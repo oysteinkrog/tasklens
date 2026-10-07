@@ -41,15 +41,18 @@ use tl_model::table::{SortSpec, TableRow, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::{FieldValidity, Validity};
 
+use super::actions::CapturedTargets;
 use super::cells::{
     CellCtx, CellTipWords, CellWords, DEFAULT_VISIBLE, GroupMembers, PROCESS_COLUMNS, PaintState,
     PowerSensor, ProcColumn, RowRef, TipCtx, cell_tooltip, fill_cell, heat_background,
     process_column, render_metric_cell, row_tint, tint_deadline,
 };
 use super::header_totals::header_total;
+use super::menu::{MenuCaps, group_header_menu, row_menu};
 use super::name_cell::{NameCellData, NameIcon, NameWords, StateGlyph, name_cell};
 use super::table::{GroupHeader, ProcessQuery};
 use super::tooltip::{RowTipState, RowTipWords, RowTooltip};
+use super::{ProcessesPage, capture_row};
 use crate::anim::AnimationDriver;
 use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
@@ -324,6 +327,10 @@ pub struct ProcessDelegate {
     tip_view: Option<AnyView>,
     cell_tip_words: CellTipWords,
     cell_tips: RefCell<CellTips>,
+    /// The page that owns the table, where the row menu stores its captured targets.
+    page: Option<WeakEntity<ProcessesPage>>,
+    /// What the desktop offers for the row menu items.
+    menu_caps: MenuCaps,
     /// A fixed clock for tests.
     #[cfg(any(test, feature = "test-hooks"))]
     fixed_now: Option<TimeNs>,
@@ -378,6 +385,8 @@ impl ProcessDelegate {
             tip_view: None,
             cell_tip_words: CellTipWords::new(cx),
             cell_tips: RefCell::default(),
+            page: None,
+            menu_caps: MenuCaps::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             fixed_now: None,
         };
@@ -420,6 +429,11 @@ impl ProcessDelegate {
     /// main window is hidden.
     pub fn set_window(&mut self, window: Option<AnyWindowHandle>) {
         self.window = window;
+    }
+
+    /// The page the row menu hands its captured targets to.
+    pub fn set_page(&mut self, page: WeakEntity<ProcessesPage>) {
+        self.page = Some(page);
     }
 
     /// Called by the page on tab activation. Active sends the demand part, which turns on the
@@ -860,6 +874,11 @@ impl ProcessDelegate {
             return;
         };
         let node = self.row(ix as usize).node.clone();
+        self.toggle_node(node, cx);
+    }
+
+    /// Expands or collapses `node`, whichever row has the focus (the group header menu).
+    pub fn toggle_node(&mut self, node: NodeId, cx: &mut App) {
         self.query.toggle(node);
         self.client_send(cx);
         self.persist(cx);
@@ -1142,15 +1161,40 @@ impl TreeTableDelegate for ProcessDelegate {
         self.row_kind(ix) != RowKind::GroupHeader
     }
 
+    /// The row menu (E22-A2). The targets are captured now and stored on the page, so its
+    /// items act on these rows even when the rows move before the click. A group header gets
+    /// its own one-item menu and captures nothing.
     fn context_menu(
         &mut self,
-        _: &[ProcRowId],
-        _: ColumnId,
+        targets: &[ProcRowId],
+        clicked_col: ColumnId,
         menu: TlMenu,
-        _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
-        menu
+        let rows: SmallVec<[usize; 8]> = targets
+            .iter()
+            .filter_map(|id| self.row_index(*id))
+            .collect();
+        if let [ix] = rows[..]
+            && self.row_kind(ix) == RowKind::GroupHeader
+        {
+            let expanded = self.row_expandable(ix).unwrap_or(false);
+            return group_header_menu(menu, expanded, self.row(ix).node.clone(), cx);
+        }
+        let captured = CapturedTargets::new(
+            rows.iter()
+                .filter_map(|&ix| capture_row(&self.snapshot, ix, self.row_kind(ix))),
+            Some(clicked_col),
+        );
+        if captured.items.is_empty() {
+            return menu;
+        }
+        if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
+            let stored = captured.clone();
+            page.update(cx, |p, _| p.set_menu_targets(stored));
+        }
+        row_menu(menu, &captured, &self.menu_caps, window, cx)
     }
 
     fn on_toggle_expand(&mut self, id: ProcRowId, cx: &mut Context<TlTreeTable<Self>>) {

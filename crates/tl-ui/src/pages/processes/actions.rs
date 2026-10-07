@@ -116,6 +116,14 @@ pub struct RestartUnit {
     pub unit: UnitRef,
 }
 
+/// Expands or collapses one row: the group header menu's item, which acts on the header it
+/// opened on and not on the focus row. `no_json`: `NodeId` has no serde derive (ADR-002).
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct ToggleGroupRow {
+    pub node: NodeId,
+}
+
 /// Brings a window to the front. `internal_id` is the KWin window id.
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
@@ -259,6 +267,7 @@ mod tests {
             SetPriority::name_for_type(),
             SetIoPriorityClass::name_for_type(),
             RestartUnit::name_for_type(),
+            ToggleGroupRow::name_for_type(),
             ActivateWindow::name_for_type(),
         ]
     }
@@ -271,7 +280,7 @@ mod tests {
             assert!(name.starts_with("tasklens::"), "{name}");
             assert!(seen.insert(*name), "declared twice: {name}");
         }
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 22);
 
         // No name here is also declared by the table or the shell.
         use crate::actions as shell;

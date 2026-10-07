@@ -101,6 +101,7 @@ enum Entry {
         label: SharedString,
         action: Box<dyn Action>,
         mark: Mark,
+        tooltip: Option<SharedString>,
     },
     Disabled {
         label: SharedString,
@@ -116,6 +117,7 @@ enum Entry {
     Submenu {
         label: SharedString,
         menu: Entity<TlMenuPopup>,
+        tooltip: Option<SharedString>,
     },
     Separator,
     Header(SharedString),
@@ -220,6 +222,7 @@ impl TlMenu {
             label: label.into(),
             action,
             mark: Mark::None,
+            tooltip: None,
         });
         self
     }
@@ -264,6 +267,7 @@ impl TlMenu {
             label,
             action,
             mark,
+            tooltip: None,
         });
         self
     }
@@ -281,7 +285,19 @@ impl TlMenu {
         self.entries.push(Entry::Submenu {
             label: label.into(),
             menu,
+            tooltip: None,
         });
+        self
+    }
+
+    /// A hover tooltip on the item or submenu added last, such as what an enabled item does.
+    /// Disabled items take theirs in [`TlMenu::item_disabled`]; on other rows this does nothing.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        if let Some(Entry::Item { tooltip, .. } | Entry::Submenu { tooltip, .. }) =
+            self.entries.last_mut()
+        {
+            *tooltip = Some(text.into());
+        }
         self
     }
 
@@ -777,6 +793,7 @@ impl TlMenuPopup {
                 label,
                 action,
                 mark,
+                tooltip,
             } => {
                 let hint =
                     shortcut_hint(action.as_ref(), &self.action_context, window).map(|hint| {
@@ -794,10 +811,14 @@ impl TlMenuPopup {
                         *hint.text_style() = t_xs(m);
                         hint
                     });
-                row(Some(label))
-                    .px(m.sp[4])
+                let item = row(Some(label));
+                let text = match tooltip {
+                    Some(tip) => menu_label(label.clone(), Some(tip.clone()), false, window, cx),
+                    None => label_text(label).into_any_element(),
+                };
+                item.px(m.sp[4])
                     .children(mark_column(*mark))
-                    .child(label_text(label))
+                    .child(text)
                     .children(hint)
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)),
@@ -807,7 +828,7 @@ impl TlMenuPopup {
             Entry::Disabled { label, tooltip } => row(Some(label))
                 .px(m.sp[4])
                 .children(mark_column(Mark::None))
-                .child(disabled_label(label.clone(), tooltip.clone(), window, cx))
+                .child(menu_label(label.clone(), tooltip.clone(), true, window, cx))
                 .into_any_element(),
             Entry::Painted {
                 label,
@@ -827,14 +848,22 @@ impl TlMenuPopup {
                 ))
                 .on_click(cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)))
                 .into_any_element(),
-            Entry::Submenu { label, menu } => {
+            Entry::Submenu {
+                label,
+                menu,
+                tooltip,
+            } => {
                 let open = self.open_sub == Some(ix);
-                row(Some(label))
-                    .relative()
+                let item = row(Some(label));
+                let text = match tooltip {
+                    Some(tip) => menu_label(label.clone(), Some(tip.clone()), false, window, cx),
+                    None => label_text(label).into_any_element(),
+                };
+                item.relative()
                     .px(m.sp[4])
                     .aria_expanded(open)
                     .children(mark_column(Mark::None))
-                    .child(label_text(label))
+                    .child(text)
                     .child(div().flex_none().ml(m.sp[6]).child(icon(
                         TlIcon::ChevronRight,
                         m.icon.xs,
@@ -1054,21 +1083,28 @@ fn label_width(label: &SharedString, size: Pixels, window: &Window) -> Pixels {
         .width
 }
 
-fn disabled_label(
+/// A row label with a hover tooltip. `disabled`: half opacity, as a disabled item.
+fn menu_label(
     label: SharedString,
     tooltip: Option<SharedString>,
+    disabled: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let t = current(cx).clone();
     let m = *metrics(cx);
+    let (id, tip_id) = if disabled {
+        ("tl-menu-disabled", "tl-menu-disabled-tip")
+    } else {
+        ("tl-menu-label", "tl-menu-tip")
+    };
     let mut row = div()
-        .id("tl-menu-disabled")
+        .id(id)
         .test_support()
         .aria_label(label.clone())
         .flex_1()
         .min_w_0()
-        .opacity(0.5)
+        .when(disabled, |d| d.opacity(0.5))
         .text_color(t.text_primary)
         .whitespace_nowrap()
         .overflow_hidden()
@@ -1077,7 +1113,7 @@ fn disabled_label(
     *row.text_style() = t_base(&m);
     if let Some(reason) = tooltip {
         let state = HoverTooltip::state(
-            ElementId::Name(format!("tl-menu-disabled-tip-{label}").into()),
+            ElementId::Name(format!("{tip_id}-{label}").into()),
             window,
             cx,
         );

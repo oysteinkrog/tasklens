@@ -11,6 +11,7 @@ pub mod confirm;
 pub mod delegate;
 pub mod header_totals;
 pub mod history;
+pub mod menu;
 pub mod name_cell;
 pub mod table;
 pub mod toasts;
@@ -36,7 +37,7 @@ use tracing::warn;
 
 use self::actions::{
     CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree,
-    EndTask, MAX_TARGETS, ResumeProcess, SetPriority, SuspendProcess,
+    EndTask, MAX_TARGETS, ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
 };
 use self::cells::{copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
@@ -112,6 +113,7 @@ impl ProcessesPage {
         };
         let mut delegate = ProcessDelegate::new(snapshot, &settings, &state, window, cx);
         delegate.set_window(Some(window.window_handle()));
+        delegate.set_page(cx.weak_entity());
         delegate.query_mut().bump_and_send(&*client);
         let defaults = delegate.default_layout();
         let table = cx.new(|cx| {
@@ -251,6 +253,13 @@ impl ProcessesPage {
             q.collapse_all();
             q.bump_and_send(client);
         });
+    }
+
+    /// The group header menu's Expand or Collapse: toggles that header, not the focus row.
+    fn on_toggle_group_row(&mut self, a: &ToggleGroupRow, _: &mut Window, cx: &mut Context<Self>) {
+        let node = a.node.clone();
+        self.table
+            .update(cx, |t, cx| t.delegate.toggle_node(node, cx));
     }
 
     /// The selection set in view order, group headers excluded, at most [`MAX_TARGETS`] items
@@ -962,6 +971,7 @@ impl Render for ProcessesPage {
             .flex()
             .flex_col()
             .on_action(cx.listener(Self::on_collapse_all))
+            .on_action(cx.listener(Self::on_toggle_group_row))
             .on_action(cx.listener(Self::on_end_task))
             .on_action(cx.listener(Self::on_end_process))
             .on_action(cx.listener(Self::on_end_process_tree))
