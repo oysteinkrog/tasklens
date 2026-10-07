@@ -18,6 +18,7 @@ mod logging;
 mod lowmem_unit;
 #[allow(dead_code, reason = "E33-006 calls it")]
 mod migrations;
+#[allow(dead_code, reason = "only tests call `Fatal::key`")]
 mod notify;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod paths;
@@ -37,9 +38,7 @@ use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
 use tl_model::settings::{EngineSettings, StartTab};
 use tl_ui::app::ToastKindTag;
-use tl_ui::{
-    AppEnv, BuildInfo, ImportSummary, OpenMode, StartOptions, UiExit, UiInit, UiLaunch,
-};
+use tl_ui::{AppEnv, BuildInfo, ImportSummary, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
 use tracing::{error, info, warn};
 
 use crate::args::TabArg;
@@ -329,7 +328,9 @@ fn relaunch(bus: Option<zbus::blocking::Connection>) {
     };
     let args: Vec<OsString> = std::env::args_os().collect();
     match relaunch_command(&exe, &args).spawn() {
-        Ok(child) => info!(target: "tasklens::ui", pid = child.id(), "relaunched after device loss"),
+        Ok(child) => {
+            info!(target: "tasklens::ui", pid = child.id(), "relaunched after device loss")
+        }
         Err(e) => error!(target: "tasklens::ui", "relaunch failed: {e}"),
     }
 }
@@ -490,9 +491,14 @@ mod tests {
 
     #[test]
     fn relaunch_drops_start_minimized() {
-        let args: Vec<OsString> = ["/usr/bin/tasklens", "--start-minimized", "--tab", "services"]
-            .map(OsString::from)
-            .into();
+        let args: Vec<OsString> = [
+            "/usr/bin/tasklens",
+            "--start-minimized",
+            "--tab",
+            "services",
+        ]
+        .map(OsString::from)
+        .into();
         assert_eq!(
             relaunch_args(&args),
             ["--tab", "services"].map(OsString::from).to_vec()
