@@ -381,6 +381,26 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         Heading::Processes,
         "shortcuts-copy-details",
     ),
+    // Information
+    doc(
+        &[
+            "tasklens::InformationScrollLineUp",
+            "tasklens::InformationScrollLineDown",
+            "tasklens::InformationScrollPageUp",
+            "tasklens::InformationScrollPageDown",
+            "tasklens::InformationScrollTop",
+            "tasklens::InformationScrollBottom",
+        ],
+        "Information",
+        Heading::Information,
+        "shortcuts-information-scroll",
+    ),
+    doc(
+        &["tasklens::CopyInformationAll"],
+        "Information",
+        Heading::Information,
+        "shortcuts-information-copy",
+    ),
     // Performance
     doc(
         &["tasklens::PerfCopyDeviceInfo"],
