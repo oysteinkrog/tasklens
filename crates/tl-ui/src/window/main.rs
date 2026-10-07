@@ -31,6 +31,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::settings::{Decorations, StartTab, WindowState};
+use tl_model::time::now_boot_ns;
 use tracing::{debug, error, info, warn};
 
 use super::filter::{FilterBox, ReturnFocus, shown_on};
@@ -52,7 +53,7 @@ use crate::components::menu::context_menu_layer;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
-use crate::hub::GlobalHub;
+use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
@@ -315,9 +316,14 @@ pub fn init(cx: &mut App) {
     });
     cx.default_global::<OpenHooks>().main = Some(Box::new(|cx| {
         // On Linux a renderer failure comes back as an Err from `open_window` (E16-012).
-        if let Err(err) = open_main_window(cx) {
+        if let Err(err) = open_first_main(cx) {
             error!(target: "tasklens::ui", %err, "main window did not open");
-            request_exit(cx, UiExit::RendererFailed(err.to_string()));
+            let exit = UiExit::RendererFailed(err);
+            request_exit(cx, exit.clone());
+            // The hook runs before the event loop starts, and the loop clears a stop request
+            // made before it runs, so the quit above is lost. Ask again from inside the loop.
+            cx.spawn(async move |cx| cx.update(|cx| request_exit(cx, exit)))
+                .detach();
         }
     }));
     cx.on_action(on_quit);
@@ -347,6 +353,24 @@ fn step_ui_scale(cx: &mut App, step: impl FnOnce(u16) -> u16) {
     let mut text = String::new();
     let _ = view.read(cx).scale_text.write(&mut text, &[&new]);
     push_main_toast(cx, ToastKind::Info, text, Some(UI_SCALE_TOAST), None);
+}
+
+/// Makes the first main window open fail with this text, for the open-failure tests.
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct FailMainOpen(pub String);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Global for FailMainOpen {}
+
+/// Opens the first main window. The error text on failure.
+fn open_first_main(cx: &mut App) -> Result<(), String> {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(fail) = cx.try_global::<FailMainOpen>() {
+        return Err(fail.0.clone());
+    }
+    open_main_window(cx)
+        .map(drop)
+        .map_err(|err| err.to_string())
 }
 
 /// `Quit` always quits, whatever the tray settings (UI-SHL-113).
@@ -657,6 +681,9 @@ pub struct MainWindow {
     /// "UI scale changed to { $pct }%", per strings version.
     scale_text: Template,
     strings_version: u64,
+    /// The 1 s health refresh runs while the chip shows a Stale item (E20-016).
+    health_ticking: bool,
+    _health_tick: Option<Task<()>>,
     _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, feature = "test-hooks"))]
     first_frames: u32,
@@ -757,6 +784,16 @@ impl MainWindow {
             window,
             |this: &mut Self, _, _: &ReturnFocus, window, cx| this.focus_page(window, cx),
         ));
+        // Health items in the status chip (E20-016).
+        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+            subs.push(
+                cx.subscribe(&hub, |this: &mut Self, _, ev: &SnapshotChanged, cx| {
+                    if ev.mask.contains(ComponentMask::HEALTH) {
+                        this.sync_health(cx);
+                    }
+                }),
+            );
+        }
         // The compositor's close request follows the same decision; tasklens then removes the
         // window or quits itself, so the platform never closes it.
         let view = cx.weak_entity();
@@ -789,6 +826,8 @@ impl MainWindow {
             scale_factor: window.scale_factor(),
             scale_text: scale_text(cx),
             strings_version: strings_version(cx),
+            health_ticking: false,
+            _health_tick: None,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             first_frames: 0,
@@ -1070,6 +1109,7 @@ impl MainWindow {
         self.titlebar
             .update(cx, |bar, cx| bar.set_toolbar(model, toolbar_for(tab), cx));
         self.sync_status(cx);
+        self.sync_health(cx);
         if write_last {
             TlSettings::update(cx, |d| d.state.tabs.last_tab = tab);
         }
@@ -1107,6 +1147,37 @@ impl MainWindow {
             chip.set_page_actions(actions, cx);
         });
         self.status_buf = buf;
+    }
+
+    /// Passes the hub's health snapshot and the active tab to the chip. While the chip shows a
+    /// Stale item, a 1 s timer calls this again so the tooltip age moves.
+    fn sync_health(&mut self, cx: &mut Context<Self>) {
+        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+            return;
+        };
+        let health = hub.read(cx).current().health.clone();
+        let tab = self.active;
+        let stale = self.status.update(cx, |chip, cx| {
+            chip.set_health(&health, tab, now_boot_ns(), cx);
+            chip.has_stale()
+        });
+        if stale && !self.health_ticking {
+            self.health_ticking = true;
+            self._health_tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let ticking = this.update(cx, |this, cx| {
+                        this.sync_health(cx);
+                        let stale = this.status.read(cx).has_stale();
+                        this.health_ticking = stale;
+                        stale
+                    });
+                    if !matches!(ticking, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
+        }
     }
 
     /// A page emitted `StatusChanged`. Only the active page reaches the chip.

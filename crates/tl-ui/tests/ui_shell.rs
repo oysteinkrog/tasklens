@@ -1856,6 +1856,217 @@ mod status {
         r.cx.simulate_click(badge.center(), Modifiers::none());
         assert_eq!(r.admin.get(), 1);
     }
+
+    mod health {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use gpui_kit::{Hsla, Modifiers, TestAppContext};
+        use tl_model::command::Tab;
+        use tl_model::health::{
+            EngineCaps, HealthSnapshot, HelperState, SourceHealth, SourceId, SourceState,
+        };
+        use tl_ui::theme::current;
+
+        use super::{Rig, bounds, draw, drawn, read, rig};
+
+        const NOW: u64 = 100_000_000_000;
+
+        fn snapshot(version: u64, states: &[(SourceId, SourceState)]) -> HealthSnapshot {
+            let mut sources: [SourceHealth; SourceId::COUNT] =
+                std::array::from_fn(|_| SourceHealth::default());
+            for &(id, state) in states {
+                sources[id.index()] = SourceHealth {
+                    state,
+                    last_ok_ns: Some(NOW - 12_000_000_000),
+                    last_error: (state == SourceState::Failed).then(|| Arc::from("read failed")),
+                    restarts: 0,
+                };
+            }
+            HealthSnapshot {
+                version,
+                sources,
+                helper: HelperState::Missing,
+                helper_start: None,
+                caps: EngineCaps::empty(),
+                setup: Arc::default(),
+            }
+        }
+
+        fn set_health(r: &mut Rig, health: &HealthSnapshot, tab: Tab) {
+            let chip = r.chip.clone();
+            r.cx.update(|_, cx| chip.update(cx, |c, cx| c.set_health(health, tab, NOW, cx)));
+            draw(r.cx);
+        }
+
+        fn warning(r: &mut Rig) -> Hsla {
+            r.cx.update(|_, cx| current(cx).status.warning)
+        }
+
+        #[gpui_kit::test]
+        fn health_item_stale_text_and_tooltip(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100, None, false);
+            let health = snapshot(1, &[(SourceId::GpuDrm, SourceState::Stale)]);
+            set_health(&mut r, &health, Tab::Performance);
+            let w = warning(&mut r);
+            assert_eq!(
+                drawn(&mut r),
+                vec![(" \u{b7} ".to_owned(), w), ("GPU data stale".to_owned(), w)]
+            );
+            assert!(
+                read(&mut r, |c| c.is_visible()),
+                "visible with no page text"
+            );
+            let items = read(&mut r, |c| c.health_items().to_vec());
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].source, SourceId::GpuDrm);
+            assert_eq!(items[0].tooltip.as_ref(), "No new data for 12 s");
+            assert!(read(&mut r, |c| c.has_stale()));
+        }
+
+        #[gpui_kit::test]
+        fn health_items_limit(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100, None, false);
+            let health = snapshot(
+                1,
+                &[
+                    (SourceId::Cpu, SourceState::Failed),
+                    (SourceId::Memory, SourceState::Failed),
+                    (SourceId::Disk, SourceState::Failed),
+                ],
+            );
+            set_health(&mut r, &health, Tab::Performance);
+            assert_eq!(
+                read(&mut r, |c| c.drawn_text()),
+                " \u{b7} CPU unavailable \u{b7} Memory unavailable \u{b7} +1 more"
+            );
+            let items = read(&mut r, |c| c.health_items().to_vec());
+            assert_eq!(items[0].tooltip.as_ref(), "read failed");
+            assert!(!read(&mut r, |c| c.has_stale()));
+        }
+
+        #[gpui_kit::test]
+        fn health_items_dedupe_gpu(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100, None, false);
+            let health = snapshot(
+                1,
+                &[
+                    (SourceId::GpuNvidia, SourceState::Stale),
+                    (SourceId::GpuDrm, SourceState::Stale),
+                ],
+            );
+            set_health(&mut r, &health, Tab::Performance);
+            assert_eq!(read(&mut r, |c| c.drawn_text()), " \u{b7} GPU data stale");
+            assert_eq!(read(&mut r, |c| c.health_items().len()), 1);
+        }
+
+        #[gpui_kit::test]
+        fn health_items_follow_tab(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100, None, false);
+            let health = snapshot(1, &[(SourceId::SystemdSystem, SourceState::Failed)]);
+            set_health(&mut r, &health, Tab::Processes);
+            assert!(read(&mut r, |c| c.health_items().is_empty()));
+            assert!(!read(&mut r, |c| c.is_visible()));
+            set_health(&mut r, &health, Tab::Services);
+            assert_eq!(
+                read(&mut r, |c| c.drawn_text()),
+                " \u{b7} Services unavailable"
+            );
+        }
+
+        #[gpui_kit::test]
+        fn health_item_opens_collector_health(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100, None, false);
+            let opened = std::rc::Rc::new(std::cell::Cell::new(0));
+            let o = opened.clone();
+            r.cx.update(|_, cx| {
+                cx.on_action(move |_: &tl_ui::actions::OpenCollectorHealth, _| o.set(o.get() + 1));
+            });
+            let health = snapshot(1, &[(SourceId::Cpu, SourceState::Failed)]);
+            set_health(&mut r, &health, Tab::Performance);
+            let item = bounds(r.cx, "StatusChip-health-0");
+            r.cx.simulate_click(item.center(), Modifiers::none());
+            assert_eq!(opened.get(), 1, "one dispatch per click");
+
+            let page = r.page.clone();
+            r.cx.update(|window, cx| {
+                page.focus(window, cx);
+                window.focus_next(cx);
+            });
+            super::press(r.cx, "enter");
+            assert_eq!(
+                opened.get(),
+                2,
+                "Tab from the page reaches the item; Enter acts"
+            );
+        }
+
+        #[gpui_kit::test]
+        fn restricted_item_ten_seconds(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100, None, false);
+            let health = snapshot(1, &[]);
+            set_health(&mut r, &health, Tab::Services);
+            let chip = r.chip.clone();
+            r.cx.update(|_, cx| chip.update(cx, |c, cx| c.note_restricted_refusal(42, cx)));
+            draw(r.cx);
+            assert_eq!(
+                read(&mut r, |c| c.drawn_text()),
+                " \u{b7} Restricted: 42 processes"
+            );
+            set_health(&mut r, &health, Tab::Processes);
+            assert!(!read(&mut r, |c| c.is_visible()), "never on Processes");
+            set_health(&mut r, &health, Tab::Services);
+            assert!(read(&mut r, |c| c.is_visible()));
+
+            r.cx.executor().advance_clock(Duration::from_millis(9_900));
+            r.cx.run_until_parked();
+            draw(r.cx);
+            assert!(read(&mut r, |c| c.is_visible()), "still shown before 10 s");
+            r.cx.executor().advance_clock(Duration::from_millis(100));
+            r.cx.run_until_parked();
+            draw(r.cx);
+            assert!(!read(&mut r, |c| c.is_visible()), "gone after 10 s");
+            assert!(drawn(&mut r).is_empty());
+        }
+
+        #[gpui_kit::test]
+        fn health_items_no_notify_when_same(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100, None, true);
+            set_health(
+                &mut r,
+                &snapshot(1, &[(SourceId::Cpu, SourceState::Failed)]),
+                Tab::Performance,
+            );
+            let before = read(&mut r, |c| c.renders());
+            // A new version with a change the chip does not show (Sensors Late).
+            set_health(
+                &mut r,
+                &snapshot(
+                    2,
+                    &[
+                        (SourceId::Cpu, SourceState::Failed),
+                        (SourceId::Sensors, SourceState::Late),
+                    ],
+                ),
+                Tab::Performance,
+            );
+            assert_eq!(
+                read(&mut r, |c| c.renders()),
+                before,
+                "same items: no render"
+            );
+            set_health(
+                &mut r,
+                &snapshot(3, &[(SourceId::Memory, SourceState::Failed)]),
+                Tab::Performance,
+            );
+            assert_eq!(
+                read(&mut r, |c| c.renders()),
+                before + 1,
+                "new items render"
+            );
+        }
+    }
 }
 
 mod main_window {

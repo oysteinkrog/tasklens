@@ -2,9 +2,9 @@
 //! APP-029, PROC-051, R-042).
 //!
 //! The chip shows the active page's status text, the page's clickable status actions and
-//! "[PAUSED - Ctrl]" while Ctrl-pause is on (E20-012). E20-016 adds health items. With nothing to
-//! show it renders an empty element of zero size, so Performance and Information normally show
-//! no chip.
+//! "[PAUSED - Ctrl]" while Ctrl-pause is on (E20-012), then the health items (E20-016,
+//! UI-SHL-051). With nothing to show it renders an empty element of zero size, so Performance and
+//! Information normally show no chip.
 //!
 //! Pages emit [`StatusChanged`] on their own entity when their status text changes. `MainWindow`
 //! (E20-008) then reads the page's `status_text` and `status_actions` and passes them to
@@ -12,25 +12,38 @@
 //! thin-space grouping, table d) is the pages' job; the chip draws the text as given.
 //!
 //! The chip's text is one `StyledText`, cut at the end with "…" when the parent's `max_w` is too
-//! small. The page actions are Tab stops; nothing else on the chip is clickable.
+//! small. The page actions and the health items are Tab stops; nothing else on the chip is
+//! clickable.
+//!
+//! Health items: `MainWindow` passes the health snapshot and the active tab to
+//! [`StatusChip::set_health`]. A source of the active tab ([`tab_sources`]) that is Stale, Failed
+//! or Disabled gives one item; collection errors show here and never as toasts (ADR-015). A click
+//! or Enter on an item dispatches `OpenCollectorHealth`.
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::{
     AbsoluteLength, Action, App, Context, Div, ElementId, FocusHandle, HighlightStyle, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, StyledText, Subscription, Window, div,
+    SharedString, StatefulInteractiveElement, Styled, StyledText, Subscription, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
+use tl_model::command::Tab;
+use tl_model::health::{HealthSnapshot, SourceId, SourceState};
+use tl_model::time::TimeNs;
 
+use crate::actions::OpenCollectorHealth;
 use crate::components::badge::{TlBadge, TlBadgeKind};
 use crate::components::focus::TlFocusRing;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{Strings, tr};
+use crate::pages::performance::details::Template;
 use crate::text::style::numeric_style;
+use crate::text::untrusted::debug_assert_clean;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Chip height, × ui_scale. Tables add this as bottom padding (UI-SHL-050).
@@ -44,6 +57,155 @@ const PAD_L: f32 = 8.0;
 const PAD_R: f32 = 12.0;
 /// The separator between text segments.
 const SEP: &str = " | ";
+/// The separator before and between health items (UI-SHL-050 segment 3).
+const HEALTH_SEP: &str = " \u{b7} ";
+/// Health items shown before "+N more" (UI-SHL-051).
+const MAX_ITEMS: usize = 2;
+/// How long the restricted item shows after a refusal (UI-FND-028).
+const RESTRICTED_FOR: Duration = Duration::from_secs(10);
+
+/// One health item: the warning text and its tooltip.
+#[derive(Clone, PartialEq, Debug)]
+pub struct HealthItem {
+    pub source: SourceId,
+    pub text: SharedString,
+    pub tooltip: SharedString,
+}
+
+/// The sources the active tab uses, in item order (UI-SHL-051, decided in E20-016). The
+/// minigraph cards on the Processes tab use the last six of its list.
+pub fn tab_sources(tab: Tab) -> &'static [SourceId] {
+    use SourceId::*;
+    match tab {
+        Tab::Processes => &[Processes, Cpu, Memory, Disk, Net, GpuNvidia, GpuDrm],
+        Tab::Performance => &[Cpu, Memory, Disk, Net, GpuNvidia, GpuDrm, Sensors],
+        Tab::Services => &[SystemdSystem, SystemdUser],
+        Tab::Startup => &[Startup],
+        Tab::Connections => &[Connections],
+        Tab::Information => &[Inventory],
+    }
+}
+
+/// The en-US display name of a source in a health item (UI-SHL-051). Two sources with the same
+/// name give one item.
+pub fn source_name(id: SourceId) -> &'static str {
+    match id {
+        SourceId::Cpu => "CPU",
+        SourceId::Memory => "Memory",
+        SourceId::Disk => "Disks",
+        SourceId::Net => "Network",
+        SourceId::GpuNvidia | SourceId::GpuDrm => "GPU",
+        SourceId::Sensors => "Sensors",
+        SourceId::Processes => "Processes",
+        SourceId::ProcessDetail => "Process details",
+        SourceId::Connections => "Connections",
+        SourceId::SystemdSystem | SourceId::SystemdUser => "Services",
+        SourceId::Logind => "Logind",
+        SourceId::Startup => "Startup",
+        SourceId::Inventory => "Inventory",
+        SourceId::KWin => "KWin",
+        SourceId::Udisks => "UDisks",
+        SourceId::UPower => "UPower",
+        SourceId::NetworkManager => "NetworkManager",
+        SourceId::HistoryRecorder => "History",
+        SourceId::Journal => "Journal",
+    }
+}
+
+/// The translation key of [`source_name`]. The Collector Health window's keys where the names
+/// match; GPU and Services have chip keys of their own. Logind, UDisks and UPower are on no tab,
+/// so the chip never shows them.
+fn source_key(id: SourceId) -> &'static str {
+    match id {
+        SourceId::Cpu => "shell-health-source-cpu",
+        SourceId::Memory => "shell-health-source-memory",
+        SourceId::Disk => "shell-health-source-disk",
+        SourceId::Net => "shell-health-source-net",
+        SourceId::GpuNvidia | SourceId::GpuDrm => "shell-health-chip-gpu",
+        SourceId::Sensors => "shell-health-source-sensors",
+        SourceId::Processes => "shell-health-source-processes",
+        SourceId::ProcessDetail => "shell-health-source-process-detail",
+        SourceId::Connections => "shell-health-source-connections",
+        SourceId::SystemdSystem | SourceId::SystemdUser => "shell-health-chip-services",
+        SourceId::Logind => "shell-health-source-logind",
+        SourceId::Startup => "shell-health-source-startup",
+        SourceId::Inventory => "shell-health-source-inventory",
+        SourceId::KWin => "shell-health-source-kwin",
+        SourceId::Udisks => "shell-health-source-udisks",
+        SourceId::UPower => "shell-health-source-upower",
+        SourceId::NetworkManager => "shell-health-source-network-manager",
+        SourceId::HistoryRecorder => "shell-health-source-history",
+        SourceId::Journal => "shell-health-source-journal",
+    }
+}
+
+/// The health item words, translated once per strings version (R-132).
+struct HealthWords {
+    names: [SharedString; SourceId::COUNT],
+    stale: Template,
+    failed: Template,
+    disabled: Template,
+    more: Template,
+    no_data: Template,
+    restricted: Template,
+    unknown_error: SharedString,
+    restarting: SharedString,
+    open: SharedString,
+}
+
+impl HealthWords {
+    fn new(cx: &App) -> Self {
+        Self {
+            names: SourceId::ALL.map(|id| tr(cx, source_key(id))),
+            stale: Template::new(cx, "shell-health-stale", &["source"]),
+            failed: Template::new(cx, "shell-health-failed", &["source"]),
+            disabled: Template::new(cx, "shell-health-disabled", &["source"]),
+            more: Template::new(cx, "shell-health-more", &["n"]),
+            no_data: Template::new(cx, "shell-health-no-data", &["secs"]),
+            restricted: Template::new(cx, "shell-health-restricted", &["n"]),
+            unknown_error: tr(cx, "shell-health-unknown-error"),
+            restarting: tr(cx, "shell-health-restarting"),
+            open: tr(cx, "shell-health-open"),
+        }
+    }
+}
+
+/// What one health item shows, compared before any text is built.
+#[derive(Clone, PartialEq, Debug)]
+enum ItemKey {
+    /// Whole seconds since the last fresh data; `None` when there was none.
+    Stale(SourceId, Option<u64>),
+    Failed(SourceId, Option<Arc<str>>),
+    Disabled(SourceId, Option<Arc<str>>),
+}
+
+/// The keys of every item for `tab`, before the limit of two.
+fn item_keys(health: &HealthSnapshot, tab: Tab, now_ns: TimeNs) -> SmallVec<[ItemKey; 4]> {
+    let mut names: SmallVec<[&'static str; 4]> = SmallVec::new();
+    let mut keys = SmallVec::new();
+    for &id in tab_sources(tab) {
+        let h = health.get(id);
+        let key = match h.state {
+            SourceState::Stale => ItemKey::Stale(
+                id,
+                h.last_ok_ns
+                    .map(|t| now_ns.saturating_sub(t) / 1_000_000_000),
+            ),
+            SourceState::Failed => ItemKey::Failed(id, h.last_error.clone()),
+            SourceState::Disabled { .. } => ItemKey::Disabled(id, h.last_error.clone()),
+            SourceState::Off
+            | SourceState::Running
+            | SourceState::Late
+            | SourceState::Unsupported => continue,
+        };
+        let name = source_name(id);
+        if !names.contains(&name) {
+            names.push(name);
+            keys.push(key);
+        }
+    }
+    keys
+}
 
 /// Emitted by a page entity when its `status_text` output changed (counts or selection size).
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +270,23 @@ pub struct StatusChip {
     paused_label: SharedString,
     /// One focus handle per page action, in order. Grows as needed.
     action_focus: SmallVec<[FocusHandle; 2]>,
+    /// The active tab from the last [`Self::set_health`].
+    tab: Tab,
+    /// Every item's key for `tab`, before the limit.
+    item_keys: SmallVec<[ItemKey; 4]>,
+    /// The shown items, at most [`MAX_ITEMS`].
+    items: SmallVec<[HealthItem; 2]>,
+    /// "+N more" when more than [`MAX_ITEMS`] items exist.
+    more: Option<SharedString>,
+    /// The refused target count while the restricted item lasts.
+    restricted: Option<u32>,
+    /// "Restricted: N processes".
+    restricted_text: SharedString,
+    /// Ends the restricted item. A new refusal replaces it.
+    restricted_task: Option<Task<()>>,
+    /// One focus handle per health part: two items, "+N more" and the restricted item.
+    health_focus: [FocusHandle; MAX_ITEMS + 2],
+    words: HealthWords,
     strings_version: u64,
     style_version: u64,
     _subs: SmallVec<[Subscription; 2]>,
@@ -131,7 +310,12 @@ impl StatusChip {
             if version != this.strings_version {
                 this.strings_version = version;
                 this.paused_label = tr(cx, "shell-status-paused");
+                this.words = HealthWords::new(cx);
                 this.rebuild();
+                this.rebuild_health();
+                if let Some(n) = this.restricted {
+                    this.restricted_text = this.restricted_label(n);
+                }
                 cx.notify();
             }
         }));
@@ -152,6 +336,15 @@ impl StatusChip {
             paused_range: None,
             paused_label: tr(cx, "shell-status-paused"),
             action_focus: SmallVec::new(),
+            tab: Tab::Processes,
+            item_keys: SmallVec::new(),
+            items: SmallVec::new(),
+            more: None,
+            restricted: None,
+            restricted_text: SharedString::default(),
+            restricted_task: None,
+            health_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            words: HealthWords::new(cx),
             strings_version: strings_version(cx),
             style_version: metrics(cx).style_version,
             _subs: subs,
@@ -199,9 +392,175 @@ impl StatusChip {
         }
     }
 
+    /// Rebuilds the items from the snapshot for the active tab. Notifies only when the item list
+    /// changed.
+    pub fn set_health(
+        &mut self,
+        health: &HealthSnapshot,
+        tab: Tab,
+        now_ns: TimeNs,
+        cx: &mut Context<Self>,
+    ) {
+        let keys = item_keys(health, tab, now_ns);
+        let restricted_before = self.restricted_shown();
+        self.tab = tab;
+        let restricted_changed = self.restricted_shown() != restricted_before;
+        if keys != self.item_keys {
+            self.item_keys = keys;
+            self.rebuild_health();
+            cx.notify();
+        } else if restricted_changed {
+            cx.notify();
+        }
+    }
+
+    /// For 10 s after a privileged action was refused with EPERM while tl-helper is missing
+    /// (UI-FND-028). The ActionTracker (E16-A3) calls it with the refused target count.
+    pub fn note_restricted_refusal(&mut self, count: u32, cx: &mut Context<Self>) {
+        self.restricted = Some(count);
+        self.restricted_text = self.restricted_label(count);
+        self.restricted_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RESTRICTED_FOR).await;
+            let _ = this.update(cx, |this, cx| {
+                this.restricted = None;
+                this.restricted_task = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// The shown health items, without "+N more" and the restricted item.
+    pub fn health_items(&self) -> &[HealthItem] {
+        &self.items
+    }
+
+    /// True while a Stale item is shown: its tooltip age moves, so `MainWindow` calls
+    /// [`Self::set_health`] every second.
+    pub fn has_stale(&self) -> bool {
+        self.item_keys
+            .iter()
+            .take(MAX_ITEMS)
+            .any(|k| matches!(k, ItemKey::Stale(..)))
+    }
+
     /// False when every segment is empty.
     pub fn is_visible(&self) -> bool {
-        !self.page_text.is_empty() || !self.page_actions.is_empty() || self.paused
+        !self.page_text.is_empty()
+            || !self.page_actions.is_empty()
+            || self.paused
+            || !self.items.is_empty()
+            || self.restricted_shown()
+    }
+
+    /// The restricted item shows on every tab but Processes, whose tab text has the count.
+    fn restricted_shown(&self) -> bool {
+        self.restricted.is_some() && self.tab != Tab::Processes
+    }
+
+    fn restricted_label(&mut self, n: u32) -> SharedString {
+        self.buf.clear();
+        let _ = self.words.restricted.write(&mut self.buf, &[&n]);
+        SharedString::new(self.buf.as_str())
+    }
+
+    /// Builds the item texts from `item_keys`. Runs once per change of the list.
+    fn rebuild_health(&mut self) {
+        let words = &self.words;
+        let buf = &mut self.buf;
+        let mut text = |template: &Template, value: &dyn std::fmt::Display| {
+            buf.clear();
+            let _ = template.write(buf, &[value]);
+            SharedString::new(buf.as_str())
+        };
+        let error = |e: &Option<Arc<str>>, fallback: &SharedString| match e {
+            Some(e) => {
+                debug_assert_clean(e);
+                SharedString::new(e.as_ref())
+            }
+            None => fallback.clone(),
+        };
+        self.items = self
+            .item_keys
+            .iter()
+            .take(MAX_ITEMS)
+            .map(|key| match key {
+                ItemKey::Stale(id, secs) => HealthItem {
+                    source: *id,
+                    text: text(&words.stale, &words.names[id.index()]),
+                    tooltip: match secs {
+                        Some(secs) => text(&words.no_data, secs),
+                        None => words.unknown_error.clone(),
+                    },
+                },
+                ItemKey::Failed(id, e) => HealthItem {
+                    source: *id,
+                    text: text(&words.failed, &words.names[id.index()]),
+                    tooltip: error(e, &words.unknown_error),
+                },
+                ItemKey::Disabled(id, e) => HealthItem {
+                    source: *id,
+                    text: text(&words.disabled, &words.names[id.index()]),
+                    tooltip: error(e, &words.restarting),
+                },
+            })
+            .collect();
+        let rest = self.item_keys.len().saturating_sub(MAX_ITEMS);
+        self.more = (rest > 0).then(|| text(&words.more, &rest));
+    }
+
+    /// The health parts in draw order: (text, tooltip).
+    fn health_parts(&self) -> impl Iterator<Item = (&SharedString, &SharedString)> {
+        self.items
+            .iter()
+            .map(|i| (&i.text, &i.tooltip))
+            .chain(self.more.iter().map(|m| (m, &self.words.open)))
+            .chain(
+                self.restricted_shown()
+                    .then_some((&self.restricted_text, &self.words.open)),
+            )
+    }
+
+    /// One health part: the leading " · " and the clickable text, both in `status.warning`.
+    fn health_part(
+        &self,
+        ix: usize,
+        (text, tooltip): &(SharedString, SharedString),
+        theme: &TlTheme,
+        m: &UiMetrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> [Div; 2] {
+        let warning = theme.status.warning;
+        let lead = plain(SharedString::new_static(HEALTH_SEP)).text_color(warning);
+        let id = ElementId::NamedInteger("StatusChipHealth".into(), ix as u64);
+        let focus = self.health_focus[ix].clone();
+        let mut part = div()
+            .id(id.clone())
+            .debug_selector(move || format!("StatusChip-health-{ix}"))
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .role(Role::Link)
+            .aria_label(text.clone())
+            .track_focus(&focus)
+            .whitespace_nowrap()
+            .text_color(warning)
+            .hover(|s| s.underline())
+            .child(text.clone());
+        if TlFocusRing::show(focus.is_focused(window), window) {
+            part = TlFocusRing::ring(part, m.radius_small, theme);
+        }
+        let part = part.on_click(|_, window, cx| {
+            cx.stop_propagation();
+            window.dispatch_action(Box::new(OpenCollectorHealth), cx);
+        });
+        let tooltip_id = ElementId::NamedChild(Arc::new(id), "tooltip".into());
+        let state = HoverTooltip::state(tooltip_id, window, cx);
+        let build = TlTooltip::text(tooltip.clone()).build();
+        let part = HoverTooltip::attach(&state, part, DELAY_CONTROL, build, window, cx);
+        [lead, div().flex_none().child(part)]
     }
 
     /// Renders since creation.
@@ -367,6 +726,10 @@ impl StatusChip {
             drawn.push((" ".into(), theme.text_primary));
             drawn.push((self.paused_label.clone(), theme.accent));
         }
+        for (text, _) in self.health_parts() {
+            drawn.push((HEALTH_SEP.into(), theme.status.warning));
+            drawn.push((text.clone(), theme.status.warning));
+        }
         self.drawn = drawn;
     }
 }
@@ -424,6 +787,15 @@ impl Render for StatusChip {
                 plain(self.paused_label.clone()).text_color(theme.accent),
             ]
         });
+        let parts: SmallVec<[(SharedString, SharedString); 4]> = self
+            .health_parts()
+            .map(|(t, tip)| (t.clone(), tip.clone()))
+            .collect();
+        let health: SmallVec<[Div; 8]> = parts
+            .iter()
+            .enumerate()
+            .flat_map(|(ix, part)| self.health_part(ix, part, &theme, &m, window, cx))
+            .collect();
 
         // The text style first: `text_color` below adds to it.
         let mut chip = div();
@@ -452,5 +824,6 @@ impl Render for StatusChip {
         chip.when_some(text, |chip, text| chip.child(text))
             .children(actions)
             .when_some(paused_tail, |chip, tail| chip.children(tail))
+            .children(health)
     }
 }
