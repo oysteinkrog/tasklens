@@ -30,6 +30,10 @@ Do not pick up any other bead.
    `assets/locales/en-US.ftl` changes under several agents at once. Never name it in a pathspec
    commit, even when `git diff` looked clean a minute ago: always stage your own hunks with
    `git apply --cached` and commit with no pathspec.
+   A commit to a `src/` file that does not compile breaks HEAD for every agent. Right after such a
+   commit, make your first build job a `cargo check -p <crate>` with and without `test-hooks`
+   (plus `cargo clippy --lib -- -D warnings`), and fix any error in your files at once, before
+   any other work.
 6. Run the bead's tests, `cargo fmt --check` and `cargo clippy -p <crate> --all-targets -- -D
    warnings`, all through `heavy-build`. Builds queue on one machine-wide lock, so start them in
    the background and wait for the result; always read the output before you report. Completion
