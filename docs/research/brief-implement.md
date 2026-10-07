@@ -27,6 +27,9 @@ Do not pick up any other bead.
    once; prefer a plain move and stage it in the same command as the commit). If
    `git diff --cached` shows anything that is not yours, do not commit without a pathspec; wait
    and tell the leader.
+   `assets/locales/en-US.ftl` changes under several agents at once. Never name it in a pathspec
+   commit, even when `git diff` looked clean a minute ago: always stage your own hunks with
+   `git apply --cached` and commit with no pathspec.
 6. Run the bead's tests, `cargo fmt --check` and `cargo clippy -p <crate> --all-targets -- -D
    warnings`, all through `heavy-build`. Builds queue on one machine-wide lock, so start them in
    the background and wait for the result; always read the output before you report. Completion
