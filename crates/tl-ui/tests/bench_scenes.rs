@@ -448,3 +448,107 @@ fn soak_sums_stalls(cx: &mut TestAppContext) {
         report.warmup_stalls
     );
 }
+
+/// Work counters of one perf-cpu or static window, summed over its charts.
+#[derive(Clone, Copy, Debug, Default)]
+struct Work {
+    paints: u64,
+    sidebar_renders: u32,
+    card_renders: u32,
+    card_builds: u32,
+    card_paths: u32,
+    overall_renders: u32,
+    overall_builds: u32,
+    overall_paths: u32,
+    grid_renders: u32,
+    grid_builds: u32,
+    grid_paths: u32,
+    grid_text_shapes: u32,
+}
+
+fn work(scene: &tl_ui::bench::scenes::SceneWindow, cx: &mut VisualTestContext) -> Work {
+    let view = scene.view.clone();
+    cx.update(|_, cx| {
+        let v = view.read(cx);
+        let page = v.page().expect("the Performance tab").read(cx);
+        let sidebar = page.sidebar().read(cx);
+        let cpu = page
+            .page(&DeviceKey(Arc::from(DeviceKey::CPU)))
+            .expect("CPU page built")
+            .clone()
+            .downcast::<CpuPage>()
+            .expect("a CpuPage")
+            .read(cx);
+        let overall = cpu.overall().read(cx);
+        let grid = cpu.grid().view.read(cx);
+        let mut w = Work {
+            paints: v.paints(),
+            sidebar_renders: sidebar.render_count.get(),
+            overall_renders: overall.render_count.get(),
+            overall_builds: overall.build_count.get(),
+            overall_paths: overall.path_paints.get(),
+            grid_renders: grid.render_count.get(),
+            grid_builds: grid.build_count.get(),
+            grid_paths: grid.path_paints.get(),
+            grid_text_shapes: grid.heading_shapes.get() + grid.value_shapes.get(),
+            ..Work::default()
+        };
+        for card in sidebar.cards() {
+            let c = card.chart.read(cx);
+            w.card_renders += c.render_count.get();
+            w.card_builds += c.build_count.get();
+            w.card_paths += c.path_paints.get();
+        }
+        w
+    })
+}
+
+/// Diagnostic for tasklens-wlf.27 and wlf.28, not a gate: how much chart work one redraw asks
+/// for in `static` and `perf-cpu`, counted in the test platform (no GPU). Run with
+/// `cargo test -p tl-ui --features bench --test bench_scenes redraw_work -- --ignored --nocapture`.
+#[gpui_kit::test]
+#[ignore = "diagnostic; prints counters"]
+fn redraw_work_per_sample(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    for scene_kind in [BenchScene::Static, BenchScene::PerfCpu] {
+        let engine = BenchEngine::start(BenchFeed::Synthetic, SEED, now_boot_ns());
+        let scene = cx
+            .update(|cx| open_scene(cx, scene_kind, engine.clone()))
+            .expect("the scene window opens");
+        let mut vcx = VisualTestContext::from_window(scene.handle, cx);
+        draw(&mut vcx);
+        let draws = 20u32;
+        let before = work(&scene, &mut vcx);
+        // One draw per real 100 ms, so each draw follows one 10 Hz publish.
+        for _ in 0..draws {
+            std::thread::sleep(Duration::from_millis(100));
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            vcx.executor().advance_clock(Duration::from_millis(100));
+        }
+        let after = work(&scene, &mut vcx);
+        let d = |a: u32, b: u32| f64::from(a - b) / f64::from(draws);
+        eprintln!(
+            "{}: per draw: paints {:.1}, sidebar renders {:.1}, 9 cards renders {:.1} builds {:.1} \
+             paths {:.1}, overall renders {:.1} builds {:.1} paths {:.1}, grid renders {:.1} \
+             builds {:.1} paths {:.1} text shapes {:.1}",
+            scene_kind.as_str(),
+            (after.paints - before.paints) as f64 / f64::from(draws),
+            d(after.sidebar_renders, before.sidebar_renders),
+            d(after.card_renders, before.card_renders),
+            d(after.card_builds, before.card_builds),
+            d(after.card_paths, before.card_paths),
+            d(after.overall_renders, before.overall_renders),
+            d(after.overall_builds, before.overall_builds),
+            d(after.overall_paths, before.overall_paths),
+            d(after.grid_renders, before.grid_renders),
+            d(after.grid_builds, before.grid_builds),
+            d(after.grid_paths, before.grid_paths),
+            d(after.grid_text_shapes, before.grid_text_shapes),
+        );
+        engine.stop();
+    }
+}
