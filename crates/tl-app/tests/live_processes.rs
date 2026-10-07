@@ -2,8 +2,12 @@
 //!
 //! Every UI test uses `FakeEngine`, so nothing checked that the Processes tab asks the real
 //! engine for the process sweep. This test starts `Engine::start` on a copy of the
-//! `owner-desktop` fixture with `process-edge` laid over it (as the engine lab tests use), runs `TasklensUi::init` with the engine as the client, opens the main window on the Processes
-//! tab and waits for a filled process table with CPU and Memory totals.
+//! `owner-desktop` fixture with `process-edge` laid over it (as the engine lab tests use), runs
+//! `TasklensUi::init` with the engine as the client, opens the main window on the Processes tab
+//! and waits for a filled process table with CPU and Memory totals.
+//!
+//! GPUI's test scheduler fails a test when another thread wakes one of its tasks, so the UI gets
+//! the engine through `Pumped`, whose wake channel the test thread feeds.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,10 +17,16 @@ use std::time::{Duration, Instant};
 use gpui_kit::{TestAppContext, VisualTestContext};
 use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
+use tl_engine::EngineHandle;
 use tl_engine::{Engine, EngineConfig, EngineHooks, EngineMode};
+use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
-use tl_model::command::Tab;
+use tl_model::command::{Command, CommandError, Tab};
+use tl_model::demand::Demand;
+use tl_model::journal::{JournalHandle, JournalQuery};
+use tl_model::settings::EngineSettings;
 use tl_model::settings::{Settings, UiState};
+use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::i18n::init_strings;
@@ -112,10 +122,74 @@ fn start_engine(dir: &Path, root: &Path) -> tl_engine::EngineHandle {
     Engine::start(config, hooks).expect("engine starts")
 }
 
+/// The engine handle with UI-side channels that only the test thread wakes. `pump` forwards the
+/// engine's wakes. No action is sent here, so the action event channel stays empty.
+struct Pumped {
+    engine: EngineHandle,
+    engine_wake: async_channel::Receiver<()>,
+    wake_tx: async_channel::Sender<()>,
+    wake_rx: async_channel::Receiver<()>,
+    _events_tx: async_channel::Sender<ActionEvent>,
+    events_rx: async_channel::Receiver<ActionEvent>,
+}
+
+impl Pumped {
+    fn new(engine: EngineHandle) -> Self {
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
+        let (events_tx, events_rx) = async_channel::bounded(1);
+        Self {
+            engine_wake: engine.wake(),
+            engine,
+            wake_tx,
+            wake_rx,
+            _events_tx: events_tx,
+            events_rx,
+        }
+    }
+
+    /// Passes a pending engine wake on, on the calling thread.
+    fn pump(&self) {
+        if self.engine_wake.try_recv().is_ok() {
+            let _ = self.wake_tx.try_send(());
+        }
+    }
+}
+
+impl EngineClient for Pumped {
+    fn latest(&self) -> Arc<Snapshot> {
+        self.engine.latest()
+    }
+
+    fn wake(&self) -> async_channel::Receiver<()> {
+        self.wake_rx.clone()
+    }
+
+    fn action_events(&self) -> async_channel::Receiver<ActionEvent> {
+        self.events_rx.clone()
+    }
+
+    fn set_demand(&self, demand: Demand) {
+        self.engine.set_demand(demand);
+    }
+
+    fn set_settings(&self, settings: EngineSettings) {
+        self.engine.set_settings(settings);
+    }
+
+    fn send(&self, cmd: Command) -> Result<(), CommandError> {
+        self.engine.send(cmd)
+    }
+
+    fn journal(&self, query: JournalQuery) -> JournalHandle {
+        self.engine.journal(query)
+    }
+}
+
 /// One step: fake time for the UI timers, a drawn frame with its next-frame callbacks (the hub
 /// counts the window as shown from those, ADR-008), and real time for the engine threads.
-fn step(vcx: &mut VisualTestContext, cpu: &mut CpuTicks) {
+fn step(vcx: &mut VisualTestContext, cpu: &mut CpuTicks, pumped: &Pumped) {
     cpu.advance();
+    pumped.pump();
     vcx.executor().advance_clock(STEP);
     vcx.run_until_parked();
     vcx.update(|window, cx| {
@@ -134,7 +208,8 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
     overlay(&fixtures().join("process-edge"), &root);
     let mut cpu_ticks = CpuTicks::new(&root);
     let engine = start_engine(dir.path(), &root);
-    let client: Arc<dyn EngineClient> = Arc::new(engine.clone());
+    let pumped = Arc::new(Pumped::new(engine.clone()));
+    let client: Arc<dyn EngineClient> = pumped.clone();
     let (_tx, rx) = async_channel::bounded(4);
     let init = UiInit {
         settings: Settings::default(),
@@ -191,7 +266,7 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
         if rows > 0 && records > 0 && cpu == Validity::Valid && memory == Validity::Valid {
             break;
         }
-        step(&mut vcx, &mut cpu_ticks);
+        step(&mut vcx, &mut cpu_ticks, &pumped);
         last = read(&mut vcx);
     }
     let demand_on = vcx.update(|_, cx| {
