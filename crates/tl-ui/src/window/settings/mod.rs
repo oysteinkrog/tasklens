@@ -16,6 +16,7 @@
 //! states are created in `SettingsWindow::new`, never in render.
 
 mod general;
+mod motion;
 mod units;
 
 use std::ops::RangeInclusive;
@@ -37,6 +38,7 @@ use tracing::warn;
 use super::main::ShellState;
 use super::registry::{GlobalRegistry, WindowKey};
 use crate::actions::OpenSettings;
+use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::slider::{TlSlider, TlSliderEvent};
 use crate::components::toast::{ToastKind, ToastQueue};
@@ -164,7 +166,7 @@ pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
     // Page order: General, Appearance, Motion, Units, Processes, Performance, Graphs,
     // Services, Startup and window, Privileges, Advanced.
     #[allow(unused_mut, reason = "test-hooks appends the test pages")]
-    let mut pages: Vec<PageBuilder> = vec![general::page(cx), units::page(cx)];
+    let mut pages: Vec<PageBuilder> = vec![general::page(cx), motion::page(cx), units::page(cx)];
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {
         pages.extend(test(cx));
@@ -213,6 +215,9 @@ pub struct PageBuilder {
     sliders: Vec<SliderSpec>,
     /// "Takes effect after restart": the next item gets it as description and as a toast.
     restart_next: Option<SharedString>,
+    /// The next item is disabled.
+    disable_next: bool,
+    description: Option<SharedString>,
     /// The switch and checkbox setters, the same closures the kit calls.
     #[cfg(any(test, feature = "test-hooks"))]
     bool_setters: Vec<(SettingKey, BoolSetter)>,
@@ -222,6 +227,12 @@ pub struct PageBuilder {
     /// The description each item shows.
     #[cfg(any(test, feature = "test-hooks"))]
     descriptions: Vec<(SettingKey, SharedString)>,
+    /// The keys of the disabled items.
+    #[cfg(any(test, feature = "test-hooks"))]
+    disabled: Vec<SettingKey>,
+    /// The banner texts, top first.
+    #[cfg(any(test, feature = "test-hooks"))]
+    banners: Vec<SharedString>,
 }
 
 impl PageBuilder {
@@ -232,12 +243,18 @@ impl PageBuilder {
             keys: Vec::new(),
             sliders: Vec::new(),
             restart_next: None,
+            disable_next: false,
+            description: None,
             #[cfg(any(test, feature = "test-hooks"))]
             bool_setters: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             dropdowns: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             descriptions: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            disabled: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            banners: Vec::new(),
         }
     }
 
@@ -260,6 +277,32 @@ impl PageBuilder {
     /// when it changes.
     pub fn restart_note(&mut self, cx: &App) -> &mut Self {
         self.restart_next = Some(tr(cx, RESTART_NOTE));
+        self
+    }
+
+    /// The text under the page title.
+    pub fn page_description(&mut self, text: impl Into<SharedString>) -> &mut Self {
+        self.description = Some(text.into());
+        self
+    }
+
+    /// Disables the next item when `disabled` is true. A disabled slider is skipped by Tab.
+    pub fn disable_next(&mut self, disabled: bool) -> &mut Self {
+        self.disable_next = disabled;
+        self
+    }
+
+    /// A full-width `TlBanner` row in `group`.
+    pub fn banner(
+        &mut self,
+        group: impl Into<SharedString>,
+        kind: TlBannerKind,
+        text: SharedString,
+    ) -> &mut Self {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.banners.push(text.clone());
+        let item = SettingItem::render(move |_, _, _| TlBanner::new(kind, text.clone()));
+        self.push_item(group, item);
         self
     }
 
@@ -378,6 +421,7 @@ impl PageBuilder {
         fmt: fn(i64) -> SharedString,
     ) -> &mut Self {
         let restart = self.take_restart();
+        let disabled = self.disable_next;
         self.sliders.push(SliderSpec {
             key,
             range: range.clone(),
@@ -390,6 +434,7 @@ impl PageBuilder {
                 Some(state) => TlSlider::new(state)
                     .range(min, max, step as f32)
                     .value_text(fmt(value))
+                    .disabled(disabled)
                     .into_any_element(),
                 None => div().into_any_element(),
             }
@@ -481,9 +526,13 @@ impl PageBuilder {
                 group.title(title)
             }
         });
-        SettingPage::new(tr(cx, self.id.title_key()))
+        let page = SettingPage::new(tr(cx, self.id.title_key()))
             .icon(self.id.icon())
-            .groups(groups)
+            .groups(groups);
+        match self.description {
+            Some(text) => page.description(text),
+            None => page,
+        }
     }
 
     /// Runs the switch or checkbox setter of `key` as a click on it would.
@@ -512,6 +561,23 @@ impl PageBuilder {
         {
             setter(i, cx);
         }
+    }
+
+    /// True when the item of `key` is disabled.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn is_disabled(&self, key: SettingKey) -> bool {
+        self.disabled.contains(&key)
+    }
+
+    /// The banner texts, top first.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn banners(&self) -> &[SharedString] {
+        &self.banners
+    }
+
+    /// The page description, if any.
+    pub fn page_description_text(&self) -> Option<&SharedString> {
+        self.description.as_ref()
     }
 
     /// The description the item of `key` shows, if any.
@@ -556,6 +622,11 @@ impl PageBuilder {
             #[cfg(any(test, feature = "test-hooks"))]
             self.descriptions.push((key, text.clone()));
             item = item.description(text);
+        }
+        if std::mem::take(&mut self.disable_next) {
+            #[cfg(any(test, feature = "test-hooks"))]
+            self.disabled.push(key);
+            item = item.disabled(true);
         }
         self.push_item(group, item);
         self

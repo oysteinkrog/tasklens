@@ -611,3 +611,12 @@ pub fn animations_on(cx: &App) -> bool {
         .is_none_or(|tl| tl.data.settings.motion.animations)
         && !cx.reduce_motion()
 }
+
+/// The system's reduce-motion setting: `cx.reduce_motion()`, unless `TlSettings` turned it on
+/// only because `motion.animations` is off.
+pub fn system_reduce_motion(cx: &App) -> bool {
+    cx.reduce_motion()
+        && !cx
+            .try_global::<TlSettings>()
+            .is_some_and(|tl| tl.forced_reduce_motion)
+}

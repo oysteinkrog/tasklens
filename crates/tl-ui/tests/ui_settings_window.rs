@@ -18,7 +18,7 @@ use tl_ui::actions::OpenSettings;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::slider::TlSliderEvent;
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
-use tl_ui::settings_global::{SettingKey, TlSettings};
+use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::ShellState;
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
@@ -36,9 +36,10 @@ impl Render for Parent {
 
 type Frame = TlSecondaryWindow<SettingsWindow>;
 
-/// A Motion page with the Animations switch and a smooth scroll amount slider.
+/// A test page (under the Advanced id) with the Animations switch and a smooth scroll amount
+/// slider.
 fn test_pages(_: &mut gpui_kit::App) -> Vec<PageBuilder> {
-    let mut page = PageBuilder::new(PageId::Motion);
+    let mut page = PageBuilder::new(PageId::Advanced);
     page.switch("Motion", SettingKey::MotionAnimations, "Animations", None)
         .slider(
             "Motion",
@@ -162,7 +163,7 @@ fn page_builder_records_keys(cx: &mut TestAppContext) {
         cx.update(|cx| (all_pages(cx), TlSettings::settings(cx).motion.animations));
     // The test page comes after the real ones.
     let test_page = pages.last().expect("pages");
-    assert_eq!(test_page.id(), PageId::Motion);
+    assert_eq!(test_page.id(), PageId::Advanced);
     assert_eq!(
         test_page.keys(),
         [
@@ -328,6 +329,92 @@ fn general_units_keys(cx: &mut TestAppContext) {
             SettingKey::GeneralLanguage,
             SettingKey::UnitsNetwork,
             SettingKey::UnitsNetworkAutoScale
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn motion_reduced_motion_notes(cx: &mut TestAppContext) {
+    // `setup` turns the system reduce-motion on.
+    setup(cx);
+    let motion = page(cx, PageId::Motion);
+    assert_eq!(
+        motion
+            .page_description_text()
+            .map(|t| t.to_string())
+            .as_deref(),
+        Some("Your system's reduced motion setting turns all of these off.")
+    );
+    assert_eq!(
+        motion.banners(),
+        ["Reduced motion is on in your system settings"]
+    );
+    assert_eq!(
+        motion
+            .description_of(SettingKey::MotionSmoothGraphs)
+            .as_deref(),
+        Some("Turned off by the system reduce-motion setting")
+    );
+    assert!(
+        cx.update(|cx| TlSettings::settings(cx).motion.smooth_graphs),
+        "Smooth Graphs keeps its stored value"
+    );
+
+    cx.update(|cx| cx.set_reduce_motion(false));
+    let motion = page(cx, PageId::Motion);
+    assert!(motion.banners().is_empty(), "no banner");
+    assert_eq!(motion.description_of(SettingKey::MotionSmoothGraphs), None);
+}
+
+#[gpui_kit::test]
+fn motion_scroll_amount_disabled(cx: &mut TestAppContext) {
+    setup(cx);
+    assert!(!page(cx, PageId::Motion).is_disabled(SettingKey::MotionSmoothScrollAmount));
+    cx.update(|cx| {
+        TlSettings::set(
+            cx,
+            SettingKey::MotionSmoothScroll,
+            SettingValue::Bool(false),
+        )
+    });
+    assert!(page(cx, PageId::Motion).is_disabled(SettingKey::MotionSmoothScrollAmount));
+}
+
+#[gpui_kit::test]
+fn motion_tab_switch_slider(cx: &mut TestAppContext) {
+    let (_, persists) = setup(cx);
+    let (frame, vcx) = open(cx, 1);
+    let state = vcx
+        .read(|cx| {
+            frame
+                .read(cx)
+                .content()
+                .read(cx)
+                .slider_state(SettingKey::MotionTabSwitchMs)
+                .cloned()
+        })
+        .expect("Tab Switch slider state");
+    let before = persists.get();
+    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Commit(300.))));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).motion.tab_switch_ms),
+        300
+    );
+    assert_eq!(persists.get(), before + 1, "Release persists");
+}
+
+#[gpui_kit::test]
+fn motion_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    assert_eq!(
+        page(cx, PageId::Motion).keys(),
+        [
+            SettingKey::MotionAnimations,
+            SettingKey::MotionSmoothGraphs,
+            SettingKey::MotionSmoothScroll,
+            SettingKey::MotionSmoothScrollAmount,
+            SettingKey::MotionTabSwitchMs
         ]
     );
 }
