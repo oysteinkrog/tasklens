@@ -588,6 +588,10 @@ processes-toolbar-history-flat = History shows a flat list
 ## Processes table toasts (E22, UI-PRC-011)
 
 processes-toast-process-exited = Process exited
+# Jump to a process (tasklens-pdu.3, PROC-071, UI-PRC-015).
+processes-jump-switched-tab = Switched to Processes tab
+processes-jump-not-found = Process not found in current view
+processes-jump-show = Show
 
 ## Include children checkbox (E20-010)
 

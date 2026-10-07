@@ -11,6 +11,7 @@ pub mod confirm;
 pub mod delegate;
 pub mod header_totals;
 pub mod history;
+pub mod jump;
 pub mod menu;
 pub mod name_cell;
 pub mod table;
@@ -90,6 +91,8 @@ pub struct ProcessesPage {
     /// else it captures the selection itself.
     menu_targets: Option<CapturedTargets>,
     confirm_words: ConfirmWords,
+    /// The jump target's pending jump (E22-A3).
+    jump: jump::JumpState,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -140,6 +143,7 @@ impl ProcessesPage {
         let section_versions = cx
             .try_global::<TlSettings>()
             .map_or([0; 4], |tl| SECTIONS.map(|s| tl.version(s)));
+        jump::register_show_hidden(cx);
         Self {
             table,
             _hub_sub: hub_sub,
@@ -151,6 +155,7 @@ impl ProcessesPage {
             strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
             menu_targets: None,
             confirm_words: ConfirmWords::new(cx),
+            jump: jump::JumpState::default(),
         }
     }
 
@@ -187,6 +192,7 @@ impl ProcessesPage {
                 cx.notify();
             }
         });
+        self.resolve_jump(cx);
     }
 
     /// `processes.mode` sends a query; `appearance`, `units` and `tables` start a new style
