@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use gpui_kit::TestAppContext;
+use gpui_kit::assets::IconName;
 use smallvec::smallvec;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
@@ -16,7 +17,9 @@ use tl_ui::pages::performance::cpu_details::{
     CpuLiveInputs, CpuSensor, ROW_L1, ROW_L2, ROW_L3, ROW_LOAD_AVERAGE, ROW_SPEED, ROW_TEMPERATURE,
     ROW_UP_TIME, cpu_details_model, cpu_temp_sensors, update_live, update_static,
 };
-use tl_ui::pages::performance::cpu_grid::{GridWords, cell_specs, heading_tooltip};
+use tl_ui::pages::performance::cpu_grid::{
+    GridWords, cell_specs, cell_specs_ranked, heading_tooltip,
+};
 use tl_ui::pages::performance::details::{KeyValueModel, KvRow};
 
 const S: u64 = 1_000_000_000;
@@ -411,6 +414,118 @@ fn cpu_grid_heading_tooltip_text() {
     );
     assert_eq!(cells[11].tooltip.as_deref(), Some("Core 3, thread 1"));
     assert_eq!(cells[3].tooltip.as_deref(), Some("Core 3, thread 0"));
+}
+
+/// 8 Performance cores then 8 Efficiency cores, one thread each.
+fn hybrid_topology() -> CpuTopology {
+    let mut online = CpuSet::empty();
+    for id in 0..16 {
+        online.insert(id);
+    }
+    CpuTopology {
+        online,
+        cores: (0..16u16)
+            .map(|c| CoreInfo {
+                id: c,
+                logical: smallvec![c],
+                l3_group: 0,
+                kind: if c < 8 {
+                    CoreKind::Performance
+                } else {
+                    CoreKind::Efficiency
+                },
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn cpu_core_mark_icons() {
+    let mut cells = Vec::new();
+    cell_specs(
+        &GridWords::default(),
+        &hybrid_topology(),
+        &logical_devices(16),
+        false,
+        &mut cells,
+    );
+    for (i, cell) in cells.iter().enumerate() {
+        let want = if i < 8 { IconName::Zap } else { IconName::Leaf };
+        assert_eq!(cell.mark, Some(want), "CPU {i}");
+    }
+}
+
+#[test]
+fn cpu_no_marks_on_homogeneous() {
+    let mut cells = Vec::new();
+    cell_specs(
+        &GridWords::default(),
+        &topology(16),
+        &logical_devices(16),
+        false,
+        &mut cells,
+    );
+    assert!(cells.iter().all(|c| c.mark.is_none()));
+
+    // Only Performance cores is not hybrid either.
+    let mut topo = hybrid_topology();
+    for core in &mut topo.cores {
+        core.kind = CoreKind::Performance;
+    }
+    cell_specs(
+        &GridWords::default(),
+        &topo,
+        &logical_devices(16),
+        false,
+        &mut cells,
+    );
+    assert!(cells.iter().all(|c| c.mark.is_none()));
+}
+
+#[test]
+fn cpu_preferred_core_star_and_tooltip() {
+    let words = GridWords::default();
+    let mut ranks: Vec<Option<u32>> = vec![Some(236), Some(236)];
+    ranks.extend((0..14).map(|i| Some(231 - i)));
+    let mut cells = Vec::new();
+    cell_specs_ranked(
+        &words,
+        &topology(16),
+        &logical_devices(16),
+        false,
+        &ranks,
+        &mut cells,
+    );
+    let starred: Vec<usize> = (0..16)
+        .filter(|&i| cells[i].mark == Some(IconName::Star))
+        .collect();
+    assert_eq!(starred, [0, 1]);
+    assert_eq!(
+        cells[0].tooltip.as_deref(),
+        Some("Core 0, thread 0 · Preferred core (rank 236)")
+    );
+    assert!(
+        cells[1]
+            .tooltip
+            .as_deref()
+            .unwrap()
+            .ends_with("Preferred core (rank 236)")
+    );
+    assert_eq!(cells[2].tooltip.as_deref(), Some("Core 2, thread 0"));
+
+    // Equal ranks everywhere, or no ranking file: no star.
+    for ranks in [vec![Some(200); 16], Vec::new(), vec![None; 16]] {
+        cell_specs_ranked(
+            &words,
+            &topology(16),
+            &logical_devices(16),
+            false,
+            &ranks,
+            &mut cells,
+        );
+        assert!(cells.iter().all(|c| c.mark.is_none()), "{ranks:?}");
+        assert!(!cells[0].tooltip.as_deref().unwrap().contains("Preferred"));
+    }
 }
 
 #[cfg(feature = "test-hooks")]
