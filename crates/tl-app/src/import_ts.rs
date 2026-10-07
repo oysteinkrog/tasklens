@@ -77,9 +77,9 @@ pub fn decode_ini(bytes: &[u8]) -> Result<String, ImportError> {
         [0xFE, 0xFF, ..] => u16::from_be_bytes,
         _ => return Ok(String::from_utf8_lossy(bytes).into_owned()),
     };
-    let chunks = bytes[2..].chunks_exact(2);
-    let odd = !chunks.remainder().is_empty();
-    let units = chunks.map(|c| unit([c[0], c[1]]));
+    let (pairs, rest) = bytes[2..].as_chunks::<2>();
+    let odd = !rest.is_empty();
+    let units = pairs.iter().map(|&pair| unit(pair));
     let mut text: String = char::decode_utf16(units)
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect();

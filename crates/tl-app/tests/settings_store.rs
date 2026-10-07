@@ -741,10 +741,10 @@ const TS_INI: &str = "[Settings]\r\nAnimationsEnabled=false\r\nCloseToTray=true\
 /// Runs the import callback on `bytes`, then persists the result the way tl-ui's
 /// `TlSettings::update` does, and returns what landed on disk.
 fn import_and_persist(bytes: &[u8]) -> (ImportSummary, Settings, UiState) {
-    let dir = TempDir::new().unwrap();
+    let dir = TempDir::new().expect("tempdir");
     let paths = paths_in(&dir);
     let ini = dir.path().join("UserSettings.ini");
-    std::fs::write(&ini, bytes).unwrap();
+    std::fs::write(&ini, bytes).expect("write fixture");
     let store = Store::new(&paths, false, false, defaults());
     let imported =
         import_ts::import_file(&ini, &Settings::default(), &UiState::default()).expect("import");
