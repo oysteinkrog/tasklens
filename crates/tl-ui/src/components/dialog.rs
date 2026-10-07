@@ -167,6 +167,7 @@ pub struct TlDialog {
     title: SharedString,
     /// False for a notice with only the action button (see [`TlDialog::without_cancel`]).
     cancel: bool,
+    cancel_label: SharedString,
 }
 
 impl TlDialog {
@@ -184,6 +185,7 @@ impl TlDialog {
             checkbox: None,
             title: DEFAULT_TITLE.into(),
             cancel: true,
+            cancel_label: CANCEL_LABEL.into(),
         }
     }
 
@@ -238,6 +240,16 @@ impl TlDialog {
     pub fn without_cancel(mut self) -> Self {
         self.cancel = false;
         self
+    }
+
+    /// The Cancel button's label. Default "Cancel"; the owner passes its translated text.
+    pub fn cancel_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.cancel_label = label.into();
+        self
+    }
+
+    pub fn cancel_text(&self) -> &SharedString {
+        &self.cancel_label
     }
 
     pub fn has_cancel(&self) -> bool {
@@ -352,7 +364,7 @@ impl TlDialog {
             let on_result = on_result.clone();
             footer_button(
                 "TlDialogCancel",
-                CANCEL_LABEL.into(),
+                self.cancel_label.clone(),
                 FooterKind::Secondary,
                 &focus.cancel,
                 move |_, window, cx| on_result(DialogResult::Cancelled, window, cx),

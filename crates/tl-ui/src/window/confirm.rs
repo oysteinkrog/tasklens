@@ -49,6 +49,7 @@ pub fn confirm_reset_settings(window: &mut Window, cx: &mut App) {
         tr(cx, "shell-confirm-reset-button"),
     )
     .title(tr(cx, "shell-confirm-title"))
+    .cancel_label(tr(cx, "shell-confirm-cancel"))
     .destructive();
     let opened = dialog.open(window, cx, |result, window, cx| {
         if let DialogResult::Confirmed { .. } = result {

@@ -1313,6 +1313,8 @@ mod reset_settings {
             "Reset all settings to their defaults? Themes and history are kept."
         );
         assert!(destructive, "Danger Reset");
+        let cancel = vcx.read(|cx| view.read(cx).dialog().cancel_text().to_string());
+        assert_eq!(cancel, "Cancel");
         let focused = vcx.update(|window, cx| view.read(cx).focused_button(window));
         assert_eq!(focused, Some(DialogButton::Cancel));
 
@@ -1322,6 +1324,18 @@ mod reset_settings {
         assert!(!is_open(cx, handle), "Esc closes it");
         assert_eq!(settings(cx), before, "no setting changes");
         assert!(r.saves.borrow().is_empty());
+    }
+
+    /// The Cancel label comes from `shell-confirm-cancel`, not the dialog's English default.
+    #[gpui_kit::test]
+    fn reset_cancel_label_translated(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        r.pcx.update(|_, cx| {
+            tl_ui::i18n::set_test_catalogue(cx, "shell-confirm-cancel = <cancel>\n")
+        });
+        let (_, view, vcx) = open_confirm(&mut r, cx);
+        let cancel = vcx.read(|cx| view.read(cx).dialog().cancel_text().to_string());
+        assert_eq!(cancel, "<cancel>");
     }
 
     #[gpui_kit::test]
