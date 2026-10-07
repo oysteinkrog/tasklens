@@ -3,7 +3,9 @@
 //!
 //! The band is `row_h` high with the `header` fill, a 3 px `accent` bar at its left edge, the
 //! title, the distro logo (Operating System only) and a copy button at the right end that
-//! dispatches [`CopyInformationSection`]. The rows draw in a `TlKeyValueGrid` inline layout.
+//! dispatches [`CopyInformationSection`]. The button's tooltip is "Copy section" and its
+//! accessible name "Copy <section title>"; its muted icon turns `text_primary` on hover. A row's
+//! `label_tooltip` shows on its label. The rows draw in a `TlKeyValueGrid` inline layout.
 //! A value with several lines is several rows high. The row menu's "Copy section" dispatches the
 //! same action; "Copy value" and "Copy row" copy and show "Copied to clipboard". A value click
 //! does not copy, so text selection works.
@@ -32,7 +34,7 @@ use crate::components::kv_grid::{
     value_copy_form,
 };
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::{Strings, tr, tr_en};
+use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::text::style::t_md;
 use crate::theme::{current, metrics};
 
@@ -43,6 +45,7 @@ const LOGO_SIZE: f32 = 16.;
 /// From the label start to the value start, × ui_scale (measured, UI-SYS-081).
 const LABEL_WIDTH: f32 = 232.;
 const KEY_COPY_SECTION: &str = "information-copy-section";
+const KEY_COPY_NAME: &str = "information-copy-section-name";
 const KEY_COPIED: &str = "information-toast-copied";
 
 /// The ten sections.
@@ -157,15 +160,19 @@ struct SectionWords {
     version: Option<Option<u64>>,
     title: SharedString,
     copy_section: SharedString,
+    /// The copy button's accessible name, "Copy <title>".
+    copy_name: SharedString,
     /// The toast after a row menu copy.
     copied: SharedString,
 }
 
 impl SectionWords {
     fn new(id: InfoSectionId) -> Self {
+        let title = id.title();
         Self {
             version: None,
-            title: id.title(),
+            copy_name: tr_en(KEY_COPY_NAME, &[("section", title.to_string().into())]),
+            title,
             copy_section: tr_en(KEY_COPY_SECTION, &[]),
             copied: tr_en(KEY_COPIED, &[]),
         }
@@ -181,6 +188,11 @@ impl SectionWords {
             return;
         }
         self.title = tr(cx, id.key());
+        self.copy_name = tr_args(
+            cx,
+            KEY_COPY_NAME,
+            &[("section", self.title.to_string().into())],
+        );
         self.copy_section = tr(cx, KEY_COPY_SECTION);
         self.copied = tr(cx, KEY_COPIED);
     }
@@ -222,6 +234,8 @@ pub struct InfoSection {
     words: SectionWords,
     /// The grid input built from `rows` in `set_rows`.
     grid: Rc<[TlKvSection]>,
+    /// The label tooltips by row index, built in `set_rows`.
+    label_tips: Rc<[(usize, SharedString)]>,
     #[cfg(any(test, feature = "test-hooks"))]
     render_count: usize,
 }
@@ -235,6 +249,7 @@ impl InfoSection {
             copy_enabled: false,
             words: SectionWords::new(id),
             grid: Rc::from(Vec::new()),
+            label_tips: Rc::from(Vec::new()),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: 0,
         }
@@ -254,6 +269,11 @@ impl InfoSection {
             return;
         }
         self.grid = Rc::from([grid_section(&rows)]);
+        self.label_tips = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(n, row)| row.label_tooltip.clone().map(|tip| (n, tip)))
+            .collect();
         self.rows = rows;
         cx.notify();
     }
@@ -272,6 +292,11 @@ impl InfoSection {
             self.copy_enabled = on;
             cx.notify();
         }
+    }
+
+    /// The copy button's accessible name, "Copy <section title>".
+    pub fn copy_button_name(&self) -> &SharedString {
+        &self.words.copy_name
     }
 
     /// Test hook: how many times the section rendered.
@@ -316,8 +341,10 @@ impl InfoSection {
             .icon(TlIcon::Copy)
             .icon_size(m.icon.sm)
             .icon_muted(true)
+            .icon_hover(true)
             .size(TlButtonSize::Sm)
             .tooltip(self.words.copy_section.clone())
+            .accessible_name(self.words.copy_name.clone())
             .disabled(!self.copy_enabled)
             .action(Box::new(CopyInformationSection { section: id }));
 
@@ -361,6 +388,7 @@ impl Render for InfoSection {
             .block_indent(m.sp[5])
             .block_gap(m.sp[5])
             .label_inset(m.sp[4])
+            .label_tooltips(self.label_tips.clone())
             .on_copy_section(move |_, window, cx| {
                 window.dispatch_action(Box::new(CopyInformationSection { section: id }), cx);
             })

@@ -34,7 +34,9 @@
 //! ellipsis) and its tooltip holds the full text.
 //!
 //! Hovering a value that has a tooltip draws a dotted underline in `text_secondary`. A link value
-//! gets none: `TlLink` draws its own hover underline.
+//! gets none: `TlLink` draws its own hover underline. A label can have a tooltip too
+//! ([`TlKeyValueGrid::label_tooltips`]), shown after the control delay; its view is built only
+//! when it opens.
 //!
 //! Values are selectable text. A click on a value with `copy_on_click` copies it and flashes the
 //! row. The context menu on a value has "Copy value", "Copy row" and "Copy section". Ctrl+C with a
@@ -591,6 +593,7 @@ pub struct TlKeyValueGrid {
     copy_on_click: bool,
     on_copied: Option<CopiedHandler>,
     on_copy_section: Option<SectionHandler>,
+    label_tooltips: Rc<[(usize, SharedString)]>,
     filtered_empty: bool,
     loading: bool,
 }
@@ -611,6 +614,7 @@ impl TlKeyValueGrid {
             copy_on_click: false,
             on_copied: None,
             on_copy_section: None,
+            label_tooltips: Rc::from(Vec::new()),
             filtered_empty: false,
             loading: false,
         }
@@ -685,6 +689,13 @@ impl TlKeyValueGrid {
         handler: impl Fn(usize, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_copy_section = Some(Rc::new(handler));
+        self
+    }
+
+    /// Label tooltips by flat row index: rows count from 0 across every section and block, in
+    /// order. The owner builds the list when its rows change, not per frame.
+    pub fn label_tooltips(mut self, tips: Rc<[(usize, SharedString)]>) -> Self {
+        self.label_tooltips = tips;
         self
     }
 
@@ -952,6 +963,25 @@ impl TlKeyValueGrid {
         )
     }
 
+    /// Attaches the label tooltip of row `n`, if it has one.
+    fn label_tip(
+        &self,
+        n: usize,
+        label: gpui_kit::Div,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> gpui_kit::Div {
+        let Some((_, tip)) = self.label_tooltips.iter().find(|(i, _)| *i == n) else {
+            return label;
+        };
+        let state = HoverTooltip::state((self.child_id("label", n), "tooltip"), window, cx);
+        let tip = TlTooltip::text(tip.clone());
+        let label = label
+            .relative()
+            .debug_selector(move || format!("TlKv-label-{n}"));
+        HoverTooltip::attach(&state, label, DELAY_CONTROL, tip.build(), window, cx)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn inline_row(
         &self,
@@ -971,6 +1001,7 @@ impl TlKeyValueGrid {
             .truncate()
             .text_color(f.theme.text_secondary)
             .child(row.label.clone());
+        let label = self.label_tip(n, label, window, cx);
         // A multi-line value keeps its label on the first line.
         let label = if lines > 1 {
             div()
@@ -1016,6 +1047,7 @@ impl TlKeyValueGrid {
             .truncate()
             .text_color(f.theme.text_secondary)
             .child(row.label.clone());
+        let label = self.label_tip(n, label, window, cx);
         Some(
             div()
                 .debug_selector(move || format!("TlKv-row-{n}"))

@@ -17,16 +17,18 @@
 //!   spinner beside the label instead of in its place.
 //!
 //! Hover and pressed change at once. The focus ring shows only after keyboard input. Icon and
-//! Toggle buttons must have a tooltip; its text is also their accessible name.
+//! Toggle buttons must have a tooltip; its text is also their accessible name unless the owner
+//! gives one with [`TlButton::accessible_name`].
 
 use std::rc::Rc;
 
+use gpui_kit::assets::IconNamed as _;
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::{
-    Action, App, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
+    Action, AnyElement, App, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
     StatefulInteractiveElement, Styled, Window, accesskit::Toggled, div,
-    prelude::FluentBuilder as _, px, rgb,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
 
 use super::focus::TlFocusRing;
@@ -42,6 +44,9 @@ const STATE_STEP: f32 = 0.08;
 const ON_ALPHA: f32 = 0.25;
 /// Minimum width of a button with a label, × ui_scale.
 const MIN_LABEL_WIDTH: f32 = 72.;
+/// Hover group of a button whose muted icon follows hover. A nested button's group is the
+/// innermost one, so one name serves every button.
+const HOVER_GROUP: &str = "tl-button";
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -161,9 +166,11 @@ pub struct TlButton {
     trailing_icon: Option<TlIcon>,
     icon_size: Option<Pixels>,
     icon_muted: bool,
+    icon_hover: bool,
     action: Option<Rc<dyn Action>>,
     on_click: Option<ClickHandler>,
     tooltip: Option<SharedString>,
+    accessible_name: Option<SharedString>,
     disabled: bool,
     loading: bool,
     pressed: bool,
@@ -182,9 +189,11 @@ impl TlButton {
             trailing_icon: None,
             icon_size: None,
             icon_muted: false,
+            icon_hover: false,
             action: None,
             on_click: None,
             tooltip: None,
+            accessible_name: None,
             disabled: false,
             loading: false,
             pressed: false,
@@ -224,6 +233,13 @@ impl TlButton {
         self
     }
 
+    /// Draws a muted icon in the kind's colour while the pointer is over the button, as the
+    /// Information section copy button does. Default `false`.
+    pub fn icon_hover(mut self, on: bool) -> Self {
+        self.icon_hover = on;
+        self
+    }
+
     pub fn size(mut self, size: TlButtonSize) -> Self {
         self.size = size;
         self
@@ -254,6 +270,26 @@ impl TlButton {
         self
     }
 
+    /// The accessible name, when it must say more than the tooltip, such as "Copy Processor" for
+    /// a button whose tooltip is "Copy section". Default: the tooltip for Icon and Toggle, else
+    /// the label.
+    pub fn accessible_name(mut self, name: impl Into<SharedString>) -> Self {
+        self.accessible_name = Some(name.into());
+        self
+    }
+
+    /// The name assistive technology reads for the button.
+    pub fn accessible_text(&self) -> Option<&SharedString> {
+        if self.accessible_name.is_some() {
+            return self.accessible_name.as_ref();
+        }
+        if self.kind.icon_only() || self.label.is_none() {
+            self.tooltip.as_ref()
+        } else {
+            self.label.as_ref()
+        }
+    }
+
     /// A disabled button is drawn at opacity 0.5, has no hover or pressed look, is not a tab
     /// stop and ignores input. Its tooltip still shows.
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -280,6 +316,13 @@ impl TlButton {
         } else {
             look(self.kind, theme).fg
         }
+    }
+
+    /// The icon colour while the pointer is over the button, when it differs from
+    /// [`TlButton::icon_color`]: a muted icon with [`TlButton::icon_hover`] on an enabled button.
+    pub fn icon_hover_color(&self, theme: &TlTheme) -> Option<Hsla> {
+        (self.icon_hover && self.icon_muted && !self.disabled && !self.loading)
+            .then(|| look(self.kind, theme).fg)
     }
 
     /// A focus handle the owner keeps, for example to list the button in a focus order. Without
@@ -309,7 +352,9 @@ impl RenderOnce for TlButton {
         let h = px(height(self.kind, self.size, &m));
         let inert = self.disabled || self.loading;
         let icon_fg = self.icon_color(&theme);
+        let icon_hover_fg = self.icon_hover_color(&theme);
         let icon_only = self.kind.icon_only() || self.label.is_none();
+        let icon_size = self.icon_size.unwrap_or(m.icon.md);
 
         let focus: FocusHandle = match self.focus.clone() {
             Some(focus) => focus,
@@ -345,7 +390,7 @@ impl RenderOnce for TlButton {
                     div()
                         .debug_selector(move || format!("TlButton-{id}-icon"))
                         .flex_none()
-                        .child(icon(name, self.icon_size.unwrap_or(m.icon.md), icon_fg)),
+                        .child(icon_element(name, icon_size, icon_fg, icon_hover_fg)),
                 )
             });
         if let Some(label) = self.label.clone().filter(|_| !self.kind.icon_only()) {
@@ -359,15 +404,11 @@ impl RenderOnce for TlButton {
                 div()
                     .debug_selector(move || format!("TlButton-{id}-trailing-icon"))
                     .flex_none()
-                    .child(icon(name, self.icon_size.unwrap_or(m.icon.md), icon_fg)),
+                    .child(icon_element(name, icon_size, icon_fg, icon_hover_fg)),
             );
         }
 
-        let accessible = if icon_only {
-            self.tooltip.clone()
-        } else {
-            self.label.clone()
-        };
+        let accessible = self.accessible_text().cloned();
         let action = self.action.clone();
         let on_click = self.on_click;
         let bg = if self.pressed { look.pressed } else { look.bg };
@@ -384,6 +425,7 @@ impl RenderOnce for TlButton {
             .relative()
             .flex_none()
             .h(h)
+            .when(icon_hover_fg.is_some(), |b| b.group(HOVER_GROUP))
             .when(icon_only, |b| b.w(h))
             .when(!icon_only, |b| b.min_w(px(MIN_LABEL_WIDTH * m.ui_scale)))
             .px(pad)
@@ -467,6 +509,21 @@ impl RenderOnce for TlButton {
         } else {
             button
         }
+    }
+}
+
+/// The icon in `color`, or in `hover` while the pointer is over the button.
+fn icon_element(name: TlIcon, size: Pixels, color: Hsla, hover: Option<Hsla>) -> AnyElement {
+    match hover {
+        // The kit `Icon` fixes its colour, so a hover colour needs the bare svg.
+        Some(hover) => svg()
+            .path(name.path())
+            .flex_none()
+            .size(size)
+            .text_color(color)
+            .group_hover(HOVER_GROUP, move |s| s.text_color(hover))
+            .into_any_element(),
+        None => icon(name, size, color).into_any_element(),
     }
 }
 
@@ -809,6 +866,55 @@ mod tests {
             let on = TlButton::new("pin", TlButtonKind::Toggle { on: true }).icon(TlIcon::Pin);
             assert_eq!(on.icon_color(&t), t.accent, "default: the kind's colour");
             assert_eq!(on.icon_muted(true).icon_color(&t), t.text_secondary);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn accessible_name_defaults_and_override(cx: &mut TestAppContext) {
+        cx.update(setup);
+        let copy = TlButton::new("copy", TlButtonKind::Icon)
+            .icon(TlIcon::Copy)
+            .tooltip("Copy section");
+        assert_eq!(
+            copy.accessible_text().map(|s| s.as_ref()),
+            Some("Copy section"),
+            "default: the tooltip"
+        );
+        let copy = copy.accessible_name("Copy Processor");
+        assert_eq!(
+            copy.accessible_text().map(|s| s.as_ref()),
+            Some("Copy Processor")
+        );
+        let run = TlButton::new("run", TlButtonKind::Primary)
+            .label("Run")
+            .tooltip("Run the command");
+        assert_eq!(
+            run.accessible_text().map(|s| s.as_ref()),
+            Some("Run"),
+            "a labelled button: the label"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn icon_hover_turns_muted_icon_to_kind_colour(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            setup(cx);
+            let t = current(cx).clone();
+            let copy = || {
+                TlButton::new("copy", TlButtonKind::Icon)
+                    .icon(TlIcon::Copy)
+                    .icon_muted(true)
+                    .tooltip("Copy section")
+            };
+            assert_eq!(copy().icon_hover_color(&t), None, "off by default");
+            let hover = copy().icon_hover(true);
+            assert_eq!(hover.icon_color(&t), t.text_secondary);
+            assert_eq!(hover.icon_hover_color(&t), Some(t.text_primary));
+            assert_eq!(
+                copy().icon_hover(true).disabled(true).icon_hover_color(&t),
+                None,
+                "a disabled button has no hover look"
+            );
         });
     }
 
