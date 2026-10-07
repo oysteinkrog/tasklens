@@ -741,3 +741,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.14 (b63b6ffe, eeb687aa, 1066362d) closed. Time range offers 30 s and 60 s only. Summary tiles get the common page menu. A page with no items of its own shows no separator, because TlMenu drops a trailing one. The crw agent adds the SHORTCUT_DOCS entry for PerfOpenCardMenu, then takes crw.21.
 - pdu.27: one Ctrl-pause rule, in MainWindow::on_modifiers. It starts on Ctrl alone (no Shift, Alt or Super) while the window is active and ends on Ctrl up. ProcessesPage follows PauseChanged. UI-PRC-017 wins over E20-012.
 - bj6.11 (7ef4f73b) closed. caption = WINDOW_TITLE. keep_above_supported checks the KWin bridge only. The m1f agent takes gma.3. bj6.27 is held until the Overview sidebar entry is planned.
+- o55.4 (6e0a779d, b7e20325, 0388d59e, 14ce54e7, 098cf881) closed. The o55.12 row keys already exist. The crw.20 value label is in 730a7458 and e75d8cac. The o55 agent takes o55.6.
