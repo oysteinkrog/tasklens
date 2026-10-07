@@ -1373,7 +1373,7 @@ mod page {
     use tl_model::demand::Demand;
     use tl_model::health::SourceId;
     use tl_model::snapshot::{InventorySnapshot, SystemSnapshot};
-    use tl_ui::actions::RefreshCurrentTab;
+    use tl_ui::actions::{ClearFilter, RefreshCurrentTab};
     use tl_ui::app::EngineGlobal;
     use tl_ui::components::toast::{self, ToastQueue};
     use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
@@ -1389,15 +1389,17 @@ mod page {
         width: f32,
         height: f32,
         retries: Rc<Cell<usize>>,
+        clears: Rc<Cell<usize>>,
     }
 
     impl Render for PageHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let retries = self.retries.clone();
+            let (retries, clears) = (self.retries.clone(), self.clears.clone());
             div()
                 .w(px(self.width))
                 .h(px(self.height))
                 .on_action(move |_: &RefreshCurrentTab, _, _| retries.set(retries.get() + 1))
+                .on_action(move |_: &ClearFilter, _, _| clears.set(clears.get() + 1))
                 .child(self.page.clone())
         }
     }
@@ -1407,6 +1409,7 @@ mod page {
         page: Entity<InformationPage>,
         queue: Entity<ToastQueue>,
         retries: Rc<Cell<usize>>,
+        clears: Rc<Cell<usize>>,
         vcx: VisualTestContext,
     }
 
@@ -1422,9 +1425,10 @@ mod page {
         let hub = cx.update(|cx| cx.new(|cx| SnapshotHub::new(client.clone(), cx)));
         let demand = cx.update(|cx| cx.new(|cx| DemandAggregator::new(client, &hub, cx)));
         let retries = Rc::new(Cell::new(0));
+        let clears = Rc::new(Cell::new(0));
         let slot = Rc::new(RefCell::new(None));
         let window = cx.add_window({
-            let (slot, retries) = (slot.clone(), retries.clone());
+            let (slot, retries, clears) = (slot.clone(), retries.clone(), clears.clone());
             move |window, cx| {
                 let page = cx.new(|cx| InformationPage::new(&hub, &demand, window, cx));
                 let host = cx.new(|_| PageHost {
@@ -1432,6 +1436,7 @@ mod page {
                     width,
                     height,
                     retries,
+                    clears,
                 });
                 *slot.borrow_mut() = Some(page);
                 Root::new(host, window, cx)
@@ -1446,6 +1451,7 @@ mod page {
             page,
             queue,
             retries,
+            clears,
             vcx,
         };
         rig.draw();
@@ -1755,5 +1761,216 @@ mod page {
         r.vcx.simulate_keystrokes("home");
         r.draw();
         assert_eq!(scroll.offset().y, px(0.));
+    }
+
+    #[gpui_kit::test]
+    fn info_filter_page_hides_and_clears(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        r.publish_inventory(1, Validity::Valid);
+        let shown = |r: &mut Rig| {
+            r.vcx
+                .read_entity(&r.page, |p, _| InfoSectionId::ALL.map(|id| p.is_shown(id)))
+        };
+        let filter = |r: &mut Rig, text: &str| {
+            let text: Arc<str> = Arc::from(text);
+            r.page.update(&mut r.vcx, |p, cx| p.apply_filter(text, cx));
+            r.draw();
+        };
+
+        filter(&mut r, "kernel");
+        let kernel = shown(&mut r);
+        assert!(kernel[InfoSectionId::OperatingSystem as usize]);
+        assert!(!kernel[InfoSectionId::Processor as usize]);
+        let os = r.vcx.read_entity(&r.page, |p, _| {
+            p.section(InfoSectionId::OperatingSystem).clone()
+        });
+        let labels = r.vcx.read_entity(&os, |s, _| {
+            s.rows()
+                .iter()
+                .map(|r| r.label.to_string())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(labels, ["Kernel", "Kernel version"]);
+        assert_eq!(
+            r.vcx.read_entity(&r.page, |p, _| p
+                .full_rows(InfoSectionId::OperatingSystem)
+                .len()),
+            9,
+            "the full rows stay for copying: all nine OS rows"
+        );
+        assert!(
+            r.bounds(&section_selector(InfoSectionId::Processor))
+                .is_none()
+        );
+
+        filter(&mut r, "KERNEL");
+        assert_eq!(shown(&mut r), kernel, "case does not matter");
+
+        filter(&mut r, "zzzz-no-such-text");
+        assert!(shown(&mut r).iter().all(|s| !*s));
+        assert!(r.bounds("InformationPage-filter-empty").is_some());
+        let text = r.bounds("TlEmptyState-text").expect("empty text");
+        assert!(text.size.width > px(0.));
+        let focus = r.vcx.read_entity(&r.page, |p, _| p.focus_handle().clone());
+        r.vcx.update(|window, cx| window.focus(&focus, cx));
+        r.draw();
+        let clear = r
+            .bounds("TlButton-TlEmptyState-clear-filter")
+            .expect("Clear filter drawn");
+        r.vcx.simulate_click(clear.center(), Modifiers::none());
+        r.vcx.run_until_parked();
+        assert_eq!(r.clears.get(), 1, "Clear filter dispatches ClearFilter");
+
+        filter(&mut r, "");
+        assert!(shown(&mut r).iter().all(|s| *s));
+        assert!(r.bounds("InformationPage-filter-empty").is_none());
+    }
+}
+
+/// The Information filter rules (tasklens-9o0.25, UI-SYS-084).
+mod filter_rules {
+    use super::*;
+    use proptest::prelude::*;
+    use tl_ui::pages::information::filter::{contains_ci, filter_section};
+    use tl_ui::pages::information::sections::BLOCK_FIRST_LABELS;
+
+    fn in_block(block: u8, label: &str, text: &str) -> InfoRow {
+        InfoRow {
+            block,
+            ..row(label, text)
+        }
+    }
+
+    fn os() -> Vec<InfoRow> {
+        vec![
+            row("OS name", "CachyOS Linux"),
+            row("Version", "Rolling"),
+            row("Kernel", "6.17.1-2-cachyos"),
+            row("Kernel version", "#1 SMP PREEMPT_DYNAMIC"),
+            row("Architecture", "x86_64 (64-bit)"),
+        ]
+    }
+
+    fn modules() -> Vec<InfoRow> {
+        let block = |n: u8, part: &str| {
+            vec![
+                in_block(n, "Module", &format!("Module {n}")),
+                in_block(n, "Slot", &format!("P0 CHANNEL A (DIMM {n})")),
+                in_block(n, "Capacity", "32.00 GiB"),
+                in_block(n, "Part number", part),
+            ]
+        };
+        let mut rows = block(1, "AAA-111");
+        rows.extend(block(2, "BBB-222"));
+        rows
+    }
+
+    fn labels(rows: &[InfoRow]) -> Vec<(u8, String, String)> {
+        rows.iter()
+            .map(|r| (r.block, r.label.to_string(), r.value.text.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn info_filter_hides_empty_sections() {
+        let kept = filter_section("Operating System", &os(), "kernel");
+        let kept: Vec<_> = kept.iter().map(|r| r.label.to_string()).collect();
+        assert_eq!(kept, ["Kernel", "Kernel version"]);
+        let cpu = vec![row("Name", "AMD Ryzen 9"), row("Cores", "16")];
+        assert!(filter_section("Processor", &cpu, "kernel").is_empty());
+        assert_eq!(
+            filter_section("Processor", &cpu, "").len(),
+            2,
+            "empty needle"
+        );
+    }
+
+    #[test]
+    fn info_filter_title_match_keeps_section() {
+        let mem = vec![
+            row("Total physical", "62.70 GiB"),
+            row("Swap total", "64.00 GiB"),
+        ];
+        assert_eq!(filter_section("Memory", &mem, "memory").len(), 2);
+        assert_eq!(
+            filter_section("Memory modules", &modules(), "memory").len(),
+            modules().len()
+        );
+    }
+
+    #[test]
+    fn info_filter_keeps_block_first_row() {
+        let kept = filter_section("Memory modules", &modules(), "bbb");
+        assert_eq!(
+            labels(&kept),
+            [
+                (2, "Module".to_owned(), "Module 2".to_owned()),
+                (2, "Part number".to_owned(), "BBB-222".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn info_filter_matches_validity_word() {
+        let board = vec![
+            row("Manufacturer", "ASUSTeK"),
+            with_validity("Serial number", Validity::Restricted),
+        ];
+        let kept = filter_section("Motherboard", &board, "restricted");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].label.as_ref(), "Serial number");
+        // A Missing value is not drawn, so it never matches on its value.
+        let gone = vec![with_validity("Temperature", Validity::Missing)];
+        assert!(filter_section("Graphics", &gone, "0").is_empty());
+    }
+
+    #[test]
+    fn info_filter_case_insensitive() {
+        let upper: Vec<_> = os()
+            .into_iter()
+            .map(|r| InfoRow {
+                label: r.label.to_uppercase().into(),
+                ..r
+            })
+            .collect();
+        assert_eq!(
+            labels(&filter_section("Operating System", &upper, "kernel")),
+            labels(&filter_section("Operating System", &os(), "kernel"))
+                .into_iter()
+                .map(|(b, l, v)| (b, l.to_uppercase(), v))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn shown(r: &InfoRow) -> String {
+        let mut out = String::new();
+        value_copy_text(r, &mut out);
+        out
+    }
+
+    proptest! {
+        /// Every kept row matches the title (rule 2), its own label or value (rule 3), or is the
+        /// first row of a block with a kept matching row (rule 4).
+        #[test]
+        fn info_filter_kept_rows_follow_the_rules(needle in "[a-z0-9 ]{1,4}") {
+            let mut rows = os();
+            rows.extend(modules());
+            for title in ["Operating System", "Memory modules"] {
+                let kept = filter_section(title, &rows, &needle);
+                if contains_ci(title, &needle) {
+                    prop_assert_eq!(kept.len(), rows.len());
+                    continue;
+                }
+                let matches = |r: &InfoRow| contains_ci(&r.label, &needle)
+                    || contains_ci(&shown(r), &needle)
+                    || contains_ci(&r.value.text, &needle);
+                for r in kept.iter() {
+                    let head_of_match = r.block != 0
+                        && BLOCK_FIRST_LABELS.contains(&r.label.as_ref())
+                        && kept.iter().any(|o| o.block == r.block && matches(o));
+                    prop_assert!(matches(r) || head_of_match, "{:?} kept for {:?}", r.label, needle);
+                }
+            }
+        }
     }
 }

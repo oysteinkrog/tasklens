@@ -945,6 +945,7 @@ information-net-ip-none = None
 information-refreshed = Information refreshed.
 information-error-load = Could not load system information
 information-error-retry = Retry
+information-filter-empty = No information matches the filter.
 
 # Process Properties window (E23-A1)
 pwn-props-tab-general = General

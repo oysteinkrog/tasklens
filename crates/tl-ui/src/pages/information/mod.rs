@@ -5,10 +5,14 @@
 //! sections on the right; narrower, they stack in [`InfoSectionId::ALL`] order (UI-SYS-080).
 //!
 //! While the tab is shown the page sends its demand part (inventory, CPU totals, memory, GPUs,
-//! disks, with `any_surface_visible`) and withdraws it on leave (ADR-008). The first activation of the session
-//! also sends `RefreshNow(Inventory)`. An INVENTORY change rebuilds every section's rows; a SYSTEM
-//! or DEVICES change rebuilds only System, Memory, Disk drives and Graphics, the sections with live
-//! rows. A section whose rows did not change does not re-render (UI-SYS-085).
+//! disks, with `any_surface_visible`) and withdraws it on leave (ADR-008). The first activation of
+//! the session also sends `RefreshNow(Inventory)`. An INVENTORY change rebuilds every section's
+//! rows; a SYSTEM or DEVICES change rebuilds only System, Memory, Disk drives and Graphics, the
+//! sections with live rows. A section whose rows did not change does not re-render (UI-SYS-085).
+//!
+//! The shell filter's text for this tab narrows the rows by the [`filter`] rules; a section left
+//! with no rows is hidden, and with every section hidden the page shows "No information matches
+//! the filter." with "Clear filter" (UI-SYS-084). The page keeps the full rows for copying.
 //!
 //! Until the inventory is first Valid or Stale every section shows its band and an 8-line
 //! skeleton; this never comes back in the session. An inventory that Failed before any data shows
@@ -17,6 +21,7 @@
 //! arrives, or 2 s later at the latest.
 
 pub mod actions;
+pub mod filter;
 pub mod section;
 pub mod sections;
 
@@ -35,7 +40,7 @@ use gpui_kit::{
     div, point, px,
 };
 use smallvec::SmallVec;
-use tl_model::command::Command;
+use tl_model::command::{Command, Tab};
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::health::SourceId;
 use tl_model::snapshot::ComponentMask;
@@ -47,18 +52,20 @@ use self::actions::{
     InformationScrollLineUp, InformationScrollPageDown, InformationScrollPageUp,
     InformationScrollTop,
 };
+use self::filter::filter_section;
 use self::section::{InfoRow, InfoSection, InfoSectionId};
 use self::sections::{InfoInputs, InfoWords};
-use crate::actions::RefreshCurrentTab;
+use crate::actions::{ClearFilter, RefreshCurrentTab};
 use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::empty::TlEmptyState;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
-use crate::window::main::ShellPage;
+use crate::window::main::{FilterChanged, GlobalShellEvents, ShellPage};
 use crate::window::status::StatusChanged;
 
 /// Content width from which the sections sit in two columns, × ui_scale.
@@ -91,6 +98,7 @@ const LIVE: [InfoSectionId; 4] = [
 const KEY_REFRESHED: &str = "information-refreshed";
 const KEY_ERROR: &str = "information-error-load";
 const KEY_RETRY: &str = "information-error-retry";
+const KEY_FILTER_EMPTY: &str = "information-filter-empty";
 
 /// The page's own texts, translated once per strings version.
 struct PageWords {
@@ -98,6 +106,7 @@ struct PageWords {
     refreshed: SharedString,
     error: SharedString,
     retry: SharedString,
+    filter_empty: SharedString,
 }
 
 impl PageWords {
@@ -112,6 +121,7 @@ impl PageWords {
             refreshed: t(KEY_REFRESHED),
             error: t(KEY_ERROR),
             retry: t(KEY_RETRY),
+            filter_empty: t(KEY_FILTER_EMPTY),
         }
     }
 }
@@ -121,6 +131,12 @@ pub struct InformationPage {
     /// Each section's drawn height. The sections are cached views, which take their size from
     /// the page.
     heights: [Rc<Cell<Pixels>>; 10],
+    /// Every built row, before the filter. Copy reads these.
+    full_rows: [Arc<[InfoRow]>; 10],
+    /// The filter text, lowercased.
+    filter: Arc<str>,
+    /// The sections the filter leaves visible.
+    shown: [bool; 10],
     scroll: ScrollHandle,
     focus: FocusHandle,
     hub: Entity<SnapshotHub>,
@@ -138,7 +154,7 @@ pub struct InformationPage {
     width: Rc<Cell<Pixels>>,
     words: InfoWords,
     page_words: PageWords,
-    _subs: SmallVec<[Subscription; 2]>,
+    _subs: SmallVec<[Subscription; 4]>,
 }
 
 impl InformationPage {
@@ -163,11 +179,21 @@ impl InformationPage {
             this.on_snapshot(ev.mask, cx);
         }));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
+        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
+            subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
+                if ev.tab == Tab::Information {
+                    this.apply_filter(Arc::from(ev.text.as_ref()), cx);
+                }
+            }));
+        }
         let mut words = InfoWords::default();
         words.refresh(cx);
         let mut page = Self {
             sections,
             heights,
+            full_rows: std::array::from_fn(|_| Arc::from([])),
+            filter: Arc::from(""),
+            shown: [true; 10],
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle().tab_stop(true),
             hub: hub.clone(),
@@ -214,6 +240,41 @@ impl InformationPage {
 
     pub fn section(&self, id: InfoSectionId) -> &Entity<InfoSection> {
         &self.sections[id as usize]
+    }
+
+    /// The rows of section `id` before the filter.
+    pub fn full_rows(&self, id: InfoSectionId) -> &Arc<[InfoRow]> {
+        &self.full_rows[id as usize]
+    }
+
+    /// Whether the filter leaves section `id` visible.
+    pub fn is_shown(&self, id: InfoSectionId) -> bool {
+        self.shown[id as usize]
+    }
+
+    /// Filters every section by `text` (UI-SYS-084). The text is lowercased once; sections whose
+    /// visible rows do not change do not re-render.
+    pub fn apply_filter(&mut self, text: Arc<str>, cx: &mut Context<Self>) {
+        let lower: Arc<str> = Arc::from(text.to_lowercase());
+        if lower == self.filter {
+            return;
+        }
+        self.filter = lower;
+        for id in InfoSectionId::ALL {
+            self.show_rows(id, cx);
+        }
+    }
+
+    /// Sets section `id`'s visible rows from its full rows and the filter.
+    fn show_rows(&mut self, id: InfoSectionId, cx: &mut Context<Self>) {
+        let n = id as usize;
+        let rows = filter_section(&id.title(), &self.full_rows[n], &self.filter);
+        let shown = self.filter.is_empty() || !rows.is_empty();
+        self.sections[n].update(cx, |s, cx| s.set_rows(rows, cx));
+        if self.shown[n] != shown {
+            self.shown[n] = shown;
+            cx.notify();
+        }
     }
 
     pub fn first_data_seen(&self) -> bool {
@@ -273,8 +334,8 @@ impl InformationPage {
         }
     }
 
-    /// Builds the rows of `ids` from the current snapshot. Sections whose rows are unchanged do
-    /// not notify.
+    /// Builds the rows of `ids` from the current snapshot and shows them through the filter.
+    /// Sections whose visible rows are unchanged do not notify.
     fn rebuild(&mut self, ids: &[InfoSectionId], cx: &mut Context<Self>) {
         let snap = Arc::clone(self.hub.read(cx).current());
         let inputs = InfoInputs {
@@ -286,11 +347,15 @@ impl InformationPage {
         for &id in ids {
             let mut rows: Vec<InfoRow> = Vec::new();
             builder(id)(&inputs, &mut rows);
-            let rows: Arc<[InfoRow]> = Arc::from(rows);
-            self.sections[id as usize].update(cx, |s, cx| s.set_rows(rows, cx));
+            self.full_rows[id as usize] = Arc::from(rows);
         }
-        if ids.contains(&InfoSectionId::OperatingSystem) {
-            let logo = sections::os_logo(&inputs);
+        let logo = ids
+            .contains(&InfoSectionId::OperatingSystem)
+            .then(|| sections::os_logo(&inputs));
+        for &id in ids {
+            self.show_rows(id, cx);
+        }
+        if let Some(logo) = logo {
             self.sections[InfoSectionId::OperatingSystem as usize]
                 .update(cx, |s, cx| s.set_logo(logo, cx));
         }
@@ -398,7 +463,11 @@ impl InformationPage {
             .flex_basis(px(0.))
             .min_w(px(COLUMN_MIN * m.ui_scale))
             .gap(m.sp[8])
-            .children(ids.iter().map(|id| self.section_view(*id)))
+            .children(
+                ids.iter()
+                    .filter(|id| self.shown[**id as usize])
+                    .map(|id| self.section_view(*id)),
+            )
             .into_any_element()
     }
 
@@ -476,6 +545,15 @@ impl Render for InformationPage {
         let m = *metrics(cx);
         let content = if self.failed {
             self.error_state(cx)
+        } else if !self.shown.contains(&true) {
+            div()
+                .debug_selector(|| "InformationPage-filter-empty".into())
+                .w_full()
+                .child(
+                    TlEmptyState::new(self.page_words.filter_empty.clone())
+                        .clear_filter(Box::new(ClearFilter)),
+                )
+                .into_any_element()
         } else if self.width.get() >= px(TWO_COLUMNS_FROM * m.ui_scale) {
             h_flex()
                 .debug_selector(|| "InformationPage-columns".into())
@@ -490,7 +568,12 @@ impl Render for InformationPage {
                 .debug_selector(|| "InformationPage-column".into())
                 .w_full()
                 .gap(m.sp[8])
-                .children(InfoSectionId::ALL.iter().map(|id| self.section_view(*id)))
+                .children(
+                    InfoSectionId::ALL
+                        .iter()
+                        .filter(|id| self.shown[**id as usize])
+                        .map(|id| self.section_view(*id)),
+                )
                 .into_any_element()
         };
 
