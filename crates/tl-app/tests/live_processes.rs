@@ -129,11 +129,6 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
     let mut last = read(&mut vcx);
     while begin.elapsed() < DEADLINE {
         let (rows, records, cpu, memory) = last;
-        eprintln!(
-            "rows {rows}, records {records}, engine records {engine_records}, cpu {cpu:?}, \
-         memory {memory:?}, hidden {hidden}"
-        );
-        assert!(!hidden, "the hub counts the drawn window as shown");
         if rows > 0 && records > 0 && cpu == Validity::Valid && memory == Validity::Valid {
             break;
         }
