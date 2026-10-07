@@ -11,6 +11,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use fluent_bundle::FluentValue;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     Action, AnyElement, App, Context, Entity, EntityId, EventEmitter, IntoElement,
@@ -40,7 +41,7 @@ use crate::components::empty::{TlEmptyState, TlEmptyTone};
 use crate::components::skeleton::{TlSkeletonRows, skeleton_row_count};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
-use crate::i18n::{tr, tr_en};
+use crate::i18n::{tr, tr_args, tr_en};
 use crate::theme::UiMetrics;
 
 /// Query owner for one system table. Generations start at 1 and only grow.
@@ -442,19 +443,20 @@ pub enum ActionKindTag {
 /// Makes the action dispatched by a failed toast's button, such as "View logs", for one target.
 pub type FailedButtonAction = Box<dyn Fn(&ActionTarget) -> Box<dyn Action>>;
 
-/// Toast texts for one action kind on one table. Fluent args: `$n` total, `$ok` succeeded,
-/// `$failed` failed.
+/// Toast texts for one action kind on one table. The counted texts are Fluent message keys,
+/// filled with `tr_args` and the args `$n` total, `$ok` succeeded, `$failed` failed, so plural
+/// forms and number formats follow the locale.
 pub struct ActionTexts {
     /// "Starting service...". Empty: no toast until the final event (opener actions).
     pub pending_one: SharedString,
-    /// "Starting { $n } services...".
-    pub pending_many: SharedString,
+    /// Key of "Starting { $n } services...", such as `sys-sys007-starting-n-services`.
+    pub pending_many: &'static str,
     /// "Service started". Empty: the toast is removed and nothing shows.
     pub done_one: SharedString,
-    /// "{ $n } services started".
-    pub done_many: SharedString,
-    /// "{ $ok } of { $n } services started. { $failed } failed."
-    pub partial_many: SharedString,
+    /// Key of "{ $n } services started".
+    pub done_many: &'static str,
+    /// Key of "{ $ok } of { $n } services started. { $failed } failed."
+    pub partial_many: &'static str,
     /// "Failed to start service".
     pub failed_prefix: SharedString,
     /// True: "<prefix>: <result>". False: the prefix alone (opener toasts).
@@ -637,7 +639,8 @@ impl SysActions {
         if !tracked.texts.pending_one.is_empty() {
             let queue = tracked.queue.clone();
             if tracked.summary() {
-                let text = fill_counts(&tracked.texts.pending_many, tracked.targets.len(), 0, 0);
+                let n = tracked.targets.len();
+                let text = counted(cx, tracked.texts.pending_many, n, 0, 0);
                 let key = ToastKey(id.0);
                 self.push(&queue, ToastKind::Progress, text, Some(key), None, cx);
             } else {
@@ -767,7 +770,7 @@ impl SysActions {
         let queue = tracked.queue.clone();
         let key = ToastKey(id.0);
         if failed == 0 {
-            let text = fill_counts(&tracked.texts.done_many, n, ok, 0);
+            let text = counted(cx, tracked.texts.done_many, n, ok, 0);
             self.push(&queue, ToastKind::Success, text, Some(key), None, cx);
             return;
         }
@@ -785,7 +788,7 @@ impl SysActions {
                 SharedString::from(format!("{label}: {reason}"))
             })
             .collect();
-        let text = fill_counts(&tracked.texts.partial_many, n, ok, failed);
+        let text = counted(cx, tracked.texts.partial_many, n, ok, failed);
         if self.details.len() == KEEP_DETAILS {
             self.details.pop_front();
         }
@@ -928,15 +931,12 @@ fn final_toast(
     Some(toast)
 }
 
-/// Fills the Fluent args `$n`, `$ok` and `$failed` of an owner text, written `{ $n }` (or
-/// `{$n}`, as Fluent leaves a missing argument).
-fn fill_counts(text: &str, n: usize, ok: usize, failed: usize) -> SharedString {
-    let mut out = text.to_owned();
-    for (name, value) in [("n", n), ("ok", ok), ("failed", failed)] {
-        let value = value.to_string();
-        out = out
-            .replace(&format!("{{ ${name} }}"), &value)
-            .replace(&format!("{{${name}}}"), &value);
-    }
-    out.into()
+/// Message `key` with the args `$n`, `$ok` and `$failed`.
+fn counted(cx: &App, key: &str, n: usize, ok: usize, failed: usize) -> SharedString {
+    let args = [
+        ("n", FluentValue::from(n)),
+        ("ok", FluentValue::from(ok)),
+        ("failed", FluentValue::from(failed)),
+    ];
+    tr_args(cx, key, &args)
 }

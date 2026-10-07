@@ -472,6 +472,10 @@ sys-sys007-details = Details
 sys-sys007-close = Close
 sys-sys007-no-authentication-agent-is-running = no authentication agent is running
 sys-sys007-not-authorized = not authorized
+# Services Start on many units (UI-SYS-007 summary toast)
+sys-sys007-starting-n-services = Starting { $n } services...
+sys-sys007-n-services-started = { $n } services started
+sys-sys007-ok-of = { $ok } of { $n } services started. { $failed } failed.
 
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.

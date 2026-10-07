@@ -1006,10 +1006,10 @@ mod sys_actions {
     fn start_texts() -> ActionTexts {
         ActionTexts {
             pending_one: "Starting service...".into(),
-            pending_many: "Starting { $n } services...".into(),
+            pending_many: "sys-sys007-starting-n-services",
             done_one: "Service started".into(),
-            done_many: "{ $n } services started".into(),
-            partial_many: "{ $ok } of { $n } services started. { $failed } failed.".into(),
+            done_many: "sys-sys007-n-services-started",
+            partial_many: "sys-sys007-ok-of",
             failed_prefix: "Failed to start service".into(),
             failed_suffix: true,
             unknown: "Service action finished.".into(),
