@@ -9,8 +9,8 @@ use gpui_kit::{
 };
 use tl_model::actions::SchedPolicy;
 use tl_model::details::{
-    ElfArch, ExeLocation, GeneralDetail, HashState, IdTriple, PackageCheck, PackageInfo, Relro,
-    Seccomp, TabPayload,
+    ElfArch, ExeLocation, GeneralDetail, HashError, HashState, IdTriple, PackageCheck, PackageInfo,
+    Relro, Seccomp, TabPayload,
 };
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
@@ -321,6 +321,155 @@ fn general_field_values(cx: &mut TestAppContext) {
         [FieldId::Root, FieldId::Unit, FieldId::AppId].map(|id| t.field(id).is_none())
     });
     assert_eq!(hidden, [true; 3]);
+}
+
+/// The grid row of `label` in column 2.
+fn col2_row(
+    tab: &Entity<GeneralTab>,
+    cx: &mut VisualTestContext,
+    label: &str,
+) -> tl_ui::components::kv_grid::TlKvRow {
+    cx.update(|_, cx| {
+        tab.read(cx)
+            .rows(1)
+            .into_iter()
+            .find(|r| r.label.as_ref() == label)
+            .expect("row shown")
+    })
+}
+
+fn sha256_3f9a() -> [u8; 32] {
+    let mut sha = [0u8; 32];
+    sha[..8].copy_from_slice(&[0x3f, 0x9a, 0x0c, 0x41, 0xe2, 0xb7, 0x7d, 0x09]);
+    for (i, b) in sha.iter_mut().enumerate().skip(8) {
+        *b = i as u8;
+    }
+    sha
+}
+
+#[gpui_kit::test]
+fn hash_pending_then_done_text(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    assert_eq!(value(&t, cx, FieldId::Sha256), "Computing…");
+    assert_eq!(value(&t, cx, FieldId::Md5), "Computing…");
+    let row = col2_row(&t, cx, "SHA-256:");
+    assert_eq!(row.value.validity, Validity::Stale, "text_secondary");
+    assert_eq!(row.value.tooltip, None);
+
+    let mut d = detail("firefox");
+    d.hashes = HashState::Done {
+        sha256: sha256_3f9a(),
+        md5: [0xa0; 16],
+    };
+    feed(&t, cx, Some(&payload(d)), 1.);
+    assert_eq!(value(&t, cx, FieldId::Sha256), "3f9a0c41e2b77d09…");
+    assert_eq!(value(&t, cx, FieldId::Md5), "a0a0a0a0a0a0a0a0…");
+    let row = col2_row(&t, cx, "SHA-256:");
+    let full = row.value.tooltip.expect("full hash tooltip").to_string();
+    assert_eq!(full.len(), 64);
+    assert!(full.starts_with("3f9a0c41e2b77d09"), "{full}");
+    assert_eq!(full, full.to_lowercase());
+    assert_eq!(row.value.validity, Validity::Valid);
+    let md5 = col2_row(&t, cx, "MD5:").value.tooltip.expect("md5 tooltip");
+    assert_eq!(md5.as_ref(), "a0".repeat(16));
+    let field_full = cx.update(|_, cx| {
+        t.read(cx)
+            .field(FieldId::Sha256)
+            .and_then(|f| f.full.clone())
+    });
+    assert_eq!(field_full.as_deref(), Some(full.as_str()), "copy form");
+}
+
+#[gpui_kit::test]
+fn hash_failed_tooltip_text(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    let mut d = detail("firefox");
+    d.hashes = HashState::Failed(HashError::ExePathUnavailable);
+    feed(&t, cx, Some(&payload(d)), 1.);
+    for (id, label) in [(FieldId::Sha256, "SHA-256:"), (FieldId::Md5, "MD5:")] {
+        assert_eq!(value(&t, cx, id), "Unavailable");
+        let row = col2_row(&t, cx, label);
+        assert_eq!(row.value.validity, Validity::Failed);
+        assert_eq!(
+            row.value.tooltip.as_deref(),
+            Some("Executable path unavailable")
+        );
+    }
+
+    let mut d = detail("firefox");
+    d.hashes = HashState::Failed(HashError::ReadFailed { errno: 13 });
+    feed(&t, cx, Some(&payload(d)), 1.);
+    assert_eq!(value(&t, cx, FieldId::Md5), "Unavailable");
+    let tip = col2_row(&t, cx, "SHA-256:")
+        .value
+        .tooltip
+        .expect("tooltip")
+        .to_string();
+    let (first, second) = tip.split_once('\n').expect("two lines");
+    assert_eq!(first, "Failed to compute one or more hashes");
+    assert!(second.contains("Permission denied"), "{second}");
+}
+
+#[gpui_kit::test]
+fn verify_button_hidden_when_not_packaged(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    draw(cx);
+    assert_eq!(value(&t, cx, FieldId::PackageStatus), "Not verified");
+    let button = cx
+        .update(|_, cx| t.read(cx).verify_button())
+        .expect("shown");
+    assert_eq!(button.label.as_ref(), "Verify against package");
+    assert!(!button.disabled && !button.loading);
+    let status = cx
+        .debug_bounds("GeneralTab-verify-row")
+        .expect("verify row");
+    assert_eq!(status.size.height, px(26.));
+    let button_h = cx
+        .debug_bounds("TlButton-general-verify")
+        .expect("button drawn")
+        .size
+        .height;
+    assert_eq!(button_h, px(24.));
+
+    let mut d = detail("firefox");
+    d.package_check = PackageCheck::NotPackaged;
+    feed(&t, cx, Some(&payload(d)), 1.);
+    draw(cx);
+    assert_eq!(value(&t, cx, FieldId::PackageStatus), "Not packaged");
+    assert!(cx.update(|_, cx| t.read(cx).verify_button()).is_none());
+    assert!(cx.debug_bounds("GeneralTab-verify-row").is_none(), "hidden");
+    assert!(cx.debug_bounds("TlButton-general-verify").is_none());
+
+    let mut d = detail("firefox");
+    d.package_check = PackageCheck::NoChecksum;
+    feed(&t, cx, Some(&payload(d)), 1.);
+    assert_eq!(
+        value(&t, cx, FieldId::PackageStatus),
+        "No checksum in package database"
+    );
+    let button = cx
+        .update(|_, cx| t.read(cx).verify_button())
+        .expect("shown");
+    assert!(button.disabled);
+    assert_eq!(
+        button.tooltip.as_deref(),
+        Some("No checksum in package database")
+    );
+
+    cx.update(|_, cx| t.update(cx, |t, cx| t.set_exited(true, cx)));
+    let button = cx
+        .update(|_, cx| t.read(cx).verify_button())
+        .expect("shown");
+    assert!(button.disabled);
+    assert_eq!(
+        button.tooltip.as_deref(),
+        Some("The process is not running.")
+    );
 }
 
 #[gpui_kit::test]
@@ -1113,6 +1262,113 @@ mod window {
         assert!(
             vcx.debug_bounds("PropsAccessBlock").is_none(),
             "Maps is not restricted"
+        );
+    }
+
+    fn props_toasts(cx: &mut TestAppContext, handle: AnyWindowHandle) -> Vec<String> {
+        cx.update(|cx| {
+            let frame =
+                TlSecondaryWindow::<PropsWindow>::find(WindowHandle::new(handle.window_id()), cx)
+                    .expect("frame");
+            let texts = frame.read(cx).toasts().read(cx).visible_texts();
+            texts.iter().map(|t| t.to_string()).collect()
+        })
+    }
+
+    fn set_check(check: PackageCheck) -> impl FnOnce(&mut TargetDetail) {
+        move |d| {
+            let mut g = detail("firefox");
+            g.package_check = check;
+            d.tabs[DetailTab::General.index()].payload = Some(payload(g));
+            d.tabs[DetailTab::General.index()].validity = Validity::Valid;
+        }
+    }
+
+    #[gpui_kit::test]
+    fn verify_result_toasts(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        publish_detail(cx, &engine, 4321, set_check(PackageCheck::NotVerified));
+        draw(&mut vcx);
+        let general = cx
+            .read(|cx| view.read(cx).tabs().general.clone())
+            .expect("general tab");
+        let status = |cx: &mut TestAppContext| {
+            cx.read(|cx| {
+                general
+                    .read(cx)
+                    .field(FieldId::PackageStatus)
+                    .map(|f| (f.value.to_string(), f.tone))
+                    .expect("status")
+            })
+        };
+
+        let cases = [
+            (
+                PackageCheck::Matches,
+                "Executable matches the package.",
+                "Matches package",
+            ),
+            (
+                PackageCheck::DoesNotMatch,
+                "Executable does not match the package.",
+                "Does not match package",
+            ),
+            (
+                PackageCheck::Failed,
+                "Could not verify against the package.",
+                "Not verified",
+            ),
+        ];
+        for (n, (result, toast, word)) in cases.into_iter().enumerate() {
+            publish_detail(cx, &engine, 4321, set_check(PackageCheck::NotVerified));
+            draw(&mut vcx);
+            let button = vcx
+                .debug_bounds("TlButton-general-verify")
+                .expect("verify button drawn");
+            vcx.simulate_click(button.center(), Default::default());
+            draw(&mut vcx);
+            let sent = engine
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, Command::VerifyPackage(k) if *k == key(4321)))
+                .count();
+            assert_eq!(sent, n + 1, "VerifyPackage sent");
+            let button = cx
+                .read(|cx| general.read(cx).verify_button())
+                .expect("shown");
+            assert!(button.loading);
+            assert_eq!(button.label.as_ref(), "Verifying…");
+            assert_eq!(status(cx).0, "Verifying…");
+
+            publish_detail(cx, &engine, 4321, set_check(PackageCheck::Verifying));
+            publish_detail(cx, &engine, 4321, set_check(result));
+            draw(&mut vcx);
+            assert!(
+                props_toasts(cx, handle).iter().any(|t| t == toast),
+                "{:?}",
+                props_toasts(cx, handle)
+            );
+            assert_eq!(status(cx).0, word);
+            let button = cx
+                .read(|cx| general.read(cx).verify_button())
+                .expect("shown");
+            assert!(!button.loading);
+        }
+        // A result without a verify running here shows no toast.
+        let before = props_toasts(cx, handle).len();
+        publish_detail(cx, &engine, 4321, set_check(PackageCheck::Matches));
+        assert_eq!(props_toasts(cx, handle).len(), before);
+        assert_eq!(
+            status(cx),
+            (
+                "Matches package".to_string(),
+                Some(tl_ui::components::kv_grid::ValueTone::Success)
+            )
         );
     }
 }
