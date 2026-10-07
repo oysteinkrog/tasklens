@@ -506,7 +506,8 @@ impl<V: 'static> TlSecondaryWindow<V> {
     }
 }
 
-type PinHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+/// Called on a pin click.
+pub type PinHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// The window pin: a `TlButton::Toggle` look, `side` square. Stateless: the look comes in as a
 /// [`PinLook`], and a click calls `on_pin`. Without `on_pin` a click does nothing, as in the
@@ -529,7 +530,7 @@ impl TlWindowPin {
         }
     }
 
-    pub fn on_pin(mut self, f: Rc<dyn Fn(&mut Window, &mut App)>) -> Self {
+    pub fn on_pin(mut self, f: PinHandler) -> Self {
         self.on_pin = Some(f);
         self
     }
@@ -650,7 +651,7 @@ impl TlTitleBar {
         self
     }
 
-    pub fn on_pin(mut self, f: Rc<dyn Fn(&mut Window, &mut App)>) -> Self {
+    pub fn on_pin(mut self, f: PinHandler) -> Self {
         self.on_pin = Some(f);
         self
     }

@@ -810,6 +810,7 @@ fn kind_icon(kind: ToastKind, theme: &TlTheme, size: Pixels) -> AnyElement {
 /// [`toast_card`] as a queued toast, as a toast that takes no input and has no tooltip. `n` keeps
 /// the element ids of cards on one page apart. The card fills its parent; the queue puts it in a
 /// [`WIDTH`] column.
+#[cfg(feature = "bench")]
 pub(crate) fn static_card(
     n: u64,
     kind: ToastKind,
