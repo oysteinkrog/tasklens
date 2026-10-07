@@ -42,6 +42,8 @@ pub struct TlLink {
     disabled_reason: Option<SharedString>,
     on_click: Option<LinkClick>,
     tab_stop: bool,
+    /// The owner's focus handle, used instead of the link's own.
+    focus: Option<FocusHandle>,
 }
 
 impl TlLink {
@@ -58,6 +60,7 @@ impl TlLink {
             disabled_reason: None,
             on_click: None,
             tab_stop: true,
+            focus: None,
         }
     }
 
@@ -72,6 +75,13 @@ impl TlLink {
     /// with its own keys (the Properties field grid) turns it off; a click still focuses it.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
+        self
+    }
+
+    /// Takes `focus` instead of the link's own handle, so the owner can name the link in a focus
+    /// order.
+    pub fn focus_handle(mut self, focus: FocusHandle) -> Self {
+        self.focus = Some(focus);
         self
     }
 
@@ -122,11 +132,14 @@ impl RenderOnce for TlLink {
         let disabled = self.disabled_reason.is_some();
         let look = link_look(disabled, &theme);
 
-        let focus: FocusHandle = window
-            .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone()
-            .tab_stop(self.tab_stop);
+        let focus: FocusHandle = match self.focus.clone() {
+            Some(focus) => focus,
+            None => window
+                .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone(),
+        }
+        .tab_stop(self.tab_stop);
 
         let size = self.text_size.unwrap_or(m.text.base);
         // The label style first: `truncate` adds to the same text style.

@@ -610,6 +610,7 @@ pub struct TlKeyValueGrid {
     on_link_click: Option<LinkHandler>,
     on_value_mouse_down: Option<RowHandler>,
     link_tab_stop: bool,
+    link_focus: Rc<[(usize, FocusHandle)]>,
     cursor: Option<usize>,
     filtered_empty: bool,
     loading: bool,
@@ -638,6 +639,7 @@ impl TlKeyValueGrid {
             on_link_click: None,
             on_value_mouse_down: None,
             link_tab_stop: true,
+            link_focus: Rc::from(Vec::new()),
             cursor: None,
             filtered_empty: false,
             loading: false,
@@ -776,6 +778,13 @@ impl TlKeyValueGrid {
         self
     }
 
+    /// The owner's focus handle for a link value, by flat row index as in
+    /// [`TlKeyValueGrid::copy_texts`], so the owner can name that link in its focus order.
+    pub fn link_focus(mut self, handles: Rc<[(usize, FocusHandle)]>) -> Self {
+        self.link_focus = handles;
+        self
+    }
+
     /// Draws the keyboard cursor ring around flat row `row`: 1 px `accent`, inset 1 px, radius
     /// `r_sm`. The owner moves it; the grid has no key handling of its own.
     pub fn cursor(mut self, row: Option<usize>) -> Self {
@@ -888,6 +897,9 @@ impl TlKeyValueGrid {
             let mut link = TlLink::new((id.clone(), "link"), look.text.clone(), action)
                 .text_size(m.text.base)
                 .tab_stop(self.link_tab_stop);
+            if let Some((_, focus)) = self.link_focus.iter().find(|(i, _)| *i == n) {
+                link = link.focus_handle(focus.clone());
+            }
             if let Some(handler) = self.on_link_click.clone() {
                 link = link.on_click_bounds(Rc::new(move |bounds, window, cx| {
                     handler(n, bounds, window, cx)
@@ -2036,6 +2048,29 @@ mod tests {
         pick_menu_item(cx, 0, 0);
         assert_eq!(opened.borrow().as_slice(), &[0]);
         assert!(copied.borrow().is_empty(), "no built-in menu item ran");
+    }
+
+    #[gpui_kit::test]
+    fn link_focus_takes_the_owner_handle(cx: &mut TestAppContext) {
+        let linked = || TlValue {
+            link: Some(Box::new(OpenSetup)),
+            ..TlValue::new("Mbps")
+        };
+        let focus = cx.update(|cx| cx.focus_handle());
+        let (cx, _, _) = host(cx, {
+            let focus = focus.clone();
+            move || {
+                TlKeyValueGrid::new("grid", KvLayout::Inline)
+                    .sections(&[section(vec![
+                        row("PID:", TlValue::new("1")),
+                        row("Display unit:", linked()),
+                    ])])
+                    .link_focus(Rc::from([(1, focus.clone())]))
+            }
+        });
+        cx.update(|window, cx| window.focus_next(cx));
+        let focused = cx.update(|window, _| focus.is_focused(window));
+        assert!(focused, "Tab reaches the link through the owner's handle");
     }
 
     #[gpui_kit::test]
