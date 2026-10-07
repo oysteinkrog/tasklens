@@ -473,6 +473,7 @@ impl Render for MinigraphPanel {
             root = root.child(
                 div()
                     .id(("MinigraphSlot", u64::from(id.0)))
+                    .debug_selector(move || format!("MinigraphSlot-{slot}"))
                     .absolute()
                     .right(px(right))
                     .bottom(px(bottom))

@@ -499,3 +499,350 @@ mod card {
         assert_eq!(shadow.blur_radius, gpui_kit::px(12.));
     }
 }
+
+/// The panel (tasklens-xdh.6, E26-004, UI-PRF-040).
+mod panel {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::demand::CpuDemand;
+    use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
+    use tl_model::ids::DeviceIdx;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::components::toast::ToastKind;
+    use tl_ui::demand::DemandAggregator;
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::pages::minigraph::actions::{MinigraphHide, ResetMinigraphLayout};
+    use tl_ui::pages::minigraph::panel::{MinigraphPanel, PanelFull, toast_full};
+    use tl_ui::pages::minigraph::sources::{
+        MinigraphEntry, MinigraphId, MinigraphSource, default_entries,
+    };
+    use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from("dev"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind: None,
+        }
+    }
+
+    fn catalog() -> DeviceCatalog {
+        DeviceCatalog {
+            version: 1,
+            entries: vec![
+                entry(0, DeviceIdentity::CpuPackage),
+                entry(1, DeviceIdentity::Memory),
+                entry(2, DeviceIdentity::Aggregate(AggregateKind::Disks)),
+                entry(3, DeviceIdentity::Aggregate(AggregateKind::Nets)),
+                entry(
+                    4,
+                    DeviceIdentity::Gpu {
+                        uuid: [0; 16],
+                        pci_bus_id: Arc::from("0000:01:00.0"),
+                    },
+                ),
+            ]
+            .into(),
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        panel: Entity<MinigraphPanel>,
+        vcx: VisualTestContext,
+        saved: Arc<Mutex<Vec<UiState>>>,
+    }
+
+    /// Hosts the panel cached, as the Processes page does, in a 1000 × 600 window.
+    struct Host {
+        panel: Entity<MinigraphPanel>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().relative().size_full().child(
+                self.panel
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let saved: Arc<Mutex<Vec<UiState>>> = Arc::default();
+        let sink = Arc::clone(&saved);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let appearance = AppearanceSettings::default();
+            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: Some(Box::new(move |_, state| {
+                    sink.lock().expect("lock").push(state.clone());
+                })),
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        engine.publish_with(|s| s.devices = Arc::new(catalog()));
+        cx.run_until_parked();
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        let (host, vcx) = cx.add_window_view(move |_, cx| Host {
+            panel: cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx)),
+        });
+        let mut vcx = vcx.clone();
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(1000.), px(600.)));
+        let panel = vcx.read_entity(&host, |h, _| h.panel.clone());
+        draw(&mut vcx);
+        Rig {
+            engine,
+            panel,
+            vcx,
+            saved,
+        }
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    impl Rig {
+        fn attached(&mut self) -> Vec<(MinigraphSource, u16)> {
+            let panel = self.panel.clone();
+            self.vcx.update(|_, cx| {
+                let mut v: Vec<_> = panel
+                    .read(cx)
+                    .attached()
+                    .map(|e| (e.source.clone(), e.slot))
+                    .collect();
+                v.sort_by_key(|(_, slot)| *slot);
+                v
+            })
+        }
+
+        fn id_of(&mut self, source: &MinigraphSource) -> MinigraphId {
+            let panel = self.panel.clone();
+            self.vcx.update(|_, cx| {
+                panel
+                    .read(cx)
+                    .attached()
+                    .find(|e| &e.source == source)
+                    .map(|e| e.id)
+                    .expect("card present")
+            })
+        }
+
+        fn toasts(&mut self) -> Vec<(ToastKind, String)> {
+            let panel = self.panel.clone();
+            self.vcx.update(|_, cx| {
+                panel
+                    .read(cx)
+                    .toasts
+                    .iter()
+                    .map(|(k, t)| (*k, t.to_string()))
+                    .collect()
+            })
+        }
+
+        fn graphs(&mut self) -> tl_model::settings::GraphsSettings {
+            self.vcx
+                .update(|_, cx| TlSettings::settings(cx).graphs.clone())
+        }
+
+        fn set(&mut self, key: SettingKey, on: bool) {
+            self.vcx
+                .update(|_, cx| TlSettings::set(cx, key, SettingValue::Bool(on)));
+            draw(&mut self.vcx);
+        }
+    }
+
+    fn defaults() -> Vec<(MinigraphSource, u16)> {
+        default_entries()
+            .into_iter()
+            .map(|e: MinigraphEntry| (e.source, e.slot))
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn panel_slots_fill_bottom_right_first(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        assert_eq!(r.attached(), defaults());
+        let cards = r.vcx.update(|_, cx| r.panel.read(cx).cards().len());
+        assert_eq!(cards, 6);
+        // Slot 0 (CPU) is at the bottom right, 16 px in; slot 1 (Memory) is left of it, 8 px
+        // apart; slot 4 (GPU) is row 1, column 0.
+        let bounds = |vcx: &mut VisualTestContext, slot: u16| {
+            vcx.debug_bounds(Box::leak(format!("MinigraphSlot-{slot}").into_boxed_str()))
+                .expect("slot drawn")
+        };
+        let cpu = bounds(&mut r.vcx, 0);
+        assert_eq!(cpu.bottom_right(), gpui_kit::point(px(984.), px(584.)));
+        assert_eq!(cpu.size, size(px(180.), px(90.)));
+        let memory = bounds(&mut r.vcx, 1);
+        assert_eq!(memory.bottom_right(), gpui_kit::point(px(796.), px(584.)));
+        let gpu = bounds(&mut r.vcx, 4);
+        assert_eq!(gpu.bottom_right(), gpui_kit::point(px(984.), px(486.)));
+        assert!(r.vcx.debug_bounds("MinigraphSlot-6").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn panel_full_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let panel = r.panel.clone();
+        for _ in 0..6 {
+            r.vcx.update(|_, cx| {
+                panel
+                    .update(cx, |p, cx| p.add_system(MinigraphSource::Cpu, cx))
+                    .expect("a free slot");
+            });
+        }
+        let full = r.vcx.update(|_, cx| {
+            panel.update(cx, |p, cx| p.add_system(MinigraphSource::GpuTemp(None), cx))
+        });
+        assert_eq!(full, Err(PanelFull));
+        r.vcx.update(|_, cx| toast_full(&panel, cx));
+        let want = (
+            ToastKind::Warning,
+            "No space for more minigraphs".to_owned(),
+        );
+        assert_eq!(r.toasts(), [want.clone()]);
+
+        // View > Graphs > GPU temp on a full grid toasts the same.
+        r.set(SettingKey::GraphsMinigraphGpuTemperature, true);
+        assert_eq!(r.toasts(), [want.clone(), want]);
+        assert_eq!(r.attached().len(), 12);
+    }
+
+    #[gpui_kit::test]
+    fn panel_reset_restores_defaults(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let panel = r.panel.clone();
+        let memory = r.id_of(&MinigraphSource::Memory);
+        r.vcx.dispatch_action(MinigraphHide { id: memory });
+        draw(&mut r.vcx);
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        r.vcx.update(|_, cx| {
+            panel.update(cx, |p, cx| {
+                p.remove(cpu, cx);
+                p.add_system(MinigraphSource::Name(Arc::from("x")), cx)
+                    .expect("slot 0");
+                p.add_system(MinigraphSource::Cpu, cx).expect("slot 1");
+            });
+        });
+        draw(&mut r.vcx);
+        assert!(!r.attached().contains(&(MinigraphSource::Memory, 1)));
+        assert!(r.attached().contains(&(MinigraphSource::Cpu, 1)));
+
+        r.vcx.dispatch_action(ResetMinigraphLayout);
+        draw(&mut r.vcx);
+        assert_eq!(r.attached(), defaults());
+        assert!(r.graphs().minigraph_memory, "Memory is on again");
+        assert_eq!(
+            r.toasts(),
+            [(ToastKind::Success, "Minigraph layout reset".to_owned())]
+        );
+        let cards = r.vcx.update(|_, cx| panel.read(cx).cards().len());
+        assert_eq!(cards, 6);
+    }
+
+    #[gpui_kit::test]
+    fn panel_follows_graph_settings(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.set(SettingKey::GraphsMinigraphDisk, false);
+        assert!(
+            r.attached()
+                .iter()
+                .all(|(s, _)| *s != MinigraphSource::Disk)
+        );
+        assert!(r.vcx.debug_bounds("MinigraphSlot-2").is_none());
+        r.set(SettingKey::GraphsMinigraphDisk, true);
+        assert!(
+            r.attached().contains(&(MinigraphSource::Disk, 2)),
+            "the next free slot"
+        );
+        r.set(SettingKey::GraphsMinigraphGpuTemperature, true);
+        assert!(r.attached().contains(&(MinigraphSource::GpuTemp(None), 6)));
+        assert!(r.vcx.debug_bounds("MinigraphSlot-6").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn panel_hide_system_card_writes_setting(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        r.vcx.dispatch_action(MinigraphHide { id: cpu });
+        draw(&mut r.vcx);
+        assert!(!r.graphs().minigraph_cpu);
+        assert!(r.attached().iter().all(|(s, _)| *s != MinigraphSource::Cpu));
+    }
+
+    #[gpui_kit::test]
+    fn panel_demand_sum(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let panel = r.panel.clone();
+        let d = r.vcx.update(|_, cx| panel.read(cx).demand_part(cx));
+        assert_eq!(d.cpu, CpuDemand::Total);
+        assert!(d.any_surface_visible && d.memory && d.disks && d.nets && d.gpus);
+        assert!(!d.cpu_fast);
+
+        // Sent only while the Processes tab is shown.
+        r.vcx.executor().advance_clock(Duration::from_millis(200));
+        draw(&mut r.vcx);
+        assert!(r.engine.demands().iter().all(|d| !d.memory));
+        r.vcx
+            .update(|_, cx| panel.update(cx, |p, cx| p.set_active(true, cx)));
+        r.vcx.executor().advance_clock(Duration::from_millis(200));
+        draw(&mut r.vcx);
+        let sent = r.engine.demands().last().cloned().expect("demand sent");
+        assert!(sent.memory && sent.gpus && sent.cpu == CpuDemand::Total);
+        assert!(!sent.cpu_fast);
+    }
+
+    #[gpui_kit::test]
+    fn panel_persists_state(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let panel = r.panel.clone();
+        r.vcx.update(|_, cx| {
+            panel
+                .update(cx, |p, cx| p.add_system(MinigraphSource::GpuTemp(None), cx))
+                .expect("slot 6");
+        });
+        r.vcx.executor().advance_clock(Duration::from_millis(600));
+        draw(&mut r.vcx);
+        let saved = r
+            .saved
+            .lock()
+            .expect("lock")
+            .last()
+            .cloned()
+            .expect("persisted");
+        let card = saved
+            .minigraphs
+            .iter()
+            .find(|m| m.source == "gpu_temp")
+            .expect("the new card in [[minigraphs]]");
+        assert_eq!(card.slot, 6);
+        assert_eq!(saved.minigraphs.len(), 7);
+    }
+}
