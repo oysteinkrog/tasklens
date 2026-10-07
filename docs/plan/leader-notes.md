@@ -608,3 +608,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ndy.17 closed: DRM per-client VRAM from the gpu_drm fdinfo scan, matched to GPU N by PCI slot; reducer keeps NVIDIA and DRM rows apart (53eed0e). Accepted the tl-collect fdinfo parser change. Follow-up: GPU memory validity on DRM-only machines.
 - pdu.50 closed: the four remaining tooltips (a50d2b1, a2e502e). Leader decision: the cancelled-writes tooltip shows a rate, "cancelled: 1.20 MiB/s".
 - fut.3 closed: ActionTracker with outcome toasts, retry as administrator, Details (0ac9390, c17434d, b54c6c9, 039aec5, 5ec776e). Accepted: TlDialog::without_cancel, no toast on EngineStopped, one button per partial toast (Retry wins on EPERM), retry only PermissionDenied targets, the Details target labels. Follow-up: the low-memory window's ActionTracker marker.
+- jqk.19 closed: ToggleHideSystem, CycleViewMode, SetViewMode with toasts (61bd129, a5df591). Follow-up to remove duplicate view mode strings: keep processes-toolbar-* keys.
+- 8fx.22 closed: History table delegate (9b6615f, 8afec71, 814eda6). Accepted: icons only for running apps, line 2 totals for CPU and Memory only, "(previous boot)" wins, selection diffing, query only when the first 8 keys change. Follow-up: apply a filter set before History mode.
+- 8fx.38 closed: set_view_range, set_metric, set_selected send one query while scrubbed (ffa7653, 6bfb30f).
+- pdu.50's rate fix c94b9b8 swept in m1f.19's two staged renames (watch_memory.rs into crates/tl-watch). No revert; m1f.19 told to land a building state first.
