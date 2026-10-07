@@ -2343,7 +2343,7 @@ mod summary {
     fn set_graph_range_updates_every_chart(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::actions::PerfSetGraphRange;
 
-        let mut r = open(cx, 1600., 1000., true);
+        let r = open(cx, 1600., 1000., true);
         r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
         draw(r.vcx);
         let page = r.page.clone();
@@ -2376,8 +2376,8 @@ mod summary {
         let view = enter(&mut r);
         let tile = r
             .vcx
-            .debug_bounds("perf-summary-tile-1")
-            .expect("memory tile");
+            .debug_bounds("perf-summary-tile-0")
+            .expect("CPU tile");
         right_click(r.vcx, tile.center());
         draw(r.vcx);
         assert!(
@@ -2394,6 +2394,9 @@ mod summary {
             ]
         );
         assert!(list[1].3, "checked in summary mode");
+        // No page items: the CPU page's Graph and Kernel times stay out (no page is drawn).
+        assert!(!list.iter().any(|e| e.1 == "Graph" || e.1 == "Kernel times"));
+        assert!(!list.iter().any(|e| e.0 == MenuEntryKind::Separator));
 
         // The items run on the summary view.
         let focus = r.vcx.update(|_, cx| view.read(cx).focus_handle(cx));
