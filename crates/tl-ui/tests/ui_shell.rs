@@ -4375,3 +4375,283 @@ mod main_window {
         }
     }
 }
+
+/// Startup step 11 after the first frame (tasklens-jqk.20, UI-SHL-110, UI-SHL-093, APP-048).
+mod startup_items {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    use gpui_kit::{SharedString, TestAppContext};
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::ids::ProcessKey;
+    use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::app::{AppEnv, CrashReport, StartOptions, TasklensUi, ToastKindTag, UiInit};
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{MainWindow, SELECT_PID_WAIT, main_window_view, open_main_window};
+    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+
+    const PID: u32 = 4242;
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        /// `mark_crash_seen` calls.
+        seen: Arc<AtomicU32>,
+        version: u64,
+    }
+
+    /// `TasklensUi::init` with `toasts` queued, a pending crash report when `crash`, and
+    /// `start` as the command line. Opens no window.
+    fn init(
+        cx: &mut TestAppContext,
+        toasts: Vec<(ToastKindTag, SharedString)>,
+        crash: bool,
+        start: StartOptions,
+    ) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let seen = Arc::new(AtomicU32::new(0));
+        let mut env = AppEnv::test();
+        if crash {
+            env.pending_crash = Some(CrashReport {
+                path: "/tmp/crash-1.txt".into(),
+                text: "panic at x".into(),
+                at: SystemTime::UNIX_EPOCH,
+            });
+            let count = seen.clone();
+            env.mark_crash_seen = Arc::new(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+            });
+        }
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: toasts,
+            env,
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_global(start);
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        Rig {
+            engine,
+            seen,
+            version: 0,
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) {
+        cx.update(open_main_window).expect("the main window opens");
+        cx.run_until_parked();
+    }
+
+    fn main_window(cx: &mut TestAppContext) -> gpui_kit::Entity<MainWindow> {
+        cx.update(|cx| main_window_view(cx).expect("main window open"))
+    }
+
+    fn toasts(cx: &mut TestAppContext) -> Vec<String> {
+        let main = main_window(cx);
+        cx.update(|cx| {
+            let texts = main.read(cx).toasts().read(cx).visible_texts();
+            texts.iter().map(|t| t.to_string()).collect()
+        })
+    }
+
+    fn record(pid: u32) -> ProcessRecord {
+        let a = |s: &str| Arc::<str>::from(s);
+        ProcessRecord {
+            key: ProcessKey {
+                start_ticks: 100,
+                boot_id: BootId(0),
+                pid,
+            },
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: a("demo"),
+                name: a("demo"),
+                exe: None,
+                cmdline: None,
+                user: a("u"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a("demo"),
+            }),
+            group: GroupKind::System.key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    impl Rig {
+        /// Publishes a process snapshot holding `pids`.
+        fn publish(&mut self, cx: &mut TestAppContext, pids: &[u32]) {
+            self.version += 1;
+            let version = self.version;
+            let records: Vec<ProcessRecord> = pids.iter().map(|&p| record(p)).collect();
+            self.engine.publish_with(|s| {
+                s.processes = Arc::new(ProcessSnapshot {
+                    header: ComponentHeader {
+                        version,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    records: records.into(),
+                    ..ProcessSnapshot::default()
+                });
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    fn jumps(cx: &mut TestAppContext) -> u32 {
+        let main = main_window(cx);
+        cx.update(|cx| main.read(cx).select_pid_jumps())
+    }
+
+    fn select_pid(pid: u32) -> StartOptions {
+        StartOptions {
+            tab: Some(tl_model::settings::StartTab::Performance),
+            select_pid: Some(pid),
+            ..StartOptions::default()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn startup_toasts_after_first_frame(cx: &mut TestAppContext) {
+        let queued = vec![
+            (ToastKindTag::Warning, SharedString::from("test warning")),
+            (ToastKindTag::Info, SharedString::from("test info")),
+        ];
+        init(cx, queued, false, StartOptions::default());
+        open(cx);
+        assert_eq!(toasts(cx), ["test warning", "test info"]);
+
+        // A reopened window does not show them again.
+        open(cx);
+        assert!(toasts(cx).is_empty(), "{:?}", toasts(cx));
+    }
+
+    #[gpui_kit::test]
+    fn crash_report_shown_after_first_frame(cx: &mut TestAppContext) {
+        let r = init(cx, Vec::new(), true, StartOptions::default());
+        open(cx);
+        let crash = cx.update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::CrashReport)
+        });
+        assert!(crash.is_some(), "the Crash Report window opened");
+        open(cx);
+        assert_eq!(
+            r.seen.load(Ordering::Relaxed),
+            1,
+            "shown and marked seen once"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn select_pid_waits_for_process(cx: &mut TestAppContext) {
+        let mut r = init(cx, Vec::new(), false, select_pid(PID));
+        open(cx);
+        let main = main_window(cx);
+        assert_eq!(cx.update(|cx| main.read(cx).active_tab()), Tab::Processes);
+        assert_eq!(jumps(cx), 0, "no record yet");
+
+        cx.executor().advance_clock(Duration::from_secs(1));
+        r.publish(cx, &[1, PID]);
+        assert_eq!(jumps(cx), 1);
+        assert_eq!(cx.update(|cx| main.read(cx).active_tab()), Tab::Processes);
+        r.publish(cx, &[1, PID, 7]);
+        assert_eq!(jumps(cx), 1, "selected once");
+        cx.executor().advance_clock(SELECT_PID_WAIT);
+        cx.run_until_parked();
+        assert!(toasts(cx).iter().all(|t| !t.contains("not found")));
+    }
+
+    #[gpui_kit::test]
+    fn select_pid_not_found_after_3s(cx: &mut TestAppContext) {
+        let mut r = init(cx, Vec::new(), false, select_pid(PID));
+        open(cx);
+        cx.executor().advance_clock(SELECT_PID_WAIT);
+        cx.run_until_parked();
+        assert!(
+            toasts(cx).iter().any(|t| t == "Process 4242 not found"),
+            "{:?}",
+            toasts(cx)
+        );
+        r.publish(cx, &[PID]);
+        assert_eq!(jumps(cx), 0, "a late process is not selected");
+    }
+
+    #[gpui_kit::test]
+    fn start_minimized_without_tray(cx: &mut TestAppContext) {
+        let start = StartOptions {
+            start_minimized: true,
+            ..StartOptions::default()
+        };
+        init(cx, Vec::new(), false, start);
+        open(cx);
+        let first = main_window(cx);
+        assert_eq!(cx.update(|cx| first.read(cx).start_minimizes()), 1);
+        open(cx);
+        let second = main_window(cx);
+        assert_eq!(cx.update(|cx| second.read(cx).start_minimizes()), 0);
+    }
+
+    #[gpui_kit::test]
+    fn first_frame_items_noop(cx: &mut TestAppContext) {
+        let r = init(cx, Vec::new(), false, StartOptions::default());
+        open(cx);
+        let main = main_window(cx);
+        cx.update(|cx| {
+            let m = main.read(cx);
+            assert_eq!(m.first_frames(), 1);
+            assert_eq!(m.select_pid_jumps(), 0);
+            assert_eq!(m.start_minimizes(), 0);
+        });
+        assert!(toasts(cx).is_empty());
+        assert_eq!(r.seen.load(Ordering::Relaxed), 0);
+        let crash = cx.update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::CrashReport)
+        });
+        assert!(crash.is_none());
+    }
+}
