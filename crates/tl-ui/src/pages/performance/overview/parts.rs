@@ -67,7 +67,7 @@ pub struct Meter {
 /// gets at least 1 physical px; 1 and above gets the whole width.
 pub fn meter_fill_w(fraction: f32, width: Pixels, scale_factor: f32) -> Pixels {
     // NaN and anything at or below 0 draw no fill.
-    if !(fraction > 0.) {
+    if fraction.is_nan() || fraction <= 0. {
         return px(0.);
     }
     if fraction >= 1. {
