@@ -508,6 +508,45 @@ Minimum tile 200 × 120; when the window is too small for that, cols shrink unti
 - **Phase**: P2.
 - **Decided here**: tile grid rule and minimums, heading composition, accent marker, click-to-select, title suffix.
 
+### UI-PRF-017 Overview page
+
+- **Implements**: owner decision D-022 (no PERF requirement yet). Follows the page panel (UI-PRF-010) and the `tile_grid` pattern (UI-PRF-016).
+- **Anatomy** (a page in the Performance tab, in the page panel like any device page, with no header row):
+
+```
+┌ page panel, padding PAGE_PAD 16, gap sp4 8 ──────────────────────────┐
+│ ┌ CPU (cols 0..1) ───────────────────────┐ ┌ MEM (col 2) ──────────┐ │
+│ │ CPU   3.40 GHz · 52 °C          12.0%  │ │ Memory          55.0% │ │
+│ │ ▁▂▃▅▃▂▁▂▃▂▁▂ total chart │ C0 ▇▇  12%   │ │ ▇▇▇▇▇▇ used chart     │ │
+│ │                          │ C1 ▇   4%    │ │ Used      ▇▇▇▇  8 GiB │ │
+│ └────────────────────────────────────────┘ └───────────────────────┘ │
+│ ┌ GPU ───────────┐ ┌ DISK ──────────────┐ ┌ NET ─────────────────┐  │
+│ │ util chart      │ │ IO chart, rows     │ │ down and up charts    │  │
+│ │ VRAM ▇▇ 3/16 GiB│ │ nvme0n1 R W ▇ busy │ │ totals since boot     │  │
+│ └─────────────────┘ └────────────────────┘ └───────────────────────┘ │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+- **Layout** (`pages/performance/overview/layout.rs`, data, so a later editor can change it):
+  - `OverviewLayout { columns, rows: [RowSpec { weight, min_h }], boxes: [BoxSpec { kind, row, col, col_span }] }`; `validate` rejects an empty layout, a box outside the grid, two boxes on one cell and a repeated kind.
+  - Default (`btop_default`): 3 columns. Row 0: weight 3, minimum 280: CPU (cols 0 to 1) and Memory (col 2). Row 1: weight 2, minimum 220: GPU, Disk and Net, one column each.
+  - `place(layout, present, area, scale)`: padding `PAGE_PAD` on every side, gap 8. A row's present boxes share the row width by `col_span` in `col` order, so with every box present a box is `span·unit + (span − 1)·gap` wide, `unit = (W − 2·pad − (cols − 1)·gap) / cols`. An absent kind is dropped and its row neighbours widen; a row with no present box is dropped. Row heights split the height by weight; if a row comes out below its minimum, every row takes its minimum and the page scrolls. Below `STACK_W` (720) the boxes stack in one column, full width, each with its row's minimum, and the page scrolls when taller than the area. `content_h` includes the padding.
+  - Examples: 1200 × 900: CPU `(16, 16, 776, 516)`, Memory `(800, 16, 384, 516)`, row 1 at `y = 540`, 344 high, boxes 384 wide. Without a GPU, Disk and Net are 580 wide. 700 × 900 stacks to 668 wide with `content_h` 1284. 1200 × 500 uses 280 and 220 and scrolls with `content_h` 540.
+- **Box contents** (each box in `box_frame`: `list_bg`, 1 px `divider` border, `radius_card`, padding `sp[5]`, a 24 px title row with the title `t_md` 500, a `t_sm` `text_secondary` line and the value `t_md` 400 tabular at the right):
+  - **CPU**: the `CPU_TOTAL` chart (plus `CPU_KERNEL` when `performance.cpu_kernel`), 0 to 100, on the left (55%), and per-core bars on the right (under the chart below 560 px box width). Bar cells are at least 140 px: name "C{n}", a 6 px meter in `graph.cpu_line`, integer percent. Value: total CPU percent. Line: frequency and temperature, each only when Valid or Stale.
+  - **Memory**: the `MEM_USED` chart and four meter rows: Used, Available, Cached and Swap ("No swap" without swap). Value: percent used.
+  - **GPU**: one section per visible sidebar GPU card, at most 2, then "+n more": `GPU_UTIL` chart, a VRAM meter row, a line with temperature and power.
+  - **Disk**: the aggregate `DISK_READ` and `DISK_WRITE` chart and one row per visible sidebar disk card, at most 8, then "+n more": name, read and write rates, a busy meter.
+  - **Net**: download and upload charts on the aggregate network device, current rates and the totals since boot, over the interfaces whose class `show_network_*` shows.
+- **Data binding**: CPU from `SERIES` (per-core samples) and `SYSTEM`; the other boxes from `SYSTEM` and `DEVICES`. The GPU and Disk boxes list the sidebar's visible cards only. A box notifies only when its text changed (hash compare) or, for the core bars, when a 1% bucket changed.
+- **Render contract** (GPUI 0.3.7 marks every ancestor of a notifying view dirty, crw.34; no GPUI fork): an idle tick renders nothing. `OverviewPage` never notifies on a tick; it re-renders only on resize or when a box kind appears or disappears. Each box is a cached child view, so a box that did not change builds no geometry. The page render does fixed work: no snapshot reads and no text formatting.
+- **Demand**: while the page is active, `any_surface_visible`, CPU per core with `cpu_fast` (10 Hz CPU), memory, disks, nets and GPUs. Nothing while inactive; the part is removed on release.
+- **Sidebar and keys**: the Overview card is the first card by default and moves with `device_order`. It shows the CPU-total mini graph, line 1 "CPU, memory, GPU, disk, network" and an empty line 2. F1 opens Overview and F2 CPU. New profiles keep `selected_device = "cpu"`. Graph summary mode (UI-PRF-016) has no Overview tile.
+- **Not yet**: saving the layout and the layout editor.
+- **Tests**: `layout.rs::tests::{overview_default_layout_validates, overview_place_default_1200x900, overview_place_without_gpu_widens_row, overview_place_narrow_stacks, overview_place_short_uses_min_heights, overview_validate_rejects_overlap_and_out_of_grid}`; the page and box beads add theirs.
+- **Phase**: P1.
+- **Decided here**: see D-022 for the owner decisions; the anatomy sketch and the copy of the box contents follow the E24 Overview beads.
+
 ---
 
 ## Part C: device pages
@@ -1280,6 +1319,7 @@ sp4 between cards
 | UI-PRF-014 | Card context menu | PERF-002, 088 | P1/P3 |
 | UI-PRF-015 | Page jump submenu and page context menu | PERF-007, 010, 011, 016, 088 | P1/P2/P3 |
 | UI-PRF-016 | Graph summary mode | PERF-010 | P2 |
+| UI-PRF-017 | Overview page | D-022 | P1 |
 | UI-PRF-020 | Device page frame | PERF-008, 012, 014 | P1 |
 | UI-PRF-021 | Details grid | PERF-012, 013 | P1 |
 | UI-PRF-022 | Copy device info | PERF-011 | P2 |

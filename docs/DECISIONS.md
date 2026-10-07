@@ -2,6 +2,30 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-07
+
+### D-022: Performance Overview page
+
+The Performance tab gets an Overview page: five btop-style boxes (CPU, MEM, GPU, DISK, NET) in
+the tasklens theme, laid out from data (UI-PRF-017). The leader recorded these decisions:
+
+- **Render contract.** GPUI 0.3.7 marks every ancestor of a notifying view dirty (crw.34), and
+  tasklens does not fork GPUI. So an idle tick renders nothing, `OverviewPage` never notifies on a
+  tick, a box that did not change builds no geometry, and the page render does fixed work with no
+  text formatting.
+- **Demand.** `cpu_fast` is true while the page is active, so the CPU box updates at 10 Hz.
+- **Sidebar card.** It shows the CPU-total mini graph, a static line 1 "CPU, memory, GPU, disk,
+  network" and an empty line 2.
+- **Order and keys.** Overview is the first card by default and moves with `device_order`. F1
+  opens Overview and F2 opens CPU.
+- **Profiles.** New profiles keep `selected_device = "cpu"`.
+- **GPU and Disk boxes** list the visible sidebar cards only.
+- **Graph summary mode** gets no Overview tile. The page has no header row.
+- **Later.** Saving the layout and the layout editor come in later beads.
+- **Fixed values.** `STACK_W` 720 px; row minimums 280 and 220 px; row weights 3:2; core bar cell
+  140 px; at most 2 GPUs and 8 disk rows; the per-core percent is an integer and its text is
+  re-shaped only when its 1% bucket changes (this settles U-47 for Overview).
+
 ## 2026-10-04
 
 D-012 to D-020 answer the owner-decision topics of the settled open items (`docs/RECONCILIATION.md`

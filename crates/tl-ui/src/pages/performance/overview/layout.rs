@@ -113,9 +113,7 @@ impl OverviewLayout {
                     return Err(LayoutError::Duplicate(b.kind));
                 }
                 let other_end = u16::from(other.col) + u16::from(other.col_span);
-                if other.row == b.row
-                    && u16::from(b.col) < other_end
-                    && u16::from(other.col) < end
+                if other.row == b.row && u16::from(b.col) < other_end && u16::from(other.col) < end
                 {
                     return Err(LayoutError::Overlap(other.kind, b.kind));
                 }
@@ -290,7 +288,11 @@ mod tests {
         assert!(!p.stacked && !p.scrolls);
         assert_eq!(rect(&p, BoxKind::Cpu), (16., 16., 776., 516.));
         assert_eq!(rect(&p, BoxKind::Memory), (800., 16., 384., 516.));
-        for (kind, x) in [(BoxKind::Gpu, 16.), (BoxKind::Disk, 408.), (BoxKind::Net, 800.)] {
+        for (kind, x) in [
+            (BoxKind::Gpu, 16.),
+            (BoxKind::Disk, 408.),
+            (BoxKind::Net, 800.),
+        ] {
             assert_eq!(rect(&p, kind), (x, 540., 384., 344.), "{kind:?}");
         }
         assert_eq!(p.content_h, px(900.));

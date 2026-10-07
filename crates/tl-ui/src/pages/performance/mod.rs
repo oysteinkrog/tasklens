@@ -14,6 +14,7 @@ pub mod memory;
 pub mod memory_bar;
 pub mod menu;
 pub mod net;
+pub mod overview;
 pub mod page;
 pub mod sidebar;
 pub mod summary;
