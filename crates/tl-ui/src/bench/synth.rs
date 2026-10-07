@@ -5,9 +5,19 @@
 //! UI-PRF-053 and R-160 OI-2.
 
 use std::f64::consts::PI;
+use std::sync::Arc;
 
+use tl_model::ids::{GroupKey, NodeId, ProcessKey};
+use tl_model::process::{
+    GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
+};
 use tl_model::series::Sample;
-use tl_model::time::TimeNs;
+use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+use tl_model::table::{ProcessTableView, TableRow, TableTotals, Total};
+use tl_model::time::{BootId, TimeNs};
+use tl_model::validity::{FieldValidity, Validity};
+
+use crate::pages::processes::table::GroupHeader;
 
 /// PRNG seed for every bench scene.
 pub const SEED: u64 = 42;
@@ -41,6 +51,16 @@ const PERIOD_1HZ_NS: u64 = NS_PER_S;
 const BURST_P: f32 = 0.1;
 /// Network value outside a burst, in Mbps.
 const NET_IDLE_MBPS: f32 = 0.01;
+
+/// `table-2000` (R-160 OI-7): 40 app groups of 50 processes.
+pub const TABLE_GROUPS: usize = 40;
+pub const TABLE_GROUP_SIZE: usize = 50;
+pub const TABLE_PROCESSES: usize = TABLE_GROUPS * TABLE_GROUP_SIZE;
+/// PID of `proc-0001`; process `i` (0-based) has PID `TABLE_FIRST_PID + i`.
+const TABLE_FIRST_PID: u32 = 1_000;
+const MIB: f32 = 1_048_576.0;
+/// Bytes per second in 1 Mbps.
+const MBPS_BYTES: f32 = 125_000.0;
 
 /// Up time at the first stats sample: 2 days, 2h 38m 15s (the UI-PRF-024 example).
 const UPTIME_START_S: u64 = 2 * 86_400 + 2 * 3_600 + 38 * 60 + 15;
@@ -351,6 +371,304 @@ pub fn prefill(
         }
     }
     out
+}
+
+/// The synthetic process table of `table-2000` (ADR-014, R-160 OI-7): 2,000 processes in 40
+/// app groups, every metric drawn fresh each second, grouped and sorted by CPU descending with
+/// the `ProcessKey` tie-break, so the order changes every tick. The view is built the way the
+/// engine builds a grouped one: the Apps header, then each group row followed by its members.
+pub struct TableSynth {
+    /// Sorted by `ProcessKey`, as `ProcessSnapshot.records` must be. Member `m` of group `g` is
+    /// record `g * TABLE_GROUP_SIZE + m`.
+    records: Vec<ProcessRecord>,
+    /// Node, key and name of each app group.
+    groups: Vec<(NodeId, GroupKey, Arc<str>)>,
+    version: u64,
+    processes: Arc<ProcessSnapshot>,
+}
+
+impl TableSynth {
+    /// Names, keys and groups only. The values come with the first [`Self::tick_1hz`]. `rng` is
+    /// not read: the layout is fixed.
+    pub fn new(_rng: &mut BenchRng) -> Self {
+        let user: Arc<str> = Arc::from("bench");
+        let description: Arc<str> = Arc::from("Synthetic process");
+        let mut groups = Vec::with_capacity(TABLE_GROUPS);
+        let mut records = Vec::with_capacity(TABLE_PROCESSES);
+        for g in 0..TABLE_GROUPS {
+            let app_id: Arc<str> = Arc::from(format!("app-{:02}", g + 1));
+            let key = GroupKind::App {
+                app_id: Arc::clone(&app_id),
+            }
+            .key();
+            groups.push((
+                NodeId::Group(key),
+                key,
+                Arc::from(format!("App {:02}", g + 1)),
+            ));
+            for m in 0..TABLE_GROUP_SIZE {
+                let i = g * TABLE_GROUP_SIZE + m;
+                let name: Arc<str> = Arc::from(format!("proc-{:04}", i + 1));
+                let pid = TABLE_FIRST_PID + i as u32;
+                records.push(ProcessRecord {
+                    key: ProcessKey {
+                        start_ticks: u64::from(pid),
+                        boot_id: BootId(0),
+                        pid,
+                    },
+                    ppid: 1,
+                    uid: 1000,
+                    meta: Arc::new(ProcessMeta {
+                        comm: Arc::clone(&name),
+                        name: Arc::clone(&name),
+                        exe: None,
+                        cmdline: None,
+                        user: Arc::clone(&user),
+                        cgroup: None,
+                        app_id: Some(Arc::clone(&app_id)),
+                        icon: None,
+                        description: Some(Arc::clone(&description)),
+                        desktop_path: None,
+                        search_lower: name,
+                    }),
+                    group: key,
+                    state: ProcState::Sleeping,
+                    flags: ProcFlags::empty(),
+                    nice: 0,
+                    threads: 1,
+                    cpu_pct: 0.0,
+                    rss_anon_bytes: 0,
+                    rss_bytes: 0,
+                    pss_bytes: 0,
+                    uss_bytes: 0,
+                    swap_bytes: 0,
+                    io_read_bps: 0.0,
+                    io_write_bps: 0.0,
+                    net_rx_bps: 0.0,
+                    net_tx_bps: 0.0,
+                    gpu_util_pct: 0.0,
+                    gpu_mem_bytes: 0,
+                    euid: None,
+                    net_shared: false,
+                    cancelled_write_bps: 0.0,
+                    validity: FieldValidity::all(Validity::Valid),
+                });
+            }
+        }
+        Self {
+            records,
+            groups,
+            version: 0,
+            processes: Arc::default(),
+        }
+    }
+
+    /// Draws every value again, publishes the records as the next [`Self::processes`] and returns
+    /// the matching view. `query_generation` is 0; the engine sets it.
+    pub fn tick_1hz(&mut self, rng: &mut BenchRng, t_ns: TimeNs) -> Arc<ProcessTableView> {
+        self.version += 1;
+        for r in &mut self.records {
+            r.cpu_pct = rng.uniform(0.0, 5.0);
+            let memory = (rng.uniform(1.0, 500.0) * MIB) as u64;
+            r.rss_anon_bytes = memory;
+            r.rss_bytes = memory;
+            r.pss_bytes = memory;
+            r.uss_bytes = memory;
+            // Read and write each 0..1 MiB/s, so Disk is 0..2 MiB/s; the same for Network.
+            r.io_read_bps = rng.uniform(0.0, MIB);
+            r.io_write_bps = rng.uniform(0.0, MIB);
+            r.net_rx_bps = rng.uniform(0.0, 0.5 * MBPS_BYTES);
+            r.net_tx_bps = rng.uniform(0.0, 0.5 * MBPS_BYTES);
+            r.gpu_util_pct = rng.uniform(0.0, 10.0);
+        }
+        let header = ComponentHeader {
+            version: self.version,
+            observed_start: t_ns,
+            observed_end: t_ns,
+            validity: Validity::Valid,
+        };
+
+        let groups: Vec<GroupRow> = self
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(g, (node, key, name))| {
+                let members = &self.records[g * TABLE_GROUP_SIZE..(g + 1) * TABLE_GROUP_SIZE];
+                group_row(node.clone(), *key, Arc::clone(name), members)
+            })
+            .collect();
+        let by_cpu = |a_cpu: f32, b_cpu: f32| b_cpu.total_cmp(&a_cpu);
+        let mut group_order: Vec<usize> = (0..TABLE_GROUPS).collect();
+        group_order.sort_by(|&a, &b| {
+            by_cpu(groups[a].cpu_pct, groups[b].cpu_pct)
+                .then_with(|| groups[a].key.cmp(&groups[b].key))
+        });
+
+        let mut rows = Vec::with_capacity(1 + TABLE_GROUPS + TABLE_PROCESSES);
+        rows.push(TableRow {
+            node: GroupHeader::Apps.node(),
+            depth: 0,
+            expanded: true,
+            has_children: true,
+            record: None,
+            group: None,
+            descendants: TABLE_PROCESSES as u32,
+            subtree: None,
+        });
+        let mut members: Vec<usize> = Vec::with_capacity(TABLE_GROUP_SIZE);
+        for g in group_order {
+            rows.push(TableRow {
+                node: groups[g].node.clone(),
+                depth: 1,
+                expanded: true,
+                has_children: true,
+                record: None,
+                group: Some(g as u32),
+                descendants: TABLE_GROUP_SIZE as u32,
+                subtree: None,
+            });
+            members.clear();
+            members.extend(g * TABLE_GROUP_SIZE..(g + 1) * TABLE_GROUP_SIZE);
+            members.sort_by(|&a, &b| {
+                let (ra, rb) = (&self.records[a], &self.records[b]);
+                by_cpu(ra.cpu_pct, rb.cpu_pct).then_with(|| ra.key.cmp(&rb.key))
+            });
+            rows.extend(members.iter().map(|&i| TableRow {
+                node: NodeId::Process(self.records[i].key),
+                depth: 2,
+                expanded: false,
+                has_children: false,
+                record: Some(i as u32),
+                group: None,
+                descendants: 0,
+                subtree: None,
+            }));
+        }
+
+        let totals = table_totals(&groups);
+        self.processes = Arc::new(ProcessSnapshot {
+            header,
+            records: self.records.as_slice().into(),
+            ..ProcessSnapshot::default()
+        });
+        Arc::new(ProcessTableView {
+            header,
+            query_generation: 0,
+            rows: rows.into(),
+            groups: groups.into(),
+            subtree: Arc::from([]),
+            totals,
+            total: TABLE_PROCESSES as u32,
+            shown: TABLE_PROCESSES as u32,
+            restricted: 0,
+        })
+    }
+
+    /// The records of the last tick; the view's `TableRow.record` indexes into them.
+    pub fn processes(&self) -> Arc<ProcessSnapshot> {
+        Arc::clone(&self.processes)
+    }
+}
+
+/// An app group row with the sums of `members`.
+fn group_row(node: NodeId, key: GroupKey, name: Arc<str>, members: &[ProcessRecord]) -> GroupRow {
+    let mut g = GroupRow {
+        node,
+        key,
+        kind: GroupRowKind::App,
+        class: GroupKind::App {
+            app_id: Arc::from(""),
+        },
+        name,
+        icon: None,
+        members: members.len() as u32,
+        pids: members.len() as u32,
+        note: None,
+        memory_bytes: 0,
+        disk_bps: 0.0,
+        net_bps: 0.0,
+        gpu_pct: 0.0,
+        cpu_pct: 0.0,
+        rss_anon_bytes: 0,
+        rss_bytes: 0,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.0,
+        io_write_bps: 0.0,
+        net_rx_bps: 0.0,
+        net_tx_bps: 0.0,
+        gpu_util_pct: 0.0,
+        gpu_mem_bytes: 0,
+        threads: 0,
+        cpu_kernel_pct: 0.0,
+        cpu_user_pct: 0.0,
+        cpu_relative_pct: 0.0,
+        utime_ticks: 0,
+        stime_ticks: 0,
+        commit_bytes: 0,
+        page_faults: 0,
+        page_faults_delta: 0,
+        major_faults: 0,
+        handles: None,
+        desktop_path: None,
+        description: None,
+        user: members.first().map(|r| Arc::clone(&r.meta.user)),
+        validity: FieldValidity::all(Validity::Valid),
+    };
+    for r in members {
+        g.cpu_pct += r.cpu_pct;
+        g.rss_anon_bytes += r.rss_anon_bytes;
+        g.rss_bytes += r.rss_bytes;
+        g.pss_bytes += r.pss_bytes;
+        g.uss_bytes += r.uss_bytes;
+        g.io_read_bps += r.io_read_bps;
+        g.io_write_bps += r.io_write_bps;
+        g.net_rx_bps += r.net_rx_bps;
+        g.net_tx_bps += r.net_tx_bps;
+        g.gpu_util_pct += r.gpu_util_pct;
+        g.threads += r.threads;
+    }
+    g.memory_bytes = g.rss_anon_bytes;
+    g.disk_bps = g.io_read_bps + g.io_write_bps;
+    g.net_bps = g.net_rx_bps + g.net_tx_bps;
+    g.gpu_pct = g.gpu_util_pct;
+    g
+}
+
+/// Header totals, all `Valid`. CPU and GPU are clamped to 100%: the synthetic sums exceed one
+/// machine.
+fn table_totals(groups: &[GroupRow]) -> TableTotals {
+    let valid = |value| Total {
+        value,
+        validity: Validity::Valid,
+    };
+    let sum = |f: fn(&GroupRow) -> f32| groups.iter().map(f).sum::<f32>();
+    TableTotals {
+        cpu_pct: valid((sum(|g| g.cpu_pct) / CORES as f32).min(100.0)),
+        memory_pct: valid(50.0),
+        swap_pct: valid(0.0),
+        disk_pct: valid(10.0),
+        net_bps: valid(f64::from(sum(|g| g.net_bps))),
+        net_link_bps: None,
+        gpu_pct: valid(
+            groups
+                .iter()
+                .map(|g| g.gpu_pct)
+                .fold(0.0, f32::max)
+                .min(100.0),
+        ),
+        vram_pct: valid(10.0),
+        threads: Total {
+            value: TABLE_PROCESSES as u64,
+            validity: Validity::Valid,
+        },
+        handles: Total {
+            value: 0,
+            validity: Validity::Valid,
+        },
+        ..TableTotals::default()
+    }
 }
 
 /// Scene time in seconds for a timestamp; the generators take `t_s` from this.
