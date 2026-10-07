@@ -1,11 +1,12 @@
 //! The real engine on a fixture root, wired to the UI as `main.rs` does (tasklens-pdu.52).
 //!
 //! Every UI test uses `FakeEngine`, so nothing checked that the Processes tab asks the real
-//! engine for the process sweep. This test starts `Engine::start` on the `owner-desktop` fixture,
-//! runs `TasklensUi::init` with the engine as the client, opens the main window on the Processes
+//! engine for the process sweep. This test starts `Engine::start` on a copy of the
+//! `owner-desktop` fixture with `process-edge` laid over it (as the engine lab tests use), runs `TasklensUi::init` with the engine as the client, opens the main window on the Processes
 //! tab and waits for a filled process table with CPU and Memory totals.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,9 +37,61 @@ fn fixtures() -> PathBuf {
     ))
 }
 
-/// The engine on the `owner-desktop` root, app lookups on the tl-collect app fixtures and the
-/// icon cache in `dir`, so the test never writes the real `~/.cache`. No helper task.
-fn start_engine(dir: &std::path::Path) -> tl_engine::EngineHandle {
+/// Copies every entry of `src` over `dst`, replacing files and links that exist in both.
+fn overlay(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("create fixture dir");
+    for entry in fs::read_dir(src).expect("list fixture dir") {
+        let entry = entry.expect("fixture dir entry");
+        let to = dst.join(entry.file_name());
+        let file_type = entry.file_type().expect("fixture file type");
+        if file_type.is_symlink() {
+            let target = fs::read_link(entry.path()).expect("read fixture symlink");
+            let _ = fs::remove_file(&to);
+            std::os::unix::fs::symlink(target, &to).expect("create fixture symlink");
+        } else if file_type.is_dir() {
+            overlay(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), &to).expect("copy fixture file");
+        }
+    }
+}
+
+/// Moves the `cpu` line of the copied `proc/stat` on by 100 busy and 100 idle ticks per call.
+/// A frozen fixture gives a zero tick delta, and the CPU total then stays `WarmingUp`.
+struct CpuTicks {
+    path: PathBuf,
+    text: String,
+    calls: u64,
+}
+
+impl CpuTicks {
+    fn new(root: &Path) -> Self {
+        let path = root.join("proc/stat");
+        let text = fs::read_to_string(&path).expect("read proc/stat");
+        Self {
+            path,
+            text,
+            calls: 0,
+        }
+    }
+
+    fn advance(&mut self) {
+        self.calls += 1;
+        let add = 100 * self.calls;
+        let (first, rest) = self.text.split_once('\n').expect("proc/stat has lines");
+        let mut fields: Vec<String> = first.split_whitespace().map(str::to_owned).collect();
+        assert_eq!(fields[0], "cpu");
+        for ix in [1, 4] {
+            let n: u64 = fields[ix].parse().expect("tick count");
+            fields[ix] = (n + add).to_string();
+        }
+        fs::write(&self.path, format!("{}\n{rest}", fields.join(" "))).expect("write proc/stat");
+    }
+}
+
+/// The engine on `root`, app lookups on the tl-collect app fixtures and the icon cache in
+/// `dir`, so the test never writes the real `~/.cache`. No helper task.
+fn start_engine(dir: &Path, root: &Path) -> tl_engine::EngineHandle {
     let share = |name: &str| fixtures().join(name).join("usr/share");
     let dirs = [share("apps-desktop"), share("apps-icons")];
     let paths = AppPaths {
@@ -50,7 +103,7 @@ fn start_engine(dir: &std::path::Path) -> tl_engine::EngineHandle {
     };
     let config = EngineConfig::new(EngineMode::Full, dir.join("state"))
         .with_history_dir(dir.join("history"))
-        .with_sys_root(SysRoot::at(&fixtures().join("owner-desktop")))
+        .with_sys_root(SysRoot::at(root))
         .with_app_paths(paths);
     let hooks = EngineHooks {
         helper: None,
@@ -61,7 +114,8 @@ fn start_engine(dir: &std::path::Path) -> tl_engine::EngineHandle {
 
 /// One step: fake time for the UI timers, a drawn frame with its next-frame callbacks (the hub
 /// counts the window as shown from those, ADR-008), and real time for the engine threads.
-fn step(vcx: &mut VisualTestContext) {
+fn step(vcx: &mut VisualTestContext, cpu: &mut CpuTicks) {
+    cpu.advance();
     vcx.executor().advance_clock(STEP);
     vcx.run_until_parked();
     vcx.update(|window, cx| {
@@ -73,8 +127,13 @@ fn step(vcx: &mut VisualTestContext) {
 
 #[gpui_kit::test]
 fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let engine = start_engine(dir.path());
+    // On disk under target, not in the tmpfs `/tmp`.
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
+    let root = dir.path().join("root");
+    overlay(&fixtures().join("owner-desktop"), &root);
+    overlay(&fixtures().join("process-edge"), &root);
+    let mut cpu_ticks = CpuTicks::new(&root);
+    let engine = start_engine(dir.path(), &root);
     let client: Arc<dyn EngineClient> = Arc::new(engine.clone());
     let (_tx, rx) = async_channel::bounded(4);
     let init = UiInit {
@@ -132,7 +191,7 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
         if rows > 0 && records > 0 && cpu == Validity::Valid && memory == Validity::Valid {
             break;
         }
-        step(&mut vcx);
+        step(&mut vcx, &mut cpu_ticks);
         last = read(&mut vcx);
     }
     let demand_on = vcx.update(|_, cx| {
