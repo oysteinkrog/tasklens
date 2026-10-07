@@ -7,7 +7,8 @@
 //!
 //! Save: `Store` writes a file 500 ms after the last change and once on exit, through
 //! `write_atomic`, on the `tasklens-save` thread. It also writes `themes.json` and
-//! `run-history.json`. A read-only file is never written.
+//! `run-history.json`. A read-only file is never written. When `[startup]` changes, it also
+//! writes or removes the autostart entry (E33-014).
 //!
 //! Logs name files, sections and keys, never their values.
 
@@ -20,14 +21,14 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tl_model::ids::ColumnId;
-use tl_model::settings::{ColumnState, SCHEMA_VERSION, Settings, UiState};
+use tl_model::settings::{ColumnState, SCHEMA_VERSION, Settings, StartupSettings, UiState};
 use tl_model::table::{SysColumnId, SysTable};
 use tl_ui::theme::user_store::serialize_user_themes;
 use tl_ui::{PersistTheme, RunHistoryEntry, RunHistoryStore};
 use tracing::{info, warn};
 
 use crate::paths::{FILE_MODE, Paths, ensure_dir};
-use crate::{atomic, migrations};
+use crate::{atomic, autostart, migrations};
 
 /// Which of the two files is being loaded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,6 +327,7 @@ struct Inner {
     settings: Target,
     state: Target,
     themes_file: PathBuf,
+    autostart_file: PathBuf,
     shared: Mutex<Shared>,
     wake: Condvar,
     /// The last bytes loaded or written per file. Held during every write, so the saver thread
@@ -342,6 +344,9 @@ struct Target {
 struct Written {
     settings: String,
     state: String,
+    /// The `[startup]` values the autostart entry last followed. Starts as the loaded values,
+    /// so the entry is only touched once the user changes them.
+    startup: StartupSettings,
 }
 
 /// What the callbacks hand to the saver thread.
@@ -378,6 +383,7 @@ impl Store {
                 read_only: state_ro,
             },
             themes_file: paths.themes_file(),
+            autostart_file: paths.autostart_file(),
             shared: Mutex::new(Shared {
                 pending: None,
                 failed: None,
@@ -389,6 +395,7 @@ impl Store {
             written: Mutex::new(Written {
                 settings: serialize_settings(&initial.0),
                 state: serialize_state(&initial.1),
+                startup: initial.0.startup.clone(),
             }),
         });
         // The saver thread logs through the subscriber of the thread that made the store.
@@ -492,7 +499,28 @@ impl Inner {
         )
         .is_ok();
         let state_ok = save_file(&self.state, serialize_state(state), &mut written.state).is_ok();
+        // A read-only settings file does not block this; the entry is not the settings file.
+        self.apply_autostart(&settings.startup, &mut written.startup);
         settings_ok && state_ok
+    }
+
+    /// Writes or removes the autostart entry when `[startup]` differs from `last`. A failure is
+    /// a warning only, and `last` is kept so the next save retries.
+    fn apply_autostart(&self, startup: &StartupSettings, last: &mut StartupSettings) {
+        if startup == last {
+            return;
+        }
+        match autostart::apply(
+            &self.autostart_file,
+            startup.start_at_login,
+            startup.start_minimized,
+        ) {
+            Ok(_) => *last = startup.clone(),
+            Err(error) => warn!(
+                target: "tasklens::settings",
+                "Could not update the autostart entry: {error}"
+            ),
+        }
     }
 
     fn persist_theme(&self, req: PersistTheme) {

@@ -2,6 +2,10 @@
 
 #[path = "../src/atomic.rs"]
 mod atomic;
+
+#[path = "../src/autostart.rs"]
+mod autostart;
+
 #[allow(dead_code, reason = "the tests use only part of the module")]
 #[path = "../src/migrations.rs"]
 mod migrations;
@@ -631,4 +635,98 @@ fn run_history_round_trip() {
 
     std::fs::write(paths.run_history_file(), "[{").unwrap();
     assert!(file.load().is_empty(), "a bad file loads as empty");
+}
+
+/// Default settings with the given `[startup]` values.
+fn startup_settings(start_at_login: bool, start_minimized: bool) -> Settings {
+    let mut s = Settings::default();
+    s.startup.start_at_login = start_at_login;
+    s.startup.start_minimized = start_minimized;
+    s
+}
+
+#[test]
+fn autostart_follows_setting() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    let entry = paths.autostart_file();
+    assert!(entry.starts_with(dir.path()));
+    let store = Store::new(&paths, false, false, defaults());
+    let persist = store.persist_callback();
+    let state = UiState::default();
+
+    // On.
+    persist(&startup_settings(true, false), &state);
+    std::thread::sleep(SETTLE);
+    let text = std::fs::read_to_string(&entry).expect("autostart entry written");
+    assert!(text.contains("\nExec=tasklens\n"), "{text}");
+    assert!(text.contains("\nX-KDE-autostart-phase=2\n"), "{text}");
+
+    // Both on.
+    persist(&startup_settings(true, true), &state);
+    std::thread::sleep(SETTLE);
+    let text = std::fs::read_to_string(&entry).unwrap();
+    assert!(
+        text.contains("\nExec=tasklens --start-minimized\n"),
+        "{text}"
+    );
+
+    // Another setting changes: the entry is not rewritten.
+    let first = inode(&entry).expect("entry exists");
+    let mut other = startup_settings(true, true);
+    other.processes.interval_ms = 2000;
+    persist(&other, &state);
+    std::thread::sleep(SETTLE);
+    assert_eq!(
+        load_settings(&paths.settings_file(), NOW)
+            .value
+            .processes
+            .interval_ms,
+        2000
+    );
+    assert_eq!(inode(&entry), Some(first), "unchanged entry rewritten");
+
+    // Off.
+    persist(&startup_settings(false, true), &state);
+    store.flush();
+    assert!(!entry.exists(), "autostart entry not removed");
+}
+
+#[test]
+fn autostart_error_logged_settings_saved() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    // A file where the autostart dir should be makes every entry write fail.
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    std::fs::write(dir.path().join("config").join("autostart"), "").unwrap();
+
+    let (store, logs) = capture_logs(|| {
+        let store = Store::new(&paths, false, false, defaults());
+        store.persist_callback()(&startup_settings(true, false), &UiState::default());
+        std::thread::sleep(SETTLE);
+        store
+    });
+    assert!(logs.contains("WARN"), "{logs}");
+    assert!(
+        logs.contains("Could not update the autostart entry"),
+        "{logs}"
+    );
+    assert!(
+        load_settings(&paths.settings_file(), NOW)
+            .value
+            .startup
+            .start_at_login
+    );
+    store.flush();
+}
+
+#[test]
+fn autostart_read_only_settings_still_applied() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    let store = Store::new(&paths, true, false, defaults());
+    store.persist_callback()(&startup_settings(true, false), &UiState::default());
+    store.flush();
+    assert!(!paths.settings_file().exists());
+    assert!(paths.autostart_file().exists());
 }
