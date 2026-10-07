@@ -1890,6 +1890,379 @@ mod window {
         draw(&mut rig.vcx);
         assert!(focused(&mut rig, &verify), "Verify after Copy");
     }
+
+    // ---- File descriptors tab (E23-021, UI-PWN-012) ----
+
+    use gpui_kit::Modifiers;
+    use tl_model::details::{FdDetail, FdKind, FdRow};
+    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
+    use tl_ui::table::actions::{CopyRow, CopyRowsAsTable, OpenContextMenu};
+    use tl_ui::windows::props::fds::FdsTab;
+
+    fn fd(fd: i32, kind: FdKind, name: &str, flags: Option<u32>, pos: Option<u64>) -> FdRow {
+        FdRow {
+            fd,
+            kind,
+            name: text(name),
+            unnamed: name.is_empty(),
+            pos,
+            flags,
+            mnt_id: Some(25),
+            inode: Some(1_048_577),
+            eventfd_count: None,
+            drm_client_id: None,
+            drm_driver: None,
+            socket_inode: None,
+        }
+    }
+
+    fn fd_rows() -> Vec<FdRow> {
+        vec![
+            fd(
+                3,
+                FdKind::File,
+                "/home/u/notes.txt",
+                Some(0o2104002),
+                Some(4096),
+            ),
+            fd(4, FdKind::Pipe, "pipe:[90211]", Some(0o4000), None),
+            fd(7, FdKind::AnonInode, "", Some(0o2), None),
+        ]
+    }
+
+    struct FdsRig {
+        engine: Arc<FakeEngine>,
+        _main: VisualTestContext,
+        handle: AnyWindowHandle,
+        view: Entity<PropsWindow>,
+        vcx: VisualTestContext,
+        tab: Entity<FdsTab>,
+    }
+
+    /// Opens Properties for `pid` on the File descriptors tab with `rows` as its payload.
+    fn fds_window(
+        cx: &mut TestAppContext,
+        engine: &Arc<FakeEngine>,
+        pid: u32,
+        rows: Vec<FdRow>,
+        validity: Validity,
+    ) -> (
+        AnyWindowHandle,
+        Entity<PropsWindow>,
+        VisualTestContext,
+        Entity<FdsTab>,
+    ) {
+        let handle = open(cx, pid).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        let payload = Arc::new(TabPayload::Fds(Arc::new(FdDetail {
+            rows: Arc::from(rows),
+            fdinfo_available: true,
+        })));
+        publish_detail(cx, engine, pid, move |d| {
+            let slot = &mut d.tabs[DetailTab::Fds.index()];
+            slot.payload = Some(payload);
+            slot.validity = validity;
+        });
+        vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(DetailTab::Fds, window, cx)));
+        draw(&mut vcx);
+        let tab = cx
+            .read(|cx| view.read(cx).tabs().fds.clone())
+            .expect("fds tab");
+        (handle, view, vcx, tab)
+    }
+
+    fn fds_rig(cx: &mut TestAppContext) -> FdsRig {
+        let (engine, main) = setup(cx);
+        publish_records(
+            cx,
+            &engine,
+            vec![
+                rec(1200, ProcFlags::default()),
+                rec(4321, ProcFlags::default()),
+            ],
+        );
+        let (handle, view, vcx, tab) = fds_window(cx, &engine, 4321, fd_rows(), Validity::Valid);
+        FdsRig {
+            engine,
+            _main: main,
+            handle,
+            view,
+            vcx,
+            tab,
+        }
+    }
+
+    fn shown_fds(rig: &mut FdsRig) -> Vec<i32> {
+        rig.vcx.read(|cx| {
+            let table = rig.tab.read(cx).table().clone();
+            table.read(cx).delegate.view_fds().collect()
+        })
+    }
+
+    /// Selects `fds` with the first as the focus row and focuses the table.
+    fn select_fds(rig: &mut FdsRig, fds: &[i32]) {
+        let table = rig.vcx.read(|cx| rig.tab.read(cx).table().clone());
+        let fds = fds.to_vec();
+        rig.vcx.update(|window, cx| {
+            table.update(cx, |t, cx| {
+                for (i, fd) in fds.iter().enumerate() {
+                    if i == 0 {
+                        t.selection.click(*fd);
+                    } else {
+                        t.selection.ctrl_click(*fd);
+                    }
+                }
+                cx.notify();
+            });
+            let focus = table.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+        });
+        draw(&mut rig.vcx);
+    }
+
+    fn clip(vcx: &mut VisualTestContext) -> String {
+        vcx.read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default()
+    }
+
+    /// A menu entry: label, enabled, action.
+    type FdsMenuItem = (String, bool, Option<Box<dyn gpui_kit::Action>>);
+
+    /// The keyboard row menu's entries.
+    fn fds_menu(rig: &mut FdsRig) -> Vec<FdsMenuItem> {
+        rig.vcx.dispatch_action(OpenContextMenu);
+        draw(&mut rig.vcx);
+        rig.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the row menu is open");
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.label.map(|l| l.to_string()).unwrap_or_default(),
+                        e.kind == MenuEntryKind::Item,
+                        e.action,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn fds_hide_unnamed_filters_anon_inode(cx: &mut TestAppContext) {
+        let mut rig = fds_rig(cx);
+        assert_eq!(
+            shown_fds(&mut rig),
+            [3, 4],
+            "the unnamed anon_inode row is hidden"
+        );
+        let label = rig
+            .vcx
+            .read(|cx| rig.view.read(cx).tab_text(DetailTab::Fds));
+        assert_eq!(label, "File descriptors [2]");
+
+        // The filter bar checkbox turns the switch off and the row comes back.
+        let check = rig
+            .vcx
+            .debug_bounds("TlCheckbox-label")
+            .expect("Hide unnamed handles drawn");
+        rig.vcx.simulate_click(check.center(), Modifiers::none());
+        draw(&mut rig.vcx);
+        let on = rig.vcx.read(|cx| {
+            tl_ui::settings_global::TlSettings::settings(cx)
+                .properties
+                .hide_unnamed_handles
+        });
+        assert!(!on, "the click wrote the setting");
+        assert_eq!(shown_fds(&mut rig), [3, 4, 7]);
+        let label = rig
+            .vcx
+            .read(|cx| rig.view.read(cx).tab_text(DetailTab::Fds));
+        assert_eq!(label, "File descriptors [3]");
+    }
+
+    /// The switch is one setting: a toggle in one window re-filters another.
+    #[gpui_kit::test]
+    fn fds_hide_toggle_refilters_other_window(cx: &mut TestAppContext) {
+        let mut rig = fds_rig(cx);
+        let engine = rig.engine.clone();
+        let (_, _, mut other_vcx, other) =
+            fds_window(cx, &engine, 1200, fd_rows(), Validity::Valid);
+        let other_fds = |vcx: &mut VisualTestContext| {
+            vcx.read(|cx| {
+                let table = other.read(cx).table().clone();
+                table.read(cx).delegate.view_fds().collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(other_fds(&mut other_vcx), [3, 4]);
+        let check = rig
+            .vcx
+            .debug_bounds("TlCheckbox-label")
+            .expect("Hide unnamed handles drawn");
+        rig.vcx.simulate_click(check.center(), Modifiers::none());
+        draw(&mut rig.vcx);
+        draw(&mut other_vcx);
+        assert_eq!(other_fds(&mut other_vcx), [3, 4, 7]);
+        assert_eq!(shown_fds(&mut rig), [3, 4, 7]);
+    }
+
+    #[gpui_kit::test]
+    fn fds_pane_reads_decoded_flags(cx: &mut TestAppContext) {
+        let mut rig = fds_rig(cx);
+        let pane = rig.vcx.read(|cx| rig.tab.read(cx).pane().clone());
+        let message = rig
+            .vcx
+            .read(|cx| pane.read(cx).message().map(|m| m.to_string()));
+        assert_eq!(
+            message.as_deref(),
+            Some("Select a descriptor to see its flags.")
+        );
+        assert!(rig.vcx.debug_bounds("FdDetailsPane-message").is_some());
+
+        select_fds(&mut rig, &[3]);
+        let lines: Vec<(String, String)> = rig.vcx.read(|cx| {
+            pane.read(cx)
+                .lines()
+                .into_iter()
+                .map(|(l, v)| (l.to_string(), v.to_string()))
+                .collect()
+        });
+        let pairs: Vec<(&str, &str)> = lines.iter().map(|(l, v)| (&**l, &**v)).collect();
+        assert_eq!(
+            pairs,
+            [
+                ("Raw flags:", "0o2104002"),
+                ("Access mode:", "Read/write"),
+                ("Status flags:", "Non-blocking"),
+                ("Descriptor flags:", "Close-on-exec"),
+                ("Mount ID:", "25"),
+                ("Inode:", "1048577"),
+            ]
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|(_, v)| v.to_lowercase().contains("large")),
+            "no large-file word"
+        );
+        assert!(rig.vcx.debug_bounds("FdDetailsPane-message").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn fds_open_location_only_for_files(cx: &mut TestAppContext) {
+        let mut rig = fds_rig(cx);
+        select_fds(&mut rig, &[4]);
+        let items = fds_menu(&mut rig);
+        let shown: Vec<(&str, bool)> = items.iter().map(|(l, e, _)| (&**l, *e)).collect();
+        assert_eq!(
+            shown,
+            [("Copy", true), ("Open file location", false)],
+            "pipe row"
+        );
+        rig.vcx.update(tl_ui::components::menu::close_context_menu);
+        draw(&mut rig.vcx);
+
+        select_fds(&mut rig, &[3]);
+        let items = fds_menu(&mut rig);
+        let (_, enabled, action) = items
+            .into_iter()
+            .find(|(l, _, _)| l == "Open file location")
+            .expect("the item");
+        assert!(enabled, "file row");
+        let action = action.expect("an action");
+        rig.vcx.update(|window, cx| {
+            tl_ui::components::menu::close_context_menu(window, cx);
+            window.dispatch_action(action, cx);
+        });
+        draw(&mut rig.vcx);
+        let sent: Vec<_> = rig
+            .engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(req) => Some(req),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].targets.is_empty());
+        assert!(matches!(
+            &sent[0].kind,
+            ActionKind::ShowInFileManager { path, properties: false }
+                if &**path == "/home/u/notes.txt"
+        ));
+        assert_eq!(props_toasts(cx, rig.handle), ["Opening file location"]);
+    }
+
+    #[gpui_kit::test]
+    fn fds_privilege_state_text(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let (_, _, mut vcx, _) = fds_window(cx, &engine, 4321, Vec::new(), Validity::Restricted);
+        assert!(vcx.debug_bounds("PropsAccessBlock").is_some());
+        assert!(
+            vcx.debug_bounds("PropsFds").is_none(),
+            "no table behind the block"
+        );
+        let words = cx.update(props_words);
+        assert_eq!(
+            words.access(ACCESS_FDS).as_ref(),
+            "Handles unavailable (insufficient privileges)"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn fds_copy_formats(cx: &mut TestAppContext) {
+        let mut rig = fds_rig(cx);
+        select_fds(&mut rig, &[4, 3]);
+        rig.vcx.dispatch_action(CopyRow);
+        assert_eq!(
+            clip(&mut rig.vcx),
+            "3\tfile\t/home/u/notes.txt\tRW +NB CLOEXEC\t4096\n4\tpipe\tpipe:[90211]\tR +NB\t-",
+            "view order, no header"
+        );
+        rig.vcx.dispatch_action(CopyRowsAsTable);
+        let tsv = clip(&mut rig.vcx);
+        let mut lines = tsv.lines();
+        assert_eq!(lines.next(), Some("FD\tType\tName\tAccess\tPosition"));
+        assert_eq!(
+            lines.next(),
+            Some("3\tfile\t/home/u/notes.txt\tRW +NB CLOEXEC\t4096")
+        );
+
+        // The menu Copy takes the Name cell from the keyboard menu.
+        select_fds(&mut rig, &[4]);
+        let items = fds_menu(&mut rig);
+        let action = items
+            .into_iter()
+            .find_map(|(l, _, a)| (l == "Copy").then_some(a).flatten())
+            .expect("Copy item");
+        rig.vcx.update(|window, cx| {
+            tl_ui::components::menu::close_context_menu(window, cx);
+            window.dispatch_action(action, cx);
+        });
+        assert_eq!(clip(&mut rig.vcx), "pipe:[90211]");
+
+        // The pane copies itself as lines.
+        let pane = rig.vcx.read(|cx| rig.tab.read(cx).pane().clone());
+        let focus = rig.vcx.read(|cx| pane.read(cx).focus_handle().clone());
+        rig.vcx.update(|window, cx| focus.focus(window, cx));
+        draw(&mut rig.vcx);
+        rig.vcx.dispatch_action(CopyRow);
+        let text = clip(&mut rig.vcx);
+        assert!(
+            text.starts_with("Raw flags: 0o4000\nAccess mode: Read only\n"),
+            "{text}"
+        );
+        assert!(text.contains("Status flags: Non-blocking"), "{text}");
+        assert_eq!(
+            props_toasts(cx, rig.handle).last().map(String::as_str),
+            Some("Copied to clipboard")
+        );
+    }
 }
 
 // ---- Threads tab (E23-016, UI-PWN-010) ----

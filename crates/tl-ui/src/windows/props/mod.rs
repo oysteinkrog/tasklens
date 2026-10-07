@@ -8,10 +8,11 @@
 //! when a tab label, the active tab or the exited state changes; the tab views are fed through
 //! their own setters and notify themselves.
 //!
-//! General and Threads have their views; the others come from later beads (E23-018 to
-//! E23-021). Until a tab has its view, its body is empty, or shows the access block when its
-//! payload is `Restricted`.
+//! General, Threads and File descriptors have their views; the others come from later beads
+//! (E23-018 to E23-021). Until a tab has its view, its body is empty, or shows the access block
+//! when its payload is `Restricted`.
 
+pub mod fds;
 pub mod filter;
 pub mod general;
 pub mod threads;
@@ -39,6 +40,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 use tracing::warn;
 
+use self::fds::{FdsCountChanged, FdsTab};
 use self::filter::{PropsFilter, filter_bar, on_clear};
 use self::general::GeneralTab;
 use self::threads::ThreadsTab;
@@ -346,6 +348,7 @@ fn place_toasts(handle: WindowHandle<Root>, cx: &mut App) {
 pub struct PropsTabs {
     pub general: Option<Entity<GeneralTab>>,
     pub threads: Option<Entity<ThreadsTab>>,
+    pub fds: Option<Entity<FdsTab>>,
 }
 
 /// The root view of a Process Properties window.
@@ -542,6 +545,24 @@ impl PropsWindow {
             }
             self.tabs.threads = Some(threads);
         }
+        if tab == DetailTab::Fds && self.tabs.fds.is_none() {
+            let filter = self.filter[strip_index(DetailTab::Fds)].clone();
+            let fds = cx.new(|cx| FdsTab::new(key, filter, window, cx));
+            // The hide switch lives in the filter bar, so a change re-renders the window too.
+            self._subs
+                .push(cx.subscribe(&fds, |this, _, ev: &FdsCountChanged, cx| {
+                    this.set_count(DetailTab::Fds, ev.0, cx);
+                    cx.notify();
+                }));
+            if let Some(detail) = &self.last_detail {
+                let payload = detail.tab(DetailTab::Fds).payload.clone();
+                fds.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
+            }
+            if self.exited {
+                fds.update(cx, |t, cx| t.set_exited(true, cx));
+            }
+            self.tabs.fds = Some(fds);
+        }
     }
 
     fn register_demand(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -593,6 +614,13 @@ impl PropsWindow {
                 }
                 None => self.focus.focus(window, cx),
             },
+            DetailTab::Fds => match &self.tabs.fds {
+                Some(t) => {
+                    let focus = t.read(cx).table().read(cx).focus_handle().clone();
+                    focus.focus(window, cx);
+                }
+                None => self.focus.focus(window, cx),
+            },
             _ => self.focus.focus(window, cx),
         }
     }
@@ -615,6 +643,7 @@ impl PropsWindow {
         }
         let general = self.tabs.general.clone();
         let threads = self.tabs.threads.clone();
+        let fds = self.tabs.fds.clone();
         if mask.intersects(ComponentMask::SYSTEM) {
             self.mem_total = snap.system.memory.total;
             let online = snap.system.cpu_topology.online;
@@ -671,12 +700,22 @@ impl PropsWindow {
             };
             let general_changed = changed(DetailTab::General);
             let threads_changed = changed(DetailTab::Threads);
+            let fds_changed = changed(DetailTab::Fds);
             let active_changed = changed(self.active);
             let validity_changed = self.last_detail.as_ref().is_none_or(|last| {
                 last.tab(self.active).validity != detail.tab(self.active).validity
             });
-            if !(general_changed || threads_changed || active_changed || validity_changed) {
+            if !(general_changed
+                || threads_changed
+                || fds_changed
+                || active_changed
+                || validity_changed)
+            {
                 return;
+            }
+            if fds_changed && let Some(t) = &fds {
+                let payload = detail.tab(DetailTab::Fds).payload.clone();
+                t.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
             }
             if threads_changed && let Some(t) = &threads {
                 let payload = detail.tab(DetailTab::Threads).payload.clone();
@@ -705,6 +744,9 @@ impl PropsWindow {
             g.update(cx, |g, cx| g.set_exited(true, cx));
         }
         if let Some(t) = &self.tabs.threads {
+            t.update(cx, |t, cx| t.set_exited(true, cx));
+        }
+        if let Some(t) = &self.tabs.fds {
             t.update(cx, |t, cx| t.set_exited(true, cx));
         }
         self.remove_demand(cx);
@@ -850,6 +892,14 @@ impl PropsWindow {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element();
         }
+        if self.active == DetailTab::Fds
+            && !restricted_now
+            && let Some(fds) = &self.tabs.fds
+        {
+            return AnyView::from(fds.clone())
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element();
+        }
         let restricted = self
             .last_detail
             .as_ref()
@@ -900,6 +950,10 @@ impl gpui_kit::Render for PropsWindow {
                 }
             });
         let filter = &self.filter[active];
+        let tools = match (&self.tabs.fds, self.active) {
+            (Some(fds), DetailTab::Fds) => Some(fds.read(cx).filter_tool(cx)),
+            _ => None,
+        };
 
         div()
             .id("PropsWindow")
@@ -919,7 +973,7 @@ impl gpui_kit::Render for PropsWindow {
             .flex_col()
             .bg(theme.window_bg)
             .child(div().flex_none().w_full().child(strip))
-            .child(filter_bar(filter, None, cx))
+            .child(filter_bar(filter, tools, cx))
             .when(self.exited, |d| d.child(self.banner(cx)))
             .child(
                 div()
