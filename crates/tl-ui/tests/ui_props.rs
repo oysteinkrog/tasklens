@@ -1856,6 +1856,40 @@ mod window {
             "nothing sent"
         );
     }
+
+    #[gpui_kit::test]
+    fn general_tab_order_and_click_moves_cursor(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |_| {});
+        // A left click copies and moves the cursor to the clicked field.
+        let row = general_row(&mut rig, 0, "PID:");
+        general_click(&mut rig, 0, row);
+        assert_eq!(
+            rig.vcx.read(|cx| rig.general.read(cx).cursor()),
+            Some((0, row))
+        );
+        assert_eq!(clipboard(&mut rig.vcx), "4321");
+
+        // Tab: the fields, then the command line Copy button, then Verify.
+        focus_fields(&mut rig);
+        let (fields, copy, verify) = rig.vcx.read(|cx| {
+            let g = rig.general.read(cx);
+            (
+                g.grid_focus().clone(),
+                g.cmdline().read(cx).copy_focus().clone(),
+                g.verify_focus().clone(),
+            )
+        });
+        let focused = |rig: &mut GeneralRig, h: &gpui_kit::FocusHandle| {
+            rig.vcx.update(|window, _| h.is_focused(window))
+        };
+        assert!(focused(&mut rig, &fields));
+        rig.vcx.simulate_keystrokes("tab");
+        draw(&mut rig.vcx);
+        assert!(focused(&mut rig, &copy), "Copy after the fields");
+        rig.vcx.simulate_keystrokes("tab");
+        draw(&mut rig.vcx);
+        assert!(focused(&mut rig, &verify), "Verify after Copy");
+    }
 }
 
 // ---- Threads tab (E23-016, UI-PWN-010) ----

@@ -140,6 +140,11 @@ const KEY_NOT_RUNNING: &str = "pwn-props-not-running";
 const KEY_WINDOW_NONE: &str = "pwn-props-window-none";
 const KEY_WINDOW_NO_BRIDGE: &str = "pwn-props-window-no-bridge";
 const KEY_WINDOW_MORE: &str = "pwn-props-window-more";
+/// Tab order inside the tab: the fields, the command line Copy button, then Verify. The buttons
+/// set their own focus handle's index to 0, so each sits in a tab group with its index.
+const TAB_FIELDS: isize = 0;
+const TAB_CMDLINE_COPY: isize = 1;
+const TAB_VERIFY: isize = 2;
 const KEY_LINK_PARENT: &str = "pwn-general-link-parent";
 const KEY_LINK_EXE: &str = "pwn-general-link-exe";
 const KEY_LINK_AFFINITY: &str = "pwn-general-link-affinity";
@@ -1200,6 +1205,8 @@ fn net_unit(units: &UnitsSettings) -> NetUnit {
 /// The command line block body. A child view, so the 32 KiB text is rebuilt and re-shaped only
 /// when the command line changes.
 pub struct CmdLineBlock {
+    /// The Copy button's focus, second in the tab's tab order.
+    copy_focus: FocusHandle,
     source: Option<Arc<str>>,
     validity: Validity,
     words: Rc<KvWords>,
@@ -1208,8 +1215,9 @@ pub struct CmdLineBlock {
 }
 
 impl CmdLineBlock {
-    fn new(words: Rc<KvWords>) -> Self {
+    fn new(words: Rc<KvWords>, copy_focus: FocusHandle) -> Self {
         Self {
+            copy_focus,
             source: None,
             validity: Validity::WarmingUp,
             text: words.collecting.clone(),
@@ -1252,6 +1260,11 @@ impl CmdLineBlock {
         true
     }
 
+    /// The Copy button's focus.
+    pub fn copy_focus(&self) -> &FocusHandle {
+        &self.copy_focus
+    }
+
     /// How often the text was rebuilt, for tests and the bench.
     pub fn shape_count(&self) -> u64 {
         self.shape_count
@@ -1281,6 +1294,7 @@ impl Render for CmdLineBlock {
             .icon(TlIcon::Copy)
             .icon_size(px(COPY_ICON * m.ui_scale))
             .label(CMDLINE_COPY)
+            .focus_handle(self.copy_focus.clone())
             .disabled(!valid)
             .on_click(move |_, window, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -1310,7 +1324,7 @@ impl Render for CmdLineBlock {
                     .items_center()
                     .gap(m.sp[4])
                     .child(title)
-                    .child(copy),
+                    .child(tab_slot(TAB_CMDLINE_COPY, copy)),
             )
             .child(body)
     }
@@ -1365,6 +1379,8 @@ pub struct GeneralTab {
     cursor: Option<(usize, usize)>,
     /// The panels' focus stop.
     focus: FocusHandle,
+    /// The Verify button's focus, last in the tab order.
+    verify_focus: FocusHandle,
     /// Panel bounds from the last paint, to place the field menu opened from the keyboard.
     panel_bounds: Rc<[Cell<Bounds<Pixels>>; 3]>,
     cmdline: Entity<CmdLineBlock>,
@@ -1413,9 +1429,13 @@ impl GeneralTab {
             main_len: [0; 3],
             copies: Default::default(),
             cursor: None,
-            focus: cx.focus_handle().tab_stop(true),
+            focus: cx.focus_handle().tab_stop(true).tab_index(TAB_FIELDS),
             panel_bounds: Rc::default(),
-            cmdline: cx.new(|cx| CmdLineBlock::new(kv_words(cx))),
+            cmdline: cx.new(|cx| {
+                let focus = cx.focus_handle();
+                CmdLineBlock::new(kv_words(cx), focus)
+            }),
+            verify_focus: cx.focus_handle(),
             filter,
             _subs: vec![sub],
         };
@@ -1689,6 +1709,11 @@ impl GeneralTab {
     /// The panels' focus stop.
     pub fn grid_focus(&self) -> &FocusHandle {
         &self.focus
+    }
+
+    /// The Verify button's focus.
+    pub fn verify_focus(&self) -> &FocusHandle {
+        &self.verify_focus
     }
 
     /// Moves the cursor to (`col`, `row`), clamped to the column's last field. Does nothing for an
@@ -2931,9 +2956,15 @@ fn window_toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: Shared
 }
 
 /// The Verify against package button in its own row, aligned with the value column.
-fn verify_row(button: VerifyButton, label_width: Pixels, height: Pixels) -> impl IntoElement {
+fn verify_row(
+    button: VerifyButton,
+    focus: FocusHandle,
+    label_width: Pixels,
+    height: Pixels,
+) -> impl IntoElement {
     let mut b = TlButton::new("general-verify", TlButtonKind::Secondary)
         .size(TlButtonSize::Sm)
+        .focus_handle(focus)
         .label(button.label)
         .action(Box::new(PropsVerifyPackage))
         .loading(button.loading)
@@ -2946,7 +2977,16 @@ fn verify_row(button: VerifyButton, label_width: Pixels, height: Pixels) -> impl
         .h(height)
         .pl(label_width)
         .items_center()
-        .child(b)
+        .child(tab_slot(TAB_VERIFY, b))
+}
+
+/// `child` at tab index `index` of the tab's tab group. The slot itself is not a tab stop.
+fn tab_slot(index: isize, child: impl IntoElement) -> gpui_kit::Div {
+    div()
+        .tab_group()
+        .tab_index(index)
+        .tab_stop(false)
+        .child(child)
 }
 
 impl Render for GeneralTab {
@@ -2978,10 +3018,17 @@ impl Render for GeneralTab {
                 .label_width(label_widths[col])
                 .sections(sections)
                 .copy_on_click(true)
+                .link_tab_stop(false)
                 .copy_texts(self.copies[col][part].clone())
                 .cursor(self.cursor_in(col, part, focused))
                 .on_copied(move |_, window, cx| {
                     window_toast(window, cx, ToastKind::Success, copied.clone());
+                })
+                .on_value_mouse_down({
+                    let view = view.clone();
+                    move |n, _, cx| {
+                        let _ = view.update(cx, |this, cx| this.set_cursor(col, offset + n, cx));
+                    }
                 })
                 .on_context_menu(move |n, position, window, cx| {
                     let _ = view.update(cx, |this, cx| {
@@ -2998,7 +3045,8 @@ impl Render for GeneralTab {
                     .flatten()
                     .map(|button| {
                         let tail = grid("general-col-tail".into(), i, 1, &self.col2_tail);
-                        (verify_row(button, label_widths[i], row_height), tail)
+                        let focus = self.verify_focus.clone();
+                        (verify_row(button, focus, label_widths[i], row_height), tail)
                     });
                 let windows = (i == 2 && !self.col3_tail.is_empty()).then(|| {
                     let tail = grid("general-col-windows".into(), i, 1, &self.col3_tail);
@@ -3120,6 +3168,11 @@ impl Render for GeneralTab {
                     .overflow_y_scroll()
                     .child(
                         v_flex()
+                            // Its own tab group, so the fields, Copy and Verify take the order
+                            // of their tab indexes at this point of the window's order.
+                            .tab_group()
+                            .tab_index(0)
+                            .tab_stop(false)
                             .w_full()
                             .px(m.sp[5])
                             .py(m.sp[4])
