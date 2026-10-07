@@ -683,9 +683,7 @@ information-section-motherboard = Motherboard
 information-section-graphics = Graphics
 information-section-network-adapters = Network adapters
 information-copy-section = Copy section
-information-menu-copy-value = Copy value
-information-menu-copy-row = Copy row
-information-menu-copy-section = Copy section
+information-copy-section-name = Copy { $section }
 
 # Menu bar and File menu (E21-A1)
 shell-menubar-file = File
