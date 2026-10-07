@@ -151,6 +151,9 @@ perf-mem-menu-composition = Show memory composition
 perf-mem-menu-swap = Show swap usage
 perf-mem-range-memory = Memory usage
 perf-mem-range-swap = Swap usage
+perf-net-heading-throughput = Throughput
+perf-net-legend-download = Download
+perf-net-legend-upload = Upload
 processes-confirm-protected-title = End {$name}?
 processes-confirm-protected-text = Ending {$name} will end your desktop session. End it anyway?
 processes-confirm-protected-tree-text = Ending {$name} will end your desktop session. End {$count} processes in this tree anyway?
@@ -428,6 +431,12 @@ sys-sys005-no-connections = No connections
 sys-sys005-could-not-load-services = Could not load services
 sys-sys005-could-not-load-startup-entries = Could not load startup entries
 sys-sys005-could-not-load-connections = Could not load connections
+
+# System table action toasts (UI-SYS-007, tasklens-hk6.9)
+sys-sys007-details = Details
+sys-sys007-close = Close
+sys-sys007-no-authentication-agent-is-running = no authentication agent is running
+sys-sys007-not-authorized = not authorized
 
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.

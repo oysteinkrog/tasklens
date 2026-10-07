@@ -11,6 +11,7 @@ pub mod details;
 pub mod gpu;
 pub mod memory;
 pub mod menu;
+pub mod net;
 pub mod page;
 pub mod sidebar;
 pub mod summary;
