@@ -39,6 +39,7 @@ impl Fatal {
     }
 
     /// The catalogue key that holds the same text (R-132).
+    #[cfg(test)]
     pub fn key(self) -> &'static str {
         match self {
             Fatal::Crashed => "app-114-tasklens-stopped-after-an-unrecoverable",
