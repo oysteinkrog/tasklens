@@ -327,18 +327,26 @@ fn net_disconnected_shows_gap(cx: &mut TestAppContext) {
         .vcx
         .read_entity(&chart, |v, _| v.stroke_right_x())
         .expect("strokes");
+    let width = f32::from(
+        r.vcx
+            .debug_bounds(THROUGHPUT_ID)
+            .expect("chart box")
+            .size
+            .width,
+    );
     // The interface went down 5 s ago: the engine marked the last 5 samples invalid.
     let chart = feed(&mut r, 2. * MBPS, MBPS, 5);
     r.vcx.read_entity(&chart, |v, _| {
         assert_eq!(v.derived_state(now_boot_ns()), ChartState::Live);
         assert_eq!(v.cached_fill_stroke_counts(), (1, 2));
         // The lines stop at the last valid sample, 5 of 60 s before the right edge: the end
-        // is a gap, with no line at zero and no dotted baseline.
+        // is a gap, with no line at zero and no dotted baseline. The plot is a little narrower
+        // than the chart box.
         let right = v.stroke_right_x().expect("strokes");
         let lost = connected - right;
         assert!(
-            lost >= connected * 4. / 60. && lost <= connected * 6. / 60.,
-            "lines end at {right}, {connected} when connected"
+            lost >= width * 4. / 60. && lost <= width * 6. / 60.,
+            "lines end at {right}, {connected} when connected, box {width} px"
         );
         assert!(v.last_gap_spans.borrow().is_empty());
     });
