@@ -2246,7 +2246,7 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
 - Targets: `tasklens::engine`, `tasklens::source::<name>`, `tasklens::action`, `tasklens::ui`, `tasklens::frame`, `tasklens::probe`.
 - No logging inside per-frame or per-process loops above `trace` level.
 - No custom log levels or categories: performance logs use `info` on target `tasklens::perf`. No repeat collapsing. `RUST_LOG` is not read.
-- The `tasklens --watch-memory` process logs `warn` and above to stderr only, with no file appender (R-152).
+- The low-memory watcher `tasklens-watch` (crate tl-watch, std plus libc only; `tasklens --watch-memory` execs it) writes `WARN tasklens-watch:` lines to stderr only, with no file appender and no `tracing` (R-152).
 
 **What is never logged** (at any level): command lines, environment, working directories, open file paths, executable paths of other users' processes, window titles, user names other than the current user. Processes are logged as `pid` plus `comm` only, and `comm` only at `debug` and below. Action logs record kind, target PID and result.
 
