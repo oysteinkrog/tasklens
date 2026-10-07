@@ -475,3 +475,13 @@ app-114-tasklens-lost-the-graphics-device = tasklens lost the graphics device an
 shell-filter-label = Filter:
 shell-filter-clear = Clear filter
 shell-filter-name = Filter
+
+## Processes toolbar buttons (E22, UI-PRC-019)
+
+processes-toolbar-hide-system = Hide system processes
+processes-toolbar-show-system = Show system processes
+processes-toolbar-mode-tree = Tree View
+processes-toolbar-mode-grouped = Task Manager Grouping
+processes-toolbar-mode-flat = List View
+processes-toolbar-cycle-mode = Toggle view mode (current: {$mode})
+processes-toolbar-history-flat = History shows a flat list
