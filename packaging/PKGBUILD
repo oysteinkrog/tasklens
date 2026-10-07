@@ -1,0 +1,42 @@
+# Arch package for tasklens, built from the local checkout this file sits in.
+# Paths follow table (c); build profile and dependencies follow ADR-002.
+# To keep build files out of the repo, set BUILDDIR, PKGDEST and SRCDEST
+# before running makepkg in this folder.
+
+pkgname=tasklens
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Task manager for Linux'
+arch=('x86_64')
+license=('MIT')
+depends=('wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'fontconfig' 'vulkan-icd-loader')
+optdepends=('nvidia-utils: NVIDIA GPU monitoring')
+makedepends=('base-devel' 'clang' 'pkgconf' 'rustup')
+# !strip: the release profile keeps line tables for crash backtraces.
+# !lto: makepkg's -flto CFLAGS turn C dependencies (ring) into GCC bitcode
+# that rust-lld cannot link. Cargo's own lto = "fat" still applies.
+options=('!strip' '!lto')
+source=()
+
+_srcroot="$startdir/.."
+_appid=io.github.oysteinkrog.Tasklens
+
+build() {
+  cd "$_srcroot"
+  # rustup picks the toolchain from rust-toolchain.toml. No bench feature.
+  cargo build --release --locked --workspace
+}
+
+check() {
+  cd "$_srcroot"
+  cargo test --release --locked --workspace
+}
+
+package() {
+  cd "$_srcroot"
+  install -Dm0755 target/release/tasklens "$pkgdir/usr/bin/tasklens"
+  install -Dm0755 target/release/tl-gpu-probe "$pkgdir/usr/lib/tasklens/tl-gpu-probe"
+  install -Dm0644 "packaging/$_appid.desktop" "$pkgdir/usr/share/applications/$_appid.desktop"
+  install -Dm0644 assets/icons/tasklens.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$_appid.svg"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
