@@ -186,6 +186,24 @@ fn ceil_helpers_edge_inputs() {
     assert!(ceil_125(f64::MIN_POSITIVE / 4.0) >= f64::MIN_POSITIVE / 4.0);
 }
 
+#[test]
+fn ceil_125_tiny_inputs() {
+    let cases = [
+        f64::MIN_POSITIVE / 2.0,
+        f64::MIN_POSITIVE,
+        1e-300,
+        5e-324,
+        3.954899102388e-311,
+    ];
+    for x in cases {
+        let c = ceil_125(x);
+        assert!(c >= x, "ceil_125({x:e}) = {c:e}");
+        assert!(c.is_normal(), "ceil_125({x:e}) = {c:e}");
+    }
+    assert_eq!(ceil_125(f64::MIN_POSITIVE), 5e-308);
+    assert_eq!(ceil_125(5e-324), 5e-308);
+}
+
 fn check(s: &str) {
     assert!(!s.is_empty());
     assert!(s.is_ascii(), "{s:?}");

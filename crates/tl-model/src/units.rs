@@ -166,6 +166,12 @@ pub fn ceil_125(x: f64) -> f64 {
     if x.is_nan() || x <= 0.0 {
         return 1.0;
     }
+    // 5e-308 is the smallest 1-2-5 step that is a normal f64 (2e-308 is below f64::MIN_POSITIVE).
+    // Below it log10 and powi lose precision in the subnormal range, so every smaller x gets it.
+    const MIN_NORMAL_STEP: f64 = 5e-308;
+    if x <= MIN_NORMAL_STEP {
+        return MIN_NORMAL_STEP;
+    }
     // log10 can be off by one near a power of ten, so try the decade below as well.
     // The cast is safe: log10 of a positive f64 lies in about -324..=309 (or is +inf, which
     // saturates to i32::MAX and gives +inf below).
