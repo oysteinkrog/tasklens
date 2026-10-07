@@ -26,11 +26,14 @@ use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
+use tl_model::system::{Metric, NetTotals};
+use tl_model::time::now_boot_ns;
+use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
-use super::details::KeyValueModel;
+use super::details::{Fallback, KeyValueModel};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text, page_words};
-use super::{DeviceKey, DeviceKind, DeviceRow};
+use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
@@ -213,6 +216,215 @@ fn health_state(snap: &Snapshot) -> ChartState {
     }
 }
 
+// ---- Details grid (UI-PRF-031, PERF-056, PERF-057) ----
+
+pub const ROW_DOWNLOAD: &str = "perf-net-row-download";
+pub const ROW_UPLOAD: &str = "perf-net-row-upload";
+pub const ROW_TOTAL_DOWN: &str = "perf-net-row-total-down";
+pub const ROW_TOTAL_UP: &str = "perf-net-row-total-up";
+pub const ROW_ADAPTER: &str = "perf-net-row-adapter";
+pub const ROW_INTERFACE: &str = "perf-net-row-interface";
+pub const ROW_TYPE: &str = "perf-net-row-type";
+pub const ROW_STATUS: &str = "perf-net-row-status";
+pub const ROW_SSID: &str = "perf-net-row-ssid";
+pub const ROW_SIGNAL: &str = "perf-net-row-signal";
+pub const ROW_RX_BITRATE: &str = "perf-net-row-rx-bitrate";
+pub const ROW_TX_BITRATE: &str = "perf-net-row-tx-bitrate";
+pub const ROW_FREQUENCY: &str = "perf-net-row-frequency";
+pub const ROW_SECURITY: &str = "perf-net-row-security";
+pub const ROW_LINK_SPEED: &str = "perf-net-row-link-speed";
+pub const ROW_IPV4: &str = "perf-net-row-ipv4";
+pub const ROW_IPV6: &str = "perf-net-row-ipv6";
+pub const ROW_MAC: &str = "perf-net-row-mac";
+pub const ROW_IFINDEX: &str = "perf-net-row-ifindex";
+pub const ROW_DRIVER: &str = "perf-net-row-driver";
+pub const ROW_DISPLAY_UNIT: &str = "perf-net-row-display-unit";
+pub const ROW_PUBLIC_IP: &str = "perf-net-row-public-ip";
+
+/// The rows before the Wi-Fi rows, in grid order.
+const HEAD_ROWS: [&str; 8] = [
+    ROW_DOWNLOAD,
+    ROW_UPLOAD,
+    ROW_TOTAL_DOWN,
+    ROW_TOTAL_UP,
+    ROW_ADAPTER,
+    ROW_INTERFACE,
+    ROW_TYPE,
+    ROW_STATUS,
+];
+/// The Wi-Fi rows, after Connection status.
+const WIFI_ROWS: [&str; 6] = [
+    ROW_SSID,
+    ROW_SIGNAL,
+    ROW_RX_BITRATE,
+    ROW_TX_BITRATE,
+    ROW_FREQUENCY,
+    ROW_SECURITY,
+];
+/// The rows after the Wi-Fi rows.
+const TAIL_ROWS: [&str; 8] = [
+    ROW_LINK_SPEED,
+    ROW_IPV4,
+    ROW_IPV6,
+    ROW_MAC,
+    ROW_IFINDEX,
+    ROW_DRIVER,
+    ROW_DISPLAY_UNIT,
+    ROW_PUBLIC_IP,
+];
+
+/// The rows this page fills in P1; E25-020 and E25-021 fill the rest.
+const P1_ROWS: [&str; 5] = [
+    ROW_DOWNLOAD,
+    ROW_UPLOAD,
+    ROW_TOTAL_DOWN,
+    ROW_TOTAL_UP,
+    ROW_DISPLAY_UNIT,
+];
+
+/// The Display unit values and the menu words (PERF-057).
+pub const KEY_UNIT_MBPS: &str = "perf-net-unit-mbps";
+pub const KEY_UNIT_MIBS: &str = "perf-net-unit-mibs";
+pub const KEY_UNIT_BITS_AUTO: &str = "perf-net-unit-bits-auto";
+pub const KEY_UNIT_BYTES_AUTO: &str = "perf-net-unit-bytes-auto";
+pub const KEY_UNIT_TOOLTIP: &str = "perf-net-unit-tooltip";
+pub const KEY_UNIT_BITS: &str = "perf-net-unit-bits";
+pub const KEY_UNIT_BYTES: &str = "perf-net-unit-bytes";
+
+/// The Network Details model: the PERF-056 rows in order, the Wi-Fi rows only when `wifi`. All
+/// but the P1 rows stay hidden until E25-020 and E25-021.
+pub fn net_details_model(wifi: bool) -> KeyValueModel {
+    let mut labels: SmallVec<[&'static str; 22]> = SmallVec::new();
+    labels.extend_from_slice(&HEAD_ROWS);
+    if wifi {
+        labels.extend_from_slice(&WIFI_ROWS);
+    }
+    labels.extend_from_slice(&TAIL_ROWS);
+    let mut model = KeyValueModel::new(&labels).with_texts(&[
+        (KEY_UNIT_MBPS, &[]),
+        (KEY_UNIT_MIBS, &[]),
+        (KEY_UNIT_BITS_AUTO, &[]),
+        (KEY_UNIT_BYTES_AUTO, &[]),
+        (KEY_UNIT_TOOLTIP, &[]),
+    ]);
+    for label in labels {
+        if !P1_ROWS.contains(&label) {
+            model.hide(label);
+        }
+    }
+    model
+}
+
+/// The key of the Display unit value for `unit` and `auto_scale`: `Mbps`, `MiB/s`,
+/// `bits/s, auto` or `bytes/s, auto`.
+pub fn display_unit_key(unit: NetworkUnit, auto_scale: bool) -> &'static str {
+    match (unit, auto_scale) {
+        (NetworkUnit::Bits, false) => KEY_UNIT_MBPS,
+        (NetworkUnit::Bytes, false) => KEY_UNIT_MIBS,
+        (NetworkUnit::Bits, true) => KEY_UNIT_BITS_AUTO,
+        (NetworkUnit::Bytes, true) => KEY_UNIT_BYTES_AUTO,
+    }
+}
+
+/// What the P1 rows are read from.
+#[derive(Clone, Copy)]
+pub struct NetDetailInputs<'a> {
+    pub now_boot_ns: u64,
+    /// `observed_end` of the system component, for the Stale age.
+    pub observed_end_ns: u64,
+    /// The interface's record in `Snapshot.system`; `None` before its first sample.
+    pub totals: Option<&'a NetTotals>,
+    /// `units.network`.
+    pub unit: NetworkUnit,
+    /// `units.network_auto_scale`.
+    pub auto_scale: bool,
+}
+
+/// One rate row: Valid formats when the rate or the unit changed, Stale keeps the value and
+/// marks it, Missing (no sample yet) reads "Collecting…", the rest show their fallback word.
+fn rate_row(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    m: Metric<f64>,
+    inp: &NetDetailInputs,
+) -> bool {
+    let (unit, auto) = (inp.unit, inp.auto_scale);
+    let net_unit = match unit {
+        NetworkUnit::Bits => NetUnit::Bits,
+        NetworkUnit::Bytes => NetUnit::Bytes,
+    };
+    // The rate at f32 precision (far finer than the one printed decimal) in the low half and
+    // the unit in the high half, so a unit change formats again.
+    let tag = u64::from(unit == NetworkUnit::Bytes) | u64::from(auto) << 1;
+    let bits = u64::from((m.value as f32).to_bits()) | tag << 32;
+    let write = |o: &mut String| units::net_rate(o, m.value, net_unit, auto);
+    match m.validity {
+        Validity::Valid => model.set_valid(label, bits, write),
+        Validity::Stale => {
+            let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
+            model.set_valid(label, bits, write) | model.set_stale(label, age_ns)
+        }
+        Validity::Missing => {
+            model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None)
+        }
+        Validity::Unsupported => {
+            model.set_fallback(label, m.validity, Fallback::NotSupported, None)
+        }
+        v => model.set_fallback(label, v, Fallback::Unavailable, None),
+    }
+}
+
+/// Fills the P1 rows (UI-PRF-031): Download and Upload speed in the network unit, Total
+/// downloaded and Total uploaded since boot (IEC), and the Display unit value with its tooltip.
+/// Each value formats again only when its raw value or the unit changed. True when any row
+/// changed.
+pub fn update_net_details_p1(model: &mut KeyValueModel, inp: &NetDetailInputs) -> bool {
+    let mut changed = false;
+    match inp.totals {
+        Some(t) => {
+            changed |= rate_row(model, ROW_DOWNLOAD, t.rx_bps, inp);
+            changed |= rate_row(model, ROW_UPLOAD, t.tx_bps, inp);
+            let (down, up) = (t.rx_total, t.tx_total);
+            changed |= model.set_valid(ROW_TOTAL_DOWN, down, |o| units::bytes(o, down));
+            changed |= model.set_valid(ROW_TOTAL_UP, up, |o| units::bytes(o, up));
+        }
+        None => {
+            for label in [ROW_DOWNLOAD, ROW_UPLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP] {
+                changed |=
+                    model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None);
+            }
+        }
+    }
+    changed | sync_display_unit(model, inp.unit, inp.auto_scale)
+}
+
+/// The Display unit row: its value from the unit settings, its tooltip, and the link.
+fn sync_display_unit(model: &mut KeyValueModel, unit: NetworkUnit, auto_scale: bool) -> bool {
+    let text = model.text(display_unit_key(unit, auto_scale));
+    let tip = model.text(KEY_UNIT_TOOLTIP);
+    let mut changed = model.set_text(ROW_DISPLAY_UNIT, text.text());
+    if let Some(row) = model.rows.iter_mut().find(|r| r.label == ROW_DISPLAY_UNIT) {
+        if row.tooltip.as_ref() != Some(tip.text()) {
+            row.tooltip = Some(tip.text().clone());
+            changed = true;
+        }
+        if !row.link {
+            row.link = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The record of `device` in the snapshot.
+fn net_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&NetTotals> {
+    snap.system
+        .nets
+        .iter()
+        .find(|(i, _)| *i == device)
+        .map(|(_, t)| t)
+}
+
 /// One network interface's device page.
 pub struct NetPage {
     key: DeviceKey,
@@ -255,6 +467,7 @@ impl NetPage {
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
         let link_speed = link_speed_bps(&snap, row.idx);
+        let wifi = row.net_class == Some(NetClass::Wireless);
         let mut words = Words::default();
         words.refresh(cx);
 
@@ -286,7 +499,7 @@ impl NetPage {
             key,
             row,
             throughput,
-            details: KeyValueModel::default(),
+            details: net_details_model(wifi),
             settings,
             settings_versions: section_versions(cx),
             link_speed_bps: link_speed,
@@ -358,14 +571,17 @@ impl NetPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings the link speed, chart state and header up to date with the components in `mask`.
-    /// Notifies only when the header changed.
+    /// Brings the link speed, chart state, Details rows and header up to date with the
+    /// components in `mask`. Notifies only when the header or a row changed.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
         if mask.contains(ComponentMask::SYSTEM) {
             let speed = link_speed_bps(snap, self.row.idx);
             if speed != self.link_speed_bps {
                 self.link_speed_bps = speed;
                 self.rebuild_spec(cx);
+            }
+            if self.sync_details(snap) {
+                cx.notify();
             }
         }
         if mask.contains(ComponentMask::HEALTH) {
@@ -382,6 +598,18 @@ impl NetPage {
                 cx.notify();
             }
         }
+    }
+
+    /// Brings the P1 Details rows up to date. True when one changed.
+    fn sync_details(&mut self, snap: &Snapshot) -> bool {
+        let inputs = NetDetailInputs {
+            now_boot_ns: now_boot_ns(),
+            observed_end_ns: snap.system.header.observed_end,
+            totals: net_totals(snap, self.row.idx),
+            unit: self.settings.unit,
+            auto_scale: self.settings.auto_scale,
+        };
+        update_net_details_p1(&mut self.details, &inputs)
     }
 
     /// Hands the chart its spec from the current settings, link speed and theme. The view keeps
@@ -408,6 +636,11 @@ impl NetPage {
         }
         self.settings = new;
         self.rebuild_spec(cx);
+        // The rates and the Display unit follow `units.network`.
+        let snap = Arc::clone(self.hub.read(cx).current());
+        if self.sync_details(&snap) {
+            cx.notify();
+        }
     }
 
     /// A new theme: the chart takes the new colours.
@@ -430,6 +663,9 @@ impl NetPage {
         self.throughput.update(cx, |v, cx| v.set_labels(labels, cx));
         let snap = Arc::clone(self.hub.read(cx).current());
         self.apply_snapshot(&snap, ComponentMask::DEVICES, cx);
+        // The Display unit text and tooltip come from the new strings.
+        self.details.refresh_strings(cx);
+        self.sync_details(&snap);
         cx.notify();
     }
 }

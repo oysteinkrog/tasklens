@@ -388,3 +388,169 @@ fn net_demand_only_when_active(cx: &mut TestAppContext) {
         .update(|_, cx| page.update(cx, |p, cx| p.set_active(false, cx)));
     assert_eq!(merged(r.vcx), Demand::default());
 }
+
+/// The Details grid's P1 rows and the Display unit row (E25-008, UI-PRF-031; PERF-056,
+/// PERF-057).
+mod details {
+    use super::*;
+    use tl_ui::pages::performance::details::KeyValueModel;
+    use tl_ui::pages::performance::net::{
+        NetDetailInputs, net_details_model, update_net_details_p1,
+    };
+
+    const GIB: u64 = 1 << 30;
+
+    /// The interface record of [`system`] with 1.2 Mbps down, 0.3 Mbps up and the totals.
+    fn record() -> NetTotals {
+        let mut t = system(1000).nets[0].1;
+        t.rx_bps = Metric::valid(f64::from(1.2 * MBPS));
+        t.tx_bps = Metric::valid(f64::from(0.3 * MBPS));
+        // 12.40 GiB
+        t.rx_total = 13_314_398_618;
+        t.tx_total = 2 * GIB;
+        t
+    }
+
+    /// A model filled from `t` with `unit` and `auto_scale`, with translated labels and texts.
+    fn model(
+        cx: &mut TestAppContext,
+        t: Option<&NetTotals>,
+        unit: NetworkUnit,
+        auto_scale: bool,
+    ) -> KeyValueModel {
+        let mut model = net_details_model(false);
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            model.refresh_strings(cx);
+        });
+        let inp = NetDetailInputs {
+            now_boot_ns: 0,
+            observed_end_ns: 0,
+            totals: t,
+            unit,
+            auto_scale,
+        };
+        update_net_details_p1(&mut model, &inp);
+        cx.update(|cx| model.refresh_labels(cx));
+        model
+    }
+
+    fn rows(model: &KeyValueModel) -> Vec<(String, String)> {
+        model
+            .to_kv_rows()
+            .map(|r| (r.label.to_string(), r.value.text.to_string()))
+            .collect()
+    }
+
+    fn value(model: &KeyValueModel, label: &str) -> Option<String> {
+        rows(model)
+            .into_iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| v)
+    }
+
+    #[gpui_kit::test]
+    fn net_details_order_ethernet(cx: &mut TestAppContext) {
+        let model = model(cx, Some(&record()), NetworkUnit::Bits, false);
+        assert_eq!(model.rows.len(), 16, "Ethernet: no Wi-Fi rows");
+        assert_eq!(net_details_model(true).rows.len(), 22);
+        assert_eq!(
+            rows(&model),
+            [
+                ("Download speed", "1.2 Mbps"),
+                ("Upload speed", "0.3 Mbps"),
+                ("Total downloaded", "12.40 GiB"),
+                ("Total uploaded", "2.00 GiB"),
+                ("Display unit", "Mbps"),
+            ]
+            .map(|(l, v)| (l.to_string(), v.to_string()))
+        );
+        let row = model
+            .to_kv_rows()
+            .find(|r| r.label.as_ref() == "Display unit")
+            .expect("Display unit row");
+        assert_eq!(
+            row.value.tooltip.as_deref(),
+            Some("Applies to all network values")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn display_unit_values(cx: &mut TestAppContext) {
+        let t = record();
+        let cases = [
+            (NetworkUnit::Bits, false, "Mbps"),
+            (NetworkUnit::Bytes, false, "MiB/s"),
+            (NetworkUnit::Bits, true, "bits/s, auto"),
+            (NetworkUnit::Bytes, true, "bytes/s, auto"),
+        ];
+        for (unit, auto, text) in cases {
+            let model = model(cx, Some(&t), unit, auto);
+            assert_eq!(
+                value(&model, "Display unit").as_deref(),
+                Some(text),
+                "{unit:?} auto {auto}"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn net_totals_iec(cx: &mut TestAppContext) {
+        let model = model(cx, Some(&record()), NetworkUnit::Bits, false);
+        assert_eq!(
+            value(&model, "Total downloaded").as_deref(),
+            Some("12.40 GiB")
+        );
+    }
+
+    /// No record yet: the rates and totals are collecting; the Display unit still reads.
+    #[gpui_kit::test]
+    fn net_rates_collecting_before_first_record(cx: &mut TestAppContext) {
+        let empty = model(cx, None, NetworkUnit::Bytes, false);
+        let mut t = record();
+        t.rx_bps = Metric::with(Validity::WarmingUp);
+        let warming = model(cx, Some(&t), NetworkUnit::Bytes, false);
+        assert_eq!(
+            value(&warming, "Download speed").as_deref(),
+            Some("Collecting…")
+        );
+        assert_eq!(
+            rows(&empty),
+            [
+                ("Download speed", "Collecting…"),
+                ("Upload speed", "Collecting…"),
+                ("Total downloaded", "Collecting…"),
+                ("Total uploaded", "Collecting…"),
+                ("Display unit", "MiB/s"),
+            ]
+            .map(|(l, v)| (l.to_string(), v.to_string()))
+        );
+    }
+
+    /// The page re-reads the rates and the Display unit when `units.network` changes.
+    #[gpui_kit::test]
+    fn net_details_follow_unit_setting(cx: &mut TestAppContext) {
+        let mut sys = system(1000);
+        Arc::make_mut(&mut sys.nets)[0].1 = record();
+        let r = open(cx, with_unit(NetworkUnit::Bits), sys);
+        let page = r.page.clone();
+        let read = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| rows(page.read(cx).details()))
+                .into_iter()
+                .map(|(_, v)| v)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            read(r.vcx),
+            ["1.2 Mbps", "0.3 Mbps", "12.40 GiB", "2.00 GiB", "Mbps"]
+        );
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.units.network = NetworkUnit::Bytes);
+        });
+        draw(r.vcx);
+        assert_eq!(
+            read(r.vcx),
+            ["0.1 MiB/s", "0 MiB/s", "12.40 GiB", "2.00 GiB", "MiB/s"]
+        );
+    }
+}
