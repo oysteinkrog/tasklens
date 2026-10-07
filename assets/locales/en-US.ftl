@@ -296,6 +296,11 @@ perf-overview-mem-available = Available
 perf-overview-mem-cached = Cached
 perf-overview-mem-swap = Swap
 perf-overview-mem-no-swap = No swap
+perf-overview-box-disks = Disks
+perf-overview-box-network = Network
+perf-overview-gpu-vram = VRAM
+perf-overview-more = +{$n} more
+perf-overview-since-boot = {$size} since boot
 
 perf-menu-select-pages = Select Pages
 perf-menu-hide-page = Hide This Page
