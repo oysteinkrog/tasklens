@@ -18,6 +18,7 @@ use tl_model::actions::{
 };
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, KWinCommand};
+use tl_model::health::HelperState;
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
     LowMemGroup, LowMemoryInfo, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
@@ -25,6 +26,7 @@ use tl_model::process::{
 use tl_model::settings::{Settings, UiState};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
+use tl_ui::action_tracker::GlobalActionTracker;
 use tl_ui::app::{AppEnv, OpenHooks, UiExit, UiExitSlot, UiInit, start_for_test};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
@@ -1175,4 +1177,31 @@ fn lowmem_identity_changed_not_killed(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     let ids: Vec<RowId> = vcx.read(|cx| view.read(cx).rows().iter().map(|r| r.id).collect());
     assert_eq!(ids, [RowId::Process(key(60, 999))]);
+}
+
+/// m1f.20: End Task goes through the window's `ActionTracker`. With tl-helper installed, a
+/// permission failure offers "Retry as administrator".
+#[gpui_kit::test]
+fn lowmem_end_task_permission_denied_offers_retry(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    engine.publish_with(|s| Arc::make_mut(&mut s.health).helper = HelperState::Locked);
+    sweep(cx, &engine, Vec::new(), vec![proc(70, "locked", 300)]);
+    let (_, mut vcx, _view) = open(cx, &engine);
+    click(&mut vcx, "LowMemEndTask-0");
+    let sent = actions(&engine);
+    assert_eq!(sent.len(), 1);
+    answer(
+        cx,
+        &engine,
+        &sent[0],
+        ActionState::Failed(ActionError::PermissionDenied),
+    );
+
+    let last = cx.update(|cx| {
+        let tracker = cx.global::<GlobalActionTracker>().0.clone();
+        tracker.read(cx).pushed().last().cloned()
+    });
+    let last = last.expect("the tracker pushed a toast");
+    assert_eq!(last.button.as_deref(), Some("Retry as administrator"));
+    assert_eq!(toasts(&mut vcx).len(), 1);
 }
