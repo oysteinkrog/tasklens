@@ -201,9 +201,9 @@ impl ChartView {
     /// value is the newest valid sample of series 0, or 0.0 when there is none; only `Valid` and
     /// `Stale` values are meant to be shown.
     ///
-    /// With `value_sum` the same rules hold for every series, and the value is the sum of their
-    /// newest valid samples: one series without a valid newest sample makes the whole value
-    /// `WarmingUp`, so a partial sum never shows as the total.
+    /// With `value_sum` the value is the sum of every series' newest valid sample, and a series
+    /// without a valid newest sample gives the whole value its own state ([`sum_state`]), so a
+    /// partial sum never shows as the total.
     pub fn value_at(&self, now_boot_ns: u64) -> Option<(f32, Validity)> {
         if self.spec.series.is_empty() {
             return None;
@@ -218,8 +218,10 @@ impl ChartView {
             ChartState::Failed(_) => Validity::Failed,
             ChartState::Restricted => Validity::Restricted,
             ChartState::Unsupported => Validity::Unsupported,
-            ChartState::Stale { .. } if value.is_some() || !self.value_sum => Validity::Stale,
-            ChartState::Stale { .. } | ChartState::WarmingUp => Validity::WarmingUp,
+            ChartState::Stale { .. } if self.value_sum && value.is_none() => sum_state(summed),
+            ChartState::Stale { .. } => Validity::Stale,
+            ChartState::WarmingUp => Validity::WarmingUp,
+            ChartState::Live if self.value_sum => sum_state(summed),
             ChartState::Live if newest_all_valid(summed) => Validity::Valid,
             ChartState::Live => Validity::WarmingUp,
         };
@@ -345,6 +347,28 @@ fn newest_valid_sum(series: &[Option<Arc<SeriesView>>]) -> Option<f32> {
         let newest = s.as_deref()?.samples.iter().rev().find(|s| s.is_valid())?;
         Some(sum + newest.value)
     })
+}
+
+/// The state of a summed value: `Missing` ("-") when a series is absent, or its newest sample
+/// is a gap after valid data (a disconnected interface); else `WarmingUp` ("…") when a series
+/// has no valid sample yet; else `Valid`. Samples carry no failure reason, so `Failed` ("!")
+/// comes only from the owner-set chart state, as for series 0.
+fn sum_state(series: &[Option<Arc<SeriesView>>]) -> Validity {
+    if series.is_empty() {
+        return Validity::WarmingUp;
+    }
+    let mut state = Validity::Valid;
+    for s in series {
+        let Some(view) = s.as_deref() else {
+            return Validity::Missing;
+        };
+        match view.samples.last() {
+            Some(newest) if newest.is_valid() => {}
+            _ if view.samples.iter().any(|s| s.is_valid()) => return Validity::Missing,
+            _ => state = Validity::WarmingUp,
+        }
+    }
+    state
 }
 
 /// True when `series` is not empty and every series is present with a valid newest sample.
@@ -489,6 +513,30 @@ mod tests {
     }
 
     #[test]
+    fn value_sum_state_per_series() {
+        let rx = view(MetricId::NET_RX, vec![Sample::valid(1, 1.2)]);
+        let ok = view(MetricId::NET_TX, vec![Sample::valid(1, 0.3)]);
+        assert_eq!(sum_state(&[rx.clone(), ok]), Validity::Valid);
+        // Absent: "-".
+        assert_eq!(sum_state(&[rx.clone(), None]), Validity::Missing);
+        // A gap after valid data (disconnected): "-".
+        let gap = view(
+            MetricId::NET_TX,
+            vec![Sample::valid(1, 0.3), Sample::gap(2)],
+        );
+        assert_eq!(sum_state(&[rx.clone(), gap]), Validity::Missing);
+        // No valid sample yet: "…".
+        let new = view(MetricId::NET_TX, vec![Sample::gap(1)]);
+        assert_eq!(sum_state(&[rx.clone(), new.clone()]), Validity::WarmingUp);
+        assert_eq!(
+            sum_state(&[rx, view(MetricId::NET_TX, Vec::new())]),
+            Validity::WarmingUp
+        );
+        // Missing wins over warming up.
+        assert_eq!(sum_state(&[new, None]), Validity::Missing);
+    }
+
+    #[test]
     fn value_sum_missing_series_is_not_partial() {
         let rx = view(MetricId::NET_RX, vec![Sample::valid(1, 1.2)]);
         // Absent series: no sum at all.
@@ -496,7 +544,7 @@ mod tests {
         assert_eq!(newest_valid_sum(&absent), None);
         assert!(!newest_all_valid(&absent));
         // A series whose newest sample is a gap: the sum keeps its last valid value, but the
-        // newest values are not all valid, so a Live chart shows WarmingUp.
+        // newest values are not all valid.
         let tx = view(
             MetricId::NET_TX,
             vec![Sample::valid(1, 0.3), Sample::gap(2)],
