@@ -2130,11 +2130,10 @@ mod end {
             "Selected process metrics copied."
         );
 
-        // An exited row copies normally.
-        assert_eq!(
-            last_toast(&mut rig, &[4300], CopyDetails),
-            "Process details copied."
-        );
+        // An exited row copies normally. The same toast text joins the one already shown.
+        rig.select_pids(&[4300]);
+        assert!(rig.dispatch(CopyDetails).is_none());
         assert!(clipboard(&mut rig).starts_with("Name: gone\nPID: 4300\n"));
+        assert!(visible(&mut rig.vcx).contains(&"Process details copied.".to_owned()));
     }
 }

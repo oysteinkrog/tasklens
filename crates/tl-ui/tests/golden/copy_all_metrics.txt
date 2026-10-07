@@ -1,0 +1,43 @@
+Name: firefox
+Name display: firefox
+Image name: firefox
+Image path: /usr/bin/firefox
+Type: Background process
+User: me
+PID: 4321
+Parent PID: 2010
+Priority: Normal
+CPU: 3.3%
+CPU (kernel): 0.5%
+CPU (user): 2.8%
+CPU (one core = 100%): 26.2%
+CPU time: 0:00:55
+CPU time kernel: 0:00:13
+CPU time user: 0:00:42
+Memory: 812.00 MiB
+Working set total: 1.08 GiB
+Working set peak: 1.27 GiB
+Working set shared: 292.00 MiB
+Commit size: 1.46 GiB
+Virtual size: 2.93 GiB
+Virtual size peak: 3.12 GiB
+Page faults: 120 000
+Page faults delta: 40
+Major faults: 12
+Swap: 0 B
+PSS: 0 B
+USS: 0 B
+Disk: 0 MiB/s
+Disk read rate: 0 MiB/s
+Disk write rate: 0 MiB/s
+Disk total rate: 0 MiB/s
+Network: 0 Mbps
+Network send: 0 Mbps
+Network receive: 0 Mbps
+GPU: 0%
+VRAM: 0 B
+Handles: 412
+Threads: 97
+State: Sleeping
+Nice: 0
+Command line: /usr/lib/firefox/firefox -P default
