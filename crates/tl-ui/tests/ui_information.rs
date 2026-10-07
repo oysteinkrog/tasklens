@@ -1591,6 +1591,11 @@ mod page {
             "the engine collects only for a visible surface"
         );
         assert!(sent.inventory && sent.memory && sent.gpus && sent.disks);
+        assert_eq!(
+            sent.cpu,
+            tl_model::demand::CpuDemand::Total,
+            "the System counts come from the CPU totals"
+        );
         r.set_active(false);
         assert_eq!(r.engine.demands().last(), Some(&Demand::default()));
     }

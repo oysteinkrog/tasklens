@@ -4,8 +4,8 @@
 //! content is 880 px wide or more (× ui_scale) they sit in two equal columns, the hardware
 //! sections on the right; narrower, they stack in [`InfoSectionId::ALL`] order (UI-SYS-080).
 //!
-//! While the tab is shown the page sends its demand part (inventory, memory, GPUs, disks, with
-//! `any_surface_visible`) and withdraws it on leave (ADR-008). The first activation of the session
+//! While the tab is shown the page sends its demand part (inventory, CPU totals, memory, GPUs,
+//! disks, with `any_surface_visible`) and withdraws it on leave (ADR-008). The first activation of the session
 //! also sends `RefreshNow(Inventory)`. An INVENTORY change rebuilds every section's rows; a SYSTEM
 //! or DEVICES change rebuilds only System, Memory, Disk drives and Graphics, the sections with live
 //! rows. A section whose rows did not change does not re-render (UI-SYS-085).
@@ -36,7 +36,7 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::command::Command;
-use tl_model::demand::Demand;
+use tl_model::demand::{CpuDemand, Demand};
 use tl_model::health::SourceId;
 use tl_model::snapshot::ComponentMask;
 use tl_model::validity::Validity;
@@ -431,10 +431,12 @@ impl InformationPage {
     }
 }
 
-/// The page's demand part while it is shown.
+/// The page's demand part while it is shown. The CPU totals carry the System section's process
+/// and handle counts.
 fn demand_part() -> Demand {
     Demand {
         any_surface_visible: true,
+        cpu: CpuDemand::Total,
         inventory: true,
         memory: true,
         gpus: true,
