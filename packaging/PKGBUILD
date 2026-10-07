@@ -29,7 +29,9 @@ build() {
 
 check() {
   cd "$_srcroot"
-  cargo test --release --locked --workspace
+  # Dev profile: with fat LTO and codegen-units=1 every test binary takes
+  # too long to link. The packaged binaries still come from build().
+  cargo test --locked --workspace
 }
 
 package() {
