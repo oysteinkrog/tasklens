@@ -752,3 +752,10 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.21 (024f61a6, cebd603a, 6c967db3) closed. The core marks switch to our own CpuPCore and CpuECore icons, to match the affinity dialog, in a follow-up. The preferred-core star appears only when the ranks differ.
 - Overview beads filed as crw.36 to crw.43 (fd5ef0a0). Owners: m1f takes crw.36 then crw.39, crw takes crw.37 then crw.38.
 - o55.6 (f8eef0b3) closed. Rows come from Snapshot.system DiskTotals, and capacity from DiskTotals.capacity. Tests are in ui_disk_page.rs. The o55 agent takes o55.8.
+- wlf.1 closed. Unlocked run, load 9 to 11:
+  - perf-cpu: frame CPU p50 8.99 ms, p99 24.4 ms, 33% CPU.
+  - bridge: p50 8.5 ms, latency p99 51 ms.
+  - table-2000: p50 4.0 ms.
+  - static: 0 frames but 21.9% CPU.
+  - The moving scenes run at 24 to 31 fps.
+  - All of these are far above the UI-PRF-053 gates. Filed as P0 wlf.27 (static idle CPU) and wlf.28 (frame cost and pacing), both for the pdu-51 agent after the soak.
