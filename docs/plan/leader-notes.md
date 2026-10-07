@@ -647,3 +647,6 @@ After the reboot: read each in-progress bead's latest comment, check `git status
 Oystein wants the system monitor graphs pushed forward, and one view that shows CPU, memory and GPU load together (TaskSlinger lacks it). That view is the Graph Summary View (PERF-010, crw.17), now P1 and depending only on crw.1 and o55.11.
 Order: pdu.52 (P0, live data missing in the real app) and crw.1 (Performance tab) first; then o55.2 Memory, o55.9 GPU, o55.5 Disk, o55.7 Net pages; then o55.11 build_page arms; then crw.17. The six interrupted beads from the reboot (pdu.51, bj6.10, fut.11, 8fx.24, m1f.2, bj6.17) wait behind this path.
 Do not take desktop screenshots to show Oystein the app; he sees his own screen.
+- gma.15 closed (tests de662d7e). gma.41 closed (b63b1cd7): freeze as exited when the key leaves a snapshot whose PROCESSES component changed; seen_exited removed. gma.40 closed (9e84f3ae, 984f20d2): TlTabSpec::tooltip, new ftl key pwn-props-tab-tooltip.
+- 49105ed7 fixed the 3c23e489 build break (BorrowAppContext import); tl-ui lib check passed.
+- pdu.51 resumed with a fresh agent on the work left on disk.
