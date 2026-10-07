@@ -10,7 +10,6 @@ mod atomic;
 mod autostart;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
-#[allow(dead_code, reason = "the AppEnv import_taskslinger builder calls it")]
 mod import_ts;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod logging;
@@ -38,7 +37,7 @@ use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
 use tl_model::settings::{EngineSettings, StartTab};
 use tl_ui::app::ToastKindTag;
-use tl_ui::{AppEnv, BuildInfo, ImportSummary, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
+use tl_ui::{AppEnv, BuildInfo, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
 use tracing::{error, info, warn};
 
 use crate::args::TabArg;
@@ -196,7 +195,7 @@ fn main() -> ExitCode {
         write_settings_now: Arc::new(move |s| write_store.write_settings_now(s)),
         set_autostart: Arc::new(|_, _| Ok(())),
         global_shortcut: None,
-        import_taskslinger: Arc::new(|| Ok(ImportSummary::default())),
+        import_taskslinger: Arc::new(import_ts::import_file),
         list_adapters: Arc::new(Vec::new),
         run_history: None,
     };

@@ -12,7 +12,8 @@ use std::io::Read;
 use std::path::Path;
 
 use tl_model::settings::{Settings, UiState};
-use tracing::debug;
+use tl_ui::app::{ImportSummary, ImportedSettings};
+use tracing::{debug, info};
 
 /// The largest `UserSettings.ini` accepted, 1 MiB.
 pub const MAX_INI_BYTES: usize = 1 << 20;
@@ -412,6 +413,34 @@ pub fn import(text: &str, base: (&Settings, &UiState)) -> ImportResult {
         imported: applied.len(),
         skipped,
     }
+}
+
+/// The `AppEnv.import_taskslinger` callback: reads `path` and imports it onto copies of the
+/// current `settings` and `state`. Writes nothing; tl-ui applies the result through
+/// `TlSettings::update`, which persists it. The error text is shown to the user.
+pub fn import_file(
+    path: &Path,
+    settings: &Settings,
+    state: &UiState,
+) -> Result<ImportedSettings, String> {
+    let text = read_ini(path).map_err(|e| e.to_string())?;
+    let result = import(&text, (settings, state));
+    // Counts only, never values or the path (privacy rule).
+    info!(
+        target: "tasklens::settings",
+        imported = result.imported,
+        skipped = result.skipped.len(),
+        "TaskSlinger settings imported"
+    );
+    Ok(ImportedSettings {
+        settings: result.settings,
+        state: result.state,
+        summary: ImportSummary {
+            settings: u32::try_from(result.imported).unwrap_or(u32::MAX),
+            // Themes import with the themes.json bead.
+            themes: 0,
+        },
+    })
 }
 
 #[cfg(test)]

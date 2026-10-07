@@ -7,6 +7,9 @@ mod atomic;
 mod autostart;
 
 #[allow(dead_code, reason = "the tests use only part of the module")]
+#[path = "../src/import_ts.rs"]
+mod import_ts;
+#[allow(dead_code, reason = "the tests use only part of the module")]
 #[path = "../src/migrations.rs"]
 mod migrations;
 #[allow(dead_code, reason = "the tests use only part of the module")]
@@ -27,7 +30,7 @@ use paths::Paths;
 use settings_store::{LoadNotice, RunHistoryFile, Store, load_settings, load_state};
 use tempfile::TempDir;
 use tl_model::settings::{Settings, UiState};
-use tl_ui::{PersistTheme, RunHistoryEntry, RunHistoryStore};
+use tl_ui::{ImportSummary, PersistTheme, RunHistoryEntry, RunHistoryStore};
 
 const NOW: u64 = 1_759_500_000;
 
@@ -729,4 +732,82 @@ fn autostart_read_only_settings_still_applied() {
     store.flush();
     assert!(!paths.settings_file().exists());
     assert!(paths.autostart_file().exists());
+}
+
+/// A TaskSlinger fixture: two booleans, an integer, a window key and one unknown key.
+const TS_INI: &str = "[Settings]\r\nAnimationsEnabled=false\r\nCloseToTray=true\r\n\
+                      RefreshIntervalMs=1000\r\nUnknownKey=5\r\n[Window]\r\nWidth=1600\r\n";
+
+/// Runs the import callback on `bytes`, then persists the result the way tl-ui's
+/// `TlSettings::update` does, and returns what landed on disk.
+fn import_and_persist(bytes: &[u8]) -> (ImportSummary, Settings, UiState) {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    let ini = dir.path().join("UserSettings.ini");
+    std::fs::write(&ini, bytes).unwrap();
+    let store = Store::new(&paths, false, false, defaults());
+    let imported =
+        import_ts::import_file(&ini, &Settings::default(), &UiState::default()).expect("import");
+    store.persist_callback()(&imported.settings, &imported.state);
+    store.flush();
+    (
+        imported.summary,
+        load_settings(&paths.settings_file(), NOW).value,
+        load_state(&paths.state_file(), NOW).value,
+    )
+}
+
+#[test]
+fn taskslinger_import_persisted() {
+    let (summary, settings, state) = import_and_persist(TS_INI.as_bytes());
+    assert_eq!(
+        summary,
+        ImportSummary {
+            settings: 4,
+            themes: 0
+        }
+    );
+    assert!(!settings.motion.animations);
+    assert!(settings.tray.close_to_tray);
+    assert_eq!(settings.processes.interval_ms, 1000);
+    assert_eq!(state.window.width, 1600);
+}
+
+#[test]
+fn taskslinger_import_utf16_matches_utf8() {
+    let mut utf16 = vec![0xFF, 0xFE];
+    for unit in TS_INI.encode_utf16() {
+        utf16.extend(unit.to_le_bytes());
+    }
+    assert_eq!(
+        import_and_persist(&utf16),
+        import_and_persist(TS_INI.as_bytes())
+    );
+}
+
+#[test]
+fn taskslinger_import_bad_file_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    let store = Store::new(&paths, false, false, defaults());
+    let (settings, state) = defaults();
+
+    let missing = dir.path().join("missing.ini");
+    let err = import_ts::import_file(&missing, &settings, &state).expect_err("missing");
+    assert!(
+        err.starts_with("Could not read the TaskSlinger settings file"),
+        "{err}"
+    );
+
+    let big = dir.path().join("big.ini");
+    let mut text = TS_INI.to_owned();
+    text.push_str(&"a".repeat(import_ts::MAX_INI_BYTES));
+    std::fs::write(&big, text).unwrap();
+    let err = import_ts::import_file(&big, &settings, &state).expect_err("too large");
+    assert_eq!(err, import_ts::TOO_LARGE);
+
+    // An error gives the UI nothing to apply, so the store writes nothing.
+    store.flush();
+    assert!(!paths.settings_file().exists());
+    assert!(!paths.state_file().exists());
 }
