@@ -1,13 +1,16 @@
-//! History mode page: header text and render on the HISTORY bit only (tasklens-8fx.19). Run with
+//! History mode page: header text and render on the HISTORY bit only (tasklens-8fx.19), and the
+//! query controller with one Frame query in flight (tasklens-8fx.20). Run with
 //! `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui_kit::{AppContext as _, TestAppContext};
+use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
+use tl_model::command::{Command, HistoryWhat};
 use tl_model::details::DetailsSnapshot;
-use tl_model::history::{HistoryStoreState, HistoryView};
+use tl_model::history::{HistoryRange, HistoryStoreState, HistoryView};
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::snapshot::ComponentHeader;
 use tl_model::time::TimeNs;
@@ -179,4 +182,193 @@ fn history_renders_only_on_history_bit(cx: &mut TestAppContext) {
         );
         assert_eq!(p.state().view_range, (100 * S, 700 * S));
     });
+}
+
+fn init(cx: &mut TestAppContext) -> Arc<FakeEngine> {
+    let engine = FakeEngine::new();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui::i18n::init_strings(cx, "en-US");
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+        cx.set_global(GlobalHub(hub));
+    });
+    engine
+}
+
+/// The `(id, range, what)` of every history query sent.
+fn queries(engine: &FakeEngine) -> Vec<(u64, HistoryRange, HistoryWhat)> {
+    engine
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::HistoryQuery { id, range, what } => Some((id, range, what)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn overview(what: &HistoryWhat) -> bool {
+    matches!(what, HistoryWhat::Frame { overview: true, .. })
+}
+
+/// Publishes a history view answering query `id`.
+fn answer(engine: &FakeEngine, id: u64, vcx: &mut VisualTestContext) {
+    engine.publish_with(|s| {
+        let version = s.history.header.version + 1;
+        s.history = Arc::new(HistoryView {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            query_id: id,
+            ..view(700 * S)
+        });
+    });
+    vcx.run_until_parked();
+}
+
+fn advance(vcx: &mut VisualTestContext, d: Duration) {
+    vcx.executor().advance_clock(d);
+    vcx.run_until_parked();
+}
+
+fn scrub(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext, t: TimeNs) {
+    page.update(vcx, |p, cx| p.set_scrub(Some(t), cx));
+    vcx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn history_one_query_in_flight(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    vcx.run_until_parked();
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 1, "mode entry sends one query");
+    assert_eq!(sent[0].0, 1);
+    assert_eq!(sent[0].1, HistoryRange::Live);
+
+    for t in [100, 200, 300] {
+        scrub(&page, vcx, t * S);
+    }
+    assert_eq!(queries(&engine).len(), 1);
+    assert_eq!(vcx.read_entity(&page, |p, _| p.query_in_flight()), Some(1));
+}
+
+#[gpui_kit::test]
+fn pending_replaced_by_latest(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    vcx.run_until_parked();
+    for t in [100, 200, 300] {
+        scrub(&page, vcx, t * S);
+    }
+    let pending = vcx.read_entity(&page, |p, _| p.query_pending());
+    assert_eq!(pending.map(|(r, _)| r), Some(HistoryRange::At(300 * S)));
+
+    answer(&engine, 1, vcx);
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 2, "exactly one command after the answer");
+    assert_eq!(sent[1].1, HistoryRange::At(300 * S));
+    vcx.read_entity(&page, |p, _| {
+        assert_eq!(p.query_in_flight(), Some(sent[1].0));
+        assert_eq!(p.query_pending(), None);
+    });
+}
+
+#[gpui_kit::test]
+fn foreign_answer_ignored(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    vcx.run_until_parked();
+    scrub(&page, vcx, 100 * S);
+    answer(&engine, 99, vcx);
+    assert_eq!(vcx.read_entity(&page, |p, _| p.query_in_flight()), Some(1));
+    assert_eq!(queries(&engine).len(), 1);
+}
+
+#[gpui_kit::test]
+fn live_queries_each_second(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (_page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    vcx.run_until_parked();
+    for _ in 0..5 {
+        let last = queries(&engine).last().expect("a query").0;
+        answer(&engine, last, vcx);
+        advance(vcx, Duration::from_secs(1));
+    }
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 6, "mode entry plus 5 ticks");
+    assert!(sent[1..].iter().all(|(_, r, _)| *r == HistoryRange::Live));
+}
+
+#[gpui_kit::test]
+fn overview_once_per_minute(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (_page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    vcx.run_until_parked();
+    for _ in 0..60 {
+        let last = queries(&engine).last().expect("a query").0;
+        answer(&engine, last, vcx);
+        advance(vcx, Duration::from_secs(1));
+    }
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 61);
+    assert!(overview(&sent[0].2), "mode entry asks for the overview");
+    assert!(sent[1..60].iter().all(|(_, _, w)| !overview(w)));
+    assert!(overview(&sent[60].2), "asked again after 60 s");
+}
+
+#[gpui_kit::test]
+fn busy_retried_next_tick(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    engine.set_busy(true);
+    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    vcx.run_until_parked();
+    assert!(queries(&engine).is_empty());
+    assert!(vcx.read_entity(&page, |p, _| p.query_pending()).is_some());
+
+    // Live: the 1 s tick sends it, still with the overview.
+    engine.set_busy(false);
+    advance(vcx, Duration::from_secs(1));
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 1);
+    assert!(overview(&sent[0].2));
+
+    // Scrubbed: the retry wake sends it.
+    answer(&engine, sent[0].0, vcx);
+    engine.set_busy(true);
+    scrub(&page, vcx, 100 * S);
+    assert_eq!(queries(&engine).len(), 1);
+    engine.set_busy(false);
+    advance(vcx, Duration::from_secs(1));
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].1, HistoryRange::At(100 * S));
+}
+
+#[gpui_kit::test]
+fn unanswered_query_resent_after_timeout(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    vcx.run_until_parked();
+    answer(&engine, 1, vcx);
+    scrub(&page, vcx, 100 * S);
+    advance(vcx, Duration::from_millis(999));
+    assert_eq!(queries(&engine).len(), 2);
+    advance(vcx, Duration::from_millis(1));
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[2].1, HistoryRange::At(100 * S));
+    assert_eq!(
+        vcx.read_entity(&page, |p, _| p.query_in_flight()),
+        Some(sent[2].0)
+    );
 }

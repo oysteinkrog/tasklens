@@ -6,15 +6,22 @@
 //! The header text is rebuilt outside render, into a reused `String`, and a new `SharedString`
 //! is made only when the text changes, so the header re-shapes only then. Nothing here notifies
 //! inside `render`.
+//!
+//! `QueryController` keeps at most one Frame query in flight (UI-PRC-030). The page asks on mode
+//! entry, on every scrub or range change and once per second while live; a 1,000 ms timeout
+//! resends an unanswered query (R-169 OI-6).
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    App, Context, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription,
-    Window, div, px,
+    App, AsyncApp, Context, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
 use smallvec::SmallVec;
-use tl_model::history::{HistoryMetric, HistoryStoreState, HistoryView};
+use tl_model::client::EngineClient;
+use tl_model::command::{Command, CommandError, HistoryWhat};
+use tl_model::history::{HistoryMetric, HistoryRange, HistoryStoreState, HistoryView};
 use tl_model::ids::ProcessKey;
 use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime};
@@ -22,6 +29,7 @@ use tl_model::units::{self, LocalDateTime};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
+use crate::settings_global::TlSettings;
 use crate::theme::{current, metrics};
 
 const NS_PER_SEC: u64 = 1_000_000_000;
@@ -33,6 +41,15 @@ pub const DEFAULT_VIEW_NS: u64 = 600 * NS_PER_SEC;
 const HEADER_H: f32 = 32.0;
 const STRIP_H: f32 = 120.0;
 const MINIMAP_H: f32 = 24.0;
+
+/// The live query period (UI-PRC-030).
+const LIVE_TICK: Duration = Duration::from_secs(1);
+/// An unanswered Frame query is resent after this (R-169 OI-6).
+const QUERY_TIMEOUT: Duration = Duration::from_millis(1000);
+/// The minimap overview is asked at most this often (UI-PRC-033).
+const OVERVIEW_EVERY_NS: u64 = 60 * NS_PER_SEC;
+/// The strip draws series for at most this many selected processes.
+const MAX_SERIES: usize = 8;
 
 /// What the strip, minimap, chips and table share. Session only; nothing here persists.
 #[derive(Clone, Debug, PartialEq)]
@@ -219,6 +236,144 @@ fn clock(out: &mut String, t: TimeNs, realtime_offset_ns: i64) {
     );
 }
 
+/// The range a Frame query asks for: `Span` while a range is set, `At` while scrubbed, else `Live`.
+pub fn query_range(s: &HistoryUiState) -> HistoryRange {
+    match (s.range, s.scrub) {
+        (Some((from, to)), _) => HistoryRange::Span { from, to },
+        (None, Some(t)) => HistoryRange::At(t),
+        (None, None) => HistoryRange::Live,
+    }
+}
+
+/// The Frame payload for `s`: its metric, strip window and first 8 selected keys.
+pub fn frame_what(s: &HistoryUiState, overview: bool) -> HistoryWhat {
+    HistoryWhat::Frame {
+        metric: s.metric,
+        view: s.view_range,
+        keys: Arc::from(&s.selected[..s.selected.len().min(MAX_SERIES)]),
+        overview,
+    }
+}
+
+/// Keeps at most one Frame query in flight. A query wanted while one is in flight waits in
+/// `pending`, and a newer one replaces it.
+pub(crate) struct QueryController {
+    next_id: u64,
+    /// Id of the Frame query sent and not yet answered.
+    in_flight: Option<u64>,
+    /// Latest wanted query while one is in flight, or one `send` refused with `Busy`.
+    pending: Option<(HistoryRange, HistoryWhat)>,
+    last_overview_ns: Option<TimeNs>,
+    /// The query in flight, resent when its answer is late and nothing newer is pending.
+    last_sent: Option<(HistoryRange, HistoryWhat)>,
+}
+
+impl QueryController {
+    pub fn new() -> Self {
+        Self {
+            next_id: 1,
+            in_flight: None,
+            pending: None,
+            last_overview_ns: None,
+            last_sent: None,
+        }
+    }
+
+    /// True for the first query and then once 60 s have passed since the last overview, and
+    /// records `now_ns` when true. `now_ns` is any monotonic nanosecond clock.
+    pub fn take_overview(&mut self, now_ns: TimeNs) -> bool {
+        let due = self
+            .last_overview_ns
+            .is_none_or(|last| now_ns.saturating_sub(last) >= OVERVIEW_EVERY_NS);
+        if due {
+            self.last_overview_ns = Some(now_ns);
+        }
+        due
+    }
+
+    /// Sends at once when nothing is in flight, else replaces `pending`. A replaced query's
+    /// overview request carries over, so it is not lost.
+    pub fn want(&mut self, range: HistoryRange, mut what: HistoryWhat, client: &dyn EngineClient) {
+        if let Some((_, HistoryWhat::Frame { overview: true, .. })) = &self.pending
+            && let HistoryWhat::Frame { overview, .. } = &mut what
+        {
+            *overview = true;
+        }
+        if self.in_flight.is_some() {
+            self.pending = Some((range, what));
+        } else {
+            self.send(range, what, client);
+        }
+    }
+
+    /// Clears `in_flight` when `view` answers it, then sends `pending` if any. Other answers are
+    /// ignored.
+    pub fn on_view(&mut self, view: &HistoryView, client: &dyn EngineClient) {
+        if self.in_flight != Some(view.query_id) {
+            return;
+        }
+        self.in_flight = None;
+        self.last_sent = None;
+        self.retry(client);
+    }
+
+    /// Gives up on the query in flight. The pending query, or else the late one, waits to be
+    /// sent again.
+    pub fn expire(&mut self) {
+        if self.in_flight.take().is_some() && self.pending.is_none() {
+            self.pending = self.last_sent.take();
+        }
+    }
+
+    /// Sends `pending` when nothing is in flight.
+    pub fn retry(&mut self, client: &dyn EngineClient) {
+        if self.in_flight.is_none()
+            && let Some((range, what)) = self.pending.take()
+        {
+            self.send(range, what, client);
+        }
+    }
+
+    pub fn in_flight(&self) -> Option<u64> {
+        self.in_flight
+    }
+
+    pub fn pending(&self) -> Option<&(HistoryRange, HistoryWhat)> {
+        self.pending.as_ref()
+    }
+
+    /// The id the next sent query gets.
+    pub fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// `Busy` keeps the query pending for the next tick. `EngineStopped` drops it.
+    fn send(&mut self, range: HistoryRange, what: HistoryWhat, client: &dyn EngineClient) {
+        let id = self.next_id;
+        let cmd = Command::HistoryQuery {
+            id,
+            range,
+            what: what.clone(),
+        };
+        match client.send(cmd) {
+            Ok(()) => {
+                self.next_id += 1;
+                self.in_flight = Some(id);
+                self.pending = None;
+                self.last_sent = Some((range, what));
+            }
+            Err(CommandError::Busy) => self.pending = Some((range, what)),
+            Err(CommandError::EngineStopped) => {}
+        }
+    }
+}
+
+/// True while History mode is on. Without settings (tests) it counts as on.
+fn history_mode(cx: &App) -> bool {
+    cx.try_global::<TlSettings>()
+        .is_none_or(|_| TlSettings::state(cx).processes.history_mode)
+}
+
 /// The History mode page. Built when History mode turns on.
 pub struct HistoryPage {
     pub(crate) state: HistoryUiState,
@@ -229,6 +384,16 @@ pub struct HistoryPage {
     header: SharedString,
     scratch: String,
     strings_version: u64,
+    queries: QueryController,
+    client: Arc<dyn EngineClient>,
+    /// Zero of the clock the overview interval counts on.
+    epoch: Instant,
+    /// When the query in flight was sent.
+    sent_at: Option<Instant>,
+    /// The 1 s live query loop. `None` while scrubbed or a range is set.
+    live_timer: Option<Task<()>>,
+    /// Timeout and `Busy` retry while not live. The live loop does both while live.
+    retry_timer: Option<Task<()>>,
     /// Created in `new`, never in render.
     _subs: SmallVec<[Subscription; 2]>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -236,15 +401,18 @@ pub struct HistoryPage {
 }
 
 impl HistoryPage {
-    /// Reads the hub's current history view and subscribes to the hub. Needs `GlobalHub`.
+    /// Reads the hub's current history view, subscribes to the hub, sends the mode entry query
+    /// and starts the live loop. Needs `GlobalHub`.
     pub fn new(cx: &mut Context<Self>) -> Self {
         let hub = cx.global::<GlobalHub>().0.clone();
         let history = Arc::clone(&hub.read(cx).current().history);
+        let client = Arc::clone(hub.read(cx).client());
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, |this, _, ev: &SnapshotChanged, cx| {
             if ev.mask.contains(ComponentMask::HISTORY) {
                 let history = Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().history);
-                this.install(history);
+                this.install(Arc::clone(&history));
+                this.drive(cx, |q, c| q.on_view(&history, c));
                 cx.notify();
             }
         }));
@@ -260,11 +428,19 @@ impl HistoryPage {
             header: SharedString::default(),
             scratch: String::with_capacity(96),
             strings_version,
+            queries: QueryController::new(),
+            client,
+            epoch: cx.background_executor().now(),
+            sent_at: None,
+            live_timer: None,
+            retry_timer: None,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
         };
         page.install(history);
+        page.request(cx);
+        page.update_live_timer(cx);
         page
     }
 
@@ -275,6 +451,141 @@ impl HistoryPage {
     /// The header line text as shown.
     pub fn header(&self) -> &SharedString {
         &self.header
+    }
+
+    /// Sets the scrub time (`None` is live) and asks for its frame.
+    pub fn set_scrub(&mut self, scrub: Option<TimeNs>, cx: &mut Context<Self>) {
+        if self.state.scrub == scrub {
+            return;
+        }
+        self.state.scrub = scrub;
+        self.on_query_state(cx);
+    }
+
+    /// Sets the selected range (`None` clears it) and asks for its frame.
+    pub fn set_range(&mut self, range: Option<(TimeNs, TimeNs)>, cx: &mut Context<Self>) {
+        if self.state.range == range {
+            return;
+        }
+        self.state.range = range;
+        self.on_query_state(cx);
+    }
+
+    /// Id of the Frame query in flight.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn query_in_flight(&self) -> Option<u64> {
+        self.queries.in_flight()
+    }
+
+    /// The query waiting for the one in flight, or for a `Busy` retry.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn query_pending(&self) -> Option<(HistoryRange, HistoryWhat)> {
+        self.queries.pending().cloned()
+    }
+
+    fn is_live(&self) -> bool {
+        self.state.scrub.is_none() && self.state.range.is_none()
+    }
+
+    fn on_query_state(&mut self, cx: &mut Context<Self>) {
+        self.refresh_header();
+        self.request(cx);
+        self.update_live_timer(cx);
+        cx.notify();
+    }
+
+    /// Wants a Frame query for the current state.
+    fn request(&mut self, cx: &mut Context<Self>) {
+        let elapsed = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(self.epoch);
+        let now_ns = TimeNs::try_from(elapsed.as_nanos()).unwrap_or(TimeNs::MAX);
+        let overview = self.queries.take_overview(now_ns);
+        let range = query_range(&self.state);
+        let what = frame_what(&self.state, overview);
+        self.drive(cx, |q, c| q.want(range, what, c));
+    }
+
+    /// Runs `f` on the controller, notes when a query went out and re-arms the retry timer.
+    fn drive(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut QueryController, &dyn EngineClient),
+    ) {
+        let next_id = self.queries.next_id();
+        f(&mut self.queries, &*self.client);
+        if self.queries.next_id() != next_id {
+            self.sent_at = Some(cx.background_executor().now());
+        }
+        self.arm_retry(cx);
+    }
+
+    /// While not live and a query is in flight or pending, wakes once its timeout ends or after
+    /// one tick for a `Busy` retry.
+    fn arm_retry(&mut self, cx: &mut Context<Self>) {
+        let wait = match (self.queries.in_flight(), self.sent_at) {
+            _ if self.is_live() => None,
+            (Some(_), Some(sent)) => {
+                let age = cx
+                    .background_executor()
+                    .now()
+                    .saturating_duration_since(sent);
+                Some(QUERY_TIMEOUT.saturating_sub(age))
+            }
+            _ if self.queries.pending().is_some() => Some(LIVE_TICK),
+            _ => None,
+        };
+        self.retry_timer = wait.map(|wait| {
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |page, cx| page.tick(cx));
+            })
+        });
+    }
+
+    /// Starts the live loop while live and History mode is on, and stops it otherwise.
+    fn update_live_timer(&mut self, cx: &mut Context<Self>) {
+        if !self.is_live() || !history_mode(cx) {
+            self.live_timer = None;
+            return;
+        }
+        if self.live_timer.is_some() {
+            return;
+        }
+        self.live_timer = Some(
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    cx.background_executor().timer(LIVE_TICK).await;
+                    match this.update(cx, |page, cx| page.tick(cx)) {
+                        Ok(true) => {}
+                        _ => break,
+                    }
+                }
+            }),
+        );
+    }
+
+    /// One live tick or retry wake. Expires a query unanswered for 1,000 ms, then sends a Live
+    /// query while live or the pending one otherwise. False once History mode is off.
+    fn tick(&mut self, cx: &mut Context<Self>) -> bool {
+        if !history_mode(cx) {
+            self.retry_timer = None;
+            return false;
+        }
+        let now = cx.background_executor().now();
+        if self
+            .sent_at
+            .is_some_and(|sent| now.saturating_duration_since(sent) >= QUERY_TIMEOUT)
+        {
+            self.queries.expire();
+        }
+        if self.is_live() {
+            self.request(cx);
+        } else {
+            self.drive(cx, |q, c| q.retry(c));
+        }
+        true
     }
 
     /// Stores `view`, sets the default strip window on the first span and rebuilds the header.
