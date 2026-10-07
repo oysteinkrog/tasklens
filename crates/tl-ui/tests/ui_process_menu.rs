@@ -1875,6 +1875,7 @@ mod end {
             "-",
             "Suspend Selected Tasks",
             "Set Priority >",
+            "Set Affinity…",
             "-",
         ];
         multi.extend(COPIES);
@@ -2340,10 +2341,9 @@ mod end {
             let m = build_menu(rig, rows, ColumnId::Name);
             shape(rig, &m)
         };
-        assert_eq!(
-            at(&shape_of(&mut rig, &[1, 2])),
-            None,
-            "not built on two rows (P1)"
+        assert!(
+            at(&shape_of(&mut rig, &[1, 2])).is_some(),
+            "built on two rows, same label (P2, E23-005)"
         );
         assert_eq!(at(&shape_of(&mut rig, &[9])), None, "not on a pseudo row");
         let exited = shape_of(&mut rig, &[4]);
@@ -2380,6 +2380,34 @@ mod end {
         assert_eq!(targets, [ActionTarget::Process(key(300))], "row A's key");
         assert!(subtitle.starts_with("proc (PID 300)"), "{subtitle}");
         assert!(rig.sent().is_empty(), "the dialog sends on OK only");
+    }
+
+    #[gpui_kit::test]
+    fn set_affinity_on_two_rows_opens_with_both(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        rig.select_pids(&[300, 301]);
+        let before = rig.windows();
+        assert!(rig.dispatch(SetAffinity).is_none());
+        let id = rig
+            .windows()
+            .into_iter()
+            .find(|w| !before.contains(w))
+            .expect("the Set Affinity dialog opened");
+        let handle = WindowHandle::<gpui_kit::base::Root>::new(id);
+        let (targets, subtitle) = rig.vcx.update(|_, cx| {
+            let dialog = AffinityDialog::find(handle, cx).expect("an affinity dialog");
+            let d = dialog.read(cx);
+            (d.targets().to_vec(), d.subtitle(cx).to_string())
+        });
+        assert_eq!(
+            targets,
+            [
+                ActionTarget::Process(key(300)),
+                ActionTarget::Process(key(301))
+            ]
+        );
+        assert!(subtitle.starts_with("2 processes"), "{subtitle}");
     }
 
     fn stopped(pid: u32) -> ProcessRecord {

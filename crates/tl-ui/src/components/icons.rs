@@ -32,6 +32,7 @@ pub enum TlIcon {
     LoaderCircle,
     Copy,
     RotateCcwClock,
+    RotateCcw,
     Minus,
     Plus,
     Eye,
@@ -47,7 +48,7 @@ pub enum TlIcon {
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -67,6 +68,7 @@ impl TlIcon {
         Self::LoaderCircle,
         Self::Copy,
         Self::RotateCcwClock,
+        Self::RotateCcw,
         Self::Minus,
         Self::Plus,
         Self::Eye,
@@ -103,6 +105,7 @@ impl TlIcon {
             Self::LoaderCircle => IconName::LoaderCircle,
             Self::Copy => IconName::Copy,
             Self::RotateCcwClock => IconName::RotateCcwClock,
+            Self::RotateCcw => IconName::RotateCcw,
             Self::Minus => IconName::Minus,
             Self::Plus => IconName::Plus,
             Self::Eye => IconName::Eye,
@@ -188,10 +191,12 @@ impl IconNamed for AppIcon {
 // the Processes toolbar icons (UI-PRC-019). `ChevronsRight` is the tab overflow button
 // (E20-015). `CircleOff` and `ShieldAlert` are the Properties exited banner and access block
 // (E23-A1). `Activity` to `SlidersHorizontal` are the Settings window page icons (E21-018).
+// `RotateCcw` is the Set Affinity Reset button (E23-005).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
-        X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square,
+        X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, RotateCcw, ArrowUp, ArrowDown,
+        Square,
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
         Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal
     ]

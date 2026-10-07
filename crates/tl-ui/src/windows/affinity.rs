@@ -7,8 +7,10 @@
 //! `Demand.affinity_targets`, so the engine reads their current mask and cpuset limit into
 //! `DetailsSnapshot.affinity`.
 //!
-//! Several targets, thread targets and mixed marks come in a later bead (E23-005); the state
-//! already has the `MIXED` value they use.
+//! Several targets and thread targets (E23-005, UI-PWN-022): a CPU is ON when every target has
+//! it, MIXED when only some do, OFF when none. A click moves MIXED to ON, ON to OFF and OFF to
+//! ON; only Reset brings MIXED back. OK sends one request per group of targets whose result
+//! masks are equal, all under one toast key, so one toast shows the results in turn (R-197).
 //!
 //! The grid is one focus stop: the arrow keys move a cursor over the CPUs, Space toggles the
 //! CPU under it and Shift+Space its group. The CPU checkboxes inside are no tab stops.
@@ -26,7 +28,7 @@ use gpui_kit::{
     Window, WindowHandle, div, px, size,
 };
 use smallvec::SmallVec;
-use tl_model::actions::{ActionKind, ActionRequest, ActionTarget};
+use tl_model::actions::{ActionKind, ActionRequest, ActionState, ActionTarget};
 use tl_model::demand::Demand;
 use tl_model::details::AffinityInfo;
 use tl_model::ids::ProcessKey;
@@ -34,13 +36,13 @@ use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::system::{CoreKind, CpuSet, CpuTopology};
 use tracing::warn;
 
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
-use crate::components::button::{TlButton, TlButtonKind};
+use crate::action_tracker::{GlobalActionTracker, SummaryTexts, ToastTexts, short_reason};
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::checkbox::{CheckboxLabelStyle, TlCheckbox};
 use crate::components::focus::TlFocusRing;
-use crate::components::icons::AppIcon;
+use crate::components::icons::{AppIcon, TlIcon};
 use crate::components::input::{TlInputSize, TlTextInput};
-use crate::components::toast::ToastQueue;
+use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::TlSecondaryWindow;
 use crate::demand::GlobalDemand;
@@ -51,7 +53,8 @@ use crate::text::style::{label_style, t_sm, t_xs};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{
     AFFINITY_DIALOG_CONTEXT, AffinityApply, AffinityEnd, AffinityHome, AffinityMoveDown,
-    AffinityMoveLeft, AffinityMoveRight, AffinityMoveUp, AffinityToggle, AffinityToggleGroup,
+    AffinityMoveLeft, AffinityMoveRight, AffinityMoveUp, AffinityReset, AffinityToggle,
+    AffinityToggleGroup,
 };
 use crate::windows::frame::{AFFINITY_HEIGHT, PwnWindow, open_pwn};
 
@@ -78,6 +81,7 @@ const HELPER_H: f32 = 16.;
 const FOOTER_H: f32 = 52.;
 const LIST_W: f32 = 200.;
 const ALERT_ICON: f32 = 14.;
+const RESET_ICON: f32 = 12.;
 
 const KEY_TITLE: &str = "pwn-affinity-title";
 const KEY_LOADING: &str = "pwn-affinity-subtitle-loading";
@@ -103,6 +107,18 @@ const KEY_OK: &str = "pwn-affinity-ok";
 const KEY_CANCEL: &str = "pwn-affinity-cancel";
 const KEY_TOAST_OK: &str = "pwn-affinity-toast-success";
 const KEY_TOAST_FAIL: &str = "pwn-affinity-toast-failure";
+const KEY_SUB_PROCESS: &str = "pwn-affinity-subtitle-process";
+const KEY_SUB_PROCESSES: &str = "pwn-affinity-subtitle-processes";
+const KEY_SUB_THREAD: &str = "pwn-affinity-subtitle-thread";
+const KEY_SUB_THREADS: &str = "pwn-affinity-subtitle-threads";
+const KEY_SUB_APP: &str = "pwn-affinity-subtitle-app";
+const KEY_RESET: &str = "pwn-affinity-reset";
+const KEY_MIXED_HELPER: &str = "pwn-affinity-mixed-helper";
+const KEY_MIXED_TIP: &str = "pwn-affinity-mixed-tooltip";
+const KEY_TOAST_MANY: &str = "pwn-affinity-toast-success-many";
+const KEY_TOAST_PARTIAL: &str = "pwn-affinity-toast-partial";
+const KEY_TOAST_THREADS: &str = "pwn-affinity-toast-threads";
+const KEY_TOAST_PARTIAL_THREADS: &str = "pwn-affinity-toast-partial-threads";
 
 // ---- CPU lists ----
 
@@ -211,13 +227,109 @@ impl CpuTriState {
 
     /// The CPUs marked `ON`.
     pub fn on_set(&self) -> CpuSet {
+        self.marked(ON)
+    }
+
+    /// The CPUs marked `MIXED`.
+    pub fn mixed_set(&self) -> CpuSet {
+        self.marked(MIXED)
+    }
+
+    fn marked(&self, mark: u8) -> CpuSet {
         let mut set = CpuSet::empty();
-        for (cpu, &mark) in self.0.iter().enumerate() {
-            if mark == ON {
+        for (cpu, &m) in self.0.iter().enumerate() {
+            if m == mark {
                 set.insert(cpu as u16);
             }
         }
         set
+    }
+
+    /// The marks for `masks` inside `allowed`: ON in every mask, MIXED in some, else OFF.
+    pub fn from_masks(masks: &[CpuSet], allowed: &CpuSet) -> Self {
+        let Some((first, rest)) = masks.split_first() else {
+            return Self::default();
+        };
+        let (every, any) = rest.iter().fold((*first, *first), |(every, any), m| {
+            (every.intersection(m), union(&any, m))
+        });
+        let mut out = Self::from_set(&every.intersection(allowed));
+        for cpu in any.intersection(allowed).iter() {
+            if out.get(cpu) != ON {
+                out.set(cpu, MIXED);
+            }
+        }
+        out
+    }
+}
+
+/// The CPUs in `a` or `b`.
+fn union(a: &CpuSet, b: &CpuSet) -> CpuSet {
+    let mut out = *a;
+    for cpu in b.iter() {
+        out.insert(cpu);
+    }
+    out
+}
+
+/// The click cycle: MIXED to ON, ON to OFF, OFF to ON.
+pub fn next_mark(mark: u8) -> u8 {
+    if mark == ON { OFF } else { ON }
+}
+
+/// Per target, the mask OK sets: the ON CPUs plus the MIXED CPUs the target has now. Targets
+/// with equal result masks are grouped, in target order.
+pub fn group_masks(
+    state: &CpuTriState,
+    targets: &[ActionTarget],
+    initial: &[CpuSet],
+) -> SmallVec<[(CpuSet, SmallVec<[ActionTarget; 4]>); 4]> {
+    let on = state.on_set();
+    let mixed = state.mixed_set();
+    let mut out: SmallVec<[(CpuSet, SmallVec<[ActionTarget; 4]>); 4]> = SmallVec::new();
+    for (i, target) in targets.iter().enumerate() {
+        let current = initial.get(i).copied().unwrap_or_default();
+        let mask = union(&on, &current.intersection(&mixed));
+        match out.iter_mut().find(|(m, _)| *m == mask) {
+            Some((_, group)) => group.push(target.clone()),
+            None => out.push((mask, smallvec::smallvec![target.clone()])),
+        }
+    }
+    out
+}
+
+/// Who the dialog is for; [`subtitle`] turns it into the subtitle line (UI-PWN-022).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AffinitySubject {
+    /// `firefox (PID 4321)`.
+    Process { name: SharedString, pid: u32 },
+    /// `4 processes`.
+    Processes(usize),
+    /// `Thread 4325 of firefox (PID 4321)`.
+    Thread {
+        tid: u32,
+        name: SharedString,
+        pid: u32,
+    },
+    /// `3 threads of firefox (PID 4321)`.
+    Threads {
+        n: usize,
+        name: SharedString,
+        pid: u32,
+    },
+    /// `Firefox (34 processes)`.
+    App { name: SharedString, n: usize },
+}
+
+/// The subtitle line for `subject`.
+pub fn subtitle(subject: &AffinitySubject, cx: &mut App) -> SharedString {
+    let w = affinity_words(cx);
+    match subject {
+        AffinitySubject::Process { name, pid } => fill(&w.sub_process, &[name, pid]),
+        AffinitySubject::Processes(n) => fill(&w.sub_processes, &[n]),
+        AffinitySubject::Thread { tid, name, pid } => fill(&w.sub_thread, &[tid, name, pid]),
+        AffinitySubject::Threads { n, name, pid } => fill(&w.sub_threads, &[n, name, pid]),
+        AffinitySubject::App { name, n } => fill(&w.sub_app, &[name, n]),
     }
 }
 
@@ -429,6 +541,21 @@ pub struct AffinityWords {
     pub cancel: SharedString,
     pub toast_success: SharedString,
     pub toast_failure: SharedString,
+    sub_process: Template,
+    sub_processes: Template,
+    sub_thread: Template,
+    sub_threads: Template,
+    sub_app: Template,
+    pub reset: SharedString,
+    pub mixed_helper: SharedString,
+    pub mixed_tooltip: SharedString,
+    /// Several processes: "Selected process affinity updated."
+    pub toast_success_many: SharedString,
+    /// "Affinity updated for {ok} of {total} processes. {failed} failed: {reason}".
+    toast_partial: Template,
+    pub toast_threads: SharedString,
+    /// "Affinity updated for {ok} of {total} threads. {failed} failed: {reason}".
+    toast_partial_threads: Template,
 }
 
 impl AffinityWords {
@@ -458,6 +585,21 @@ impl AffinityWords {
             cancel: t(KEY_CANCEL),
             toast_success: t(KEY_TOAST_OK),
             toast_failure: t(KEY_TOAST_FAIL),
+            sub_process: tmpl(KEY_SUB_PROCESS, &["name", "pid"]),
+            sub_processes: tmpl(KEY_SUB_PROCESSES, &["n"]),
+            sub_thread: tmpl(KEY_SUB_THREAD, &["tid", "name", "pid"]),
+            sub_threads: tmpl(KEY_SUB_THREADS, &["n", "name", "pid"]),
+            sub_app: tmpl(KEY_SUB_APP, &["name", "n"]),
+            reset: t(KEY_RESET),
+            mixed_helper: t(KEY_MIXED_HELPER),
+            mixed_tooltip: t(KEY_MIXED_TIP),
+            toast_success_many: t(KEY_TOAST_MANY),
+            toast_partial: tmpl(KEY_TOAST_PARTIAL, &["ok", "total", "failed", "reason"]),
+            toast_threads: t(KEY_TOAST_THREADS),
+            toast_partial_threads: tmpl(
+                KEY_TOAST_PARTIAL_THREADS,
+                &["ok", "total", "failed", "reason"],
+            ),
         }
     }
 
@@ -486,6 +628,16 @@ impl AffinityWords {
             GroupLabel::ECores => fill(&self.group_e, &[&list]),
             GroupLabel::Cpus => fill(&self.group_cpus, &[&list]),
         }
+    }
+
+    /// "Affinity updated for {ok} of {total} processes. {failed} failed: {reason}".
+    pub fn partial(&self, ok: u16, total: u16, reason: &str, threads: bool) -> SharedString {
+        let template = if threads {
+            &self.toast_partial_threads
+        } else {
+            &self.toast_partial
+        };
+        fill(template, &[&ok, &total, &(total - ok), &reason])
     }
 
     /// `CPU {n}`.
@@ -558,6 +710,8 @@ fn words_now(cx: &App) -> Rc<AffinityWords> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CpuView {
     pub checked: bool,
+    /// Set for some of the targets only: the checkbox shows its indeterminate mark.
+    pub mixed: bool,
     pub disabled: bool,
     pub tooltip: Option<SharedString>,
 }
@@ -575,7 +729,12 @@ pub struct AffinityDialog {
     targets: SmallVec<[ActionTarget; 1]>,
     /// The mask of each target, once `DetailsSnapshot.affinity` has it.
     initial: Vec<CpuSet>,
+    /// The caller's masks per target (thread targets: `ThreadRow.cpus`), used instead of the
+    /// process masks in `DetailsSnapshot.affinity`.
+    given: Option<Vec<CpuSet>>,
     state: CpuTriState,
+    /// The marks when the masks arrived; Reset returns to them.
+    initial_state: CpuTriState,
     list_input: Entity<InputState>,
     loading: bool,
     subtitle: SharedString,
@@ -601,12 +760,28 @@ pub struct AffinityDialog {
 /// Opens the Set Affinity dialog for `targets`, modal to `parent`. `subtitle` is
 /// `{name} (PID {pid})`. Returns the open error and opens nothing on failure.
 pub fn open(
-    mut targets: SmallVec<[ActionTarget; 1]>,
+    targets: SmallVec<[ActionTarget; 1]>,
     subtitle: SharedString,
     parent: AnyWindowHandle,
     cx: &mut App,
 ) -> gpui_kit::Result<WindowHandle<Root>> {
+    open_with_masks(targets, subtitle, None, parent, cx)
+}
+
+/// [`open`] with the current mask of each target given by the caller, one per target in order:
+/// thread targets pass `ThreadRow.cpus`. The cpuset limit still comes from the process's
+/// `AffinityInfo`.
+pub fn open_with_masks(
+    mut targets: SmallVec<[ActionTarget; 1]>,
+    subtitle: SharedString,
+    mut given: Option<Vec<CpuSet>>,
+    parent: AnyWindowHandle,
+    cx: &mut App,
+) -> gpui_kit::Result<WindowHandle<Root>> {
     targets.truncate(MAX_TARGETS);
+    if let Some(given) = &mut given {
+        given.truncate(MAX_TARGETS);
+    }
     let title = affinity_words(cx).title.clone();
     let parent_toasts = parent
         .update(cx, |_, window, cx| ToastQueue::of_window(window, cx))
@@ -619,7 +794,7 @@ pub fn open(
         title,
         Some(parent),
         move |window, cx| {
-            cx.new(|cx| AffinityDialog::new(targets, subtitle, parent_toasts, window, cx))
+            cx.new(|cx| AffinityDialog::new(targets, subtitle, given, parent_toasts, window, cx))
         },
     )
 }
@@ -633,6 +808,7 @@ impl AffinityDialog {
     fn new(
         targets: SmallVec<[ActionTarget; 1]>,
         subtitle: SharedString,
+        given: Option<Vec<CpuSet>>,
         parent_toasts: Option<WeakEntity<ToastQueue>>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -672,7 +848,15 @@ impl AffinityDialog {
             let id = cx.entity_id();
             let part = Demand {
                 any_surface_visible: true,
-                affinity_targets: target_keys(&targets).collect::<Vec<_>>().into(),
+                affinity_targets: {
+                    let mut keys: Vec<ProcessKey> = Vec::new();
+                    for key in target_keys(&targets) {
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
+                    keys.into()
+                },
                 ..Demand::default()
             };
             let handle = window.window_handle();
@@ -687,7 +871,9 @@ impl AffinityDialog {
         let mut this = Self {
             targets,
             initial: Vec::new(),
+            given,
             state: CpuTriState::default(),
+            initial_state: CpuTriState::default(),
             list_input,
             loading: true,
             subtitle,
@@ -751,9 +937,12 @@ impl AffinityDialog {
             && !self.targets.is_empty()
         {
             self.loading = false;
-            self.initial = infos.iter().map(|i| i.mask).collect();
-            let first = self.initial.first().copied().unwrap_or_default();
-            self.state = CpuTriState::from_set(&first.intersection(&self.allowed));
+            self.initial = match &self.given {
+                Some(given) if given.len() == self.targets.len() => given.clone(),
+                _ => infos.iter().map(|i| i.mask).collect(),
+            };
+            self.state = CpuTriState::from_masks(&self.initial, &self.allowed);
+            self.initial_state = self.state.clone();
             self.write_list(window, cx);
             changed = true;
         }
@@ -858,12 +1047,34 @@ impl AffinityDialog {
     }
 
     /// Nothing is checked: the validation line shows.
+    /// With several targets: no ON and no MIXED CPU.
     pub fn nothing_checked(&self) -> bool {
-        !self.loading && self.checked().is_empty()
+        !self.loading && self.checked().is_empty() && self.state.mixed_set().is_empty()
     }
 
     pub fn ok_enabled(&self) -> bool {
-        !self.loading && !self.list_invalid && !self.checked().is_empty()
+        !self.loading && !self.list_invalid && !self.nothing_checked()
+    }
+
+    /// Some CPU is MIXED: the helper under the field shows.
+    pub fn has_mixed(&self) -> bool {
+        !self.loading && !self.state.mixed_set().is_empty()
+    }
+
+    /// Reset shows with several targets.
+    pub fn reset_shown(&self) -> bool {
+        self.targets.len() > 1
+    }
+
+    /// The marks Reset returns to.
+    pub fn initial_state(&self) -> &CpuTriState {
+        &self.initial_state
+    }
+
+    /// Per target, ON set, OFF cleared and MIXED kept from that target's current mask; targets
+    /// with equal results grouped.
+    pub fn resulting_masks(&self) -> SmallVec<[(CpuSet, SmallVec<[ActionTarget; 4]>); 4]> {
+        group_masks(&self.state, &self.targets, &self.initial)
     }
 
     /// The OK tooltip while OK is disabled by an empty selection.
@@ -895,7 +1106,10 @@ impl AffinityDialog {
             _ => None,
         };
         let outside = matches!(block, Some(CpuBlock::Offline | CpuBlock::Cpuset));
+        let mixed = !outside && self.state.get(cpu) == MIXED;
+        let tooltip = tooltip.or_else(|| mixed.then(|| words.mixed_tooltip.clone()));
         CpuView {
+            mixed,
             checked: !outside && self.state.get(cpu) == ON,
             disabled: block.is_some(),
             tooltip,
@@ -937,6 +1151,22 @@ impl AffinityDialog {
         cx.notify();
     }
 
+    /// A click on CPU `cpu`: MIXED to ON, ON to OFF, OFF to ON.
+    pub fn cycle_cpu(&mut self, cpu: u16, window: &mut Window, cx: &mut Context<Self>) {
+        let on = next_mark(self.state.get(cpu)) == ON;
+        self.set_cpu(cpu, on, window, cx);
+    }
+
+    /// Reset: every CPU back to its mark when the dialog opened, MIXED included.
+    pub fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.state = self.initial_state.clone();
+        self.write_list(window, cx);
+        cx.notify();
+    }
+
     /// Sets every allowed CPU in `cpus` to `on`.
     fn set_many(&mut self, cpus: CpuSet, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
@@ -964,15 +1194,19 @@ impl AffinityDialog {
         self.set_many(cpus, on, window, cx);
     }
 
-    /// Sends one `SetAffinity` request for the checked CPUs and closes the dialog. Does nothing
-    /// while OK is disabled.
+    /// Sends one `SetAffinity` request per group of [`Self::resulting_masks`] and closes the
+    /// dialog. Every request uses the first request's toast key, so one toast shows and each
+    /// result replaces it (R-197). Does nothing while OK is disabled.
     pub fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.ok_enabled() {
             return;
         }
-        let mask = self.checked();
+        let groups = self.resulting_masks();
         let words = affinity_words(cx);
-        let texts = ToastTexts::new(words.toast_success.clone(), words.toast_failure.clone());
+        let threads = self
+            .targets
+            .iter()
+            .all(|t| matches!(t, ActionTarget::Thread { .. }));
         let queue = self
             .parent_toasts
             .clone()
@@ -983,13 +1217,19 @@ impl AffinityDialog {
         ) {
             (Some(tracker), Some(queue)) => {
                 tracker.update(cx, |t, cx| {
-                    let request = ActionRequest {
-                        id: t.next_id(),
-                        kind: ActionKind::SetAffinity(mask),
-                        targets: self.targets.clone(),
-                        privileged: false,
-                    };
-                    t.track_or_toast(request, queue, texts, cx);
+                    let mut key = None;
+                    for (mask, targets) in groups {
+                        let id = t.next_id();
+                        let key = *key.get_or_insert(ToastKey(id.0));
+                        let texts = toast_texts(&words, targets.len(), threads, key);
+                        let request = ActionRequest {
+                            id,
+                            kind: ActionKind::SetAffinity(mask),
+                            targets: targets.into_iter().collect(),
+                            privileged: false,
+                        };
+                        t.track_or_toast(request, queue.clone(), texts, cx);
+                    }
                 });
             }
             _ => warn!(target: "tasklens::ui", "affinity not sent: no action tracker or toasts"),
@@ -1054,8 +1294,7 @@ impl AffinityDialog {
     fn on_toggle(&mut self, _: &AffinityToggle, window: &mut Window, cx: &mut Context<Self>) {
         self.in_grid(window, cx, |this, window, cx| {
             if let Some(cpu) = this.cursor {
-                let on = this.state.get(cpu) != ON;
-                this.set_cpu(cpu, on, window, cx);
+                this.cycle_cpu(cpu, window, cx);
             }
         });
     }
@@ -1105,11 +1344,55 @@ impl AffinityDialog {
         if self.list_invalid {
             body += HELPER_H * scale + gap;
         }
+        if self.has_mixed() {
+            body += HELPER_H * scale + gap;
+        }
         if self.nothing_checked() {
             body += VALIDATION_H * scale + gap;
         }
         body + 2. * pad + FOOTER_H * scale
     }
+}
+
+/// The toast texts of one request with `n` targets, under the dialog's shared `key`.
+fn toast_texts(words: &Rc<AffinityWords>, n: usize, threads: bool, key: ToastKey) -> ToastTexts {
+    let success = if threads {
+        words.toast_threads.clone()
+    } else if n > 1 {
+        words.toast_success_many.clone()
+    } else {
+        words.toast_success.clone()
+    };
+    let mut texts = ToastTexts::new(success.clone(), words.toast_failure.clone());
+    texts.toast_key = Some(key);
+    // Two or more targets: one summary toast on the shared key, not one toast per target.
+    {
+        let words = words.clone();
+        texts.summary_min_targets = 2;
+        texts.summary = Some(SummaryTexts {
+            started_kind: ToastKind::Info,
+            ..SummaryTexts::new(
+                SharedString::default(),
+                success,
+                move |ok, total, failures: &[(u16, &ActionState)]| {
+                    let reason = failures
+                        .iter()
+                        .find_map(|(_, state)| match state {
+                            ActionState::Failed(err) => Some(short_reason(err)),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let kind = if ok == 0 {
+                        ToastKind::Error
+                    } else {
+                        ToastKind::Warning
+                    };
+                    (kind, words.partial(ok, total, &reason, threads))
+                },
+            )
+        });
+    }
+    texts
 }
 
 /// The process keys of `targets` (a thread target counts as its process).
@@ -1195,6 +1478,17 @@ impl Render for AffinityDialog {
             *helper.text_style() = t_xs(&m);
             helper.child(words.invalid_list.clone())
         });
+        let mixed_helper = self.has_mixed().then(|| {
+            let mut helper = div()
+                .debug_selector(|| "AffinityMixedHelper".into())
+                .flex_none()
+                .flex()
+                .justify_end()
+                .h(px(HELPER_H * s))
+                .text_color(theme.text_secondary);
+            *helper.text_style() = t_xs(&m);
+            helper.child(words.mixed_helper.clone())
+        });
 
         // Groups and tiles.
         let grid_focused = self.grid_focus.is_focused(window);
@@ -1250,15 +1544,15 @@ impl Render for AffinityDialog {
                     let cpu_view = self.cpu_view_in(cpu, &words);
                     let view = view.clone();
                     let check = TlCheckbox::new(("AffinityCpu", usize::from(cpu)))
-                        .checked(Some(cpu_view.checked))
+                        .checked((!cpu_view.mixed).then_some(cpu_view.checked))
                         .label(words.cpu(cpu))
                         .label_style(CheckboxLabelStyle::SmallNumeric)
                         .tab_stop(false)
                         .disabled(cpu_view.disabled)
-                        .on_change(move |on, window, cx| {
+                        .on_change(move |_, window, cx| {
                             let _ = view.update(cx, |this, cx| {
                                 this.cursor = Some(cpu);
-                                this.set_cpu(cpu, on, window, cx);
+                                this.cycle_cpu(cpu, window, cx);
                             });
                         });
                     let mut row = row.id(("AffinityCpuRow", usize::from(cpu))).child(check);
@@ -1370,17 +1664,27 @@ impl Render for AffinityDialog {
         if self.nothing_checked() {
             ok = ok.tooltip(words.validation.clone());
         }
+        let reset = self.reset_shown().then(|| {
+            TlButton::new("AffinityReset", TlButtonKind::Ghost)
+                .size(TlButtonSize::Sm)
+                .icon(TlIcon::RotateCcw)
+                .icon_size(px(RESET_ICON * s))
+                .label(words.reset.clone())
+                .disabled(self.loading)
+                .action(Box::new(AffinityReset))
+        });
         let footer = div()
             .debug_selector(|| "AffinityFooter".into())
             .flex_none()
             .flex()
             .items_center()
-            .justify_end()
             .gap(m.sp[4])
             .h(px(FOOTER_H * s))
             .px(m.sp[6])
             .border_t_1()
             .border_color(theme.divider)
+            .children(reset)
+            .child(div().flex_1())
             .child(cancel)
             .child(ok);
 
@@ -1412,6 +1716,9 @@ impl Render for AffinityDialog {
             .on_action(cx.listener(Self::on_toggle))
             .on_action(cx.listener(Self::on_toggle_group))
             .on_action(cx.listener(Self::on_apply))
+            .on_action(cx.listener(|this, _: &AffinityReset, window, cx| {
+                this.reset(window, cx);
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -1429,6 +1736,7 @@ impl Render for AffinityDialog {
                     .child(subtitle)
                     .child(all_row)
                     .children(helper)
+                    .children(mixed_helper)
                     .child(div().flex_none().h(px(1.)).bg(theme.divider))
                     .child(grid)
                     .children(validation),

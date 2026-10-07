@@ -258,9 +258,9 @@ fn add_set_priority(
     }
 }
 
-/// Item 7: Set Affinity…, on one process, app or unit row (several targets come with E23-005).
+/// Item 7: Set Affinity…, on one process, app or unit row, or on several rows (E23-005).
 fn add_set_affinity(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
-    if !(shape.process || shape.group) {
+    if !(shape.process || shape.group || (shape.multi && !shape.pseudo)) {
         return menu;
     }
     let label = tr(cx, "processes-menu-set-affinity");

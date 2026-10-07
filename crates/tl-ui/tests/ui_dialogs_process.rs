@@ -521,6 +521,328 @@ fn affinity_core_tooltip_names_core_type(cx: &mut TestAppContext) {
     );
 }
 
+// ---- Several targets, mixed marks and thread targets (tasklens-gma.8, UI-PWN-022) ----
+
+fn key_of(pid: u32) -> ProcessKey {
+    ProcessKey { pid, ..key() }
+}
+
+/// The dialog for `targets` with each process key's mask from `masks`, and the parent window
+/// with its toast queue.
+fn open_many(
+    cx: &mut TestAppContext,
+    targets: Vec<ActionTarget>,
+    subtitle: &str,
+    given: Option<Vec<CpuSet>>,
+    masks: &[(ProcessKey, CpuSet)],
+) -> (Rig, Entity<ToastQueue>) {
+    let engine = setup(cx);
+    publish_topology(cx, &engine, topology(&[]));
+    let parent = cx.add_window(|window, cx| {
+        let host = cx.new(|_| Host);
+        Root::new(host, window, cx)
+    });
+    let mut pcx = VisualTestContext::from_window(parent.into(), cx);
+    let queue = pcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
+    pcx.run_until_parked();
+    let subtitle = subtitle.to_owned();
+    let handle = cx
+        .update(|cx| {
+            affinity::open_with_masks(
+                targets.into_iter().collect(),
+                subtitle.into(),
+                given,
+                parent.into(),
+                cx,
+            )
+        })
+        .expect("dialog opens");
+    let dialog = cx
+        .update(|cx| AffinityDialog::find(handle, cx))
+        .expect("dialog content");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+    let masks = masks.to_vec();
+    engine.publish_with(|s| {
+        let details = Arc::make_mut(&mut s.details);
+        for (key, mask) in masks {
+            details.affinity.insert(
+                key,
+                AffinityInfo {
+                    mask,
+                    cpuset_limit: all(),
+                },
+            );
+        }
+        details.header.version += 1;
+    });
+    cx.run_until_parked();
+    let mut rig = Rig {
+        cx: cx.clone(),
+        engine,
+        handle,
+        vcx,
+        dialog,
+    };
+    rig.draw();
+    (rig, queue)
+}
+
+/// Three processes with masks {0,1}, {0,2} and {0}.
+fn three(cx: &mut TestAppContext) -> (Rig, Entity<ToastQueue>) {
+    let masks = [
+        (key_of(1), set([0, 1])),
+        (key_of(2), set([0, 2])),
+        (key_of(3), set([0])),
+    ];
+    let targets = masks
+        .iter()
+        .map(|(k, _)| ActionTarget::Process(*k))
+        .collect();
+    open_many(cx, targets, "3 processes", None, &masks)
+}
+
+fn mark(rig: &mut Rig, cpu: u16) -> u8 {
+    rig.vcx.read(|cx| rig.dialog.read(cx).state().get(cpu))
+}
+
+fn click_cpu(rig: &mut Rig, cpu: u16) {
+    rig.draw();
+    let at = rig
+        .vcx
+        .debug_bounds(Box::leak(
+            format!("TlCheckbox-AffinityCpu-{cpu}").into_boxed_str(),
+        ))
+        .map(|b| b.center());
+    match at {
+        Some(at) => {
+            rig.vcx.simulate_click(at, Default::default());
+            rig.vcx.run_until_parked();
+            rig.draw();
+        }
+        None => rig.update(|d, window, cx| d.cycle_cpu(cpu, window, cx)),
+    }
+}
+
+#[gpui_kit::test]
+fn affinity_mixed_initial_marks(cx: &mut TestAppContext) {
+    let (mut rig, _parent) = three(cx);
+    assert_eq!(mark(&mut rig, 0), affinity::ON);
+    assert_eq!(mark(&mut rig, 1), affinity::MIXED);
+    assert_eq!(mark(&mut rig, 2), affinity::MIXED);
+    assert!((3..32).all(|c| mark(&mut rig, c) == affinity::OFF));
+    // The field lists only ON CPUs; the mixed helper shows; the MIXED box has its tooltip.
+    assert_eq!(rig.list_text(), "0");
+    assert!(rig.vcx.debug_bounds("AffinityMixedHelper").is_some());
+    let view = rig.vcx.read(|cx| rig.dialog.read(cx).cpu_view(1, cx));
+    assert!(view.mixed);
+    assert_eq!(
+        view.tooltip.as_deref(),
+        Some("Set for some of the selected processes")
+    );
+    assert!(
+        rig.vcx.debug_bounds("TlButton-AffinityReset").is_some(),
+        "Reset shows"
+    );
+    assert_eq!(
+        rig.vcx
+            .read(|cx| rig.dialog.read(cx).subtitle(cx).to_string()),
+        "3 processes"
+    );
+}
+
+#[gpui_kit::test]
+fn affinity_mixed_click_sets_all(cx: &mut TestAppContext) {
+    let (mut rig, _parent) = three(cx);
+    click_cpu(&mut rig, 1);
+    assert_eq!(mark(&mut rig, 1), affinity::ON);
+    click_cpu(&mut rig, 1);
+    assert_eq!(mark(&mut rig, 1), affinity::OFF);
+    click_cpu(&mut rig, 1);
+    assert_eq!(mark(&mut rig, 1), affinity::ON);
+    assert_eq!(rig.list_text(), "0-1");
+}
+
+#[gpui_kit::test]
+fn affinity_reset_restores_mixed(cx: &mut TestAppContext) {
+    let (mut rig, _parent) = three(cx);
+    let before = rig.vcx.read(|cx| rig.dialog.read(cx).state().clone());
+    click_cpu(&mut rig, 1);
+    click_cpu(&mut rig, 2);
+    click_cpu(&mut rig, 2);
+    click_cpu(&mut rig, 5);
+    assert_ne!(
+        rig.vcx.read(|cx| rig.dialog.read(cx).state().clone()),
+        before
+    );
+    let reset = rig
+        .vcx
+        .debug_bounds("TlButton-AffinityReset")
+        .expect("Reset drawn");
+    rig.vcx.simulate_click(reset.center(), Default::default());
+    rig.vcx.run_until_parked();
+    rig.draw();
+    assert_eq!(
+        rig.vcx.read(|cx| rig.dialog.read(cx).state().clone()),
+        before
+    );
+    assert_eq!(mark(&mut rig, 1), affinity::MIXED);
+    assert_eq!(rig.list_text(), "0");
+}
+
+#[gpui_kit::test]
+fn affinity_one_target_has_no_reset(cx: &mut TestAppContext) {
+    let mut rig = open(cx, &[], Some((set(0..4), all())));
+    assert!(rig.vcx.debug_bounds("TlButton-AffinityReset").is_none());
+    assert!(rig.vcx.debug_bounds("AffinityMixedHelper").is_none());
+}
+
+#[gpui_kit::test]
+fn affinity_ok_groups_targets_by_mask(cx: &mut TestAppContext) {
+    let (mut rig, parent) = three(cx);
+    // CPU 2 ON: results {0,1,2}, {0,2}, {0,2}; CPU 1 stays MIXED.
+    click_cpu(&mut rig, 2);
+    let groups = rig.vcx.read(|cx| rig.dialog.read(cx).resulting_masks());
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].0, set([0, 1, 2]));
+    assert_eq!(&groups[0].1[..], &[ActionTarget::Process(key_of(1))]);
+    assert_eq!(groups[1].0, set([0, 2]));
+    assert_eq!(
+        &groups[1].1[..],
+        &[
+            ActionTarget::Process(key_of(2)),
+            ActionTarget::Process(key_of(3))
+        ]
+    );
+
+    let dialog = rig.dialog.clone();
+    rig.vcx
+        .update(|window, cx| dialog.update(cx, |d, cx| d.apply(window, cx)));
+    rig.cx.run_until_parked();
+    let sent = rig.actions_sent();
+    assert_eq!(sent.len(), 2, "one request per group");
+    assert_eq!(sent[0].kind, ActionKind::SetAffinity(set([0, 1, 2])));
+    assert_eq!(sent[1].kind, ActionKind::SetAffinity(set([0, 2])));
+    for req in &sent {
+        rig.engine.emit(tl_model::actions::ActionEvent {
+            id: req.id,
+            target: None,
+            state: tl_model::actions::ActionState::Succeeded,
+        });
+        rig.cx.run_until_parked();
+    }
+    let toasts = rig.cx.read(|cx| {
+        parent
+            .read(cx)
+            .visible_texts()
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        toasts,
+        ["Selected process affinity updated."],
+        "one toast id"
+    );
+}
+
+#[gpui_kit::test]
+fn affinity_thread_targets_subtitle_and_toast(cx: &mut TestAppContext) {
+    let targets = vec![
+        ActionTarget::Thread {
+            process: key(),
+            tid: 4325,
+        },
+        ActionTarget::Thread {
+            process: key(),
+            tid: 4326,
+        },
+    ];
+    let subject = affinity::AffinitySubject::Threads {
+        n: 2,
+        name: "firefox".into(),
+        pid: 4321,
+    };
+    let subtitle = cx.update(|cx| affinity::subtitle(&subject, cx).to_string());
+    assert_eq!(subtitle, "2 threads of firefox (PID 4321)");
+    // The thread masks come from the Threads payload; the process mask is not used.
+    let given = vec![set([0, 1]), set([0, 1])];
+    let (mut rig, parent) = open_many(
+        cx,
+        targets.clone(),
+        &subtitle,
+        Some(given),
+        &[(key(), set(0..32))],
+    );
+    assert_eq!(rig.list_text(), "0-1");
+    assert_eq!(
+        rig.vcx
+            .read(|cx| rig.dialog.read(cx).subtitle(cx).to_string()),
+        "2 threads of firefox (PID 4321)"
+    );
+    assert_eq!(rig.demanded(), [key()], "the process once");
+    let dialog = rig.dialog.clone();
+    rig.vcx
+        .update(|window, cx| dialog.update(cx, |d, cx| d.apply(window, cx)));
+    rig.cx.run_until_parked();
+    let sent = rig.actions_sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(&sent[0].targets[..], &targets[..]);
+    rig.engine.emit(tl_model::actions::ActionEvent {
+        id: sent[0].id,
+        target: None,
+        state: tl_model::actions::ActionState::Succeeded,
+    });
+    rig.cx.run_until_parked();
+    let toasts = rig.cx.read(|cx| {
+        parent
+            .read(cx)
+            .visible_texts()
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(toasts, ["Thread affinity updated"]);
+}
+
+#[gpui_kit::test]
+fn affinity_subtitle_forms(cx: &mut TestAppContext) {
+    setup(cx);
+    use affinity::AffinitySubject as S;
+    let cases = [
+        (
+            S::Process {
+                name: "firefox".into(),
+                pid: 4321,
+            },
+            "firefox (PID 4321)",
+        ),
+        (S::Processes(4), "4 processes"),
+        (
+            S::Thread {
+                tid: 4325,
+                name: "firefox".into(),
+                pid: 4321,
+            },
+            "Thread 4325 of firefox (PID 4321)",
+        ),
+        (
+            S::App {
+                name: "Firefox".into(),
+                n: 34,
+            },
+            "Firefox (34 processes)",
+        ),
+    ];
+    for (subject, want) in cases {
+        assert_eq!(
+            cx.update(|cx| affinity::subtitle(&subject, cx).to_string()),
+            want
+        );
+    }
+}
+
 // ---- VirusTotal notice and hashing toast (tasklens-gma.3, UI-PWN-036) ----
 
 mod virustotal {

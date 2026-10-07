@@ -52,7 +52,7 @@ use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
 use crate::components::toast::ToastKind;
 use crate::demand::GlobalDemand;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
-use crate::i18n::{Strings, tr, tr_args};
+use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::panel::MinigraphPanel;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::{CollapseAll, CopyCell};
@@ -557,35 +557,65 @@ impl ProcessesPage {
     /// Set Affinity… (UI-PRC-021): opens the dialog for the one captured row. An app or unit
     /// row gives its current member processes, at most [`MAX_TARGETS`].
     fn on_set_affinity(&mut self, _: &SetAffinity, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::windows::affinity::{AffinitySubject, subtitle};
         let Some((rows, _)) = self.prune(|_| None, cx) else {
-            return;
-        };
-        let [t] = &rows[..] else {
             return;
         };
         let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
         let p = &snapshot.processes;
-        let keys: Vec<ProcessKey> = match (t.kind, &t.node) {
-            (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => vec![*key],
-            (RowKind::App | RowKind::Unit, node) => members(p, node)
-                .into_iter()
-                .take(MAX_TARGETS)
-                .map(|i| p.records[i].key)
-                .collect(),
-            _ => Vec::new(),
+        let (keys, subject): (Vec<ProcessKey>, _) = match &rows[..] {
+            [t] => {
+                let keys: Vec<ProcessKey> = match (t.kind, &t.node) {
+                    (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => vec![*key],
+                    (RowKind::App | RowKind::Unit, node) => members(p, node)
+                        .into_iter()
+                        .take(MAX_TARGETS)
+                        .map(|i| p.records[i].key)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let Some(first) = keys.first() else {
+                    return;
+                };
+                let name = t.name.clone();
+                let subject = match t.kind {
+                    RowKind::App | RowKind::Unit => AffinitySubject::App {
+                        name,
+                        n: keys.len(),
+                    },
+                    _ => AffinitySubject::Process {
+                        name,
+                        pid: t.pid.unwrap_or(first.pid),
+                    },
+                };
+                (keys, subject)
+            }
+            // Several rows (E23-005): their processes, each once.
+            rows => {
+                let mut keys: Vec<ProcessKey> = Vec::new();
+                for t in rows {
+                    if let (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) =
+                        (t.kind, &t.node)
+                        && !keys.contains(key)
+                        && keys.len() < MAX_TARGETS
+                    {
+                        keys.push(*key);
+                    }
+                }
+                let subject = match (&keys[..], rows.first()) {
+                    ([key], Some(t)) => AffinitySubject::Process {
+                        name: t.name.clone(),
+                        pid: key.pid,
+                    },
+                    _ => AffinitySubject::Processes(keys.len()),
+                };
+                (keys, subject)
+            }
         };
-        let Some(first) = keys.first() else {
+        if keys.is_empty() {
             return;
-        };
-        let pid = t.pid.unwrap_or(first.pid);
-        let subtitle = tr_args(
-            cx,
-            "processes-affinity-subtitle",
-            &[
-                ("name", t.name.to_string().into()),
-                ("pid", pid.to_string().into()),
-            ],
-        );
+        }
+        let subtitle = subtitle(&subject, cx);
         let targets = keys.into_iter().map(ActionTarget::Process).collect();
         if let Err(err) =
             crate::windows::affinity::open(targets, subtitle, window.window_handle(), cx)
