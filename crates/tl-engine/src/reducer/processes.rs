@@ -59,7 +59,10 @@ struct GpuValue {
     mem_bytes: u64,
     /// Per GPU column, see `ProcessExtrasP2::gpu_vram_bytes`.
     vram: GpuVram,
-    validity: Validity,
+    /// Of `util_pct`.
+    util_validity: Validity,
+    /// Of `mem_bytes` and `vram`.
+    mem_validity: Validity,
 }
 
 /// Per-process PSS values of the last `apply_pss` (or of a sweep that read them).
@@ -93,8 +96,9 @@ pub struct ProcessState {
     /// Per GPU UUID: each key's utilisation on that GPU in the last GPU sample, for the power
     /// estimate (E09-030).
     gpu_by_dev: FxHashMap<[u8; 16], FxHashMap<ProcessKey, f32>>,
-    /// GPU validity of live keys without a sample; `None` before the first GPU sample.
-    gpu_default: Option<Validity>,
+    /// GPU validity (utilization, memory) of live keys without a sample; `None` before the
+    /// first GPU sample.
+    gpu_default: Option<(Validity, Validity)>,
     /// True when the last GPU sample had process rows.
     gpu_process: bool,
     /// UUID and PCI bus id of each GPU, in the order of the `gpu_0` to `gpu_15` columns, from
@@ -104,6 +108,8 @@ pub struct ProcessState {
     /// `apply_drm_vram`. A sample from one GPU worker keeps the other worker's rows.
     gpu_rows: Vec<GpuProcessSample>,
     drm_rows: Vec<DrmProcessVram>,
+    /// True once a DRM worker sent process rows, so a key without a DRM row uses no VRAM.
+    drm_sampled: bool,
     /// PSS values of the detail keys.
     pss: FxHashMap<ProcessKey, PssValue>,
     /// Attributed TCP rates of the last `ConnectionsUpdate`; `None` before the first one.
@@ -144,6 +150,7 @@ impl ProcessState {
             gpu_slots: SmallVec::new(),
             gpu_rows: Vec::new(),
             drm_rows: Vec::new(),
+            drm_sampled: false,
             pss: FxHashMap::default(),
             net: None,
             system_threads: 0,
@@ -266,8 +273,8 @@ impl ProcessState {
         let key = record.key;
         if let Some(g) = self.gpu.get(&key) {
             set_gpu(record, g);
-        } else if let Some(v) = self.gpu_default {
-            set_gpu(record, &GpuValue::none(v));
+        } else if let Some((util, mem)) = self.gpu_default {
+            set_gpu(record, &GpuValue::none(util, mem));
         }
         if let Some(net) = &self.net {
             set_net(record, net.get(&key));
@@ -321,7 +328,8 @@ impl ProcessState {
 
     /// Replaces the DRM rows (AMD and Intel) and applies them with the NVIDIA rows of the last
     /// `apply_gpu_processes`. Each row adds its memory to `gpu_mem_bytes` and to its card's
-    /// column. Utilization and validity come from the NVIDIA rows only, as DRM cards have no
+    /// column, with memory validity `Valid`; a live key without a row then gets a valid 0 memory.
+    /// Utilization and its validity come from the NVIDIA rows only, as DRM cards have no
     /// per-process utilization. Returns the number of keys matched.
     pub fn apply_drm_vram(
         &mut self,
@@ -330,17 +338,22 @@ impl ProcessState {
     ) -> u32 {
         self.drm_rows.clear();
         self.drm_rows.extend_from_slice(rows);
+        self.drm_sampled = true;
         self.apply_gpu_rows(device_caps)
     }
 
     /// Rebuilds the per-key GPU values from `gpu_rows` and `drm_rows`.
     fn apply_gpu_rows(&mut self, device_caps: &FxHashMap<[u8; 16], bool>) -> u32 {
         let any_supported = device_caps.values().any(|&s| s);
-        let default = if any_supported {
-            Validity::Valid
-        } else {
-            Validity::Unsupported
+        let valid_if = |b: bool| {
+            if b {
+                Validity::Valid
+            } else {
+                Validity::Unsupported
+            }
         };
+        let util_default = valid_if(any_supported);
+        let mem_default = valid_if(any_supported || self.drm_sampled);
 
         self.gpu.clear();
         self.gpu_by_dev.clear();
@@ -365,13 +378,14 @@ impl ProcessState {
             let entry = self
                 .gpu
                 .entry(key)
-                .or_insert_with(|| GpuValue::none(Validity::Unsupported));
+                .or_insert_with(|| GpuValue::none(Validity::Unsupported, Validity::Unsupported));
             entry.util_pct = entry.util_pct.max(util);
             entry.mem_bytes = entry.mem_bytes.saturating_add(mem);
             let slot = self.gpu_slots.iter().position(|(u, _)| *u == s.uuid);
             add_vram(entry, slot, mem);
             if supported {
-                entry.validity = Validity::Valid;
+                entry.util_validity = Validity::Valid;
+                entry.mem_validity = Validity::Valid;
             }
         }
         for r in &self.drm_rows {
@@ -381,8 +395,9 @@ impl ProcessState {
             let entry = self
                 .gpu
                 .entry(key)
-                .or_insert_with(|| GpuValue::none(default));
+                .or_insert_with(|| GpuValue::none(util_default, mem_default));
             entry.mem_bytes = entry.mem_bytes.saturating_add(r.vram_bytes);
+            entry.mem_validity = Validity::Valid;
             // DRM cards have no UUID (R-166).
             let slot = self
                 .gpu_slots
@@ -391,12 +406,12 @@ impl ProcessState {
             add_vram(entry, slot, r.vram_bytes);
         }
 
-        let none = GpuValue::none(default);
+        let none = GpuValue::none(util_default, mem_default);
         for live in self.live.values_mut() {
             let g = self.gpu.get(&live.record.key).unwrap_or(&none);
             set_gpu(&mut live.record, g);
         }
-        self.gpu_default = Some(default);
+        self.gpu_default = Some((util_default, mem_default));
         self.gpu_process = !self.gpu_rows.is_empty() || !self.drm_rows.is_empty();
         self.dirty = true;
         u32::try_from(self.gpu.len()).unwrap_or(u32::MAX)
@@ -634,13 +649,14 @@ impl ProcessState {
 }
 
 impl GpuValue {
-    /// No GPU use, with `validity`.
-    fn none(validity: Validity) -> Self {
+    /// No GPU use, with the validity of utilization and of memory.
+    fn none(util_validity: Validity, mem_validity: Validity) -> Self {
         Self {
             util_pct: 0.0,
             mem_bytes: 0,
             vram: GpuVram::new(),
-            validity,
+            util_validity,
+            mem_validity,
         }
     }
 }
@@ -659,11 +675,8 @@ fn add_vram(entry: &mut GpuValue, slot: Option<usize>, bytes: u64) {
 fn set_gpu(record: &mut ProcessRecord, g: &GpuValue) {
     record.gpu_util_pct = g.util_pct;
     record.gpu_mem_bytes = g.mem_bytes;
-    set_fields(
-        &mut record.validity,
-        &[ProcessField::GpuUtil, ProcessField::GpuMem],
-        g.validity,
-    );
+    record.validity.set(ProcessField::GpuUtil, g.util_validity);
+    record.validity.set(ProcessField::GpuMem, g.mem_validity);
 }
 
 fn set_net(record: &mut ProcessRecord, rate: Option<&NetRate>) {
@@ -1198,9 +1211,10 @@ mod tests {
 
         let r = live_record(&state, a);
         assert_eq!(r.gpu_mem_bytes, 6 * GIB);
-        // DRM cards have no per-process utilization.
+        // DRM cards have no per-process utilization, but the memory is known.
         assert_eq!(r.gpu_util_pct, 0.0);
-        assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Unsupported);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+        assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
         assert_eq!(live_record(&state, b).gpu_mem_bytes, GIB);
         let (va, vb) = published_vram(&mut state, a, b);
         assert_eq!(va.as_slice(), [2 * GIB, 0, 4 * GIB]);
@@ -1224,11 +1238,43 @@ mod tests {
             published_vram(&mut state, a, b).0.as_slice(),
             [2 * GIB, GIB]
         );
-        // A DRM-only key takes the default validity.
+        // A DRM-only key takes the default utilization validity.
         state.apply_drm_vram(&rows[3..4], &caps(true));
         let r = live_record(&state, b);
         assert_eq!(r.gpu_mem_bytes, GIB);
         assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
+    }
+
+    #[test]
+    fn drm_rows_make_memory_valid() {
+        const AMD: &str = "0000:03:00.0";
+        let (a, b) = (key(100, 10), key(200, 20));
+        let mut state = ProcessState::new();
+        apply(&mut state, &[a, b], 1_000 * MS);
+        state.set_gpu_slots(&gpus(&[([0; 16], AMD)]));
+        let amd_only: FxHashMap<[u8; 16], bool> = [([0; 16], false)].into_iter().collect();
+
+        // An empty DRM sample: no key uses VRAM, so memory is a valid 0.
+        state.apply_drm_vram(&[], &amd_only);
+        for k in [a, b] {
+            let r = live_record(&state, k);
+            assert_eq!(r.gpu_mem_bytes, 0);
+            assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
+            assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+        }
+
+        state.apply_drm_vram(&[drm(AMD, 100, GIB)], &amd_only);
+        assert_eq!(
+            live_record(&state, a).validity.get(ProcessField::GpuMem),
+            Validity::Valid
+        );
+        // A new key in the next sweep gets the same defaults.
+        let c = key(300, 30);
+        apply(&mut state, &[a, b, c], 2_000 * MS);
+        let r = live_record(&state, c);
+        assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
     }
 
     /// `gpu_vram_bytes` of keys `a` and `b` in the next published snapshot.
@@ -1307,6 +1353,7 @@ mod tests {
         );
         let r = live_record(&state, keys[0]);
         assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+        assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Unsupported);
     }
 
     #[test]

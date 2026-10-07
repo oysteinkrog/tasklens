@@ -19,9 +19,9 @@ use tl_engine::reducer::{DRAIN_MAX, InvariantViolation, Publisher, Reducer};
 use tl_engine::source::{WorkerCommand, WorkerControl};
 use tl_engine::update::{
     ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
-    DeviceKinds, DeviceList, DiskSample, EngineMsg, GpuInfoUpdate, GpuSample, GpuStaticInfo,
-    HelperUpdate, MemorySample, NetSample, ProcessSweep, PssEntry, SensorSample, ServicesUpdate,
-    SourceUpdate, StartupUpdate,
+    DeviceKinds, DeviceList, DiskSample, DrmProcessVram, EngineMsg, GpuInfoUpdate, GpuSample,
+    GpuStaticInfo, HelperUpdate, MemorySample, NetSample, ProcessSweep, PssEntry, SensorSample,
+    ServicesUpdate, SourceUpdate, StartupUpdate,
 };
 use tl_engine::workers::cpu::CpuSource;
 use tl_model::actions::{
@@ -2958,6 +2958,140 @@ fn gpu_sample(cards: &[(&DeviceIdentity, f32)]) -> EngineMsg {
         processes: None,
         drm_processes: None,
     }))
+}
+
+/// `gpu_sample` for `card` with these NVIDIA and DRM process rows.
+fn gpu_rows_msg(
+    card: &DeviceIdentity,
+    nvidia: Option<Vec<GpuProcessSample>>,
+    drm: Option<&[(u32, u64)]>,
+) -> EngineMsg {
+    let mut msg = gpu_sample(&[(card, 10.0)]);
+    let pdev = match card {
+        DeviceIdentity::Gpu { pci_bus_id, .. } => Arc::clone(pci_bus_id),
+        _ => unreachable!("a GPU identity"),
+    };
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut msg {
+        s.processes = nvidia;
+        s.drm_processes = drm.map(|rows| {
+            rows.iter()
+                .map(|&(pid, vram_bytes)| DrmProcessVram {
+                    pdev: Arc::clone(&pdev),
+                    pid,
+                    vram_bytes,
+                })
+                .collect()
+        });
+    }
+    msg
+}
+
+/// `gpu_vram_bytes` of `pid` in `snap`.
+fn vram_of(snap: &Snapshot, pid: u32) -> Vec<u64> {
+    let i = snap
+        .processes
+        .records
+        .iter()
+        .position(|r| r.key == proc_key(pid))
+        .expect("the record is published");
+    snap.processes.extras_p2[i].gpu_vram_bytes.to_vec()
+}
+
+#[test]
+fn drm_vram_valid_on_amd_only() {
+    let mut rig = Rig::new();
+    let amd = gpu_id([0; 16], "0000:03:00.0");
+    rig.run(vec![
+        drm_list(&[&amd]),
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&amd, false)],
+        })),
+        sweep_without_pss(now_boot_ns(), &[1, 2]),
+    ])
+    .expect("no invariant violation");
+    let swept = record_of(&rig.latest(), proc_key(1)).validity;
+    // No worker sent process rows yet: the GPU fields keep the sweep's validity.
+    rig.run(vec![gpu_sample(&[(&amd, 10.0)])])
+        .expect("no invariant violation");
+    assert_eq!(record_of(&rig.latest(), proc_key(1)).validity, swept);
+
+    rig.run(vec![gpu_rows_msg(&amd, None, Some(&[(2, 4096)]))])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    let busy = record_of(&snap, proc_key(2));
+    assert_eq!(busy.gpu_mem_bytes, 4096);
+    assert_eq!(busy.validity.get(ProcessField::GpuMem), Validity::Valid);
+    assert_eq!(
+        busy.validity.get(ProcessField::GpuUtil),
+        Validity::Unsupported,
+        "DRM gives no per-process utilization"
+    );
+    assert_eq!(vram_of(&snap, 2), [4096], "the AMD card is GPU 0");
+    let idle = record_of(&snap, proc_key(1));
+    assert_eq!(idle.gpu_mem_bytes, 0);
+    assert_eq!(
+        idle.validity.get(ProcessField::GpuMem),
+        Validity::Valid,
+        "a process without a DRM row uses no VRAM"
+    );
+    assert_eq!(
+        idle.validity.get(ProcessField::GpuUtil),
+        Validity::Unsupported
+    );
+    assert!(vram_of(&snap, 1).iter().all(|&b| b == 0));
+    rig.passed();
+}
+
+#[test]
+fn drm_vram_valid_with_nvidia_and_amd() {
+    let mut rig = Rig::new();
+    // Columns by PCI bus: NVIDIA GPU 0, AMD GPU 1.
+    let nvidia = gpu_id([9; 16], "00000000:01:00.0");
+    let amd = gpu_id([0; 16], "0000:03:00.0");
+    let nv_row = |pid, mem| GpuProcessSample {
+        uuid: [9; 16],
+        pid,
+        sm_pct: Reading::Ok(20),
+        mem_pct: Reading::Ok(0),
+        enc_pct: Reading::Ok(0),
+        dec_pct: Reading::Ok(0),
+        mem_used: Reading::Ok(mem),
+    };
+    rig.run(vec![
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&nvidia, true)],
+        })),
+        drm_list(&[&amd]),
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&amd, false)],
+        })),
+        sweep_without_pss(now_boot_ns(), &[1, 2, 3]),
+        gpu_rows_msg(&nvidia, Some(vec![nv_row(1, 1000), nv_row(2, 2000)]), None),
+        gpu_rows_msg(&amd, None, Some(&[(2, 300), (3, 400)])),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+
+    // NVIDIA only.
+    let r = record_of(&snap, proc_key(1));
+    assert_eq!(r.gpu_mem_bytes, 1000);
+    assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
+    assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
+    assert_eq!(vram_of(&snap, 1), [1000]);
+    // Both cards.
+    let r = record_of(&snap, proc_key(2));
+    assert_eq!(r.gpu_mem_bytes, 2300);
+    assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
+    assert!((r.gpu_util_pct - 20.0).abs() < f32::EPSILON);
+    assert_eq!(vram_of(&snap, 2), [2000, 300]);
+    // AMD only: utilization is a valid 0 because the NVIDIA card reports per process.
+    let r = record_of(&snap, proc_key(3));
+    assert_eq!(r.gpu_mem_bytes, 400);
+    assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
+    assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
+    assert!(r.gpu_util_pct.abs() < f32::EPSILON);
+    assert_eq!(vram_of(&snap, 3), [0, 400]);
+    rig.passed();
 }
 
 #[test]
