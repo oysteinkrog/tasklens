@@ -2063,7 +2063,8 @@ mod summary {
         assert!(r.vcx.read_entity(&view, |v, _| v.fades()));
         assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_none());
 
-        r.vcx.executor().advance_clock(M_BASE * 2);
+        // GPUI times `with_animation` by the wall clock, not the test clock.
+        std::thread::sleep(M_BASE + M_FAST);
         let seen = frames(&mut r, 8);
         assert_eq!(
             &seen[5..],
