@@ -2811,13 +2811,16 @@ mod main_window {
         use std::rc::Rc;
         use std::time::Duration;
 
-        use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, px};
+        use gpui_kit::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px};
         use tl_model::command::Tab;
+        use tl_model::table::TableMode;
         use tl_ui::actions::{ClearFilter, EscapeChain, FocusFilter, SelectTab};
         use tl_ui::components::input::{FILTER_WIDTH, FILTER_WIDTH_WIDE};
         use tl_ui::settings_global::TlSettings;
         use tl_ui::theme::current;
-        use tl_ui::window::filter::{FILTER_DEBOUNCE, FilterBox, shown_on};
+        use tl_ui::window::filter::{
+            FILTER_DEBOUNCE, FilterBox, include_children_visible, shown_on,
+        };
         use tl_ui::window::main::{FilterChanged, GlobalShellEvents};
 
         use super::{Opts, act, draw, main, page, rig};
@@ -2917,6 +2920,33 @@ mod main_window {
             fn select(&mut self, tab: Tab) {
                 act(&mut self.vcx, SelectTab(tab as usize));
             }
+
+            fn set_mode(&mut self, mode: TableMode) {
+                self.vcx
+                    .update(|_, cx| TlSettings::update(cx, |d| d.settings.processes.mode = mode));
+                self.vcx.run_until_parked();
+                draw(&mut self.vcx);
+            }
+
+            fn include_shown(&mut self) -> bool {
+                self.vcx
+                    .debug_bounds("FilterBox-include-children")
+                    .is_some()
+            }
+
+            fn include_children(&mut self) -> bool {
+                self.vcx
+                    .update(|_, cx| TlSettings::settings(cx).processes.filter_include_children)
+            }
+        }
+
+        /// The main window on Processes in Tree mode, with the `ToggleSetting` handler.
+        fn tree_rig(cx: &mut TestAppContext) -> Rig {
+            let mut r = filter_rig(cx);
+            r.vcx
+                .update(|_, cx| tl_ui::actions::register_global_handlers(cx));
+            r.set_mode(TableMode::Tree);
+            r
         }
 
         #[gpui_kit::test]
@@ -3077,6 +3107,80 @@ mod main_window {
             r.vcx.run_until_parked();
             draw(&mut r.vcx);
             assert_eq!(r.vcx.read_entity(&f, |f, _| f.outline_color()), divider);
+        }
+
+        #[gpui_kit::test]
+        fn include_children_visibility(cx: &mut TestAppContext) {
+            use TableMode::{Flat, Grouped, Tree};
+            assert!(!include_children_visible(Tab::Processes, "", Grouped));
+            assert!(include_children_visible(Tab::Processes, "", Tree));
+            assert!(include_children_visible(Tab::Processes, "ssh", Grouped));
+            assert!(!include_children_visible(Tab::Services, "ssh", Grouped));
+            assert!(!include_children_visible(Tab::Services, "", Tree));
+            assert!(!include_children_visible(Tab::Processes, "", Flat));
+
+            let mut r = filter_rig(cx);
+            assert!(!r.include_shown(), "grouped, empty filter");
+            r.set_mode(TableMode::Tree);
+            assert!(r.include_shown(), "tree, empty filter");
+
+            // Drawn left of the outline, 16 px away, and counted in the box width.
+            let include = r.vcx.debug_bounds("FilterBox-include-children").unwrap();
+            let outline = r.vcx.debug_bounds("FilterBox-outline").unwrap();
+            let drawn = r.vcx.debug_bounds("FilterBox").unwrap();
+            assert_eq!(include.right() + px(16.), outline.left());
+            assert_eq!(drawn.left(), include.left());
+            let f = r.filter();
+            assert_eq!(r.vcx.read_entity(&f, |f, _| f.width()), drawn.size.width);
+
+            r.set_mode(TableMode::Grouped);
+            assert!(!r.include_shown());
+            r.type_settled("ssh");
+            assert!(r.include_shown(), "grouped, filter ssh");
+
+            r.select(Tab::Services);
+            r.type_settled("ssh");
+            assert!(!r.include_shown(), "Services, filter ssh");
+        }
+
+        #[gpui_kit::test]
+        fn include_children_toggles_setting(cx: &mut TestAppContext) {
+            let mut r = tree_rig(cx);
+            assert!(!r.include_children());
+            assert!(r.vcx.debug_bounds("TlCheckbox-check").is_none());
+            let label = r
+                .vcx
+                .debug_bounds("FilterBox-include-children-label")
+                .expect("label drawn");
+            r.vcx.simulate_click(label.center(), Modifiers::none());
+            r.vcx.run_until_parked();
+            draw(&mut r.vcx);
+            assert!(r.include_children());
+            assert!(
+                r.vcx.debug_bounds("TlCheckbox-check").is_some(),
+                "the box shows checked"
+            );
+        }
+
+        /// The main window binds no Tab key yet, so `focus_next` stands in for it: it walks the
+        /// same GPUI tab order.
+        #[gpui_kit::test]
+        fn include_children_tab_stop(cx: &mut TestAppContext) {
+            let mut r = tree_rig(cx);
+            r.focus_filter();
+            let next = |r: &mut Rig| {
+                r.vcx.update(|window, cx| window.focus_next(cx));
+                r.vcx.run_until_parked();
+                draw(&mut r.vcx);
+            };
+            next(&mut r);
+            assert!(!r.filter_focused());
+            assert!(!r.page_focused());
+            r.vcx.simulate_keystrokes("space");
+            r.vcx.run_until_parked();
+            assert!(r.include_children(), "Space toggles the focused checkbox");
+            next(&mut r);
+            assert!(r.page_focused(), "the page follows the checkbox");
         }
     }
 }

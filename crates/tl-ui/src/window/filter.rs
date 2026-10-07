@@ -17,6 +17,10 @@
 //!
 //! Moving focus to the active page is the main window's job: the box emits [`ReturnFocus`] and
 //! `MainWindow` focuses the page's `primary_focus`.
+//!
+//! On Processes the box also draws the "Include children" checkbox to the left of the outline
+//! (E20-010, UI-SHL-025). It toggles `processes.filter_include_children` through
+//! `ToggleSetting`; the process page owns the toasts and the filtering.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -34,14 +38,17 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
+use tl_model::table::TableMode;
 
 use super::main::{FilterChanged, GlobalShellEvents};
-use crate::actions::{FilterAccept, FilterEscape, SHELL_FILTER_CONTEXT};
+use crate::actions::{FilterAccept, FilterEscape, SHELL_FILTER_CONTEXT, ToggleSetting};
+use crate::components::checkbox::TlCheckbox;
 use crate::components::icons::{TlIcon, icon};
 use crate::components::input::{FILTER_GROW, FILTER_WIDTH, FILTER_WIDTH_WIDE};
 use crate::components::motion::ease_out_cubic;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{Strings, tr};
+use crate::settings_global::{Section, SettingKey, TlSettings};
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 
@@ -69,11 +76,40 @@ pub fn shown_on(tab: Tab) -> bool {
     tab != Tab::Performance
 }
 
+/// "Include children" shows on Processes while the filter has text or the mode is Tree. The
+/// same rule as E22's `include_children_visible`; E20 cannot depend on E22.
+pub fn include_children_visible(tab: Tab, filter_text: &str, mode: TableMode) -> bool {
+    tab == Tab::Processes && (!filter_text.is_empty() || mode == TableMode::Tree)
+}
+
+/// The `processes` settings the checkbox follows, read once per section version.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct ProcessesView {
+    mode: TableMode,
+    include_children: bool,
+    version: u64,
+}
+
+impl ProcessesView {
+    fn read(cx: &App) -> Self {
+        let Some(settings) = cx.try_global::<TlSettings>() else {
+            return Self::default();
+        };
+        let p = &TlSettings::settings(cx).processes;
+        Self {
+            mode: p.mode,
+            include_children: p.filter_include_children,
+            version: settings.version(Section::Processes),
+        }
+    }
+}
+
 /// Translated text, read once per language.
 struct Labels {
     label: SharedString,
     clear: SharedString,
     name: SharedString,
+    include_children: SharedString,
     strings_version: u64,
 }
 
@@ -91,6 +127,7 @@ impl Labels {
             label: text("shell-filter-label"),
             clear: text("shell-filter-clear"),
             name: text("shell-filter-name"),
+            include_children: text("shell-filter-include-children"),
             strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
         }
     }
@@ -105,9 +142,10 @@ pub struct FilterBox {
     debounce: Option<Task<()>>,
     window_active: bool,
     labels: Labels,
-    /// The outlined width at the last prepaint.
+    processes: ProcessesView,
+    /// The drawn width at the last prepaint: the outline plus the checkbox part when shown.
     width: Rc<Cell<Pixels>>,
-    _subs: SmallVec<[Subscription; 3]>,
+    _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     outline: gpui_kit::Hsla,
 }
@@ -144,6 +182,13 @@ impl FilterBox {
                 cx.notify();
             }
         }));
+        subs.push(cx.observe_global::<TlSettings>(|this: &mut Self, cx| {
+            let version = cx.global::<TlSettings>().version(Section::Processes);
+            if version != this.processes.version {
+                this.processes = ProcessesView::read(cx);
+                cx.notify();
+            }
+        }));
         Self {
             input,
             per_tab: Default::default(),
@@ -151,6 +196,7 @@ impl FilterBox {
             debounce: None,
             window_active: window.is_window_active(),
             labels: Labels::read(cx),
+            processes: ProcessesView::read(cx),
             width: Rc::new(Cell::new(px(0.))),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -215,9 +261,18 @@ impl FilterBox {
         });
     }
 
-    /// The outlined width at the last layout, for the tab strip.
+    /// The drawn width at the last layout, checkbox part included, for the tab strip.
     pub fn width(&self) -> Pixels {
         self.width.get()
+    }
+
+    /// Whether the "Include children" checkbox shows for the current tab, text and mode.
+    pub fn include_children_shown(&self) -> bool {
+        include_children_visible(
+            self.tab,
+            &self.per_tab[self.tab as usize],
+            self.processes.mode,
+        )
     }
 
     /// The outline colour of the last render.
@@ -388,15 +443,58 @@ impl Render for FilterBox {
             .on_action(cx.listener(|this, _: &FilterAccept, _, cx| this.on_accept(cx)))
             .child(input);
 
+        let include = self.include_children_shown().then(|| {
+            let toggle = |window: &mut Window, cx: &mut App| {
+                window.dispatch_action(
+                    Box::new(ToggleSetting(SettingKey::ProcessesFilterIncludeChildren)),
+                    cx,
+                );
+            };
+            let checked = self.processes.include_children;
+            let mut text = div()
+                .id("shell-filter-include-children-label")
+                .debug_selector(|| "FilterBox-include-children-label".into())
+                .flex_none()
+                .whitespace_nowrap()
+                .text_color(theme.text_primary)
+                .on_click(move |_, window, cx| toggle(window, cx));
+            *text.text_style() = t_sm(&m);
+            div()
+                .id("shell-filter-include-children")
+                .debug_selector(|| "FilterBox-include-children".into())
+                .role(Role::CheckBox)
+                .aria_label(self.labels.include_children.clone())
+                .aria_toggled(checked.into())
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .h_full()
+                .gap(m.sp[3])
+                .child(text.child(self.labels.include_children.clone()))
+                .child(
+                    TlCheckbox::new("shell-filter-include-children-box")
+                        .checked(Some(checked))
+                        .inline(true)
+                        .on_change(move |_, window, cx| toggle(window, cx)),
+                )
+        });
+
         let width = self.width.clone();
+        // Reversed so the outline comes first in element order: the checkbox is the Tab stop
+        // after the filter input (UI-SHL-121) while it is drawn to the left.
         div()
             .debug_selector(|| "FilterBox".into())
             .flex()
+            .flex_row_reverse()
             .flex_none()
             .h(px(BOX_H * s))
+            .gap(m.sp[6])
             .on_children_prepainted(move |bounds, _, _| {
-                if let Some(b) = bounds.first() {
-                    width.set(b.size.width);
+                let left = bounds.iter().map(|b| b.left()).reduce(Pixels::min);
+                let right = bounds.iter().map(|b| b.right()).reduce(Pixels::max);
+                if let (Some(left), Some(right)) = (left, right) {
+                    width.set(right - left);
                 }
             })
             .child(
@@ -426,5 +524,6 @@ impl Render for FilterBox {
                     .child(label)
                     .child(field),
             )
+            .children(include)
     }
 }
