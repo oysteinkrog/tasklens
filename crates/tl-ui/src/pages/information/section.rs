@@ -6,10 +6,11 @@
 //! dispatches [`CopyInformationSection`]. The button's tooltip is "Copy section" and its
 //! accessible name "Copy <section title>"; its muted icon turns `text_primary` on hover. A row's
 //! `label_tooltip` shows on its label, and a row with `label_lines` 2 wraps its label inside the
-//! label column and is two rows high (Peak committed, UI-SYS-089). The rows draw in a `TlKeyValueGrid` inline layout.
-//! A value with several lines is several rows high. The row menu's "Copy section" dispatches the
-//! same action; "Copy value" and "Copy row" copy and show "Copied to clipboard". A value click
-//! does not copy, so text selection works.
+//! label column and is two rows high (Peak committed, UI-SYS-089). The rows draw in a
+//! `TlKeyValueGrid` inline layout; until the page's first data an 8-line skeleton block stands in
+//! for them (UI-SYS-085). A value with several lines is several rows high. The row menu's "Copy
+//! section" dispatches the same action; "Copy value" and "Copy row" copy and show "Copied to
+//! clipboard". A value click does not copy, so text selection works.
 //!
 //! The page builds the rows and passes them in as one `Arc`. A new `Arc` with the same rows does
 //! not re-render the section. Render builds no strings: the grid rows are made in `set_rows`
@@ -242,6 +243,8 @@ pub struct InfoSection {
     label_tips: Rc<[(usize, SharedString)]>,
     /// The wrapped labels by row index, built in `set_rows`.
     label_lines: Rc<[(usize, u8)]>,
+    /// Draws an 8-line skeleton block instead of the rows, until the first data (UI-SYS-085).
+    loading: bool,
     #[cfg(any(test, feature = "test-hooks"))]
     render_count: usize,
 }
@@ -257,6 +260,7 @@ impl InfoSection {
             grid: Rc::from(Vec::new()),
             label_tips: Rc::from(Vec::new()),
             label_lines: Rc::from(Vec::new()),
+            loading: false,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: 0,
         }
@@ -305,6 +309,18 @@ impl InfoSection {
             self.copy_enabled = on;
             cx.notify();
         }
+    }
+
+    /// The skeleton body while the page has no data yet. The band stays.
+    pub fn set_loading(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.loading != on {
+            self.loading = on;
+            cx.notify();
+        }
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading
     }
 
     /// The copy button's accessible name, "Copy <section title>".
@@ -403,6 +419,7 @@ impl Render for InfoSection {
             .label_inset(m.sp[4])
             .label_tooltips(self.label_tips.clone())
             .label_lines(self.label_lines.clone())
+            .loading(self.loading)
             .on_copy_section(move |_, window, cx| {
                 window.dispatch_action(Box::new(CopyInformationSection { section: id }), cx);
             })

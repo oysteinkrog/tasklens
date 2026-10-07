@@ -920,6 +920,11 @@ information-net-mac-address = MAC address
 information-net-unknown-adapter = Unknown adapter
 information-net-ip-none = None
 
+# Information page: refresh toast and load error (E28-033)
+information-refreshed = Information refreshed.
+information-error-load = Could not load system information
+information-error-retry = Retry
+
 # Process Properties window (E23-A1)
 pwn-props-tab-general = General
 pwn-props-tab-threads = Threads
