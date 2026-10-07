@@ -576,3 +576,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.22 (bfb80ef): ceil_125 returns 5e-308 for x <= 5e-308. ceil_125(1e-300) gives 2e-300, still >= x (fine).
 - Process note: tl-app main.rs pathspec commits took other agents' unbuilt edits twice (9193258 had cr0.19's; 92eadf3 had cr0.15's). From now on only one agent at a time edits tl-app main.rs; the leader holds main.rs beads until it is free.
 - pdu.26 (8625b2d, 12c09d2): toolbar_for now has a Processes arm and the allow is removed; the tests use the real MainWindow. Nothing in src handles ToggleHideSystem or CycleViewMode yet; when a handler lands, the app-level counters in those tests must change.
+- cr0.22 (cfb9e79, 92eadf3): --app-id paths and bus name are validated; '-' maps to '_' in the object path. The window app_id and the autostart file name are on jqk.32.
