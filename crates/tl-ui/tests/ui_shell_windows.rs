@@ -859,3 +859,268 @@ fn shortcuts_dialogs_and_windows_rows(cx: &mut TestAppContext) {
         assert_eq!(last.heading, Heading::DialogsAndWindows, "the last heading");
     });
 }
+
+// ---- About (E21-015) ----
+
+use tl_model::actions::ActionKind;
+use tl_model::command::Command;
+use tl_ui::app::BuildInfo;
+use tl_ui::window::about::{
+    AboutBack, AboutView, AboutWindow, CopyVersionInfo, OpenAbout, OpenLogFolder, ShowLicenses,
+    file_uri, parse_licenses,
+};
+
+type AboutFrame = TlSecondaryWindow<AboutWindow>;
+
+const LICENSES_JSON: &str = r#"{
+  "overview": [],
+  "licenses": [
+    { "name": "MIT License", "id": "MIT", "text": "...",
+      "used_by": [
+        { "crate": { "name": "smallvec", "version": "1.15.1", "license": "MIT OR Apache-2.0" } },
+        { "crate": { "name": "anyhow", "version": "1.0.98", "license": null } }
+      ] },
+    { "name": "Apache License 2.0", "id": "Apache-2.0", "text": "...",
+      "used_by": [
+        { "crate": { "name": "smallvec", "version": "1.15.1", "license": "MIT OR Apache-2.0" } }
+      ] }
+  ]
+}"#;
+
+/// `setup_engine` with build info 0.1.0, a1b2c3d, 2026-10-03 and a logs directory.
+fn setup_about(cx: &mut TestAppContext) -> Arc<FakeEngine> {
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (_tx, rx) = async_channel::bounded(4);
+    let mut env = AppEnv::test();
+    env.build = BuildInfo {
+        version: "0.1.0",
+        git_hash: "a1b2c3d",
+        build_date: "2026-10-03",
+        gpui_rev: "0123456789ab",
+        licenses_json: LICENSES_JSON,
+    };
+    env.logs_dir = "/home/u/.local/state/tasklens/logs".into();
+    let init = UiInit {
+        settings: Settings::default(),
+        state: UiState::default(),
+        themes_json: None,
+        persist: Box::new(|_, _| {}),
+        persist_themes: Box::new(|_| {}),
+        app_requests: rx,
+        startup_toasts: Vec::new(),
+        env,
+    };
+    cx.update(|cx| {
+        TasklensUi::init(cx, client, init);
+        cx.set_reduce_motion(true);
+    });
+    cx.run_until_parked();
+    engine
+}
+
+/// The registered About window, if open.
+fn about_window(cx: &mut TestAppContext) -> Option<WindowHandle<Root>> {
+    cx.update(|cx| {
+        cx.global::<GlobalRegistry>()
+            .0
+            .read(cx)
+            .get(&WindowKey::About)
+    })
+    .and_then(|h| h.downcast::<Root>())
+}
+
+/// Dispatches `OpenAbout` from a parent window `times` times and returns the window.
+fn open_about(cx: &mut TestAppContext, times: usize) -> (Entity<AboutFrame>, VisualTestContext) {
+    let parent: AnyWindowHandle = cx.add_window(|_, _| Parent).into();
+    let mut pcx = VisualTestContext::from_window(parent, cx);
+    for _ in 0..times {
+        pcx.update(|window, _| window.activate_window());
+        pcx.dispatch_action(OpenAbout);
+        pcx.run_until_parked();
+    }
+    let handle = about_window(cx).expect("about window registered");
+    let frame = cx
+        .update(|cx| AboutFrame::find(handle, cx))
+        .expect("about frame");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    (frame, vcx)
+}
+
+#[gpui_kit::test]
+fn secondary_window_refocus(cx: &mut TestAppContext) {
+    setup_about(cx);
+    let before = cx.update(|cx| cx.windows().len());
+    let (frame, vcx) = open_about(cx, 2);
+    assert_eq!(
+        cx.update(|cx| cx.windows().len()),
+        before + 2,
+        "the parent and one About window"
+    );
+    let id = about_window(cx).expect("open").window_id();
+    assert_eq!(
+        cx.update(|cx| cx.active_window().map(|w| w.window_id())),
+        Some(id),
+        "the About window has focus"
+    );
+    let (title, kind) = vcx.read(|cx| (frame.read(cx).title().to_string(), frame.read(cx).kind()));
+    assert_eq!(title, "tasklens About");
+    assert_eq!(kind, TlWindowKind::Tool { resizable: false });
+}
+
+#[gpui_kit::test]
+fn about_version_line(cx: &mut TestAppContext) {
+    setup_about(cx);
+    let (frame, vcx) = open_about(cx, 1);
+    let line = vcx.read(|cx| frame.read(cx).content().read(cx).version_line().to_string());
+    assert_eq!(line, "Version: 0.1.0 (a1b2c3d, 2026-10-03)");
+}
+
+#[gpui_kit::test]
+fn about_copy_version_info(cx: &mut TestAppContext) {
+    setup_about(cx);
+    let (frame, mut vcx) = open_about(cx, 1);
+    vcx.dispatch_action(CopyVersionInfo);
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    let text = vcx
+        .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        .expect("clipboard text");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 9, "{text}");
+    assert_eq!(lines[0], "Version: 0.1.0");
+    assert_eq!(lines[1], "Git hash: a1b2c3d");
+    assert_eq!(lines[2], "Build date: 2026-10-03");
+    assert_eq!(lines[3], "GPUI revision: 0123456789ab");
+    let labels: Vec<&str> = lines
+        .iter()
+        .map(|l| l.split_once(": ").expect("Label: value").0)
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "Version",
+            "Git hash",
+            "Build date",
+            "GPUI revision",
+            "Kernel",
+            "NVIDIA driver",
+            "Compositor",
+            "Session type",
+            "Scale",
+        ]
+    );
+    assert_eq!(
+        lines[5], "NVIDIA driver: Unknown",
+        "no graphics rows in the snapshot"
+    );
+    assert!(lines[8].ends_with('%'), "{}", lines[8]);
+    assert!(!text.contains("/home/"), "no paths in the block");
+    let toasts = vcx.read(|cx| frame.read(cx).toasts().read(cx).visible_texts());
+    assert_eq!(toasts, ["Copied to clipboard"]);
+}
+
+#[gpui_kit::test]
+fn about_licenses_back(cx: &mut TestAppContext) {
+    setup_about(cx);
+    let (frame, mut vcx) = open_about(cx, 1);
+    let view =
+        |vcx: &mut VisualTestContext| vcx.read(|cx| frame.read(cx).content().read(cx).view());
+    assert_eq!(view(&mut vcx), AboutView::Main);
+    assert!(
+        vcx.read(|cx| frame.read(cx).content().read(cx).license_rows().is_none()),
+        "the list is built on first open"
+    );
+    vcx.dispatch_action(ShowLicenses);
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(view(&mut vcx), AboutView::Licenses);
+    let rows = vcx.read(|cx| {
+        frame
+            .read(cx)
+            .content()
+            .read(cx)
+            .license_rows()
+            .expect("rows")
+            .iter()
+            .map(|r| {
+                (
+                    r.name.to_string(),
+                    r.version.to_string(),
+                    r.license.to_string(),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        rows,
+        [
+            ("anyhow".into(), "1.0.98".into(), "MIT".into()),
+            (
+                "smallvec".into(),
+                "1.15.1".into(),
+                "MIT OR Apache-2.0".into()
+            ),
+        ],
+        "one row per crate, sorted by name"
+    );
+    vcx.dispatch_action(AboutBack);
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(view(&mut vcx), AboutView::Main);
+    assert!(parse_licenses("not json").is_empty());
+}
+
+#[gpui_kit::test]
+fn about_open_log_folder(cx: &mut TestAppContext) {
+    let engine = setup_about(cx);
+    let (_frame, mut vcx) = open_about(cx, 1);
+    let before = engine.commands().len();
+    vcx.dispatch_action(OpenLogFolder);
+    vcx.run_until_parked();
+    let commands = engine.commands();
+    let uris: Vec<String> = commands[before..]
+        .iter()
+        .filter_map(|c| match c {
+            Command::Action(req) => match &req.kind {
+                ActionKind::OpenUri(uri) => Some(uri.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(uris.len(), 1, "{uris:?}");
+    assert_eq!(uris[0], "file:///home/u/.local/state/tasklens/logs");
+    assert!(uris[0].ends_with("/tasklens/logs"));
+    assert_eq!(
+        file_uri(std::path::Path::new("/a b/ø")),
+        "file:///a%20b/%C3%B8"
+    );
+}
+
+#[gpui_kit::test]
+fn about_no_foreign_branding(cx: &mut TestAppContext) {
+    setup_about(cx);
+    let (frame, mut vcx) = open_about(cx, 1);
+    let check = |vcx: &mut VisualTestContext| {
+        let (title, texts) = vcx.read(|cx| {
+            let f = frame.read(cx);
+            (f.title().to_string(), f.content().read(cx).drawn_text())
+        });
+        assert!(texts.len() > 1);
+        for t in std::iter::once(title.as_str()).chain(texts.iter().map(|t| t.as_ref())) {
+            assert!(
+                !t.contains("TaskSlinger") && !t.contains("Mission Center"),
+                "{t}"
+            );
+        }
+    };
+    check(&mut vcx);
+    vcx.dispatch_action(ShowLicenses);
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    check(&mut vcx);
+}
