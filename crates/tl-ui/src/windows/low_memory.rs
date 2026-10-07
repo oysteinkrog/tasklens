@@ -13,39 +13,50 @@
 //! (R-073, R-152 OI-9). Closing the window ends the process.
 
 use std::borrow::Cow;
+use std::cmp::{Ordering as CmpOrdering, Reverse};
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui_kit::base::Root;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, FontWeight, Global, Hsla,
-    InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, WindowHandle, div, px, size,
+    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, FontWeight, Global,
+    Hsla, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window,
+    WindowHandle, div, px, size,
 };
-use smallvec::SmallVec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
+use smallvec::{SmallVec, smallvec};
+use tl_model::actions::{
+    ActionId, ActionKind, ActionRequest, ActionTarget, LaunchSpec, LaunchWhat, Signal,
+};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, KWinCommand};
-use tl_model::process::LowMemoryInfo;
+use tl_model::ids::{GroupKey, ProcessKey};
+use tl_model::process::{LowMemGroup, LowMemoryInfo, ProcFlags, ProcessRecord};
 use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::time::TimeNs;
+use tl_model::validity::{ProcessField, Validity};
 use tracing::{debug, warn};
 
+use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker, ToastTexts};
 use crate::app::{
     AppRequestHandler, BootSettings, EngineGlobal, OpenHooks, UiExit, UiInit, request_exit,
 };
-use crate::components::button::{TlButton, TlButtonKind};
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::input::{TlFilterBox, TlInputSize, TlTextInput};
-use crate::components::toast;
+use crate::components::toast::{self, ToastQueue};
+use crate::components::validity::glyph;
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{self, Strings, tr, tr_en};
+use crate::pages::performance::details::Template;
 use crate::settings_global::TlSettings;
-use crate::text::style::{label_style, t_base};
+use crate::text::style::{label_style, numeric_style, t_base};
 use crate::theme::user_store::ThemePersist;
-use crate::theme::{self, TlTheme, current, metrics};
+use crate::theme::{self, TlTheme, UiMetrics, current, metrics};
 
 gpui_kit::actions!(
     tasklens,
@@ -71,6 +82,12 @@ pub const MIN_SIZE: (f32, f32) = (360., 400.);
 const FOOTER: f32 = 52.;
 /// List row height, × ui_scale, not affected by the row-height setting.
 const ROW: f32 = 32.;
+/// Width of the "Memory 12.0%" text, × ui_scale.
+const MEMORY_W: f32 = 100.;
+/// Width of the End Task button, × ui_scale.
+const BUTTON_W: f32 = 84.;
+/// The list shows at most this many apps and processes (PROC-098).
+pub const MAX_ROWS: usize = 30;
 
 /// How long every sample must stay below the threshold before the eased line shows.
 pub const EASE_AFTER_NS: TimeNs = 10_000_000_000;
@@ -96,6 +113,13 @@ const KEY_EASED: &str = "lowmem-text-eased";
 const KEY_FILTER_PLACEHOLDER: &str = "lowmem-filter-placeholder";
 const KEY_FILTER_EMPTY: &str = "lowmem-filter-empty";
 const KEY_OPEN_FULL: &str = "lowmem-button-open-full";
+const KEY_ROW_MEMORY: &str = "lowmem-row-memory";
+const KEY_END_TASK: &str = "lowmem-button-end-task";
+const KEY_END_TASK_TOOLTIP: &str = "lowmem-tooltip-end-task";
+const KEY_NEEDS_ADMIN: &str = "lowmem-tooltip-needs-admin";
+const KEY_END_TASK_A11Y: &str = "lowmem-a11y-end-task";
+const KEY_ENDED: &str = "lowmem-toast-ended";
+const KEY_END_FAILED: &str = "lowmem-toast-end-failed";
 
 /// Binds Esc and Ctrl+W in `LowMemory`. The only key binding call in the rescue process.
 pub fn bind_keys_low_memory(cx: &mut App) {
@@ -169,6 +193,7 @@ pub fn init_low_memory(cx: &mut App, client: Arc<dyn EngineClient>, init: UiInit
     toast::init(cx);
 
     // ActionTracker
+    crate::action_tracker::install(client.clone(), cx);
 
     cx.default_global::<OpenHooks>().low_memory = Some(Box::new(move |cx| {
         if let Err(err) = open_first_rescue(cx, client.clone()) {
@@ -207,10 +232,20 @@ pub struct LowMemWords {
     pub filter_placeholder: SharedString,
     pub filter_empty: SharedString,
     pub open_full: SharedString,
+    /// "Memory { $pct }%".
+    pub row_memory: Template,
+    pub end_task: SharedString,
+    pub end_task_tooltip: SharedString,
+    pub needs_admin: SharedString,
+    /// "End Task: { $name }".
+    pub end_task_a11y: Template,
+    pub ended: SharedString,
+    /// The failure prefix; the tracker adds the error text after it.
+    pub end_failed: SharedString,
 }
 
 impl LowMemWords {
-    fn with(t: impl Fn(&str) -> SharedString) -> Self {
+    fn with(t: impl Fn(&str) -> SharedString, tmpl: impl Fn(&str, &[&str]) -> Template) -> Self {
         Self {
             title: t(KEY_TITLE),
             critical: t(KEY_CRITICAL),
@@ -219,6 +254,13 @@ impl LowMemWords {
             filter_placeholder: t(KEY_FILTER_PLACEHOLDER),
             filter_empty: t(KEY_FILTER_EMPTY),
             open_full: t(KEY_OPEN_FULL),
+            row_memory: tmpl(KEY_ROW_MEMORY, &["pct"]),
+            end_task: t(KEY_END_TASK),
+            end_task_tooltip: t(KEY_END_TASK_TOOLTIP),
+            needs_admin: t(KEY_NEEDS_ADMIN),
+            end_task_a11y: tmpl(KEY_END_TASK_A11Y, &["name"]),
+            ended: t(KEY_ENDED),
+            end_failed: t(KEY_END_FAILED),
         }
     }
 }
@@ -256,9 +298,9 @@ fn cached_words(cx: &App) -> Option<Rc<LowMemWords>> {
 
 fn fresh_words(cx: &App) -> LowMemWords {
     if cx.has_global::<Strings>() {
-        LowMemWords::with(|key| tr(cx, key))
+        LowMemWords::with(|key| tr(cx, key), |key, args| Template::new(cx, key, args))
     } else {
-        LowMemWords::with(|key| tr_en(key, &[]))
+        LowMemWords::with(|key| tr_en(key, &[]), Template::en)
     }
 }
 
@@ -311,6 +353,184 @@ pub struct HeaderLine {
     pub strong: bool,
 }
 
+/// What one list row ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RowId {
+    Process(ProcessKey),
+    App(GroupKey),
+}
+
+/// One list row (UI-PWN-033). Its texts are built when its name or percent changes, never per
+/// frame.
+#[derive(Clone, Debug)]
+pub struct LowMemRow {
+    pub id: RowId,
+    /// The target End Task sends, as captured from the sweep: the process key, or the app
+    /// cgroup with its inode. Never looked up again by pid.
+    pub target: ActionTarget,
+    /// Apps: "{app name} ({process count})". Processes: the display name.
+    pub name: SharedString,
+    /// RssAnon plus swap for a process, `memory.current` for an app.
+    pub memory_bytes: u64,
+    pub validity: Validity,
+    /// "Memory 12.0%". Empty when the memory is not `Valid`.
+    pub memory_text: SharedString,
+    /// "End Task: {name}".
+    pub a11y: SharedString,
+    /// Another user's process or app: End Task is disabled.
+    pub other_user: bool,
+    /// Percent of MemTotal in tenths, so the text is rebuilt only when it changes.
+    tenths: u32,
+    /// The name as the sweep gave it and the app's process count.
+    name_src: Arc<str>,
+    count: u32,
+}
+
+/// Where a row's values come from in the current sweep.
+#[derive(Clone, Copy)]
+enum RowSrc<'a> {
+    App(&'a LowMemGroup),
+    Process(&'a ProcessRecord),
+}
+
+/// One row before the 30-row cut: an index into the groups or the records.
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    valid: bool,
+    memory: u64,
+    /// 0 for an app, 1 for a process, then the index, so ties keep the sweep order.
+    src: (u8, u32),
+}
+
+impl Candidate {
+    /// `Valid` memory first, then memory descending.
+    fn order(a: &Self, b: &Self) -> CmpOrdering {
+        (Reverse(a.valid), Reverse(a.memory), a.src).cmp(&(
+            Reverse(b.valid),
+            Reverse(b.memory),
+            b.src,
+        ))
+    }
+}
+
+/// RssAnon plus swap, and its validity: the RssAnon validity. Swap counts only when `Valid`.
+fn process_memory(r: &ProcessRecord) -> (Validity, u64) {
+    let validity = r.validity.get(ProcessField::RssAnon);
+    if !validity.is_valid() {
+        return (validity, 0);
+    }
+    let swap = if r.validity.get(ProcessField::Swap).is_valid() {
+        r.swap_bytes
+    } else {
+        0
+    };
+    (Validity::Valid, r.rss_anon_bytes.saturating_add(swap))
+}
+
+/// `memory` as a percent of `total` in tenths, rounded half up. 0 when `total` is 0.
+fn tenths(memory: u64, total: u64) -> u32 {
+    if total == 0 {
+        return 0;
+    }
+    let t = (u128::from(memory) * 1000 + u128::from(total) / 2) / u128::from(total);
+    u32::try_from(t).unwrap_or(u32::MAX)
+}
+
+/// The uid of this session: the uid of any record not marked `OTHER_USER`.
+fn session_uid(records: &[ProcessRecord]) -> Option<u32> {
+    records
+        .iter()
+        .find(|r| !r.flags.contains(ProcFlags::OTHER_USER))
+        .map(|r| r.uid)
+}
+
+/// The row of `src`. Texts are taken from `prev` when it is the same row with the same name,
+/// count, percent and validity.
+fn make_row(
+    src: RowSrc<'_>,
+    mem_total: u64,
+    uid: Option<u32>,
+    words: &LowMemWords,
+    prev: Option<&LowMemRow>,
+) -> LowMemRow {
+    let (id, target, name_src, count, other_user, validity, memory_bytes) = match src {
+        RowSrc::App(g) => (
+            RowId::App(g.group),
+            ActionTarget::Cgroup(g.cgroup.clone()),
+            g.name.clone(),
+            g.process_count,
+            uid.is_some_and(|uid| uid != g.uid),
+            Validity::Valid,
+            g.memory_current,
+        ),
+        RowSrc::Process(r) => {
+            let (validity, memory) = process_memory(r);
+            (
+                RowId::Process(r.key),
+                ActionTarget::Process(r.key),
+                r.meta.name.clone(),
+                0,
+                r.flags.contains(ProcFlags::OTHER_USER),
+                validity,
+                memory,
+            )
+        }
+    };
+    let tenths = tenths(memory_bytes, mem_total);
+    let prev = prev.filter(|p| p.id == id);
+    let (name, a11y) = match prev {
+        Some(p) if p.count == count && p.name_src == name_src => (p.name.clone(), p.a11y.clone()),
+        _ => {
+            let name: SharedString = match id {
+                RowId::App(_) => format!("{name_src} ({count})").into(),
+                RowId::Process(_) => name_src.clone().into(),
+            };
+            let mut a11y = String::new();
+            let _ = words.end_task_a11y.write(&mut a11y, &[&name]);
+            (name, a11y.into())
+        }
+    };
+    let memory_text = match prev {
+        Some(p) if p.tenths == tenths && p.validity == validity => p.memory_text.clone(),
+        _ if validity.is_valid() => {
+            let mut text = String::new();
+            words.row_memory.write_each(&mut text, |_, out| {
+                let _ = write!(out, "{}.{}", tenths / 10, tenths % 10);
+            });
+            text.into()
+        }
+        _ => SharedString::default(),
+    };
+    LowMemRow {
+        id,
+        target,
+        name,
+        memory_bytes,
+        validity,
+        memory_text,
+        a11y,
+        other_user,
+        tenths,
+        name_src,
+        count,
+    }
+}
+
+/// The End Task request for `target`: SIGKILL for a process, a `cgroup.kill` write for an app
+/// (ADR-006). No confirmation (PROC-098).
+fn end_task_request(target: &ActionTarget) -> ActionRequest {
+    let kind = match target {
+        ActionTarget::Cgroup(_) => ActionKind::KillGroup,
+        _ => ActionKind::Signal(Signal::Kill),
+    };
+    ActionRequest {
+        id: ActionId(0),
+        kind,
+        targets: smallvec![target.clone()],
+        privileged: false,
+    }
+}
+
 /// Action ids come from the UI, counting up from 1 (ADR-015).
 fn next_action_id() -> ActionId {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -337,14 +557,24 @@ pub struct LowMemoryWindow {
     ease: EaseTracker,
     /// The last sample taken, compared by pointer so a sweep counts once.
     last_info: Option<Arc<LowMemoryInfo>>,
-    /// Row names (E32-A2 adds the processes and the values).
-    names: Vec<SharedString>,
-    names_lower: Vec<String>,
-    /// Indexes into `names` that match the filter.
-    visible: Vec<u32>,
+    /// The records of that sweep, sorted by `ProcessKey`.
+    records: Arc<[ProcessRecord]>,
+    /// At most 30 rows, in the order shown.
+    rows: Vec<LowMemRow>,
+    /// The previous rows, kept for their allocation.
+    spare: Vec<LowMemRow>,
+    candidates: Vec<Candidate>,
+    /// The words the row texts were built with.
+    rows_words: Option<Rc<LowMemWords>>,
     /// The lowercased filter text.
     needle: String,
-    _subscriptions: SmallVec<[Subscription; 2]>,
+    /// The pointer is over the list.
+    hovered: bool,
+    /// The keyboard highlight (`row_selected`).
+    highlight: Option<RowId>,
+    /// End Task requests in flight; their buttons show loading.
+    ending: SmallVec<[(ActionId, RowId); 2]>,
+    _subscriptions: SmallVec<[Subscription; 6]>,
 }
 
 impl LowMemoryWindow {
@@ -413,45 +643,95 @@ impl LowMemoryWindow {
     fn new(engine: Arc<dyn EngineClient>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter = cx.new(|cx| InputState::new(window, cx));
         filter.update(cx, |s, cx| s.focus(window, cx));
+        let list_focus = cx.focus_handle().tab_stop(true);
         let mut subscriptions = SmallVec::new();
         subscriptions.push(cx.subscribe(&filter, |this, filter, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
                 this.needle = filter.read(cx).text().to_string().to_lowercase();
-                this.refilter();
+                this.rebuild(&low_mem_words(cx));
                 cx.notify();
             }
         }));
         let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
         if let Some(hub) = &hub {
-            subscriptions.push(cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
-                if ev.mask.contains(ComponentMask::PROCESSES)
-                    && this.take_sample(&hub.read(cx).current().clone())
-                {
-                    cx.notify();
-                }
-            }));
+            subscriptions.push(cx.subscribe_in(
+                hub,
+                window,
+                |this, hub, ev: &SnapshotChanged, window, cx| {
+                    if !ev.mask.contains(ComponentMask::PROCESSES) {
+                        return;
+                    }
+                    let snap = hub.read(cx).current().clone();
+                    let hold = this.holds_order(window, cx);
+                    if this.take_sample(&snap, hold, &low_mem_words(cx)) {
+                        cx.notify();
+                    }
+                },
+            ));
         }
+        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+            subscriptions.push(
+                cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, cx| {
+                    if let ActionTrackerEvent::Finished { id, .. } = *ev {
+                        let before = this.ending.len();
+                        this.ending.retain(|(a, _)| *a != id);
+                        if this.ending.len() != before {
+                            cx.notify();
+                        }
+                    }
+                }),
+            );
+        }
+        // The order is held while the list has focus; it re-sorts when focus leaves and the
+        // pointer is not over the list.
+        subscriptions.push(cx.on_focus_out(&list_focus, window, |this, _, _, cx| {
+            if !this.hovered {
+                this.rebuild(&low_mem_words(cx));
+                cx.notify();
+            }
+        }));
+        // A language change rebuilds the row texts.
+        subscriptions.push(cx.observe_global_in::<Strings>(window, |this, window, cx| {
+            let words = low_mem_words(cx);
+            if this.holds_order(window, cx) {
+                this.refresh_held(&words);
+            } else {
+                this.rebuild(&words);
+            }
+            cx.notify();
+        }));
         let mut this = Self {
             engine,
             filter,
-            list_focus: cx.focus_handle().tab_stop(true),
+            list_focus,
             ease: EaseTracker::default(),
             last_info: None,
-            names: Vec::new(),
-            names_lower: Vec::new(),
-            visible: Vec::new(),
+            records: Arc::from([]),
+            rows: Vec::new(),
+            spare: Vec::new(),
+            candidates: Vec::new(),
+            rows_words: None,
             needle: String::new(),
+            hovered: false,
+            highlight: None,
+            ending: SmallVec::new(),
             _subscriptions: subscriptions,
         };
         if let Some(hub) = hub {
-            this.take_sample(&hub.read(cx).current().clone());
+            let snap = hub.read(cx).current().clone();
+            this.take_sample(&snap, false, &low_mem_words(cx));
         }
         this
     }
 
-    /// Takes the sweep's pressure sample and row names. False when the snapshot has no new
-    /// low-memory data.
-    fn take_sample(&mut self, snap: &Snapshot) -> bool {
+    /// Whether the order is held: the pointer is over the list or focus is in it.
+    fn holds_order(&self, window: &Window, cx: &App) -> bool {
+        self.hovered || self.list_focus.contains_focused(window, cx)
+    }
+
+    /// Takes the sweep's pressure sample and rows. With `hold` the rows keep their order and
+    /// only their values change. False when the snapshot has no new low-memory data.
+    fn take_sample(&mut self, snap: &Snapshot, hold: bool, words: &Rc<LowMemWords>) -> bool {
         let Some(info) = snap.processes.low_memory.as_ref() else {
             return false;
         };
@@ -463,27 +743,118 @@ impl LowMemoryWindow {
             return false;
         }
         self.ease.sample(snap.published_ns, below_threshold(info));
-        // E32-A2: the processes, the values, the order and the 30-row cut.
-        self.names = info
-            .groups
-            .iter()
-            .map(|g| SharedString::from(g.name.to_string()))
-            .collect();
-        self.names_lower = self.names.iter().map(|n| n.to_lowercase()).collect();
         self.last_info = Some(info.clone());
-        self.refilter();
+        self.records = snap.processes.records.clone();
+        if hold {
+            self.refresh_held(words);
+        } else {
+            self.rebuild(words);
+        }
         true
     }
 
-    fn refilter(&mut self) {
-        self.visible.clear();
-        self.visible.extend(
-            self.names_lower
-                .iter()
-                .enumerate()
-                .filter(|(_, name)| name.contains(self.needle.as_str()))
-                .map(|(i, _)| i as u32),
-        );
+    /// The shown rows, and whether their texts may be reused: false when the words changed
+    /// since they were built.
+    fn take_prev(&mut self, words: &Rc<LowMemWords>) -> (Vec<LowMemRow>, bool) {
+        let reuse = self
+            .rows_words
+            .as_ref()
+            .is_some_and(|w| Rc::ptr_eq(w, words));
+        self.rows_words = Some(words.clone());
+        (std::mem::take(&mut self.rows), reuse)
+    }
+
+    /// Picks the 30 apps and processes with the most memory that match the filter, sorted by
+    /// memory descending. Rows whose memory is not `Valid` sort last.
+    fn rebuild(&mut self, words: &Rc<LowMemWords>) {
+        let (mut prev, reuse) = self.take_prev(words);
+        let mut rows = std::mem::take(&mut self.spare);
+        rows.clear();
+        if let Some(info) = self.last_info.clone() {
+            let records = self.records.clone();
+            self.collect_candidates(&info, &records);
+            let uid = session_uid(&records);
+            for c in &self.candidates {
+                let src = match c.src {
+                    (0, i) => RowSrc::App(&info.groups[i as usize]),
+                    (_, i) => RowSrc::Process(&records[i as usize]),
+                };
+                let id = match src {
+                    RowSrc::App(g) => RowId::App(g.group),
+                    RowSrc::Process(r) => RowId::Process(r.key),
+                };
+                let old = prev.iter().find(|p| reuse && p.id == id);
+                rows.push(make_row(src, info.mem_total, uid, words, old));
+            }
+        }
+        prev.clear();
+        self.spare = prev;
+        self.rows = rows;
+    }
+
+    /// Fills `candidates` with the matching apps, and the matching processes outside an app
+    /// group, cut at 30 and sorted. Kernel threads and tasklens itself are left out.
+    fn collect_candidates(&mut self, info: &LowMemoryInfo, records: &[ProcessRecord]) {
+        let needle = self.needle.as_str();
+        let cands = &mut self.candidates;
+        cands.clear();
+        for (i, g) in info.groups.iter().enumerate() {
+            if needle.is_empty() || g.name.to_lowercase().contains(needle) {
+                cands.push(Candidate {
+                    valid: true,
+                    memory: g.memory_current,
+                    src: (0, i as u32),
+                });
+            }
+        }
+        for (i, r) in records.iter().enumerate() {
+            if r.flags
+                .intersects(ProcFlags::KERNEL_THREAD | ProcFlags::IS_SELF)
+                || info.groups.iter().any(|g| g.group == r.group)
+                || !(needle.is_empty() || r.meta.search_lower.contains(needle))
+            {
+                continue;
+            }
+            let (validity, memory) = process_memory(r);
+            cands.push(Candidate {
+                valid: validity.is_valid(),
+                memory,
+                src: (1, i as u32),
+            });
+        }
+        if cands.len() > MAX_ROWS {
+            cands.select_nth_unstable_by(MAX_ROWS - 1, Candidate::order);
+            cands.truncate(MAX_ROWS);
+        }
+        cands.sort_unstable_by(Candidate::order);
+    }
+
+    /// Updates the values of the shown rows in their current order. A row whose app or process
+    /// is gone is dropped.
+    fn refresh_held(&mut self, words: &Rc<LowMemWords>) {
+        let (mut prev, reuse) = self.take_prev(words);
+        let mut rows = std::mem::take(&mut self.spare);
+        rows.clear();
+        if let Some(info) = self.last_info.clone() {
+            let records = self.records.clone();
+            let uid = session_uid(&records);
+            for old in &prev {
+                let src = match old.id {
+                    RowId::App(key) => info.groups.iter().find(|g| g.group == key).map(RowSrc::App),
+                    RowId::Process(key) => records
+                        .binary_search_by(|r| r.key.cmp(&key))
+                        .ok()
+                        .map(|i| RowSrc::Process(&records[i])),
+                };
+                if let Some(src) = src {
+                    let old = reuse.then_some(old);
+                    rows.push(make_row(src, info.mem_total, uid, words, old));
+                }
+            }
+        }
+        prev.clear();
+        self.spare = prev;
+        self.rows = rows;
     }
 
     pub fn filter(&self) -> &Entity<InputState> {
@@ -498,9 +869,25 @@ impl LowMemoryWindow {
         self.ease.eased()
     }
 
+    /// The rows the list shows, in order.
+    pub fn rows(&self) -> &[LowMemRow] {
+        &self.rows
+    }
+
     /// The names the list shows, in order.
     pub fn visible_names(&self) -> impl Iterator<Item = &SharedString> {
-        self.visible.iter().map(|&i| &self.names[i as usize])
+        self.rows.iter().map(|r| &r.name)
+    }
+
+    /// The highlighted row's index.
+    pub fn highlight(&self) -> Option<usize> {
+        let id = self.highlight?;
+        self.rows.iter().position(|r| r.id == id)
+    }
+
+    /// Whether End Task of `id` is in flight.
+    pub fn is_ending(&self, id: RowId) -> bool {
+        self.ending.iter().any(|(_, r)| *r == id)
     }
 
     /// The lines at the top: two warning lines, or the one eased line.
@@ -537,16 +924,20 @@ impl LowMemoryWindow {
     }
 
     fn empty_text_in(&self, words: &LowMemWords) -> Option<SharedString> {
-        (!self.needle.is_empty() && self.visible.is_empty()).then(|| words.filter_empty.clone())
+        (!self.needle.is_empty() && self.rows.is_empty()).then(|| words.filter_empty.clone())
     }
 
-    fn open_full(&mut self, _: &OpenFullTasklens, _: &mut Window, _: &mut Context<Self>) {
-        self.send_open_full();
+    fn open_full(&mut self, _: &OpenFullTasklens, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_open_full(cx);
     }
 
-    fn send_open_full(&self) {
+    fn send_open_full(&self, cx: &App) {
+        // Ids come from the tracker when there is one, so an End Task id is never reused.
+        let id = cx
+            .try_global::<GlobalActionTracker>()
+            .map_or_else(next_action_id, |t| t.0.read(cx).next_id());
         let request = ActionRequest {
-            id: next_action_id(),
+            id,
             kind: ActionKind::Launch(LaunchSpec {
                 what: LaunchWhat::Command(MAIN_PROGRAM.into()),
                 as_admin: false,
@@ -558,6 +949,147 @@ impl LowMemoryWindow {
         if let Err(err) = self.engine.send(Command::Action(request)) {
             warn!(target: "tasklens::ui", ?err, "Open Full tasklens not sent");
         }
+    }
+
+    /// Ends the row `id` at once through the app's `ActionTracker`, with no confirmation
+    /// (PROC-098). Another user's row, or one already ending, does nothing. The request carries
+    /// the target captured from the sweep (PROC-001).
+    fn end_task(&mut self, id: RowId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.iter().find(|r| r.id == id) else {
+            return;
+        };
+        if row.other_user || self.is_ending(id) {
+            return;
+        }
+        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+            warn!(target: "tasklens::ui", "no action tracker; End Task was not sent");
+            return;
+        };
+        let Some(queue) = ToastQueue::of_window(window, cx) else {
+            warn!(target: "tasklens::ui", "no toast queue; End Task was not sent");
+            return;
+        };
+        let request = end_task_request(&row.target);
+        let words = low_mem_words(cx);
+        let texts = ToastTexts {
+            retry_as_admin: true,
+            ..ToastTexts::new(words.ended.clone(), words.end_failed.clone())
+        };
+        let sent = tracker.update(cx, |t, cx| {
+            t.track_or_toast(request, queue.downgrade(), texts, cx)
+        });
+        if let Some(action) = sent {
+            self.ending.push((action, id));
+            cx.notify();
+        }
+    }
+
+    /// End Task on the highlighted row.
+    fn end_highlighted(&mut self, _: &LowMemEndTask, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.highlight {
+            self.end_task(id, window, cx);
+        }
+    }
+
+    /// Moves the highlight one row up (`-1`) or down (`1`). With no highlight it starts at the
+    /// first row.
+    fn move_highlight(&mut self, step: isize) {
+        let last = self.rows.len().checked_sub(1);
+        let Some(last) = last else {
+            self.highlight = None;
+            return;
+        };
+        let at = match self.highlight() {
+            Some(at) => at.saturating_add_signed(step).min(last),
+            None => 0,
+        };
+        self.highlight = Some(self.rows[at].id);
+    }
+
+    /// One row: the name, "Memory 12.0%" or the validity glyph, and End Task.
+    fn render_row(
+        &self,
+        i: usize,
+        row: &LowMemRow,
+        words: &LowMemWords,
+        theme: &TlTheme,
+        m: &UiMetrics,
+        this: WeakEntity<Self>,
+    ) -> AnyElement {
+        let s = m.ui_scale;
+        let selected = self.highlight == Some(row.id);
+        let (primary, secondary) = if selected {
+            (theme.text_selected_primary, theme.text_selected_secondary)
+        } else {
+            (theme.text_primary, theme.text_secondary)
+        };
+
+        let mut name = div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(primary);
+        *name.text_style() = t_base(m);
+
+        let memory = if row.validity.is_valid() {
+            let mut text = div()
+                .debug_selector(move || format!("LowMemMemory-{i}"))
+                .flex()
+                .justify_end()
+                .whitespace_nowrap()
+                .text_color(secondary);
+            *text.text_style() = numeric_style(m, m.text.sm);
+            text.child(row.memory_text.clone()).into_any_element()
+        } else {
+            glyph(row.validity, &row.memory_text, selected, m, theme)
+        };
+
+        let id = row.id;
+        let tooltip = if row.other_user {
+            words.needs_admin.clone()
+        } else {
+            words.end_task_tooltip.clone()
+        };
+        let button = TlButton::new(("LowMemEndTask", i), TlButtonKind::Danger)
+            .size(TlButtonSize::Sm)
+            .label(words.end_task.clone())
+            .tooltip(tooltip)
+            .disabled(row.other_user)
+            .loading(self.is_ending(id))
+            // The list is the one focus stop; the buttons are reached with the highlight.
+            .tab_stop(false)
+            .on_click(move |_, window, cx| {
+                let _ = this.update(cx, |this, cx| this.end_task(id, window, cx));
+            });
+
+        div()
+            .id(("LowMemRow", i))
+            .debug_selector(move || format!("LowMemRow-{i}"))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(m.sp[4])
+            .h(px(ROW * s))
+            .px(m.sp[4])
+            .border_b_1()
+            .border_color(theme.divider)
+            .when(selected, |r| r.bg(theme.row_selected))
+            .child(name.child(row.name.clone()))
+            .child(div().flex_none().w(px(MEMORY_W * s)).child(memory))
+            .child(
+                div()
+                    .id(("LowMemEndTaskCell", i))
+                    .debug_selector(move || format!("LowMemEndTask-{i}"))
+                    .aria_label(row.a11y.clone())
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .w(px(BUTTON_W * s))
+                    .child(button),
+            )
+            .into_any_element()
     }
 
     fn clear_or_close(
@@ -577,12 +1109,29 @@ impl LowMemoryWindow {
         window.remove_window();
     }
 
-    /// A printable character typed in the list moves focus to the filter with that character.
+    /// Up and Down move the highlight; Enter and Delete end the highlighted row. A printable
+    /// character typed in the list moves focus to the filter with that character.
     fn list_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let mods = ks.modifiers;
         if mods.control || mods.alt || mods.platform || mods.function {
             return;
+        }
+        if !mods.shift {
+            match ks.key.as_str() {
+                "up" | "down" => {
+                    self.move_highlight(if ks.key == "up" { -1 } else { 1 });
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                "enter" | "delete" => {
+                    self.end_highlighted(&LowMemEndTask, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
         }
         let Some(text) = ks.key_char.as_deref() else {
             return;
@@ -618,6 +1167,13 @@ impl Render for LowMemoryWindow {
             .debug_selector(|| "LowMemList".into())
             .track_focus(&self.list_focus)
             .on_key_down(cx.listener(Self::list_key_down))
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                this.hovered = *hovered;
+                if !*hovered && !this.list_focus.contains_focused(window, cx) {
+                    this.rebuild(&low_mem_words(cx));
+                    cx.notify();
+                }
+            }))
             .flex_1()
             .min_h_0()
             .flex()
@@ -639,23 +1195,13 @@ impl Render for LowMemoryWindow {
                 list = list.child(empty.child(text));
             }
             None => {
-                // E32-A2: the full rows (memory share and End Task).
-                list = list.children(self.visible.iter().map(|&i| {
-                    let mut row = div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .h(px(ROW * s))
-                        .px(m.sp[4])
-                        .border_b_1()
-                        .border_color(theme.divider)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(theme.text_primary);
-                    *row.text_style() = t_base(&m);
-                    row.child(self.names[i as usize].clone())
-                }));
+                let this = cx.entity().downgrade();
+                list = list.children(
+                    self.rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, row)| self.render_row(i, row, &words, &theme, &m, this.clone())),
+                );
             }
         }
 
@@ -663,7 +1209,7 @@ impl Render for LowMemoryWindow {
         let open_full = TlButton::new("LowMemOpenFull", TlButtonKind::Primary)
             .label(words.open_full.clone())
             .on_click(move |_, _, cx| {
-                let _ = this.update(cx, |this, _| this.send_open_full());
+                let _ = this.update(cx, |this, cx| this.send_open_full(cx));
             });
 
         div()
@@ -672,6 +1218,7 @@ impl Render for LowMemoryWindow {
             .on_action(cx.listener(Self::clear_or_close))
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::open_full))
+            .on_action(cx.listener(Self::end_highlighted))
             .size_full()
             .flex()
             .flex_col()
