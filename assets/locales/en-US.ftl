@@ -599,3 +599,16 @@ shortcuts-column-picker = Move, toggle, jump
 shortcuts-handle-search = Start search; stop a running search, else close when idle
 shortcuts-handle-search-table = End Task, End Process, Go to process, copy paths, copy rows as TSV
 shortcuts-low-memory = Clear filter then close; close; start filtering
+
+# Status chip health items (E20-016)
+shell-health-stale = { $source } data stale
+shell-health-failed = { $source } unavailable
+shell-health-disabled = { $source } paused after errors
+shell-health-more = +{ $n } more
+shell-health-no-data = No new data for { $secs } s
+shell-health-unknown-error = Unknown error
+shell-health-restarting = Restarting in a minute
+shell-health-open = Open Collector Health
+shell-health-restricted = Restricted: { $n } processes
+shell-health-chip-gpu = GPU
+shell-health-chip-services = Services
