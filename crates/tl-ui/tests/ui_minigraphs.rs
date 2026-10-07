@@ -543,7 +543,7 @@ mod panel {
         }
     }
 
-    fn catalog() -> DeviceCatalog {
+    pub(super) fn catalog() -> DeviceCatalog {
         DeviceCatalog {
             version: 1,
             entries: vec![
@@ -1017,10 +1017,11 @@ mod mounted {
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::app::{AppEnv, StartOptions, TasklensUi, UiInit};
-    use tl_ui::pages::minigraph::actions::ResetMinigraphLayout;
+    use tl_ui::pages::minigraph::actions::{MinigraphHide, ResetMinigraphLayout};
     use tl_ui::pages::minigraph::panel::MinigraphPanel;
     use tl_ui::pages::minigraph::sources::{MinigraphSource, default_entries};
     use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window};
 
@@ -1110,6 +1111,7 @@ mod mounted {
             })
             .collect();
         engine.publish_with(|s| {
+            s.devices = Arc::new(super::panel::catalog());
             s.processes = Arc::new(ProcessSnapshot {
                 header: ComponentHeader {
                     version: 1,
@@ -1250,5 +1252,78 @@ mod mounted {
             .map(|e| (e.source, e.slot))
             .collect();
         assert_eq!(attached, defaults);
+    }
+
+    /// The E26-A1 anchor: six cards over the Processes table, each with a label, a value and a
+    /// chart, and the CPU tooltip.
+    #[gpui_kit::test]
+    fn minigraph_panel_smoke(cx: &mut TestAppContext) {
+        let mut vcx = open(cx, StartTab::Processes);
+        for slot in 0..6u16 {
+            let selector: &'static str =
+                Box::leak(format!("MinigraphSlot-{slot}").into_boxed_str());
+            assert!(vcx.debug_bounds(selector).is_some(), "slot {slot} painted");
+        }
+        let cards = vcx.update(|_, cx| {
+            let panel = MinigraphPanel::global(cx).expect("panel");
+            panel
+                .read(cx)
+                .cards()
+                .iter()
+                .map(|(_, card)| {
+                    let c = card.read(cx);
+                    (
+                        c.label().to_string(),
+                        c.value().to_string(),
+                        c.series_ids(cx).len(),
+                        c.tooltip_lines().is_some(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let labels: Vec<_> = cards.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(labels, ["CPU", "Memory", "Disk", "Network", "GPU", "VRAM"]);
+        for (label, value, series, _) in &cards {
+            assert!(!value.is_empty(), "{label} has a value");
+            assert!(*series > 0, "{label} draws a chart series");
+        }
+        let tips: Vec<_> = cards.iter().map(|c| c.3).collect();
+        assert_eq!(
+            tips,
+            [true, false, false, false, false, false],
+            "CPU has the tooltip"
+        );
+        assert!(vcx.debug_bounds("MinigraphCard-label").is_some());
+        assert!(vcx.debug_bounds("MinigraphCard-value").is_some());
+    }
+
+    /// The anchor's Hide graph: dispatched from the window on Memory.
+    #[gpui_kit::test]
+    fn minigraph_hide_from_anchor_smoke(cx: &mut TestAppContext) {
+        let mut vcx = open(cx, StartTab::Processes);
+        let panel = vcx.update(|_, cx| MinigraphPanel::global(cx).expect("panel"));
+        let memory = vcx.update(|_, cx| {
+            panel
+                .read(cx)
+                .attached()
+                .find(|e| e.source == MinigraphSource::Memory)
+                .map(|e| e.id)
+                .expect("Memory card")
+        });
+        vcx.dispatch_action(MinigraphHide { id: memory });
+        draw(&mut vcx);
+        let (cards, memory_on) = vcx.update(|_, cx| {
+            (
+                panel.read(cx).cards().len(),
+                TlSettings::settings(cx).graphs.minigraph_memory,
+            )
+        });
+        assert_eq!(cards, 5);
+        assert!(!memory_on);
+        assert!(
+            vcx.debug_bounds("MinigraphSlot-5").is_some(),
+            "VRAM keeps its slot"
+        );
+        assert!(vcx.debug_bounds("MinigraphSlot-1").is_none());
     }
 }
