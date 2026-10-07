@@ -1318,6 +1318,9 @@ impl Render for CmdLineBlock {
 
 // ---- The tab ----
 
+/// Copy texts of one grid, by its flat row index.
+type CopyTexts = Rc<[(usize, SharedString)]>;
+
 /// The General tab view. `PropsWindow` builds it with the process key and the tab's filter.
 pub struct GeneralTab {
     key: ProcessKey,
@@ -1357,7 +1360,7 @@ pub struct GeneralTab {
     /// How many of `visible[i]` the column's first grid draws; the rest are its tail grid.
     main_len: [usize; 3],
     /// Copy texts per column and grid (first, tail), by the grid's flat row index.
-    copies: [[Rc<[(usize, SharedString)]>; 2]; 3],
+    copies: [[CopyTexts; 2]; 3],
     /// The field cursor: (column, index into `visible`).
     cursor: Option<(usize, usize)>,
     /// The panels' focus stop.
@@ -1676,6 +1679,11 @@ impl GeneralTab {
         let (col, row) = self.cursor?;
         let id = *self.visible[col].get(row)?;
         self.field(id)
+    }
+
+    /// The label column width of column `col` from the last frame; the values start after it.
+    pub fn label_width(&self, col: usize) -> Option<Pixels> {
+        self.label_widths.map(|(_, w)| w[col])
     }
 
     /// The panels' focus stop.
@@ -2036,7 +2044,7 @@ impl GeneralTab {
                 };
             }
             self.main_len[i] = rows.len();
-            let copies = |range: std::ops::Range<usize>| -> Rc<[(usize, SharedString)]> {
+            let copies = |range: std::ops::Range<usize>| -> CopyTexts {
                 shown[range]
                     .iter()
                     .enumerate()

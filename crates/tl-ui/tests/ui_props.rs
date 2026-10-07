@@ -949,6 +949,7 @@ mod window {
     use std::rc::Rc;
 
     use gpui_kit::{AnyWindowHandle, WindowHandle};
+    use tl_model::actions::ActionKind;
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
     use tl_model::demand::DetailDemand;
@@ -1560,6 +1561,299 @@ mod window {
                 "Matches package".to_string(),
                 Some(tl_ui::components::kv_grid::ValueTone::Success)
             )
+        );
+    }
+
+    // ---- General copy, links, field menu and keyboard (E23-011) ----
+
+    struct GeneralRig {
+        engine: Arc<FakeEngine>,
+        main: VisualTestContext,
+        handle: AnyWindowHandle,
+        vcx: VisualTestContext,
+        general: Entity<GeneralTab>,
+    }
+
+    /// Parent 1200 and the process 4321 with a General payload from `edit`.
+    fn general_rig(cx: &mut TestAppContext, edit: impl FnOnce(&mut GeneralDetail)) -> GeneralRig {
+        let (engine, main) = setup(cx);
+        publish_records(
+            cx,
+            &engine,
+            vec![
+                rec(1200, ProcFlags::default()),
+                rec(4321, ProcFlags::default()),
+            ],
+        );
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        let mut d = detail("firefox --x");
+        edit(&mut d);
+        publish_detail(cx, &engine, 4321, move |t| {
+            t.tabs[DetailTab::General.index()].payload = Some(payload(d));
+            t.tabs[DetailTab::General.index()].validity = Validity::Valid;
+        });
+        draw(&mut vcx);
+        draw(&mut vcx);
+        let general = cx
+            .read(|cx| view.read(cx).tabs().general.clone())
+            .expect("general tab");
+        GeneralRig {
+            engine,
+            main,
+            handle,
+            vcx,
+            general,
+        }
+    }
+
+    /// The row index of `label` in column `col`.
+    fn general_row(rig: &mut GeneralRig, col: usize, label: &str) -> usize {
+        rig.vcx
+            .read(|cx| rig.general.read(cx).rows(col))
+            .iter()
+            .position(|r| r.label.as_ref() == label)
+            .unwrap_or_else(|| panic!("{label} shown"))
+    }
+
+    /// A point just inside the value of row `row` in column `col` (rows in the first grid).
+    fn general_value_point(
+        rig: &mut GeneralRig,
+        col: usize,
+        row: usize,
+    ) -> gpui_kit::Point<Pixels> {
+        draw(&mut rig.vcx);
+        let panel = rig
+            .vcx
+            .debug_bounds(
+                [
+                    "GeneralTab-panel-0",
+                    "GeneralTab-panel-1",
+                    "GeneralTab-panel-2",
+                ][col],
+            )
+            .expect("panel drawn");
+        let (sp3, sp4, row_h) = rig.vcx.update(|_, cx| {
+            let m = tl_ui::theme::metrics(cx);
+            (m.sp[3], m.sp[4], px(26. * m.ui_scale))
+        });
+        let label = rig
+            .vcx
+            .read(|cx| rig.general.read(cx).label_width(col))
+            .expect("measured");
+        gpui_kit::point(
+            panel.left() + sp4 + label + px(3.),
+            panel.top() + sp3 + row_h * (row as f32 + 0.5),
+        )
+    }
+
+    fn general_click(rig: &mut GeneralRig, col: usize, row: usize) {
+        let at = general_value_point(rig, col, row);
+        rig.vcx.simulate_click(at, Default::default());
+        rig.vcx.run_until_parked();
+    }
+
+    fn clipboard(vcx: &mut VisualTestContext) -> String {
+        vcx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default()
+    }
+
+    fn focus_fields(rig: &mut GeneralRig) {
+        let focus = rig.vcx.read(|cx| rig.general.read(cx).grid_focus().clone());
+        rig.vcx.update(|window, cx| focus.focus(window, cx));
+        draw(&mut rig.vcx);
+    }
+
+    #[gpui_kit::test]
+    fn general_click_copies_full_hash(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |d| {
+            d.hashes = HashState::Done {
+                sha256: sha256_3f9a(),
+                md5: [0xa0; 16],
+            };
+        });
+        let row = general_row(&mut rig, 1, "SHA-256:");
+        general_click(&mut rig, 1, row);
+        let copied = clipboard(&mut rig.vcx);
+        assert_eq!(copied.len(), 64, "{copied}");
+        assert!(copied.starts_with("3f9a0c41e2b77d09"));
+        assert!(copied.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            props_toasts(cx, rig.handle),
+            ["Process property value copied."]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn general_ppid_link_dispatches_goto(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |_| {});
+        let page = rig.main.update(|_, cx| {
+            main_window_view(cx)
+                .and_then(|v| {
+                    v.read(cx)
+                        .page_entity::<tl_ui::pages::processes::ProcessesPage>(Tab::Processes)
+                })
+                .expect("processes page")
+        });
+        let generation = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation())
+        };
+        let before = generation(&mut rig.main);
+        let row = general_row(&mut rig, 0, "PPID:");
+        assert!(
+            rig.vcx
+                .read(|cx| rig.general.read(cx).rows(0)[row].value.link.is_some()),
+            "PPID is a link"
+        );
+        general_click(&mut rig, 0, row);
+        assert!(
+            generation(&mut rig.main) > before,
+            "the jump to the parent expands its path"
+        );
+        let active = cx.update(|cx| cx.active_window().map(|w| w.window_id()));
+        let main_id = rig
+            .main
+            .update(|window, _| window.window_handle().window_id());
+        assert_eq!(active, Some(main_id), "the main window is activated");
+        assert!(
+            clipboard(&mut rig.vcx).is_empty(),
+            "a link click copies nothing"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn general_exe_link_sends_show_in_file_manager(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |_| {});
+        let row = general_row(&mut rig, 0, "Executable:");
+        general_click(&mut rig, 0, row);
+        let sent: Vec<_> = rig
+            .engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(req) => Some(req),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].targets.is_empty());
+        assert!(!sent[0].privileged);
+        assert!(matches!(
+            &sent[0].kind,
+            ActionKind::ShowInFileManager { path, properties: false }
+                if &**path == "/usr/lib/firefox/firefox"
+        ));
+        assert_eq!(props_toasts(cx, rig.handle), ["Opening file location"]);
+    }
+
+    #[gpui_kit::test]
+    fn general_keyboard_cursor_moves_between_columns(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |_| {});
+        focus_fields(&mut rig);
+        let cursor = |rig: &mut GeneralRig| rig.vcx.read(|cx| rig.general.read(cx).cursor());
+
+        rig.vcx.simulate_keystrokes("down");
+        assert_eq!(
+            cursor(&mut rig),
+            Some((0, 0)),
+            "the first key places the cursor"
+        );
+        rig.vcx.simulate_keystrokes("down down");
+        assert_eq!(cursor(&mut rig), Some((0, 2)), "column 1 row 3");
+        rig.vcx.simulate_keystrokes("right");
+        assert_eq!(cursor(&mut rig), Some((1, 2)), "column 2 row 3");
+        draw(&mut rig.vcx);
+        assert!(
+            rig.vcx.debug_bounds("TlKv-cursor-2").is_some(),
+            "the ring is drawn"
+        );
+
+        // Column 2 is longer than column 3: Right clamps to column 3's last row.
+        let (n2, n3) = rig.vcx.read(|cx| {
+            let g = rig.general.read(cx);
+            (g.rows(1).len(), g.rows(2).len())
+        });
+        assert!(n2 > n3, "{n2} > {n3}");
+        rig.vcx.simulate_keystrokes("end");
+        assert_eq!(cursor(&mut rig), Some((1, n2 - 1)));
+        rig.vcx.simulate_keystrokes("right");
+        assert_eq!(cursor(&mut rig), Some((2, n3 - 1)), "clamped");
+        rig.vcx.simulate_keystrokes("home left");
+        assert_eq!(cursor(&mut rig), Some((1, 0)));
+
+        // Enter copies a plain value; Ctrl+C too.
+        rig.vcx.simulate_keystrokes("left enter");
+        assert_eq!(clipboard(&mut rig.vcx), "firefox");
+        assert_eq!(
+            props_toasts(cx, rig.handle),
+            ["Process property value copied."]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn general_copy_all_fields_order(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |d| {
+            d.hashes = HashState::Done {
+                sha256: sha256_3f9a(),
+                md5: [0xa0; 16],
+            };
+        });
+        focus_fields(&mut rig);
+        // Shift+F10 opens the field menu; Copy all fields is its last item.
+        rig.vcx.simulate_keystrokes("shift-f10");
+        draw(&mut rig.vcx);
+        rig.vcx.simulate_keystrokes("end enter");
+        rig.vcx.run_until_parked();
+        let text = clipboard(&mut rig.vcx);
+        let lines: Vec<&str> = text.lines().collect();
+        let at = |prefix: &str| {
+            lines
+                .iter()
+                .position(|l| l.starts_with(prefix))
+                .unwrap_or_else(|| panic!("{prefix} in {text}"))
+        };
+        assert_eq!(lines[0], "Process: firefox");
+        assert!(at("PID: 4321") < at("Executable: /usr/lib/firefox/firefox"));
+        assert!(
+            at("Cgroup:").max(at("Executable:")) < at("SHA-256: "),
+            "column 1 first"
+        );
+        assert!(
+            at("I/O write ops:").max(at("SHA-256:")) < at("Disk read bytes:"),
+            "then 2, 3"
+        );
+        let sha = lines[at("SHA-256: ")];
+        assert_eq!(sha.len(), "SHA-256: ".len() + 64, "the full hash");
+        assert_eq!(*lines.last().unwrap(), "Command line: firefox --x");
+        assert_eq!(props_toasts(cx, rig.handle), ["Copied to clipboard"]);
+    }
+
+    #[gpui_kit::test]
+    fn general_exited_links_plain_and_copy(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |_| {});
+        publish_records(cx, &rig.engine, vec![rec(1200, ProcFlags::default())]);
+        draw(&mut rig.vcx);
+        let row = general_row(&mut rig, 0, "PPID:");
+        let value = rig
+            .vcx
+            .read(|cx| rig.general.read(cx).rows(0)[row].value.clone());
+        assert!(value.link.is_none(), "plain text");
+        assert_eq!(value.validity, Validity::Stale, "text_secondary");
+        general_click(&mut rig, 0, row);
+        assert_eq!(clipboard(&mut rig.vcx), "1200");
+        assert_eq!(
+            props_toasts(cx, rig.handle),
+            ["Process property value copied."]
+        );
+        assert!(
+            !rig.engine
+                .commands()
+                .iter()
+                .any(|c| matches!(c, Command::Action(_))),
+            "nothing sent"
         );
     }
 }
