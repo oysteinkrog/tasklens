@@ -739,6 +739,9 @@ fn history_sort_persisted(cx: &mut TestAppContext) {
     });
 }
 
+/// A change to one Frame input of the page.
+type Change = dyn Fn(&mut HistoryPage, &mut gpui_kit::Context<HistoryPage>);
+
 /// Answers the query in flight, if any.
 fn answer_last(engine: &FakeEngine, page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) {
     if let Some(id) = vcx.read_entity(page, |p, _| p.query_in_flight()) {
@@ -756,7 +759,7 @@ fn scrubbed_frame_inputs_send_one_query_each(cx: &mut TestAppContext) {
     answer_last(&engine, &page, vcx);
     let base = queries(&engine).len();
 
-    let changes: [&dyn Fn(&mut HistoryPage, &mut gpui_kit::Context<HistoryPage>); 3] = [
+    let changes: [&Change; 3] = [
         &|p, cx| p.set_view_range((50 * S, 150 * S), cx),
         &|p, cx| p.set_metric(HistoryMetric::Memory, cx),
         &|p, cx| p.set_selected(vec![key(4), key(2)], cx),
