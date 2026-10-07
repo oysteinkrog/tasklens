@@ -660,3 +660,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - fut.11 closed (19c6e83a, a066eb4e, d7d0a878, f8cf47c6, 47c05f0f, a1f3cf32): five gallery pages; TlTitleBar and TlWindowPin hold no state; static_card only with the bench feature. The gallery_icons goldens are updated for the ChevronsRight icon that jqk.17 added. The inactive window frame is not drawn separately, because the compositor dims the border and shadow, not the bar. The same agent takes gma.39.
 - bj6.10 closed (2dc7fadf): Run... with Ctrl+N, separator, Exit tasklens. The same agent takes bj6.4.
 - bj6.17 closed (3ac55981, 0cc680d5, 5ff1c9ff, 707e241e): About links show only failure toasts, per the OpenUri decision. pdu.51 clippy confirmed. The same agent takes pdu.21.
+- gma.39: P-core and E-core icons sit in the group headers only. A 10 px icon in the 72 px tile (64 px inside) would cut "CPU 23" off. Tiles keep the core-type tooltip.
