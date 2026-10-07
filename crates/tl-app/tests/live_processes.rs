@@ -129,6 +129,11 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
     let mut last = read(&mut vcx);
     while begin.elapsed() < DEADLINE {
         let (rows, records, cpu, memory) = last;
+        eprintln!(
+            "rows {rows}, records {records}, engine records {engine_records}, cpu {cpu:?}, \
+         memory {memory:?}, hidden {hidden}"
+        );
+        assert!(!hidden, "the hub counts the drawn window as shown");
         if rows > 0 && records > 0 && cpu == Validity::Valid && memory == Validity::Valid {
             break;
         }
@@ -142,9 +147,16 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
             .merged()
             .process_table
     });
+    let hidden = vcx.update(|_, cx| cx.global::<tl_ui::hub::GlobalHub>().0.read(cx).is_hidden());
+    let engine_records = engine.latest().processes.records.len();
     let report = engine.shutdown(Duration::from_millis(1500));
 
     let (rows, records, cpu, memory) = last;
+    eprintln!(
+        "rows {rows}, records {records}, engine records {engine_records}, cpu {cpu:?}, \
+         memory {memory:?}, hidden {hidden}"
+    );
+    assert!(!hidden, "the hub counts the drawn window as shown");
     assert!(demand_on, "the Processes tab sends process_table demand");
     assert!(records > 0, "the sweep published process records");
     assert!(rows > 0, "the table shows process rows");
