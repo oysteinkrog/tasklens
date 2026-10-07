@@ -5,14 +5,20 @@
 //! Space dispatches the owner's action from the link, so it bubbles to the owner's `on_action`.
 //! GPUI turns Enter and Space on a focused element into a keyboard click on key up, so `on_click`
 //! covers all three and no key binding is needed. Right-click is left to the owner.
+//!
+//! [`TlLink::on_click_bounds`] replaces the dispatch with the owner's handler, called with the
+//! link's bounds, so the owner can open a popup under it (a keyboard click passes the bounds
+//! GPUI gives it; a mouse click passes the bounds of the last paint).
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::Colorize;
 use gpui_kit::{
-    Action, App, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Pixels, RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled,
-    Window, div,
+    Action, App, Bounds, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, StatefulInteractiveElement,
+    Styled, Window, canvas, div,
 };
 
 use crate::components::focus::TlFocusRing;
@@ -23,6 +29,9 @@ use crate::theme::{TlTheme, current, metrics};
 /// Press darkens the link colour by this fraction.
 const PRESS_SHADE: f32 = 0.08;
 
+/// The owner's click handler, with the link's bounds.
+pub type LinkClick = Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>;
+
 /// A link. The owner handles `action`; the link only dispatches it.
 #[derive(IntoElement)]
 pub struct TlLink {
@@ -31,6 +40,7 @@ pub struct TlLink {
     action: Box<dyn Action>,
     text_size: Option<Pixels>,
     disabled_reason: Option<SharedString>,
+    on_click: Option<LinkClick>,
 }
 
 impl TlLink {
@@ -45,7 +55,15 @@ impl TlLink {
             action,
             text_size: None,
             disabled_reason: None,
+            on_click: None,
         }
+    }
+
+    /// Click, Enter or Space calls `handler` with the link's bounds instead of dispatching the
+    /// action.
+    pub fn on_click_bounds(mut self, handler: LinkClick) -> Self {
+        self.on_click = Some(handler);
+        self
     }
 
     /// Text size of the surrounding text. Default `t_base`.
@@ -108,6 +126,14 @@ impl RenderOnce for TlLink {
         let text = text.min_w_0().truncate().child(self.text.clone());
 
         let tooltip_id = ElementId::NamedChild(Arc::new(self.id.clone()), "tooltip".into());
+        // The bounds of the last paint, for a mouse click with an owner handler.
+        let painted = self.on_click.as_ref().map(|_| {
+            let id = ElementId::NamedChild(Arc::new(self.id.clone()), "bounds".into());
+            window
+                .use_keyed_state(id, cx, |_, _| Rc::new(Cell::new(Bounds::default())))
+                .read(cx)
+                .clone()
+        });
 
         // The outer box carries the ring and does not clip; the inner text truncates.
         let mut link = div()
@@ -121,6 +147,14 @@ impl RenderOnce for TlLink {
             .key_context("TlLink")
             .text_color(look.color)
             .child(text);
+        if let Some(cell) = &painted {
+            let cell = cell.clone();
+            link = link.child(
+                canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            );
+        }
 
         // A disabled link tracks no focus, so it is neither a Tab stop nor focusable.
         if !disabled && TlFocusRing::show(focus.is_focused(window), window) {
@@ -132,14 +166,23 @@ impl RenderOnce for TlLink {
             let build = TlTooltip::text(reason).build();
             HoverTooltip::attach(&state, link, DELAY_CONTROL, build, window, cx)
         } else {
-            let action = self.action;
+            let (action, on_click) = (self.action, self.on_click);
             link.track_focus(&focus)
                 .cursor_pointer()
                 .hover(|s| s.underline())
                 .active(move |s| s.text_color(look.pressed))
-                .on_click(move |_, window, cx| {
+                .on_click(move |ev, window, cx| {
                     focus.focus(window, cx);
-                    window.dispatch_action(action.boxed_clone(), cx);
+                    match (&on_click, &painted) {
+                        (Some(handler), Some(painted)) => {
+                            let bounds = match ev {
+                                ClickEvent::Keyboard(k) => k.bounds,
+                                _ => painted.get(),
+                            };
+                            handler(bounds, window, cx);
+                        }
+                        _ => window.dispatch_action(action.boxed_clone(), cx),
+                    }
                 })
         }
     }
@@ -163,12 +206,17 @@ mod tests {
     struct Harness {
         disabled: bool,
         dispatched: Rc<Cell<usize>>,
+        /// Set: the link calls the owner's handler, which records the bounds.
+        clicked: Option<Rc<Cell<Option<Bounds<Pixels>>>>>,
     }
 
     impl Render for Harness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let dispatched = self.dispatched.clone();
-            let link = TlLink::new("link", "systemd", Box::new(OpenTarget));
+            let mut link = TlLink::new("link", "systemd", Box::new(OpenTarget));
+            if let Some(clicked) = self.clicked.clone() {
+                link = link.on_click_bounds(Rc::new(move |b, _, _| clicked.set(Some(b))));
+            }
             let link = if self.disabled {
                 link.disabled("Not reported")
             } else {
@@ -201,10 +249,43 @@ mod tests {
             move |_, _| Harness {
                 disabled,
                 dispatched,
+                clicked: None,
             }
         });
         cx.run_until_parked();
         (cx, dispatched)
+    }
+
+    /// A link with an owner click handler; the handler records the bounds it is given.
+    fn harness_bounds(
+        cx: &mut TestAppContext,
+    ) -> (
+        &mut VisualTestContext,
+        Rc<Cell<usize>>,
+        Rc<Cell<Option<Bounds<Pixels>>>>,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+        });
+        let dispatched = Rc::new(Cell::new(0));
+        let clicked = Rc::new(Cell::new(None));
+        let (_, cx) = cx.add_window_view({
+            let (dispatched, clicked) = (dispatched.clone(), clicked.clone());
+            move |_, _| Harness {
+                disabled: false,
+                dispatched,
+                clicked: Some(clicked),
+            }
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        (cx, dispatched, clicked)
     }
 
     fn focus_link(cx: &mut VisualTestContext) {
@@ -269,6 +350,22 @@ mod tests {
         let (cx, dispatched) = harness(cx, false);
         cx.simulate_click(point(px(4.), px(6.)), Modifiers::none());
         assert_eq!(dispatched.get(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn on_click_bounds_replaces_dispatch(cx: &mut TestAppContext) {
+        let (cx, dispatched, clicked) = harness_bounds(cx);
+        cx.simulate_click(point(px(4.), px(6.)), Modifiers::none());
+        let mouse = clicked.take().expect("the handler ran");
+        assert_eq!(dispatched.get(), 0, "no dispatch");
+        assert_eq!(mouse.origin, point(px(0.), px(0.)));
+        assert!(mouse.size.width > px(0.) && mouse.size.height > px(0.));
+
+        focus_link(cx);
+        press(cx, "enter");
+        let keyboard = clicked.take().expect("Enter runs the handler");
+        assert_eq!(keyboard, mouse, "the keyboard click passes the same bounds");
+        assert_eq!(dispatched.get(), 0);
     }
 
     #[gpui_kit::test]

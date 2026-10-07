@@ -46,7 +46,8 @@
 //!
 //! Owner hooks, all opt-in: [`TlKeyValueGrid::copy_texts`] copies a longer form than the shown
 //! value (a full hash), [`TlKeyValueGrid::on_context_menu`] replaces the built-in menu with the
-//! owner's, and [`TlKeyValueGrid::cursor`] draws a keyboard cursor ring around one row.
+//! owner's, [`TlKeyValueGrid::cursor`] draws a keyboard cursor ring around one row, and
+//! [`TlKeyValueGrid::on_link_click`] hands a link click to the owner with the link's bounds.
 //!
 //! The grid caches nothing. Owners keep the formatted strings and re-format only changed values.
 //! Values are never logged.
@@ -60,9 +61,9 @@ use gpui_kit::base::{SelectableText, TextSelection};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    Action, Animation, AnimationExt as _, AnyElement, App, BorrowAppContext as _, ClipboardItem,
-    Context, ElementId, FocusHandle, FontWeight, Global, Hsla, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, ParentElement, Pixels, Point, RenderOnce, SharedString,
+    Action, Animation, AnimationExt as _, AnyElement, App, BorrowAppContext as _, Bounds,
+    ClipboardItem, Context, ElementId, FocusHandle, FontWeight, Global, Hsla, InteractiveElement,
+    IntoElement, KeyBinding, MouseButton, ParentElement, Pixels, Point, RenderOnce, SharedString,
     StatefulInteractiveElement as _, Styled, Task, Window, canvas, div, fill, point,
     prelude::FluentBuilder as _, px, size,
 };
@@ -126,6 +127,7 @@ const LINE_IDS: [&str; 8] = [
 type CopiedHandler = Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
 type SectionHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 type MenuHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
+type LinkHandler = Rc<dyn Fn(usize, Bounds<Pixels>, &mut Window, &mut App)>;
 
 /// Binds Ctrl+C inside the grid, so a text selection is copied before the page's Copy binding
 /// runs. Call once at startup.
@@ -603,6 +605,7 @@ pub struct TlKeyValueGrid {
     label_lines: Rc<[(usize, u8)]>,
     copy_texts: Rc<[(usize, SharedString)]>,
     on_context_menu: Option<MenuHandler>,
+    on_link_click: Option<LinkHandler>,
     cursor: Option<usize>,
     filtered_empty: bool,
     loading: bool,
@@ -628,6 +631,7 @@ impl TlKeyValueGrid {
             label_lines: Rc::from(Vec::new()),
             copy_texts: Rc::from(Vec::new()),
             on_context_menu: None,
+            on_link_click: None,
             cursor: None,
             filtered_empty: false,
             loading: false,
@@ -735,6 +739,17 @@ impl TlKeyValueGrid {
         handler: impl Fn(usize, Point<Pixels>, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_context_menu = Some(Rc::new(handler));
+        self
+    }
+
+    /// A click, Enter or Space on a link value calls `handler` with the flat row index and the
+    /// link's bounds instead of dispatching the value's action, so the owner can open a popup
+    /// under it.
+    pub fn on_link_click(
+        mut self,
+        handler: impl Fn(usize, Bounds<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_link_click = Some(Rc::new(handler));
         self
     }
 
@@ -847,9 +862,14 @@ impl TlKeyValueGrid {
         let mut line_count = 1;
         if look.link {
             let action = row.value.link.as_ref()?.boxed_clone();
-            cell = cell.child(
-                TlLink::new((id.clone(), "link"), look.text.clone(), action).text_size(m.text.base),
-            );
+            let mut link =
+                TlLink::new((id.clone(), "link"), look.text.clone(), action).text_size(m.text.base);
+            if let Some(handler) = self.on_link_click.clone() {
+                link = link.on_click_bounds(Rc::new(move |bounds, window, cx| {
+                    handler(n, bounds, window, cx)
+                }));
+            }
+            cell = cell.child(link);
         } else {
             if let Some(lines) = multiline.then(|| f.lines_of(&look.text)).flatten() {
                 line_count = lines.len();
@@ -1987,6 +2007,35 @@ mod tests {
         pick_menu_item(cx, 0, 0);
         assert_eq!(opened.borrow().as_slice(), &[0]);
         assert!(copied.borrow().is_empty(), "no built-in menu item ran");
+    }
+
+    #[gpui_kit::test]
+    fn on_link_click_replaces_dispatch(cx: &mut TestAppContext) {
+        let linked = || TlValue {
+            link: Some(Box::new(OpenSetup)),
+            ..TlValue::new("Mbps")
+        };
+        let clicked: Rc<RefCell<Vec<(usize, Bounds<Pixels>)>>> = Rc::default();
+        let (cx, _, setups) = host(cx, {
+            let clicked = clicked.clone();
+            move || {
+                let clicked = clicked.clone();
+                TlKeyValueGrid::new("grid", KvLayout::Inline)
+                    .sections(&[section(vec![
+                        row("PID:", TlValue::new("1")),
+                        row("Display unit:", linked()),
+                    ])])
+                    .on_link_click(move |n, b, _, _| clicked.borrow_mut().push((n, b)))
+            }
+        });
+        let value = bounds(cx, "TlKv-value-1").expect("value drawn");
+        cx.simulate_click(value.center(), Modifiers::none());
+        let got = clicked.borrow().clone();
+        assert_eq!(got.len(), 1, "the handler ran once");
+        assert_eq!(got[0].0, 1, "with the row index");
+        assert!(value.contains(&got[0].1.center()), "and the link's bounds");
+        assert_eq!(setups.get(), 0, "the action is not dispatched");
+        // Without the hook a link dispatches: `needs_setup_link_dispatches`.
     }
 
     #[gpui_kit::test]
