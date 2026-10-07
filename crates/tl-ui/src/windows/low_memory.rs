@@ -516,6 +516,16 @@ fn make_row(
     }
 }
 
+/// "Needs administrator rights" on another user's row, else "Ends immediately, unsaved work is
+/// lost".
+fn end_task_tooltip_in(row: &LowMemRow, words: &LowMemWords) -> SharedString {
+    if row.other_user {
+        words.needs_admin.clone()
+    } else {
+        words.end_task_tooltip.clone()
+    }
+}
+
 /// The End Task request for `target`: SIGKILL for a process, a `cgroup.kill` write for an app
 /// (ADR-006). No confirmation (PROC-098).
 fn end_task_request(target: &ActionTarget) -> ActionRequest {
@@ -885,6 +895,12 @@ impl LowMemoryWindow {
         self.rows.iter().position(|r| r.id == id)
     }
 
+    /// The End Task tooltip of row `ix`.
+    pub fn end_task_tooltip(&self, ix: usize, cx: &App) -> Option<SharedString> {
+        let row = self.rows.get(ix)?;
+        Some(end_task_tooltip_in(row, &words_now(cx)))
+    }
+
     /// Whether End Task of `id` is in flight.
     pub fn is_ending(&self, id: RowId) -> bool {
         self.ending.iter().any(|(_, r)| *r == id)
@@ -1047,14 +1063,11 @@ impl LowMemoryWindow {
         };
 
         let id = row.id;
-        let tooltip = if row.other_user {
-            words.needs_admin.clone()
-        } else {
-            words.end_task_tooltip.clone()
-        };
+        let tooltip = end_task_tooltip_in(row, words);
         let button = TlButton::new(("LowMemEndTask", i), TlButtonKind::Danger)
             .size(TlButtonSize::Sm)
             .label(words.end_task.clone())
+            .accessible_name(row.a11y.clone())
             .tooltip(tooltip)
             .disabled(row.other_user)
             .loading(self.is_ending(id))
@@ -1080,9 +1093,7 @@ impl LowMemoryWindow {
             .child(div().flex_none().w(px(MEMORY_W * s)).child(memory))
             .child(
                 div()
-                    .id(("LowMemEndTaskCell", i))
                     .debug_selector(move || format!("LowMemEndTask-{i}"))
-                    .aria_label(row.a11y.clone())
                     .flex_none()
                     .flex()
                     .justify_end()

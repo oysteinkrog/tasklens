@@ -1,5 +1,6 @@
-//! Low-memory rescue window: frame, texts, filter, eased state, keys and the minimal init
-//! (E32-009, UI-PWN-032, R-243). Run with `--features test-hooks`.
+//! Low-memory rescue window: frame, texts, filter, eased state, keys, the minimal init, and the
+//! process list with End Task (E32-009, E32-A2, UI-PWN-032, UI-PWN-033, R-243). Run with
+//! `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::borrow::Cow;
@@ -11,18 +12,25 @@ use gpui_kit::{
     Modifiers, Pixels, PlatformTextSystem, RenderGlyphParams, Size, TestAppContext, TestDispatcher,
     TextRenderingMode, VisualTestContext, WindowHandle,
 };
-use tl_model::actions::CgroupRef;
-use tl_model::actions::{ActionKind, LaunchWhat};
+use tl_model::actions::{
+    ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, CgroupRef,
+    LaunchWhat, RejectReason, Signal,
+};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, KWinCommand};
-use tl_model::ids::GroupKey;
-use tl_model::process::{LowMemGroup, LowMemoryInfo};
+use tl_model::ids::{GroupKey, ProcessKey};
+use tl_model::process::{
+    LowMemGroup, LowMemoryInfo, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
+};
 use tl_model::settings::{Settings, UiState};
+use tl_model::time::BootId;
+use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::app::{AppEnv, OpenHooks, UiExit, UiExitSlot, UiInit, start_for_test};
+use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
-use tl_ui::windows::low_memory::{LowMemoryWindow, init_low_memory};
+use tl_ui::windows::low_memory::{LowMemoryWindow, MAX_ROWS, RowId, init_low_memory};
 use tl_ui::{OpenMode, StartOptions, UiLaunch};
 
 const SECOND: u64 = 1_000_000_000;
@@ -187,7 +195,7 @@ fn lowmem_texts_and_title(cx: &mut TestAppContext) {
             .map(|n| n.to_string())
             .collect()
     });
-    assert_eq!(names, ["Firefox", "Konsole"]);
+    assert_eq!(names, ["Firefox (3)", "Konsole (3)"]);
 
     // A second frame makes no `tr` call.
     let before = tl_ui::i18n::tr_calls();
@@ -285,7 +293,7 @@ fn lowmem_esc_clears_then_closes(cx: &mut TestAppContext) {
             .map(|n| n.to_string())
             .collect()
     });
-    assert_eq!(names, ["Firefox"]);
+    assert_eq!(names, ["Firefox (3)"]);
 
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
@@ -697,4 +705,473 @@ fn low_memory_loads_two_faces() {
     assert_eq!(added.len(), 2);
     assert!(added.iter().any(|f| f.as_slice() == REGULAR));
     assert!(added.iter().any(|f| f.as_slice() == SEMIBOLD));
+}
+
+// E32-A2: the process list and End Task.
+
+const MIB: u64 = 1 << 20;
+/// MemTotal of the list tests: 1000 MiB, so 120 MiB is 12.0%.
+const TOTAL: u64 = 1000 * MIB;
+
+fn key(pid: u32, start_ticks: u64) -> ProcessKey {
+    ProcessKey {
+        start_ticks,
+        boot_id: BootId(0),
+        pid,
+    }
+}
+
+/// A process of this user outside any app group, with `mib` MiB of RssAnon.
+fn proc(pid: u32, name: &str, mib: u64) -> ProcessRecord {
+    let name: Arc<str> = Arc::from(name);
+    let lower: Arc<str> = Arc::from(name.to_lowercase());
+    ProcessRecord {
+        key: key(pid, u64::from(pid) * 10),
+        ppid: 1,
+        uid: 1000,
+        meta: Arc::new(ProcessMeta {
+            comm: name.clone(),
+            name,
+            exe: None,
+            cmdline: None,
+            user: Arc::from("user"),
+            cgroup: None,
+            app_id: None,
+            icon: None,
+            description: None,
+            desktop_path: None,
+            search_lower: lower,
+        }),
+        group: GroupKey(0),
+        state: ProcState::Sleeping,
+        flags: ProcFlags::empty(),
+        nice: 0,
+        threads: 1,
+        cpu_pct: 0.,
+        rss_anon_bytes: mib * MIB,
+        rss_bytes: mib * MIB,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.,
+        io_write_bps: 0.,
+        net_rx_bps: 0.,
+        net_tx_bps: 0.,
+        gpu_util_pct: 0.,
+        gpu_mem_bytes: 0,
+        euid: None,
+        net_shared: false,
+        cancelled_write_bps: 0.,
+        validity: FieldValidity::all(Validity::Valid),
+    }
+}
+
+/// An app group of this user with `count` processes and `mib` MiB of `memory.current`.
+fn app(id: u64, name: &str, count: u32, mib: u64) -> LowMemGroup {
+    LowMemGroup {
+        process_count: count,
+        memory_current: mib * MIB,
+        ..group(id, name)
+    }
+}
+
+/// Publishes one sweep with these groups and records, under pressure.
+fn sweep(
+    cx: &mut TestAppContext,
+    engine: &FakeEngine,
+    groups: Vec<LowMemGroup>,
+    mut records: Vec<ProcessRecord>,
+) {
+    records.sort_by_key(|r| r.key);
+    engine.publish_with(|s| {
+        s.published_ns += SECOND;
+        let p = Arc::make_mut(&mut s.processes);
+        p.header.version += 1;
+        p.records = Arc::from(records);
+        p.low_memory = Some(Arc::new(LowMemoryInfo {
+            groups: Arc::from(groups),
+            mem_total: TOTAL,
+            mem_available: 10 * MIB,
+            psi_full_pct: Some(40.),
+            critical: true,
+        }));
+    });
+    cx.run_until_parked();
+}
+
+fn names(vcx: &mut VisualTestContext, view: &gpui_kit::Entity<LowMemoryWindow>) -> Vec<String> {
+    vcx.read(|cx| {
+        view.read(cx)
+            .visible_names()
+            .map(|n| n.to_string())
+            .collect()
+    })
+}
+
+/// Every `ActionRequest` the window sent, in order.
+fn actions(engine: &FakeEngine) -> Vec<ActionRequest> {
+    engine
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::Action(req) => Some(req),
+            _ => None,
+        })
+        .collect()
+}
+
+fn click(vcx: &mut VisualTestContext, selector: &'static str) {
+    draw(vcx);
+    let bounds = vcx.debug_bounds(selector).expect("drawn");
+    vcx.simulate_click(bounds.center(), Modifiers::none());
+    vcx.run_until_parked();
+}
+
+fn toasts(vcx: &mut VisualTestContext) -> Vec<String> {
+    vcx.update(|window, cx| {
+        ToastQueue::of_window(window, cx)
+            .expect("toast queue")
+            .read(cx)
+            .visible_texts()
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    })
+}
+
+/// Sends the engine's summary for request `req`.
+fn answer(cx: &mut TestAppContext, engine: &FakeEngine, req: &ActionRequest, state: ActionState) {
+    engine.emit(ActionEvent {
+        id: req.id,
+        target: None,
+        state,
+    });
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn lowmem_list_caps_30_sorted(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    // 40 processes with 1..=40 MiB, in a mixed order.
+    let records = (1..=40u32)
+        .map(|i| {
+            let mib = u64::from((i * 17) % 40 + 1);
+            proc(1000 + i, &format!("p{mib}"), mib)
+        })
+        .collect();
+    sweep(cx, &engine, Vec::new(), records);
+    let (_, mut vcx, view) = open(cx, &engine);
+    draw(&mut vcx);
+
+    let rows: Vec<u64> = vcx.read(|cx| {
+        view.read(cx)
+            .rows()
+            .iter()
+            .map(|r| r.memory_bytes)
+            .collect()
+    });
+    assert_eq!(rows.len(), MAX_ROWS);
+    let want: Vec<u64> = (11..=40).rev().map(|mib| mib * MIB).collect();
+    assert_eq!(rows, want);
+    assert_eq!(names(&mut vcx, &view)[0], "p40");
+    assert!(vcx.debug_bounds("LowMemRow-29").is_some());
+    assert!(vcx.debug_bounds("LowMemRow-30").is_none());
+}
+
+#[gpui_kit::test]
+fn lowmem_app_row_name_and_percent(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    sweep(
+        cx,
+        &engine,
+        vec![app(7, "Firefox", 34, 120)],
+        vec![proc(4000, "konsole", 50)],
+    );
+    let (_, mut vcx, view) = open(cx, &engine);
+    draw(&mut vcx);
+    assert_eq!(names(&mut vcx, &view), ["Firefox (34)", "konsole"]);
+    let (memory, a11y) = vcx.read(|cx| {
+        let row = &view.read(cx).rows()[0];
+        (row.memory_text.to_string(), row.a11y.to_string())
+    });
+    assert_eq!(memory, "Memory 12.0%");
+    assert_eq!(a11y, "End Task: Firefox (34)");
+    assert_eq!(
+        vcx.read(|cx| view.read(cx).rows()[1].memory_text.to_string()),
+        "Memory 5.0%"
+    );
+    assert!(vcx.debug_bounds("LowMemMemory-0").is_some());
+    // The End Task button's accessible name carries the row name, when the tree is built.
+    draw(&mut vcx);
+    if let Some(tree) = vcx.update(|window, _| window.debug_a11y_tree_json()) {
+        assert!(
+            tree.contains("End Task: Firefox (34)"),
+            "the a11y tree names it"
+        );
+    }
+
+    // A process inside an app group is not listed on its own.
+    let mut member = proc(4001, "firefox", 900);
+    member.group = GroupKey(7);
+    sweep(
+        cx,
+        &engine,
+        vec![app(7, "Firefox", 34, 120)],
+        vec![proc(4000, "konsole", 50), member],
+    );
+    assert_eq!(names(&mut vcx, &view), ["Firefox (34)", "konsole"]);
+
+    // A frame formats nothing.
+    draw(&mut vcx);
+    let before = tl_ui::i18n::tr_calls();
+    draw(&mut vcx);
+    assert_eq!(tl_ui::i18n::tr_calls(), before);
+}
+
+#[gpui_kit::test]
+fn lowmem_order_held_while_hovered(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    sweep(
+        cx,
+        &engine,
+        Vec::new(),
+        vec![proc(10, "alpha", 200), proc(11, "beta", 100)],
+    );
+    let (_, mut vcx, view) = open(cx, &engine);
+    draw(&mut vcx);
+    assert_eq!(names(&mut vcx, &view), ["alpha", "beta"]);
+
+    let list = vcx.debug_bounds("LowMemList").expect("list drawn");
+    vcx.simulate_mouse_move(list.center(), None, Modifiers::none());
+    vcx.run_until_parked();
+
+    sweep(
+        cx,
+        &engine,
+        Vec::new(),
+        vec![proc(10, "alpha", 50), proc(11, "beta", 300)],
+    );
+    draw(&mut vcx);
+    assert_eq!(names(&mut vcx, &view), ["alpha", "beta"], "order held");
+    let values: Vec<String> = vcx.read(|cx| {
+        view.read(cx)
+            .rows()
+            .iter()
+            .map(|r| r.memory_text.to_string())
+            .collect()
+    });
+    assert_eq!(values, ["Memory 5.0%", "Memory 30.0%"], "values update");
+
+    // The pointer leaves and nothing in the list has focus: the list re-sorts.
+    let header = vcx.debug_bounds("LowMemHeaderLine").expect("header drawn");
+    vcx.simulate_mouse_move(header.center(), None, Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(names(&mut vcx, &view), ["beta", "alpha"]);
+
+    // Focus in the list holds the order too, until it moves out.
+    focus_list(&mut vcx, &view);
+    sweep(
+        cx,
+        &engine,
+        Vec::new(),
+        vec![proc(10, "alpha", 400), proc(11, "beta", 300)],
+    );
+    assert_eq!(names(&mut vcx, &view), ["beta", "alpha"], "held by focus");
+    let filter = vcx.read(|cx| view.read(cx).filter().read(cx).focus_handle(cx));
+    vcx.update(|window, cx| filter.focus(window, cx));
+    vcx.run_until_parked();
+    assert_eq!(names(&mut vcx, &view), ["alpha", "beta"]);
+}
+
+#[gpui_kit::test]
+fn lowmem_other_user_disabled_tooltip(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    let mut root = proc(20, "postgres", 300);
+    root.uid = 0;
+    root.flags = ProcFlags::OTHER_USER;
+    sweep(cx, &engine, Vec::new(), vec![root, proc(21, "kate", 100)]);
+    let (_, mut vcx, view) = open(cx, &engine);
+    draw(&mut vcx);
+    assert_eq!(names(&mut vcx, &view), ["postgres", "kate"]);
+    let (other, tip0, tip1) = vcx.update(|_, cx| {
+        let v = view.read(cx);
+        (
+            v.rows()[0].other_user,
+            v.end_task_tooltip(0, cx).map(|t| t.to_string()),
+            v.end_task_tooltip(1, cx).map(|t| t.to_string()),
+        )
+    });
+    assert!(other);
+    assert_eq!(tip0.as_deref(), Some("Needs administrator rights"));
+    assert_eq!(
+        tip1.as_deref(),
+        Some("Ends immediately, unsaved work is lost")
+    );
+
+    // The disabled button sends nothing.
+    click(&mut vcx, "LowMemEndTask-0");
+    assert!(actions(&engine).is_empty());
+
+    // Its tooltip still shows on hover.
+    let button = vcx.debug_bounds("LowMemEndTask-0").expect("button drawn");
+    vcx.simulate_mouse_move(button.center(), None, Modifiers::none());
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("TlTooltip").is_some(), "tooltip shows");
+}
+
+#[gpui_kit::test]
+fn lowmem_end_task_no_confirmation(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    sweep(cx, &engine, Vec::new(), vec![proc(30, "leaky", 700)]);
+    let (_, mut vcx, view) = open(cx, &engine);
+    click(&mut vcx, "LowMemEndTask-0");
+
+    let sent = actions(&engine);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].kind, ActionKind::Signal(Signal::Kill));
+    assert_eq!(
+        sent[0].targets.as_slice(),
+        [ActionTarget::Process(key(30, 300))]
+    );
+    assert!(!sent[0].privileged);
+    // No dialog: the rescue window is the only window and nothing else drew over it.
+    assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("TlDialog").is_none());
+    // The button shows loading while the request runs.
+    assert!(vcx.read(|cx| view.read(cx).is_ending(RowId::Process(key(30, 300)))));
+    assert!(vcx.debug_bounds("TlButton-spinner").is_some());
+
+    // A second click while in flight sends nothing more.
+    click(&mut vcx, "LowMemEndTask-0");
+    assert_eq!(actions(&engine).len(), 1);
+
+    answer(cx, &engine, &sent[0], ActionState::Succeeded);
+    assert!(!vcx.read(|cx| view.read(cx).is_ending(RowId::Process(key(30, 300)))));
+    assert_eq!(toasts(&mut vcx), ["Task ended"]);
+    // The row goes with the next sweep.
+    sweep(cx, &engine, Vec::new(), Vec::new());
+    assert!(names(&mut vcx, &view).is_empty());
+}
+
+#[gpui_kit::test]
+fn lowmem_end_task_app_uses_kill_group(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    sweep(cx, &engine, vec![app(5, "Firefox", 12, 400)], Vec::new());
+    let (_, mut vcx, _) = open(cx, &engine);
+    click(&mut vcx, "LowMemEndTask-0");
+
+    let sent = actions(&engine);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].kind, ActionKind::KillGroup);
+    assert_eq!(
+        sent[0].targets.as_slice(),
+        [ActionTarget::Cgroup(CgroupRef {
+            rel_path: Arc::from("user.slice/app-Firefox.scope"),
+            cgroup_id: 5,
+        })]
+    );
+    assert!(!sent[0].privileged);
+}
+
+#[gpui_kit::test]
+fn lowmem_end_task_failure_toast(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    sweep(cx, &engine, Vec::new(), vec![proc(40, "stuck", 300)]);
+    let (_, mut vcx, view) = open(cx, &engine);
+    click(&mut vcx, "LowMemEndTask-0");
+    let sent = actions(&engine);
+    answer(
+        cx,
+        &engine,
+        &sent[0],
+        ActionState::Failed(ActionError::Os(5)),
+    );
+    assert_eq!(
+        toasts(&mut vcx),
+        ["End Task Failed. The system call failed (error 5)."]
+    );
+    assert!(!vcx.read(|cx| view.read(cx).is_ending(RowId::Process(key(40, 400)))));
+}
+
+#[gpui_kit::test]
+fn lowmem_keyboard_delete_ends_highlighted(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    sweep(
+        cx,
+        &engine,
+        Vec::new(),
+        vec![proc(50, "a", 300), proc(51, "b", 200), proc(52, "c", 100)],
+    );
+    let (_, mut vcx, view) = open(cx, &engine);
+    focus_list(&mut vcx, &view);
+    vcx.simulate_keystrokes("down down");
+    vcx.run_until_parked();
+    assert_eq!(vcx.read(|cx| view.read(cx).highlight()), Some(1));
+    vcx.simulate_keystrokes("down up");
+    assert_eq!(vcx.read(|cx| view.read(cx).highlight()), Some(1));
+
+    vcx.simulate_keystrokes("delete");
+    vcx.run_until_parked();
+    let sent = actions(&engine);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].targets.as_slice(),
+        [ActionTarget::Process(key(51, 510))]
+    );
+
+    // Enter on another row ends that one.
+    vcx.simulate_keystrokes("up enter");
+    vcx.run_until_parked();
+    let sent = actions(&engine);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        sent[1].targets.as_slice(),
+        [ActionTarget::Process(key(50, 500))]
+    );
+}
+
+/// Security regression (PROC-001): the request carries the key captured from the sweep, never a
+/// pid looked up again, and an identity change kills nothing.
+#[gpui_kit::test]
+fn lowmem_identity_changed_not_killed(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    sweep(cx, &engine, Vec::new(), vec![proc(60, "editor", 300)]);
+    let (_, mut vcx, view) = open(cx, &engine);
+    click(&mut vcx, "LowMemEndTask-0");
+
+    // The pid is reused by a new process before the engine checks the request.
+    let mut reused = proc(60, "editor", 300);
+    reused.key = key(60, 999);
+    sweep(cx, &engine, Vec::new(), vec![reused]);
+    let sent = actions(&engine);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].targets.as_slice(),
+        [ActionTarget::Process(key(60, 600))]
+    );
+    answer(
+        cx,
+        &engine,
+        &sent[0],
+        ActionState::Rejected(RejectReason::IdentityChanged),
+    );
+
+    assert_eq!(actions(&engine).len(), 1, "nothing else sent");
+    assert_eq!(
+        toasts(&mut vcx),
+        ["The selected process changed; wait for the list to update and try again."]
+    );
+    // The pointer still holds the order, so the gone process left and the new one waits. Once
+    // the pointer leaves, the new process gets its own row.
+    assert!(names(&mut vcx, &view).is_empty());
+    draw(&mut vcx);
+    let header = vcx.debug_bounds("LowMemHeaderLine").expect("header drawn");
+    vcx.simulate_mouse_move(header.center(), None, Modifiers::none());
+    vcx.run_until_parked();
+    let ids: Vec<RowId> = vcx.read(|cx| view.read(cx).rows().iter().map(|r| r.id).collect());
+    assert_eq!(ids, [RowId::Process(key(60, 999))]);
 }
