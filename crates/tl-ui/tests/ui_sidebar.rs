@@ -1302,13 +1302,11 @@ mod sidebar {
 
     #[gpui_kit::test]
     fn card_menu_items_default(cx: &mut TestAppContext) {
-        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let r = open(cx, nine(), Settings::default(), UiState::default());
         let sidebar = r.sidebar.clone();
         let list = r.vcx.update(|window, cx| {
             let focus = sidebar.read(cx).focus_handle(cx);
-            let menu = sidebar
-                .read(cx)
-                .card_menu_for(&key("cpu"), focus, window, cx);
+            let menu = sidebar.update(cx, |s, cx| s.card_menu_for(&key("cpu"), focus, window, cx));
             entries(window, &menu, cx)
         });
         // The trailing separator before the P3 tray item is dropped by `TlMenu::build`.
@@ -1371,9 +1369,7 @@ mod sidebar {
         let sidebar = r.sidebar.clone();
         let list = r.vcx.update(|window, cx| {
             let focus = sidebar.read(cx).focus_handle(cx);
-            let menu = sidebar
-                .read(cx)
-                .card_menu_for(&key("cpu"), focus, window, cx);
+            let menu = sidebar.update(cx, |s, cx| s.card_menu_for(&key("cpu"), focus, window, cx));
             entries(window, &menu, cx)
         });
         assert_eq!(list[1].0, MenuEntryKind::Disabled);
