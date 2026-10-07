@@ -515,3 +515,6 @@ processes-cell-tooltip-zram = original { $original }, compressed { $compressed }
 processes-cell-tooltip-oom-score-adj = oom_score_adj { $adj }
 processes-cell-tooltip-disk-ops = Linux counts storage operations per cgroup, not per process
 processes-cell-tooltip-irq-in-task-time = Interrupt time is included in task time on this kernel
+
+# UI scale keys (E20-013)
+shell-toast-ui-scale = UI scale changed to { $pct }%
