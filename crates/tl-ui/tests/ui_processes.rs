@@ -2198,3 +2198,170 @@ mod filter {
         );
     }
 }
+
+/// Hold Ctrl to pause (UI-PRC-017): the shell owns the rule, the page holds its snapshot.
+mod pause {
+    use std::sync::Arc;
+
+    use gpui_kit::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
+    use tl_model::client::EngineClient as _;
+    use tl_model::command::Tab;
+    use tl_model::ids::NodeId;
+    use tl_model::process::ProcFlags;
+    use tl_model::settings::UiState;
+    use tl_model::snapshot::Snapshot;
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::window::main::{ShellState, main_window_view};
+
+    use super::delegate::{key, record, row, snapshot};
+    use super::shell::open_with;
+
+    struct Rig {
+        engine: Arc<tl_ui::testing::fake_engine::FakeEngine>,
+        vcx: VisualTestContext,
+        page: Entity<ProcessesPage>,
+        version: u64,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let (engine, mut vcx) = open_with(cx, UiState::default());
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        let page = vcx
+            .read_entity(&main, |m, _| m.page_entity::<ProcessesPage>(Tab::Processes))
+            .expect("Processes built");
+        let mut r = Rig {
+            engine,
+            vcx,
+            page,
+            version: 1,
+        };
+        r.publish(&[100, 101, 102]);
+        r
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        /// A new table version with one flat process row per PID, for the current query.
+        fn publish(&mut self, pids: &[u32]) {
+            self.version += 1;
+            let records = pids
+                .iter()
+                .map(|&p| record(p, &format!("proc-{p}"), ProcFlags::empty()))
+                .collect();
+            let rows = pids
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| row(NodeId::Process(key(p)), 0, Some(i as u32), None))
+                .collect();
+            let page = self.page.clone();
+            let generation = self
+                .vcx
+                .update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation());
+            let mut s = Snapshot::clone(&snapshot(self.version, rows, Vec::new(), records));
+            s.sequence = self.engine.latest().sequence + 1;
+            Arc::make_mut(&mut s.table).query_generation = generation;
+            self.engine.publish(s);
+            self.draw();
+        }
+
+        fn modifiers(&mut self, control: bool, shift: bool) {
+            self.vcx.simulate_modifiers_change(Modifiers {
+                control,
+                shift,
+                ..Modifiers::default()
+            });
+            self.draw();
+        }
+
+        fn is_paused(&mut self) -> bool {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| page.read(cx).is_paused())
+        }
+
+        fn shell_paused(&mut self) -> bool {
+            self.vcx.update(|_, cx| cx.global::<ShellState>().paused)
+        }
+
+        /// The PIDs of the rows the table draws.
+        fn shown(&mut self) -> Vec<u32> {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| {
+                let d = &page.read(cx).table().read(cx).delegate;
+                let snap = d.snapshot();
+                d.query()
+                    .shown()
+                    .map(|v| {
+                        v.rows
+                            .iter()
+                            .filter_map(|r| r.record)
+                            .map(|i| snap.processes.records[i as usize].key.pid)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+        }
+
+        fn renders(&mut self) -> u32 {
+            let page = self.page.clone();
+            self.vcx
+                .update(|_, cx| page.read(cx).table().read(cx).render_count.get())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_down_freezes_rows_and_sets_status(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        assert_eq!(r.shown(), [100, 101, 102]);
+        r.modifiers(true, false);
+        assert!(r.is_paused());
+        assert!(r.shell_paused(), "the status chip shows the paused tag");
+        r.publish(&[200, 201]);
+        assert_eq!(r.shown(), [100, 101, 102], "rows frozen");
+
+        // Ctrl up: the latest view, rendered once.
+        let before = r.renders();
+        r.modifiers(false, false);
+        assert!(!r.is_paused());
+        assert!(!r.shell_paused());
+        assert_eq!(r.shown(), [200, 201]);
+        assert_eq!(r.renders(), before + 1, "one render on resume");
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_with_other_modifier_does_not_pause(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.modifiers(false, true);
+        r.modifiers(true, true);
+        assert!(!r.is_paused(), "Ctrl+Shift");
+        r.publish(&[200]);
+        assert_eq!(r.shown(), [200]);
+    }
+
+    #[gpui_kit::test]
+    fn window_deactivate_resumes(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.modifiers(true, false);
+        r.publish(&[200]);
+        assert!(r.is_paused());
+        r.vcx.deactivate_window();
+        r.draw();
+        assert!(!r.is_paused());
+        assert_eq!(r.shown(), [200]);
+    }
+
+    #[gpui_kit::test]
+    fn no_render_while_paused(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.modifiers(true, false);
+        let before = r.renders();
+        for n in 0..5 {
+            r.publish(&[200 + n]);
+        }
+        assert_eq!(r.renders(), before, "five snapshots, no table render");
+        assert!(r.is_paused());
+    }
+}

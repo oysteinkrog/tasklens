@@ -1640,6 +1640,41 @@ mod end {
         assert_eq!(rig.sent()[1], (ActionKind::Signal(Signal::Term), vec![302]));
     }
 
+    /// UI-PRC-017: an action started during Ctrl-pause targets the paused snapshot's identity,
+    /// and the engine revalidates it.
+    #[gpui_kit::test]
+    fn action_while_paused_revalidates_identity(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        rig.select_pids(&[300]);
+        let ctrl = |rig: &mut Rig, control: bool| {
+            rig.vcx.simulate_modifiers_change(gpui_kit::Modifiers {
+                control,
+                ..gpui_kit::Modifiers::default()
+            });
+            rig.vcx.run_until_parked();
+        };
+        let page = rig.page.clone();
+        ctrl(&mut rig, true);
+        assert!(rig.vcx.update(|_, cx| page.read(cx).is_paused()));
+        // PID 300 restarts: the new snapshot has another identity for it.
+        let mut restarted = own(&[300, 301]);
+        restarted[0].key.start_ticks += 500;
+        rig.publish(restarted, &[300, 301], Vec::new());
+        let menu = build_menu(&mut rig, &[0], ColumnId::Name);
+        assert_eq!(shape(&mut rig, &menu)[0], "End Task");
+        assert!(rig.dispatch(EndTask).is_none());
+        let request = actions_sent(&rig.engine).pop().expect("a request");
+        assert_eq!(request.kind, ActionKind::Signal(Signal::Term));
+        assert_eq!(
+            request.targets.as_slice(),
+            [ActionTarget::Process(key(300))],
+            "the paused snapshot's identity, not the restarted one"
+        );
+        ctrl(&mut rig, false);
+        assert!(!rig.vcx.update(|_, cx| page.read(cx).is_paused()));
+    }
+
     /// Builds the menu the table opens for the rows at `rows`, right-clicked in `col`, the
     /// way `TlTreeTable::open_menu` builds it.
     fn build_menu(rig: &mut Rig, rows: &[usize], col: ColumnId) -> Entity<TlMenuPopup> {
