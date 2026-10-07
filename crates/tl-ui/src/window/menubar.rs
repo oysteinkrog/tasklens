@@ -16,14 +16,20 @@
 //! `TlMenu`'s. Alt pressed and released alone does nothing. The buttons are not Tab stops
 //! (UI-SHL-121).
 //!
+//! The slider rows of the menus (View > Appearance, E21-009) use the slider states in
+//! [`MenuSliders`], made once per bar. A drag previews the value in memory; the release, or a
+//! key press on a highlighted slider row, saves it once.
+//!
 //! The buttons are plain elements, not `TlButton`: a ghost `TlButton` is 24 or 28 px high with
 //! 8 px padding and a `tab_hover` fill, and the menu buttons need 26 px, 16 px padding and the
 //! `menu_hover` fill.
 
+use fluent_bundle::FluentValue;
 #[cfg(any(test, feature = "test-hooks"))]
 use gpui_kit::Hsla;
 use gpui_kit::base::POPUP_PRIORITY;
 use gpui_kit::base::actions::{SelectLeft, SelectRight};
+use gpui_kit::base::slider::SliderState;
 use gpui_kit::{
     App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _, FontWeight,
     Global, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels,
@@ -31,11 +37,17 @@ use gpui_kit::{
     WeakEntity, Window, WindowId, anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 
+use tl_model::settings::Settings;
+
+use super::main::{UI_SCALE_TOAST, push_main_toast};
 use super::titlebar::{MenuBarFactory, MenuRowHeight, bar_height};
 use super::{menus_file, menus_settings, menus_view};
 use crate::actions::{MenuId, OpenMenu};
 use crate::components::menu::TlMenuPopup;
-use crate::i18n::{Strings, tr, tr_en};
+use crate::components::slider::{TlSliderEvent, set_from_elsewhere};
+use crate::components::toast::{ToastKind, ToastQueue};
+use crate::i18n::{Strings, tr, tr_args, tr_en};
+use crate::settings_global::TlSettings;
 use crate::text::style::label_style;
 use crate::theme::{current, metrics};
 
@@ -93,18 +105,162 @@ pub fn has_menu(id: MenuId, cx: &App) -> bool {
 }
 
 /// The menu registry: builds the menu `id` with its item actions going to `return_focus`, or
-/// `None` when it has no items now.
+/// `None` when it has no items now. Slider rows use the bar's `sliders`.
 fn build_menu(
     id: MenuId,
     window: &mut Window,
     cx: &mut App,
     return_focus: &FocusHandle,
+    sliders: &MenuSliders,
 ) -> Option<Entity<TlMenuPopup>> {
     match id {
         MenuId::File => Some(menus_file::build(window, cx, return_focus)),
-        MenuId::View => Some(menus_view::build(window, cx, return_focus)),
+        MenuId::View => Some(menus_view::build(window, cx, return_focus, sliders)),
         MenuId::Settings => Some(menus_settings::build(window, cx, return_focus)),
         MenuId::Help | MenuId::Debug => None,
+    }
+}
+
+/// One menu slider's setting: the range and step, and how to read and write the value.
+pub(crate) struct SliderSetting {
+    /// Min, max and step, as `TlMenu::slider_row` takes them.
+    pub range: (f32, f32, f32),
+    get: fn(&Settings) -> f32,
+    set: fn(&mut Settings, f32),
+}
+
+/// `appearance.ui_scale_pct`, 75..=200 step 5 (APP-040).
+pub(crate) static UI_SCALE: SliderSetting = SliderSetting {
+    range: (75.0, 200.0, 5.0),
+    get: |s| f32::from(s.appearance.ui_scale_pct),
+    set: |s, v| s.appearance.ui_scale_pct = v.round() as u16,
+};
+/// `appearance.row_height_pct`, 80..=150 step 5.
+pub(crate) static ROW_HEIGHT: SliderSetting = SliderSetting {
+    range: (80.0, 150.0, 5.0),
+    get: |s| f32::from(s.appearance.row_height_pct),
+    set: |s, v| s.appearance.row_height_pct = v.round() as u16,
+};
+/// `appearance.heat_intensity_pct`, 0..=100 step 5.
+pub(crate) static HEAT_INTENSITY: SliderSetting = SliderSetting {
+    range: (0.0, 100.0, 5.0),
+    get: |s| f32::from(s.appearance.heat_intensity_pct),
+    set: |s, v| s.appearance.heat_intensity_pct = v.round() as u8,
+};
+/// `appearance.shadow_intensity_pct`, 0..=100 step 5.
+pub(crate) static SHADOW_INTENSITY: SliderSetting = SliderSetting {
+    range: (0.0, 100.0, 5.0),
+    get: |s| f32::from(s.appearance.shadow_intensity_pct),
+    set: |s, v| s.appearance.shadow_intensity_pct = v.round() as u8,
+};
+/// `motion.tab_switch_ms`, 0..=500 step 10. Its row is Settings > Tab Switch (E21-010).
+pub(crate) static TAB_SWITCH: SliderSetting = SliderSetting {
+    range: (0.0, 500.0, 10.0),
+    get: |s| f32::from(s.motion.tab_switch_ms),
+    set: |s, v| s.motion.tab_switch_ms = v.round() as u16,
+};
+
+/// The slider states of the menu slider rows. Made once in `MenuBar::new` and reused by every
+/// open of the menus, so no entity is made in render. Each one is subscribed once there.
+#[derive(Clone)]
+pub struct MenuSliders {
+    pub ui_scale: Entity<SliderState>,
+    pub row_height: Entity<SliderState>,
+    pub heat_intensity: Entity<SliderState>,
+    pub shadow_intensity: Entity<SliderState>,
+    pub tab_switch: Entity<SliderState>,
+}
+
+impl MenuSliders {
+    fn new(window: &mut Window, cx: &mut Context<MenuBar>) -> (Self, Vec<Subscription>) {
+        let mut subs = Vec::new();
+        let mut slider = |setting: &'static SliderSetting, cx: &mut Context<MenuBar>| {
+            let (min, max, step) = setting.range;
+            let value = setting_value(setting, cx);
+            let state = cx.new(|_| {
+                SliderState::new()
+                    .min(min)
+                    .max(max)
+                    .step(step)
+                    .default_value(value)
+            });
+            subs.push(cx.subscribe_in(
+                &state,
+                window,
+                move |_, _, event: &TlSliderEvent, window, cx| {
+                    on_slider(setting, *event, window, cx)
+                },
+            ));
+            state
+        };
+        let sliders = Self {
+            ui_scale: slider(&UI_SCALE, cx),
+            row_height: slider(&ROW_HEIGHT, cx),
+            heat_intensity: slider(&HEAT_INTENSITY, cx),
+            shadow_intensity: slider(&SHADOW_INTENSITY, cx),
+            tab_switch: slider(&TAB_SWITCH, cx),
+        };
+        (sliders, subs)
+    }
+
+    fn each(&self) -> [(&Entity<SliderState>, &'static SliderSetting); 5] {
+        [
+            (&self.ui_scale, &UI_SCALE),
+            (&self.row_height, &ROW_HEIGHT),
+            (&self.heat_intensity, &HEAT_INTENSITY),
+            (&self.shadow_intensity, &SHADOW_INTENSITY),
+            (&self.tab_switch, &TAB_SWITCH),
+        ]
+    }
+
+    /// Moves each slider to its setting, which Ctrl+Plus or the Settings window may have
+    /// changed while the menus were closed. Emits nothing.
+    fn sync(&self, cx: &mut App) {
+        for (state, setting) in self.each() {
+            let value = setting_value(setting, cx);
+            set_from_elsewhere(state, value, cx);
+        }
+    }
+}
+
+/// The setting's value now, or its default before `TlSettings` is installed.
+fn setting_value(setting: &SliderSetting, cx: &App) -> f32 {
+    if cx.has_global::<TlSettings>() {
+        (setting.get)(TlSettings::settings(cx))
+    } else {
+        (setting.get)(&Settings::default())
+    }
+}
+
+/// A drag applies the value in memory and the settings observers re-lay out the UI. The release
+/// or a key press saves it once. A saved UI scale shows "UI scale changed to N%" in the one
+/// keyed scale toast, which Ctrl+Plus and Ctrl+Minus also use.
+fn on_slider(setting: &SliderSetting, event: TlSliderEvent, window: &mut Window, cx: &mut App) {
+    let set = setting.set;
+    match event {
+        TlSliderEvent::Preview(v) => TlSettings::preview(cx, |d| set(&mut d.settings, v)),
+        TlSliderEvent::Commit(v) => {
+            TlSettings::update(cx, |d| set(&mut d.settings, v));
+            if std::ptr::eq(setting, &UI_SCALE) {
+                let pct = TlSettings::settings(cx).appearance.ui_scale_pct;
+                let text = scale_toast_text(pct, cx);
+                match ToastQueue::of_window(window, cx) {
+                    Some(queue) => queue.update(cx, |queue, cx| {
+                        queue.push(ToastKind::Info, text, Some(UI_SCALE_TOAST), None, cx)
+                    }),
+                    None => push_main_toast(cx, ToastKind::Info, text, Some(UI_SCALE_TOAST), None),
+                }
+            }
+        }
+    }
+}
+
+fn scale_toast_text(pct: u16, cx: &App) -> SharedString {
+    let args = [("pct", FluentValue::from(pct))];
+    if cx.has_global::<Strings>() {
+        tr_args(cx, "shell-toast-ui-scale", &args)
+    } else {
+        tr_en("shell-toast-ui-scale", &args)
     }
 }
 
@@ -183,8 +339,10 @@ pub struct MenuBar {
     /// The action context when nothing was focused before the menu opened.
     fallback_focus: FocusHandle,
     words: MenuWords,
+    sliders: MenuSliders,
     dismiss: Option<Subscription>,
     _activation: Subscription,
+    _sliders: Vec<Subscription>,
     #[cfg(any(test, feature = "test-hooks"))]
     drawn_label_color: Option<Hsla>,
 }
@@ -192,6 +350,7 @@ pub struct MenuBar {
 impl MenuBar {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
+        let (sliders, slider_subs) = MenuSliders::new(window, cx);
         Self {
             open: None,
             popup: None,
@@ -199,8 +358,10 @@ impl MenuBar {
             opened_by_key: false,
             fallback_focus: cx.focus_handle(),
             words: MenuWords::new(cx),
+            sliders,
             dismiss: None,
             _activation: activation,
+            _sliders: slider_subs,
             #[cfg(any(test, feature = "test-hooks"))]
             drawn_label_color: None,
         }
@@ -214,6 +375,12 @@ impl MenuBar {
     /// The open menu's popup, if any.
     pub fn popup(&self) -> Option<&Entity<TlMenuPopup>> {
         self.popup.as_ref()
+    }
+
+    /// The menu slider states (tests check they are reused across opens).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn sliders(&self) -> &MenuSliders {
+        &self.sliders
     }
 
     /// Whether the open menu was opened from the keyboard.
@@ -255,7 +422,9 @@ impl MenuBar {
             .unwrap_or_else(|| self.fallback_focus.clone());
         self.dismiss = None;
         self.popup = None;
-        let Some(popup) = build_menu(id, window, cx, &context) else {
+        self.sliders.sync(cx);
+        let sliders = self.sliders.clone();
+        let Some(popup) = build_menu(id, window, cx, &context, &sliders) else {
             self.close(window, cx);
             return;
         };

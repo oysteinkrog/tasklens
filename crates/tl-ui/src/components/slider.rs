@@ -26,8 +26,8 @@ use gpui_kit::base::{Slider, SliderIndicator, SliderThumb, SliderTrack};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, FontFeatures, InteractiveElement, IntoElement,
-    KeyBinding, ParentElement, Pixels, RenderOnce, SharedString, Styled, Subscription, Window, div,
-    px, relative, white,
+    KeyBinding, ParentElement, Pixels, RenderOnce, SharedString, Styled, Subscription,
+    TextOverflow, Window, div, px, relative, white,
 };
 
 use crate::components::focus::TlFocusRing;
@@ -350,6 +350,7 @@ impl RenderOnce for TlSlider {
             );
 
         let value_el = div()
+            .debug_selector(|| "TlSliderValue".into())
             .flex_none()
             .min_w(s(VALUE_MIN_WIDTH))
             .text_size(m.text.sm)
@@ -368,12 +369,25 @@ impl RenderOnce for TlSlider {
             .flex()
             .items_center()
             .gap(m.sp[4])
-            .when(self.in_menu, |d| d.h(s(MENU_ROW_HEIGHT)))
+            .when(self.in_menu, |d| d.h(s(MENU_ROW_HEIGHT)).flex_1().min_w_0())
             .when_some(self.label, |d, label| {
-                d.child(
+                // In a menu the label takes the row's spare width, 140 if the menu has room,
+                // and ends in an ellipsis when the menu is at its widest.
+                let label_el = if self.in_menu {
                     div()
-                        .flex_none()
-                        .when(self.in_menu, |d| d.min_w(s(MENU_LABEL_MIN_WIDTH)))
+                        .flex_grow(1.)
+                        .flex_shrink(1.)
+                        .flex_basis(s(MENU_LABEL_MIN_WIDTH))
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_overflow(TextOverflow::Truncate("\u{2026}".into()))
+                } else {
+                    div().flex_none()
+                };
+                d.child(
+                    label_el
+                        .debug_selector(|| "TlSliderLabel".into())
                         .text_size(m.text.base)
                         .text_color(theme.text_primary)
                         .child(label),

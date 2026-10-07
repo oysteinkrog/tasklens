@@ -7,14 +7,17 @@
 //! UI-SHL-035) holds the view mode radios, two process display checks and "Collapse all"; the
 //! view mode Actions and their toasts are the Processes page's. View > Window (E21-008,
 //! UI-SHL-036) holds "Always On Top", the menu path to the main window pin; the pin's owner
-//! handles the Action.
+//! handles the Action. View > Appearance (E21-009, UI-SHL-037) holds the UI Scale, Row Height
+//! and intensity slider rows and two checks that keep the menu open; the menu bar owns the
+//! slider states and saves their values.
 
-use gpui_kit::{App, Entity, FocusHandle, Window};
+use gpui_kit::{App, Entity, FocusHandle, SharedString, Window};
 use tl_model::command::Tab;
 use tl_model::settings::{ColumnResize, ProcessesSettings};
 use tl_model::table::TableMode;
 
 use super::main::{ShellState, WINDOW_TITLE};
+use super::menubar::{HEAT_INTENSITY, MenuSliders, ROW_HEIGHT, SHADOW_INTENSITY, UI_SCALE};
 use super::registry::WindowKey;
 use super::titlebar::keep_above_supported;
 use crate::actions::{SetSetting, SetViewMode, ToggleSetting};
@@ -25,9 +28,15 @@ use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::{CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
 use crate::table::columns::TableId;
 
-/// Builds the View menu. Item actions go to `return_focus`.
-pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> Entity<TlMenuPopup> {
+/// Builds the View menu. Item actions go to `return_focus`; the slider rows use `sliders`.
+pub fn build(
+    window: &mut Window,
+    cx: &mut App,
+    return_focus: &FocusHandle,
+    sliders: &MenuSliders,
+) -> Entity<TlMenuPopup> {
     let table = active_table(cx);
+    let sliders = sliders.clone();
     TlMenu::build(window, cx, return_focus.clone(), move |menu, window, cx| {
         let columns = tr(cx, "shell-menu-view-columns");
         let menu = match table {
@@ -43,6 +52,12 @@ pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> E
             process_view_submenu,
         )
         .submenu(tr(cx, "shell-menu-view-window"), window, cx, window_submenu)
+        .submenu(
+            tr(cx, "shell-menu-view-appearance"),
+            window,
+            cx,
+            move |menu, _, cx| appearance_submenu(menu, &sliders, cx),
+        )
     })
 }
 
@@ -200,4 +215,50 @@ fn window_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
         ),
         (false, _) => menu.item_disabled(label, Some(tr(cx, "fnd-pin-unsupported"))),
     }
+}
+
+/// A slider value as a whole percent, "120%".
+fn pct_text(v: f32) -> SharedString {
+    format!("{v:.0}%").into()
+}
+
+fn appearance_submenu(menu: TlMenu, sliders: &MenuSliders, cx: &mut App) -> TlMenu {
+    let appearance = &TlSettings::settings(cx).appearance;
+    let (rounded, heat) = (appearance.rounded_corners, appearance.heat_coloring);
+    menu.slider_row(
+        tr(cx, "shell-menu-appearance-ui-scale"),
+        &sliders.ui_scale,
+        UI_SCALE.range,
+        pct_text,
+    )
+    .slider_row(
+        tr(cx, "shell-menu-appearance-row-height"),
+        &sliders.row_height,
+        ROW_HEIGHT.range,
+        pct_text,
+    )
+    .check_item(
+        tr(cx, "shell-menu-appearance-rounded-corners"),
+        rounded,
+        Box::new(ToggleSetting(SettingKey::AppearanceRoundedCorners)),
+    )
+    .keep_open()
+    .check_item(
+        tr(cx, "shell-menu-appearance-heat-coloring"),
+        heat,
+        Box::new(ToggleSetting(SettingKey::AppearanceHeatColoring)),
+    )
+    .keep_open()
+    .slider_row(
+        tr(cx, "shell-menu-appearance-heat-intensity"),
+        &sliders.heat_intensity,
+        HEAT_INTENSITY.range,
+        pct_text,
+    )
+    .slider_row(
+        tr(cx, "shell-menu-appearance-shadow-intensity"),
+        &sliders.shadow_intensity,
+        SHADOW_INTENSITY.range,
+        pct_text,
+    )
 }

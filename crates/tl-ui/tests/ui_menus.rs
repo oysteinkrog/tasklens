@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::AsKeystroke as _;
+use gpui_kit::base::Root;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
@@ -26,6 +27,8 @@ use tl_ui::actions::{
     MenuId, OpenRunDialog, Quit, SetViewMode, bind_keys_global, register_global_handlers,
 };
 use tl_ui::app::{BootSettings, EngineGlobal};
+use tl_ui::components::slider::TlSliderEvent;
+use tl_ui::components::toast::ToastQueue;
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::actions::{
     CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, TABLE_CONTEXT, bind_keys_table,
@@ -82,9 +85,22 @@ struct Rig<'a> {
     modes: Rc<RefCell<Vec<TableMode>>>,
     engine: Arc<FakeEngine>,
     resets: Rc<Cell<u32>>,
+    /// Calls of the settings persist callback.
+    persists: Rc<Cell<u32>>,
+    /// The window's toast queue, in a rig made by `rig_with_toasts`.
+    toasts: Option<Entity<ToastQueue>>,
 }
 
 fn rig(cx: &mut TestAppContext) -> Rig<'_> {
+    rig_with(cx, false)
+}
+
+/// A rig whose window has a Root with a toast layer and queue, as the main window has.
+fn rig_with_toasts(cx: &mut TestAppContext) -> Rig<'_> {
+    rig_with(cx, true)
+}
+
+fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
     let quits = Rc::new(Cell::new(0));
     let count = Rc::clone(&quits);
     let runs = Rc::new(Cell::new(0));
@@ -98,8 +114,13 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
     let client: Arc<dyn EngineClient> = engine.clone();
     let resets = Rc::new(Cell::new(0));
     let reset_count = resets.clone();
+    let persists = Rc::new(Cell::new(0));
+    let persist_count = persists.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
+        if toasts {
+            tl_ui::components::toast::init(cx);
+        }
         tl_ui::theme::store::init(
             cx,
             &ThemeSettings::default(),
@@ -128,7 +149,9 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
         cx.set_global(BootSettings {
             settings: Settings::default(),
             state: UiState::default(),
-            persist: None,
+            persist: Some(Box::new(move |_, _| {
+                persist_count.set(persist_count.get() + 1)
+            })),
             startup_toasts: Vec::new(),
         });
         TlSettings::init(cx);
@@ -138,11 +161,29 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
         cx.set_reduce_motion(true);
     });
     let host_collapses = collapses.clone();
-    let (host, cx) = cx.add_window_view(|window, cx| Host {
-        table: cx.focus_handle(),
-        bar: cx.new(|cx| TitleBarView::new(window, cx)),
-        collapses: host_collapses,
-    });
+    let (host, cx) = if toasts {
+        let slot = Rc::new(RefCell::new(None));
+        let out = slot.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|cx| Host {
+                table: cx.focus_handle(),
+                bar: cx.new(|cx| TitleBarView::new(window, cx)),
+                collapses: host_collapses,
+            });
+            *out.borrow_mut() = Some(host.clone());
+            Root::new(host, window, cx)
+        });
+        let host = slot.borrow_mut().take().expect("host created");
+        (host, cx)
+    } else {
+        cx.add_window_view(|window, cx| Host {
+            table: cx.focus_handle(),
+            bar: cx.new(|cx| TitleBarView::new(window, cx)),
+            collapses: host_collapses,
+        })
+    };
+    let toasts =
+        toasts.then(|| cx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.)))));
     cx.simulate_resize(size(px(1000.), px(400.)));
     cx.update(|window, _| window.activate_window());
     let table = cx.update(|window, cx| {
@@ -161,6 +202,8 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
         modes,
         engine,
         resets,
+        persists,
+        toasts,
     }
 }
 
@@ -464,7 +507,7 @@ fn set_tab(cx: &mut VisualTestContext, tab: Tab, history: bool) {
 }
 
 /// The View root items in order.
-const VIEW_ROOT: [&str; 3] = ["Columns", "Process View", "Window"];
+const VIEW_ROOT: [&str; 4] = ["Columns", "Process View", "Window", "Appearance"];
 
 /// The labels of the open submenus: every drawn label except the View root items.
 fn sub_labels(cx: &mut VisualTestContext) -> Vec<String> {
@@ -490,13 +533,14 @@ fn menubar_alt_keys(cx: &mut TestAppContext) {
     let entries = entries(r.cx);
     assert_eq!(
         entries.len(),
-        3,
-        "Columns, Process View, Window: {entries:?}"
+        4,
+        "Columns, Process View, Window, Appearance: {entries:?}"
     );
     assert_eq!(entries[0].label(), Some("Columns"));
     assert_eq!(entries[0].selected(), Some(true), "Columns highlighted");
     assert_eq!(entries[1].label(), Some("Process View"));
     assert_eq!(entries[2].label(), Some("Window"));
+    assert_eq!(entries[3].label(), Some("Appearance"));
 }
 
 #[gpui_kit::test]
@@ -571,7 +615,7 @@ fn columns_disabled_on_performance(cx: &mut TestAppContext) {
     keys(r.cx, "alt-v");
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     let drawn = entries(r.cx);
-    assert_eq!(drawn.len(), 3);
+    assert_eq!(drawn.len(), 4);
     assert_eq!(drawn[0].label(), Some("Columns"));
     assert_ne!(
         drawn[0].selected(),
@@ -994,4 +1038,201 @@ fn window_menu_check_follows_key(cx: &mut TestAppContext) {
         r.cx.update(|_, cx| menus_view::always_on_top_marks(cx)),
         (true, false)
     );
+}
+
+// View > Appearance (E21-009).
+
+/// Opens View > Appearance from the keyboard; its first row, UI Scale, is highlighted.
+fn open_appearance(cx: &mut VisualTestContext) {
+    keys(cx, "alt-v end right");
+    assert_eq!(sub_highlighted(cx), ["UI Scale 100%"]);
+}
+
+fn appearance(cx: &mut VisualTestContext) -> AppearanceSettings {
+    cx.update(|_, cx| TlSettings::settings(cx).appearance.clone())
+}
+
+fn toast_texts(r: &mut Rig<'_>) -> Vec<String> {
+    let queue = r.toasts.clone().expect("rig with toasts");
+    r.cx.update(|_, cx| {
+        queue
+            .read(cx)
+            .visible_texts()
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    })
+}
+
+/// The menu bar's slider states, in `MenuSliders` field order.
+fn slider_states(cx: &mut VisualTestContext) -> Vec<Entity<gpui_kit::base::slider::SliderState>> {
+    let bar = bar(cx);
+    cx.update(|_, cx| {
+        let s = bar.read(cx).sliders();
+        vec![
+            s.ui_scale.clone(),
+            s.row_height.clone(),
+            s.heat_intensity.clone(),
+            s.shadow_intensity.clone(),
+            s.tab_switch.clone(),
+        ]
+    })
+}
+
+fn emit(
+    cx: &mut VisualTestContext,
+    state: &Entity<gpui_kit::base::slider::SliderState>,
+    event: TlSliderEvent,
+) {
+    cx.update(|_, cx| state.update(cx, |_, cx| cx.emit(event)));
+    draw(cx);
+}
+
+#[gpui_kit::test]
+fn appearance_slider_persist_on_release(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    open_appearance(r.cx);
+    let scale = slider_states(r.cx)[0].clone();
+    let before = r.persists.get();
+    for v in [105., 110., 115.] {
+        emit(r.cx, &scale, TlSliderEvent::Preview(v));
+        assert_eq!(appearance(r.cx).ui_scale_pct, v as u16, "applied in memory");
+    }
+    assert_eq!(r.persists.get(), before, "a Change never persists");
+    assert!(toast_texts(&mut r).is_empty(), "no toast while dragging");
+    emit(r.cx, &scale, TlSliderEvent::Commit(115.));
+    assert_eq!(r.persists.get(), before + 1, "the release persists once");
+    assert_eq!(appearance(r.cx).ui_scale_pct, 115);
+    assert_eq!(toast_texts(&mut r), ["UI scale changed to 115%"]);
+    assert_eq!(open_menu(r.cx), Some(MenuId::View), "the popup stays open");
+}
+
+#[gpui_kit::test]
+fn appearance_slider_keys(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    open_appearance(r.cx);
+    keys(r.cx, "down");
+    assert_eq!(sub_highlighted(r.cx), ["Row Height 100%"]);
+    let mut persists = r.persists.get();
+    for (key, pct) in [("right", 105), ("left", 100), ("home", 80), ("end", 150)] {
+        keys(r.cx, key);
+        assert_eq!(appearance(r.cx).row_height_pct, pct, "{key}");
+        persists += 1;
+        assert_eq!(r.persists.get(), persists, "{key} persists once");
+    }
+    assert_eq!(
+        sub_highlighted(r.cx),
+        ["Row Height 150%"],
+        "the value text follows"
+    );
+    assert!(
+        toast_texts(&mut r).is_empty(),
+        "only UI Scale shows a toast"
+    );
+
+    keys(r.cx, "escape escape");
+    r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.appearance.ui_scale_pct = 200));
+    let persists = r.persists.get();
+    open_appearance_at(r.cx, "UI Scale 200%");
+    keys(r.cx, "end");
+    assert_eq!(appearance(r.cx).ui_scale_pct, 200, "End at the maximum");
+    assert_eq!(r.persists.get(), persists, "no change, no persist");
+    assert!(toast_texts(&mut r).is_empty(), "no change, no toast");
+    keys(r.cx, "left");
+    assert_eq!(appearance(r.cx).ui_scale_pct, 195);
+    assert_eq!(r.persists.get(), persists + 1);
+    assert_eq!(toast_texts(&mut r), ["UI scale changed to 195%"]);
+    assert_eq!(open_menu(r.cx), Some(MenuId::View));
+}
+
+/// Opens View > Appearance and checks the highlighted first row reads `first`.
+fn open_appearance_at(cx: &mut VisualTestContext, first: &str) {
+    keys(cx, "alt-v end right");
+    assert_eq!(sub_highlighted(cx), [first]);
+}
+
+#[gpui_kit::test]
+fn appearance_popup_stays_open(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let start = appearance(r.cx);
+    open_appearance(r.cx);
+    keys(r.cx, "down down");
+    assert_eq!(sub_highlighted(r.cx), ["Rounded Corners"]);
+    keys(r.cx, "enter");
+    assert_eq!(appearance(r.cx).rounded_corners, !start.rounded_corners);
+    assert_eq!(open_menu(r.cx), Some(MenuId::View), "open after the check");
+    assert!(sub_labels(r.cx).contains(&"Rounded Corners".to_owned()));
+
+    let heat = entries(r.cx)
+        .into_iter()
+        .find(|e| e.label() == Some("Value Color Coding"))
+        .expect("Value Color Coding drawn")
+        .bounds()
+        .center();
+    click(r.cx, heat);
+    assert_eq!(appearance(r.cx).heat_coloring, !start.heat_coloring);
+    assert_eq!(open_menu(r.cx), Some(MenuId::View), "open after a click");
+
+    let shadow = slider_states(r.cx)[3].clone();
+    emit(r.cx, &shadow, TlSliderEvent::Preview(30.));
+    emit(r.cx, &shadow, TlSliderEvent::Commit(30.));
+    assert_eq!(appearance(r.cx).shadow_intensity_pct, 30);
+    assert_eq!(open_menu(r.cx), Some(MenuId::View), "open after a release");
+}
+
+#[gpui_kit::test]
+fn slider_entities_reused(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let first = slider_states(r.cx);
+    let drawn = |cx: &mut VisualTestContext| {
+        let bar = bar(cx);
+        cx.update(|window, cx| {
+            let popup = bar.read(cx).popup().expect("menu open").clone();
+            let root = popup.read(cx).entries_for_test(window);
+            let sub = root[3].submenu.clone().expect("Appearance submenu");
+            sub.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .filter_map(|e| e.slider)
+                .collect::<Vec<_>>()
+        })
+    };
+    open_appearance(r.cx);
+    assert_eq!(drawn(r.cx), first[..4]);
+    keys(r.cx, "escape escape");
+    assert_eq!(open_menu(r.cx), None);
+    open_appearance(r.cx);
+    assert_eq!(slider_states(r.cx), first, "no new entity");
+    assert_eq!(drawn(r.cx), first[..4]);
+}
+
+#[gpui_kit::test]
+fn slider_row_layout(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    open_appearance(r.cx);
+    let row = entries(r.cx)
+        .into_iter()
+        .find(|e| e.label() == Some("UI Scale 100%"))
+        .expect("UI Scale row");
+    assert_eq!(row.bounds().size.height, px(28.), "row height at 100%");
+    let label = bounds(r.cx, "TlSliderLabel");
+    // The label column asks for 140. "Value Color Coding Intensity" holds the menu at its 360
+    // maximum, where the fixed parts (border, padding, mark, gaps, track, value) leave 138.
+    assert!(label.size.width >= px(138.), "label column {label:?}");
+    let value = bounds(r.cx, "TlSliderValue");
+    assert_eq!(value.size.width, px(40.), "value column");
+    let menu = widest_menu(r.cx);
+    assert!(
+        menu <= px(360.),
+        "the menu stays within its 360 maximum: {menu:?}"
+    );
+}
+
+/// The widest drawn menu.
+fn widest_menu(cx: &mut VisualTestContext) -> Pixels {
+    cx.update(|window, _| snapshots(window))
+        .into_iter()
+        .filter(|s| s.role() == Some(Role::Menu))
+        .map(|s| s.bounds().size.width)
+        .fold(px(0.), |a, b| a.max(b))
 }
