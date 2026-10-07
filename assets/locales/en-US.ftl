@@ -1018,6 +1018,10 @@ processes-toast-exited = Process exited
 processes-toast-including-children = Including filtered process children.
 processes-toast-hiding-children = Hiding unmatched filtered process children.
 processes-empty-no-match = No processes match the filter
+processes-status-count = { $total } Processes
+processes-status-filtered = { $shown } / { $total } Processes
+processes-status-selected = { $count } processes selected
+processes-status-restricted = { $count } restricted
 information-toast-copied = Copied to clipboard
 
 # File menu: Run... (E21-044)
