@@ -418,6 +418,7 @@ lowmem-text-eased = Memory pressure has eased. You can open the full tasklens or
 lowmem-filter-placeholder = Filter...
 lowmem-filter-empty = No processes match the filter.
 lowmem-button-open-full = Open Full tasklens
+app-lowmem-setup-failed = Could not set up the rescue window
 
 # Share Theme window (UI-SHL-082)
 shell-share-theme-title = tasklens Share Theme

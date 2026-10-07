@@ -26,6 +26,8 @@ pub enum Fatal {
     Crashed,
     RendererFailed,
     DeviceLost,
+    /// Installing or removing the lowmem unit failed (R-152 OI-7).
+    LowmemSetupFailed,
 }
 
 impl Fatal {
@@ -35,6 +37,7 @@ impl Fatal {
             Fatal::Crashed => "tasklens stopped after an unrecoverable error.",
             Fatal::RendererFailed => "tasklens could not start the renderer",
             Fatal::DeviceLost => "tasklens lost the graphics device and must restart",
+            Fatal::LowmemSetupFailed => "Could not set up the rescue window",
         }
     }
 
@@ -45,6 +48,7 @@ impl Fatal {
             Fatal::Crashed => "app-114-tasklens-stopped-after-an-unrecoverable",
             Fatal::RendererFailed => "app-114-tasklens-could-not-start-the",
             Fatal::DeviceLost => "app-114-tasklens-lost-the-graphics-device",
+            Fatal::LowmemSetupFailed => "app-lowmem-setup-failed",
         }
     }
 }
@@ -121,7 +125,12 @@ mod tests {
 
     use super::*;
 
-    const ALL: [Fatal; 3] = [Fatal::Crashed, Fatal::RendererFailed, Fatal::DeviceLost];
+    const ALL: [Fatal; 4] = [
+        Fatal::Crashed,
+        Fatal::RendererFailed,
+        Fatal::DeviceLost,
+        Fatal::LowmemSetupFailed,
+    ];
 
     #[test]
     fn texts_exact() {
