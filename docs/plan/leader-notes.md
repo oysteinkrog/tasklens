@@ -557,3 +557,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - cr0.11 (28af994, 7da3d53): settings save half; wiring noted on cr0.2. themes.json uses tl-ui's format (accepted).
 - pdu.1 (a1fcb0a, c23c046, f683bc4): ProcessesPage. The main.rs arm and the ui_shell test fix are approved (re-sent).
 - pdu.1 arm (10a1107): Processes is in page_factory; GlobalHub is set at app.rs:253 before the open hook, so the panic is test-only. pdu.13 tests remain. jqk.11 (c9136bf, 9d8bc47, f41d785, d677fb5) is wiring main.rs now.
+- rsf.25 (2c5e7a1, 52029b4): want_tooltip is set only when hovered and hover_tips_ready. Stale age comes from the process header observed_end; a stale extras cell shows the process sample age (accepted for now, minor).
