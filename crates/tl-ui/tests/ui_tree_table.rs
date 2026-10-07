@@ -789,26 +789,93 @@ fn name_cell_indent_by_depth() {
     assert_eq!(text.left() - cell.left(), px(78.));
 }
 
+/// A depth-0 row and its depth-1 child, guide lines on or off.
+#[cfg(feature = "test-hooks")]
+fn parent_child(guides: bool) -> TDelegate {
+    let mut d = TDelegate::new(vec![
+        plain(0),
+        TRow {
+            depth: 1,
+            flags: RowFlags {
+                bits: RowFlags::LAST_SIBLING,
+                ancestor_continues: 0,
+            },
+            ..plain(1)
+        },
+    ]);
+    d.guides = guides;
+    d
+}
+
+#[cfg(feature = "test-hooks")]
+fn guides(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<TDelegate>>,
+) -> Vec<gpui_kit::Bounds<Pixels>> {
+    vcx.update(|_, cx| table.read(cx).guide_quads.borrow().clone())
+}
+
+#[cfg(feature = "test-hooks")]
+fn line_canvases(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>) -> u32 {
+    vcx.update(|_, cx| table.read(cx).line_canvases.get())
+}
+
+#[cfg(feature = "test-hooks")]
 #[test]
 fn connector_lines_only_when_enabled() {
-    let child = |guides: bool| {
-        let mut d = TDelegate::new(vec![
-            plain(0),
-            TRow {
-                depth: 1,
-                ..plain(1)
-            },
-        ]);
-        d.guides = guides;
-        d
-    };
     let mut cx = cosmic_cx();
-    let (_, vcx) = open_table(&mut cx, child(false), 600., 100.);
-    assert!(vcx.debug_bounds("TlNameCell-guides").is_none());
-    let mut cx = cosmic_cx();
-    let (_, vcx) = open_table(&mut cx, child(true), 600., 100.);
-    assert!(vcx.debug_bounds("TlNameCell-guides").is_some());
+    let (table, vcx) = open_table(&mut cx, parent_child(false), 600., 100.);
+    assert!(vcx.debug_bounds("TlNameCell").is_some(), "rows drawn");
+    assert!(guides(vcx, &table).is_empty());
+    assert_eq!(
+        line_canvases(vcx, &table),
+        0,
+        "no line canvas when both are off"
+    );
 
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_table(&mut cx, parent_child(true), 600., 100.);
+    let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
+    let scale = vcx.update(|window, _| window.scale_factor());
+    // Only the child draws lines: the depth-0 row has no continuing line, so no canvas.
+    let child = point(body.left(), body.top() + px(ROW_H));
+    let flags = parent_child(true).rows[1].flags;
+    assert_eq!(
+        guides(vcx, &table),
+        guide_quads(1, flags, child, px(ROW_H), 1.0, scale).into_vec()
+    );
+    assert_eq!(line_canvases(vcx, &table), 1);
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn connector_lines_skip_group_headers() {
+    let mut d = TDelegate::new(vec![group(0), plain(1)]);
+    d.guides = true;
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_table(&mut cx, d, 600., 100.);
+    assert!(
+        vcx.debug_bounds("TlTreeTable-group-row").is_some(),
+        "rows drawn"
+    );
+    assert!(guides(vcx, &table).is_empty());
+    assert_eq!(line_canvases(vcx, &table), 0);
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn guides_and_separators_share_one_canvas_per_row() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_table(&mut cx, parent_child(true), 600., 100.);
+    separators_on(vcx, &table);
+    // Two body rows, each with one canvas: guides on the child, separators on both.
+    assert_eq!(line_canvases(vcx, &table), 2);
+    assert_eq!(separators(vcx, &table).len(), 2 * 2);
+    assert_eq!(guides(vcx, &table).len(), 2, "the child's elbow");
+}
+
+#[test]
+fn connector_quads_geometry() {
     // Depth 2, the level-0 line continues, last sibling: one full line, the elbow's vertical
     // half line and its horizontal line to the chevron.
     let flags = RowFlags {

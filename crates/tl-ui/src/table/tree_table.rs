@@ -18,8 +18,8 @@ use gpui_kit::base::{
 };
 
 use gpui_kit::{
-    AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, Context, Div,
-    ElementId, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
+    AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, ContentMask, Context,
+    Div, ElementId, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
     Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, TextRun, UniformListScrollHandle,
@@ -43,8 +43,8 @@ use crate::table::actions::{
 };
 use crate::table::cells::{
     CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
-    glyph_cell, icon_px, name_indent, numeric_cell, paint_group_header_cell, paint_name_cell,
-    path_cell, text_cell,
+    glyph_cell, guide_quads, icon_px, name_indent, numeric_cell, paint_group_header_cell,
+    paint_name_cell, path_cell, text_cell,
 };
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn,
@@ -302,6 +302,12 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     /// The column separator quads painted since the last render, in window coordinates.
     #[cfg(any(test, feature = "test-hooks"))]
     pub separator_quads: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    /// The tree guide line quads painted since the last render, in window coordinates.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub guide_quads: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    /// Row line canvases (guides and separators) built since the last render.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub line_canvases: Cell<u32>,
 }
 
 /// What every row of one frame shares.
@@ -360,6 +366,10 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             rows_built_last_frame: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             separator_quads: Rc::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            guide_quads: Rc::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            line_canvases: Cell::new(0),
         }
     }
 
@@ -724,6 +734,8 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let stale = flags.has(RowFlags::STALE);
         let tips = hovered && self.hover_tips_ready;
         let row_key = FxBuildHasher.hash_one(id);
+        // The Name cell's tree guides, when this row draws any: (depth, cell left, cell width).
+        let mut guides = None;
 
         row = row.on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
             this.set_hover(Some(ix), cx);
@@ -742,12 +754,14 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 let name = self.delegate.name_cell(ix);
                 let depth = self.delegate.row_depth(ix);
                 let expandable = self.delegate.row_expandable(ix);
+                if f.guide_lines && (depth > 0 || flags.ancestor_continues != 0) {
+                    guides = Some((depth, x, width));
+                }
                 let mut cell = paint_name_cell(
                     name,
                     depth,
                     expandable,
                     flags,
-                    f.guide_lines,
                     &ctx,
                     tips.then_some(row_key),
                     &mut self.icons,
@@ -793,9 +807,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             }
             row = row.child(cell.absolute().top_0().left(x));
         }
-        if f.separators {
+        if f.separators || guides.is_some() {
             // Painted after the cells so the cell fills do not cover the lines.
-            row = row.child(self.separator_canvas(f));
+            row = row.child(self.line_canvas(f, flags, guides));
         }
         if !selected && self.selection.focus() == Some(id) {
             // The keyboard caret on a row that is not selected (UI-PRC-008).
@@ -814,27 +828,54 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         row.into_any_element()
     }
 
-    /// The row's column separators: one canvas whose paint draws one quad per boundary.
-    fn separator_canvas(&self, f: &FrameCtx<D::Column>) -> impl IntoElement {
-        let offsets = f.offsets.clone();
+    /// The row's lines: one canvas whose paint draws the Name cell's tree guides (`guides` is
+    /// its depth, left edge and width, [`guide_quads`]), clipped to that cell, then one column
+    /// separator per boundary when they are on.
+    fn line_canvas(
+        &self,
+        f: &FrameCtx<D::Column>,
+        flags: RowFlags,
+        guides: Option<(u8, Pixels, Pixels)>,
+    ) -> impl IntoElement {
+        let offsets = f.separators.then(|| f.offsets.clone());
         let total_width = f.total_width;
         let line = f.hairline;
+        let row_h = f.m.row_height;
+        let ui_scale = f.m.ui_scale;
         let divider = f.theme.divider;
         #[cfg(any(test, feature = "test-hooks"))]
-        let log = self.separator_quads.clone();
+        let (guide_log, separator_log) = {
+            self.line_canvases.set(self.line_canvases.get() + 1);
+            (self.guide_quads.clone(), self.separator_quads.clone())
+        };
         canvas(
             |_, _, _| (),
             move |bounds, (), window, _| {
-                for q in separator_quads(
-                    &offsets,
-                    total_width,
-                    bounds.origin,
-                    bounds.size.height,
-                    line,
-                ) {
-                    #[cfg(any(test, feature = "test-hooks"))]
-                    log.borrow_mut().push(q);
-                    window.paint_quad(fill(q, divider));
+                if let Some((depth, left, width)) = guides {
+                    let origin = bounds.origin + point(left, Pixels::ZERO);
+                    let cell = Bounds::new(origin, size(width, row_h));
+                    let quads =
+                        guide_quads(depth, flags, origin, row_h, ui_scale, window.scale_factor());
+                    window.with_content_mask(Some(ContentMask { bounds: cell }), |window| {
+                        for q in quads {
+                            #[cfg(any(test, feature = "test-hooks"))]
+                            guide_log.borrow_mut().push(q);
+                            window.paint_quad(fill(q, divider));
+                        }
+                    });
+                }
+                if let Some(offsets) = &offsets {
+                    for q in separator_quads(
+                        offsets,
+                        total_width,
+                        bounds.origin,
+                        bounds.size.height,
+                        line,
+                    ) {
+                        #[cfg(any(test, feature = "test-hooks"))]
+                        separator_log.borrow_mut().push(q);
+                        window.paint_quad(fill(q, divider));
+                    }
                 }
             },
         )
@@ -2204,7 +2245,11 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         self.sync_versions(m.style_version);
         self.list_calls = 0;
         #[cfg(any(test, feature = "test-hooks"))]
-        self.separator_quads.borrow_mut().clear();
+        {
+            self.separator_quads.borrow_mut().clear();
+            self.guide_quads.borrow_mut().clear();
+            self.line_canvases.set(0);
+        }
         self.x_offset = -ScrollbarHandle::offset(&self.scroll).x;
         let hairline = UiMetrics::hairline(window);
 

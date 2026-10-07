@@ -1355,8 +1355,6 @@ mod name_cell {
 
     enum Cell {
         Name(fn() -> NameCellData),
-        /// A Name cell with connector lines on and these tree flags.
-        Tree(fn() -> NameCellData, RowFlags),
         Group(&'static str, bool),
     }
 
@@ -1379,18 +1377,6 @@ mod name_cell {
                 Cell::Name(make) => render_name_cell(
                     make(),
                     7,
-                    None,
-                    &ctx,
-                    &words(),
-                    false,
-                    &mut self.icons,
-                    window,
-                    cx,
-                ),
-                Cell::Tree(make, flags) => render_name_cell(
-                    make(),
-                    7,
-                    Some(*flags),
                     &ctx,
                     &words(),
                     false,
@@ -1598,25 +1584,6 @@ mod name_cell {
         Bounds::new(point(px(x), px(ROW_H / 2.)), size(px(w), px(1.)))
     }
 
-    #[gpui_kit::test]
-    fn connector_lines_only_when_enabled(cx: &mut TestAppContext) {
-        let open_row = RowFlags {
-            bits: 0,
-            ancestor_continues: 0b1,
-        };
-        let vcx = open(cx, Cell::Name(|| data(RowKind::Process, 2, None)));
-        assert!(vcx.debug_bounds("TlNameCell-guides").is_none());
-        let vcx = open(cx, Cell::Tree(|| data(RowKind::Process, 2, None), open_row));
-        let guides = bounds(vcx, "TlNameCell-guides");
-        assert_eq!(guides, bounds(vcx, "TlNameCell"));
-        // A depth-0 row with no continuing line draws nothing, so it gets no canvas.
-        let vcx = open(
-            cx,
-            Cell::Tree(|| data(RowKind::Process, 0, None), RowFlags::default()),
-        );
-        assert!(vcx.debug_bounds("TlNameCell-guides").is_none());
-    }
-
     #[test]
     fn connector_quads_for_depth_and_siblings() {
         // Depth 2, not the last sibling, the level-0 line continues. R-190: guides at
@@ -1676,12 +1643,6 @@ mod name_cell {
                 hline(54., 12.)
             ]
         );
-    }
-
-    #[gpui_kit::test]
-    fn connector_group_header_draws_none(cx: &mut TestAppContext) {
-        let vcx = open(cx, Cell::Group("Apps (11)", true));
-        assert!(vcx.debug_bounds("TlNameCell-guides").is_none());
     }
 
     #[test]

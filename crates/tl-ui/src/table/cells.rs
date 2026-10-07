@@ -36,7 +36,7 @@ use gpui_kit::{
     App, Bounds, ContentMask, Div, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla,
     ImageSource, InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement,
     Pixels, Point, SharedString, Style, Styled, StyledImage, StyledText, TextRun,
-    TextStyleRefinement, Window, canvas, div, fill, font, img, point, px, relative, size, svg,
+    TextStyleRefinement, Window, div, font, img, point, px, relative, size, svg,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -706,7 +706,8 @@ pub fn name_look(flags: RowFlags, ctx: &CellCtx) -> (Hsla, f32) {
 /// The Name cell (UI-PRC-003, R-190): the 16 px chevron box (always reserved) at
 /// `20 + depth × 20 + 6`, gap 6, the icon (16 or 24) and gap 6 when there is one, then the
 /// primary text, the secondary text, the state glyphs and the trailing element. The connector
-/// lines are drawn under them when `guide_lines`.
+/// lines are not part of the cell: `TlTreeTable` paints them with the row's column separators
+/// ([`guide_quads`]).
 ///
 /// `window` measures the primary text, and only when there is a secondary text. `tips` is
 /// `Some(key)` on the hovered row: the state glyphs then get their tooltips, keyed by `key`.
@@ -718,7 +719,6 @@ pub fn paint_name_cell(
     depth: u8,
     expandable: Option<bool>,
     flags: RowFlags,
-    guide_lines: bool,
     ctx: &CellCtx,
     tips: Option<u64>,
     icons: &mut IconSourceCache,
@@ -737,38 +737,6 @@ pub fn paint_name_cell(
         .h_full()
         .overflow_hidden()
         .whitespace_nowrap();
-
-    if guide_lines && (depth > 0 || flags.ancestor_continues != 0) {
-        let divider = ctx.theme.divider;
-        let row_h = m.row_height;
-        root = root.child(
-            div()
-                .debug_selector(|| "TlNameCell-guides".into())
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, (), window, _| {
-                            let quads = guide_quads(
-                                depth,
-                                flags,
-                                bounds.origin,
-                                row_h,
-                                s,
-                                window.scale_factor(),
-                            );
-                            for q in quads {
-                                window.paint_quad(fill(q, divider));
-                            }
-                        },
-                    )
-                    .size_full(),
-                ),
-        );
-    }
 
     // The chevron's hover area is 20 wide, centred on its 16 px box.
     let hit_extra = px((CHEVRON_HIT_W - CHEVRON) / 2.0 * s);
