@@ -378,8 +378,10 @@ mod sidebar {
     use tl_ui::chart::labels::format_value;
     use tl_ui::demand::DemandAggregator;
     use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
-    use tl_ui::pages::performance::actions::{PerfSelectPrevDevice, PerfSelectVisibleDevice};
-    use tl_ui::pages::performance::sidebar::{DeviceSidebar, SidebarEvent};
+    use tl_ui::pages::performance::actions::{
+        PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice,
+    };
+    use tl_ui::pages::performance::sidebar::{CardAnim, DeviceSidebar, SidebarEvent};
     use tl_ui::settings_global::TlSettings;
 
     use super::*;
@@ -807,13 +809,192 @@ mod sidebar {
         draw(r.vcx);
         assert_eq!(selected(&mut r).as_deref(), Some("disk:sdc"));
         assert_eq!(lines(&mut r, "disk:sdc").heading, "Disk 1", "renumbered");
+        settle(&mut r);
         assert_eq!(
             *r.events.borrow(),
             [
-                SidebarEvent::Removed(DeviceKey(Arc::from("disk:sdb"))),
                 SidebarEvent::Selected(DeviceKey(Arc::from("disk:sdc"))),
-            ]
+                SidebarEvent::Removed(DeviceKey(Arc::from("disk:sdb"))),
+            ],
+            "the card goes when its collapse ends"
         );
+    }
+
+    /// Runs the hotplug animations to their end.
+    fn settle(r: &mut Rig) {
+        r.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(250));
+        draw(r.vcx);
+    }
+
+    /// Every card in the list with its animation, collapsing ones included.
+    fn anims(r: &mut Rig) -> Vec<(String, CardAnim)> {
+        let sidebar = r.sidebar.clone();
+        r.vcx.update(|_, cx| {
+            sidebar
+                .read(cx)
+                .cards()
+                .iter()
+                .map(|c| (c.row.key.0.to_string(), c.anim))
+                .collect()
+        })
+    }
+
+    fn is_inserting(a: &CardAnim) -> bool {
+        matches!(a, CardAnim::Inserting { .. })
+    }
+
+    fn is_removing(a: &CardAnim) -> bool {
+        matches!(a, CardAnim::Removing { .. })
+    }
+
+    /// Installs a catalog of `entries` at `version`.
+    fn plug(r: &mut Rig, version: u64, entries: Vec<DeviceEntry>) {
+        r.engine.publish_with(|s| {
+            s.devices = Arc::new(DeviceCatalog {
+                version,
+                entries: Arc::from(entries),
+            });
+        });
+        draw(r.vcx);
+    }
+
+    fn cpu_and_memory() -> Vec<DeviceEntry> {
+        vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+        ]
+    }
+
+    fn with_order(order: &[&str]) -> Settings {
+        let mut s = Settings::default();
+        s.performance.device_order = order.iter().map(|k| (*k).to_owned()).collect();
+        s
+    }
+
+    #[gpui_kit::test]
+    fn device_appears_in_saved_slot(cx: &mut TestAppContext) {
+        let settings = with_order(&["cpu", "disk:sdz", "memory"]);
+        let mut r = open(cx, cpu_and_memory(), settings, UiState::default());
+        assert!(
+            anims(&mut r).iter().all(|(_, a)| *a == CardAnim::Steady),
+            "the first cards do not animate"
+        );
+        let mut entries = cpu_and_memory();
+        entries.push(disk(9, "sdz"));
+        plug(&mut r, 2, entries);
+        assert_eq!(keys(&mut r), ["cpu", "disk:sdz", "memory"]);
+        let a = anims(&mut r);
+        assert_eq!(a[1].0, "disk:sdz");
+        assert!(is_inserting(&a[1].1), "{a:?}");
+        assert_eq!(a[0].1, CardAnim::Steady);
+
+        settle(&mut r);
+        assert_eq!(anims(&mut r)[1].1, CardAnim::Steady);
+    }
+
+    #[gpui_kit::test]
+    fn selected_device_removed_selects_next(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), saved("disk:sdb"));
+        let without: Vec<DeviceEntry> = nine()
+            .into_iter()
+            .filter(|e| e.idx != DeviceIdx(4))
+            .collect();
+        plug(&mut r, 2, without);
+        // The selection moves at once; the card still collapses in its place.
+        assert_eq!(selected(&mut r).as_deref(), Some("disk:sdc"));
+        let a = anims(&mut r);
+        let at = a
+            .iter()
+            .position(|(k, _)| k == "disk:sdb")
+            .expect("collapsing");
+        assert!(is_removing(&a[at].1));
+        assert_eq!(a[at + 1].0, "disk:sdc", "in its old place");
+        assert!(!keys(&mut r).contains(&"disk:sdb".to_owned()));
+        let sdb = DeviceKey(Arc::from("disk:sdb"));
+        assert!(
+            !r.events
+                .borrow()
+                .contains(&SidebarEvent::Removed(sdb.clone()))
+        );
+
+        settle(&mut r);
+        assert!(anims(&mut r).iter().all(|(k, _)| k != "disk:sdb"), "gone");
+        assert!(
+            r.events.borrow().contains(&SidebarEvent::Removed(sdb)),
+            "the page goes with the card"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn reduced_motion_skips_animation(cx: &mut TestAppContext) {
+        let mut settings = with_order(&["cpu", "disk:sdz", "memory"]);
+        settings.motion.animations = false;
+        let mut r = open(cx, cpu_and_memory(), settings, UiState::default());
+        let mut entries = cpu_and_memory();
+        entries.push(disk(9, "sdz"));
+        plug(&mut r, 2, entries);
+        let a = anims(&mut r);
+        assert_eq!(a[1], ("disk:sdz".to_owned(), CardAnim::Steady));
+
+        // Removal is at once too.
+        plug(&mut r, 3, cpu_and_memory());
+        assert_eq!(anims(&mut r).len(), 2);
+        assert!(
+            r.events
+                .borrow()
+                .contains(&SidebarEvent::Removed(DeviceKey(Arc::from("disk:sdz"))))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn removing_card_skipped_by_keys(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), saved("cpu"));
+        let without: Vec<DeviceEntry> = nine()
+            .into_iter()
+            .filter(|e| e.idx != DeviceIdx(4))
+            .collect();
+        plug(&mut r, 2, without);
+        assert!(
+            anims(&mut r)
+                .iter()
+                .any(|(k, a)| k == "disk:sdb" && is_removing(a))
+        );
+        // cpu, memory, gpu, sda, sdc: the collapsing sdb does not count.
+        r.vcx.dispatch_action(PerfSelectVisibleDevice { index: 4 });
+        draw(r.vcx);
+        assert_eq!(selected(&mut r).as_deref(), Some("disk:sdc"));
+        // Down from sda goes past sdb.
+        r.vcx.dispatch_action(PerfSelectVisibleDevice { index: 3 });
+        r.vcx.dispatch_action(PerfSelectNextDevice);
+        draw(r.vcx);
+        assert_eq!(selected(&mut r).as_deref(), Some("disk:sdc"));
+    }
+
+    #[gpui_kit::test]
+    fn replug_creates_new_chart(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), saved("cpu"));
+        let old = chart_of(&mut r, "disk:sda").entity_id();
+        let without: Vec<DeviceEntry> = nine()
+            .into_iter()
+            .filter(|e| e.idx != DeviceIdx(3))
+            .collect();
+        plug(&mut r, 2, without);
+        settle(&mut r);
+        let back: Vec<DeviceEntry> = nine()
+            .into_iter()
+            .map(|mut e| {
+                if e.idx == DeviceIdx(3) {
+                    e.generation = 1;
+                }
+                e
+            })
+            .collect();
+        plug(&mut r, 3, back);
+        let new = chart_of(&mut r, "disk:sda").entity_id();
+        assert_ne!(new, old, "a new card with a new chart");
+        assert!(keys(&mut r).contains(&"disk:sda".to_owned()));
     }
 
     fn chart_of(r: &mut Rig, key: &str) -> Entity<ChartView> {
