@@ -47,6 +47,7 @@ use crate::single_instance::{Forward, Outcome};
 const NV_X11_VAR: &str = "__NV_FORCE_ENABLE_X11_EGL_PLATFORM";
 const NVIDIA_VERSION_FILE: &str = "/proc/driver/nvidia/version";
 const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
+const NO_DISPLAY_MSG: &str = "tasklens needs a Wayland or X11 display";
 /// Set on the one automatic relaunch after device loss (ADR-015, R-153).
 const RELAUNCHED_VAR: &str = "TASKLENS_RELAUNCHED";
 
@@ -109,6 +110,17 @@ fn main() -> ExitCode {
         info!(target: "tasklens::perf", exec_to_main_ms = ms, "process start");
     }
     tl_ui::app::perf_step("logging");
+
+    // Without a display gpui falls back to its headless platform and tasklens runs with no
+    // window (tasklens-cr0.29). Autostart (`--start-minimized`) and `--low-memory` exit here too.
+    if !has_display(
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("DISPLAY"),
+    ) {
+        error!(target: "tasklens::ui", "{NO_DISPLAY_MSG}");
+        eprintln!("{NO_DISPLAY_MSG}");
+        return ExitCode::from(1);
+    }
 
     // Step 2: arguments (parsed above).
     let debug = debug_enabled(args.debug, std::env::var_os("TASKLENS_DEBUG"));
@@ -412,6 +424,11 @@ fn debug_enabled(flag: bool, env: Option<OsString>) -> bool {
     flag || env.is_some_and(|v| v == "1")
 }
 
+/// True when `WAYLAND_DISPLAY` or `DISPLAY` is set and not empty.
+fn has_display(wayland: Option<OsString>, x11: Option<OsString>) -> bool {
+    [wayland, x11].iter().flatten().any(|v| !v.is_empty())
+}
+
 /// True when tasklens must set `__NV_FORCE_ENABLE_X11_EGL_PLATFORM=1` (ADR-010): the session
 /// is X11 (`WAYLAND_DISPLAY` unset or empty), the NVIDIA driver is loaded and the user has not
 /// set the variable.
@@ -481,6 +498,16 @@ mod tests {
     #[test]
     fn x11_rule_empty_wayland_counts_as_unset() {
         assert!(nvidia_x11_rule(os(""), true, None));
+    }
+
+    #[test]
+    fn display_needs_wayland_or_x11() {
+        assert!(has_display(os("wayland-0"), None));
+        assert!(has_display(None, os(":0")));
+        assert!(has_display(os(""), os(":0")));
+        assert!(!has_display(None, None));
+        assert!(!has_display(os(""), os("")));
+        assert!(!has_display(None, os("")));
     }
 
     #[test]
