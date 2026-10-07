@@ -1,4 +1,5 @@
-//! Information section entity (E28-030, UI-SYS-081, UI-SYS-082, UI-FND-025).
+//! Information section entity (E28-030, UI-SYS-081, UI-SYS-082, UI-FND-025) and the page
+//! (E28-033). The page tests need `--features test-hooks`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1355,5 +1356,393 @@ mod hardware_builders {
             let want = if n == peak { px(56.) } else { px(28.) };
             assert_eq!(r.size.height, want, "row {n} height");
         }
+    }
+}
+
+/// The InformationPage entity: layout, demand, loading, live refresh, F5 toast, error state and
+/// keyboard scrolling (tasklens-9o0.24).
+#[cfg(feature = "test-hooks")]
+mod page {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use super::*;
+    use gpui_kit::base::Root;
+    use tl_model::client::EngineClient;
+    use tl_model::command::Command;
+    use tl_model::demand::Demand;
+    use tl_model::health::SourceId;
+    use tl_model::snapshot::{InventorySnapshot, SystemSnapshot};
+    use tl_ui::actions::RefreshCurrentTab;
+    use tl_ui::app::EngineGlobal;
+    use tl_ui::components::toast::{self, ToastQueue};
+    use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::pages::information::actions::bind_keys_information;
+    use tl_ui::pages::information::{InformationPage, REFRESH_TOAST_AFTER};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const S: u64 = 1_000_000_000;
+
+    struct PageHost {
+        page: Entity<InformationPage>,
+        width: f32,
+        height: f32,
+        retries: Rc<Cell<usize>>,
+    }
+
+    impl Render for PageHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let retries = self.retries.clone();
+            div()
+                .w(px(self.width))
+                .h(px(self.height))
+                .on_action(move |_: &RefreshCurrentTab, _, _| retries.set(retries.get() + 1))
+                .child(self.page.clone())
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        page: Entity<InformationPage>,
+        queue: Entity<ToastQueue>,
+        retries: Rc<Cell<usize>>,
+        vcx: VisualTestContext,
+    }
+
+    fn rig(cx: &mut TestAppContext, width: f32, height: f32) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            setup(cx, 100);
+            toast::init(cx);
+            bind_keys_information(cx);
+            cx.set_global(EngineGlobal(client.clone()));
+        });
+        let hub = cx.update(|cx| cx.new(|cx| SnapshotHub::new(client.clone(), cx)));
+        let demand = cx.update(|cx| cx.new(|cx| DemandAggregator::new(client, &hub, cx)));
+        let retries = Rc::new(Cell::new(0));
+        let slot = Rc::new(RefCell::new(None));
+        let window = cx.add_window({
+            let (slot, retries) = (slot.clone(), retries.clone());
+            move |window, cx| {
+                let page = cx.new(|cx| InformationPage::new(&hub, &demand, window, cx));
+                let host = cx.new(|_| PageHost {
+                    page: page.clone(),
+                    width,
+                    height,
+                    retries,
+                });
+                *slot.borrow_mut() = Some(page);
+                Root::new(host, window, cx)
+            }
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.))));
+        let page = slot.borrow_mut().take().expect("page made");
+        let mut rig = Rig {
+            engine,
+            page,
+            queue,
+            retries,
+            vcx,
+        };
+        rig.draw();
+        rig
+    }
+
+    impl Rig {
+        /// Two frames: the first measures the width, the second lays out for it.
+        fn draw(&mut self) {
+            draw(&mut self.vcx);
+            draw(&mut self.vcx);
+        }
+
+        fn bounds(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
+            bounds(&mut self.vcx, selector)
+        }
+
+        fn publish_inventory(&mut self, version: u64, validity: Validity) {
+            self.engine.publish_with(|s| {
+                let mut inv = InventorySnapshot::default();
+                inv.header.version = version;
+                inv.header.validity = validity;
+                inv.os.name = tl_model::table::Total {
+                    value: Arc::from("CachyOS Linux"),
+                    validity: Validity::Valid,
+                };
+                s.inventory = Arc::new(inv);
+            });
+            self.draw();
+        }
+
+        fn publish_system(&mut self, version: u64, uptime_s: u64) {
+            self.engine.publish_with(|s| {
+                let mut sys = SystemSnapshot::default();
+                sys.header.version = version;
+                sys.header.validity = Validity::Valid;
+                sys.header.observed_end = uptime_s * S;
+                s.system = Arc::new(sys);
+            });
+            self.draw();
+        }
+
+        fn renders(&mut self, id: InfoSectionId) -> usize {
+            let section = self
+                .vcx
+                .read_entity(&self.page, |p, _| p.section(id).clone());
+            self.vcx.read_entity(&section, |s, _| s.render_count())
+        }
+
+        fn value(&mut self, id: InfoSectionId, label: &str) -> String {
+            let section = self
+                .vcx
+                .read_entity(&self.page, |p, _| p.section(id).clone());
+            self.vcx.read_entity(&section, |s, _| {
+                s.rows()
+                    .iter()
+                    .find(|r| r.label.as_ref() == label)
+                    .map(|r| r.value.text.to_string())
+                    .unwrap_or_default()
+            })
+        }
+
+        fn set_active(&mut self, on: bool) {
+            self.page
+                .update(&mut self.vcx, |p, cx| p.set_active(on, cx));
+            self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+            self.vcx.run_until_parked();
+        }
+
+        fn refresh_toasts(&mut self) -> usize {
+            self.vcx.update(|_, cx| {
+                self.queue
+                    .read(cx)
+                    .visible_texts()
+                    .iter()
+                    .filter(|t| t.as_ref() == "Information refreshed.")
+                    .count()
+            })
+        }
+
+        fn inventory_refreshes(&self) -> usize {
+            self.engine
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, Command::RefreshNow(SourceId::Inventory)))
+                .count()
+        }
+    }
+
+    fn section_selector(id: InfoSectionId) -> String {
+        format!("InfoSection-{}", id as usize)
+    }
+
+    #[gpui_kit::test]
+    fn info_two_columns_above_880(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        assert!(r.bounds("InformationPage-columns").is_some());
+        let os = r
+            .bounds(&section_selector(InfoSectionId::OperatingSystem))
+            .unwrap();
+        let mem = r.bounds(&section_selector(InfoSectionId::Memory)).unwrap();
+        assert_eq!(os.origin.y, mem.origin.y, "both at the top");
+        assert!(
+            mem.origin.x > os.origin.x + os.size.width,
+            "Memory on the right"
+        );
+        assert_eq!(os.origin.x, px(24.), "left padding 24");
+        assert_eq!(os.origin.y, px(16.), "top padding 16");
+        let processor = r
+            .bounds(&section_selector(InfoSectionId::Processor))
+            .unwrap();
+        assert_eq!(processor.origin.x, os.origin.x, "Processor under OS");
+    }
+
+    #[gpui_kit::test]
+    fn info_one_column_order(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 879., 800.);
+        assert!(r.bounds("InformationPage-column").is_some());
+        let mut last: Option<Bounds<Pixels>> = None;
+        for id in InfoSectionId::ALL {
+            let b = r.bounds(&section_selector(id)).unwrap();
+            if let Some(prev) = last {
+                assert_eq!(b.origin.x, prev.origin.x, "{id:?} in the same column");
+                assert_eq!(
+                    b.origin.y,
+                    prev.origin.y + prev.size.height + px(32.),
+                    "{id:?} 32 below the previous section"
+                );
+            }
+            last = Some(b);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn info_demand_only_while_visible(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        r.set_active(true);
+        let sent = r.engine.demands().last().cloned().expect("demand sent");
+        assert!(
+            sent.any_surface_visible,
+            "the engine collects only for a visible surface"
+        );
+        assert!(sent.inventory && sent.memory && sent.gpus && sent.disks);
+        r.set_active(false);
+        assert_eq!(r.engine.demands().last(), Some(&Demand::default()));
+    }
+
+    #[gpui_kit::test]
+    fn info_refresh_now_on_first_visit_only(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        assert_eq!(r.inventory_refreshes(), 0);
+        r.set_active(true);
+        assert_eq!(r.inventory_refreshes(), 1);
+        r.set_active(false);
+        r.set_active(true);
+        assert_eq!(r.inventory_refreshes(), 1, "only the first visit");
+    }
+
+    #[gpui_kit::test]
+    fn info_skeleton_once(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        let loading = |r: &mut Rig| {
+            InfoSectionId::ALL.map(|id| {
+                let s = r.vcx.read_entity(&r.page, |p, _| p.section(id).clone());
+                r.vcx.read_entity(&s, |s, _| s.is_loading())
+            })
+        };
+        assert!(
+            loading(&mut r).iter().all(|l| *l),
+            "skeleton while warming up"
+        );
+        for id in InfoSectionId::ALL {
+            let band = format!("{}-band", section_selector(id));
+            assert!(r.bounds(&band).is_some(), "{id:?} band drawn");
+        }
+        assert!(r.bounds("TlButton-info-copy-0").is_some());
+
+        r.publish_inventory(1, Validity::Valid);
+        assert!(
+            loading(&mut r).iter().all(|l| !*l),
+            "data ends the skeleton"
+        );
+        assert!(r.vcx.read_entity(&r.page, |p, _| p.first_data_seen()));
+        r.publish_inventory(2, Validity::WarmingUp);
+        assert!(
+            loading(&mut r).iter().all(|l| !*l),
+            "never again in the session"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn info_only_live_sections_rerender(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        r.publish_inventory(1, Validity::Valid);
+        r.publish_system(1, 100);
+        let (os, cpu, system) = (
+            r.renders(InfoSectionId::OperatingSystem),
+            r.renders(InfoSectionId::Processor),
+            r.renders(InfoSectionId::System),
+        );
+        r.publish_system(2, 101);
+        assert_eq!(r.renders(InfoSectionId::OperatingSystem), os);
+        assert_eq!(r.renders(InfoSectionId::Processor), cpu);
+        assert!(r.renders(InfoSectionId::System) > system);
+    }
+
+    #[gpui_kit::test]
+    fn info_live_uptime_ticks(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        r.publish_inventory(1, Validity::Valid);
+        r.publish_system(1, 9_000);
+        let first = r.value(InfoSectionId::System, "System uptime");
+        r.publish_system(2, 9_001);
+        let second = r.value(InfoSectionId::System, "System uptime");
+        assert!(!first.is_empty());
+        assert_ne!(first, second);
+    }
+
+    #[gpui_kit::test]
+    fn info_refresh_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        r.publish_inventory(1, Validity::Valid);
+
+        // A new version after 300 ms.
+        r.page.update(&mut r.vcx, |p, cx| p.refresh(cx));
+        r.vcx.run_until_parked();
+        assert_eq!(r.inventory_refreshes(), 1);
+        r.vcx.executor().advance_clock(Duration::from_millis(300));
+        r.vcx.run_until_parked();
+        assert_eq!(r.refresh_toasts(), 0);
+        r.publish_inventory(2, Validity::Valid);
+        assert_eq!(r.refresh_toasts(), 1);
+        r.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
+        r.vcx.run_until_parked();
+        assert_eq!(r.refresh_toasts(), 1, "one toast per F5");
+
+        // No new version: the toast shows at 2 s.
+        r.vcx.executor().advance_clock(Duration::from_secs(10));
+        r.vcx.run_until_parked();
+        assert_eq!(r.refresh_toasts(), 0, "the first toast is gone");
+        r.page.update(&mut r.vcx, |p, cx| p.refresh(cx));
+        r.vcx
+            .executor()
+            .advance_clock(REFRESH_TOAST_AFTER - Duration::from_millis(100));
+        r.vcx.run_until_parked();
+        assert_eq!(r.refresh_toasts(), 0);
+        r.vcx.executor().advance_clock(Duration::from_millis(100));
+        r.vcx.run_until_parked();
+        assert_eq!(r.refresh_toasts(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn info_load_error_state(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        assert!(r.bounds("InformationPage-error").is_none());
+        r.publish_inventory(1, Validity::Failed);
+        assert!(r.bounds("InformationPage-error").is_some());
+        assert!(r.bounds("InformationPage-columns").is_none());
+        let retry = r.bounds("TlButton-information-retry").expect("Retry drawn");
+        r.vcx.simulate_click(retry.center(), Modifiers::none());
+        r.vcx.run_until_parked();
+        assert_eq!(r.retries.get(), 1, "Retry dispatches RefreshCurrentTab");
+
+        // A failure after data keeps the sections.
+        r.publish_inventory(2, Validity::Valid);
+        assert!(r.bounds("InformationPage-error").is_none());
+        r.publish_inventory(3, Validity::Failed);
+        assert!(r.bounds("InformationPage-error").is_none());
+        assert!(r.bounds("InformationPage-columns").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn info_keyboard_scrolling(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 879., 400.);
+        r.publish_inventory(1, Validity::Valid);
+        let focus = r.vcx.read_entity(&r.page, |p, _| p.focus_handle().clone());
+        r.vcx.update(|window, cx| window.focus(&focus, cx));
+        r.draw();
+        let scroll = r.vcx.read_entity(&r.page, |p, _| p.scroll_handle().clone());
+        let max = scroll.max_offset().y;
+        assert!(max > px(0.), "the page is taller than the window");
+
+        r.vcx.simulate_keystrokes("end");
+        r.draw();
+        assert_eq!(scroll.offset().y, -max, "End goes to the bottom");
+
+        r.vcx.simulate_keystrokes("pageup");
+        r.draw();
+        let viewport = scroll.bounds().size.height;
+        assert_eq!(scroll.offset().y, -max + (viewport - px(28.)));
+
+        r.vcx.simulate_keystrokes("down");
+        r.draw();
+        assert_eq!(scroll.offset().y, -max + (viewport - px(56.)));
+
+        r.vcx.simulate_keystrokes("home");
+        r.draw();
+        assert_eq!(scroll.offset().y, px(0.));
     }
 }
