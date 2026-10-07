@@ -9,6 +9,7 @@ pub mod actions;
 pub mod cells;
 pub mod confirm;
 pub mod delegate;
+pub mod filter;
 pub mod header_totals;
 pub mod history;
 pub mod jump;
@@ -44,6 +45,7 @@ use self::actions::{
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
 use self::delegate::ProcessDelegate;
+use self::filter::FilterBinding;
 use self::jump::JumpTexts;
 use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
 use crate::components::toast::ToastKind;
@@ -96,6 +98,8 @@ pub struct ProcessesPage {
     confirm_words: ConfirmWords,
     /// The jump target's pending jump (E22-A3).
     jump: jump::JumpState,
+    /// The shell filter box's events for this tab (UI-PRC-016).
+    filter: FilterBinding,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -159,6 +163,7 @@ impl ProcessesPage {
             menu_targets: None,
             confirm_words: ConfirmWords::new(cx),
             jump: jump::JumpState::default(),
+            filter: FilterBinding::new(cx),
         }
     }
 

@@ -894,6 +894,9 @@ processes-toast-io-priority-partial = I/O priority updated for { $done } of { $t
 processes-toast-refuse-self = Refusing to end tasklens itself.
 processes-toast-refuse-pid1 = PID 1 (systemd) cannot be ended.
 processes-toast-exited = Process exited
+processes-toast-including-children = Including filtered process children.
+processes-toast-hiding-children = Hiding unmatched filtered process children.
+processes-empty-no-match = No processes match the filter
 information-toast-copied = Copied to clipboard
 
 # File menu: Run... (E21-044)

@@ -302,6 +302,8 @@ pub struct ProcessDelegate {
     name_words: NameWords,
     /// "Apps", "Background processes", "System processes".
     header_words: [Arc<str>; 3],
+    /// "No processes match the filter" (UI-PRC-024).
+    no_match: SharedString,
     headers: [ProcRowId; 3],
     tips: ValidityTips,
     settings: Settings,
@@ -370,6 +372,7 @@ impl ProcessDelegate {
             cell_words: CellWords::new(cx),
             name_words: NameWords::new(cx),
             header_words: HEADER_KEYS.map(|k| Arc::from(tr(cx, k).as_ref())),
+            no_match: tr(cx, "processes-empty-no-match"),
             headers,
             tips: ValidityTips::default(),
             settings: settings.clone(),
@@ -500,6 +503,7 @@ impl ProcessDelegate {
         self.cell_words = CellWords::new(cx);
         self.name_words = NameWords::new(cx);
         self.header_words = HEADER_KEYS.map(|k| Arc::from(tr(cx, k).as_ref()));
+        self.no_match = tr(cx, "processes-empty-no-match");
         self.tip_words = RowTipWords::new(cx);
         self.tip.borrow_mut().clear();
         self.cell_tip_words = CellTipWords::new(cx);
@@ -1318,8 +1322,10 @@ impl TreeTableDelegate for ProcessDelegate {
             .then(|| view.clone())
     }
 
+    /// An empty view under a filter: "No processes match the filter" (UI-PRC-024). The engine
+    /// sends no group header when nothing matches at all.
     fn empty_text(&self) -> Option<SharedString> {
-        None
+        (!self.query.filter().is_empty()).then(|| self.no_match.clone())
     }
 
     fn cell_tip_delay(&self) -> Duration {
