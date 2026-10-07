@@ -1179,3 +1179,17 @@ processes-menu-go-to-parent = Go to parent process
 processes-menu-process-exited = Process exited
 processes-menu-expand = Expand
 processes-menu-collapse = Collapse
+# Settings window frame (tasklens-bj6.21, UI-SHL-060).
+shell-settings-title = tasklens Settings
+shell-settings-page-general = General
+shell-settings-page-appearance = Appearance
+shell-settings-page-motion = Motion
+shell-settings-page-units = Units
+shell-settings-page-processes = Processes
+shell-settings-page-performance = Performance
+shell-settings-page-graphs = Graphs
+shell-settings-page-services = Services
+shell-settings-page-startup-window = Startup and window
+shell-settings-page-privileges = Privileges
+shell-settings-page-advanced = Advanced
+shell-settings-restart-note = Takes effect after restart

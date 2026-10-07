@@ -25,8 +25,9 @@ use gpui_kit::component::setting::{
     Settings as KitSettings,
 };
 use gpui_kit::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, Global, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px, size,
+    Action, AnyElement, App, AppContext as _, Context, Entity, Global, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    px, size,
 };
 use tracing::warn;
 
@@ -195,6 +196,7 @@ impl SliderStates {
 }
 
 type CustomRender = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+type BoolSetter = Rc<dyn Fn(bool, &mut App)>;
 
 /// Builds one page: groups of items, each control bound to one setting. `keys` records every
 /// key a control binds, in order.
@@ -205,6 +207,9 @@ pub struct PageBuilder {
     sliders: Vec<SliderSpec>,
     /// "Takes effect after restart": the next item gets it as description and as a toast.
     restart_next: Option<SharedString>,
+    /// The switch and checkbox setters, the same closures the kit calls.
+    #[cfg(any(test, feature = "test-hooks"))]
+    bool_setters: Vec<(SettingKey, BoolSetter)>,
 }
 
 impl PageBuilder {
@@ -215,6 +220,8 @@ impl PageBuilder {
             keys: Vec::new(),
             sliders: Vec::new(),
             restart_next: None,
+            #[cfg(any(test, feature = "test-hooks"))]
+            bool_setters: Vec::new(),
         }
     }
 
@@ -257,10 +264,9 @@ impl PageBuilder {
         description: Option<SharedString>,
     ) -> &mut Self {
         let restart = self.take_restart();
-        let field = SettingField::switch(
-            move |cx| read_bool(cx, key),
-            bool_setter(key, restart.clone()),
-        );
+        let setter = self.bool_setter(key, restart.clone());
+        let field =
+            SettingField::switch(move |cx| read_bool(cx, key), move |on, cx| setter(on, cx));
         self.push(group, key, label, description, restart, field)
     }
 
@@ -272,10 +278,9 @@ impl PageBuilder {
         description: Option<SharedString>,
     ) -> &mut Self {
         let restart = self.take_restart();
-        let field = SettingField::checkbox(
-            move |cx| read_bool(cx, key),
-            bool_setter(key, restart.clone()),
-        );
+        let setter = self.bool_setter(key, restart.clone());
+        let field =
+            SettingField::checkbox(move |cx| read_bool(cx, key), move |on, cx| setter(on, cx));
         self.push(group, key, label, description, restart, field)
     }
 
@@ -440,11 +445,32 @@ impl PageBuilder {
             .groups(groups)
     }
 
+    /// Runs the switch or checkbox setter of `key` as a click on it would.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_bool(&self, key: SettingKey, on: bool, cx: &mut App) {
+        if let Some((_, setter)) = self.bool_setters.iter().find(|(k, _)| *k == key) {
+            setter(on, cx);
+        }
+    }
+
+    /// Writes a Bool key and pushes the restart toast when the item needs one.
+    fn bool_setter(&mut self, key: SettingKey, restart: Option<SharedString>) -> BoolSetter {
+        let setter: BoolSetter = Rc::new(move |on, cx| {
+            TlSettings::set(cx, key, SettingValue::Bool(on));
+            if let Some(note) = &restart {
+                restart_toast(note.clone(), cx);
+            }
+        });
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.bool_setters.push((key, setter.clone()));
+        setter
+    }
+
     fn take_restart(&mut self) -> Option<SharedString> {
         self.restart_next.take()
     }
 
-    fn push<T: 'static>(
+    fn push<T: Clone + PartialEq + Send + Sync + 'static>(
         &mut self,
         group: impl Into<SharedString>,
         key: SettingKey,
@@ -512,15 +538,6 @@ fn value_matches(v: &SettingValue, now: &serde_json::Value) -> bool {
                     .zip(list.iter())
                     .all(|(x, y)| x.as_str() == Some(y))
         }),
-    }
-}
-
-fn bool_setter(key: SettingKey, restart: Option<SharedString>) -> impl Fn(bool, &mut App) {
-    move |on, cx| {
-        TlSettings::set(cx, key, SettingValue::Bool(on));
-        if let Some(note) = &restart {
-            restart_toast(note.clone(), cx);
-        }
     }
 }
 

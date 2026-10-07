@@ -187,12 +187,13 @@ impl IconNamed for AppIcon {
 // arrows (R-185). `Binary` is the Name cell's file icon fallback. `LayoutGrid` to `List` are
 // the Processes toolbar icons (UI-PRC-019). `ChevronsRight` is the tab overflow button
 // (E20-015). `CircleOff` and `ShieldAlert` are the Properties exited banner and access block
-// (E23-A1).
+// (E23-A1). `Activity` to `SlidersHorizontal` are the Settings window page icons (E21-018).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
         X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square,
-        Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert
+        Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
+        Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal
     ]
 );
 
