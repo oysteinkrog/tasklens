@@ -1237,3 +1237,207 @@ mod sys_actions {
         );
     }
 }
+
+mod copy {
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use smallvec::SmallVec;
+    use tl_model::ids::ColumnId;
+    use tl_ui::components::toast::{self, ToastQueue};
+    use tl_ui::pages::sys_copy::{
+        CopyTexts, SysCopySource, copied_toast_text, copy_cell, copy_row, copy_rows_as_table,
+    };
+
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("content")
+        }
+    }
+
+    /// One row: id, "Copy row" block, Name cell, PID cell.
+    type Row = (u32, &'static str, &'static str, &'static str);
+
+    /// A page stand-in. `groups` are group row ids, which `copy_rows` drops.
+    struct Source {
+        rows: Vec<Row>,
+        selected: Vec<u32>,
+        groups: Vec<u32>,
+        texts: CopyTexts,
+    }
+
+    impl Source {
+        fn new(rows: Vec<Row>, selected: Vec<u32>) -> Self {
+            Self {
+                rows,
+                selected,
+                groups: Vec::new(),
+                texts: CopyTexts {
+                    row_ok: "Row copied".into(),
+                    row_failed: "Copy failed".into(),
+                    nothing_selected: "Select a row first.".into(),
+                },
+            }
+        }
+
+        fn row(&self, id: u32) -> &Row {
+            self.rows.iter().find(|r| r.0 == id).expect("row")
+        }
+    }
+
+    impl SysCopySource for Source {
+        type RowId = u32;
+
+        fn copy_rows(&self) -> SmallVec<[u32; 8]> {
+            self.selected
+                .iter()
+                .copied()
+                .filter(|id| !self.groups.contains(id))
+                .collect()
+        }
+
+        fn write_block(&self, row: u32, out: &mut String) {
+            out.push_str(self.row(row).1);
+        }
+
+        fn visible_columns(&self) -> SmallVec<[(SharedString, ColumnId); 24]> {
+            SmallVec::from_iter([
+                ("Name".into(), ColumnId::Name),
+                ("PID".into(), ColumnId::Pid),
+            ])
+        }
+
+        fn write_cell(&self, row: u32, col: ColumnId, out: &mut String) {
+            let row = self.row(row);
+            let text = if col == ColumnId::Name { row.2 } else { row.3 };
+            // The validity glyph cell writes nothing.
+            if text != "\u{2026}" {
+                out.push_str(text);
+            }
+        }
+
+        fn copy_texts(&self) -> &CopyTexts {
+            &self.texts
+        }
+    }
+
+    struct Rig {
+        vcx: VisualTestContext,
+        queue: Entity<ToastQueue>,
+    }
+
+    impl Rig {
+        fn run(&mut self, f: impl FnOnce(&mut Window, &mut gpui_kit::App)) {
+            self.vcx.update(f);
+            self.vcx.run_until_parked();
+        }
+
+        fn clipboard(&mut self) -> Option<String> {
+            self.vcx
+                .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.queue.read_with(&self.vcx, |q, _| {
+                q.visible_texts().iter().map(|t| t.to_string()).collect()
+            })
+        }
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        cx.update(|cx| {
+            super::setup(cx);
+            toast::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let window = cx.add_window(|window, cx| {
+            let host = cx.new(|_| Host);
+            Root::new(host, window, cx)
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
+        vcx.update(|_, cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()))
+        });
+        vcx.run_until_parked();
+        Rig { vcx, queue }
+    }
+
+    #[gpui_kit::test]
+    fn copy_row_blocks_joined_by_blank_line(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let src = Source::new(vec![(1, "A", "a", "1"), (2, "B", "b", "2")], vec![1, 2]);
+        r.run(|window, cx| copy_row(&src, window, cx));
+        assert_eq!(r.clipboard().as_deref(), Some("A\n\nB"));
+        assert_eq!(r.toasts(), ["Row copied"]);
+    }
+
+    #[gpui_kit::test]
+    fn copy_nothing_selected_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let src = Source::new(vec![(1, "A", "a", "1")], Vec::new());
+        r.run(|window, cx| copy_row(&src, window, cx));
+        assert_eq!(
+            r.clipboard().as_deref(),
+            Some("before"),
+            "clipboard unchanged"
+        );
+        assert_eq!(r.toasts(), ["Select a row first."]);
+        r.run(|window, cx| copy_rows_as_table(&src, window, cx));
+        assert_eq!(r.clipboard().as_deref(), Some("before"));
+        assert_eq!(r.toasts(), ["Select a row first. (×2)"]);
+    }
+
+    #[gpui_kit::test]
+    fn copy_rows_as_table_tsv_header(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let src = Source::new(vec![(1, "A", "sshd.service", "812")], vec![1]);
+        r.run(|window, cx| copy_rows_as_table(&src, window, cx));
+        assert_eq!(
+            r.clipboard().as_deref(),
+            Some("Name\tPID\nsshd.service\t812")
+        );
+        assert_eq!(r.toasts(), ["Row copied"]);
+
+        // Rows in view order, a tab inside a value becomes a space, a glyph cell is empty.
+        let src = Source::new(
+            vec![(1, "A", "b\tc", "\u{2026}"), (2, "B", "a", "7")],
+            vec![2, 1],
+        );
+        r.run(|window, cx| copy_rows_as_table(&src, window, cx));
+        assert_eq!(r.clipboard().as_deref(), Some("Name\tPID\na\t7\nb c\t"));
+    }
+
+    #[gpui_kit::test]
+    fn copy_cell_truncates_toast_at_60(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let value: &'static str = "v".repeat(75).leak();
+        let src = Source::new(vec![(1, "A", value, "1")], Vec::new());
+        r.run(|window, cx| copy_cell(&src, 1, ColumnId::Name, window, cx));
+        assert_eq!(r.clipboard().as_deref(), Some(value), "all 75 chars");
+        let expected = format!("Copied: {}\u{2026}", "v".repeat(60));
+        assert_eq!(r.toasts(), [expected.as_str()]);
+        assert_eq!(copied_toast_text(value).as_ref(), expected);
+    }
+
+    #[gpui_kit::test]
+    fn copy_skips_group_rows(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let mut src = Source::new(
+            vec![
+                (1, "A", "a", "1"),
+                (9, "GROUP", "g", ""),
+                (2, "B", "b", "2"),
+            ],
+            vec![1, 9, 2],
+        );
+        src.groups = vec![9];
+        r.run(|window, cx| copy_row(&src, window, cx));
+        assert_eq!(r.clipboard().as_deref(), Some("A\n\nB"));
+    }
+}
