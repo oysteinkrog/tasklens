@@ -5,15 +5,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
+use tl_model::ids::{NodeId, ProcessKey};
+use tl_model::table::ProcessTableView;
 use tl_model::time::now_boot_ns;
 use tl_ui::bench::engine::{BenchEngine, BenchFeed};
-use tl_ui::bench::scenes::open_scene;
-use tl_ui::bench::stats::BenchReport;
-use tl_ui::bench::synth::SEED;
+use tl_ui::bench::scenes::{TABLE_SCROLL_PX_PER_S, TableScroller, open_scene};
+use tl_ui::bench::stats::{BenchReport, OUTPUT_PERIOD_NS};
+use tl_ui::bench::synth::{
+    BenchRng, SEED, TABLE_GROUP_SIZE, TABLE_GROUPS, TABLE_PROCESSES, TableSynth,
+};
 use tl_ui::bench::{BenchClocks, BenchError, BenchOptions, BenchScene, run};
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::cpu::CpuPage;
@@ -99,7 +103,7 @@ fn bench_scene_perf_cpu_builds_32_cells_and_9_cards(cx: &mut TestAppContext) {
 
     let view = window.view.clone();
     let (cells, cards, both, selected) = vcx.update(|_, cx| {
-        let page = view.read(cx).page().read(cx);
+        let page = view.read(cx).page().expect("the Performance tab").read(cx);
         let cpu = page
             .page(&DeviceKey(Arc::from(DeviceKey::CPU)))
             .expect("CPU page built")
@@ -153,4 +157,173 @@ fn bridge_fails_without_samples(cx: &mut TestAppContext) {
         result.map(|r| r.scene).map_err(|e| e.to_string()),
         Err("bridge: only 0 samples arrived".to_owned())
     );
+}
+
+/// The process keys of `view`'s process rows, in display order.
+fn process_keys(view: &ProcessTableView) -> Vec<ProcessKey> {
+    view.rows
+        .iter()
+        .filter_map(|r| match r.node {
+            NodeId::Process(key) => Some(key),
+            _ => None,
+        })
+        .collect()
+}
+
+fn first_tick(seed: u64) -> (TableSynth, BenchRng, Arc<ProcessTableView>) {
+    let mut rng = BenchRng::new(seed);
+    let mut synth = TableSynth::new(&mut rng);
+    let view = synth.tick_1hz(&mut rng, 3_600_000_000_000);
+    (synth, rng, view)
+}
+
+#[test]
+fn bench_table_2000_scene_exists_and_is_deterministic() {
+    assert_eq!(
+        BenchScene::from_arg("table-2000"),
+        Some(BenchScene::Table2000)
+    );
+    let (_, _, a) = first_tick(SEED);
+    let (_, _, b) = first_tick(SEED);
+    let keys = process_keys(&a);
+    assert_eq!(keys.len(), TABLE_PROCESSES);
+    assert_eq!(keys, process_keys(&b));
+}
+
+#[test]
+fn table_synth_sorted_grouped_2000() {
+    let (synth, _, view) = first_tick(SEED);
+    let procs = synth.processes();
+    assert_eq!(view.rows.len(), 1 + TABLE_GROUPS + TABLE_PROCESSES);
+    assert_eq!((view.total, view.shown, view.restricted), (2000, 2000, 0));
+    assert_eq!(view.rows[0].depth, 0, "the Apps header first");
+
+    let mut group_cpu: Vec<f32> = Vec::new();
+    let mut members: Vec<(f32, ProcessKey)> = Vec::new();
+    let mut check_members = |members: &mut Vec<(f32, ProcessKey)>| {
+        assert!(members.is_empty() || members.len() == TABLE_GROUP_SIZE);
+        for pair in members.windows(2) {
+            let ((ca, ka), (cb, kb)) = (pair[0], pair[1]);
+            assert!(ca > cb || (ca == cb && ka < kb), "member order");
+        }
+        members.clear();
+    };
+    for row in &view.rows[1..] {
+        match (row.group, row.record) {
+            (Some(g), None) => {
+                check_members(&mut members);
+                let group = &view.groups[g as usize];
+                assert_eq!(row.depth, 1);
+                assert_eq!(group.members as usize, TABLE_GROUP_SIZE);
+                group_cpu.push(group.cpu_pct);
+            }
+            (None, Some(i)) => {
+                let r = &procs.records[i as usize];
+                assert_eq!(row.depth, 2);
+                assert_eq!(row.node, NodeId::Process(r.key));
+                members.push((r.cpu_pct, r.key));
+            }
+            other => panic!("unexpected row {other:?}"),
+        }
+    }
+    check_members(&mut members);
+    assert_eq!(group_cpu.len(), TABLE_GROUPS);
+    assert!(
+        group_cpu.windows(2).all(|p| p[0] >= p[1]),
+        "groups by CPU descending"
+    );
+    for g in view.groups.iter() {
+        let sum: f32 = procs
+            .records
+            .iter()
+            .filter(|r| r.group == g.key)
+            .map(|r| r.cpu_pct)
+            .sum();
+        assert!(
+            (g.cpu_pct - sum).abs() < 1e-3,
+            "group CPU is the member sum"
+        );
+    }
+    assert!(
+        procs.records.windows(2).all(|p| p[0].key < p[1].key),
+        "records sorted by ProcessKey"
+    );
+}
+
+#[test]
+fn table_synth_changes_every_tick() {
+    let (mut synth, mut rng, first) = first_tick(SEED);
+    let before = synth.processes();
+    let second = synth.tick_1hz(&mut rng, 3_601_000_000_000);
+    let after = synth.processes();
+    assert!(second.header.version > first.header.version);
+    for (a, b) in before.records.iter().zip(after.records.iter()) {
+        assert_eq!(a.key, b.key);
+        assert_ne!(a.cpu_pct, b.cpu_pct, "{} CPU changed", a.meta.name);
+        assert_ne!(a.rss_anon_bytes, b.rss_anon_bytes);
+        assert_ne!(a.gpu_util_pct, b.gpu_util_pct);
+    }
+    assert_ne!(process_keys(&first), process_keys(&second), "order changed");
+}
+
+#[gpui_kit::test]
+fn table_scroll_bounces_at_1200_px_per_s(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let engine = BenchEngine::start(BenchFeed::Table, SEED, now_boot_ns());
+    let window = cx
+        .update(|cx| open_scene(cx, BenchScene::Table2000, engine.clone()))
+        .expect("the scene window opens");
+    let mut vcx = VisualTestContext::from_window(window.handle, cx);
+    let page = window
+        .view
+        .read_with(&vcx, |v, _| v.processes().cloned())
+        .expect("the Processes tab");
+
+    // The engine answers the page's first query on its next 1 Hz tick, in real time.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        draw(&mut vcx);
+        let rows = vcx.update(|_, cx| {
+            page.read(cx)
+                .table()
+                .read(cx)
+                .delegate
+                .query()
+                .shown()
+                .map_or(0, |v| v.rows.len())
+        });
+        if rows > 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the table never arrived");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let scroller = vcx.update(|_, cx| Rc::new(RefCell::new(TableScroller::new(&page, cx))));
+    let handle = vcx.update(|_, cx| page.read(cx).scroll_handle(cx));
+    let offset = || -f32::from(handle.0.borrow().base_handle.offset().y);
+    let start = offset();
+    for _ in 0..144 {
+        vcx.update(|_, cx| scroller.borrow_mut().frame(OUTPUT_PERIOD_NS, cx));
+        draw(&mut vcx);
+    }
+    let moved = offset() - start;
+    assert!(
+        (moved - TABLE_SCROLL_PX_PER_S).abs() <= 20.,
+        "moved {moved} px in 1 s"
+    );
+
+    // Run on to the bottom; the next frame moves up.
+    let mut frames = 0;
+    while !scroller.borrow().scroll().up {
+        vcx.update(|_, cx| scroller.borrow_mut().frame(OUTPUT_PERIOD_NS, cx));
+        frames += 1;
+        assert!(frames < 100_000, "never reached the bottom");
+    }
+    let bottom = offset();
+    let max = f32::from(handle.0.borrow().base_handle.max_offset().y);
+    assert!((bottom - max).abs() < 0.5, "stopped at {bottom}, max {max}");
+    vcx.update(|_, cx| scroller.borrow_mut().frame(OUTPUT_PERIOD_NS, cx));
+    assert!(offset() < bottom, "moves upward after the bottom");
+    engine.stop();
 }

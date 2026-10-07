@@ -1,8 +1,9 @@
-//! Bench scenes `perf-cpu`, `static` and `bridge` and the run loop (ADR-014, UI-PRF-053,
-//! E01-007).
+//! Bench scenes `perf-cpu`, `static`, `bridge` and `table-2000` and the run loop (ADR-014,
+//! UI-PRF-053, E01-007, E01-008).
 //!
 //! A scene opens one window with the production Performance tab, CPU page selected, fed by
-//! [`BenchEngine`]. [`run`] waits out the warm-up, takes its baselines, measures for the
+//! [`BenchEngine`]. `table-2000` opens the production Processes tab instead, over the
+//! [`super::synth::TableSynth`] table, and scrolls it with [`TableScroller`]. [`run`] waits out the warm-up, takes its baselines, measures for the
 //! duration, builds the [`BenchReport`], writes the JSON when asked and prints it on one line;
 //! [`run_app`] then quits. Nothing runs while measuring but the scene's own views: one timer waits out the
 //! duration, and the frame probe records each frame.
@@ -16,8 +17,9 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Context, Entity, IntoElement,
-    ParentElement as _, QuitMode, Render, Styled as _, Task, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowOptions, div, px, size,
+    ParentElement as _, QuitMode, Render, Styled as _, Task, UniformListScrollHandle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, point, px,
+    size,
 };
 use rustc_hash::FxHashSet;
 use tl_model::client::EngineClient;
@@ -37,6 +39,9 @@ use crate::demand::GlobalDemand;
 use crate::hub::GlobalHub;
 use crate::pages::performance::cpu::CpuPage;
 use crate::pages::performance::{DeviceKey, PerformancePage};
+use crate::pages::processes::ProcessesPage;
+use crate::pages::processes::delegate::ProcessDelegate;
+use crate::table::tree_table::TlTreeTable;
 use crate::window::main::APP_ID;
 
 /// Phase-0 fixture window size, logical px.
@@ -44,6 +49,8 @@ pub const WINDOW_W: f32 = 1600.;
 pub const WINDOW_H: f32 = 1000.;
 /// UI-PRF-053: `bridge` needs this many real samples in 30 s.
 pub const BRIDGE_MIN_SAMPLES_30S: u64 = 295;
+/// ADR-014 `table-2000` scroll speed, logical px per second.
+pub const TABLE_SCROLL_PX_PER_S: f32 = 1_200.;
 
 /// A bench scene (APP-052 `--bench <scene>`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +111,8 @@ impl std::error::Error for BenchError {}
 
 /// The fixture settings of `scene` (UI-PRF-053 common fixture): Default Dark, 100% UI scale,
 /// 60 s graph range, kernel overlays on, smooth graphs except in `static`, CPU page selected
-/// with the sidebar at 252 px.
+/// with the sidebar at 252 px. `table-2000` shows the Power column after R-006's nine default
+/// process columns (R-160 OI-7).
 pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
     // The default theme is Default Dark without follow-system, so `init` activates it with no
     // crossfade.
@@ -116,19 +124,41 @@ pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
     let mut state = UiState::default();
     state.performance.nav_width = 252;
     state.performance.selected_device = DeviceKey::CPU.to_owned();
+    if scene == BenchScene::Table2000 {
+        let columns = &mut state.columns.processes;
+        for list in [&mut columns.order, &mut columns.visible] {
+            if !list.iter().any(|c| c == "power") {
+                list.push("power".to_owned());
+            }
+        }
+    }
     (settings, state)
 }
 
-/// The scene window's root: the Performance tab and the window's animation driver.
+/// The tab a scene window shows.
+pub enum SceneContent {
+    Performance(Entity<PerformancePage>),
+    Processes(Entity<ProcessesPage>),
+}
+
+/// The scene window's root: the scene's tab and the window's animation driver.
 pub struct SceneView {
-    page: Entity<PerformancePage>,
+    content: SceneContent,
     driver: Entity<AnimationDriver>,
 }
 
 impl SceneView {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(scene: BenchScene, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
+        if scene == BenchScene::Table2000 {
+            let page = cx.new(|cx| ProcessesPage::new(window, cx));
+            page.update(cx, |page, cx| page.focus_table(window, cx));
+            return Self {
+                content: SceneContent::Processes(page),
+                driver,
+            };
+        }
         let hub = cx.global::<GlobalHub>().0.clone();
         let demand = cx.global::<GlobalDemand>().0.clone();
         // Hidden-state demand follows this window as it follows the main window.
@@ -147,11 +177,30 @@ impl SceneView {
         }
         let focus = page.read(cx).primary_focus();
         focus.focus(window, cx);
-        Self { page, driver }
+        Self {
+            content: SceneContent::Performance(page),
+            driver,
+        }
     }
 
-    pub fn page(&self) -> &Entity<PerformancePage> {
-        &self.page
+    pub fn content(&self) -> &SceneContent {
+        &self.content
+    }
+
+    /// The Performance tab, in every scene but `table-2000`.
+    pub fn page(&self) -> Option<&Entity<PerformancePage>> {
+        match &self.content {
+            SceneContent::Performance(page) => Some(page),
+            SceneContent::Processes(_) => None,
+        }
+    }
+
+    /// The Processes tab, in `table-2000` only.
+    pub fn processes(&self) -> Option<&Entity<ProcessesPage>> {
+        match &self.content {
+            SceneContent::Processes(page) => Some(page),
+            SceneContent::Performance(_) => None,
+        }
     }
 
     pub fn driver(&self) -> &Entity<AnimationDriver> {
@@ -161,7 +210,11 @@ impl SceneView {
 
 impl Render for SceneView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.page.clone())
+        let root = div().size_full();
+        match &self.content {
+            SceneContent::Performance(page) => root.child(page.clone()),
+            SceneContent::Processes(page) => root.child(page.clone()),
+        }
     }
 }
 
@@ -172,7 +225,7 @@ pub struct SceneWindow {
 }
 
 /// Initialises the UI over `client` with the fixture settings of `scene` and opens the scene
-/// window. The Processes tab and every other tab are never built.
+/// window. Only the scene's own tab is built.
 pub fn open_scene(
     cx: &mut App,
     scene: BenchScene,
@@ -206,7 +259,7 @@ pub fn open_scene(
         ..Default::default()
     };
     let (handle, view) = gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| SceneView::new(window, cx))
+        cx.new(|cx| SceneView::new(scene, window, cx))
     })
     .map_err(|e| BenchError(format!("cannot open the bench window: {e}")))?;
     Ok(SceneWindow { handle, view })
@@ -223,11 +276,7 @@ pub fn run(
     real: Option<Arc<dyn EngineClient>>,
 ) -> Task<Result<BenchReport, BenchError>> {
     let feed = match (scene, real) {
-        (BenchScene::Table2000, _) => {
-            return Task::ready(Err(BenchError(
-                "table-2000: the scene is not built yet (E01-008)".to_owned(),
-            )));
-        }
+        (BenchScene::Table2000, _) => BenchFeed::Table,
         (BenchScene::Bridge, Some(real)) => BenchFeed::Bridge(real),
         (BenchScene::Bridge, None) => {
             return Task::ready(Err(BenchError("bridge: no real engine client".to_owned())));
@@ -313,6 +362,24 @@ async fn measure(
             .update(cx, |_, window, _| FrameProbe::start(probe, window))
             .map_err(closed)?;
     }
+    // table-2000 scrolls from the start of the warm-up, so the measured window starts mid-scroll.
+    let scroller = if scene == BenchScene::Table2000 {
+        let view = window.view.clone();
+        let scroller = window
+            .handle
+            .update(cx, |_, window, cx| {
+                let page = view.read(cx).processes().cloned();
+                page.map(|page| {
+                    let scroller = Rc::new(RefCell::new(TableScroller::new(&page, cx)));
+                    TableScroller::start(&scroller, window);
+                    scroller
+                })
+            })
+            .map_err(closed)?;
+        Some(scroller.ok_or_else(|| BenchError("table-2000: no process table".to_owned()))?)
+    } else {
+        None
+    };
 
     let executor = cx.background_executor().clone();
     executor
@@ -340,6 +407,9 @@ async fn measure(
     let cpu_ns = (clocks.process_cpu_ns)().saturating_sub(cpu_at);
     let wall_ns = u64::try_from(wall_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
     probe.borrow_mut().stop();
+    if let Some(scroller) = &scroller {
+        scroller.borrow_mut().stop();
+    }
     let samples = engine.bridge_samples().saturating_sub(samples_at);
     let (requested, stalls, paint_log) = cx.update(|cx| {
         driver.update(cx, |d, _| {
@@ -382,6 +452,116 @@ async fn measure(
         bridge_latency_ms,
         gpu: None,
     })
+}
+
+/// The `table-2000` scroll position: [`TABLE_SCROLL_PX_PER_S`] down to the bottom, then back up
+/// to the top, and so on. `offset` is in logical px from the top, so it is `-y` of GPUI's scroll
+/// offset (which is negative downward).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TableScroll {
+    pub offset: f32,
+    pub up: bool,
+}
+
+impl TableScroll {
+    /// Moves by `TABLE_SCROLL_PX_PER_S * dt`, clamped to `[0, max]`, and turns at either end.
+    /// Returns the new offset.
+    pub fn advance(&mut self, dt_ns: u64, max: f32) -> f32 {
+        let max = max.max(0.);
+        let step = TABLE_SCROLL_PX_PER_S * (dt_ns as f64 / 1e9) as f32;
+        let next = if self.up {
+            self.offset - step
+        } else {
+            self.offset + step
+        };
+        self.offset = if next >= max {
+            self.up = true;
+            max
+        } else if next <= 0. {
+            self.up = false;
+            0.
+        } else {
+            next
+        };
+        self.offset
+    }
+}
+
+/// Scrolls the production process table once per frame (ADR-014 `table-2000`). Each frame it
+/// sets the offset of the table's `uniform_list` scroll handle and notifies the table, which is
+/// what a mouse-wheel scroll does. Like [`FrameProbe`], it runs from its own `on_next_frame`
+/// callback and re-registers while active.
+pub struct TableScroller {
+    handle: UniformListScrollHandle,
+    table: Entity<TlTreeTable<ProcessDelegate>>,
+    scroll: TableScroll,
+    last: Option<Instant>,
+    active: bool,
+}
+
+impl TableScroller {
+    /// Takes the table's scroll handle once, through `ProcessesPage::scroll_handle`.
+    pub fn new(page: &Entity<ProcessesPage>, cx: &App) -> Self {
+        let page = page.read(cx);
+        Self {
+            handle: page.scroll_handle(cx),
+            table: page.table().clone(),
+            scroll: TableScroll::default(),
+            last: None,
+            active: false,
+        }
+    }
+
+    pub fn scroll(&self) -> TableScroll {
+        self.scroll
+    }
+
+    /// One frame `dt_ns` after the previous one: the next offset, one `set_offset` and one
+    /// notify of the table. `max` is the list's content height minus its viewport height, from
+    /// its last layout.
+    pub fn frame(&mut self, dt_ns: u64, cx: &mut App) {
+        let base = self.handle.0.borrow().base_handle.clone();
+        let max = f32::from(base.max_offset().y);
+        let y = self.scroll.advance(dt_ns, max);
+        base.set_offset(point(base.offset().x, px(-y)));
+        self.table.update(cx, |_, cx| cx.notify());
+    }
+
+    /// Starts the per-frame callback. The first frame only takes the time.
+    pub fn start(this: &Rc<RefCell<Self>>, window: &Window) {
+        {
+            let mut s = this.borrow_mut();
+            if s.active {
+                return;
+            }
+            s.active = true;
+            s.last = None;
+        }
+        Self::arm(this, window);
+    }
+
+    /// The next callback does nothing and does not re-register.
+    pub fn stop(&mut self) {
+        self.active = false;
+    }
+
+    fn arm(this: &Rc<RefCell<Self>>, window: &Window) {
+        let scroller = Rc::clone(this);
+        window.on_next_frame(move |window, cx| {
+            let mut s = scroller.borrow_mut();
+            if !s.active {
+                return;
+            }
+            let now = Instant::now();
+            if let Some(last) = s.last {
+                let dt = u64::try_from(now.duration_since(last).as_nanos()).unwrap_or(u64::MAX);
+                s.frame(dt, cx);
+            }
+            s.last = Some(now);
+            drop(s);
+            Self::arm(&scroller, window);
+        });
+    }
 }
 
 /// Wake-to-render latency (UI-PRF-053): for each real sample, `published_ns` of the snapshot
