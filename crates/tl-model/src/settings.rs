@@ -193,6 +193,9 @@ pub struct MotionSettings {
     pub smooth_scroll_amount: u8,
     /// 0..=500, step 10.
     pub tab_switch_ms: u16,
+    /// "Save power on battery": while on battery, CPU updates drop from 10 Hz to 1 Hz and
+    /// charts stop sliding (wlf.32).
+    pub save_power_on_battery: bool,
 }
 
 impl Default for MotionSettings {
@@ -203,6 +206,7 @@ impl Default for MotionSettings {
             smooth_scroll: true,
             smooth_scroll_amount: 15,
             tab_switch_ms: 250,
+            save_power_on_battery: true,
         }
     }
 }
@@ -1171,6 +1175,7 @@ mod tests {
 
         assert!(s.motion.animations);
         assert!(s.motion.smooth_graphs);
+        assert!(s.motion.save_power_on_battery);
         assert!(s.motion.smooth_scroll);
         assert_eq!(s.motion.smooth_scroll_amount, 15);
         assert_eq!(s.motion.tab_switch_ms, 250);

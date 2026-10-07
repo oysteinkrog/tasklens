@@ -123,6 +123,7 @@ impl Element for ChartElement {
             metrics: *cx.global::<UiMetrics>(),
             theme: crate::theme::current(cx).clone(),
             reduce_motion: cx.reduce_motion(),
+            power_saving: crate::demand::power_saving(cx),
             network_unit: if cx.has_global::<TlSettings>() {
                 TlSettings::settings(cx).units.network
             } else {
@@ -209,6 +210,8 @@ struct PaintEnv {
     metrics: UiMetrics,
     theme: Arc<TlTheme>,
     reduce_motion: bool,
+    /// Save power on battery is in effect: no sliding (wlf.32).
+    power_saving: bool,
     network_unit: NetworkUnit,
     /// `performance.curved_lines`.
     curved: bool,
@@ -278,7 +281,7 @@ fn paint_view(
     if period_ns == u64::MAX {
         period_ns = DEFAULT_PERIOD_NS;
     }
-    let sliding = spec.smooth && !env.reduce_motion;
+    let sliding = spec.smooth && !env.reduce_motion && !env.power_saving;
     let stale = newest_ns > 0 && geometry::is_stale(newest_ns, now, period_ns);
     // No data: the grid is placed against the clock, where the first samples will land.
     let right_edge = if newest_ns == 0 {

@@ -37,6 +37,12 @@ pub fn page(cx: &mut App) -> PageBuilder {
     )
     .switch(
         group,
+        SettingKey::MotionSavePowerOnBattery,
+        tr(cx, "shell-settings-save-power-on-battery"),
+        Some(tr(cx, "shell-settings-save-power-on-battery-note")),
+    )
+    .switch(
+        group,
         SettingKey::MotionSmoothScroll,
         tr(cx, "shell-menu-settings-smooth-scroll"),
         None,

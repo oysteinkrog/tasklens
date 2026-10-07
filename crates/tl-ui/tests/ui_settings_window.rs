@@ -416,6 +416,7 @@ fn motion_keys(cx: &mut TestAppContext) {
         [
             SettingKey::MotionAnimations,
             SettingKey::MotionSmoothGraphs,
+            SettingKey::MotionSavePowerOnBattery,
             SettingKey::MotionSmoothScroll,
             SettingKey::MotionSmoothScrollAmount,
             SettingKey::MotionTabSwitchMs

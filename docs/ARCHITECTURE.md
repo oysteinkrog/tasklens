@@ -1763,7 +1763,7 @@ pub struct TlTheme {
 - Esc closes the topmost dialog or menu; else clears the filter and focuses the table; else closes the window if `window.close_with_esc` is on; else does nothing.
 - Key contexts beyond the main window (Properties windows, dialogs, Handle Search, the journal list, the low-memory window) are rows of table (b) too (R-120); the owning UI file names the context on each window.
 
-Motion settings: `motion.smooth_graphs` alone decides whether charts slide. `motion.animations` decides tab, theme and toast motion. The system reduce-motion setting (`App::reduce_motion()`) turns all of them off. GPUI has no screen reader support on Linux [inferred]; chart values are also shown as text next to every chart.
+Motion settings: `motion.smooth_graphs` decides whether charts slide, except while `motion.save_power_on_battery` is on and the system runs on battery (UPower `OnBattery`): then charts do not slide and the merged demand leaves `cpu_fast` off, so CPU updates drop to 1 Hz. `motion.animations` decides tab, theme and toast motion. The system reduce-motion setting (`App::reduce_motion()`) turns all of them off. GPUI has no screen reader support on Linux [inferred]; chart values are also shown as text next to every chart.
 
 ### Consequences
 
@@ -1913,6 +1913,7 @@ heat_intensity_pct = 50        # 0..=100
 [motion]
 animations = true              # tab, theme, toast motion
 smooth_graphs = true           # chart sliding
+save_power_on_battery = true   # on battery: CPU at 1 Hz, no chart sliding
 
 [units]
 network = "bits"               # bits | bytes

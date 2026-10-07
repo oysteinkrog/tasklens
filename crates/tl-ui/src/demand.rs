@@ -2,12 +2,17 @@
 //! the engine at most every 100 ms, only when it changed (ADR-005, ADR-008). While the hub
 //! reports the main window hidden, parts from the main window are ignored (ADR-008 "Hidden
 //! detection", ADR-010).
+//!
+//! Save power on battery (wlf.32): while the system runs on battery and
+//! `motion.save_power_on_battery` is on, the merge leaves `cpu_fast` off, so CPU updates drop
+//! from 10 Hz to 1 Hz, and [`PowerSaving`] tells the charts to stop sliding. Both are applied
+//! only when the battery state or the setting changes.
 
 use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::{AnyWindowHandle, AsyncApp, Context, Entity, EntityId, Global, WeakEntity};
+use gpui_kit::{AnyWindowHandle, App, AsyncApp, Context, Entity, EntityId, Global, WeakEntity};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::client::EngineClient;
 use tl_model::demand::{
@@ -15,7 +20,8 @@ use tl_model::demand::{
     UNIT_DETAILS_MAX,
 };
 
-use crate::hub::{HiddenChanged, SnapshotHub};
+use crate::hub::{ComponentMask, HiddenChanged, SnapshotChanged, SnapshotHub};
+use crate::settings_global::TlSettings;
 
 /// The shortest time between two `set_demand` calls.
 pub const DEMAND_COALESCE: Duration = Duration::from_millis(100);
@@ -30,10 +36,33 @@ pub struct DemandAggregator {
     flush_scheduled: bool,
     /// Mirrors `SnapshotHub::is_hidden` through `HiddenChanged`.
     hidden: bool,
+    /// On battery with `motion.save_power_on_battery` on; mirrored in [`PowerSaving`].
+    power_saving: bool,
+}
+
+/// Save power on battery is in effect: charts do not slide (wlf.32). Set by the
+/// [`DemandAggregator`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PowerSaving(pub bool);
+
+impl Global for PowerSaving {}
+
+/// Whether save power on battery is in effect. False before the aggregator sets it.
+pub fn power_saving(cx: &App) -> bool {
+    cx.try_global::<PowerSaving>().is_some_and(|p| p.0)
+}
+
+/// On battery with the setting on. The setting counts as on (its default) before settings load.
+fn power_saving_now(hub: &Entity<SnapshotHub>, cx: &App) -> bool {
+    let on_battery = hub.read(cx).current().device_details.on_battery == Some(true);
+    let setting =
+        !cx.has_global::<TlSettings>() || TlSettings::settings(cx).motion.save_power_on_battery;
+    on_battery && setting
 }
 
 impl DemandAggregator {
-    /// Subscribes to the hub's `HiddenChanged`.
+    /// Subscribes to the hub's `HiddenChanged`, and to the battery state and the settings for
+    /// save power on battery.
     pub fn new(
         client: Arc<dyn EngineClient>,
         hub: &Entity<SnapshotHub>,
@@ -46,6 +75,19 @@ impl DemandAggregator {
             }
         })
         .detach();
+        cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
+            if ev.mask.contains(ComponentMask::DEVICE_DETAILS) {
+                this.sync_power_saving(&hub, cx);
+            }
+        })
+        .detach();
+        let settings_hub = hub.clone();
+        cx.observe_global::<TlSettings>(move |this, cx| {
+            this.sync_power_saving(&settings_hub, cx);
+        })
+        .detach();
+        let power_saving = power_saving_now(hub, cx);
+        cx.set_global(PowerSaving(power_saving));
         Self {
             client,
             parts: FxHashMap::default(),
@@ -53,7 +95,26 @@ impl DemandAggregator {
             last_sent: None,
             flush_scheduled: false,
             hidden: hub.read(cx).is_hidden(),
+            power_saving,
         }
+    }
+
+    /// Recomputes save power on battery; on a change, updates [`PowerSaving`], refreshes the
+    /// windows so the charts read it, and schedules a flush.
+    fn sync_power_saving(&mut self, hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) {
+        let on = power_saving_now(hub, cx);
+        if on == self.power_saving {
+            return;
+        }
+        self.power_saving = on;
+        cx.set_global(PowerSaving(on));
+        cx.refresh_windows();
+        self.schedule_flush(cx);
+    }
+
+    /// Save power on battery is in effect.
+    pub fn power_saving(&self) -> bool {
+        self.power_saving
     }
 
     /// Replaces this surface's part and schedules a flush.
@@ -99,7 +160,11 @@ impl DemandAggregator {
         // Map order is arbitrary. Sorting keeps list order stable, so an unchanged set of
         // parts gives an equal merge and nothing is resent.
         parts.sort_unstable_by_key(|(id, _)| *id);
-        merge(parts.into_iter().map(|(_, part)| part))
+        let mut merged = merge(parts.into_iter().map(|(_, part)| part));
+        if self.power_saving {
+            merged.cpu_fast = false;
+        }
+        merged
     }
 
     fn schedule_flush(&mut self, cx: &mut Context<Self>) {

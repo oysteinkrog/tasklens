@@ -1445,6 +1445,8 @@ shell-settings-language-desc = Numbers and dates keep the same format in every l
 shell-settings-motion-desc = Your system's reduced motion setting turns all of these off.
 shell-settings-reduced-motion-on = Reduced motion is on in your system settings
 shell-settings-smooth-graphs-note = Turned off by the system reduce-motion setting
+shell-settings-save-power-on-battery = Save power on battery
+shell-settings-save-power-on-battery-note = On battery, CPU values update once a second and graphs do not slide
 shell-settings-smooth-scroll-amount = Smooth scroll amount
 shell-settings-tab-switch = Tab Switch
 # Settings window, Processes page (tasklens-bj6.25, UI-SHL-065).

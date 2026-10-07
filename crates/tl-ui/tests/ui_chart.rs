@@ -503,6 +503,22 @@ mod element {
         assert_eq!(edge, newest);
     }
 
+    /// Save power on battery stops the sliding as reduce motion does (wlf.32).
+    #[gpui_kit::test]
+    fn power_saving_disables_sliding(cx: &mut TestAppContext) {
+        let mut r = rig(cx, spec(true, false));
+        r.vcx
+            .update(|_, cx| cx.set_global(tl_ui::demand::PowerSaving(true)));
+        let newest = now_boot_ns() - 50 * MS;
+        r.set(view_of(600, newest, 100 * MS, 1), ChartState::Live);
+        r.draw();
+        assert!(!r.armed(), "no frame requested");
+        let edge = r
+            .vcx
+            .read_entity(&r.chart, |v, _| v.last_right_edge_ns.get());
+        assert_eq!(edge, newest);
+    }
+
     #[gpui_kit::test]
     fn chart_stale_tail_half_alpha(cx: &mut TestAppContext) {
         let mut r = rig(cx, spec(false, false));

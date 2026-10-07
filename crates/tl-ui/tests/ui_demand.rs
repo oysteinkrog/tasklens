@@ -235,3 +235,100 @@ fn detached_part_survives_hidden(cx: &mut TestAppContext) {
     assert_eq!(last.cpu, CpuDemand::Total);
     assert!(!last.process_table, "main-window part ignored while hidden");
 }
+
+/// Save power on battery (wlf.32): the merged demand and the charts' [`PowerSaving`].
+mod battery {
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::demand::power_saving;
+    use tl_ui::settings_global::TlSettings;
+
+    use super::*;
+
+    /// A rig with settings, and a CPU page part that wants `cpu_fast`.
+    fn battery_rig(cx: &mut TestAppContext) -> (Rig, AnyWindowHandle) {
+        cx.update(|cx| {
+            let client: Arc<dyn EngineClient> = FakeEngine::new();
+            cx.set_global(EngineGlobal(client));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let rig = rig(cx);
+        let main = window(cx);
+        let part = Demand {
+            cpu_fast: true,
+            ..performance(CpuDemand::Total)
+        };
+        set(&rig, cx, source(1), Some(main), part);
+        wait_flush(cx);
+        (rig, main)
+    }
+
+    fn on_battery(rig: &Rig, cx: &mut TestAppContext, on: Option<bool>) {
+        rig.engine.publish_with(|s| {
+            let d = Arc::make_mut(&mut s.device_details);
+            d.on_battery = on;
+            d.header.version += 1;
+        });
+        cx.run_until_parked();
+        wait_flush(cx);
+    }
+
+    fn cpu_fast_sent(rig: &Rig) -> bool {
+        rig.engine
+            .demands()
+            .last()
+            .expect("a demand was sent")
+            .cpu_fast
+    }
+
+    #[gpui_kit::test]
+    fn on_battery_turns_cpu_fast_and_sliding_off(cx: &mut TestAppContext) {
+        let (rig, _) = battery_rig(cx);
+        assert!(cpu_fast_sent(&rig));
+        assert!(!cx.read(power_saving));
+
+        on_battery(&rig, cx, Some(true));
+        assert!(!cpu_fast_sent(&rig), "1 Hz on battery");
+        assert!(cx.read(power_saving), "charts stop sliding");
+
+        on_battery(&rig, cx, Some(false));
+        assert!(cpu_fast_sent(&rig), "10 Hz again on mains");
+        assert!(!cx.read(power_saving));
+    }
+
+    #[gpui_kit::test]
+    fn setting_off_ignores_battery(cx: &mut TestAppContext) {
+        let (rig, _) = battery_rig(cx);
+        cx.update(|cx| {
+            TlSettings::update(cx, |d| d.settings.motion.save_power_on_battery = false);
+        });
+        on_battery(&rig, cx, Some(true));
+        assert!(cpu_fast_sent(&rig));
+        assert!(!cx.read(power_saving));
+
+        // Turning the setting on applies at once.
+        cx.update(|cx| {
+            TlSettings::update(cx, |d| d.settings.motion.save_power_on_battery = true);
+        });
+        cx.run_until_parked();
+        wait_flush(cx);
+        assert!(!cpu_fast_sent(&rig));
+        assert!(cx.read(power_saving));
+    }
+
+    #[gpui_kit::test]
+    fn no_battery_no_change(cx: &mut TestAppContext) {
+        let (rig, _) = battery_rig(cx);
+        let sent = rig.engine.demands().len();
+        on_battery(&rig, cx, None);
+        assert_eq!(rig.engine.demands().len(), sent, "nothing resent");
+        assert!(cpu_fast_sent(&rig));
+        assert!(!cx.read(power_saving));
+    }
+}

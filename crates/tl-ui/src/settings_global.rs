@@ -339,7 +339,7 @@ macro_rules! setting_keys {
 
         impl SettingKey {
             /// Every key in table (a) order.
-            pub const ALL: [SettingKey; 85] = [$(SettingKey::$key,)*];
+            pub const ALL: [SettingKey; 86] = [$(SettingKey::$key,)*];
 
             /// The dotted name, for example `"motion.animations"`. `Fans` is `"fans"`.
             pub fn as_str(self) -> &'static str {
@@ -382,6 +382,7 @@ setting_keys! {
     MotionSmoothScroll => "motion.smooth_scroll", Motion, Bool;
     MotionSmoothScrollAmount => "motion.smooth_scroll_amount", Motion, Int;
     MotionTabSwitchMs => "motion.tab_switch_ms", Motion, Int;
+    MotionSavePowerOnBattery => "motion.save_power_on_battery", Motion, Bool;
     UnitsNetwork => "units.network", Units, Str;
     UnitsNetworkAutoScale => "units.network_auto_scale", Units, Bool;
     ProcessesIntervalMs => "processes.interval_ms", Processes, Int;
@@ -462,6 +463,7 @@ fn bool_mut(s: &mut Settings, key: SettingKey) -> Option<&mut bool> {
         K::MotionAnimations => &mut s.motion.animations,
         K::MotionSmoothGraphs => &mut s.motion.smooth_graphs,
         K::MotionSmoothScroll => &mut s.motion.smooth_scroll,
+        K::MotionSavePowerOnBattery => &mut s.motion.save_power_on_battery,
         K::UnitsNetworkAutoScale => &mut s.units.network_auto_scale,
         K::ProcessesTreeGuideLines => &mut s.processes.tree_guide_lines,
         K::ProcessesHighlightNewExited => &mut s.processes.highlight_new_exited,
