@@ -1316,6 +1316,13 @@ shell-crash-open-logs = Open log folder
 shell-crash-copy = Copy report
 shell-crash-close = Close
 shell-toast-copied = Copied to clipboard
+# Public IP Notice (tasklens-bj6.20, UI-SHL-096).
+shell-public-ip-title = tasklens Public IP Notice
+shell-public-ip-line-1 = tasklens will fetch your public IP address from an online service.
+shell-public-ip-line-2 = Service: https://api.ipify.org
+shell-public-ip-line-3 = Continue only if you want this computer to contact that service.
+shell-public-ip-dont-ask = Do not ask again for public IP fetches
+shell-public-ip-continue = Continue
 # Set Affinity… row menu item (tasklens-gma.7, UI-PRC-013 item 7)
 processes-menu-set-affinity = Set Affinity…
 processes-affinity-subtitle = { $name } (PID { $pid })

@@ -10,6 +10,7 @@ pub mod menubar;
 pub mod menus_file;
 pub mod menus_settings;
 pub mod menus_view;
+pub mod public_ip;
 pub mod registry;
 pub mod settings;
 pub mod share_theme;

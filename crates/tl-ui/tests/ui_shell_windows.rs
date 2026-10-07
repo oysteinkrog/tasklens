@@ -1632,3 +1632,219 @@ mod crash_report {
         assert!(!is_open(cx, handle), "Enter on Close closes the window");
     }
 }
+
+// ---- Public IP Notice (tasklens-bj6.20, UI-SHL-096) ----
+
+mod public_ip {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, Modifiers,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualContext as _,
+        VisualTestContext, Window, WindowHandle, div, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::public_ip::request_public_ip_fetch;
+
+    struct Body;
+
+    impl Render for Body {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("parent")
+        }
+    }
+
+    type ParentFrame = TlSecondaryWindow<Body>;
+
+    struct Rig {
+        /// How many times the fetch ran. The test fetch only counts; nothing touches the network.
+        fetches: Rc<Cell<u32>>,
+        pcx: VisualTestContext,
+        parent_id: gpui_kit::WindowId,
+    }
+
+    fn rig(cx: &mut TestAppContext, accepted: bool) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let mut settings = Settings::default();
+        settings.network.public_ip_notice_accepted = accepted;
+        let init = UiInit {
+            settings,
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        let spec = TlWindowSpec::new(
+            TlWindowKind::Tool { resizable: true },
+            "parent",
+            size(px(600.), px(400.)),
+        );
+        let handle = cx
+            .update(|cx| ParentFrame::open(cx, spec, |_, cx| cx.new(|_| Body)))
+            .expect("parent opens");
+        let mut pcx = VisualTestContext::from_window(handle.into(), cx);
+        pcx.update(|window, _| window.activate_window());
+        pcx.run_until_parked();
+        Rig {
+            fetches: Rc::new(Cell::new(0)),
+            pcx,
+            parent_id: handle.window_id(),
+        }
+    }
+
+    /// Calls `request_public_ip_fetch` from the parent with a counting fetch.
+    fn request(r: &mut Rig) {
+        let count = r.fetches.clone();
+        r.pcx.update(|window, cx| {
+            request_public_ip_fetch(window, cx, move |_, _| count.set(count.get() + 1))
+        });
+        r.pcx.run_until_parked();
+    }
+
+    fn windows(cx: &mut TestAppContext) -> usize {
+        cx.update(|cx| cx.windows().len())
+    }
+
+    /// The notice window and its dialog view.
+    fn notice(
+        r: &Rig,
+        cx: &mut TestAppContext,
+    ) -> (WindowHandle<Root>, Entity<TlDialogView>, VisualTestContext) {
+        let parent_id = r.parent_id;
+        let handle = cx
+            .update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .find(|w| w.window_id() != parent_id)
+            })
+            .and_then(|w: AnyWindowHandle| w.downcast::<Root>())
+            .expect("the notice window");
+        let view = cx
+            .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+            .map(|frame| cx.read(|cx| frame.read(cx).content().clone()))
+            .expect("a TlDialog");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        (handle, view, vcx)
+    }
+
+    fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
+        let id = handle.window_id();
+        cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
+    }
+
+    fn accepted(cx: &mut TestAppContext) -> bool {
+        cx.update(|cx| TlSettings::settings(cx).network.public_ip_notice_accepted)
+    }
+
+    fn click(vcx: &mut VisualTestContext, selector: &'static str) {
+        let at = vcx.debug_bounds(selector).expect("drawn");
+        vcx.simulate_click(at.center(), Modifiers::none());
+        vcx.run_until_parked();
+        // Redraw for the next click, unless the click closed the notice.
+        let id = vcx.window_handle().window_id();
+        if vcx.read(|cx| cx.windows().iter().any(|w| w.window_id() == id)) {
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_notice_first_fetch(cx: &mut TestAppContext) {
+        let mut r = rig(cx, false);
+        let before = windows(cx);
+        request(&mut r);
+        assert_eq!(windows(cx), before + 1, "the notice opens");
+        assert_eq!(r.fetches.get(), 0, "no fetch before Continue");
+        let (_, view, mut vcx) = notice(&r, cx);
+        let (title, text, focused) = vcx.update(|window, cx| {
+            let v = view.read(cx);
+            (
+                v.dialog().window_title().to_string(),
+                v.dialog().text().to_string(),
+                v.focused_button(window),
+            )
+        });
+        assert_eq!(title, "tasklens Public IP Notice");
+        assert_eq!(
+            text,
+            "tasklens will fetch your public IP address from an online service."
+        );
+        assert_eq!(focused, Some(DialogButton::Action), "focus on Continue");
+        assert!(
+            !vcx.read(|cx| view.read(cx).checked()),
+            "the box starts unchecked"
+        );
+
+        // A second request while open focuses the notice and drops its fetch.
+        request(&mut r);
+        assert_eq!(windows(cx), before + 1, "still one notice");
+        let (_, _, mut vcx) = notice(&r, cx);
+        click(&mut vcx, "TlDialogAction");
+        assert_eq!(r.fetches.get(), 1, "only the first fetch runs");
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_continue_unchecked(cx: &mut TestAppContext) {
+        let mut r = rig(cx, false);
+        request(&mut r);
+        let (handle, _, mut vcx) = notice(&r, cx);
+        click(&mut vcx, "TlDialogAction");
+        assert!(!is_open(cx, handle), "Continue closes the notice");
+        assert_eq!(r.fetches.get(), 1);
+        assert!(!accepted(cx), "the key stays false");
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_continue_checked_writes_key(cx: &mut TestAppContext) {
+        let mut r = rig(cx, false);
+        request(&mut r);
+        let (_, view, mut vcx) = notice(&r, cx);
+        click(&mut vcx, "TlCheckbox-label");
+        assert!(vcx.read(|cx| view.read(cx).checked()), "the box is checked");
+        click(&mut vcx, "TlDialogAction");
+        assert!(accepted(cx), "the key becomes true");
+        assert_eq!(r.fetches.get(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_cancel_no_fetch(cx: &mut TestAppContext) {
+        let mut r = rig(cx, false);
+        request(&mut r);
+        let (handle, _, mut vcx) = notice(&r, cx);
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert!(!is_open(cx, handle), "Esc closes the notice");
+        assert_eq!(r.fetches.get(), 0, "no fetch");
+        assert!(!accepted(cx));
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_accepted_skips_notice(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        let before = windows(cx);
+        request(&mut r);
+        assert_eq!(windows(cx), before, "no window opens");
+        assert_eq!(r.fetches.get(), 1, "the fetch runs at once");
+    }
+}

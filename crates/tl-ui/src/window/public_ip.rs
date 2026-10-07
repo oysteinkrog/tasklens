@@ -11,8 +11,7 @@
 //! no network contact.
 
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, IntoElement, ParentElement as _,
-    Styled as _, Window, div,
+    AnyElement, AnyWindowHandle, App, IntoElement, ParentElement as _, Styled as _, Window, div,
 };
 use tracing::warn;
 
@@ -48,7 +47,9 @@ pub fn request_public_ip_fetch(
         let open = move |cx: &mut App| open_notice(parent, fetch, cx);
         match cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
             Some(registry) => {
-                registry.update(cx, |r, cx| r.open_or_focus(WindowKey::PublicIpNotice, cx, open));
+                registry.update(cx, |r, cx| {
+                    r.open_or_focus(WindowKey::PublicIpNotice, cx, open)
+                });
             }
             None => {
                 if let Err(e) = open(cx) {
@@ -90,7 +91,9 @@ fn open_notice(
     cx.windows()
         .into_iter()
         .find(|w| !before.iter().any(|b| b.window_id() == w.window_id()))
-        .ok_or_else(|| gpui_kit::anyhow!("the public IP notice window is not listed"))
+        .ok_or_else(|| {
+            gpui_kit::gpui::private::anyhow::anyhow!("the public IP notice window is not listed")
+        })
 }
 
 /// Lines 2 and 3, each its own paragraph in `t_base`.
