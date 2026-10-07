@@ -31,6 +31,7 @@ use gpui_kit::{
     InteractiveElement, IntoElement, KeyBinding, LayoutId, ParentElement, Pixels, Render,
     SharedString, Styled, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
+use tl_model::health::HelperState;
 use tl_model::settings::AppearanceSettings;
 use tl_model::units;
 use tl_model::validity::Validity;
@@ -39,6 +40,7 @@ use super::badge::{TlBadge, TlBadgeKind, count_text};
 use super::banner::{TlBanner, TlBannerKind};
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
 use super::checkbox::{TlCheckbox, bind_keys_components};
+use super::dialog::{DialogFocus, DialogResult, TlDialog};
 use super::empty::TlEmptyState;
 use super::focus::TlFocusRing;
 use super::icons::{AppIcon, TlIcon, icon};
@@ -47,9 +49,11 @@ use super::kv_grid::{
     self, KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
 };
 use super::link::TlLink;
+use super::menu::{TlMenu, TlMenuPopup};
 use super::progress::{TlProgress, TlProgressSize, TlSpinner};
 use super::radio::{RadioDirection, TlRadio, TlRadioGroup};
 use super::select::{TlCombo, TlSelect, TlSelectItem, TlSelectState};
+use super::shield::TlShield;
 use super::skeleton::{TlSkeletonBlock, TlSkeletonRows};
 use super::slider::TlSlider;
 use super::stepper::TlStepper;
@@ -57,6 +61,7 @@ use super::switch::TlSwitch;
 use super::tabs::{NextInWindowTab, PrevInWindowTab, TlTabSpec, TlTabs, tabs_window_context};
 use super::tooltip::TlTooltip;
 use super::validity::glyph;
+use crate::i18n::{Strings, init_strings};
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::fonts::{MONO_FAMILY, UI_FAMILY};
 use crate::text::metrics::TextMetricsCache;
@@ -66,15 +71,21 @@ use crate::theme::{ThemeMode, ThemeStore, TlTheme, UiMetrics, current, metrics};
 
 gpui_kit::actions!(
     tl_gallery,
-    [GalleryNoop, GalleryFocusNext, GalleryFocusPrev]
+    [
+        GalleryNoop,
+        GalleryFocusNext,
+        GalleryFocusPrev,
+        GalleryEndTask,
+        GalleryEndProcess,
+        GalleryToggle
+    ]
 );
 
-/// One page per E15 component module, plus `text`. E16-011 appends `toast`, `dialog`,
-/// `window_frame`, `menu` and `shield`.
+/// One page per component module, plus `text`.
 pub const GALLERY_PAGES: &[&str] = &[
     "button", "checkbox", "radio", "switch", "slider", "stepper", "input", "select", "tabs",
     "tooltip", "progress", "skeleton", "kv_grid", "validity", "badge", "empty", "banner", "link",
-    "icons", "text",
+    "icons", "text", "dialog", "menu", "shield",
 ];
 
 /// Window size in logical px.
@@ -90,19 +101,26 @@ struct GalleryKeys;
 
 impl Global for GalleryKeys {}
 
-/// Binds the component keys, Tab and Shift+Tab between controls, and Ctrl+E to a no-op so the
-/// tooltip page can show a shortcut line. Runs once per app; later calls do nothing.
+/// Binds the component keys, Tab and Shift+Tab between controls, Ctrl+E to a no-op so the
+/// tooltip page can show a shortcut line, and Delete and Shift+Delete to no-ops so the menu page
+/// shows shortcut hints. Loads the en-US strings when no language is loaded yet, for the menu's
+/// "No items" row and the shield tooltips. Runs once per app; later calls do nothing.
 pub fn init(cx: &mut App) {
     if cx.has_global::<GalleryKeys>() {
         return;
     }
     cx.set_global(GalleryKeys);
+    if !cx.has_global::<Strings>() {
+        init_strings(cx, "en-US");
+    }
     bind_keys_components(cx);
     kv_grid::init(cx);
     cx.bind_keys([
         KeyBinding::new("tab", GalleryFocusNext, Some(ROOT_CONTEXT)),
         KeyBinding::new("shift-tab", GalleryFocusPrev, Some(ROOT_CONTEXT)),
         KeyBinding::new("ctrl-e", GalleryNoop, None),
+        KeyBinding::new("delete", GalleryEndTask, None),
+        KeyBinding::new("shift-delete", GalleryEndProcess, None),
     ]);
 }
 
@@ -133,6 +151,10 @@ struct Half {
     filters: [Entity<InputState>; 2],
     selects: [Entity<TlSelectState>; 4],
     tooltips: [AnyView; 5],
+    /// The full menu with its first item highlighted, and the empty menu.
+    menus: [Entity<TlMenuPopup>; 2],
+    /// Footer focus handles of the destructive and the plain confirmation.
+    dialogs: [DialogFocus; 2],
 }
 
 /// The gallery window.
@@ -146,9 +168,11 @@ impl GalleryView {
     /// A gallery showing `GALLERY_PAGES[page]`.
     pub fn new(page: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (dark, light) = scoped_themes(cx);
+        // Each half's menu paints a theme item in the other half's colours.
+        let (dark_t, light_t) = (dark.0.clone(), light.0.clone());
         let halves = [
-            Half::new("dark", "Default Dark", dark, window, cx),
-            Half::new("light", "Default Light", light, window, cx),
+            Half::new("dark", "Default Dark", dark, &light_t, window, cx),
+            Half::new("light", "Default Light", light, &dark_t, window, cx),
         ];
         Self {
             page: page.min(GALLERY_PAGES.len() - 1),
@@ -222,6 +246,7 @@ impl Half {
         id: &'static str,
         title: &'static str,
         (theme, kit): (Arc<TlTheme>, Theme),
+        other: &TlTheme,
         window: &mut Window,
         cx: &mut Context<GalleryView>,
     ) -> Self {
@@ -306,6 +331,8 @@ impl Half {
             .view(cx),
             TlTooltip::lines(many).view(cx),
         ];
+        let menus = gallery_menus(other, window, cx);
+        let dialogs = [DialogFocus::new(cx), DialogFocus::new(cx)];
         Self {
             id,
             title,
@@ -317,8 +344,47 @@ impl Half {
             filters,
             selects,
             tooltips,
+            menus,
+            dialogs,
         }
     }
+}
+
+/// The menu page's two menus: every row kind, opened with the first item highlighted as a menu
+/// opened from the keyboard shows it, and a menu with no items. The painted item uses `other`'s
+/// colours, as the theme menu paints another theme.
+fn gallery_menus(
+    other: &TlTheme,
+    window: &mut Window,
+    cx: &mut Context<GalleryView>,
+) -> [Entity<TlMenuPopup>; 2] {
+    let (bg, fg, name) = (other.window_bg, other.text_primary, other.name.clone());
+    let context = cx.focus_handle();
+    let full = TlMenu::build(window, cx, context.clone(), move |menu, window, cx| {
+        menu.header("firefox (PID 4127)")
+            .item("End Task", GalleryEndTask.boxed_clone())
+            .item("End Process", GalleryEndProcess.boxed_clone())
+            .separator()
+            .check_item("Always on top", true, GalleryToggle.boxed_clone())
+            .check_item("Show kernel threads", false, GalleryToggle.boxed_clone())
+            .item_disabled("Open File Location", Some("The executable is gone.".into()))
+            .submenu("Set Priority", window, cx, |menu, _, _| {
+                menu.radio_item("Normal", true, GalleryToggle.boxed_clone())
+                    .radio_item("Low", false, GalleryToggle.boxed_clone())
+            })
+            .separator()
+            .header("Themes")
+            .painted_item(
+                SharedString::from(name.to_string()),
+                bg,
+                fg,
+                Some(TlIcon::Copy),
+                GalleryNoop.boxed_clone(),
+            )
+    });
+    full.update(cx, |menu, cx| menu.highlight_first(window, cx));
+    let empty = TlMenu::build(window, cx, context, |menu, _, _| menu);
+    [full, empty]
 }
 
 /// Placeholder and text of each `Half.inputs` entry, in the order the input page uses them.
@@ -523,6 +589,9 @@ fn page_body(page: &str, p: &mut PageCx, window: &mut Window, cx: &mut App) -> V
         "link" => page_link(p),
         "icons" => page_icons(p),
         "text" => page_text(p, window, cx),
+        "dialog" => page_dialog(p, window, cx),
+        "menu" => page_menu(p),
+        "shield" => page_shield(p),
         _ => vec![p.heading(&format!("No page for {page}"))],
     }
 }
@@ -1451,6 +1520,128 @@ fn page_text(p: &mut PageCx, window: &mut Window, cx: &mut App) -> Vec<AnyElemen
             ),
         );
     }
+    out
+}
+
+/// Runs `f` with `half`'s themes in the globals, for a component that reads the theme while
+/// its element is built rather than while it is laid out.
+fn in_half<R>(half: &Half, cx: &mut App, f: impl FnOnce(&mut App) -> R) -> R {
+    let mut scope = ThemeScope {
+        id: half.id.into(),
+        tl: Some(half.theme.clone()),
+        kit: half.kit.clone(),
+        child: gpui_kit::Empty.into_any_element(),
+    };
+    scope.swap(cx);
+    let out = f(cx);
+    scope.swap(cx);
+    out
+}
+
+fn page_dialog(p: &mut PageCx, window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+    let samples = [
+        (
+            "Destructive",
+            TlDialog::confirm(
+                "Ending kwin_wayland will end your desktop session. End it anyway?",
+                "End",
+            )
+            .heading("End kwin_wayland?")
+            .destructive(),
+        ),
+        ("Plain", TlDialog::confirm("Apply these changes?", "Apply")),
+    ];
+    let mut out = Vec::new();
+    for ((name, dialog), focus) in samples.into_iter().zip(&p.half.dialogs) {
+        let body = in_half(p.half, cx, |cx| {
+            dialog.render_body(
+                focus,
+                false,
+                |_: bool, _: &mut Window, _: &mut App| {},
+                |_: DialogResult, _: &mut Window, _: &mut App| {},
+                window,
+                cx,
+            )
+        });
+        let first = if dialog.is_destructive() {
+            "Cancel"
+        } else {
+            "Apply"
+        };
+        out.push(
+            p.row(
+                name,
+                [div()
+                    .w(px(420. * p.m.ui_scale))
+                    .flex_none()
+                    .border_1()
+                    .border_color(p.t.divider)
+                    .child(body)
+                    .into_any_element()],
+            ),
+        );
+        out.push(
+            p.row(
+                "",
+                [caption(
+                    &p.m,
+                    p.t.text_secondary,
+                    &format!("Focus starts on {first}."),
+                )
+                .into_any_element()],
+            ),
+        );
+    }
+    out.push(p.heading("The focus ring shows only after keyboard input, so it is not drawn here."));
+    out
+}
+
+fn page_menu(p: &mut PageCx) -> Vec<AnyElement> {
+    let [full, empty] = &p.half.menus;
+    vec![
+        p.heading("Opened from the keyboard: the first item is highlighted"),
+        div()
+            .id("menu-full")
+            .flex_none()
+            .w(px(260. * p.m.ui_scale))
+            .child(full.clone())
+            .into_any_element(),
+        p.heading("A menu with no items"),
+        div()
+            .id("menu-empty")
+            .flex_none()
+            .w(px(260. * p.m.ui_scale))
+            .child(empty.clone())
+            .into_any_element(),
+    ]
+}
+
+fn page_shield(p: &mut PageCx) -> Vec<AnyElement> {
+    let states = [
+        ("Locked", HelperState::Locked),
+        ("Starting", HelperState::Starting),
+        ("Unlocked", HelperState::Unlocked),
+        ("Missing", HelperState::Missing),
+    ];
+    let mut out = Vec::new();
+    for (name, state) in states {
+        if state == HelperState::Starting {
+            p.animated();
+        }
+        let shield = div()
+            .id(ElementId::Name(format!("shield-{name}").into()))
+            .flex_none()
+            .child(TlShield::new(state))
+            .into_any_element();
+        let mut items = vec![shield];
+        if state == HelperState::Missing {
+            items.push(caption(&p.m, p.t.text_secondary, "(hidden)").into_any_element());
+        }
+        out.push(p.row(name, items));
+    }
+    out.push(p.heading(
+        "Starting shows a spinner; under reduced motion it is the static loader-circle at 50%.",
+    ));
     out
 }
 
