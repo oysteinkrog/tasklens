@@ -578,6 +578,37 @@ mod details {
         assert_eq!(shown.as_deref(), Some("MiB/s"));
     }
 
+    /// The Display unit link is the page's focus order and its first Tab stop (no header
+    /// toggles); Enter on it opens the unit menu.
+    #[gpui_kit::test]
+    fn display_unit_in_focus_order(cx: &mut TestAppContext) {
+        let mut sys = system(1000);
+        Arc::make_mut(&mut sys.nets)[0].1 = record();
+        let r = open(cx, with_unit(NetworkUnit::Bits), sys);
+        let page = r.page.clone();
+        let order = r.vcx.update(|_, cx| page.read(cx).focus_order());
+        assert_eq!(order.len(), 1, "one block control");
+        r.vcx.update(|window, cx| window.focus_next(cx));
+        let first = r.vcx.update(|window, _| order[0].is_focused(window));
+        assert!(first, "the first Tab stop is the Display unit link");
+
+        // GPUI turns Enter on the focused link into a keyboard click on key up.
+        draw(r.vcx);
+        let enter = gpui_kit::Keystroke::parse("enter").expect("keystroke");
+        r.vcx.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        r.vcx
+            .simulate_event(gpui_kit::KeyUpEvent { keystroke: enter });
+        draw(r.vcx);
+        let open = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx).is_some());
+        assert!(open, "Enter opens the unit menu");
+    }
+
     /// The page re-reads the rates and the Display unit when `units.network` changes.
     #[gpui_kit::test]
     fn net_details_follow_unit_setting(cx: &mut TestAppContext) {

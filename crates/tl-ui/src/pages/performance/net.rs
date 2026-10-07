@@ -460,6 +460,11 @@ pub struct NetPage {
     focus: FocusHandle,
     /// Opens the Display unit menu under the value; built once.
     link_click: DetailsLinkClick,
+    /// The Display unit link's focus handle, the page's block control in `focus_order`
+    /// (UI-SHL-121).
+    unit_focus: FocusHandle,
+    /// `unit_focus` by the Display unit row's flat index, for the grid.
+    link_focus: Rc<[(usize, FocusHandle)]>,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -522,6 +527,8 @@ impl NetPage {
             active: false,
             window: None,
             focus: cx.focus_handle(),
+            unit_focus: cx.focus_handle(),
+            link_focus: Rc::from(Vec::new()),
             link_click: {
                 let page = cx.weak_entity();
                 Rc::new(move |n, bounds, window, cx| {
@@ -663,7 +670,26 @@ impl NetPage {
             unit: self.settings.unit,
             auto_scale: self.settings.auto_scale,
         };
-        update_net_details_p1(&mut self.details, &inputs)
+        let changed = update_net_details_p1(&mut self.details, &inputs);
+        self.sync_link_focus();
+        changed
+    }
+
+    /// Points `link_focus` at the Display unit row's flat index; rebuilt only when it moved.
+    fn sync_link_focus(&mut self) {
+        let at = self
+            .details
+            .rows
+            .iter()
+            .filter(|r| !r.hidden)
+            .position(|r| r.label == ROW_DISPLAY_UNIT);
+        if self.link_focus.first().map(|(i, _)| *i) == at {
+            return;
+        }
+        self.link_focus = match at {
+            Some(i) => Rc::from([(i, self.unit_focus.clone())]),
+            None => Rc::from(Vec::new()),
+        };
     }
 
     /// Hands the chart its spec from the current settings, link speed and theme. The view keeps
@@ -772,8 +798,13 @@ impl DevicePage for NetPage {
         self.details.copy_into(out);
     }
 
+    /// No header toggles; the Display unit link is the page's one block control.
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
-        SmallVec::new()
+        smallvec![self.unit_focus.clone()]
+    }
+
+    fn details_link_focus(&self) -> Option<Rc<[(usize, FocusHandle)]>> {
+        Some(self.link_focus.clone())
     }
 
     fn details_link_click(&self) -> Option<DetailsLinkClick> {

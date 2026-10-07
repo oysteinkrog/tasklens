@@ -176,6 +176,11 @@ pub trait DevicePage: 'static {
     fn details_link_click(&self) -> Option<DetailsLinkClick> {
         None
     }
+    /// The page's focus handles for Details link values, by flat row index
+    /// (`TlKeyValueGrid::link_focus`), so `focus_order` can name them. `None` by default.
+    fn details_link_focus(&self) -> Option<Rc<[(usize, FocusHandle)]>> {
+        None
+    }
     /// Called with true when the page becomes the shown page and false when it stops being
     /// shown (R-229; E25-010 wires the calls).
     fn set_active(&mut self, active: bool, cx: &mut App) {
@@ -405,7 +410,10 @@ impl DevicePageFrame<'_> {
             .child(heading)
             .child(div().h(m.sp[4]))
             .child({
-                let grid = render_details(page.details(), m, cx);
+                let mut grid = render_details(page.details(), m, cx);
+                if let Some(focus) = page.details_link_focus() {
+                    grid = grid.link_focus(focus);
+                }
                 match page.details_link_click() {
                     Some(click) => grid.on_link_click(move |n, b, w, cx| click(n, b, w, cx)),
                     None => grid,
