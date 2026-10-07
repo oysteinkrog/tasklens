@@ -1050,3 +1050,10 @@ shell-menu-columns-proportional = Proportional
 shell-menu-columns-last-column = Last Column
 shell-menu-columns-reset = Reset to default
 shell-menu-view-no-table = This tab has no table
+# Shell confirmations: Reset settings (tasklens-bj6.3, UI-SHL-072).
+shell-confirm-title = tasklens
+shell-confirm-reset-text = Reset all settings to their defaults? Themes and history are kept.
+shell-confirm-reset-button = Reset
+shell-confirm-cancel = Cancel
+shell-toast-settings-reset = Settings reset to defaults
+shell-toast-settings-reset-failed = Failed to reset settings
