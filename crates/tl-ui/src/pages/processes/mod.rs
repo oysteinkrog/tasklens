@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
-    Subscription, UniformListScrollHandle, Window, div,
+    IntoElement, KeyBinding, ParentElement as _, Render, SharedString, StyleRefinement,
+    Styled as _, Subscription, UniformListScrollHandle, Window, div,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -66,6 +66,20 @@ use status::{StatusCounts, write_status};
 
 /// Key context of the page div. The table inside it has `Table`.
 pub const PAGE_CONTEXT: &str = "ProcessTable";
+
+/// The ProcessTable keys (PROC-049, table (b), R-045): Delete and Ctrl+E run End Task,
+/// Shift+Delete and Ctrl+X run End Process. They dispatch the same handlers as the row menu,
+/// with the same confirmations and refusals. Bound before any menu is built, so the menu shows
+/// them as hints.
+pub fn bind_keys_processes(cx: &mut App) {
+    let ctx = Some(PAGE_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("delete", EndTask, ctx),
+        KeyBinding::new("ctrl-e", EndTask, ctx),
+        KeyBinding::new("shift-delete", EndProcess, ctx),
+        KeyBinding::new("ctrl-x", EndProcess, ctx),
+    ]);
+}
 
 /// The snapshot parts the table draws. Settings changes come through `TlSettings`.
 const DRAWN: ComponentMask = ComponentMask::PROCESSES
