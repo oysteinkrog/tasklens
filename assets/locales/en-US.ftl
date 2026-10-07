@@ -290,6 +290,7 @@ perf-summary-title-suffix = {" "}· Graph Summary
 perf-summary-range-percentage = Percentage
 
 # Performance Overview page
+perf-overview-title = Overview
 perf-overview-core = C{$n}
 perf-overview-mem-used = Used
 perf-overview-mem-available = Available
