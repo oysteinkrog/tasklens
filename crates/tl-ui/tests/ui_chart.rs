@@ -1288,6 +1288,7 @@ mod labels {
                         spec: &i.spec,
                         state: &i.state,
                         value: i.value,
+                        value_text: None,
                         axis_text: i.axis_text,
                         metrics: &metrics,
                         theme: &theme,
