@@ -14,6 +14,10 @@
 //! with no rows is hidden, and with every section hidden the page shows "No information matches
 //! the filter." with "Clear filter" (UI-SYS-084). The page keeps the full rows for copying.
 //!
+//! `CopyInformationSection` and `CopyInformationAll` copy the full rows in the [`copy`] format and
+//! show "Copied to clipboard". Ctrl+C copies a text selection when there is one, else everything.
+//! `App::write_to_clipboard` reports no failure, so there is no failure toast (R-199).
+//!
 //! Until the inventory is first Valid or Stale every section shows its band and an 8-line
 //! skeleton; this never comes back in the session. An inventory that Failed before any data shows
 //! "Could not load system information" with a "Retry" button instead of the sections. F5 sends
@@ -21,6 +25,7 @@
 //! arrives, or 2 s later at the latest.
 
 pub mod actions;
+pub mod copy;
 pub mod filter;
 pub mod section;
 pub mod sections;
@@ -31,13 +36,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::TextSelection;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, Subscription, Task, Window, canvas,
-    div, point, px,
+    AnyElement, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity,
+    EventEmitter, FocusHandle, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    Subscription, Task, Window, canvas, div, point, px,
 };
 use smallvec::SmallVec;
 use tl_model::command::{Command, Tab};
@@ -48,9 +54,9 @@ use tl_model::validity::Validity;
 use tracing::debug;
 
 use self::actions::{
-    INFORMATION_CONTEXT, InformationScrollBottom, InformationScrollLineDown,
-    InformationScrollLineUp, InformationScrollPageDown, InformationScrollPageUp,
-    InformationScrollTop,
+    CopyInformationAll, CopyInformationSection, INFORMATION_CONTEXT, InformationScrollBottom,
+    InformationScrollLineDown, InformationScrollLineUp, InformationScrollPageDown,
+    InformationScrollPageUp, InformationScrollTop,
 };
 use self::filter::filter_section;
 use self::section::{InfoRow, InfoSection, InfoSectionId};
@@ -99,6 +105,7 @@ const KEY_REFRESHED: &str = "information-refreshed";
 const KEY_ERROR: &str = "information-error-load";
 const KEY_RETRY: &str = "information-error-retry";
 const KEY_FILTER_EMPTY: &str = "information-filter-empty";
+const KEY_COPIED: &str = "information-toast-copied";
 
 /// The page's own texts, translated once per strings version.
 struct PageWords {
@@ -107,6 +114,7 @@ struct PageWords {
     error: SharedString,
     retry: SharedString,
     filter_empty: SharedString,
+    copied: SharedString,
 }
 
 impl PageWords {
@@ -122,6 +130,7 @@ impl PageWords {
             error: t(KEY_ERROR),
             retry: t(KEY_RETRY),
             filter_empty: t(KEY_FILTER_EMPTY),
+            copied: t(KEY_COPIED),
         }
     }
 }
@@ -245,6 +254,53 @@ impl InformationPage {
     /// The rows of section `id` before the filter.
     pub fn full_rows(&self, id: InfoSectionId) -> &Arc<[InfoRow]> {
         &self.full_rows[id as usize]
+    }
+
+    /// Every section's full rows as copy text, in [`InfoSectionId::ALL`] order.
+    pub fn copy_all_text(&self) -> String {
+        let sections = InfoSectionId::ALL.map(|id| (id, Arc::clone(&self.full_rows[id as usize])));
+        let mut out = String::with_capacity(copy::COPY_CAPACITY);
+        copy::all_text(&sections, &mut out);
+        out
+    }
+
+    /// Section `id`'s full rows as copy text.
+    pub fn copy_section_text(&self, id: InfoSectionId) -> String {
+        let mut out = String::with_capacity(copy::COPY_CAPACITY);
+        copy::section_text(id, &self.full_rows[id as usize], &mut out);
+        out
+    }
+
+    fn on_copy_section(
+        &mut self,
+        action: &CopyInformationSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.copy_section_text(action.section);
+        self.write_clipboard(text, window, cx);
+    }
+
+    /// Ctrl+C and the tab copy icon: a text selection when there is one, else every section.
+    fn on_copy_all(&mut self, _: &CopyInformationAll, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = TextSelection::selected_text(window, cx);
+        let selected = selected.trim();
+        let text = if selected.is_empty() {
+            self.copy_all_text()
+        } else {
+            selected.to_owned()
+        };
+        self.write_clipboard(text, window, cx);
+    }
+
+    fn write_clipboard(&self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            let copied = self.page_words.copied.clone();
+            queue.update(cx, |q, cx| {
+                q.push(ToastKind::Success, copied, None, None, cx);
+            });
+        }
     }
 
     /// Whether the filter leaves section `id` visible.
@@ -610,6 +666,8 @@ impl Render for InformationPage {
                     .on_action(cx.listener(Self::on_page_down))
                     .on_action(cx.listener(Self::on_top))
                     .on_action(cx.listener(Self::on_bottom))
+                    .on_action(cx.listener(Self::on_copy_section))
+                    .on_action(cx.listener(Self::on_copy_all))
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)

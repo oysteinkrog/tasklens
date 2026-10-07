@@ -21,6 +21,8 @@ gpui_kit::actions!(
         InformationScrollPageDown,
         InformationScrollTop,
         InformationScrollBottom,
+        /// Copies every section (the tab copy icon and Ctrl+C without a text selection).
+        CopyInformationAll,
     ]
 );
 
@@ -42,5 +44,6 @@ pub fn bind_keys_information(cx: &mut App) {
         KeyBinding::new("pagedown", InformationScrollPageDown, ctx),
         KeyBinding::new("home", InformationScrollTop, ctx),
         KeyBinding::new("end", InformationScrollBottom, ctx),
+        KeyBinding::new("ctrl-c", CopyInformationAll, ctx),
     ]);
 }
