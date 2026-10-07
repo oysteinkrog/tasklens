@@ -2759,7 +2759,8 @@ mod main_window {
             cx,
             Opts {
                 pages: &[Tab::Processes, Tab::Services],
-                start_tab: StartTab::Performance,
+                // Startup has no page arm; Performance has one since E24-A1.
+                start_tab: StartTab::Startup,
                 ..Opts::default()
             },
         );
