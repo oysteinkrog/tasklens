@@ -17,7 +17,7 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{
     App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    Styled, Window, div, gpui, img, px,
+    StatefulInteractiveElement as _, Styled, Window, div, gpui, img, px,
 };
 use serde::Deserialize;
 
