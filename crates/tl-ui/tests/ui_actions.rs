@@ -202,13 +202,17 @@ fn end_task_texts() -> ToastTexts {
 }
 
 fn service_summary() -> SummaryTexts {
-    SummaryTexts {
-        started: "Starting 6 services...".into(),
-        all_ok: "6 services started".into(),
-        partial: Box::new(|ok, total, failed| {
-            format!("{ok} of {total} services started. {failed} failed.").into()
-        }),
-    }
+    SummaryTexts::new(
+        "Starting 6 services...",
+        "6 services started",
+        |ok, total, failed| {
+            let n = failed.len();
+            (
+                ToastKind::Warning,
+                format!("{ok} of {total} services started. {n} failed.").into(),
+            )
+        },
+    )
 }
 
 fn job_failed() -> ActionState {
@@ -421,6 +425,45 @@ fn summary_toast_for_four_or_more_targets(cx: &mut TestAppContext) {
         "one toast per target"
     );
     assert!(!r.visible().iter().any(|t| t == "End task requested."));
+}
+
+#[gpui_kit::test]
+fn summary_partial_gets_failures_and_chooses_kinds(cx: &mut TestAppContext) {
+    let mut r = rig(cx, None);
+    let seen: Rc<RefCell<Vec<(u16, ActionState)>>> = Rc::default();
+    let sink = seen.clone();
+    let mut summary = SummaryTexts::new("Ending 3...", "3 ended", move |ok, total, failures| {
+        sink.borrow_mut()
+            .extend(failures.iter().map(|(i, s)| (*i, (*s).clone())));
+        let kind = if ok == 0 {
+            ToastKind::Error
+        } else {
+            ToastKind::Warning
+        };
+        (kind, format!("{ok} of {total}").into())
+    });
+    summary.started_kind = ToastKind::Info;
+    let texts = ToastTexts {
+        started: Some((ToastKind::Info, "End requested.".into())),
+        summary: Some(summary),
+        summary_min_targets: 2,
+        ..ToastTexts::new("Ended", "Could not end.")
+    };
+    let id = r.track(end_task(3), texts);
+    let gone = ActionState::Failed(ActionError::NoSuchProcess);
+    r.finish(id, &[EPERM, ActionState::Succeeded, gone.clone()]);
+    assert_eq!(
+        r.pushed()[0],
+        toast(ToastKind::Info, "Ending 3...", ToastKey(id.0), None),
+        "the owner's started kind"
+    );
+    assert_eq!(
+        *seen.borrow(),
+        [(0, EPERM), (2, gone)],
+        "failures in target order"
+    );
+    assert_eq!(r.last().kind, ToastKind::Warning);
+    assert_eq!(r.last().text, "1 of 3");
 }
 
 #[gpui_kit::test]

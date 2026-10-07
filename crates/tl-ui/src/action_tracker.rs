@@ -11,8 +11,9 @@
 //!   `toast_key`.
 //! - 2 targets up to `summary_min_targets - 1`: one toast per target result, keyed
 //!   `id.0 << 8 | index` (R-114).
-//! - `summary_min_targets` or more with `summary` set: one Progress toast, then one summary toast
-//!   with a "Details" button when any target failed (R-197).
+//! - `summary_min_targets` or more with `summary` set: one started toast (Progress unless the
+//!   owner chose another kind), then one summary toast whose kind and text the owner builds
+//!   from the failures, with a "Details" button when any target failed (R-197).
 //!
 //! A request with a deadline that has had no summary `deadline + 5 s` after it was sent becomes
 //! "Outcome unknown" (ADR-005). Nothing is ever retried automatically; "Retry as administrator"
@@ -73,7 +74,9 @@ pub struct RetryActionAsAdmin(pub u64);
 #[action(namespace = tasklens, no_json)]
 pub struct ShowActionDetails(pub u64);
 
-type PartialText = Box<dyn Fn(u16, u16, u16) -> SharedString>;
+/// (ok, total, failures) to the summary toast. `failures` holds each target that did not
+/// succeed as (target index, final state), in target order.
+type PartialText = Box<dyn Fn(u16, u16, &[(u16, &ActionState)]) -> (ToastKind, SharedString)>;
 
 /// The owner's texts for one request. Per-feature texts belong to the owner (UI-PRC-015).
 pub struct ToastTexts {
@@ -111,12 +114,32 @@ impl ToastTexts {
 
 /// The summary texts for many targets (R-114).
 pub struct SummaryTexts {
-    /// "Starting 6 services...", shown as Progress.
+    /// "Starting 6 services...", shown as `started_kind`.
     pub started: SharedString,
+    /// Progress unless the owner chose another kind, such as Info for a multi-target End
+    /// (UI-PRC-015).
+    pub started_kind: ToastKind,
     /// "6 services started".
     pub all_ok: SharedString,
-    /// (ok, total, failed) to "4 of 6 services started. 2 failed.".
+    /// The kind and text when any target did not succeed, such as (Warning, "4 of 6 services
+    /// started. 2 failed.").
     pub partial: PartialText,
+}
+
+impl SummaryTexts {
+    /// Summary texts whose started toast is Progress.
+    pub fn new(
+        started: impl Into<SharedString>,
+        all_ok: impl Into<SharedString>,
+        partial: impl Fn(u16, u16, &[(u16, &ActionState)]) -> (ToastKind, SharedString) + 'static,
+    ) -> Self {
+        Self {
+            started: started.into(),
+            started_kind: ToastKind::Progress,
+            all_ok: all_ok.into(),
+            partial: Box::new(partial),
+        }
+    }
 }
 
 /// One request in flight.
@@ -383,7 +406,7 @@ impl ActionTracker {
             return;
         };
         let (kind, text) = match (entry.mode(), &entry.texts.summary) {
-            (Mode::Summary, Some(summary)) => (ToastKind::Progress, summary.started.clone()),
+            (Mode::Summary, Some(summary)) => (summary.started_kind, summary.started.clone()),
             _ => (kind, text),
         };
         let (queue, key) = (entry.queue.clone(), entry.key());
@@ -480,7 +503,11 @@ impl ActionTracker {
                         cx,
                     );
                 } else {
-                    let text = (texts.partial)(ok, total, failed);
+                    let failures: SmallVec<[(u16, &ActionState); 4]> = (0..total)
+                        .map(|i| (i, states[usize::from(i)]))
+                        .filter(|(_, s)| !matches!(s, ActionState::Succeeded))
+                        .collect();
+                    let (kind, text) = (texts.partial)(ok, total, &failures);
                     let button = if retry {
                         retry_button(id, &words)
                     } else {
@@ -497,14 +524,7 @@ impl ActionTracker {
                             action: Box::new(ShowActionDetails(id.0)),
                         }
                     };
-                    self.push(
-                        &queue,
-                        ToastKind::Warning,
-                        text,
-                        Some(key),
-                        Some(button),
-                        cx,
-                    );
+                    self.push(&queue, kind, text, Some(key), Some(button), cx);
                 }
             }
         }
@@ -969,6 +989,19 @@ impl ActionWords {
         (ToastKind::Warning, text)
     }
 
+    /// The reason a target did not succeed, as the first sentence of its text in lower case
+    /// without the full stop, such as "permission denied" (R-196). `None` for `Succeeded` and
+    /// `Started`.
+    pub fn short_reason(&self, state: &ActionState) -> Option<SharedString> {
+        let text = match state {
+            ActionState::Succeeded | ActionState::Started => return None,
+            ActionState::Failed(err) => self.message(err),
+            ActionState::Rejected(reason) => self.reject(*reason).1,
+            ActionState::OutcomeUnknown(_) => self.outcome_unknown.clone(),
+        };
+        Some(first_sentence(&text).into())
+    }
+
     /// How a Details line names a target: the PID, thread id, cgroup path, unit or entry name,
     /// or the socket's two addresses.
     pub fn target_label(&self, target: &ActionTarget) -> SharedString {
@@ -1089,6 +1122,20 @@ mod tests {
             s(short_reason(&ActionError::Os(13))),
             "the system call failed (error 13)"
         );
+        let state = |state: ActionState| EN_WORDS.with(|w| w.short_reason(&state)).map(s);
+        assert_eq!(
+            state(ActionState::Failed(ActionError::PermissionDenied)).as_deref(),
+            Some("permission denied")
+        );
+        assert_eq!(
+            state(ActionState::Rejected(RejectReason::KernelThread)).as_deref(),
+            Some("kernel threads cannot be signalled")
+        );
+        assert_eq!(
+            state(ActionState::OutcomeUnknown("timeout".into())).as_deref(),
+            Some("outcome unknown")
+        );
+        assert_eq!(state(ActionState::Succeeded), None);
     }
 
     #[test]
