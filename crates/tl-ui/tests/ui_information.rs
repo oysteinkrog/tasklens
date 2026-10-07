@@ -952,3 +952,373 @@ mod names_and_tips {
         );
     }
 }
+
+/// Memory, Memory modules, Disk drives, Graphics and Network adapters rows (tasklens-9o0.23).
+mod hardware_builders {
+    use super::*;
+    use tl_model::devices::DeviceCatalog;
+    use tl_model::ids::DeviceIdx;
+    use tl_model::snapshot::{
+        DiskDrive, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot, MemoryModule,
+        NetworkAdapter, SystemSnapshot,
+    };
+    use tl_model::system::{GpuTotals, Metric};
+    use tl_model::table::Total;
+    use tl_ui::pages::information::sections::{
+        BLOCK_FIRST_LABELS, InfoInputs, InfoWords, build_bios, build_disks, build_graphics,
+        build_memory, build_modules, build_motherboard, build_network, build_os, build_processor,
+        build_system,
+    };
+
+    const GIB: u64 = 1 << 30;
+
+    fn ok<T>(value: T) -> InvField<T> {
+        Total {
+            value,
+            validity: Validity::Valid,
+        }
+    }
+
+    fn s(text: &str) -> InvField<Arc<str>> {
+        ok(Arc::from(text))
+    }
+
+    fn module(slot: &str) -> MemoryModule {
+        MemoryModule {
+            slot: s(slot),
+            capacity_bytes: ok(32 * GIB),
+            speed_mts: ok(6000),
+            kind: s("DDR5"),
+            form_factor: s("DIMM"),
+            manufacturer: s("Kingston"),
+            part_number: s("KF560C30-32"),
+        }
+    }
+
+    fn disk(device: u16, free: u64, volumes: &[&str]) -> DiskDrive {
+        DiskDrive {
+            device: Some(DeviceIdx(device)),
+            name: Some(Arc::from("nvme0n1")),
+            model: s("Samsung SSD 990 PRO 2TB"),
+            kind: s("NVMe"),
+            interface: s("NVMe"),
+            capacity_bytes: ok(2_000_398_934_016),
+            free_bytes: ok(free),
+            volumes: volumes.iter().map(|v| Arc::from(*v)).collect(),
+            serial: s("S6Z2NF0W123456"),
+        }
+    }
+
+    /// This machine's values (UI-SYS-089 to UI-SYS-095 examples).
+    fn inventory() -> InventorySnapshot {
+        let mut inv = InventorySnapshot::default();
+        let m = &mut inv.memory;
+        m.total_bytes = ok(67_324_510_208);
+        m.page_size = ok(4096);
+        m.huge_page_size = ok(2 << 20);
+        m.swap_total_bytes = ok(64 * GIB);
+        m.zram_bytes = ok(33_661_255_680);
+        m.peak_committed_bytes = ok(51_561_123_922);
+        inv.modules = vec![
+            module("P0 CHANNEL A (DIMM 1)"),
+            module("P0 CHANNEL B (DIMM 1)"),
+        ]
+        .into();
+        inv.disks = vec![disk(4, 872_308_051_558, &["/", "/home"])].into();
+        inv.graphics = vec![GraphicsAdapter {
+            device: Some(DeviceIdx(7)),
+            name: s("NVIDIA GeForce RTX 4090"),
+            temperature_source: s("NVML (GPU core)"),
+            dedicated_bytes: ok(24 * GIB),
+            displays: vec![
+                DisplayMode {
+                    width: 2560,
+                    height: 1440,
+                    refresh_mhz: 59_951,
+                    primary: false,
+                },
+                DisplayMode {
+                    width: 3840,
+                    height: 2160,
+                    refresh_mhz: 144_000,
+                    primary: true,
+                },
+            ]
+            .into(),
+            ..GraphicsAdapter::default()
+        }]
+        .into();
+        inv.network = vec![NetworkAdapter {
+            device: Some(DeviceIdx(9)),
+            connection: s("enp6s0 (Ethernet)"),
+            adapter_name: s("Intel Ethernet Controller I225-V"),
+            driver: s("igc"),
+            link_speed_mbps: ok(2500),
+            ip_addresses: vec![
+                Arc::from("192.168.1.10/24"),
+                Arc::from("fe80::1c2:3ff:fe4a:5b6c/64"),
+            ]
+            .into(),
+            mac: s("a8:a1:59:12:34:56"),
+        }]
+        .into();
+        inv
+    }
+
+    fn system() -> SystemSnapshot {
+        let mut sys = SystemSnapshot::default();
+        sys.header.validity = Validity::Valid;
+        let m = &mut sys.memory;
+        m.validity = Validity::Valid;
+        m.total = 67_324_510_208;
+        m.available = 30_537_592_258;
+        m.used = 36_759_182_573;
+        m.committed = 49_585_198_202;
+        m.commit_limit = 72_112_843_243;
+        sys.gpus = vec![(
+            DeviceIdx(7),
+            GpuTotals {
+                device: DeviceIdx(7),
+                temp_c: Metric::valid(52.2),
+                ..GpuTotals::default()
+            },
+        )]
+        .into();
+        sys
+    }
+
+    fn rows(
+        inv: &InventorySnapshot,
+        sys: &SystemSnapshot,
+        build: fn(&InfoInputs, &mut Vec<InfoRow>),
+    ) -> Vec<InfoRow> {
+        let words = InfoWords::default();
+        let devices = DeviceCatalog::default();
+        let inputs = InfoInputs {
+            inv,
+            sys,
+            devices: &devices,
+            words: &words,
+        };
+        let mut out = Vec::new();
+        build(&inputs, &mut out);
+        out
+    }
+
+    /// Block, label and shown text of each row, in en-US.
+    fn shown(rows: &[InfoRow]) -> Vec<(u8, String, String)> {
+        let words = KvWords::default();
+        rows.iter()
+            .map(|r| {
+                let text = tl_ui::components::kv_grid::shown_text_in(&r.value, &words)
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
+                (r.block, r.label.to_string(), text)
+            })
+            .collect()
+    }
+
+    fn value_of(rows: &[InfoRow], label: &str) -> String {
+        shown(rows)
+            .into_iter()
+            .find(|(_, l, _)| l == label)
+            .map(|(_, _, v)| v)
+            .unwrap_or_else(|| panic!("no {label} row"))
+    }
+
+    #[test]
+    fn info_memory_rows_golden() {
+        let got = rows(&inventory(), &system(), build_memory);
+        let want = [
+            ("Total physical", "62.70 GiB", false),
+            ("Available physical", "28.44 GiB", true),
+            ("Memory usage", "54.6%", true),
+            ("Committed", "46.18 GiB", true),
+            ("Commit limit", "67.16 GiB", false),
+            ("Peak committed (since tasklens started)", "48.02 GiB", true),
+            ("Page size", "4096 bytes", false),
+            ("Huge page size", "2.00 MiB", false),
+            ("Swap total", "64.00 GiB", false),
+            ("zram size", "31.35 GiB", false),
+        ];
+        let shown = shown(&got);
+        assert_eq!(shown.len(), want.len());
+        for ((row, (_, label, text)), (l, t, live)) in got.iter().zip(&shown).zip(want) {
+            assert_eq!((label.as_str(), text.as_str()), (l, t));
+            assert_eq!(row.live, live, "{l} live");
+            assert_eq!(row.block, 0);
+        }
+    }
+
+    #[test]
+    fn info_memory_zram_none() {
+        let mut inv = inventory();
+        inv.memory.zram_bytes = ok(0);
+        let got = rows(&inv, &system(), build_memory);
+        assert_eq!(value_of(&got, "zram size"), "None");
+        let zram = got
+            .iter()
+            .find(|r| r.label.as_ref() == "zram size")
+            .unwrap();
+        assert_eq!(zram.value.validity, Validity::Valid, "None is a Valid text");
+    }
+
+    /// D-007 regression. `MemoryModule` has no serial field, so the udev `SERIAL_NUMBER` the
+    /// collector skips (tl-collect `inventory::modules` tests) has no path to a row. This checks
+    /// the UI side: no "Serial" row in Memory modules and no module serial text in any section.
+    #[test]
+    fn info_no_dimm_serial() {
+        const SERIAL: &str = "ABC123";
+        let inv = inventory();
+        let sys = system();
+        let builders: [fn(&InfoInputs, &mut Vec<InfoRow>); 10] = [
+            build_os,
+            build_processor,
+            build_system,
+            build_memory,
+            build_modules,
+            build_disks,
+            build_bios,
+            build_motherboard,
+            build_graphics,
+            build_network,
+        ];
+        let modules = rows(&inv, &sys, build_modules);
+        assert!(
+            modules.iter().all(|r| !r.label.contains("Serial")),
+            "no serial row in Memory modules"
+        );
+        for build in builders {
+            for (_, label, text) in shown(&rows(&inv, &sys, build)) {
+                assert!(!text.contains(SERIAL), "{label} holds a module serial");
+            }
+        }
+    }
+
+    #[test]
+    fn info_modules_blocks() {
+        let got = rows(&inventory(), &system(), build_modules);
+        let firsts: Vec<_> = shown(&got)
+            .into_iter()
+            .filter(|(_, l, _)| l == "Module")
+            .map(|(b, _, v)| (b, v))
+            .collect();
+        assert_eq!(
+            firsts,
+            [(1, "Module 1".to_owned()), (2, "Module 2".to_owned())]
+        );
+        let labels: Vec<_> = shown(&got)
+            .into_iter()
+            .filter(|(b, _, _)| *b == 2)
+            .map(|(_, l, v)| (l, v))
+            .collect();
+        let want = [
+            ("Module", "Module 2"),
+            ("Slot", "P0 CHANNEL B (DIMM 1)"),
+            ("Capacity", "32.00 GiB"),
+            ("Speed", "6000 MT/s"),
+            ("Type", "DDR5"),
+            ("Form factor", "DIMM"),
+            ("Manufacturer", "Kingston"),
+            ("Part number", "KF560C30-32"),
+        ];
+        assert_eq!(
+            labels,
+            want.map(|(l, v)| (l.to_owned(), v.to_owned())).to_vec()
+        );
+        assert_eq!(got[0].label.as_ref(), BLOCK_FIRST_LABELS[0]);
+    }
+
+    #[test]
+    fn info_modules_none() {
+        let mut inv = inventory();
+        inv.modules = Arc::from([]);
+        let got = shown(&rows(&inv, &system(), build_modules));
+        assert_eq!(got, [(0, "Modules".to_owned(), "Not reported".to_owned())]);
+    }
+
+    #[test]
+    fn info_disk_space_format() {
+        let got = rows(&inventory(), &system(), build_disks);
+        assert_eq!(got[0].label.as_ref(), BLOCK_FIRST_LABELS[1]);
+        assert_eq!(value_of(&got, "Space"), "812.40 GiB free of 1.82 TiB");
+        assert_eq!(value_of(&got, "Capacity"), "1.82 TiB");
+        assert_eq!(value_of(&got, "Type"), "SSD");
+        assert_eq!(value_of(&got, "Volumes"), "/, /home");
+        assert!(
+            got.iter()
+                .all(|r| r.live == (r.label.as_ref() == "Space") && r.block == 1)
+        );
+    }
+
+    #[test]
+    fn info_disk_volumes_none() {
+        let mut inv = inventory();
+        let mut hdd = disk(2, GIB, &[]);
+        hdd.kind = s("HDD");
+        inv.disks = vec![disk(4, GIB, &["/"]), hdd].into();
+        let got = rows(&inv, &system(), build_disks);
+        let second: Vec<_> = shown(&got)
+            .into_iter()
+            .filter(|(b, _, _)| *b == 2)
+            .collect();
+        let first: Vec<_> = shown(&got)
+            .into_iter()
+            .filter(|(b, _, _)| *b == 1)
+            .collect();
+        let find = |rows: &[(u8, String, String)], label: &str| {
+            rows.iter().find(|(_, l, _)| l == label).unwrap().2.clone()
+        };
+        assert_eq!(find(&first, "Volumes"), "None", "device 2 sorts first");
+        assert_eq!(find(&first, "Type"), "HDD");
+        assert_eq!(find(&second, "Volumes"), "/");
+    }
+
+    #[test]
+    fn info_gpu_resolution_multiline() {
+        let got = rows(&inventory(), &system(), build_graphics);
+        assert_eq!(got[0].label.as_ref(), BLOCK_FIRST_LABELS[2]);
+        let res = value_of(&got, "Resolution");
+        let lines: Vec<_> = res.split('\n').collect();
+        assert_eq!(lines, ["2560x1440 @ 60 Hz", "3840x2160 @ 144 Hz (primary)"]);
+        assert_eq!(value_of(&got, "Temperature"), "52 °C");
+        assert_eq!(value_of(&got, "Dedicated memory"), "24.00 GiB");
+        let temp = got
+            .iter()
+            .find(|r| r.label.as_ref() == "Temperature")
+            .unwrap();
+        assert!(temp.live);
+
+        let mut inv = inventory();
+        let mut nameless = inv.graphics[0].clone();
+        nameless.name = InvField {
+            value: Arc::from(""),
+            validity: Validity::Unsupported,
+        };
+        inv.graphics = vec![nameless].into();
+        assert_eq!(
+            value_of(&rows(&inv, &system(), build_graphics), "Name"),
+            "Unknown GPU"
+        );
+    }
+
+    #[test]
+    fn info_net_multiple_addresses() {
+        let got = rows(&inventory(), &system(), build_network);
+        assert_eq!(got[0].label.as_ref(), BLOCK_FIRST_LABELS[3]);
+        let want = [
+            ("Connection", "enp6s0 (Ethernet)"),
+            (
+                "Details",
+                "Intel Ethernet Controller I225-V, igc, 2500 Mbps",
+            ),
+            ("IP address", "192.168.1.10/24\nfe80::1c2:3ff:fe4a:5b6c/64"),
+            ("MAC address", "a8:a1:59:12:34:56"),
+        ];
+        let got: Vec<_> = shown(&got).into_iter().map(|(_, l, v)| (l, v)).collect();
+        assert_eq!(
+            got,
+            want.map(|(l, v)| (l.to_owned(), v.to_owned())).to_vec()
+        );
+    }
+}

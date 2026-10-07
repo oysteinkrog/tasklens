@@ -1,10 +1,10 @@
-//! Row builders for the Operating System, Processor, System, BIOS/Firmware and Motherboard
-//! sections (UI-SYS-086 to UI-SYS-088, UI-SYS-092, UI-SYS-093; PERF-095 to PERF-097, PERF-101,
-//! PERF-102, APP-041, R-050, table d).
+//! Row builders for the ten Information sections (UI-SYS-086 to UI-SYS-095; PERF-095 to
+//! PERF-104, PERF-069, APP-041, D-007, R-050, table d).
 //!
 //! Each builder turns the snapshot into [`InfoRow`]s with fixed labels, formats and hide rules,
-//! so the section entity only draws. The page calls them only when INVENTORY or SYSTEM changes;
-//! they append to the caller's `Vec` and format each value once.
+//! so the section entity only draws. The page calls them only when INVENTORY, SYSTEM or DEVICES
+//! changes; they append to the caller's `Vec` and format each value once. Memory modules, Disk
+//! drives, Graphics and Network adapters give one sub-block per item, numbered from 1.
 //!
 //! A value whose field is not Valid or Stale carries that validity and no text; the grid shows
 //! the word (UI-SYS-082). Unsupported inventory fields read "Not reported" (R-050), and so does
@@ -14,8 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::{App, SharedString};
+use smallvec::SmallVec;
 use tl_model::devices::DeviceCatalog;
-use tl_model::snapshot::{FirmwareType, InvField, InventorySnapshot, SystemSnapshot};
+use tl_model::ids::DeviceIdx;
+use tl_model::snapshot::{
+    DisplayMode, FirmwareType, InvField, InventorySnapshot, NetworkAdapter, SystemSnapshot,
+};
 use tl_model::system::Metric;
 use tl_model::units;
 use tl_model::validity::Validity;
@@ -93,9 +97,56 @@ enum W {
     BoardChassisType,
     BoardSerial,
     BoardSerialRestrictedTip,
+    MemTotal,
+    MemAvailable,
+    MemUsage,
+    MemCommitted,
+    MemCommitLimit,
+    MemPeak,
+    MemPageSize,
+    MemHugePageSize,
+    MemSwapTotal,
+    MemZram,
+    MemZramNone,
+    ModModule,
+    ModSlot,
+    ModCapacity,
+    ModSpeed,
+    ModType,
+    ModFormFactor,
+    ModManufacturer,
+    ModPartNumber,
+    ModNone,
+    DiskModel,
+    DiskType,
+    DiskInterface,
+    DiskCapacity,
+    DiskSpace,
+    DiskVolumes,
+    DiskSerial,
+    DiskSsd,
+    DiskHdd,
+    DiskVolumesNone,
+    GpuName,
+    GpuDriverVersion,
+    GpuKernelModule,
+    GpuVulkan,
+    GpuOpenGl,
+    GpuTemperature,
+    GpuTemperatureSource,
+    GpuDedicated,
+    GpuShared,
+    GpuResolution,
+    GpuUnknown,
+    NetConnection,
+    NetDetails,
+    NetIp,
+    NetMac,
+    NetUnknown,
+    NetIpNone,
 }
 
-const KEYS: [&str; 56] = [
+const KEYS: [&str; 103] = [
     "information-os-name",
     "information-os-version",
     "information-os-build",
@@ -152,7 +203,58 @@ const KEYS: [&str; 56] = [
     "information-board-chassis-type",
     "information-board-serial-number",
     "information-board-serial-restricted-tooltip",
+    "information-memory-total-physical",
+    "information-memory-available-physical",
+    "information-memory-memory-usage",
+    "information-memory-committed",
+    "information-memory-commit-limit",
+    "information-memory-peak-committed-since-tasklens-started",
+    "information-memory-page-size",
+    "information-memory-huge-page-size",
+    "information-memory-swap-total",
+    "information-memory-zram-size",
+    "information-memory-zram-none",
+    "information-modules-module",
+    "information-modules-slot",
+    "information-modules-capacity",
+    "information-modules-speed",
+    "information-modules-type",
+    "information-modules-form-factor",
+    "information-modules-manufacturer",
+    "information-modules-part-number",
+    "information-modules-modules",
+    "information-disk-model",
+    "information-disk-type",
+    "information-disk-interface",
+    "information-disk-capacity",
+    "information-disk-space",
+    "information-disk-volumes",
+    "information-disk-serial",
+    "information-disk-ssd",
+    "information-disk-hdd",
+    "information-disk-volumes-none",
+    "information-gpu-name",
+    "information-gpu-driver-version",
+    "information-gpu-kernel-module",
+    "information-gpu-vulkan-version",
+    "information-gpu-opengl-version",
+    "information-gpu-temperature",
+    "information-gpu-temperature-source",
+    "information-gpu-dedicated-memory",
+    "information-gpu-shared-memory",
+    "information-gpu-resolution",
+    "information-gpu-unknown-gpu",
+    "information-net-connection",
+    "information-net-details",
+    "information-net-ip-address",
+    "information-net-mac-address",
+    "information-net-unknown-adapter",
+    "information-net-ip-none",
 ];
+
+/// The first label of each sub-block, in Memory modules, Disk drives, Graphics and Network
+/// adapters order. The filter keeps a block's first row (UI-SYS-084).
+pub const BLOCK_FIRST_LABELS: [&str; 4] = ["Module", "Model", "Name", "Connection"];
 
 /// The highest SMBIOS chassis type with a word ("Stick PC").
 const CHASSIS_MAX: usize = 36;
@@ -161,6 +263,14 @@ const KEY_ARCH_BITS: &str = "information-os-architecture-bits";
 const KEY_IDENTIFIER: &str = "information-cpu-identifier-value";
 const KEY_FLAGS: &str = "information-cpu-flags-value";
 const KEY_COMPUTER_NAME: &str = "information-system-computer-name-value";
+const KEY_PAGE_SIZE: &str = "information-memory-page-size-value";
+const KEY_MODULE_N: &str = "information-modules-module-value";
+const KEY_SPEED_MTS: &str = "information-modules-speed-value";
+const KEY_SPACE: &str = "information-disk-space-value";
+const KEY_RESOLUTION: &str = "information-gpu-resolution-value";
+const KEY_RESOLUTION_SIZE: &str = "information-gpu-resolution-size";
+const KEY_PRIMARY: &str = "information-gpu-resolution-primary";
+const KEY_LINK_SPEED: &str = "information-net-link-speed";
 /// Icon sizes tried for a PNG distro logo, largest first.
 const LOGO_PNG_SIZES: [&str; 7] = [
     "256x256", "128x128", "64x64", "48x48", "32x32", "24x24", "16x16",
@@ -186,6 +296,22 @@ pub struct InfoWords {
     flags: Template,
     /// "{pretty} ({static})".
     computer_name: Template,
+    /// "{bytes} bytes".
+    page_size: Template,
+    /// "Module {n}".
+    module_n: Template,
+    /// "{speed} MT/s".
+    speed_mts: Template,
+    /// "{free} free of {capacity}".
+    space: Template,
+    /// "{width}x{height} @ {hz} Hz".
+    resolution: Template,
+    /// "{width}x{height}", for a mode without a refresh rate.
+    resolution_size: Template,
+    /// "{mode} (primary)".
+    primary: Template,
+    /// "{speed} Mbps".
+    link_speed: Template,
 }
 
 impl Default for InfoWords {
@@ -213,6 +339,14 @@ impl InfoWords {
             identifier: template(KEY_IDENTIFIER, &["family", "model", "stepping"]),
             flags: template(KEY_FLAGS, &["virtualization", "avx512"]),
             computer_name: template(KEY_COMPUTER_NAME, &["pretty", "static"]),
+            page_size: template(KEY_PAGE_SIZE, &["bytes"]),
+            module_n: template(KEY_MODULE_N, &["n"]),
+            speed_mts: template(KEY_SPEED_MTS, &["speed"]),
+            space: template(KEY_SPACE, &["free", "capacity"]),
+            resolution: template(KEY_RESOLUTION, &["width", "height", "hz"]),
+            resolution_size: template(KEY_RESOLUTION_SIZE, &["width", "height"]),
+            primary: template(KEY_PRIMARY, &["mode"]),
+            link_speed: template(KEY_LINK_SPEED, &["speed"]),
         }
     }
 
@@ -542,6 +676,369 @@ pub fn build_motherboard(i: &InfoInputs, out: &mut Vec<InfoRow>) {
     push(out, w.get(W::BoardSerial), serial, false);
 }
 
+/// Memory rows (UI-SYS-089). Available physical, Memory usage, Committed and Peak committed are
+/// live.
+pub fn build_memory(i: &InfoInputs, out: &mut Vec<InfoRow>) {
+    let (m, live, w) = (&i.inv.memory, &i.sys.memory, i.words);
+    push(out, w.get(W::MemTotal), bytes_value(&m.total_bytes), false);
+    let validity = live.validity;
+    push(
+        out,
+        w.get(W::MemAvailable),
+        live_value(validity, |s| units::bytes(s, live.available)),
+        true,
+    );
+    let usage = if shows(validity) && live.total == 0 {
+        word_value(Validity::Unsupported)
+    } else {
+        live_value(validity, |s| {
+            units::percent(s, (live.used as f64 / live.total as f64 * 100.) as f32);
+        })
+    };
+    push(out, w.get(W::MemUsage), usage, true);
+    push(
+        out,
+        w.get(W::MemCommitted),
+        live_value(validity, |s| units::bytes(s, live.committed)),
+        true,
+    );
+    push(
+        out,
+        w.get(W::MemCommitLimit),
+        live_value(validity, |s| units::bytes(s, live.commit_limit)),
+        false,
+    );
+    push(
+        out,
+        w.get(W::MemPeak),
+        bytes_value(&m.peak_committed_bytes),
+        true,
+    );
+    push(
+        out,
+        w.get(W::MemPageSize),
+        num_value(&m.page_size, |s, v| {
+            let _ = w.page_size.write(s, &[&v]);
+        }),
+        false,
+    );
+    push(
+        out,
+        w.get(W::MemHugePageSize),
+        bytes_value(&m.huge_page_size),
+        false,
+    );
+    push(
+        out,
+        w.get(W::MemSwapTotal),
+        bytes_value(&m.swap_total_bytes),
+        false,
+    );
+    let zram = &m.zram_bytes;
+    // The worker sums `disksize` over the zram devices, so 0 means there is none.
+    let none = zram.validity == Validity::Unsupported || (shows(zram.validity) && zram.value == 0);
+    let zram_value = if none {
+        TlValue::new(w.get(W::MemZramNone).clone())
+    } else {
+        bytes_value(zram)
+    };
+    push(out, w.get(W::MemZram), zram_value, false);
+}
+
+/// Memory modules rows (UI-SYS-090): one block per module in slot order. No row holds a module
+/// serial (D-007): `MemoryModule` has no serial field.
+pub fn build_modules(i: &InfoInputs, out: &mut Vec<InfoRow>) {
+    let w = i.words;
+    if i.inv.modules.is_empty() {
+        push(
+            out,
+            w.get(W::ModNone),
+            word_value(Validity::Unsupported),
+            false,
+        );
+        return;
+    }
+    for (n, m) in i.inv.modules.iter().enumerate() {
+        let block = block_number(n);
+        let mut title = String::new();
+        let _ = w.module_n.write(&mut title, &[&(n + 1)]);
+        push_in(out, block, w.get(W::ModModule), TlValue::new(title), false);
+        push_in(out, block, w.get(W::ModSlot), text_value(&m.slot), false);
+        push_in(
+            out,
+            block,
+            w.get(W::ModCapacity),
+            bytes_value(&m.capacity_bytes),
+            false,
+        );
+        let speed = num_value(&m.speed_mts, |s, v| {
+            let _ = w.speed_mts.write(s, &[&v]);
+        });
+        push_in(out, block, w.get(W::ModSpeed), speed, false);
+        push_in(out, block, w.get(W::ModType), text_value(&m.kind), false);
+        push_in(
+            out,
+            block,
+            w.get(W::ModFormFactor),
+            text_value(&m.form_factor),
+            false,
+        );
+        push_in(
+            out,
+            block,
+            w.get(W::ModManufacturer),
+            text_value(&m.manufacturer),
+            false,
+        );
+        push_in(
+            out,
+            block,
+            w.get(W::ModPartNumber),
+            text_value(&m.part_number),
+            false,
+        );
+    }
+}
+
+/// Disk drives rows (UI-SYS-091): one block per disk in Performance sidebar order, which is
+/// device index order; a disk the reducer has not matched goes last. Space is live.
+pub fn build_disks(i: &InfoInputs, out: &mut Vec<InfoRow>) {
+    let w = i.words;
+    let mut disks: Vec<_> = i.inv.disks.iter().collect();
+    disks.sort_by_key(|d| d.device.map_or((1, DeviceIdx(0)), |idx| (0, idx)));
+    for (n, d) in disks.into_iter().enumerate() {
+        let block = block_number(n);
+        push_in(out, block, w.get(W::DiskModel), text_value(&d.model), false);
+        let kind = &d.kind;
+        let kind_value = if shows(kind.validity) {
+            // The worker's PERF-047 kind word. Of those, only HDD rotates.
+            match kind.value.trim() {
+                "HDD" => formatted(w.get(W::DiskHdd), kind.validity),
+                "NVMe" | "SSD" | "eMMC" | "SD" => formatted(w.get(W::DiskSsd), kind.validity),
+                _ => text_value(kind),
+            }
+        } else {
+            word_value(kind.validity)
+        };
+        push_in(out, block, w.get(W::DiskType), kind_value, false);
+        push_in(
+            out,
+            block,
+            w.get(W::DiskInterface),
+            text_value(&d.interface),
+            false,
+        );
+        push_in(
+            out,
+            block,
+            w.get(W::DiskCapacity),
+            bytes_value(&d.capacity_bytes),
+            false,
+        );
+        let validity = combined(&[d.free_bytes.validity, d.capacity_bytes.validity]);
+        let space = if shows(validity) {
+            let mut s = String::new();
+            w.space.write_each(&mut s, |arg, s| match arg {
+                0 => units::bytes(s, d.free_bytes.value),
+                _ => units::bytes(s, d.capacity_bytes.value),
+            });
+            formatted(s, validity)
+        } else {
+            word_value(validity)
+        };
+        push_in(out, block, w.get(W::DiskSpace), space, true);
+        let volumes = if d.volumes.is_empty() {
+            TlValue::new(w.get(W::DiskVolumesNone).clone())
+        } else {
+            TlValue::new(d.volumes.join(", "))
+        };
+        push_in(out, block, w.get(W::DiskVolumes), volumes, false);
+        push_in(
+            out,
+            block,
+            w.get(W::DiskSerial),
+            text_value(&d.serial),
+            false,
+        );
+    }
+}
+
+/// Graphics rows (UI-SYS-094): one block per GPU. Temperature is live. Resolution has one line
+/// per display.
+pub fn build_graphics(i: &InfoInputs, out: &mut Vec<InfoRow>) {
+    let w = i.words;
+    for (n, g) in i.inv.graphics.iter().enumerate() {
+        let block = block_number(n);
+        let live = g
+            .device
+            .and_then(|idx| i.sys.gpus.iter().find(|(d, _)| *d == idx))
+            .map(|(_, t)| t);
+        let name = if absent(g.name.validity, &g.name.value) {
+            TlValue::new(w.get(W::GpuUnknown).clone())
+        } else {
+            text_value(&g.name)
+        };
+        push_in(out, block, w.get(W::GpuName), name, false);
+        push_in(
+            out,
+            block,
+            w.get(W::GpuDriverVersion),
+            text_value(&g.driver_version),
+            false,
+        );
+        push_in(
+            out,
+            block,
+            w.get(W::GpuKernelModule),
+            text_value(&g.kernel_module),
+            false,
+        );
+        push_in(
+            out,
+            block,
+            w.get(W::GpuVulkan),
+            text_value(&g.vulkan_version),
+            false,
+        );
+        push_in(
+            out,
+            block,
+            w.get(W::GpuOpenGl),
+            text_value(&g.opengl_version),
+            false,
+        );
+        let temp = match live {
+            Some(t) => live_value(t.temp_c.validity, |s| units::celsius(s, t.temp_c.value)),
+            None => word_value(Validity::Unsupported),
+        };
+        push_in(out, block, w.get(W::GpuTemperature), temp, true);
+        push_in(
+            out,
+            block,
+            w.get(W::GpuTemperatureSource),
+            text_value(&g.temperature_source),
+            false,
+        );
+        // The worker leaves NVIDIA sizes to NVML, which the live GPU totals carry (PERF-064).
+        let dedicated = sized(&g.dedicated_bytes, live.map(|t| t.mem_total));
+        push_in(out, block, w.get(W::GpuDedicated), dedicated, false);
+        let shared = sized(&g.shared_bytes, live.map(|t| t.shared_total));
+        push_in(out, block, w.get(W::GpuShared), shared, false);
+        let resolution = resolution_value(w, &g.displays);
+        push_in(out, block, w.get(W::GpuResolution), resolution, false);
+    }
+}
+
+/// Network adapters rows (UI-SYS-095) without the Public IP row: one block per interface the
+/// worker kept by the Performance sidebar rules (PERF-004). IP address has one line per address,
+/// in snapshot order.
+pub fn build_network(i: &InfoInputs, out: &mut Vec<InfoRow>) {
+    let w = i.words;
+    for (n, a) in i.inv.network.iter().enumerate() {
+        let block = block_number(n);
+        let connection = if absent(a.connection.validity, &a.connection.value) {
+            TlValue::new(w.get(W::NetUnknown).clone())
+        } else {
+            text_value(&a.connection)
+        };
+        push_in(out, block, w.get(W::NetConnection), connection, false);
+        push_in(out, block, w.get(W::NetDetails), details_value(w, a), false);
+        let ips = if a.ip_addresses.is_empty() {
+            TlValue::new(w.get(W::NetIpNone).clone())
+        } else {
+            TlValue::new(a.ip_addresses.join("\n"))
+        };
+        push_in(out, block, w.get(W::NetIp), ips, false);
+        push_in(out, block, w.get(W::NetMac), text_value(&a.mac), false);
+    }
+}
+
+/// "<adapter name>, <driver>, <speed> Mbps" from the parts that show; "Not reported" when none
+/// does.
+fn details_value(w: &InfoWords, a: &NetworkAdapter) -> TlValue {
+    let mut s = String::new();
+    let mut parts: SmallVec<[Validity; 3]> = SmallVec::new();
+    for f in [&a.adapter_name, &a.driver] {
+        if shows(f.validity) && !f.value.trim().is_empty() {
+            if !parts.is_empty() {
+                s.push_str(", ");
+            }
+            parts.push(f.validity);
+            s.push_str(f.value.trim());
+        }
+    }
+    let speed = &a.link_speed_mbps;
+    if shows(speed.validity) && speed.value > 0 {
+        if !parts.is_empty() {
+            s.push_str(", ");
+        }
+        parts.push(speed.validity);
+        let _ = w.link_speed.write(&mut s, &[&speed.value]);
+    }
+    if parts.is_empty() {
+        return word_value(Validity::Unsupported);
+    }
+    formatted(s, combined(&parts))
+}
+
+/// One line per display, with " (primary)" on the primary one; "Not reported" with none.
+fn resolution_value(w: &InfoWords, displays: &[DisplayMode]) -> TlValue {
+    if displays.is_empty() {
+        return word_value(Validity::Unsupported);
+    }
+    let mut s = String::new();
+    let mut mode = String::new();
+    for (n, d) in displays.iter().enumerate() {
+        if n > 0 {
+            s.push('\n');
+        }
+        mode.clear();
+        // Sysfs has no refresh rate, so a mode can come without one.
+        let hz = d.refresh_mhz.saturating_add(500) / 1000;
+        if hz == 0 {
+            let _ = w.resolution_size.write(&mut mode, &[&d.width, &d.height]);
+        } else {
+            let _ = w.resolution.write(&mut mode, &[&d.width, &d.height, &hz]);
+        }
+        if d.primary {
+            let _ = w.primary.write(&mut s, &[&mode]);
+        } else {
+            s.push_str(&mode);
+        }
+    }
+    TlValue::new(s)
+}
+
+/// The inventory size, else the live one while the inventory has none.
+fn sized(f: &InvField<u64>, live: Option<Metric<u64>>) -> TlValue {
+    match live {
+        Some(m) if !shows(f.validity) && shows(m.validity) => {
+            live_value(m.validity, |s| units::bytes(s, m.value))
+        }
+        _ => bytes_value(f),
+    }
+}
+
+/// Sub-block `n`, counted from 0, as a block number from 1.
+fn block_number(n: usize) -> u8 {
+    u8::try_from(n + 1).unwrap_or(u8::MAX)
+}
+
+/// An IEC size, "62.70 GiB".
+fn bytes_value(f: &InvField<u64>) -> TlValue {
+    num_value(f, units::bytes)
+}
+
+/// A live value under the validity of its whole reading.
+fn live_value(v: Validity, write: impl FnOnce(&mut String)) -> TlValue {
+    if !shows(v) {
+        return word_value(v);
+    }
+    let mut s = String::new();
+    write(&mut s);
+    formatted(s, v)
+}
+
 /// The os-release LOGO icon as a file path, or `None` when the icon is not found in the hicolor
 /// theme or `pixmaps` of the XDG data directories.
 pub fn os_logo(i: &InfoInputs) -> Option<SharedString> {
@@ -594,6 +1091,14 @@ fn row(label: &SharedString, value: TlValue, live: bool) -> InfoRow {
 
 fn push(out: &mut Vec<InfoRow>, label: &SharedString, value: TlValue, live: bool) {
     out.push(row(label, value, live));
+}
+
+/// [`push`] into sub-block `block`.
+fn push_in(out: &mut Vec<InfoRow>, block: u8, label: &SharedString, value: TlValue, live: bool) {
+    out.push(InfoRow {
+        block,
+        ..row(label, value, live)
+    });
 }
 
 /// The grid shows the text for these; for the others it shows the word.
