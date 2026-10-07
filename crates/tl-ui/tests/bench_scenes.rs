@@ -164,9 +164,20 @@ fn bench_scene_perf_cpu_builds_32_cells_and_9_cards(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn static_scene_requests_no_frames(cx: &mut TestAppContext) {
+    // The run fails if the driver requested a frame; `frames` counts the window's paints.
     let report = run_scene(cx, BenchScene::Static, 2, None, None, true).expect("static passes");
     assert_eq!(report.scene, "static");
-    assert_eq!(report.frames, 0, "the probe is not started");
+    assert!(
+        (15..=25).contains(&report.frames),
+        "one paint per simulated 100 ms frame over 2 s: {}",
+        report.frames
+    );
+}
+
+#[gpui_kit::test]
+fn static_scene_counts_no_paints_without_frames(cx: &mut TestAppContext) {
+    let report = run_scene(cx, BenchScene::Static, 1, None, None, false).expect("static passes");
+    assert_eq!(report.frames, 0);
 }
 
 #[gpui_kit::test]

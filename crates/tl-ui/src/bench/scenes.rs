@@ -10,7 +10,7 @@
 //! [`run_app`] then quits. Nothing runs while measuring but the scene's own views: one timer waits out the
 //! duration, and the frame probe records each frame.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -21,7 +21,7 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Context, Entity, IntoElement,
     ParentElement as _, QuitMode, Render, Styled as _, Task, TitlebarOptions,
     UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowOptions, div, point, px, size,
+    WindowOptions, canvas, div, point, px, size,
 };
 use rustc_hash::FxHashSet;
 use smallvec::{SmallVec, smallvec};
@@ -182,6 +182,9 @@ pub enum SceneContent {
 pub struct SceneView {
     content: SceneContent,
     driver: Entity<AnimationDriver>,
+    /// Window paints, counted by an empty canvas at the root. `static` reports these as its
+    /// frames: it redraws once per sample but never starts the frame probe.
+    paints: Rc<Cell<u64>>,
 }
 
 impl SceneView {
@@ -194,6 +197,7 @@ impl SceneView {
             return Self {
                 content: SceneContent::Processes(page),
                 driver,
+                paints: Rc::default(),
             };
         }
         let hub = cx.global::<GlobalHub>().0.clone();
@@ -217,6 +221,7 @@ impl SceneView {
         Self {
             content: SceneContent::Performance(page),
             driver,
+            paints: Rc::default(),
         }
     }
 
@@ -243,11 +248,20 @@ impl SceneView {
     pub fn driver(&self) -> &Entity<AnimationDriver> {
         &self.driver
     }
+
+    /// Window paints since the window opened.
+    pub fn paints(&self) -> u64 {
+        self.paints.get()
+    }
 }
 
 impl Render for SceneView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let root = div().size_full();
+        let paints = Rc::clone(&self.paints);
+        let counter = canvas(|_, _, _| {}, move |_, _, _, _| paints.set(paints.get() + 1))
+            .absolute()
+            .size_0();
+        let root = div().size_full().child(counter);
         match &self.content {
             SceneContent::Performance(page) => root.child(page.clone()),
             SceneContent::Processes(page) => root.child(page.clone()),
@@ -572,6 +586,7 @@ async fn measure(
         cx.update(|cx| driver.update(cx, |d, _| d.install_paint_log()));
     }
     let at_measure = counts(cx);
+    let paints_at = cx.update(|cx| window.view.read(cx).paints());
     let samples_at = engine.bridge_samples();
     let cpu_at = (clocks.process_cpu_ns)();
     let wall_at = Instant::now();
@@ -590,6 +605,9 @@ async fn measure(
     let (requested, paint_log) =
         cx.update(|cx| driver.update(cx, |d, _| (d.stats.requested, d.take_paint_log())));
     let at_end = counts(cx);
+    let paints = cx
+        .update(|cx| window.view.read(cx).paints())
+        .saturating_sub(paints_at);
     let delta = |to: &[(u64, u64)], from: &[(u64, u64)]| -> (u64, u64) {
         to.iter().zip(from).fold((0, 0), |(s, f), (t, b)| {
             (s + t.0.saturating_sub(b.0), f + t.1.saturating_sub(b.1))
@@ -625,9 +643,12 @@ async fn measure(
 
     let probe = probe.borrow();
     let intervals = probe.intervals_ns();
-    // The probe's frames, or in `soak` the drivers' frame callbacks.
+    // The probe's frames; in `soak` the drivers' frame callbacks; in `static`, which runs
+    // without the probe, the window's paints.
     let frames = if soak {
         driver_frames
+    } else if scene == BenchScene::Static {
+        paints
     } else {
         intervals.len() as u64
     };
