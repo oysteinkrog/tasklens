@@ -463,9 +463,8 @@ mod body_states {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement, Modifiers,
-        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window, div,
-        px,
+        Context, FocusHandle, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _,
+        Render, Styled as _, TestAppContext, VisualTestContext, Window, div, px,
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
