@@ -1563,3 +1563,256 @@ mod window {
         );
     }
 }
+
+// ---- Threads tab (E23-016, UI-PWN-010) ----
+
+mod threads {
+    use tl_model::details::ThreadRow;
+    use tl_ui::table::actions::{CopyRow, CopyRowsAsTable};
+    use tl_ui::windows::props::threads::{ThreadColumn, ThreadsTab};
+
+    use super::*;
+
+    struct ThreadsHost {
+        tab: Entity<ThreadsTab>,
+        filter: Entity<PropsFilter>,
+    }
+
+    impl Render for ThreadsHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(1400.))
+                .h(px(600.))
+                .flex()
+                .flex_col()
+                .child(filter_bar(&self.filter, None, cx))
+                .child(div().flex_1().child(self.tab.clone()))
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> (Entity<ThreadsHost>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui::table::actions::bind_keys_table(cx);
+        });
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let filter = cx.new(|cx| PropsFilter::new("Threads", window, cx));
+            let tab = cx.new(|cx| ThreadsTab::new(KEY, filter.clone(), window, cx));
+            ThreadsHost { tab, filter }
+        });
+        draw(cx);
+        (view, cx)
+    }
+
+    fn row(tid: u32, comm: &str, policy: SchedPolicy, rt_prio: u8, cpu: f32) -> ThreadRow {
+        ThreadRow {
+            tid,
+            comm: text(comm),
+            state: ProcState::Sleeping,
+            cpu_pct: cpu,
+            utime_ms: 1500,
+            stime_ms: 20,
+            policy,
+            rt_prio,
+            nice: 0,
+            cpus: text("0-31"),
+            last_cpu: 3,
+            vol_ctx: 1204,
+            invol_ctx: 33,
+            wchan: text("0"),
+            validity: Validity::Valid,
+        }
+    }
+
+    fn threads(rows: Vec<ThreadRow>) -> Arc<TabPayload> {
+        Arc::new(TabPayload::Threads(Arc::from(rows)))
+    }
+
+    fn feed(view: &Entity<ThreadsHost>, cx: &mut VisualTestContext, p: Option<Arc<TabPayload>>) {
+        let tab = cx.update(|_, cx| view.read(cx).tab.clone());
+        cx.update(|_, cx| {
+            tab.update(cx, |t, cx| {
+                t.set_online_cpus(cpus(&[(0, 31)]), cx);
+                t.set_payload(p.as_ref(), cx);
+            })
+        });
+        draw(cx);
+    }
+
+    fn cell(
+        view: &Entity<ThreadsHost>,
+        cx: &mut VisualTestContext,
+        tid: u32,
+        col: ThreadColumn,
+    ) -> String {
+        cx.update(|_, cx| {
+            let table = view.read(cx).tab.read(cx).table().clone();
+            table
+                .read(cx)
+                .delegate
+                .cell_text(tid, col)
+                .expect("row shown")
+        })
+    }
+
+    fn empty_text(view: &Entity<ThreadsHost>, cx: &mut VisualTestContext) -> Option<String> {
+        use tl_ui::table::TreeTableDelegate as _;
+        cx.update(|_, cx| {
+            let table = view.read(cx).tab.read(cx).table().clone();
+            let d = &table.read(cx).delegate;
+            (d.row_count() == 0).then(|| d.empty_text().map(|t| t.to_string()))?
+        })
+    }
+
+    fn sample() -> Vec<ThreadRow> {
+        vec![
+            row(4321, "firefox", SchedPolicy::Other, 0, 1.0),
+            row(4325, "Renderer", SchedPolicy::Fifo, 50, 9.5),
+            row(4330, "IPC I/O", SchedPolicy::Batch, 0, 4.0),
+        ]
+    }
+
+    #[gpui_kit::test]
+    fn threads_priority_words(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        assert_eq!(cell(&view, cx, 4321, ThreadColumn::Priority), "Variable");
+        assert_eq!(cell(&view, cx, 4325, ThreadColumn::Priority), "Realtime 50");
+        assert_eq!(cell(&view, cx, 4330, ThreadColumn::Priority), "Variable");
+        assert_eq!(cell(&view, cx, 4325, ThreadColumn::BasePriority), "50");
+        assert_eq!(
+            cell(&view, cx, 4321, ThreadColumn::CtxSwitches),
+            "1\u{2009}204 / 33"
+        );
+        assert_eq!(cell(&view, cx, 4321, ThreadColumn::WaitChannel), "-");
+        assert_eq!(cell(&view, cx, 4321, ThreadColumn::Affinity), "All");
+        assert_eq!(cell(&view, cx, 4325, ThreadColumn::Cpu), "9.5");
+        assert_eq!(
+            cell(&view, cx, 4321, ThreadColumn::UserTime),
+            "1\u{2009}500"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn threads_selection_survives_resort(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        let table = cx.update(|_, cx| view.read(cx).tab.read(cx).table().clone());
+        cx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                t.selection.click(4325);
+                t.sort_by_column(ThreadColumn::Cpu, cx);
+            })
+        });
+        draw(cx);
+        let order = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| table.read(cx).delegate.view_tids().collect::<Vec<_>>())
+        };
+        assert_eq!(order(cx), [4325, 4330, 4321], "CPU % descending first");
+
+        // A new sweep: the CPU values move and the order with them.
+        let mut next = sample();
+        next[0].cpu_pct = 50.;
+        feed(&view, cx, Some(threads(next)));
+        assert_eq!(order(cx), [4321, 4325, 4330]);
+        let (selected, focus) = cx.update(|_, cx| {
+            let t = table.read(cx);
+            (t.selection.ids().collect::<Vec<_>>(), t.selection.focus())
+        });
+        assert_eq!(selected, [4325]);
+        assert_eq!(focus, Some(4325));
+    }
+
+    #[gpui_kit::test]
+    fn threads_loading_and_empty_texts(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        assert_eq!(empty_text(&view, cx).as_deref(), Some("Loading threads..."));
+        assert!(cx.debug_bounds("TlTreeTable-empty").is_some());
+        feed(&view, cx, Some(threads(Vec::new())));
+        assert_eq!(empty_text(&view, cx).as_deref(), Some("No threads found."));
+
+        // A filter with no match keeps the header and shows the Threads text.
+        feed(&view, cx, Some(threads(sample())));
+        let filter = cx.update(|_, cx| view.read(cx).filter.clone());
+        cx.update(|window, cx| {
+            let input = filter.read(cx).input.clone();
+            input.update(cx, |s, cx| s.insert("xyz".to_owned(), window, cx));
+        });
+        cx.executor().advance_clock(Duration::from_millis(100));
+        draw(cx);
+        assert_eq!(
+            empty_text(&view, cx).as_deref(),
+            Some("No threads match the current filter.")
+        );
+        assert!(
+            cx.debug_bounds("TlTreeTableHeader-label-tid").is_some(),
+            "the header stays"
+        );
+
+        // A matching filter keeps the rows it names.
+        cx.update(|window, cx| {
+            let input = filter.read(cx).input.clone();
+            input.update(cx, |s, cx| {
+                s.clean(window, cx);
+                s.insert("render".to_owned(), window, cx);
+            });
+        });
+        cx.executor().advance_clock(Duration::from_millis(100));
+        draw(cx);
+        let shown = cx.update(|_, cx| {
+            let table = view.read(cx).tab.read(cx).table().clone();
+            table.read(cx).delegate.view_tids().collect::<Vec<_>>()
+        });
+        assert_eq!(shown, [4325]);
+    }
+
+    #[gpui_kit::test]
+    fn threads_copy_row_and_tsv(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        let table = cx.update(|_, cx| view.read(cx).tab.read(cx).table().clone());
+        cx.update(|window, cx| {
+            table.update(cx, |t, _| t.selection.click(4325));
+            let focus = table.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+        });
+        draw(cx);
+
+        cx.dispatch_action(CopyRow);
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 12, "{text}");
+        assert_eq!(lines[0], "Thread ID: 4325");
+        assert_eq!(lines[1], "Name: Renderer");
+        assert_eq!(lines[6], "Priority: Realtime 50");
+        assert_eq!(lines[10], "Ctx switches: 1\u{2009}204 / 33");
+
+        cx.dispatch_action(CopyRowsAsTable);
+        let tsv = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default();
+        let mut tsv_lines = tsv.lines();
+        let header = tsv_lines.next().unwrap_or_default();
+        assert!(
+            header.starts_with("Thread ID\tName\tState\tCPU %"),
+            "{header}"
+        );
+        let first = tsv_lines.next().unwrap_or_default();
+        assert!(
+            first.starts_with("4325\tRenderer\tSleeping\t9.5"),
+            "{first}"
+        );
+        assert_eq!(tsv_lines.next(), None, "one selected row");
+    }
+}
