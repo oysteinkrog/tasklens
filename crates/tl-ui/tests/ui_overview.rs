@@ -1184,8 +1184,8 @@ mod page {
     use std::time::Duration;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-        TestAppContext, VisualTestContext, Window, div, px, size,
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::demand::{CpuDemand, Demand};
@@ -1224,7 +1224,11 @@ mod page {
             div()
                 .relative()
                 .size_full()
-                .children(self.page.clone())
+                .children(
+                    self.page
+                        .clone()
+                        .map(|p| p.cached(StyleRefinement::default().size_full())),
+                )
                 .child(
                     div()
                         .absolute()
@@ -1617,8 +1621,11 @@ mod page {
         assert!(r.vcx.update(|_, cx| page.read(cx).placement().stacked));
         let after = r.counts();
         assert_eq!(after[1] - before[1], 1, "one relayout notify");
-        // The resize frame renders the page, and the relayout renders it once more.
-        assert_eq!(after[0] - before[0], 2, "page renders");
+        // The resize frame renders the page and the relayout renders it once more. A box whose
+        // fit (rows, sections, side by side) changed with its new size notifies once, which
+        // GPUI's ancestor marking turns into one more page render (crw.34).
+        let renders = after[0] - before[0];
+        assert!((2..=3).contains(&renders), "page renders {renders}");
         // Same size again: nothing.
         r.vcx.simulate_resize(size(px(700.), px(900.)));
         draw(r.vcx);
