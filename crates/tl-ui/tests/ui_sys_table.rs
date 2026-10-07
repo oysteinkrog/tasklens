@@ -755,11 +755,11 @@ mod body_states {
         });
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(
-            vcx.debug_bounds("SysEmpty-heading").is_some(),
+            vcx.debug_bounds("TlEmptyState-heading").is_some(),
             "heading drawn"
         );
         let button = vcx
-            .debug_bounds("TlButton-SysEmpty-button")
+            .debug_bounds("TlButton-TlEmptyState-clear-filter")
             .expect("button drawn");
         vcx.simulate_click(button.center(), Modifiers::none());
         vcx.run_until_parked();

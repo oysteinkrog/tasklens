@@ -10,10 +10,8 @@
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
 use gpui_kit::{
-    Action, AnyElement, App, Entity, EntityId, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, SharedString, Styled, div, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, Entity, EntityId, IntoElement, Pixels, SharedString, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
@@ -26,12 +24,11 @@ use tracing::debug;
 
 use crate::actions::RefreshCurrentTab;
 use crate::app::EngineGlobal;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::empty::{TlEmptyState, TlEmptyTone};
 use crate::components::skeleton::{TlSkeletonRows, skeleton_row_count};
 use crate::demand::DemandAggregator;
 use crate::i18n::tr;
-use crate::text::style::{t_base, t_md};
-use crate::theme::{UiMetrics, current, metrics};
+use crate::theme::UiMetrics;
 
 /// Query owner for one system table. Generations start at 1 and only grow.
 pub struct SysQuery {
@@ -382,12 +379,9 @@ pub fn sys_empty_content(body: &SysBody, tab: Tab, cx: &App) -> Option<SysEmptyC
     })
 }
 
-/// Max width of the empty-state text before the UI scale.
-const EMPTY_TEXT_MAX_W: f32 = 420.;
-
-/// The centred empty or error state for `body` (UI-FND-029 look with a heading). `clear_action`
-/// is the page's clear action; Retry dispatches `RefreshCurrentTab`. An empty element for a
-/// body with no empty state.
+/// The centred empty or error state for `body` (UI-SYS-005), drawn by `TlEmptyState`.
+/// `clear_action` is the page's clear action; Retry dispatches `RefreshCurrentTab`. An empty
+/// element for a body with no empty state.
 pub fn render_empty(
     body: &SysBody,
     tab: Tab,
@@ -397,50 +391,19 @@ pub fn render_empty(
     let Some(c) = sys_empty_content(body, tab, cx) else {
         return div().into_any_element();
     };
-    let m = *metrics(cx);
-    let theme = current(cx);
-    let fg = theme.text_secondary;
-    let icon_color = if c.warning { theme.status.warning } else { fg };
-
-    let mut heading = div().debug_selector(|| "SysEmpty-heading".into());
-    *heading.text_style() = t_md(&m);
-    let heading = heading
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.text_primary)
-        .child(c.heading);
-    let text = c.text.map(|line| {
-        let mut el = div().debug_selector(|| "SysEmpty-text".into());
-        *el.text_style() = t_base(&m);
+    let mut state = TlEmptyState::new(c.text.unwrap_or_default())
+        .kit_icon(c.icon)
+        .heading(c.heading);
+    if c.warning {
         // The error is one line; an over-long one ends in an ellipsis.
-        el.max_w(px(EMPTY_TEXT_MAX_W * m.ui_scale))
-            .text_color(fg)
-            .text_center()
-            .when(c.warning, |el| el.truncate())
-            .child(line)
-    });
-    let button = c.button.map(|(label, what)| {
+        state = state.tone(TlEmptyTone::Warning).one_line();
+    }
+    if let Some((label, what)) = c.button {
         let action = match what {
             SysEmptyButton::Clear => clear_action,
             SysEmptyButton::Retry => Box::new(RefreshCurrentTab),
         };
-        TlButton::new("SysEmpty-button", TlButtonKind::Secondary)
-            .size(TlButtonSize::Sm)
-            .label(label)
-            .action(action)
-    });
-
-    div()
-        .debug_selector(|| "SysEmpty".into())
-        .size_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(m.sp[4])
-        .p(m.sp[8])
-        .child(Icon::new(c.icon).size(m.icon.lg).text_color(icon_color))
-        .child(heading)
-        .children(text)
-        .children(button)
-        .into_any_element()
+        state = state.clear_filter(action).button_label(label);
+    }
+    state.into_any_element()
 }
