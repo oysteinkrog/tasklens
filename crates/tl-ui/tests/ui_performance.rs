@@ -703,10 +703,10 @@ mod page_frame {
         let client: Arc<dyn EngineClient> = engine.clone();
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        let key = DeviceKey(Arc::from(DeviceKey::MEMORY));
+        let key = DeviceKey(Arc::from("fan:nct6799:2"));
         let row = DeviceRow {
             key: key.clone(),
-            kind: DeviceKind::Memory,
+            kind: DeviceKind::Fan,
             idx: DeviceIdx(1),
             generation: 0,
             net_class: None,
