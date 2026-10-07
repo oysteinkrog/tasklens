@@ -2477,6 +2477,74 @@ mod tests {
         assert_eq!(names, ["Bash", "bash", "Xorg", "zsh"]);
     }
 
+    /// PROC-047: the order compares the step the cell shows, then `ProcessKey`.
+    #[test]
+    fn cpu_sort_on_shown_step() {
+        let cpu_desc = SortSpec {
+            column: ColumnId::Cpu,
+            ascending: false,
+        };
+        let order = |a: f32, b: f32| -> Vec<u32> {
+            let records = vec![rec(1, 0, "a", a), rec(2, 0, "b", b)];
+            tree(&records, "", false, &[], cpu_desc)
+                .iter()
+                .map(|r| r.0)
+                .collect()
+        };
+        // Both cells read "5.0%": PID order, whichever is higher underneath.
+        assert_eq!(order(5.01, 5.04), [1, 2]);
+        assert_eq!(order(5.04, 5.01), [1, 2]);
+        // "5.0%" against "5.1%": the shown step reorders.
+        assert_eq!(order(5.01, 5.11), [2, 1]);
+        // A measured zero and a value that prints "0%" tie.
+        assert_eq!(order(0.0, 0.04), [1, 2]);
+    }
+
+    #[test]
+    fn memory_and_rate_keys_on_shown_step() {
+        const KIB_U: i128 = 1024;
+        const MIB_U: i128 = 1024 * 1024;
+        const GIB_U: i128 = 1024 * 1024 * 1024;
+        // Below 1 KiB the bytes show exactly.
+        assert_eq!(iec_shown(512), 512);
+        assert_ne!(iec_shown(1022), iec_shown(1023));
+        // "1.00 GiB" for both.
+        assert_eq!(
+            iec_shown(GIB_U + GIB_U / 1000),
+            iec_shown(GIB_U + GIB_U / 400)
+        );
+        // "1.00 GiB" against "1.01 GiB".
+        assert!(iec_shown(GIB_U) < iec_shown(GIB_U + GIB_U / 100));
+        // The order holds across a unit change: "1023.99 KiB" < "1.00 MiB".
+        assert!(iec_shown(1023 * KIB_U + 1013) < iec_shown(MIB_U));
+        assert!(iec_shown(1023) < iec_shown(KIB_U));
+
+        let mut settings = EngineSettings::default();
+        settings.network = NetworkUnit::Bits;
+        // 0.1 Mbps is 12 500 bytes per second.
+        assert_eq!(
+            net_shown(13_000.0, &settings),
+            net_shown(12_000.0, &settings)
+        );
+        assert!(net_shown(12_000.0, &settings) < net_shown(19_000.0, &settings));
+        settings.network = NetworkUnit::Bytes;
+        assert_eq!(net_shown(0.0, &settings), 0);
+        assert_eq!(
+            net_shown(1.04 * MIB, &settings),
+            net_shown(1.0 * MIB, &settings)
+        );
+
+        // Disk rates step by 0.1 MiB/s, then the key falls back to ProcessKey.
+        let disk = |v: f32| shown_key(SortKey::Float(v), ColumnId::DiskReadRate, &settings);
+        assert_eq!(disk(1_000.0), disk(2_000.0));
+        assert_ne!(disk(1_000.0), disk(200_000.0));
+        // Columns without a shown step keep their raw key.
+        assert_eq!(
+            shown_key(SortKey::Int(7), ColumnId::Pid, &settings),
+            SortKey::Int(7)
+        );
+    }
+
     // Grouped mode (E09-011).
 
     const GIB: u64 = 1 << 30;

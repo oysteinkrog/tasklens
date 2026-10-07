@@ -973,6 +973,28 @@ mod paint {
         }
     }
 
+    /// UI-PRC-004: heat alpha takes only 2% steps, so the tint holds on hidden differences.
+    #[test]
+    fn heat_alpha_takes_two_percent_steps() {
+        let env = Env::new();
+        let ctx = env.ctx();
+        let cpu = process_column(ColumnId::Cpu);
+        // ncpu 32: reference 12.5 %. 0.1 % CPU steps are 0.8 % alpha at intensity 100.
+        for tenth in 0..=200 {
+            let alpha = heat_alpha(cpu, f64::from(tenth) / 10.0, &ctx, 100);
+            let steps = alpha / 0.02;
+            assert!(
+                (steps - steps.round()).abs() < 1e-4,
+                "{alpha} at {tenth} tenths"
+            );
+        }
+        // 5.0 % and 5.04 % share one step.
+        assert_eq!(
+            heat_alpha(cpu, 5.0, &ctx, 100),
+            heat_alpha(cpu, 5.04, &ctx, 100)
+        );
+    }
+
     #[test]
     fn heat_alpha_clamped_and_intensity_scaled() {
         let env = Env::new();
