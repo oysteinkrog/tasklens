@@ -2613,3 +2613,174 @@ mod status {
         assert_eq!(r.emitted.get(), after_first + 1);
     }
 }
+
+/// The ProcessTable keys for End Task and End Process (PROC-049, pdu.29).
+mod keys {
+    use std::sync::Arc;
+
+    use gpui_kit::{Action, App, AppContext as _, Entity, KeyContext, Keystroke};
+    use gpui_kit::{TestAppContext, VisualTestContext};
+    use tl_model::actions::{ActionKind, ActionTarget, Signal};
+    use tl_model::client::EngineClient as _;
+    use tl_model::command::{Command, Tab};
+    use tl_model::ids::NodeId;
+    use tl_model::process::ProcFlags;
+    use tl_model::settings::UiState;
+    use tl_model::snapshot::Snapshot;
+    use tl_ui::actions::FocusFilter;
+    use tl_ui::pages::processes::actions::{EndProcess, EndTask};
+    use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::pages::processes::{ProcessesPage, bind_keys_processes};
+    use tl_ui::window::main::main_window_view;
+
+    use super::delegate::{key, record, row, snapshot};
+    use super::shell::open_with;
+
+    struct Rig {
+        engine: Arc<tl_ui::testing::fake_engine::FakeEngine>,
+        vcx: VisualTestContext,
+        page: Entity<ProcessesPage>,
+    }
+
+    /// The main window with PIDs 300 and 301 (own, unprotected) and PID 300 selected.
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let (engine, mut vcx) = open_with(cx, UiState::default());
+        vcx.update(|_, cx| bind_keys_processes(cx));
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        let page = vcx
+            .read_entity(&main, |m, _| m.page_entity::<ProcessesPage>(Tab::Processes))
+            .expect("Processes built");
+        let mut r = Rig { engine, vcx, page };
+        let pids = [300, 301];
+        let records = pids
+            .iter()
+            .map(|&p| record(p, "proc", ProcFlags::empty()))
+            .collect();
+        let rows = pids
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| row(NodeId::Process(key(p)), 0, Some(i as u32), None))
+            .collect();
+        let page = r.page.clone();
+        let generation = r
+            .vcx
+            .update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation());
+        let mut s = Snapshot::clone(&snapshot(2, rows, Vec::new(), records));
+        s.sequence = r.engine.latest().sequence + 1;
+        Arc::make_mut(&mut s.table).query_generation = generation;
+        r.engine.publish(s);
+        r.draw();
+        r.vcx.update(|window, cx| {
+            let table = page.read(cx).table().clone();
+            table.update(cx, |t, cx| {
+                t.selection.click(ProcRowId::Process(key(300)));
+                cx.notify();
+            });
+            page.update(cx, |p, cx| p.focus_table(window, cx));
+        });
+        r.draw();
+        r
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        fn press(&mut self, keys: &str) {
+            self.vcx.simulate_keystrokes(keys);
+            self.draw();
+        }
+
+        /// The action requests sent: kind and target PIDs.
+        fn sent(&self) -> Vec<(ActionKind, Vec<u32>)> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Action(r) => Some(r),
+                    _ => None,
+                })
+                .map(|r| {
+                    let pids = r
+                        .targets
+                        .iter()
+                        .filter_map(|t| match t {
+                            ActionTarget::Process(k) => Some(k.pid),
+                            _ => None,
+                        })
+                        .collect();
+                    (r.kind, pids)
+                })
+                .collect()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn delete_dispatches_end_task_with_selection(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.press("delete");
+        assert_eq!(r.sent(), [(ActionKind::Signal(Signal::Term), vec![300])]);
+        r.press("ctrl-e");
+        assert_eq!(r.sent().len(), 2, "Ctrl+E runs End Task too");
+        assert_eq!(r.sent()[1].0, ActionKind::Signal(Signal::Term));
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_x_dispatches_end_process(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.press("ctrl-x");
+        assert_eq!(r.sent(), [(ActionKind::Signal(Signal::Kill), vec![300])]);
+        r.press("shift-delete");
+        assert_eq!(r.sent().len(), 2, "Shift+Delete runs End Process too");
+        assert_eq!(r.sent()[1].0, ActionKind::Signal(Signal::Kill));
+    }
+
+    #[gpui_kit::test]
+    fn keys_ignored_when_input_focused(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.vcx.dispatch_action(FocusFilter);
+        r.draw();
+        r.press("delete");
+        r.press("shift-delete");
+        assert!(r.sent().is_empty(), "no action reached the table");
+    }
+
+    /// The Action `keys` resolves to with `contexts` as the stack (outermost first).
+    fn resolve(cx: &App, keys: &str, contexts: &[&str]) -> Option<Box<dyn Action>> {
+        let input = [Keystroke::parse(keys).expect("a keystroke")];
+        let stack: Vec<KeyContext> = contexts
+            .iter()
+            .map(|c| KeyContext::parse(c).expect("key context"))
+            .collect();
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let (bindings, _) = keymap.bindings_for_input(&input, &stack);
+        bindings.first().map(|b| b.action().boxed_clone())
+    }
+
+    #[gpui_kit::test]
+    fn keymap_rows_match_table_b_processtable(cx: &mut TestAppContext) {
+        cx.update(bind_keys_processes);
+        let rows: [(&str, &dyn Action); 4] = [
+            ("delete", &EndTask),
+            ("ctrl-e", &EndTask),
+            ("shift-delete", &EndProcess),
+            ("ctrl-x", &EndProcess),
+        ];
+        cx.update(|cx| {
+            for (keys, expected) in rows {
+                let got = resolve(cx, keys, &["ProcessTable", "Table"]);
+                assert!(
+                    got.as_ref().is_some_and(|a| a.partial_eq(expected)),
+                    "{keys}: expected {expected:?}, got {got:?}"
+                );
+                assert!(
+                    resolve(cx, keys, &["Table"]).is_none(),
+                    "{keys} is bound only in ProcessTable"
+                );
+            }
+        });
+    }
+}

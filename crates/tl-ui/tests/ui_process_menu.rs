@@ -986,7 +986,7 @@ mod end {
 
     use gpui_kit::component::kbd::Kbd;
     use gpui_kit::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle, WindowId};
-    use gpui_kit::{KeyBinding, Keystroke, point, px};
+    use gpui_kit::{Keystroke, point, px};
     use tl_model::actions::ActionError;
     use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
@@ -2090,13 +2090,8 @@ mod end {
     #[gpui_kit::test]
     fn row_menu_key_hints_from_process_table_context(cx: &mut TestAppContext) {
         let mut rig = Rig::new(cx);
-        // The ProcessTable bindings come with pdu.29; bound here the same way.
-        rig.vcx.update(|_, cx| {
-            cx.bind_keys([
-                KeyBinding::new("delete", EndTask, Some("ProcessTable")),
-                KeyBinding::new("shift-delete", EndProcess, Some("ProcessTable")),
-            ])
-        });
+        rig.vcx
+            .update(|_, cx| tl_ui::pages::processes::bind_keys_processes(cx));
         rig.publish(own(&[300]), &[300], Vec::new());
         let menu = build_menu(&mut rig, &[0], ColumnId::Name);
         let all = entries(&mut rig, &menu);
