@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use gpui_kit::{App, AppContext, AsyncApp, Global, QuitMode, SharedString};
+use gpui_kit::{App, AppContext, AsyncApp, BorrowAppContext as _, Global, QuitMode, SharedString};
 use tl_model::client::EngineClient;
 use tl_model::command::AppRequest;
 use tl_model::settings::{Settings, StartTab, UiState};
