@@ -7,8 +7,14 @@ use std::ffi::OsStr;
 
 use tracing::warn;
 
-/// The Arch `vulkan-swrast` lavapipe ICD (R-158 item 5).
-const LAVAPIPE_ICD: &str = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json";
+/// The Arch `vulkan-swrast` lavapipe ICD (R-158 item 5). Current packages ship
+/// `lvp_icd.json`, older ones `lvp_icd.x86_64.json`; the Vulkan loader skips a missing file.
+const LAVAPIPE_ICD: &str =
+    "/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json";
+
+/// The Mesa EGL vendor file. gpui always enables the GL backend, and without this glvnd
+/// loads the NVIDIA EGL driver, which `LIBGL_ALWAYS_SOFTWARE` does not affect (cr0.25).
+const MESA_EGL_VENDOR: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
 
 /// The variables to set for `gpu`. `read_device_id` maps a PCI bus id to its device id.
 pub fn env_for(
@@ -18,10 +24,7 @@ pub fn env_for(
 ) -> Vec<(&'static str, String)> {
     match gpu {
         "auto" => Vec::new(),
-        "software" => vec![
-            ("WGPU_ADAPTER_NAME", "llvmpipe".to_owned()),
-            ("VK_ICD_FILENAMES", LAVAPIPE_ICD.to_owned()),
-        ],
+        "software" => software_env(),
         _ => match gpu.strip_prefix("pci:") {
             Some(_) if user_zed_device_id.is_some() => Vec::new(),
             Some(bus_id) => match valid_bus_id(bus_id)
@@ -40,6 +43,17 @@ pub fn env_for(
             }
         },
     }
+}
+
+/// Vulkan limited to lavapipe and GL to Mesa llvmpipe, so every adapter gpui lists is a
+/// software one.
+fn software_env() -> Vec<(&'static str, String)> {
+    vec![
+        ("WGPU_ADAPTER_NAME", "llvmpipe".to_owned()),
+        ("VK_ICD_FILENAMES", LAVAPIPE_ICD.to_owned()),
+        ("__EGL_VENDOR_LIBRARY_FILENAMES", MESA_EGL_VENDOR.to_owned()),
+        ("LIBGL_ALWAYS_SOFTWARE", "1".to_owned()),
+    ]
 }
 
 /// The device id of the PCI device at `bus_id`, from `/sys/bus/pci/devices/<bus id>/device`
@@ -102,10 +116,19 @@ mod tests {
     }
 
     #[test]
-    fn software_sets_both() {
+    fn software_limits_vulkan_and_gl() {
         let expected = vec![
             ("WGPU_ADAPTER_NAME", "llvmpipe".to_owned()),
-            ("VK_ICD_FILENAMES", LAVAPIPE_ICD.to_owned()),
+            (
+                "VK_ICD_FILENAMES",
+                "/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
+                    .to_owned(),
+            ),
+            (
+                "__EGL_VENDOR_LIBRARY_FILENAMES",
+                "/usr/share/glvnd/egl_vendor.d/50_mesa.json".to_owned(),
+            ),
+            ("LIBGL_ALWAYS_SOFTWARE", "1".to_owned()),
         ];
         assert_eq!(env_for("software", None, found), expected);
         assert_eq!(
