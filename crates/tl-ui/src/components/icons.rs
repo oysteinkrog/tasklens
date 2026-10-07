@@ -39,10 +39,14 @@ pub enum TlIcon {
     ArrowDown,
     Square,
     Binary,
+    LayoutGrid,
+    Rows2,
+    ListTree,
+    List,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 30] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronDown,
@@ -69,6 +73,10 @@ impl TlIcon {
         Self::ArrowDown,
         Self::Square,
         Self::Binary,
+        Self::LayoutGrid,
+        Self::Rows2,
+        Self::ListTree,
+        Self::List,
     ];
 
     /// The kit name for this icon.
@@ -100,6 +108,10 @@ impl TlIcon {
             Self::ArrowDown => IconName::ArrowDown,
             Self::Square => IconName::Square,
             Self::Binary => IconName::Binary,
+            Self::LayoutGrid => IconName::LayoutGrid,
+            Self::Rows2 => IconName::Rows2,
+            Self::ListTree => IconName::ListTree,
+            Self::List => IconName::List,
         }
     }
 }
@@ -150,10 +162,14 @@ impl IconNamed for AppIcon {
 }
 
 // The icons not in the kit's default component bundle (`default-icons.txt`), plus the sort
-// arrows (R-185). `Binary` is the Name cell's file icon fallback.
+// arrows (R-185). `Binary` is the Name cell's file icon fallback. The last four are the
+// Processes toolbar icons (UI-PRC-019).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
-    [X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square, Binary]
+    [
+        X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square,
+        Binary, LayoutGrid, Rows2, ListTree, List
+    ]
 );
 
 /// The app's asset source: tasklens SVGs first, then `TlExtraIcons`, then the kit bundle.

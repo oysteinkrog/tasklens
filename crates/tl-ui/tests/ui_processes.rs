@@ -1369,3 +1369,249 @@ mod shell {
         assert_eq!(rows, 8, "the view was installed while hidden");
     }
 }
+
+/// The Processes toolbar buttons (tasklens-pdu.25, UI-PRC-019, UI-SHL-012, UI-SHL-013).
+mod toolbar {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui_kit::{
+        App, Bounds, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, Modifiers,
+        ParentElement as _, Pixels, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+        div, px,
+    };
+    use tl_model::command::Tab;
+    use tl_model::health::HelperState;
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::table::TableMode;
+    use tl_ui::actions::{CycleViewMode, ToggleHideSystem};
+    use tl_ui::components::icons::TlIcon;
+    use tl_ui::i18n::tr_calls;
+    use tl_ui::pages::processes::toolbar::{
+        HIDE_SYSTEM_ID, ProcessesButtons, ProcessesToolbar, VIEW_MODE_ID, toolbar_words,
+    };
+    use tl_ui::window::toolbar::{Toolbar, ToolbarContent, ToolbarModel};
+
+    fn model(tab: Tab) -> ToolbarModel {
+        ToolbarModel {
+            tab,
+            history_mode: false,
+            hide_system: false,
+            mode: TableMode::Grouped,
+            helper: HelperState::Missing,
+            helper_installed: false,
+            picker_available: false,
+            picking: false,
+            window_active: true,
+        }
+    }
+
+    /// A stand-in window root that holds focus and counts the two Actions, as the main window's
+    /// handlers would receive them.
+    struct Host {
+        focus: FocusHandle,
+        model: ToolbarModel,
+        hide: Rc<Cell<usize>>,
+        cycle: Rc<Cell<usize>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let (hide, cycle) = (self.hide.clone(), self.cycle.clone());
+            let page = ProcessesToolbar.buttons(&self.model, window, cx);
+            div()
+                .track_focus(&self.focus)
+                .size(px(600.))
+                .flex()
+                .items_start()
+                .on_action(move |_: &ToggleHideSystem, _, _| hide.set(hide.get() + 1))
+                .on_action(move |_: &CycleViewMode, _, _| cycle.set(cycle.get() + 1))
+                .child(Toolbar::new(self.model.clone(), page))
+        }
+    }
+
+    struct Rig<'a> {
+        cx: &'a mut VisualTestContext,
+        view: Entity<Host>,
+        hide: Rc<Cell<usize>>,
+        cycle: Rc<Cell<usize>>,
+    }
+
+    fn rig(cx: &mut TestAppContext, model: ToolbarModel) -> Rig<'_> {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+        });
+        let hide = Rc::new(Cell::new(0));
+        let cycle = Rc::new(Cell::new(0));
+        let (view, cx) = cx.add_window_view({
+            let (hide, cycle) = (hide.clone(), cycle.clone());
+            move |_, cx| Host {
+                focus: cx.focus_handle(),
+                model,
+                hide,
+                cycle,
+            }
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.read(cx).focus.clone().focus(window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        Rig {
+            cx,
+            view,
+            hide,
+            cycle,
+        }
+    }
+
+    /// The debug selectors of the two buttons, `TlButton-<id>`.
+    const HIDE: &str = "TlButton-processes-hide-system";
+    const CYCLER: &str = "TlButton-processes-view-mode";
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Option<Bounds<Pixels>> {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.debug_bounds(selector)
+    }
+
+    fn button(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        bounds(cx, selector).unwrap_or_else(|| panic!("{selector} drawn"))
+    }
+
+    fn buttons(cx: &mut App, model: &ToolbarModel) -> Option<ProcessesButtons> {
+        let words = toolbar_words(cx);
+        ProcessesButtons::for_model(model, &words)
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_buttons_only_on_processes_tab(cx: &mut TestAppContext) {
+        assert_eq!(HIDE, format!("TlButton-{HIDE_SYSTEM_ID}"));
+        assert_eq!(CYCLER, format!("TlButton-{VIEW_MODE_ID}"));
+        let r = rig(cx, model(Tab::Processes));
+        let hide = button(r.cx, HIDE);
+        let cycler = button(r.cx, CYCLER);
+        for b in [hide, cycler] {
+            assert_eq!((b.size.width, b.size.height), (px(24.), px(24.)));
+        }
+        assert!(
+            hide.origin.x < cycler.origin.x,
+            "toggle first, cycler second"
+        );
+
+        let b =
+            r.cx.update(|_, cx| buttons(cx, &model(Tab::Processes)))
+                .unwrap();
+        assert!(!b.hide_on, "hide_system off draws the toggle off");
+        assert_eq!(b.hide_tooltip.as_ref(), "Hide system processes");
+        let on = ToolbarModel {
+            hide_system: true,
+            ..model(Tab::Processes)
+        };
+        let b = r.cx.update(|_, cx| buttons(cx, &on)).unwrap();
+        assert!(b.hide_on);
+        assert_eq!(b.hide_tooltip.as_ref(), "Show system processes");
+
+        for tab in Tab::ALL.into_iter().filter(|t| *t != Tab::Processes) {
+            let m = model(tab);
+            let empty = r.cx.update(|window, cx| {
+                buttons(cx, &m).is_none() && ProcessesToolbar.buttons(&m, window, cx).is_empty()
+            });
+            assert!(empty, "{tab:?}: no buttons");
+        }
+
+        r.cx.update(|_, cx| {
+            r.view.update(cx, |host, cx| {
+                host.model = model(Tab::Performance);
+                cx.notify();
+            });
+        });
+        r.cx.run_until_parked();
+        assert!(bounds(r.cx, HIDE).is_none());
+        assert!(bounds(r.cx, CYCLER).is_none());
+        let toolbar = bounds(r.cx, "Toolbar").expect("Toolbar drawn");
+        assert_eq!(toolbar.size.width, px(0.), "no space reserved");
+    }
+
+    #[gpui_kit::test]
+    fn cycler_icon_and_tooltip_per_mode(cx: &mut TestAppContext) {
+        let r = rig(cx, model(Tab::Processes));
+        let cases = [
+            (
+                TableMode::Grouped,
+                TlIcon::Rows2,
+                "Toggle view mode (current: Task Manager Grouping)",
+            ),
+            (
+                TableMode::Tree,
+                TlIcon::ListTree,
+                "Toggle view mode (current: Tree View)",
+            ),
+            (
+                TableMode::Flat,
+                TlIcon::List,
+                "Toggle view mode (current: List View)",
+            ),
+        ];
+        r.cx.update(|_, cx| {
+            // The words are cached for this strings version: later lookups translate nothing.
+            toolbar_words(cx);
+            let before = tr_calls();
+            for (mode, icon, tooltip) in cases {
+                let m = ToolbarModel {
+                    mode,
+                    ..model(Tab::Processes)
+                };
+                let b = buttons(cx, &m).unwrap();
+                assert_eq!(b.cycler_icon, icon, "{mode:?}");
+                assert_eq!(b.cycler_tooltip.as_ref(), tooltip, "{mode:?}");
+                assert!(!b.cycler_disabled);
+            }
+            assert_eq!(tr_calls(), before, "no tr call per frame");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn cycler_disabled_in_history(cx: &mut TestAppContext) {
+        let history = ToolbarModel {
+            history_mode: true,
+            ..model(Tab::Processes)
+        };
+        let r = rig(cx, history.clone());
+        let b = r.cx.update(|_, cx| buttons(cx, &history)).unwrap();
+        assert!(b.cycler_disabled);
+        assert_eq!(b.cycler_tooltip.as_ref(), "History shows a flat list");
+        assert_eq!(b.hide_tooltip.as_ref(), "Hide system processes");
+
+        let cycler = button(r.cx, CYCLER).center();
+        r.cx.simulate_click(cycler, Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!(r.cycle.get(), 0, "the disabled cycler dispatches nothing");
+
+        let hide = button(r.cx, HIDE).center();
+        r.cx.simulate_click(hide, Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!(r.hide.get(), 1, "the toggle stays enabled");
+    }
+
+    #[gpui_kit::test]
+    fn toggle_dispatches_toggle_hide_system(cx: &mut TestAppContext) {
+        let r = rig(cx, model(Tab::Processes));
+        let hide = button(r.cx, HIDE).center();
+        r.cx.simulate_click(hide, Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!((r.hide.get(), r.cycle.get()), (1, 0));
+
+        let cycler = button(r.cx, CYCLER).center();
+        r.cx.simulate_click(cycler, Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!((r.hide.get(), r.cycle.get()), (1, 1));
+    }
+}
