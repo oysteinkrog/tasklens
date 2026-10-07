@@ -351,13 +351,13 @@ fn spawn_watcher(runtime_dir: &std::path::Path) -> std::process::Child {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .unwrap()
+        .expect("start tasklens-watch")
 }
 
 /// A scratch `XDG_RUNTIME_DIR` under the target folder, one per test.
 fn scratch_runtime_dir(test: &str) -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(test);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).expect("create the scratch runtime dir");
     dir
 }
 
