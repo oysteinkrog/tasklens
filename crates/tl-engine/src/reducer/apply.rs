@@ -1336,6 +1336,12 @@ impl Reducer {
     }
 
     fn apply_device_details(&mut self, d: DeviceDetailsUpdate) -> Result<(), InvariantViolation> {
+        // An unchanged battery state publishes nothing.
+        if let DeviceDetailsUpdate::OnBattery(on) = d
+            && self.components.device_details.on_battery == on
+        {
+            return Ok(());
+        }
         let mut next: DeviceDetailsSnapshot = (*self.components.device_details).clone();
         match d {
             DeviceDetailsUpdate::Cpu(cpu) => next.cpu = cpu,
@@ -1406,6 +1412,7 @@ impl Reducer {
                 next.batteries = rows.into();
                 self.mark(ComponentMask::SERIES);
             }
+            DeviceDetailsUpdate::OnBattery(on) => next.on_battery = on,
         }
         self.components.device_details = Arc::new(next);
         self.mark(ComponentMask::DEVICE_DETAILS);

@@ -136,6 +136,8 @@ pub enum DeviceDetailsUpdate {
         entries: Vec<(DeviceIdentity, NetDetails)>,
     },
     Batteries(Vec<(DeviceIdentity, BatteryDetails)>),
+    /// `DeviceDetailsSnapshot::on_battery`, sent when it changes.
+    OnBattery(Option<bool>),
 }
 
 /// Helper session state (R-150 item 1).
@@ -403,7 +405,9 @@ pub fn source_of(update: &SourceUpdate) -> Option<SourceId> {
             DeviceDetailsUpdate::Disks { from, .. } | DeviceDetailsUpdate::Nets { from, .. } => {
                 *from
             }
-            DeviceDetailsUpdate::Batteries(_) => SourceId::UPower,
+            DeviceDetailsUpdate::Batteries(_) | DeviceDetailsUpdate::OnBattery(_) => {
+                SourceId::UPower
+            }
         }),
         SourceUpdate::Helper(_) => None,
         SourceUpdate::Setup(_) => None,
@@ -683,6 +687,10 @@ mod tests {
             ),
             (
                 SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Batteries(Vec::new())),
+                Some(SourceId::UPower),
+            ),
+            (
+                SourceUpdate::DeviceDetails(DeviceDetailsUpdate::OnBattery(Some(true))),
                 Some(SourceId::UPower),
             ),
             (

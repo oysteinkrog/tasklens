@@ -7,6 +7,10 @@
 //! A forwarded `BatteryHistory` command also wakes it and fills that battery's `history` from
 //! `GetHistory` (E12-029).
 //!
+//! It also publishes whether the system runs on battery (wlf.32): UPower's `OnBattery`, read at
+//! each resync and on the manager's `PropertiesChanged`; without UPower, a battery and no mains
+//! or USB supply online. `None` without a battery. Sent only when it changes.
+//!
 //! The battery serial is shown on screen only. Never log it.
 
 use std::collections::{BTreeMap, HashMap};
@@ -181,7 +185,17 @@ async fn bus_loop<B: UpowerBus>(
     if let Some(stop) = send(cx, io, health(None)).await {
         return Next::Stop(stop);
     }
+    let mut flag = match on_battery_flag(cx, &mut bus).await {
+        Ok(flag) => flag,
+        Err(e) => return fail(cx, &e),
+    };
+    let on = |batteries: &BTreeMap<String, BatteryDetails>, flag| {
+        on_battery(!batteries.is_empty(), flag)
+    };
     if let Some(stop) = publish(cx, io, batteries.values().cloned().collect(), sent).await {
+        return Next::Stop(stop);
+    }
+    if let Some(stop) = send_on_battery(cx, io, on(&batteries, flag), sent).await {
         return Next::Stop(stop);
     }
     let mut next_resync = cx.now().as_nanos() + nanos(RESYNC);
@@ -203,6 +217,13 @@ async fn bus_loop<B: UpowerBus>(
             return Next::Idle;
         }
         let changed = match bus.next_event(cx, IDLE_RECHECK).await {
+            Ok(Some(Event::ManagerChanged)) => {
+                flag = match on_battery_flag(cx, &mut bus).await {
+                    Ok(flag) => flag,
+                    Err(e) => return fail(cx, &e),
+                };
+                false
+            }
             Ok(Some(event)) => match apply_event(cx, &mut bus, &mut batteries, event).await {
                 Ok(changed) => changed,
                 Err(e) => return fail(cx, &e),
@@ -229,13 +250,56 @@ async fn bus_loop<B: UpowerBus>(
                 Err(e) if unavailable(&e) => return Next::Sysfs,
                 Err(e) => return fail(cx, &e),
             }
+            flag = match on_battery_flag(cx, &mut bus).await {
+                Ok(flag) => flag,
+                Err(e) if unavailable(&e) => return Next::Sysfs,
+                Err(e) => return fail(cx, &e),
+            };
         }
         if (changed || resynced)
             && let Some(stop) = publish(cx, io, batteries.values().cloned().collect(), sent).await
         {
             return Next::Stop(stop);
         }
+        if let Some(stop) = send_on_battery(cx, io, on(&batteries, flag), sent).await {
+            return Next::Stop(stop);
+        }
     }
+}
+
+/// UPower's `OnBattery`. `Ok(None)` when the call fails with anything but a closed bus.
+async fn on_battery_flag<B: UpowerBus>(cx: &Cx, bus: &mut B) -> Result<Option<bool>, DbusError> {
+    match bus.on_battery(cx).await {
+        Ok(flag) => Ok(Some(flag)),
+        Err(DbusError::Closed) => Err(DbusError::Closed),
+        Err(e) => {
+            tracing::debug!(error = dbus_name(&e), "UPower OnBattery failed");
+            Ok(None)
+        }
+    }
+}
+
+/// The published state: `None` without a battery, else the source's flag.
+fn on_battery(has_battery: bool, flag: Option<bool>) -> Option<bool> {
+    flag.filter(|_| has_battery)
+}
+
+/// Sends `OnBattery` when it differs from the last one sent.
+async fn send_on_battery(
+    cx: &Cx,
+    io: &WorkerIo,
+    on: Option<bool>,
+    sent: &mut Sent,
+) -> Option<Outcome<(), WorkerError>> {
+    if sent.on_battery == Some(on) {
+        return None;
+    }
+    let update = SourceUpdate::DeviceDetails(DeviceDetailsUpdate::OnBattery(on));
+    let stop = send(cx, io, update).await;
+    if stop.is_none() {
+        sent.on_battery = Some(on);
+    }
+    stop
 }
 
 /// Step 5 for one signal. `Ok(true)` when the battery set or a battery changed.
@@ -247,6 +311,8 @@ async fn apply_event<B: UpowerBus>(
 ) -> Result<bool, DbusError> {
     match event {
         Event::Removed(path) => Ok(batteries.remove(&path).is_some()),
+        // `bus_loop` reads `OnBattery` itself.
+        Event::ManagerChanged => Ok(false),
         // Changes of other devices (the display device, a mouse) are ignored; the resync
         // picks up a device that becomes a battery.
         Event::Changed(path) if !batteries.contains_key(&path) => Ok(false),
@@ -346,11 +412,15 @@ async fn sysfs_loop<C: Connector>(
         let now = cx.now().as_nanos();
         if now >= next_read {
             next_read = now + nanos(SYSFS_PERIOD);
-            let batteries = match read_sysfs(cx, sys).await {
-                Ok(batteries) => batteries,
+            let (batteries, supply_online) = match read_sysfs(cx, sys).await {
+                Ok(read) => read,
                 Err(stop) => return Next::Stop(stop),
             };
+            let on = on_battery(!batteries.is_empty(), supply_online.map(|online| !online));
             if let Some(stop) = publish(cx, io, batteries, sent).await {
+                return Next::Stop(stop);
+            }
+            if let Some(stop) = send_on_battery(cx, io, on, sent).await {
                 return Next::Stop(stop);
             }
         }
@@ -371,17 +441,21 @@ async fn sysfs_loop<C: Connector>(
     }
 }
 
+/// The sysfs batteries and [`sysfs_supply_online`]: one listing in a blocking job.
+type SysfsRead = (Vec<BatteryDetails>, Option<bool>);
+
 /// One sysfs listing in a blocking job.
-async fn read_sysfs(cx: &Cx, sys: &Path) -> Result<Vec<BatteryDetails>, Outcome<(), WorkerError>> {
+async fn read_sysfs(cx: &Cx, sys: &Path) -> Result<SysfsRead, Outcome<(), WorkerError>> {
     let dir = sys.join("class/power_supply");
-    let mut job = match cx.spawn_blocking(move |_| sysfs_batteries(&dir)) {
-        Ok(job) => job,
-        Err(e) => {
-            return Err(Outcome::Err(WorkerError::Other(
-                format!("spawn: {e}").into(),
-            )));
-        }
-    };
+    let mut job =
+        match cx.spawn_blocking(move |_| (sysfs_batteries(&dir), sysfs_supply_online(&dir))) {
+            Ok(job) => job,
+            Err(e) => {
+                return Err(Outcome::Err(WorkerError::Other(
+                    format!("spawn: {e}").into(),
+                )));
+            }
+        };
     match job.join(cx).await {
         Ok(batteries) => Ok(batteries),
         Err(JoinError::Cancelled(reason)) => {
@@ -409,6 +483,27 @@ fn sysfs_batteries(dir: &Path) -> Vec<BatteryDetails> {
         .filter_map(|path| battery_from_sysfs(path))
         .filter(|battery| battery.power_supply)
         .collect()
+}
+
+/// Whether any external supply in `dir` is online: `type` `Mains` or `USB` (a USB-C charger)
+/// with `online` 1. `None` when there is no such supply.
+fn sysfs_supply_online(dir: &Path) -> Option<bool> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut buf = Vec::new();
+    let mut found = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let mut text = |name: &str| -> Option<String> {
+            let bytes = read_trimmed(&path.join(name), &mut buf).ok()?;
+            Some(std::str::from_utf8(bytes).ok()?.to_owned())
+        };
+        if !matches!(text("type").as_deref(), Some("Mains" | "USB")) {
+            continue;
+        }
+        let online = text("online").as_deref() == Some("1");
+        found = Some(found.unwrap_or(false) || online);
+    }
+    found
 }
 
 /// Commands the reducer forwards to this worker (R-276).
@@ -456,10 +551,12 @@ impl Commands {
     }
 }
 
-/// The last `Devices` list sent, as (native path, display name) pairs.
+/// The last `Devices` list sent, as (native path, display name) pairs, and the last
+/// `OnBattery`.
 #[derive(Default)]
 struct Sent {
     devices: Option<Vec<(Arc<str>, Arc<str>)>>,
+    on_battery: Option<Option<bool>>,
 }
 
 /// Step 4: `Devices` when the set changed, then `Batteries`.
@@ -807,6 +904,8 @@ enum Event {
     Added(String),
     Removed(String),
     Changed(String),
+    /// `PropertiesChanged` on the manager (`OnBattery`).
+    ManagerChanged,
 }
 
 /// Opens a UPower session. Tests replace the system bus with a fake.
@@ -815,7 +914,7 @@ trait Connector: Send + Sync + 'static {
     fn open(&self, cx: &Cx) -> impl Future<Output = Result<Self::Bus, DbusError>> + Send;
 }
 
-/// The four UPower calls the worker makes.
+/// The five UPower calls the worker makes.
 trait UpowerBus {
     /// `EnumerateDevices`.
     fn devices(&mut self, cx: &Cx) -> impl Future<Output = Result<Vec<String>, DbusError>> + Send;
@@ -831,6 +930,8 @@ trait UpowerBus {
         cx: &Cx,
         d: Duration,
     ) -> impl Future<Output = Result<Option<Event>, DbusError>> + Send;
+    /// `Get("org.freedesktop.UPower", "OnBattery")` on the manager.
+    fn on_battery(&mut self, cx: &Cx) -> impl Future<Output = Result<bool, DbusError>> + Send;
     /// `GetHistory("charge", HISTORY_SPAN_S, HISTORY_POINTS)` on `path`: (unix time s, percent,
     /// state) entries.
     fn history(
@@ -913,6 +1014,20 @@ impl UpowerBus for SystemUpower {
         msg.body().deserialize().map_err(|e| call_error(&e))
     }
 
+    async fn on_battery(&mut self, cx: &Cx) -> Result<bool, DbusError> {
+        let raw = self.conn.raw();
+        let call = raw.call_method(
+            Some(BUS),
+            PATH,
+            Some(PROPS_IFACE),
+            "Get",
+            &(MANAGER_IFACE, "OnBattery"),
+        );
+        let msg = self.conn.read(cx, call).await?;
+        let value: OwnedValue = msg.body().deserialize().map_err(|e| call_error(&e))?;
+        bool::try_from(value).map_err(|e| call_error(&e))
+    }
+
     async fn history(&mut self, cx: &Cx, path: &str) -> Result<Vec<(u32, f64, u32)>, DbusError> {
         let raw = self.conn.raw();
         let call = raw.call_method(
@@ -945,6 +1060,9 @@ impl UpowerBus for SystemUpower {
                     Ok((iface, _, _)) => iface,
                     Err(e) => return Err(call_error(&e)),
                 };
+                if iface == MANAGER_IFACE {
+                    return Ok(Some(Event::ManagerChanged));
+                }
                 Ok((iface == DEVICE_IFACE)
                     .then(|| header.path().map(|p| Event::Changed(p.as_str().to_owned())))
                     .flatten())
@@ -1171,6 +1289,8 @@ mod tests {
         history: Option<Vec<(u32, f64, u32)>>,
         /// The device path of each `GetHistory` call.
         history_calls: Vec<String>,
+        /// The manager's `OnBattery`. `None`: the call fails.
+        on_battery: Option<bool>,
     }
 
     #[derive(Clone, Default)]
@@ -1225,6 +1345,14 @@ mod tests {
                 return Err(DbusError::Closed);
             }
             Ok(None)
+        }
+
+        async fn on_battery(&mut self, _cx: &Cx) -> Result<bool, DbusError> {
+            let state = self.0.lock().expect("fake lock");
+            state.on_battery.ok_or_else(|| DbusError::Call {
+                name: "org.freedesktop.DBus.Error.UnknownProperty".into(),
+                message: "no OnBattery".into(),
+            })
         }
 
         async fn history(
@@ -1336,6 +1464,85 @@ mod tests {
         }
     }
 
+    fn on_battery_of(update: &SourceUpdate) -> Option<Option<bool>> {
+        match update {
+            SourceUpdate::DeviceDetails(DeviceDetailsUpdate::OnBattery(on)) => Some(*on),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn on_battery_follows_upower() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        {
+            let mut state = fake.lock().expect("fake lock");
+            state.devices = Some(BTreeMap::from([(BAT_PATH.to_owned(), discharging())]));
+            state.on_battery = Some(true);
+        }
+        let mut rig = Rig::start(connector);
+        let first = rig.drain();
+        let ons: Vec<_> = first.iter().filter_map(on_battery_of).collect();
+        assert_eq!(ons, [Some(true)], "{first:?}");
+
+        // The charger is plugged in: the manager's PropertiesChanged.
+        {
+            let mut state = fake.lock().expect("fake lock");
+            state.on_battery = Some(false);
+            state.events.push_back(Event::ManagerChanged);
+        }
+        rig.advance(IDLE_RECHECK);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "only OnBattery: {got:?}");
+        assert_eq!(on_battery_of(&got[0]), Some(Some(false)));
+
+        // An unchanged flag sends nothing.
+        fake.lock()
+            .expect("fake lock")
+            .events
+            .push_back(Event::ManagerChanged);
+        rig.advance(IDLE_RECHECK);
+        assert!(rig.drain().is_empty());
+        rig.finish();
+    }
+
+    #[test]
+    fn on_battery_none_without_battery() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        {
+            let mut state = fake.lock().expect("fake lock");
+            state.devices = Some(BTreeMap::new());
+            state.on_battery = Some(true);
+        }
+        let mut rig = Rig::start(connector);
+        let first = rig.drain();
+        let ons: Vec<_> = first.iter().filter_map(on_battery_of).collect();
+        assert_eq!(ons, [None], "no battery: {first:?}");
+        rig.finish();
+    }
+
+    #[test]
+    fn sysfs_supply_online_mains_and_usb() {
+        let ac_off = fake_supply(&[("AC", "type", "Mains"), ("AC", "online", "0")]);
+        assert_eq!(sysfs_supply_online(ac_off.path()), Some(false));
+        let usb_on = fake_supply(&[
+            ("AC", "type", "Mains"),
+            ("AC", "online", "0"),
+            ("ucsi-source-psy-USBC000:001", "type", "USB"),
+            ("ucsi-source-psy-USBC000:001", "online", "1"),
+        ]);
+        assert_eq!(
+            sysfs_supply_online(usb_on.path()),
+            Some(true),
+            "a USB-C charger"
+        );
+        let none = fake_supply(&[("BAT0", "type", "Battery")]);
+        assert_eq!(sysfs_supply_online(none.path()), None);
+        assert_eq!(on_battery(true, Some(false).map(|o: bool| !o)), Some(true));
+        assert_eq!(on_battery(false, Some(true)), None, "no battery");
+    }
+
     fn batteries(update: &SourceUpdate) -> Option<&[(DeviceIdentity, BatteryDetails)]> {
         match update {
             SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Batteries(b)) => Some(b),
@@ -1350,7 +1557,12 @@ mod tests {
         let mut rig = Rig::start(connector);
 
         let first = rig.drain();
-        assert_eq!(first.len(), 3, "{first:?}");
+        assert_eq!(first.len(), 4, "{first:?}");
+        assert_eq!(
+            on_battery_of(&first[3]),
+            Some(Some(true)),
+            "the fixture's AC is offline"
+        );
         assert!(
             matches!(&first[0], SourceUpdate::Health {
                 id: SourceId::UPower,
@@ -1405,7 +1617,12 @@ mod tests {
         let mut rig = Rig::start(connector);
 
         let first = rig.drain();
-        assert_eq!(first.len(), 3, "{first:?}");
+        assert_eq!(first.len(), 4, "{first:?}");
+        assert_eq!(
+            on_battery_of(&first[3]),
+            Some(None),
+            "no OnBattery reply: unknown"
+        );
         assert!(
             matches!(
                 &first[0],
@@ -1471,7 +1688,7 @@ mod tests {
             state.history = history;
         }
         let mut rig = Rig::start(connector);
-        assert_eq!(rig.drain().len(), 3, "Health, Devices, Batteries");
+        assert_eq!(rig.drain().len(), 4, "Health, Devices, Batteries, OnBattery");
         (rig, fake)
     }
 

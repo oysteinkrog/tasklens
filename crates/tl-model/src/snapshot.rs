@@ -1297,6 +1297,9 @@ pub struct DeviceDetailsSnapshot {
     pub disks: Arc<[(DeviceIdx, DiskDetails)]>,
     pub nets: Arc<[(DeviceIdx, NetDetails)]>,
     pub batteries: Arc<[(DeviceIdx, BatteryDetails)]>,
+    /// The system runs on battery (UPower `OnBattery`, or sysfs: a battery and no mains supply
+    /// online). `None` without a battery or before the first reading (wlf.32).
+    pub on_battery: Option<bool>,
 }
 
 // ---- The snapshot ----

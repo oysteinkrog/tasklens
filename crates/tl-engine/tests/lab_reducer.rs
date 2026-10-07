@@ -1111,6 +1111,35 @@ fn battery_details_append_battery_pct() {
 }
 
 #[test]
+fn on_battery_publishes_only_on_change() {
+    let mut rig = Rig::new();
+    rig.run(vec![health_msg(0)])
+        .expect("no invariant violation");
+    let on = |on| {
+        src(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::OnBattery(
+            on,
+        )))
+    };
+    let prev = rig.latest();
+    rig.run(vec![on(Some(true))])
+        .expect("no invariant violation");
+    let next = rig.latest();
+    assert_eq!(next.device_details.on_battery, Some(true));
+    let mut changed = SmallVec::new();
+    assert!(
+        next.changed_since(&prev, &mut changed)
+            .contains(ComponentMask::DEVICE_DETAILS)
+    );
+    rig.run(vec![on(Some(true))])
+        .expect("no invariant violation");
+    let same = rig.latest();
+    assert!(
+        Arc::ptr_eq(&same.device_details, &next.device_details),
+        "an unchanged state keeps the component"
+    );
+}
+
+#[test]
 fn disk_details_merge_by_source() {
     let mut rig = Rig::new();
     let sda = disk_id("sda", 0);
