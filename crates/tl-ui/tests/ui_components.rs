@@ -1436,7 +1436,7 @@ mod tab_tooltips {
         }
     }
 
-    fn hover_shows_tooltip(cx: &mut VisualTestContext, cell: &str) -> bool {
+    fn hover_shows_tooltip(cx: &mut VisualTestContext, cell: &'static str) -> bool {
         cx.simulate_mouse_move(point(px(590.), px(590.)), None, Modifiers::none());
         draw(cx);
         let at = cx.debug_bounds(cell).expect("cell drawn").center();
