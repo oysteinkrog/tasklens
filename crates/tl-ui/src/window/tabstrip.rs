@@ -7,23 +7,32 @@
 //!
 //! Only the tabs whose page is built are shown. Tabs are not Tab stops; Ctrl+1..6, Alt+1..6,
 //! Ctrl+Tab and Ctrl+Shift+Tab select them (E20-002). Each tab's accessible name is its label.
+//!
+//! Tabs that do not fit left of the filter box move into the "More tabs" menu behind a "»"
+//! button (E20-015, UI-SHL-022). The fit uses the label widths shaped once per language, scale
+//! and history mode change, and the filter box's final width, so no tab moves while the box
+//! animates. The strip and filter widths come from the last prepaint; when one of them changed,
+//! the strip asks for one more frame.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::{
-    AnyView, App, Bounds, Context, Element, ElementId, Entity, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    ParentElement, Path, PathBuilder, Pixels, Point, Position, Render, SharedString,
-    StatefulInteractiveElement, Style, Styled, Subscription, TextRun, Window, div, point,
-    prelude::FluentBuilder as _, px, relative,
+    AnyView, App, Bounds, ClickEvent, Context, Element, ElementId, Entity, FocusHandle, FontWeight,
+    GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, ParentElement, Path, PathBuilder, Pixels, Point, Position, Render,
+    SharedString, StatefulInteractiveElement, Style, Styled, Subscription, TextRun, WeakEntity,
+    Window, div, point, prelude::FluentBuilder as _, px, relative,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 
 use super::filter::FilterBox;
 use crate::actions::SelectTab;
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::icons::TlIcon;
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::TlSettings;
 use crate::theme::{UiMetrics, current, metrics};
@@ -34,16 +43,52 @@ pub const TAB_STRIP_H: f32 = 30.0;
 pub const TAB_PAD_X: f32 = 22.0;
 /// Outline and line thickness, × ui_scale.
 pub const ACCENT_W: f32 = 2.0;
+/// Space kept free between the last tab and the filter box, × ui_scale.
+pub const FILTER_GAP: f32 = 16.0;
+/// Room kept for the overflow button, × ui_scale.
+pub const OVERFLOW_SLOT: f32 = 28.0;
+/// The overflow button's size, × ui_scale.
+pub const OVERFLOW_BUTTON: f32 = 24.0;
 
 /// Control point factor of a cubic Bézier that follows a quarter circle.
 const QUARTER_ARC_K: f32 = 0.552_284_8;
 
-/// The active tab's and the filter slot's bounds, recorded when the tab row's children are
-/// prepainted. `AccentRule` reads them in its own prepaint, which runs after the row's.
+/// The active tab's, the overflow button's and the filter slot's bounds, recorded when the tab
+/// row's children are prepainted. `AccentRule` reads them in its own prepaint, which runs after
+/// the row's; the overflow button opens its menu below its bounds.
 #[derive(Clone, Copy, Default)]
 struct RuleLayout {
     active: Option<Bounds<Pixels>>,
+    overflow: Option<Bounds<Pixels>>,
     filter: Option<Bounds<Pixels>>,
+}
+
+/// The widths the tab fit is computed from, recorded at the last prepaint.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+struct FitInputs {
+    /// Viewport width minus strip width. Stays the same across window resizes, so the next
+    /// render knows the strip width before layout.
+    inset: Pixels,
+    /// The filter slot's final width: the filter box's width with its input at the target
+    /// width, or the slot's drawn width for another view. 0 without a slot.
+    filter: Pixels,
+}
+
+/// The strip's own text, translated once per language and history mode (R-132).
+struct TabWords {
+    /// Index = `Tab::ALL` position. Processes reads "History" in history mode.
+    tabs: [SharedString; 6],
+    /// "More tabs".
+    more: SharedString,
+}
+
+impl TabWords {
+    fn new(history_mode: bool, cx: &App) -> Self {
+        Self {
+            tabs: Tab::ALL.map(|tab| TabStrip::label(tab, history_mode, cx)),
+            more: tr(cx, "shell-tab-more"),
+        }
+    }
 }
 
 /// What the cached rule path was built from. A change in any field rebuilds the path.
@@ -89,8 +134,17 @@ pub struct TabStrip {
     /// the "Include children" checkbox.
     filter_box: Option<Entity<FilterBox>>,
     /// Label widths at `t_md` medium weight. Shaped once per language, scale and history mode
-    /// change; read by the overflow menu (E20-015).
+    /// change, together with `words`; the tab fit reads them (E20-015).
     label_widths: SmallVec<[(Tab, Pixels); 6]>,
+    /// The UI scale `label_widths` were shaped at.
+    shaped_scale: f32,
+    words: TabWords,
+    /// Tabs in the overflow menu at the last render, in R-023 order.
+    hidden: SmallVec<[Tab; 6]>,
+    /// The widths the last render fitted the tabs to.
+    fit: FitInputs,
+    /// Where the overflow menu's items go when no element has focus.
+    menu_focus: FocusHandle,
     rule: Option<(AccentRuleKey, Path<Pixels>)>,
     layout: Rc<Cell<RuleLayout>>,
     style_version: u64,
@@ -100,6 +154,8 @@ pub struct TabStrip {
     drawn: SmallVec<[SharedString; 6]>,
     #[cfg(any(test, feature = "test-hooks"))]
     rule_builds: u32,
+    #[cfg(any(test, feature = "test-hooks"))]
+    label_shapes: u32,
 }
 
 fn history_mode(cx: &App) -> bool {
@@ -161,6 +217,11 @@ impl TabStrip {
             filter_slot: None,
             filter_box: None,
             label_widths: SmallVec::new(),
+            shaped_scale: metrics(cx).ui_scale,
+            words: TabWords::new(history_mode(cx), cx),
+            hidden: SmallVec::new(),
+            fit: FitInputs::default(),
+            menu_focus: cx.focus_handle(),
             rule: None,
             layout: Rc::new(Cell::new(RuleLayout::default())),
             style_version: metrics(cx).style_version,
@@ -170,6 +231,8 @@ impl TabStrip {
             drawn: SmallVec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             rule_builds: 0,
+            #[cfg(any(test, feature = "test-hooks"))]
+            label_shapes: 0,
         }
     }
 
@@ -234,6 +297,49 @@ impl TabStrip {
         &self.label_widths
     }
 
+    /// The drawn width of `tab`: its label plus the padding on both sides. 0 before the labels
+    /// are shaped or for a tab that is not built. Icons (E20-023, E20-025) add their width here.
+    pub fn tab_width(&self, tab: Tab) -> Pixels {
+        self.label_widths
+            .iter()
+            .find(|(t, _)| *t == tab)
+            .map_or(px(0.), |(_, label)| {
+                *label + px(2. * TAB_PAD_X * self.shaped_scale)
+            })
+    }
+
+    /// Splits the built tabs into the ones shown in the strip and the ones in the overflow menu,
+    /// for `avail` pixels of room. Takes tabs in R-023 order while they fit. When the active tab
+    /// is not among them it takes the last shown place, and the tab there moves to the front of
+    /// the hidden list, which keeps R-023 order. Returns (visible, hidden).
+    pub fn visible_tabs(&self, avail: Pixels) -> (SmallVec<[Tab; 6]>, SmallVec<[Tab; 6]>) {
+        let mut visible = SmallVec::<[Tab; 6]>::new();
+        let mut hidden = SmallVec::<[Tab; 6]>::new();
+        let mut used = px(0.);
+        for &tab in &self.tabs {
+            let width = self.tab_width(tab);
+            if hidden.is_empty() && used + width <= avail {
+                used += width;
+                visible.push(tab);
+            } else {
+                hidden.push(tab);
+            }
+        }
+        if let Some(at) = hidden.iter().position(|t| *t == self.active) {
+            hidden.remove(at);
+            if let Some(replaced) = visible.pop() {
+                hidden.insert(0, replaced);
+            }
+            visible.push(self.active);
+        }
+        (visible, hidden)
+    }
+
+    /// The tabs in the overflow menu at the last render, in R-023 order.
+    pub fn hidden_tabs(&self) -> &[Tab] {
+        &self.hidden
+    }
+
     /// The labels as last drawn, left to right.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn drawn_labels(&self) -> &[SharedString] {
@@ -260,14 +366,28 @@ impl TabStrip {
         self.rule_builds
     }
 
-    fn shape_labels(&mut self, labels: &[SharedString], m: &UiMetrics, window: &Window) {
+    /// How many times the labels were translated and shaped.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn label_shapes(&self) -> u32 {
+        self.label_shapes
+    }
+
+    /// Translates the labels and shapes them.
+    fn shape_labels(&mut self, m: &UiMetrics, window: &Window, cx: &App) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.label_shapes += 1;
+        }
+        self.words = TabWords::new(self.history_mode, cx);
+        self.shaped_scale = m.ui_scale;
         let mut font = window.text_style().font();
         font.weight = FontWeight::MEDIUM;
+        let labels = &self.words.tabs;
         self.label_widths = self
             .tabs
             .iter()
-            .zip(labels)
-            .map(|(tab, label)| {
+            .map(|tab| {
+                let label = &labels[*tab as usize];
                 let run = TextRun {
                     len: label.len(),
                     font: font.clone(),
@@ -290,28 +410,63 @@ fn stop(_: &MouseDownEvent, _: &mut Window, cx: &mut App) {
     cx.stop_propagation();
 }
 
+/// Opens the "More tabs" menu below the overflow button, one item per hidden tab.
+fn open_overflow(
+    strip: &WeakEntity<TabStrip>,
+    layout: &Cell<RuleLayout>,
+    event: &ClickEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(strip) = strip.upgrade() else {
+        return;
+    };
+    let at = layout
+        .get()
+        .overflow
+        .map_or(event.position(), |b| b.bottom_left());
+    // The items go where focus is, so focus comes back there when the menu closes.
+    let context = window
+        .focused(cx)
+        .unwrap_or_else(|| strip.read(cx).menu_focus.clone());
+    let menu = TlMenu::build(window, cx, context, move |menu, _, cx| {
+        let strip = strip.read(cx);
+        strip.hidden.iter().fold(menu, |menu, tab| {
+            menu.item(
+                strip.words.tabs[*tab as usize].clone(),
+                Box::new(SelectTab(*tab as usize)),
+            )
+        })
+    });
+    open_context_menu_at(at, window, cx, menu);
+}
+
 impl Render for TabStrip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         let m = *metrics(cx);
         let s = m.ui_scale;
-        let labels: SmallVec<[SharedString; 6]> = self
-            .tabs
-            .iter()
-            .map(|tab| Self::label(*tab, self.history_mode, cx))
-            .collect();
         if self.label_widths.is_empty() {
-            self.shape_labels(&labels, &m, window);
+            self.shape_labels(&m, window, cx);
         }
+
+        let strip_w = window.viewport_size().width - self.fit.inset;
+        let avail = strip_w - self.fit.filter - px((FILTER_GAP + OVERFLOW_SLOT) * s);
+        let (visible, hidden) = self.visible_tabs(avail);
+        self.hidden = hidden;
         #[cfg(any(test, feature = "test-hooks"))]
         {
-            self.drawn = labels.clone();
+            self.drawn = visible
+                .iter()
+                .map(|tab| self.words.tabs[*tab as usize].clone())
+                .collect();
         }
 
         let height = px(TAB_STRIP_H * s);
-        let tabs = self.tabs.iter().zip(labels).map(|(tab, label)| {
+        let tabs = visible.iter().map(|tab| {
             let tab = *tab;
-            let index = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
+            let index = tab as usize;
+            let label = self.words.tabs[index].clone();
             let active = tab == self.active;
             div()
                 .id(ElementId::Name(tab.as_str().into()))
@@ -348,14 +503,43 @@ impl Render for TabStrip {
                 .child(label)
         });
 
-        let active_ix = self.tabs.iter().position(|t| *t == self.active);
-        let filter_ix = self.filter_slot.is_some().then_some(self.tabs.len() + 1);
+        let overflow = (!self.hidden.is_empty()).then(|| {
+            let strip = cx.entity().downgrade();
+            let layout = self.layout.clone();
+            div()
+                .debug_selector(|| "TabStripOverflow".into())
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(height)
+                .on_mouse_down(MouseButton::Left, stop)
+                .on_mouse_down(MouseButton::Right, stop)
+                .on_mouse_down(MouseButton::Middle, stop)
+                .child(
+                    TlButton::new("TabStripOverflow-button", TlButtonKind::Icon)
+                        .size(TlButtonSize::Sm)
+                        .icon(TlIcon::ChevronsRight)
+                        .tooltip(self.words.more.clone())
+                        .tab_stop(false)
+                        .on_click(move |event, window, cx| {
+                            open_overflow(&strip, &layout, event, window, cx);
+                        }),
+                )
+        });
+
+        let active_ix = visible.iter().position(|t| *t == self.active);
+        let overflow_ix = overflow.is_some().then_some(visible.len());
+        let filter_ix = self
+            .filter_slot
+            .is_some()
+            .then_some(visible.len() + usize::from(overflow.is_some()) + 1);
         let layout = self.layout.clone();
         let row = div()
             .flex()
             .flex_row()
             .size_full()
             .children(tabs)
+            .children(overflow)
             .child(div().flex_1())
             .when_some(self.filter_slot.clone(), |row, slot| {
                 row.child(
@@ -369,6 +553,7 @@ impl Render for TabStrip {
             .on_children_prepainted(move |bounds, _, _| {
                 layout.set(RuleLayout {
                     active: active_ix.and_then(|i| bounds.get(i).copied()),
+                    overflow: overflow_ix.and_then(|i| bounds.get(i).copied()),
                     filter: filter_ix.and_then(|i| bounds.get(i).copied()),
                 });
             });
@@ -457,15 +642,22 @@ impl Element for AccentRule {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) {
         let layout = self.layout.get();
-        // The filter box was prepainted with the row, so its inset is this frame's.
-        let inset = self
-            .filter_box
-            .as_ref()
-            .map_or(px(0.), |f| f.read(cx).outline_inset());
+        // The filter box was prepainted with the row, so its inset and widths are this frame's.
+        let (inset, filter_w) = match (&self.filter_box, layout.filter) {
+            (Some(f), _) => {
+                let f = f.read(cx);
+                (f.outline_inset(), f.target_width())
+            }
+            (None, slot) => (px(0.), slot.map_or(px(0.), |b| b.size.width)),
+        };
+        let fit = FitInputs {
+            inset: window.viewport_size().width - bounds.size.width,
+            filter: filter_w,
+        };
         let key = AccentRuleKey {
             active: layout.active.unwrap_or_default(),
             end_x: layout
@@ -476,6 +668,16 @@ impl Element for AccentRule {
             scale_bits: self.scale.to_bits(),
         };
         let (width, radius) = (self.width, self.radius);
+        let refit = self.strip.update(cx, |strip, _| {
+            let refit = strip.fit != fit;
+            strip.fit = fit;
+            refit
+        });
+        if refit {
+            // The tabs were fitted to old widths: render once more with these.
+            let strip = self.strip.clone();
+            cx.defer(move |cx| strip.update(cx, |_, cx| cx.notify()));
+        }
         self.strip.update(cx, |strip, _| {
             if strip.rule.as_ref().is_some_and(|(k, _)| *k == key) {
                 return;

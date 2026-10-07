@@ -1130,9 +1130,10 @@ mod tabstrip {
     use std::rc::Rc;
     use std::sync::Arc;
 
+    use gpui_kit::base::test_support::snapshots;
     use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, InteractiveElement, IntoElement, Modifiers,
-        MouseButton, ParentElement, Pixels, Point, Render, Styled, TestAppContext,
+        MouseButton, ParentElement, Pixels, Point, Render, Role, Styled, TestAppContext,
         VisualTestContext, Window, div, point, px, size,
     };
     use smallvec::SmallVec;
@@ -1142,11 +1143,14 @@ mod tabstrip {
     use tl_model::table::TableMode;
     use tl_ui::actions::SelectTab;
     use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::components::menu::context_menu_layer;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::current;
     use tl_ui::window::filter::FilterBox;
-    use tl_ui::window::tabstrip::{AccentRuleProbe, TabStrip};
+    use tl_ui::window::tabstrip::{
+        AccentRuleProbe, FILTER_GAP, OVERFLOW_BUTTON, OVERFLOW_SLOT, TabStrip,
+    };
 
     const W: f32 = 1280.;
 
@@ -1157,12 +1161,13 @@ mod tabstrip {
     }
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let downs = self.downs.clone();
             div()
                 .size_full()
                 .on_mouse_down(MouseButton::Left, move |_, _, _| downs.set(downs.get() + 1))
                 .child(self.strip.clone())
+                .children(context_menu_layer(window, cx))
         }
     }
 
@@ -1510,6 +1515,247 @@ mod tabstrip {
             point(rule.active.right() - px(3.), bottom)
         ));
         assert!(has_vertex(&rule, point(px(W), bottom - px(3.))));
+    }
+
+    /// Puts the real filter box in the slot, resizes the window to `width` and draws until the
+    /// tab fit has settled.
+    fn with_filter_box(r: &mut Rig, width: f32) -> Entity<FilterBox> {
+        let strip = r.strip.clone();
+        let filter = r.cx.update(|window, cx| {
+            let filter = cx.new(|cx| FilterBox::new(Tab::Processes, window, cx));
+            strip.update(cx, |s, cx| {
+                s.set_filter_slot(Some(filter.clone().into()), cx)
+            });
+            filter
+        });
+        resize(r, width);
+        filter
+    }
+
+    fn resize(r: &mut Rig, width: f32) {
+        r.cx.simulate_resize(size(px(width), px(200.)));
+        settle(r.cx);
+    }
+
+    /// Draws twice: the second frame uses the widths the first one measured.
+    fn settle(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            draw(cx);
+        }
+    }
+
+    fn hidden(r: &mut Rig) -> Vec<Tab> {
+        let strip = r.strip.clone();
+        r.cx.update(|_, cx| strip.read(cx).hidden_tabs().to_vec())
+    }
+
+    fn drawn_tabs(r: &mut Rig) -> Vec<Tab> {
+        Tab::ALL
+            .into_iter()
+            .filter(|t| r.cx.debug_bounds(selector(*t)).is_some())
+            .collect()
+    }
+
+    /// The labels of the open menu's items, top to bottom.
+    fn menu_items(r: &mut Rig) -> Vec<(String, Bounds<Pixels>)> {
+        let mut items: Vec<_> = r.cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .filter(|s| s.role() == Some(Role::MenuItem))
+                .map(|s| (s.label().unwrap_or_default().to_string(), s.bounds()))
+                .collect()
+        });
+        items.sort_by(|a, b| f32::from(a.1.origin.y).total_cmp(&f32::from(b.1.origin.y)));
+        items
+    }
+
+    fn open_overflow_menu(r: &mut Rig) -> Vec<(String, Bounds<Pixels>)> {
+        let at = bounds(r.cx, "TlButton-TabStripOverflow-button").center();
+        r.cx.simulate_click(at, Modifiers::none());
+        r.cx.run_until_parked();
+        draw(r.cx);
+        menu_items(r)
+    }
+
+    #[gpui_kit::test]
+    fn overflow_none_when_wide(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, false);
+        with_filter_box(&mut r, 1360.);
+        assert_eq!(drawn_tabs(&mut r), Tab::ALL);
+        assert!(hidden(&mut r).is_empty());
+        assert!(r.cx.debug_bounds("TabStripOverflow").is_none());
+        // The tabs end left of the filter box with room to spare.
+        let last = bounds(r.cx, "TabStrip-information");
+        let filter = bounds(r.cx, "TabStripFilter");
+        assert!(last.right() + px(FILTER_GAP + OVERFLOW_SLOT) <= filter.left());
+    }
+
+    #[gpui_kit::test]
+    fn overflow_keeps_active_tab(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Information, false);
+        with_filter_box(&mut r, 800.);
+
+        let shown = drawn_tabs(&mut r);
+        let hidden = hidden(&mut r);
+        assert!(
+            shown.contains(&Tab::Information),
+            "active tab shown: {shown:?}"
+        );
+        assert!(!hidden.is_empty());
+        assert!(!hidden.contains(&Tab::Information));
+        let mut every: Vec<Tab> = shown.iter().chain(&hidden).copied().collect();
+        every.sort_by_key(|t| *t as usize);
+        assert_eq!(every, Tab::ALL, "each tab once");
+        assert!(
+            hidden.windows(2).all(|w| (w[0] as usize) < (w[1] as usize)),
+            "R-023 order: {hidden:?}"
+        );
+
+        // Information takes the last shown place; the button sits right after it.
+        let info = bounds(r.cx, "TabStrip-information");
+        let shown_right = shown
+            .iter()
+            .map(|t| bounds(r.cx, selector(*t)).right())
+            .fold(px(0.), Pixels::max);
+        assert_eq!(info.right(), shown_right);
+        let button = bounds(r.cx, "TlButton-TabStripOverflow-button");
+        assert_eq!(button.left(), info.right());
+        assert_eq!(button.size, size(px(OVERFLOW_BUTTON), px(OVERFLOW_BUTTON)));
+        let filter = bounds(r.cx, "TabStripFilter");
+        assert!(button.right() < filter.left());
+
+        // The menu lists the hidden tabs in R-023 order, below the button.
+        let items = open_overflow_menu(&mut r);
+        let labels: Vec<&str> = items.iter().map(|(l, _)| l.as_str()).collect();
+        let expected: Vec<String> = hidden
+            .iter()
+            .map(|t| {
+                [
+                    "Processes",
+                    "Performance",
+                    "Services",
+                    "Startup Apps",
+                    "Connections",
+                    "Information",
+                ][*t as usize]
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(labels, expected);
+        assert!(items[0].1.top() >= button.bottom());
+        assert_eq!(r.downs.get(), 0, "the press stops at the button");
+    }
+
+    #[gpui_kit::test]
+    fn overflow_menu_selects_tab(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Information, false);
+        with_filter_box(&mut r, 640.);
+        assert!(hidden(&mut r).contains(&Tab::Services));
+        assert!(r.cx.debug_bounds("TabStrip-services").is_none());
+
+        let items = open_overflow_menu(&mut r);
+        let services = items
+            .iter()
+            .find(|(l, _)| l == "Services")
+            .expect("Services listed")
+            .1;
+        r.cx.simulate_click(services.center(), Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!(*r.selects.borrow(), [2]);
+
+        // The main window answers SelectTab(2) by making Services active.
+        r.strip
+            .update(r.cx, |s, cx| s.set_active(Tab::Services, cx));
+        settle(r.cx);
+        assert!(r.cx.debug_bounds("TabStrip-services").is_some());
+        assert!(!hidden(&mut r).contains(&Tab::Services));
+        assert!(menu_items(&mut r).is_empty(), "the menu closed");
+    }
+
+    #[gpui_kit::test]
+    fn overflow_ignores_filter_animation(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, false);
+        r.cx.update(|_, cx| cx.set_reduce_motion(false));
+        // A width where the wide box hides one more tab than the narrow one: the narrow fit
+        // leaves less than the 120 px the box grows by.
+        let filter = with_filter_box(&mut r, 1000.);
+        let narrow = r.cx.update(|_, cx| filter.read(cx).width());
+        let strip = r.strip.clone();
+        let fit = |r: &mut Rig, filter_w: Pixels| {
+            r.cx.update(|_, cx| {
+                strip
+                    .read(cx)
+                    .visible_tabs(px(1000.) - filter_w - px(FILTER_GAP + OVERFLOW_SLOT))
+                    .0
+                    .to_vec()
+            })
+        };
+        let before = fit(&mut r, narrow);
+        let after = fit(&mut r, narrow + px(120.));
+        assert_eq!(drawn_tabs(&mut r), before);
+        assert!(after.len() < before.len(), "{before:?} then {after:?}");
+
+        r.cx.update(|window, cx| filter.update(cx, |f, cx| f.focus_and_select_all(window, cx)));
+        let mut sets = Vec::new();
+        let mut widths = Vec::new();
+        for _ in 0..16 {
+            r.cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            r.cx.run_until_parked();
+            draw(r.cx);
+            sets.push(drawn_tabs(&mut r));
+            widths.push(r.cx.update(|_, cx| filter.read(cx).width()));
+        }
+        assert!(
+            widths
+                .iter()
+                .any(|w| *w > narrow + px(1.) && *w < narrow + px(119.)),
+            "the box animated: {widths:?}"
+        );
+        assert_eq!(widths.last(), Some(&(narrow + px(120.))));
+        // The set changes at most once, at the start, straight to the final fit.
+        assert!(sets[1..].iter().all(|s| *s == after), "{sets:?}");
+        assert!(sets[0] == before || sets[0] == after, "{sets:?}");
+        let target = r.cx.update(|_, cx| filter.read(cx).target_width());
+        assert_eq!(target, narrow + px(120.));
+    }
+
+    #[gpui_kit::test]
+    fn overflow_reshapes_on_scale(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, true);
+        settle(r.cx);
+        let strip = r.strip.clone();
+        let shapes = |r: &mut Rig| r.cx.update(|_, cx| strip.read(cx).label_shapes());
+        let widths = |r: &mut Rig| r.cx.update(|_, cx| strip.read(cx).label_widths().to_vec());
+        let first = shapes(&mut r);
+        let at_100 = widths(&mut r);
+        assert_eq!(first, 1, "shaped once when first drawn");
+        r.strip.update(r.cx, |_, cx| cx.notify());
+        settle(r.cx);
+        assert_eq!(shapes(&mut r), first, "a plain re-render does not shape");
+
+        r.cx.update(|_, cx| {
+            tl_ui::theme::store::apply_metrics(
+                &AppearanceSettings {
+                    ui_scale_pct: 150,
+                    ..AppearanceSettings::default()
+                },
+                cx,
+            )
+        });
+        settle(r.cx);
+        assert_eq!(shapes(&mut r), first + 1, "scale change shapes once");
+        let at_150 = widths(&mut r);
+        assert!(
+            at_100.iter().zip(&at_150).all(|(a, b)| b.1 > a.1),
+            "{at_100:?} {at_150:?}"
+        );
+
+        r.cx.update(|_, cx| tl_ui::i18n::set_test_catalogue(cx, "shell-tab-services = Dienste\n"));
+        settle(r.cx);
+        assert_eq!(shapes(&mut r), first + 2, "language change shapes once");
+        assert_eq!(labels(&mut r)[2], "Dienste");
     }
 }
 

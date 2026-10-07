@@ -148,6 +148,9 @@ pub struct FilterBox {
     /// The outline's left edge minus the box's left edge at the last prepaint: the checkbox part
     /// and its gap when shown, else 0. The tab strip ends its accent line there.
     outline_inset: Rc<Cell<Pixels>>,
+    /// The input's target width minus its drawn width at the last render. Not 0 only while
+    /// the width animates.
+    grow: Pixels,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     outline: gpui_kit::Hsla,
@@ -202,6 +205,7 @@ impl FilterBox {
             processes: ProcessesView::read(cx),
             width: Rc::new(Cell::new(px(0.))),
             outline_inset: Rc::new(Cell::new(px(0.))),
+            grow: px(0.),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             outline: gpui_kit::Hsla::default(),
@@ -268,6 +272,12 @@ impl FilterBox {
     /// The drawn width at the last layout, checkbox part included, for the tab strip.
     pub fn width(&self) -> Pixels {
         self.width.get()
+    }
+
+    /// The drawn width at the last layout with the input at its target width, so it does not
+    /// change while the width animates. The tab strip fits its tabs to it (E20-015).
+    pub fn target_width(&self) -> Pixels {
+        self.width.get() + self.grow
     }
 
     /// The outline's left edge minus the box's left edge at the last layout, for the tab strip.
@@ -369,6 +379,7 @@ impl Render for FilterBox {
             window,
             cx,
         );
+        self.grow = px(target * s) - input_w;
 
         let mut label = div()
             .debug_selector(|| "FilterBox-label".into())

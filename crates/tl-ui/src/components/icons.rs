@@ -15,6 +15,7 @@ use gpui_kit::{AssetSource, Hsla, Pixels, Result, SharedString, Styled};
 pub enum TlIcon {
     Check,
     ChevronRight,
+    ChevronsRight,
     ChevronDown,
     ChevronUp,
     X,
@@ -46,9 +47,10 @@ pub enum TlIcon {
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::Check,
         Self::ChevronRight,
+        Self::ChevronsRight,
         Self::ChevronDown,
         Self::ChevronUp,
         Self::X,
@@ -84,6 +86,7 @@ impl TlIcon {
         match self {
             Self::Check => IconName::Check,
             Self::ChevronRight => IconName::ChevronRight,
+            Self::ChevronsRight => IconName::ChevronsRight,
             Self::ChevronDown => IconName::ChevronDown,
             Self::ChevronUp => IconName::ChevronUp,
             Self::X => IconName::X,
@@ -162,13 +165,14 @@ impl IconNamed for AppIcon {
 }
 
 // The icons not in the kit's default component bundle (`default-icons.txt`), plus the sort
-// arrows (R-185). `Binary` is the Name cell's file icon fallback. The last four are the
-// Processes toolbar icons (UI-PRC-019).
+// arrows (R-185). `Binary` is the Name cell's file icon fallback. `LayoutGrid` to `List` are
+// the Processes toolbar icons (UI-PRC-019). `ChevronsRight` is the tab overflow button
+// (E20-015).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
         X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square,
-        Binary, LayoutGrid, Rows2, ListTree, List
+        Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight
     ]
 );
 
