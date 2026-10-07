@@ -570,3 +570,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.11 (57a53a4, ed3cf9d): the filter box is wired into MainWindow; tests run on the real window.
 - m1f.4 (815729a, 96fc890, 76f80a2): the lowmem unit template and install, enable and remove; unit_path returns a Result (accepted). OWNER RUN (U-24): `heavy-build cargo test -p tl-app --test watch_memory -- --ignored real_install_enable_remove --nocapture` installs the unit in your real user session, removes it, and prints the accepted OOMScoreAdjust.
 - cr0.19 (acf9d32, 9193258): rendering_env. GPU selection does not shorten the adapter probe. "software" may still pick a GL adapter for the real GPU; a cr0 bug bead was filed to verify it.
+- cr0.21 (8361a3c, da42146, 66f0f74): import_ts with a 1 MiB cap, clamp-or-skip, and only key names logged. The wiring, a callback that takes a path from the portal chooser (APP-034), and UTF-16 BOM detection are in a new cr0 P4 bead.
+- cr0.14 (eb5cbb1): finish() flushes the store, then shuts the engine down within 1500 ms; U-2 was answered from source (Application::run returns after quit). MANUAL DESKTOP CHECK: close the window, time the exit (<= 2 s), and check that `pgrep tl-gpu-probe` finds nothing.
+- pdu.15 (8369ce1, 09caa37, eca9adf): new and exited tint with a 300 ms fade, no row rebuilds, frames requested only while fading; TreeTableDelegate gains row_tint and before_rows (accepted); heat cells no longer double-tint.
+- yrf.22 (bfb80ef): ceil_125 returns 5e-308 for x <= 5e-308. ceil_125(1e-300) gives 2e-300, still >= x (fine).
