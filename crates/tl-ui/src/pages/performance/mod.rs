@@ -314,6 +314,9 @@ pub struct PerformancePage {
     _subs: SmallVec<[Subscription; 1]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+    /// The last title this page set; the test platform window does not report its title.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub window_title: String,
 }
 
 impl PerformancePage {
@@ -350,6 +353,8 @@ impl PerformancePage {
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            window_title: String::new(),
         };
         if let Some(key) = first {
             this.show(key, cx);
@@ -417,7 +422,12 @@ impl PerformancePage {
             update_page(&page, cx, |p, cx| p.set_active(false, cx));
         }
         let suffix = tr(cx, "perf-summary-title-suffix");
-        window.set_window_title(&format!("{WINDOW_TITLE}{suffix}"));
+        let title = format!("{WINDOW_TITLE}{suffix}");
+        window.set_window_title(&title);
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.window_title = title;
+        }
         let focus = view.read(cx).focus_handle(cx);
         focus.focus(window, cx);
         cx.emit(SummaryToggled);
@@ -440,6 +450,10 @@ impl PerformancePage {
             update_page(&page, cx, |p, cx| p.set_active(page_on, cx));
         }
         window.set_window_title(WINDOW_TITLE);
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.window_title = WINDOW_TITLE.into();
+        }
         self.sidebar_focus.focus(window, cx);
         if let Some(key) = select {
             self.sidebar.update(cx, |s, cx| s.select(key, cx));

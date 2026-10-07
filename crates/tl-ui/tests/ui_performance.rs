@@ -1630,3 +1630,504 @@ mod tab {
         assert!(overall.left() >= page.left() && grid.right() <= page.right());
     }
 }
+
+// ---- Graph summary mode (E24-015) ----
+
+#[cfg(feature = "test-hooks")]
+mod summary {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, FocusHandle, IntoElement, Modifiers, MouseButton,
+        MouseDownEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext, Window, div, px,
+        size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::demand::Demand;
+    use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::SeriesSet;
+    use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
+    use tl_ui::components::kv_grid;
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::memory::MemoryPage;
+    use tl_ui::pages::performance::summary::{MARKER_ID, SummaryView, tile_grid};
+    use tl_ui::pages::performance::{DeviceKey, PerformancePage};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{
+        self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
+    };
+    use tl_ui::window::titlebar::TitleBarProbe;
+
+    const GPU: &str = "gpu:pci:0000:2d:00.0";
+
+    fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from("device"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind,
+        }
+    }
+
+    fn disk(idx: u16, name: &str) -> DeviceEntry {
+        let identity = DeviceIdentity::Disk {
+            major: 8,
+            minor: idx.into(),
+            name: Arc::from(name),
+            wwn_or_serial: None,
+        };
+        entry(idx, identity, None)
+    }
+
+    fn net(idx: u16, name: &str, kind: NetKind) -> DeviceEntry {
+        let identity = DeviceIdentity::Net {
+            netns_ino: 1,
+            ifindex: idx.into(),
+            name: Arc::from(name),
+        };
+        entry(idx, identity, Some(kind))
+    }
+
+    /// Nine visible cards: CPU, Memory, a GPU, four disks, a wired interface and a VPN tunnel.
+    fn catalog() -> Vec<DeviceEntry> {
+        let gpu = DeviceIdentity::Gpu {
+            uuid: [0; 16],
+            pci_bus_id: Arc::from("0000:2d:00.0"),
+        };
+        vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+            entry(2, gpu, None),
+            disk(3, "sda"),
+            disk(4, "sdb"),
+            disk(5, "sdc"),
+            disk(6, "sdd"),
+            net(7, "enp38s0", NetKind::Wired),
+            net(8, "tailscale0", NetKind::VpnTunnel),
+        ]
+    }
+
+    struct FakeProcesses(FocusHandle);
+
+    impl gpui_kit::EventEmitter<tl_ui::window::status::StatusChanged> for FakeProcesses {}
+
+    impl Render for FakeProcesses {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use gpui_kit::{InteractiveElement as _, Styled as _};
+            div().track_focus(&self.0).size_full()
+        }
+    }
+
+    impl shell::ShellPage for FakeProcesses {
+        fn primary_focus(&self) -> FocusHandle {
+            self.0.clone()
+        }
+    }
+
+    struct Rig<'a> {
+        main: Entity<MainWindow>,
+        page: Entity<PerformancePage>,
+        demand: Entity<DemandAggregator>,
+        hub: Entity<SnapshotHub>,
+        engine: Arc<FakeEngine>,
+        vcx: &'a mut VisualTestContext,
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
+
+    /// The main window, `width` × `height`, on the Performance tab with the sidebar focused.
+    fn open(cx: &mut TestAppContext, width: f32, height: f32, reduce_motion: bool) -> Rig<'_> {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| {
+            s.devices = Arc::new(DeviceCatalog {
+                version: 1,
+                entries: Arc::from(catalog()),
+            });
+        });
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (hub, demand) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(reduce_motion);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+            kv_grid::init(cx);
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            cx.set_global(GlobalHub(hub.clone()));
+            cx.set_global(GlobalDemand(demand.clone()));
+            tl_ui::components::toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            tl_ui::pages::performance::actions::bind_keys_performance(cx);
+            cx.set_global(StartOptions::default());
+            set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
+                let page = cx.new(|cx| FakeProcesses(cx.focus_handle().tab_stop(true)));
+                PageSlot::new(page, cx)
+            });
+            cx.set_global(TitleBarProbe {
+                client: Some(true),
+                ..TitleBarProbe::default()
+            });
+            shell::init(cx);
+            (hub, demand)
+        });
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let vcx = VisualTestContext::from_window(handle.into(), cx).into_mut();
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(width), px(height)));
+        vcx.update(|window, _| window.activate_window());
+        draw(vcx);
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        vcx.dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+        draw(vcx);
+        let page = vcx
+            .read_entity(&main, |m, _| {
+                m.page_entity::<PerformancePage>(Tab::Performance)
+            })
+            .expect("PerformancePage built");
+        Rig {
+            main,
+            page,
+            demand,
+            hub,
+            engine,
+            vcx,
+        }
+    }
+
+    fn key(s: &str) -> DeviceKey {
+        DeviceKey(Arc::from(s))
+    }
+
+    fn summary(r: &mut Rig) -> Option<Entity<SummaryView>> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).summary().cloned())
+    }
+
+    /// Ctrl+M from the sidebar.
+    fn enter(r: &mut Rig) -> Entity<SummaryView> {
+        r.vcx.simulate_keystrokes("ctrl-m");
+        draw(r.vcx);
+        summary(r).expect("summary mode on")
+    }
+
+    fn select(r: &mut Rig, k: &str) {
+        let page = r.page.clone();
+        let k = key(k);
+        r.vcx.update(|_, cx| {
+            let sidebar = page.read(cx).sidebar().clone();
+            sidebar.update(cx, |s, cx| s.select(k, cx));
+        });
+        draw(r.vcx);
+    }
+
+    fn selected(r: &mut Rig) -> Option<String> {
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.read(cx).selected().map(|k| k.0.to_string()))
+    }
+
+    fn title(r: &mut Rig) -> String {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).window_title.clone())
+    }
+
+    fn merged(r: &mut Rig) -> Demand {
+        let demand = r.demand.clone();
+        r.vcx.update(|_, cx| demand.read(cx).merged())
+    }
+
+    fn click(cx: &mut VisualTestContext, at: gpui_kit::Point<gpui_kit::Pixels>) {
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn summary_tiles_all_visible_devices(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., false);
+        let page = r.page.clone();
+        let cards: Vec<String> = r.vcx.update(|_, cx| {
+            let sidebar = page.read(cx).sidebar().clone();
+            sidebar
+                .read(cx)
+                .visible_keys()
+                .map(|k| k.0.to_string())
+                .collect()
+        });
+        assert_eq!(cards.len(), 9, "{cards:?}");
+        let view = enter(&mut r);
+        let tiles: Vec<String> = r.vcx.read_entity(&view, |v, _| {
+            v.tiles.iter().map(|t| t.key.0.to_string()).collect()
+        });
+        assert_eq!(tiles, cards, "one tile per card, in sidebar order");
+        for i in 0..9 {
+            let id = format!("perf-summary-tile-{i}");
+            assert!(r.vcx.debug_bounds(Box::leak(id.into_boxed_str())).is_some());
+        }
+        // The tab strip and the sidebar are not drawn under the summary.
+        assert!(
+            r.vcx
+                .debug_bounds(tl_ui::pages::performance::SIDEBAR_PANEL_ID)
+                .is_none()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn summary_tile_grid_for_9(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., false);
+        let view = enter(&mut r);
+        let l = r.vcx.read_entity(&view, |v, _| v.layout());
+        assert_eq!((l.cols, l.rows), (3, 3));
+        assert!(!l.scrolls);
+        let t0 = r.vcx.debug_bounds("perf-summary-tile-0").expect("tile 0");
+        let t2 = r.vcx.debug_bounds("perf-summary-tile-2").expect("tile 2");
+        let t3 = r.vcx.debug_bounds("perf-summary-tile-3").expect("tile 3");
+        assert_eq!(t0.size, t3.size);
+        assert_eq!(t2.top(), t0.top(), "three tiles in the first row");
+        assert!(t3.top() > t0.bottom(), "tile 3 starts the second row");
+        assert_eq!(t3.left(), t0.left());
+    }
+
+    #[gpui_kit::test]
+    fn summary_blocks_tab_switch(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., false);
+        enter(&mut r);
+        for keys in ["ctrl-2", "ctrl-1", "ctrl-3", "alt-1", "ctrl-tab"] {
+            r.vcx.simulate_keystrokes(keys);
+            draw(r.vcx);
+            let tab = r.vcx.read_entity(&r.main, |m, _| m.active_tab());
+            assert_eq!(tab, Tab::Performance, "{keys}");
+            assert!(summary(&mut r).is_some(), "{keys}: summary still on");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn summary_esc_returns_to_selected_device(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., false);
+        select(&mut r, "memory");
+        assert_eq!(title(&mut r), "");
+        let view = enter(&mut r);
+        assert_eq!(title(&mut r), "tasklens · Graph Summary");
+        let marked = r.vcx.read_entity(&view, |v, _| v.selected_on_entry.clone());
+        assert_eq!(marked, Some(key("memory")));
+        let marker = r.vcx.debug_bounds(MARKER_ID).expect("accent marker");
+        let tile = r
+            .vcx
+            .debug_bounds("perf-summary-tile-1")
+            .expect("memory tile");
+        assert!(
+            tile.contains(&marker.origin),
+            "the marker is on the memory tile"
+        );
+
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        assert!(summary(&mut r).is_none());
+        assert_eq!(selected(&mut r).as_deref(), Some("memory"));
+        assert_eq!(title(&mut r), "tasklens");
+        assert!(r.vcx.debug_bounds("perf-summary-tile-0").is_none());
+        assert!(
+            r.vcx
+                .debug_bounds(tl_ui::pages::performance::SIDEBAR_PANEL_ID)
+                .is_some()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn summary_click_selects_and_exits(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., false);
+        let view = enter(&mut r);
+        let i = r
+            .vcx
+            .read_entity(&view, |v, _| {
+                v.tiles.iter().position(|t| t.key.0.as_ref() == GPU)
+            })
+            .expect("a GPU tile");
+        let id = format!("perf-summary-tile-{i}");
+        let tile = r
+            .vcx
+            .debug_bounds(Box::leak(id.into_boxed_str()))
+            .expect("GPU tile drawn");
+        click(r.vcx, tile.center());
+        draw(r.vcx);
+        assert!(summary(&mut r).is_none());
+        assert_eq!(selected(&mut r).as_deref(), Some(GPU));
+        assert_eq!(title(&mut r), "tasklens");
+    }
+
+    #[test]
+    fn summary_small_window_shrinks_cols_and_scrolls() {
+        let l = tile_grid(9, px(500.), px(300.));
+        assert_eq!(l.cols, 2, "two 200 px columns fit, three do not");
+        assert_eq!(l.rows, 5);
+        assert!(l.scrolls);
+        assert!(l.tile_w >= px(200.));
+        assert_eq!(l.tile_h, px(120.), "the minimum tile height");
+
+        let big = tile_grid(9, px(1600.), px(1000.));
+        assert_eq!((big.cols, big.rows), (3, 3));
+        assert!(!big.scrolls);
+    }
+
+    #[gpui_kit::test]
+    fn summary_fade_follows_reduce_motion(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let view = enter(&mut r);
+        assert!(
+            !r.vcx.read_entity(&view, |v, _| v.fades()),
+            "reduce motion: instant"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn summary_fades_in_with_motion(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., false);
+        let view = enter(&mut r);
+        assert!(r.vcx.read_entity(&view, |v, _| v.fades()));
+    }
+
+    /// A CPU sample re-renders the CPU tile's chart and not the summary view (ADR-009).
+    #[gpui_kit::test]
+    fn summary_sample_tick_does_not_rerender_view(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let view = enter(&mut r);
+        draw(r.vcx);
+        let chart = r.vcx.read_entity(&view, |v, _| v.tiles[0].chart.clone());
+        let renders = |r: &mut Rig| {
+            let (view, chart) = (view.clone(), chart.clone());
+            r.vcx.update(|_, cx| {
+                (
+                    view.read(cx).render_count.get(),
+                    chart.read(cx).render_count.get(),
+                )
+            })
+        };
+        let before = renders(&mut r);
+        for version in 1..=3u64 {
+            r.engine.publish_with(|s| {
+                let id = SeriesId {
+                    device: DeviceIdx(0),
+                    metric: MetricId::CPU_TOTAL,
+                };
+                let samples: Vec<Sample> = (0..version)
+                    .map(|i| Sample::valid(i * 1_000_000_000, 10.0 * i as f32))
+                    .collect();
+                let mut set = SeriesSet::default();
+                set.header.version = version;
+                set.series = Arc::from([Arc::new(SeriesView {
+                    id,
+                    version,
+                    period_ns: 1_000_000_000,
+                    samples: Arc::from(samples),
+                })]);
+                s.series = Arc::new(set);
+            });
+            draw(r.vcx);
+        }
+        let after = renders(&mut r);
+        assert!(
+            after.1 > before.1,
+            "the CPU chart re-rendered: {before:?} {after:?}"
+        );
+        assert_eq!(after.0, before.0, "the summary view did not");
+    }
+
+    /// The summary sends its own part (CPU at the fast rate); the hidden device page withdraws
+    /// its part; the sidebar keeps its own; a hidden window drops them all.
+    #[gpui_kit::test]
+    fn summary_demand_on_off_and_hidden(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        select(&mut r, "memory");
+        let memory = {
+            let page = r.page.clone();
+            r.vcx.update(|_, cx| {
+                page.read(cx)
+                    .page(&key("memory"))
+                    .expect("memory page built")
+                    .clone()
+                    .downcast::<MemoryPage>()
+                    .expect("a MemoryPage")
+            })
+        };
+        let off = merged(&mut r);
+        assert!(off.any_surface_visible && off.memory);
+        assert!(!off.cpu_fast, "the CPU page is not shown");
+
+        enter(&mut r);
+        let on = merged(&mut r);
+        assert!(on.any_surface_visible);
+        assert!(on.cpu_fast, "the CPU tile runs at 10 Hz");
+        assert!(
+            on.disks && on.nets && on.gpus,
+            "the sidebar keeps its part: {on:?}"
+        );
+        assert!(
+            !r.vcx.read_entity(&memory, |p, _| p.is_active()),
+            "page part withdrawn"
+        );
+
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        let back = merged(&mut r);
+        assert!(!back.cpu_fast, "the summary part is gone");
+        assert!(r.vcx.read_entity(&memory, |p, _| p.is_active()));
+        assert_eq!(back, off);
+
+        // Hidden: a change waits over 1 s for a render, and every main-window part drops out.
+        enter(&mut r);
+        assert!(merged(&mut r).cpu_fast);
+        r.engine
+            .publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
+        r.vcx.run_until_parked();
+        r.vcx.executor().advance_clock(Duration::from_millis(1600));
+        r.vcx.run_until_parked();
+        let hub = r.hub.clone();
+        assert!(r.vcx.read_entity(&hub, |h, _| h.is_hidden()));
+        assert_eq!(merged(&mut r), Demand::default());
+    }
+}
