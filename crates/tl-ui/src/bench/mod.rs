@@ -2,5 +2,9 @@
 //! Built only with `--features bench`.
 
 pub mod engine;
+pub mod scenes;
 pub mod stats;
 pub mod synth;
+
+pub use scenes::{BenchError, BenchOptions, BenchScene, run};
+pub use stats::BenchClocks;

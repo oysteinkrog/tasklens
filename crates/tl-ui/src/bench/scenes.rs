@@ -1,0 +1,373 @@
+//! Bench scenes `perf-cpu`, `static` and `bridge` and the run loop (ADR-014, UI-PRF-053,
+//! E01-007).
+//!
+//! A scene opens one window with the production Performance tab, CPU page selected, fed by
+//! [`BenchEngine`]. [`run`] waits out the warm-up, takes its baselines, measures for the
+//! duration, builds the [`BenchReport`], writes the JSON when asked, prints it on one line and
+//! quits. Nothing runs while measuring but the scene's own views: one timer waits out the
+//! duration, and the frame probe records each frame.
+
+use std::cell::RefCell;
+use std::fmt;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Context, Entity, IntoElement,
+    ParentElement as _, Render, Styled as _, Task, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowDecorations, WindowOptions, div, px, size,
+};
+use rustc_hash::FxHashSet;
+use tl_model::client::EngineClient;
+use tl_model::settings::{Settings, ThemeSettings, UiState};
+use tl_model::time::now_boot_ns;
+
+use super::engine::{BenchEngine, BenchFeed};
+use super::stats::{
+    BenchClocks, BenchReport, FrameProbe, LatencyPct, PROBE_CAPACITY, count_missed, percentiles_ms,
+    process_cpu_pct, read_rss_pss_mb, write_json,
+};
+use super::synth::SEED;
+use crate::anim::{AnimationDriver, PaintRecord};
+use crate::app::{AppEnv, TasklensUi, UiInit};
+use crate::demand::GlobalDemand;
+use crate::hub::GlobalHub;
+use crate::pages::performance::cpu::CpuPage;
+use crate::pages::performance::{DeviceKey, PerformancePage};
+use crate::window::main::APP_ID;
+
+/// Phase-0 fixture window size, logical px.
+pub const WINDOW_W: f32 = 1600.;
+pub const WINDOW_H: f32 = 1000.;
+/// UI-PRF-053: `bridge` needs this many real samples in 30 s.
+pub const BRIDGE_MIN_SAMPLES_30S: u64 = 295;
+
+/// A bench scene (APP-052 `--bench <scene>`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchScene {
+    PerfCpu,
+    Table2000,
+    Bridge,
+    Static,
+}
+
+impl BenchScene {
+    pub const ALL: [BenchScene; 4] = [Self::PerfCpu, Self::Table2000, Self::Bridge, Self::Static];
+
+    /// "perf-cpu", "table-2000", "bridge" or "static".
+    pub fn from_arg(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|scene| scene.as_str() == s)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PerfCpu => "perf-cpu",
+            Self::Table2000 => "table-2000",
+            Self::Bridge => "bridge",
+            Self::Static => "static",
+        }
+    }
+}
+
+/// `--duration`, `--warmup` and `--json`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BenchOptions {
+    pub duration_s: u32,
+    pub warmup_s: u32,
+    pub json: Option<PathBuf>,
+}
+
+impl Default for BenchOptions {
+    fn default() -> Self {
+        Self {
+            duration_s: 30,
+            warmup_s: 5,
+            json: None,
+        }
+    }
+}
+
+/// Why a scene failed. tl-app prints it and exits 1 (E01-009).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BenchError(pub String);
+
+impl fmt::Display for BenchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BenchError {}
+
+/// The fixture settings of `scene` (UI-PRF-053 common fixture): Default Dark, 100% UI scale,
+/// 60 s graph range, kernel overlays on, smooth graphs except in `static`, CPU page selected
+/// with the sidebar at 252 px.
+pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
+    let mut settings = Settings::default();
+    settings.theme = ThemeSettings::default();
+    settings.appearance.ui_scale_pct = 100;
+    settings.motion.smooth_graphs = scene != BenchScene::Static;
+    settings.performance.graph_range_s = 60;
+    settings.performance.cpu_kernel = true;
+    let mut state = UiState::default();
+    state.performance.nav_width = 252;
+    state.performance.selected_device = DeviceKey::CPU.to_owned();
+    (settings, state)
+}
+
+/// The scene window's root: the Performance tab and the window's animation driver.
+pub struct SceneView {
+    page: Entity<PerformancePage>,
+    driver: Entity<AnimationDriver>,
+}
+
+impl SceneView {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let driver = cx.new(AnimationDriver::new);
+        AnimationDriver::register(&driver, window, cx);
+        let hub = cx.global::<GlobalHub>().0.clone();
+        let demand = cx.global::<GlobalDemand>().0.clone();
+        // Hidden-state demand follows this window as it follows the main window.
+        let handle = window.window_handle();
+        demand.update(cx, |d, _| d.set_main_window(handle));
+        let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
+        let cpu = page
+            .read(cx)
+            .page(&DeviceKey(Arc::from(DeviceKey::CPU)))
+            .and_then(|view| view.clone().downcast::<CpuPage>().ok());
+        if let Some(cpu) = cpu {
+            cpu.update(cx, |cpu, cx| {
+                cpu.bench_show_both = true;
+                cx.notify();
+            });
+        }
+        let focus = page.read(cx).primary_focus();
+        focus.focus(window, cx);
+        Self { page, driver }
+    }
+
+    pub fn page(&self) -> &Entity<PerformancePage> {
+        &self.page
+    }
+
+    pub fn driver(&self) -> &Entity<AnimationDriver> {
+        &self.driver
+    }
+}
+
+impl Render for SceneView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.page.clone())
+    }
+}
+
+/// An open scene window.
+pub struct SceneWindow {
+    pub handle: AnyWindowHandle,
+    pub view: Entity<SceneView>,
+}
+
+/// Initialises the UI over `client` with the fixture settings of `scene` and opens the scene
+/// window. The Processes tab and every other tab are never built.
+pub fn open_scene(
+    cx: &mut App,
+    scene: BenchScene,
+    client: Arc<dyn EngineClient>,
+) -> Result<SceneWindow, BenchError> {
+    let (settings, state) = fixture(scene);
+    // The sender drops at once; tl-app's single-instance requests do not reach a bench run.
+    let (_requests, app_requests) = async_channel::bounded(4);
+    TasklensUi::init(
+        cx,
+        client,
+        UiInit {
+            settings,
+            state,
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        },
+    );
+    let bounds = Bounds::centered(None, size(px(WINDOW_W), px(WINDOW_H)), cx);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_decorations: Some(WindowDecorations::Client),
+        window_background: WindowBackgroundAppearance::Opaque,
+        app_id: Some(APP_ID.into()),
+        focus: true,
+        show: true,
+        ..Default::default()
+    };
+    let (handle, view) = gpui_kit::open_window(options, cx, |window, cx| {
+        cx.new(|cx| SceneView::new(window, cx))
+    })
+    .map_err(|e| BenchError(format!("cannot open the bench window: {e}")))?;
+    Ok(SceneWindow { handle, view })
+}
+
+/// Runs `scene` and returns its report. Called by tl-app inside `Application::run`. `real` is
+/// `Some` only for `bridge`. On success the report is printed as one JSON line and the app
+/// quits; on failure tl-app prints the error.
+pub fn run(
+    cx: &mut App,
+    scene: BenchScene,
+    opts: BenchOptions,
+    clocks: BenchClocks,
+    real: Option<Arc<dyn EngineClient>>,
+) -> Task<Result<BenchReport, BenchError>> {
+    let feed = match (scene, real) {
+        (BenchScene::Table2000, _) => {
+            return Task::ready(Err(BenchError(
+                "table-2000: the scene is not built yet (E01-008)".to_owned(),
+            )));
+        }
+        (BenchScene::Bridge, Some(real)) => BenchFeed::Bridge(real),
+        (BenchScene::Bridge, None) => {
+            return Task::ready(Err(BenchError("bridge: no real engine client".to_owned())));
+        }
+        _ => BenchFeed::Synthetic,
+    };
+    let engine = BenchEngine::start(feed, SEED, now_boot_ns());
+    let window = match open_scene(cx, scene, engine.clone()) {
+        Ok(window) => window,
+        Err(e) => return Task::ready(Err(e)),
+    };
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let result = measure(cx, scene, &opts, clocks, &engine, &window).await;
+        engine.stop();
+        let report = result?;
+        if let Some(path) = &opts.json {
+            write_json(&report, path)
+                .map_err(|e| BenchError(format!("cannot write {}: {e}", path.display())))?;
+        }
+        let line = serde_json::to_string(&report)
+            .map_err(|e| BenchError(format!("cannot serialize the report: {e}")))?;
+        println!("{line}");
+        cx.update(|cx| cx.quit());
+        Ok(report)
+    })
+}
+
+/// Warm-up, baselines, the measured window and the report.
+async fn measure(
+    cx: &mut AsyncApp,
+    scene: BenchScene,
+    opts: &BenchOptions,
+    clocks: BenchClocks,
+    engine: &BenchEngine,
+    window: &SceneWindow,
+) -> Result<BenchReport, BenchError> {
+    let closed = |_| BenchError("the bench window closed".to_owned());
+    let bridge = scene == BenchScene::Bridge;
+    let driver = cx.update(|cx| window.view.read(cx).driver.clone());
+
+    // The probe arms `on_next_frame` every frame, so `static` runs without it.
+    let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, PROBE_CAPACITY)));
+    if scene != BenchScene::Static {
+        let probe = Rc::clone(&probe);
+        window
+            .handle
+            .update(cx, |_, window, _| FrameProbe::start(probe, window))
+            .map_err(closed)?;
+    }
+
+    let executor = cx.background_executor().clone();
+    executor
+        .timer(Duration::from_secs(u64::from(opts.warmup_s)))
+        .await;
+
+    // Baselines, taken after the warm-up.
+    probe.borrow_mut().reset();
+    let stalls_at = cx.update(|cx| {
+        driver.update(cx, |d, _| {
+            if bridge {
+                d.install_paint_log();
+            }
+            d.stats.stalls
+        })
+    });
+    let samples_at = engine.bridge_samples();
+    let cpu_at = (clocks.process_cpu_ns)();
+    let wall_at = Instant::now();
+
+    executor
+        .timer(Duration::from_secs(u64::from(opts.duration_s)))
+        .await;
+
+    let cpu_ns = (clocks.process_cpu_ns)().saturating_sub(cpu_at);
+    let wall_ns = u64::try_from(wall_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    probe.borrow_mut().stop();
+    let samples = engine.bridge_samples().saturating_sub(samples_at);
+    let (requested, stalls, paint_log) = cx.update(|cx| {
+        driver.update(cx, |d, _| {
+            (d.stats.requested, d.stats.stalls, d.take_paint_log())
+        })
+    });
+
+    if scene == BenchScene::Static && requested != 0 {
+        return Err(BenchError(
+            "static scene requested animation frames".to_owned(),
+        ));
+    }
+    if bridge {
+        let needed = BRIDGE_MIN_SAMPLES_30S * u64::from(opts.duration_s) / 30;
+        if samples < needed {
+            return Err(BenchError(format!(
+                "bridge: only {samples} samples arrived"
+            )));
+        }
+    }
+
+    let probe = probe.borrow();
+    let intervals = probe.intervals_ns();
+    let (missed, long_missed) = count_missed(intervals);
+    let (rss_mb, pss_mb) = read_rss_pss_mb();
+    let bridge_latency_ms = paint_log
+        .filter(|_| bridge)
+        .and_then(|log| bridge_latency(&log.records, engine));
+    Ok(BenchReport {
+        scene: scene.as_str(),
+        frames: intervals.len() as u64,
+        frame_cpu_ms: percentiles_ms(probe.cpu_ns()),
+        missed_frames: missed,
+        long_missed_frames: long_missed,
+        process_cpu_pct: process_cpu_pct(cpu_ns, wall_ns),
+        probe_cpu_pct: None,
+        rss_mb,
+        pss_mb,
+        stalls: u32::try_from(stalls.saturating_sub(stalls_at)).unwrap_or(u32::MAX),
+        bridge_latency_ms,
+        gpu: None,
+    })
+}
+
+/// Wake-to-render latency (UI-PRF-053): for each real sample, `published_ns` of the snapshot
+/// that first carried it to the first paint whose newest sample is that one. Paints of
+/// synthetic series have no bridge origin and are skipped. `None` when no real sample was
+/// painted.
+fn bridge_latency(records: &[PaintRecord], engine: &BenchEngine) -> Option<LatencyPct> {
+    let mut seen = FxHashSet::default();
+    let mut latencies = Vec::new();
+    for r in records {
+        if seen.contains(&r.newest_ns) {
+            continue;
+        }
+        if let Some(published) = engine.bridge_origin(r.newest_ns) {
+            seen.insert(r.newest_ns);
+            latencies.push(r.painted_at_ns.saturating_sub(published));
+        }
+    }
+    if latencies.is_empty() {
+        return None;
+    }
+    let p = percentiles_ms(&latencies);
+    Some(LatencyPct {
+        p50: p.p50,
+        p99: p.p99,
+    })
+}
