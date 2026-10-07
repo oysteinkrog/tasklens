@@ -483,12 +483,13 @@ fn shutdown_times_out_on_blocked_job() {
 }
 
 #[test]
-fn shutdown_not_torn_down_with_live_clone() {
+fn shutdown_torn_down_with_live_clone() {
     let handle = start_wall_cpu();
     let clone = handle.clone();
     let report = handle.shutdown(Duration::from_secs(2));
-    // The clone still holds `Inner` and with it a `RuntimeHandle` (API notes section 8).
-    assert!(!report.torn_down, "{report:?}");
+    // The clone still holds `Inner`, but `shutdown` took its `RuntimeHandle` out, as `tl-app`
+    // needs: GPUI never drops the UI's clone (tasklens-8hz.13).
+    assert!(report.torn_down, "{report:?}");
     assert!(
         report.elapsed < DRAIN_BUDGET + TEARDOWN_BUDGET,
         "{report:?}"
@@ -499,6 +500,4 @@ fn shutdown_not_torn_down_with_live_clone() {
         Err(CommandError::EngineStopped)
     );
     assert!(clone.action_events().is_closed());
-    // Dropping the clone lets the background teardown finish.
-    drop(clone);
 }

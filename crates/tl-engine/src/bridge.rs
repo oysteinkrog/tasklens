@@ -115,8 +115,8 @@ struct Inner {
     last_demand: Mutex<Demand>,
     journal: Option<JournalSpawner>,
     rt: Mutex<Option<Runtime>>,
-    /// Spawns the default journal reader in `EngineClient::journal`. Dropped with `Inner`, so a
-    /// live `EngineHandle` clone keeps the runtime alive.
+    /// Spawns the default journal reader in `EngineClient::journal`. `shutdown` takes it out, so
+    /// a live `EngineHandle` clone does not keep the runtime alive.
     rt_handle: Mutex<Option<RuntimeHandle>>,
     stopped: AtomicBool,
 }
@@ -169,8 +169,9 @@ impl EngineHandle {
     }
 
     /// Stops the engine in the five ADR-004 steps and consumes the handle. Call it on the main
-    /// thread after GPUI has stopped (ADR-010), and drop every other `EngineHandle` clone first:
-    /// a live clone keeps the runtime alive, so teardown cannot finish and `torn_down` is false.
+    /// thread after GPUI has stopped (ADR-010). Other `EngineHandle` clones may stay alive: GPUI
+    /// never drops its app state, so `tl-app` cannot drop the UI's clone. They see a stopped
+    /// engine afterwards.
     ///
     /// `total` is advisory. `DRAIN_BUDGET` and `TEARDOWN_BUDGET` are the real bounds, 1.5 s
     /// together. A blocking job that is still running is not interrupted; teardown then goes on
@@ -202,8 +203,15 @@ impl EngineHandle {
         };
         // Step 2: cancel the root region with `CancelKind::Shutdown` and wait for it.
         let drained = rt.drain_root_region(DRAIN_BUDGET) == RootDrainOutcome::Quiescent;
-        // Step 3: drop `rt_handle`. This is the last owner of `Inner` unless the caller kept a
-        // clone.
+        // Step 3: drop every `RuntimeHandle` clone. A live `EngineHandle` clone keeps `Inner`,
+        // so take the handle out rather than wait for `Inner` to drop.
+        drop(
+            inner
+                .rt_handle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
         drop(inner);
         // Step 4.
         let torn_down = rt.shutdown_timeout(TEARDOWN_BUDGET);
