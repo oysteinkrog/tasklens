@@ -23,7 +23,7 @@ use tl_model::table::{ServiceColumn, SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
 use tl_ui::components::menu::{TlMenu, context_menu_layer};
 use tl_ui::components::tooltip::DELAY_CONTROL;
-use tl_ui::components::validity::{GlyphContent, glyph_parts};
+use tl_ui::components::validity::{GlyphContent, GlyphCtx, glyph_parts, tooltip_text};
 use tl_ui::table::actions::{
     CollapseAll, CollapseOrParent, CopyRow, CopyRowsAsTable, ExpandOrChild, MoveFocus,
     MoveFocusEdge, MoveFocusPage, OpenContextMenu, OpenProperties, SelectAll, TABLE_CONTEXT,
@@ -404,6 +404,11 @@ struct TDelegate {
     cells: Vec<(u32, ColumnId, &'static str, Validity)>,
     /// Every `context_menu` call: the targets and the clicked column.
     menu_calls: Vec<(Vec<u32>, ColumnId)>,
+    /// Every `cell` call, and the row index of each call that had `want_tooltip` set.
+    cell_calls: Cell<usize>,
+    tip_rows: RefCell<Vec<usize>>,
+    /// Every Stale tooltip `cell` built.
+    tips_built: RefCell<Vec<SharedString>>,
 }
 
 impl TDelegate {
@@ -433,6 +438,9 @@ impl TDelegate {
             version: 1,
             cells: Vec::new(),
             menu_calls: Vec::new(),
+            cell_calls: Cell::new(0),
+            tip_rows: RefCell::new(Vec::new()),
+            tips_built: RefCell::new(Vec::new()),
         }
     }
 
@@ -493,6 +501,10 @@ impl TreeTableDelegate for TDelegate {
             .expect("spec for every column")
     }
     fn cell(&self, ix: usize, col: ColumnId, out: &mut CellOut) {
+        self.cell_calls.set(self.cell_calls.get() + 1);
+        if out.want_tooltip {
+            self.tip_rows.borrow_mut().push(ix);
+        }
         let id = self.rows[ix].id;
         if let Some(k) = self.cells.iter().position(|c| c.0 == id && c.1 == col) {
             let (_, _, text, validity) = self.cells[k];
@@ -500,6 +512,14 @@ impl TreeTableDelegate for TDelegate {
             out.validity = validity;
             if out.want_text {
                 out.text.push_str(text);
+            }
+            if out.want_tooltip && validity == Validity::Stale {
+                let ctx = GlyphCtx {
+                    age_ns: 12_000_000_000,
+                    ..GlyphCtx::default()
+                };
+                out.tooltip = tooltip_text(validity, &ctx);
+                self.tips_built.borrow_mut().extend(out.tooltip.clone());
             }
             return;
         }
@@ -2727,4 +2747,60 @@ fn separators_move_with_horizontal_scroll() {
     for (a, b) in after.iter().zip(&before) {
         assert_eq!(a.left(), b.left() - px(100.));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// tasklens-rsf.25: `CellOut::want_tooltip` on the hovered row only.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn want_tooltip_only_on_hovered_row() {
+    let mut cx = cosmic_cx();
+    let mut d = TDelegate::new((0..3).map(plain).collect());
+    d.cells = vec![(1, ColumnId::Cpu, "4.0%", Validity::Stale)];
+    let (table, vcx) = open_table(&mut cx, d, 600., 200.);
+
+    // 60 frames with no hover: cells are built, but none is asked for a tooltip.
+    let calls_before = vcx.update(|_, cx| table.read(cx).delegate.cell_calls.get());
+    for _ in 0..60 {
+        vcx.update(|window, _| window.refresh());
+        redraw(vcx);
+    }
+    let (calls, tip_rows, built) = vcx.update(|_, cx| {
+        let d = &table.read(cx).delegate;
+        (
+            d.cell_calls.get(),
+            d.tip_rows.borrow().clone(),
+            d.tips_built.borrow().len(),
+        )
+    });
+    assert!(calls > calls_before, "the frames built cells");
+    assert!(tip_rows.is_empty(), "no row is hovered: {tip_rows:?}");
+    assert_eq!(built, 0, "no tooltip text allocated");
+
+    // Hover the Stale CPU cell of row 1 (Name is 248 px wide, CPU 80 px). The first move sets
+    // the hovered row, the second makes its tooltips ready, the third starts the tooltip delay.
+    for _ in 0..3 {
+        hover_at(vcx, 290., HEADER_H + 28. + 14.);
+    }
+    vcx.executor().advance_clock(DELAY_CONTROL * 2);
+    redraw(vcx);
+    let (tip_rows, built) = vcx.update(|_, cx| {
+        let d = &table.read(cx).delegate;
+        (d.tip_rows.borrow().clone(), d.tips_built.borrow().clone())
+    });
+    assert!(!tip_rows.is_empty(), "the hovered row asks for tooltips");
+    assert!(
+        tip_rows.iter().all(|&ix| ix == 1),
+        "only row 1 is hovered: {tip_rows:?}"
+    );
+    assert!(
+        built.iter().all(|t| t.as_ref() == "Last updated 12s ago"),
+        "{built:?}"
+    );
+    assert!(!built.is_empty());
+    assert!(
+        vcx.debug_bounds("TlTooltip").is_some(),
+        "the Stale cell shows its age tooltip"
+    );
 }
