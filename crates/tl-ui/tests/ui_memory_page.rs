@@ -579,3 +579,205 @@ mod composition {
         assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "bar drawn");
     }
 }
+
+// Memory Details rows (E25, UI-PRF-028; PERF-043).
+
+mod details {
+    use tl_model::system::{Metric, ZramTotals};
+    use tl_ui::pages::performance::details::KeyValueModel;
+    use tl_ui::pages::performance::memory::{
+        MemoryDetailInputs, memory_details_model, update_memory_details,
+    };
+
+    use super::*;
+
+    const MIB: u64 = 1 << 20;
+    const KIB: u64 = 1 << 10;
+
+    fn gib(x: f64) -> u64 {
+        (x * GIB as f64).round() as u64
+    }
+
+    /// The memory record of [`system`] with every row field set.
+    fn record() -> tl_model::system::MemoryTotals {
+        let mut m = system(64 * GIB, gib(67.20), 32 * GIB).memory;
+        m.committed = gib(46.20);
+        m.cached = gib(12.40);
+        m.free = 10 * GIB;
+        m.slab_reclaimable = gib(1.10);
+        m.slab_unreclaimable = 420 * MIB;
+        m.swap_free = gib(30.80);
+        m.zswap = 512 * MIB;
+        m.zswapped = 2 * GIB;
+        m.zram = Metric::valid(ZramTotals {
+            orig_data: GIB,
+            compr_data: 256 * MIB,
+            mem_used: 512 * MIB,
+        });
+        m.huge_pages_total = 2048;
+        m.huge_page_size = 2 * MIB;
+        m
+    }
+
+    /// The model updated from `m`, with translated labels.
+    fn model(cx: &mut TestAppContext, m: &tl_model::system::MemoryTotals) -> KeyValueModel {
+        let mut model = memory_details_model();
+        let inp = MemoryDetailInputs {
+            mem: m,
+            now_boot_ns: 0,
+            observed_end_ns: 0,
+            error: None,
+        };
+        update_memory_details(&mut model, &inp);
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            model.refresh_strings(cx);
+            model.refresh_labels(cx);
+        });
+        model
+    }
+
+    fn rows(model: &KeyValueModel) -> Vec<(String, String)> {
+        model
+            .to_kv_rows()
+            .map(|r| (r.label.to_string(), r.value.text.to_string()))
+            .collect()
+    }
+
+    fn value(model: &KeyValueModel, label: &str) -> Option<String> {
+        rows(model)
+            .into_iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| v)
+    }
+
+    #[gpui_kit::test]
+    fn memory_details_order(cx: &mut TestAppContext) {
+        let model = model(cx, &record());
+        let labels: Vec<String> = rows(&model).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            labels,
+            [
+                "In use",
+                "Available",
+                "Committed",
+                "Cached",
+                "Kernel slab (reclaimable)",
+                "Kernel slab (unreclaimable)",
+                "Swap used",
+                "Swap available",
+                "Compressed",
+                "Savings",
+                "Huge pages",
+            ]
+        );
+        assert_eq!(model.rows.len(), 16);
+        let values: Vec<String> = rows(&model).into_iter().map(|(_, v)| v).collect();
+        assert_eq!(
+            values,
+            [
+                "32.00 GiB",
+                "32.00 GiB",
+                "46.20 GiB / 67.20 GiB",
+                "12.40 GiB",
+                "1.10 GiB",
+                "420.00 MiB",
+                "1.20 GiB",
+                "30.80 GiB",
+                "1.00 GiB",
+                // (1 GiB + 2 GiB) − (256 MiB + 512 MiB)
+                "2.25 GiB",
+                "2\u{2009}048 × 2 MiB",
+            ]
+        );
+        let tip = |label: &str| {
+            model
+                .to_kv_rows()
+                .find(|r| r.label.as_ref() == label)
+                .and_then(|r| r.value.tooltip.map(|t| t.to_string()))
+        };
+        assert_eq!(
+            tip("Kernel slab (reclaimable)").as_deref(),
+            Some("SReclaimable")
+        );
+        assert_eq!(
+            tip("Kernel slab (unreclaimable)").as_deref(),
+            Some("SUnreclaim")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn memory_hidden_rows_rule(cx: &mut TestAppContext) {
+        let mut m = record();
+        m.zram = Metric::with(Validity::Unsupported);
+        m.zswap = 512 * KIB;
+        let small = model(cx, &m);
+        assert_eq!(value(&small, "Compressed"), None);
+        assert_eq!(value(&small, "Savings"), None);
+        m.zswap = MIB;
+        let shown = model(cx, &m);
+        assert_eq!(value(&shown, "Compressed").as_deref(), Some("1.00 MiB"));
+        assert!(value(&shown, "Savings").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn memory_huge_pages_format(cx: &mut TestAppContext) {
+        let mut m = record();
+        m.huge_pages_total = 0;
+        assert_eq!(value(&model(cx, &m), "Huge pages"), None);
+        m.huge_pages_total = 2048;
+        assert_eq!(
+            value(&model(cx, &m), "Huge pages").as_deref(),
+            Some("2\u{2009}048 × 2 MiB")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn memory_committed_composite(cx: &mut TestAppContext) {
+        let model = model(cx, &record());
+        assert_eq!(
+            value(&model, "Committed").as_deref(),
+            Some("46.20 GiB / 67.20 GiB")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn memory_details_collecting_and_failed(cx: &mut TestAppContext) {
+        let mut m = record();
+        m.validity = Validity::WarmingUp;
+        let warming = model(cx, &m);
+        assert!(rows(&warming).iter().all(|(_, v)| v == "Collecting…"));
+
+        m.validity = Validity::Failed;
+        let mut failed = memory_details_model();
+        let inp = MemoryDetailInputs {
+            mem: &m,
+            now_boot_ns: 0,
+            observed_end_ns: 0,
+            error: Some("read /proc/meminfo: EACCES"),
+        };
+        update_memory_details(&mut failed, &inp);
+        let row = failed.rows.iter().find(|r| !r.hidden).expect("a row");
+        assert_eq!(row.value.as_ref(), "Unavailable");
+        assert_eq!(
+            row.tooltip.as_deref(),
+            Some("Could not read: read /proc/meminfo: EACCES")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn memory_page_details_from_snapshot(cx: &mut TestAppContext) {
+        let mut sys = system(64 * GIB, 80 * GIB, 0);
+        sys.memory.cached = gib(12.40);
+        let r = open(cx, Settings::default(), sys);
+        let page = r.page.clone();
+        let cached = r.vcx.update(|_, cx| {
+            let d = page.read(cx).details();
+            d.refresh_labels(cx);
+            d.to_kv_rows()
+                .find(|row| row.label.as_ref() == "Cached")
+                .map(|row| row.value.text.to_string())
+        });
+        assert_eq!(cached.as_deref(), Some("12.40 GiB"));
+    }
+}
