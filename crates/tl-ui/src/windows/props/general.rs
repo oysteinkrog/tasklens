@@ -10,8 +10,15 @@
 //!
 //! Hashes and Verify against package (UI-PWN-008): the hex strings are formatted once per
 //! `HashState`; the Verify button sits in its own row under `Package status:` and sends
-//! `Command::VerifyPackage`. Copy and links (E23-011) are a later bead on this file. Until then
-//! link fields draw as plain text.
+//! `Command::VerifyPackage`.
+//!
+//! Copy and links (E23-011, UI-PWN-007): a click on a value copies it (hashes as the full hex);
+//! PPID, Executable and Affinity are links. A right-click, Shift+F10 or the Menu key opens the
+//! field menu: Copy value, Copy row, Copy section (one column panel) and Copy all fields. The
+//! three panels are one focus stop (context `PropsWindow > KvGrid`) with a field cursor: Up and
+//! Down move in a column, Left and Right to the same row of the next column, Home and End to the
+//! ends, Enter runs a link or copies, Ctrl+C copies. After the process exited, links are plain
+//! text and copying still works. The Unit link comes with E23-016.
 //!
 //! The window block (UI-PWN-009) ends column 3 under a divider: the topmost KWin window of this
 //! pid from `Snapshot.windows`, fed by [`GeneralTab::set_windows`]. Captions and classes are
@@ -26,22 +33,25 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::base::input::Copy;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
-    prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, ClipboardItem,
+    Context, Entity, FocusHandle, FontWeight, Global, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, WeakEntity, Window, canvas, div, point, prelude::FluentBuilder as _,
+    px,
 };
 use rustc_hash::{FxHashMap, FxHasher};
-use tl_model::actions::SchedPolicy;
-use tl_model::command::Command;
+use smallvec::{SmallVec, smallvec};
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, SchedPolicy};
+use tl_model::command::{Command, Tab};
 use tl_model::details::{
     ElfArch, ExeLocation, GeneralDetail, GpuEngine, HashError, HashState, IdTriple, PackageCheck,
     Relro, Seccomp, TabPayload,
 };
 use tl_model::ids::ProcessKey;
-use tl_model::process::ProcessRecord;
+use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::settings::{NetworkUnit, UnitsSettings};
 use tl_model::snapshot::{FrameGeometry, WindowEntry, WindowsSnapshot};
 use tl_model::system::CpuSet;
@@ -51,21 +61,42 @@ use tl_model::validity::{ProcessField, Validity};
 use tracing::warn;
 
 use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
+use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
     KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
-    ValueTone, kv_words,
+    ValueTone, kv_words, shown_text_in, value_copy_form,
 };
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::Strings;
+use crate::hub::GlobalHub;
+use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::details::Template;
+use crate::pages::processes::ProcessesPage;
+use crate::pages::processes::jump::JumpTexts;
 use crate::settings_global::TlSettings;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{UiMetrics, current, metrics};
-use crate::windows::actions::PropsVerifyPackage;
+use crate::window::main::{ShellState, main_window_view};
+use crate::windows::actions::{
+    KV_GRID_CONTEXT, PropsActivateField, PropsCopyAllFields, PropsCopyValue, PropsFieldDown,
+    PropsFieldEnd, PropsFieldHome, PropsFieldLeft, PropsFieldMenu, PropsFieldRight, PropsFieldUp,
+    PropsVerifyPackage,
+};
+
+gpui_kit::actions!(
+    tasklens_general,
+    [
+        GeneralGoToParent,
+        GeneralOpenFileLocation,
+        GeneralSetAffinity,
+        GeneralCopyRow,
+        GeneralCopySection
+    ]
+);
 
 /// Tooltip of a Restricted value (R-050, P2 text; E23-025 adds the shield sentence in P3).
 pub const RESTRICTED_TOOLTIP: &str = "Needs administrator access.";
@@ -109,6 +140,18 @@ const KEY_NOT_RUNNING: &str = "pwn-props-not-running";
 const KEY_WINDOW_NONE: &str = "pwn-props-window-none";
 const KEY_WINDOW_NO_BRIDGE: &str = "pwn-props-window-no-bridge";
 const KEY_WINDOW_MORE: &str = "pwn-props-window-more";
+const KEY_LINK_PARENT: &str = "pwn-general-link-parent";
+const KEY_LINK_EXE: &str = "pwn-general-link-exe";
+const KEY_LINK_AFFINITY: &str = "pwn-general-link-affinity";
+const KEY_COPY_VALUE: &str = "pwn-general-copy-value";
+const KEY_COPY_ROW: &str = "pwn-general-copy-row";
+const KEY_COPY_SECTION: &str = "pwn-general-copy-section";
+const KEY_COPY_ALL: &str = "pwn-general-copy-all";
+const KEY_TOAST_VALUE_COPIED: &str = "pwn-general-toast-value-copied";
+const KEY_TOAST_COPIED: &str = "pwn-general-toast-copied";
+const KEY_TOAST_OPENING: &str = "pwn-general-toast-opening";
+const KEY_TOAST_OPEN_FAILED: &str = "pwn-general-toast-open-failed";
+const KEY_CMDLINE_LABEL: &str = "pwn-general-cmdline-label";
 /// Captions the "And N more" tooltip lists at most.
 const WINDOW_MORE_LISTED: usize = 10;
 
@@ -142,6 +185,23 @@ pub struct GeneralWords {
     pub window_no_bridge: SharedString,
     /// "And {n} more".
     window_more: Template,
+    /// Link tooltips.
+    pub link_parent: SharedString,
+    pub link_exe: SharedString,
+    pub link_affinity: SharedString,
+    /// Field menu items.
+    pub copy_value: SharedString,
+    pub copy_row: SharedString,
+    pub copy_section: SharedString,
+    pub copy_all: SharedString,
+    /// "Process property value copied.": a value copy.
+    pub toast_value_copied: SharedString,
+    /// "Copied to clipboard": a row, section or all fields.
+    pub toast_copied: SharedString,
+    pub toast_opening: SharedString,
+    pub toast_open_failed: SharedString,
+    /// The label of the command line in Copy all fields.
+    pub cmdline_label: SharedString,
 }
 
 impl GeneralWords {
@@ -164,6 +224,18 @@ impl GeneralWords {
             window_none: t(KEY_WINDOW_NONE),
             window_no_bridge: t(KEY_WINDOW_NO_BRIDGE),
             window_more: tmpl(KEY_WINDOW_MORE, &["n"]),
+            link_parent: t(KEY_LINK_PARENT),
+            link_exe: t(KEY_LINK_EXE),
+            link_affinity: t(KEY_LINK_AFFINITY),
+            copy_value: t(KEY_COPY_VALUE),
+            copy_row: t(KEY_COPY_ROW),
+            copy_section: t(KEY_COPY_SECTION),
+            copy_all: t(KEY_COPY_ALL),
+            toast_value_copied: t(KEY_TOAST_VALUE_COPIED),
+            toast_copied: t(KEY_TOAST_COPIED),
+            toast_opening: t(KEY_TOAST_OPENING),
+            toast_open_failed: t(KEY_TOAST_OPEN_FAILED),
+            cmdline_label: t(KEY_CMDLINE_LABEL),
         }
     }
 
@@ -207,7 +279,7 @@ pub fn general_words(cx: &mut App) -> Rc<GeneralWords> {
     words
 }
 
-/// What a link field opens. The click handlers come with E23-011.
+/// What a link field opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LinkTarget {
     /// PPID: Go to parent process.
@@ -1194,6 +1266,7 @@ impl CmdLineBlock {
 impl Render for CmdLineBlock {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *metrics(cx);
+        let copied = general_words(cx).toast_value_copied.clone();
         let theme = current(cx);
         let mut title = div().flex_1().min_w_0();
         *title.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
@@ -1201,12 +1274,18 @@ impl Render for CmdLineBlock {
             .truncate()
             .text_color(theme.text_secondary)
             .child(CMDLINE_TITLE);
+        let valid = self.validity.is_valid() || self.validity == Validity::Stale;
+        let text = self.text.clone();
         let copy = TlButton::new("general-cmdline-copy", TlButtonKind::Ghost)
             .size(TlButtonSize::Sm)
             .icon(TlIcon::Copy)
             .icon_size(px(COPY_ICON * m.ui_scale))
-            .label(CMDLINE_COPY);
-        let valid = self.validity.is_valid() || self.validity == Validity::Stale;
+            .label(CMDLINE_COPY)
+            .disabled(!valid)
+            .on_click(move |_, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                window_toast(window, cx, ToastKind::Success, copied.clone());
+            });
         let mut body = div().debug_selector(|| "GeneralTab-cmdline-text".into());
         *body.text_style() = t_sm(&m);
         let body = body
@@ -1273,6 +1352,18 @@ pub struct GeneralTab {
     label_widths: Option<(u64, [Pixels; 3])>,
     /// Body width from the last paint (inside the padding), zero before the first.
     width: Rc<Cell<Pixels>>,
+    /// The fields each column shows after the filter, in order; the field cursor indexes them.
+    visible: [Vec<FieldId>; 3],
+    /// How many of `visible[i]` the column's first grid draws; the rest are its tail grid.
+    main_len: [usize; 3],
+    /// Copy texts per column and grid (first, tail), by the grid's flat row index.
+    copies: [[Rc<[(usize, SharedString)]>; 2]; 3],
+    /// The field cursor: (column, index into `visible`).
+    cursor: Option<(usize, usize)>,
+    /// The panels' focus stop.
+    focus: FocusHandle,
+    /// Panel bounds from the last paint, to place the field menu opened from the keyboard.
+    panel_bounds: Rc<[Cell<Bounds<Pixels>>; 3]>,
     cmdline: Entity<CmdLineBlock>,
     filter: Entity<PropsFilter>,
     _subs: Vec<Subscription>,
@@ -1315,6 +1406,12 @@ impl GeneralTab {
             verify_row: false,
             label_widths: None,
             width: Rc::default(),
+            visible: Default::default(),
+            main_len: [0; 3],
+            copies: Default::default(),
+            cursor: None,
+            focus: cx.focus_handle().tab_stop(true),
+            panel_bounds: Rc::default(),
             cmdline: cx.new(|cx| CmdLineBlock::new(kv_words(cx))),
             filter,
             _subs: vec![sub],
@@ -1569,6 +1666,327 @@ impl GeneralTab {
         &self.cmdline
     }
 
+    /// The field cursor: (column, index into the column's shown fields).
+    pub fn cursor(&self) -> Option<(usize, usize)> {
+        self.cursor
+    }
+
+    /// The field under the cursor.
+    pub fn cursor_field(&self) -> Option<&KvField> {
+        let (col, row) = self.cursor?;
+        let id = *self.visible[col].get(row)?;
+        self.field(id)
+    }
+
+    /// The panels' focus stop.
+    pub fn grid_focus(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    /// Moves the cursor to (`col`, `row`), clamped to the column's last field. Does nothing for an
+    /// empty column.
+    pub fn set_cursor(&mut self, col: usize, row: usize, cx: &mut Context<Self>) {
+        let len = self.visible[col].len();
+        if len == 0 {
+            return;
+        }
+        let next = Some((col, row.min(len - 1)));
+        if next != self.cursor {
+            self.cursor = next;
+            cx.notify();
+        }
+    }
+
+    /// The first column with a field, for a cursor key with no cursor yet.
+    fn first_cursor(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.cursor.is_some() {
+            return false;
+        }
+        if let Some(col) = (0..3).find(|&c| !self.visible[c].is_empty()) {
+            self.set_cursor(col, 0, cx);
+        }
+        true
+    }
+
+    fn step_row(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.first_cursor(cx) {
+            return;
+        }
+        let Some((col, row)) = self.cursor else {
+            return;
+        };
+        let row = row.saturating_add_signed(delta);
+        self.set_cursor(col, row, cx);
+    }
+
+    /// Left or Right: the same row index in the next column with fields, clamped to its last row.
+    fn step_column(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.first_cursor(cx) {
+            return;
+        }
+        let Some((col, row)) = self.cursor else {
+            return;
+        };
+        let next = if forward {
+            (col + 1..3).find(|&c| !self.visible[c].is_empty())
+        } else {
+            (0..col).rev().find(|&c| !self.visible[c].is_empty())
+        };
+        if let Some(next) = next {
+            self.set_cursor(next, row, cx);
+        }
+    }
+
+    fn row_end(&mut self, last: bool, cx: &mut Context<Self>) {
+        self.first_cursor(cx);
+        if let Some((col, _)) = self.cursor {
+            let row = if last { usize::MAX } else { 0 };
+            self.set_cursor(col, row, cx);
+        }
+    }
+
+    /// The copy form of a field: the full text for a shortened value, else the shown text.
+    fn copy_text(&self, field: &KvField) -> String {
+        if let Some(full) = &field.full {
+            return full.to_string();
+        }
+        let row = to_row(field, self.exited, &self.general_words);
+        let shown = shown_text_in(&row.value, &self.words).unwrap_or_default();
+        value_copy_form(&shown).into_owned()
+    }
+
+    fn row_line(&self, field: &KvField) -> String {
+        line(&field.label, &self.copy_text(field))
+    }
+
+    fn column_lines(&self, col: usize) -> impl Iterator<Item = String> + '_ {
+        self.visible[col]
+            .iter()
+            .filter_map(|id| self.field(*id))
+            .map(|f| self.row_line(f))
+    }
+
+    /// Copy all fields: every shown field of the three columns as `Label: value` lines in column
+    /// order, then the command line.
+    pub fn all_fields_text(&self, cx: &App) -> String {
+        let mut lines: Vec<String> = (0..3).flat_map(|c| self.column_lines(c)).collect();
+        let cmdline = self.cmdline.read(cx).text();
+        lines.push(line(&self.general_words.cmdline_label, cmdline));
+        lines.join("\n")
+    }
+
+    fn copy(&self, text: String, kind_value: bool, window: &mut Window, cx: &mut App) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let words = &self.general_words;
+        let toast = if kind_value {
+            words.toast_value_copied.clone()
+        } else {
+            words.toast_copied.clone()
+        };
+        window_toast(window, cx, ToastKind::Success, toast);
+    }
+
+    fn copy_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.cursor_field().map(|f| self.copy_text(f)) {
+            self.copy(text, true, window, cx);
+        }
+    }
+
+    fn copy_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.cursor_field().map(|f| self.row_line(f)) {
+            self.copy(text, false, window, cx);
+        }
+    }
+
+    fn copy_section(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((col, _)) = self.cursor {
+            let text = self.column_lines(col).collect::<Vec<_>>().join("\n");
+            self.copy(text, false, window, cx);
+        }
+    }
+
+    pub fn copy_all_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.all_fields_text(cx);
+        self.copy(text, false, window, cx);
+    }
+
+    /// Enter: runs the cursor field's link, or copies its value.
+    fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = self.cursor_field() else {
+            return;
+        };
+        let link = (!self.exited && field.validity == Validity::Valid)
+            .then(|| link_of(field, &self.general_words))
+            .flatten();
+        match link.map(|_| field.kind) {
+            Some(KvKind::Link(LinkTarget::Parent)) => self.go_to_parent(window, cx),
+            Some(KvKind::Link(LinkTarget::Executable)) => self.open_file_location(window, cx),
+            Some(KvKind::Link(LinkTarget::Affinity)) => self.set_affinity(window, cx),
+            _ => self.copy_value(window, cx),
+        }
+    }
+
+    /// The PPID link: the Processes page selects the live parent through its jump target
+    /// (PROC-071), and the main window comes to the front.
+    pub fn go_to_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ppid) = self.live.as_ref().map(|l| l.ppid).filter(|p| *p != 0) else {
+            return;
+        };
+        let parent = cx.try_global::<GlobalHub>().and_then(|hub| {
+            hub.0
+                .read(cx)
+                .current()
+                .processes
+                .records
+                .iter()
+                .find(|r| r.key.pid == ppid && !r.flags.contains(ProcFlags::EXITED))
+                .map(|r| r.key)
+        });
+        let not_found = tr(cx, "processes-toast-parent-not-found");
+        let Some(parent) = parent else {
+            window_toast(window, cx, ToastKind::Warning, not_found);
+            return;
+        };
+        let texts = JumpTexts {
+            success: Some(tr(cx, "processes-toast-switched-to-parent")),
+            not_found: not_found.clone(),
+            hidden: Some(not_found),
+            switched_tab: None,
+        };
+        let main = cx.try_global::<ShellState>().and_then(|s| s.main_window);
+        let page = main_window_view(cx)
+            .and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
+        let (Some(main), Some(page)) = (main, page) else {
+            warn!(target: "tasklens::ui", "no Processes page for Go to parent process");
+            return;
+        };
+        let _ = main.update(cx, |_, window, cx| {
+            window.activate_window();
+            page.update(cx, |p, cx| p.select_by_key(parent, texts, window, cx));
+        });
+    }
+
+    /// The Executable link: the file manager shows the executable (PROC-073).
+    pub fn open_file_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .payload
+            .as_ref()
+            .filter(|d| !d.exe_deleted && d.exe.validity.is_valid())
+            .map(|d| d.exe.value.clone())
+        else {
+            return;
+        };
+        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+            warn!(target: "tasklens::ui", "no action tracker, file location not opened");
+            return;
+        };
+        let Some(queue) = ToastQueue::of_window(window, cx) else {
+            return;
+        };
+        let request = ActionRequest {
+            id: ActionId(0),
+            kind: ActionKind::ShowInFileManager {
+                path,
+                properties: false,
+            },
+            targets: SmallVec::new(),
+            privileged: false,
+        };
+        let words = self.general_words.clone();
+        let texts = ToastTexts::new(SharedString::default(), words.toast_open_failed.clone());
+        let sent = tracker.update(cx, |t, cx| {
+            t.track_or_toast(request, queue.downgrade(), texts, cx)
+        });
+        if sent.is_some() {
+            window_toast(window, cx, ToastKind::Info, words.toast_opening.clone());
+        }
+    }
+
+    /// The Affinity link: the Set Affinity dialog for this process.
+    pub fn set_affinity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .live
+            .as_ref()
+            .map(|l| l.name.to_string())
+            .unwrap_or_default();
+        let subtitle = tr_args(
+            cx,
+            "processes-affinity-subtitle",
+            &[
+                ("name", name.into()),
+                ("pid", self.key.pid.to_string().into()),
+            ],
+        );
+        let targets = smallvec![ActionTarget::Process(self.key)];
+        if let Err(err) =
+            crate::windows::affinity::open(targets, subtitle, window.window_handle(), cx)
+        {
+            warn!(target: "tasklens::ui", %err, "the Set Affinity dialog did not open");
+        }
+    }
+
+    /// Opens the field menu on the cursor field (`col`, `row`): at `position` for a right-click,
+    /// else under the row.
+    pub fn open_field_menu(
+        &mut self,
+        col: usize,
+        row: usize,
+        position: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.visible[col].get(row).is_none() {
+            return;
+        }
+        self.set_cursor(col, row, cx);
+        let position = position.unwrap_or_else(|| self.row_anchor(col, row, cx));
+        let words = self.general_words.clone();
+        let menu = TlMenu::build(window, cx, self.focus.clone(), |menu, _, _| {
+            menu.item(words.copy_value.clone(), Box::new(PropsCopyValue))
+                .item(words.copy_row.clone(), Box::new(GeneralCopyRow))
+                .item(words.copy_section.clone(), Box::new(GeneralCopySection))
+                .separator()
+                .item(words.copy_all.clone(), Box::new(PropsCopyAllFields))
+        });
+        open_context_menu_at(position, window, cx, menu);
+    }
+
+    /// Where Shift+F10 opens the menu: the row's left edge plus `sp4`, at the row's bottom.
+    fn row_anchor(&self, col: usize, row: usize, cx: &App) -> Point<Pixels> {
+        let m = metrics(cx);
+        let row_h = px(ROW_HEIGHT * m.ui_scale);
+        let bounds = self.panel_bounds[col].get();
+        let mut y = bounds.top() + m.sp[3] + row_h * (row + 1) as f32;
+        if row >= self.main_len[col] {
+            y += match col {
+                1 => row_h,
+                2 => px(WINDOW_GAP * m.ui_scale) + px(1.),
+                _ => px(0.),
+            };
+        }
+        point(bounds.left() + m.sp[4] * 2., y)
+    }
+
+    fn on_menu_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.first_cursor(cx);
+        if let Some((col, row)) = self.cursor {
+            self.open_field_menu(col, row, None, window, cx);
+        }
+    }
+
+    /// The cursor row in grid `part` (0 the first, 1 the tail) of column `col`.
+    fn cursor_in(&self, col: usize, part: usize, focused: bool) -> Option<usize> {
+        let (c, row) = self.cursor?;
+        if c != col || !focused {
+            return None;
+        }
+        let main = self.main_len[col];
+        match part {
+            0 => (row < main).then_some(row),
+            _ => row.checked_sub(main),
+        }
+    }
+
     fn passes(&self, field: &KvField) -> bool {
         if field.validity == Validity::Missing {
             return false;
@@ -1589,8 +2007,10 @@ impl GeneralTab {
         for i in 0..3 {
             let mut rows = Vec::with_capacity(self.columns[i].len());
             let mut split = None;
-            for f in self.columns[i].iter().filter(|f| self.passes(f)) {
-                rows.push(to_row(f, self.exited));
+            let shown: Vec<&KvField> = self.columns[i].iter().filter(|f| self.passes(f)).collect();
+            self.visible[i] = shown.iter().map(|f| f.id).collect();
+            for f in &shown {
+                rows.push(to_row(f, self.exited, &self.general_words));
                 if f.id == FieldId::PackageStatus && button {
                     split = Some(rows.len());
                 }
@@ -1615,8 +2035,21 @@ impl GeneralTab {
                     section(tail)
                 };
             }
+            self.main_len[i] = rows.len();
+            let copies = |range: std::ops::Range<usize>| -> Rc<[(usize, SharedString)]> {
+                shown[range]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(n, f)| f.full.clone().map(|full| (n, full)))
+                    .collect()
+            };
+            self.copies[i] = [copies(0..rows.len()), copies(rows.len()..shown.len())];
             self.sections[i] = section(rows);
         }
+        self.cursor = self.cursor.and_then(|(col, row)| {
+            let len = self.visible[col].len();
+            (len > 0).then(|| (col, row.min(len - 1)))
+        });
     }
 
     fn rebuild(&mut self, cx: &mut App) {
@@ -2420,8 +2853,9 @@ fn section(rows: Vec<TlKvRow>) -> Rc<[TlKvSection]> {
 
 /// Grid row for `field`. Restricted values get the R-050 tooltip; a placeholder word that is not
 /// the grid's own word (`Computing…`) and exited links draw as Stale, which keeps the text and
-/// uses `text_secondary`. A deleted executable draws in `status.warning`.
-fn to_row(field: &KvField, exited: bool) -> TlKvRow {
+/// uses `text_secondary`. A deleted executable draws in `status.warning`. A Valid link field of
+/// a running process draws as a link with its action's tooltip.
+fn to_row(field: &KvField, exited: bool, words: &GeneralWords) -> TlKvRow {
     let mut value = TlValue::new(field.value.clone());
     value.path = field.id.is_path();
     if field.id == FieldId::Executable && field.value.ends_with(" (deleted)") {
@@ -2444,9 +2878,47 @@ fn to_row(field: &KvField, exited: bool) -> TlKvRow {
         }
         v => v,
     };
+    if !exited
+        && value.validity == Validity::Valid
+        && let Some((action, tip)) = link_of(field, words)
+    {
+        value.link = Some(action);
+        value.tooltip = Some(tip);
+    }
     TlKvRow {
         label: field.label.clone(),
         value,
+    }
+}
+
+/// The action and tooltip of a link field. A deleted executable has no file location to open;
+/// the Unit link comes with E23-016.
+fn link_of(field: &KvField, words: &GeneralWords) -> Option<(Box<dyn Action>, SharedString)> {
+    let KvKind::Link(target) = field.kind else {
+        return None;
+    };
+    match target {
+        LinkTarget::Parent => Some((Box::new(GeneralGoToParent), words.link_parent.clone())),
+        LinkTarget::Executable if !field.value.ends_with(" (deleted)") => {
+            Some((Box::new(GeneralOpenFileLocation), words.link_exe.clone()))
+        }
+        LinkTarget::Affinity => Some((Box::new(GeneralSetAffinity), words.link_affinity.clone())),
+        LinkTarget::Executable | LinkTarget::Unit => None,
+    }
+}
+
+/// "Label: value" with the label's ":" not doubled.
+fn line(label: &str, value: &str) -> String {
+    let label = label.trim_end();
+    let label = label.strip_suffix(':').unwrap_or(label);
+    format!("{label}: {value}")
+}
+
+/// A toast in `window`'s own stack.
+fn window_toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: SharedString) {
+    match ToastQueue::of_window(window, cx) {
+        Some(queue) => queue.update(cx, |q, cx| q.push(kind, text, None, None, cx)),
+        None => warn!(target: "tasklens::ui", "no toast stack for the General tab"),
     }
 }
 
@@ -2485,28 +2957,43 @@ impl Render for GeneralTab {
         };
         let wide = body_width >= px(THREE_COLUMN_MIN * m.ui_scale);
         let row_height = px(ROW_HEIGHT * m.ui_scale);
+        let focused = self.focus.contains_focused(window, cx);
+        let view = cx.entity().downgrade();
+        let value_copied = self.general_words.toast_value_copied.clone();
+        // Grid `part` (0 the first, 1 the tail) of column `col`.
+        let grid = |id: gpui_kit::ElementId, col: usize, part: usize, sections: &[TlKvSection]| {
+            let offset = if part == 0 { 0 } else { self.main_len[col] };
+            let view = view.clone();
+            let copied = value_copied.clone();
+            TlKeyValueGrid::new(id, KvLayout::Inline)
+                .row_height(row_height)
+                .label_width(label_widths[col])
+                .sections(sections)
+                .copy_on_click(true)
+                .copy_texts(self.copies[col][part].clone())
+                .cursor(self.cursor_in(col, part, focused))
+                .on_copied(move |_, window, cx| {
+                    window_toast(window, cx, ToastKind::Success, copied.clone());
+                })
+                .on_context_menu(move |n, position, window, cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        this.open_field_menu(col, offset + n, Some(position), window, cx);
+                    });
+                })
+        };
 
         let panels: Vec<AnyElement> = (0..3)
             .map(|i| {
-                let grid = TlKeyValueGrid::new(("general-col", i), KvLayout::Inline)
-                    .row_height(row_height)
-                    .label_width(label_widths[i])
-                    .sections(&self.sections[i]);
+                let grid_main = grid(("general-col", i).into(), i, 0, &self.sections[i]);
                 let verify = (i == 1 && self.verify_row)
                     .then(|| self.verify_button())
                     .flatten()
                     .map(|button| {
-                        let tail = TlKeyValueGrid::new("general-col-tail", KvLayout::Inline)
-                            .row_height(row_height)
-                            .label_width(label_widths[i])
-                            .sections(&self.col2_tail);
+                        let tail = grid("general-col-tail".into(), i, 1, &self.col2_tail);
                         (verify_row(button, label_widths[i], row_height), tail)
                     });
                 let windows = (i == 2 && !self.col3_tail.is_empty()).then(|| {
-                    let tail = TlKeyValueGrid::new("general-col-windows", KvLayout::Inline)
-                        .row_height(row_height)
-                        .label_width(label_widths[i])
-                        .sections(&self.col3_tail);
+                    let tail = grid("general-col-windows".into(), i, 1, &self.col3_tail);
                     let divider = div()
                         .debug_selector(|| "GeneralTab-window-divider".into())
                         .mt(px(WINDOW_GAP * m.ui_scale))
@@ -2515,8 +3002,10 @@ impl Render for GeneralTab {
                         .bg(theme.divider);
                     (divider, tail)
                 });
+                let bounds = self.panel_bounds.clone();
                 div()
                     .debug_selector(move || format!("GeneralTab-panel-{i}"))
+                    .relative()
                     .min_w_0()
                     .when(wide, |d| d.flex_1().flex_basis(px(0.)))
                     .when(!wide, |d| d.w_full())
@@ -2524,7 +3013,12 @@ impl Render for GeneralTab {
                     .rounded(m.radius_small)
                     .px(m.sp[4])
                     .py(m.sp[3])
-                    .child(grid)
+                    .child(
+                        canvas(move |b, _, _| bounds[i].set(b), |_, _, _, _| {})
+                            .absolute()
+                            .inset_0(),
+                    )
+                    .child(grid_main)
                     .when_some(verify, |d, (row, tail)| d.child(row).child(tail))
                     .when_some(windows, |d, (divider, tail)| d.child(divider).child(tail))
                     .into_any_element()
@@ -2544,6 +3038,49 @@ impl Render for GeneralTab {
                 .gap(m.sp[4])
                 .children(panels)
         };
+        let panels = div()
+            .id("general-fields")
+            .key_context(KV_GRID_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &PropsFieldUp, _, cx| this.step_row(-1, cx)))
+            .on_action(cx.listener(|this, _: &PropsFieldDown, _, cx| this.step_row(1, cx)))
+            .on_action(cx.listener(|this, _: &PropsFieldLeft, _, cx| this.step_column(false, cx)))
+            .on_action(cx.listener(|this, _: &PropsFieldRight, _, cx| this.step_column(true, cx)))
+            .on_action(cx.listener(|this, _: &PropsFieldHome, _, cx| this.row_end(false, cx)))
+            .on_action(cx.listener(|this, _: &PropsFieldEnd, _, cx| this.row_end(true, cx)))
+            .on_action(cx.listener(|this, _: &PropsActivateField, window, cx| {
+                this.activate(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PropsCopyValue, window, cx| {
+                this.copy_value(window, cx);
+            }))
+            // Ctrl+C without a text selection, from inside a grid.
+            .on_action(cx.listener(|this, _: &Copy, window, cx| this.copy_value(window, cx)))
+            .on_action(cx.listener(|this, _: &GeneralCopyRow, window, cx| {
+                this.copy_row(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GeneralCopySection, window, cx| {
+                this.copy_section(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PropsCopyAllFields, window, cx| {
+                this.copy_all_fields(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PropsFieldMenu, window, cx| {
+                this.on_menu_key(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GeneralGoToParent, window, cx| {
+                this.go_to_parent(window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &GeneralOpenFileLocation, window, cx| {
+                    this.open_file_location(window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &GeneralSetAffinity, window, cx| {
+                this.set_affinity(window, cx);
+            }))
+            .w_full()
+            .child(panels);
 
         let width = self.width.clone();
         let pad = m.sp[5] * 2.;
