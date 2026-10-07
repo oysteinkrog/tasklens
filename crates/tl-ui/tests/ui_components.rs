@@ -1265,3 +1265,153 @@ mod dialog_enter {
         assert!(!is_open(cx, o.handle));
     }
 }
+
+/// TlButton accessible name and icon hover, TlKeyValueGrid label tooltips (tasklens-9o0.34).
+mod names_and_label_tips {
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use gpui_kit::{SharedString, point};
+    use tl_ui::components::icons::TlIcon;
+    use tl_ui::components::kv_grid::{
+        KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
+    };
+    use tl_ui::components::tooltip::DELAY_CONTROL;
+
+    use super::*;
+
+    struct Grid {
+        tips: Rc<[(usize, SharedString)]>,
+    }
+
+    impl Render for Grid {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let row = |label: &str, value: &str| TlKvRow {
+                label: label.to_owned().into(),
+                value: TlValue::new(value.to_owned()),
+            };
+            let section = |rows| TlKvSection {
+                title: None,
+                blocks: vec![TlKvBlock {
+                    indent: None,
+                    heading: None,
+                    rows,
+                }],
+            };
+            let sections = [
+                section(vec![row("Threads:", "5 596")]),
+                section(vec![row("Handles:", "253 248")]),
+            ];
+            div().size(px(600.)).child(
+                TlKeyValueGrid::new("grid", KvLayout::Inline)
+                    .sections(&sections)
+                    .label_tooltips(self.tips.clone()),
+            )
+        }
+    }
+
+    fn hover_for(cx: &mut VisualTestContext, at: gpui_kit::Point<Pixels>, wait: Duration) -> bool {
+        cx.simulate_mouse_move(point(px(590.), px(590.)), None, Modifiers::none());
+        draw(cx);
+        cx.simulate_mouse_move(at, None, Modifiers::none());
+        cx.executor().advance_clock(wait);
+        cx.run_until_parked();
+        draw(cx);
+        draw(cx);
+        cx.debug_bounds("TlTooltip-text").is_some()
+    }
+
+    #[gpui_kit::test]
+    fn kv_grid_label_tooltip_by_flat_row(cx: &mut TestAppContext) {
+        cx.update(setup);
+        let tips: Rc<[(usize, SharedString)]> = Rc::from(vec![(
+            1,
+            SharedString::from("Open file descriptors, system-wide"),
+        )]);
+        let (_, cx) = cx.add_window_view(move |_, _| Grid { tips: tips.clone() });
+        cx.update(|window, _| window.activate_window());
+        draw(cx);
+        assert!(
+            cx.debug_bounds("TlKv-label-0").is_none(),
+            "row 0 has no label tooltip"
+        );
+        let label = cx
+            .debug_bounds("TlKv-label-1")
+            .expect("row 1 of the second section is flat row 1");
+        assert!(
+            !hover_for(
+                cx,
+                label.center(),
+                DELAY_CONTROL - Duration::from_millis(50)
+            ),
+            "not before the control delay"
+        );
+        assert!(
+            hover_for(cx, label.center(), DELAY_CONTROL),
+            "shown after the control delay"
+        );
+        let value = cx.debug_bounds("TlKv-value-1").expect("value drawn");
+        assert!(
+            !hover_for(cx, value.center(), DELAY_CONTROL),
+            "the value has no tooltip of its own"
+        );
+    }
+
+    struct Copy {
+        name: Option<&'static str>,
+    }
+
+    impl Render for Copy {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let mut button = TlButton::new("copy", TlButtonKind::Icon)
+                .icon(TlIcon::Copy)
+                .icon_muted(true)
+                .icon_hover(true)
+                .size(TlButtonSize::Sm)
+                .tooltip("Copy section");
+            if let Some(name) = self.name {
+                button = button.accessible_name(name);
+            }
+            div().size(px(200.)).child(button)
+        }
+    }
+
+    #[gpui_kit::test]
+    fn button_accessible_name_separate_from_tooltip(cx: &mut TestAppContext) {
+        cx.update(setup);
+        let theme = cx.update(|cx| current(cx).clone());
+        let button = TlButton::new("copy", TlButtonKind::Icon)
+            .icon(TlIcon::Copy)
+            .icon_muted(true)
+            .icon_hover(true)
+            .tooltip("Copy section");
+        assert_eq!(
+            button.accessible_text().map(|s| s.as_ref()),
+            Some("Copy section")
+        );
+        assert_eq!(button.icon_color(&theme), theme.text_secondary);
+        assert_eq!(button.icon_hover_color(&theme), Some(theme.text_primary));
+        let button = button.accessible_name("Copy Processor");
+        assert_eq!(
+            button.accessible_text().map(|s| s.as_ref()),
+            Some("Copy Processor")
+        );
+
+        let (_, cx) = cx.add_window_view(|_, _| Copy {
+            name: Some("Copy Processor"),
+        });
+        cx.update(|window, _| window.activate_window());
+        draw(cx);
+        if let Some(tree) = cx.update(|window, _| window.debug_a11y_tree_json()) {
+            assert!(
+                tree.contains("Copy Processor"),
+                "the a11y tree uses the name"
+            );
+        }
+        // Hovering redraws the muted icon in its hover colour without losing the button.
+        let b = cx.debug_bounds("TlButton-copy").expect("button drawn");
+        cx.simulate_mouse_move(b.center(), None, Modifiers::none());
+        draw(cx);
+        assert!(cx.debug_bounds("TlButton-copy-icon").is_some());
+    }
+}

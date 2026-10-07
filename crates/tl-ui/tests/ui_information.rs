@@ -863,3 +863,85 @@ mod row_builders {
         assert!(find_logo("", &[root]).is_none());
     }
 }
+
+/// Copy button name and hover, row label tooltips (tasklens-9o0.34).
+mod names_and_tips {
+    use super::*;
+    use gpui_kit::point;
+    use tl_ui::components::tooltip::DELAY_CONTROL;
+    use tl_ui::i18n::set_test_catalogue;
+
+    #[gpui_kit::test]
+    fn info_copy_button_accessible_name(cx: &mut TestAppContext) {
+        let (section, _, cx) = host(cx, InfoSectionId::Processor, 100, os_rows());
+        draw(cx);
+        assert_eq!(
+            cx.update(|_, cx| section.read(cx).copy_button_name().clone())
+                .as_ref(),
+            "Copy Processor"
+        );
+        if let Some(tree) = cx.update(|window, _| window.debug_a11y_tree_json()) {
+            assert!(tree.contains("Copy Processor"), "the a11y tree names it");
+        }
+
+        cx.update(|window, cx| {
+            set_test_catalogue(
+                cx,
+                "information-section-processor = <cpu>\ninformation-copy-section-name = <copy {$section}>\n",
+            );
+            window.refresh();
+        });
+        cx.update(|_, cx| section.update(cx, |_, cx| cx.notify()));
+        draw(cx);
+        assert_eq!(
+            cx.update(|_, cx| section.read(cx).copy_button_name().clone())
+                .as_ref(),
+            "<copy <cpu>>",
+            "translated once per strings version"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn info_handle_count_label_tooltip(cx: &mut TestAppContext) {
+        let rows = vec![
+            row("Thread count", "5 596"),
+            InfoRow {
+                label_tooltip: Some("Open file descriptors, system-wide".into()),
+                ..row("Handle count", "253 248")
+            },
+        ];
+        let (_, _, cx) = host(cx, InfoSectionId::System, 100, rows);
+        cx.update(|window, _| window.activate_window());
+        draw(cx);
+        assert!(
+            bounds(cx, "TlKv-label-0").is_none(),
+            "a row without a label tooltip has no trigger"
+        );
+        let label = bounds(cx, "TlKv-label-1").expect("label with a tooltip");
+        assert!(
+            cx.debug_bounds("TlTooltip-text").is_none(),
+            "no tooltip before hover"
+        );
+
+        cx.simulate_mouse_move(point(px(590.), px(390.)), None, Modifiers::none());
+        draw(cx);
+        cx.simulate_mouse_move(label.center(), None, Modifiers::none());
+        cx.executor()
+            .advance_clock(DELAY_CONTROL - std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+        draw(cx);
+        assert!(
+            cx.debug_bounds("TlTooltip-text").is_none(),
+            "not before the control delay"
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+        draw(cx);
+        draw(cx);
+        assert!(
+            cx.debug_bounds("TlTooltip-text").is_some(),
+            "shown after the control delay"
+        );
+    }
+}
