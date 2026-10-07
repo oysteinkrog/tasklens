@@ -48,13 +48,16 @@ fn draw(cx: &mut VisualTestContext) {
 
 type Outcome = Rc<RefCell<Option<Result<BenchReport, BenchError>>>>;
 
-/// Runs `scene` for `duration_s` simulated seconds with no warm-up and returns its result.
+/// Runs `scene` for `duration_s` simulated seconds with no warm-up and returns its result. With
+/// `frames`, the scene window gets one simulated frame every 100 ms; without, no frame callback
+/// ever runs (a locked screen).
 fn run_scene(
     cx: &mut TestAppContext,
     scene: BenchScene,
     duration_s: u32,
     json: Option<std::path::PathBuf>,
     real: Option<Arc<dyn EngineClient>>,
+    frames: bool,
 ) -> Result<BenchReport, BenchError> {
     cx.executor().allow_parking();
     let outcome: Outcome = Rc::default();
@@ -69,11 +72,30 @@ fn run_scene(
         cx.spawn(async move |_| *slot.borrow_mut() = Some(task.await))
             .detach();
     });
+    let window = cx.update(|cx| cx.windows().last().copied());
+    let mut vcx = window.map(|w| VisualTestContext::from_window(w, cx));
     for _ in 0..=duration_s * 10 {
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_millis(100));
+        match vcx.as_mut() {
+            Some(vcx) => {
+                vcx.run_until_parked();
+                if frames {
+                    vcx.update(|window, cx| {
+                        window.simulate_next_frame(cx);
+                        window.draw(cx).clear(cx);
+                    });
+                }
+                vcx.executor().advance_clock(Duration::from_millis(100));
+            }
+            None => {
+                cx.run_until_parked();
+                cx.executor().advance_clock(Duration::from_millis(100));
+            }
+        }
     }
-    cx.run_until_parked();
+    match vcx.as_mut() {
+        Some(vcx) => vcx.run_until_parked(),
+        None => cx.run_until_parked(),
+    }
     outcome.borrow_mut().take().expect("the scene finished")
 }
 
@@ -130,7 +152,7 @@ fn bench_scene_perf_cpu_builds_32_cells_and_9_cards(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn static_scene_requests_no_frames(cx: &mut TestAppContext) {
-    let report = run_scene(cx, BenchScene::Static, 2, None, None).expect("static passes");
+    let report = run_scene(cx, BenchScene::Static, 2, None, None, true).expect("static passes");
     assert_eq!(report.scene, "static");
     assert_eq!(report.frames, 0, "the probe is not started");
 }
@@ -139,20 +161,31 @@ fn static_scene_requests_no_frames(cx: &mut TestAppContext) {
 fn json_written_when_requested(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("perf-cpu.json");
-    let report =
-        run_scene(cx, BenchScene::PerfCpu, 1, Some(path.clone()), None).expect("perf-cpu passes");
+    let report = run_scene(cx, BenchScene::PerfCpu, 1, Some(path.clone()), None, true)
+        .expect("perf-cpu passes");
     assert_eq!(report.scene, "perf-cpu");
     let text = std::fs::read_to_string(&path).expect("the JSON file exists");
     let json: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
     assert_eq!(json["scene"], "perf-cpu");
     assert!(json["bridge_latency_ms"].is_null());
     assert!(json["gpu"].is_null());
+    assert!(report.frames > 0, "simulated frames were recorded");
+    assert_eq!(json["warmup_stalls"], 0);
+}
+
+#[gpui_kit::test]
+fn moving_scene_without_frames_fails(cx: &mut TestAppContext) {
+    let result = run_scene(cx, BenchScene::PerfCpu, 1, None, None, false);
+    assert_eq!(
+        result.map(|r| r.scene).map_err(|e| e.to_string()),
+        Err("perf-cpu: 0 frames drawn; possible frame-callback stall".to_owned())
+    );
 }
 
 #[gpui_kit::test]
 fn bridge_fails_without_samples(cx: &mut TestAppContext) {
     let real: Arc<dyn EngineClient> = FakeEngine::new();
-    let result = run_scene(cx, BenchScene::Bridge, 1, None, Some(real));
+    let result = run_scene(cx, BenchScene::Bridge, 1, None, Some(real), true);
     assert_eq!(
         result.map(|r| r.scene).map_err(|e| e.to_string()),
         Err("bridge: only 0 samples arrived".to_owned())
