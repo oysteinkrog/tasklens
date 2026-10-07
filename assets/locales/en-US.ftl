@@ -627,3 +627,32 @@ history-tip-averages = Averages over the selected range (peak in cell tooltips)
 history-cell-peak = peak { $value }
 history-not-running = Process not running
 history-previous-boot = (previous boot)
+
+## Action tracker (E16-A3, ADR-015, R-196, R-197, R-240)
+fnd-action-permission-denied = Permission denied. This process belongs to another user.
+fnd-action-no-such-process = The process has already exited.
+fnd-action-partial = Done for { $done } of { $total } targets.
+fnd-action-unit-job = The service job ended with result: { $result }.
+fnd-action-os = The system call failed (error { $code }).
+fnd-action-internal = Internal error: { $text }.
+fnd-action-not-authorized = Administrator access was refused.
+fnd-action-auth-cancelled = Authentication was cancelled.
+fnd-action-unsupported = Not supported on this system.
+fnd-action-outcome-unknown = Outcome unknown
+fnd-action-eperm = Permission denied
+fnd-action-retry-admin = Retry as administrator
+fnd-action-details = Details
+fnd-action-close = Close
+fnd-action-send-busy = Too many actions are running. Try again shortly.
+fnd-action-reject-busy = Another action on this process is still running.
+fnd-action-reject-too-many-targets = Too many processes selected. The limit is { $limit }.
+fnd-action-reject-identity-changed = The selected process changed; wait for the list to update and try again.
+fnd-action-reject-kernel-thread = Kernel threads cannot be signalled.
+fnd-action-reject-protected = This process is protected. Confirm the warning to end it.
+fnd-action-reject-not-owner = This process belongs to another user. Administrator access is needed.
+fnd-action-reject-unsupported = This action is not available for this process.
+fnd-action-reject-already-running = Already running
+# Target labels in the Details dialog lines.
+fnd-action-target-pid = PID { $pid }
+fnd-action-target-tid = Thread { $tid }
+fnd-action-target-socket = { $local } to { $remote }
