@@ -213,8 +213,8 @@ pub fn open_scene(
 }
 
 /// Runs `scene` and returns its report. Called by tl-app inside `Application::run`. `real` is
-/// `Some` only for `bridge`. On success the report is printed as one JSON line and the app
-/// quits; on failure tl-app prints the error.
+/// `Some` only for `bridge`. On success the report is printed as one JSON line; on failure
+/// tl-app prints the error. The caller quits the app ([`run_app`] does).
 pub fn run(
     cx: &mut App,
     scene: BenchScene,
@@ -257,7 +257,6 @@ pub fn run(
         {
             println!("{line}");
         }
-        cx.update(|cx| cx.quit());
         Ok(report)
     })
 }
@@ -279,12 +278,9 @@ pub fn run_app(
         .run(move |cx| {
             let task = run(cx, scene, opts, clocks, real);
             cx.spawn(async move |cx: &mut AsyncApp| {
-                let result = task.await;
-                // `run` quits after a finished scene; a failed one leaves that to its caller.
-                if result.is_err() {
-                    cx.update(|cx| cx.quit());
-                }
-                *slot.borrow_mut() = Some(result);
+                // Store the result first: `Application::run` returns as soon as the app quits.
+                *slot.borrow_mut() = Some(task.await);
+                cx.update(|cx| cx.quit());
             })
             .detach();
         });
