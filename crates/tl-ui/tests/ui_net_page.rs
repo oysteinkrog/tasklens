@@ -182,7 +182,8 @@ fn series(metric: MetricId, value: f32, gaps: u64) -> Arc<SeriesView> {
             device: NET,
             metric,
         },
-        version: 1,
+        // A new shape gets a new version, so the chart rebuilds its paths.
+        version: 1 + gaps,
         period_ns: PERIOD,
         samples: (0..60u64)
             .map(|k| {
@@ -321,16 +322,25 @@ fn net_value_is_sum(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn net_disconnected_shows_gap(cx: &mut TestAppContext) {
     let mut r = open(cx, Settings::default(), system(1000));
+    let chart = feed(&mut r, 2. * MBPS, MBPS, 0);
+    let connected = r
+        .vcx
+        .read_entity(&chart, |v, _| v.stroke_right_x())
+        .expect("strokes");
     // The interface went down 5 s ago: the engine marked the last 5 samples invalid.
     let chart = feed(&mut r, 2. * MBPS, MBPS, 5);
     r.vcx.read_entity(&chart, |v, _| {
         assert_eq!(v.derived_state(now_boot_ns()), ChartState::Live);
-        let gaps = v.last_gap_spans.borrow();
-        assert_eq!(gaps.len(), 1, "one dotted span after the last valid sample");
-        let span = gaps[0].clone();
-        assert!(span.start > 0. && span.end > span.start, "span {span:?}");
-        // Only the dotted baseline covers the gap: the paths end at the last valid sample.
         assert_eq!(v.cached_fill_stroke_counts(), (1, 2));
+        // The lines stop at the last valid sample, 5 of 60 s before the right edge: the end
+        // is a gap, with no line at zero and no dotted baseline.
+        let right = v.stroke_right_x().expect("strokes");
+        let lost = connected - right;
+        assert!(
+            lost >= connected * 4. / 60. && lost <= connected * 6. / 60.,
+            "lines end at {right}, {connected} when connected"
+        );
+        assert!(v.last_gap_spans.borrow().is_empty());
     });
     let page = r.page.clone();
     let header = r.vcx.update(|_, cx| page.read(cx).header());
