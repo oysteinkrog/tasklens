@@ -5,6 +5,9 @@
 //! frame. The page view and the box contents follow in later beads.
 
 pub mod cpu_box;
+pub mod disk_box;
+pub mod gpu_box;
 pub mod layout;
 pub mod mem_box;
+pub mod net_box;
 pub mod parts;

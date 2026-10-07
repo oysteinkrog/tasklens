@@ -12,8 +12,8 @@ use std::rc::Rc;
 use gpui_kit::{
     AnyElement, App, Bounds, Corners, Div, Element, ElementId, EntityId, FontWeight,
     GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    ParentElement as _, Pixels, Position, SharedString, Style, Styled as _, Window, canvas, div,
-    fill, point, px, relative, size,
+    ParentElement as _, Pixels, Position, SharedString, Size, Style, Styled as _, Window, canvas,
+    div, fill, point, px, relative, size,
 };
 use tl_model::settings::Settings;
 
@@ -494,6 +494,33 @@ pub fn width_probe(
     .left_0()
     .size_full()
 }
+
+/// A canvas over its parent (which must be `relative`) that keeps the parent's size in `size`
+/// and notifies `view` after the frame when `classify(size)` differs from `class`, the layout
+/// class the last render used (such as how many rows fit). Other resizes never notify.
+pub fn class_probe(
+    size: Rc<Cell<Size<Pixels>>>,
+    class: u32,
+    classify: impl Fn(Size<Pixels>) -> u32 + 'static,
+    view: EntityId,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, _, cx| {
+            size.set(bounds.size);
+            if classify(bounds.size) != class {
+                cx.defer(move |cx| cx.notify(view));
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// The lowest a chart in a box with rows below it gets, logical px before `ui_scale` (TMOG).
+pub const MIN_CHART_H: f32 = 48.;
 
 /// Whether a box `width` wide (0 before the first paint) puts its chart beside its side part.
 pub fn is_wide(width: Pixels, scale: f32) -> bool {

@@ -367,7 +367,7 @@ impl MemBox {
 }
 
 /// One meter row: label, meter, value.
-fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+pub(super) fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let s = m.ui_scale;
     let mut label = div()
         .flex_none()
