@@ -9,7 +9,7 @@
 //! in `TlSettings` and re-apply the default theme. `state.toml`, `themes.json` and history are
 //! never touched. No setting value is logged.
 
-use gpui_kit::{App, AppContext as _, Window};
+use gpui_kit::{App, Window};
 use tl_model::settings::Settings;
 use tracing::warn;
 
