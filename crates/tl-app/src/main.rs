@@ -25,10 +25,10 @@ mod single_instance;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::{Arc, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tl_engine::{Engine, EngineConfig, EngineHooks, EngineMode};
+use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
 use tl_model::settings::{EngineSettings, StartTab};
 use tl_ui::app::ToastKindTag;
@@ -56,8 +56,8 @@ fn main() -> ExitCode {
     };
     let recent_cell = Arc::new(OnceLock::new());
     crash::install_hook(paths.crash_dir(), recent_cell.clone(), main_panic_notify);
-    // Dropped last, so buffered log lines are flushed.
-    let _log_guard = match logging::init(&paths.logs_dir()) {
+    // Dropped last (in `finish`), so buffered log lines are flushed.
+    let log_guard = match logging::init(&paths.logs_dir()) {
         Ok((guard, recent)) => {
             let _ = recent_cell.set(recent);
             Some(guard)
@@ -169,7 +169,7 @@ fn main() -> ExitCode {
         run_history: None,
     };
     let exit = tl_ui::run(UiLaunch {
-        client: Arc::new(engine),
+        client: Arc::new(engine.clone()),
         init: UiInit {
             settings,
             state,
@@ -190,11 +190,43 @@ fn main() -> ExitCode {
         },
     });
 
+    // U-2: `Application::run` returns on Linux after `cx.quit()`, so this is the only path.
+    info!(target: "tasklens::engine", ?exit, "shutdown after run returned");
+    let once = ExitOnce::new((engine, log_guard));
+    match once.take() {
+        Some((engine, log_guard)) => finish(engine, &store, log_guard),
+        None => ExitCode::SUCCESS,
+    }
+}
+
+/// Holds a value that only the first `take` gets, so the exit steps run once even when two
+/// paths race to run them.
+struct ExitOnce<T>(Mutex<Option<T>>);
+
+impl<T> ExitOnce<T> {
+    fn new(value: T) -> Self {
+        Self(Mutex::new(Some(value)))
+    }
+
+    fn take(&self) -> Option<T> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+}
+
+/// The exit steps after the UI stops (ADR-010 Close behaviour, ADR-004 Shutdown): settings,
+/// then the engine within 1500 ms, then the log file. Exits 0 without running destructors, so a
+/// stuck engine thread cannot hold the process open.
+fn finish(engine: EngineHandle, store: &Store, log: Option<logging::LogGuard>) -> ! {
     // Pending changes are written before anything else on exit (ADR-011).
     store.flush();
-    // E33-011 adds the 1500 ms engine shutdown here.
-    info!(target: "tasklens::engine", ?exit, "ui stopped");
-    ExitCode::SUCCESS
+    let report = engine.shutdown(Duration::from_millis(1500));
+    if !report.clean() {
+        warn!(target: "tasklens::engine", drained = report.drained, torn_down = report.torn_down,
+            "engine shutdown timed out");
+    }
+    // The non-blocking writer loses lines unless its guard is dropped before `exit`.
+    drop(log);
+    std::process::exit(0)
 }
 
 /// The time from `exec` to `main` (the dynamic loader and static initialisers), at the 10 ms
@@ -338,6 +370,17 @@ mod tests {
         let path = dir.path().join("present.json");
         std::fs::write(&path, br#"{"themes":[]}"#).expect("write");
         assert_eq!(read_themes(&path).as_deref(), Some(r#"{"themes":[]}"#));
+    }
+
+    #[test]
+    fn finish_runs_once() {
+        let once = Arc::new(ExitOnce::new(7_u32));
+        let other = once.clone();
+        let thread = std::thread::spawn(move || other.take());
+        let here = once.take();
+        let there = thread.join().expect("join");
+        assert_eq!([here, there].iter().flatten().collect::<Vec<_>>(), vec![&7]);
+        assert_eq!(once.take(), None);
     }
 
     #[test]
