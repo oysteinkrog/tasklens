@@ -989,8 +989,10 @@ impl TreeTableDelegate for ProcessDelegate {
     type Column = ColumnId;
     type Sort = SortSpec;
 
+    /// The rows of the installed view. `snapshot` can hold a view that was never installed (one
+    /// the hub had before the page sent its query), so its row count is not used.
     fn row_count(&self) -> usize {
-        self.snapshot.table.rows.len()
+        self.ids.len()
     }
 
     fn row_id(&self, ix: usize) -> ProcRowId {
