@@ -697,3 +697,25 @@ shell-menu-file-exit = Exit tasklens
 
 # Tab overflow menu (E20-015)
 shell-tab-more = More tabs
+
+# Set Affinity dialog (UI-PWN-021, E23-002). Numbers and CPU lists are formatted by the caller.
+pwn-affinity-title = tasklens Set Affinity
+pwn-affinity-subtitle-loading = { $subtitle } - reading current affinity…
+pwn-affinity-all-processors = All processors
+pwn-affinity-cpu-list = CPU list
+pwn-affinity-placeholder = 0-7,16-23
+pwn-affinity-group-ccd = CCD { $n }: CPU { $list }
+pwn-affinity-group-pcores = P-cores: CPU { $list }
+pwn-affinity-group-ecores = E-cores: CPU { $list }
+pwn-affinity-group-cpus = CPUs: { $list }
+pwn-affinity-cpu = CPU { $n }
+pwn-affinity-core-tooltip = Core { $k }: CPU { $a } and CPU { $b }
+pwn-affinity-core-tooltip-one = Core { $k }: CPU { $a }
+pwn-affinity-validation = At least one CPU must stay enabled
+pwn-affinity-invalid-list = Use CPU numbers and ranges, for example 0-7,16-23
+pwn-affinity-cpuset-tooltip = Not allowed by the process's cpuset
+pwn-affinity-offline-tooltip = CPU is offline
+pwn-affinity-ok = OK
+pwn-affinity-cancel = Cancel
+pwn-affinity-toast-success = Affinity updated
+pwn-affinity-toast-failure = Could not update selected process affinity.
