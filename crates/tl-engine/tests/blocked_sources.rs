@@ -112,7 +112,7 @@ fn cpu_samples_beside(blocked: usize) -> u64 {
     let ids = [
         SourceId::Disk,
         SourceId::Net,
-        SourceId::Gpu,
+        SourceId::GpuDrm,
         SourceId::Sensors,
         SourceId::Memory,
     ];
