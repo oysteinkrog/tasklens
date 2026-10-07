@@ -335,12 +335,13 @@ mod window {
 
     #[gpui_kit::test]
     fn run_combo_five_rows_visible(cx: &mut TestAppContext) {
-        let commands: Vec<String> = (0..8).map(|i| format!("cmd{i}")).collect();
+        let commands: Vec<String> = (0..10).map(|i| format!("cmd{i}")).collect();
         let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
         let mut rig = setup(cx, &refs);
         set_text(&mut rig, "");
         rig.run.simulate_keystrokes("down");
-        assert_eq!(rig.run.read(|cx| rig.view.read(cx).popup_rows().len()), 8);
+        assert_eq!(rig.run.read(|cx| rig.view.read(cx).popup_rows().len()), 10);
+        assert_eq!(text(&mut rig), "cmd0", "the first command fills the input");
         draw(&mut rig.run);
         let popup = rig.run.debug_bounds(POPUP_ID).expect("popup drawn");
         let s = rig.run.update(|_, cx| tl_ui::theme::metrics(cx).ui_scale);
@@ -350,5 +351,24 @@ mod window {
             "popup height {:?}, want {want}",
             popup.size.height
         );
+    }
+
+    #[gpui_kit::test]
+    fn run_ctrl_n_activates_existing(cx: &mut TestAppContext) {
+        let mut rig = setup(cx, &[]);
+        let (first, _) = find_run(cx).expect("open");
+        rig.main.update(|window, _| window.activate_window());
+        rig.main.simulate_keystrokes("ctrl-n");
+        cx.run_until_parked();
+        let runs = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .filter_map(|w| w.downcast::<Root>())
+                .filter(|h| RunWindow::find(*h, cx).is_some())
+                .count()
+        });
+        assert_eq!(runs, 1, "Ctrl+N does not open a second Run window");
+        let active = cx.update(|cx| cx.active_window().map(|w| w.window_id()));
+        assert_eq!(active, Some(first.window_id()));
     }
 }
