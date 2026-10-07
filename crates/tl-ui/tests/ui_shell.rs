@@ -2807,14 +2807,15 @@ mod main_window {
 
     /// The shell filter box in the main window (E20-009).
     mod filter {
-        use std::cell::{Cell, RefCell};
+        use std::cell::RefCell;
         use std::rc::Rc;
         use std::time::Duration;
 
         use gpui_kit::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px};
         use tl_model::command::Tab;
         use tl_model::table::TableMode;
-        use tl_ui::actions::{ClearFilter, EscapeChain, FocusFilter, SelectTab};
+        use tl_ui::actions::{ClearFilter, FocusFilter, SelectTab};
+        use tl_ui::app::UiExit;
         use tl_ui::components::input::{FILTER_WIDTH, FILTER_WIDTH_WIDE};
         use tl_ui::settings_global::TlSettings;
         use tl_ui::theme::current;
@@ -2823,36 +2824,28 @@ mod main_window {
         };
         use tl_ui::window::main::{FilterChanged, GlobalShellEvents};
 
-        use super::{Opts, act, draw, main, page, rig};
+        use super::{Opts, act, draw, exit, main, page, rig};
 
         type Events = Rc<RefCell<Vec<(Tab, String)>>>;
 
         struct Rig {
             vcx: VisualTestContext,
             events: Events,
-            escape_chain: Rc<Cell<u32>>,
         }
 
-        /// The main window on Processes with every fake page, recording `FilterChanged` and
-        /// app-level `EscapeChain` (E20-011 adds the window's own handler).
+        /// The main window on Processes with every fake page, recording `FilterChanged`.
         fn filter_rig(cx: &mut TestAppContext) -> Rig {
             let mut vcx = rig(cx, Opts::default());
             let events: Events = Rc::default();
-            let escape_chain: Rc<Cell<u32>> = Rc::default();
-            let (seen, chain) = (events.clone(), escape_chain.clone());
+            let seen = events.clone();
             vcx.update(|_, cx| {
                 let bus = cx.global::<GlobalShellEvents>().0.clone();
                 cx.subscribe(&bus, move |_, e: &FilterChanged, _| {
                     seen.borrow_mut().push((e.tab, e.text.to_string()));
                 })
                 .detach();
-                cx.on_action(move |_: &EscapeChain, _| chain.set(chain.get() + 1));
             });
-            Rig {
-                vcx,
-                events,
-                escape_chain,
-            }
+            Rig { vcx, events }
         }
 
         impl Rig {
@@ -2988,9 +2981,17 @@ mod main_window {
             r.vcx.simulate_keystrokes("escape");
             assert!(r.page_focused());
             assert!(r.events().is_empty());
-            assert_eq!(r.escape_chain.get(), 0, "the Esc chain does not run yet");
+            // A further Esc reaches the window's Esc chain: with "Close with Esc" on, it quits.
+            r.vcx.update(|_, cx| {
+                TlSettings::update(cx, |d| d.settings.window.close_with_esc = true)
+            });
             r.vcx.simulate_keystrokes("escape");
-            assert_eq!(r.escape_chain.get(), 1, "a further Esc reaches EscapeChain");
+            r.vcx.run_until_parked();
+            assert_eq!(
+                exit(&r.vcx),
+                Some(UiExit::Quit),
+                "a further Esc reaches EscapeChain"
+            );
         }
 
         #[gpui_kit::test]
