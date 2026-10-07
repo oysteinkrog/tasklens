@@ -634,3 +634,9 @@ After the reboot: read each in-progress bead's latest comment, check `git status
 - pdu.20 closed: EndTask, EndProcess, EndProcessTree handlers through pdu.19's submit (1845e4a, 62087c9, 223eaa9, 6e03bcd). Accepted: one refusal toast per distinct reason with the rest still sent, dialog from 2 sent keys, app and unit rows take the union of their primaries' flags, tree acts on the first process row and warns if any subtree process is protected. Follow-up: refuse a tree that contains tasklens or PID 1.
 - 9o0.22 closed: Information row builders for OS, Processor, System, BIOS, Motherboard (3aa2431, beb4f9f, 3cdf6a3, 5dc1f6b). Session type shows the type alone until the model has a logind Class (follow-up bead). 9o0.34 committed (9540194, 6042214, 49463c1), tests wait for the build hold.
 - 2026-10-07 build queue: the leader stopped 7 duplicate or stale heavy-build jobs from this session (manager-machine asked for at most 2 queued). Only gma.15 and m1f.6 may build; the other agents are paused until told "your turn". Brief: one combined heavy-build job per agent.
+- 2026-10-07 about 11:45, build queue overload: agents re-queued 7 jobs after the pause message, so the leader stopped those jobs again and stopped six agents (fut.11, bj6.10, 8fx.24 with 8fx.39, m1f.2 with m1f.20, bj6.17, pdu.51). Their uncommitted work stays on disk:
+  - fut.11: components/gallery.rs, tests/ui_components.rs (shared), six untracked gallery_{dialog,menu,shield}_1_{0,1}.png goldens.
+  - bj6.10: window/menus_file.rs, tests/ui_menus.rs.
+  - pdu.51: pages/processes/mod.rs, tests/ui_process_menu.rs.
+  - 8fx.24 (last commit 77cc6f16), bj6.17 (5ff1c9ff), m1f.2 (3327378f): check their bead status and comments before resuming.
+  Still running: gma.15 agent (then gma.41, gma.40), m1f.6, 9o0.22 agent (9o0.34, then 9o0.23). Resume the stopped beads with fresh agents, one or two at a time, when the machine has build capacity again.
