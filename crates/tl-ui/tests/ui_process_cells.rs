@@ -2758,3 +2758,467 @@ mod highlight {
         }
     }
 }
+
+/// The process row hover tooltip (E22, PROC-039, R-009, PROC-012).
+mod row_tooltip {
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement, Render,
+        SharedString, Styled, TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::actions::SchedPolicy;
+    use tl_model::ids::{GroupKey, NodeId, ProcessKey, PseudoKind};
+    use tl_model::process::{
+        GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta,
+        ProcessRecord,
+    };
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{
+        ComponentHeader, ProcessSnapshot, ServiceStatus, ServicesSnapshot, Snapshot, StartupType,
+        UnitRecord,
+    };
+    use tl_model::system::CpuSet;
+    use tl_model::table::{Manager, ProcessTableView, TableRow, Total, UnitRef, UnitType};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, ProcessField, Validity};
+    use tl_ui::components::tooltip::DELAY_ROW_NAME;
+    use tl_ui::pages::processes::cells::RowRef;
+    use tl_ui::pages::processes::delegate::ProcessDelegate;
+    use tl_ui::pages::processes::tooltip::{RowTipWords, TipLine, row_tooltip_lines};
+    use tl_ui::table::tree_table::{RowKind, TlTreeTable};
+
+    fn a(s: &str) -> Arc<str> {
+        Arc::from(s)
+    }
+
+    fn words() -> RowTipWords {
+        RowTipWords::from_fn(|key| {
+            SharedString::from(match key {
+                "processes-tooltip-path" => "path:",
+                "processes-tooltip-restricted" => "restricted",
+                "processes-tooltip-user" => "user:",
+                "processes-tooltip-uid" => "uid",
+                "processes-tooltip-unit" => "Unit:",
+                "processes-tooltip-cgroup" => "cgroup:",
+                "processes-tooltip-desktop-file" => "Desktop file:",
+                "processes-tooltip-some-values-need-administrator-access" => {
+                    "Some values need administrator access."
+                }
+                "processes-tooltip-cpu-time-spent-in-hardware" => {
+                    "CPU time spent in hardware and software interrupts"
+                }
+                "processes-tooltip-memory-held-by-zram-compressed" => {
+                    "Memory held by zram compressed swap devices"
+                }
+                other => panic!("unexpected key {other}"),
+            })
+        })
+    }
+
+    fn unit() -> UnitRef {
+        UnitRef {
+            manager: Manager::User,
+            name: a("app-firefox@1234.service"),
+        }
+    }
+
+    fn record(pid: u32) -> ProcessRecord {
+        ProcessRecord {
+            key: ProcessKey {
+                start_ticks: u64::from(pid),
+                boot_id: BootId(0),
+                pid,
+            },
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: a("firefox"),
+                name: a("Firefox"),
+                exe: Some(a("/usr/lib/firefox/firefox")),
+                cmdline: Some(a("/usr/lib/firefox/firefox --name firefox")),
+                user: a("oystein"),
+                cgroup: Some(a(
+                    "/user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@1234.service",
+                )),
+                app_id: Some(a("firefox")),
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a("firefox"),
+            }),
+            group: GroupKind::App {
+                app_id: a("firefox"),
+            }
+            .key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn extras(unit: Option<UnitRef>) -> ProcessExtras {
+        ProcessExtras {
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            start_boot_ns: 0,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: CpuSet::empty(),
+            handles: None,
+            exe_name: a("firefox"),
+            exe_path: a("/usr/lib/firefox/firefox"),
+            exe_deleted: false,
+            unit,
+            state_letter: b'S',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+        }
+    }
+
+    fn missing<T: Default>() -> Total<T> {
+        Total {
+            value: T::default(),
+            validity: Validity::Missing,
+        }
+    }
+
+    fn unit_record(unit: UnitRef, description: &str) -> UnitRecord {
+        UnitRecord {
+            unit,
+            kind: UnitType::Service,
+            description: description.into(),
+            status: ServiceStatus::Running,
+            sub_state: "running".into(),
+            load_state: "loaded".into(),
+            startup: StartupType::Enabled,
+            main_pid: 0,
+            user: "oystein".into(),
+            path: "".into(),
+            unit_file: None,
+            active_since_us: None,
+            triggered_by: Arc::from([]),
+            control_group: None,
+            can_reload: false,
+            has_cgroup_procs: false,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: missing(),
+            memory_bytes: missing(),
+            disk_bps: missing(),
+            tasks: missing(),
+        }
+    }
+
+    fn group(node: NodeId, kind: GroupRowKind) -> GroupRow {
+        GroupRow {
+            node,
+            key: GroupKind::App {
+                app_id: a("firefox"),
+            }
+            .key(),
+            kind,
+            class: GroupKind::App {
+                app_id: a("firefox"),
+            },
+            name: a("Firefox"),
+            icon: None,
+            members: 1,
+            pids: 1,
+            note: None,
+            memory_bytes: 0,
+            disk_bps: 0.0,
+            net_bps: 0.0,
+            gpu_pct: 0.0,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            threads: 1,
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            commit_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            handles: None,
+            desktop_path: Some(a("/usr/share/applications/firefox.desktop")),
+            description: None,
+            user: None,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn row_of(r: &ProcessRecord) -> TableRow {
+        TableRow {
+            node: NodeId::Process(r.key),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(0),
+            group: None,
+            descendants: 0,
+            subtree: None,
+        }
+    }
+
+    /// A snapshot with `records` (extras carry the Firefox unit) and the unit's services entry.
+    fn snapshot(records: Vec<ProcessRecord>) -> Snapshot {
+        let mut s = Snapshot::empty(BootId(0), 0);
+        let n = records.len();
+        s.processes = Arc::new(ProcessSnapshot {
+            records: records.into(),
+            extras: (0..n).map(|_| extras(Some(unit()))).collect(),
+            ..ProcessSnapshot::default()
+        });
+        s.services = Arc::new(ServicesSnapshot {
+            units: Arc::from([unit_record(unit(), "Firefox")]),
+            ..ServicesSnapshot::default()
+        });
+        s
+    }
+
+    fn texts(lines: &[TipLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|(label, value)| match label {
+                Some(l) => format!("{l} {value}"),
+                None => value.to_string(),
+            })
+            .collect()
+    }
+
+    fn lines_of(row: RowRef, s: &Snapshot) -> (Vec<String>, bool) {
+        let mut out = Vec::new();
+        let warn = row_tooltip_lines(row, s, &words(), &mut out);
+        (texts(&out), warn)
+    }
+
+    #[test]
+    fn row_tooltip_lines_in_order_and_optional() {
+        let r = record(1234);
+        let s = snapshot(vec![r.clone()]);
+        let row = row_of(&r);
+        let (lines, warn) = lines_of(RowRef::Record(&r, &row, RowKind::Process), &s);
+        assert_eq!(
+            lines,
+            [
+                "/usr/lib/firefox/firefox --name firefox",
+                "path: /usr/lib/firefox/firefox",
+                "user: oystein (uid 1000)",
+                "Unit: app-firefox@1234.service (Firefox)",
+                "cgroup: /user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@1234.service",
+            ]
+        );
+        assert!(!warn);
+
+        // Without a unit, a cgroup or a readable exe: the Unit and cgroup lines go, the path
+        // reads "restricted".
+        let mut bare = record(1);
+        let meta = Arc::make_mut(&mut bare.meta);
+        meta.exe = None;
+        meta.cgroup = None;
+        let mut s2 = snapshot(vec![bare.clone()]);
+        s2.processes = Arc::new(ProcessSnapshot {
+            records: Arc::from([bare.clone()]),
+            extras: Arc::from([extras(None)]),
+            ..ProcessSnapshot::default()
+        });
+        let row = row_of(&bare);
+        let (lines, _) = lines_of(RowRef::Record(&bare, &row, RowKind::Process), &s2);
+        assert_eq!(
+            lines,
+            [
+                "/usr/lib/firefox/firefox --name firefox",
+                "path: restricted",
+                "user: oystein (uid 1000)",
+            ]
+        );
+
+        // An app row: the earliest member's lines, then its desktop file.
+        let g = group(NodeId::Group(GroupKey(7)), GroupRowKind::App);
+        let (lines, _) = lines_of(RowRef::Group(&g, RowKind::App), &s);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("Desktop file: /usr/share/applications/firefox.desktop")
+        );
+        assert_eq!(lines.len(), 6, "{lines:?}");
+
+        // A restricted row ends with the note, shown in status.warning.
+        let mut locked = record(1234);
+        locked
+            .validity
+            .set(ProcessField::Cmdline, Validity::Restricted);
+        let s3 = snapshot(vec![locked.clone()]);
+        let row = row_of(&locked);
+        let (lines, warn) = lines_of(RowRef::Record(&locked, &row, RowKind::Process), &s3);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("Some values need administrator access.")
+        );
+        assert!(warn, "the note is the warning line");
+    }
+
+    #[test]
+    fn row_tooltip_truncates_cmdline_512() {
+        let mut r = record(1234);
+        let long: String = "é".repeat(2_000);
+        Arc::make_mut(&mut r.meta).cmdline = Some(a(&long));
+        let s = snapshot(vec![r.clone()]);
+        let row = row_of(&r);
+        let (lines, _) = lines_of(RowRef::Record(&r, &row, RowKind::Process), &s);
+        assert_eq!(lines[0].chars().count(), 512);
+    }
+
+    #[test]
+    fn row_tooltip_pseudo_and_kthread() {
+        let s = snapshot(Vec::new());
+        for (kind, text) in [
+            (
+                PseudoKind::Interrupts,
+                "CPU time spent in hardware and software interrupts",
+            ),
+            (
+                PseudoKind::MemoryCompression,
+                "Memory held by zram compressed swap devices",
+            ),
+        ] {
+            let g = group(NodeId::Pseudo(kind), GroupRowKind::Pseudo);
+            let (lines, warn) = lines_of(RowRef::Group(&g, RowKind::Pseudo), &s);
+            assert_eq!(lines, [text]);
+            assert!(!warn);
+        }
+
+        let mut k = record(42);
+        k.flags = ProcFlags::KERNEL_THREAD;
+        let meta = Arc::make_mut(&mut k.meta);
+        meta.comm = a("kworker/0:1");
+        meta.exe = None;
+        meta.cmdline = Some(a(""));
+        let s = snapshot(vec![k.clone()]);
+        let row = row_of(&k);
+        let (lines, _) = lines_of(RowRef::Record(&k, &row, RowKind::KernelThread), &s);
+        assert_eq!(lines[0], "[kworker/0:1]");
+    }
+
+    struct Host {
+        table: Entity<TlTreeTable<ProcessDelegate>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(800.))
+                .h(px(400.))
+                .flex()
+                .flex_col()
+                .child(self.table.clone())
+        }
+    }
+
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    #[gpui_kit::test]
+    fn row_tooltip_delay_600ms(cx: &mut TestAppContext) {
+        let mut r = record(1234);
+        r.validity.set(ProcessField::Cmdline, Validity::Restricted);
+        let mut s = snapshot(vec![r.clone()]);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: Arc::from([row_of(&r)]),
+            ..ProcessTableView::default()
+        });
+        let snap = Arc::new(s);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+        });
+        let window = cx.add_window(move |window, cx| {
+            let d =
+                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
+            let host = cx.new(|_| Host { table });
+            Root::new(host, window, cx)
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        redraw(&mut vcx);
+
+        let name = vcx.debug_bounds("TlNameCell").expect("the row's Name cell");
+        // The first move sets the hovered row, the second makes its tooltips ready, the third
+        // starts the delay.
+        for _ in 0..3 {
+            vcx.simulate_mouse_move(name.center(), None, Modifiers::none());
+            redraw(&mut vcx);
+        }
+        assert!(vcx.debug_bounds("TlRowTip").is_none());
+
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        redraw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("TlRowTip").is_none(),
+            "no tooltip at 500 ms"
+        );
+
+        vcx.executor()
+            .advance_clock(DELAY_ROW_NAME - std::time::Duration::from_millis(500));
+        redraw(&mut vcx);
+        assert!(vcx.debug_bounds("TlRowTip").is_some(), "shown at 600 ms");
+        assert!(
+            vcx.debug_bounds("TlRowTip-warning").is_some(),
+            "the restricted note is the warning line"
+        );
+    }
+}
