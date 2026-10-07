@@ -639,10 +639,12 @@ fn group_row(node: NodeId, key: GroupKey, name: Arc<str>, members: &[ProcessReco
 /// Header totals, all `Valid`. CPU and GPU are clamped to 100%: the synthetic sums exceed one
 /// machine.
 fn table_totals(groups: &[GroupRow]) -> TableTotals {
-    let valid = |value| Total {
-        value,
-        validity: Validity::Valid,
-    };
+    fn valid<T>(value: T) -> Total<T> {
+        Total {
+            value,
+            validity: Validity::Valid,
+        }
+    }
     let sum = |f: fn(&GroupRow) -> f32| groups.iter().map(f).sum::<f32>();
     TableTotals {
         cpu_pct: valid((sum(|g| g.cpu_pct) / CORES as f32).min(100.0)),
@@ -659,14 +661,8 @@ fn table_totals(groups: &[GroupRow]) -> TableTotals {
                 .min(100.0),
         ),
         vram_pct: valid(10.0),
-        threads: Total {
-            value: TABLE_PROCESSES as u64,
-            validity: Validity::Valid,
-        },
-        handles: Total {
-            value: 0,
-            validity: Validity::Valid,
-        },
+        threads: valid(TABLE_PROCESSES as u64),
+        handles: valid(0),
         ..TableTotals::default()
     }
 }
