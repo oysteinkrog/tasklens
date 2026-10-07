@@ -5,16 +5,21 @@
 //! active tab (PROC-024 to PROC-026, R-065, R-075). Performance and Information have no table, so
 //! "Columns" is disabled there with the reason as tooltip. View > Process View (E21-002,
 //! UI-SHL-035) holds the view mode radios, two process display checks and "Collapse all"; the
-//! view mode Actions and their toasts are the Processes page's.
+//! view mode Actions and their toasts are the Processes page's. View > Window (E21-008,
+//! UI-SHL-036) holds "Always On Top", the menu path to the main window pin; the pin's owner
+//! handles the Action.
 
 use gpui_kit::{App, Entity, FocusHandle, Window};
 use tl_model::command::Tab;
 use tl_model::settings::{ColumnResize, ProcessesSettings};
 use tl_model::table::TableMode;
 
-use super::main::ShellState;
+use super::main::{ShellState, WINDOW_TITLE};
+use super::registry::WindowKey;
+use super::titlebar::keep_above_supported;
 use crate::actions::{SetSetting, SetViewMode, ToggleSetting};
 use crate::components::menu::{TlMenu, TlMenuPopup};
+use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::{CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
@@ -37,6 +42,7 @@ pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> E
             cx,
             process_view_submenu,
         )
+        .submenu(tr(cx, "shell-menu-view-window"), window, cx, window_submenu)
     })
 }
 
@@ -169,5 +175,29 @@ fn process_view_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMen
         menu.item(collapse, Box::new(CollapseAll))
     } else {
         menu.item_disabled(collapse, None)
+    }
+}
+
+/// "Always On Top": `(enabled, checked)`. Enabled when the caption pin can work
+/// ([`keep_above_supported`]); checked from `window.always_on_top`.
+pub fn always_on_top_marks(cx: &App) -> (bool, bool) {
+    (
+        keep_above_supported(cx),
+        TlSettings::settings(cx).window.always_on_top,
+    )
+}
+
+fn window_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+    let label = tr(cx, "shell-menu-window-always-on-top");
+    match always_on_top_marks(cx) {
+        (true, checked) => menu.check_item(
+            label,
+            checked,
+            Box::new(ToggleAlwaysOnTop {
+                window: WindowKey::Main,
+                caption: WINDOW_TITLE.into(),
+            }),
+        ),
+        (false, _) => menu.item_disabled(label, Some(tr(cx, "fnd-pin-unsupported"))),
     }
 }

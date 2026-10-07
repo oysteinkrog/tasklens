@@ -463,11 +463,14 @@ fn set_tab(cx: &mut VisualTestContext, tab: Tab, history: bool) {
     });
 }
 
+/// The View root items in order.
+const VIEW_ROOT: [&str; 3] = ["Columns", "Process View", "Window"];
+
 /// The labels of the open submenus: every drawn label except the View root items.
 fn sub_labels(cx: &mut VisualTestContext) -> Vec<String> {
     labels(cx)
         .into_iter()
-        .filter(|l| l != "Columns" && l != "Process View")
+        .filter(|l| !VIEW_ROOT.contains(&l.as_str()))
         .collect()
 }
 
@@ -485,10 +488,15 @@ fn menubar_alt_keys(cx: &mut TestAppContext) {
     keys(r.cx, "alt-v");
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     let entries = entries(r.cx);
-    assert_eq!(entries.len(), 2, "Columns, Process View: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        3,
+        "Columns, Process View, Window: {entries:?}"
+    );
     assert_eq!(entries[0].label(), Some("Columns"));
     assert_eq!(entries[0].selected(), Some(true), "Columns highlighted");
     assert_eq!(entries[1].label(), Some("Process View"));
+    assert_eq!(entries[2].label(), Some("Window"));
 }
 
 #[gpui_kit::test]
@@ -501,7 +509,7 @@ fn menubar_hover_switch(cx: &mut TestAppContext) {
     draw(r.cx);
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     // One popup, View's, below the View button.
-    assert_eq!(labels(r.cx), ["Columns", "Process View"]);
+    assert_eq!(labels(r.cx), VIEW_ROOT);
     let popup = popup_bounds(r.cx).expect("popup drawn");
     assert_eq!(popup.origin.x, bounds(r.cx, VIEW_BUTTON).origin.x);
 }
@@ -563,7 +571,7 @@ fn columns_disabled_on_performance(cx: &mut TestAppContext) {
     keys(r.cx, "alt-v");
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     let drawn = entries(r.cx);
-    assert_eq!(drawn.len(), 2);
+    assert_eq!(drawn.len(), 3);
     assert_eq!(drawn[0].label(), Some("Columns"));
     assert_ne!(
         drawn[0].selected(),
@@ -619,7 +627,7 @@ fn sub_highlighted(cx: &mut VisualTestContext) -> Vec<String> {
         .iter()
         .filter(|e| e.selected() == Some(true))
         .filter_map(|e| e.label().map(str::to_owned))
-        .filter(|l| l != "Columns" && l != "Process View")
+        .filter(|l| !VIEW_ROOT.contains(&l.as_str()))
         .collect()
 }
 
@@ -880,4 +888,110 @@ fn reset_item_dispatches(cx: &mut TestAppContext) {
     keys(r.cx, "alt-s up enter");
     assert_eq!(r.resets.get(), 1);
     assert_eq!(open_menu(r.cx), None);
+}
+
+// View > Window (E21-008).
+
+/// Installs a hub on the rig's fake engine and publishes a windows snapshot with `validity`
+/// (the KWin bridge state the caption pin reads).
+fn set_kwin(r: &mut Rig<'_>, validity: tl_model::validity::Validity) {
+    let client: Arc<dyn EngineClient> = r.engine.clone();
+    r.cx.update(|_, cx| {
+        if !cx.has_global::<tl_ui::hub::GlobalHub>() {
+            let hub = cx.new(|cx| tl_ui::hub::SnapshotHub::new(client, cx));
+            cx.set_global(tl_ui::hub::GlobalHub(hub));
+        }
+    });
+    r.engine.publish_with(|s| {
+        let w = Arc::make_mut(&mut s.windows);
+        w.header.validity = validity;
+        w.header.version += 1;
+    });
+    r.cx.run_until_parked();
+}
+
+fn set_on_top(cx: &mut VisualTestContext, on: bool) {
+    cx.update(|_, cx| {
+        TlSettings::set(
+            cx,
+            tl_ui::settings_global::SettingKey::WindowAlwaysOnTop,
+            tl_ui::settings_global::SettingValue::Bool(on),
+        )
+    });
+}
+
+#[gpui_kit::test]
+fn window_menu_always_on_top_dispatch(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_kwin(&mut r, tl_model::validity::Validity::Valid);
+    let toggles = Rc::new(RefCell::new(Vec::new()));
+    let sink = toggles.clone();
+    r.cx.update(|_, cx| {
+        cx.on_action(
+            move |a: &tl_ui::components::window_frame::ToggleAlwaysOnTop, _| {
+                sink.borrow_mut().push(a.clone())
+            },
+        );
+    });
+    assert_eq!(
+        r.cx.update(|_, cx| menus_view::always_on_top_marks(cx)),
+        (true, false),
+        "enabled and unchecked"
+    );
+    keys(r.cx, "alt-v");
+    assert!(
+        labels(r.cx).contains(&"Window".to_owned()),
+        "{:?}",
+        labels(r.cx)
+    );
+    keys(r.cx, "down down right");
+    assert_eq!(sub_labels(r.cx), ["Always On Top"]);
+    keys(r.cx, "enter");
+    let got = toggles.borrow().clone();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].window, tl_ui::window::registry::WindowKey::Main);
+}
+
+#[gpui_kit::test]
+fn window_menu_disabled_without_keep_above(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_kwin(&mut r, tl_model::validity::Validity::Unsupported);
+    assert!(
+        !r.cx.update(|_, cx| menus_view::always_on_top_marks(cx)).0,
+        "no keep-above mechanism"
+    );
+    keys(r.cx, "alt-v down down right");
+    let item = entries(r.cx)
+        .into_iter()
+        .find(|e| e.label() == Some("Always On Top"))
+        .expect("Always On Top drawn");
+    assert_ne!(
+        item.selected(),
+        Some(true),
+        "a disabled item is never highlighted"
+    );
+    r.cx.simulate_mouse_move(item.bounds().center(), None, Modifiers::none());
+    r.cx.executor()
+        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+    draw(r.cx);
+    assert!(r.cx.debug_bounds("TlTooltip").is_some(), "tooltip shown");
+    let reason =
+        r.cx.update(|_, cx| tl_ui::i18n::tr(cx, "fnd-pin-unsupported"));
+    assert_eq!(reason.as_ref(), "Not supported by this desktop");
+}
+
+#[gpui_kit::test]
+fn window_menu_check_follows_key(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_kwin(&mut r, tl_model::validity::Validity::Valid);
+    set_on_top(r.cx, true);
+    assert_eq!(
+        r.cx.update(|_, cx| menus_view::always_on_top_marks(cx)),
+        (true, true)
+    );
+    set_on_top(r.cx, false);
+    assert_eq!(
+        r.cx.update(|_, cx| menus_view::always_on_top_marks(cx)),
+        (true, false)
+    );
 }
