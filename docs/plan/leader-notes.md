@@ -658,3 +658,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 9o0.23 closed (060859bc, 06a370da, 4c10ea99): label_lines by row index on the grid, like label_tooltips, so TlKvRow literals stay unchanged. The same agent takes 8fx.24, then 8fx.39.
 - pdu.51 closed (9aa00583, 1b837169): the subtree check refuses IS_SELF or PID 1. The test data had to be in PID order (Forest::index_of binary-searches). The same agent takes bj6.17.
 - fut.11 closed (19c6e83a, a066eb4e, d7d0a878, f8cf47c6, 47c05f0f, a1f3cf32): five gallery pages; TlTitleBar and TlWindowPin hold no state; static_card only with the bench feature. The gallery_icons goldens are updated for the ChevronsRight icon that jqk.17 added. The inactive window frame is not drawn separately, because the compositor dims the border and shadow, not the bar. The same agent takes gma.39.
+- bj6.10 closed (2dc7fadf): Run... with Ctrl+N, separator, Exit tasklens. The same agent takes bj6.4.
