@@ -331,6 +331,7 @@ impl TasklensUi {
         crate::window::share_theme::init(cx);
         crate::window::collector_health::init(cx);
         crate::window::shortcuts::init(cx);
+        crate::window::about::init(cx);
         #[cfg(feature = "bench")]
         install_gallery_hook(cx);
         perf_step("ui_init");
