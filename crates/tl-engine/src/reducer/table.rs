@@ -196,12 +196,30 @@ fn iec_shown(n: i128) -> i128 {
     (v * 100.0).round() as i128 * scale / 100
 }
 
-/// A network rate at the step `units::net_rate` prints with `units.network` and auto scale off.
+/// A network rate at the step `units::net_rate` prints with `units.network` and
+/// `units.network_auto_scale`.
 fn net_shown(bytes_per_s: f64, settings: &EngineSettings) -> i128 {
-    match settings.network {
-        NetworkUnit::Bits => tenths(bytes_per_s * 8.0 / 1e6),
-        NetworkUnit::Bytes => tenths(bytes_per_s / MIB),
+    match (settings.network, settings.network_auto_scale) {
+        (NetworkUnit::Bits, false) => tenths(bytes_per_s * 8.0 / 1e6),
+        (NetworkUnit::Bytes, false) => tenths(bytes_per_s / MIB),
+        (NetworkUnit::Bits, true) => scaled_tenths(bytes_per_s * 8.0 / 1e3, 1000, 3),
+        (NetworkUnit::Bytes, true) => scaled_tenths(bytes_per_s / KIB, 1024, 3),
     }
+}
+
+/// `v`, in the first of `units` units, at the step auto scale prints: one decimal of the unit
+/// chosen like `units::net_rate`, scaled back to tenths of the first unit so the order holds
+/// across units.
+fn scaled_tenths(mut v: f64, base: u32, units: u32) -> i128 {
+    let b = f64::from(base);
+    let mut scale: i128 = 1;
+    let mut i = 1;
+    while v >= b - 0.05 && i < units {
+        v /= b;
+        scale *= i128::from(base);
+        i += 1;
+    }
+    tenths(v) * scale
 }
 
 /// True when the field's validity lets its value take part in the order.
@@ -2535,6 +2553,22 @@ mod tests {
             net_shown(1.04 * MIB, &settings),
             net_shown(1.0 * MIB, &settings)
         );
+
+        // Auto scale: "0.4 Kbps" and "0.5 Kbps" differ though both read "0 Mbps" fixed.
+        settings.network = NetworkUnit::Bits;
+        settings.network_auto_scale = true;
+        assert!(net_shown(50.0, &settings) < net_shown(62.0, &settings));
+        // Both "1.0 Mbps"; and "992.0 Kbps" sorts below "1.0 Mbps".
+        assert_eq!(
+            net_shown(125_000.0, &settings),
+            net_shown(128_000.0, &settings)
+        );
+        assert!(net_shown(124_000.0, &settings) < net_shown(125_000.0, &settings));
+        settings.network = NetworkUnit::Bytes;
+        // "0.5 KiB/s" below "1.0 KiB/s"; "1023.9 KiB/s" below "1.0 MiB/s".
+        assert!(net_shown(512.0, &settings) < net_shown(1024.0, &settings));
+        assert!(net_shown(1023.9 * KIB, &settings) < net_shown(MIB, &settings));
+        settings.network_auto_scale = false;
 
         // Disk rates step by 0.1 MiB/s, then the key falls back to ProcessKey.
         let disk = |v: f32| shown_key(SortKey::Float(v), ColumnId::DiskReadRate, &settings);
