@@ -2031,23 +2031,45 @@ mod summary {
         assert!(r.vcx.read_entity(&view, |v, _| v.fades()));
     }
 
-    /// A CPU sample re-renders the CPU tile's chart and not the summary view (ADR-009).
+    /// The summary view never notifies on a tick: a snapshot that changes no tile series renders
+    /// nothing. A CPU sample notifies the CPU chart only. GPUI then marks every ancestor view
+    /// dirty, so the summary view and the other tile charts re-run `render` too, but the other
+    /// charts build no new geometry (ADR-009).
     #[gpui_kit::test]
     fn summary_sample_tick_does_not_rerender_view(cx: &mut TestAppContext) {
         let mut r = open(cx, 1600., 1000., true);
         let view = enter(&mut r);
         draw(r.vcx);
-        let chart = r.vcx.read_entity(&view, |v, _| v.tiles[0].chart.clone());
-        let renders = |r: &mut Rig| {
-            let (view, chart) = (view.clone(), chart.clone());
+        let (cpu, memory) = r.vcx.read_entity(&view, |v, _| {
+            (v.tiles[0].chart.clone(), v.tiles[1].chart.clone())
+        });
+        assert_eq!(
+            r.vcx.read_entity(&view, |v, _| v.tiles[1].key.clone()),
+            key("memory")
+        );
+        let counts = |r: &mut Rig| {
+            let (view, cpu, memory) = (view.clone(), cpu.clone(), memory.clone());
             r.vcx.update(|_, cx| {
                 (
                     view.read(cx).render_count.get(),
-                    chart.read(cx).render_count.get(),
+                    cpu.read(cx).render_count.get(),
+                    memory.read(cx).build_count.get(),
                 )
             })
         };
-        let before = renders(&mut r);
+
+        let before = counts(&mut r);
+        for _ in 0..3 {
+            r.engine
+                .publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
+            draw(r.vcx);
+        }
+        assert_eq!(
+            counts(&mut r),
+            before,
+            "no tile series changed: nothing renders"
+        );
+
         for version in 1..=3u64 {
             r.engine.publish_with(|s| {
                 let id = SeriesId {
@@ -2069,12 +2091,12 @@ mod summary {
             });
             draw(r.vcx);
         }
-        let after = renders(&mut r);
+        let after = counts(&mut r);
         assert!(
             after.1 > before.1,
             "the CPU chart re-rendered: {before:?} {after:?}"
         );
-        assert_eq!(after.0, before.0, "the summary view did not");
+        assert_eq!(after.2, before.2, "the memory chart built no geometry");
     }
 
     /// The summary sends its own part (CPU at the fast rate); the hidden device page withdraws

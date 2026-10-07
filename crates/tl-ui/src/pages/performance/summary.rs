@@ -21,7 +21,9 @@ use gpui_kit::{
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
 
-use super::actions::{PERFORMANCE_SUMMARY_CONTEXT, PerfShowMiniWindow, PerfToggleSummaryMode};
+use super::actions::{
+    NoOp, PERFORMANCE_SUMMARY_CONTEXT, PerfShowMiniWindow, PerfToggleSummaryMode,
+};
 use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{ChartBg, ChartLabels, ChartView, LegendStyle, ValueAlign, ValueFormat};
@@ -458,6 +460,9 @@ impl Render for SummaryView {
             .key_context(PERFORMANCE_SUMMARY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle))
+            // A binding whose action has no handler falls through to the next binding for the
+            // same keys, so the swallowed tab keys need this empty handler.
+            .on_action(|_: &NoOp, _, _| {})
             .relative()
             .size_full()
             .bg(theme.window_bg)
