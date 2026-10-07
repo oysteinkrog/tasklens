@@ -770,3 +770,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - gma.14 (80184733, 4f321973, 01310b0d) closed. Accepted gaps: no clipboard-failure trigger, the grid look, Unit stays plain until gma.17. Tab order and click-moves-cursor get a follow-up. The gma agent takes gma.8.
 - pdu.27 (a920e5c4, 370d01ba, 1c1a5d17) closed. Ctrl alone pauses, and the page keeps its snapshot while paused. The pdu-52 agent takes pdu.54.
 - wlf.20 (419a1cc9) closed. U-9 is not needed. wlf.27 gate set to the UI-PRF-053 spec, 2% of one core. Static "0 frames" means no probe, not no paints: the scene redraws at 10 Hz by design. wlf.27 and wlf.28 are probably one cause (expensive CPU page redraw), so they get one profile on the next unlock.
+- o55.8 (227b8ede, 5796d259, e75a499c) closed. TlLink::on_click_bounds and TlKeyValueGrid::on_link_click added, plus DevicePage::details_link_click. The Display unit menu opens under the value. The o55 agent takes wlf.29.
