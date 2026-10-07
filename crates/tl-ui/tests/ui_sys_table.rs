@@ -794,3 +794,63 @@ mod body_states {
         assert_eq!(click(cx, body, Tab::Services), (0, 1), "Retry refreshes");
     }
 }
+
+/// System-table action texts (tasklens-hk6.9).
+mod action_texts {
+    use std::sync::Arc;
+
+    use tl_model::actions::ActionError;
+    use tl_ui::action_tracker::message;
+    use tl_ui::pages::sys_table::failure_text;
+
+    const PREFIX: &str = "Failed to start service";
+
+    fn job(result: &str, error_name: Option<&str>) -> ActionError {
+        ActionError::UnitJob {
+            result: Arc::from(result),
+            error_name: error_name.map(Arc::from),
+        }
+    }
+
+    #[test]
+    fn failure_text_maps_dbus_errors() {
+        assert_eq!(
+            failure_text(PREFIX, &ActionError::PermissionDenied),
+            "Failed to start service: not authorized"
+        );
+        assert_eq!(
+            failure_text(
+                PREFIX,
+                &job("failed", Some("org.freedesktop.DBus.Error.AccessDenied"))
+            ),
+            "Failed to start service: not authorized"
+        );
+        assert_eq!(
+            failure_text(
+                PREFIX,
+                &job(
+                    "failed",
+                    Some("org.freedesktop.DBus.Error.InteractiveAuthorizationRequired")
+                )
+            ),
+            "Failed to start service: no authentication agent is running"
+        );
+        assert_eq!(
+            failure_text(PREFIX, &job("timeout", None)),
+            "Failed to start service: timeout"
+        );
+        assert_eq!(
+            failure_text(
+                PREFIX,
+                &job("failed", Some("org.freedesktop.systemd1.NoSuchUnit"))
+            ),
+            "Failed to start service: org.freedesktop.systemd1.NoSuchUnit",
+            "an unmapped D-Bus error name is shown as is"
+        );
+        let internal = ActionError::Internal(Arc::from("bus closed"));
+        assert_eq!(
+            failure_text(PREFIX, &internal),
+            format!("{PREFIX}: {}", message(&internal))
+        );
+    }
+}

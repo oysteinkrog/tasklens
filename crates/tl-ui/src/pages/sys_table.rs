@@ -14,6 +14,7 @@ use gpui_kit::{
     Action, AnyElement, App, Entity, EntityId, IntoElement, Pixels, SharedString, div, px,
 };
 use smallvec::SmallVec;
+use tl_model::actions::{ActionError, ActionTarget};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, Tab};
 use tl_model::demand::Demand;
@@ -22,12 +23,13 @@ use tl_model::table::{ServiceFilter, SysNodeId, SysSortSpec, SysTable, SysTableQ
 use tl_model::validity::Validity;
 use tracing::debug;
 
+use crate::action_tracker::message;
 use crate::actions::RefreshCurrentTab;
 use crate::app::EngineGlobal;
 use crate::components::empty::{TlEmptyState, TlEmptyTone};
 use crate::components::skeleton::{TlSkeletonRows, skeleton_row_count};
 use crate::demand::DemandAggregator;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_en};
 use crate::theme::UiMetrics;
 
 /// Query owner for one system table. Generations start at 1 and only grow.
@@ -406,4 +408,74 @@ pub fn render_empty(
         state = state.clear_filter(action).button_label(label);
     }
     state.into_any_element()
+}
+
+/// The system-table action a request runs, for the pending map and the row overlay
+/// (UI-SYS-007).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ActionKindTag {
+    Start,
+    Stop,
+    Restart,
+    Reload,
+    ResetFailed,
+    SetStartup,
+    StartupEnable,
+    StartupDisable,
+    StartupRunNow,
+    StartupDelete,
+    CloseTcp,
+    Other,
+}
+
+/// Makes the action dispatched by a failed toast's button, such as "View logs", for one target.
+pub type FailedButtonAction = Box<dyn Fn(&ActionTarget) -> Box<dyn Action>>;
+
+/// Toast texts for one action kind on one table. Fluent args: `$n` total, `$ok` succeeded,
+/// `$failed` failed.
+pub struct ActionTexts {
+    /// "Starting service...". Empty: no toast until the final event (opener actions).
+    pub pending_one: SharedString,
+    /// "Starting { $n } services...".
+    pub pending_many: SharedString,
+    /// "Service started". Empty: the toast is removed and nothing shows.
+    pub done_one: SharedString,
+    /// "{ $n } services started".
+    pub done_many: SharedString,
+    /// "{ $ok } of { $n } services started. { $failed } failed."
+    pub partial_many: SharedString,
+    /// "Failed to start service".
+    pub failed_prefix: SharedString,
+    /// True: "<prefix>: <result>". False: the prefix alone (opener toasts).
+    pub failed_suffix: bool,
+    /// "Service action finished."
+    pub unknown: SharedString,
+    /// "A service action is already in progress."
+    pub busy: SharedString,
+    /// "View logs" and the action it dispatches for the failed target.
+    pub failed_button: Option<(SharedString, FailedButtonAction)>,
+}
+
+/// D-Bus error names `failure_text` maps (R-117, U-39).
+const NO_AGENT: &str = "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired";
+const ACCESS_DENIED: &str = "org.freedesktop.DBus.Error.AccessDenied";
+
+/// "<prefix>: <reason>" for a failed system-table action. A dismissed polkit prompt cannot be
+/// told from a denial on systemd D-Bus calls, so both read "not authorized" (R-117, U-39). The
+/// reason is en-US, as `action_tracker::message` gives it.
+pub fn failure_text(prefix: &str, err: &ActionError) -> SharedString {
+    let not_authorized = || tr_en("sys-sys007-not-authorized", &[]);
+    let reason = match err {
+        ActionError::PermissionDenied => not_authorized(),
+        ActionError::UnitJob { result, error_name } => {
+            let s = error_name.as_deref().unwrap_or(result);
+            match s {
+                NO_AGENT => tr_en("sys-sys007-no-authentication-agent-is-running", &[]),
+                ACCESS_DENIED => not_authorized(),
+                _ => SharedString::from(s.to_owned()),
+            }
+        }
+        _ => message(err),
+    };
+    format!("{prefix}: {reason}").into()
 }
