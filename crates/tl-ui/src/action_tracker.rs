@@ -852,6 +852,10 @@ fn result_toast(
             words.eperm.clone(),
             Some(retry_button(id, words)),
         ),
+        // An empty failure text shows the reason alone (Open file location).
+        ActionState::Failed(err) if texts.failure.is_empty() => {
+            (ToastKind::Error, words.message(err), None)
+        }
         ActionState::Failed(err) => (
             ToastKind::Error,
             format!("{} {}", texts.failure, words.message(err)).into(),

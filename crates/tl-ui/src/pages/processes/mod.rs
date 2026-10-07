@@ -31,19 +31,21 @@ use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, Signal};
 use tl_model::client::EngineClient;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
-use tl_model::process::{ProcFlags, ProcState, ProcessRecord};
+use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{ProcessSnapshot, Snapshot};
 use tracing::warn;
 
 use self::actions::{
     CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree,
-    EndTask, MAX_TARGETS, ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
+    EndTask, GoToParent, MAX_TARGETS, OpenFileLocation, ResumeProcess, SetPriority, SuspendProcess,
+    ToggleGroupRow,
 };
-use self::cells::{copy_all_metrics, copy_cell, copy_details, process_column};
+use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
 use self::delegate::ProcessDelegate;
-use self::toasts::{refusal_reason, submit, toast_words};
+use self::jump::JumpTexts;
+use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
 use crate::components::toast::ToastKind;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr};
@@ -448,6 +450,95 @@ impl ProcessesPage {
         self.copy(CopyKind::AllMetrics, cx);
     }
 
+    /// Go to parent process (PROC-071): selects the live record whose PID is the target's
+    /// parent PID through the jump target. Nothing for a parent PID of 0 or several targets.
+    fn on_go_to_parent(&mut self, _: &GoToParent, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        let [t] = &targets.items[..] else {
+            return;
+        };
+        if !matches!(t.kind, RowKind::Process | RowKind::KernelThread) || t.ppid == 0 {
+            return;
+        }
+        let not_found = tr(cx, "processes-toast-parent-not-found");
+        let hub = cx.global::<GlobalHub>().0.clone();
+        let parent = hub
+            .read(cx)
+            .current()
+            .processes
+            .records
+            .iter()
+            .find(|r| r.key.pid == t.ppid && !r.flags.contains(ProcFlags::EXITED))
+            .map(|r| r.key);
+        let Some(parent) = parent else {
+            warning_toast(not_found, cx);
+            return;
+        };
+        let texts = JumpTexts {
+            success: Some(tr(cx, "processes-toast-switched-to-parent")),
+            not_found: not_found.clone(),
+            hidden: Some(not_found),
+            switched_tab: None,
+        };
+        self.select_by_key(parent, texts, window, cx);
+    }
+
+    /// Open file location (PROC-073): the file manager shows the executable. A restricted path
+    /// toasts "Process image unavailable"; a deleted one sends nothing (the item is disabled).
+    fn on_open_file_location(
+        &mut self,
+        _: &OpenFileLocation,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.take_targets(cx);
+        let [t] = &targets.items[..] else {
+            return;
+        };
+        let NodeId::Process(key) = t.node else {
+            return;
+        };
+        if t.exe_deleted {
+            return;
+        }
+        let exe = {
+            let d = &self.table.read(cx).delegate;
+            let records = &d.snapshot().processes.records;
+            let Some(r) = records.iter().find(|r| r.key == key) else {
+                return;
+            };
+            if exe_deleted(&r.meta) {
+                return;
+            }
+            r.meta.exe.clone()
+        };
+        let Some(path) = exe else {
+            warning_toast(tr(cx, "processes-toast-image-unavailable"), cx);
+            return;
+        };
+        let req = ActionRequest {
+            // The tracker gives id 0 its next ActionId.
+            id: ActionId(0),
+            kind: ActionKind::ShowInFileManager {
+                path,
+                properties: false,
+            },
+            targets: SmallVec::new(),
+            privileged: false,
+        };
+        // No success text: the Info toast stays as the result. A failure shows the reason only.
+        let texts = ActionToastTexts {
+            requested: Some((
+                ToastKind::Info,
+                tr(cx, "processes-toast-opening-file-location"),
+            )),
+            success: (ToastKind::Success, SharedString::default()),
+            failure: (ToastKind::Error, SharedString::default()),
+            partial: None,
+        };
+        submit(self, req, texts, cx);
+    }
+
     /// Copy, Copy details and Copy all metrics (PROC-070, ADR-015): the captured targets in
     /// view order, exited rows too, onto the clipboard, then a Success toast (UI-PRC-015).
     /// Command lines leave only through Copy all metrics and Copy on the Command line cell.
@@ -804,7 +895,7 @@ pub(crate) fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<Capt
         return Some(CapturedTarget {
             node: row.node.clone(),
             kind,
-            exe_deleted: p.extras.get(i).is_some_and(|e| e.exe_deleted),
+            exe_deleted: exe_deleted(&r.meta) || p.extras.get(i).is_some_and(|e| e.exe_deleted),
             ..record_target(r)
         });
     }
@@ -954,6 +1045,14 @@ fn is_bwrap(r: &ProcessRecord) -> bool {
 }
 
 /// A Warning toast on the main window.
+/// The executable was deleted: its path ends in " (deleted)" (PROC-073). The row menu disables
+/// Open file location for it.
+pub fn exe_deleted(meta: &ProcessMeta) -> bool {
+    meta.exe
+        .as_deref()
+        .is_some_and(|e| e.ends_with(DELETED_SUFFIX))
+}
+
 fn warning_toast(text: SharedString, cx: &mut App) {
     toast(ToastKind::Warning, text, cx);
 }
@@ -987,6 +1086,8 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_details))
             .on_action(cx.listener(Self::on_copy_all_metrics))
+            .on_action(cx.listener(Self::on_go_to_parent))
+            .on_action(cx.listener(Self::on_open_file_location))
             .child(
                 self.table
                     .clone()

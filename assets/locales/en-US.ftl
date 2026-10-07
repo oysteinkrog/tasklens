@@ -1263,3 +1263,16 @@ shell-settings-dim-zero-values = Dim zero values
 shell-settings-hide-unnamed-handles = Hide unnamed handles
 shell-settings-shared-objects-only = Shared libraries only
 shell-settings-env-mask = Mask secret environment values
+# Go to parent process and Open file location (tasklens-pdu.23, PROC-071, PROC-073)
+processes-toast-switched-to-parent = Switched to parent process
+processes-toast-parent-not-found = Parent process not found in current view
+processes-toast-opening-file-location = Opening file location
+processes-toast-image-unavailable = Process image unavailable
+# Crash Report window (tasklens-bj6.8, UI-SHL-093).
+shell-crash-title = tasklens Crash Report
+shell-crash-line-1 = tasklens closed unexpectedly last time.
+shell-crash-line-2 = If tasklens crashed without a report, run coredumpctl info tasklens in a terminal.
+shell-crash-open-logs = Open log folder
+shell-crash-copy = Copy report
+shell-crash-close = Close
+shell-toast-copied = Copied to clipboard

@@ -987,6 +987,7 @@ mod end {
     use gpui_kit::component::kbd::Kbd;
     use gpui_kit::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle, WindowId};
     use gpui_kit::{KeyBinding, Keystroke, point, px};
+    use tl_model::actions::ActionError;
     use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
     use tl_model::command::Tab;
@@ -1004,6 +1005,7 @@ mod end {
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::action_tracker::message;
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::menu::{
         MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup, open_context_menu, open_context_menu_at,
@@ -1011,8 +1013,9 @@ mod end {
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
-        CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree, EndTask, PriorityClass,
-        ResumeProcess, SetPriority, SuspendProcess,
+        CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree, EndTask, GoToParent,
+        OpenFileLocation, PriorityClass, ProcessesShowHidden, ResumeProcess, SetPriority,
+        SuspendProcess,
     };
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
@@ -2104,6 +2107,170 @@ mod end {
         assert_eq!(selected, [row_301], "the selection is unchanged");
         assert_eq!(focus, Some(row_301), "the focus row is unchanged");
         assert!(rig.sent().is_empty(), "no action request");
+    }
+
+    /// PID 300 (parent PID 1) and its child 400.
+    fn parent_and_child() -> Vec<ProcessRecord> {
+        vec![
+            record(300, 1, "parent", ProcFlags::empty()),
+            record(400, 300, "child", ProcFlags::empty()),
+        ]
+    }
+
+    fn query_generation(rig: &mut Rig) -> u64 {
+        rig.vcx.update(|_, cx| {
+            rig.page
+                .read(cx)
+                .table()
+                .read(cx)
+                .delegate
+                .query()
+                .generation()
+        })
+    }
+
+    fn selected(rig: &mut Rig) -> Vec<ProcRowId> {
+        rig.vcx
+            .update(|_, cx| rig.page.read(cx).table().read(cx).selection.ids().collect())
+    }
+
+    #[gpui_kit::test]
+    fn go_to_parent_selects_parent(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(parent_and_child(), &[300, 400], Vec::new());
+        rig.select_pids(&[400]);
+        let before = query_generation(&mut rig);
+        assert!(rig.dispatch(GoToParent).is_none());
+        assert!(
+            query_generation(&mut rig) > before,
+            "the jump expands the path"
+        );
+        // The view of the jump's query holds the parent.
+        rig.publish(parent_and_child(), &[300, 400], Vec::new());
+        assert_eq!(selected(&mut rig), [ProcRowId::Process(key(300))]);
+        assert_eq!(visible(&mut rig.vcx), ["Switched to parent process"]);
+        assert!(rig.sent().is_empty(), "no action request");
+    }
+
+    #[gpui_kit::test]
+    fn go_to_parent_hidden_offers_show(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(parent_and_child(), &[300, 400], Vec::new());
+        rig.select_pids(&[400]);
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        rig.vcx.update(|_, cx| {
+            table.update(cx, |t, _| t.delegate.query_mut().set_filter("child".into()))
+        });
+        assert!(rig.dispatch(GoToParent).is_none());
+        // The filtered view lacks the parent.
+        rig.publish(parent_and_child(), &[400], Vec::new());
+        assert_eq!(
+            visible(&mut rig.vcx),
+            ["Parent process not found in current view"]
+        );
+        assert_eq!(selected(&mut rig), [ProcRowId::Process(key(400))]);
+
+        // The toast's Show button dispatches this: it clears the filter and asks again.
+        let generation = query_generation(&mut rig);
+        rig.vcx.dispatch_action(ProcessesShowHidden);
+        rig.vcx.run_until_parked();
+        let filter = rig
+            .vcx
+            .update(|_, cx| table.read(cx).delegate.query().filter().clone());
+        assert_eq!(filter.as_ref(), "", "Show clears the filter");
+        assert!(
+            query_generation(&mut rig) > generation,
+            "Show expands again"
+        );
+        rig.publish(parent_and_child(), &[300, 400], Vec::new());
+        assert_eq!(selected(&mut rig), [ProcRowId::Process(key(300))]);
+    }
+
+    #[gpui_kit::test]
+    fn go_to_parent_ppid_zero_does_nothing(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(
+            vec![record(1, 0, "systemd", ProcFlags::PROTECTED)],
+            &[1],
+            Vec::new(),
+        );
+        rig.select_pids(&[1]);
+        let before = query_generation(&mut rig);
+        assert!(rig.dispatch(GoToParent).is_none());
+        assert_eq!(query_generation(&mut rig), before, "no jump");
+        assert!(visible(&mut rig.vcx).is_empty(), "no toast");
+
+        // A parent PID with no live record toasts not found.
+        rig.publish(own(&[300]), &[300], Vec::new());
+        rig.select_pids(&[300]);
+        assert!(rig.dispatch(GoToParent).is_none());
+        assert_eq!(
+            visible(&mut rig.vcx),
+            ["Parent process not found in current view"]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn open_file_location_sends_show_in_file_manager(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300]), &[300], Vec::new());
+        rig.select_pids(&[300]);
+        assert!(rig.dispatch(OpenFileLocation).is_none());
+        let sent = actions_sent(&rig.engine);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::ShowInFileManager {
+                path: Arc::from("/usr/bin/proc"),
+                properties: false,
+            }
+        );
+        assert!(sent[0].targets.is_empty(), "no targets");
+        assert_eq!(visible(&mut rig.vcx), ["Opening file location"]);
+
+        // Success keeps the Info toast; a failure shows the reason alone.
+        let id = sent[0].id;
+        emit(&rig.engine, &mut rig.vcx, id, None, ActionState::Succeeded);
+        assert_eq!(visible(&mut rig.vcx), ["Opening file location"]);
+        assert!(rig.dispatch(OpenFileLocation).is_none());
+        let id = actions_sent(&rig.engine)[1].id;
+        let err = ActionError::Unsupported;
+        emit(
+            &rig.engine,
+            &mut rig.vcx,
+            id,
+            None,
+            ActionState::Failed(err.clone()),
+        );
+        let toasts = visible(&mut rig.vcx);
+        assert_eq!(
+            toasts.last().map(String::as_str),
+            Some(message(&err).as_ref())
+        );
+    }
+
+    #[gpui_kit::test]
+    fn open_file_location_restricted_toasts(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let mut restricted = record(300, 1, "proc", ProcFlags::empty());
+        Arc::make_mut(&mut restricted.meta).exe = None;
+        let mut deleted = record(301, 1, "proc", ProcFlags::empty());
+        Arc::make_mut(&mut deleted.meta).exe = Some(Arc::from("/usr/bin/proc (deleted)"));
+        rig.publish(vec![restricted, deleted], &[300, 301], Vec::new());
+        rig.select_pids(&[300]);
+        assert!(rig.dispatch(OpenFileLocation).is_none());
+        assert_eq!(visible(&mut rig.vcx), ["Process image unavailable"]);
+        assert!(actions_sent(&rig.engine).is_empty(), "nothing is sent");
+
+        // A deleted executable: the menu item is disabled and the handler does nothing.
+        let menu = build_menu(&mut rig, &[1], ColumnId::Name);
+        assert!(
+            shape(&mut rig, &menu).contains(&"(Open file location: Executable deleted)".into())
+        );
+        rig.select_pids(&[301]);
+        assert!(rig.dispatch(OpenFileLocation).is_none());
+        assert!(actions_sent(&rig.engine).is_empty());
+        assert_eq!(visible(&mut rig.vcx), ["Process image unavailable"]);
     }
 
     fn stopped(pid: u32) -> ProcessRecord {
