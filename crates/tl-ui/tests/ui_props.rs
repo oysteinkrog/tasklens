@@ -1773,6 +1773,47 @@ mod threads {
         assert_eq!(shown, [4325]);
     }
 
+    /// The Threads layout is tagged `TableId::Processes` but lives in memory only: a column
+    /// change never reaches `state.toml`, so it cannot overwrite the Processes layout.
+    #[gpui_kit::test]
+    fn threads_layout_never_persisted(cx: &mut TestAppContext) {
+        use tl_model::settings::{Settings, UiState};
+        use tl_ui::app::BootSettings;
+        use tl_ui::settings_global::TlSettings;
+        use tl_ui::table::TreeTableDelegate as _;
+        cx.update(|cx| {
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        let table = cx.update(|_, cx| view.read(cx).tab.read(cx).table().clone());
+        let saved = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let s = TlSettings::state(cx);
+                (s.columns.clone(), s.sort.clone())
+            })
+        };
+        let before = saved(cx);
+        cx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                let mut layout = t.columns().clone();
+                layout.widths.insert(ThreadColumn::Tid, px(200.));
+                t.delegate_mut().on_columns_changed(&layout, cx);
+                t.sort_by_column(ThreadColumn::Name, cx);
+            })
+        });
+        draw(cx);
+        let width = cx.update(|_, cx| table.read(cx).columns().widths[&ThreadColumn::Tid]);
+        assert_eq!(width, px(200.), "kept in memory");
+        assert_eq!(saved(cx), before, "nothing reached the saved state");
+    }
+
     #[gpui_kit::test]
     fn threads_copy_row_and_tsv(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
