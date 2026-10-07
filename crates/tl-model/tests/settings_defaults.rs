@@ -222,6 +222,9 @@ fn state_toml_equals_default() {
     parsed.columns.services = defaults.services;
     parsed.columns.startup = defaults.startup;
     parsed.columns.connections = defaults.connections;
+    // Table (a) shows an installed unit; the default has none.
+    assert_eq!(parsed.lowmem.oom_score_adjust, Some(-900));
+    parsed.lowmem = Default::default();
     assert_eq!(parsed, UiState::default());
 }
 
@@ -257,4 +260,18 @@ fn state_save_load_roundtrip() {
         toml::from_str::<UiState>(&text).unwrap(),
         UiState::default()
     );
+}
+
+#[test]
+fn lowmem_state_key_left_out_when_none_and_clamped() {
+    let text = toml::to_string(&UiState::default()).unwrap();
+    assert!(!text.contains("oom_score_adjust"), "{text}");
+    let mut state = UiState::default();
+    state.lowmem.oom_score_adjust = Some(0);
+    let text = toml::to_string(&state).unwrap();
+    assert!(text.contains("[lowmem]\noom_score_adjust = 0\n"), "{text}");
+    assert_eq!(toml::from_str::<UiState>(&text).unwrap(), state);
+    state.lowmem.oom_score_adjust = Some(-5000);
+    assert_eq!(state.clamp(), vec!["lowmem.oom_score_adjust"]);
+    assert_eq!(state.lowmem.oom_score_adjust, Some(-1000));
 }

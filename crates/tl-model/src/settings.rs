@@ -921,6 +921,16 @@ impl Default for TrayGraphState {
     }
 }
 
+/// `[lowmem]` in `state.toml` (P3, R-152 OI-7).
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LowmemState {
+    /// The OOMScoreAdjust the installed watcher unit accepted: -900, or 0 when the user manager
+    /// refused -900 (U-24). Left out of the file when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oom_score_adjust: Option<i32>,
+}
+
 /// The whole of `state.toml`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -931,6 +941,8 @@ pub struct UiState {
     pub processes: ProcessesState,
     pub services: ServicesState,
     pub performance: PerformanceState,
+    /// P3.
+    pub lowmem: LowmemState,
     pub sort: SortTables,
     pub columns: ColumnTables,
     pub minigraphs: Vec<MinigraphState>,
@@ -949,6 +961,7 @@ impl Default for UiState {
             processes: ProcessesState::default(),
             services: ServicesState::default(),
             performance: PerformanceState::default(),
+            lowmem: LowmemState::default(),
             sort: SortTables::default(),
             columns: ColumnTables::default(),
             minigraphs: Vec::new(),
@@ -1118,6 +1131,10 @@ impl UiState {
             "performance.nav_width",
             c,
         );
+        // OOMScoreAdjust is -1000 to 1000 (proc(5)).
+        if let Some(oom) = &mut self.lowmem.oom_score_adjust {
+            clamp_key(oom, (-1000, 1000, 1), "lowmem.oom_score_adjust", c);
+        }
         changed
     }
 }
