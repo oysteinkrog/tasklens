@@ -266,11 +266,11 @@ impl ActionTracker {
         });
 
         let this = cx.weak_entity();
-        cx.on_action(move |a: &RetryActionAsAdmin, cx| {
+        App::on_action(cx, move |a: &RetryActionAsAdmin, cx| {
             let _ = this.update(cx, |t, cx| t.retry(ActionId(a.0), cx));
         });
         let this = cx.weak_entity();
-        cx.on_action(move |a: &ShowActionDetails, cx| {
+        App::on_action(cx, move |a: &ShowActionDetails, cx| {
             let _ = this.update(cx, |t, cx| t.show_details(ActionId(a.0), cx));
         });
 
@@ -497,11 +497,19 @@ impl ActionTracker {
                             action: Box::new(ShowActionDetails(id.0)),
                         }
                     };
-                    self.push(&queue, ToastKind::Warning, text, Some(key), Some(button), cx);
+                    self.push(
+                        &queue,
+                        ToastKind::Warning,
+                        text,
+                        Some(key),
+                        Some(button),
+                        cx,
+                    );
                 }
             }
         }
 
+        drop(states);
         if retry {
             let mut request = entry.request;
             request.id = ActionId(0);
@@ -892,10 +900,7 @@ pub struct ActionWords {
 }
 
 impl ActionWords {
-    fn with(
-        t: impl Fn(&str) -> SharedString,
-        tmpl: impl Fn(&str, &[&str]) -> Template,
-    ) -> Self {
+    fn with(t: impl Fn(&str) -> SharedString, tmpl: impl Fn(&str, &[&str]) -> Template) -> Self {
         Self {
             permission_denied: t("fnd-action-permission-denied"),
             no_such_process: t("fnd-action-no-such-process"),
@@ -1091,7 +1096,10 @@ mod tests {
         use RejectReason::*;
         let warn = |text: &str| (ToastKind::Warning, text.to_owned());
         let cases = [
-            (Busy, warn("Another action on this process is still running.")),
+            (
+                Busy,
+                warn("Another action on this process is still running."),
+            ),
             (
                 TooManyTargets,
                 warn("Too many processes selected. The limit is 256."),

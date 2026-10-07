@@ -12,7 +12,6 @@ use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, TestAppContext, VisualTestContext, WeakEntity, Window, WindowHandle, div, px,
 };
-use smallvec::SmallVec;
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
     DumpMode, RejectReason, Signal,
