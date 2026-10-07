@@ -120,10 +120,12 @@ pub trait TreeTableDelegate: 'static + Sized {
     fn sort(&self) -> Self::Sort;
     /// False for group headers.
     fn selectable(&self, ix: usize) -> bool;
+    /// The row menu for `targets`. `clicked_col` is the column under the pointer on a
+    /// right-click, `None` when Shift+F10 or the Menu key opened it.
     fn context_menu(
         &mut self,
         targets: &[Self::RowId],
-        clicked_col: Self::Column,
+        clicked_col: Option<Self::Column>,
         menu: TlMenu,
         window: &mut Window,
         cx: &mut Context<TlTreeTable<Self>>,
@@ -1316,7 +1318,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             self.selection.in_view_order(&DelegateView(&self.delegate))
         };
         cx.stop_propagation();
-        self.open_menu(targets, col, ev.position, window, cx);
+        self.open_menu(targets, Some(col), ev.position, window, cx);
     }
 
     /// Shift+F10 and the Menu key: the menu for the current selection, its top left corner at
@@ -1339,7 +1341,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             return;
         }
         let at = self.focus_menu_anchor(ix, col, cx);
-        self.open_menu(targets, col, at, window, cx);
+        self.open_menu(targets, None, at, window, cx);
     }
 
     /// Window position of row `ix`'s Name text start at the row's bottom edge. When the Name
@@ -1373,7 +1375,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     fn open_menu(
         &mut self,
         targets: SmallVec<[D::RowId; 8]>,
-        col: D::Column,
+        col: Option<D::Column>,
         at: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,

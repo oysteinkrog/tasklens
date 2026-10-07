@@ -1006,7 +1006,7 @@ mod end {
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::menu::{
-        MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup, open_context_menu_at,
+        MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup, open_context_menu, open_context_menu_at,
     };
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::i18n::tr_en;
@@ -1638,6 +1638,15 @@ mod end {
     /// Builds the menu the table opens for the rows at `rows`, right-clicked in `col`, the
     /// way `TlTreeTable::open_menu` builds it.
     fn build_menu(rig: &mut Rig, rows: &[usize], col: ColumnId) -> Entity<TlMenuPopup> {
+        build_menu_from(rig, rows, Some(col))
+    }
+
+    /// As [`build_menu`], with `None` for the keyboard path.
+    fn build_menu_from(
+        rig: &mut Rig,
+        rows: &[usize],
+        col: Option<ColumnId>,
+    ) -> Entity<TlMenuPopup> {
         let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
         rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
         rig.vcx.update(|window, cx| {
@@ -1867,6 +1876,90 @@ mod end {
             ["Collapse"],
             "an expanded group header"
         );
+    }
+
+    /// Shift+F10 on the focus row opens the menu without Copy: the keyboard names no cell.
+    #[gpui_kit::test]
+    fn keyboard_row_menu_has_no_copy_cell(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        rig.select_pids(&[301]);
+        let page = rig.page.clone();
+        rig.vcx
+            .update(|window, cx| page.update(cx, |p, cx| p.focus_table(window, cx)));
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        rig.vcx.simulate_keystrokes("shift-f10");
+        rig.vcx.run_until_parked();
+        let menu = rig
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("the keyboard opened the menu");
+        let mut expected = process_shape("Open file location", Some("Go to parent process"));
+        expected.retain(|e| e != "Copy");
+        assert_eq!(shape(&mut rig, &menu), expected);
+        assert_eq!(
+            shape(&mut rig, &build_menu_from(&mut rig, &[1], None)),
+            expected,
+            "None from the keyboard"
+        );
+    }
+
+    /// A right-click on a CPU cell opens the menu with Copy, which copies that cell.
+    #[gpui_kit::test]
+    fn right_click_cpu_cell_copies_that_cell(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let records = (300..302)
+            .map(|pid| ProcessRecord {
+                cpu_pct: 1.5,
+                ..record(pid, 1, "proc", ProcFlags::empty())
+            })
+            .collect();
+        rig.publish(records, &[300, 301], Vec::new());
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        let body = rig
+            .vcx
+            .debug_bounds("TlTreeTable-body")
+            .expect("the table body");
+        let (x, row_h) = rig.vcx.update(|_, cx| {
+            let layout = table.read(cx).columns().clone();
+            let pos = layout
+                .visible_columns()
+                .iter()
+                .position(|c| *c == ColumnId::Cpu)
+                .expect("CPU is shown");
+            (
+                layout.offsets()[pos] + px(4.),
+                tl_ui::theme::metrics(cx).row_height,
+            )
+        });
+        let at = point(body.origin.x + x, body.origin.y + row_h * 1.5);
+        rig.vcx.simulate_event(gpui_kit::MouseDownEvent {
+            position: at,
+            modifiers: gpui_kit::Modifiers::none(),
+            button: gpui_kit::MouseButton::Right,
+            click_count: 1,
+            first_mouse: false,
+        });
+        rig.vcx.run_until_parked();
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let menu = rig
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("the right-click opened the menu");
+        let copy = entries(&mut rig, &menu)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Copy"))
+            .and_then(|e| e.action)
+            .expect("a Copy item");
+        assert!(copy.partial_eq(&CopyCell { col: ColumnId::Cpu }));
+        rig.vcx.dispatch_action(copy);
+        rig.vcx.run_until_parked();
+        assert_eq!(clipboard(&mut rig), "1.5%", "the CPU cell of row 301");
+        let selected = rig
+            .vcx
+            .update(|_, cx| table.read(cx).selection.ids().collect::<Vec<_>>());
+        assert_eq!(selected, [ProcRowId::Process(key(301))]);
     }
 
     #[gpui_kit::test]

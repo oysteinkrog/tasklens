@@ -667,7 +667,7 @@ impl TreeTableDelegate for HistoryTableDelegate {
     fn context_menu(
         &mut self,
         _: &[ProcessKey],
-        _: ColumnId,
+        _: Option<ColumnId>,
         menu: TlMenu,
         _: &mut Window,
         _: &mut Context<TlTreeTable<Self>>,

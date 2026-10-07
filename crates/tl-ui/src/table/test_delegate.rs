@@ -196,7 +196,7 @@ impl<R: Copy + Eq + Hash + 'static, C: VecColumn> TreeTableDelegate for VecDeleg
     fn context_menu(
         &mut self,
         _: &[R],
-        _: C,
+        _: Option<C>,
         menu: TlMenu,
         _: &mut Window,
         _: &mut Context<TlTreeTable<Self>>,

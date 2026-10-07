@@ -1324,6 +1324,17 @@ pub fn close_context_menu(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// The context menu open in this window, if any (tests).
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn open_context_menu(window: &Window, cx: &App) -> Option<Entity<TlMenuPopup>> {
+    let window_id = window.window_handle().window_id();
+    cx.try_global::<OpenMenus>()?
+        .0
+        .iter()
+        .find(|o| o.window == window_id)
+        .map(|o| o.menu.clone())
+}
+
 /// Whether a context menu from [`open_context_menu_at`] is open in this window.
 pub fn context_menu_open(window: &Window, cx: &App) -> bool {
     let window_id = window.window_handle().window_id();

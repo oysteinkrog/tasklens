@@ -1167,7 +1167,7 @@ impl TreeTableDelegate for ProcessDelegate {
     fn context_menu(
         &mut self,
         targets: &[ProcRowId],
-        clicked_col: ColumnId,
+        clicked_col: Option<ColumnId>,
         menu: TlMenu,
         window: &mut Window,
         cx: &mut Context<TlTreeTable<Self>>,
@@ -1185,7 +1185,7 @@ impl TreeTableDelegate for ProcessDelegate {
         let captured = CapturedTargets::new(
             rows.iter()
                 .filter_map(|&ix| capture_row(&self.snapshot, ix, self.row_kind(ix))),
-            Some(clicked_col),
+            clicked_col,
         );
         if captured.items.is_empty() {
             return menu;

@@ -221,7 +221,7 @@ impl TreeTableDelegate for HDelegate {
     fn context_menu(
         &mut self,
         _: &[u32],
-        _: ColumnId,
+        _: Option<ColumnId>,
         menu: TlMenu,
         _: &mut Window,
         _: &mut Context<TlTreeTable<Self>>,

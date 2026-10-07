@@ -403,7 +403,7 @@ struct TDelegate {
     /// Cell overrides: (row id, column, text, validity). Other cells show "{ix}.0%".
     cells: Vec<(u32, ColumnId, &'static str, Validity)>,
     /// Every `context_menu` call: the targets and the clicked column.
-    menu_calls: Vec<(Vec<u32>, ColumnId)>,
+    menu_calls: Vec<(Vec<u32>, Option<ColumnId>)>,
     /// Every `cell` call, and the row index of each call that had `want_tooltip` set.
     cell_calls: Cell<usize>,
     tip_rows: RefCell<Vec<usize>>,
@@ -564,7 +564,7 @@ impl TreeTableDelegate for TDelegate {
     fn context_menu(
         &mut self,
         targets: &[u32],
-        col: ColumnId,
+        col: Option<ColumnId>,
         menu: TlMenu,
         _: &mut Window,
         _: &mut Context<TlTreeTable<Self>>,
@@ -1906,7 +1906,7 @@ fn right_click(vcx: &mut VisualTestContext, at: gpui_kit::Point<Pixels>) {
 fn menu_calls(
     vcx: &mut VisualTestContext,
     table: &Entity<TlTreeTable<TDelegate>>,
-) -> Vec<(Vec<u32>, ColumnId)> {
+) -> Vec<(Vec<u32>, Option<ColumnId>)> {
     vcx.update(|_, cx| table.read(cx).delegate.menu_calls.clone())
 }
 
@@ -1938,7 +1938,10 @@ fn right_click_selects_unselected_and_captures_targets() {
     let at = row_at(2, 300.);
     right_click(vcx, at);
     assert_eq!(sel(vcx, &table), (vec![3], Some(3)));
-    assert_eq!(menu_calls(vcx, &table), vec![(vec![3], ColumnId::Cpu)]);
+    assert_eq!(
+        menu_calls(vcx, &table),
+        vec![(vec![3], Some(ColumnId::Cpu))]
+    );
     let menu = menu_bounds(vcx).expect("menu open");
     assert_eq!(menu.origin, at, "the menu opens at the pointer");
 }
@@ -1953,7 +1956,7 @@ fn right_click_keeps_multi_selection() {
     assert_eq!(sel(vcx, &table).0, vec![1, 3]);
     assert_eq!(
         menu_calls(vcx, &table),
-        vec![(vec![1, 3], ColumnId::Name)],
+        vec![(vec![1, 3], Some(ColumnId::Name))],
         "targets in view order"
     );
 }
@@ -1963,7 +1966,10 @@ fn right_click_targets_survive_resort() {
     let mut cx = cosmic_cx();
     let (table, ended, vcx) = open_menu_host(&mut cx, TDelegate::new(abc()));
     right_click(vcx, row_at(2, 50.));
-    assert_eq!(menu_calls(vcx, &table), vec![(vec![3], ColumnId::Name)]);
+    assert_eq!(
+        menu_calls(vcx, &table),
+        vec![(vec![3], Some(ColumnId::Name))]
+    );
 
     // A new version reverses the rows while the menu is open: C is now first, A last.
     vcx.update(|_, cx| {
@@ -1997,7 +2003,10 @@ fn group_header_right_click_no_selection_change() {
     select(vcx, &table, 2);
     right_click(vcx, row_at(0, 50.));
     assert_eq!(sel(vcx, &table), (vec![2], Some(2)), "selection unchanged");
-    assert_eq!(menu_calls(vcx, &table), vec![(vec![10], ColumnId::Name)]);
+    assert_eq!(
+        menu_calls(vcx, &table),
+        vec![(vec![10], Some(ColumnId::Name))]
+    );
     assert_eq!(gestures(vcx, &table), (vec![], vec![]), "no toggle");
 }
 
@@ -2015,7 +2024,11 @@ fn shift_f10_opens_at_focus_row() {
 
     select(vcx, &table, 2);
     keys(vcx, "shift-f10");
-    assert_eq!(menu_calls(vcx, &table), vec![(vec![2], ColumnId::Name)]);
+    assert_eq!(
+        menu_calls(vcx, &table),
+        vec![(vec![2], None)],
+        "the keyboard names no column"
+    );
     let menu = menu_bounds(vcx).expect("menu open");
     // Name text start: pad 20, chevron slot 16 after the 6 px gap, then a 16 px icon and the
     // text, each after a 6 px gap.
@@ -2526,7 +2539,7 @@ impl TreeTableDelegate for SysDelegate {
     fn context_menu(
         &mut self,
         _: &[u32],
-        _: SysColumnId,
+        _: Option<SysColumnId>,
         menu: TlMenu,
         _: &mut Window,
         _: &mut Context<TlTreeTable<Self>>,
