@@ -10,6 +10,8 @@ mod atomic;
 mod autostart;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
+#[allow(dead_code, reason = "the AppEnv import_taskslinger builder calls it")]
+mod import_ts;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod logging;
 #[allow(dead_code, reason = "E33-006 calls it")]
