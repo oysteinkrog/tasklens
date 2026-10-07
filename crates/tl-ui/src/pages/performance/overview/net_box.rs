@@ -6,6 +6,7 @@
 //! text only when the inputs' hash changes and notifies only then. Pointer movement never
 //! notifies.
 
+#[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
 use std::sync::Arc;
