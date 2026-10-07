@@ -18,6 +18,7 @@ use gpui_kit::{
 use crate::components::focus::TlFocusRing;
 use crate::components::icons::{TlIcon, icon};
 use crate::components::motion::{M_FAST, ease_out_cubic};
+use crate::text::style::numeric_style;
 use crate::theme::{TlTheme, current, metrics};
 
 gpui_kit::actions!(tasklens, [ToggleCheckbox]);
@@ -51,12 +52,35 @@ pub fn bind_keys_components(cx: &mut App) {
 
 type ChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
+/// How a checkbox draws its label.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CheckboxLabelStyle {
+    /// `text.base` with proportional figures.
+    #[default]
+    Base,
+    /// `t_sm` with tabular figures, for numbered labels such as "CPU 12".
+    SmallNumeric,
+}
+
+impl CheckboxLabelStyle {
+    /// The label's debug selector, for tests.
+    pub fn selector(self) -> &'static str {
+        match self {
+            Self::Base => "TlCheckbox-label",
+            Self::SmallNumeric => "TlCheckbox-label-sm-tnum",
+        }
+    }
+}
+
 /// A checkbox with a label. `checked(None)` is the indeterminate state.
 #[derive(IntoElement)]
 pub struct TlCheckbox {
     id: ElementId,
     checked: Option<bool>,
     label: Option<SharedString>,
+    label_style: CheckboxLabelStyle,
+    /// The owner's focus handle, so the owner can focus the checkbox.
+    focus: Option<FocusHandle>,
     inline: bool,
     disabled: bool,
     tab_stop: bool,
@@ -69,6 +93,8 @@ impl TlCheckbox {
             id: id.into(),
             checked: Some(false),
             label: None,
+            label_style: CheckboxLabelStyle::Base,
+            focus: None,
             inline: false,
             disabled: false,
             tab_stop: true,
@@ -84,6 +110,18 @@ impl TlCheckbox {
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    pub fn label_style(mut self, style: CheckboxLabelStyle) -> Self {
+        self.label_style = style;
+        self
+    }
+
+    /// Uses `focus` instead of a handle of its own, so the owner can move focus to the
+    /// checkbox, for example when a dialog opens.
+    pub fn focus_handle(mut self, focus: FocusHandle) -> Self {
+        self.focus = Some(focus);
         self
     }
 
@@ -177,6 +215,7 @@ impl RenderOnce for TlCheckbox {
             glyph: look.glyph,
             epoch: 0,
         });
+        let own_focus = self.focus;
         let (focus, epoch) = state.update(cx, |s, _| {
             if look.glyph != s.glyph {
                 if look.glyph.is_some() {
@@ -184,10 +223,8 @@ impl RenderOnce for TlCheckbox {
                 }
                 s.glyph = look.glyph;
             }
-            (
-                s.focus.clone().tab_stop(self.tab_stop && !self.disabled),
-                s.epoch,
-            )
+            let focus = own_focus.unwrap_or_else(|| s.focus.clone());
+            (focus.tab_stop(self.tab_stop && !self.disabled), s.epoch)
         });
 
         let scale = |v: f32| px(v * m.ui_scale);
@@ -252,11 +289,19 @@ impl RenderOnce for TlCheckbox {
             .key_context("TlCheckbox")
             .child(check_box)
             .children(self.label.map(|label| {
-                div()
-                    .text_size(m.text.base)
-                    .line_height(relative(m.line_height))
-                    .text_color(theme.text_primary)
-                    .child(label)
+                let style = self.label_style;
+                let el = div().debug_selector(move || style.selector().into());
+                let el = match style {
+                    CheckboxLabelStyle::Base => el
+                        .text_size(m.text.base)
+                        .line_height(relative(m.line_height)),
+                    CheckboxLabelStyle::SmallNumeric => {
+                        let mut el = el;
+                        *el.text_style() = numeric_style(&m, m.text.sm);
+                        el
+                    }
+                };
+                el.text_color(theme.text_primary).child(label)
             }));
 
         if self.disabled {

@@ -132,15 +132,26 @@ pub enum AppIcon {
     ShieldUnlocked,
     /// The app logo (UI-FND-003). A placeholder until E15-026 (D-014).
     Logo,
+    /// A chip with "P": a performance core on a hybrid CPU (UI-PWN-021).
+    CpuPCore,
+    /// A chip with "E": an efficiency core on a hybrid CPU (UI-PWN-021).
+    CpuECore,
 }
 
 impl AppIcon {
-    pub const ALL: [Self; 2] = [Self::ShieldUnlocked, Self::Logo];
+    pub const ALL: [Self; 4] = [
+        Self::ShieldUnlocked,
+        Self::Logo,
+        Self::CpuPCore,
+        Self::CpuECore,
+    ];
 
     pub fn path_str(self) -> &'static str {
         match self {
             Self::ShieldUnlocked => "icons/tl/shield-unlocked.svg",
             Self::Logo => "icons/tl/tasklens.svg",
+            Self::CpuPCore => "icons/tl/cpu-pcore.svg",
+            Self::CpuECore => "icons/tl/cpu-ecore.svg",
         }
     }
 
@@ -153,6 +164,14 @@ impl AppIcon {
             Self::Logo => include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../assets/icons/tasklens.svg"
+            )),
+            Self::CpuPCore => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/icons/cpu-pcore.svg"
+            )),
+            Self::CpuECore => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/icons/cpu-ecore.svg"
             )),
         }
     }

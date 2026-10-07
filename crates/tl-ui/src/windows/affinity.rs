@@ -36,8 +36,9 @@ use tracing::warn;
 
 use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::checkbox::TlCheckbox;
+use crate::components::checkbox::{CheckboxLabelStyle, TlCheckbox};
 use crate::components::focus::TlFocusRing;
+use crate::components::icons::AppIcon;
 use crate::components::input::{TlInputSize, TlTextInput};
 use crate::components::toast::ToastQueue;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
@@ -46,7 +47,7 @@ use crate::demand::GlobalDemand;
 use crate::hub::{GlobalHub, SnapshotChanged};
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
-use crate::text::style::{label_style, numeric_style, t_sm, t_xs};
+use crate::text::style::{label_style, t_sm, t_xs};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{
     AFFINITY_DIALOG_CONTEXT, AffinityApply, AffinityEnd, AffinityHome, AffinityMoveDown,
@@ -69,6 +70,9 @@ const TILE_W: f32 = 72.;
 const TILE_H: f32 = 52.;
 const TILE_GAP: f32 = 4.;
 const CPU_ROW_H: f32 = 24.;
+/// The P-core and E-core icon in a hybrid group header, × ui_scale. Tiles have no icon: a
+/// 10 px icon before "CPU n" does not fit the 64 px tile interior.
+const GROUP_ICON: f32 = 12.;
 const VALIDATION_H: f32 = 20.;
 const HELPER_H: f32 = 16.;
 const FOOTER_H: f32 = 52.;
@@ -245,6 +249,15 @@ pub struct CpuGroup {
     pub cpus: CpuSet,
     /// In core order.
     pub tiles: Vec<CpuTile>,
+}
+
+/// The icon and its letter for a hybrid group header.
+fn core_icon(label: GroupLabel) -> Option<(AppIcon, char)> {
+    match label {
+        GroupLabel::PCores => Some((AppIcon::CpuPCore, 'P')),
+        GroupLabel::ECores => Some((AppIcon::CpuECore, 'E')),
+        _ => None,
+    }
 }
 
 /// The groups of `topology`: P-cores and E-cores when any core is hybrid, else one group per
@@ -560,6 +573,8 @@ pub struct AffinityDialog {
     /// The CPU list field holds text that is not a valid list of allowed CPUs.
     list_invalid: bool,
     cursor: Option<u16>,
+    /// "All processors", focused when the dialog opens.
+    all_focus: FocusHandle,
     grid_focus: FocusHandle,
     cancel_focus: FocusHandle,
     /// The parent window's toast queue; results show there (UI-PRC-015).
@@ -653,7 +668,8 @@ impl AffinityDialog {
         }
 
         let grid_focus = cx.focus_handle().tab_stop(true);
-        grid_focus.focus(window, cx);
+        let all_focus = cx.focus_handle();
+        all_focus.focus(window, cx);
         let mut this = Self {
             targets,
             initial: Vec::new(),
@@ -667,6 +683,7 @@ impl AffinityDialog {
             allowed: CpuSet::empty(),
             list_invalid: false,
             cursor: None,
+            all_focus,
             grid_focus,
             cancel_focus: cx.focus_handle(),
             parent_toasts,
@@ -773,6 +790,10 @@ impl AffinityDialog {
 
     pub fn grid_focus(&self) -> &FocusHandle {
         &self.grid_focus
+    }
+
+    pub fn all_focus(&self) -> &FocusHandle {
+        &self.all_focus
     }
 
     pub fn cursor(&self) -> Option<u16> {
@@ -1116,6 +1137,7 @@ impl Render for AffinityDialog {
         let all = {
             let view = view.clone();
             TlCheckbox::new("AffinityAll")
+                .focus_handle(self.all_focus.clone())
                 .checked(self.all_state())
                 .label(words.all_processors.clone())
                 .disabled(self.loading)
@@ -1185,6 +1207,16 @@ impl Render for AffinityDialog {
             };
             let mut label = div().text_color(theme.text_primary);
             *label.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
+            let kind_icon = core_icon(group.label).map(|(icon, mark)| {
+                div()
+                    .debug_selector(move || format!("AffinityGroupIcon-{mark}"))
+                    .flex_none()
+                    .child(
+                        Icon::new(icon)
+                            .size(px(GROUP_ICON * s))
+                            .text_color(theme.text_secondary),
+                    )
+            });
             let header = div()
                 .flex_none()
                 .flex()
@@ -1192,11 +1224,12 @@ impl Render for AffinityDialog {
                 .gap(m.sp[3])
                 .h(px(GROUP_HEADER_H * s))
                 .child(group_check)
+                .children(kind_icon)
                 .child(label.child(words.group(group)));
 
             let tiles = group.tiles.iter().enumerate().map(|(ti, tile)| {
                 let rows = [Some(tile.top), tile.bottom].into_iter().map(|cpu| {
-                    let mut row = div().flex_none().flex().items_center().h(px(CPU_ROW_H * s));
+                    let row = div().flex_none().flex().items_center().h(px(CPU_ROW_H * s));
                     let Some(cpu) = cpu else {
                         return row.into_any_element();
                     };
@@ -1205,6 +1238,7 @@ impl Render for AffinityDialog {
                     let check = TlCheckbox::new(("AffinityCpu", usize::from(cpu)))
                         .checked(Some(cpu_view.checked))
                         .label(words.cpu(cpu))
+                        .label_style(CheckboxLabelStyle::SmallNumeric)
                         .tab_stop(false)
                         .disabled(cpu_view.disabled)
                         .on_change(move |on, window, cx| {
@@ -1213,7 +1247,6 @@ impl Render for AffinityDialog {
                                 this.set_cpu(cpu, on, window, cx);
                             });
                         });
-                    *row.text_style() = numeric_style(&m, m.text.sm);
                     let mut row = row.id(("AffinityCpuRow", usize::from(cpu))).child(check);
                     if grid_focused && self.cursor == Some(cpu) {
                         row = TlFocusRing::ring(row, m.radius_small, &theme);

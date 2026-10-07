@@ -88,8 +88,31 @@ fn key() -> ProcessKey {
     }
 }
 
+/// Two P-cores with SMT (CPUs 0-1 and 2-3) and two E-cores (CPUs 4 and 5), one L3.
+fn hybrid_topology() -> CpuTopology {
+    let core = |id: u16, logical: &[u16], kind| CoreInfo {
+        id,
+        logical: SmallVec::from_slice(logical),
+        l3_group: 0,
+        kind,
+    };
+    CpuTopology {
+        online: set(0..6),
+        cores: Arc::from(vec![
+            core(0, &[0, 1], CoreKind::Performance),
+            core(1, &[2, 3], CoreKind::Performance),
+            core(2, &[4], CoreKind::Efficiency),
+            core(3, &[5], CoreKind::Efficiency),
+        ]),
+    }
+}
+
 fn publish_topology(cx: &mut TestAppContext, engine: &FakeEngine, offline: &[u16]) {
-    let topo = Arc::new(topology(offline));
+    publish_topology_as(cx, engine, topology(offline));
+}
+
+fn publish_topology_as(cx: &mut TestAppContext, engine: &FakeEngine, topo: CpuTopology) {
+    let topo = Arc::new(topo);
     engine.publish_with(|s| {
         let system = Arc::make_mut(&mut s.system);
         system.cpu_topology = topo;
@@ -203,8 +226,12 @@ impl Rig {
 /// Topology published, then the dialog opened for one target from a parent window with a
 /// toast queue. With `mask`, the affinity payload arrives too.
 fn open(cx: &mut TestAppContext, offline: &[u16], mask: Option<(CpuSet, CpuSet)>) -> Rig {
+    open_on(cx, topology(offline), mask)
+}
+
+fn open_on(cx: &mut TestAppContext, topo: CpuTopology, mask: Option<(CpuSet, CpuSet)>) -> Rig {
     let engine = setup(cx);
-    publish_topology(cx, &engine, offline);
+    publish_topology_as(cx, &engine, topo);
     let parent = cx.add_window(|window, cx| {
         let host = cx.new(|_| Host);
         Root::new(host, window, cx)
@@ -424,4 +451,46 @@ fn affinity_demand_registered_and_removed(cx: &mut TestAppContext) {
         demand.read(cx).merged().affinity_targets.to_vec()
     });
     assert!(keys.is_empty(), "{keys:?}");
+}
+
+#[gpui_kit::test]
+fn affinity_hybrid_core_icons(cx: &mut TestAppContext) {
+    let mut rig = open_on(cx, hybrid_topology(), Some((set(0..6), set(0..6))));
+    rig.draw();
+    for mark in ['P', 'E'] {
+        assert!(
+            rig.vcx
+                .debug_bounds(&format!("AffinityGroupIcon-{mark}"))
+                .is_some(),
+            "{mark} group icon"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn affinity_cpu_labels_small_tabular(cx: &mut TestAppContext) {
+    let mut rig = open(cx, &[], Some((set(0..4), all())));
+    rig.draw();
+    let cpu = rig
+        .vcx
+        .debug_bounds("TlCheckbox-label-sm-tnum")
+        .expect("a CPU label in t_sm with tabular figures");
+    // "All processors" keeps the default label at text.base.
+    let base = rig
+        .vcx
+        .debug_bounds("TlCheckbox-label")
+        .expect("All processors label");
+    assert!(cpu.size.height < base.size.height, "{cpu:?} {base:?}");
+    // L3 groups have no core icon.
+    assert!(rig.vcx.debug_bounds("AffinityGroupIcon-P").is_none());
+}
+
+#[gpui_kit::test]
+fn affinity_first_focus_all_processors(cx: &mut TestAppContext) {
+    let mut rig = open(cx, &[], Some((set(0..4), all())));
+    let dialog = rig.dialog.clone();
+    let focused = rig
+        .vcx
+        .update(|window, cx| dialog.read(cx).all_focus().is_focused(window));
+    assert!(focused, "All processors has focus");
 }
