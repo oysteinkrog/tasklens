@@ -1300,6 +1300,13 @@ shell-menu-pv-guides = Tree Connector Lines
 shell-menu-pv-highlight = Highlight New and Exited Processes
 shell-menu-pv-collapse-all = Collapse all
 shell-menu-pv-history-flat = History shows a flat list
+# View > Appearance (tasklens-bj6.12, UI-SHL-037).
+shell-menu-appearance-ui-scale = UI Scale
+shell-menu-appearance-row-height = Row Height
+shell-menu-appearance-rounded-corners = Rounded Corners
+shell-menu-appearance-heat-coloring = Value Color Coding
+shell-menu-appearance-heat-intensity = Value Color Coding Intensity
+shell-menu-appearance-shadow-intensity = Drop Shadow Intensity
 # Settings menu, P1 rows (tasklens-bj6.7, UI-SHL-040).
 shell-menu-settings-monitoring = Monitoring
 shell-menu-settings-refresh = Refresh
