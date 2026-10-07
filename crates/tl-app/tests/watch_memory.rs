@@ -269,6 +269,7 @@ fn unit_file_write_and_remove_in_scratch_dir() {
 /// the user manager accepted (U-24).
 #[test]
 #[ignore = "changes the user's real systemd session"]
+#[allow(clippy::print_stdout, reason = "prints the U-24 result for the owner")]
 fn real_install_enable_remove() {
     let installed = lowmem_unit::install_and_enable().expect("install_and_enable");
     println!(
