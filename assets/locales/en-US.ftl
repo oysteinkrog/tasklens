@@ -1417,6 +1417,8 @@ minigraph-label-vram = VRAM
 minigraph-label-gpu-temp = GPU temp
 minigraph-tip-total = Total
 minigraph-tip-kernel = Kernel
+minigraph-toast-full = No space for more minigraphs
+minigraph-toast-reset = Minigraph layout reset
 # Settings window, Performance page (tasklens-bj6.26, UI-SHL-066).
 shell-settings-perf-group-graphs = Graphs
 shell-settings-perf-group-cpu = CPU
