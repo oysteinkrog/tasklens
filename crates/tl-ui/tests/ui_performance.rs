@@ -1451,7 +1451,7 @@ mod tab {
 
     #[gpui_kit::test]
     fn toggle_sidebar_animates_width(cx: &mut TestAppContext) {
-        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        let r = open(cx, UiState::default(), 16, 1280., 800.);
         r.vcx.dispatch_action(PerfToggleSidebar);
         draw(r.vcx);
         r.vcx.executor().advance_clock(Duration::from_millis(100));
