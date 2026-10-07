@@ -42,15 +42,16 @@ use super::titlebar::TitleBarProbe;
 use super::titlebar::{TitleBarView, bar_height_of, is_client, minimize_main, zoom};
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
-    ClearFilter, CloseWindow, FocusFilter, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit,
-    RefreshCurrentTab, SelectTab, ShowMainWindow, ToggleMainWindow, ZoomWindow,
+    CancelWindowPick, ClearFilter, CloseWindow, EscapeChain, FocusFilter, GLOBAL_CONTEXT,
+    MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, SelectTab, ShowMainWindow,
+    ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::AnimationDriver;
 use crate::app::{OpenHooks, StartOptions, UiExit, request_exit};
 use crate::components::menu::context_menu_layer;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
-use crate::focus::focus_initial;
+use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::hub::GlobalHub;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::toolbar::ProcessesToolbar;
@@ -574,6 +575,8 @@ pub struct MainWindow {
     /// Index = `Tab::ALL` position. Created on first visit, kept.
     pages: [Option<PageSlot>; 6],
     active: Tab,
+    /// Window picking is active (E20-027 sets it). Esc cancels it first.
+    picking: bool,
     status_buf: String,
     /// `(state_version, processes version)` the toolbar model was built from.
     settings_versions: (u64, u64),
@@ -689,6 +692,7 @@ impl MainWindow {
             _anim: anim,
             pages: Default::default(),
             active: start,
+            picking: false,
             status_buf: String::new(),
             settings_versions: settings_versions(cx),
             style_version: metrics(cx).style_version,
@@ -751,6 +755,34 @@ impl MainWindow {
 
     fn on_clear_filter(&mut self, _: &ClearFilter, window: &mut Window, cx: &mut Context<Self>) {
         self.filter.update(cx, |f, cx| f.clear(window, cx));
+    }
+
+    /// The Esc chain (UI-SHL-122). The kit has already closed any open menu, popover or
+    /// in-window dialog: those are deeper in the focus path.
+    fn on_escape_chain(&mut self, _: &EscapeChain, window: &mut Window, cx: &mut Context<Self>) {
+        let filter = self.filter.read(cx);
+        let state = EscState {
+            picking: self.picking,
+            filter_focused: filter.is_focused(window, cx),
+            filter_has_text: !filter.text(self.active).is_empty(),
+            close_with_esc: TlSettings::settings(cx).window.close_with_esc,
+        };
+        match esc_outcome(state) {
+            EscOutcome::CancelPick => window.dispatch_action(Box::new(CancelWindowPick), cx),
+            // `FilterEscape` in "ShellFilter" handled this Esc already.
+            EscOutcome::FilterRule | EscOutcome::Nothing => {}
+            EscOutcome::ClearFilterAndFocusTable => {
+                self.filter.update(cx, |f, cx| f.clear(window, cx));
+                self.focus_page(window, cx);
+            }
+            EscOutcome::CloseWindow => window.dispatch_action(Box::new(CloseWindow), cx),
+        }
+    }
+
+    /// Sets window picking for tests until E20-027 owns it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_picking_for_test(&mut self, picking: bool) {
+        self.picking = picking;
     }
 
     /// The status chip. E20-012 sets its paused tag through it.
@@ -1056,6 +1088,7 @@ impl Render for MainWindow {
             // window-level on_action handlers (chain edits)
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_clear_filter))
+            .on_action(cx.listener(Self::on_escape_chain))
             .child(
                 AnyView::from(self.titlebar.clone()).cached(
                     StyleRefinement::default()
