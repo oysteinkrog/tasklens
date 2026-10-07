@@ -92,3 +92,74 @@ over the 200 ms warm gate. tasklens cannot change it without patching gpui. Two 
 
 Options for the owner: accept a higher warm gate on this hardware, patch gpui to drop the GL
 backend when Vulkan works, or cache the chosen adapter between runs.
+
+## rendering.gpu = "software" (tasklens-cr0.25, 2026-10-07)
+
+With `rendering.gpu = "software"`, gpui now picks lavapipe (llvmpipe on Vulkan). Before this
+change it picked no software adapter at all.
+
+### Setup
+
+Release build, this machine (NVIDIA RTX 5070 Ti, KWin Wayland, Mesa 26.2.3,
+`vulkan-swrast` 26.2.3). Scratch `XDG_CONFIG_HOME` with a `settings.toml` holding
+`[rendering] gpu = "software"`, scratch `XDG_STATE_HOME`. The adapter lines come from gpui's
+own log (`gpui_wgpu::wgpu_context`) in the tasklens log file.
+
+### Run 1: cr0.19 variables
+
+`env_for` set `WGPU_ADAPTER_NAME=llvmpipe` and
+`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`.
+
+| Adapter listed | Backend | Type | Result |
+|---|---|---|---|
+| NVIDIA GeForce RTX 5070 Ti/PCIe/SSE2 | Gl | Other | failed: no compatible surface formats |
+
+The main window did not open ("No GPU adapter found that can configure the display surface").
+Two faults:
+
+- The ICD path is wrong. Current `vulkan-swrast` ships `lvp_icd.json`, not
+  `lvp_icd.x86_64.json`, so Vulkan listed no adapter at all.
+- The GL backend used the NVIDIA EGL driver. On a machine where that GL adapter works, it
+  would have been picked, because gpui ranks type `Other` above type `Cpu`.
+
+gpui does not read `WGPU_ADAPTER_NAME` (cr0.19).
+
+### Experiments with gpu = "auto" and variables set by hand
+
+| Variables | Adapters listed | Picked |
+|---|---|---|
+| none | NVIDIA Vulkan, NVIDIA Gl, llvmpipe Vulkan | NVIDIA Vulkan |
+| `VK_ICD_FILENAMES=lvp_icd.json` | NVIDIA Gl, llvmpipe Vulkan | llvmpipe Vulkan (NVIDIA Gl failed) |
+| plus `LIBGL_ALWAYS_SOFTWARE=1` | NVIDIA Gl, llvmpipe Vulkan | same |
+| missing ICD, `LIBGL_ALWAYS_SOFTWARE=1` | NVIDIA Gl | none, window did not open |
+| missing ICD, `LIBGL_ALWAYS_SOFTWARE=1`, `__EGL_VENDOR_LIBRARY_FILENAMES=50_mesa.json` | llvmpipe Gl | llvmpipe Gl |
+
+`LIBGL_ALWAYS_SOFTWARE=1` alone does not move GL off NVIDIA. glvnd loads the NVIDIA EGL vendor
+first, and that driver ignores the Mesa variable. Pointing glvnd at the Mesa vendor file
+(`/usr/share/glvnd/egl_vendor.d/50_mesa.json`) does. `MESA_LOADER_DRIVER_OVERRIDE` was not
+needed.
+
+### Run 2: the new variables
+
+`env_for("software")` now sets:
+
+- `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`
+  (the loader skips a file that is missing)
+- `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json`
+- `LIBGL_ALWAYS_SOFTWARE=1`
+- `WGPU_ADAPTER_NAME=llvmpipe` (kept, has no effect on gpui)
+
+| Adapter listed | Backend | Type | Result |
+|---|---|---|---|
+| llvmpipe (LLVM 22.1.8, 256 bits) | Vulkan | Cpu | selected |
+| llvmpipe (LLVM 22.1.8, 256 bits) | Gl | Cpu | not tried |
+
+Every adapter gpui can list is now a software one, so the real GPU cannot be picked.
+`window_open` took 164 ms.
+
+### Open points
+
+- When no adapter works, the main window does not open but the process keeps running with
+  no window. Run 1 had to be stopped by hand. Not fixed here.
+- The Mesa vendor file path is the Arch one (package `mesa`). A system without that file was
+  not tested.
