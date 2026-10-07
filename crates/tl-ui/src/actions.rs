@@ -108,6 +108,11 @@ pub struct SetSetting {
 /// component keys (checkbox, radio, slider and the others in `bind_keys_components`). Runs
 /// once at init, before any menu is built. A binding whose Action has no handler yet does
 /// nothing.
+///
+/// Tab and Shift+Tab are not bound here. `gpui_kit::init` binds them in the kit `Root` context,
+/// which wraps every window `gpui_kit::open_window` opens, main and secondary alike; the kit
+/// handler moves focus with `focus_next` and `focus_prev` and keeps it inside a focus trap.
+/// A second binding in `Global` would win over it and lose the trap.
 pub fn bind_keys_global(cx: &mut App) {
     checkbox::bind_keys_components(cx);
     window_frame::bind_keys(cx);

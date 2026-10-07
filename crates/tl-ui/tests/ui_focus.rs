@@ -1,5 +1,5 @@
-//! Main window focus rules (E20-007, UI-SHL-121, UI-SHL-122): the initial-focus helper and the
-//! Esc chain decision table.
+//! Main window focus rules (E20-007, UI-SHL-121, UI-SHL-122): the initial-focus helper, the
+//! Esc chain decision table, and the Tab order.
 
 use gpui_kit::TestAppContext;
 use tl_ui::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
@@ -55,7 +55,9 @@ fn esc_outcome_order() {
     assert_eq!(esc_outcome(EscState::default()), EscOutcome::Nothing);
 }
 
-/// The main window's Esc chain (E20-011, UI-SHL-122). Run with `--features test-hooks`.
+/// The main window's Esc chain (E20-011, UI-SHL-122) and Tab order (UI-SHL-121). Tab and
+/// Shift+Tab are the kit `Root` bindings, so the tests press the real keys. Run with
+/// `--features test-hooks`.
 #[cfg(feature = "test-hooks")]
 mod esc_chain {
     use std::cell::{Cell, RefCell};
@@ -69,6 +71,7 @@ mod esc_chain {
     };
     use tl_model::command::Tab;
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::table::TableMode;
     use tl_ui::actions::{CancelWindowPick, EscapeChain, RefreshCurrentTab};
     use tl_ui::app::{BootSettings, UiExit, UiExitSlot};
     use tl_ui::components::menu::{TlMenu, context_menu_open, open_context_menu_at};
@@ -116,7 +119,8 @@ mod esc_chain {
         events: Events,
     }
 
-    /// The main window on a fake Processes page, recording `FilterChanged` texts.
+    /// The main window on a fake Processes page, with a fake Services page, recording
+    /// `FilterChanged` texts.
     fn rig(cx: &mut TestAppContext) -> Rig {
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -133,6 +137,7 @@ mod esc_chain {
             toast::init(cx);
             tl_ui::actions::bind_keys_global(cx);
             set_test_page(cx, Tab::Processes, fake);
+            set_test_page(cx, Tab::Services, fake);
             shell::init(cx);
         });
         let handle = cx.update(open_main_window).expect("the main window opens");
@@ -164,10 +169,14 @@ mod esc_chain {
         }
 
         fn page_focus(&mut self) -> FocusHandle {
+            self.page_focus_on(Tab::Processes)
+        }
+
+        fn page_focus_on(&mut self, tab: Tab) -> FocusHandle {
             let main = self.main();
             let page = self
                 .vcx
-                .read_entity(&main, |m, _| m.page_entity::<FakePage>(Tab::Processes))
+                .read_entity(&main, |m, _| m.page_entity::<FakePage>(tab))
                 .expect("page built");
             self.vcx.read_entity(&page, |p, _| p.focus.clone())
         }
@@ -175,6 +184,40 @@ mod esc_chain {
         fn page_focused(&mut self) -> bool {
             let focus = self.page_focus();
             self.vcx.update(|window, _| focus.is_focused(window))
+        }
+
+        fn filter_focused(&mut self) -> bool {
+            let main = self.main();
+            self.vcx.update(|window, cx| {
+                let filter = main.read(cx).filter_box().clone();
+                filter.read(cx).is_focused(window, cx)
+            })
+        }
+
+        /// The "Include children" checkbox holds focus.
+        fn checkbox_focused(&mut self) -> bool {
+            self.vcx.update(|window, _| {
+                window
+                    .context_stack()
+                    .iter()
+                    .any(|c| c.contains("TlCheckbox"))
+            })
+        }
+
+        fn focus_filter(&mut self) {
+            let main = self.main();
+            self.vcx.update(|window, cx| {
+                let input = main.read(cx).filter_box().read(cx).input().clone();
+                input.update(cx, |s, cx| s.focus(window, cx));
+            });
+            self.draw();
+        }
+
+        /// Presses `keys` as real keystrokes and draws the next frame.
+        fn press(&mut self, keys: &str) {
+            self.vcx.simulate_keystrokes(keys);
+            self.vcx.run_until_parked();
+            self.draw();
         }
 
         fn filter_text(&mut self) -> String {
@@ -287,5 +330,76 @@ mod esc_chain {
         r.vcx.run_until_parked();
         assert_eq!(cancels.get(), 1, "CancelWindowPick dispatched");
         assert_eq!(r.exit(), None);
+    }
+
+    /// UI-SHL-121 on Processes: the filter, "Include children" while shown, the table, then
+    /// back to the filter. The fake page has no status chip actions, so nothing follows the
+    /// table.
+    #[gpui_kit::test]
+    fn tab_order_processes(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.focus_filter();
+        assert!(r.filter_focused());
+
+        r.press("tab");
+        assert!(r.page_focused(), "Tab from the filter reaches the table");
+        r.press("tab");
+        assert!(r.filter_focused(), "Tab from the table wraps to the filter");
+        r.press("shift-tab");
+        assert!(
+            r.page_focused(),
+            "Shift+Tab from the filter wraps to the table"
+        );
+        r.press("shift-tab");
+        assert!(
+            r.filter_focused(),
+            "Shift+Tab from the table reaches the filter"
+        );
+
+        // Tree mode shows "Include children" between the filter and the table.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.processes.mode = TableMode::Tree)
+        });
+        r.vcx.run_until_parked();
+        r.draw();
+        assert!(r.vcx.debug_bounds("FilterBox-include-children").is_some());
+
+        r.press("tab");
+        assert!(
+            r.checkbox_focused(),
+            "Tab from the filter reaches the checkbox"
+        );
+        assert!(!r.filter_focused());
+        r.press("tab");
+        assert!(r.page_focused(), "the table follows the checkbox");
+        r.press("tab");
+        assert!(r.filter_focused(), "Tab wraps to the filter");
+        r.press("shift-tab");
+        assert!(r.page_focused());
+        r.press("shift-tab");
+        assert!(
+            r.checkbox_focused(),
+            "Shift+Tab from the table reaches the checkbox"
+        );
+        r.press("shift-tab");
+        assert!(r.filter_focused());
+    }
+
+    /// UI-SHL-121 initial focus: after Ctrl+3 (`SelectTab(2)`) the Services table holds focus,
+    /// and Tab goes on from there.
+    #[gpui_kit::test]
+    fn focus_after_tab_switch(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.focus_filter();
+        r.press("ctrl-3");
+        let services = r.page_focus_on(Tab::Services);
+        assert!(
+            r.vcx.update(|window, _| services.is_focused(window)),
+            "the Services table is focused"
+        );
+        r.press("tab");
+        assert!(r.filter_focused(), "Tab from the table wraps to the filter");
+        r.press("shift-tab");
+        assert!(r.vcx.update(|window, _| services.is_focused(window)));
     }
 }
