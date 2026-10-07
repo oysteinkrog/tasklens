@@ -333,8 +333,6 @@ pub struct PropsWindow {
     tabs: PropsTabs,
     filter: [Entity<PropsFilter>; 7],
     exited: bool,
-    /// The record had `ProcFlags::EXITED` in some snapshot.
-    seen_exited: bool,
     last_record: Option<ProcessRecord>,
     last_detail: Option<Arc<TargetDetail>>,
     /// Per tab: the count and the cached `[n]` suffix.
@@ -382,7 +380,6 @@ impl PropsWindow {
             tabs: PropsTabs::default(),
             filter,
             exited: false,
-            seen_exited: false,
             last_record: None,
             last_detail: None,
             labels: Default::default(),
@@ -584,9 +581,6 @@ impl PropsWindow {
         if mask.intersects(ComponentMask::PROCESSES | ComponentMask::SYSTEM) {
             match snap.processes.get(self.key) {
                 Some(record) => {
-                    if record.flags.contains(ProcFlags::EXITED) {
-                        self.seen_exited = true;
-                    }
                     self.set_count(DetailTab::Threads, record.threads, cx);
                     let mem_total = self.mem_total;
                     if let Some(g) = &general {
@@ -594,7 +588,9 @@ impl PropsWindow {
                     }
                     self.last_record = Some(record.clone());
                 }
-                None if self.seen_exited => {
+                // `processes` is the full table: a key missing from it has exited, whether or
+                // not a snapshot showed it with `EXITED` before it was reaped.
+                None if mask.intersects(ComponentMask::PROCESSES) => {
                     self.mark_exited(window, cx);
                     return;
                 }

@@ -1229,6 +1229,38 @@ mod window {
     }
 
     #[gpui_kit::test]
+    fn props_exited_when_key_missing_without_exited_flag(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        draw(&mut vcx);
+
+        // A partial snapshot: the system changed, the process table did not.
+        engine.publish_with(|s| {
+            Arc::make_mut(&mut s.processes).records = Arc::from(Vec::new());
+            Arc::make_mut(&mut s.system).header.version += 1;
+        });
+        cx.run_until_parked();
+        assert!(!cx.read(|cx| view.read(cx).exited()), "partial snapshot");
+
+        // Exited and reaped between two snapshots: never seen with `EXITED`.
+        publish_records(cx, &engine, vec![rec(99, ProcFlags::default())]);
+        draw(&mut vcx);
+        assert!(cx.read(|cx| view.read(cx).exited()));
+        assert_eq!(
+            title(cx, handle),
+            "Process Properties - firefox - PID 4321 (not running)"
+        );
+        assert!(
+            vcx.debug_bounds("PropsExitedBanner").is_some(),
+            "banner drawn"
+        );
+        assert!(demanded(cx).is_empty(), "demand removed");
+    }
+
+    #[gpui_kit::test]
     fn access_block_texts_per_tab(cx: &mut TestAppContext) {
         let (engine, _main) = setup(cx);
         let words = cx.update(props_words);
