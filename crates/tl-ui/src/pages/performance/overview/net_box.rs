@@ -26,7 +26,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::cpu_box::value_text;
-use super::parts::{ChartSettings, box_frame, chart_section_versions};
+use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
@@ -247,7 +247,7 @@ impl NetBox {
         let chart = |upload: bool, cx: &mut Context<Self>| {
             let spec = chart_spec(aggregate, upload, net.unit, &settings, &theme);
             let labels = chart_labels(range.clone());
-            cx.new(|cx| ChartView::new(spec, labels, hub, cx))
+            box_chart(spec, labels, hub, cx)
         };
         let (down, up) = (chart(false, cx), chart(true, cx));
         let mut this = Self {

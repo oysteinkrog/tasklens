@@ -10,15 +10,17 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, App, Bounds, Corners, Div, Element, ElementId, EntityId, FontWeight,
-    GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    ParentElement as _, Pixels, Position, SharedString, Size, Style, Styled as _, Window, canvas,
-    div, fill, point, px, relative, size,
+    AnyElement, App, AppContext as _, Bounds, Context, Corners, Div, Element, ElementId, Entity,
+    EntityId, FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _,
+    IntoElement, LayoutId, ParentElement as _, Pixels, Position, SharedString, Size, Style,
+    Styled as _, Window, canvas, div, fill, point, px, relative, size,
 };
 use tl_model::settings::Settings;
 
 use crate::chart::labels::{self, CachedLine, LABEL_ROW, LineStyle, WARMING};
+use crate::chart::{ChartLabels, ChartSpec, ChartView};
 use crate::components::progress::bucket;
+use crate::hub::SnapshotHub;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current};
@@ -468,9 +470,6 @@ pub const SPLIT_W: f32 = 560.;
 /// The chart's share of a wide box's body.
 const CHART_SHARE: f32 = 0.55;
 
-/// The plot must be at least this tall for the scale label, logical px before `ui_scale`.
-const SCALE_MIN_PLOT_H: f32 = 32.;
-
 /// A canvas over its parent (which must be `relative`) that keeps the parent's width in `width`
 /// and notifies `view` after the frame when the width crosses `threshold` the other way from
 /// `wide`, the side the last render used. Resizes inside one side never notify.
@@ -591,107 +590,17 @@ pub fn chart_section_versions(cx: &App) -> [u64; 3] {
     ]
 }
 
-/// The scale label's shaped line.
-#[derive(Default, Debug)]
-pub struct ScaleLabelCache {
-    line: CachedLine,
-    /// Times the line was shaped.
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub shape_count: Cell<u32>,
-    /// The last paint drew the label.
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub shown: Cell<bool>,
-}
-
-/// A chart's ceiling ("100%", "64.0 GiB") as one `t_xs` line in the plot's top-left corner, laid
-/// over its parent (which must be `relative`). Shown when the parent is at least 32 px tall. The
-/// line is re-shaped only when `text` changes.
-pub struct ScaleLabel {
-    pub text: SharedString,
-    pub cache: Rc<RefCell<ScaleLabelCache>>,
-}
-
-impl IntoElement for ScaleLabel {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl Element for ScaleLabel {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        let mut style = Style {
-            position: Position::Absolute,
-            size: size(relative(1.).into(), relative(1.).into()),
-            ..Style::default()
-        };
-        style.inset.top = px(0.).into();
-        style.inset.left = px(0.).into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut Window,
-        _: &mut App,
-    ) {
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let m = *cx.global::<UiMetrics>();
-        let s = m.ui_scale;
-        let shown = bounds.size.height >= px(SCALE_MIN_PLOT_H * s);
-        let mut cache = self.cache.borrow_mut();
-        #[cfg(any(test, feature = "test-hooks"))]
-        cache.shown.set(shown);
-        if !shown {
-            return;
-        }
-        let style = LineStyle {
-            size: m.text.xs,
-            weight: FontWeight::NORMAL,
-            color: current(cx).text_secondary,
-            tnum: true,
-        };
-        let shaped = cache.line.sync(window, &self.text, style);
-        #[cfg(any(test, feature = "test-hooks"))]
-        cache
-            .shape_count
-            .set(cache.shape_count.get() + u32::from(shaped));
-        #[cfg(not(any(test, feature = "test-hooks")))]
-        let _ = shaped;
-        let origin = point(bounds.left() + m.sp[2], bounds.top() + m.sp[1]);
-        labels::paint_line(window, cx, &cache.line, origin, px(LABEL_ROW * s));
-    }
+/// A box chart: `ChartView::new` with the compact scale label on (TMOG), the ceiling small in
+/// the plot's top-left corner.
+pub fn box_chart<T: 'static>(
+    spec: ChartSpec,
+    labels: ChartLabels,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut Context<T>,
+) -> Entity<ChartView> {
+    cx.new(|cx| {
+        let mut view = ChartView::new(spec, labels, hub, cx);
+        view.set_compact_scale(true, cx);
+        view
+    })
 }

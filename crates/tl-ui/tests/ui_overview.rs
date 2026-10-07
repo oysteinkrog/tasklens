@@ -205,6 +205,8 @@ mod boxes {
     use tl_model::time::now_boot_ns;
     use tl_model::validity::Validity;
     use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::chart::ChartView;
+    use tl_ui::chart::labels::LabelKind;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::overview::cpu_box::CpuBox;
@@ -549,24 +551,31 @@ mod boxes {
         });
         draw(r.vcx);
         let (cpu, mem) = (r.cpu(), r.mem());
-        let shapes = |r: &mut Rig| {
+        let cpu_chart = r.vcx.update(|_, cx| cpu.read(cx).total_chart().clone());
+        let mem_chart = r.vcx.update(|_, cx| mem.read(cx).chart().clone());
+        let label = |r: &mut Rig, chart: &Entity<ChartView>| {
             r.vcx.update(|_, cx| {
-                let (c, m) = (cpu.read(cx), mem.read(cx));
-                let (c, m) = (c.scale_label(), m.scale_label());
-                assert!(c.shown.get() && m.shown.get(), "both labels shown");
-                (c.shape_count.get(), m.shape_count.get())
+                let c = chart.read(cx).label_cache();
+                assert!(
+                    c.painted(LabelKind::AxisMax).is_some(),
+                    "scale label painted"
+                );
+                (c.text(LabelKind::AxisMax).map(str::to_owned), c.shape_count)
             })
         };
-        let first = shapes(&mut r);
-        assert_eq!(first.0, 1, "CPU 100% shaped once");
-        // Memory changes below the total keep the label.
+        assert_eq!(label(&mut r, &cpu_chart).0.as_deref(), Some("100.0%"));
+        let (text, shapes) = label(&mut r, &mem_chart);
+        assert_eq!(text.as_deref(), Some("16.00 GiB"));
+        // Memory changes below the total keep the label shaped.
         r.system(|s| s.memory.used = 5 * GIB);
         draw(r.vcx);
-        assert_eq!(shapes(&mut r), first);
+        assert_eq!(label(&mut r, &mem_chart).1, shapes);
         // A new total is a new ceiling.
         r.system(|s| s.memory.total = 32 * GIB);
         draw(r.vcx);
-        assert_eq!(shapes(&mut r), (first.0, first.1 + 1));
+        let (text, after) = label(&mut r, &mem_chart);
+        assert_eq!(text.as_deref(), Some("32.00 GiB"));
+        assert_eq!(after, shapes + 1);
     }
 
     #[gpui_kit::test]
@@ -1004,7 +1013,7 @@ mod bottom {
 
     #[gpui_kit::test]
     fn disk_box_io_chart_on_aggregate(cx: &mut TestAppContext) {
-        let r = open(cx, Vec::new(), devices("disk", &[20]), (200., 300.));
+        let mut r = open(cx, Vec::new(), devices("disk", &[20]), (200., 300.));
         let (_, disk, _) = r.boxes();
         let ids: Vec<SeriesId> = r
             .vcx
@@ -1014,6 +1023,46 @@ mod bottom {
             metric,
         };
         assert_eq!(ids, [id(MetricId::DISK_READ), id(MetricId::DISK_WRITE)]);
+
+        // With data, the auto scale's ceiling shows as the compact scale label.
+        let newest = now_boot_ns();
+        let views: Vec<_> = [MetricId::DISK_READ, MetricId::DISK_WRITE]
+            .into_iter()
+            .map(|metric| {
+                Arc::new(SeriesView {
+                    id: id(metric),
+                    version: 1,
+                    period_ns: 1_000_000_000,
+                    samples: (0..5u64)
+                        .map(|k| Sample::valid(newest - (4 - k) * 1_000_000_000, 3. * MIB as f32))
+                        .collect::<Vec<_>>()
+                        .into(),
+                })
+            })
+            .collect();
+        r.publish(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version: 1,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+        let text = r.vcx.update(|_, cx| {
+            let chart = disk.read(cx).io_chart().read(cx);
+            chart
+                .label_cache()
+                .text(tl_ui::chart::labels::LabelKind::AxisMax)
+                .map(str::to_owned)
+        });
+        assert_eq!(
+            text.as_deref(),
+            Some("4 MiB/s"),
+            "the power-of-two ceiling over 3 MiB/s"
+        );
     }
 
     #[gpui_kit::test]

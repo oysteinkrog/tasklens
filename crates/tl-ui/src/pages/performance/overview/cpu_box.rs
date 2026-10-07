@@ -24,8 +24,8 @@ use tl_model::validity::Validity;
 
 use super::super::cpu::logical_devices;
 use super::parts::{
-    ChartSettings, CoreBars, CoreBarsModel, SPLIT_W, ScaleLabel, ScaleLabelCache, box_frame,
-    chart_section_versions, is_wide, split_body, width_probe,
+    ChartSettings, CoreBars, CoreBarsModel, SPLIT_W, box_chart, box_frame, chart_section_versions,
+    is_wide, split_body, width_probe,
 };
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
@@ -140,8 +140,6 @@ pub struct CpuBox {
     line: SharedString,
     /// Hash of the inputs `value` and `line` were formatted from.
     text_bits: u64,
-    scale: Rc<RefCell<ScaleLabelCache>>,
-    scale_text: SharedString,
     /// The box width of the last paint, and whether the last render put the bars beside the
     /// chart.
     width: Rc<Cell<Pixels>>,
@@ -163,14 +161,7 @@ impl CpuBox {
         let settings = ChartSettings::read(cx);
         let spec = total_spec(cpu, &settings, &theme);
         let labels = total_labels(tr(cx, KEY_RANGE));
-        let total = cx.new(|cx| ChartView::new(spec, labels, hub, cx));
-        let mut scale_text = String::new();
-        format_value(
-            ValueFormat::Percent,
-            100.,
-            NetworkUnit::default(),
-            &mut scale_text,
-        );
+        let total = box_chart(spec, labels, hub, cx);
         let snap = Arc::clone(hub.read(cx).current());
         let mut this = Self {
             cpu,
@@ -183,8 +174,6 @@ impl CpuBox {
             value: SharedString::default(),
             line: SharedString::default(),
             text_bits: 0,
-            scale: Rc::default(),
-            scale_text: scale_text.into(),
             width: Rc::new(Cell::new(px(0.))),
             wide: true,
             settings,
@@ -218,11 +207,6 @@ impl CpuBox {
     /// The title, value and line text.
     pub fn text(&self) -> (&SharedString, &SharedString, &SharedString) {
         (&self.title, &self.value, &self.line)
-    }
-
-    /// The scale label's cache.
-    pub fn scale_label(&self) -> Ref<'_, ScaleLabelCache> {
-        self.scale.borrow()
     }
 
     /// Whether the last render put the bars beside the chart (box at least 560 px wide).
@@ -412,10 +396,6 @@ impl Render for CpuBox {
                     .clone()
                     .cached(StyleRefinement::default().size_full()),
             )
-            .child(ScaleLabel {
-                text: self.scale_text.clone(),
-                cache: Rc::clone(&self.scale),
-            })
             .into_any_element();
         let bars = CoreBars {
             model: Rc::clone(&self.bars),

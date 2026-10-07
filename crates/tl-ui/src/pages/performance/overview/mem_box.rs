@@ -25,8 +25,8 @@ use tl_model::validity::Validity;
 
 use super::cpu_box::value_text;
 use super::parts::{
-    ChartSettings, Meter, SPLIT_W, ScaleLabel, ScaleLabelCache, box_frame, chart_section_versions,
-    is_wide, split_body, width_probe,
+    ChartSettings, Meter, SPLIT_W, box_chart, box_frame, chart_section_versions, is_wide,
+    split_body, width_probe,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -131,8 +131,6 @@ pub struct MemBox {
     value: SharedString,
     /// Hash of the inputs `value` and `rows` were formatted from.
     text_bits: u64,
-    scale: Rc<RefCell<ScaleLabelCache>>,
-    scale_text: SharedString,
     /// The box width of the last paint, and whether the last render put the meters beside the
     /// chart.
     width: Rc<Cell<Pixels>>,
@@ -156,7 +154,7 @@ impl MemBox {
         let total = snap.system.memory.total;
         let spec = chart_spec(memory, total, &settings, &theme);
         let labels = chart_labels(tr(cx, KEY_RANGE));
-        let chart = cx.new(|cx| ChartView::new(spec, labels, hub, cx));
+        let chart = box_chart(spec, labels, hub, cx);
         let colors = row_colors(&theme);
         let rows = std::array::from_fn(|i| MeterRow {
             label: tr(cx, KEY_ROWS[i]),
@@ -173,8 +171,6 @@ impl MemBox {
             title: tr(cx, KEY_TITLE),
             value: SharedString::default(),
             text_bits: 0,
-            scale: Rc::default(),
-            scale_text: SharedString::default(),
             width: Rc::new(Cell::new(px(0.))),
             wide: true,
             settings,
@@ -192,7 +188,6 @@ impl MemBox {
             #[cfg(any(test, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         };
-        this.sync_scale_text();
         this.sync_text(&snap.system.memory, true, cx);
         this
     }
@@ -208,11 +203,6 @@ impl MemBox {
     /// The title and value text.
     pub fn text(&self) -> (&SharedString, &SharedString) {
         (&self.title, &self.value)
-    }
-
-    /// The scale label's cache.
-    pub fn scale_label(&self) -> Ref<'_, ScaleLabelCache> {
-        self.scale.borrow()
     }
 
     /// "Memory\t50.0%", then "Used\t32.00 GiB" per row.
@@ -268,7 +258,6 @@ impl MemBox {
         self.text_bits = bits;
         if mem.total != self.total {
             self.total = mem.total;
-            self.sync_scale_text();
             self.rebuild_spec(cx);
         }
         let valid = matches!(mem.validity, Validity::Valid | Validity::Stale);
@@ -299,15 +288,6 @@ impl MemBox {
             row.fraction = if valid { fraction(part, whole) } else { None };
         }
         true
-    }
-
-    /// The ceiling the chart is drawn to: the total in bytes, or nothing before the first total.
-    fn sync_scale_text(&mut self) {
-        let mut text = String::new();
-        if self.total > 0 {
-            units::bytes(&mut text, self.total);
-        }
-        self.scale_text = text.into();
     }
 
     /// Applies the chart settings when one of their sections changed.
@@ -417,10 +397,6 @@ impl Render for MemBox {
                     .clone()
                     .cached(StyleRefinement::default().size_full()),
             )
-            .child(ScaleLabel {
-                text: self.scale_text.clone(),
-                cache: Rc::clone(&self.scale),
-            })
             .into_any_element();
         let meters = div()
             .flex()

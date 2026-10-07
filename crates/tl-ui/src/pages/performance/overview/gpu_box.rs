@@ -30,8 +30,7 @@ use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::mem_box::{MeterRow, meter_row};
 use super::parts::{
-    ChartSettings, MIN_CHART_H, ScaleLabel, ScaleLabelCache, box_frame, chart_section_versions,
-    class_probe,
+    ChartSettings, MIN_CHART_H, box_chart, box_frame, chart_section_versions, class_probe,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -68,7 +67,6 @@ pub struct GpuSection {
     pub vram: MeterRow,
     /// Temperature and power, each only when known.
     pub line: SharedString,
-    scale: Rc<RefCell<ScaleLabelCache>>,
 }
 
 /// The utilization chart: filled, 0..100.
@@ -159,7 +157,6 @@ pub struct GpuBox {
     more_text: SharedString,
     more_text_fit: SharedString,
     text_bits: u64,
-    scale_text: SharedString,
     /// The body size of the last paint, and how many sections the last render showed.
     body: Rc<Cell<Size<Pixels>>>,
     shown: usize,
@@ -180,8 +177,6 @@ impl GpuBox {
         gpus: &[(DeviceKey, DeviceIdx, SharedString)],
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut scale_text = String::new();
-        units::percent(&mut scale_text, 100.);
         let mut this = Self {
             hub: hub.clone(),
             sections: SmallVec::new(),
@@ -189,7 +184,6 @@ impl GpuBox {
             more_text: SharedString::default(),
             more_text_fit: SharedString::default(),
             text_bits: 0,
-            scale_text: scale_text.into(),
             body: Rc::new(Cell::new(size(px(0.), px(0.)))),
             shown: 0,
             settings: ChartSettings::read(cx),
@@ -298,7 +292,7 @@ impl GpuBox {
                         key: key.clone(),
                         idx: *idx,
                         heading: heading.clone(),
-                        chart: cx.new(|cx| ChartView::new(spec, labels, &hub, cx)),
+                        chart: box_chart(spec, labels, &hub, cx),
                         value: SharedString::default(),
                         vram: MeterRow {
                             label: tr(cx, KEY_VRAM),
@@ -307,7 +301,6 @@ impl GpuBox {
                             color: theme.graph.gpu_line,
                         },
                         line: SharedString::default(),
-                        scale: Rc::default(),
                     }
                 }
             };
@@ -482,8 +475,8 @@ fn format_section(s: &mut GpuSection, t: Option<&GpuTotals>) {
     s.line = line.into();
 }
 
-/// The chart with its scale label laid over it.
-fn chart_element(s: &GpuSection, scale_text: &SharedString) -> AnyElement {
+/// The section's chart.
+fn chart_element(s: &GpuSection) -> AnyElement {
     div()
         .relative()
         .size_full()
@@ -492,10 +485,6 @@ fn chart_element(s: &GpuSection, scale_text: &SharedString) -> AnyElement {
                 .clone()
                 .cached(StyleRefinement::default().size_full()),
         )
-        .child(ScaleLabel {
-            text: scale_text.clone(),
-            cache: Rc::clone(&s.scale),
-        })
         .into_any_element()
 }
 
@@ -551,7 +540,7 @@ impl Render for GpuBox {
                         .flex_1()
                         .min_h(px(MIN_CHART_H * s))
                         .w_full()
-                        .child(chart_element(section, &self.scale_text)),
+                        .child(chart_element(section)),
                 )
                 .child(meter_row(&section.vram, &m, &theme));
             if i > 0 && !section.line.is_empty() {

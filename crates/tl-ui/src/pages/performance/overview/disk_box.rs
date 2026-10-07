@@ -27,7 +27,7 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::parts::{
-    ChartSettings, MIN_CHART_H, Meter, box_frame, chart_section_versions, class_probe,
+    ChartSettings, MIN_CHART_H, Meter, box_chart, box_frame, chart_section_versions, class_probe,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -180,7 +180,7 @@ impl DiskBox {
         let aggregate = aggregate(&snap.devices);
         let spec = chart_spec(aggregate, &settings, &theme);
         let labels = chart_labels(tr(cx, KEY_RANGE));
-        let io_chart = cx.new(|cx| ChartView::new(spec, labels, hub, cx));
+        let io_chart = box_chart(spec, labels, hub, cx);
         let mut this = Self {
             hub: hub.clone(),
             rows: SmallVec::new(),
