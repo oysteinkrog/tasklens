@@ -1214,12 +1214,25 @@ mod page {
 
     struct Host {
         page: Option<Entity<OverviewPage>>,
-        _sidebar: Entity<DeviceSidebar>,
+        sidebar: Entity<DeviceSidebar>,
     }
 
     impl Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().children(self.page.clone())
+            // The sidebar draws out of the way, so its demand part carries this window as in
+            // the main window.
+            div()
+                .relative()
+                .size_full()
+                .children(self.page.clone())
+                .child(
+                    div()
+                        .absolute()
+                        .w(px(0.))
+                        .h(px(0.))
+                        .overflow_hidden()
+                        .child(self.sidebar.clone()),
+                )
         }
     }
 
@@ -1303,8 +1316,9 @@ mod page {
         _driver: Entity<AnimationDriver>,
     }
 
-    /// One window of `w × h` that is the main window, with a sidebar (not drawn) and the Overview
-    /// page filling the window.
+    /// One window of `w × h` that is the main window, with a sidebar (drawn 0 × 0) and the
+    /// Overview page filling the window. Smooth graphs are off, so a live chart draws once per
+    /// sample and not on every frame.
     fn open(cx: &mut TestAppContext, gpu: bool, w: f32, h: f32) -> Rig<'_> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| s.devices = Arc::new(catalog(gpu)));
@@ -1321,8 +1335,10 @@ mod page {
             init_strings(cx, "en-US");
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
+            let mut settings = Settings::default();
+            settings.motion.smooth_graphs = false;
             cx.set_global(BootSettings {
-                settings: Settings::default(),
+                settings,
                 state: UiState::default(),
                 persist: None,
                 startup_toasts: Vec::new(),
@@ -1345,7 +1361,7 @@ mod page {
             });
             Host {
                 page: Some(page),
-                _sidebar: sidebar,
+                sidebar,
             }
         });
         vcx.simulate_scale_factor_change(1.0);
