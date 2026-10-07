@@ -31,13 +31,13 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::assets::IconName;
+use gpui_kit::assets::{IconName, IconNamed as _};
 use gpui_kit::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Edges, Element, ElementId,
     Entity, FillOptions, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, Path,
-    PathBuilder, PathStyle, Pixels, Point, Render, SharedString, Size, Style, Subscription, Window,
-    point, px, quad, relative, size, transparent_black,
+    PathBuilder, PathStyle, Pixels, Point, Render, SharedString, Size, Style, Subscription,
+    TransformationMatrix, Window, point, px, quad, relative, size, transparent_black,
 };
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
@@ -247,6 +247,9 @@ pub struct ChartGridView {
     pub heading_shapes: std::cell::Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub value_shapes: std::cell::Cell<u32>,
+    /// Core marks the last paint drew, (cell, icon, left edge).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub last_marks: RefCell<Vec<(usize, IconName, Pixels)>>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub offline_shapes: std::cell::Cell<u32>,
     /// Reads of the offline text from the strings.
@@ -298,6 +301,8 @@ impl ChartGridView {
             heading_shapes: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             value_shapes: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            last_marks: RefCell::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             offline_shapes: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -982,6 +987,8 @@ fn paint_grid_view(
         color: theme.text_primary,
         tnum: false,
     };
+    #[cfg(any(test, feature = "test-hooks"))]
+    view.last_marks.borrow_mut().clear();
     for (i, cell) in spec.cells.iter().enumerate() {
         let b = cell_bounds(bounds, &layout, i, cell_h, gap);
         let row1 = b.top() + pad;
@@ -991,6 +998,22 @@ fn paint_grid_view(
             view.heading_shapes.set(view.heading_shapes.get() + 1);
         }
         labels::paint_line(window, cx, &headings[i], point(b.left() + pad, row1), row);
+        // The core mark (PERF-031): a 12 px icon after the heading in `text_secondary`.
+        if let Some(icon) = cell.mark {
+            let side = m.icon.xs;
+            let x = b.left() + pad + headings[i].width() + m.sp[2];
+            let mark = Bounds::new(point(x, row1 + (row - side) / 2.0), size(side, side));
+            let _ = window.paint_svg(
+                mark,
+                icon.path(),
+                None,
+                TransformationMatrix::unit(),
+                theme.text_secondary,
+                cx,
+            );
+            #[cfg(any(test, feature = "test-hooks"))]
+            view.last_marks.borrow_mut().push((i, icon, x));
+        }
 
         if cell.offline {
             let style = LineStyle {

@@ -841,6 +841,7 @@ impl CpuPage {
         {
             self.static_info = Arc::clone(&snap.device_details.cpu);
             changed |= update_static(&mut self.details, &self.static_info);
+            self.grid.set_prefcore(&self.static_info.prefcore_rank, cx);
         }
         if mask.contains(ComponentMask::HEALTH) {
             let state = health_state(snap);

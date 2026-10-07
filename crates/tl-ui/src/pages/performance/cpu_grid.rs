@@ -17,6 +17,7 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, SharedString, StyleRefinement, Styled as _, Window, canvas, div,
@@ -24,7 +25,7 @@ use gpui_kit::{
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::system::CpuTopology;
+use tl_model::system::{CoreKind, CpuTopology};
 use tl_model::validity::Validity;
 
 use crate::chart::grid_element::{
@@ -54,6 +55,7 @@ const KEY_TIP: &str = "perf-cpu-cell-tooltip";
 const KEY_TIP_NO_CLOCK: &str = "perf-cpu-cell-tooltip-noclock";
 const KEY_TOTAL: &str = "perf-legend-total";
 const KEY_KERNEL: &str = "perf-legend-kernel";
+const KEY_PREFERRED: &str = "perf-cpu-tip-preferred";
 
 /// Width used for the height before the first paint has measured the box: wide enough for the
 /// full column count, which is the usual case.
@@ -70,6 +72,8 @@ pub struct GridWords {
     pub tip: Template,
     /// "Core {$core}, thread {$thread}".
     pub tip_no_clock: Template,
+    /// "Preferred core (rank {$rank})".
+    pub preferred: Template,
     pub total: SharedString,
     pub kernel: SharedString,
 }
@@ -82,6 +86,7 @@ impl Default for GridWords {
             cell: Template::en(KEY_CELL, &["n"]),
             tip: Template::en(KEY_TIP, &["core", "thread", "mhz"]),
             tip_no_clock: Template::en(KEY_TIP_NO_CLOCK, &["core", "thread"]),
+            preferred: Template::en(KEY_PREFERRED, &["rank"]),
             total: tr_en(KEY_TOTAL, &[]),
             kernel: tr_en(KEY_KERNEL, &[]),
         }
@@ -100,6 +105,7 @@ impl GridWords {
             cell: Template::new(cx, KEY_CELL, &["n"]),
             tip: Template::new(cx, KEY_TIP, &["core", "thread", "mhz"]),
             tip_no_clock: Template::new(cx, KEY_TIP_NO_CLOCK, &["core", "thread"]),
+            preferred: Template::new(cx, KEY_PREFERRED, &["rank"]),
             total: tr(cx, KEY_TOTAL),
             kernel: tr(cx, KEY_KERNEL),
         }
@@ -124,6 +130,8 @@ pub struct CpuGrid {
     places: Vec<Option<(u16, u16)>>,
     /// The MHz each heading tooltip shows, per logical CPU id.
     clocks: Vec<Option<u32>>,
+    /// The preferred-core rank of each starred CPU, per logical CPU id ([`stars`]).
+    stars: Vec<Option<u32>>,
     /// The box width of the last paint; 0 before the first.
     width: Rc<Cell<Pixels>>,
     words: GridWords,
@@ -153,6 +161,7 @@ impl CpuGrid {
             &devices,
             kernel,
             &clocks,
+            &[],
             &mut places,
             &mut scratch,
             &mut cells,
@@ -183,6 +192,7 @@ impl CpuGrid {
             devices,
             places,
             clocks,
+            stars: Vec::new(),
             width: Rc::new(Cell::new(px(0.))),
             words,
         }
@@ -206,6 +216,7 @@ impl CpuGrid {
             &self.devices,
             self.kernel,
             &self.clocks,
+            &self.stars,
             &mut self.places,
             &mut self.scratch,
             &mut spec.cells,
@@ -254,6 +265,31 @@ impl CpuGrid {
             &self.devices,
             self.kernel,
             &self.clocks,
+            &self.stars,
+            &mut self.places,
+            &mut self.scratch,
+            &mut spec.cells,
+        );
+        self.view.update(cx, |v, cx| v.set_spec(spec, cx));
+    }
+
+    /// Takes the preferred-core ranking per logical CPU id (`amd_pstate_prefcore_ranking`,
+    /// PERF-031). Rebuilds the cells only when the starred CPUs changed.
+    pub fn set_prefcore(&mut self, ranks: &[Option<u32>], cx: &mut App) {
+        let mut new = Vec::new();
+        stars(ranks, &mut new);
+        if new == self.stars {
+            return;
+        }
+        self.stars = new;
+        let mut spec = self.view.read(cx).spec.clone();
+        build_cells(
+            &self.words,
+            &self.cores,
+            &self.devices,
+            self.kernel,
+            &self.clocks,
+            &self.stars,
             &mut self.places,
             &mut self.scratch,
             &mut spec.cells,
@@ -269,6 +305,7 @@ impl CpuGrid {
             view,
             places,
             clocks,
+            stars,
             scratch,
             words,
             ..
@@ -294,7 +331,8 @@ impl CpuGrid {
                     continue;
                 }
                 *slot = now;
-                heading_tooltip(words, *core, *thread, now, scratch);
+                let star = stars.get(i).copied().flatten();
+                cell_tooltip(words, *core, *thread, now, star, scratch);
                 cell.tooltip = Some(SharedString::from(scratch.as_str()));
             }
         });
@@ -423,20 +461,49 @@ pub fn cell_specs(
     kernel: bool,
     out: &mut Vec<GridCellSpec>,
 ) {
-    let (mut places, mut scratch) = (Vec::new(), String::new());
+    cell_specs_ranked(words, topology, logical_devices, kernel, &[], out);
+}
+
+/// [`cell_specs`] with the preferred-core ranking per logical CPU id.
+pub fn cell_specs_ranked(
+    words: &GridWords,
+    topology: &CpuTopology,
+    logical_devices: &[DeviceIdx],
+    kernel: bool,
+    ranks: &[Option<u32>],
+    out: &mut Vec<GridCellSpec>,
+) {
+    let (mut places, mut scratch, mut starred) = (Vec::new(), String::new(), Vec::new());
+    stars(ranks, &mut starred);
     build_cells(
         words,
         topology,
         logical_devices,
         kernel,
         &[],
+        &starred,
         &mut places,
         &mut scratch,
         out,
     );
 }
 
-/// [`cell_specs`] with the clock per logical CPU id (missing ids have none). Refills `places`.
+/// The rank of each CPU whose rank is the highest, per logical CPU id, when the ranking differs
+/// between CPUs; empty otherwise (a missing ranking file gives no stars).
+fn stars(ranks: &[Option<u32>], out: &mut Vec<Option<u32>>) {
+    out.clear();
+    let known = ranks.iter().flatten();
+    let (Some(&max), Some(&min)) = (known.clone().max(), known.min()) else {
+        return;
+    };
+    if max == min {
+        return;
+    }
+    out.extend(ranks.iter().map(|r| r.filter(|&r| r == max)));
+}
+
+/// [`cell_specs`] with the clock and the preferred-core star per logical CPU id (missing ids
+/// have none). Refills `places`.
 #[allow(clippy::too_many_arguments)]
 fn build_cells(
     words: &GridWords,
@@ -444,29 +511,58 @@ fn build_cells(
     devices: &[DeviceIdx],
     kernel: bool,
     clocks: &[Option<u32>],
+    stars: &[Option<u32>],
     places_out: &mut Vec<Option<(u16, u16)>>,
     scratch: &mut String,
     out: &mut Vec<GridCellSpec>,
 ) {
     places(topology, devices.len(), places_out);
+    let has = |k| topology.cores.iter().any(|c| c.kind == k);
+    let hybrid = has(CoreKind::Performance) && has(CoreKind::Efficiency);
     out.clear();
     for (id, &device) in devices.iter().enumerate() {
+        let star = stars.get(id).copied().flatten();
         let tooltip = places_out[id].map(|(core, thread)| {
-            heading_tooltip(
-                words,
-                core,
-                thread,
-                clocks.get(id).copied().flatten(),
-                scratch,
-            );
+            let mhz = clocks.get(id).copied().flatten();
+            cell_tooltip(words, core, thread, mhz, star, scratch);
             SharedString::from(scratch.as_str())
         });
+        let kind = || {
+            let cpu = u16::try_from(id).ok()?;
+            let core = topology.cores.iter().find(|c| c.logical.contains(&cpu))?;
+            Some(core.kind)
+        };
+        let mark = match (star, hybrid.then(kind).flatten()) {
+            (Some(_), _) => Some(IconName::Star),
+            (None, Some(CoreKind::Performance)) => Some(IconName::Zap),
+            (None, Some(CoreKind::Efficiency)) => Some(IconName::Leaf),
+            _ => None,
+        };
         scratch.clear();
         words.cell.write_each(scratch, |_, o| {
             let _ = write!(o, "{id}");
         });
         let heading = SharedString::from(scratch.as_str());
-        out.push(cell(topology, id, device, kernel, heading, tooltip));
+        out.push(cell(topology, id, device, kernel, heading, tooltip, mark));
+    }
+}
+
+/// The heading tooltip, with " · Preferred core (rank 236)" after it on a starred CPU
+/// (UI-PRF-023: the grid has one tooltip per heading). Replaces `out`.
+fn cell_tooltip(
+    words: &GridWords,
+    core: u16,
+    thread: u16,
+    mhz: Option<u32>,
+    star: Option<u32>,
+    out: &mut String,
+) {
+    heading_tooltip(words, core, thread, mhz, out);
+    if let Some(rank) = star {
+        out.push_str(" · ");
+        words.preferred.write_each(out, |_, o| {
+            let _ = write!(o, "{rank}");
+        });
     }
 }
 
@@ -500,6 +596,7 @@ fn cell(
     kernel: bool,
     heading: SharedString,
     tooltip: Option<SharedString>,
+    mark: Option<IconName>,
 ) -> GridCellSpec {
     let online = u16::try_from(id).is_ok_and(|id| topology.online.contains(id));
     GridCellSpec {
@@ -513,7 +610,7 @@ fn cell(
             metric: MetricId::CPU_KERNEL,
         }),
         offline: !online,
-        mark: None,
+        mark,
         tooltip,
     }
 }

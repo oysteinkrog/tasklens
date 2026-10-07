@@ -163,6 +163,7 @@ perf-net-type-other = Other
 perf-cpu-cell = CPU {$n}
 perf-cpu-cell-tooltip = Core {$core}, thread {$thread}, {$mhz} MHz
 perf-cpu-cell-tooltip-noclock = Core {$core}, thread {$thread}
+perf-cpu-tip-preferred = Preferred core (rank {$rank})
 perf-cpu-offline = Offline
 perf-legend-total = Total
 perf-legend-kernel = Kernel
