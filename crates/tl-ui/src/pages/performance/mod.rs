@@ -38,14 +38,17 @@ use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::DeviceVisibility;
 
-use self::actions::{PERFORMANCE_CONTEXT, PerfJumpToType, PerfSelectDevice, PerfToggleSidebar};
+use self::actions::{
+    PERFORMANCE_CONTEXT, PerfJumpToType, PerfSelectDevice, PerfToggleSidebar, PerfToggleSummaryMode,
+};
 use self::page::DevicePage;
 use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
+use crate::i18n::tr;
 use crate::settings_global::{TlSettings, animations_on};
 use crate::theme::metrics;
-use crate::window::main::ShellPage;
+use crate::window::main::{ShellPage, WINDOW_TITLE};
 use crate::window::status::StatusChanged;
 
 /// PERF-054 type class of a network interface, as the engine reports it in the catalog.
@@ -286,7 +289,9 @@ pub struct PerformancePage {
     pub(crate) selected: Option<DeviceKey>,
     /// The selected page's `focus_order`, read once when it is selected.
     page_focus: SmallVec<[FocusHandle; 4]>,
-    // E24-015: summary: Option<Entity<summary::SummaryView>> (added by crw.17 as a chain edit, R-262)
+    /// Graph summary mode (E24-015), `Some` while it is on.
+    pub(crate) summary: Option<Entity<summary::SummaryView>>,
+    summary_sub: Option<Subscription>,
     /// Not persisted (R-090).
     pub(crate) sidebar_visible: bool,
     anim: Option<SidebarAnim>,
@@ -340,6 +345,8 @@ impl PerformancePage {
             hub,
             demand,
             focus: cx.focus_handle(),
+            summary: None,
+            summary_sub: None,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -355,9 +362,90 @@ impl PerformancePage {
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.active = active;
         self.sidebar.update(cx, |s, cx| s.set_active(active, cx));
+        let page_on = self.page_on();
         if let Some(view) = self.selected_view() {
-            update_page(&view, cx, |p, cx| p.set_active(active, cx));
+            update_page(&view, cx, |p, cx| p.set_active(page_on, cx));
         }
+    }
+
+    /// The shown device page sends demand: the tab is active and summary mode is off.
+    fn page_on(&self) -> bool {
+        self.active && self.summary.is_none()
+    }
+
+    /// The summary mode view while it is on. `MainWindow` renders it in place of the tab strip
+    /// and the page (UI-SHL-001).
+    pub fn summary_view(&self) -> Option<AnyView> {
+        self.summary.clone().map(AnyView::from)
+    }
+
+    pub fn summary(&self) -> Option<&Entity<summary::SummaryView>> {
+        self.summary.as_ref()
+    }
+
+    /// `PerfToggleSummaryMode` (Ctrl+M) on the tab.
+    fn on_toggle_summary(
+        &mut self,
+        _: &PerfToggleSummaryMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.summary.is_some() {
+            self.exit_summary(None, window, cx);
+        } else {
+            self.enter_summary(window, cx);
+        }
+    }
+
+    /// Opens summary mode: one tile per visible card. The shown page withdraws its demand; the
+    /// sidebar keeps its part and the summary sends its own.
+    fn enter_summary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let size = window.viewport_size();
+        let (sidebar, demand) = (self.sidebar.clone(), self.demand.clone());
+        let view = cx.new(|cx| summary::SummaryView::new(&sidebar, demand, size, cx));
+        self.summary_sub = Some(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, ev: &summary::SummaryEvent, window, cx| match ev {
+                summary::SummaryEvent::Exit { select } => {
+                    this.exit_summary(select.clone(), window, cx);
+                }
+            },
+        ));
+        self.summary = Some(view.clone());
+        if let Some(page) = self.selected_view() {
+            update_page(&page, cx, |p, cx| p.set_active(false, cx));
+        }
+        let suffix = tr(cx, "perf-summary-title-suffix");
+        window.set_window_title(&format!("{WINDOW_TITLE}{suffix}"));
+        let focus = view.read(cx).focus_handle(cx);
+        focus.focus(window, cx);
+        cx.emit(SummaryToggled);
+        cx.notify();
+    }
+
+    /// Closes summary mode, then selects `select` when set (a tile click).
+    fn exit_summary(
+        &mut self,
+        select: Option<DeviceKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.summary.take().is_none() {
+            return;
+        }
+        self.summary_sub = None;
+        let page_on = self.page_on();
+        if let Some(page) = self.selected_view() {
+            update_page(&page, cx, |p, cx| p.set_active(page_on, cx));
+        }
+        window.set_window_title(WINDOW_TITLE);
+        self.sidebar_focus.focus(window, cx);
+        if let Some(key) = select {
+            self.sidebar.update(cx, |s, cx| s.select(key, cx));
+        }
+        cx.emit(SummaryToggled);
+        cx.notify();
     }
 
     /// UI-SHL-121 initial focus: the sidebar list.
@@ -458,7 +546,7 @@ impl PerformancePage {
         if let Some(old) = self.selected_view() {
             update_page(&old, cx, |p, cx| p.set_active(false, cx));
         }
-        if self.active {
+        if self.page_on() {
             update_page(&view, cx, |p, cx| p.set_active(true, cx));
         }
         self.page_focus = page_focus_order(&view, cx);
@@ -622,6 +710,12 @@ impl Focusable for PerformancePage {
 
 impl EventEmitter<StatusChanged> for PerformancePage {}
 
+/// Summary mode turned on or off; the main window renders again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SummaryToggled;
+
+impl EventEmitter<SummaryToggled> for PerformancePage {}
+
 impl ShellPage for PerformancePage {
     fn primary_focus(&self) -> FocusHandle {
         PerformancePage::primary_focus(self)
@@ -716,6 +810,7 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_jump_to_type))
             .on_action(cx.listener(Self::on_select_device))
+            .on_action(cx.listener(Self::on_toggle_summary))
             .size_full()
             .children(animated)
             .child(split)

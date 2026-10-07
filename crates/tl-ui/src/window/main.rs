@@ -30,7 +30,7 @@ use gpui_kit::{
     FocusHandle, Global, InteractiveElement, IntoElement, KeyDownEvent, ModifiersChangedEvent,
     ParentElement, Pixels, Render, SharedString, StyleRefinement, Styled, Subscription, Task,
     WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle,
-    WindowOptions, div, point, px, size,
+    WindowOptions, div, point, prelude::FluentBuilder as _, px, size,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
@@ -63,8 +63,8 @@ use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::information::InformationPage;
-use crate::pages::performance::PerformancePage;
 use crate::pages::performance::details::Template;
+use crate::pages::performance::{PerformancePage, SummaryToggled};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::settings_global::{Section, TlSettings};
@@ -235,6 +235,9 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
             let hub = cx.global::<GlobalHub>().0.clone();
             let demand = cx.global::<GlobalDemand>().0.clone();
             let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
+            // Graph summary mode replaces the tab strip and the page (UI-PRF-016).
+            cx.subscribe(&page, |_, _, _: &SummaryToggled, cx| cx.notify())
+                .detach();
             PageSlot::new(page, cx)
         }),
         Tab::Information => Some(|window, cx| {
@@ -1657,6 +1660,12 @@ impl Render for MainWindow {
                 .clone()
                 .cached(StyleRefinement::default().size_full())
         });
+        // Graph summary mode: the summary view takes the place of the tab strip and the page.
+        let summary = (self.active == Tab::Performance)
+            .then(|| self.page_entity::<PerformancePage>(Tab::Performance))
+            .flatten()
+            .and_then(|p| p.read(cx).summary_view());
+        let shell = summary.is_none();
         // A cached view is laid out at its style size, so the chip gets the slot's full width;
         // the chip itself sizes to its content inside it (max_w_full).
         let chip = AnyView::from(self.status.clone())
@@ -1691,36 +1700,47 @@ impl Render for MainWindow {
                         .h(bar_height_of(client, s)),
                 ),
             )
-            .child(
-                AnyView::from(self.tabstrip.clone())
-                    .cached(StyleRefinement::default().w_full().h(px(TAB_STRIP_H * s))),
-            )
-            .child(
+            .children(summary.map(|view| {
                 div()
-                    .debug_selector(|| "MainWindowPage".into())
-                    .relative()
+                    .debug_selector(|| "MainWindowSummary".into())
                     .flex_1()
                     .min_h_0()
-                    .children(page)
-                    // Painted after the page, so the chip's actions come last in Tab order
-                    // (UI-SHL-121).
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .bottom_0()
-                            .max_w(chip_w)
-                            .child(chip),
-                    )
-                    // Above the page; not a Tab stop.
-                    .children(self.fps.read(cx).is_shown().then(|| {
-                        div()
-                            .absolute()
-                            .top(px(FPS_INSET * s))
-                            .right(px(FPS_INSET * s))
-                            .child(self.fps.clone())
-                    })),
-            )
+                    .child(view.cached(StyleRefinement::default().size_full()))
+            }))
+            .when(shell, |el| {
+                el.child(
+                    AnyView::from(self.tabstrip.clone())
+                        .cached(StyleRefinement::default().w_full().h(px(TAB_STRIP_H * s))),
+                )
+            })
+            .when(shell, |el| {
+                el.child(
+                    div()
+                        .debug_selector(|| "MainWindowPage".into())
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .children(page)
+                        // Painted after the page, so the chip's actions come last in Tab order
+                        // (UI-SHL-121).
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .bottom_0()
+                                .max_w(chip_w)
+                                .child(chip),
+                        )
+                        // Above the page; not a Tab stop.
+                        .children(self.fps.read(cx).is_shown().then(|| {
+                            div()
+                                .absolute()
+                                .top(px(FPS_INSET * s))
+                                .right(px(FPS_INSET * s))
+                                .child(self.fps.clone())
+                        })),
+                )
+            })
             // Last: an open context menu covers the window (E16-A3).
             .children(menu)
     }
