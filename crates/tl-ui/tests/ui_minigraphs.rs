@@ -846,3 +846,220 @@ mod panel {
         assert_eq!(saved.minigraphs.len(), 7);
     }
 }
+
+/// The panel mounted in the Processes page (tasklens-xdh.8, UI-PRF-040).
+mod mounted {
+    use std::sync::Arc;
+
+    use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::ids::ProcessKey;
+    use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::settings::{Settings, StartTab, UiState};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::app::{AppEnv, StartOptions, TasklensUi, UiInit};
+    use tl_ui::pages::minigraph::actions::ResetMinigraphLayout;
+    use tl_ui::pages::minigraph::panel::MinigraphPanel;
+    use tl_ui::pages::minigraph::sources::{MinigraphSource, default_entries};
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window};
+
+    fn record(pid: u32) -> ProcessRecord {
+        let a = |s: &str| Arc::<str>::from(s);
+        ProcessRecord {
+            key: ProcessKey {
+                start_ticks: 100,
+                boot_id: BootId(0),
+                pid,
+            },
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: a("demo"),
+                name: a("demo"),
+                exe: None,
+                cmdline: None,
+                user: a("u"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a("demo"),
+            }),
+            group: GroupKind::System.key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    /// `TasklensUi::init` on `start_tab` with 80 processes, then the main window at 1280 × 800.
+    fn open(cx: &mut TestAppContext, start_tab: StartTab) -> VisualTestContext {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let mut settings = Settings::default();
+        settings.general.start_tab = start_tab;
+        let init = UiInit {
+            settings,
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_global(StartOptions::default());
+            cx.set_reduce_motion(true);
+        });
+        let records: Vec<ProcessRecord> = (100..180).map(record).collect();
+        engine.publish_with(|s| {
+            s.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                records: records.into(),
+                ..ProcessSnapshot::default()
+            });
+        });
+        cx.run_until_parked();
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(1280.), px(800.)));
+        draw(&mut vcx);
+        vcx
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.run_until_parked();
+    }
+
+    fn page(vcx: &mut VisualTestContext) -> gpui_kit::Entity<ProcessesPage> {
+        vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .page_entity::<ProcessesPage>(Tab::Processes)
+                .expect("the Processes page is built")
+        })
+    }
+
+    #[gpui_kit::test]
+    fn panel_mounted_bottom_right(cx: &mut TestAppContext) {
+        let mut vcx = open(cx, StartTab::Processes);
+        let table = vcx.debug_bounds("TlTreeTable").expect("table drawn");
+        let cpu = vcx.debug_bounds("MinigraphSlot-0").expect("CPU card drawn");
+        assert_eq!(table.right() - cpu.right(), px(16.));
+        assert_eq!(table.bottom() - cpu.bottom(), px(16.));
+        let cards = vcx.update(|_, cx| {
+            MinigraphPanel::global(cx)
+                .expect("panel")
+                .read(cx)
+                .cards()
+                .len()
+        });
+        assert_eq!(cards, 6);
+        assert!(vcx.debug_bounds("MinigraphSlot-5").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn panel_absent_on_other_tabs(cx: &mut TestAppContext) {
+        let mut vcx = open(cx, StartTab::Performance);
+        assert!(vcx.debug_bounds("MinigraphSlot-0").is_none());
+        assert!(
+            vcx.update(|_, cx| MinigraphPanel::global(cx)).is_none(),
+            "never built before the Processes tab"
+        );
+
+        // Visited, then left: the panel exists but draws nothing.
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window"));
+        vcx.update(|window, cx| main.update(cx, |m, cx| m.select_tab(Tab::Processes, window, cx)));
+        draw(&mut vcx);
+        assert!(vcx.debug_bounds("MinigraphSlot-0").is_some());
+        vcx.update(|window, cx| {
+            main.update(cx, |m, cx| m.select_tab(Tab::Performance, window, cx))
+        });
+        draw(&mut vcx);
+        assert!(vcx.debug_bounds("MinigraphSlot-0").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn gap_click_reaches_table(cx: &mut TestAppContext) {
+        let mut vcx = open(cx, StartTab::Processes);
+        let page = page(&mut vcx);
+        let selected = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| page.read(cx).table().read(cx).selection.len())
+        };
+        assert_eq!(selected(&mut vcx), 0);
+        let cpu = vcx.debug_bounds("MinigraphSlot-0").expect("CPU card");
+        let memory = vcx.debug_bounds("MinigraphSlot-1").expect("Memory card");
+        assert_eq!(cpu.left() - memory.right(), px(8.));
+        let gap = point(cpu.left() - px(4.), cpu.center().y);
+        vcx.simulate_click(gap, Modifiers::none());
+        draw(&mut vcx);
+        assert_eq!(selected(&mut vcx), 1, "the row under the gap is selected");
+    }
+
+    #[gpui_kit::test]
+    fn reset_reaches_panel_from_window(cx: &mut TestAppContext) {
+        let mut vcx = open(cx, StartTab::Processes);
+        let panel = vcx.update(|_, cx| MinigraphPanel::global(cx).expect("panel"));
+        vcx.update(|_, cx| {
+            panel.update(cx, |p, cx| {
+                let memory = p
+                    .attached()
+                    .find(|e| e.source == MinigraphSource::Memory)
+                    .map(|e| e.id)
+                    .expect("Memory card");
+                p.hide(memory, cx);
+            });
+        });
+        draw(&mut vcx);
+        vcx.dispatch_action(ResetMinigraphLayout);
+        draw(&mut vcx);
+        let attached = vcx.update(|_, cx| {
+            let mut v: Vec<_> = panel
+                .read(cx)
+                .attached()
+                .map(|e| (e.source.clone(), e.slot))
+                .collect();
+            v.sort_by_key(|(_, slot)| *slot);
+            v
+        });
+        let defaults: Vec<_> = default_entries()
+            .into_iter()
+            .map(|e| (e.source, e.slot))
+            .collect();
+        assert_eq!(attached, defaults);
+    }
+}
