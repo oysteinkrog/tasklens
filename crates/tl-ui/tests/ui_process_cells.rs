@@ -2479,6 +2479,8 @@ mod highlight {
     struct Rig {
         table: Entity<TlTreeTable<ProcessDelegate>>,
         driver: Entity<AnimationDriver>,
+        /// Read by the Enter check, which needs `test-hooks`.
+        #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
         opened: Rc<Cell<u32>>,
         #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
         toasts: Entity<tl_ui::components::toast::ToastQueue>,
