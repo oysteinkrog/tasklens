@@ -5,6 +5,7 @@ pub mod filter;
 pub mod main;
 pub mod registry;
 pub mod share_theme;
+pub mod shortcuts;
 pub mod status;
 pub mod tabstrip;
 pub mod titlebar;
