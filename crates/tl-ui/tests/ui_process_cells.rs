@@ -3086,7 +3086,7 @@ mod row_tooltip {
         let mut locked = record(1234);
         locked
             .validity
-            .set(ProcessField::Cmdline, Validity::Restricted);
+            .set(ProcessField::IoRead, Validity::Restricted);
         let s3 = snapshot(vec![locked.clone()]);
         let row = row_of(&locked);
         let (lines, warn) = lines_of(RowRef::Record(&locked, &row, RowKind::Process), &s3);
@@ -3162,7 +3162,7 @@ mod row_tooltip {
     #[gpui_kit::test]
     fn row_tooltip_delay_600ms(cx: &mut TestAppContext) {
         let mut r = record(1234);
-        r.validity.set(ProcessField::Cmdline, Validity::Restricted);
+        r.validity.set(ProcessField::IoRead, Validity::Restricted);
         let mut s = snapshot(vec![r.clone()]);
         s.table = Arc::new(ProcessTableView {
             header: ComponentHeader {
