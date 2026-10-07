@@ -1,7 +1,8 @@
 //! History mode page: header text and render on the HISTORY bit only (tasklens-8fx.19), and the
 //! query controller with one Frame query in flight (tasklens-8fx.20), and the History table
 //! (tasklens-8fx.22), and queries on strip window, metric and selection changes
-//! (tasklens-8fx.38). Run with `--features test-hooks`.
+//! (tasklens-8fx.38), and the timeline strip's cached geometry and gap bands (tasklens-8fx.24).
+//! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
@@ -13,8 +14,8 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, HistoryWhat};
 use tl_model::details::DetailsSnapshot;
 use tl_model::history::{
-    HistoryMetric, HistoryPeaks, HistoryProcessRow, HistoryRange, HistoryStoreState, HistoryTotals,
-    HistoryView,
+    HistoryMetric, HistoryPeaks, HistoryPoint, HistoryProcessRow, HistoryRange, HistorySeries,
+    HistoryStackBucket, HistoryStoreState, HistoryTotals, HistoryView,
 };
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::{AppearanceSettings, Settings, SortState, ThemeSettings, UiState};
@@ -840,4 +841,124 @@ fn live_frame_inputs_wait_for_tick(cx: &mut TestAppContext) {
             }
         ))
     ));
+}
+
+/// Paints the window once.
+fn draw(vcx: &mut VisualTestContext) {
+    vcx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+}
+
+/// A view at `version` with a CPU total, one selected series and a stack over 100..700 s, and
+/// the given gaps.
+fn strip_view(version: u64, gaps: Vec<(TimeNs, TimeNs)>) -> HistoryView {
+    let points: Vec<HistoryPoint> = (100..=700u64)
+        .step_by(10)
+        .map(|t| HistoryPoint {
+            t_ns: t * S,
+            min: (t % 50) as f32,
+            max: (t % 50) as f32 + 5.0,
+        })
+        .collect();
+    let stack: Vec<HistoryStackBucket> = (100..=700u64)
+        .step_by(10)
+        .map(|t| HistoryStackBucket {
+            t_ns: t * S,
+            top: [10.0, 5.0, 2.0],
+            other: 3.0,
+        })
+        .collect();
+    let points: Arc<[HistoryPoint]> = points.into();
+    HistoryView {
+        header: ComponentHeader {
+            version,
+            ..ComponentHeader::default()
+        },
+        store_state: HistoryStoreState::Ready,
+        series: vec![
+            HistorySeries {
+                key: None,
+                metric: HistoryMetric::Cpu,
+                points: Arc::clone(&points),
+            },
+            HistorySeries {
+                key: Some(key(7)),
+                metric: HistoryMetric::Cpu,
+                points,
+            },
+        ]
+        .into(),
+        stack: stack.into(),
+        gaps: gaps.into(),
+        ..view(700 * S)
+    }
+}
+
+fn publish_view(engine: &FakeEngine, vcx: &mut VisualTestContext, v: HistoryView) {
+    engine.publish_with(|s| s.history = Arc::new(v));
+    vcx.run_until_parked();
+}
+
+fn builds(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) -> u32 {
+    vcx.read_entity(page, |p, _| p.scrubber().build_count)
+}
+
+#[gpui_kit::test]
+fn scrubber_geometry_cached_until_key_changes(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    publish_view(&engine, vcx, strip_view(1, Vec::new()));
+    draw(vcx);
+    let first = builds(&page, vcx);
+    assert!(first >= 1);
+    // The same view, size and range: no rebuild.
+    draw(vcx);
+    draw(vcx);
+    assert_eq!(builds(&page, vcx), first);
+    // Moving the handle or the hover hairline builds nothing either.
+    page.update(vcx, |p, cx| p.set_scrub(Some(400 * S), cx));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert_eq!(builds(&page, vcx), first);
+    // A new view version rebuilds once.
+    publish_view(&engine, vcx, strip_view(2, Vec::new()));
+    draw(vcx);
+    draw(vcx);
+    assert_eq!(builds(&page, vcx), first + 1);
+    // So does a new strip window.
+    page.update(vcx, |p, cx| p.set_view_range((200 * S, 700 * S), cx));
+    vcx.run_until_parked();
+    draw(vcx);
+    draw(vcx);
+    assert_eq!(builds(&page, vcx), first + 2);
+    // Labels count back from the newest second, with "now" at the right edge.
+    let labels = vcx.read_entity(&page, |p, _| p.scrubber().label_texts());
+    assert_eq!(labels.last().map(String::as_str), Some("now"));
+    assert!(labels.iter().any(|l| l == "-5:00"), "{labels:?}");
+}
+
+#[gpui_kit::test]
+fn scrubber_draws_gap_band(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    publish_view(&engine, vcx, strip_view(1, Vec::new()));
+    draw(vcx);
+    assert!(vcx.read_entity(&page, |p, _| p.scrubber().painted_gaps.is_empty()));
+
+    // 60 s and 120 s gaps inside the 100..700 s window.
+    let gaps = vec![(200 * S, 260 * S), (400 * S, 520 * S)];
+    publish_view(&engine, vcx, strip_view(2, gaps));
+    draw(vcx);
+    let bands = vcx.read_entity(&page, |p, _| p.scrubber().painted_gaps.to_vec());
+    assert_eq!(bands.len(), 2);
+    let w0 = f32::from(bands[0].end - bands[0].start);
+    let w1 = f32::from(bands[1].end - bands[1].start);
+    assert!(w0 > 0.0);
+    assert!((w1 / w0 - 2.0).abs() < 0.05, "{w0} {w1}");
+    // The second band starts 200 s after the first: 200 / 60 band widths to the right.
+    let dx = f32::from(bands[1].start - bands[0].start);
+    assert!((dx / w0 - 200.0 / 60.0).abs() < 0.05, "{dx} {w0}");
 }
