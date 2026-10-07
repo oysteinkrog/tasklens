@@ -82,7 +82,7 @@ impl TabArg {
     }
 }
 
-/// Values of `--bench`. CLI names: perf-cpu, table-2000, bridge, static, history-scrub.
+/// Values of `--bench`. CLI names: perf-cpu, table-2000, bridge, static, history-scrub, soak.
 #[cfg(feature = "bench")]
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchScene {
@@ -92,6 +92,7 @@ pub enum BenchScene {
     Bridge,
     Static,
     HistoryScrub,
+    Soak,
 }
 
 /// Parses the process arguments. On a usage error clap prints usage to stderr and exits 2.
@@ -203,6 +204,7 @@ mod tests {
             ("bridge", BenchScene::Bridge),
             ("static", BenchScene::Static),
             ("history-scrub", BenchScene::HistoryScrub),
+            ("soak", BenchScene::Soak),
         ];
         for (name, scene) in pairs {
             assert_eq!(parse_from(&["--bench", name]).unwrap().bench, Some(scene));
