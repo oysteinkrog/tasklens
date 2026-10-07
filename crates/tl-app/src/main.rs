@@ -26,6 +26,7 @@ mod rendering_env;
 mod settings_store;
 #[allow(dead_code, reason = "tests call the rest")]
 mod single_instance;
+#[allow(dead_code, reason = "only tests call `MemInfoReader::read`")]
 mod watch_memory;
 
 use std::ffi::OsString;
