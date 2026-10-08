@@ -1752,8 +1752,12 @@ mod wired {
     use tl_model::command::Tab;
     use tl_model::demand::{CpuDemand, Demand};
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
-    use tl_model::ids::DeviceIdx;
+    use tl_model::ids::{DeviceIdx, GroupKey, ProcessKey};
+    use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
     use tl_ui::components::kv_grid;
     use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
@@ -1766,6 +1770,9 @@ mod wired {
     use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
     use tl_ui::pages::performance::overview::parts::title_row_id;
+    use tl_ui::pages::performance::overview::procs_box::{
+        PROC_ROW_ID_PREFIX, PROCS_BOX_ID, ProcsBox,
+    };
     use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
@@ -1855,6 +1862,7 @@ mod wired {
     struct Rig<'a> {
         page: Entity<PerformancePage>,
         demand: Entity<DemandAggregator>,
+        engine: Arc<FakeEngine>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -1883,6 +1891,7 @@ mod wired {
                 entries: Arc::from(catalog()),
             });
         });
+        let fake = Arc::clone(&engine);
         let client: Arc<dyn EngineClient> = engine;
         let demand = cx.update(|cx| {
             gpui_kit::init(cx);
@@ -1942,7 +1951,12 @@ mod wired {
                 m.page_entity::<PerformancePage>(Tab::Performance)
             })
             .expect("PerformancePage built");
-        Rig { page, demand, vcx }
+        Rig {
+            page,
+            demand,
+            engine: fake,
+            vcx,
+        }
     }
 
     fn key(s: &str) -> DeviceKey {
@@ -2205,5 +2219,177 @@ mod wired {
         select(&mut r, OVERVIEW_KEY);
         assert_eq!(overview(&mut r).expect("kept").entity_id(), first);
         assert_eq!(r.vcx.read_entity(&page, |p, _| p.page_count()), count);
+    }
+
+    fn proc_key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: u64::from(pid),
+            boot_id: BootId(1),
+            pid,
+        }
+    }
+
+    fn proc_record(pid: u32, cpu_pct: f32) -> ProcessRecord {
+        let name: Arc<str> = Arc::from(format!("proc{pid}"));
+        ProcessRecord {
+            key: proc_key(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: name.clone(),
+                name: name.clone(),
+                exe: None,
+                cmdline: None,
+                user: Arc::from("user"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: name,
+            }),
+            group: GroupKey(0),
+            state: ProcState::Running,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.,
+            io_write_bps: 0.,
+            net_rx_bps: 0.,
+            net_tx_bps: 0.,
+            gpu_util_pct: 0.,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    /// 12 processes: pid `10 + i` at `i` % CPU, so pids 21 down to 12 are the top 10. Each call
+    /// is a new `PROCESSES` version.
+    fn publish_procs(r: &mut Rig, exited: Option<u32>) {
+        r.engine.publish_with(|s| {
+            let version = s.processes.header.version + 1;
+            let records: Vec<ProcessRecord> = (0..12u32)
+                .map(|i| {
+                    let mut rec = proc_record(10 + i, i as f32);
+                    if exited == Some(10 + i) {
+                        rec.flags = ProcFlags::EXITED;
+                    }
+                    rec
+                })
+                .collect();
+            s.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                records: Arc::from(records),
+                ..ProcessSnapshot::default()
+            });
+        });
+        draw(r.vcx);
+    }
+
+    fn set_top_procs(r: &mut Rig, on: bool) {
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.performance.overview_top_processes = on);
+        });
+        draw(r.vcx);
+    }
+
+    fn procs_box(r: &mut Rig) -> Option<Entity<ProcsBox>> {
+        let page = overview(r).expect("an OverviewPage");
+        r.vcx.update(|_, cx| page.read(cx).procs_box().cloned())
+    }
+
+    /// crw.45: the Top processes box is off by default, and the Overview asks for no process
+    /// sweep.
+    #[gpui_kit::test]
+    fn overview_top_procs_off_by_default(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_procs(&mut r, None);
+        select(&mut r, OVERVIEW_KEY);
+        assert!(procs_box(&mut r).is_none());
+        assert!(r.vcx.debug_bounds(PROCS_BOX_ID).is_none());
+        let d = merged(&mut r);
+        assert!(has_overview_part(&d), "{d:?}");
+        assert!(!d.process_top && !d.process_table, "{d:?}");
+    }
+
+    /// crw.45: with the setting on, the box shows the 10 busiest live processes and the page
+    /// asks for `process_top`; a tick with the same top 10 renders nothing; a row click selects
+    /// that process; the setting off removes the box and the demand.
+    #[gpui_kit::test]
+    fn overview_top_procs_rows_ticks_and_click(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_procs(&mut r, None);
+        select(&mut r, OVERVIEW_KEY);
+        set_top_procs(&mut r, true);
+        let procs = procs_box(&mut r).expect("the Top processes box");
+        assert!(r.vcx.debug_bounds(PROCS_BOX_ID).is_some(), "placed");
+        let d = merged(&mut r);
+        assert!(d.process_top && !d.process_table, "{d:?}");
+
+        let pids = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                procs
+                    .read(cx)
+                    .rows()
+                    .iter()
+                    .map(|row| row.key.pid)
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(pids(&mut r), (12..=21).rev().collect::<Vec<_>>());
+        let first = r.vcx.update(|_, cx| procs.read(cx).rows()[0].clone());
+        assert_eq!(
+            (first.name.as_ref(), first.pid.as_ref(), first.cpu.as_ref()),
+            ("proc21", "21", "11%")
+        );
+
+        // The same top 10 at the same percents: nothing renders.
+        let counts = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let b = procs.read(cx);
+                (b.render_count.get(), b.notify_count.get())
+            })
+        };
+        let before = counts(&mut r);
+        publish_procs(&mut r, None);
+        assert_eq!(counts(&mut r), before, "same top 10");
+        // The busiest process exits: the rows change once.
+        publish_procs(&mut r, Some(21));
+        assert_eq!(pids(&mut r), (11..=20).rev().collect::<Vec<_>>());
+        assert_eq!(counts(&mut r).1, before.1 + 1);
+
+        let at = center_of(&mut r, &format!("{PROC_ROW_ID_PREFIX}18"));
+        mouse(r.vcx, MouseButton::Left, at);
+        draw(r.vcx);
+        let jumped = r.vcx.update(|_, cx| procs.read(cx).last_jump.get());
+        assert_eq!(jumped, Some(proc_key(18)));
+
+        // Copy carries the rows.
+        let page = overview(&mut r).expect("an OverviewPage");
+        let text = r.vcx.update(|_, cx| {
+            let mut out = String::new();
+            page.read(cx).copy_all(&mut out, cx);
+            out
+        });
+        assert!(text.contains("Top processes\n"), "{text}");
+        assert!(text.contains("proc20\t20\t10%\n"), "{text}");
+
+        set_top_procs(&mut r, false);
+        assert!(procs_box(&mut r).is_none());
+        assert!(r.vcx.debug_bounds(PROCS_BOX_ID).is_none());
+        let d = merged(&mut r);
+        assert!(has_overview_part(&d) && !d.process_top, "{d:?}");
     }
 }
