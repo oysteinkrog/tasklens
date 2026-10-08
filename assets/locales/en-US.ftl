@@ -737,6 +737,34 @@ sys-sys007-starting-n-services = Starting { $n } services...
 sys-sys007-n-services-started = { $n } services started
 sys-sys007-ok-of = { $ok } of { $n } services started. { $failed } failed.
 
+# Startup Apps table (UI-SYS-041, tasklens-9o0.6)
+startup-column-name = Name
+startup-column-publisher = Publisher
+startup-column-status = Status
+startup-column-impact = Startup impact
+startup-column-type = Type
+startup-column-location = Location
+startup-column-command = Command
+startup-type-autostart-user = Autostart (user)
+startup-type-autostart-system = Autostart (system)
+startup-type-autostart-system-overridden = Autostart (system, overridden)
+startup-type-user-unit = systemd user unit
+startup-type-plasma-pre-startup = Plasma pre-startup script
+startup-type-plasma-logout = Plasma logout script
+startup-impact-high = High
+startup-impact-medium = Medium
+startup-impact-low = Low
+startup-impact-none = None
+startup-impact-not-measured = Not measured
+startup-publisher-user = User
+startup-tooltip-activation = Activation time: { $ms } ms
+startup-tooltip-started = Started { $seconds } s after login
+startup-tooltip-cpu = CPU time: { $time }
+startup-tooltip-fork-exec-only = For this unit type only the time to start the program is measured.
+startup-tooltip-impact-none = Disabled entries do not run at login.
+startup-tooltip-impact-not-measured = This entry did not start through systemd in this session.
+startup-row-name = { $name }, { $status }, { $type }
+
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.
 
