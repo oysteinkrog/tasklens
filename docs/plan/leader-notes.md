@@ -850,3 +850,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.45: Demand.process_top (tl-model) starts only the process sweep for the Overview Top processes box; no history window. Opt-in key in the existing Performance settings section.
 - gma.43: accepted. GeneralWords/SecurityWords cached per strings version; SCHED_*/CAP_* identifiers and geometry punctuation stay literal.
 - gma.25: flag columns draw a centred Lucide check via cell_element (9o0.6) once in HEAD, glyph until then; min widths via TableColumn::min_width (rsf.28); copy text Yes.
+- o55.37: Template::counted with per-category translations and PluralRules::select at write time; only category keys ([one]/[other]) supported.
