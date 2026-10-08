@@ -5260,4 +5260,80 @@ mod startup_items {
         assert!(on_top(cx));
         assert_eq!(r.keep_above_captions(), [(None, true)]);
     }
+
+    // ---- Startup public IP fetch (E20-024) ----
+
+    use tl_model::command::DeviceCommand;
+
+    impl Rig {
+        fn ip_fetches(&self) -> usize {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter(|c| matches!(c, Command::Device(DeviceCommand::FetchPublicIp)))
+                .count()
+        }
+    }
+
+    /// `init` with the two `[network]` keys set.
+    fn init_ip(cx: &mut TestAppContext, auto: bool, accepted: bool) -> Rig {
+        let r = init(cx, Vec::new(), false, StartOptions::default());
+        cx.update(|cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.network.auto_fetch_public_ip = auto;
+                d.settings.network.public_ip_notice_accepted = accepted;
+            })
+        });
+        r
+    }
+
+    fn windows(cx: &mut TestAppContext) -> usize {
+        cx.read(|cx| cx.windows().len())
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_auto_fetch_when_accepted(cx: &mut TestAppContext) {
+        let r = init_ip(cx, true, true);
+        let _vcx = open(cx);
+        assert_eq!(r.ip_fetches(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_no_fetch_without_consent(cx: &mut TestAppContext) {
+        let r = init_ip(cx, true, false);
+        let _vcx = open(cx);
+        assert_eq!(r.ip_fetches(), 0);
+        assert_eq!(windows(cx), 1, "no notice window opens");
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_no_fetch_when_off(cx: &mut TestAppContext) {
+        let r = init_ip(cx, false, true);
+        let _vcx = open(cx);
+        assert_eq!(r.ip_fetches(), 0);
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_auto_fetch_once_per_process(cx: &mut TestAppContext) {
+        let r = init_ip(cx, true, true);
+        let vcx = open(cx);
+        assert_eq!(r.ip_fetches(), 1);
+        let _vcx = reopen(vcx, cx);
+        assert_eq!(r.ip_fetches(), 1, "a reopened window does not fetch again");
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_auto_fetch_retries_busy(cx: &mut TestAppContext) {
+        let r = init_ip(cx, true, true);
+        r.engine.set_busy(true);
+        let _vcx = open(cx);
+        assert_eq!(r.ip_fetches(), 0, "refused as busy");
+        r.engine.set_busy(false);
+        cx.executor().advance_clock(Duration::from_millis(999));
+        cx.run_until_parked();
+        assert_eq!(r.ip_fetches(), 0, "not before 1 s");
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert_eq!(r.ip_fetches(), 1, "sent again 1 s later");
+    }
 }
