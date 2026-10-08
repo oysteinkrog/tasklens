@@ -1,10 +1,10 @@
-//! The CPU page's Details grid, P1 rows (docs/ui/performance.md UI-PRF-024; PERF-033 to
-//! PERF-036, PERF-039, PERF-040).
+//! The CPU page's Details grid (docs/ui/performance.md UI-PRF-024; PERF-033 to PERF-040).
 //!
-//! Rows 1 to 12 are live and update at 1 Hz from `SystemSnapshot`; rows 13, 14 and 19 to 21 are
-//! static and update from `CpuStaticInfo`. Each value is formatted only when its bits change, and
-//! tooltips are compared in place before they are rebuilt, so a tick where nothing changed does
-//! not allocate.
+//! Rows 1 to 12 are live and update at 1 Hz from `SystemSnapshot`; rows 13 to 26 are static and
+//! update from `CpuStaticInfo`. Row 10 (Power draw) is live, but `CpuStaticInfo.rapl` decides
+//! whether it is shown: it stays hidden until the static info reports a RAPL zone (PERF-013).
+//! Each value is formatted only when its bits or text change, and tooltips are compared in place
+//! before they are rebuilt, so a tick where nothing changed does not allocate.
 //!
 //! The tooltip texts are `perf-cpu-tip-*` in `en-US.ftl`, translated by the model with its
 //! fallback words ([`KeyValueModel::with_texts`]).
@@ -16,7 +16,9 @@ use std::sync::Arc;
 use gpui_kit::SharedString;
 use tl_model::devices::{DeviceCatalog, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
-use tl_model::snapshot::{CacheLevelInfo, CpuStaticInfo, SystemSnapshot};
+use tl_model::snapshot::{
+    CacheLevelInfo, CpuStaticInfo, InvField, RaplState, SecurityFeature, SystemSnapshot, VirtState,
+};
 use tl_model::system::Metric;
 use tl_model::units;
 use tl_model::validity::Validity;
@@ -32,16 +34,26 @@ pub const ROW_HANDLES: &str = "perf-cpu-row-handles";
 pub const ROW_UP_TIME: &str = "perf-cpu-row-up-time";
 pub const ROW_BASE_SPEED: &str = "perf-cpu-row-base-speed";
 pub const ROW_SOCKETS: &str = "perf-cpu-row-sockets";
+pub const ROW_POWER: &str = "perf-cpu-row-power";
 pub const ROW_TEMPERATURE: &str = "perf-cpu-row-temperature";
 pub const ROW_LOAD_AVERAGE: &str = "perf-cpu-row-load-average";
 pub const ROW_CORES: &str = "perf-cpu-row-cores";
 pub const ROW_LOGICAL: &str = "perf-cpu-row-logical-processors";
+pub const ROW_VIRTUALIZATION: &str = "perf-cpu-row-virtualization";
+pub const ROW_RUNNING_IN_VM: &str = "perf-cpu-row-running-in-vm";
+pub const ROW_SECURITY: &str = "perf-cpu-row-security";
+pub const ROW_HYPERVISOR: &str = "perf-cpu-row-hypervisor";
 pub const ROW_L1: &str = "perf-cpu-row-l1";
 pub const ROW_L2: &str = "perf-cpu-row-l2";
 pub const ROW_L3: &str = "perf-cpu-row-l3";
+pub const ROW_CPUFREQ_DRIVER: &str = "perf-cpu-row-cpufreq-driver";
+pub const ROW_GOVERNOR: &str = "perf-cpu-row-governor";
+pub const ROW_EPP: &str = "perf-cpu-row-epp";
+pub const ROW_PLATFORM_PROFILE: &str = "perf-cpu-row-platform-profile";
+pub const ROW_MICROCODE: &str = "perf-cpu-row-microcode";
 
-/// The P1 rows in grid order (rows 10, 15 to 18 and 22 to 26 are P2).
-pub const P1_ROWS: [&str; 16] = [
+/// The 26 rows in grid order.
+pub const ROWS: [&str; 26] = [
     ROW_UTILIZATION,
     ROW_KERNEL_TIME,
     ROW_SPEED,
@@ -51,13 +63,23 @@ pub const P1_ROWS: [&str; 16] = [
     ROW_UP_TIME,
     ROW_BASE_SPEED,
     ROW_SOCKETS,
+    ROW_POWER,
     ROW_TEMPERATURE,
     ROW_LOAD_AVERAGE,
     ROW_CORES,
     ROW_LOGICAL,
+    ROW_VIRTUALIZATION,
+    ROW_RUNNING_IN_VM,
+    ROW_SECURITY,
+    ROW_HYPERVISOR,
     ROW_L1,
     ROW_L2,
     ROW_L3,
+    ROW_CPUFREQ_DRIVER,
+    ROW_GOVERNOR,
+    ROW_EPP,
+    ROW_PLATFORM_PROFILE,
+    ROW_MICROCODE,
 ];
 
 /// `{$mhz}`: the fastest core's MHz.
@@ -75,8 +97,23 @@ const TIP_L1_INSTRUCTION: &str = "perf-cpu-tip-l1-instruction";
 const TIP_L4: &str = "perf-cpu-tip-l4";
 /// A boot time that does not convert to a date.
 const TIME_UNKNOWN: &str = "perf-cpu-time-unknown";
-/// The tooltip texts and their arguments.
-const TEXTS: [(&str, &[&str]); 9] = [
+/// `{$pkg}` and `{$core}`: the RAPL watts with one decimal.
+const TIP_POWER: &str = "perf-cpu-tip-power";
+const TIP_VULNS: &str = "perf-cpu-tip-vulns";
+/// No security feature, and no hypervisor.
+const FEATURE_NONE: &str = "perf-cpu-feature-none";
+const VIRT_ENABLED: &str = "perf-cpu-virt-enabled";
+const VIRT_NO_KVM: &str = "perf-cpu-virt-no-kvm";
+const VIRT_NOT_SUPPORTED: &str = "perf-cpu-virt-not-supported";
+/// Running in VM on bare metal.
+const VM_NO: &str = "perf-cpu-vm-no";
+const FEATURE_SECURE_BOOT: &str = "perf-cpu-feature-secure-boot";
+const FEATURE_LOCKDOWN: &str = "perf-cpu-feature-lockdown";
+const FEATURE_MEMORY_ENCRYPTION: &str = "perf-cpu-feature-memory-encryption";
+const FEATURE_SHADOW_STACK: &str = "perf-cpu-feature-shadow-stack";
+const FEATURE_IOMMU: &str = "perf-cpu-feature-iommu";
+/// The tooltip texts and value words, and their arguments.
+const TEXTS: [(&str, &[&str]); 22] = [
     (TIP_FASTEST, &["mhz"]),
     (TIP_BOGOMIPS, &[]),
     (TIP_HANDLES, &[]),
@@ -86,7 +123,21 @@ const TEXTS: [(&str, &[&str]); 9] = [
     (TIP_L1_INSTRUCTION, &["size"]),
     (TIP_L4, &["size"]),
     (TIME_UNKNOWN, &[]),
+    (TIP_POWER, &["pkg", "core"]),
+    (TIP_VULNS, &["mitigated", "vulnerable", "not_affected"]),
+    (FEATURE_NONE, &[]),
+    (VIRT_ENABLED, &[]),
+    (VIRT_NO_KVM, &[]),
+    (VIRT_NOT_SUPPORTED, &[]),
+    (VM_NO, &[]),
+    (FEATURE_SECURE_BOOT, &[]),
+    (FEATURE_LOCKDOWN, &[]),
+    (FEATURE_MEMORY_ENCRYPTION, &[]),
+    (FEATURE_SHADOW_STACK, &[]),
+    (FEATURE_IOMMU, &[]),
 ];
+/// Separates the active security features.
+const LIST_SEP: &str = ", ";
 /// Marks a clock read from BogoMIPS.
 const BOGOMIPS_MARK: &str = " (?)";
 /// Separates the parts of a tooltip.
@@ -114,9 +165,12 @@ pub struct CpuLiveInputs<'a> {
     pub temp_sensors: &'a [CpuSensor],
 }
 
-/// A Details model with the 16 P1 rows, collecting, and the tooltip texts.
+/// A Details model with the 26 rows, collecting, and the tooltip texts. Power draw starts
+/// hidden until [`update_static`] sees a RAPL zone.
 pub fn cpu_details_model() -> KeyValueModel {
-    KeyValueModel::new(&P1_ROWS).with_texts(&TEXTS)
+    let mut model = KeyValueModel::new(&ROWS).with_texts(&TEXTS);
+    model.hide(ROW_POWER);
+    model
 }
 
 /// Fills `out` with the temperature sensors of the first CPU hwmon chip present, in catalog
@@ -142,7 +196,7 @@ pub fn cpu_temp_sensors(catalog: &DeviceCatalog, out: &mut Vec<CpuSensor>) {
     }
 }
 
-/// Updates rows 1 to 9, 11 and 12. True when any shown text or state changed.
+/// Updates rows 1 to 12. True when any shown text or state changed.
 pub fn update_live(model: &mut KeyValueModel, sys: &SystemSnapshot, inp: &CpuLiveInputs) -> bool {
     let cpu = &sys.cpu;
     let age_ns = inp.now_boot_ns.saturating_sub(sys.header.observed_end);
@@ -210,6 +264,7 @@ pub fn update_live(model: &mut KeyValueModel, sys: &SystemSnapshot, inp: &CpuLiv
         units::count(o, u64::from(v))
     });
 
+    changed |= update_power(model, sys, &live);
     changed |= update_temperature(model, sys, &live, inp.temp_sensors);
 
     changed |= live.row(model, ROW_LOAD_AVERAGE, cpu.load_avg, load_bits, |o, _| {
@@ -223,7 +278,7 @@ pub fn update_live(model: &mut KeyValueModel, sys: &SystemSnapshot, inp: &CpuLiv
     changed
 }
 
-/// Updates rows 13, 14 and 19 to 21. True when any shown text or state changed.
+/// Updates rows 13 to 26, and shows or hides row 10. True when any shown text or state changed.
 pub fn update_static(model: &mut KeyValueModel, info: &CpuStaticInfo) -> bool {
     let mut changed = false;
     // Zero cores means the static info has not arrived yet: the rows keep collecting.
@@ -280,7 +335,152 @@ pub fn update_static(model: &mut KeyValueModel, info: &CpuStaticInfo) -> bool {
         }
         Ok(())
     });
+
+    changed |= update_static_p2(model, info);
     changed
+}
+
+/// Rows 15 to 18 and 22 to 26, and whether row 10 is shown.
+fn update_static_p2(model: &mut KeyValueModel, info: &CpuStaticInfo) -> bool {
+    let mut changed = false;
+    // No zone hides the power row; a zone shows it and update_live fills it.
+    let power_hidden = row(model, ROW_POWER).hidden;
+    match info.rapl {
+        Some(RaplState::NoZone) if !power_hidden => {
+            model.hide(ROW_POWER);
+            changed = true;
+        }
+        Some(RaplState::Unreadable | RaplState::Readable) if power_hidden => {
+            model.show(ROW_POWER);
+            changed = true;
+        }
+        _ => {}
+    }
+
+    let v = info.virtualization;
+    changed |= if v.validity == Validity::Valid {
+        let word = model.text(match v.value {
+            VirtState::EnabledKvm => VIRT_ENABLED,
+            VirtState::SupportedNoKvm => VIRT_NO_KVM,
+            VirtState::NotSupported => VIRT_NOT_SUPPORTED,
+        });
+        model.set_text(ROW_VIRTUALIZATION, word.text())
+    } else {
+        static_fallback(model, ROW_VIRTUALIZATION, v.validity)
+    };
+
+    // systemd reports "" on bare metal.
+    let vm = &info.running_in_vm;
+    changed |= match (vm.validity, vm.value.is_empty()) {
+        (Validity::Valid, true) => {
+            let no = model.text(VM_NO);
+            model.set_text(ROW_RUNNING_IN_VM, no.text())
+        }
+        (Validity::Valid, false) => model.set_text(ROW_RUNNING_IN_VM, &vm.value),
+        (other, _) => static_fallback(model, ROW_RUNNING_IN_VM, other),
+    };
+
+    changed |= update_security(model, info);
+
+    changed |= match info.hypervisor.as_deref() {
+        Some(vendor) => model.set_text(ROW_HYPERVISOR, vendor),
+        None => {
+            let none = model.text(FEATURE_NONE);
+            model.set_text(ROW_HYPERVISOR, none.text())
+        }
+    };
+
+    changed |= static_text(model, ROW_CPUFREQ_DRIVER, &info.driver);
+    changed |= static_text(model, ROW_GOVERNOR, &info.governor);
+    changed |= static_text(model, ROW_EPP, &info.epp);
+    changed |= static_text(model, ROW_PLATFORM_PROFILE, &info.platform_profile);
+    changed |= static_text(model, ROW_MICROCODE, &info.microcode);
+    changed
+}
+
+/// Row 17: the active features in PERF-037 order, or "None". The tooltip has the vulnerability
+/// counts and names each source that could not be read.
+fn update_security(model: &mut KeyValueModel, info: &CpuStaticInfo) -> bool {
+    let mut changed = with_text(|o| {
+        // Both lockdown modes are one feature, and the worker pushes at most one of them.
+        let mut first = true;
+        for f in &info.security {
+            if !first {
+                o.push_str(LIST_SEP);
+            }
+            first = false;
+            o.push_str(model.text(feature_key(*f)).text());
+        }
+        if first {
+            o.push_str(model.text(FEATURE_NONE).text());
+        }
+        model.set_text(ROW_SECURITY, o)
+    });
+
+    if info.vulns.is_none() && info.security_unreadable.is_empty() {
+        return changed | clear_tip(model, ROW_SECURITY);
+    }
+    let vulns_tip = model.text(TIP_VULNS);
+    let could_not_read = model.words().could_not_read.clone();
+    changed |= set_tip(model, ROW_SECURITY, |o| {
+        let mut sep = "";
+        if let Some(v) = info.vulns {
+            vulns_tip.write(o, &[&v.mitigated, &v.vulnerable, &v.not_affected])?;
+            sep = DOT;
+        }
+        for source in &info.security_unreadable {
+            o.write_str(sep)?;
+            could_not_read.write(o, &[source])?;
+            sep = DOT;
+        }
+        Ok(())
+    });
+    changed
+}
+
+fn feature_key(f: SecurityFeature) -> &'static str {
+    match f {
+        SecurityFeature::SecureBoot => FEATURE_SECURE_BOOT,
+        SecurityFeature::LockdownIntegrity | SecurityFeature::LockdownConfidentiality => {
+            FEATURE_LOCKDOWN
+        }
+        SecurityFeature::MemoryEncryption => FEATURE_MEMORY_ENCRYPTION,
+        SecurityFeature::UserShadowStack => FEATURE_SHADOW_STACK,
+        SecurityFeature::Iommu => FEATURE_IOMMU,
+    }
+}
+
+/// A static text row: the text when Valid, else its fallback word.
+fn static_text(model: &mut KeyValueModel, label: &'static str, f: &InvField<Arc<str>>) -> bool {
+    if f.validity == Validity::Valid {
+        model.set_text(label, &f.value)
+    } else {
+        static_fallback(model, label, f.validity)
+    }
+}
+
+/// The word for a static field that is not Valid. Missing reads as collecting: the inventory
+/// has not filled the field yet.
+fn static_fallback(model: &mut KeyValueModel, label: &'static str, v: Validity) -> bool {
+    match v {
+        Validity::Unsupported => model.set_fallback(label, v, Fallback::NotSupported, None),
+        Validity::Missing => {
+            model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None)
+        }
+        _ => model.set_fallback(label, v, Fallback::Unavailable, None),
+    }
+}
+
+/// Builds a text in a reused per-thread buffer and passes it to `f`, so an unchanged text costs
+/// no allocation.
+fn with_text<R>(f: impl FnOnce(&mut String) -> R) -> R {
+    thread_local! {
+        static TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    TEXT.with_borrow_mut(|s| {
+        s.clear();
+        f(s)
+    })
 }
 
 /// The validity and Stale age shared by the live rows.
@@ -324,6 +524,45 @@ impl Live<'_> {
             }
             _ => model.set_fallback(label, v, Fallback::Unavailable, self.error),
         }
+    }
+}
+
+/// Row 10: RAPL package watts with Package and Core in the tooltip. Hidden while
+/// [`update_static`] has not seen a RAPL zone. A zone the user cannot read (Restricted, or
+/// Unsupported) reads "Needs setup", a link to Additional Setup (PERF-013, PERF-038).
+fn update_power(model: &mut KeyValueModel, sys: &SystemSnapshot, live: &Live) -> bool {
+    if row(model, ROW_POWER).hidden {
+        return false;
+    }
+    let (pkg, core) = (sys.cpu.package_power_w, sys.cpu.core_power_w);
+    if matches!(pkg.validity, Validity::Restricted | Validity::Unsupported) {
+        return model.set_fallback(ROW_POWER, Validity::Unsupported, Fallback::NeedsSetup, None);
+    }
+    let mut changed = live.row(model, ROW_POWER, pkg, f32_bits, units::watts);
+    if shows_value(pkg.validity) {
+        changed |= if shows_value(core.validity) {
+            let tip = model.text(TIP_POWER);
+            set_tip(model, ROW_POWER, |o| {
+                tip.write(o, &[&Watts(pkg.value), &Watts(core.value)])
+            })
+        } else {
+            clear_tip(model, ROW_POWER)
+        };
+    }
+    changed
+}
+
+/// Watts with one decimal and no unit, for the Power draw tooltip.
+struct Watts(f32);
+
+impl fmt::Display for Watts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_with(f, |s| {
+            units::watts(s, self.0);
+            if s.ends_with(" W") {
+                s.truncate(s.len() - 2);
+            }
+        })
     }
 }
 
