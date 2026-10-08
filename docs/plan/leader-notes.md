@@ -793,3 +793,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - Next beads: pdu-52 takes pdu.55 then pdu.29, 9o0 takes xdh.1, gma takes gma.21, crw takes crw.40.
 - wlf.32 plan approved: the setting is motion.save_power_on_battery.
 - Owner, 2026-10-08: wlf.30 uses a thread per source. ADR-004 is amended, the shared pool stays for actions and the journal, and a hung source shows Late. The pdu-51 agent implements it, but the profile comes first whenever the session unlocks.
+- 2026-10-08 morning: overnight the impl2 agents closed crw.40, wlf.32, gma.21, pdu.29, pdu.55, xdh.1, fut.20 and o55.8, then stopped. Started 6 impl3 agents: crw.41 then crw.42 and crw.43; bj6.6 then bj6.28; pdu.30 then pdu.33; jqk.21 then hk6.1; gma.9 then gma.23; crw.22 then o55.36. impl2-pdu-51 continues on wlf.30 and the wlf.27/28 profile. Count: 727 of 985.
