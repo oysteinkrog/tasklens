@@ -393,6 +393,7 @@ perf-menu-add-tray = Add tray icon graph
 perf-toast-last-page = At least one performance page must stay visible
 perf-tip-no-tray = No system tray available
 perf-menu-copy = Copy
+perf-menu-copy-value = Copy value
 perf-menu-summary = Graph Summary View
 perf-menu-time-range = Time range
 perf-menu-view = View
