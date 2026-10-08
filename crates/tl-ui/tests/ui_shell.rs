@@ -2491,6 +2491,8 @@ mod main_window {
                 ..Settings::default()
             };
             settings.general.start_tab = opts.start_tab;
+            // Tab switches are instant here; the tab_switch tests turn the animation on.
+            settings.motion.tab_switch_ms = 0;
             let mut state = UiState::default();
             state.tabs.last_tab = opts.last_tab;
             let persist = opts.persisted.clone().map(|count| {
@@ -4423,6 +4425,13 @@ mod main_window {
         })
     }
 
+    /// The rig with `motion.tab_switch_ms` at its 250 ms default; the rig itself turns it off.
+    fn anim_rig(cx: &mut TestAppContext) -> VisualTestContext {
+        let mut vcx = rig(cx, Opts::default());
+        vcx.update(|_, cx| TlSettings::update(cx, |d| d.settings.motion.tab_switch_ms = 250));
+        vcx
+    }
+
     /// Moves the clock, runs the animation frame callbacks (they mark the strip and the window
     /// for redraw), then draws.
     fn advance(vcx: &mut VisualTestContext, ms: u64) {
@@ -4433,7 +4442,7 @@ mod main_window {
 
     #[gpui_kit::test]
     fn tab_switch_animates(cx: &mut TestAppContext) {
-        let mut vcx = rig(cx, Opts::default());
+        let mut vcx = anim_rig(cx);
         let old = tab_x(&mut vcx, "TabStrip-processes");
         let new = tab_x(&mut vcx, "TabStrip-performance");
         assert_eq!(anim_state(&mut vcx).0, old);
@@ -4450,7 +4459,7 @@ mod main_window {
 
     #[gpui_kit::test]
     fn tab_switch_instant_when_reduced_motion(cx: &mut TestAppContext) {
-        let mut vcx = rig(cx, Opts::default());
+        let mut vcx = anim_rig(cx);
         vcx.update(|_, cx| cx.set_reduce_motion(true));
         let new = tab_x(&mut vcx, "TabStrip-performance");
         act(&mut vcx, SelectTab(1));
@@ -4463,7 +4472,7 @@ mod main_window {
 
     #[gpui_kit::test]
     fn tab_switch_zero_ms_instant(cx: &mut TestAppContext) {
-        let mut vcx = rig(cx, Opts::default());
+        let mut vcx = anim_rig(cx);
         vcx.update(|_, cx| TlSettings::update(cx, |d| d.settings.motion.tab_switch_ms = 0));
         let new = tab_x(&mut vcx, "TabStrip-performance");
         act(&mut vcx, SelectTab(1));
@@ -4473,7 +4482,7 @@ mod main_window {
 
     #[gpui_kit::test]
     fn tab_switch_restarts_from_current(cx: &mut TestAppContext) {
-        let mut vcx = rig(cx, Opts::default());
+        let mut vcx = anim_rig(cx);
         act(&mut vcx, SelectTab(1));
         advance(&mut vcx, 125);
         let (mid, _) = anim_state(&mut vcx);
@@ -4494,7 +4503,7 @@ mod main_window {
 
     #[gpui_kit::test]
     fn tab_switch_no_frames_after_end(cx: &mut TestAppContext) {
-        let mut vcx = rig(cx, Opts::default());
+        let mut vcx = anim_rig(cx);
         act(&mut vcx, SelectTab(1));
         advance(&mut vcx, 250);
         let frames = anim_frames(&mut vcx);
@@ -4549,6 +4558,14 @@ mod startup_items {
         requests: async_channel::Sender<AppRequest>,
     }
 
+    /// Default settings with instant tab switches (E20-021), so frame counts do not see the
+    /// switch animation.
+    fn no_tab_animation() -> Settings {
+        let mut settings = Settings::default();
+        settings.motion.tab_switch_ms = 0;
+        settings
+    }
+
     /// `TasklensUi::init` with `toasts` queued, a pending crash report when `crash`, and
     /// `start` as the command line. Opens no window.
     fn init(
@@ -4574,7 +4591,7 @@ mod startup_items {
             });
         }
         let init = UiInit {
-            settings: Settings::default(),
+            settings: no_tab_animation(),
             state: UiState::default(),
             themes_json: None,
             persist: Box::new(|_, _| {}),

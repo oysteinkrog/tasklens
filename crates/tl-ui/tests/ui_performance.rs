@@ -1784,6 +1784,8 @@ mod summary {
         reduce_motion: bool,
         mut settings: Settings,
     ) -> Rig<'_> {
+        // Instant tab switches (E20-021): frame counts here must not see the switch fade.
+        settings.motion.tab_switch_ms = 0;
         settings
             .performance
             .device_overrides
