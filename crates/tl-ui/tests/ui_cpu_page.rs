@@ -7,7 +7,10 @@ use gpui_kit::assets::IconName;
 use smallvec::smallvec;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::{CacheInfo, CacheLevelInfo, CpuStaticInfo, SystemSnapshot};
+use tl_model::snapshot::{
+    CacheInfo, CacheLevelInfo, CpuStaticInfo, RaplState, SecurityFeature, SystemSnapshot,
+    VirtState, VulnSummary,
+};
 use tl_model::system::{
     CoreInfo, CoreKind, CpuSet, CpuTopology, Metric, SensorKind, SensorReading,
 };
@@ -16,8 +19,10 @@ use tl_ui::chart::grid_element::CellMark;
 use tl_ui::components::icons::AppIcon;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::cpu_details::{
-    CpuLiveInputs, CpuSensor, ROW_L1, ROW_L2, ROW_L3, ROW_LOAD_AVERAGE, ROW_SPEED, ROW_TEMPERATURE,
-    ROW_UP_TIME, cpu_details_model, cpu_temp_sensors, update_live, update_static,
+    CpuLiveInputs, CpuSensor, ROW_HYPERVISOR, ROW_L1, ROW_L2, ROW_L3, ROW_LOAD_AVERAGE,
+    ROW_PLATFORM_PROFILE, ROW_POWER, ROW_RUNNING_IN_VM, ROW_SECURITY, ROW_SPEED, ROW_TEMPERATURE,
+    ROW_UP_TIME, ROW_VIRTUALIZATION, cpu_details_model, cpu_temp_sensors, update_live,
+    update_static,
 };
 use tl_ui::pages::performance::cpu_grid::{
     GridWords, cell_specs, cell_specs_ranked, heading_tooltip,
@@ -131,9 +136,34 @@ fn level(instances: u16, instance_kib: u64) -> Option<CacheLevelInfo> {
     })
 }
 
+fn inv<T>(value: T) -> tl_model::snapshot::InvField<T> {
+    tl_model::snapshot::InvField {
+        value,
+        validity: Validity::Valid,
+    }
+}
+
+/// Static info with every P2 field Valid and a readable RAPL zone.
+fn static_info() -> CpuStaticInfo {
+    CpuStaticInfo {
+        cores: 8,
+        logical: 16,
+        driver: inv(Arc::from("amd-pstate-epp")),
+        governor: inv(Arc::from("powersave")),
+        epp: inv(Arc::from("balance_performance")),
+        platform_profile: inv(Arc::from("balanced")),
+        virtualization: inv(VirtState::EnabledKvm),
+        running_in_vm: inv(Arc::from("")),
+        microcode: inv(Arc::from("0xa601206")),
+        rapl: Some(RaplState::Readable),
+        ..CpuStaticInfo::default()
+    }
+}
+
 #[gpui_kit::test]
-fn cpu_details_order_p1(cx: &mut TestAppContext) {
-    let model = cpu_details_model();
+fn cpu_details_order_p2(cx: &mut TestAppContext) {
+    let mut model = cpu_details_model();
+    update_static(&mut model, &static_info());
     cx.update(|cx| {
         init_strings(cx, "en-US");
         model.refresh_labels(cx);
@@ -151,15 +181,150 @@ fn cpu_details_order_p1(cx: &mut TestAppContext) {
             "Up time",
             "Base speed",
             "Sockets",
+            "Power draw",
             "Temperature",
             "Load average",
             "Cores",
             "Logical processors",
+            "Virtualization",
+            "Running in VM",
+            "Security features",
+            "Hypervisor",
             "L1 cache",
             "L2 cache",
             "L3 cache",
+            "Cpufreq driver",
+            "Governor",
+            "Power preference",
+            "Platform profile",
+            "Microcode",
         ]
     );
+
+    // The static P2 values as UI-PRF-024 shows them.
+    let shown: Vec<String> = model.rows[14..18]
+        .iter()
+        .chain(&model.rows[21..])
+        .map(|r| r.value.to_string())
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "Enabled (KVM available)",
+            "No",
+            "None",
+            "None",
+            "amd-pstate-epp",
+            "powersave",
+            "balance_performance",
+            "balanced",
+            "0xa601206",
+        ]
+    );
+
+    let mut info = static_info();
+    info.virtualization = inv(VirtState::SupportedNoKvm);
+    info.running_in_vm = inv(Arc::from("kvm"));
+    info.hypervisor = Some(Arc::from("KVM"));
+    info.platform_profile.validity = Validity::Unsupported;
+    assert!(update_static(&mut model, &info));
+    assert_eq!(
+        value(&model, ROW_VIRTUALIZATION),
+        "Supported, KVM module not loaded"
+    );
+    assert_eq!(value(&model, ROW_RUNNING_IN_VM), "kvm");
+    assert_eq!(value(&model, ROW_HYPERVISOR), "KVM");
+    assert_eq!(value(&model, ROW_PLATFORM_PROFILE), "Not supported");
+    assert!(!update_static(&mut model, &info), "same info: no change");
+}
+
+#[test]
+fn cpu_power_row_states() {
+    let mut model = cpu_details_model();
+    let mut sys = snapshot();
+    sys.cpu.package_power_w = Metric::valid(31.9);
+    sys.cpu.core_power_w = Metric::valid(18.2);
+    let inp = CpuLiveInputs::default();
+
+    // Hidden until the static info reports a zone.
+    update_live(&mut model, &sys, &inp);
+    assert!(row(&model, ROW_POWER).hidden);
+
+    let mut info = static_info();
+    assert!(update_static(&mut model, &info));
+    assert!(update_live(&mut model, &sys, &inp));
+    assert!(!row(&model, ROW_POWER).hidden);
+    assert_eq!(value(&model, ROW_POWER), "31.9 W");
+    assert_eq!(
+        tip(&model, ROW_POWER).as_deref(),
+        Some("Package 31.9 W · Core 18.2 W")
+    );
+    assert!(
+        !update_live(&mut model, &sys, &inp),
+        "same values: no change"
+    );
+
+    // A zone the user cannot read: Needs setup, a link to Additional Setup.
+    info.rapl = Some(RaplState::Unreadable);
+    update_static(&mut model, &info);
+    for v in [Validity::Unsupported, Validity::Restricted] {
+        sys.cpu.package_power_w = Metric::with(v);
+        sys.cpu.core_power_w = Metric::with(v);
+        update_live(&mut model, &sys, &inp);
+        let r = row(&model, ROW_POWER);
+        assert_eq!(r.value.as_ref(), "Needs setup", "{v:?}");
+        assert!(r.link && r.action.is_some(), "{v:?}");
+        assert!(!r.hidden);
+    }
+
+    // No zone at all: hidden.
+    info.rapl = Some(RaplState::NoZone);
+    assert!(update_static(&mut model, &info));
+    assert!(row(&model, ROW_POWER).hidden);
+    assert!(!update_live(&mut model, &sys, &inp));
+    assert!(!model.to_kv_rows().any(|r| r.label.as_ref() == ROW_POWER));
+}
+
+#[test]
+fn cpu_security_features_text_and_tooltip() {
+    let mut model = cpu_details_model();
+    let mut info = static_info();
+    info.security = smallvec![SecurityFeature::SecureBoot, SecurityFeature::Iommu];
+    info.security_unreadable = smallvec![Arc::from("lockdown")];
+    info.vulns = Some(VulnSummary {
+        mitigated: 12,
+        vulnerable: 0,
+        not_affected: 3,
+        unknown: 0,
+    });
+    assert!(update_static(&mut model, &info));
+    assert_eq!(value(&model, ROW_SECURITY), "Secure Boot, IOMMU");
+    assert_eq!(
+        tip(&model, ROW_SECURITY).as_deref(),
+        Some("12 mitigated, 0 vulnerable, 3 not affected · Could not read: lockdown")
+    );
+    assert!(!update_static(&mut model, &info), "same info: no change");
+
+    // All five, in PERF-037 order.
+    info.security = smallvec![
+        SecurityFeature::SecureBoot,
+        SecurityFeature::LockdownIntegrity,
+        SecurityFeature::MemoryEncryption,
+        SecurityFeature::UserShadowStack,
+        SecurityFeature::Iommu,
+    ];
+    update_static(&mut model, &info);
+    assert_eq!(
+        value(&model, ROW_SECURITY),
+        "Secure Boot, Kernel lockdown, Memory encryption, User shadow stack, IOMMU"
+    );
+
+    info.security.clear();
+    info.security_unreadable.clear();
+    info.vulns = None;
+    assert!(update_static(&mut model, &info));
+    assert_eq!(value(&model, ROW_SECURITY), "None");
+    assert_eq!(tip(&model, ROW_SECURITY), None);
 }
 
 #[test]
