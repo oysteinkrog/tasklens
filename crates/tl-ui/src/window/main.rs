@@ -42,7 +42,7 @@ use gpui_kit::{
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use tl_model::command::{AppRequest, Command, CommandError, KWinCommand, Tab};
+use tl_model::command::{AppRequest, Command, CommandError, DeviceCommand, KWinCommand, Tab};
 use tl_model::settings::{Decorations, StartTab, WindowState};
 use tl_model::table::TableMode;
 use tl_model::time::now_boot_ns;
@@ -377,6 +377,42 @@ impl Default for ShellState {
 struct FirstFrameLogged;
 
 impl Global for FirstFrameLogged {}
+
+/// Set once the startup public IP fetch was considered, so a reopened window does not fetch
+/// again (E20-024).
+struct PublicIpAutoFetched;
+
+impl Global for PublicIpAutoFetched {}
+
+/// How long the startup public IP fetch waits before its one retry after `Busy`.
+const PUBLIC_IP_RETRY: Duration = Duration::from_secs(1);
+
+/// The startup public IP fetch (UI-SHL-110 step 11, APP-056, PERF-060): only with both
+/// `network.auto_fetch_public_ip` and `network.public_ip_notice_accepted` on, so there is no
+/// network contact before consent. `Busy` gets one retry 1 s later; no toast either way.
+fn auto_fetch_public_ip(cx: &mut App) {
+    let network = &TlSettings::settings(cx).network;
+    if !(network.auto_fetch_public_ip && network.public_ip_notice_accepted) {
+        return;
+    }
+    let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+        return;
+    };
+    let fetch = || Command::Device(DeviceCommand::FetchPublicIp);
+    match engine.send(fetch()) {
+        Ok(()) => {}
+        Err(CommandError::Busy) => {
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                cx.background_executor().timer(PUBLIC_IP_RETRY).await;
+                if engine.send(fetch()).is_err() {
+                    warn!(target: "tasklens::ui", "public IP auto-fetch not queued");
+                }
+            })
+            .detach();
+        }
+        Err(_) => warn!(target: "tasklens::ui", "public IP auto-fetch not queued"),
+    }
+}
 
 /// Installs `GlobalShellEvents` and `ShellState`, the app-level window actions and the main open
 /// hook.
@@ -1911,7 +1947,11 @@ impl MainWindow {
             }
         }
         // step 11: helper unlock at launch (E20-026)
-        // step 11: public IP auto-fetch (E20-024)
+        // step 11: public IP auto-fetch (E20-024), once per process
+        if !cx.has_global::<PublicIpAutoFetched>() {
+            cx.set_global(PublicIpAutoFetched);
+            auto_fetch_public_ip(cx);
+        }
     }
 }
 
