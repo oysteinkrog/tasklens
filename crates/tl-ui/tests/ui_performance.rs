@@ -1281,6 +1281,16 @@ mod tab {
         }
     }
 
+    /// Default settings with the Overview card hidden (D-022), so the CPU page is the first page.
+    fn hidden_overview() -> Settings {
+        let mut s = Settings::default();
+        s.performance.device_overrides.insert(
+            tl_ui::pages::performance::overview::OVERVIEW_KEY.to_owned(),
+            tl_model::settings::DeviceVisibility::Hide,
+        );
+        s
+    }
+
     /// Every Global the tab needs over a fake catalog with CPU (`cpus` logical CPUs) and Memory.
     fn install(cx: &mut TestAppContext, state: UiState, cpus: u16) -> Rc<RefCell<Vec<u16>>> {
         let engine = FakeEngine::new();
@@ -1312,7 +1322,7 @@ mod tab {
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             cx.set_global(BootSettings {
-                settings: Settings::default(),
+                settings: hidden_overview(),
                 state,
                 persist: Some(Box::new(move |_, state| {
                     seen.borrow_mut().push(state.performance.nav_width)
@@ -1649,7 +1659,9 @@ mod summary {
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::settings::{
+        AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
+    };
     use tl_model::snapshot::SeriesSet;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
     use tl_ui::components::kv_grid;
@@ -1659,6 +1671,7 @@ mod summary {
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::memory::MemoryPage;
+    use tl_ui::pages::performance::overview::OVERVIEW_KEY;
     use tl_ui::pages::performance::summary::{MARKER_ID, SummaryView, tile_grid};
     use tl_ui::pages::performance::{DeviceKey, PerformancePage, SIDEBAR_PANEL_ID};
     use tl_ui::settings_global::TlSettings;
@@ -1759,6 +1772,23 @@ mod summary {
 
     /// The main window, `width` × `height`, on the Performance tab with the sidebar focused.
     fn open(cx: &mut TestAppContext, width: f32, height: f32, reduce_motion: bool) -> Rig<'_> {
+        open_with(cx, width, height, reduce_motion, Settings::default())
+    }
+
+    /// [`open`] with `settings`. The Overview card is hidden unless `settings` has an entry
+    /// for it (D-022).
+    fn open_with(
+        cx: &mut TestAppContext,
+        width: f32,
+        height: f32,
+        reduce_motion: bool,
+        mut settings: Settings,
+    ) -> Rig<'_> {
+        settings
+            .performance
+            .device_overrides
+            .entry(OVERVIEW_KEY.to_owned())
+            .or_insert(DeviceVisibility::Hide);
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             s.devices = Arc::new(DeviceCatalog {
@@ -1781,7 +1811,7 @@ mod summary {
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             cx.set_global(BootSettings {
-                settings: Settings::default(),
+                settings,
                 state: UiState::default(),
                 persist: None,
                 startup_toasts: Vec::new(),
@@ -1937,6 +1967,45 @@ mod summary {
         }
         // The tab strip and the sidebar are not drawn under the summary.
         assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn summary_skips_overview_card(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings
+            .performance
+            .device_overrides
+            .insert(OVERVIEW_KEY.to_owned(), DeviceVisibility::Show);
+        let mut r = open_with(cx, 1600., 1000., false, settings);
+        let page = r.page.clone();
+        let cards: Vec<String> = r.vcx.update(|_, cx| {
+            let sidebar = page.read(cx).sidebar().clone();
+            sidebar
+                .read(cx)
+                .visible_keys()
+                .map(|k| k.0.to_string())
+                .collect()
+        });
+        assert_eq!(cards.len(), 10, "{cards:?}");
+        assert_eq!(cards[0], OVERVIEW_KEY);
+        let view = enter(&mut r);
+        let tiles: Vec<String> = r.vcx.read_entity(&view, |v, _| {
+            v.tiles.iter().map(|t| t.key.0.to_string()).collect()
+        });
+        assert_eq!(tiles, cards[1..], "no Overview tile (D-022)");
+        // A sidebar notify re-runs the tile sync; the Overview card does not rebuild the tiles.
+        let first = r
+            .vcx
+            .read_entity(&view, |v, _| v.tiles[0].chart.entity_id());
+        r.vcx.update(|_, cx| {
+            let sidebar = page.read(cx).sidebar().clone();
+            sidebar.update(cx, |_, cx| cx.notify());
+        });
+        draw(r.vcx);
+        let again = r
+            .vcx
+            .read_entity(&view, |v, _| v.tiles[0].chart.entity_id());
+        assert_eq!(first, again);
     }
 
     #[gpui_kit::test]

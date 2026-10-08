@@ -110,6 +110,16 @@ fn draw(cx: &mut VisualTestContext) {
     }
 }
 
+/// Default settings with the Overview card hidden (D-022), so CPU is the first page.
+fn hidden_overview() -> Settings {
+    let mut s = Settings::default();
+    s.performance.device_overrides.insert(
+        tl_ui::pages::performance::overview::OVERVIEW_KEY.to_owned(),
+        tl_model::settings::DeviceVisibility::Hide,
+    );
+    s
+}
+
 fn install(cx: &mut TestAppContext) -> Arc<FakeEngine> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
@@ -132,7 +142,7 @@ fn install(cx: &mut TestAppContext) -> Arc<FakeEngine> {
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(client));
         cx.set_global(BootSettings {
-            settings: Settings::default(),
+            settings: hidden_overview(),
             state: UiState::default(),
             persist: None,
             startup_toasts: Vec::new(),

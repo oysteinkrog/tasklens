@@ -69,6 +69,8 @@ pub struct DeviceKey(pub Arc<str>);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema)]
 #[schemars(crate = "gpui_kit::private::schemars")]
 pub enum DeviceKind {
+    /// The Overview page (D-022). Not a catalog device; first by default.
+    Overview,
     Cpu,
     Memory,
     Gpu,
@@ -81,6 +83,7 @@ pub enum DeviceKind {
 }
 
 impl DeviceKey {
+    pub const OVERVIEW: &'static str = overview::OVERVIEW_KEY;
     pub const CPU: &'static str = "cpu";
     pub const MEMORY: &'static str = "memory";
     pub const AGGREGATE_DISK: &'static str = "aggregate:disk";
@@ -133,6 +136,7 @@ impl DeviceKey {
     pub fn kind(&self) -> DeviceKind {
         let k = &*self.0;
         match k {
+            Self::OVERVIEW => DeviceKind::Overview,
             Self::CPU => DeviceKind::Cpu,
             Self::MEMORY => DeviceKind::Memory,
             Self::AGGREGATE_DISK => DeviceKind::AggregateDisk,
@@ -177,8 +181,10 @@ pub struct DeviceRow {
 }
 
 /// Fills `out` with the present devices: keys in `settings.order` first, in that order, then
-/// the rest by kind (Cpu, Memory, Gpu, Disk, Net, Fan, Battery, AggregateDisk, AggregateGpu)
-/// and within a kind in catalog order. `lo` is never included. Runs on catalog changes only.
+/// the rest by kind (Overview, Cpu, Memory, Gpu, Disk, Net, Fan, Battery, AggregateDisk,
+/// AggregateGpu) and within a kind in catalog order. `lo` is never included. The Overview row
+/// is added when the CPU package is present and carries its index (D-022). Runs on catalog
+/// changes only.
 pub fn sidebar_order(
     catalog: &DeviceCatalog,
     settings: &PerformanceSettingsView,
@@ -200,6 +206,19 @@ pub fn sidebar_order(
             net_class: entry.net_kind,
         });
     }
+    if let Some(cpu) = catalog
+        .entries
+        .iter()
+        .find(|e| e.present && matches!(e.identity, DeviceIdentity::CpuPackage))
+    {
+        out.push(DeviceRow {
+            key: DeviceKey(DeviceKey::OVERVIEW.into()),
+            kind: DeviceKind::Overview,
+            idx: cpu.idx,
+            generation: 0,
+            net_class: None,
+        });
+    }
     // Stable sort, so rows of one kind keep catalog order.
     out.sort_by_key(|row| {
         let saved = settings.order.iter().position(|k| *k == row.key);
@@ -207,8 +226,8 @@ pub fn sidebar_order(
     });
 }
 
-/// A per-device override wins; otherwise the per-type setting decides. Cpu and Memory show by
-/// default, aggregates are hidden.
+/// A per-device override wins; otherwise the per-type setting decides. Overview, Cpu and Memory
+/// show by default, aggregates are hidden.
 pub fn is_visible(row: &DeviceRow, settings: &PerformanceSettingsView) -> bool {
     match settings.overrides.get(&row.key) {
         Some(DeviceVisibility::Show) => return true,
@@ -216,7 +235,7 @@ pub fn is_visible(row: &DeviceRow, settings: &PerformanceSettingsView) -> bool {
         None => {}
     }
     match row.kind {
-        DeviceKind::Cpu | DeviceKind::Memory => true,
+        DeviceKind::Cpu | DeviceKind::Memory | DeviceKind::Overview => true,
         DeviceKind::Gpu => settings.show_gpus,
         DeviceKind::Disk => settings.show_disks,
         DeviceKind::Fan => settings.show_fans,
@@ -1150,6 +1169,7 @@ mod tests {
             [
                 "net:enp38s0",
                 "disk:Y",
+                "overview",
                 "cpu",
                 "memory",
                 "gpu:pci:A",
@@ -1159,6 +1179,31 @@ mod tests {
         );
         assert_eq!(out[0].idx, DeviceIdx(3));
         assert_eq!(out[0].net_class, Some(NetClass::Wired));
+    }
+
+    #[test]
+    fn overview_row_follows_device_order() {
+        let cat = catalog(vec![
+            entry(0, DeviceIdentity::CpuPackage, true),
+            entry(1, DeviceIdentity::Memory, true),
+        ]);
+        let overrides = HashMap::new();
+        let mut out = Vec::new();
+        sidebar_order(&cat, &view(&[], &overrides), &mut out);
+        let keys: Vec<&str> = out.iter().map(|r| &*r.key.0).collect();
+        assert_eq!(keys, ["overview", "cpu", "memory"]);
+        assert_eq!(out[0].kind, DeviceKind::Overview);
+        assert_eq!(out[0].idx, DeviceIdx(0));
+
+        let order = [key("cpu"), key("overview")];
+        sidebar_order(&cat, &view(&order, &overrides), &mut out);
+        let keys: Vec<&str> = out.iter().map(|r| &*r.key.0).collect();
+        assert_eq!(keys, ["cpu", "overview", "memory"]);
+        assert!(is_visible(&out[1], &view(&order, &overrides)));
+
+        let no_cpu = catalog(vec![entry(1, DeviceIdentity::Memory, true)]);
+        sidebar_order(&no_cpu, &view(&[], &overrides), &mut out);
+        assert!(out.iter().all(|r| r.kind != DeviceKind::Overview));
     }
 
     #[test]

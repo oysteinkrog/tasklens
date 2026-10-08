@@ -68,6 +68,8 @@ pub const GRAPH_AREA_ID: &str = "perf-graph-area";
 pub struct PageWords {
     /// The strings version, `None` without strings.
     version: Option<u64>,
+    /// The Overview page's title; it has no header row (D-022).
+    pub overview: SharedString,
     pub processor: SharedString,
     pub memory: SharedString,
     pub gpu: SharedString,
@@ -118,6 +120,7 @@ impl PageWords {
     ) -> Self {
         Self {
             version,
+            overview: t("perf-card-heading-overview"),
             processor: t("perf-header-processor"),
             memory: t("perf-header-memory"),
             gpu: t("perf-header-gpu"),
@@ -211,6 +214,7 @@ pub fn header_text(
     let idx = entry.idx;
     let w = words;
     match kind {
+        DeviceKind::Overview => (w.overview.clone(), SharedString::default()),
         DeviceKind::Cpu => {
             let p = &snap.inventory.processor.name;
             let model = shown(&p.value, p.validity).unwrap_or(w.unknown_processor.as_ref());

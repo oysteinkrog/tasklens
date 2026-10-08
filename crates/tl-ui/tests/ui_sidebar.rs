@@ -382,6 +382,7 @@ mod sidebar {
     use tl_ui::pages::performance::actions::{
         PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice,
     };
+    use tl_ui::pages::performance::overview::OVERVIEW_KEY as OVERVIEW;
     use tl_ui::pages::performance::sidebar::{CardAnim, DeviceSidebar, SidebarEvent};
     use tl_ui::settings_global::TlSettings;
 
@@ -404,6 +405,7 @@ mod sidebar {
 
     struct Rig<'a> {
         sidebar: Entity<DeviceSidebar>,
+        hub: Entity<SnapshotHub>,
         demand: Entity<DemandAggregator>,
         engine: Arc<FakeEngine>,
         events: Rc<RefCell<Vec<SidebarEvent>>>,
@@ -483,13 +485,20 @@ mod sidebar {
     }
 
     /// `rooted`: the sidebar sits in a kit `Root` with a toast queue, as in the main window.
+    /// The Overview card is hidden unless `settings` has an entry for it (D-022), so the
+    /// device tests keep their card lists.
     fn open_in(
         cx: &mut TestAppContext,
         devices: Vec<DeviceEntry>,
-        settings: Settings,
+        mut settings: Settings,
         state: UiState,
         rooted: bool,
     ) -> Rig<'_> {
+        settings
+            .performance
+            .device_overrides
+            .entry(OVERVIEW.to_owned())
+            .or_insert(DeviceVisibility::Hide);
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             s.devices = Arc::new(DeviceCatalog {
@@ -516,8 +525,8 @@ mod sidebar {
         });
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        let d = demand.clone();
-        let sidebar = cx.new(|cx| DeviceSidebar::new(hub, d, cx));
+        let (h, d) = (hub.clone(), demand.clone());
+        let sidebar = cx.new(|cx| DeviceSidebar::new(h, d, cx));
         let events: Rc<RefCell<Vec<SidebarEvent>>> = Rc::default();
         let seen = Rc::clone(&events);
         cx.update(|cx| {
@@ -546,6 +555,7 @@ mod sidebar {
         draw(vcx);
         Rig {
             sidebar,
+            hub,
             demand,
             engine,
             events,
@@ -617,7 +627,8 @@ mod sidebar {
                 sidebar.read(cx).rows().len(),
             )
         });
-        assert_eq!((cards, rows), (9, 9));
+        // The hidden Overview card still has its row.
+        assert_eq!((cards, rows), (9, 10));
         assert_eq!(lines(&mut r, "disk:sdc").heading, "Disk 2");
         // 260 px less sp4 padding on each side.
         let card = r.vcx.debug_bounds("perf-card").expect("card");
@@ -1289,15 +1300,36 @@ mod sidebar {
         }
     }
 
+    /// The device overrides, without the Overview entry `open_in` adds.
     fn overrides(r: &mut Rig) -> Vec<(String, DeviceVisibility)> {
         r.vcx.update(|_, cx| {
             TlSettings::settings(cx)
                 .performance
                 .device_overrides
                 .iter()
+                .filter(|(k, _)| *k != OVERVIEW)
                 .map(|(k, v)| (k.clone(), *v))
                 .collect()
         })
+    }
+
+    fn overview_override(r: &mut Rig) -> Option<DeviceVisibility> {
+        r.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .performance
+                .device_overrides
+                .get(OVERVIEW)
+                .copied()
+        })
+    }
+
+    /// Settings with the Overview card on by its type default.
+    fn with_overview() -> Settings {
+        let mut s = Settings::default();
+        s.performance
+            .device_overrides
+            .insert(OVERVIEW.to_owned(), DeviceVisibility::Show);
+        s
     }
 
     #[gpui_kit::test]
@@ -1424,6 +1456,75 @@ mod sidebar {
         let queue = r.toasts.clone().expect("a toast queue");
         let shown: Vec<SharedString> = r.vcx.update(|_, cx| queue.read(cx).visible_texts());
         assert_eq!(shown, ["At least one performance page must stay visible"]);
+    }
+
+    #[gpui_kit::test]
+    fn overview_card_first_by_default(cx: &mut TestAppContext) {
+        let mut s = with_overview();
+        s.performance.device_overrides.clear();
+        let mut r = open(cx, nine(), s, UiState::default());
+        let shown = keys(&mut r);
+        assert_eq!(shown[..2], ["overview", "cpu"]);
+        assert_eq!(shown.len(), 10);
+        let l = lines(&mut r, OVERVIEW);
+        assert_eq!(
+            (&*l.heading, &*l.line1, &*l.line2),
+            ("Overview", "CPU, memory, GPU, disk, network", "")
+        );
+        r.vcx.dispatch_action(PerfSelectVisibleDevice { index: 1 });
+        r.vcx.run_until_parked();
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"), "F2 selects CPU");
+        r.vcx.dispatch_action(PerfSelectVisibleDevice { index: 0 });
+        r.vcx.run_until_parked();
+        assert_eq!(
+            selected(&mut r).as_deref(),
+            Some(OVERVIEW),
+            "F1 selects Overview"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn overview_hidden_by_card_menu(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), with_overview(), saved("cpu"));
+        draw(r.vcx);
+        // The Overview card is the first card; the list starts at sp4 (8 px).
+        let card = r.vcx.debug_bounds("perf-card").expect("a card");
+        let at = gpui_kit::point(card.center().x, px(8.) + card.size.height / 2.);
+        right_click(r.vcx, at);
+        draw(r.vcx);
+        let hide = open_menu_hide(&mut r).expect("the Overview card's menu is open");
+        assert!(hide.partial_eq(&set_visible(OVERVIEW, false)));
+        r.vcx.dispatch_action(set_visible(OVERVIEW, false));
+        draw(r.vcx);
+        assert_eq!(overview_override(&mut r), Some(DeviceVisibility::Hide));
+        assert_eq!(keys(&mut r)[0], "cpu");
+        r.vcx.dispatch_action(set_visible(OVERVIEW, true));
+        draw(r.vcx);
+        assert_eq!(overview_override(&mut r), None, "the type default shows it");
+        assert_eq!(keys(&mut r)[0], OVERVIEW);
+    }
+
+    #[gpui_kit::test]
+    fn overview_selection_persists(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), with_overview(), saved("cpu"));
+        let sidebar = r.sidebar.clone();
+        r.vcx.update(|_, cx| {
+            sidebar.update(cx, |s, cx| s.select(DeviceKey(Arc::from(OVERVIEW)), cx))
+        });
+        r.vcx.run_until_parked();
+        let saved = r
+            .vcx
+            .update(|_, cx| TlSettings::state(cx).performance.selected_device.clone());
+        assert_eq!(saved, OVERVIEW);
+        // A new sidebar reads the saved state, as when the tab opens again.
+        let (hub, demand) = (r.hub.clone(), r.demand.clone());
+        let again = r
+            .vcx
+            .update(|_, cx| cx.new(|cx| DeviceSidebar::new(hub, demand, cx)));
+        let first = r
+            .vcx
+            .update(|_, cx| again.read(cx).selected().map(|k| k.0.to_string()));
+        assert_eq!(first.as_deref(), Some(OVERVIEW));
     }
 
     #[gpui_kit::test]

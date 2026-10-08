@@ -149,7 +149,8 @@ fn graph_range_ns(cx: &App) -> u64 {
     u64::from(TlSettings::settings(cx).performance.graph_range_s) * 1_000_000_000
 }
 
-/// One tile per visible (not collapsing) sidebar card, in sidebar order.
+/// One tile per visible (not collapsing) sidebar card, in sidebar order. The Overview card
+/// gets no tile (D-022).
 fn build_tiles(sidebar: &Entity<DeviceSidebar>, cx: &mut App) -> Vec<Tile> {
     let words = Words::new(cx);
     let s = sidebar.read(cx);
@@ -157,7 +158,7 @@ fn build_tiles(sidebar: &Entity<DeviceSidebar>, cx: &mut App) -> Vec<Tile> {
     let cards: Vec<_> = s
         .cards()
         .iter()
-        .filter(|c| !c.is_removing())
+        .filter(|c| !c.is_removing() && c.row.kind != DeviceKind::Overview)
         .map(|c| {
             (
                 c.row.key.clone(),
@@ -290,7 +291,9 @@ impl SummaryView {
     fn sync_tiles(&mut self, cx: &mut Context<Self>) {
         let same = {
             let s = self.sidebar.read(cx);
-            s.visible_keys().eq(self.tiles.iter().map(|t| &t.key))
+            s.visible_keys()
+                .filter(|k| k.kind() != DeviceKind::Overview)
+                .eq(self.tiles.iter().map(|t| &t.key))
         };
         if same {
             return;
@@ -389,7 +392,9 @@ impl Words {
 
     fn range_word(&self, kind: DeviceKind, fmt: ValueFormat) -> SharedString {
         match kind {
-            DeviceKind::Cpu | DeviceKind::Gpu | DeviceKind::AggregateGpu => &self.utilization,
+            DeviceKind::Overview | DeviceKind::Cpu | DeviceKind::Gpu | DeviceKind::AggregateGpu => {
+                &self.utilization
+            }
             DeviceKind::Memory => &self.memory,
             DeviceKind::Disk | DeviceKind::AggregateDisk => &self.active,
             DeviceKind::Net => &self.throughput,

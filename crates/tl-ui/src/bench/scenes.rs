@@ -27,7 +27,7 @@ use rustc_hash::FxHashSet;
 use smallvec::{SmallVec, smallvec};
 use tl_model::client::EngineClient;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::{Settings, UiState};
+use tl_model::settings::{DeviceVisibility, Settings, UiState};
 use tl_model::time::now_boot_ns;
 use tracing::info;
 
@@ -158,6 +158,11 @@ pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
     settings.motion.smooth_graphs = scene != BenchScene::Static;
     settings.performance.graph_range_s = 60;
     settings.performance.cpu_kernel = true;
+    // The Overview card stays hidden, so the scenes keep the phase-0 card count (D-022).
+    settings
+        .performance
+        .device_overrides
+        .insert(DeviceKey::OVERVIEW.to_owned(), DeviceVisibility::Hide);
     let mut state = UiState::default();
     state.performance.nav_width = 252;
     state.performance.selected_device = DeviceKey::CPU.to_owned();

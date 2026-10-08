@@ -63,6 +63,9 @@ const UP: &str = " ↑ ";
 /// in en-US.
 #[derive(Clone, Debug)]
 pub struct CardWords {
+    pub overview: SharedString,
+    /// The Overview card's static line 1 (D-022).
+    pub overview_line1: SharedString,
     pub cpu: SharedString,
     pub memory: SharedString,
     /// "GPU {$n}".
@@ -116,6 +119,8 @@ impl CardWords {
         template: impl Fn(&str, &[&str]) -> Template,
     ) -> Self {
         Self {
+            overview: t("perf-card-heading-overview"),
+            overview_line1: t("perf-card-overview-line1"),
             cpu: t("perf-card-heading-cpu"),
             memory: t("perf-card-heading-memory"),
             gpu: template("perf-card-heading-gpu", &["n"]),
@@ -350,6 +355,7 @@ fn write_heading(input: &CardTextInput, out: &mut String) {
     let n = input.number;
     let w = input.words;
     match input.kind {
+        DeviceKind::Overview => out.push_str(&w.overview),
         DeviceKind::Cpu => out.push_str(&w.cpu),
         DeviceKind::Memory => out.push_str(&w.memory),
         DeviceKind::Gpu => write_n(out, &w.gpu, n),
@@ -373,6 +379,7 @@ fn write_line1(input: &CardTextInput, out: &mut String, locks: &mut LockOffsets)
     let entry = input.entry;
     let w = input.words;
     match input.kind {
+        DeviceKind::Overview => out.push_str(&w.overview_line1),
         DeviceKind::Cpu => {
             let p = &snap.inventory.processor.name;
             out.push_str(shown(&p.value, p.validity).unwrap_or(&*w.unknown_processor));
@@ -442,6 +449,8 @@ fn write_line2(
     let idx = input.entry.idx;
     let w = input.words;
     match input.kind {
+        // Empty (D-022).
+        DeviceKind::Overview => {}
         DeviceKind::Cpu => {
             let freq = sys.cpu.freq_mhz;
             value(out, locks, freq.validity, |o| {
@@ -1058,6 +1067,21 @@ mod tests {
         sys.cpu.freq_mhz = freq;
         sys.cpu.temp_c = temp;
         sys
+    }
+
+    #[test]
+    fn card_lines_overview() {
+        let cpu = entry(0, DeviceIdentity::CpuPackage, "CPU");
+        let s = snap(
+            cpu_system(Metric::valid(4631), Metric::valid(52.0)),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Overview, &cpu, &s));
+        assert_eq!(
+            strs(&l),
+            ("Overview", "CPU, memory, GPU, disk, network", "")
+        );
     }
 
     #[test]
