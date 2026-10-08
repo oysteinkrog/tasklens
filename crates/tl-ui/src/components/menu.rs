@@ -74,6 +74,8 @@ pub const SUBMENU_HOVER_DELAY: Duration = Duration::from_millis(150);
 
 /// The radio mark: a filled circle this wide at 100% scale.
 const RADIO_DOT: f32 = 6.0;
+/// The colour square of a swatch row, before the UI scale.
+const SWATCH: f32 = 12.0;
 /// The menu border width.
 const BORDER: Pixels = px(1.);
 
@@ -114,6 +116,8 @@ enum Entry {
         keep_open: bool,
         /// Space before the label ([`TlMenu::indent`]), already scaled.
         indent: Pixels,
+        /// The colour square before the label ([`TlMenu::swatch_radio_item`]).
+        swatch: Option<Hsla>,
     },
     Disabled {
         label: SharedString,
@@ -255,6 +259,7 @@ impl TlMenu {
             tooltip: None,
             keep_open: false,
             indent: px(0.),
+            swatch: None,
         });
         self
     }
@@ -305,6 +310,22 @@ impl TlMenu {
         self.marked(label.into(), Mark::Radio(selected), action)
     }
 
+    /// A [`radio_item`](Self::radio_item) with a 12 × 12 colour square between the mark and
+    /// the label. The square is decorative; the label is the accessible name.
+    pub fn swatch_radio_item(
+        self,
+        label: impl Into<SharedString>,
+        swatch: Hsla,
+        selected: bool,
+        action: Box<dyn Action>,
+    ) -> Self {
+        let mut menu = self.marked(label.into(), Mark::Radio(selected), action);
+        if let Some(Entry::Item { swatch: slot, .. }) = menu.entries.last_mut() {
+            *slot = Some(swatch);
+        }
+        menu
+    }
+
     /// The column stays reserved in a menu where nothing is checked yet.
     fn marked(mut self, label: SharedString, mark: Mark, action: Box<dyn Action>) -> Self {
         self.has_mark_column = true;
@@ -315,6 +336,7 @@ impl TlMenu {
             tooltip: None,
             keep_open: false,
             indent: px(0.),
+            swatch: None,
         });
         self
     }
@@ -474,6 +496,8 @@ pub struct MenuEntryInfo {
     pub indent: Pixels,
     /// The background and text colour of a painted row.
     pub painted: Option<(Hsla, Hsla)>,
+    /// The colour square of a swatch row.
+    pub swatch: Option<Hsla>,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -545,6 +569,10 @@ impl TlMenuPopup {
                         ..
                     }
                 );
+                let swatch = match e {
+                    Entry::Item { swatch, .. } => *swatch,
+                    _ => None,
+                };
                 let painted = match e {
                     Entry::Painted { bg, fg, .. } => Some((*bg, *fg)),
                     _ => None,
@@ -604,6 +632,7 @@ impl TlMenuPopup {
                     keep_open,
                     indent,
                     painted,
+                    swatch,
                 }
             })
             .collect()
@@ -1062,6 +1091,7 @@ impl TlMenuPopup {
                 mark,
                 tooltip,
                 indent,
+                swatch,
                 ..
             } => {
                 let hint =
@@ -1088,6 +1118,16 @@ impl TlMenuPopup {
                 item.px(m.sp[4])
                     .children(mark_column(*mark))
                     .when(*indent > px(0.), |d| d.child(div().flex_none().w(*indent)))
+                    .when_some(*swatch, |d, color| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .size(s(SWATCH))
+                                .mr(m.sp[2])
+                                .rounded(m.radius_small)
+                                .bg(color),
+                        )
+                    })
                     .child(text)
                     .children(hint)
                     .on_click(
