@@ -156,6 +156,7 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
             startup_toasts: Vec::new(),
         });
         TlSettings::init(cx);
+        menus_view::init(cx);
         register_global_handlers(cx);
         cx.set_global(EngineGlobal(client));
         cx.on_action(move |_: &ResetSettings, _| reset_count.set(reset_count.get() + 1));
@@ -508,7 +509,14 @@ fn set_tab(cx: &mut VisualTestContext, tab: Tab, history: bool) {
 }
 
 /// The View root items in order.
-const VIEW_ROOT: [&str; 5] = ["Columns", "Process View", "Window", "Appearance", "Graphs"];
+const VIEW_ROOT: [&str; 6] = [
+    "Columns",
+    "Process View",
+    "Window",
+    "Appearance",
+    "Theme",
+    "Graphs",
+];
 
 /// The labels of the open submenus: every drawn label except the View root items.
 fn sub_labels(cx: &mut VisualTestContext) -> Vec<String> {
@@ -534,15 +542,16 @@ fn menubar_alt_keys(cx: &mut TestAppContext) {
     let entries = entries(r.cx);
     assert_eq!(
         entries.len(),
-        5,
-        "Columns, Process View, Window, Appearance, Graphs: {entries:?}"
+        6,
+        "Columns, Process View, Window, Appearance, Theme, Graphs: {entries:?}"
     );
     assert_eq!(entries[0].label(), Some("Columns"));
     assert_eq!(entries[0].selected(), Some(true), "Columns highlighted");
     assert_eq!(entries[1].label(), Some("Process View"));
     assert_eq!(entries[2].label(), Some("Window"));
     assert_eq!(entries[3].label(), Some("Appearance"));
-    assert_eq!(entries[4].label(), Some("Graphs"));
+    assert_eq!(entries[4].label(), Some("Theme"));
+    assert_eq!(entries[5].label(), Some("Graphs"));
 }
 
 #[gpui_kit::test]
@@ -617,7 +626,7 @@ fn columns_disabled_on_performance(cx: &mut TestAppContext) {
     keys(r.cx, "alt-v");
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     let drawn = entries(r.cx);
-    assert_eq!(drawn.len(), 5);
+    assert_eq!(drawn.len(), 6);
     assert_eq!(drawn[0].label(), Some("Columns"));
     assert_ne!(
         drawn[0].selected(),
@@ -1446,8 +1455,8 @@ fn graphs_entries(cx: &mut VisualTestContext) -> Vec<tl_ui::components::menu::Me
     cx.update(|window, cx| {
         let popup = bar.read(cx).popup().expect("menu open").clone();
         let root = popup.read(cx).entries_for_test(window);
-        assert_eq!(root[4].label.as_deref(), Some("Graphs"));
-        let sub = root[4].submenu.clone().expect("Graphs submenu");
+        assert_eq!(root[5].label.as_deref(), Some("Graphs"));
+        let sub = root[5].submenu.clone().expect("Graphs submenu");
         sub.read(cx).entries_for_test(window)
     })
 }
@@ -1728,4 +1737,214 @@ fn start_minimized_rewrites_entry(cx: &mut TestAppContext) {
     draw(r.cx);
     assert!(!settings(r.cx).startup.start_minimized);
     assert_eq!(calls.lock().expect("calls").len(), 1, "no writer call");
+}
+
+// View > Theme (E21-012).
+
+const P2_THEMES: [&str; 12] = [
+    "Default Dark",
+    "Vivid Nightfall",
+    "Catppuccin Frappé",
+    "Catppuccin Macchiato",
+    "Catppuccin Mocha",
+    "Dracula",
+    "OLED Black",
+    "Default Light",
+    "Windows 7 Aero",
+    "Golden Summer Fields",
+    "Soft Pink Delight",
+    "Catppuccin Latte",
+];
+
+/// Opens View > Theme from the keyboard (the item above Graphs).
+fn open_theme(cx: &mut VisualTestContext) {
+    keys(cx, "alt-v end up right");
+    assert_eq!(open_menu(cx), Some(MenuId::View));
+}
+
+/// The built entries of the open View > Theme submenu.
+fn theme_entries(cx: &mut VisualTestContext) -> Vec<tl_ui::components::menu::MenuEntryInfo> {
+    let bar = bar(cx);
+    cx.update(|window, cx| {
+        let popup = bar.read(cx).popup().expect("menu open").clone();
+        let root = popup.read(cx).entries_for_test(window);
+        assert_eq!(root[4].label.as_deref(), Some("Theme"));
+        let sub = root[4].submenu.clone().expect("Theme submenu");
+        sub.read(cx).entries_for_test(window)
+    })
+}
+
+fn theme(cx: &mut VisualTestContext) -> ThemeSettings {
+    cx.update(|_, cx| TlSettings::settings(cx).theme.clone())
+}
+
+fn active_theme(cx: &mut VisualTestContext) -> String {
+    cx.update(|_, cx| tl_ui::theme::current(cx).name.to_string())
+}
+
+fn set_follow(cx: &mut VisualTestContext, on: bool) {
+    cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.theme.follow_system = on));
+}
+
+fn activate(cx: &mut VisualTestContext, name: &str) {
+    cx.dispatch_action(tl_ui::theme::ActivateTheme {
+        name: name.to_owned().into(),
+    });
+    draw(cx);
+}
+
+#[gpui_kit::test]
+fn theme_rows_painted(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    open_theme(r.cx);
+    let rows = theme_entries(r.cx);
+    let labels: Vec<String> = rows
+        .iter()
+        .take(12)
+        .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
+        .collect();
+    assert_eq!(labels, P2_THEMES);
+    assert!(rows[0].checked, "the active theme carries the mark");
+    assert!(rows[1..12].iter().all(|e| !e.checked));
+    let dracula = rows[5].painted.expect("painted row");
+    keys(r.cx, "escape escape");
+    // The Dracula theme's own colours, as built when it is active.
+    r.cx.update(|_, cx| {
+        tl_ui::theme::store::activate("Dracula", tl_ui::theme::ActivateSource::User, cx)
+            .expect("Dracula exists");
+    });
+    let (menu_bg, text) = r.cx.update(|_, cx| {
+        let t = tl_ui::theme::current(cx);
+        (t.menu_bg, t.text_primary)
+    });
+    assert_eq!(dracula, (menu_bg, text));
+    // Then sync, and the two preferred-theme submenus.
+    open_theme(r.cx);
+    let tail: Vec<String> = theme_entries(r.cx)
+        .iter()
+        .skip(12)
+        .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            "",
+            "Sync theme with system",
+            "Preferred Light Theme",
+            "Preferred Dark Theme"
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn set_theme_turns_off_sync(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    set_follow(r.cx, true);
+    activate(r.cx, "Dracula");
+    assert!(
+        !theme(r.cx).follow_system,
+        "an explicit choice turns sync off"
+    );
+    assert_eq!(theme(r.cx).active, "Dracula");
+    assert_eq!(active_theme(r.cx), "Dracula");
+    assert_eq!(toast_texts(&mut r), ["Theme sync turned off"]);
+}
+
+#[gpui_kit::test]
+fn set_theme_no_toast_without_sync(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    assert!(!theme(r.cx).follow_system);
+    // From the menu: Vivid Nightfall is the second row.
+    open_theme(r.cx);
+    keys(r.cx, "down enter");
+    assert_eq!(theme(r.cx).active, "Vivid Nightfall");
+    assert_eq!(active_theme(r.cx), "Vivid Nightfall");
+    assert!(toast_texts(&mut r).is_empty());
+}
+
+#[gpui_kit::test]
+fn theme_custom_suffix(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    r.cx.update(|_, cx| {
+        let dracula = cx
+            .global::<tl_ui::theme::ThemeStore>()
+            .builtin
+            .iter()
+            .find(|d| &*d.name == "Dracula")
+            .expect("built-in Dracula")
+            .clone();
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            vec![dracula],
+        );
+    });
+    let labels: Vec<String> =
+        r.cx.update(|_, cx| menus_view::theme_rows(cx))
+            .into_iter()
+            .map(|row| row.label.to_string())
+            .collect();
+    assert_eq!(labels.len(), 13);
+    assert_eq!(labels[5], "Dracula");
+    assert_eq!(labels[12], "Dracula (custom)");
+    open_theme(r.cx);
+    let drawn = labels(r.cx);
+    assert!(drawn.iter().any(|l| l == "Dracula (custom)"), "{drawn:?}");
+}
+
+#[gpui_kit::test]
+fn activate_refused_while_editing(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    r.cx.update(|_, cx| {
+        let store = cx.global_mut::<tl_ui::theme::ThemeStore>();
+        store.preview = Some(store.active.clone());
+    });
+    activate(r.cx, "Dracula");
+    assert_eq!(active_theme(r.cx), "Default Dark", "unchanged");
+    assert_eq!(theme(r.cx).active, "Default Dark");
+    assert_eq!(
+        toast_texts(&mut r),
+        ["Finish or cancel the theme editor first"]
+    );
+    let rows = r.cx.update(|_, cx| menus_view::theme_rows(cx));
+    let marked: Vec<String> = rows
+        .iter()
+        .filter(|row| row.selected)
+        .map(|row| row.label.to_string())
+        .collect();
+    assert_eq!(marked, ["Default Dark (editing)"]);
+}
+
+#[gpui_kit::test]
+fn sync_on_applies_at_once(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    r.cx.update(|_, cx| cx.global_mut::<tl_ui::theme::ThemeStore>().system_scheme = 2);
+    assert!(!theme(r.cx).follow_system);
+    open_theme(r.cx);
+    click_label(r.cx, "Sync theme with system");
+    assert!(theme(r.cx).follow_system);
+    assert_eq!(active_theme(r.cx), theme(r.cx).light, "theme.light at once");
+    assert_eq!(active_theme(r.cx), "Default Light");
+}
+
+#[gpui_kit::test]
+fn preferred_theme_radios(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    open_theme(r.cx);
+    // End reaches Preferred Dark Theme, the last row.
+    keys(r.cx, "end right");
+    assert!(
+        sub_highlighted(r.cx).contains(&"Default Dark".to_owned()),
+        "the first radio is highlighted: {:?}",
+        sub_highlighted(r.cx)
+    );
+    keys(r.cx, "down down down down down down enter");
+    assert_eq!(theme(r.cx).dark, "OLED Black");
+    assert_eq!(theme(r.cx).light, "Default Light", "the other key is kept");
+    assert_eq!(
+        active_theme(r.cx),
+        "Default Dark",
+        "no switch with sync off"
+    );
 }
