@@ -64,9 +64,9 @@ use super::titlebar::{
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, EscapeChain, FocusFilter,
-    GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab,
+    GLOBAL_CONTEXT, MinimizeWindow, NextTab, PICKER_CONTEXT, PrevTab, Quit, RefreshCurrentTab,
     SHELL_FILTER_CONTEXT, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetViewMode, ShowMainWindow,
-    ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow, ZoomWindow,
+    StartWindowPick, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::{AnimationDriver, FrameStats};
 use crate::app::{
@@ -131,6 +131,13 @@ fn single_char(text: &str) -> Option<char> {
     let ch = chars.next()?;
     chars.next().is_none().then_some(ch)
 }
+
+/// The window picker's toast key: the start toast, then "No window selected", replace each other
+/// (E20-027).
+pub const PICK_TOAST: ToastKey = ToastKey(0x7069_636b_0000_0001);
+const PICK_START_TEXT: &str = "shell-toast-pick-start";
+const PICK_NONE_TEXT: &str = "shell-toast-pick-none";
+const PICK_FAILED_TEXT: &str = "shell-toast-pick-failed";
 
 /// The UI scale toast's key. Fixed, so repeated presses replace one toast (UI-SHL-130).
 pub const UI_SCALE_TOAST: ToastKey = ToastKey(0x7569_7363_616c_6531);
@@ -1090,8 +1097,10 @@ pub struct MainWindow {
     /// Index = `Tab::ALL` position. Created on first visit, kept.
     pages: [Option<PageSlot>; 6],
     active: Tab,
-    /// Window picking is active (E20-027 sets it). Esc cancels it first.
+    /// Window picking is active (E20-027). Esc cancels it first.
     picking: bool,
+    /// The `seq` of the last `KWin(Pick)` sent; its `CancelPick` and its `PickResult` carry it.
+    pick_seq: u64,
     status_buf: String,
     /// `(state_version, processes version)` the toolbar model was built from.
     settings_versions: (u64, u64),
@@ -1255,6 +1264,14 @@ impl MainWindow {
                         let model = this.toolbar_model(cx);
                         this.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
                     }
+                    // The picker follows the KWin bridge; picking ends when the bridge goes.
+                    if ev.mask.contains(ComponentMask::WINDOWS) {
+                        if this.picking && !keep_above_supported(cx) {
+                            this.end_window_pick(cx);
+                        }
+                        let model = this.toolbar_model(cx);
+                        this.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
+                    }
                     this.note_next_frame(hub.clone(), window, cx);
                 },
             ));
@@ -1283,6 +1300,7 @@ impl MainWindow {
             pages: Default::default(),
             active: start,
             picking: false,
+            pick_seq: 0,
             status_buf: String::new(),
             settings_versions: settings_versions(cx),
             style_version: metrics(cx).style_version,
@@ -1471,6 +1489,80 @@ impl MainWindow {
             }
             EscOutcome::CloseWindow => window.dispatch_action(Box::new(CloseWindow), cx),
         }
+    }
+
+    /// `StartWindowPick` (E20-027, UI-SHL-014): sends `KWin(Pick)`; once queued, picking starts
+    /// and the start toast shows. A full queue shows "Could not start window picking".
+    fn on_start_pick(&mut self, _: &StartWindowPick, _: &mut Window, cx: &mut Context<Self>) {
+        if self.picking {
+            return;
+        }
+        let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+            return;
+        };
+        let seq = self.pick_seq + 1;
+        match engine.send(Command::KWin(KWinCommand::Pick { seq })) {
+            Ok(()) => {
+                self.pick_seq = seq;
+                self.set_picking(true, cx);
+                let text = shell_text(cx, PICK_START_TEXT, &[]);
+                self.toasts.update(cx, |q, cx| {
+                    q.push(ToastKind::Info, text, Some(PICK_TOAST), None, cx)
+                });
+            }
+            Err(err) => {
+                warn!(target: "tasklens::ui", ?err, "window pick not started");
+                let text = shell_text(cx, PICK_FAILED_TEXT, &[]);
+                self.toasts
+                    .update(cx, |q, cx| q.push(ToastKind::Warning, text, None, None, cx));
+            }
+        }
+    }
+
+    /// `CancelWindowPick` (Esc in "Picker", or the picker clicked again): sends
+    /// `KWin(CancelPick)`, ends picking and shows "No window selected" in place of the start
+    /// toast.
+    fn on_cancel_pick(&mut self, _: &CancelWindowPick, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.picking {
+            return;
+        }
+        if let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) {
+            let cmd = Command::KWin(KWinCommand::CancelPick { seq: self.pick_seq });
+            if let Err(err) = engine.send(cmd) {
+                warn!(target: "tasklens::ui", ?err, "window pick cancel not sent");
+            }
+        }
+        self.end_window_pick(cx);
+        let text = shell_text(cx, PICK_NONE_TEXT, &[]);
+        self.toasts.update(cx, |q, cx| {
+            q.push(ToastKind::Info, text, Some(PICK_TOAST), None, cx)
+        });
+    }
+
+    /// Ends picking: the button turns off, the "Picker" context goes and the start toast is
+    /// removed. The Processes page calls it when the pick result arrives (PROC-055).
+    pub fn end_window_pick(&mut self, cx: &mut Context<Self>) {
+        if !self.picking {
+            return;
+        }
+        self.set_picking(false, cx);
+        self.toasts.update(cx, |q, cx| q.remove(PICK_TOAST, cx));
+    }
+
+    /// The `seq` of the last pick sent; a `PickResult` with another `seq` is stale.
+    pub fn pick_seq(&self) -> u64 {
+        self.pick_seq
+    }
+
+    pub fn is_picking(&self) -> bool {
+        self.picking
+    }
+
+    fn set_picking(&mut self, picking: bool, cx: &mut Context<Self>) {
+        self.picking = picking;
+        let model = self.toolbar_model(cx);
+        self.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
+        cx.notify();
     }
 
     /// Sets window picking for tests until E20-027 owns it.
@@ -1817,6 +1909,8 @@ impl MainWindow {
         model.hide_system = settings.processes.hide_system;
         model.mode = settings.processes.mode;
         model.helper_installed = cx.try_global::<HelperInstalled>().is_some_and(|h| h.0);
+        model.picker_available = keep_above_supported(cx);
+        model.picking = self.picking;
         if let Some(hub) = cx.try_global::<GlobalHub>() {
             model.helper = hub.0.read(cx).current().health.helper;
         }
@@ -2259,6 +2353,8 @@ impl Render for MainWindow {
             .on_modifiers_changed(cx.listener(Self::on_modifiers))
             // window-level on_action handlers (chain edits)
             .on_action(cx.listener(Self::on_toggle_history))
+            .on_action(cx.listener(Self::on_start_pick))
+            .on_action(cx.listener(Self::on_cancel_pick))
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_clear_filter))
             .on_action(cx.listener(Self::on_escape_chain))
@@ -2291,6 +2387,8 @@ impl Render for MainWindow {
                         .relative()
                         .flex_1()
                         .min_h_0()
+                        // Above "Global" for the focused page: Esc maps to CancelWindowPick.
+                        .when(self.picking, |el| el.key_context(PICKER_CONTEXT))
                         .when_some(opacity, |el, t| el.opacity(t))
                         .children(page)
                         // Painted after the page, so the chip's actions come last in Tab order

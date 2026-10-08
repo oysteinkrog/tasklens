@@ -35,8 +35,8 @@ use tl_model::validity::Validity;
 
 use super::main::WINDOW_TITLE;
 use super::registry::WindowKey;
-use super::toolbar::{DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel};
-use crate::actions::{CloseWindow, MinimizeWindow, ZoomWindow};
+use super::toolbar::{DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel, toolbar_toggle};
+use crate::actions::{CancelWindowPick, CloseWindow, MinimizeWindow, StartWindowPick, ZoomWindow};
 use crate::components::icons::{AppIcon, TlIcon};
 use crate::components::shield::TlShield;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
@@ -115,6 +115,8 @@ struct CaptionStrings {
     pin_off: SharedString,
     pin_on: SharedString,
     pin_unsupported: SharedString,
+    /// "Select process by window" (E20-027).
+    picker: SharedString,
 }
 
 /// One caption button as last drawn. Tests read it through `TitleBarView::drawn_captions`.
@@ -373,6 +375,7 @@ impl TitleBarView {
             pin_off: tr(cx, "fnd-pin-off"),
             pin_on: tr(cx, "fnd-pin-on"),
             pin_unsupported: tr(cx, "fnd-pin-unsupported"),
+            picker: tr(cx, "shell-toolbar-picker"),
         };
 
         let mut subs = SmallVec::new();
@@ -681,10 +684,30 @@ impl TitleBarView {
             .model
             .helper_installed
             .then(|| TlShield::new(self.model.helper).into_any_element());
+        // Slot 4 (E20-027): the window picker on every tab while the KWin bridge is up. While
+        // picking, the same button cancels.
+        let picker = self.model.picker_available.then(|| {
+            let action: Box<dyn Action> = if self.model.picking {
+                Box::new(CancelWindowPick)
+            } else {
+                Box::new(StartWindowPick)
+            };
+            toolbar_toggle(
+                "picker",
+                TlIcon::Plus,
+                self.model.picking,
+                self.strings.picker.clone(),
+                action,
+                &self.model,
+            )
+            .into_any_element()
+        });
         let toolbar = no_drag(
-            div()
-                .flex_none()
-                .child(Toolbar::new(self.model.clone(), page).shield(shield)),
+            div().flex_none().child(
+                Toolbar::new(self.model.clone(), page)
+                    .shield(shield)
+                    .picker(picker),
+            ),
         );
         div()
             .id("TitleBar")
