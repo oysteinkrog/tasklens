@@ -1688,7 +1688,11 @@ mod tests {
             state.history = history;
         }
         let mut rig = Rig::start(connector);
-        assert_eq!(rig.drain().len(), 4, "Health, Devices, Batteries, OnBattery");
+        assert_eq!(
+            rig.drain().len(),
+            4,
+            "Health, Devices, Batteries, OnBattery"
+        );
         (rig, fake)
     }
 
