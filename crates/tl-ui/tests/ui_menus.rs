@@ -1880,14 +1880,14 @@ fn theme_custom_suffix(cx: &mut TestAppContext) {
             vec![dracula],
         );
     });
-    let labels: Vec<String> =
+    let rows: Vec<String> =
         r.cx.update(|_, cx| menus_view::theme_rows(cx))
             .into_iter()
             .map(|row| row.label.to_string())
             .collect();
-    assert_eq!(labels.len(), 13);
-    assert_eq!(labels[5], "Dracula");
-    assert_eq!(labels[12], "Dracula (custom)");
+    assert_eq!(rows.len(), 13);
+    assert_eq!(rows[5], "Dracula");
+    assert_eq!(rows[12], "Dracula (custom)");
     open_theme(r.cx);
     let drawn = labels(r.cx);
     assert!(drawn.iter().any(|l| l == "Dracula (custom)"), "{drawn:?}");
