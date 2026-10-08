@@ -1345,8 +1345,8 @@ shell-confirm-reset-button = Reset
 shell-confirm-cancel = Cancel
 shell-toast-settings-reset = Settings reset to defaults
 shell-toast-settings-reset-failed = Failed to reset settings
-# View > Process View (tasklens-bj6.5, UI-SHL-035).
 shell-toast-pid-not-found = Process { $pid } not found
+# View > Process View (tasklens-bj6.5, UI-SHL-035).
 shell-menu-pv-tree = Tree View
 shell-menu-pv-grouped = Task Manager Grouping
 shell-menu-pv-list = List View
@@ -1496,15 +1496,15 @@ minigraph-tip-total = Total
 minigraph-tip-kernel = Kernel
 minigraph-toast-full = No space for more minigraphs
 minigraph-toast-reset = Minigraph layout reset
+minigraph-menu-hide = Hide graph
+minigraph-menu-remove = Remove graph
+minigraph-menu-range = Time range
+minigraph-menu-reset = Reset minigraph layout
 # Settings window, Performance page (tasklens-bj6.26, UI-SHL-066).
 shell-settings-perf-group-graphs = Graphs
 shell-settings-perf-group-cpu = CPU
 shell-settings-perf-group-memory = Memory
 shell-settings-perf-group-gpu = GPU
-minigraph-menu-hide = Hide graph
-minigraph-menu-remove = Remove graph
-minigraph-menu-range = Time range
-minigraph-menu-reset = Reset minigraph layout
 shell-settings-perf-group-devices = Devices
 shell-settings-perf-group-network = Network adapters
 shell-settings-perf-graph-range = Graph time range
