@@ -40,6 +40,7 @@ use gpui_kit::{
     WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle,
     WindowOptions, div, point, prelude::FluentBuilder as _, px, size,
 };
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::command::{AppRequest, Command, CommandError, KWinCommand, Tab};
 use tl_model::settings::{Decorations, StartTab, WindowState};
@@ -351,6 +352,9 @@ pub struct ShellState {
     pub history_mode: bool,
     /// Ctrl-pause (E20-012).
     pub paused: bool,
+    /// Keep-above of the open secondary windows, in memory only (E20-029, R-073). A key is
+    /// dropped when its window leaves the registry.
+    pub secondary_pins: FxHashMap<WindowKey, bool>,
 }
 
 impl Global for ShellState {}
@@ -364,6 +368,7 @@ impl Default for ShellState {
             built_tabs: SmallVec::new(),
             history_mode: false,
             paused: false,
+            secondary_pins: FxHashMap::default(),
         }
     }
 }
@@ -409,6 +414,26 @@ pub fn init(cx: &mut App) {
     cx.on_action(|a: &SetViewMode, cx| set_view_mode(cx, a.0));
     cx.set_global(AppRequestHandler(Box::new(handle_app_request)));
     cx.on_action(on_toggle_always_on_top);
+    // A closed secondary window forgets its pin (E20-029).
+    if let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
+        cx.observe(&registry, |registry, cx| {
+            let open = registry.read(cx);
+            let pins = &cx.global::<ShellState>().secondary_pins;
+            let gone: SmallVec<[WindowKey; 4]> = pins
+                .keys()
+                .filter(|key| open.get(key).is_none())
+                .cloned()
+                .collect();
+            if gone.is_empty() {
+                return;
+            }
+            let pins = &mut cx.global_mut::<ShellState>().secondary_pins;
+            for key in gone {
+                pins.remove(&key);
+            }
+        })
+        .detach();
+    }
     cx.set_global(KeepAboveState::default());
     if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
         cx.subscribe(&hub, |_, ev: &SnapshotChanged, cx| {
@@ -432,15 +457,38 @@ struct KeepAboveState {
 impl Global for KeepAboveState {}
 
 /// `ToggleAlwaysOnTop` (UI-SHL-005): for the main window, while the KWin bridge is up, flips
-/// `window.always_on_top` (saved at once, no toast) and sends `KeepAbove`.
+/// `window.always_on_top` (saved at once, no toast) and sends `KeepAbove`. A secondary window
+/// flips its in-memory pin and sends `KeepAbove` for its caption (E20-029).
 fn on_toggle_always_on_top(a: &ToggleAlwaysOnTop, cx: &mut App) {
-    // secondary-window arm (E20-029 chain edit)
-    if a.window != WindowKey::Main || !keep_above_supported(cx) {
+    if !keep_above_supported(cx) {
+        return;
+    }
+    if a.window != WindowKey::Main {
+        toggle_secondary_pin(a.window.clone(), &a.caption, cx);
         return;
     }
     let on = !TlSettings::settings(cx).window.always_on_top;
     TlSettings::update(cx, |d| d.settings.window.always_on_top = on);
     keep_above_main(on, cx);
+}
+
+/// Flips the pin of the secondary window `key`, found by KWin through the tasklens pid and
+/// `caption`. Nothing is saved (R-073). A failed send is logged and the stored state kept.
+fn toggle_secondary_pin(key: WindowKey, caption: &SharedString, cx: &mut App) {
+    let pins = &mut cx.default_global::<ShellState>().secondary_pins;
+    let on = !pins.get(&key).copied().unwrap_or(false);
+    pins.insert(key, on);
+    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+        return;
+    };
+    let cmd = Command::KWin(KWinCommand::KeepAbove {
+        pid: std::process::id(),
+        caption: Some(Arc::from(caption.as_ref())),
+        on,
+    });
+    if engine.0.send(cmd).is_err() {
+        warn!(target: "tasklens::ui", "keep above not sent");
+    }
 }
 
 /// Sends `KeepAbove` for the main window. A busy engine gets one retry on the next `WINDOWS`
