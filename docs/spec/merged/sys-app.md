@@ -1303,6 +1303,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   device_overrides = {}          # device key -> "show" | "hide"
   curved_lines = false
   network_dynamic_scale = true   # false = link speed
+  overview_top_processes = false # Overview Top processes box (crw.45)
 
   [fans]                          # per fan key, P3
   # "<key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }
@@ -1484,6 +1485,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   | performance.device_overrides | TS Performance.HiddenPages; MC performance-sidebar-device-overrides |
   | performance.curved_lines | MC performance-smooth-graphs (monotone cubic, no overshoot) |
   | performance.network_dynamic_scale | MC performance-page-network-dynamic-scaling |
+  | performance.overview_top_processes | tasklens: Overview Top processes box, opt-in (D-022, crw.45) |
   | fans.* | PERF spec |
   | graphs.minigraph_cpu / _memory / _disk / _network | TS ShowCpuGraph/ShowRamGraph/ShowDiskGraph/ShowNetworkGraph |
   | graphs.minigraph_gpu / _vram | TS screenshot (inferred) |

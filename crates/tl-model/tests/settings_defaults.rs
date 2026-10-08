@@ -80,6 +80,7 @@ device_order = []              # device keys (PERF-005)
 device_overrides = {}          # device key -> "show" | "hide"
 curved_lines = false
 network_dynamic_scale = true   # false = link speed
+overview_top_processes = false # Overview Top processes box (crw.45)
 
 [fans]                          # per fan key, P3
 # "<key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }

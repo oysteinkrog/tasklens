@@ -310,6 +310,9 @@ pub struct PerformanceSettings {
     pub curved_lines: bool,
     /// `false` scales the network graph to the link speed.
     pub network_dynamic_scale: bool,
+    /// The Overview page's opt-in Top processes box (crw.45). Set by hand until the layout
+    /// editor exists.
+    pub overview_top_processes: bool,
 }
 
 impl Default for PerformanceSettings {
@@ -337,6 +340,7 @@ impl Default for PerformanceSettings {
             device_overrides: BTreeMap::new(),
             curved_lines: false,
             network_dynamic_scale: true,
+            overview_top_processes: false,
         }
     }
 }
@@ -1280,6 +1284,7 @@ mod tests {
         assert!(p.device_overrides.is_empty());
         assert!(!p.curved_lines);
         assert!(p.network_dynamic_scale);
+        assert!(!p.overview_top_processes);
 
         assert!(s.fans.is_empty());
         assert_eq!(
