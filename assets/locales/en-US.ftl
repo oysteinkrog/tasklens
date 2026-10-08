@@ -1665,6 +1665,15 @@ shell-settings-services-state-failed = Failed
 shell-settings-services-state-stopped = Stopped
 shell-settings-services-state-disabled = Disabled
 shell-toast-unit-type-required = At least one unit type must stay selected
+# Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
+shell-settings-sidebar = Sidebar
+shell-settings-device-order = Device order and visibility
+shell-settings-device-default = Default
+shell-settings-device-show = Show
+shell-settings-device-hide = Hide
+shell-settings-device-reset-order = Reset order
+shell-settings-device-show-all = Show all
+shell-toast-sidebar-order-reset = Sidebar order reset
 # Settings window, Performance page (tasklens-bj6.26, UI-SHL-066).
 shell-settings-perf-group-graphs = Graphs
 shell-settings-perf-group-cpu = CPU
