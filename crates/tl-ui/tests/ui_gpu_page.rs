@@ -32,6 +32,7 @@ use tl_ui::testing::fake_engine::FakeEngine;
 
 const GPU: DeviceIdx = DeviceIdx(7);
 const GIB: u64 = 1 << 30;
+const MIB: u64 = 1 << 20;
 
 /// The page, and the window's animation driver, which a chart with data needs.
 struct Host(Entity<GpuPage>, #[allow(dead_code)] Entity<AnimationDriver>);
@@ -63,7 +64,7 @@ fn totals(shared: bool) -> GpuTotals {
         shared_total,
         enc_pct: Metric::valid(0.0),
         dec_pct: Metric::valid(0.0),
-        mem_reserved: Metric::with(Validity::Unsupported),
+        mem_reserved: Metric::valid(380 * MIB),
         enc_sessions: Metric::with(Validity::Unsupported),
         enc_dec_shared: false,
         temp_c: Metric::valid(52.0),
@@ -452,7 +453,7 @@ fn gpu_details_order(cx: &mut TestAppContext) {
             "10.9%",
             "3.00 GiB / 16.00 GiB",
             "Not supported",
-            "Not reported",
+            "380.00 MiB",
             // `units::percent` writes zero as "0%" (table (d)).
             "0%",
             "0%",
@@ -461,12 +462,118 @@ fn gpu_details_order(cx: &mut TestAppContext) {
         ]
     );
     assert_eq!(rows[2].2.as_deref(), Some("Not available on this device"));
-    // All 28 rows exist in the model, rows 9 to 28 hidden.
+    // The 28 rows and the merged encode/decode row exist in the model. The merged row and
+    // rows 9 to 28 are hidden.
     r.vcx.update(|_, cx| {
         let d = r.page.read(cx).details();
-        assert_eq!(d.rows.len(), 28);
-        assert!(d.rows[8..].iter().all(|row| row.hidden));
+        assert_eq!(d.rows.len(), 29);
+        assert_eq!(d.rows[6].label, "perf-gpu-row-encode-decode");
+        assert!(d.rows[6].hidden);
+        assert!(d.rows[9..].iter().all(|row| row.hidden));
     });
+}
+
+/// Publishes `t` as the GPU's record and draws.
+fn publish_totals(r: &mut Rig, t: GpuTotals) {
+    r.engine.publish_with(|s| {
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        sys.gpus = Arc::from([(GPU, t)].as_slice());
+    });
+    draw(r.vcx);
+}
+
+fn find<'a>(
+    rows: &'a [(String, String, Option<String>)],
+    label: &str,
+) -> Option<&'a (String, String, Option<String>)> {
+    rows.iter().find(|(l, _, _)| l == label)
+}
+
+#[gpui_kit::test]
+fn gpu_shared_encode_decode_row(cx: &mut TestAppContext) {
+    let mut r = open(cx, "i915", "hwmon i915", false);
+    let mut t = totals(false);
+    t.enc_dec_shared = true;
+    t.enc_pct = Metric::valid(12.5);
+    t.dec_pct = Metric::valid(12.5);
+    publish_totals(&mut r, t);
+    let rows = detail_rows(&mut r);
+    let labels: Vec<&str> = rows.iter().map(|(l, _, _)| l.as_str()).collect();
+    assert_eq!(
+        labels[3..6],
+        [
+            "Hardware reserved memory",
+            "Video encode/decode",
+            "Temperature"
+        ]
+    );
+    assert_eq!(
+        find(&rows, "Video encode/decode").map(|r| r.1.as_str()),
+        Some("12.5%")
+    );
+
+    // Separate engines again: two rows.
+    publish_totals(&mut r, totals(false));
+    let rows = detail_rows(&mut r);
+    assert!(find(&rows, "Video encode/decode").is_none());
+    assert!(find(&rows, "Video encode").is_some());
+    assert!(find(&rows, "Video decode").is_some());
+}
+
+#[gpui_kit::test]
+fn gpu_encode_sessions_tooltip(cx: &mut TestAppContext) {
+    let mut r = nvidia(cx);
+    let mut t = totals(false);
+    t.enc_sessions = Metric::valid(2);
+    publish_totals(&mut r, t);
+    let rows = detail_rows(&mut r);
+    let encode = find(&rows, "Video encode").expect("encode row");
+    assert_eq!(encode.2.as_deref(), Some("2 active sessions"));
+
+    // No session count: no tooltip.
+    t.enc_sessions = Metric::with(Validity::Unsupported);
+    publish_totals(&mut r, t);
+    let rows = detail_rows(&mut r);
+    assert_eq!(find(&rows, "Video encode").and_then(|r| r.2.clone()), None);
+}
+
+#[gpui_kit::test]
+fn gpu_amd_temperature_sensors(cx: &mut TestAppContext) {
+    let mut r = open(cx, "amdgpu", "hwmon amdgpu: junction", true);
+    let mut t = totals(true);
+    t.mem_reserved = Metric::with(Validity::Unsupported);
+    t.temp_c = Metric::valid(52.0);
+    t.temp_edge_c = Metric::valid(48.0);
+    t.temp_junction_c = Metric::valid(52.0);
+    t.temp_mem_c = Metric::valid(60.0);
+    publish_totals(&mut r, t);
+    let rows = detail_rows(&mut r);
+    let temp = find(&rows, "Temperature").expect("temperature row");
+    assert_eq!(temp.1, "52 °C");
+    assert_eq!(
+        temp.2.as_deref(),
+        Some("edge 48 °C · junction 52 °C · mem 60 °C")
+    );
+    assert_eq!(
+        find(&rows, "Temperature source").map(|r| r.1.as_str()),
+        Some("hwmon amdgpu: junction")
+    );
+    assert_eq!(
+        find(&rows, "Hardware reserved memory").map(|r| r.1.as_str()),
+        Some("Not supported")
+    );
+
+    // No mem sensor: two in the tooltip.
+    t.temp_mem_c = Metric::with(Validity::Unsupported);
+    publish_totals(&mut r, t);
+    let rows = detail_rows(&mut r);
+    assert_eq!(
+        find(&rows, "Temperature")
+            .and_then(|r| r.2.clone())
+            .as_deref(),
+        Some("edge 48 °C · junction 52 °C")
+    );
 }
 
 #[gpui_kit::test]

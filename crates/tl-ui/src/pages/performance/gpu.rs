@@ -971,7 +971,7 @@ pub const ROW_SHARED: &str = "perf-gpu-row-shared";
 pub const ROW_RESERVED: &str = "perf-gpu-row-reserved";
 pub const ROW_ENCODE: &str = "perf-gpu-row-encode";
 pub const ROW_DECODE: &str = "perf-gpu-row-decode";
-/// Row 5's label when the hardware shares one engine (tasklens-o55.36 sets it).
+/// The one row that stands in for rows 5 and 6 when the hardware shares one engine.
 pub const ROW_ENCODE_DECODE: &str = "perf-gpu-row-encode-decode";
 pub const ROW_TEMPERATURE: &str = "perf-gpu-row-temperature";
 pub const ROW_TEMP_SOURCE: &str = "perf-gpu-row-temp-source";
@@ -1010,11 +1010,22 @@ pub const GPU_DETAIL_ROWS: [&str; 28] = [
 
 /// The rows 1 to 8 fill.
 const P1_ROWS: usize = 8;
+/// `{$n}`: the active NVENC sessions.
+const TIP_SESSIONS: &str = "perf-gpu-enc-sessions";
+/// Separates the sensors in the Temperature tooltip.
+const DOT: &str = " · ";
 
-/// The GPU Details model: all 28 rows in order, rows 9 to 28 hidden until E25-024.
+/// The GPU Details model: the 28 rows in order plus `Video encode/decode` after
+/// `Video decode`. Rows 9 to 28 are hidden until E25-024; the merged row is hidden until a
+/// record reports a shared engine.
 pub fn gpu_details_model() -> KeyValueModel {
-    let mut model = KeyValueModel::new(&GPU_DETAIL_ROWS);
-    for label in &GPU_DETAIL_ROWS[P1_ROWS..] {
+    let mut labels = GPU_DETAIL_ROWS.to_vec();
+    labels.insert(6, ROW_ENCODE_DECODE);
+    let mut model = KeyValueModel::new(&labels).with_texts(&[(TIP_SESSIONS, &["n"])]);
+    for label in GPU_DETAIL_ROWS[P1_ROWS..]
+        .iter()
+        .chain([&ROW_ENCODE_DECODE])
+    {
         model.hide(label);
     }
     model
@@ -1042,11 +1053,10 @@ fn shown_u64(value: u64, validity: Validity) -> Option<u64> {
     matches!(validity, Validity::Valid | Validity::Stale).then_some(value)
 }
 
-/// Fills rows 1 to 8 (UI-PRF-033) from the GPU record and the inventory adapter. Rows the model
-/// has no field for yet (hardware reserved memory, NVENC sessions, a shared encode/decode
-/// engine, AMD per-sensor temperatures) read "Not reported" until tasklens-o55.36. In a probe
-/// state every row reads "Unavailable" (restarting) or "Not supported" (missing). True when the
-/// grid needs a redraw.
+/// Fills rows 1 to 8 (UI-PRF-033) from the GPU record and the inventory adapter. A shared
+/// encode and decode engine shows one `Video encode/decode` row in place of rows 5 and 6. In a
+/// probe state every row reads "Unavailable" (restarting) or "Not supported" (missing). True
+/// when the grid needs a redraw.
 pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -> bool {
     let probe_word = match inp.probe {
         ProbeState::Ok => None,
@@ -1055,7 +1065,10 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
     };
     if let Some(f) = probe_word {
         let mut changed = false;
-        for label in &GPU_DETAIL_ROWS[..P1_ROWS] {
+        for label in GPU_DETAIL_ROWS[..P1_ROWS]
+            .iter()
+            .chain([&ROW_ENCODE_DECODE])
+        {
             changed |= model.set_fallback(label, Validity::Unsupported, f, None);
         }
         return changed;
@@ -1108,33 +1121,73 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
         ),
     };
 
-    changed |= model.set_fallback(
+    changed |= rows.metric(
+        model,
         ROW_RESERVED,
-        Validity::Unsupported,
-        Fallback::NotReported,
-        None,
+        t.map_or(missing(), |t| t.mem_reserved),
+        |v| v,
+        units::bytes,
     );
-    changed |= rows.metric(
-        model,
-        ROW_ENCODE,
-        t.map_or(missing(), |t| t.enc_pct),
-        pct_bits,
-        pct,
-    );
-    changed |= rows.metric(
-        model,
-        ROW_DECODE,
-        t.map_or(missing(), |t| t.dec_pct),
-        pct_bits,
-        pct,
-    );
-    changed |= rows.metric(
-        model,
-        ROW_TEMPERATURE,
-        t.map_or(missing(), |t| t.temp_c),
-        pct_bits,
-        units::celsius,
-    );
+
+    // A shared engine: one row with the encode value, which equals the decode value.
+    let shared = t.is_some_and(|t| t.enc_dec_shared);
+    changed |= show_if(model, ROW_ENCODE, !shared)
+        | show_if(model, ROW_DECODE, !shared)
+        | show_if(model, ROW_ENCODE_DECODE, shared);
+    let enc = t.map_or(missing(), |t| t.enc_pct);
+    if shared {
+        changed |= rows.metric(model, ROW_ENCODE_DECODE, enc, pct_bits, pct);
+    } else {
+        changed |= rows.metric(model, ROW_ENCODE, enc, pct_bits, pct);
+        // NVENC sessions in the tooltip. A Stale value keeps its age tooltip.
+        if enc.validity == Validity::Valid {
+            let sessions = t.map_or(missing(), |t| t.enc_sessions);
+            let tip = model.text(TIP_SESSIONS);
+            changed |= if matches!(sessions.validity, Validity::Valid | Validity::Stale) {
+                set_tip(model, ROW_ENCODE, |o| {
+                    let _ = tip.write(o, &[&sessions.value]);
+                })
+            } else {
+                clear_tip(model, ROW_ENCODE)
+            };
+        }
+        changed |= rows.metric(
+            model,
+            ROW_DECODE,
+            t.map_or(missing(), |t| t.dec_pct),
+            pct_bits,
+            pct,
+        );
+    }
+
+    let temp = t.map_or(missing(), |t| t.temp_c);
+    changed |= rows.metric(model, ROW_TEMPERATURE, temp, pct_bits, units::celsius);
+    // Every amdgpu sensor in the tooltip: "edge 48 °C · junction 52 °C · mem 60 °C".
+    if temp.validity == Validity::Valid {
+        let sensors = t.map_or([missing(); 3], |t| {
+            [t.temp_edge_c, t.temp_junction_c, t.temp_mem_c]
+        });
+        let shown = || {
+            ["edge", "junction", "mem"]
+                .into_iter()
+                .zip(sensors)
+                .filter(|(_, m)| matches!(m.validity, Validity::Valid | Validity::Stale))
+        };
+        changed |= if shown().next().is_none() {
+            clear_tip(model, ROW_TEMPERATURE)
+        } else {
+            set_tip(model, ROW_TEMPERATURE, |o| {
+                for (n, (name, m)) in shown().enumerate() {
+                    if n > 0 {
+                        o.push_str(DOT);
+                    }
+                    o.push_str(name);
+                    o.push(' ');
+                    units::celsius(o, m.value);
+                }
+            })
+        };
+    }
 
     changed |= match inp.adapter.map(|a| &a.temperature_source) {
         Some(src)
@@ -1151,6 +1204,53 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
         ),
     };
     changed
+}
+
+/// Shows or hides the row. True when that changed.
+fn show_if(model: &mut KeyValueModel, label: &'static str, show: bool) -> bool {
+    let Some(row) = model.rows.iter().find(|r| r.label == label) else {
+        return false;
+    };
+    if row.hidden != show {
+        return false;
+    }
+    if show {
+        model.show(label);
+    } else {
+        model.hide(label);
+    }
+    true
+}
+
+/// Sets the row's tooltip to what `write` produces, through a reused buffer, so an unchanged
+/// tooltip costs no allocation. True when it changed.
+fn set_tip(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    write: impl FnOnce(&mut String),
+) -> bool {
+    thread_local! {
+        static TIP: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    TIP.with_borrow_mut(|text| {
+        text.clear();
+        write(text);
+        let current = model.rows.iter().find(|r| r.label == label);
+        if current.and_then(|r| r.tooltip.as_deref()) == Some(text.as_str()) {
+            return false;
+        }
+        model.set_tooltip(label, Some(SharedString::from(text.as_str())));
+        true
+    })
+}
+
+fn clear_tip(model: &mut KeyValueModel, label: &'static str) -> bool {
+    let current = model.rows.iter().find(|r| r.label == label);
+    if current.is_none_or(|r| r.tooltip.is_none()) {
+        return false;
+    }
+    model.set_tooltip(label, None);
+    true
 }
 
 /// The shared parts of a row update.
