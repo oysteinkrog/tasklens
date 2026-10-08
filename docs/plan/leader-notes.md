@@ -799,3 +799,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
   - crw.40 found that smoothing re-renders OverviewPage every animation frame. Decision: Overview charts step at the sample rate (crw.46), revisit after wlf.31. crw.40 notes for crw.41: embed the page cached, and Ctrl+C uses copy_all.
   - Accepted: crw.40, fut.20 (d12552aa), the o55.8 focus follow-up (fd083283, 3ac07b06), xdh.1, pdu.55, pdu.29, wlf.32, gma.21 (four gaps).
   - All-targets clippy fails in the kv_grid and link tests. Fixed by fut.21, owned by impl3-crw-22.
+- hk6.1: the SysDelegate reads take the incoming snapshot (component_header, rows_len and query_generation get snap). The frame overlays the skeleton and empty states below the header. set_paused is driven by the shell PauseChanged.
