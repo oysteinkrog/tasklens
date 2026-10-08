@@ -1649,12 +1649,13 @@ fn start_minimized_disabled(cx: &mut TestAppContext) {
                 .entries_for_test(window)
                 .into_iter()
                 .find(|e| e.label.as_deref() == Some("Start minimized"))
-                .map(|e| e.kind)
+                .map(|e| (e.kind, e.indent))
         })
     };
     assert_eq!(
         built,
-        Some(tl_ui::components::menu::MenuEntryKind::Disabled)
+        Some((tl_ui::components::menu::MenuEntryKind::Disabled, px(16.))),
+        "disabled and indented by 16 at 100%"
     );
     assert_ne!(row.selected(), Some(true));
     // Nine Downs from Refresh pass "Start at login" and skip the disabled row.
