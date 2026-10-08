@@ -16,6 +16,7 @@ pub mod fds;
 pub mod filter;
 pub mod general;
 pub mod maps;
+pub mod security;
 pub mod threads;
 
 use std::rc::Rc;
@@ -45,6 +46,7 @@ use self::fds::{FdsCountChanged, FdsTab};
 use self::filter::{PropsFilter, filter_bar, on_clear};
 use self::general::GeneralTab;
 use self::maps::{MapsCountChanged, MapsTab};
+use self::security::SecurityTab;
 use self::threads::ThreadsTab;
 use crate::app::EngineGlobal;
 use crate::components::menu::{close_context_menu, context_menu_open};
@@ -352,6 +354,7 @@ pub struct PropsTabs {
     pub threads: Option<Entity<ThreadsTab>>,
     pub fds: Option<Entity<FdsTab>>,
     pub maps: Option<Entity<MapsTab>>,
+    pub security: Option<Entity<SecurityTab>>,
 }
 
 /// The root view of a Process Properties window.
@@ -584,6 +587,18 @@ impl PropsWindow {
             }
             self.tabs.maps = Some(maps);
         }
+        if tab == DetailTab::Security && self.tabs.security.is_none() {
+            let filter = self.filter[strip_index(DetailTab::Security)].clone();
+            let security = cx.new(|cx| SecurityTab::new(key, filter, cx));
+            if let Some(detail) = &self.last_detail {
+                let payload = detail.tab(DetailTab::Security).payload.clone();
+                security.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
+            }
+            if self.exited {
+                security.update(cx, |t, cx| t.set_exited(true, cx));
+            }
+            self.tabs.security = Some(security);
+        }
     }
 
     fn register_demand(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -673,6 +688,7 @@ impl PropsWindow {
         let threads = self.tabs.threads.clone();
         let fds = self.tabs.fds.clone();
         let maps = self.tabs.maps.clone();
+        let security = self.tabs.security.clone();
         if mask.intersects(ComponentMask::SYSTEM) {
             self.mem_total = snap.system.memory.total;
             let online = snap.system.cpu_topology.online;
@@ -731,6 +747,7 @@ impl PropsWindow {
             let threads_changed = changed(DetailTab::Threads);
             let fds_changed = changed(DetailTab::Fds);
             let maps_changed = changed(DetailTab::Maps);
+            let security_changed = changed(DetailTab::Security);
             let active_changed = changed(self.active);
             let validity_changed = self.last_detail.as_ref().is_none_or(|last| {
                 last.tab(self.active).validity != detail.tab(self.active).validity
@@ -739,6 +756,7 @@ impl PropsWindow {
                 || threads_changed
                 || fds_changed
                 || maps_changed
+                || security_changed
                 || active_changed
                 || validity_changed)
             {
@@ -746,6 +764,10 @@ impl PropsWindow {
             }
             if fds_changed && let Some(t) = &fds {
                 let payload = detail.tab(DetailTab::Fds).payload.clone();
+                t.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
+            }
+            if security_changed && let Some(t) = &security {
+                let payload = detail.tab(DetailTab::Security).payload.clone();
                 t.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
             }
             if maps_changed && let Some(t) = &maps {
@@ -785,6 +807,9 @@ impl PropsWindow {
             t.update(cx, |t, cx| t.set_exited(true, cx));
         }
         if let Some(t) = &self.tabs.maps {
+            t.update(cx, |t, cx| t.set_exited(true, cx));
+        }
+        if let Some(t) = &self.tabs.security {
             t.update(cx, |t, cx| t.set_exited(true, cx));
         }
         self.remove_demand(cx);
@@ -935,6 +960,14 @@ impl PropsWindow {
             && let Some(fds) = &self.tabs.fds
         {
             return AnyView::from(fds.clone())
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element();
+        }
+        if self.active == DetailTab::Security
+            && !restricted_now
+            && let Some(security) = &self.tabs.security
+        {
+            return AnyView::from(security.clone())
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element();
         }
