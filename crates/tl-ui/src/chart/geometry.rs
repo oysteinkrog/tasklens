@@ -266,8 +266,11 @@ pub struct Scratch {
 }
 
 impl Scratch {
-    /// An empty fill for a grid build, reusing a vertex buffer `finish_grid` gave back.
-    pub fn take_fill(&mut self) -> FillMesh {
+    /// An empty fill for a grid build. Takes back `cache`'s fill paths first, so the new fill
+    /// reuses their vertex buffers.
+    pub fn take_fill(&mut self, cache: &mut ChartCache) -> FillMesh {
+        self.live.reclaim(&mut cache.fills);
+        self.stale.reclaim(&mut cache.stale_fills);
         self.live.mesh()
     }
 
@@ -705,6 +708,9 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         ..
     } = scratch;
     cache.gaps.clear();
+    // The old fill paths' vertex buffers serve this build's fills.
+    live.reclaim(&mut cache.fills);
+    stale.reclaim(&mut cache.stale_fills);
     let bucket = bucket_ns(map.range_ns, map.plot_width.max(1.0).round() as u32);
     let grid = input.stack.then(|| StackGrid::new(input, acc));
 
@@ -918,8 +924,8 @@ pub fn build_cell(
 
 /// Tessellates a grid's shared builders into `cache`: `fills[0]` from `fill`, `strokes[0]` from
 /// `stroke` and `strokes[1]` from `overlay`, plus the stale sets from `scratch`. Empty paths add
-/// no set. Also stores the time map and y range the geometry was built for. The old fill paths
-/// go back to `scratch` for `Scratch::take_fill`.
+/// no set. Also stores the time map and y range the geometry was built for. Take `fill` from
+/// `Scratch::take_fill` so it reuses the old fill's vertex buffer.
 pub fn finish_grid(
     input: &BuildInput,
     fill: (Hsla, FillMesh),

@@ -1264,7 +1264,7 @@ fn build_cells(
     gaps: &mut Vec<(usize, Range<f32>)>,
 ) {
     gaps.clear();
-    let mut fill = scratch.take_fill();
+    let mut fill = scratch.take_fill(cache);
     let mut stroke = PathBuilder::stroke(px(1.0));
     let mut overlay = spec
         .cells
