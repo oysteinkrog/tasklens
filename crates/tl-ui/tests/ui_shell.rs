@@ -5578,4 +5578,159 @@ mod startup_items {
         assert!(vcx.debug_bounds("TlShield-icon-unlocked").is_some());
         assert!(vcx.debug_bounds("TlShield-icon-shield").is_none());
     }
+
+    // ---- Window picker slot and picking mode (E20-027) ----
+
+    use tl_ui::actions::{CancelWindowPick, StartWindowPick};
+
+    const PICK_START: &str = "Click a window to select its process. Hold CTRL while clicking to terminate process. Esc cancels.";
+
+    /// `init_bar` with blank pages for the unbuilt tabs and the KWin bridge at `validity`.
+    fn picker_rig(cx: &mut TestAppContext, validity: Validity) -> (Rig, VisualTestContext) {
+        let r = init_bar(cx, true);
+        cx.update(|cx| {
+            for tab in [Tab::Services, Tab::Startup, Tab::Connections] {
+                set_test_page(cx, tab, blank);
+            }
+        });
+        let mut vcx = open(cx);
+        r.publish_windows(cx, validity, "tasklens");
+        redraw(&mut vcx);
+        (r, vcx)
+    }
+
+    impl Rig {
+        /// The `seq` of each `KWin(Pick)` (`true`) and `KWin(CancelPick)` (`false`) sent.
+        fn picks(&self) -> Vec<(bool, u64)> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::KWin(KWinCommand::Pick { seq }) => Some((true, seq)),
+                    Command::KWin(KWinCommand::CancelPick { seq }) => Some((false, seq)),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn picking(cx: &mut TestAppContext) -> bool {
+        let main = main_window(cx);
+        cx.read(|cx| main.read(cx).is_picking())
+    }
+
+    fn picker_bounds(vcx: &mut VisualTestContext) -> Option<gpui_kit::Bounds<Pixels>> {
+        vcx.debug_bounds("TlButton-picker")
+    }
+
+    fn click_picker(vcx: &mut VisualTestContext) {
+        let at = picker_bounds(vcx).expect("picker drawn").center();
+        vcx.simulate_click(at, Modifiers::none());
+        redraw(vcx);
+    }
+
+    #[gpui_kit::test]
+    fn picker_hidden_without_bridge(cx: &mut TestAppContext) {
+        let (r, mut vcx) = picker_rig(cx, Validity::Unsupported);
+        assert!(picker_bounds(&mut vcx).is_none());
+        let without = vcx.debug_bounds("Toolbar").map(|b| b.size.width);
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        redraw(&mut vcx);
+        assert!(picker_bounds(&mut vcx).is_some());
+        let with = vcx.debug_bounds("Toolbar").map(|b| b.size.width);
+        assert!(
+            without < with,
+            "no space when hidden: {without:?} < {with:?}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn picker_every_tab(cx: &mut TestAppContext) {
+        let (_r, mut vcx) = picker_rig(cx, Validity::Valid);
+        for tab in Tab::ALL {
+            select(&mut vcx, cx, tab);
+            assert_eq!(active_tab(cx), tab);
+            assert!(picker_bounds(&mut vcx).is_some(), "picker on {tab:?}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn picker_click_starts_pick(cx: &mut TestAppContext) {
+        let (r, mut vcx) = picker_rig(cx, Validity::Valid);
+        click_picker(&mut vcx);
+        assert!(picking(cx));
+        assert_eq!(r.picks(), vec![(true, 1)]);
+        let main = main_window(cx);
+        assert_eq!(cx.read(|cx| main.read(cx).pick_seq()), 1);
+        assert_eq!(toasts(cx), vec![PICK_START.to_string()]);
+    }
+
+    #[gpui_kit::test]
+    fn picker_esc_cancels(cx: &mut TestAppContext) {
+        let (r, mut vcx) = picker_rig(cx, Validity::Valid);
+        click_picker(&mut vcx);
+        vcx.simulate_keystrokes("escape");
+        redraw(&mut vcx);
+        assert!(!picking(cx));
+        assert_eq!(r.picks(), vec![(true, 1), (false, 1)]);
+        assert_eq!(toasts(cx), vec!["No window selected".to_string()]);
+    }
+
+    #[gpui_kit::test]
+    fn picker_second_click_cancels(cx: &mut TestAppContext) {
+        let (r, mut vcx) = picker_rig(cx, Validity::Valid);
+        click_picker(&mut vcx);
+        click_picker(&mut vcx);
+        assert!(!picking(cx));
+        assert_eq!(r.picks(), vec![(true, 1), (false, 1)]);
+        assert_eq!(toasts(cx), vec!["No window selected".to_string()]);
+
+        // The next pick takes a new seq.
+        click_picker(&mut vcx);
+        assert!(picking(cx));
+        assert_eq!(r.picks().last(), Some(&(true, 2)));
+    }
+
+    #[gpui_kit::test]
+    fn picker_end_clears_state(cx: &mut TestAppContext) {
+        let (r, mut vcx) = picker_rig(cx, Validity::Valid);
+        click_picker(&mut vcx);
+        let main = main_window(cx);
+        cx.update(|cx| main.update(cx, |m, cx| m.end_window_pick(cx)));
+        redraw(&mut vcx);
+        assert!(!picking(cx));
+        assert!(toasts(cx).is_empty(), "the start toast goes");
+        assert_eq!(r.picks(), vec![(true, 1)], "no cancel for a finished pick");
+        // Esc no longer reaches CancelWindowPick.
+        vcx.simulate_keystrokes("escape");
+        redraw(&mut vcx);
+        assert_eq!(r.picks(), vec![(true, 1)]);
+
+        // The bridge going away ends picking too.
+        click_picker(&mut vcx);
+        assert!(picking(cx));
+        r.publish_windows(cx, Validity::Unsupported, "tasklens");
+        redraw(&mut vcx);
+        assert!(!picking(cx));
+        assert!(picker_bounds(&mut vcx).is_none());
+        assert!(!toasts(cx).iter().any(|t| t == PICK_START));
+    }
+
+    #[gpui_kit::test]
+    fn picker_busy_warns(cx: &mut TestAppContext) {
+        let (r, mut vcx) = picker_rig(cx, Validity::Valid);
+        r.engine.set_busy(true);
+        click_picker(&mut vcx);
+        assert!(!picking(cx));
+        assert_eq!(
+            toasts(cx),
+            vec!["Could not start window picking".to_string()]
+        );
+        // CancelWindowPick while not picking does nothing.
+        vcx.dispatch_action(CancelWindowPick);
+        r.engine.set_busy(false);
+        vcx.dispatch_action(StartWindowPick);
+        redraw(&mut vcx);
+        assert!(picking(cx));
+    }
 }
