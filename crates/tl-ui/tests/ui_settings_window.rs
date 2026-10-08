@@ -1296,14 +1296,15 @@ fn page_builder_str_switch_restart_toast(cx: &mut TestAppContext) {
 static COMMITTED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
 fn commit_pages(_: &mut gpui_kit::App) -> Vec<PageBuilder> {
+    // A key no real page has a slider for: the window keeps the first slider of a key.
     let mut page = PageBuilder::new(PageId::Advanced);
     page.slider_on_commit(|v, _| COMMITTED.store(v, std::sync::atomic::Ordering::SeqCst))
         .slider(
-            "Motion",
-            SettingKey::MotionSmoothScrollAmount,
-            "Smooth scroll amount",
-            1..=10,
-            1,
+            "History",
+            SettingKey::HistoryMaxDiskMb,
+            "Max disk",
+            100..=1000,
+            100,
             |v| format!("{v}").into(),
         );
     vec![page]
@@ -1320,16 +1321,16 @@ fn page_builder_slider_on_commit(cx: &mut TestAppContext) {
                 .read(cx)
                 .content()
                 .read(cx)
-                .slider_state(SettingKey::MotionSmoothScrollAmount)
+                .slider_state(SettingKey::HistoryMaxDiskMb)
                 .cloned()
         })
         .expect("slider state");
-    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Preview(4.))));
+    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Preview(400.))));
     cx.run_until_parked();
     assert_eq!(COMMITTED.load(std::sync::atomic::Ordering::SeqCst), -1);
-    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Commit(6.))));
+    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Commit(600.))));
     cx.run_until_parked();
-    assert_eq!(COMMITTED.load(std::sync::atomic::Ordering::SeqCst), 6);
+    assert_eq!(COMMITTED.load(std::sync::atomic::Ordering::SeqCst), 600);
 }
 
 // Startup and window page (E21-026).
