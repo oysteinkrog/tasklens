@@ -2,22 +2,28 @@
 //!
 //! Each turn the loop re-reads demand and settings, sleeps until the next absolute deadline,
 //! applies baseline resets and forwarded commands from the control watch, runs one sample on
-//! the blocking pool, and sends the result to the reducer. Missed ticks are skipped, never
-//! caught up. An off source wakes every `IDLE_RECHECK` and does no I/O.
+//! the source's own sampling thread, and sends the result to the reducer. Missed ticks are
+//! skipped, never caught up. An off source wakes every `IDLE_RECHECK` and does no I/O.
+//!
+//! Each source has its own sampling thread, started at its first sample and asleep between
+//! samples (ADR-004, tasklens-wlf.30). A hung `sample` stalls only that source: after
+//! `LATE_COUNT` periods its health goes `Late`, and the other sources keep their rate. The
+//! shared blocking pool is for actions, the launcher, the opener and the journal. Without a
+//! blocking pool (LabRuntime) the sample runs inline, as `spawn_blocking` would run it.
 //!
 //! Never hold a `watch` `Ref` across another channel call. This module only uses
 //! `borrow_and_clone()` (bead `c11v6v`).
 //!
 //! `WorkerCommand::StringScan` and `HandleSearch` carry search patterns. Never log them.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use asupersync::channel::{mpsc, watch};
-use asupersync::runtime::JoinError;
-use asupersync::time::{Interval, MissedTickBehavior, interval, sleep_until};
-use asupersync::{Cx, Outcome};
+use asupersync::channel::{mpsc, oneshot, watch};
+use asupersync::time::{Interval, MissedTickBehavior, interval, sleep_until, timeout};
+use asupersync::{Cx, Outcome, PanicPayload};
 use tl_model::command::{DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
 use tl_model::demand::Demand;
 use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, StringScanOpts};
@@ -196,13 +202,13 @@ impl WorkerCommand {
     }
 }
 
-/// A periodic sampler. `sample` runs on the blocking pool; the other methods run on the async
-/// worker and must not block.
+/// A periodic sampler. `sample` runs on the source's own sampling thread; the other methods
+/// run on the async worker and must not block.
 pub trait Source: Send + 'static {
     fn id(&self) -> SourceId;
     /// `None` means the source is off.
     fn period(&self, demand: &Demand, settings: &EngineSettings) -> Option<Duration>;
-    /// Runs on the blocking pool. Takes `self` by value so no lock is needed.
+    /// Runs on the sampling thread. Takes `self` by value so no lock is needed.
     fn sample(self) -> (Self, SourceUpdate)
     where
         Self: Sized;
@@ -220,8 +226,9 @@ pub trait Source: Send + 'static {
 }
 
 /// The sampling loop (ADR-004). Returns `Outcome::Ok(())` when `cx` is cancelled and
-/// `Outcome::Err` when a job cannot be spawned or the reducer's queue is closed, so the
-/// supervisor restarts the worker.
+/// `Outcome::Err` when the sampling thread cannot be started or the reducer's queue is closed,
+/// so the supervisor restarts the worker. On return the sampling thread ends; a thread stuck in
+/// `sample` is left detached and ends when that sample returns.
 pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), WorkerError> {
     let id = src.id();
     let mut period = src.period(
@@ -262,6 +269,7 @@ pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), Wor
     }
 
     let mut late = Lateness::default();
+    let mut sampler: Option<Sampler<S>> = None;
 
     loop {
         let next = src.period(
@@ -316,21 +324,56 @@ pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), Wor
         }
 
         let started = cx.now();
-        let mut job = match cx.spawn_blocking(move |_| src.sample()) {
-            Ok(job) => job,
-            Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
-        };
-        let (s, update) = match job.join(&cx).await {
-            Ok(done) => done,
-            Err(JoinError::Cancelled(reason)) => {
-                if cx.checkpoint().is_err() {
-                    return Outcome::Ok(());
+        let (s, update) = if cx.blocking_pool_handle().is_none() {
+            src.sample()
+        } else {
+            let thread = match &mut sampler {
+                Some(thread) => thread,
+                slot @ None => match Sampler::spawn(id) {
+                    Ok(thread) => slot.insert(thread),
+                    Err(e) => {
+                        return Outcome::Err(WorkerError::Other(
+                            format!("sampling thread: {e}").into(),
+                        ));
+                    }
+                },
+            };
+            let Some(mut done) = thread.start(src) else {
+                return Outcome::Err(WorkerError::Other("sampling thread ended".into()));
+            };
+            // A sample still running after `LATE_COUNT` periods is hung: report `Late` now,
+            // not when it returns.
+            let mut hung_after = period.map(|p| p * LATE_COUNT);
+            let got = loop {
+                let Some(wait) = hung_after.take() else {
+                    break done.recv(&cx).await;
+                };
+                match timeout(cx.now(), wait, done.recv(&cx)).await {
+                    Ok(got) => break got,
+                    Err(_) => {
+                        if let Some(state) = late.hung() {
+                            let health = SourceUpdate::Health {
+                                id,
+                                state,
+                                last_error: None,
+                                t_ns: now_boot_ns(),
+                            };
+                            if let Some(stop) = send(&cx, &io, health).await {
+                                return stop;
+                            }
+                        }
+                    }
                 }
-                return Outcome::Cancelled(reason);
-            }
-            Err(JoinError::Panicked(payload)) => return Outcome::Panicked(payload),
-            Err(JoinError::PolledAfterCompletion) => {
-                return Outcome::Err(WorkerError::Other("job polled after completion".into()));
+            };
+            match got {
+                Ok(Some(done)) => done,
+                Ok(None) => return Outcome::Panicked(PanicPayload::new("sample panicked")),
+                Err(oneshot::RecvError::Cancelled) => return Outcome::Ok(()),
+                Err(e) => {
+                    return Outcome::Err(WorkerError::Other(
+                        format!("sampling thread: {e}").into(),
+                    ));
+                }
             }
         };
         src = s;
@@ -367,6 +410,39 @@ pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), Wor
         if let Some(seq) = pending_done {
             progress.set_done(id, seq);
         }
+    }
+}
+
+/// A source's own sampling thread. It sleeps on its job channel between samples. Dropping the
+/// `Sampler` ends an idle thread at once. A thread stuck in `sample` is never joined: it ends
+/// when the sample returns and finds the worker gone, so it never holds up shutdown.
+struct Sampler<S> {
+    jobs: std::sync::mpsc::Sender<Job<S>>,
+}
+
+/// One sample request and where its result goes. `None` means `sample` panicked.
+type Job<S> = (S, oneshot::Sender<Option<(S, SourceUpdate)>>);
+
+impl<S: Source> Sampler<S> {
+    fn spawn(id: SourceId) -> std::io::Result<Self> {
+        let (jobs, requests) = std::sync::mpsc::channel::<Job<S>>();
+        std::thread::Builder::new()
+            .name(format!("tl-src-{id:?}"))
+            .spawn(move || {
+                while let Ok((src, reply)) = requests.recv() {
+                    let done = std::panic::catch_unwind(AssertUnwindSafe(|| src.sample())).ok();
+                    // A failed send means the worker is gone; the next `recv` ends the thread.
+                    let _ = reply.send_blocking(done);
+                }
+            })?;
+        Ok(Self { jobs })
+    }
+
+    /// Hands `src` to the thread. Fails when the thread has ended.
+    fn start(&self, src: S) -> Option<oneshot::Receiver<Option<(S, SourceUpdate)>>> {
+        let (reply, done) = oneshot::channel();
+        self.jobs.send((src, reply)).ok()?;
+        Some(done)
     }
 }
 
@@ -411,6 +487,16 @@ impl Lateness {
         }
         None
     }
+
+    /// A sample that has not returned after `LATE_COUNT` periods. Returns `Late` once. The
+    /// next on-time job reports `Running` again.
+    fn hung(&mut self) -> Option<SourceState> {
+        if self.reported {
+            return None;
+        }
+        self.reported = true;
+        Some(SourceState::Late)
+    }
 }
 
 #[cfg(test)]
@@ -445,5 +531,17 @@ mod tests {
         for _ in 0..LATE_COUNT {
             assert_eq!(late.record(Duration::from_millis(80), period), None);
         }
+    }
+    #[test]
+    fn hung_sample_reports_late_once_then_running_after_an_on_time_job() {
+        let period = Duration::from_millis(100);
+        let mut late = Lateness::default();
+        assert_eq!(late.hung(), Some(SourceState::Late));
+        assert_eq!(late.hung(), None);
+        assert_eq!(late.record(Duration::from_secs(5), period), None);
+        assert_eq!(
+            late.record(Duration::from_millis(10), period),
+            Some(SourceState::Running)
+        );
     }
 }
