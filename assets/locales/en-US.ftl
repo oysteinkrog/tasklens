@@ -97,6 +97,30 @@ pwn-fds-menu-open-location = Open file location
 pwn-fds-toast-copied = Copied to clipboard
 pwn-fds-toast-opening = Opening file location
 pwn-fds-toast-open-failed = Could not open file location.
+
+# Properties Memory maps tab (UI-PWN-013, PROC-081, E23-018).
+pwn-maps-col-name = Name
+pwn-maps-col-base = Base address
+pwn-maps-col-size = Size
+pwn-maps-col-rss = RSS
+pwn-maps-col-perms = Perms
+pwn-maps-col-offset = Offset
+pwn-maps-col-path = Path
+pwn-maps-col-desc = Description
+pwn-maps-col-pkg = Package
+pwn-maps-primary = { $name } (Primary)
+pwn-maps-outside = Outside loaded modules
+pwn-maps-primary-tooltip = Main executable
+pwn-maps-outside-tooltip = Anonymous, heap, stack and other mappings without a file
+pwn-maps-loading = Loading memory maps...
+pwn-maps-empty = No memory maps.
+pwn-maps-shared-only = Shared libraries only
+pwn-maps-menu-copy = Copy
+pwn-maps-menu-copy-path = Copy path
+pwn-maps-menu-open-location = Open file location
+pwn-maps-toast-copied = Copied to clipboard
+pwn-maps-toast-opening = Opening file location
+pwn-maps-toast-open-failed = Could not open file location.
 # VirusTotal notices (tasklens-gma.3, UI-PWN-036).
 pwn-notices-vt-computing = Computing SHA-256…
 pwn-notices-vt-hash-failed = SHA-256 unavailable
