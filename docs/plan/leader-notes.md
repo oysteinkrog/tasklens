@@ -852,3 +852,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - gma.25: flag columns draw a centred Lucide check via cell_element (9o0.6) once in HEAD, glyph until then; min widths via TableColumn::min_width (rsf.28); copy text Yes.
 - o55.37: Template::counted with per-category translations and PluralRules::select at write time; only category keys ([one]/[other]) supported.
 - crw.44 closed; crw.45 accepted (Demand.process_top, performance.overview_top_processes default off, TopProcs box, perf-overview-procs bench scene). Bench numbers go to the final quiet pass, which now includes perf-overview, perf-overview-static and perf-overview-procs.
+- 9o0.6: row id is u64 FxHash of SysNodeId (Copy); Publisher "User" mapped to startup-publisher-user; selected row loses impact warning colour (accepted). Double-click route noted on 9o0.7.
