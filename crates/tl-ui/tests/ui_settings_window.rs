@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AnyWindowHandle, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+    AnyWindowHandle, Context, Entity, IntoElement, ParentElement as _, Pixels, Render, Styled as _,
     TestAppContext, VisualTestContext, Window, WindowHandle, div, px, size,
 };
 use tl_model::client::EngineClient;
@@ -829,4 +829,309 @@ fn graphs_services_keys(cx: &mut TestAppContext) {
         .position(|id| *id == PageId::Performance)
         .expect("Performance listed");
     assert_eq!(ids[perf + 1..perf + 3], [PageId::Graphs, PageId::Services]);
+}
+
+// Performance page: device order and visibility list (E21-024).
+
+const DEVICE_LIST: &str = "Device order and visibility";
+
+/// A window that draws only the Performance page's device list, re-rendering on settings and
+/// device changes as the Settings window does.
+struct DeviceProbe {
+    page: PageBuilder,
+    _subs: Vec<gpui_kit::Subscription>,
+}
+
+impl DeviceProbe {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let page = all_pages(cx)
+            .into_iter()
+            .find(|p| p.id() == PageId::Performance)
+            .expect("Performance page");
+        let hub = cx.global::<tl_ui::hub::GlobalHub>().0.clone();
+        let subs = vec![
+            cx.observe_global::<TlSettings>(|_, cx| cx.notify()),
+            cx.subscribe(&hub, |_, _, _: &tl_ui::hub::SnapshotChanged, cx| {
+                cx.notify()
+            }),
+        ];
+        Self { page, _subs: subs }
+    }
+}
+
+impl Render for DeviceProbe {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .children(self.page.render_custom(DEVICE_LIST, window, cx))
+    }
+}
+
+fn disk(idx: u16, name: &str) -> DeviceEntry {
+    DeviceEntry {
+        idx: DeviceIdx(idx),
+        identity: DeviceIdentity::Disk {
+            major: 8,
+            minor: u32::from(idx) * 16,
+            name: Arc::from(name),
+            wwn_or_serial: None,
+        },
+        generation: 0,
+        display_name: Arc::from(format!("Disk {name}")),
+        present: true,
+        parent: None,
+        persistent_key: Arc::from(""),
+        net_kind: None,
+    }
+}
+
+/// Publishes a catalog of cpu, memory and the disks `disks`.
+fn publish_devices(engine: &FakeEngine, disks: &[&str], cx: &mut TestAppContext) {
+    let mut entries = vec![
+        DeviceEntry {
+            idx: DeviceIdx(0),
+            identity: DeviceIdentity::CpuPackage,
+            generation: 0,
+            display_name: Arc::from("Test CPU"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind: None,
+        },
+        DeviceEntry {
+            idx: DeviceIdx(1),
+            identity: DeviceIdentity::Memory,
+            generation: 0,
+            display_name: Arc::from("Memory"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind: None,
+        },
+    ];
+    for (i, name) in disks.iter().enumerate() {
+        entries.push(disk(2 + i as u16, name));
+    }
+    engine.publish_with(|s| {
+        s.devices = Arc::new(DeviceCatalog {
+            version: s.devices.version + 1,
+            entries: Arc::from(entries),
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// Opens the probe window with a toast queue, and draws it.
+fn device_probe(cx: &mut TestAppContext) -> (VisualTestContext, Entity<ToastQueue>) {
+    let window = cx.add_window(|window, cx| {
+        let probe = cx.new(DeviceProbe::new);
+        Root::new(probe, window, cx)
+    });
+    let mut vcx = VisualTestContext::from_window(window.into(), cx);
+    vcx.simulate_resize(size(px(900.), px(400.)));
+    vcx.update(|window, _| window.activate_window());
+    let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.))));
+    draw_probe(&mut vcx);
+    (vcx, queue)
+}
+
+fn draw_probe(vcx: &mut VisualTestContext) {
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// The row keys from top to bottom, as drawn.
+fn drawn_keys(vcx: &mut VisualTestContext) -> Vec<String> {
+    let mut rows: Vec<(Pixels, String)> = ["overview", "cpu", "memory", "disk:sda", "disk:sdb"]
+        .into_iter()
+        .filter_map(|k| {
+            let selector: &'static str = Box::leak(format!("DeviceOrderRow-{k}").into_boxed_str());
+            vcx.debug_bounds(selector)
+                .map(|b| (b.origin.y, k.to_owned()))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("finite"));
+    rows.into_iter().map(|(_, k)| k).collect()
+}
+
+fn device_order(cx: &mut TestAppContext) -> Vec<String> {
+    cx.update(|cx| TlSettings::settings(cx).performance.device_order.clone())
+}
+
+fn row_bounds(vcx: &mut VisualTestContext, key: &str) -> gpui_kit::Bounds<Pixels> {
+    let selector: &'static str = Box::leak(format!("DeviceOrderRow-{key}").into_boxed_str());
+    vcx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{key} row drawn"))
+}
+
+fn click_at(vcx: &mut VisualTestContext, at: gpui_kit::Point<Pixels>) {
+    vcx.simulate_mouse_down(at, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::none());
+    vcx.simulate_mouse_up(at, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::none());
+    draw_probe(vcx);
+}
+
+fn click_selector(vcx: &mut VisualTestContext, selector: String) {
+    let selector: &'static str = Box::leak(selector.into_boxed_str());
+    let at = vcx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} drawn"))
+        .center();
+    click_at(vcx, at);
+}
+
+#[gpui_kit::test]
+fn device_list_initial_order(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_devices(&engine, &["sda"], cx);
+    let (mut vcx, _) = device_probe(cx);
+    // The Overview row comes first when the CPU package is present (D-022).
+    assert_eq!(
+        drawn_keys(&mut vcx),
+        ["overview", "cpu", "memory", "disk:sda"]
+    );
+    let rows = page(cx, PageId::Performance);
+    assert!(rows.keys().contains(&SettingKey::PerformanceDeviceOrder));
+    assert!(
+        rows.keys()
+            .contains(&SettingKey::PerformanceDeviceOverrides)
+    );
+    // "Default" is selected on each row: no override is stored.
+    assert!(cx.update(|cx| {
+        TlSettings::settings(cx)
+            .performance
+            .device_overrides
+            .is_empty()
+    }));
+    assert!(vcx.debug_bounds("TlButton-device-vis-cpu-0").is_some());
+}
+
+#[gpui_kit::test]
+fn device_list_alt_up_moves(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_devices(&engine, &["sda"], cx);
+    let (mut vcx, _) = device_probe(cx);
+    // Focus the disk row with a click on its name, then Alt+Up.
+    let row = row_bounds(&mut vcx, "disk:sda");
+    click_at(
+        &mut vcx,
+        gpui_kit::point(row.origin.x + px(60.), row.center().y),
+    );
+    vcx.simulate_keystrokes("alt-up");
+    draw_probe(&mut vcx);
+    assert_eq!(device_order(cx), ["overview", "cpu", "disk:sda", "memory"]);
+    assert_eq!(
+        drawn_keys(&mut vcx),
+        ["overview", "cpu", "disk:sda", "memory"]
+    );
+    // Focus stays on the moved row: Alt+Down moves it back.
+    vcx.simulate_keystrokes("alt-down");
+    draw_probe(&mut vcx);
+    assert_eq!(device_order(cx), ["overview", "cpu", "memory", "disk:sda"]);
+}
+
+#[gpui_kit::test]
+fn device_list_drag_reorders(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_devices(&engine, &["sda"], cx);
+    let (mut vcx, _) = device_probe(cx);
+    let from = vcx
+        .debug_bounds("DeviceOrderHandle-memory")
+        .expect("memory handle")
+        .center();
+    let to = row_bounds(&mut vcx, "cpu").center();
+    vcx.simulate_mouse_down(
+        from,
+        gpui_kit::MouseButton::Left,
+        gpui_kit::Modifiers::none(),
+    );
+    for at in [
+        gpui_kit::point(from.x, from.y - px(4.)),
+        gpui_kit::point(to.x, to.y + px(2.)),
+        to,
+    ] {
+        vcx.simulate_mouse_move(
+            at,
+            Some(gpui_kit::MouseButton::Left),
+            gpui_kit::Modifiers::none(),
+        );
+        draw_probe(&mut vcx);
+    }
+    vcx.simulate_mouse_up(to, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::none());
+    draw_probe(&mut vcx);
+    assert_eq!(device_order(cx), ["overview", "memory", "cpu", "disk:sda"]);
+}
+
+#[gpui_kit::test]
+fn device_list_override_segments(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_devices(&engine, &["sda"], cx);
+    let (mut vcx, _) = device_probe(cx);
+    let overrides = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            serde_json::to_value(&TlSettings::settings(cx).performance.device_overrides)
+                .expect("serialize")
+        })
+    };
+    click_selector(&mut vcx, "TlButton-device-vis-cpu-2".into());
+    assert_eq!(overrides(cx), serde_json::json!({ "cpu": "hide" }));
+    click_selector(&mut vcx, "TlButton-device-vis-cpu-1".into());
+    assert_eq!(overrides(cx), serde_json::json!({ "cpu": "show" }));
+    click_selector(&mut vcx, "TlButton-device-vis-cpu-0".into());
+    assert_eq!(
+        overrides(cx),
+        serde_json::json!({}),
+        "Default removes the key"
+    );
+    // The Overview row is hideable too (D-022).
+    click_selector(&mut vcx, "TlButton-device-vis-overview-2".into());
+    assert_eq!(overrides(cx), serde_json::json!({ "overview": "hide" }));
+}
+
+#[gpui_kit::test]
+fn device_list_reset_and_show_all(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_devices(&engine, &["sda"], cx);
+    cx.update(|cx| {
+        TlSettings::update(cx, |d| {
+            let p = &mut d.settings.performance;
+            p.device_order = vec!["memory".into(), "cpu".into()];
+            p.device_overrides
+                .insert("cpu".into(), tl_model::settings::DeviceVisibility::Hide);
+        })
+    });
+    let (mut vcx, queue) = device_probe(cx);
+    click_selector(&mut vcx, "TlButton-device-order-reset".into());
+    assert!(device_order(cx).is_empty());
+    let toasts = vcx.update(|_, cx| queue.read(cx).visible_texts());
+    assert_eq!(toasts, ["Sidebar order reset"]);
+    assert!(
+        !cx.update(|cx| TlSettings::settings(cx)
+            .performance
+            .device_overrides
+            .is_empty()),
+        "Reset order keeps the overrides"
+    );
+    click_selector(&mut vcx, "TlButton-device-order-show-all".into());
+    assert!(cx.update(|cx| {
+        TlSettings::settings(cx)
+            .performance
+            .device_overrides
+            .is_empty()
+    }));
+    let toasts = vcx.update(|_, cx| queue.read(cx).visible_texts());
+    assert_eq!(toasts.len(), 1, "Show all shows no toast");
+}
+
+#[gpui_kit::test]
+fn device_list_hotplug_row(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_devices(&engine, &["sda"], cx);
+    let (mut vcx, _) = device_probe(cx);
+    assert_eq!(drawn_keys(&mut vcx).len(), 4);
+    publish_devices(&engine, &["sda", "sdb"], cx);
+    draw_probe(&mut vcx);
+    assert_eq!(
+        drawn_keys(&mut vcx),
+        ["overview", "cpu", "memory", "disk:sda", "disk:sdb"]
+    );
 }
