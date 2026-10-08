@@ -1040,6 +1040,33 @@ pwn-affinity-toast-success-many = Selected process affinity updated.
 pwn-affinity-toast-partial = Affinity updated for { $ok } of { $total } processes. { $failed } failed: { $reason }
 pwn-affinity-toast-threads = Thread affinity updated
 pwn-affinity-toast-partial-threads = Affinity updated for { $ok } of { $total } threads. { $failed } failed: { $reason }
+
+# Custom Set Priority dialog (UI-PWN-023, UI-PWN-024, PROC-069, E23-007).
+pwn-priority-title = tasklens Set Priority
+pwn-priority-policy = Policy
+pwn-priority-policy-other = Normal (SCHED_OTHER)
+pwn-priority-policy-batch = Batch (SCHED_BATCH)
+pwn-priority-policy-idle = Idle (SCHED_IDLE)
+pwn-priority-policy-fifo = Realtime FIFO (SCHED_FIFO)
+pwn-priority-policy-rr = Realtime round-robin (SCHED_RR)
+pwn-priority-policy-app-tooltip = Applies to the app's current processes
+pwn-priority-nice = Nice
+pwn-priority-nice-name = Nice value
+pwn-priority-nice-highest = -20 (highest)
+pwn-priority-nice-lowest = 19 (lowest)
+pwn-priority-nice-tooltip = With autogroup on, nice only orders processes within the same session.
+pwn-priority-not-used = Not used by this policy
+pwn-priority-realtime = Realtime priority
+pwn-priority-warning = Realtime priority can freeze the desktop if the process spins.
+pwn-priority-warning-children = Child processes start at normal priority.
+pwn-priority-cancel = Cancel
+pwn-priority-apply = Set priority
+pwn-priority-toast-success = Priority updated
+pwn-priority-toast-failure = Could not update selected process priority.
+pwn-priority-toast-success-many = Selected process priority updated.
+pwn-priority-toast-partial = Priority updated for { $ok } of { $total } processes. { $failed } failed: { $reason }
+pwn-priority-toast-threads = Thread priority updated
+pwn-priority-toast-partial-threads = Priority updated for { $ok } of { $total } threads. { $failed } failed: { $reason }
 # Process action toasts (UI-PRC-015, PROC-059). Identity, permission and outcome texts are fnd-action-*.
 processes-toast-end-task-requested = End task requested.
 processes-toast-end-task-failed = Could not end task.
