@@ -1318,6 +1318,12 @@ impl MainWindow {
         self.picking = picking;
     }
 
+    /// The title bar view, for the pin tests.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn titlebar_view(&self) -> &Entity<TitleBarView> {
+        &self.titlebar
+    }
+
     /// The status chip. E20-012 sets its paused tag through it.
     pub fn status_chip(&self) -> &Entity<StatusChip> {
         &self.status

@@ -1066,7 +1066,9 @@ mod titlebar {
         let xs: Vec<Pixels> = parts.iter().map(|p| bounds(r.cx, p).origin.x).collect();
         assert!(xs.windows(2).all(|w| w[0] < w[1]), "left to right: {xs:?}");
         assert_eq!(bounds(r.cx, "TitleBarIcon").origin.x, px(12.));
-        assert_eq!(bounds(r.cx, "TitleBarSpacer").right(), bar.right());
+        let pin = bounds(r.cx, "TitleBarPin");
+        assert_eq!(bounds(r.cx, "TitleBarSpacer").right(), pin.origin.x);
+        assert_eq!(pin.right(), bar.right(), "the pin is the last item");
         for id in ["minimize", "maximize", "close"] {
             let selector = match id {
                 "minimize" => "TitleBarCaption-minimize",
@@ -4721,9 +4723,10 @@ mod startup_items {
                 window_type: 0,
             };
             self.engine.publish_with(|s| {
+                let version = s.windows.header.version + 1;
                 s.windows = Arc::new(WindowsSnapshot {
                     header: ComponentHeader {
-                        version: 1,
+                        version,
                         validity,
                         ..ComponentHeader::default()
                     },
@@ -4871,5 +4874,155 @@ mod startup_items {
         r.request(cx, AppRequest::Quit);
         let exit = cx.read(|cx| cx.try_global::<UiExitSlot>().and_then(|s| s.0.clone()));
         assert_eq!(exit, Some(UiExit::Quit));
+    }
+
+    // ---- Always-on-top pin (E20-022) ----
+
+    use gpui_kit::{Modifiers, MouseButton, Pixels, point, px};
+    use tl_ui::components::icons::TlIcon;
+    use tl_ui::window::titlebar::DrawnPin;
+
+    impl Rig {
+        fn keep_aboves(&self) -> Vec<bool> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::KWin(KWinCommand::KeepAbove { pid, caption, on }) => {
+                        assert_eq!(pid, std::process::id());
+                        assert_eq!(caption, None, "None means the main window");
+                        Some(on)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    /// `init` with a probe that reports `client` decorations.
+    fn init_bar(cx: &mut TestAppContext, client: bool) -> Rig {
+        let r = init(cx, Vec::new(), false, StartOptions::default());
+        cx.update(|cx| {
+            cx.set_global(TitleBarProbe {
+                client: Some(client),
+                ..TitleBarProbe::default()
+            })
+        });
+        r
+    }
+
+    fn drawn_pin(cx: &mut TestAppContext) -> DrawnPin {
+        let main = main_window(cx);
+        cx.update(|cx| {
+            let bar = main.read(cx).titlebar_view().clone();
+            bar.read(cx).drawn_pin().cloned().expect("pin drawn")
+        })
+    }
+
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn pin_bounds(vcx: &mut VisualTestContext) -> gpui_kit::Bounds<Pixels> {
+        vcx.debug_bounds("TitleBarPin").expect("pin drawn")
+    }
+
+    fn on_top(cx: &mut TestAppContext) -> bool {
+        cx.read(|cx| TlSettings::settings(cx).window.always_on_top)
+    }
+
+    #[gpui_kit::test]
+    fn pin_toggles_setting(cx: &mut TestAppContext) {
+        let r = init_bar(cx, true);
+        let mut vcx = open(cx);
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        redraw(&mut vcx);
+        let pin = drawn_pin(cx);
+        assert!(pin.enabled && !pin.on);
+        assert_eq!(pin.icon, TlIcon::PinOff);
+        assert_eq!(pin.tooltip.as_ref(), "Always on top");
+        let b = pin_bounds(&mut vcx);
+        assert_eq!((b.size.width, b.size.height), (px(36.), px(34.)));
+
+        vcx.simulate_click(b.center(), Modifiers::none());
+        redraw(&mut vcx);
+        assert!(on_top(cx));
+        assert_eq!(r.keep_aboves(), [true]);
+        let pin = drawn_pin(cx);
+        assert!(pin.on);
+        assert_eq!(pin.icon, TlIcon::Pin);
+        assert_eq!(pin.tooltip.as_ref(), "Always on top (on)");
+
+        vcx.simulate_click(b.center(), Modifiers::none());
+        redraw(&mut vcx);
+        assert!(!on_top(cx));
+        assert_eq!(r.keep_aboves(), [true, false]);
+    }
+
+    #[gpui_kit::test]
+    fn pin_disabled_without_bridge(cx: &mut TestAppContext) {
+        let r = init_bar(cx, true);
+        let mut vcx = open(cx);
+        r.publish_windows(cx, Validity::Unsupported, "tasklens");
+        redraw(&mut vcx);
+        let pin = drawn_pin(cx);
+        assert!(!pin.enabled);
+        assert_eq!(pin.tooltip.as_ref(), "Not supported by this desktop");
+        let b = pin_bounds(&mut vcx);
+        vcx.simulate_click(b.center(), Modifiers::none());
+        redraw(&mut vcx);
+        assert!(!on_top(cx));
+        assert!(r.keep_aboves().is_empty(), "a click sends nothing");
+    }
+
+    #[gpui_kit::test]
+    fn pin_applied_at_start_once(cx: &mut TestAppContext) {
+        let r = init_bar(cx, true);
+        cx.update(|cx| TlSettings::update(cx, |d| d.settings.window.always_on_top = true));
+        let mut vcx = open(cx);
+        r.publish_windows(cx, Validity::WarmingUp, "tasklens");
+        assert!(r.keep_aboves().is_empty(), "the bridge is not up yet");
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        assert_eq!(r.keep_aboves(), [true]);
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        redraw(&mut vcx);
+        assert_eq!(r.keep_aboves(), [true], "sent exactly once");
+        assert!(drawn_pin(cx).on);
+    }
+
+    #[gpui_kit::test]
+    fn server_mode_has_pin(cx: &mut TestAppContext) {
+        init_bar(cx, false);
+        let mut vcx = open(cx);
+        redraw(&mut vcx);
+        let bar = vcx.debug_bounds("TitleBar").expect("menu row drawn");
+        let pin = pin_bounds(&mut vcx);
+        assert_eq!((pin.size.width, pin.size.height), (px(36.), px(28.)));
+        assert_eq!(pin.right(), bar.right(), "last item");
+        let spacer = vcx.debug_bounds("TitleBarSpacer").expect("spacer");
+        assert_eq!(spacer.right(), pin.origin.x);
+    }
+
+    #[gpui_kit::test]
+    fn pin_no_drag(cx: &mut TestAppContext) {
+        let r = init_bar(cx, true);
+        let mut vcx = open(cx);
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        redraw(&mut vcx);
+        let at = pin_bounds(&mut vcx).center();
+        vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        vcx.simulate_mouse_move(
+            at + point(px(10.), px(2.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        vcx.simulate_mouse_up(
+            at + point(px(10.), px(2.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        let moves = cx.read(|cx| cx.global::<TitleBarProbe>().moves);
+        assert_eq!(moves, 0, "no window drag from the pin");
     }
 }
