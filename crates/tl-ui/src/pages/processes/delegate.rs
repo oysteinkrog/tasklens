@@ -25,8 +25,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyView, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Div, Hsla, Pixels,
-    SharedString, Task, WeakEntity, Window, px,
+    AnyView, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Hsla, SharedString, Task,
+    WeakEntity, Window, px,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -44,8 +44,9 @@ use tl_model::validity::{FieldValidity, Validity};
 use super::actions::CapturedTargets;
 use super::cells::{
     CellCtx, CellTipWords, CellWords, DEFAULT_VISIBLE, GroupMembers, PROCESS_COLUMNS, PaintState,
-    PowerSensor, ProcColumn, RowRef, TipCtx, cell_tooltip, fill_cell, heat_background,
-    process_column, render_metric_cell, row_tint, tint_deadline,
+    PowerSensor, ProcColumn, RowRef, SUBTREE_PREFIX, TipCtx, cell_tooltip, dims_zero, fill_cell,
+    heat_background, process_column, row_tint, subtree_column, subtree_prefix_color, subtree_total,
+    tint_deadline,
 };
 use super::header_totals::header_total;
 use super::menu::{MenuCaps, group_header_menu, row_menu};
@@ -208,8 +209,9 @@ pub struct ProcessRowCells;
 
 impl ProcessRowCells {
     /// Fills `out` for one cell (E22-003): the value through `fill_cell`, the heat fill in
-    /// `out.background` and the validity tooltip in `out.tooltip`. The table attaches the
-    /// tooltip on the hovered row only. Allocates nothing unless `out.want_text` is set.
+    /// `out.background`, a dimmed zero in `out.dim` (PROC-041), the "Σ " of a subtree total in
+    /// `out.prefix` (UI-PRC-002) and the validity tooltip in `out.tooltip`. The table attaches
+    /// the tooltip on the hovered row only. Allocates nothing unless `out.want_text` is set.
     pub fn fill(
         row: RowRef,
         col: ColumnId,
@@ -222,34 +224,14 @@ impl ProcessRowCells {
         let spec = process_column(col);
         fill_cell(row, spec, ctx, out);
         out.background = heat_background(out, spec, ctx, st, theme);
+        out.dim = dims_zero(out, spec, st);
+        out.prefix = (st.subtree && subtree_column(col)).then(|| {
+            (
+                SharedString::new_static(SUBTREE_PREFIX),
+                subtree_prefix_color(st, theme),
+            )
+        });
         out.tooltip = tips.get(out.validity);
-    }
-
-    /// One filled cell other than Name, `width` wide. `text` is the cached display text of
-    /// `out`. On a `STALE` row the table dims the whole row, so a Stale cell is not dimmed a
-    /// second time here.
-    #[allow(clippy::too_many_arguments)]
-    pub fn render(
-        out: &CellOut,
-        text: SharedString,
-        col: ColumnId,
-        width: Pixels,
-        st: PaintState,
-        row_stale: bool,
-        theme: &TlTheme,
-        cx: &App,
-    ) -> Div {
-        let spec = process_column(col);
-        if row_stale && out.validity == Validity::Stale {
-            let undimmed = CellOut {
-                bits: out.bits,
-                validity: Validity::Valid,
-                background: None,
-                ..CellOut::default()
-            };
-            return render_metric_cell(&undimmed, text, spec, width, st, theme, cx);
-        }
-        render_metric_cell(out, text, spec, width, st, theme, cx)
     }
 }
 
@@ -803,7 +785,7 @@ impl ProcessDelegate {
         tip
     }
 
-    fn paint_state(&self, exited: bool) -> PaintState {
+    fn paint_state(&self, exited: bool, subtree: bool) -> PaintState {
         let a = &self.settings.appearance;
         PaintState {
             selected: false,
@@ -811,8 +793,7 @@ impl ProcessDelegate {
             heat_on: a.heat_coloring,
             heat_intensity_pct: a.heat_intensity_pct,
             dim_zero: self.settings.tables.dim_zero_values,
-            // `ProcessRowCells::fill` does not read it.
-            subtree: false,
+            subtree,
         }
     }
 
@@ -1111,7 +1092,7 @@ impl TreeTableDelegate for ProcessDelegate {
             row_ref,
             col,
             &ctx,
-            self.paint_state(exited),
+            self.paint_state(exited, subtree_total(row_ref, &ctx).is_some()),
             &self.theme,
             &self.tips,
             out,

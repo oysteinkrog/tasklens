@@ -19,7 +19,8 @@
 //! [`paint_name_cell`] and [`paint_group_header_cell`] draw the generic Name cell of a tree table
 //! (UI-PRC-003) and the group header band (R-105). Page-specific painters (heat colouring rules,
 //! dim zeros) live in the pages.
-//! Pages pass their colours through [`CellOut::background`] and [`CellOut::text_color`].
+//! Pages pass their colours through [`CellOut::background`], [`CellOut::text_color`] and
+//! [`CellOut::dim`], and a numeric prefix through [`CellOut::prefix`].
 //!
 //! No painter formats text: texts arrive as `SharedString` from `CellTextCache`. No cell has an
 //! element id; the tooltip state of a truncated cell is keyed by the id its owner passes to
@@ -68,8 +69,13 @@ pub struct CellOut {
     pub want_text: bool,
     /// Page override (heat colouring, UI-PRC-004). Drawn under the selection, never on glyphs.
     pub background: Option<Hsla>,
-    /// Page override (dim zero values).
+    /// Page override (an exited process row's secondary text).
     pub text_color: Option<Hsla>,
+    /// Page override (dim zero values, PROC-041): the text draws at [`DIM_OPACITY`].
+    pub dim: bool,
+    /// Drawn before a numeric value in its own colour (the process table's "Σ ", UI-PRC-002).
+    /// `text_selected_secondary` on a selected row. Never drawn on glyphs.
+    pub prefix: Option<(SharedString, Hsla)>,
     /// Optional explicit cell tooltip.
     pub tooltip: Option<SharedString>,
     /// Set by the table only on the hovered row, once its tooltips can show. A delegate
@@ -87,6 +93,8 @@ impl CellOut {
         self.want_text = false;
         self.background = None;
         self.text_color = None;
+        self.dim = false;
+        self.prefix = None;
         self.tooltip = None;
         self.want_tooltip = false;
     }
@@ -159,6 +167,18 @@ pub fn numeric_cell(
     clipped: Rc<Cell<bool>>,
     ctx: &CellCtx,
 ) -> Div {
+    numeric_cell_prefixed(text, validity, None, clipped, ctx)
+}
+
+/// [`numeric_cell`] with [`CellOut::prefix`] drawn before a Valid or Stale value, in its own
+/// colour (`text_selected_secondary` on a selected row). The value keeps the rest of the width.
+pub fn numeric_cell_prefixed(
+    text: SharedString,
+    validity: Validity,
+    prefix: Option<(SharedString, Hsla)>,
+    clipped: Rc<Cell<bool>>,
+    ctx: &CellCtx,
+) -> Div {
     let color = match validity {
         Validity::Valid => ctx.primary(),
         Validity::Stale => ctx.secondary(),
@@ -167,10 +187,24 @@ pub fn numeric_cell(
             return glyph_cell(validity, &text, ctx);
         }
     };
-    cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
+    let mut cell = cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
         .debug_selector(|| "TlCell-numeric".into())
-        .text_color(color)
-        .child(CellText::new(text, Align::End, Fit::Clip, Some(clipped)))
+        .text_color(color);
+    if let Some((prefix, prefix_color)) = prefix {
+        let prefix_color = if ctx.selected {
+            ctx.theme.text_selected_secondary
+        } else {
+            prefix_color
+        };
+        cell = cell.child(
+            div()
+                .debug_selector(|| "TlCell-prefix".into())
+                .flex_none()
+                .text_color(prefix_color)
+                .child(prefix),
+        );
+    }
+    cell.child(CellText::new(text, Align::End, Fit::Clip, Some(clipped)))
 }
 
 /// A cell showing `TlValidityGlyph`: the glyph for any validity other than Valid, right-aligned
@@ -215,16 +249,24 @@ pub fn cell_background(out: &CellOut, ctx: &CellCtx) -> Option<Hsla> {
     out.background
 }
 
+/// Text opacity of a cell with [`CellOut::dim`] set.
+pub const DIM_OPACITY: f32 = 0.3;
+
 /// The page text colour for a cell: `out.text_color`, which becomes `text_selected_secondary`
-/// on a selected row. Glyphs keep their own colours.
+/// on a selected row, at [`DIM_OPACITY`] when `out.dim` is set (from the row's primary colour
+/// when there is no `text_color`). Glyphs and a prefix keep their own colours.
 pub fn cell_text_color(out: &CellOut, ctx: &CellCtx) -> Option<Hsla> {
-    out.text_color.map(|color| {
+    let color = out.text_color.map(|color| {
         if ctx.selected {
             ctx.theme.text_selected_secondary
         } else {
             color
         }
-    })
+    });
+    if out.dim {
+        return Some(color.unwrap_or_else(|| ctx.primary()).opacity(DIM_OPACITY));
+    }
+    color
 }
 
 /// Applies [`cell_background`] and [`cell_text_color`] to a cell built by a painter.
@@ -348,6 +390,8 @@ impl Element for CellText {
         let (text_id, ()) = self.inner.request_layout(None, None, window, cx);
         let mut style = Style::default();
         style.size.width = relative(1.).into();
+        // Shrinks beside a prefix; alone it fills the content width.
+        style.min_size.width = px(0.).into();
         (window.request_layout(style, [text_id], cx), ())
     }
 

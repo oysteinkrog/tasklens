@@ -273,7 +273,7 @@ mod values {
         }
     }
 
-    fn record() -> ProcessRecord {
+    pub(super) fn record() -> ProcessRecord {
         ProcessRecord {
             key: ProcessKey {
                 start_ticks: 100,
@@ -310,7 +310,7 @@ mod values {
         }
     }
 
-    fn extras() -> ProcessExtras {
+    pub(super) fn extras() -> ProcessExtras {
         let mut affinity = CpuSet::empty();
         for cpu in (0..8).chain(16..24) {
             affinity.insert(cpu);
@@ -346,7 +346,7 @@ mod values {
         }
     }
 
-    fn group(kind: GroupRowKind) -> GroupRow {
+    pub(super) fn group(kind: GroupRowKind) -> GroupRow {
         GroupRow {
             node: NodeId::Group(GroupKey(7)),
             key: GroupKind::App {
@@ -3507,5 +3507,188 @@ mod row_tooltip {
             vcx.debug_bounds("TlRowTip-warning").is_some(),
             "the restricted note is the warning line"
         );
+    }
+}
+
+// pdu.56: the live process table (TlTreeTable with ProcessDelegate) draws the "Σ " prefix of a
+// subtree total and dims a measured zero, through CellOut and numeric_cell.
+mod live {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::ids::{ColumnId, NodeId, ProcessKey};
+    use tl_model::process::GroupRowKind;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
+    use tl_model::table::{ProcessTableView, TableRow};
+    use tl_model::time::BootId;
+    use tl_model::validity::Validity;
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::processes::cells::SUBTREE_PREFIX;
+    use tl_ui::pages::processes::delegate::ProcessDelegate;
+    use tl_ui::table::cells::{CellCtx, CellOut, DIM_OPACITY, cell_text_color};
+    use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
+    use tl_ui::theme::{current, metrics};
+
+    use super::values::{extras, group, record};
+
+    struct Host {
+        table: Entity<TlTreeTable<ProcessDelegate>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(1200.)).h(px(400.)).child(self.table.clone())
+        }
+    }
+
+    fn key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            pid,
+            ..record().key
+        }
+    }
+
+    /// Parent PID 10 (expanded, with a subtree total of CPU 12.5%) and its child PID 11 at
+    /// CPU 0%. `has_children` is false on the parent when `leaf`.
+    fn snapshot(leaf: bool) -> Arc<Snapshot> {
+        let mut parent = record();
+        parent.key = key(10);
+        let mut child = record();
+        child.key = key(11);
+        child.ppid = 10;
+        child.cpu_pct = 0.0;
+        let row = |k: ProcessKey, depth: u8, record: u32, children: bool| TableRow {
+            node: NodeId::Process(k),
+            depth,
+            expanded: children,
+            has_children: children,
+            record: Some(record),
+            group: None,
+            descendants: u32::from(children),
+            subtree: children.then_some(0),
+        };
+        let mut s = Snapshot::empty(BootId(0), 0);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: vec![row(key(10), 0, 0, !leaf), row(key(11), 1, 1, false)].into(),
+            subtree: vec![group(GroupRowKind::App)].into(),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot {
+            records: vec![parent, child].into(),
+            extras: vec![extras(), extras()].into(),
+            ..ProcessSnapshot::default()
+        });
+        Arc::new(s)
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+        settings: Settings,
+        leaf: bool,
+    ) -> (Entity<TlTreeTable<ProcessDelegate>>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::table::actions::bind_keys_table(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            init_strings(cx, "en-US");
+        });
+        let snap = snapshot(leaf);
+        let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let out = slot.clone();
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            let d = ProcessDelegate::new(snap, &settings, &UiState::default(), window, cx);
+            let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
+            *out.borrow_mut() = Some(table.clone());
+            Host { table }
+        });
+        vcx.run_until_parked();
+        let table = slot.borrow_mut().take().expect("table created");
+        (table, vcx)
+    }
+
+    fn prefix_drawn(vcx: &mut VisualTestContext) -> bool {
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.debug_bounds("TlCell-prefix").is_some()
+    }
+
+    fn cell(
+        vcx: &mut VisualTestContext,
+        table: &Entity<TlTreeTable<ProcessDelegate>>,
+        ix: usize,
+        col: ColumnId,
+    ) -> CellOut {
+        vcx.update(|_, cx| {
+            let mut out = CellOut {
+                want_text: true,
+                ..CellOut::default()
+            };
+            table.read(cx).delegate.cell(ix, col, &mut out);
+            out
+        })
+    }
+
+    fn on() -> Settings {
+        let mut s = Settings::default();
+        s.processes.subtree_totals = true;
+        s.tables.dim_zero_values = true;
+        s
+    }
+
+    #[gpui_kit::test]
+    fn live_table_draws_subtree_prefix_and_dim_zero(cx: &mut TestAppContext) {
+        let (table, vcx) = open(cx, on(), false);
+        assert!(prefix_drawn(vcx), "the parent's CPU cell draws the prefix");
+
+        let theme = vcx.update(|_, cx| current(cx).clone());
+        let parent = cell(vcx, &table, 0, ColumnId::Cpu);
+        assert_eq!(parent.text, "12.5%", "the engine's subtree sum");
+        let (text, color) = parent.prefix.clone().expect("a prefix on the parent");
+        assert_eq!(text.as_ref(), SUBTREE_PREFIX);
+        assert_eq!(color, theme.text_secondary);
+        assert!(cell(vcx, &table, 0, ColumnId::Pid).prefix.is_none());
+
+        let child = cell(vcx, &table, 1, ColumnId::Cpu);
+        assert!(child.prefix.is_none(), "a leaf has no subtree total");
+        assert!(child.dim, "a measured zero is dimmed");
+        assert!(!parent.dim);
+        let dimmed = vcx.update(|_, cx| {
+            let ctx = CellCtx {
+                m: metrics(cx),
+                theme: &theme,
+                selected: false,
+                width: px(100.),
+            };
+            cell_text_color(&child, &ctx)
+        });
+        assert_eq!(dimmed, Some(theme.text_primary.opacity(DIM_OPACITY)));
+    }
+
+    #[gpui_kit::test]
+    fn live_table_no_prefix_when_off_or_leaf(cx: &mut TestAppContext) {
+        let (table, vcx) = open(cx, Settings::default(), false);
+        assert!(!prefix_drawn(vcx), "setting off");
+        let parent = cell(vcx, &table, 0, ColumnId::Cpu);
+        assert_eq!(parent.text, "3.3%", "the process's own value");
+        assert!(!cell(vcx, &table, 1, ColumnId::Cpu).dim, "dim zero is off");
+    }
+
+    #[gpui_kit::test]
+    fn live_table_no_prefix_on_a_leaf(cx: &mut TestAppContext) {
+        let (_, vcx) = open(cx, on(), true);
+        assert!(!prefix_drawn(vcx));
     }
 }

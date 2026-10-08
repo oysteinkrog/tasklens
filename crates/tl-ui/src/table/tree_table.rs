@@ -45,7 +45,7 @@ use crate::table::actions::{
 };
 use crate::table::cells::{
     CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
-    glyph_cell, guide_quads, icon_px, name_indent, numeric_cell, paint_group_header_cell,
+    glyph_cell, guide_quads, icon_px, name_indent, numeric_cell_prefixed, paint_group_header_cell,
     paint_name_cell, path_cell, text_cell,
 };
 use crate::table::columns::{
@@ -1017,7 +1017,10 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             match kind {
                 ColumnKind::Text => text_cell(text.clone(), ctx, flag),
                 ColumnKind::Path => path_cell(text.clone(), ctx),
-                ColumnKind::Numeric => numeric_cell(text.clone(), validity, flag, ctx),
+                ColumnKind::Numeric => {
+                    let prefix = self.out.prefix.clone();
+                    numeric_cell_prefixed(text.clone(), validity, prefix, flag, ctx)
+                }
             }
         };
         (cell, text)

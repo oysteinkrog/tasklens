@@ -1682,7 +1682,7 @@ pub struct PaintState {
 }
 
 /// Text opacity of a measured zero when `tables.dim_zero_values` is on (PROC-041).
-pub const DIM_ZERO_OPACITY: f32 = 0.3;
+pub const DIM_ZERO_OPACITY: f32 = crate::table::cells::DIM_OPACITY;
 
 /// The kinds whose zero is dimmed: Percent, MemorySize, DiskRate, NetRate, Count and
 /// BytesCumulative. Text, ids, durations, times and power classes never are.
