@@ -1342,7 +1342,11 @@ mod paint {
     fn stale_text_dimmed_60(cx: &mut TestAppContext) {
         // The table dims a STALE row's metric cells as a whole, once.
         assert_eq!(STALE_OPACITY, 0.6);
-        assert_eq!(metric_cell_opacity(RowFlags::STALE), STALE_OPACITY);
+        let stale = RowFlags {
+            bits: RowFlags::STALE,
+            ..RowFlags::default()
+        };
+        assert_eq!(metric_cell_opacity(stale), STALE_OPACITY);
         assert_eq!(metric_cell_opacity(RowFlags::default()), 1.0);
 
         // A Stale value still draws its text; a WarmingUp cell draws its glyph, never dimmed,
