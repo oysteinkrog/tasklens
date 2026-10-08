@@ -9,10 +9,13 @@
 //! UI-SHL-036) holds "Always On Top", the menu path to the main window pin; the pin's owner
 //! handles the Action. View > Appearance (E21-009, UI-SHL-037) holds the UI Scale, Row Height
 //! and intensity slider rows and two checks that keep the menu open; the menu bar owns the
-//! slider states and saves their values.
+//! slider states and saves their values. View > Graphs (E21-003, UI-SHL-039, R-089) holds the
+//! seven minigraph checks and "Reset Minigraph Layout"; the GPU checks are disabled when the
+//! device catalog has no GPU.
 
 use gpui_kit::{App, Entity, FocusHandle, SharedString, Window};
 use tl_model::command::Tab;
+use tl_model::devices::DeviceKind;
 use tl_model::settings::{ColumnResize, ProcessesSettings};
 use tl_model::table::TableMode;
 
@@ -23,7 +26,9 @@ use super::titlebar::keep_above_supported;
 use crate::actions::{SetSetting, SetViewMode, ToggleSetting};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::window_frame::ToggleAlwaysOnTop;
+use crate::hub::GlobalHub;
 use crate::i18n::tr;
+use crate::pages::minigraph::actions::ResetMinigraphLayout;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::{CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
 use crate::table::columns::TableId;
@@ -58,6 +63,7 @@ pub fn build(
             cx,
             move |menu, _, cx| appearance_submenu(menu, &sliders, cx),
         )
+        .submenu(tr(cx, "shell-menu-view-graphs"), window, cx, graphs_submenu)
     })
 }
 
@@ -260,5 +266,90 @@ fn appearance_submenu(menu: TlMenu, sliders: &MenuSliders, cx: &mut App) -> TlMe
         &sliders.shadow_intensity,
         SHADOW_INTENSITY.range,
         pct_text,
+    )
+}
+
+/// The seven minigraph checks: label key, setting key, and whether the item needs a GPU.
+const GRAPHS: [(&str, SettingKey, bool); 7] = [
+    (
+        "shell-menu-graphs-cpu",
+        SettingKey::GraphsMinigraphCpu,
+        false,
+    ),
+    (
+        "shell-menu-graphs-memory",
+        SettingKey::GraphsMinigraphMemory,
+        false,
+    ),
+    (
+        "shell-menu-graphs-disk",
+        SettingKey::GraphsMinigraphDisk,
+        false,
+    ),
+    (
+        "shell-menu-graphs-network",
+        SettingKey::GraphsMinigraphNetwork,
+        false,
+    ),
+    (
+        "shell-menu-graphs-gpu",
+        SettingKey::GraphsMinigraphGpu,
+        true,
+    ),
+    (
+        "shell-menu-graphs-vram",
+        SettingKey::GraphsMinigraphVram,
+        true,
+    ),
+    (
+        "shell-menu-graphs-gpu-temp",
+        SettingKey::GraphsMinigraphGpuTemperature,
+        true,
+    ),
+];
+
+/// The check marks of the seven minigraph items, in menu order, from `graphs.minigraph_*`.
+pub fn graphs_marks(cx: &App) -> [bool; 7] {
+    let g = &TlSettings::settings(cx).graphs;
+    [
+        g.minigraph_cpu,
+        g.minigraph_memory,
+        g.minigraph_disk,
+        g.minigraph_network,
+        g.minigraph_gpu,
+        g.minigraph_vram,
+        g.minigraph_gpu_temperature,
+    ]
+}
+
+/// Whether the device catalog of the installed snapshot holds a present GPU. False without a hub.
+pub fn has_gpu(cx: &App) -> bool {
+    cx.try_global::<GlobalHub>().is_some_and(|hub| {
+        hub.0
+            .read(cx)
+            .current()
+            .devices
+            .present_of(DeviceKind::Gpu)
+            .next()
+            .is_some()
+    })
+}
+
+/// The seven minigraph checks, a separator and "Reset Minigraph Layout". The GPU, VRAM and GPU
+/// Temperature checks are disabled with "No GPU found" when [`has_gpu`] is false. E21-034 adds
+/// its P3 item between the separator and Reset.
+fn graphs_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+    let gpu = has_gpu(cx);
+    let marks = graphs_marks(cx);
+    for ((label, key, needs_gpu), checked) in GRAPHS.into_iter().zip(marks) {
+        menu = if needs_gpu && !gpu {
+            menu.item_disabled(tr(cx, label), Some(tr(cx, "shell-settings-perf-no-gpu")))
+        } else {
+            menu.check_item(tr(cx, label), checked, Box::new(ToggleSetting(key)))
+        };
+    }
+    menu.separator().item(
+        tr(cx, "shell-menu-graphs-reset"),
+        Box::new(ResetMinigraphLayout),
     )
 }

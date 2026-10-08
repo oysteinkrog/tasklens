@@ -1361,6 +1361,15 @@ shell-menu-appearance-rounded-corners = Rounded Corners
 shell-menu-appearance-heat-coloring = Value Color Coding
 shell-menu-appearance-heat-intensity = Value Color Coding Intensity
 shell-menu-appearance-shadow-intensity = Drop Shadow Intensity
+# View > Graphs (tasklens-bj6.6, UI-SHL-039). "No GPU found" is shell-settings-perf-no-gpu.
+shell-menu-graphs-cpu = CPU Graph
+shell-menu-graphs-memory = Memory Graph
+shell-menu-graphs-disk = Disk Graph
+shell-menu-graphs-network = Network Graph
+shell-menu-graphs-gpu = GPU Graph
+shell-menu-graphs-vram = VRAM Graph
+shell-menu-graphs-gpu-temp = GPU Temperature Graph
+shell-menu-graphs-reset = Reset Minigraph Layout
 # Settings menu, P1 rows (tasklens-bj6.7, UI-SHL-040).
 shell-menu-settings-monitoring = Monitoring
 shell-menu-settings-refresh = Refresh
