@@ -2234,6 +2234,37 @@ mod window {
     }
 
     #[gpui_kit::test]
+    fn security_restricted_access_block(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        publish_detail(cx, &engine, 4321, |d| {
+            d.tabs[DetailTab::Security.index()].validity = Validity::Restricted;
+        });
+        vcx.update(|window, cx| {
+            view.update(cx, |p, cx| p.select_tab(DetailTab::Security, window, cx))
+        });
+        draw(&mut vcx);
+        assert!(vcx.debug_bounds("PropsAccessBlock").is_some());
+        assert!(
+            vcx.debug_bounds("PropsSecurity").is_none(),
+            "no summary behind the block"
+        );
+        assert!(
+            vcx.debug_bounds("TlButton").is_none(),
+            "Security never gets a button"
+        );
+        let words = cx.update(props_words);
+        assert_eq!(
+            words.access(ACCESS_SECURITY).as_ref(),
+            "Security information unavailable (insufficient privileges)"
+        );
+    }
+
+    #[gpui_kit::test]
     fn fds_copy_formats(cx: &mut TestAppContext) {
         let mut rig = fds_rig(cx);
         select_fds(&mut rig, &[4, 3]);
@@ -2833,5 +2864,217 @@ mod maps {
             ],
             "the matching region keeps its node; the other region is hidden"
         );
+    }
+}
+
+// ---- Security tab summary (E23-020, UI-PWN-014) ----
+
+mod security {
+    use tl_model::details::{
+        CapRow, Elevated, GroupMembershipRow, NsKind, NsRow, NsState, SecurityDetail,
+    };
+    use tl_ui::windows::props::security::{
+        NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
+    };
+
+    use super::*;
+
+    struct SecurityHost {
+        tab: Entity<SecurityTab>,
+        filter: Entity<PropsFilter>,
+    }
+
+    impl Render for SecurityHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(1000.))
+                .h(px(600.))
+                .flex()
+                .flex_col()
+                .child(filter_bar(&self.filter, None, cx))
+                .child(div().flex_1().child(self.tab.clone()))
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> (Entity<SecurityHost>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+        });
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let filter = cx.new(|cx| PropsFilter::new("Security", window, cx));
+            let tab = cx.new(|cx| SecurityTab::new(KEY, filter.clone(), cx));
+            SecurityHost { tab, filter }
+        });
+        draw(cx);
+        (view, cx)
+    }
+
+    fn ids(real: u32, effective: u32) -> IdTriple {
+        IdTriple {
+            real,
+            effective,
+            saved: effective,
+            fs: effective,
+        }
+    }
+
+    fn names(real: &str, other: &str) -> [Arc<str>; 4] {
+        [text(real), text(other), text(other), text(other)]
+    }
+
+    fn group(name: &str, gid: u32, admin: bool, root_equivalent: bool) -> GroupMembershipRow {
+        GroupMembershipRow {
+            name: text(name),
+            gid,
+            primary: false,
+            root_equivalent,
+            admin,
+        }
+    }
+
+    fn detail(uids: IdTriple, uid_names: [Arc<str>; 4]) -> SecurityDetail {
+        let ns = |kind| NsRow {
+            kind,
+            state: NsState::SharedWithInit,
+            validity: Validity::Valid,
+        };
+        SecurityDetail {
+            uids: valid(uids),
+            uid_names: valid(uid_names),
+            gids: valid(ids(1000, 1000)),
+            gid_names: valid(names("oystein", "oystein")),
+            elevated: valid(Elevated::No),
+            no_new_privs: valid(false),
+            seccomp: valid(Seccomp::Disabled),
+            dumpable: valid(true),
+            security_label: valid(text("unconfined")),
+            session: Some(text("2")),
+            audit_session: Some(NO_ID),
+            login_uid: Some(1000),
+            namespaces: [
+                NsKind::User,
+                NsKind::Pid,
+                NsKind::Net,
+                NsKind::Mnt,
+                NsKind::Ipc,
+                NsKind::Uts,
+                NsKind::Cgroup,
+                NsKind::Time,
+            ]
+            .map(ns),
+            store_bypass: valid(text("thread vulnerable")),
+            indirect_branch: valid(text("conditional enabled")),
+            caps: Arc::from(Vec::<CapRow>::new()),
+            groups: Arc::from(vec![
+                group("wheel", 998, true, false),
+                group("docker", 965, false, true),
+                group("audio", 995, false, false),
+            ]),
+        }
+    }
+
+    fn feed(view: &Entity<SecurityHost>, cx: &mut VisualTestContext, d: SecurityDetail) {
+        let p = Arc::new(TabPayload::Security(Arc::new(d)));
+        let tab = cx.update(|_, cx| view.read(cx).tab.clone());
+        cx.update(|_, cx| tab.update(cx, |t, cx| t.set_payload(Some(&p), cx)));
+        draw(cx);
+    }
+
+    fn value(view: &Entity<SecurityHost>, cx: &mut VisualTestContext, id: SecField) -> String {
+        cx.update(|_, cx| {
+            view.read(cx)
+                .tab
+                .read(cx)
+                .value(id)
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn security_user_line_equal_and_mixed(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        assert_eq!(value(&view, cx, SecField::User), "Collecting\u{2026}");
+        feed(
+            &view,
+            cx,
+            detail(ids(1000, 1000), names("oystein", "oystein")),
+        );
+        assert_eq!(value(&view, cx, SecField::User), "oystein (1000)");
+        assert_eq!(value(&view, cx, SecField::Group), "oystein (1000)");
+        assert_eq!(value(&view, cx, SecField::Groups), "3");
+        assert_eq!(value(&view, cx, SecField::LoginUid), "oystein (1000)");
+        assert_eq!(value(&view, cx, SecField::AuditSession), "None");
+        feed(&view, cx, detail(ids(1000, 0), names("oystein", "root")));
+        assert_eq!(
+            value(&view, cx, SecField::User),
+            "real oystein (1000), effective root (0), saved root (0), fs root (0)"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn security_admin_groups_root_equivalent(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.caps = Arc::from(vec![CapRow {
+            cap: 21,
+            effective: true,
+            permitted: true,
+            inheritable: false,
+            bounding: true,
+            ambient: false,
+            risky: true,
+        }]);
+        feed(&view, cx, d);
+        assert_eq!(
+            value(&view, cx, SecField::AdminGroups),
+            "wheel, docker (root-equivalent)"
+        );
+        assert_eq!(value(&view, cx, SecField::RiskyCaps), "SYS_ADMIN");
+        let tip = cx.update(|_, cx| view.read(cx).tab.read(cx).tooltip(SecField::RiskyCaps));
+        assert_eq!(tip.as_deref(), Some(RISKY_TOOLTIP));
+    }
+
+    #[gpui_kit::test]
+    fn security_ns_same_as_tasklens_without_helper(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.namespaces[0].state = NsState::SameAsTasklens;
+        d.namespaces[1].state = NsState::IsolatedFromTasklens { inode: 4026532211 };
+        d.namespaces[2].validity = Validity::Restricted;
+        feed(&view, cx, d);
+        let ns = SecField::Ns(NsKind::User);
+        assert_eq!(value(&view, cx, ns), "Same as tasklens");
+        let tip = cx.update(|_, cx| view.read(cx).tab.read(cx).tooltip(ns));
+        assert_eq!(tip.as_deref(), Some(NS_TIP_SELF));
+        assert_eq!(
+            tip.as_deref(),
+            Some("Compared with tasklens (PID 1 not readable)")
+        );
+        assert_eq!(
+            value(&view, cx, SecField::Ns(NsKind::Pid)),
+            "Isolated (4026532211)"
+        );
+        assert_eq!(value(&view, cx, SecField::Ns(NsKind::Net)), "Restricted");
+    }
+
+    /// A clipboard failure cannot be detected in v1 (R-199); the text the failed write shows
+    /// is checked here.
+    #[gpui_kit::test]
+    fn security_copy_failure_toast_text(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let (failed, ok) = cx.update(|_, cx| {
+            let tab = view.read(cx).tab.read(cx);
+            (tab.copy_toast(Err(()), true), tab.copy_toast(Ok(()), true))
+        });
+        assert_eq!(failed.1.as_ref(), "Could not copy token summary value.");
+        assert_eq!(ok.1.as_ref(), "Process property value copied.");
     }
 }
