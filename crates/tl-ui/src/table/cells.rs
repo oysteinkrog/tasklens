@@ -1028,6 +1028,8 @@ mod tests {
             want_text: true,
             background: Some(gpui_kit::red()),
             text_color: Some(gpui_kit::red()),
+            dim: true,
+            prefix: Some(("Σ ".into(), gpui_kit::red())),
             tooltip: Some("tip".into()),
             want_tooltip: true,
         };
@@ -1037,6 +1039,7 @@ mod tests {
         assert_eq!(out.validity, Validity::WarmingUp);
         assert!(out.arc.is_none() && out.background.is_none() && out.text_color.is_none());
         assert!(out.tooltip.is_none() && !out.want_text && !out.want_tooltip);
+        assert!(!out.dim && out.prefix.is_none());
         assert!(out.text.is_empty());
         assert!(out.text.capacity() >= 64, "the scratch keeps its capacity");
     }
