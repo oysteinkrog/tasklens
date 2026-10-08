@@ -132,6 +132,9 @@ enum Entry {
         action: Box<dyn Action>,
         /// The radio dot of [`TlMenu::painted_radio_item`].
         selected: bool,
+        /// Made by `painted_radio_item`: the row has the mark column. A plain painted row fills
+        /// the row from its left edge, as before.
+        radio: bool,
     },
     Submenu {
         label: SharedString,
@@ -438,6 +441,7 @@ impl TlMenu {
             suffix_icon,
             action,
             selected: false,
+            radio: false,
         });
         self
     }
@@ -461,6 +465,7 @@ impl TlMenu {
             suffix_icon,
             action,
             selected,
+            radio: true,
         });
         self
     }
@@ -1151,6 +1156,7 @@ impl TlMenuPopup {
                 fg,
                 suffix_icon,
                 selected,
+                radio,
                 ..
             } => row(Some(label))
                 .when(*selected, |d| {
@@ -1160,7 +1166,7 @@ impl TlMenuPopup {
                         &[("label", FluentValue::from(label.as_ref()))],
                     ))
                 })
-                .children(mark_column(Mark::Radio(*selected)))
+                .when(*radio, |d| d.children(mark_column(Mark::Radio(*selected))))
                 .child(painted_row(
                     label.clone(),
                     *bg,
