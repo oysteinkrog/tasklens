@@ -5142,4 +5142,123 @@ mod startup_items {
         let moves = cx.read(|cx| cx.global::<TitleBarProbe>().moves);
         assert_eq!(moves, 0, "no window drag from the pin");
     }
+
+    // ---- Secondary-window pins (E20-029) ----
+
+    use tl_ui::components::window_frame::ToggleAlwaysOnTop;
+    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui::window::settings::open_settings;
+
+    impl Rig {
+        /// `KeepAbove` commands as (caption, on).
+        fn keep_above_captions(&self) -> Vec<(Option<String>, bool)> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::KWin(KWinCommand::KeepAbove { pid, caption, on }) => {
+                        assert_eq!(pid, std::process::id());
+                        Some((caption.map(|c| c.to_string()), on))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn pin(cx: &mut TestAppContext, window: WindowKey, caption: &str) {
+        let action = ToggleAlwaysOnTop {
+            window,
+            caption: SharedString::from(caption.to_owned()),
+        };
+        cx.update(|cx| cx.dispatch_action(&action));
+        cx.run_until_parked();
+    }
+
+    fn settings_open(cx: &mut TestAppContext) -> bool {
+        cx.read(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::Settings)
+                .is_some()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn secondary_pin_sends_keep_above_with_caption(cx: &mut TestAppContext) {
+        let r = init_bar(cx, true);
+        let _vcx = open(cx);
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        let before =
+            cx.read(|cx| TlSettings::get(cx).version(tl_ui::settings_global::Section::Window));
+        pin(cx, WindowKey::Settings, "Settings");
+        assert_eq!(
+            r.keep_above_captions(),
+            [(Some("Settings".to_owned()), true)]
+        );
+        pin(cx, WindowKey::Settings, "Settings");
+        assert_eq!(
+            r.keep_above_captions(),
+            [
+                (Some("Settings".to_owned()), true),
+                (Some("Settings".to_owned()), false)
+            ]
+        );
+        let after =
+            cx.read(|cx| TlSettings::get(cx).version(tl_ui::settings_global::Section::Window));
+        assert_eq!(before, after, "no setting changed");
+        assert!(!on_top(cx));
+    }
+
+    #[gpui_kit::test]
+    fn secondary_pin_unsupported_sends_nothing(cx: &mut TestAppContext) {
+        let r = init_bar(cx, true);
+        let _vcx = open(cx);
+        r.publish_windows(cx, Validity::Unsupported, "tasklens");
+        pin(cx, WindowKey::Settings, "Settings");
+        assert!(r.keep_above_captions().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn secondary_pin_forgotten_on_close(cx: &mut TestAppContext) {
+        let r = init_bar(cx, true);
+        let _vcx = open(cx);
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        cx.update(open_settings);
+        cx.run_until_parked();
+        assert!(settings_open(cx));
+        pin(cx, WindowKey::Settings, "Settings");
+        let handle = cx.read(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::Settings)
+                .expect("settings open")
+        });
+        cx.update(|cx| {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        });
+        cx.run_until_parked();
+        assert!(!settings_open(cx));
+        cx.update(open_settings);
+        cx.run_until_parked();
+        pin(cx, WindowKey::Settings, "Settings");
+        let sent: Vec<bool> = r
+            .keep_above_captions()
+            .into_iter()
+            .map(|(_, on)| on)
+            .collect();
+        assert_eq!(sent, [true, true], "the reopened window starts unpinned");
+    }
+
+    #[gpui_kit::test]
+    fn main_pin_unchanged(cx: &mut TestAppContext) {
+        let r = init_bar(cx, true);
+        let _vcx = open(cx);
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        pin(cx, WindowKey::Main, "tasklens");
+        assert!(on_top(cx));
+        assert_eq!(r.keep_above_captions(), [(None, true)]);
+    }
 }
