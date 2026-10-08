@@ -2109,6 +2109,20 @@ mod wired {
         r.vcx.debug_bounds(id).expect(id).center()
     }
 
+    /// crw.44: the page measures its size during the first frame and lays out after it, so the
+    /// frames that follow a select show all five boxes with nothing else notifying the page.
+    #[gpui_kit::test]
+    fn overview_first_frame_after_select_shows_all_boxes(cx: &mut TestAppContext) {
+        let mut r = open_with(cx, true);
+        select(&mut r, OVERVIEW_KEY);
+        for id in [CPU_BOX_ID, MEM_BOX_ID, GPU_BOX_ID, DISK_BOX_ID, NET_BOX_ID] {
+            assert!(r.vcx.debug_bounds(id).is_some(), "{id} drawn");
+        }
+        let page = overview(&mut r).expect("an OverviewPage");
+        let renders = r.vcx.read_entity(&page, |p, _| p.render_count.get());
+        assert_eq!(renders, 2, "the empty measuring render, then the boxes");
+    }
+
     /// crw.44: a click on a box title opens that device's page; a disk row opens its disk.
     #[gpui_kit::test]
     fn overview_titles_open_device_pages(cx: &mut TestAppContext) {

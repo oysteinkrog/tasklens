@@ -406,7 +406,12 @@ impl Render for OverviewPage {
         let this = cx.entity().downgrade();
         let measure = canvas(
             move |bounds, _, cx| {
-                let _ = this.update(cx, |v, cx| v.resize(bounds.size, cx));
+                // After the frame: a notify during the frame is lost, so the page would keep
+                // its empty first render until something else notified it.
+                let (this, size) = (this.clone(), bounds.size);
+                cx.defer(move |cx| {
+                    let _ = this.update(cx, |v, cx| v.resize(size, cx));
+                });
             },
             |_, _, _, _| {},
         )
