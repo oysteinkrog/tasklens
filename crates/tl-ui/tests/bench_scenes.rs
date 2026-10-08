@@ -206,6 +206,43 @@ fn bench_scene_perf_overview_builds_five_boxes(cx: &mut TestAppContext) {
     engine.stop();
 }
 
+/// crw.45: perf-overview-procs places the Top processes box with 10 rows and asks for the
+/// process sweep.
+#[gpui_kit::test]
+fn bench_scene_perf_overview_procs_shows_top_processes(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let engine = BenchEngine::start(BenchFeed::OverviewProcs, SEED, now_boot_ns());
+    let window = cx
+        .update(|cx| open_scene(cx, BenchScene::PerfOverviewProcs, engine.clone()))
+        .expect("the scene window opens");
+    let mut vcx = VisualTestContext::from_window(window.handle, cx);
+    draw(&mut vcx);
+
+    let view = window.view.clone();
+    let (boxes, rows) = vcx.update(|_, cx| {
+        let page = view.read(cx).page().expect("the Performance tab").read(cx);
+        let overview = page
+            .page(&DeviceKey(Arc::from(OVERVIEW_KEY)))
+            .expect("Overview page built")
+            .clone()
+            .downcast::<OverviewPage>()
+            .expect("an OverviewPage")
+            .read(cx);
+        (
+            overview.placement().boxes.len(),
+            overview
+                .procs_box()
+                .map(|b| b.read(cx).rows().len())
+                .unwrap_or(0),
+        )
+    });
+    assert_eq!(boxes, 6, "the five boxes and Top processes");
+    assert_eq!(rows, 10);
+    let merged = vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged());
+    assert!(merged.process_top && !merged.process_table, "{merged:?}");
+    engine.stop();
+}
+
 #[gpui_kit::test]
 fn static_scene_requests_no_frames(cx: &mut TestAppContext) {
     // The run fails if the driver requested a frame; `frames` counts the window's paints.

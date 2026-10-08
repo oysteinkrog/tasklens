@@ -55,6 +55,8 @@ const CAP_10HZ: u32 = SeriesRing::fast_capacity(PERIOD_10HZ_NS);
 const CAP_1HZ: u32 = SeriesRing::fast_capacity(PERIOD_1HZ_NS);
 /// Entries kept for [`BenchEngine::bridge_origin`].
 const BRIDGE_ORIGINS: usize = 1_024;
+/// XORed into the seed for perf-overview-procs' process PRNG.
+const PROCS_SEED: u64 = 0x7072_6f63;
 
 /// Placeholder memory size for the MEM_USED series, in bytes (64 GiB).
 pub(crate) const MEM_TOTAL_BYTES: u64 = 64 << 30;
@@ -122,6 +124,9 @@ pub enum BenchFeed {
     /// DISK_READ, DISK_WRITE, MEM_CACHED, SWAP_USED and GPU_MEM series, and the disk and
     /// network aggregates with their summed rates.
     Overview,
+    /// perf-overview-procs: the `Overview` feed, and once per second the records of a
+    /// [`TableSynth`] with their own PRNG as the PROCESSES component (crw.45).
+    OverviewProcs,
     /// table-2000: the prefilled series never change; once per second a new [`TableSynth`]
     /// table replaces the PROCESSES and TABLE components, and nothing else is published.
     Table,
@@ -195,6 +200,11 @@ impl BenchEngine {
         let (mut publisher, real) = match feed {
             BenchFeed::Synthetic | BenchFeed::Soak => (Publisher::new(seed, t0, None, false), None),
             BenchFeed::Overview => (Publisher::build(seed, t0, None, false, true), None),
+            BenchFeed::OverviewProcs => {
+                let mut publisher = Publisher::build(seed, t0, None, false, true);
+                publisher.add_overview_procs(seed, t0);
+                (publisher, None)
+            }
             BenchFeed::Table => (Publisher::new(seed, t0, None, true), None),
             BenchFeed::Bridge(client) => {
                 let wake = client.wake();
@@ -449,6 +459,9 @@ struct Publisher {
     cursor: BridgeCursor,
     /// Some in table-2000 only.
     table_synth: Option<TableSynth>,
+    /// perf-overview-procs: the process records and their own PRNG, so the series stay those
+    /// of perf-overview.
+    overview_procs: Option<(TableSynth, BenchRng)>,
     processes: Arc<ProcessSnapshot>,
     table: Arc<ProcessTableView>,
     /// Some in perf-overview only.
@@ -500,6 +513,7 @@ impl Publisher {
             bridge,
             cursor: BridgeCursor::default(),
             table_synth: None,
+            overview_procs: None,
             overview,
         };
         if table {
@@ -507,6 +521,15 @@ impl Publisher {
             this.tick_table(t0, None);
         }
         this
+    }
+
+    /// perf-overview-procs: process records from now on, first drawn at `t0`.
+    fn add_overview_procs(&mut self, seed: u64, t0: TimeNs) {
+        let mut rng = BenchRng::new(seed ^ PROCS_SEED);
+        let mut synth = TableSynth::new(&mut rng);
+        synth.tick_1hz(&mut rng, t0);
+        self.processes = synth.processes();
+        self.overview_procs = Some((synth, rng));
     }
 
     /// The next table at `t_ns`, built for the last `SetTableQuery` generation sent.
@@ -556,6 +579,10 @@ impl Publisher {
         }
         if k.is_multiple_of(TICKS_PER_1HZ) {
             self.tick_1hz(t_ns, &f);
+            if let Some((synth, rng)) = &mut self.overview_procs {
+                synth.tick_1hz(rng, t_ns);
+                self.processes = synth.processes();
+            }
         }
         self.series_version += 1;
         true
