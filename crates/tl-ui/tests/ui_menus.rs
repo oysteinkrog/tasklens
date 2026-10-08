@@ -1,5 +1,5 @@
-//! Menu bar, File menu and View menu tests (E21-A1, E21-001, E21-044, UI-SHL-030 to UI-SHL-034,
-//! ADR-013).
+//! Menu bar, File menu and View menu tests (E21-A1, E21-001, E21-003, E21-044, UI-SHL-030 to
+//! UI-SHL-034, UI-SHL-039, ADR-013).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -508,7 +508,7 @@ fn set_tab(cx: &mut VisualTestContext, tab: Tab, history: bool) {
 }
 
 /// The View root items in order.
-const VIEW_ROOT: [&str; 4] = ["Columns", "Process View", "Window", "Appearance"];
+const VIEW_ROOT: [&str; 5] = ["Columns", "Process View", "Window", "Appearance", "Graphs"];
 
 /// The labels of the open submenus: every drawn label except the View root items.
 fn sub_labels(cx: &mut VisualTestContext) -> Vec<String> {
@@ -534,14 +534,15 @@ fn menubar_alt_keys(cx: &mut TestAppContext) {
     let entries = entries(r.cx);
     assert_eq!(
         entries.len(),
-        4,
-        "Columns, Process View, Window, Appearance: {entries:?}"
+        5,
+        "Columns, Process View, Window, Appearance, Graphs: {entries:?}"
     );
     assert_eq!(entries[0].label(), Some("Columns"));
     assert_eq!(entries[0].selected(), Some(true), "Columns highlighted");
     assert_eq!(entries[1].label(), Some("Process View"));
     assert_eq!(entries[2].label(), Some("Window"));
     assert_eq!(entries[3].label(), Some("Appearance"));
+    assert_eq!(entries[4].label(), Some("Graphs"));
 }
 
 #[gpui_kit::test]
@@ -616,7 +617,7 @@ fn columns_disabled_on_performance(cx: &mut TestAppContext) {
     keys(r.cx, "alt-v");
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     let drawn = entries(r.cx);
-    assert_eq!(drawn.len(), 4);
+    assert_eq!(drawn.len(), 5);
     assert_eq!(drawn[0].label(), Some("Columns"));
     assert_ne!(
         drawn[0].selected(),
@@ -1192,7 +1193,7 @@ fn window_menu_check_follows_key(cx: &mut TestAppContext) {
 
 /// Opens View > Appearance from the keyboard; its first row, UI Scale, is highlighted.
 fn open_appearance(cx: &mut VisualTestContext) {
-    keys(cx, "alt-v end right");
+    keys(cx, "alt-v down down down right");
     assert_eq!(sub_highlighted(cx), ["UI Scale 100%"]);
 }
 
@@ -1295,7 +1296,7 @@ fn appearance_slider_keys(cx: &mut TestAppContext) {
 
 /// Opens View > Appearance and checks the highlighted first row reads `first`.
 fn open_appearance_at(cx: &mut VisualTestContext, first: &str) {
-    keys(cx, "alt-v end right");
+    keys(cx, "alt-v down down down right");
     assert_eq!(sub_highlighted(cx), [first]);
 }
 
@@ -1383,4 +1384,210 @@ fn widest_menu(cx: &mut VisualTestContext) -> Pixels {
         .filter(|s| s.role() == Some(Role::Menu))
         .map(|s| s.bounds().size.width)
         .fold(px(0.), |a, b| a.max(b))
+}
+
+// View > Graphs (E21-003).
+
+/// Installs a hub on the rig's fake engine and publishes a device catalog with `gpus` present
+/// GPUs.
+fn set_gpus(r: &mut Rig<'_>, gpus: usize) {
+    use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
+    use tl_model::ids::DeviceIdx;
+    let client: Arc<dyn EngineClient> = r.engine.clone();
+    r.cx.update(|_, cx| {
+        if !cx.has_global::<tl_ui::hub::GlobalHub>() {
+            let hub = cx.new(|cx| tl_ui::hub::SnapshotHub::new(client, cx));
+            cx.set_global(tl_ui::hub::GlobalHub(hub));
+        }
+    });
+    let entries: Vec<DeviceEntry> = (0..gpus)
+        .map(|i| DeviceEntry {
+            idx: DeviceIdx(i as _),
+            identity: DeviceIdentity::Gpu {
+                uuid: [i as u8; 16],
+                pci_bus_id: Arc::from(format!("0000:0{i}:00.0")),
+            },
+            generation: 0,
+            display_name: Arc::from("GPU"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind: None,
+        })
+        .collect();
+    r.engine.publish_with(|s| {
+        s.devices = Arc::new(DeviceCatalog {
+            version: s.devices.version + 1,
+            entries: Arc::from(entries),
+        });
+    });
+    r.cx.run_until_parked();
+}
+
+/// Opens View > Graphs from the keyboard (the last root item).
+fn open_graphs(cx: &mut VisualTestContext) {
+    keys(cx, "alt-v end right");
+    assert_eq!(open_menu(cx), Some(MenuId::View));
+}
+
+/// The built entries of the open View > Graphs submenu.
+fn graphs_entries(cx: &mut VisualTestContext) -> Vec<tl_ui::components::menu::MenuEntryInfo> {
+    let bar = bar(cx);
+    cx.update(|window, cx| {
+        let popup = bar.read(cx).popup().expect("menu open").clone();
+        let root = popup.read(cx).entries_for_test(window);
+        assert_eq!(root[4].label.as_deref(), Some("Graphs"));
+        let sub = root[4].submenu.clone().expect("Graphs submenu");
+        sub.read(cx).entries_for_test(window)
+    })
+}
+
+const GRAPH_LABELS: [&str; 7] = [
+    "CPU Graph",
+    "Memory Graph",
+    "Disk Graph",
+    "Network Graph",
+    "GPU Graph",
+    "VRAM Graph",
+    "GPU Temperature Graph",
+];
+
+#[gpui_kit::test]
+fn graphs_menu_p1_items(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_gpus(&mut r, 1);
+    open_graphs(r.cx);
+    let mut expected: Vec<String> = GRAPH_LABELS.iter().map(|l| format!("item:{l}")).collect();
+    expected.push("separator".to_owned());
+    expected.push("item:Reset Minigraph Layout".to_owned());
+    let drawn: Vec<String> = shapes(r.cx)
+        .into_iter()
+        .filter(|s| {
+            !s.strip_prefix("item:")
+                .is_some_and(|l| VIEW_ROOT.contains(&l))
+        })
+        .collect();
+    assert_eq!(drawn, expected);
+    assert!(
+        !drawn.iter().any(|s| s.contains("Keep detached")),
+        "the P3 item comes with E21-034"
+    );
+    assert_eq!(sub_highlighted(r.cx), ["CPU Graph"]);
+}
+
+#[gpui_kit::test]
+fn graphs_checks_follow_keys(cx: &mut TestAppContext) {
+    use tl_ui::components::menu::MenuEntryKind;
+    let mut r = rig(cx);
+    set_gpus(&mut r, 1);
+    let defaults = [true, true, true, true, true, true, false];
+    assert_eq!(r.cx.update(|_, cx| menus_view::graphs_marks(cx)), defaults);
+    open_graphs(r.cx);
+    let checks: Vec<(String, bool)> = graphs_entries(r.cx)
+        .into_iter()
+        .filter(|e| e.kind == MenuEntryKind::Item)
+        .take(7)
+        .map(|e| (e.label.expect("label").to_string(), e.checked))
+        .collect();
+    let expected: Vec<(String, bool)> = GRAPH_LABELS
+        .iter()
+        .map(|l| l.to_string())
+        .zip(defaults)
+        .collect();
+    assert_eq!(checks, expected);
+
+    // CPU is highlighted; two Downs reach Disk Graph.
+    keys(r.cx, "down down enter");
+    let graphs =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| TlSettings::settings(cx).graphs.clone());
+    assert!(!graphs(r.cx).minigraph_disk);
+    assert_eq!(open_menu(r.cx), None);
+    assert_eq!(
+        r.cx.update(|_, cx| menus_view::graphs_marks(cx)),
+        [true, true, false, true, true, true, false]
+    );
+    // GPU Temperature Graph turns on.
+    open_graphs(r.cx);
+    click_label(r.cx, "GPU Temperature Graph");
+    assert!(graphs(r.cx).minigraph_gpu_temperature);
+    assert!(!graphs(r.cx).minigraph_disk);
+}
+
+#[gpui_kit::test]
+fn gpu_items_disabled_without_gpu(cx: &mut TestAppContext) {
+    use tl_ui::components::menu::MenuEntryKind;
+    let mut r = rig(cx);
+    set_gpus(&mut r, 0);
+    assert!(!r.cx.update(|_, cx| menus_view::has_gpu(cx)));
+    open_graphs(r.cx);
+    let built = graphs_entries(r.cx);
+    let kinds: Vec<(Option<String>, MenuEntryKind, Option<String>)> = built
+        .iter()
+        .take(7)
+        .map(|e| {
+            (
+                e.label.as_ref().map(|l| l.to_string()),
+                e.kind,
+                e.tooltip.as_ref().map(|t| t.to_string()),
+            )
+        })
+        .collect();
+    for (i, (label, kind, tooltip)) in kinds.iter().enumerate() {
+        assert_eq!(label.as_deref(), Some(GRAPH_LABELS[i]));
+        if i >= 4 {
+            assert_eq!(*kind, MenuEntryKind::Disabled, "{label:?}");
+            assert_eq!(tooltip.as_deref(), Some("No GPU found"), "{label:?}");
+        } else {
+            assert_eq!(*kind, MenuEntryKind::Item, "{label:?}");
+        }
+    }
+    // Up from CPU wraps to Reset, then the last enabled check is Network Graph.
+    keys(r.cx, "up up");
+    assert_eq!(sub_highlighted(r.cx), ["Network Graph"]);
+
+    // The tooltip opens on hover and gives the reason.
+    let row = entries(r.cx)
+        .into_iter()
+        .find(|e| e.label() == Some("VRAM Graph"))
+        .expect("VRAM Graph drawn")
+        .bounds();
+    r.cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    r.cx.executor()
+        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+    draw(r.cx);
+    assert!(r.cx.debug_bounds("TlTooltip").is_some(), "tooltip shown");
+
+    // One GPU: all seven checks are enabled.
+    keys(r.cx, "escape escape");
+    set_gpus(&mut r, 1);
+    assert!(r.cx.update(|_, cx| menus_view::has_gpu(cx)));
+    open_graphs(r.cx);
+    let enabled = graphs_entries(r.cx)
+        .iter()
+        .take(7)
+        .filter(|e| e.kind == MenuEntryKind::Item)
+        .count();
+    assert_eq!(enabled, 7);
+}
+
+#[gpui_kit::test]
+fn reset_minigraph_dispatch(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_gpus(&mut r, 1);
+    let resets = Rc::new(Cell::new(0));
+    let count = resets.clone();
+    r.cx.update(|_, cx| {
+        cx.on_action(
+            move |_: &tl_ui::pages::minigraph::actions::ResetMinigraphLayout, _| {
+                count.set(count.get() + 1)
+            },
+        );
+    });
+    open_graphs(r.cx);
+    // Up from CPU wraps to Reset.
+    keys(r.cx, "up");
+    assert_eq!(sub_highlighted(r.cx), ["Reset Minigraph Layout"]);
+    keys(r.cx, "enter");
+    assert_eq!(resets.get(), 1, "ResetMinigraphLayout dispatched once");
+    assert_eq!(open_menu(r.cx), None);
 }
