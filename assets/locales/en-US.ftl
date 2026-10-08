@@ -1397,6 +1397,8 @@ pwn-general-toast-value-copied = Process property value copied.
 pwn-general-toast-copied = Copied to clipboard
 pwn-general-toast-opening = Opening file location
 pwn-general-toast-open-failed = Could not open file location.
+# Security tab (UI-PWN-014). Unused in v1: a clipboard failure cannot be detected (R-199).
+pwn-security-toast-copy-failed = Could not copy token summary value.
 pwn-general-cmdline-label = Command line
 # View menu and View > Columns (tasklens-bj6.4, UI-SHL-033, UI-SHL-034).
 shell-menu-view-columns = Columns
