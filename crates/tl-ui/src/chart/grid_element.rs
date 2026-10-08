@@ -34,10 +34,10 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Edges, Element, ElementId,
-    Entity, FillOptions, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, Path,
-    PathBuilder, PathStyle, Pixels, Point, Render, SharedString, Size, Style, Subscription,
-    TransformationMatrix, Window, point, px, quad, relative, size, transparent_black,
+    Entity, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
+    IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, Path, PathBuilder, Pixels,
+    Point, Render, SharedString, Size, Style, Subscription, TransformationMatrix, Window, point,
+    px, quad, relative, size, transparent_black,
 };
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
@@ -1264,7 +1264,7 @@ fn build_cells(
     gaps: &mut Vec<(usize, Range<f32>)>,
 ) {
     gaps.clear();
-    let mut fill = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::non_zero()));
+    let mut fill = scratch.take_fill();
     let mut stroke = PathBuilder::stroke(px(1.0));
     let mut overlay = spec
         .cells

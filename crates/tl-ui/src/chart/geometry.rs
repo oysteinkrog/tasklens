@@ -3,10 +3,11 @@
 //! UI-PRF-007; PERF-022; PERF-026; R-051).
 //!
 //! Every function here is pure and allocation-free given the caller's buffers, except that `build`
-//! allocates inside lyon's tessellator. Time math is `u64` and the pixel scale is `f64`: 60 s in
-//! ns against 1,600 px loses precision in `f32`.
+//! allocates inside lyon's stroke tessellator. Fills skip lyon: they are monotone in x, so
+//! `FillMesh` triangulates them directly (tasklens-wlf.33). Time math is `u64` and the pixel
+//! scale is `f64`: 60 s in ns against 1,600 px loses precision in `f32`.
 
-use gpui_kit::{FillOptions, Hsla, PathBuilder, PathStyle, Pixels, Point, point, px};
+use gpui_kit::{Bounds, Hsla, Path, PathBuilder, Pixels, Point, point, px};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 
@@ -240,7 +241,8 @@ pub struct BuildInput<'a> {
     pub curved: bool,
 }
 
-/// Buffers reused across rebuilds so the steady state allocates only inside lyon.
+/// Buffers reused across rebuilds so the steady state allocates only inside lyon's stroke
+/// tessellator.
 #[derive(Default)]
 pub struct Scratch {
     runs: SmallVec<[Run; 8]>,
@@ -264,6 +266,11 @@ pub struct Scratch {
 }
 
 impl Scratch {
+    /// An empty fill for a grid build, reusing a vertex buffer `finish_grid` gave back.
+    pub fn take_fill(&mut self) -> FillMesh {
+        self.live.mesh()
+    }
+
     /// Dotted-gap spans of the cell `build_cell` built last, chart-local physical px as
     /// `ChartCache::gaps` holds them.
     pub fn cell_gaps(&self) -> &[std::ops::Range<f32>] {
@@ -458,6 +465,73 @@ fn cubic(p0: (f32, f32), c1: (f32, f32), c2: (f32, f32), p3: (f32, f32), t: f32)
     )
 }
 
+/// Texture coordinates that mark a triangle as fully inside the fill (as `PathBuilder` sets them).
+const INSIDE: (Point<f32>, Point<f32>, Point<f32>) = (point(0., 1.), point(0., 1.), point(0., 1.));
+
+/// A chart fill built directly as triangles, without lyon (tasklens-wlf.33). Every chart fill
+/// is the band between a top chain and a bottom chain that share x and never go left, so each
+/// segment is two triangles: O(n), no sort, and no triangle overlaps another.
+#[derive(Default)]
+pub struct FillMesh {
+    path: Option<Path<Pixels>>,
+    /// A vertex buffer from an earlier build, cleared, used for the first triangle.
+    spare: Option<Path<Pixels>>,
+}
+
+impl FillMesh {
+    fn reusing(spare: Option<Path<Pixels>>) -> Self {
+        Self { path: None, spare }
+    }
+
+    fn tri(&mut self, a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels>) {
+        let path = self.path.get_or_insert_with(|| match self.spare.take() {
+            Some(mut path) => {
+                path.vertices.clear();
+                path.bounds = Bounds {
+                    origin: a,
+                    size: Default::default(),
+                };
+                path
+            }
+            None => Path::new(a),
+        });
+        path.push_triangle((a, b, c), INSIDE);
+    }
+
+    /// The band between `top` and `bottom(i, top[i])`, two triangles per segment. A segment
+    /// whose chains cross is split at the crossing, so both lobes fill once, as the non-zero
+    /// rule fills them. Segments with no width add nothing.
+    fn band(
+        &mut self,
+        top: &[Point<Pixels>],
+        bottom: impl Fn(usize, Point<Pixels>) -> Point<Pixels>,
+    ) {
+        for (i, w) in top.windows(2).enumerate() {
+            let (t0, t1) = (w[0], w[1]);
+            if t1.x <= t0.x {
+                continue;
+            }
+            let (b0, b1) = (bottom(i, t0), bottom(i + 1, t1));
+            let d0 = f32::from(t0.y) - f32::from(b0.y);
+            let d1 = f32::from(t1.y) - f32::from(b1.y);
+            if d0 * d1 < 0.0 {
+                let k = d0 / (d0 - d1);
+                let c = point(t0.x + (t1.x - t0.x) * k, t0.y + (t1.y - t0.y) * k);
+                self.tri(t0, c, b0);
+                self.tri(c, t1, b1);
+            } else {
+                self.tri(t0, t1, b1);
+                self.tri(t0, b1, b0);
+            }
+        }
+    }
+
+    /// The finished path, or `None` when no triangle was added.
+    fn finish(self) -> Option<Path<Pixels>> {
+        self.path.filter(|p| !p.vertices.is_empty())
+    }
+}
+
 /// One run's emitted vertices: the line, the band floor under it (stacked mode) and the tangent
 /// buffer `emit_run` uses for both.
 #[derive(Default)]
@@ -476,22 +550,32 @@ const DASH: [gpui_kit::Pixels; 2] = [px(5.0), px(5.0)];
 /// per build when a stacked chart has more colours than the inline size.
 #[derive(Default)]
 struct Builders {
-    fills: SmallVec<[(Hsla, PathBuilder); 2]>,
+    fills: SmallVec<[(Hsla, FillMesh); 2]>,
     strokes: SmallVec<[(Hsla, bool, PathBuilder); 3]>,
+    /// Fill paths of the previous build, kept for their vertex buffers.
+    spare: Vec<Path<Pixels>>,
 }
 
 impl Builders {
-    fn fill(&mut self, color: Hsla) -> &mut PathBuilder {
+    fn mesh(&mut self) -> FillMesh {
+        FillMesh::reusing(self.spare.pop())
+    }
+
+    fn fill(&mut self, color: Hsla) -> &mut FillMesh {
         let i = match self.fills.iter().position(|(c, _)| *c == color) {
             Some(i) => i,
             None => {
-                // Non-zero: with the default even-odd rule, overlapping merged polygons cancel.
-                let b = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::non_zero()));
-                self.fills.push((color, b));
+                let mesh = self.mesh();
+                self.fills.push((color, mesh));
                 self.fills.len() - 1
             }
         };
         &mut self.fills[i].1
+    }
+
+    /// Keeps the fill paths of `sets` for reuse and empties it.
+    fn reclaim(&mut self, sets: &mut SmallVec<[PathSet; 2]>) {
+        self.spare.extend(sets.drain(..).map(|set| set.path));
     }
 
     fn stroke(&mut self, s: &ChartSeries) -> &mut PathBuilder {
@@ -534,11 +618,10 @@ impl Builders {
         let Some((&p0, rest)) = line.split_first() else {
             return;
         };
-        let h = input.plot_height;
+        let h = px(input.plot_height);
         if let Some(fill) = s.fill
-            && let Some(&last) = rest.last()
+            && !rest.is_empty()
         {
-            let b = self.fill(fill);
             match floors {
                 Some(floors) => {
                     floor_pts.clear();
@@ -546,38 +629,28 @@ impl Builders {
                         t_ns: p.t_ns,
                         value: *f,
                     }));
+                    // Same points in time, same curve kind: `floor` has one vertex per line
+                    // vertex, at the same x.
                     emit_run(floor_pts, input.curved, input, tangents, floor);
-                    b.move_to(p0);
-                    for &p in rest {
-                        b.line_to(p);
-                    }
-                    for &p in floor.iter().rev() {
-                        b.line_to(p);
-                    }
+                    let floor = &floor[..];
+                    self.fill(fill)
+                        .band(line, |i, p| floor.get(i).copied().unwrap_or(point(p.x, h)));
                 }
-                None => {
-                    b.move_to(point(p0.x, px(h)));
-                    b.line_to(p0);
-                    for &p in rest {
-                        b.line_to(p);
-                    }
-                    b.line_to(point(last.x, px(h)));
-                }
+                None => self.fill(fill).band(line, |_, p| point(p.x, h)),
             }
-            b.close();
         }
         emit_cell_stroke(self.stroke(s), p0, rest);
     }
 
-    /// Tessellates every builder into `fills` and `strokes` and leaves the builder lists empty. A
-    /// failed or empty path adds no set.
+    /// Tessellates every stroke builder into `strokes`, moves the fills into `fills` and leaves
+    /// the builder lists empty. A failed or empty path adds no set.
     fn finish(&mut self, fills: &mut SmallVec<[PathSet; 2]>, strokes: &mut SmallVec<[PathSet; 3]>) {
-        fills.clear();
+        self.reclaim(fills);
         strokes.clear();
         fills.extend(
             self.fills
                 .drain(..)
-                .filter_map(|(color, b)| set(color, false, b)),
+                .filter_map(|(color, mesh)| fill_set(color, mesh)),
         );
         strokes.extend(
             self.strokes
@@ -585,6 +658,14 @@ impl Builders {
                 .filter_map(|(color, dashed, b)| set(color, dashed, b)),
         );
     }
+}
+
+fn fill_set(color: Hsla, mesh: FillMesh) -> Option<PathSet> {
+    Some(PathSet {
+        color,
+        dashed: false,
+        path: mesh.finish()?,
+    })
 }
 
 fn set(color: Hsla, dashed: bool, b: PathBuilder) -> Option<PathSet> {
@@ -759,7 +840,7 @@ pub fn build_cell(
     input: &BuildInput,
     origin: (f32, f32),
     clip_w: f32,
-    fill: &mut PathBuilder,
+    fill: &mut FillMesh,
     stroke: &mut PathBuilder,
     mut overlay: Option<&mut PathBuilder>,
     scratch: &mut Scratch,
@@ -837,19 +918,20 @@ pub fn build_cell(
 
 /// Tessellates a grid's shared builders into `cache`: `fills[0]` from `fill`, `strokes[0]` from
 /// `stroke` and `strokes[1]` from `overlay`, plus the stale sets from `scratch`. Empty paths add
-/// no set. Also stores the time map and y range the geometry was built for.
+/// no set. Also stores the time map and y range the geometry was built for. The old fill paths
+/// go back to `scratch` for `Scratch::take_fill`.
 pub fn finish_grid(
     input: &BuildInput,
-    fill: (Hsla, PathBuilder),
+    fill: (Hsla, FillMesh),
     stroke: (Hsla, PathBuilder),
     overlay: Option<(Hsla, PathBuilder)>,
     cache: &mut ChartCache,
     scratch: &mut Scratch,
 ) {
-    cache.fills.clear();
+    scratch.live.reclaim(&mut cache.fills);
     cache.strokes.clear();
     cache.gaps.clear();
-    cache.fills.extend(set(fill.0, false, fill.1));
+    cache.fills.extend(fill_set(fill.0, fill.1));
     cache.strokes.extend(set(stroke.0, false, stroke.1));
     if let Some((color, b)) = overlay {
         cache.strokes.extend(set(color, false, b));
@@ -913,7 +995,7 @@ impl CellPlace {
 /// A fill polygon down to the cell's baseline (when `fill` is given and there are 2 or more
 /// points) and a stroke along `pts`. A single point strokes 1 px to the right.
 fn emit_cell(
-    fill: Option<&mut PathBuilder>,
+    fill: Option<&mut FillMesh>,
     stroke: &mut PathBuilder,
     pts: &[Point<Pixels>],
     place: &CellPlace,
@@ -922,28 +1004,15 @@ fn emit_cell(
     let Some((&first, rest)) = pts.split_first() else {
         return;
     };
-    if let Some(b) = fill
-        && let Some(&last) = rest.last()
-    {
-        emit_cell_fill(b, first, rest, last, place.baseline(input));
+    if let Some(b) = fill {
+        emit_cell_fill(b, pts, place.baseline(input));
     }
     emit_cell_stroke(stroke, first, rest);
 }
 
-fn emit_cell_fill(
-    b: &mut PathBuilder,
-    first: Point<Pixels>,
-    rest: &[Point<Pixels>],
-    last: Point<Pixels>,
-    baseline: Pixels,
-) {
-    b.move_to(point(first.x, baseline));
-    b.line_to(first);
-    for &p in rest {
-        b.line_to(p);
-    }
-    b.line_to(point(last.x, baseline));
-    b.close();
+/// The fill under `pts` down to `baseline`.
+fn emit_cell_fill(b: &mut FillMesh, pts: &[Point<Pixels>], baseline: Pixels) {
+    b.band(pts, |_, p| point(p.x, baseline));
 }
 
 fn emit_cell_stroke(b: &mut PathBuilder, first: Point<Pixels>, rest: &[Point<Pixels>]) {
@@ -970,11 +1039,8 @@ fn emit_stale(
     let Some((&first, rest)) = pts.split_first() else {
         return;
     };
-    if main
-        && let Some(color) = spec.fill
-        && let Some(&last) = rest.last()
-    {
-        emit_cell_fill(stale.fill(color), first, rest, last, place.baseline(input));
+    if main && let Some(color) = spec.fill {
+        emit_cell_fill(stale.fill(color), pts, place.baseline(input));
     }
     emit_cell_stroke(stale.stroke(spec), first, rest);
 }
