@@ -419,6 +419,10 @@ pub fn open_scene(
         app_id: Some(APP_ID.into()),
         focus: true,
         show: true,
+        // GPUI caps a window that is not active at 30 fps by default. KWin does not activate a
+        // window that opens without an xdg-activation token, so the bench would measure the
+        // cap, not our frames (tasklens-wlf.28).
+        inactive_frame_interval: None,
         ..Default::default()
     };
     let (handle, view) = gpui_kit::open_window(options, cx, |window, cx| {
@@ -440,6 +444,7 @@ pub fn open_scene(
                 app_id: Some(APP_ID.into()),
                 focus: false,
                 show: true,
+                inactive_frame_interval: None,
                 ..Default::default()
             };
             let opened = gpui_kit::open_window(options, cx, |window, cx| {
@@ -603,6 +608,13 @@ async fn measure(
         cx.update(|cx| driver.update(cx, |d, _| d.install_paint_log()));
     }
     let at_measure = counts(cx);
+    let is_active = |cx: &mut AsyncApp| {
+        window
+            .handle
+            .update(cx, |_, window, _| window.is_window_active())
+            .unwrap_or(false)
+    };
+    let active_at = is_active(cx);
     let paints_at = cx.update(|cx| window.view.read(cx).paints());
     let samples_at = engine.bridge_samples();
     let cpu_at = (clocks.process_cpu_ns)();
@@ -622,6 +634,7 @@ async fn measure(
     let (requested, paint_log) =
         cx.update(|cx| driver.update(cx, |d, _| (d.stats.requested, d.take_paint_log())));
     let at_end = counts(cx);
+    let window_active = active_at && is_active(cx);
     let paints = cx
         .update(|cx| window.view.read(cx).paints())
         .saturating_sub(paints_at);
@@ -694,6 +707,7 @@ async fn measure(
         pss_mb,
         stalls: u32::try_from(stalls).unwrap_or(u32::MAX),
         warmup_stalls: u32::try_from(warmup_stalls).unwrap_or(u32::MAX),
+        window_active,
         bridge_latency_ms,
         gpu: None,
     })

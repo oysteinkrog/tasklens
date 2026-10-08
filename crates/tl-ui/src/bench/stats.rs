@@ -219,6 +219,8 @@ pub struct BenchReport {
     pub stalls: u32,
     /// Stalls during the warm-up, kept apart so they are not hidden.
     pub warmup_stalls: u32,
+    /// The bench window was active at the start and the end of the measured window.
+    pub window_active: bool,
     pub bridge_latency_ms: Option<LatencyPct>,
     /// `None` in phase 0; E01-023 fills it (R-160 OI-14).
     pub gpu: Option<GpuReport>,
@@ -303,6 +305,7 @@ mod tests {
             pss_mb: 110.0,
             stalls: 0,
             warmup_stalls: 0,
+            window_active: true,
             bridge_latency_ms: None,
             gpu: None,
         }
@@ -376,6 +379,7 @@ mod tests {
             "pss_mb",
             "stalls",
             "warmup_stalls",
+            "window_active",
             "bridge_latency_ms",
             "gpu",
         ];
