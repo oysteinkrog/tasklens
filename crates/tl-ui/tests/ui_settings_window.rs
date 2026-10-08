@@ -1137,3 +1137,193 @@ fn device_list_hotplug_row(cx: &mut TestAppContext) {
         ["overview", "cpu", "memory", "disk:sda", "disk:sdb"]
     );
 }
+
+// PageBuilder: action switches and dropdowns, Str switches, indent, tooltip, restart toast text
+// and the slider Release hook (E21-026, E21-020).
+
+gpui_kit::actions!(tl_settings_test, [FlipAnimations]);
+
+/// A test action carrying a picked value.
+#[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
+#[action(namespace = tl_settings_test, no_json)]
+struct PickName {
+    name: gpui_kit::SharedString,
+}
+
+/// All toast texts of the Settings window, shown and waiting.
+fn window_toasts(vcx: &mut VisualTestContext) -> Vec<String> {
+    vcx.update(|window, cx| {
+        let queue =
+            ToastQueue::of_window(window, cx).expect("the Settings window has a toast layer");
+        let q = queue.read(cx);
+        let mut all = q.visible_texts().to_vec();
+        all.extend(q.waiting_texts().iter().cloned());
+        all.iter().map(|t| t.to_string()).collect()
+    })
+}
+
+#[gpui_kit::test]
+fn page_builder_action_switch_dispatches(cx: &mut TestAppContext) {
+    setup(cx);
+    let count = Rc::new(Cell::new(0));
+    let seen = count.clone();
+    cx.update(|cx| cx.on_action(move |_: &FlipAnimations, _| seen.set(seen.get() + 1)));
+    let mut page = PageBuilder::new(PageId::Advanced);
+    page.action_switch("G", SettingKey::MotionAnimations, "Animations", || {
+        Box::new(FlipAnimations)
+    });
+    assert_eq!(page.keys(), [SettingKey::MotionAnimations]);
+    let now = cx.update(|cx| TlSettings::settings(cx).motion.animations);
+    cx.update(|cx| page.set_bool(SettingKey::MotionAnimations, !now, cx));
+    cx.run_until_parked();
+    assert_eq!(count.get(), 1, "a change dispatches once");
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).motion.animations),
+        now,
+        "the switch itself writes nothing"
+    );
+    cx.update(|cx| page.set_bool(SettingKey::MotionAnimations, now, cx));
+    cx.run_until_parked();
+    assert_eq!(count.get(), 1, "the stored value dispatches nothing");
+}
+
+#[gpui_kit::test]
+fn page_builder_action_dropdown_dispatches(cx: &mut TestAppContext) {
+    setup(cx);
+    let picked = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let seen = picked.clone();
+    cx.update(|cx| cx.on_action(move |a: &PickName, _| seen.borrow_mut().push(a.name.to_string())));
+    let mut page = PageBuilder::new(PageId::Advanced);
+    page.action_dropdown(
+        "G",
+        SettingKey::ThemeActive,
+        "Theme",
+        &[
+            ("One".into(), SettingValue::Str("one".into())),
+            ("Two (custom)".into(), SettingValue::Str("two".into())),
+        ],
+        |name| {
+            Box::new(PickName {
+                name: name.to_string().into(),
+            })
+        },
+    );
+    let before = cx.update(|cx| TlSettings::settings(cx).theme.active.clone());
+    assert_eq!(
+        page.dropdown_labels(SettingKey::ThemeActive),
+        ["One", "Two (custom)"]
+    );
+    cx.update(|cx| page.pick(SettingKey::ThemeActive, "Two (custom)", cx));
+    cx.run_until_parked();
+    assert_eq!(*picked.borrow(), ["two"]);
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).theme.active.clone()),
+        before,
+        "the dropdown itself writes nothing"
+    );
+}
+
+#[gpui_kit::test]
+fn page_builder_indent_tooltip_disabled(cx: &mut TestAppContext) {
+    setup(cx);
+    let mut page = PageBuilder::new(PageId::Advanced);
+    page.switch("G", SettingKey::MotionAnimations, "Animations", None)
+        .indent_next(16.)
+        .disable_next(true)
+        .switch("G", SettingKey::MotionSmoothGraphs, "Smooth Graphs", None)
+        .tooltip_next(Some("Not supported by this desktop".into()))
+        .switch("G", SettingKey::MotionSmoothScroll, "Smooth scroll", None);
+    assert_eq!(
+        page.keys(),
+        [
+            SettingKey::MotionAnimations,
+            SettingKey::MotionSmoothGraphs,
+            SettingKey::MotionSmoothScroll
+        ]
+    );
+    assert_eq!(page.indent_of(SettingKey::MotionAnimations), 0.);
+    assert_eq!(page.indent_of(SettingKey::MotionSmoothGraphs), 16.);
+    assert!(page.is_disabled(SettingKey::MotionSmoothGraphs));
+    assert!(!page.is_disabled(SettingKey::MotionSmoothScroll));
+    assert_eq!(page.tooltip_of(SettingKey::MotionSmoothGraphs), None);
+    assert_eq!(
+        page.tooltip_of(SettingKey::MotionSmoothScroll).as_deref(),
+        Some("Not supported by this desktop")
+    );
+    // A drawn row still writes through its setter.
+    cx.update(|cx| page.set_bool(SettingKey::MotionSmoothScroll, false, cx));
+    assert!(!cx.update(|cx| TlSettings::settings(cx).motion.smooth_scroll));
+}
+
+#[gpui_kit::test]
+fn page_builder_str_switch_restart_toast(cx: &mut TestAppContext) {
+    setup(cx);
+    let (_, mut vcx) = open(cx, 1);
+    let mut page = PageBuilder::new(PageId::Advanced);
+    vcx.update(|_, cx| {
+        page.restart_note_toast(cx, "Restart to apply".into())
+            .str_switch(
+                "G",
+                SettingKey::AppearanceDecorations,
+                "Use system title bar",
+                "server",
+                "client",
+            );
+    });
+    assert_eq!(
+        page.description_of(SettingKey::AppearanceDecorations)
+            .as_deref(),
+        Some("Takes effect after restart")
+    );
+    vcx.update(|_, cx| page.set_bool(SettingKey::AppearanceDecorations, true, cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).appearance.decorations),
+        tl_model::settings::Decorations::Server
+    );
+    assert_eq!(window_toasts(&mut vcx), ["Restart to apply"]);
+    vcx.update(|_, cx| page.set_bool(SettingKey::AppearanceDecorations, false, cx));
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).appearance.decorations),
+        tl_model::settings::Decorations::Client
+    );
+}
+
+static COMMITTED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+fn commit_pages(_: &mut gpui_kit::App) -> Vec<PageBuilder> {
+    let mut page = PageBuilder::new(PageId::Advanced);
+    page.slider_on_commit(|v, _| COMMITTED.store(v, std::sync::atomic::Ordering::SeqCst))
+        .slider(
+            "Motion",
+            SettingKey::MotionSmoothScrollAmount,
+            "Smooth scroll amount",
+            1..=10,
+            1,
+            |v| format!("{v}").into(),
+        );
+    vec![page]
+}
+
+#[gpui_kit::test]
+fn page_builder_slider_on_commit(cx: &mut TestAppContext) {
+    setup(cx);
+    cx.update(|cx| cx.set_global(TestPages(commit_pages)));
+    let (frame, vcx) = open(cx, 1);
+    let state = vcx
+        .read(|cx| {
+            frame
+                .read(cx)
+                .content()
+                .read(cx)
+                .slider_state(SettingKey::MotionSmoothScrollAmount)
+                .cloned()
+        })
+        .expect("slider state");
+    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Preview(4.))));
+    cx.run_until_parked();
+    assert_eq!(COMMITTED.load(std::sync::atomic::Ordering::SeqCst), -1);
+    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Commit(6.))));
+    cx.run_until_parked();
+    assert_eq!(COMMITTED.load(std::sync::atomic::Ordering::SeqCst), 6);
+}

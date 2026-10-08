@@ -29,10 +29,13 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::slider::SliderState;
+use gpui_kit::component::label::Label;
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
     Settings as KitSettings,
 };
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, AppContext as _, Context, Entity, Global, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
@@ -202,6 +205,7 @@ struct SliderSpec {
     key: SettingKey,
     range: RangeInclusive<i64>,
     step: i64,
+    on_commit: Option<SliderCommit>,
 }
 
 /// The slider states of the open Settings window, by key. Render looks them up here.
@@ -218,6 +222,11 @@ impl SliderStates {
 
 type CustomRender = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 type BoolSetter = Rc<dyn Fn(bool, &mut App)>;
+type BoolGetter = Rc<dyn Fn(&App) -> bool>;
+/// Runs with the value after a slider's Release write (the UI Scale toast).
+pub type SliderCommit = fn(i64, &mut App);
+/// What picking a dropdown option does with its value.
+type PickValue = Rc<dyn Fn(&SettingValue, &mut App)>;
 /// A dropdown setter taking the index of the picked option.
 type PickSetter = Rc<dyn Fn(usize, &mut App)>;
 /// A checklist section as rendered: its heading and `(label, value, setter)` per checkbox.
@@ -234,6 +243,14 @@ pub struct PageBuilder {
     restart_next: Option<SharedString>,
     /// The next item is disabled.
     disable_next: bool,
+    /// The next switch's left indent, in px before the UI scale.
+    indent_next: f32,
+    /// The next switch's tooltip.
+    tooltip_next: Option<SharedString>,
+    /// The next item's restart toast when it is not the restart note itself.
+    restart_toast_next: Option<SharedString>,
+    /// Runs after the next slider's Release write.
+    commit_next: Option<SliderCommit>,
     description: Option<SharedString>,
     /// The switch and checkbox setters, the same closures the kit calls.
     #[cfg(any(test, feature = "test-hooks"))]
@@ -262,6 +279,12 @@ pub struct PageBuilder {
     /// The custom item labels and their render closures.
     #[cfg(any(test, feature = "test-hooks"))]
     customs: Vec<(SharedString, CustomRender)>,
+    /// The indent of each indented switch, in px before the UI scale.
+    #[cfg(any(test, feature = "test-hooks"))]
+    indents: Vec<(SettingKey, f32)>,
+    /// The tooltip of each switch that has one.
+    #[cfg(any(test, feature = "test-hooks"))]
+    tooltips: Vec<(SettingKey, SharedString)>,
 }
 
 /// One checklist section: a sub-heading (none when empty) and its `(label, value)` checkboxes.
@@ -279,6 +302,10 @@ impl PageBuilder {
             sliders: Vec::new(),
             restart_next: None,
             disable_next: false,
+            indent_next: 0.,
+            tooltip_next: None,
+            restart_toast_next: None,
+            commit_next: None,
             description: None,
             #[cfg(any(test, feature = "test-hooks"))]
             bool_setters: Vec::new(),
@@ -298,6 +325,10 @@ impl PageBuilder {
             buttons: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             customs: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            indents: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            tooltips: Vec::new(),
         }
     }
 
@@ -323,6 +354,14 @@ impl PageBuilder {
         self
     }
 
+    /// Like [`Self::restart_note`], but the toast says `toast` instead of the note
+    /// (`appearance.decorations`: "Restart tasklens to apply the title bar change").
+    pub fn restart_note_toast(&mut self, cx: &App, toast: SharedString) -> &mut Self {
+        self.restart_next = Some(tr(cx, RESTART_NOTE));
+        self.restart_toast_next = Some(toast);
+        self
+    }
+
     /// The text under the page title.
     pub fn page_description(&mut self, text: impl Into<SharedString>) -> &mut Self {
         self.description = Some(text.into());
@@ -332,6 +371,25 @@ impl PageBuilder {
     /// Disables the next item when `disabled` is true. A disabled slider is skipped by Tab.
     pub fn disable_next(&mut self, disabled: bool) -> &mut Self {
         self.disable_next = disabled;
+        self
+    }
+
+    /// Indents the next switch by `indent` px (before the UI scale), for a row that depends on
+    /// the row above it.
+    pub fn indent_next(&mut self, indent: f32) -> &mut Self {
+        self.indent_next = indent;
+        self
+    }
+
+    /// Gives the next switch a tooltip when `text` is set (why a disabled row is disabled).
+    pub fn tooltip_next(&mut self, text: Option<SharedString>) -> &mut Self {
+        self.tooltip_next = text;
+        self
+    }
+
+    /// Runs `on_commit` with the value after the next slider's Release write.
+    pub fn slider_on_commit(&mut self, on_commit: SliderCommit) -> &mut Self {
+        self.commit_next = Some(on_commit);
         self
     }
 
@@ -525,9 +583,55 @@ impl PageBuilder {
     ) -> &mut Self {
         let restart = self.take_restart();
         let setter = self.bool_setter(key, restart.clone());
-        let field =
-            SettingField::switch(move |cx| read_bool(cx, key), move |on, cx| setter(on, cx));
-        self.push(group, key, label, description, restart, field)
+        let get: BoolGetter = Rc::new(move |cx| read_bool(cx, key));
+        self.push_switch(group, key, label, description, restart, get, setter)
+    }
+
+    /// A switch that shows `key` and, when switched to the other value, dispatches `action()`
+    /// instead of writing. The action's handler writes the key (Always On Top, Start at login,
+    /// the Public IP notice).
+    pub fn action_switch(
+        &mut self,
+        group: impl Into<SharedString>,
+        key: SettingKey,
+        label: impl Into<SharedString>,
+        action: fn() -> Box<dyn Action>,
+    ) -> &mut Self {
+        let restart = self.take_restart();
+        let setter: BoolSetter = Rc::new(move |on, cx| {
+            if on != read_bool(cx, key) {
+                dispatch_deferred(action(), cx);
+            }
+        });
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.bool_setters.push((key, setter.clone()));
+        let get: BoolGetter = Rc::new(move |cx| read_bool(cx, key));
+        self.push_switch(group, key, label, None, restart, get, setter)
+    }
+
+    /// A switch over the Str `key`: on stores `on`, off stores `off`. Any other stored value
+    /// shows as off.
+    pub fn str_switch(
+        &mut self,
+        group: impl Into<SharedString>,
+        key: SettingKey,
+        label: impl Into<SharedString>,
+        on: &'static str,
+        off: &'static str,
+    ) -> &mut Self {
+        let restart = self.take_restart();
+        let toast = self.take_toast(&restart);
+        let setter: BoolSetter = Rc::new(move |checked, cx| {
+            let value = if checked { on } else { off };
+            TlSettings::set(cx, key, SettingValue::Str(value.into()));
+            if let Some(note) = &toast {
+                info_toast(note.clone(), cx);
+            }
+        });
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.bool_setters.push((key, setter.clone()));
+        let get: BoolGetter = Rc::new(move |cx| read(cx, key).as_str() == Some(on));
+        self.push_switch(group, key, label, None, restart, get, setter)
     }
 
     pub fn checkbox(
@@ -554,6 +658,44 @@ impl PageBuilder {
         options: &[(SharedString, SettingValue)],
     ) -> &mut Self {
         let restart = self.take_restart();
+        let toast = self.take_toast(&restart);
+        let write: PickValue = Rc::new(move |value, cx| {
+            TlSettings::set(cx, key, value.clone());
+            if let Some(note) = &toast {
+                info_toast(note.clone(), cx);
+            }
+        });
+        self.dropdown_with(group, key, label, options, restart, write)
+    }
+
+    /// A dropdown of `(label, stored value)` options that shows `key` and, on a pick, dispatches
+    /// `action(value)` instead of writing (the Theme dropdown's `ActivateTheme`).
+    pub fn action_dropdown(
+        &mut self,
+        group: impl Into<SharedString>,
+        key: SettingKey,
+        label: impl Into<SharedString>,
+        options: &[(SharedString, SettingValue)],
+        action: fn(&str) -> Box<dyn Action>,
+    ) -> &mut Self {
+        let restart = self.take_restart();
+        let send: PickValue = Rc::new(move |value, cx| {
+            if let SettingValue::Str(value) = value {
+                dispatch_deferred(action(value), cx);
+            }
+        });
+        self.dropdown_with(group, key, label, options, restart, send)
+    }
+
+    fn dropdown_with(
+        &mut self,
+        group: impl Into<SharedString>,
+        key: SettingKey,
+        label: impl Into<SharedString>,
+        options: &[(SharedString, SettingValue)],
+        restart: Option<SharedString>,
+        on_pick: PickValue,
+    ) -> &mut Self {
         let values: Rc<[SettingValue]> = options.iter().map(|(_, v)| v.clone()).collect();
         let kit_options = options
             .iter()
@@ -561,14 +703,9 @@ impl PageBuilder {
             .map(|(i, (label, _))| (SharedString::from(i.to_string()), label.clone()))
             .collect();
         let read_values = values.clone();
-        let toast = restart.clone();
         let pick: PickSetter = Rc::new(move |i, cx| {
-            let Some(value) = values.get(i) else {
-                return;
-            };
-            TlSettings::set(cx, key, value.clone());
-            if let Some(note) = &toast {
-                info_toast(note.clone(), cx);
+            if let Some(value) = values.get(i) {
+                on_pick(value, cx);
             }
         });
         #[cfg(any(test, feature = "test-hooks"))]
@@ -613,6 +750,7 @@ impl PageBuilder {
             key,
             range: range.clone(),
             step,
+            on_commit: self.commit_next.take(),
         });
         let (min, max) = (*range.start() as f32, *range.end() as f32);
         let field = SettingField::render(move |_, _, cx| {
@@ -646,7 +784,7 @@ impl PageBuilder {
             max: *range.end() as f64,
             step: step as f64,
         };
-        let toast = restart.clone();
+        let toast = self.take_toast(&restart);
         let field = SettingField::number_input(
             options,
             move |cx| read(cx, key).as_f64().unwrap_or_default(),
@@ -814,6 +952,24 @@ impl PageBuilder {
         self.disabled.contains(&key)
     }
 
+    /// The indent of the switch of `key`, in px before the UI scale; 0 when it has none.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn indent_of(&self, key: SettingKey) -> f32 {
+        self.indents
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map_or(0., |(_, indent)| *indent)
+    }
+
+    /// The tooltip of the switch of `key`, if any.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn tooltip_of(&self, key: SettingKey) -> Option<SharedString> {
+        self.tooltips
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, text)| text.clone())
+    }
+
     /// The banner texts, top first.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn banners(&self) -> &[SharedString] {
@@ -837,9 +993,10 @@ impl PageBuilder {
 
     /// Writes a Bool key and pushes the restart toast when the item needs one.
     fn bool_setter(&mut self, key: SettingKey, restart: Option<SharedString>) -> BoolSetter {
+        let toast = self.take_toast(&restart);
         let setter: BoolSetter = Rc::new(move |on, cx| {
             TlSettings::set(cx, key, SettingValue::Bool(on));
-            if let Some(note) = &restart {
+            if let Some(note) = &toast {
                 info_toast(note.clone(), cx);
             }
         });
@@ -852,6 +1009,91 @@ impl PageBuilder {
         self.restart_next.take()
     }
 
+    /// The restart toast of an item with the restart note `restart`: the text from
+    /// `restart_note_toast`, else the note itself.
+    fn take_toast(&mut self, restart: &Option<SharedString>) -> Option<SharedString> {
+        let own = self.restart_toast_next.take();
+        restart
+            .as_ref()
+            .map(|note| own.unwrap_or_else(|| note.clone()))
+    }
+
+    /// A switch item. With an indent or a tooltip it is drawn as the kit row draws it (title
+    /// left, switch right), since the kit item has neither.
+    #[allow(clippy::too_many_arguments)]
+    fn push_switch(
+        &mut self,
+        group: impl Into<SharedString>,
+        key: SettingKey,
+        label: impl Into<SharedString>,
+        description: Option<SharedString>,
+        restart: Option<SharedString>,
+        get: BoolGetter,
+        set: BoolSetter,
+    ) -> &mut Self {
+        let indent = std::mem::take(&mut self.indent_next);
+        let tooltip = self.tooltip_next.take();
+        if indent == 0. && tooltip.is_none() {
+            let field = SettingField::switch(move |cx| get(cx), move |on, cx| set(on, cx));
+            return self.push(group, key, label, description, restart, field);
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            if indent != 0. {
+                self.indents.push((key, indent));
+            }
+            if let Some(text) = &tooltip {
+                self.tooltips.push((key, text.clone()));
+            }
+        }
+        self.keys.push(key);
+        self.restart_toast_next = None;
+        let label: SharedString = label.into();
+        let description = restart.or(description);
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(text) = &description {
+            self.descriptions.push((key, text.clone()));
+        }
+        let disabled = std::mem::take(&mut self.disable_next);
+        #[cfg(any(test, feature = "test-hooks"))]
+        if disabled {
+            self.disabled.push(key);
+        }
+        let title = label.clone();
+        let item = SettingItem::render(move |options, _, cx| {
+            let s = metrics(cx).ui_scale;
+            let muted = current(cx).text_secondary;
+            let set = set.clone();
+            let mut text = v_flex()
+                .flex_1()
+                .max_w_3_5()
+                .child(Label::new(title.clone()).text_sm());
+            if let Some(description) = &description {
+                text = text.child(div().text_sm().text_color(muted).child(description.clone()));
+            }
+            let mut switch = Switch::new("check")
+                .checked(get(cx))
+                .disabled(options.is_disabled())
+                .with_size(options.size())
+                .on_click(move |on: &bool, _, cx: &mut App| set(*on, cx));
+            if let Some(tip) = &tooltip {
+                switch = switch.tooltip(tip.clone());
+            }
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .gap_3()
+                .pl(px(indent * s))
+                .child(text)
+                .child(div().id("field").child(switch))
+        })
+        .keywords([label])
+        .disabled(disabled);
+        self.push_item(group, item);
+        self
+    }
+
     fn push<T: Clone + PartialEq + Send + Sync + 'static>(
         &mut self,
         group: impl Into<SharedString>,
@@ -862,6 +1104,7 @@ impl PageBuilder {
         field: SettingField<T>,
     ) -> &mut Self {
         self.keys.push(key);
+        self.restart_toast_next = None;
         let mut item = SettingItem::new(label, field);
         if let Some(text) = restart.or(description) {
             #[cfg(any(test, feature = "test-hooks"))]
@@ -993,6 +1236,12 @@ fn value_matches(v: &SettingValue, now: &serde_json::Value) -> bool {
     }
 }
 
+/// Dispatches `action` once the current event is done: a setter runs while the window handles
+/// the click, so the window is busy and a dispatch now would be lost.
+fn dispatch_deferred(action: Box<dyn Action>, cx: &mut App) {
+    cx.defer(move |cx| cx.dispatch_action(action.as_ref()));
+}
+
 /// Pushes `text` (such as "Takes effect after restart") as an Info toast in the active window.
 /// Deferred: a setter runs while the window handles the click, so the window is busy.
 fn info_toast(text: SharedString, cx: &mut App) {
@@ -1039,6 +1288,7 @@ impl SettingsWindow {
                     .default_value(value as f32)
             });
             let key = spec.key;
+            let on_commit = spec.on_commit;
             slider_subs.push(
                 cx.subscribe(&state, move |_, _, ev: &TlSliderEvent, cx| match *ev {
                     TlSliderEvent::Preview(v) => {
@@ -1048,7 +1298,11 @@ impl SettingsWindow {
                         });
                     }
                     TlSliderEvent::Commit(v) => {
-                        TlSettings::set(cx, key, SettingValue::Int(v.round() as i64));
+                        let value = v.round() as i64;
+                        TlSettings::set(cx, key, SettingValue::Int(value));
+                        if let Some(on_commit) = on_commit {
+                            on_commit(value, cx);
+                        }
                     }
                 }),
             );

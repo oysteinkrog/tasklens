@@ -259,7 +259,7 @@ fn on_slider(setting: &SliderSetting, event: TlSliderEvent, window: &mut Window,
     }
 }
 
-fn scale_toast_text(pct: u16, cx: &App) -> SharedString {
+pub(crate) fn scale_toast_text(pct: u16, cx: &App) -> SharedString {
     let args = [("pct", FluentValue::from(pct))];
     if cx.has_global::<Strings>() {
         tr_args(cx, "shell-toast-ui-scale", &args)
