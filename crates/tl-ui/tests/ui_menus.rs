@@ -1605,16 +1605,16 @@ fn reset_minigraph_dispatch(cx: &mut TestAppContext) {
 // Settings menu: Start at login and Start minimized (E21-011).
 
 /// The calls of the fake autostart writer, `(enabled, minimized)`.
-type AutostartCalls = Rc<RefCell<Vec<(bool, bool)>>>;
+type AutostartCalls = Arc<std::sync::Mutex<Vec<(bool, bool)>>>;
 
 /// Installs an `AppEnv` whose `set_autostart` records each call and fails when `fail` is set.
 fn fake_autostart(cx: &mut VisualTestContext, fail: bool) -> AutostartCalls {
-    let calls: AutostartCalls = Rc::new(RefCell::new(Vec::new()));
+    let calls: AutostartCalls = Arc::default();
     let log = calls.clone();
     cx.update(|_, cx| {
         cx.set_global(tl_ui::app::AppEnv {
             set_autostart: Arc::new(move |enabled, minimized| {
-                log.borrow_mut().push((enabled, minimized));
+                log.lock().expect("calls").push((enabled, minimized));
                 if fail {
                     Err("read-only file system".to_owned())
                 } else {
@@ -1675,14 +1675,17 @@ fn start_at_login_success(cx: &mut TestAppContext) {
     let calls = fake_autostart(r.cx, false);
     keys(r.cx, "alt-s");
     click_label(r.cx, "Start at login");
-    assert_eq!(*calls.borrow(), [(true, false)]);
+    assert_eq!(*calls.lock().expect("calls"), [(true, false)]);
     assert!(settings(r.cx).startup.start_at_login);
     assert_eq!(open_menu(r.cx), None);
 
     // Activated again: the entry is deleted and the key turns off.
     keys(r.cx, "alt-s");
     click_label(r.cx, "Start at login");
-    assert_eq!(*calls.borrow(), [(true, false), (false, false)]);
+    assert_eq!(
+        *calls.lock().expect("calls"),
+        [(true, false), (false, false)]
+    );
     assert!(!settings(r.cx).startup.start_at_login);
 }
 
@@ -1693,7 +1696,7 @@ fn start_at_login_failure_reverts(cx: &mut TestAppContext) {
     keys(r.cx, "alt-s");
     click_label(r.cx, "Start at login");
     draw(r.cx);
-    assert_eq!(*calls.borrow(), [(true, false)]);
+    assert_eq!(*calls.lock().expect("calls"), [(true, false)]);
     assert!(
         !settings(r.cx).startup.start_at_login,
         "the key stays false"
@@ -1712,12 +1715,16 @@ fn start_minimized_rewrites_entry(cx: &mut TestAppContext) {
     keys(r.cx, "alt-s");
     click_label(r.cx, "Start minimized");
     assert!(settings(r.cx).startup.start_minimized);
-    assert_eq!(*calls.borrow(), [(true, true)], "the entry is rewritten");
+    assert_eq!(
+        *calls.lock().expect("calls"),
+        [(true, true)],
+        "the entry is rewritten"
+    );
 
     // With Start at login off only the key changes.
     set_start_at_login(r.cx, false);
-    r.cx.update(|_, cx| cx.dispatch_action(&tl_ui::window::menus_settings::ToggleStartMinimized));
+    r.cx.dispatch_action(tl_ui::window::menus_settings::ToggleStartMinimized);
     draw(r.cx);
     assert!(!settings(r.cx).startup.start_minimized);
-    assert_eq!(calls.borrow().len(), 1, "no writer call");
+    assert_eq!(calls.lock().expect("calls").len(), 1, "no writer call");
 }
