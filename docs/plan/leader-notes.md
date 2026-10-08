@@ -802,3 +802,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - hk6.1: the SysDelegate reads take the incoming snapshot (component_header, rows_len and query_generation get snap). The frame overlays the skeleton and empty states below the header. set_paused is driven by the shell PauseChanged.
 - pdu.30: ctrl-c to CopyDetails in bind_keys_processes added as a chain edit under pdu.30. pdu.33: Σ only on columns GroupRow sums; the live-table gap (no Σ prefix, no dim zeros) filed as pdu.56.
 - bj6.6: with no GlobalHub, View > Graphs treats the machine as having no GPU (GPU, VRAM, GPU Temperature items disabled). Accepted.
+- pdu.56: scope is CellOut prefix and dim plus deleting ProcessRowCells::render; render_metric_cell stays until pdu.57 moves the +N and (deleted) runs to the live path and ports the paint tests.
