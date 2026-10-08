@@ -4514,6 +4514,105 @@ mod main_window {
         assert_eq!(anim_frames(&mut vcx), frames, "no frame after the end");
         assert!(!animating(&mut vcx));
     }
+
+    // ---- History toggle (E20-025) ----
+
+    use tl_ui::actions::ToggleHistoryMode;
+
+    fn history_mode(vcx: &mut VisualTestContext) -> bool {
+        vcx.update(|_, cx| TlSettings::state(cx).processes.history_mode)
+    }
+
+    fn first_label(vcx: &mut VisualTestContext) -> String {
+        let main = main(vcx);
+        vcx.update(|_, cx| {
+            let strip = main.read(cx).tabstrip_view().read(cx);
+            strip.drawn_labels()[0].to_string()
+        })
+    }
+
+    fn drawn_history(vcx: &mut VisualTestContext) -> tl_ui::window::tabstrip::DrawnHistory {
+        let main = main(vcx);
+        vcx.update(|_, cx| {
+            let strip = main.read(cx).tabstrip_view().read(cx);
+            strip.drawn_history().cloned().expect("history icon drawn")
+        })
+    }
+
+    #[gpui_kit::test]
+    fn history_toggle_selects_processes(cx: &mut TestAppContext) {
+        let persisted = Rc::new(std::cell::Cell::new(0));
+        let mut vcx = rig(
+            cx,
+            Opts {
+                start_tab: StartTab::Performance,
+                persisted: Some(persisted.clone()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(active(&mut vcx), Tab::Performance);
+        assert!(!history_mode(&mut vcx));
+        let before = persisted.get();
+        act(&mut vcx, ToggleHistoryMode);
+        assert_eq!(active(&mut vcx), Tab::Processes);
+        assert!(history_mode(&mut vcx));
+        assert!(persisted.get() > before, "the state is saved");
+        draw(&mut vcx);
+        assert_eq!(first_label(&mut vcx), "History");
+    }
+
+    #[gpui_kit::test]
+    fn history_icon_click_toggles_off(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        vcx.update(|_, cx| TlSettings::update(cx, |d| d.state.processes.history_mode = true));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert_eq!(first_label(&mut vcx), "History");
+        let created = log(&mut vcx, |l| l.created.clone());
+        let at = bounds(&mut vcx, "TabStrip-history").center();
+        vcx.simulate_click(at, Modifiers::none());
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert!(!history_mode(&mut vcx));
+        assert_eq!(first_label(&mut vcx), "Processes");
+        assert_eq!(active(&mut vcx), Tab::Processes);
+        assert_eq!(
+            log(&mut vcx, |l| l.created.clone()),
+            created,
+            "no page built"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn history_icon_colours_and_tooltips(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let (accent, secondary, hover) = vcx.update(|_, cx| {
+            let t = tl_ui::theme::current(cx);
+            (t.accent, t.text_secondary, t.tab_hover)
+        });
+        let off = drawn_history(&mut vcx);
+        assert_eq!(off.color, secondary);
+        assert_eq!(off.tooltip.as_ref(), "Show history");
+
+        // Hover: a tab_hover square under the icon.
+        let icon = bounds(&mut vcx, "TabStrip-history");
+        vcx.simulate_mouse_move(icon.center(), None, Modifiers::none());
+        let square = vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let scale = window.scale_factor();
+            window.painted_quads().iter().any(|q| {
+                q.background == gpui_kit::Background::from(hover) && q.bounds == icon.scale(scale)
+            })
+        });
+        assert!(square, "hover draws the tab_hover square");
+
+        vcx.update(|_, cx| TlSettings::update(cx, |d| d.state.processes.history_mode = true));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        let on = drawn_history(&mut vcx);
+        assert_eq!(on.color, accent);
+        assert_eq!(on.tooltip.as_ref(), "Show live processes");
+    }
 }
 
 /// Startup step 11 after the first frame (tasklens-jqk.20, UI-SHL-110, UI-SHL-093, APP-048).
