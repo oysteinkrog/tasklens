@@ -816,3 +816,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - gma.23: open item decided: with Shared libraries only on, (Primary) and Outside loaded modules stay visible. Other choices accepted (row ids, filter rule, copy_text, 0x%08x offsets). Min widths go to rsf.28.
 - hk6.1: cover div below the header; SysBody computed in on_snapshot; Services page supplies managers_unavailable. loading_status_text must not return fixed English: use a Fluent key (follow-up commit).
 - bj6.14: Start minimized dispatches ToggleStartMinimized (set_autostart first, key only on Ok); bj6.29 reuses it. Failure toast via cx.defer.
+- o55.36: sessions from encoder_stats().session_count; separate Video encode/decode row (29 rows) shown when shared; GPU_PROTO_VERSION bumped to 2 (follow-up); sessions tooltip must pluralise via a Fluent selector if the helper passes numbers.
