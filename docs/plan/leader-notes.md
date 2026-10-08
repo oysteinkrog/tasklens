@@ -832,3 +832,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - jqk.35: shell-menu-pv-* and shell-settings-hide-system keys stay (different UI contexts); AC means no duplicate shell-toolbar/shell-view-mode keys. jqk.23 page fade stays as is.
 - bj6.35: GraphColor::hsla uses theme/palette.rs ACCENT_COLORS (one table). Gallery goldens (menu, slider, icons) fail since about 2026-10-08 midday: bj6-6 to bisect in a worktree.
 - summary_fades_page_out_then_tiles_in fails (frame per draw after fade): pdu-51 to investigate after the wlf.34 bench.
+- crw.24: U-46 found real selection (gpui-kit SelectableText in TlKeyValueGrid); fallback dropped. Right-click on a Details value opens the page menu with Copy value first (page.rs hook); Esc unchanged.
