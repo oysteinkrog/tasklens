@@ -1421,6 +1421,7 @@ mod page {
             BoxKind::Gpu => "perf-overview-box-gpu",
             BoxKind::Disk => "perf-overview-box-disk",
             BoxKind::Net => "perf-overview-box-net",
+            BoxKind::TopProcs => "perf-overview-box-processes",
         }
     }
 
