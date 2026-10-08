@@ -259,6 +259,9 @@ pub struct PageBuilder {
     /// The button labels and actions.
     #[cfg(any(test, feature = "test-hooks"))]
     buttons: Vec<(SharedString, Rc<dyn Action>)>,
+    /// The custom item labels and their render closures.
+    #[cfg(any(test, feature = "test-hooks"))]
+    customs: Vec<(SharedString, CustomRender)>,
 }
 
 /// One checklist section: a sub-heading (none when empty) and its `(label, value)` checkboxes.
@@ -293,6 +296,8 @@ impl PageBuilder {
             empty_texts: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             buttons: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            customs: Vec::new(),
         }
     }
 
@@ -666,6 +671,9 @@ impl PageBuilder {
     ) -> &mut Self {
         self.keys.extend_from_slice(keys);
         let render: CustomRender = Rc::new(render);
+        let label: SharedString = label.into();
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.customs.push((label.clone(), render.clone()));
         let item = SettingItem::new(
             label,
             SettingField::render(move |_, window, cx| render(window, cx)),
@@ -775,6 +783,20 @@ impl PageBuilder {
         if let Some((_, action)) = self.buttons.iter().find(|(l, _)| l.as_ref() == label) {
             window.dispatch_action(action.boxed_clone(), cx);
         }
+    }
+
+    /// The element of the custom item labelled `label`, as the page renders it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn render_custom(
+        &self,
+        label: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        self.customs
+            .iter()
+            .find(|(l, _)| l.as_ref() == label)
+            .map(|(_, render)| render(window, cx))
     }
 
     /// The text the checklist of `key` shows when it has no option.
