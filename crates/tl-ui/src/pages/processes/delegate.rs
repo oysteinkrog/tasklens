@@ -50,7 +50,7 @@ use super::cells::{
 };
 use super::header_totals::header_total;
 use super::menu::{MenuCaps, group_header_menu, row_menu};
-use super::name_cell::{NameCellData, NameIcon, NameWords, StateGlyph, name_cell};
+use super::name_cell::{NameCellData, NameIcon, NameWords, StateGlyph, name_cell, pseudo_icon};
 use super::table::{GroupHeader, ProcessQuery};
 use super::tooltip::{RowTipState, RowTipWords, RowTooltip};
 use super::{ProcessesPage, capture_row};
@@ -1130,10 +1130,13 @@ impl TreeTableDelegate for ProcessDelegate {
             exited: false,
         };
         if let Some(g) = self.group(row) {
-            d.icon = g
-                .icon
-                .as_ref()
-                .map_or(NameIcon::None, |i| NameIcon::File(Arc::clone(i)));
+            d.icon = match &g.node {
+                NodeId::Pseudo(kind) => pseudo_icon(*kind),
+                _ => g
+                    .icon
+                    .as_ref()
+                    .map_or(NameIcon::None, |i| NameIcon::File(Arc::clone(i))),
+            };
             d.primary = SharedString::from(&g.name);
         } else if let Some(r) = row
             .record

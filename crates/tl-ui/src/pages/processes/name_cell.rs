@@ -18,6 +18,7 @@ use std::ops::Range;
 use gpui_kit::assets::IconName;
 use gpui_kit::{AnyElement, App, ElementId, InteractiveElement, IntoElement, SharedString, Window};
 use smallvec::SmallVec;
+use tl_model::ids::PseudoKind;
 
 use crate::i18n::tr;
 use crate::table::cells::{CellCtx, IconSourceCache, paint_group_header_cell, paint_name_cell};
@@ -107,6 +108,15 @@ pub fn row_icon(kind: RowKind, icon: NameIcon) -> NameIcon {
         RowKind::KernelThread => NameIcon::Lucide(IconName::Cpu),
         _ => icon,
     }
+}
+
+/// The 16 px Lucide icon of a pseudo row (UI-PRC-002): `activity` for "Interrupts", `archive`
+/// for "Memory compression (zram)".
+pub fn pseudo_icon(kind: PseudoKind) -> NameIcon {
+    NameIcon::Lucide(match kind {
+        PseudoKind::Interrupts => IconName::Activity,
+        PseudoKind::MemoryCompression => IconName::Archive,
+    })
 }
 
 /// The `NameCell` the table paints for `d`.

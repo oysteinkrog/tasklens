@@ -191,14 +191,15 @@ impl IconNamed for AppIcon {
 // the Processes toolbar icons (UI-PRC-019). `ChevronsRight` is the tab overflow button
 // (E20-015). `CircleOff` and `ShieldAlert` are the Properties exited banner and access block
 // (E23-A1). `Activity` to `SlidersHorizontal` are the Settings window page icons (E21-018).
-// `RotateCcw` is the Set Affinity Reset button (E23-005).
+// `RotateCcw` is the Set Affinity Reset button (E23-005). `Archive` is the Memory compression
+// pseudo row (UI-PRC-002).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
         X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, RotateCcw, ArrowUp, ArrowDown,
         Square,
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
-        Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal
+        Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive
     ]
 );
 

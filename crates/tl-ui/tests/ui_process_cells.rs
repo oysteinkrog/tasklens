@@ -3820,4 +3820,137 @@ mod live {
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(vcx.debug_bounds("TlCell-numeric").is_some());
     }
+
+    /// Both pseudo rows as the engine sends them (PROC-012): Interrupts with CPU 1.5%, Memory
+    /// compression with 64 MiB Memory and 2 MiB/s disk. Every other field is Unsupported.
+    fn pseudo_rows() -> Arc<Snapshot> {
+        use tl_model::ids::PseudoKind;
+        use tl_model::process::GroupRow;
+        use tl_model::validity::{FieldValidity, ProcessField as F};
+
+        let pseudo = |kind: PseudoKind, name: &str| GroupRow {
+            node: NodeId::Pseudo(kind),
+            name: Arc::from(name),
+            members: 0,
+            pids: 0,
+            cpu_pct: 0.0,
+            memory_bytes: 0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            threads: 0,
+            validity: FieldValidity::all(Validity::Unsupported),
+            ..group(GroupRowKind::Pseudo)
+        };
+        let mut irq = pseudo(PseudoKind::Interrupts, "Interrupts");
+        irq.cpu_pct = 1.5;
+        irq.validity.set(F::Cpu, Validity::Valid);
+        let mut zram = pseudo(PseudoKind::MemoryCompression, "Memory compression (zram)");
+        zram.rss_anon_bytes = 64 << 20;
+        zram.memory_bytes = 64 << 20;
+        zram.io_read_bps = 2.0 * 1_048_576.0;
+        zram.disk_bps = 2.0 * 1_048_576.0;
+        for f in [F::RssAnon, F::IoRead, F::IoWrite] {
+            zram.validity.set(f, Validity::Valid);
+        }
+        let row = |node: NodeId, group: u32| TableRow {
+            node,
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: None,
+            group: Some(group),
+            descendants: 0,
+            subtree: None,
+        };
+        let mut s = Snapshot::empty(BootId(0), 0);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: vec![row(irq.node.clone(), 0), row(zram.node.clone(), 1)].into(),
+            groups: vec![irq, zram].into(),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot::default());
+        Arc::new(s)
+    }
+
+    fn shown(out: &CellOut) -> String {
+        out.arc
+            .as_deref()
+            .map_or_else(|| out.text.clone(), str::to_owned)
+    }
+
+    /// UI-PRC-002: `activity` and `archive` at 16 px (the small slot), no chevron, PID blank,
+    /// Type "Pseudo", User "root".
+    #[gpui_kit::test]
+    fn pseudo_rows_icons_and_blank_pid(cx: &mut TestAppContext) {
+        use gpui_kit::assets::IconName;
+        use tl_ui::table::tree_table::{IconSlot, NameIcon};
+
+        let (table, vcx) = open(cx, Settings::default(), pseudo_rows());
+        for (ix, icon, name) in [
+            (0, IconName::Activity, "Interrupts"),
+            (1, IconName::Archive, "Memory compression (zram)"),
+        ] {
+            let (cell, expandable) = vcx.update(|_, cx| {
+                let d = &table.read(cx).delegate;
+                (d.name_cell(ix), d.row_expandable(ix))
+            });
+            assert!(
+                matches!(cell.icon, NameIcon::Lucide(i) if i == icon),
+                "{name}: the Lucide icon"
+            );
+            assert!(matches!(cell.icon_size, IconSlot::Small), "{name}: 16 px");
+            assert_eq!(cell.primary.as_ref(), name);
+            assert_eq!(expandable, None, "{name}: no chevron");
+
+            let pid = cell(vcx, &table, ix, ColumnId::Pid);
+            assert_eq!(pid.validity, Validity::Valid, "{name}: PID blank, not n/a");
+            assert!(shown(&pid).is_empty(), "{name}: PID blank");
+            assert_eq!(shown(&cell(vcx, &table, ix, ColumnId::Type)), "Pseudo");
+            assert_eq!(shown(&cell(vcx, &table, ix, ColumnId::User)), "root");
+        }
+        // The table draws both rows with their icons.
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(vcx.debug_bounds("TlNameCell").is_some());
+    }
+
+    /// PROC-012: a pseudo row shows `n/a` in every column it has no data for. Interrupts has
+    /// only CPU; Memory compression has Memory and Disk.
+    #[gpui_kit::test]
+    fn pseudo_rows_na_columns(cx: &mut TestAppContext) {
+        let (table, vcx) = open(cx, Settings::default(), pseudo_rows());
+        let validity = |vcx: &mut VisualTestContext, ix, col| cell(vcx, &table, ix, col).validity;
+        let na = Validity::Unsupported;
+
+        assert_eq!(validity(vcx, 0, ColumnId::Cpu), Validity::Valid);
+        assert_eq!(shown(&cell(vcx, &table, 0, ColumnId::Cpu)), "1.5%");
+        for col in [
+            ColumnId::Memory,
+            ColumnId::Disk,
+            ColumnId::Network,
+            ColumnId::Threads,
+            ColumnId::Handles,
+            ColumnId::CpuKernel,
+            ColumnId::Description,
+            ColumnId::Cmdline,
+        ] {
+            assert_eq!(validity(vcx, 0, col), na, "Interrupts {col:?}");
+        }
+
+        assert_eq!(
+            validity(vcx, 1, ColumnId::Cpu),
+            na,
+            "Memory compression CPU"
+        );
+        assert_eq!(validity(vcx, 1, ColumnId::Memory), Validity::Valid);
+        assert_eq!(shown(&cell(vcx, &table, 1, ColumnId::Memory)), "64.00 MiB");
+        assert_eq!(validity(vcx, 1, ColumnId::Disk), Validity::Valid);
+        for col in [ColumnId::Network, ColumnId::Threads, ColumnId::Gpu] {
+            assert_eq!(validity(vcx, 1, col), na, "Memory compression {col:?}");
+        }
+    }
 }

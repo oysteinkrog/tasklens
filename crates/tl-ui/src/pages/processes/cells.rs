@@ -639,7 +639,7 @@ enum Value<'a> {
 pub fn fill_cell(row: RowRef, col: &ProcColumn, ctx: &CellCtx, out: &mut CellOut) {
     let value = match row {
         RowRef::Group(_, RowKind::GroupHeader) => Value::Blank,
-        RowRef::Group(g, _) => group_value(g, col.id, ctx),
+        RowRef::Group(g, _) => pseudo_na(g, col.id, group_value(g, col.id, ctx)),
         RowRef::Record(r, t, _) => match subtree_total(row, ctx) {
             Some(g) if subtree_column(col.id) => group_value(g, col.id, ctx),
             _ => {
@@ -1070,6 +1070,21 @@ fn first_member<'a>(g: &GroupRow, ctx: &CellCtx<'a>) -> Option<(usize, &'a Proce
     ctx.records.get(i).map(|r| (i, r))
 }
 
+/// User of the pseudo rows (PROC-012): the kernel's work, shown as root.
+fn root_user() -> &'static Arc<str> {
+    static ROOT: OnceLock<Arc<str>> = OnceLock::new();
+    ROOT.get_or_init(|| Arc::from("root"))
+}
+
+/// A pseudo row shows `n/a` in every column it has no data for (PROC-012). PID stays blank.
+fn pseudo_na<'a>(g: &GroupRow, col: ColumnId, value: Value<'a>) -> Value<'a> {
+    if g.kind == GroupRowKind::Pseudo && col != ColumnId::Pid && matches!(value, Value::Blank) {
+        Value::Glyph(Validity::Unsupported)
+    } else {
+        value
+    }
+}
+
 fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a> {
     use ColumnId as C;
     use ProcessField as F;
@@ -1102,6 +1117,7 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
             .as_ref()
             .map_or(Value::Glyph(Validity::Unsupported), Value::Arc),
         C::Name | C::NameDisplay => Value::Arc(&g.name),
+        C::User if g.kind == GroupRowKind::Pseudo => Value::Arc(root_user()),
         C::Type => Value::Arc(match g.kind {
             GroupRowKind::App => &w.type_app,
             GroupRowKind::Unit => &w.type_unit,
