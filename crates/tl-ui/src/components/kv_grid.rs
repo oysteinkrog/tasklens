@@ -2073,13 +2073,16 @@ mod tests {
         assert!(focused, "Tab reaches the link through the owner's handle");
     }
 
+    /// The link clicks an owner handler saw: row index and value bounds.
+    type Clicks = Rc<RefCell<Vec<(usize, Bounds<Pixels>)>>>;
+
     #[gpui_kit::test]
     fn on_link_click_replaces_dispatch(cx: &mut TestAppContext) {
         let linked = || TlValue {
             link: Some(Box::new(OpenSetup)),
             ..TlValue::new("Mbps")
         };
-        let clicked: Rc<RefCell<Vec<(usize, Bounds<Pixels>)>>> = Rc::default();
+        let clicked: Clicks = Rc::default();
         let (cx, _, setups) = host(cx, {
             let clicked = clicked.clone();
             move || {

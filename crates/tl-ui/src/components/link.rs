@@ -278,14 +278,13 @@ mod tests {
         (cx, dispatched)
     }
 
+    /// The bounds the owner click handler was last given.
+    type SeenBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
+
     /// A link with an owner click handler; the handler records the bounds it is given.
     fn harness_bounds(
         cx: &mut TestAppContext,
-    ) -> (
-        &mut VisualTestContext,
-        Rc<Cell<usize>>,
-        Rc<Cell<Option<Bounds<Pixels>>>>,
-    ) {
+    ) -> (&mut VisualTestContext, Rc<Cell<usize>>, SeenBounds) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::store::init(
