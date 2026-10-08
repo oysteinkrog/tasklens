@@ -12,6 +12,10 @@
 //! (`window.window_decorations()`), not the setting, because a compositor may refuse server
 //! decorations.
 //!
+//! The pin ("Always on top", E20-022, UI-SHL-005, APP-008, R-073) sits left of minimize in the
+//! client bar and last in the menu row. It dispatches `ToggleAlwaysOnTop` for the main window and
+//! is disabled while the KWin bridge is not up.
+//!
 //! The bar has no Tab stops (R-108). Every caption command also has a key (Ctrl+W) or a
 //! compositor shortcut. Each caption button's tooltip text is its accessible name.
 
@@ -29,10 +33,13 @@ use tl_model::health::HelperState;
 use tl_model::table::TableMode;
 use tl_model::validity::Validity;
 
+use super::main::WINDOW_TITLE;
+use super::registry::WindowKey;
 use super::toolbar::{DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{CloseWindow, MinimizeWindow, ZoomWindow};
 use crate::components::icons::{AppIcon, TlIcon};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::tr;
 use crate::settings_global::{Section, TlSettings};
@@ -59,6 +66,10 @@ const DRAG_MIN_W: f32 = 24.0;
 const MENU_ROW_BUTTON_H: f32 = 24.0;
 /// A pressed caption button shows its hover fill at this opacity.
 const PRESSED_OPACITY: f32 = 0.8;
+/// Fill alpha of the pin when on, as `TlButton::Toggle` (UI-FND-021).
+const PIN_ON_ALPHA: f32 = 0.25;
+/// Opacity of the disabled pin (UI-FND-021).
+const PIN_DISABLED_OPACITY: f32 = 0.5;
 
 /// Slot for the menu bar. E21-A1 sets it in `menubar::init` before the main window opens.
 pub struct MenuBarFactory(pub fn(&mut Window, &mut App) -> AnyView);
@@ -100,6 +111,9 @@ struct CaptionStrings {
     maximize: SharedString,
     restore: SharedString,
     close: SharedString,
+    pin_off: SharedString,
+    pin_on: SharedString,
+    pin_unsupported: SharedString,
 }
 
 /// One caption button as last drawn. Tests read it through `TitleBarView::drawn_captions`.
@@ -112,6 +126,16 @@ pub struct DrawnCaption {
     pub tooltip: SharedString,
     /// The icon colour when not hovered.
     pub color: Hsla,
+}
+
+/// The pin as last drawn. Tests read it through `TitleBarView::drawn_pin`.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawnPin {
+    pub on: bool,
+    pub enabled: bool,
+    pub icon: TlIcon,
+    pub tooltip: SharedString,
 }
 
 /// Test stand-in for the platform window. The GPUI test window panics on `start_window_move`,
@@ -319,6 +343,8 @@ pub struct TitleBarView {
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     drawn: Vec<DrawnCaption>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    drawn_pin: Option<DrawnPin>,
 }
 
 impl TitleBarView {
@@ -343,6 +369,9 @@ impl TitleBarView {
             maximize: tr(cx, "shell-titlebar-maximize"),
             restore: tr(cx, "shell-titlebar-restore"),
             close: tr(cx, "shell-titlebar-close"),
+            pin_off: tr(cx, "fnd-pin-off"),
+            pin_on: tr(cx, "fnd-pin-on"),
+            pin_unsupported: tr(cx, "fnd-pin-unsupported"),
         };
 
         let mut subs = SmallVec::new();
@@ -390,6 +419,8 @@ impl TitleBarView {
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             drawn: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            drawn_pin: None,
         }
     }
 
@@ -434,6 +465,86 @@ impl TitleBarView {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn drawn_captions(&self) -> &[DrawnCaption] {
         &self.drawn
+    }
+
+    /// The pin as last drawn; `None` before the first render.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn drawn_pin(&self) -> Option<&DrawnPin> {
+        self.drawn_pin.as_ref()
+    }
+
+    /// The pin cell, `CAPTION_W` × `h` (UI-SHL-005). On: `pin` in `accent` on an `accent` fill
+    /// at 0.25 with a 1 px `accent` border. Off: `pin-off`. Without the KWin bridge it is drawn
+    /// at 0.5 opacity with no hover, and a click does nothing. No Tab stop; every mouse-down
+    /// stops at it, so it never starts a drag.
+    fn pin(&mut self, h: Pixels, theme: &TlTheme, window: &mut Window, cx: &mut App) -> AnyElement {
+        let m = *metrics(cx);
+        let s = m.ui_scale;
+        let on = cx.has_global::<TlSettings>() && TlSettings::settings(cx).window.always_on_top;
+        let enabled = self.keep_above;
+        let icon = if on { TlIcon::Pin } else { TlIcon::PinOff };
+        let tooltip = match (enabled, on) {
+            (false, _) => self.strings.pin_unsupported.clone(),
+            (true, true) => self.strings.pin_on.clone(),
+            (true, false) => self.strings.pin_off.clone(),
+        };
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.drawn_pin = Some(DrawnPin {
+                on,
+                enabled,
+                icon,
+                tooltip: tooltip.clone(),
+            });
+        }
+        let fg = if on { theme.accent } else { theme.text_primary };
+        let hover = theme.tab_hover;
+        let accent = theme.accent;
+        let button = no_drag(
+            div()
+                .id("TitleBarPin")
+                .debug_selector(|| "TitleBarPin".into())
+                .role(Role::Button)
+                .aria_label(tooltip.clone())
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .w(px(CAPTION_W * s))
+                .h(h)
+                .text_color(fg)
+                .when(on, |b| {
+                    b.bg(accent.alpha(PIN_ON_ALPHA))
+                        .border_1()
+                        .border_color(accent)
+                })
+                .when(!enabled, |b| b.opacity(PIN_DISABLED_OPACITY))
+                .when(enabled, |b| {
+                    b.hover(move |st| st.bg(hover))
+                        .active(move |st| st.bg(hover.opacity(PRESSED_OPACITY)))
+                        .on_click(|_, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(
+                                Box::new(ToggleAlwaysOnTop {
+                                    window: WindowKey::Main,
+                                    caption: WINDOW_TITLE.into(),
+                                }),
+                                cx,
+                            );
+                        })
+                })
+                .child(Icon::new(icon).size(m.icon.md)),
+        );
+        let tip = HoverTooltip::state("TitleBarPin-tooltip", window, cx);
+        HoverTooltip::attach(
+            &tip,
+            button,
+            DELAY_CONTROL,
+            TlTooltip::text(tooltip).build(),
+            window,
+            cx,
+        )
+        .into_any_element()
     }
 
     /// One caption button: `CAPTION_W` × `TITLEBAR_H`, no Tab stop, a hover tooltip.
@@ -606,19 +717,21 @@ impl TitleBarView {
     }
 
     /// The menu row under server decorations (UI-SHL-006): the shared parts, a spacer, then the
-    /// pin cell (36 × 28) once E20-022 adds it. KWin draws the caption buttons and handles drag,
+    /// pin cell (36 × 28). KWin draws the caption buttons and handles drag,
     /// so the row has no drag, double-click or window-menu handlers.
     fn menu_row(&mut self, theme: &TlTheme, window: &mut Window, cx: &mut App) -> Stateful<Div> {
         let s = metrics(cx).ui_scale;
         set_menu_row_height(Some(px(MENU_ROW_BUTTON_H * s)), cx);
-        self.leading(bar_height_of(false, s), theme, window, cx)
+        let h = bar_height_of(false, s);
+        let pin = self.pin(h, theme, window, cx);
+        self.leading(h, theme, window, cx)
             .child(
                 div()
                     .debug_selector(|| "TitleBarSpacer".into())
                     .flex_1()
                     .h_full(),
             )
-        // menu row pin cell (E20-022 chain edit)
+            .child(pin)
     }
 
     /// The client bar (E20-004): the shared parts, the drag area and the caption buttons.
@@ -630,7 +743,9 @@ impl TitleBarView {
     ) -> Stateful<Div> {
         let s = metrics(cx).ui_scale;
         set_menu_row_height(None, cx);
-        let bar = self.leading(bar_height_of(true, s), theme, window, cx);
+        let h = bar_height_of(true, s);
+        let bar = self.leading(h, theme, window, cx);
+        let pin = self.pin(h, theme, window, cx);
         let captions = self.captions(theme, window, cx);
         let bar = bar
             .child(
@@ -640,6 +755,7 @@ impl TitleBarView {
                     .min_w(px(DRAG_MIN_W * s))
                     .h_full(),
             )
+            .child(pin)
             .child(captions);
         drag_handlers(bar, cx)
     }
@@ -649,7 +765,10 @@ impl Render for TitleBarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         #[cfg(any(test, feature = "test-hooks"))]
-        self.drawn.clear();
+        {
+            self.drawn.clear();
+            self.drawn_pin = None;
+        }
         if is_client(window, cx) {
             self.client_bar(&theme, window, cx)
         } else {

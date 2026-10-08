@@ -19,6 +19,10 @@
 //! The process-view Actions `ToggleHideSystem`, `CycleViewMode` and `SetViewMode` are app-level
 //! handlers here (E20-017, UI-SHL-012, UI-SHL-013, UI-SHL-035, PROC-015, PROC-016).
 //!
+//! `ToggleAlwaysOnTop` for the main window flips `window.always_on_top` and sends `KeepAbove`
+//! through the KWin bridge; a window that opens with the setting on gets it once the bridge is up
+//! (E20-022, UI-SHL-005, APP-008, APP-009, R-073, R-176).
+//!
 //! The requests a second `tasklens` launch forwards to this copy go to [`handle_app_request`]
 //! (E20-019, UI-SHL-112, APP-011, APP-052, ADR-010).
 
@@ -37,14 +41,14 @@ use gpui_kit::{
     WindowOptions, div, point, prelude::FluentBuilder as _, px, size,
 };
 use smallvec::SmallVec;
-use tl_model::command::{AppRequest, Command, KWinCommand, Tab};
+use tl_model::command::{AppRequest, Command, CommandError, KWinCommand, Tab};
 use tl_model::settings::{Decorations, StartTab, WindowState};
 use tl_model::table::TableMode;
 use tl_model::time::now_boot_ns;
 use tracing::{debug, error, info, warn};
 
 use super::filter::{FilterBox, ReturnFocus, shown_on};
-use super::registry::GlobalRegistry;
+use super::registry::{GlobalRegistry, WindowKey};
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
 use super::tabstrip::TabStrip;
 #[cfg(any(test, feature = "test-hooks"))]
@@ -67,6 +71,7 @@ use crate::app::{
 use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
 use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
+use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::demand::GlobalDemand;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
@@ -402,6 +407,80 @@ pub fn init(cx: &mut App) {
     });
     cx.on_action(|a: &SetViewMode, cx| set_view_mode(cx, a.0));
     cx.set_global(AppRequestHandler(Box::new(handle_app_request)));
+    cx.on_action(on_toggle_always_on_top);
+    cx.set_global(KeepAboveState::default());
+    if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+        cx.subscribe(&hub, |_, ev: &SnapshotChanged, cx| {
+            if ev.mask.intersects(ComponentMask::WINDOWS) {
+                on_windows_changed(cx);
+            }
+        })
+        .detach();
+    }
+}
+
+/// Keep-above work that waits for a `WINDOWS` change.
+#[derive(Default)]
+struct KeepAboveState {
+    /// The main window opened and `window.always_on_top` was not applied to it yet.
+    apply_pending: bool,
+    /// A `KeepAbove` the engine refused as busy, sent once more on the next `WINDOWS` change.
+    retry: Option<bool>,
+}
+
+impl Global for KeepAboveState {}
+
+/// `ToggleAlwaysOnTop` (UI-SHL-005): for the main window, while the KWin bridge is up, flips
+/// `window.always_on_top` (saved at once, no toast) and sends `KeepAbove`.
+fn on_toggle_always_on_top(a: &ToggleAlwaysOnTop, cx: &mut App) {
+    // secondary-window arm (E20-029 chain edit)
+    if a.window != WindowKey::Main || !keep_above_supported(cx) {
+        return;
+    }
+    let on = !TlSettings::settings(cx).window.always_on_top;
+    TlSettings::update(cx, |d| d.settings.window.always_on_top = on);
+    keep_above_main(on, cx);
+}
+
+/// Sends `KeepAbove` for the main window. A busy engine gets one retry on the next `WINDOWS`
+/// change.
+fn keep_above_main(on: bool, cx: &mut App) {
+    match send_keep_above(on, cx) {
+        Ok(()) => {}
+        Err(CommandError::Busy) => cx.default_global::<KeepAboveState>().retry = Some(on),
+        Err(err) => warn!(target: "tasklens::ui", ?err, on, "keep-above not sent"),
+    }
+}
+
+fn send_keep_above(on: bool, cx: &App) -> Result<(), CommandError> {
+    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+        return Err(CommandError::EngineStopped);
+    };
+    engine.0.send(Command::KWin(KWinCommand::KeepAbove {
+        pid: std::process::id(),
+        caption: None,
+        on,
+    }))
+}
+
+/// A `WINDOWS` change with the KWin bridge up: the busy retry, then the setting for a main
+/// window that opened since the last apply.
+fn on_windows_changed(cx: &mut App) {
+    if !keep_above_supported(cx) {
+        return;
+    }
+    if let Some(on) = cx.default_global::<KeepAboveState>().retry.take()
+        && let Err(err) = send_keep_above(on, cx)
+    {
+        warn!(target: "tasklens::ui", ?err, on, "keep-above retry failed");
+    }
+    if !cx.default_global::<KeepAboveState>().apply_pending || main_handle(cx).is_none() {
+        return;
+    }
+    cx.global_mut::<KeepAboveState>().apply_pending = false;
+    if TlSettings::settings(cx).window.always_on_top {
+        keep_above_main(true, cx);
+    }
 }
 
 /// Hide system processes: flips `processes.hide_system` and says so in a toast. The engine
@@ -815,6 +894,8 @@ pub fn open_main_window_on(start: Tab, cx: &mut App) -> gpui_kit::Result<WindowH
     let state = cx.default_global::<ShellState>();
     state.main_window = Some(handle);
     state.main_view = Some(view.downgrade());
+    // A new window is not kept above until `KeepAbove` reaches it.
+    cx.default_global::<KeepAboveState>().apply_pending = true;
     Ok(handle)
 }
 
