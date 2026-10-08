@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Entity, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
+    AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -28,6 +28,7 @@ use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::parts::{
     ChartSettings, MIN_CHART_H, Meter, box_chart, box_frame, chart_section_versions, class_probe,
+    opens_device,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -445,8 +446,13 @@ impl DiskBox {
     }
 }
 
-/// A row: name, read, write, busy. With `None` for the meter it is the column header.
+/// The debug selector prefix of a disk row, followed by its device key.
+pub const DISK_ROW_ID_PREFIX: &str = "perf-overview-disk-row:";
+
+/// A row: name, read, write, busy. With `None` for the meter it is the column header. A click
+/// on a row with a `target` opens that disk (crw.44).
 fn row_element(
+    target: Option<&DeviceKey>,
     name: &SharedString,
     read: &SharedString,
     write: &SharedString,
@@ -494,7 +500,11 @@ fn row_element(
         }),
         None => busy_el,
     };
-    div()
+    let mut row = div();
+    if let Some(key) = target.map(|k| k.0.clone()) {
+        row = row.debug_selector(move || format!("{DISK_ROW_ID_PREFIX}{key}"));
+    }
+    let row = row
         .flex()
         .flex_row()
         .flex_none()
@@ -504,8 +514,8 @@ fn row_element(
         .child(label)
         .child(rate(read))
         .child(rate(write))
-        .child(busy_el)
-        .into_any_element()
+        .child(busy_el);
+    opens_device(row, target.cloned()).into_any_element()
 }
 
 impl Render for DiskBox {
@@ -532,6 +542,7 @@ impl Render for DiskBox {
         let mut list = div().flex().flex_col().flex_none().w_full();
         if rows > 0 {
             list = list.child(row_element(
+                None,
                 &SharedString::default(),
                 &self.read_word,
                 &self.write_word,
@@ -542,6 +553,7 @@ impl Render for DiskBox {
         }
         for r in self.rows.iter().take(self.shown) {
             list = list.child(row_element(
+                Some(&r.key),
                 &r.name,
                 &r.read,
                 &r.write,
@@ -577,6 +589,7 @@ impl Render for DiskBox {
             ));
         box_frame(
             DISK_BOX_ID,
+            self.rows.first().map(|r| r.key.clone()),
             self.title.clone(),
             SharedString::default(),
             SharedString::default(),

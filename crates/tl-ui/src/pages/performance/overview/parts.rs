@@ -12,8 +12,8 @@ use std::rc::Rc;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Corners, Div, Element, ElementId, Entity,
     EntityId, FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _,
-    IntoElement, LayoutId, ParentElement as _, Pixels, SharedString, Size, Style, Styled as _,
-    Window, canvas, div, fill, point, px, relative, size,
+    IntoElement, LayoutId, MouseButton, ParentElement as _, Pixels, SharedString, Size, Style,
+    Styled as _, Window, canvas, div, fill, point, px, relative, size,
 };
 use tl_model::settings::Settings;
 
@@ -21,6 +21,8 @@ use crate::chart::labels::{self, CachedLine, LABEL_ROW, LineStyle, WARMING};
 use crate::chart::{ChartLabels, ChartSpec, ChartView};
 use crate::components::progress::bucket;
 use crate::hub::SnapshotHub;
+use crate::pages::performance::DeviceKey;
+use crate::pages::performance::actions::PerfSelectDevice;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current};
@@ -406,10 +408,32 @@ impl Element for CoreBars {
     }
 }
 
+/// `el` selects `target`'s page on a left click (crw.44). A static hitbox: no hover style, so
+/// pointer moves notify nothing. `None` leaves `el` as it is.
+pub fn opens_device(el: Div, target: Option<DeviceKey>) -> Div {
+    match target {
+        Some(key) => el.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.dispatch_action(Box::new(PerfSelectDevice { key: key.clone() }), cx);
+        }),
+        None => el,
+    }
+}
+
+/// The debug selector of a box's title row: the box id with `-title`.
+pub fn title_row_id(box_id: &str) -> String {
+    format!("{box_id}-title")
+}
+
 /// One Overview box: a `list_bg` card with a 24 px title row (title, a one-line summary that
-/// ellipsizes, and the headline value at the right) above `body`, which fills the rest.
+/// ellipsizes, and the headline value at the right) above `body`, which fills the rest. A click
+/// on the title row opens `target`'s page.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call per box, all positional parts"
+)]
 pub fn box_frame(
     id: &'static str,
+    target: Option<DeviceKey>,
     title: SharedString,
     value: SharedString,
     line: SharedString,
@@ -448,8 +472,9 @@ pub fn box_frame(
         .border_color(theme.divider)
         .rounded(m.radius_card)
         .p(m.sp[5])
-        .child(
+        .child(opens_device(
             div()
+                .debug_selector(move || title_row_id(id))
                 .flex()
                 .flex_row()
                 .flex_none()
@@ -459,7 +484,8 @@ pub fn box_frame(
                 .child(title_el)
                 .child(line_el)
                 .child(value_el),
-        )
+            target,
+        ))
         .child(div().flex_1().min_h_0().w_full().child(body))
 }
 

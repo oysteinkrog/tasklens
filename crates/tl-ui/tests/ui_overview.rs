@@ -1760,6 +1760,12 @@ mod wired {
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::overview::cpu_box::CPU_BOX_ID;
+    use tl_ui::pages::performance::overview::disk_box::{DISK_BOX_ID, DISK_ROW_ID_PREFIX};
+    use tl_ui::pages::performance::overview::gpu_box::GPU_BOX_ID;
+    use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
+    use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
+    use tl_ui::pages::performance::overview::parts::title_row_id;
     use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
@@ -1783,12 +1789,30 @@ mod wired {
         }
     }
 
-    /// CPU, memory, a disk and a wired interface. The disk and net cards are hidden by
-    /// [`open`], so only the Overview part asks for disks and nets.
+    /// CPU, memory, a GPU, two disks and a wired interface. [`open`] hides the GPU, disk and net
+    /// cards, so only the Overview part asks for GPUs, disks and nets.
     fn catalog() -> Vec<DeviceEntry> {
         vec![
             entry(0, DeviceIdentity::CpuPackage, None),
             entry(1, DeviceIdentity::Memory, None),
+            entry(
+                2,
+                DeviceIdentity::Gpu {
+                    uuid: [0; 16],
+                    pci_bus_id: Arc::from("0000:01:00.0"),
+                },
+                None,
+            ),
+            entry(
+                4,
+                DeviceIdentity::Disk {
+                    major: 8,
+                    minor: 16,
+                    name: Arc::from("sdb"),
+                    wwn_or_serial: None,
+                },
+                None,
+            ),
             entry(
                 3,
                 DeviceIdentity::Disk {
@@ -1845,8 +1869,13 @@ mod wired {
     }
 
     /// The main window, 1600 × 1000, on the Performance tab with CPU selected and the sidebar
-    /// focused. Animations are off.
+    /// focused. Animations are off. The GPU, disk and net cards are hidden.
     fn open(cx: &mut TestAppContext) -> Rig<'_> {
+        open_with(cx, false)
+    }
+
+    /// [`open`]; with `all_cards` every card is shown.
+    fn open_with(cx: &mut TestAppContext, all_cards: bool) -> Rig<'_> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             s.devices = Arc::new(DeviceCatalog {
@@ -1869,8 +1898,9 @@ mod wired {
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             let mut settings = Settings::default();
-            settings.performance.show_disks = false;
-            settings.performance.show_network_wired = false;
+            settings.performance.show_disks = all_cards;
+            settings.performance.show_gpus = all_cards;
+            settings.performance.show_network_wired = all_cards;
             cx.set_global(BootSettings {
                 settings,
                 state: UiState::default(),
@@ -2072,6 +2102,80 @@ mod wired {
         let mut text = String::new();
         r.vcx.read_entity(&page, |p, _| p.copy_text(&mut text));
         assert!(text.starts_with("Overview"), "{text:?}");
+    }
+
+    fn center_of(r: &mut Rig, id: &str) -> gpui_kit::Point<gpui_kit::Pixels> {
+        let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+        r.vcx.debug_bounds(id).expect(id).center()
+    }
+
+    /// crw.44: a click on a box title opens that device's page; a disk row opens its disk.
+    #[gpui_kit::test]
+    fn overview_titles_open_device_pages(cx: &mut TestAppContext) {
+        let mut r = open_with(cx, true);
+        for (target, want) in [
+            (title_row_id(CPU_BOX_ID), "cpu"),
+            (title_row_id(MEM_BOX_ID), "memory"),
+            (title_row_id(GPU_BOX_ID), "gpu:pci:0000:01:00.0"),
+            // sdb comes first in the catalog, so it is the first disk row.
+            (title_row_id(DISK_BOX_ID), "disk:sdb"),
+            (format!("{DISK_ROW_ID_PREFIX}disk:sda"), "disk:sda"),
+            (title_row_id(NET_BOX_ID), "net:eth0"),
+        ] {
+            select(&mut r, OVERVIEW_KEY);
+            let at = center_of(&mut r, &target);
+            mouse(r.vcx, MouseButton::Left, at);
+            draw(r.vcx);
+            assert_eq!(selected(&mut r).as_deref(), Some(want), "{target}");
+        }
+    }
+
+    /// crw.44: a click on a chart does nothing, and pointer moves over the titles render
+    /// nothing.
+    #[gpui_kit::test]
+    fn overview_chart_click_and_title_hover_do_nothing(cx: &mut TestAppContext) {
+        let mut r = open_with(cx, true);
+        select(&mut r, OVERVIEW_KEY);
+        let page = overview(&mut r).expect("an OverviewPage");
+        // The CPU box body, below the title row.
+        let b = r.vcx.debug_bounds(CPU_BOX_ID).expect("the CPU box");
+        let at = gpui_kit::point(b.left() + b.size.width / 4., b.top() + b.size.height * 0.6);
+        mouse(r.vcx, MouseButton::Left, at);
+        draw(r.vcx);
+        assert_eq!(
+            selected(&mut r).as_deref(),
+            Some(OVERVIEW_KEY),
+            "chart click"
+        );
+
+        let renders = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let p = page.read(cx);
+                [
+                    p.render_count.get(),
+                    p.cpu_box().read(cx).render_count.get(),
+                    p.mem_box().read(cx).render_count.get(),
+                    p.gpu_box().read(cx).render_count.get(),
+                    p.disk_box().read(cx).render_count.get(),
+                    p.net_box().read(cx).render_count.get(),
+                ]
+            })
+        };
+        let before = renders(&mut r);
+        for id in [CPU_BOX_ID, MEM_BOX_ID, GPU_BOX_ID, DISK_BOX_ID, NET_BOX_ID] {
+            let row: &'static str = Box::leak(title_row_id(id).into_boxed_str());
+            let t = r.vcx.debug_bounds(row).expect(row);
+            for i in 0..10 {
+                let x = t.left() + t.size.width * ((i as f32 + 0.5) / 10.);
+                r.vcx.simulate_event(gpui_kit::MouseMoveEvent {
+                    position: gpui_kit::point(x, t.center().y),
+                    pressed_button: None,
+                    modifiers: Modifiers::none(),
+                });
+            }
+            draw(r.vcx);
+        }
+        assert_eq!(renders(&mut r), before, "title hover renders nothing");
     }
 
     #[gpui_kit::test]

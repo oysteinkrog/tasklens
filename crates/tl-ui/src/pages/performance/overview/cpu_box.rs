@@ -22,6 +22,7 @@ use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
+use super::super::DeviceKey;
 use super::super::cpu::logical_devices;
 use super::parts::{
     ChartSettings, CoreBars, CoreBarsModel, SPLIT_W, box_chart, box_frame, chart_section_versions,
@@ -404,6 +405,7 @@ impl Render for CpuBox {
         let body = split_body(chart, bars, self.wide, &m).into_any_element();
         box_frame(
             CPU_BOX_ID,
+            Some(DeviceKey(DeviceKey::CPU.into())),
             self.title.clone(),
             self.value.clone(),
             self.line.clone(),

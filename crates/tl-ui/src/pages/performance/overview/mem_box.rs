@@ -23,6 +23,7 @@ use tl_model::system::MemoryTotals;
 use tl_model::units;
 use tl_model::validity::Validity;
 
+use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::parts::{
     ChartSettings, Meter, SPLIT_W, box_chart, box_frame, chart_section_versions, is_wide,
@@ -409,6 +410,7 @@ impl Render for MemBox {
         let body = split_body(chart, meters, self.wide, &m).into_any_element();
         box_frame(
             MEM_BOX_ID,
+            Some(DeviceKey(DeviceKey::MEMORY.into())),
             self.title.clone(),
             self.value.clone(),
             SharedString::default(),

@@ -583,6 +583,7 @@ impl Render for GpuBox {
         let pick = |f: fn(&GpuSection) -> &SharedString| first.map(f).cloned().unwrap_or_default();
         box_frame(
             GPU_BOX_ID,
+            first.map(|s| s.key.clone()),
             pick(|s| &s.heading),
             pick(|s| &s.value),
             pick(|s| &s.line),

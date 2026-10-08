@@ -25,6 +25,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::units;
 use tl_model::validity::Validity;
 
+use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions};
 use crate::chart::labels::LABEL_ROW;
@@ -222,6 +223,8 @@ pub struct NetBox {
     down_word: SharedString,
     up_word: SharedString,
     aggregate: DeviceIdx,
+    /// The first visible network card, which the title opens (crw.44).
+    target: Option<DeviceKey>,
     catalog_version: u64,
     text_bits: u64,
     settings: ChartSettings,
@@ -237,6 +240,14 @@ pub struct NetBox {
 }
 
 impl NetBox {
+    /// The network card the title opens, from the page. The same key does nothing.
+    pub fn set_target(&mut self, target: Option<DeviceKey>, cx: &mut Context<Self>) {
+        if self.target != target {
+            self.target = target;
+            cx.notify();
+        }
+    }
+
     pub fn new(hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) -> Self {
         let theme = current(cx).clone();
         let settings = ChartSettings::read(cx);
@@ -262,6 +273,7 @@ impl NetBox {
             down_word: tr(cx, KEY_DOWNLOAD),
             up_word: tr(cx, KEY_UPLOAD),
             aggregate,
+            target: None,
             catalog_version: snap.devices.version,
             text_bits: 0,
             settings,
@@ -549,6 +561,7 @@ impl Render for NetBox {
             ));
         box_frame(
             NET_BOX_ID,
+            self.target.clone(),
             self.title.clone(),
             SharedString::default(),
             SharedString::default(),
