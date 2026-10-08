@@ -812,3 +812,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - gma.9: confirm() called via cx.defer; SetNice chained after SetSched success with one toast; dialog catches SliderPageUp/Down to step 5; value shown by TlSlider's own text; open_with(app: bool) added; aria labels on wrapper divs. Accepted.
 - bj6.28: PageBuilder::check_columns (keep_one refusal), PageBuilder::press test hook, restart_toast renamed info_toast and deferred (fixes lost restart toasts). Accepted.
 - bj6.14: TlMenu::indent(px) added to components/menu.rs (last Item or Disabled entry, scaled), MenuEntryInfo exposes it.
+- bj6.15: Entry::Painted gets selected: bool, new TlMenu::painted_radio_item; MenuEntryInfo.painted under test-hooks; ActivateTheme reused from theme/store.rs (no second declaration).
