@@ -12,6 +12,7 @@
 //! (E23-018 to E23-021). Until a tab has its view, its body is empty, or shows the access block
 //! when its payload is `Restricted`.
 
+pub mod environ;
 pub mod fds;
 pub mod filter;
 pub mod general;
@@ -42,6 +43,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 use tracing::warn;
 
+use self::environ::{EnvCountChanged, EnvironTab};
 use self::fds::{FdsCountChanged, FdsTab};
 use self::filter::{PropsFilter, filter_bar, on_clear};
 use self::general::GeneralTab;
@@ -355,6 +357,7 @@ pub struct PropsTabs {
     pub fds: Option<Entity<FdsTab>>,
     pub maps: Option<Entity<MapsTab>>,
     pub security: Option<Entity<SecurityTab>>,
+    pub environ: Option<Entity<EnvironTab>>,
 }
 
 /// The root view of a Process Properties window.
@@ -599,6 +602,24 @@ impl PropsWindow {
             }
             self.tabs.security = Some(security);
         }
+        if tab == DetailTab::Environment && self.tabs.environ.is_none() {
+            let filter = self.filter[strip_index(DetailTab::Environment)].clone();
+            let environ = cx.new(|cx| EnvironTab::new(key, filter, window, cx));
+            // Refresh lives in the filter bar, so a new payload re-renders the window too.
+            self._subs
+                .push(cx.subscribe(&environ, |this, _, ev: &EnvCountChanged, cx| {
+                    this.set_count(DetailTab::Environment, ev.0, cx);
+                    cx.notify();
+                }));
+            if let Some(detail) = &self.last_detail {
+                let payload = detail.tab(DetailTab::Environment).payload.clone();
+                environ.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
+            }
+            if self.exited {
+                environ.update(cx, |t, cx| t.set_exited(true, cx));
+            }
+            self.tabs.environ = Some(environ);
+        }
     }
 
     fn register_demand(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -664,6 +685,13 @@ impl PropsWindow {
                 }
                 None => self.focus.focus(window, cx),
             },
+            DetailTab::Environment => match &self.tabs.environ {
+                Some(t) => {
+                    let focus = t.read(cx).table().read(cx).focus_handle().clone();
+                    focus.focus(window, cx);
+                }
+                None => self.focus.focus(window, cx),
+            },
             _ => self.focus.focus(window, cx),
         }
     }
@@ -689,6 +717,7 @@ impl PropsWindow {
         let fds = self.tabs.fds.clone();
         let maps = self.tabs.maps.clone();
         let security = self.tabs.security.clone();
+        let environ = self.tabs.environ.clone();
         if mask.intersects(ComponentMask::SYSTEM) {
             self.mem_total = snap.system.memory.total;
             let online = snap.system.cpu_topology.online;
@@ -748,6 +777,7 @@ impl PropsWindow {
             let fds_changed = changed(DetailTab::Fds);
             let maps_changed = changed(DetailTab::Maps);
             let security_changed = changed(DetailTab::Security);
+            let environ_changed = changed(DetailTab::Environment);
             let active_changed = changed(self.active);
             let validity_changed = self.last_detail.as_ref().is_none_or(|last| {
                 last.tab(self.active).validity != detail.tab(self.active).validity
@@ -757,6 +787,7 @@ impl PropsWindow {
                 || fds_changed
                 || maps_changed
                 || security_changed
+                || environ_changed
                 || active_changed
                 || validity_changed)
             {
@@ -764,6 +795,10 @@ impl PropsWindow {
             }
             if fds_changed && let Some(t) = &fds {
                 let payload = detail.tab(DetailTab::Fds).payload.clone();
+                t.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
+            }
+            if environ_changed && let Some(t) = &environ {
+                let payload = detail.tab(DetailTab::Environment).payload.clone();
                 t.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
             }
             if security_changed && let Some(t) = &security {
@@ -812,6 +847,9 @@ impl PropsWindow {
         if let Some(t) = &self.tabs.security {
             t.update(cx, |t, cx| t.set_exited(true, cx));
         }
+        if let Some(t) = &self.tabs.environ {
+            t.update(cx, |t, cx| t.set_exited(true, cx));
+        }
         self.remove_demand(cx);
         let title = props_title(&self.name, self.key.pid, true);
         let frame = window.root::<Root>().flatten().and_then(|root| {
@@ -856,6 +894,13 @@ impl PropsWindow {
 
     fn on_refresh(&mut self, _: &PropsRefreshNow, _: &mut Window, cx: &mut Context<Self>) {
         if self.exited {
+            return;
+        }
+        // The Environment tab also masks every row again and shows Refresh as loading.
+        if self.active == DetailTab::Environment
+            && let Some(t) = &self.tabs.environ
+        {
+            t.update(cx, |t, cx| t.refresh(cx));
             return;
         }
         self.send(
@@ -971,6 +1016,14 @@ impl PropsWindow {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element();
         }
+        if self.active == DetailTab::Environment
+            && !restricted_now
+            && let Some(environ) = &self.tabs.environ
+        {
+            return AnyView::from(environ.clone())
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element();
+        }
         if self.active == DetailTab::Maps
             && !restricted_now
             && let Some(maps) = &self.tabs.maps
@@ -1033,7 +1086,12 @@ impl gpui_kit::Render for PropsWindow {
             (Some(fds), DetailTab::Fds) => Some(fds.read(cx).filter_tool(cx)),
             _ => match (&self.tabs.maps, self.active) {
                 (Some(maps), DetailTab::Maps) => Some(maps.read(cx).filter_tool(cx)),
-                _ => None,
+                _ => match (&self.tabs.environ, self.active) {
+                    (Some(environ), DetailTab::Environment) => {
+                        Some(environ.read(cx).filter_tool(cx))
+                    }
+                    _ => None,
+                },
             },
         };
 

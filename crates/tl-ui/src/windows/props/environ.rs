@@ -42,7 +42,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
 use crate::i18n::{Strings, tr};
 use crate::settings_global::TlSettings;
-use crate::table::actions::{CopyRow, ToggleExpand};
+use crate::table::actions::{CopyRow, CopyRowsAsTable, ToggleExpand};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -191,7 +191,7 @@ fn mask_setting(cx: &App) -> bool {
 }
 
 /// The errno text of a failed read, such as "Permission denied (os error 13)".
-fn errno_text(errno: i32) -> SharedString {
+pub fn errno_text(errno: i32) -> SharedString {
     std::io::Error::from_raw_os_error(errno).to_string().into()
 }
 
@@ -625,7 +625,7 @@ pub struct EnvironTab {
     exited: bool,
     words: Rc<EnvWords>,
     weak: WeakEntity<Self>,
-    _subs: SmallVec<[Subscription; 5]>,
+    _subs: SmallVec<[Subscription; 6]>,
 }
 
 impl EventEmitter<EnvCountChanged> for EnvironTab {}
@@ -680,6 +680,22 @@ impl EnvironTab {
                 });
             }
         }));
+        subs.push(cx.observe_global::<Strings>(|this: &mut Self, cx| {
+            let version = cx.try_global::<Strings>().map(|s| s.strings_version);
+            if this.words.strings_version != version {
+                this.words = Rc::new(EnvWords::new(cx));
+                let words = this.words.clone();
+                let tip = TlTooltip::text(words.masked_tip.clone()).view(cx);
+                this.table.update(cx, |t, cx| {
+                    let d = t.delegate_mut();
+                    d.specs = specs(&words);
+                    d.words = words;
+                    d.masked_tip = Some(tip);
+                    d.version += 1;
+                    t.on_new_version(cx);
+                });
+            }
+        }));
         if cx.has_global::<TlSettings>() {
             subs.push(cx.observe_global::<TlSettings>(|this: &mut Self, cx| {
                 let on = mask_setting(cx);
@@ -708,6 +724,10 @@ impl EnvironTab {
 
     pub fn table(&self) -> &Entity<TlTreeTable<EnvDelegate>> {
         &self.table
+    }
+
+    pub fn filter(&self) -> &Entity<PropsFilter> {
+        &self.filter
     }
 
     pub fn words(&self) -> &Rc<EnvWords> {
@@ -940,6 +960,39 @@ impl EnvironTab {
         });
     }
 
+    /// Copy as table: the table would copy the Value column's primary text, which is empty
+    /// while masked, so the tab writes the rows itself with "••••••".
+    fn on_copy_as_table(
+        &mut self,
+        _: &CopyRowsAsTable,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = {
+            let t = self.table.read(cx);
+            let d = &t.delegate;
+            let mut ids: Vec<(usize, u32)> = t
+                .selection
+                .ids()
+                .filter_map(|i| d.row_index(i).map(|ix| (ix, i)))
+                .collect();
+            if ids.is_empty() {
+                return;
+            }
+            ids.sort_unstable();
+            let mut text = self.words.headers.join("\t");
+            for &(_, i) in &ids {
+                text.push('\n');
+                text.push_str(d.name(i));
+                text.push('\t');
+                text.push_str(d.shown_value(i));
+            }
+            text
+        };
+        cx.stop_propagation();
+        self.copy(text, window, cx);
+    }
+
     fn copy(&self, text: String, window: &mut Window, cx: &mut App) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         toast(window, cx, self.words.copied.clone());
@@ -1031,6 +1084,7 @@ impl Render for EnvironTab {
             .on_action(cx.listener(Self::on_toggle_reveal))
             // Space on a secret row reveals it; the table's own Space toggles a tree row, and
             // these rows have none.
+            .capture_action(cx.listener(Self::on_copy_as_table))
             .capture_action(cx.listener(|this, _: &ToggleExpand, _, cx| {
                 let focus = {
                     let t = this.table.read(cx);

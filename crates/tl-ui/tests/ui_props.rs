@@ -2306,6 +2306,312 @@ mod window {
         // Four copies, one toast with its repeat count.
         assert_eq!(props_toasts(cx, rig.handle), ["Copied to clipboard (×4)"]);
     }
+
+    // ---- Environment tab (E23-022, UI-PWN-016, R-099) ----
+
+    use tl_model::details::EnvDetail;
+    use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
+    use tl_ui::table::actions::SelectAll;
+    use tl_ui::windows::props::environ::{
+        EnvCopyAll, EnvironTab, MASK, READ_FAILED_ROW, errno_text,
+    };
+
+    struct EnvRig {
+        engine: Arc<FakeEngine>,
+        _main: VisualTestContext,
+        handle: AnyWindowHandle,
+        vcx: VisualTestContext,
+        tab: Entity<EnvironTab>,
+    }
+
+    fn env_payload(vars: &[(&str, &str)], read_errno: Option<i32>) -> Arc<TabPayload> {
+        let vars: Vec<(Box<str>, Box<str>)> = vars
+            .iter()
+            .map(|(n, v)| (Box::from(*n), Box::from(*v)))
+            .collect();
+        Arc::new(TabPayload::Environ(Arc::new(EnvDetail {
+            vars: Arc::from(vars),
+            truncated: false,
+            read_errno,
+            unavailable: false,
+        })))
+    }
+
+    fn env_vars() -> Arc<TabPayload> {
+        env_payload(
+            &[
+                ("PATH", "/usr/bin"),
+                ("GH_TOKEN", "ghp_secret1"),
+                ("HOME", "/home/u"),
+            ],
+            None,
+        )
+    }
+
+    fn publish_env(cx: &mut TestAppContext, engine: &FakeEngine, payload: Arc<TabPayload>) {
+        publish_detail(cx, engine, 4321, move |d| {
+            let slot = &mut d.tabs[DetailTab::Environment.index()];
+            slot.payload = Some(payload);
+            slot.validity = Validity::Valid;
+        });
+    }
+
+    /// Opens Properties for 4321 on the Environment tab with `payload`.
+    fn env_rig(cx: &mut TestAppContext, payload: Arc<TabPayload>) -> EnvRig {
+        let (engine, main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        publish_env(cx, &engine, payload);
+        vcx.update(|window, cx| {
+            view.update(cx, |p, cx| p.select_tab(DetailTab::Environment, window, cx))
+        });
+        draw(&mut vcx);
+        let tab = cx
+            .read(|cx| view.read(cx).tabs().environ.clone())
+            .expect("environment tab");
+        EnvRig {
+            engine,
+            _main: main,
+            handle,
+            vcx,
+            tab,
+        }
+    }
+
+    /// Selects the row of `name` and focuses the table.
+    fn select_env(rig: &mut EnvRig, name: &str) {
+        let table = rig.vcx.read(|cx| rig.tab.read(cx).table().clone());
+        let id = rig
+            .vcx
+            .read(|cx| table.read(cx).delegate.row_named(name))
+            .expect("row shown");
+        rig.vcx.update(|window, cx| {
+            table.update(cx, |t, cx| {
+                t.selection.click(id);
+                cx.notify();
+            });
+            let focus = table.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+        });
+        draw(&mut rig.vcx);
+    }
+
+    fn env_names(rig: &mut EnvRig) -> Vec<String> {
+        rig.vcx.read(|cx| {
+            let table = rig.tab.read(cx).table().clone();
+            let d = &table.read(cx).delegate;
+            d.view_ids().map(|i| d.name(i).to_owned()).collect()
+        })
+    }
+
+    /// Runs row menu item `n` (1-based) from the keyboard.
+    fn env_menu_pick(rig: &mut EnvRig, n: usize) -> Vec<String> {
+        rig.vcx.dispatch_action(OpenContextMenu);
+        draw(&mut rig.vcx);
+        let labels = rig.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the row menu is open");
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| e.label.map(|l| l.to_string()).unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
+        let keys = vec!["down"; n].join(" ") + " enter";
+        rig.vcx.simulate_keystrokes(&keys);
+        draw(&mut rig.vcx);
+        labels
+    }
+
+    fn env_filter(rig: &mut EnvRig, text: &str) {
+        let filter = rig.vcx.read(|cx| rig.tab.read(cx).filter().clone());
+        rig.vcx
+            .update(|window, cx| filter.update(cx, |f, cx| f.clear(window, cx)));
+        rig.vcx.executor().advance_clock(Duration::from_millis(150));
+        draw(&mut rig.vcx);
+        if !text.is_empty() {
+            rig.vcx.update(|window, cx| {
+                let input = filter.read(cx).input.clone();
+                input.update(cx, |s, cx| s.insert(text.to_owned(), window, cx));
+            });
+            rig.vcx.executor().advance_clock(Duration::from_millis(150));
+        }
+        draw(&mut rig.vcx);
+    }
+
+    fn masked(rig: &mut EnvRig, name: &str) -> bool {
+        rig.vcx.read(|cx| {
+            let table = rig.tab.read(cx).table().clone();
+            let d = &table.read(cx).delegate;
+            d.row_named(name).is_some_and(|i| d.is_masked(i))
+        })
+    }
+
+    #[gpui_kit::test]
+    fn env_copy_value_masked_unless_revealed(cx: &mut TestAppContext) {
+        let mut rig = env_rig(cx, env_vars());
+        assert_eq!(env_names(&mut rig), ["GH_TOKEN", "HOME", "PATH"]);
+        select_env(&mut rig, "GH_TOKEN");
+        let labels = env_menu_pick(&mut rig, 2);
+        assert_eq!(
+            labels,
+            [
+                "Copy name",
+                "Copy value",
+                "Copy all as NAME=value",
+                "",
+                "Reveal value"
+            ]
+        );
+        assert_eq!(clip(&mut rig.vcx), MASK);
+        rig.vcx.dispatch_action(CopyRow);
+        assert_eq!(clip(&mut rig.vcx), format!("GH_TOKEN={MASK}"));
+
+        // Space on the focus row reveals it.
+        select_env(&mut rig, "GH_TOKEN");
+        rig.vcx.simulate_keystrokes("space");
+        draw(&mut rig.vcx);
+        assert!(!masked(&mut rig, "GH_TOKEN"));
+        let labels = env_menu_pick(&mut rig, 2);
+        assert_eq!(labels[4], "Hide value");
+        assert_eq!(clip(&mut rig.vcx), "ghp_secret1");
+        rig.vcx.dispatch_action(CopyRow);
+        assert_eq!(clip(&mut rig.vcx), "GH_TOKEN=ghp_secret1");
+
+        // The menu hides it again.
+        env_menu_pick(&mut rig, 4);
+        assert!(masked(&mut rig, "GH_TOKEN"));
+    }
+
+    #[gpui_kit::test]
+    fn env_copy_all_masks(cx: &mut TestAppContext) {
+        let mut rig = env_rig(cx, env_vars());
+        select_env(&mut rig, "HOME");
+        rig.vcx.dispatch_action(EnvCopyAll);
+        assert_eq!(
+            clip(&mut rig.vcx),
+            format!("GH_TOKEN={MASK}\nHOME=/home/u\nPATH=/usr/bin")
+        );
+        rig.vcx.dispatch_action(SelectAll);
+        rig.vcx.dispatch_action(CopyRowsAsTable);
+        assert_eq!(
+            clip(&mut rig.vcx),
+            format!("Name\tValue\nGH_TOKEN\t{MASK}\nHOME\t/home/u\nPATH\t/usr/bin")
+        );
+        assert!(
+            props_toasts(cx, rig.handle)
+                .iter()
+                .all(|t| t.starts_with("Copied to clipboard")),
+        );
+    }
+
+    #[gpui_kit::test]
+    fn env_refresh_remasks(cx: &mut TestAppContext) {
+        let mut rig = env_rig(cx, env_vars());
+        select_env(&mut rig, "GH_TOKEN");
+        rig.vcx.simulate_keystrokes("space");
+        draw(&mut rig.vcx);
+        assert!(!masked(&mut rig, "GH_TOKEN"));
+        rig.vcx.simulate_keystrokes("f5");
+        draw(&mut rig.vcx);
+        assert!(masked(&mut rig, "GH_TOKEN"), "Refresh masks every row");
+        assert!(rig.vcx.read(|cx| rig.tab.read(cx).is_refreshing()));
+        assert!(rig.engine.commands().iter().any(|c| matches!(
+            c,
+            Command::DetailRefresh { target, tab: DetailTab::Environment }
+                if *target == DetailTarget::Process(key(4321))
+        )));
+        let engine = rig.engine.clone();
+        publish_env(cx, &engine, env_vars());
+        draw(&mut rig.vcx);
+        assert!(!rig.vcx.read(|cx| rig.tab.read(cx).is_refreshing()));
+        assert!(masked(&mut rig, "GH_TOKEN"));
+    }
+
+    #[gpui_kit::test]
+    fn env_mask_off_setting(cx: &mut TestAppContext) {
+        let mut rig = env_rig(cx, env_vars());
+        assert!(masked(&mut rig, "GH_TOKEN"));
+        rig.vcx.update(|_, cx| {
+            TlSettings::set(cx, SettingKey::PropertiesEnvMask, SettingValue::Bool(false))
+        });
+        draw(&mut rig.vcx);
+        assert!(!masked(&mut rig, "GH_TOKEN"));
+        select_env(&mut rig, "GH_TOKEN");
+        rig.vcx.dispatch_action(CopyRow);
+        assert_eq!(clip(&mut rig.vcx), "GH_TOKEN=ghp_secret1");
+        rig.vcx.update(|_, cx| {
+            TlSettings::set(cx, SettingKey::PropertiesEnvMask, SettingValue::Bool(true))
+        });
+        draw(&mut rig.vcx);
+        assert!(masked(&mut rig, "GH_TOKEN"));
+    }
+
+    #[gpui_kit::test]
+    fn env_read_failed_row(cx: &mut TestAppContext) {
+        let mut rig = env_rig(cx, env_payload(&[], Some(13)));
+        let ids: Vec<u32> = rig.vcx.read(|cx| {
+            let table = rig.tab.read(cx).table().clone();
+            table.read(cx).delegate.view_ids().collect()
+        });
+        assert_eq!(ids, [READ_FAILED_ROW]);
+        assert_eq!(env_names(&mut rig), ["(read failed)"]);
+        assert!(
+            errno_text(13).contains("Permission denied"),
+            "{}",
+            errno_text(13)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn props_filter_masked_env_matches_name_only(cx: &mut TestAppContext) {
+        let mut rig = env_rig(cx, env_vars());
+        env_filter(&mut rig, "ghp_secret");
+        assert!(
+            env_names(&mut rig).is_empty(),
+            "a masked value never matches"
+        );
+        env_filter(&mut rig, "token");
+        assert_eq!(env_names(&mut rig), ["GH_TOKEN"]);
+        env_filter(&mut rig, "/home");
+        assert_eq!(env_names(&mut rig), ["HOME"], "plain values match");
+        env_filter(&mut rig, "");
+        select_env(&mut rig, "GH_TOKEN");
+        rig.vcx.simulate_keystrokes("space");
+        draw(&mut rig.vcx);
+        env_filter(&mut rig, "ghp_secret");
+        assert_eq!(
+            env_names(&mut rig),
+            ["GH_TOKEN"],
+            "a revealed value matches"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn env_restricted_access_block(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        publish_detail(cx, &engine, 4321, |d| {
+            d.tabs[DetailTab::Environment.index()].validity = Validity::Restricted;
+        });
+        vcx.update(|window, cx| {
+            view.update(cx, |p, cx| p.select_tab(DetailTab::Environment, window, cx))
+        });
+        draw(&mut vcx);
+        assert!(vcx.debug_bounds("PropsAccessBlock").is_some());
+        assert!(vcx.debug_bounds("PropsEnvironment").is_none());
+        let words = cx.update(props_words);
+        assert_eq!(
+            words.access(ACCESS_ENV).as_ref(),
+            "Environment unavailable (insufficient privileges)"
+        );
+    }
 }
 
 // ---- Threads tab (E23-016, UI-PWN-010) ----
