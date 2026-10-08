@@ -829,3 +829,6 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.23: accepted (rapl decides Power availability; only Power falls back; no legend). crw.19 adds 7 perf-group-* keys, crw.15 adds only perf-group-aggregate. gma.24: accepted except English literals; filed gma.43 to move General and Security strings to Fluent; new Properties strings must use pwn-* keys.
 - wlf.28: inactive 30 fps cap confirmed on bench windows (window_active false); cap off gives 26 to 47% more frames, then CPU-bound (p50 15 to 19 ms at load 30 to 48). Benches share /var/tmp/claude/tasklens-bench-slot.lock.
 - crw.43/46: perf-overview before numbers taken at load 32 to 90 (rough). Final gate numbers need a quiet machine: one leader-run bench pass of all scenes at the end, with builds paused.
+- jqk.35: shell-menu-pv-* and shell-settings-hide-system keys stay (different UI contexts); AC means no duplicate shell-toolbar/shell-view-mode keys. jqk.23 page fade stays as is.
+- bj6.35: GraphColor::hsla uses theme/palette.rs ACCENT_COLORS (one table). Gallery goldens (menu, slider, icons) fail since about 2026-10-08 midday: bj6-6 to bisect in a worktree.
+- summary_fades_page_out_then_tiles_in fails (frame per draw after fade): pdu-51 to investigate after the wlf.34 bench.
