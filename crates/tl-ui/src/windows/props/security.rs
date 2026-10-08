@@ -22,9 +22,9 @@ use std::sync::Arc;
 use gpui_kit::base::input::Copy;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    App, BorrowAppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, point, px, relative,
+    App, BorrowAppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point, px, relative,
 };
 use tl_model::details::{Elevated, IdTriple, NsKind, NsState, Seccomp, SecurityDetail, TabPayload};
 use tl_model::ids::ProcessKey;
@@ -35,8 +35,7 @@ use tracing::warn;
 
 use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
 use super::general::{
-    GeneralCopyRow, GeneralCopySection, GeneralWords, RESTRICTED_TOOLTIP, escape_controls,
-    general_words,
+    GeneralCopyRow, GeneralCopySection, GeneralWords, escape_controls, general_words,
 };
 use crate::components::kv_grid::{
     KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, ValueTone,
@@ -44,7 +43,8 @@ use crate::components::kv_grid::{
 };
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::tr;
+use crate::i18n::{Strings, tr};
+use crate::pages::performance::details::Template;
 use crate::text::metrics::TextMetricsCache;
 use crate::theme::{UiMetrics, metrics};
 use crate::util::clipboard_write;
@@ -64,6 +64,8 @@ const SUMMARY_MAX: f32 = 0.45;
 pub const NO_ID: u32 = u32::MAX;
 
 const KEY_COPY_FAILED: &str = "pwn-security-toast-copy-failed";
+/// The en-US tooltips, for tests. The tab shows `pwn-security-risky-tooltip` and
+/// `pwn-security-ns-tip-*`.
 pub const RISKY_TOOLTIP: &str = "Capabilities that allow taking over the system";
 pub const NS_TIP_INIT: &str = "Compared with PID 1";
 pub const NS_TIP_SELF: &str = "Compared with tasklens (PID 1 not readable)";
@@ -183,52 +185,161 @@ pub const RIGHT: [SecField; 11] = [
 ];
 
 impl SecField {
-    pub const fn label(self) -> &'static str {
+    /// The Fluent key of the label.
+    pub const fn label_key(self) -> &'static str {
         match self {
-            Self::User => "User:",
-            Self::Group => "Group:",
-            Self::Groups => "Groups:",
-            Self::RiskyCaps => "Risky capabilities:",
-            Self::AdminGroups => "Admin groups:",
-            Self::Flags => "Flags:",
-            Self::Label => "Security label:",
-            Self::Session => "Session:",
-            Self::AuditSession => "Audit session:",
-            Self::LoginUid => "Login UID:",
-            Self::Elevated => "Elevated:",
-            Self::Ns(NsKind::User) => "User namespace:",
-            Self::Ns(NsKind::Pid) => "PID namespace:",
-            Self::Ns(NsKind::Net) => "Network namespace:",
-            Self::Ns(NsKind::Mnt) => "Mount namespace:",
-            Self::Ns(NsKind::Ipc) => "IPC namespace:",
-            Self::Ns(NsKind::Uts) => "UTS namespace:",
-            Self::Ns(NsKind::Cgroup) => "Cgroup namespace:",
-            Self::Ns(NsKind::Time) => "Time namespace:",
-            Self::StoreBypass => "Store bypass:",
-            Self::IndirectBranch => "Indirect branch:",
+            Self::User => "pwn-security-label-user",
+            Self::Group => "pwn-security-label-group",
+            Self::Groups => "pwn-security-label-groups",
+            Self::RiskyCaps => "pwn-security-label-risky-caps",
+            Self::AdminGroups => "pwn-security-label-admin-groups",
+            Self::Flags => "pwn-security-label-flags",
+            Self::Label => "pwn-security-label-label",
+            Self::Session => "pwn-security-label-session",
+            Self::AuditSession => "pwn-security-label-audit-session",
+            Self::LoginUid => "pwn-security-label-login-uid",
+            Self::Elevated => "pwn-security-label-elevated",
+            Self::Ns(NsKind::User) => "pwn-security-label-ns-user",
+            Self::Ns(NsKind::Pid) => "pwn-security-label-ns-pid",
+            Self::Ns(NsKind::Net) => "pwn-security-label-ns-net",
+            Self::Ns(NsKind::Mnt) => "pwn-security-label-ns-mnt",
+            Self::Ns(NsKind::Ipc) => "pwn-security-label-ns-ipc",
+            Self::Ns(NsKind::Uts) => "pwn-security-label-ns-uts",
+            Self::Ns(NsKind::Cgroup) => "pwn-security-label-ns-cgroup",
+            Self::Ns(NsKind::Time) => "pwn-security-label-ns-time",
+            Self::StoreBypass => "pwn-security-label-store-bypass",
+            Self::IndirectBranch => "pwn-security-label-indirect-branch",
         }
     }
+}
+
+// ---- Words (R-132) ----
+
+/// The Security tab's labels and value words, translated once per strings version by
+/// [`security_words`].
+pub struct SecurityWords {
+    /// Labels in [`LEFT`] then [`RIGHT`] order.
+    labels: Vec<SharedString>,
+    restricted_tooltip: SharedString,
+    risky_tooltip: SharedString,
+    ns_tip_init: SharedString,
+    ns_tip_self: SharedString,
+    /// real, effective, saved, fs.
+    ids: [Template; 4],
+    root_equivalent: SharedString,
+    no_new_privs: SharedString,
+    seccomp_strict: SharedString,
+    seccomp_one: SharedString,
+    seccomp_many: Template,
+    dumpable: SharedString,
+    ns_shared_with_init: SharedString,
+    ns_isolated: Template,
+    ns_same_as_tasklens: SharedString,
+    /// Root, Capabilities, Setuid, No.
+    elevated: [SharedString; 4],
+    none_reported: SharedString,
+    none: SharedString,
+}
+
+impl SecurityWords {
+    fn with(t: impl Fn(&str) -> SharedString, tmpl: impl Fn(&str, &[&str]) -> Template) -> Self {
+        let id = |key| tmpl(key, &["name", "id"]);
+        Self {
+            labels: LEFT
+                .iter()
+                .chain(RIGHT.iter())
+                .map(|f| t(f.label_key()))
+                .collect(),
+            restricted_tooltip: t("pwn-general-restricted-tooltip"),
+            risky_tooltip: t("pwn-security-risky-tooltip"),
+            ns_tip_init: t("pwn-security-ns-tip-init"),
+            ns_tip_self: t("pwn-security-ns-tip-self"),
+            ids: [
+                id("pwn-security-ids-real"),
+                id("pwn-security-ids-effective"),
+                id("pwn-security-ids-saved"),
+                id("pwn-security-ids-fs"),
+            ],
+            root_equivalent: t("pwn-security-root-equivalent"),
+            no_new_privs: t("pwn-security-flag-no-new-privs"),
+            seccomp_strict: t("pwn-security-flag-seccomp-strict"),
+            seccomp_one: t("pwn-security-flag-seccomp-filter-one"),
+            seccomp_many: tmpl("pwn-security-flag-seccomp-filter-many", &["n"]),
+            dumpable: t("pwn-security-flag-dumpable"),
+            ns_shared_with_init: t("pwn-security-ns-shared-with-init"),
+            ns_isolated: tmpl("pwn-security-ns-isolated", &["inode"]),
+            ns_same_as_tasklens: t("pwn-security-ns-same-as-tasklens"),
+            elevated: [
+                t("pwn-security-elevated-root"),
+                t("pwn-security-elevated-capabilities"),
+                t("pwn-security-elevated-setuid"),
+                t("pwn-security-elevated-no"),
+            ],
+            none_reported: t("pwn-security-none-reported"),
+            none: t("pwn-security-none"),
+        }
+    }
+
+    /// The en-US words, for code that runs without the strings.
+    pub fn en() -> Self {
+        Self::with(|key| crate::i18n::tr_en(key, &[]), Template::en)
+    }
+
+    /// The label of `id`, such as "User:".
+    pub fn label(&self, id: SecField) -> &SharedString {
+        let i = LEFT
+            .iter()
+            .chain(RIGHT.iter())
+            .position(|f| *f == id)
+            .unwrap_or(0);
+        &self.labels[i]
+    }
+}
+
+struct SecurityWordsCache {
+    version: u64,
+    words: Rc<SecurityWords>,
+}
+
+impl Global for SecurityWordsCache {}
+
+/// The texts for the current strings. Translated only when the strings version changed; without
+/// strings they are in en-US.
+pub fn security_words(cx: &mut App) -> Rc<SecurityWords> {
+    let Some(version) = cx.try_global::<Strings>().map(|s| s.strings_version) else {
+        return Rc::new(SecurityWords::en());
+    };
+    if let Some(cache) = cx.try_global::<SecurityWordsCache>()
+        && cache.version == version
+    {
+        return cache.words.clone();
+    }
+    let words = Rc::new(SecurityWords::with(
+        |key| tr(cx, key),
+        |key, args| Template::new(cx, key, args),
+    ));
+    cx.set_global(SecurityWordsCache {
+        version,
+        words: words.clone(),
+    });
+    words
 }
 
 // ---- Formatters (pure) ----
 
 /// `oystein (1000)` when all four ids are equal; else
 /// `real oystein (1000), effective root (0), saved root (0), fs root (0)`.
-pub fn fmt_ids(out: &mut String, ids: &IdTriple, names: &[Arc<str>; 4]) {
+pub fn fmt_ids(out: &mut String, w: &SecurityWords, ids: &IdTriple, names: &[Arc<str>; 4]) {
     let all = [ids.real, ids.effective, ids.saved, ids.fs];
     if all.iter().all(|&id| id == ids.real) {
         let _ = write!(out, "{} ({})", names[0], ids.real);
         return;
     }
-    for (i, (word, id)) in ["real", "effective", "saved", "fs"]
-        .iter()
-        .zip(all)
-        .enumerate()
-    {
+    for (i, (template, id)) in w.ids.iter().zip(all).enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        let _ = write!(out, "{word} {} ({id})", names[i]);
+        let _ = template.write(out, &[&names[i], &id]);
     }
 }
 
@@ -256,7 +367,7 @@ pub fn fmt_risky(out: &mut String, d: &SecurityDetail) {
 }
 
 /// `wheel, docker (root-equivalent)` in payload order. Empty when none.
-pub fn fmt_admin_groups(out: &mut String, d: &SecurityDetail) {
+pub fn fmt_admin_groups(out: &mut String, w: &SecurityWords, d: &SecurityDetail) {
     let groups = d.groups.iter().filter(|g| g.admin || g.root_equivalent);
     for (i, g) in groups.enumerate() {
         if i > 0 {
@@ -264,58 +375,69 @@ pub fn fmt_admin_groups(out: &mut String, d: &SecurityDetail) {
         }
         out.push_str(&g.name);
         if g.root_equivalent {
-            out.push_str(" (root-equivalent)");
+            out.push(' ');
+            out.push_str(&w.root_equivalent);
         }
     }
 }
 
 /// `NoNewPrivs, Seccomp filter (3 filters), Dumpable`. Empty when none is set.
-pub fn fmt_flags(out: &mut String, no_new_privs: bool, seccomp: Seccomp, dumpable: bool) {
+pub fn fmt_flags(
+    out: &mut String,
+    w: &SecurityWords,
+    no_new_privs: bool,
+    seccomp: Seccomp,
+    dumpable: bool,
+) {
     let mut parts: Vec<String> = Vec::new();
     if no_new_privs {
-        parts.push("NoNewPrivs".into());
+        parts.push(w.no_new_privs.to_string());
     }
     match seccomp {
         Seccomp::Disabled => {}
-        Seccomp::Strict => parts.push("Seccomp strict".into()),
-        Seccomp::Filter { filters: 1 } => parts.push("Seccomp filter (1 filter)".into()),
-        Seccomp::Filter { filters } => parts.push(format!("Seccomp filter ({filters} filters)")),
+        Seccomp::Strict => parts.push(w.seccomp_strict.to_string()),
+        Seccomp::Filter { filters: 1 } => parts.push(w.seccomp_one.to_string()),
+        Seccomp::Filter { filters } => {
+            let mut part = String::new();
+            let _ = w.seccomp_many.write(&mut part, &[&filters]);
+            parts.push(part);
+        }
     }
     if dumpable {
-        parts.push("Dumpable".into());
+        parts.push(w.dumpable.to_string());
     }
     out.push_str(&parts.join(", "));
 }
 
 /// `Shared with init`, `Isolated (4026532211)`, `Same as tasklens` or `Isolated (4026532211)`,
 /// and the tooltip that says what it was compared with.
-pub fn fmt_ns(out: &mut String, state: NsState) -> &'static str {
+pub fn fmt_ns<'a>(out: &mut String, w: &'a SecurityWords, state: NsState) -> &'a SharedString {
     match state {
         NsState::SharedWithInit => {
-            out.push_str("Shared with init");
-            NS_TIP_INIT
+            out.push_str(&w.ns_shared_with_init);
+            &w.ns_tip_init
         }
         NsState::Isolated { inode } => {
-            let _ = write!(out, "Isolated ({inode})");
-            NS_TIP_INIT
+            let _ = w.ns_isolated.write(out, &[&inode]);
+            &w.ns_tip_init
         }
         NsState::SameAsTasklens => {
-            out.push_str("Same as tasklens");
-            NS_TIP_SELF
+            out.push_str(&w.ns_same_as_tasklens);
+            &w.ns_tip_self
         }
         NsState::IsolatedFromTasklens { inode } => {
-            let _ = write!(out, "Isolated ({inode})");
-            NS_TIP_SELF
+            let _ = w.ns_isolated.write(out, &[&inode]);
+            &w.ns_tip_self
         }
     }
 }
 
-fn elevated_word(e: Elevated) -> &'static str {
+fn elevated_word(w: &SecurityWords, e: Elevated) -> &SharedString {
     match e {
-        Elevated::Root => "Yes (root)",
-        Elevated::Capabilities => "Yes (capabilities)",
-        Elevated::Setuid => "Setuid",
-        Elevated::No => "No",
+        Elevated::Root => &w.elevated[0],
+        Elevated::Capabilities => &w.elevated[1],
+        Elevated::Setuid => &w.elevated[2],
+        Elevated::No => &w.elevated[3],
     }
 }
 
@@ -331,44 +453,54 @@ pub struct SecRow {
     pub row: TlKvRow,
 }
 
-fn row(id: SecField, text: impl Into<SharedString>, validity: Validity) -> SecRow {
+fn row(
+    w: &SecurityWords,
+    id: SecField,
+    text: impl Into<SharedString>,
+    validity: Validity,
+) -> SecRow {
     let mut value = TlValue::new(text);
     value.validity = validity;
     if validity == Validity::Restricted {
-        value.tooltip = Some(RESTRICTED_TOOLTIP.into());
+        value.tooltip = Some(w.restricted_tooltip.clone());
     }
     SecRow {
         id,
         row: TlKvRow {
-            label: id.label().into(),
+            label: w.label(id).clone(),
             value,
         },
     }
 }
 
 /// A `Total` formatted by `f` when Valid or Stale; else the grid's word for its validity.
-fn total<T>(id: SecField, t: &Total<T>, f: impl FnOnce(&T, &mut String)) -> SecRow {
+fn total<T>(
+    w: &SecurityWords,
+    id: SecField,
+    t: &Total<T>,
+    f: impl FnOnce(&T, &mut String),
+) -> SecRow {
     let mut s = String::new();
     if matches!(t.validity, Validity::Valid | Validity::Stale) {
         f(&t.value, &mut s);
     }
-    row(id, s, t.validity)
+    row(w, id, s, t.validity)
 }
 
-fn or_none_reported(s: String) -> String {
+fn or_none_reported(w: &SecurityWords, s: String) -> String {
     if s.is_empty() {
-        "None reported".into()
+        w.none_reported.to_string()
     } else {
         s
     }
 }
 
 /// The two columns from `d`; without a payload every value is `Collecting…`.
-pub fn build(d: Option<&SecurityDetail>) -> [Vec<SecRow>; 2] {
+pub fn build(w: &SecurityWords, d: Option<&SecurityDetail>) -> [Vec<SecRow>; 2] {
     let Some(d) = d else {
         let collecting = |ids: &[SecField]| -> Vec<SecRow> {
             ids.iter()
-                .map(|&id| row(id, "", Validity::WarmingUp))
+                .map(|&id| row(w, id, "", Validity::WarmingUp))
                 .collect()
         };
         return [collecting(&LEFT), collecting(&RIGHT)];
@@ -378,9 +510,9 @@ pub fn build(d: Option<&SecurityDetail>) -> [Vec<SecRow>; 2] {
         let validity = worst(ids.validity, names.validity);
         let mut s = String::new();
         if matches!(validity, Validity::Valid | Validity::Stale) {
-            fmt_ids(&mut s, &ids.value, &names.value);
+            fmt_ids(&mut s, w, &ids.value, &names.value);
         }
-        row(id, s, validity)
+        row(w, id, s, validity)
     };
     left.push(ids_row(SecField::User, &d.uids, &d.uid_names));
     left.push(ids_row(SecField::Group, &d.gids, &d.gid_names));
@@ -389,24 +521,26 @@ pub fn build(d: Option<&SecurityDetail>) -> [Vec<SecRow>; 2] {
         &mut count,
         d.groups.iter().filter(|g| !g.primary).count() as u64,
     );
-    left.push(row(SecField::Groups, count, Validity::Valid));
+    left.push(row(w, SecField::Groups, count, Validity::Valid));
     let mut risky = String::new();
     fmt_risky(&mut risky, d);
     let mut risky_row = row(
+        w,
         SecField::RiskyCaps,
-        or_none_reported(risky.clone()),
+        or_none_reported(w, risky.clone()),
         Validity::Valid,
     );
     if !risky.is_empty() {
         risky_row.row.value.tone = Some(ValueTone::Warning);
-        risky_row.row.value.tooltip = Some(RISKY_TOOLTIP.into());
+        risky_row.row.value.tooltip = Some(w.risky_tooltip.clone());
     }
     left.push(risky_row);
     let mut admin = String::new();
-    fmt_admin_groups(&mut admin, d);
+    fmt_admin_groups(&mut admin, w, d);
     left.push(row(
+        w,
         SecField::AdminGroups,
-        or_none_reported(admin),
+        or_none_reported(w, admin),
         Validity::Valid,
     ));
     let flags_validity = worst(
@@ -417,14 +551,15 @@ pub fn build(d: Option<&SecurityDetail>) -> [Vec<SecRow>; 2] {
     if matches!(flags_validity, Validity::Valid | Validity::Stale) {
         fmt_flags(
             &mut flags,
+            w,
             d.no_new_privs.value,
             d.seccomp.value,
             d.dumpable.value,
         );
-        flags = or_none_reported(flags);
+        flags = or_none_reported(w, flags);
     }
-    left.push(row(SecField::Flags, flags, flags_validity));
-    left.push(total(SecField::Label, &d.security_label, |v, s| {
+    left.push(row(w, SecField::Flags, flags, flags_validity));
+    left.push(total(w, SecField::Label, &d.security_label, |v, s| {
         escape_controls(s, v)
     }));
     let session = match &d.session {
@@ -433,43 +568,44 @@ pub fn build(d: Option<&SecurityDetail>) -> [Vec<SecRow>; 2] {
             escape_controls(&mut s, id);
             s
         }
-        None => "None".into(),
+        None => w.none.to_string(),
     };
-    left.push(row(SecField::Session, session, Validity::Valid));
+    left.push(row(w, SecField::Session, session, Validity::Valid));
     let audit = match d.audit_session.filter(|&id| id != NO_ID) {
         Some(id) => id.to_string(),
-        None => "None".into(),
+        None => w.none.to_string(),
     };
-    left.push(row(SecField::AuditSession, audit, Validity::Valid));
+    left.push(row(w, SecField::AuditSession, audit, Validity::Valid));
     let login = match d.login_uid.filter(|&id| id != NO_ID) {
         Some(uid) => login_text(d, uid),
-        None => "None".into(),
+        None => w.none.to_string(),
     };
-    left.push(row(SecField::LoginUid, login, Validity::Valid));
+    left.push(row(w, SecField::LoginUid, login, Validity::Valid));
 
     let mut right = Vec::with_capacity(RIGHT.len());
-    right.push(total(SecField::Elevated, &d.elevated, |e, s| {
-        s.push_str(elevated_word(*e))
+    right.push(total(w, SecField::Elevated, &d.elevated, |e, s| {
+        s.push_str(elevated_word(w, *e))
     }));
     for kind in NS_KINDS {
         let ns = d.namespaces.iter().find(|n| n.kind == kind);
         let Some(ns) = ns else {
-            right.push(row(SecField::Ns(kind), "", Validity::Unsupported));
+            right.push(row(w, SecField::Ns(kind), "", Validity::Unsupported));
             continue;
         };
         let mut s = String::new();
         let tip = matches!(ns.validity, Validity::Valid | Validity::Stale)
-            .then(|| fmt_ns(&mut s, ns.state));
-        let mut r = row(SecField::Ns(kind), s, ns.validity);
+            .then(|| fmt_ns(&mut s, w, ns.state).clone());
+        let mut r = row(w, SecField::Ns(kind), s, ns.validity);
         if let Some(tip) = tip {
-            r.row.value.tooltip = Some(tip.into());
+            r.row.value.tooltip = Some(tip);
         }
         right.push(r);
     }
-    right.push(total(SecField::StoreBypass, &d.store_bypass, |v, s| {
+    right.push(total(w, SecField::StoreBypass, &d.store_bypass, |v, s| {
         escape_controls(s, v)
     }));
     right.push(total(
+        w,
         SecField::IndirectBranch,
         &d.indirect_branch,
         |v, s| escape_controls(s, v),
@@ -510,6 +646,7 @@ pub struct SecurityTab {
     label_widths: Option<(u64, [Pixels; 2])>,
     words: Rc<KvWords>,
     general_words: Rc<GeneralWords>,
+    sec_words: Rc<SecurityWords>,
     copy_failed: SharedString,
     focus: FocusHandle,
     filter: Entity<PropsFilter>,
@@ -525,18 +662,20 @@ impl SecurityTab {
                 cx.notify();
             }
         });
+        let sec_words = security_words(cx);
         let mut tab = Self {
             key,
             payload: None,
             exited: false,
             needle: SharedString::default(),
-            columns: build(None),
+            columns: build(&sec_words, None),
             visible: Default::default(),
             sections: [Rc::from([]), Rc::from([])],
             cursor: None,
             label_widths: None,
             words: kv_words(cx),
             general_words: general_words(cx),
+            sec_words,
             copy_failed: tr(cx, KEY_COPY_FAILED),
             focus: cx.focus_handle().tab_stop(true),
             filter,
@@ -581,7 +720,12 @@ impl SecurityTab {
             return;
         }
         self.payload = payload.cloned();
-        self.columns = build(detail.as_deref());
+        let words = security_words(cx);
+        if !Rc::ptr_eq(&words, &self.sec_words) {
+            self.sec_words = words;
+            self.label_widths = None;
+        }
+        self.columns = build(&self.sec_words, detail.as_deref());
         self.apply_filter();
         cx.notify();
     }
@@ -854,13 +998,14 @@ impl SecurityTab {
             cx.set_global(TextMetricsCache::default());
         }
         let size = m.text.base;
+        let words = self.sec_words.clone();
         let widths = cx.update_global::<TextMetricsCache, _>(|cache, cx| {
             cache.clear_if_stale(m.style_version);
             [&LEFT[..], &RIGHT[..]].map(|ids| {
                 let widest = ids
                     .iter()
                     .map(|id| {
-                        id.label().chars().fold(px(0.), |sum, ch| {
+                        words.label(*id).chars().fold(px(0.), |sum, ch| {
                             sum + cache.char_advance(ch, size, window, cx)
                         })
                     })
@@ -1046,7 +1191,8 @@ mod tests {
     #[test]
     fn formatters() {
         let d = detail();
-        let [left, right] = build(Some(&d));
+        let w = SecurityWords::en();
+        let [left, right] = build(&w, Some(&d));
         assert_eq!(text(&left, SecField::RiskyCaps), "SYS_ADMIN, NET_ADMIN");
         assert_eq!(text(&left, SecField::Flags), "Dumpable");
         assert_eq!(text(&left, SecField::AuditSession), "None");
@@ -1056,11 +1202,11 @@ mod tests {
         assert_eq!(text(&right, SecField::Elevated), "No");
         assert_eq!(text(&right, SecField::Ns(NsKind::Net)), "Shared with init");
         let mut s = String::new();
-        fmt_flags(&mut s, true, Seccomp::Filter { filters: 3 }, false);
+        fmt_flags(&mut s, &w, true, Seccomp::Filter { filters: 3 }, false);
         assert_eq!(s, "NoNewPrivs, Seccomp filter (3 filters)");
         s.clear();
-        fmt_ns(&mut s, NsState::Isolated { inode: 4026532211 });
+        fmt_ns(&mut s, &w, NsState::Isolated { inode: 4026532211 });
         assert_eq!(s, "Isolated (4026532211)");
-        assert_eq!(build(None)[1].len(), RIGHT.len());
+        assert_eq!(build(&w, None)[1].len(), RIGHT.len());
     }
 }

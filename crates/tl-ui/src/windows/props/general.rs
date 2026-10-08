@@ -98,13 +98,9 @@ gpui_kit::actions!(
     ]
 );
 
-/// Tooltip of a Restricted value (R-050, P2 text; E23-025 adds the shield sentence in P3).
+/// The en-US tooltip of a Restricted value (R-050, P2 text; E23-025 adds the shield sentence in
+/// P3), for tests. The tab shows `pwn-general-restricted-tooltip`.
 pub const RESTRICTED_TOOLTIP: &str = "Needs administrator access.";
-/// Title of the command line block.
-pub const CMDLINE_TITLE: &str = "Command line";
-/// Label of the command line copy button.
-pub const CMDLINE_COPY: &str = "Copy";
-const COLLECTING: &str = "Collecting…";
 
 /// Body width from which the three panels sit side by side, × ui_scale.
 pub const THREE_COLUMN_MIN: f32 = 840.;
@@ -157,6 +153,8 @@ const KEY_TOAST_COPIED: &str = "pwn-general-toast-copied";
 const KEY_TOAST_OPENING: &str = "pwn-general-toast-opening";
 const KEY_TOAST_OPEN_FAILED: &str = "pwn-general-toast-open-failed";
 const KEY_CMDLINE_LABEL: &str = "pwn-general-cmdline-label";
+/// The marker the kernel puts after the path of a deleted executable.
+const KERNEL_DELETED: &str = " (deleted)";
 /// Captions the "And N more" tooltip lists at most.
 const WINDOW_MORE_LISTED: usize = 10;
 
@@ -207,6 +205,51 @@ pub struct GeneralWords {
     pub toast_open_failed: SharedString,
     /// The label of the command line in Copy all fields.
     pub cmdline_label: SharedString,
+    /// Field labels, in [`FieldId::ALL`] order.
+    labels: Vec<SharedString>,
+    /// A value not read yet: "Collecting…".
+    pub collecting: SharedString,
+    /// Tooltip of a Restricted value.
+    pub restricted_tooltip: SharedString,
+    pub cmdline_title: SharedString,
+    pub cmdline_copy: SharedString,
+    priority_nice: Template,
+    priority_rt: Template,
+    affinity_all: Template,
+    affinity_one: Template,
+    affinity_many: Template,
+    threads_differ: SharedString,
+    user_setuid: Template,
+    aslr: [SharedString; 3],
+    aslr_unknown: Template,
+    aslr_disabled: SharedString,
+    seccomp_disabled: SharedString,
+    seccomp_strict: SharedString,
+    seccomp_one: SharedString,
+    seccomp_many: Template,
+    /// PIE, NX stack, Full RELRO, Shadow stack, NoNewPrivs, Seccomp.
+    hardening: [SharedString; 6],
+    none: SharedString,
+    net_io: Template,
+    arch: [SharedString; 3],
+    unknown: SharedString,
+    /// In [`location_index`] order.
+    location: [SharedString; 11],
+    /// 3D, Compute, Video decode, Video encode.
+    gpu_engine: [SharedString; 4],
+    /// Minimized, Maximized, Normal.
+    window_state: [SharedString; 3],
+    yes: SharedString,
+    no: SharedString,
+    ppid_none: SharedString,
+    autogroup: Template,
+    nx_stack_no: SharedString,
+    relro_full: SharedString,
+    relro_partial: SharedString,
+    enabled: SharedString,
+    disabled: SharedString,
+    /// "(deleted)", after a deleted executable's path.
+    pub exe_deleted: SharedString,
 }
 
 impl GeneralWords {
@@ -241,7 +284,103 @@ impl GeneralWords {
             toast_opening: t(KEY_TOAST_OPENING),
             toast_open_failed: t(KEY_TOAST_OPEN_FAILED),
             cmdline_label: t(KEY_CMDLINE_LABEL),
+            labels: FieldId::ALL
+                .iter()
+                .map(|&id| match id {
+                    FieldId::WindowMore => SharedString::default(),
+                    id => t(id.label_key()),
+                })
+                .collect(),
+            collecting: t("pwn-general-collecting"),
+            restricted_tooltip: t("pwn-general-restricted-tooltip"),
+            cmdline_title: t("pwn-general-cmdline-title"),
+            cmdline_copy: t("pwn-general-cmdline-copy"),
+            priority_nice: tmpl("pwn-general-priority-nice", &["nice", "policy", "kernel"]),
+            priority_rt: tmpl("pwn-general-priority-rt", &["rt", "policy", "kernel"]),
+            affinity_all: tmpl("pwn-general-affinity-all", &["cpus"]),
+            affinity_one: tmpl("pwn-general-affinity-one", &["cpus"]),
+            affinity_many: tmpl("pwn-general-affinity-many", &["cpus", "n"]),
+            threads_differ: t("pwn-general-affinity-threads-differ"),
+            user_setuid: tmpl(
+                "pwn-general-user-setuid",
+                &["euser", "euid", "suser", "suid"],
+            ),
+            aslr: [
+                t("pwn-general-aslr-off"),
+                t("pwn-general-aslr-partial"),
+                t("pwn-general-aslr-full"),
+            ],
+            aslr_unknown: tmpl("pwn-general-aslr-unknown", &["n"]),
+            aslr_disabled: t("pwn-general-aslr-disabled-for-process"),
+            seccomp_disabled: t("pwn-general-seccomp-disabled"),
+            seccomp_strict: t("pwn-general-seccomp-strict"),
+            seccomp_one: t("pwn-general-seccomp-filter-one"),
+            seccomp_many: tmpl("pwn-general-seccomp-filter-many", &["n"]),
+            hardening: [
+                t("pwn-general-hardening-pie"),
+                t("pwn-general-hardening-nx-stack"),
+                t("pwn-general-hardening-full-relro"),
+                t("pwn-general-hardening-shadow-stack"),
+                t("pwn-general-hardening-no-new-privs"),
+                t("pwn-general-hardening-seccomp"),
+            ],
+            none: t("pwn-general-none"),
+            net_io: tmpl("pwn-general-net-io", &["rx", "tx"]),
+            arch: [
+                t("pwn-general-arch-x86-64"),
+                t("pwn-general-arch-x86"),
+                t("pwn-general-arch-aarch64"),
+            ],
+            unknown: t("pwn-general-unknown"),
+            location: [
+                t("pwn-general-location-temp"),
+                t("pwn-general-location-downloads"),
+                t("pwn-general-location-user-data"),
+                t("pwn-general-location-user-profile"),
+                t("pwn-general-location-system"),
+                t("pwn-general-location-optional"),
+                t("pwn-general-location-flatpak"),
+                t("pwn-general-location-appimage"),
+                t("pwn-general-location-wine-prefix"),
+                t("pwn-general-location-deleted"),
+                t("pwn-general-location-other"),
+            ],
+            gpu_engine: [
+                t("pwn-general-gpu-engine-3d"),
+                t("pwn-general-gpu-engine-compute"),
+                t("pwn-general-gpu-engine-video-decode"),
+                t("pwn-general-gpu-engine-video-encode"),
+            ],
+            window_state: [
+                t("pwn-general-window-minimized"),
+                t("pwn-general-window-maximized"),
+                t("pwn-general-window-normal"),
+            ],
+            yes: t("pwn-general-yes"),
+            no: t("pwn-general-no"),
+            ppid_none: t("pwn-general-ppid-none"),
+            autogroup: tmpl("pwn-general-autogroup", &["name", "nice"]),
+            nx_stack_no: t("pwn-general-nx-stack-no"),
+            relro_full: t("pwn-general-relro-full"),
+            relro_partial: t("pwn-general-relro-partial"),
+            enabled: t("pwn-general-enabled"),
+            disabled: t("pwn-general-disabled"),
+            exe_deleted: t("pwn-general-exe-deleted"),
         }
+    }
+
+    /// The en-US words, for code that runs without the strings.
+    pub fn en() -> Self {
+        Self::with(|key| crate::i18n::tr_en(key, &[]), Template::en)
+    }
+
+    /// The label of `id`, such as "Process:". Empty for [`FieldId::WindowMore`].
+    pub fn label(&self, id: FieldId) -> &SharedString {
+        &self.labels[id as usize]
+    }
+
+    fn yes_no(&self, yes: bool) -> &str {
+        if yes { &self.yes } else { &self.no }
     }
 
     /// "And {n} more".
@@ -263,10 +402,7 @@ impl Global for GeneralWordsCache {}
 /// strings they are in en-US.
 pub fn general_words(cx: &mut App) -> Rc<GeneralWords> {
     let Some(version) = cx.try_global::<Strings>().map(|s| s.strings_version) else {
-        return Rc::new(GeneralWords::with(
-            |key| crate::i18n::tr_en(key, &[]),
-            Template::en,
-        ));
+        return Rc::new(GeneralWords::en());
     };
     if let Some(cache) = cx.try_global::<GeneralWordsCache>()
         && cache.version == version
@@ -382,74 +518,145 @@ pub enum FieldId {
 }
 
 impl FieldId {
-    pub const fn label(self) -> &'static str {
+    /// Every field, in declaration order: `ALL[id as usize] == id`.
+    pub const ALL: [FieldId; 65] = [
+        FieldId::Process,
+        FieldId::Pid,
+        FieldId::Started,
+        FieldId::Ppid,
+        FieldId::User,
+        FieldId::Priority,
+        FieldId::Autogroup,
+        FieldId::Affinity,
+        FieldId::Hardening,
+        FieldId::Pie,
+        FieldId::NxStack,
+        FieldId::Relro,
+        FieldId::ShadowStack,
+        FieldId::Aslr,
+        FieldId::NoNewPrivs,
+        FieldId::Seccomp,
+        FieldId::Architecture,
+        FieldId::Executable,
+        FieldId::Location,
+        FieldId::Package,
+        FieldId::Description,
+        FieldId::WorkingDir,
+        FieldId::Root,
+        FieldId::Cgroup,
+        FieldId::Unit,
+        FieldId::AppId,
+        FieldId::Sha256,
+        FieldId::Md5,
+        FieldId::PackageStatus,
+        FieldId::Packager,
+        FieldId::Threads,
+        FieldId::Handles,
+        FieldId::Memory,
+        FieldId::WorkingSetTotal,
+        FieldId::WorkingSetShared,
+        FieldId::Pss,
+        FieldId::Uss,
+        FieldId::Swap,
+        FieldId::Commit,
+        FieldId::MemoryPct,
+        FieldId::CpuPct,
+        FieldId::CpuTime,
+        FieldId::IoReadBytes,
+        FieldId::IoWriteBytes,
+        FieldId::IoReadOps,
+        FieldId::IoWriteOps,
+        FieldId::DiskReadBytes,
+        FieldId::DiskWriteBytes,
+        FieldId::CancelledWriteBytes,
+        FieldId::DiskReadRate,
+        FieldId::DiskWriteRate,
+        FieldId::DiskTotalRate,
+        FieldId::NetIo,
+        FieldId::GpuPct,
+        FieldId::Vram,
+        FieldId::GpuMemShared,
+        FieldId::GpuEngine,
+        FieldId::WindowTitle,
+        FieldId::WindowId,
+        FieldId::WindowState,
+        FieldId::WindowClass,
+        FieldId::WindowRect,
+        FieldId::WindowSize,
+        FieldId::WindowMore,
+        FieldId::Window,
+    ];
+
+    /// The Fluent key of the label.
+    pub const fn label_key(self) -> &'static str {
         use FieldId::*;
         match self {
-            Process => "Process:",
-            Pid => "PID:",
-            Started => "Started:",
-            Ppid => "PPID:",
-            User => "User:",
-            Priority => "Priority:",
-            Autogroup => "Autogroup:",
-            Affinity => "Affinity:",
-            Hardening => "Hardening:",
-            Pie => "PIE:",
-            NxStack => "NX stack:",
-            Relro => "RELRO:",
-            ShadowStack => "Shadow stack:",
-            Aslr => "ASLR:",
-            NoNewPrivs => "NoNewPrivs:",
-            Seccomp => "Seccomp:",
-            Architecture => "Architecture:",
-            Executable => "Executable:",
-            Location => "Location:",
-            Package => "Package:",
-            Description => "Description:",
-            WorkingDir => "Working dir:",
-            Root => "Root:",
-            Cgroup => "Cgroup:",
-            Unit => "Unit:",
-            AppId => "App ID:",
-            Sha256 => "SHA-256:",
-            Md5 => "MD5:",
-            PackageStatus => "Package status:",
-            Packager => "Packager:",
-            Threads => "Threads:",
-            Handles => "Handles:",
-            Memory => "Memory:",
-            WorkingSetTotal => "Working set total:",
-            WorkingSetShared => "Working set shared:",
-            Pss => "PSS:",
-            Uss => "USS:",
-            Swap => "Swap:",
-            Commit => "Commit:",
-            MemoryPct => "Memory %:",
-            CpuPct => "CPU %:",
-            CpuTime => "CPU time:",
-            IoReadBytes => "I/O read bytes:",
-            IoWriteBytes => "I/O write bytes:",
-            IoReadOps => "I/O read ops:",
-            IoWriteOps => "I/O write ops:",
-            DiskReadBytes => "Disk read bytes:",
-            DiskWriteBytes => "Disk write bytes:",
-            CancelledWriteBytes => "Cancelled write bytes:",
-            DiskReadRate => "Disk read rate:",
-            DiskWriteRate => "Disk write rate:",
-            DiskTotalRate => "Disk total rate:",
-            NetIo => "Net I/O:",
-            GpuPct => "GPU %:",
-            Vram => "VRAM:",
-            GpuMemShared => "GPU memory shared:",
-            GpuEngine => "GPU engine:",
-            WindowTitle => "Window title:",
-            WindowId => "Window ID:",
-            WindowState => "Window state:",
-            WindowClass => "Window class:",
-            WindowRect => "Window rect:",
-            WindowSize => "Window size:",
+            Process => "pwn-general-label-process",
+            Pid => "pwn-general-label-pid",
+            Started => "pwn-general-label-started",
+            Ppid => "pwn-general-label-ppid",
+            User => "pwn-general-label-user",
+            Priority => "pwn-general-label-priority",
+            Autogroup => "pwn-general-label-autogroup",
+            Affinity => "pwn-general-label-affinity",
+            Hardening => "pwn-general-label-hardening",
+            Pie => "pwn-general-label-pie",
+            NxStack => "pwn-general-label-nx-stack",
+            Relro => "pwn-general-label-relro",
+            ShadowStack => "pwn-general-label-shadow-stack",
+            Aslr => "pwn-general-label-aslr",
+            NoNewPrivs => "pwn-general-label-no-new-privs",
+            Seccomp => "pwn-general-label-seccomp",
+            Architecture => "pwn-general-label-architecture",
+            Executable => "pwn-general-label-executable",
+            Location => "pwn-general-label-location",
+            Package => "pwn-general-label-package",
+            Description => "pwn-general-label-description",
+            WorkingDir => "pwn-general-label-working-dir",
+            Root => "pwn-general-label-root",
+            Cgroup => "pwn-general-label-cgroup",
+            Unit => "pwn-general-label-unit",
+            AppId => "pwn-general-label-app-id",
+            Sha256 => "pwn-general-label-sha256",
+            Md5 => "pwn-general-label-md5",
+            PackageStatus => "pwn-general-label-package-status",
+            Packager => "pwn-general-label-packager",
+            Threads => "pwn-general-label-threads",
+            Handles => "pwn-general-label-handles",
+            Memory => "pwn-general-label-memory",
+            WorkingSetTotal => "pwn-general-label-working-set-total",
+            WorkingSetShared => "pwn-general-label-working-set-shared",
+            Pss => "pwn-general-label-pss",
+            Uss => "pwn-general-label-uss",
+            Swap => "pwn-general-label-swap",
+            Commit => "pwn-general-label-commit",
+            MemoryPct => "pwn-general-label-memory-pct",
+            CpuPct => "pwn-general-label-cpu-pct",
+            CpuTime => "pwn-general-label-cpu-time",
+            IoReadBytes => "pwn-general-label-io-read-bytes",
+            IoWriteBytes => "pwn-general-label-io-write-bytes",
+            IoReadOps => "pwn-general-label-io-read-ops",
+            IoWriteOps => "pwn-general-label-io-write-ops",
+            DiskReadBytes => "pwn-general-label-disk-read-bytes",
+            DiskWriteBytes => "pwn-general-label-disk-write-bytes",
+            CancelledWriteBytes => "pwn-general-label-cancelled-write-bytes",
+            DiskReadRate => "pwn-general-label-disk-read-rate",
+            DiskWriteRate => "pwn-general-label-disk-write-rate",
+            DiskTotalRate => "pwn-general-label-disk-total-rate",
+            NetIo => "pwn-general-label-net-io",
+            GpuPct => "pwn-general-label-gpu-pct",
+            Vram => "pwn-general-label-vram",
+            GpuMemShared => "pwn-general-label-gpu-mem-shared",
+            GpuEngine => "pwn-general-label-gpu-engine",
+            WindowTitle => "pwn-general-label-window-title",
+            WindowId => "pwn-general-label-window-id",
+            WindowState => "pwn-general-label-window-state",
+            WindowClass => "pwn-general-label-window-class",
+            WindowRect => "pwn-general-label-window-rect",
+            WindowSize => "pwn-general-label-window-size",
+            // No label: the row shows "And N more" only.
             WindowMore => "",
-            Window => "Window:",
+            Window => "pwn-general-label-window",
         }
     }
 
@@ -574,7 +781,14 @@ pub struct KvField {
 // ---- Formatters (pure) ----
 
 /// `Nice 0, SCHED_OTHER, kernel prio 120`; realtime `RT 50, SCHED_FIFO, kernel prio 49`.
-pub fn fmt_priority(out: &mut String, policy: SchedPolicy, nice: i8, rt_prio: u8, kernel: i32) {
+pub fn fmt_priority(
+    out: &mut String,
+    w: &GeneralWords,
+    policy: SchedPolicy,
+    nice: i8,
+    rt_prio: u8,
+    kernel: i32,
+) {
     let name = match policy {
         SchedPolicy::Other => "SCHED_OTHER",
         SchedPolicy::Batch => "SCHED_BATCH",
@@ -584,9 +798,9 @@ pub fn fmt_priority(out: &mut String, policy: SchedPolicy, nice: i8, rt_prio: u8
     };
     let _ = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
-            write!(out, "RT {rt_prio}, {name}, kernel prio {kernel}")
+            w.priority_rt.write(out, &[&rt_prio, &name, &kernel])
         }
-        _ => write!(out, "Nice {nice}, {name}, kernel prio {kernel}"),
+        _ => w.priority_nice.write(out, &[&nice, &name, &kernel]),
     };
 }
 
@@ -622,58 +836,75 @@ fn write_ranges(out: &mut String, set: &CpuSet) {
 
 /// `All (0-31)` when `set` holds every online CPU, else `0-7,16-23 (16 CPUs)`; plus
 /// ` (threads differ)`. An empty `online` set (not known yet) never reads as All.
-pub fn fmt_affinity(out: &mut String, set: &CpuSet, online: &CpuSet, threads_differ: bool) {
+pub fn fmt_affinity(
+    out: &mut String,
+    w: &GeneralWords,
+    set: &CpuSet,
+    online: &CpuSet,
+    threads_differ: bool,
+) {
     if !online.is_empty() && set.intersection(online) == *online {
-        out.push_str("All (");
-        write_ranges(out, online);
-        out.push(')');
+        w.affinity_all
+            .write_each(out, |_, out| write_ranges(out, online));
     } else {
-        write_ranges(out, set);
         let n = set.count();
-        let _ = write!(out, " ({n} {})", if n == 1 { "CPU" } else { "CPUs" });
+        let template = if n == 1 {
+            &w.affinity_one
+        } else {
+            &w.affinity_many
+        };
+        template.write_each(out, |i, out| match i {
+            0 => write_ranges(out, set),
+            _ => {
+                let _ = write!(out, "{n}");
+            }
+        });
     }
     if threads_differ {
-        out.push_str(" (threads differ)");
+        out.push(' ');
+        out.push_str(&w.threads_differ);
     }
 }
 
 /// `oystein (1000)`; when the effective or saved uid differs from the real one:
 /// `oystein (1000), euid root (0), suid root (0)`. `names` are the real, effective and saved
 /// user names.
-pub fn fmt_user(out: &mut String, ids: &IdTriple, names: (&str, &str, &str)) {
+pub fn fmt_user(out: &mut String, w: &GeneralWords, ids: &IdTriple, names: (&str, &str, &str)) {
     let (real, effective, saved) = names;
     let _ = write!(out, "{real} ({})", ids.real);
     if ids.effective != ids.real || ids.saved != ids.real {
-        let _ = write!(
-            out,
-            ", euid {effective} ({}), suid {saved} ({})",
-            ids.effective, ids.saved
-        );
+        out.push_str(", ");
+        let _ = w
+            .user_setuid
+            .write(out, &[&effective, &ids.effective, &saved, &ids.saved]);
     }
 }
 
 /// `Full (2)`, `Partial (1)` or `Off (0)` from randomize_va_space, plus
 /// `, disabled for this process` with ADDR_NO_RANDOMIZE.
-pub fn fmt_aslr(out: &mut String, system: u8, disabled_for_process: bool) {
-    let _ = match system {
-        0 => write!(out, "Off (0)"),
-        1 => write!(out, "Partial (1)"),
-        2 => write!(out, "Full (2)"),
-        n => write!(out, "Unknown ({n})"),
-    };
+pub fn fmt_aslr(out: &mut String, w: &GeneralWords, system: u8, disabled_for_process: bool) {
+    match w.aslr.get(usize::from(system)) {
+        Some(word) => out.push_str(word),
+        None => {
+            let _ = w.aslr_unknown.write(out, &[&system]);
+        }
+    }
     if disabled_for_process {
-        out.push_str(", disabled for this process");
+        out.push_str(", ");
+        out.push_str(&w.aslr_disabled);
     }
 }
 
 /// `Disabled`, `Strict` or `Filter (3 filters)`.
-pub fn fmt_seccomp(out: &mut String, seccomp: Seccomp) {
-    let _ = match seccomp {
-        Seccomp::Disabled => write!(out, "Disabled"),
-        Seccomp::Strict => write!(out, "Strict"),
-        Seccomp::Filter { filters: 1 } => write!(out, "Filter (1 filter)"),
-        Seccomp::Filter { filters } => write!(out, "Filter ({filters} filters)"),
-    };
+pub fn fmt_seccomp(out: &mut String, w: &GeneralWords, seccomp: Seccomp) {
+    match seccomp {
+        Seccomp::Disabled => out.push_str(&w.seccomp_disabled),
+        Seccomp::Strict => out.push_str(&w.seccomp_strict),
+        Seccomp::Filter { filters: 1 } => out.push_str(&w.seccomp_one),
+        Seccomp::Filter { filters } => {
+            let _ = w.seccomp_many.write(out, &[&filters]);
+        }
+    }
 }
 
 /// The hardening items that apply.
@@ -689,15 +920,16 @@ pub struct Hardening {
 
 /// The enabled items in this order, comma separated:
 /// `PIE, NX stack, Full RELRO, Shadow stack, NoNewPrivs, Seccomp`; `None` when none apply.
-pub fn fmt_hardening(out: &mut String, h: Hardening) {
-    let items = [
-        (h.pie, "PIE"),
-        (h.nx_stack, "NX stack"),
-        (h.full_relro, "Full RELRO"),
-        (h.shadow_stack, "Shadow stack"),
-        (h.no_new_privs, "NoNewPrivs"),
-        (h.seccomp, "Seccomp"),
+pub fn fmt_hardening(out: &mut String, w: &GeneralWords, h: Hardening) {
+    let on = [
+        h.pie,
+        h.nx_stack,
+        h.full_relro,
+        h.shadow_stack,
+        h.no_new_privs,
+        h.seccomp,
     ];
+    let items = on.into_iter().zip(w.hardening.iter());
     let mut any = false;
     for (on, name) in items {
         if on {
@@ -709,50 +941,62 @@ pub fn fmt_hardening(out: &mut String, h: Hardening) {
         }
     }
     if !any {
-        out.push_str("None");
+        out.push_str(&w.none);
     }
 }
 
 /// `Receive 1.2 Mbps, send 0.3 Mbps` in the `units.network` unit. Rates in bytes per second.
-pub fn fmt_net_io(out: &mut String, rx_bps: f64, tx_bps: f64, unit: NetUnit, auto_scale: bool) {
-    out.push_str("Receive ");
-    units::net_rate(out, rx_bps, unit, auto_scale);
-    out.push_str(", send ");
-    units::net_rate(out, tx_bps, unit, auto_scale);
+pub fn fmt_net_io(
+    out: &mut String,
+    w: &GeneralWords,
+    rx_bps: f64,
+    tx_bps: f64,
+    unit: NetUnit,
+    auto_scale: bool,
+) {
+    w.net_io.write_each(out, |i, out| {
+        let bps = if i == 0 { rx_bps } else { tx_bps };
+        units::net_rate(out, bps, unit, auto_scale);
+    });
 }
 
-fn arch_word(arch: ElfArch) -> &'static str {
+fn arch_word(w: &GeneralWords, arch: ElfArch) -> &str {
     match arch {
-        ElfArch::X86_64 => "x86-64",
-        ElfArch::X86 => "x86 (32-bit)",
-        ElfArch::AArch64 => "AArch64",
-        ElfArch::Unknown => "Unknown",
+        ElfArch::X86_64 => &w.arch[0],
+        ElfArch::X86 => &w.arch[1],
+        ElfArch::AArch64 => &w.arch[2],
+        ElfArch::Unknown => &w.unknown,
     }
 }
 
-fn location_word(location: ExeLocation) -> &'static str {
+/// The position of `location`'s word in [`GeneralWords`].
+fn location_index(location: ExeLocation) -> usize {
     match location {
-        ExeLocation::TempDirectory => "Temp directory",
-        ExeLocation::UserDownloads => "User Downloads",
-        ExeLocation::UserData => "User data",
-        ExeLocation::UserProfile => "User profile",
-        ExeLocation::System => "System",
-        ExeLocation::OptionalSoftware => "Optional software",
-        ExeLocation::Flatpak => "Flatpak",
-        ExeLocation::AppImage => "AppImage",
-        ExeLocation::WinePrefix => "Wine prefix",
-        ExeLocation::Deleted => "Deleted",
-        ExeLocation::Other => "Other",
+        ExeLocation::TempDirectory => 0,
+        ExeLocation::UserDownloads => 1,
+        ExeLocation::UserData => 2,
+        ExeLocation::UserProfile => 3,
+        ExeLocation::System => 4,
+        ExeLocation::OptionalSoftware => 5,
+        ExeLocation::Flatpak => 6,
+        ExeLocation::AppImage => 7,
+        ExeLocation::WinePrefix => 8,
+        ExeLocation::Deleted => 9,
+        ExeLocation::Other => 10,
     }
 }
 
-fn gpu_engine_word(engine: Option<GpuEngine>) -> &'static str {
+fn location_word(w: &GeneralWords, location: ExeLocation) -> &str {
+    &w.location[location_index(location)]
+}
+
+fn gpu_engine_word(w: &GeneralWords, engine: Option<GpuEngine>) -> &str {
     match engine {
-        Some(GpuEngine::ThreeD) => "3D",
-        Some(GpuEngine::Compute) => "Compute",
-        Some(GpuEngine::VideoDecode) => "Video decode",
-        Some(GpuEngine::VideoEncode) => "Video encode",
-        None => "None",
+        Some(GpuEngine::ThreeD) => &w.gpu_engine[0],
+        Some(GpuEngine::Compute) => &w.gpu_engine[1],
+        Some(GpuEngine::VideoDecode) => &w.gpu_engine[2],
+        Some(GpuEngine::VideoEncode) => &w.gpu_engine[3],
+        None => &w.none,
     }
 }
 
@@ -768,18 +1012,14 @@ pub fn fmt_window_size(out: &mut String, g: FrameGeometry) {
     let _ = write!(out, "{} x {}", g.width, g.height);
 }
 
-fn window_state_word(w: &WindowEntry) -> &'static str {
+fn window_state_word<'a>(words: &'a GeneralWords, w: &WindowEntry) -> &'a str {
     if w.minimized {
-        "Minimized"
+        &words.window_state[0]
     } else if w.maximized {
-        "Maximized"
+        &words.window_state[1]
     } else {
-        "Normal"
+        &words.window_state[2]
     }
-}
-
-fn yes_no(yes: bool) -> &'static str {
-    if yes { "Yes" } else { "No" }
 }
 
 /// Characters the untrusted-text rules never show raw (UI-FND-053).
@@ -810,7 +1050,7 @@ pub fn escape_controls(out: &mut String, text: &str) {
 }
 
 /// "YYYY-MM-DD HH:MM:SS" in the system time zone.
-fn write_local(out: &mut String, unix_s: i64) {
+fn write_local(out: &mut String, w: &GeneralWords, unix_s: i64) {
     match jiff::Timestamp::from_second(unix_s) {
         Ok(ts) => {
             let z = ts.to_zoned(jiff::tz::TimeZone::system());
@@ -826,7 +1066,7 @@ fn write_local(out: &mut String, unix_s: i64) {
                 },
             );
         }
-        Err(_) => out.push_str("Unknown"),
+        Err(_) => out.push_str(&w.unknown),
     }
 }
 
@@ -1002,6 +1242,7 @@ impl ValueCache {
 struct Builder<'a> {
     cache: &'a mut ValueCache,
     words: &'a KvWords,
+    gw: &'a GeneralWords,
     out: Vec<KvField>,
 }
 
@@ -1020,7 +1261,7 @@ impl Builder<'_> {
     ) {
         let value: SharedString = match validity {
             Validity::Valid | Validity::Stale => self.cache.get(id, bits, validity, format),
-            Validity::WarmingUp => COLLECTING.into(),
+            Validity::WarmingUp => self.gw.collecting.clone(),
             Validity::Restricted => self.words.restricted.clone(),
             Validity::Unsupported => self.words.unsupported(unsupported).clone(),
             Validity::Failed => self.words.unavailable.clone(),
@@ -1028,7 +1269,7 @@ impl Builder<'_> {
         };
         self.out.push(KvField {
             id,
-            label: id.label().into(),
+            label: self.gw.label(id).clone(),
             value,
             kind,
             validity,
@@ -1040,11 +1281,11 @@ impl Builder<'_> {
     }
 
     /// A field with a fixed text.
-    fn word(&mut self, id: FieldId, kind: KvKind, validity: Validity, text: &'static str) {
+    fn word(&mut self, id: FieldId, kind: KvKind, validity: Validity, text: SharedString) {
         self.out.push(KvField {
             id,
-            label: id.label().into(),
-            value: text.into(),
+            label: self.gw.label(id).clone(),
+            value: text,
             kind,
             validity,
             full: None,
@@ -1052,6 +1293,12 @@ impl Builder<'_> {
             tooltip: None,
             tone: None,
         });
+    }
+
+    /// A field not read yet: "Collecting…".
+    fn collecting(&mut self, id: FieldId, kind: KvKind) {
+        let text = self.gw.collecting.clone();
+        self.word(id, kind, Validity::WarmingUp, text);
     }
 
     /// A field with a prepared text, tooltip and tone.
@@ -1068,7 +1315,7 @@ impl Builder<'_> {
     ) {
         self.out.push(KvField {
             id,
-            label: id.label().into(),
+            label: self.gw.label(id).clone(),
             value,
             kind,
             validity,
@@ -1083,7 +1330,7 @@ impl Builder<'_> {
     fn unsupported(&mut self, id: FieldId, kind: KvKind, word: UnsupportedWord) {
         self.out.push(KvField {
             id,
-            label: id.label().into(),
+            label: self.gw.label(id).clone(),
             value: self.words.unsupported(word).clone(),
             kind,
             validity: Validity::Unsupported,
@@ -1116,7 +1363,7 @@ impl Builder<'_> {
         format: impl FnOnce(&T, &mut String),
     ) {
         match total {
-            None => self.word(id, kind, Validity::WarmingUp, COLLECTING),
+            None => self.collecting(id, kind),
             Some(t) => {
                 let b = bits(&t.value);
                 self.add(id, kind, t.validity, unsupported, b, |s| {
@@ -1279,21 +1526,22 @@ impl CmdLineBlock {
 impl Render for CmdLineBlock {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *metrics(cx);
-        let copied = general_words(cx).toast_value_copied.clone();
+        let words = general_words(cx);
+        let copied = words.toast_value_copied.clone();
         let theme = current(cx);
         let mut title = div().flex_1().min_w_0();
         *title.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
         let title = title
             .truncate()
             .text_color(theme.text_secondary)
-            .child(CMDLINE_TITLE);
+            .child(words.cmdline_title.clone());
         let valid = self.validity.is_valid() || self.validity == Validity::Stale;
         let text = self.text.clone();
         let copy = TlButton::new("general-cmdline-copy", TlButtonKind::Ghost)
             .size(TlButtonSize::Sm)
             .icon(TlIcon::Copy)
             .icon_size(px(COPY_ICON * m.ui_scale))
-            .label(CMDLINE_COPY)
+            .label(words.cmdline_copy.clone())
             .focus_handle(self.copy_focus.clone())
             .disabled(!valid)
             .on_click(move |_, window, cx| {
@@ -2087,7 +2335,13 @@ impl GeneralTab {
 
     fn rebuild(&mut self, cx: &mut App) {
         self.words = kv_words(cx);
-        self.general_words = general_words(cx);
+        let gw = general_words(cx);
+        if !Rc::ptr_eq(&gw, &self.general_words) {
+            // New strings: format every value and measure the labels again.
+            self.cache = ValueCache::default();
+            self.label_widths = None;
+        }
+        self.general_words = gw.clone();
         let d = self.payload.clone();
         let d = d.as_deref();
         if let Some(d) = d
@@ -2110,12 +2364,12 @@ impl GeneralTab {
         }
         let live = self.live.clone();
         let live = live.as_ref();
-        let none = || Validity::WarmingUp;
 
         // Column 1.
         let mut b = Builder {
             cache: &mut self.cache,
             words: &self.words,
+            gw: &gw,
             out: Vec::with_capacity(COLUMNS[0].len()),
         };
         match live {
@@ -2129,7 +2383,7 @@ impl GeneralTab {
                     |s| s.push_str(&l.name),
                 );
             }
-            None => b.word(FieldId::Process, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::Process, KvKind::Text),
         }
         let pid = self.key.pid;
         b.add(
@@ -2147,12 +2401,15 @@ impl GeneralTab {
             KvKind::Text,
             d.map(|d| &d.started_s),
             |v| *v as u64,
-            |v, s| write_local(s, *v),
+            |v, s| write_local(s, &gw, *v),
         );
         match live {
-            Some(l) if l.ppid == 0 => {
-                b.word(FieldId::Ppid, KvKind::Text, Validity::Valid, "0 (none)")
-            }
+            Some(l) if l.ppid == 0 => b.word(
+                FieldId::Ppid,
+                KvKind::Text,
+                Validity::Valid,
+                gw.ppid_none.clone(),
+            ),
             Some(l) => {
                 let ppid = l.ppid;
                 b.add(
@@ -2166,7 +2423,7 @@ impl GeneralTab {
                     },
                 );
             }
-            None => b.word(FieldId::Ppid, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::Ppid, KvKind::Text),
         }
         match d {
             Some(d) => {
@@ -2187,10 +2444,10 @@ impl GeneralTab {
                     validity,
                     UnsupportedWord::NotSupported,
                     bits,
-                    |out| fmt_user(out, ids, (r, e, s)),
+                    |out| fmt_user(out, &gw, ids, (r, e, s)),
                 );
             }
-            None => b.word(FieldId::User, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::User, KvKind::Text),
         }
         match d {
             Some(d) => {
@@ -2208,10 +2465,10 @@ impl GeneralTab {
                     validity,
                     UnsupportedWord::NotSupported,
                     hash_of((policy as u8, nice, rt, kernel)),
-                    |s| fmt_priority(s, policy, nice, rt, kernel),
+                    |s| fmt_priority(s, &gw, policy, nice, rt, kernel),
                 );
             }
-            None => b.word(FieldId::Priority, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::Priority, KvKind::Text),
         }
         b.total(
             FieldId::Autogroup,
@@ -2219,7 +2476,7 @@ impl GeneralTab {
             d.map(|d| &d.autogroup),
             |(name, nice)| hash_of((ptr_bits(name), *nice)),
             |(name, nice), s| {
-                let _ = write!(s, "{name} nice {nice}");
+                let _ = gw.autogroup.write(s, &[name, nice]);
             },
         );
         {
@@ -2230,7 +2487,7 @@ impl GeneralTab {
                 KvKind::Link(LinkTarget::Affinity),
                 d.map(|d| &d.affinity),
                 |set| hash_of((set, online, differ)),
-                |set, s| fmt_affinity(s, set, &online, differ),
+                |set, s| fmt_affinity(s, &gw, set, &online, differ),
             );
         }
         match d {
@@ -2260,24 +2517,24 @@ impl GeneralTab {
                     validity,
                     UnsupportedWord::NotSupported,
                     hash_of(h),
-                    |s| fmt_hardening(s, h),
+                    |s| fmt_hardening(s, &gw, h),
                 );
             }
-            None => b.word(FieldId::Hardening, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::Hardening, KvKind::Text),
         }
         b.total(
             FieldId::Pie,
             KvKind::Text,
             d.map(|d| &d.pie),
             |v| u64::from(*v),
-            |v, s| s.push_str(yes_no(*v)),
+            |v, s| s.push_str(gw.yes_no(*v)),
         );
         b.total(
             FieldId::NxStack,
             KvKind::Text,
             d.map(|d| &d.nx_stack),
             |v| u64::from(*v),
-            |v, s| s.push_str(if *v { "Yes" } else { "No (executable stack)" }),
+            |v, s| s.push_str(if *v { &gw.yes } else { &gw.nx_stack_no }),
         );
         b.total(
             FieldId::Relro,
@@ -2286,9 +2543,9 @@ impl GeneralTab {
             |v| *v as u64,
             |v, s| {
                 s.push_str(match v {
-                    Relro::Full => "Full",
-                    Relro::Partial => "Partial",
-                    Relro::None => "None",
+                    Relro::Full => &gw.relro_full,
+                    Relro::Partial => &gw.relro_partial,
+                    Relro::None => &gw.none,
                 })
             },
         );
@@ -2297,7 +2554,7 @@ impl GeneralTab {
             KvKind::Text,
             d.map(|d| &d.shadow_stack),
             |v| u64::from(*v),
-            |v, s| s.push_str(if *v { "Enabled" } else { "Disabled" }),
+            |v, s| s.push_str(if *v { &gw.enabled } else { &gw.disabled }),
         );
         match d {
             Some(d) => {
@@ -2309,17 +2566,17 @@ impl GeneralTab {
                     validity,
                     UnsupportedWord::NotSupported,
                     hash_of((sys, off)),
-                    |s| fmt_aslr(s, sys, off),
+                    |s| fmt_aslr(s, &gw, sys, off),
                 );
             }
-            None => b.word(FieldId::Aslr, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::Aslr, KvKind::Text),
         }
         b.total(
             FieldId::NoNewPrivs,
             KvKind::Text,
             d.map(|d| &d.no_new_privs),
             |v| u64::from(*v),
-            |v, s| s.push_str(yes_no(*v)),
+            |v, s| s.push_str(gw.yes_no(*v)),
         );
         b.total(
             FieldId::Seccomp,
@@ -2330,14 +2587,14 @@ impl GeneralTab {
                 Seccomp::Strict => 1,
                 Seccomp::Filter { filters } => 2 + u64::from(*filters),
             },
-            |v, s| fmt_seccomp(s, *v),
+            |v, s| fmt_seccomp(s, &gw, *v),
         );
         b.total(
             FieldId::Architecture,
             KvKind::Text,
             d.map(|d| &d.architecture),
             |v| *v as u64,
-            |v, s| s.push_str(arch_word(*v)),
+            |v, s| s.push_str(arch_word(&gw, *v)),
         );
         match d {
             Some(d) if d.exe_deleted && d.exe.validity.is_valid() => {
@@ -2348,10 +2605,10 @@ impl GeneralTab {
                     Some(&d.exe),
                     ptr_bits,
                     |v, s| {
-                        s.push_str(v);
-                        if !v.ends_with(" (deleted)") {
-                            s.push_str(" (deleted)");
-                        }
+                        // The kernel's own marker is replaced by the translated one.
+                        s.push_str(v.strip_suffix(KERNEL_DELETED).unwrap_or(v));
+                        s.push(' ');
+                        s.push_str(&gw.exe_deleted);
                     },
                 );
             }
@@ -2366,7 +2623,7 @@ impl GeneralTab {
             KvKind::Text,
             d.map(|d| &d.location),
             |v| *v as u64,
-            |v, s| s.push_str(location_word(*v)),
+            |v, s| s.push_str(location_word(&gw, *v)),
         );
         b.total(
             FieldId::Package,
@@ -2382,7 +2639,7 @@ impl GeneralTab {
                 Some(p) => {
                     let _ = write!(s, "{} {}", p.name, p.version);
                 }
-                None => s.push_str("Not packaged"),
+                None => s.push_str(&gw.not_packaged),
             },
         );
         b.total_word(
@@ -2415,7 +2672,7 @@ impl GeneralTab {
                 ),
                 None => b.unsupported(FieldId::Cgroup, KvKind::Text, UnsupportedWord::NotReported),
             },
-            None => b.word(FieldId::Cgroup, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::Cgroup, KvKind::Text),
         }
         if let Some(unit) = d.and_then(|d| d.unit.as_ref()) {
             b.add(
@@ -2443,6 +2700,7 @@ impl GeneralTab {
         let mut b = Builder {
             cache: &mut self.cache,
             words: &self.words,
+            gw: &gw,
             out: Vec::with_capacity(COLUMNS[1].len()),
         };
         match (d, &self.hashes) {
@@ -2471,8 +2729,8 @@ impl GeneralTab {
                 }
             }
             _ => {
-                b.word(FieldId::Sha256, KvKind::Hash, none(), COLLECTING);
-                b.word(FieldId::Md5, KvKind::Hash, none(), COLLECTING);
+                b.collecting(FieldId::Sha256, KvKind::Hash);
+                b.collecting(FieldId::Md5, KvKind::Hash);
             }
         }
         match d {
@@ -2498,7 +2756,7 @@ impl GeneralTab {
                     tone,
                 );
             }
-            None => b.word(FieldId::PackageStatus, KvKind::Status, none(), COLLECTING),
+            None => b.collecting(FieldId::PackageStatus, KvKind::Status),
         }
         match d.map(|d| &d.package) {
             Some(p) if p.validity.is_valid() => {
@@ -2528,7 +2786,7 @@ impl GeneralTab {
                 0,
                 |_| {},
             ),
-            None => b.word(FieldId::Packager, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::Packager, KvKind::Text),
         }
         let live_count = |b: &mut Builder, id, f: ProcessField, v: Option<u64>| match (live, v) {
             (Some(l), Some(v)) => b.add(
@@ -2539,7 +2797,7 @@ impl GeneralTab {
                 v,
                 |s| units::count(s, v),
             ),
-            _ => b.word(id, KvKind::Text, Validity::WarmingUp, COLLECTING),
+            _ => b.collecting(id, KvKind::Text),
         };
         let live_size = |b: &mut Builder, id, f: ProcessField, v: Option<u64>| match (live, v) {
             (Some(l), Some(v)) => b.add(
@@ -2550,7 +2808,7 @@ impl GeneralTab {
                 v,
                 |s| units::bytes(s, v),
             ),
-            _ => b.word(id, KvKind::Text, Validity::WarmingUp, COLLECTING),
+            _ => b.collecting(id, KvKind::Text),
         };
         live_count(
             &mut b,
@@ -2566,7 +2824,7 @@ impl GeneralTab {
                 |v| u64::from(*v),
                 |v, s| units::count(s, u64::from(*v)),
             ),
-            None => b.word(FieldId::Handles, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::Handles, KvKind::Text),
         }
         live_size(
             &mut b,
@@ -2612,7 +2870,7 @@ impl GeneralTab {
                     |s| units::percent(s, pct),
                 );
             }
-            _ => b.word(FieldId::MemoryPct, KvKind::Text, none(), COLLECTING),
+            _ => b.collecting(FieldId::MemoryPct, KvKind::Text),
         }
         match live {
             Some(l) => {
@@ -2626,7 +2884,7 @@ impl GeneralTab {
                     |s| units::percent(s, pct),
                 );
             }
-            None => b.word(FieldId::CpuPct, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::CpuPct, KvKind::Text),
         }
         b.total(
             FieldId::CpuTime,
@@ -2645,6 +2903,7 @@ impl GeneralTab {
         let mut b = Builder {
             cache: &mut self.cache,
             words: &self.words,
+            gw: &gw,
             out: Vec::with_capacity(COLUMNS[2].len()),
         };
         b.size(FieldId::DiskReadBytes, d.map(|d| &d.disk_read_bytes));
@@ -2662,7 +2921,7 @@ impl GeneralTab {
                 bps.to_bits(),
                 |s| units::rate_mib_fixed(s, bps),
             ),
-            None => b.word(id, KvKind::Text, Validity::WarmingUp, COLLECTING),
+            None => b.collecting(id, KvKind::Text),
         };
         let read = live.map(|l| (l.get(ProcessField::IoRead), f64::from(l.io_read_bps)));
         let write = live.map(|l| (l.get(ProcessField::IoWrite), f64::from(l.io_write_bps)));
@@ -2696,10 +2955,10 @@ impl GeneralTab {
                     validity,
                     UnsupportedWord::NotSupported,
                     hash_of((rx.to_bits(), tx.to_bits(), unit == NetUnit::Bits, auto)),
-                    |s| fmt_net_io(s, rx, tx, unit, auto),
+                    |s| fmt_net_io(s, &gw, rx, tx, unit, auto),
                 );
             }
-            None => b.word(FieldId::NetIo, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::NetIo, KvKind::Text),
         }
         match live {
             Some(l) => {
@@ -2713,7 +2972,7 @@ impl GeneralTab {
                     |s| units::percent(s, pct),
                 );
             }
-            None => b.word(FieldId::GpuPct, KvKind::Text, none(), COLLECTING),
+            None => b.collecting(FieldId::GpuPct, KvKind::Text),
         }
         live_size(
             &mut b,
@@ -2727,7 +2986,7 @@ impl GeneralTab {
             KvKind::Text,
             d.map(|d| &d.gpu_engine),
             |v| v.map_or(0, |e| e as u64 + 1),
-            |v, s| s.push_str(gpu_engine_word(*v)),
+            |v, s| s.push_str(gpu_engine_word(&gw, *v)),
         );
         window_block(&mut b, self.windows.as_ref(), &self.general_words);
         let col3 = b.finish();
@@ -2748,13 +3007,14 @@ impl GeneralTab {
             cx.set_global(TextMetricsCache::default());
         }
         let size = m.text.base;
+        let words = self.general_words.clone();
         let widths = cx.update_global::<TextMetricsCache, _>(|cache, cx| {
             cache.clear_if_stale(m.style_version);
             COLUMNS.map(|ids| {
                 let widest = ids
                     .iter()
                     .map(|id| {
-                        id.label().chars().fold(px(0.), |sum, ch| {
+                        words.label(*id).chars().fold(px(0.), |sum, ch| {
                             sum + cache.char_advance(ch, size, window, cx)
                         })
                     })
@@ -2772,12 +3032,7 @@ impl GeneralTab {
 /// The window block: the topmost window's six fields and "And N more", or one `Window:` row.
 fn window_block(b: &mut Builder, view: Option<&WindowsView>, words: &GeneralWords) {
     let Some(view) = view else {
-        b.word(
-            FieldId::Window,
-            KvKind::Text,
-            Validity::WarmingUp,
-            COLLECTING,
-        );
+        b.collecting(FieldId::Window, KvKind::Text);
         return;
     };
     match view.validity {
@@ -2838,7 +3093,7 @@ fn window_block(b: &mut Builder, view: Option<&WindowsView>, words: &GeneralWord
         v,
         UnsupportedWord::NotSupported,
         u64::from(w.minimized) | (u64::from(w.maximized) << 1),
-        |s| s.push_str(window_state_word(w)),
+        |s| s.push_str(window_state_word(words, w)),
     );
     text(b, FieldId::WindowClass, &w.resource_class);
     let g = w.frame_geometry;
@@ -2891,7 +3146,7 @@ fn section(rows: Vec<TlKvRow>) -> Rc<[TlKvSection]> {
 fn to_row(field: &KvField, exited: bool, words: &GeneralWords) -> TlKvRow {
     let mut value = TlValue::new(field.value.clone());
     value.path = field.id.is_path();
-    if field.id == FieldId::Executable && field.value.ends_with(" (deleted)") {
+    if field.id == FieldId::Executable && is_deleted_exe(field, words) {
         value.tone = Some(ValueTone::Warning);
     }
     if field.tone.is_some() {
@@ -2900,9 +3155,9 @@ fn to_row(field: &KvField, exited: bool, words: &GeneralWords) -> TlKvRow {
     value.tooltip = field.tooltip.clone();
     value.validity = match field.validity {
         Validity::Valid if exited && matches!(field.kind, KvKind::Link(_)) => Validity::Stale,
-        Validity::WarmingUp if field.value.as_ref() != COLLECTING => Validity::Stale,
+        Validity::WarmingUp if field.value != words.collecting => Validity::Stale,
         Validity::Restricted => {
-            value.tooltip = Some(RESTRICTED_TOOLTIP.into());
+            value.tooltip = Some(words.restricted_tooltip.clone());
             Validity::Restricted
         }
         Validity::Unsupported => {
@@ -2932,12 +3187,20 @@ fn link_of(field: &KvField, words: &GeneralWords) -> Option<(Box<dyn Action>, Sh
     };
     match target {
         LinkTarget::Parent => Some((Box::new(GeneralGoToParent), words.link_parent.clone())),
-        LinkTarget::Executable if !field.value.ends_with(" (deleted)") => {
+        LinkTarget::Executable if !is_deleted_exe(field, words) => {
             Some((Box::new(GeneralOpenFileLocation), words.link_exe.clone()))
         }
         LinkTarget::Affinity => Some((Box::new(GeneralSetAffinity), words.link_affinity.clone())),
         LinkTarget::Executable | LinkTarget::Unit => None,
     }
+}
+
+/// The Executable value ends with " (deleted)" in the current words.
+fn is_deleted_exe(field: &KvField, words: &GeneralWords) -> bool {
+    field
+        .value
+        .strip_suffix(words.exe_deleted.as_ref())
+        .is_some_and(|rest| rest.ends_with(' '))
 }
 
 /// "Label: value" with the label's ":" not doubled.
@@ -3197,6 +3460,21 @@ mod tests {
         set
     }
 
+    fn w() -> GeneralWords {
+        GeneralWords::en()
+    }
+
+    #[test]
+    fn field_all_matches_declaration_order() {
+        for (i, id) in FieldId::ALL.iter().enumerate() {
+            assert_eq!(*id as usize, i, "{id:?}");
+        }
+        let w = w();
+        assert_eq!(w.label(FieldId::Process).as_ref(), "Process:");
+        assert_eq!(w.label(FieldId::Window).as_ref(), "Window:");
+        assert_eq!(w.label(FieldId::WindowMore).as_ref(), "");
+    }
+
     fn run(f: impl FnOnce(&mut String)) -> String {
         let mut s = String::new();
         f(&mut s);
@@ -3206,15 +3484,15 @@ mod tests {
     #[test]
     fn fmt_priority_other_and_fifo() {
         assert_eq!(
-            run(|s| fmt_priority(s, SchedPolicy::Other, 0, 0, 120)),
+            run(|s| fmt_priority(s, &w(), SchedPolicy::Other, 0, 0, 120)),
             "Nice 0, SCHED_OTHER, kernel prio 120"
         );
         assert_eq!(
-            run(|s| fmt_priority(s, SchedPolicy::Fifo, 0, 50, 49)),
+            run(|s| fmt_priority(s, &w(), SchedPolicy::Fifo, 0, 50, 49)),
             "RT 50, SCHED_FIFO, kernel prio 49"
         );
         assert_eq!(
-            run(|s| fmt_priority(s, SchedPolicy::Batch, -5, 0, 115)),
+            run(|s| fmt_priority(s, &w(), SchedPolicy::Batch, -5, 0, 115)),
             "Nice -5, SCHED_BATCH, kernel prio 115"
         );
     }
@@ -3223,21 +3501,21 @@ mod tests {
     fn fmt_affinity_all_and_list_threads_differ() {
         let online = set_of(&[(0, 31)]);
         assert_eq!(
-            run(|s| fmt_affinity(s, &online, &online, false)),
+            run(|s| fmt_affinity(s, &w(), &online, &online, false)),
             "All (0-31)"
         );
         let some = set_of(&[(0, 7), (16, 23)]);
         assert_eq!(
-            run(|s| fmt_affinity(s, &some, &online, true)),
+            run(|s| fmt_affinity(s, &w(), &some, &online, true)),
             "0-7,16-23 (16 CPUs) (threads differ)"
         );
         assert_eq!(
-            run(|s| fmt_affinity(s, &set_of(&[(3, 3)]), &online, false)),
+            run(|s| fmt_affinity(s, &w(), &set_of(&[(3, 3)]), &online, false)),
             "3 (1 CPU)"
         );
         // Online not known yet: never "All".
         assert_eq!(
-            run(|s| fmt_affinity(s, &online, &CpuSet::empty(), false)),
+            run(|s| fmt_affinity(s, &w(), &online, &CpuSet::empty(), false)),
             "0-31 (32 CPUs)"
         );
     }
@@ -3251,7 +3529,7 @@ mod tests {
             fs: 1000,
         };
         assert_eq!(
-            run(|s| fmt_user(s, &same, ("oystein", "oystein", "oystein"))),
+            run(|s| fmt_user(s, &w(), &same, ("oystein", "oystein", "oystein"))),
             "oystein (1000)"
         );
         let setuid = IdTriple {
@@ -3261,38 +3539,41 @@ mod tests {
             fs: 0,
         };
         assert_eq!(
-            run(|s| fmt_user(s, &setuid, ("oystein", "root", "root"))),
+            run(|s| fmt_user(s, &w(), &setuid, ("oystein", "root", "root"))),
             "oystein (1000), euid root (0), suid root (0)"
         );
     }
 
     #[test]
     fn fmt_aslr_personality() {
-        assert_eq!(run(|s| fmt_aslr(s, 2, false)), "Full (2)");
-        assert_eq!(run(|s| fmt_aslr(s, 1, false)), "Partial (1)");
+        assert_eq!(run(|s| fmt_aslr(s, &w(), 2, false)), "Full (2)");
+        assert_eq!(run(|s| fmt_aslr(s, &w(), 1, false)), "Partial (1)");
         assert_eq!(
-            run(|s| fmt_aslr(s, 0, true)),
+            run(|s| fmt_aslr(s, &w(), 0, true)),
             "Off (0), disabled for this process"
         );
         assert_eq!(
-            run(|s| fmt_aslr(s, 2, true)),
+            run(|s| fmt_aslr(s, &w(), 2, true)),
             "Full (2), disabled for this process"
         );
     }
 
     #[test]
     fn fmt_seccomp_filters() {
-        assert_eq!(run(|s| fmt_seccomp(s, Seccomp::Disabled)), "Disabled");
-        assert_eq!(run(|s| fmt_seccomp(s, Seccomp::Strict)), "Strict");
+        assert_eq!(run(|s| fmt_seccomp(s, &w(), Seccomp::Disabled)), "Disabled");
+        assert_eq!(run(|s| fmt_seccomp(s, &w(), Seccomp::Strict)), "Strict");
         assert_eq!(
-            run(|s| fmt_seccomp(s, Seccomp::Filter { filters: 3 })),
+            run(|s| fmt_seccomp(s, &w(), Seccomp::Filter { filters: 3 })),
             "Filter (3 filters)"
         );
     }
 
     #[test]
     fn fmt_hardening_order_and_none() {
-        assert_eq!(run(|s| fmt_hardening(s, Hardening::default())), "None");
+        assert_eq!(
+            run(|s| fmt_hardening(s, &w(), Hardening::default())),
+            "None"
+        );
         let all = Hardening {
             pie: true,
             nx_stack: true,
@@ -3302,7 +3583,7 @@ mod tests {
             seccomp: true,
         };
         assert_eq!(
-            run(|s| fmt_hardening(s, all)),
+            run(|s| fmt_hardening(s, &w(), all)),
             "PIE, NX stack, Full RELRO, Shadow stack, NoNewPrivs, Seccomp"
         );
         let some = Hardening {
@@ -3310,13 +3591,13 @@ mod tests {
             seccomp: true,
             ..Hardening::default()
         };
-        assert_eq!(run(|s| fmt_hardening(s, some)), "NX stack, Seccomp");
+        assert_eq!(run(|s| fmt_hardening(s, &w(), some)), "NX stack, Seccomp");
     }
 
     #[test]
     fn fmt_net_io_bits() {
         assert_eq!(
-            run(|s| fmt_net_io(s, 150_000., 37_500., NetUnit::Bits, false)),
+            run(|s| fmt_net_io(s, &w(), 150_000., 37_500., NetUnit::Bits, false)),
             "Receive 1.2 Mbps, send 0.3 Mbps"
         );
     }

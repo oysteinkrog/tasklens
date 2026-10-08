@@ -811,6 +811,51 @@ fnd-kv-not-reported = <not-reported>
     assert_eq!(tr_calls(), before, "60 frames make no tr call");
 }
 
+/// Field labels and value words come from the catalogue (R-132): a swapped key shows in the tab,
+/// in the copy text, and the formatted values use the swapped words.
+#[cfg(feature = "test-hooks")]
+#[gpui_kit::test]
+fn general_labels_and_words_follow_test_locale(cx: &mut TestAppContext) {
+    use tl_ui::i18n::set_test_catalogue;
+
+    const MARKERS: &str = "
+pwn-general-label-cgroup = <cgroup>:
+pwn-general-yes = <yes>
+pwn-general-seccomp-filter-many = <filter { $n }>
+";
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        tl_ui::i18n::init_strings(cx, "en-US");
+        set_test_catalogue(cx, MARKERS);
+    });
+    let (t, cx) = cx.add_window_view(|window, cx| {
+        let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
+        GeneralTab::new(KEY, filter, cx)
+    });
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    draw(cx);
+
+    assert_eq!(value(&t, cx, FieldId::Pie), "<yes>");
+    assert_eq!(value(&t, cx, FieldId::Seccomp), "<filter 3>");
+    let labels: Vec<String> = cx.update(|_, cx| {
+        (0..3)
+            .flat_map(|i| t.read(cx).rows(i))
+            .map(|r| r.label.to_string())
+            .collect()
+    });
+    assert!(labels.iter().any(|l| l == "<cgroup>:"), "{labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "Process:"),
+        "other keys keep their en-US text"
+    );
+}
+
 /// The filter bar resolves its words once per strings version: the General tab with the bar makes
 /// no tr call over 60 frames, and a new catalogue reaches the placeholder and tooltip (R-132).
 #[cfg(feature = "test-hooks")]
