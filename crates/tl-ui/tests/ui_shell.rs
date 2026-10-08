@@ -4423,9 +4423,11 @@ mod main_window {
         })
     }
 
+    /// Moves the clock, runs the animation frame callbacks (they mark the strip and the window
+    /// for redraw), then draws.
     fn advance(vcx: &mut VisualTestContext, ms: u64) {
         vcx.executor().advance_clock(Duration::from_millis(ms));
-        vcx.run_until_parked();
+        frame(vcx);
         draw(vcx);
     }
 
