@@ -16,8 +16,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui_kit::base::Root;
 use gpui_kit::base::slider::SliderState;
+use gpui_kit::base::{ElementExt as _, Root};
 use gpui_kit::component::Icon;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
@@ -118,7 +118,7 @@ fn is_realtime(policy: SchedPolicy) -> bool {
 }
 
 /// What "Set priority" sends first. `then_nice` follows `first` once every target succeeded.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PriorityPlan {
     pub first: ActionKind,
     pub then_nice: Option<i8>,
@@ -342,8 +342,7 @@ impl PriorityDialog {
             .zip(words.policies.iter())
             .map(|((_, value), label)| TlSelectItem::new(*value, label.clone()))
             .collect();
-        let policy =
-            cx.new(|cx| TlSelectState::new(items, Some(policy_value(initial.0)), cx));
+        let policy = cx.new(|cx| TlSelectState::new(items, Some(policy_value(initial.0)), cx));
         let nice_value = f32::from(initial.1.clamp(NICE_MIN, NICE_MAX));
         let nice = cx.new(|_| {
             SliderState::new()
@@ -356,15 +355,13 @@ impl PriorityDialog {
         let mut subs = vec![cx.observe(&nice, |_, _, cx| cx.notify())];
         // Enter in the field applies the typed value first (the stepper hears the same event),
         // then sends.
-        subs.push(cx.subscribe_in(
-            &rt_input,
-            window,
-            |_, _, ev: &InputEvent, window, cx| {
+        subs.push(
+            cx.subscribe_in(&rt_input, window, |_, _, ev: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = ev {
                     cx.defer_in(window, |this, window, cx| this.apply(window, cx));
                 }
-            },
-        ));
+            }),
+        );
         policy.read(cx).focus_handle(cx).focus(window, cx);
         Self {
             targets,
