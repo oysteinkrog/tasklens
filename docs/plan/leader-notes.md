@@ -792,3 +792,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - Filed pdu.55, the delegate first-draw panic.
 - Next beads: pdu-52 takes pdu.55 then pdu.29, 9o0 takes xdh.1, gma takes gma.21, crw takes crw.40.
 - wlf.32 plan approved: the setting is motion.save_power_on_battery.
+- Owner, 2026-10-08: wlf.30 uses a thread per source. ADR-004 is amended, the shared pool stays for actions and the journal, and a hung source shows Late. The pdu-51 agent implements it, but the profile comes first whenever the session unlocks.
