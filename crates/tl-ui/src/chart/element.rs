@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use gpui_kit::{
     App, Bounds, ContentMask, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
-    Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, Path, Pixels,
-    Point, Style, Window, point, px, relative, size,
+    Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, Path,
+    PathVertex, Pixels, Point, Style, Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use tl_model::series::{SampleFlags, SeriesView};
@@ -593,13 +593,24 @@ fn visible_min_max(
 /// `path` (chart-local physical px) as logical px moved by `offset`: every vertex and the bounds
 /// divided by `scale_factor` once, then shifted, like gpui-component `path_cache.rs::translated`.
 /// `Path::translate` is not used: it works in scaled pixels and would apply the scale twice.
-fn translated(path: &Path<Pixels>, offset: Point<Pixels>, scale_factor: f32) -> Path<Pixels> {
+/// `paint_path` takes the path by value, so one copy per paint is needed. The vertices are
+/// written once in that copy, not cloned and then rewritten (tasklens-wlf.34).
+pub(super) fn translated(
+    path: &Path<Pixels>,
+    offset: Point<Pixels>,
+    scale_factor: f32,
+) -> Path<Pixels> {
     let inv = 1.0 / scale_factor;
-    let mut path = path.clone();
-    path.bounds.origin = path.bounds.origin * inv + offset;
-    path.bounds.size = size(path.bounds.size.width * inv, path.bounds.size.height * inv);
-    for vertex in &mut path.vertices {
-        vertex.xy_position = vertex.xy_position * inv + offset;
-    }
-    path
+    let mut out = Path::new(path.bounds.origin * inv + offset);
+    out.bounds.size = size(path.bounds.size.width * inv, path.bounds.size.height * inv);
+    out.vertices = path
+        .vertices
+        .iter()
+        .map(|v| PathVertex {
+            xy_position: v.xy_position * inv + offset,
+            st_position: v.st_position,
+            content_mask: Default::default(),
+        })
+        .collect();
+    out
 }

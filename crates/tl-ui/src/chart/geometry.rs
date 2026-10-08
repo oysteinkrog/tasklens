@@ -7,7 +7,7 @@
 //! `FillMesh` triangulates them directly (tasklens-wlf.33). Time math is `u64` and the pixel
 //! scale is `f64`: 60 s in ns against 1,600 px loses precision in `f32`.
 
-use gpui_kit::{Bounds, Hsla, Path, PathBuilder, Pixels, Point, point, px};
+use gpui_kit::{Bounds, Hsla, Path, PathBuilder, PathVertex, Pixels, Point, point, px, size};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 
@@ -468,37 +468,58 @@ fn cubic(p0: (f32, f32), c1: (f32, f32), c2: (f32, f32), p3: (f32, f32), t: f32)
     )
 }
 
-/// Texture coordinates that mark a triangle as fully inside the fill (as `PathBuilder` sets them).
-const INSIDE: (Point<f32>, Point<f32>, Point<f32>) = (point(0., 1.), point(0., 1.), point(0., 1.));
+/// Texture coordinates that mark a vertex as fully inside the fill (as `PathBuilder` sets them).
+const INSIDE: Point<f32> = point(0., 1.);
 
 /// A chart fill built directly as triangles, without lyon (tasklens-wlf.33). Every chart fill
 /// is the band between a top chain and a bottom chain that share x and never go left, so each
 /// segment is two triangles: O(n), no sort, and no triangle overlaps another.
-#[derive(Default)]
+///
+/// Vertices are pushed straight into the path, and the bounds are set once in `finish`, not per
+/// triangle as `Path::push_triangle` does (tasklens-wlf.34).
 pub struct FillMesh {
     path: Option<Path<Pixels>>,
     /// A vertex buffer from an earlier build, cleared, used for the first triangle.
     spare: Option<Path<Pixels>>,
+    /// The smallest and largest x and y of the vertices so far.
+    min: (f32, f32),
+    max: (f32, f32),
+}
+
+impl Default for FillMesh {
+    fn default() -> Self {
+        Self::reusing(None)
+    }
 }
 
 impl FillMesh {
     fn reusing(spare: Option<Path<Pixels>>) -> Self {
-        Self { path: None, spare }
+        Self {
+            path: None,
+            spare,
+            min: (f32::MAX, f32::MAX),
+            max: (f32::MIN, f32::MIN),
+        }
     }
 
     fn tri(&mut self, a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels>) {
         let path = self.path.get_or_insert_with(|| match self.spare.take() {
             Some(mut path) => {
                 path.vertices.clear();
-                path.bounds = Bounds {
-                    origin: a,
-                    size: Default::default(),
-                };
                 path
             }
             None => Path::new(a),
         });
-        path.push_triangle((a, b, c), INSIDE);
+        for p in [a, b, c] {
+            let (x, y) = (f32::from(p.x), f32::from(p.y));
+            self.min = (self.min.0.min(x), self.min.1.min(y));
+            self.max = (self.max.0.max(x), self.max.1.max(y));
+            path.vertices.push(PathVertex {
+                xy_position: p,
+                st_position: INSIDE,
+                content_mask: Default::default(),
+            });
+        }
     }
 
     /// The band between `top` and `bottom(i, top[i])`, two triangles per segment. A segment
@@ -529,9 +550,14 @@ impl FillMesh {
         }
     }
 
-    /// The finished path, or `None` when no triangle was added.
+    /// The finished path with its bounds, or `None` when no triangle was added.
     fn finish(self) -> Option<Path<Pixels>> {
-        self.path.filter(|p| !p.vertices.is_empty())
+        let mut path = self.path.filter(|p| !p.vertices.is_empty())?;
+        path.bounds = Bounds {
+            origin: point(px(self.min.0), px(self.min.1)),
+            size: size(px(self.max.0 - self.min.0), px(self.max.1 - self.min.1)),
+        };
+        Some(path)
     }
 }
 
@@ -1077,6 +1103,17 @@ mod tests {
         let mut mesh = FillMesh::default();
         mesh.band(&top, |i, _| bottom[i]);
         assert!((area(mesh) - 50.0).abs() < 1e-3);
+    }
+
+    /// The bounds cover exactly the vertices, set once in `finish`.
+    #[test]
+    fn bounds_cover_the_vertices() {
+        let top = [point(px(2.0), px(3.0)), point(px(12.0), px(1.0))];
+        let mut mesh = FillMesh::default();
+        mesh.band(&top, |_, p| point(p.x, px(20.0)));
+        let path = mesh.finish().expect("triangles");
+        assert_eq!(path.bounds.origin, point(px(2.0), px(1.0)));
+        assert_eq!(path.bounds.size, size(px(10.0), px(19.0)));
     }
 
     /// A segment with no width adds no triangle.

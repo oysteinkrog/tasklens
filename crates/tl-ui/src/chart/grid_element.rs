@@ -47,6 +47,7 @@ use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
+use super::element::translated;
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint, HoverState};
@@ -1364,17 +1365,4 @@ fn visible_min_max(series: &[CellSeries], right_edge: u64, range_ns: u64) -> (f3
         }
     }
     if lo > hi { (0.0, 0.0) } else { (lo, hi) }
-}
-
-/// `path` (physical px) as logical px moved by `offset`, as `element.rs` does it: vertices and
-/// bounds divided by `scale_factor` once, then shifted.
-fn translated(path: &Path<Pixels>, offset: Point<Pixels>, scale_factor: f32) -> Path<Pixels> {
-    let inv = 1.0 / scale_factor;
-    let mut path = path.clone();
-    path.bounds.origin = path.bounds.origin * inv + offset;
-    path.bounds.size = size(path.bounds.size.width * inv, path.bounds.size.height * inv);
-    for vertex in &mut path.vertices {
-        vertex.xy_position = vertex.xy_position * inv + offset;
-    }
-    path
 }
