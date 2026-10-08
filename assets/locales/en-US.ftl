@@ -1041,6 +1041,8 @@ shell-menu-file-exit = Exit tasklens
 
 # Tab overflow menu (E20-015)
 shell-tab-more = More tabs
+shell-tab-show-history = Show history
+shell-tab-show-live = Show live processes
 
 # Set Affinity dialog (UI-PWN-021, E23-002). Numbers and CPU lists are formatted by the caller.
 pwn-affinity-title = tasklens Set Affinity

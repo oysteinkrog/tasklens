@@ -62,7 +62,7 @@ use crate::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, EscapeChain, FocusFilter,
     GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab,
     SHELL_FILTER_CONTEXT, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetViewMode, ShowMainWindow,
-    ToggleHideSystem, ToggleMainWindow, ZoomWindow,
+    ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::{AnimationDriver, FrameStats};
 use crate::app::{
@@ -1863,6 +1863,23 @@ impl MainWindow {
         Some(built[(at + step).rem_euclid(n) as usize])
     }
 
+    /// `ToggleHistoryMode` (E20-025, UI-SHL-023, PROC-088): selects Processes when another tab
+    /// is active, then flips `UiState.processes.history_mode`. The tab label and the Processes
+    /// page follow the state. The only handler of this Action.
+    fn on_toggle_history(
+        &mut self,
+        _: &ToggleHistoryMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active != Tab::Processes {
+            self.select_tab(Tab::Processes, window, cx);
+        }
+        TlSettings::update(cx, |d| {
+            d.state.processes.history_mode = !d.state.processes.history_mode
+        });
+    }
+
     fn on_select_tab(&mut self, a: &SelectTab, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(&tab) = Tab::ALL.get(a.0) {
             self.select_tab(tab, window, cx);
@@ -2196,6 +2213,7 @@ impl Render for MainWindow {
             // Only the main window pauses; secondary windows have no such listener.
             .on_modifiers_changed(cx.listener(Self::on_modifiers))
             // window-level on_action handlers (chain edits)
+            .on_action(cx.listener(Self::on_toggle_history))
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_clear_filter))
             .on_action(cx.listener(Self::on_escape_chain))

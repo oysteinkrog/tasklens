@@ -14,6 +14,9 @@
 //! animates. The strip and filter widths come from the last prepaint; when one of them changed,
 //! the strip asks for one more frame.
 //!
+//! The Processes tab carries the History toggle icon after its label (E20-025, UI-SHL-023). It
+//! dispatches `ToggleHistoryMode`, which the main window handles.
+//!
 //! A tab switch can slide the outline from the old tab to the new one over
 //! `motion.tab_switch_ms` with `ease_out_cubic` (E20-021, UI-SHL-021). The progress comes from
 //! the executor clock, not the element animation's wall clock, so tests can step it. The path is
@@ -25,20 +28,23 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::{
-    AnyView, App, Bounds, ClickEvent, Context, Element, ElementId, Entity, FocusHandle, FontWeight,
-    GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, ParentElement, Path, PathBuilder, Pixels, Point, Position, Render,
-    SharedString, StatefulInteractiveElement, Style, Styled, Subscription, TextRun, WeakEntity,
-    Window, div, point, prelude::FluentBuilder as _, px, relative,
+    AnyElement, AnyView, App, Bounds, ClickEvent, Context, Element, ElementId, Entity, FocusHandle,
+    FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, ParentElement, Path, PathBuilder, Pixels, Point,
+    Position, Render, SharedString, StatefulInteractiveElement, Style, Styled, Subscription,
+    TextRun, WeakEntity, Window, div, point, prelude::FluentBuilder as _, px, relative,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 
+use gpui_kit::component::Icon;
+
 use super::filter::FilterBox;
-use crate::actions::SelectTab;
+use crate::actions::{SelectTab, ToggleHistoryMode};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::TlSettings;
 use crate::theme::{UiMetrics, current, metrics};
@@ -81,6 +87,19 @@ struct TabAnim {
     duration: Duration,
 }
 
+/// Gap between the Processes label and the History icon, × ui_scale.
+pub const HISTORY_GAP: f32 = 6.0;
+/// The History icon's square hit area, × ui_scale.
+pub const HISTORY_HIT: f32 = 22.0;
+
+/// The History icon as last drawn. Tests read it through `TabStrip::drawn_history`.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawnHistory {
+    pub color: Hsla,
+    pub tooltip: SharedString,
+}
+
 /// Control point factor of a cubic Bézier that follows a quarter circle.
 const QUARTER_ARC_K: f32 = 0.552_284_8;
 
@@ -111,6 +130,9 @@ struct TabWords {
     tabs: [SharedString; 6],
     /// "More tabs".
     more: SharedString,
+    /// The History icon's tooltip: "Show history" off, "Show live processes" on.
+    show_history: SharedString,
+    show_live: SharedString,
 }
 
 impl TabWords {
@@ -118,6 +140,8 @@ impl TabWords {
         Self {
             tabs: Tab::ALL.map(|tab| TabStrip::label(tab, history_mode, cx)),
             more: tr(cx, "shell-tab-more"),
+            show_history: tr(cx, "shell-tab-show-history"),
+            show_live: tr(cx, "shell-tab-show-live"),
         }
     }
 }
@@ -185,6 +209,8 @@ pub struct TabStrip {
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     drawn: SmallVec<[SharedString; 6]>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    drawn_history: Option<DrawnHistory>,
     #[cfg(any(test, feature = "test-hooks"))]
     rule_builds: u32,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -266,6 +292,8 @@ impl TabStrip {
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             drawn: SmallVec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            drawn_history: None,
             #[cfg(any(test, feature = "test-hooks"))]
             rule_builds: 0,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -380,8 +408,81 @@ impl TabStrip {
             .iter()
             .find(|(t, _)| *t == tab)
             .map_or(px(0.), |(_, label)| {
-                *label + px(2. * TAB_PAD_X * self.shaped_scale)
+                let icon = if tab == Tab::Processes {
+                    HISTORY_GAP + HISTORY_HIT
+                } else {
+                    0.
+                };
+                *label + px((2. * TAB_PAD_X + icon) * self.shaped_scale)
             })
+    }
+
+    /// The History icon as last drawn; `None` when the Processes tab was not shown.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn drawn_history(&self) -> Option<&DrawnHistory> {
+        self.drawn_history.as_ref()
+    }
+
+    /// The History toggle after the Processes label (UI-SHL-023): `rotate-ccw-clock` at the
+    /// small icon size in a 22 px square, `text_secondary`, or `accent` in History mode; hover
+    /// and press show `text_primary` on `tab_hover`. A click dispatches `ToggleHistoryMode` and
+    /// never reaches the tab.
+    fn history_icon(&mut self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let theme = current(cx).clone();
+        let m = *metrics(cx);
+        let s = m.ui_scale;
+        let on = self.history_mode;
+        let color = if on {
+            theme.accent
+        } else {
+            theme.text_secondary
+        };
+        let tooltip = if on {
+            self.words.show_live.clone()
+        } else {
+            self.words.show_history.clone()
+        };
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.drawn_history = Some(DrawnHistory {
+                color,
+                tooltip: tooltip.clone(),
+            });
+        }
+        let (hover, primary) = (theme.tab_hover, theme.text_primary);
+        let icon = div()
+            .id("TabStrip-history")
+            .debug_selector(|| "TabStrip-history".into())
+            .role(Role::Button)
+            .aria_label(tooltip.clone())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .ml(px(HISTORY_GAP * s))
+            .size(px(HISTORY_HIT * s))
+            .rounded(m.radius_small)
+            .text_color(color)
+            .hover(move |st| st.bg(hover).text_color(primary))
+            .active(move |st| st.bg(hover).text_color(primary))
+            .on_mouse_down(MouseButton::Left, stop)
+            .on_mouse_down(MouseButton::Right, stop)
+            .on_mouse_down(MouseButton::Middle, stop)
+            .on_click(|_, window, cx| {
+                cx.stop_propagation();
+                window.dispatch_action(Box::new(ToggleHistoryMode), cx);
+            })
+            .child(Icon::new(TlIcon::RotateCcwClock).size(m.icon.sm));
+        let tip = HoverTooltip::state("TabStrip-history-tooltip", window, cx);
+        HoverTooltip::attach(
+            &tip,
+            icon,
+            DELAY_CONTROL,
+            TlTooltip::text(tooltip).build(),
+            window,
+            cx,
+        )
+        .into_any_element()
     }
 
     /// Splits the built tabs into the ones shown in the strip and the ones in the overflow menu,
@@ -539,6 +640,13 @@ impl Render for TabStrip {
         }
 
         let height = px(TAB_STRIP_H * s);
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.drawn_history = None;
+        }
+        let mut history = visible
+            .contains(&Tab::Processes)
+            .then(|| self.history_icon(window, cx));
         let tabs = visible.iter().map(|tab| {
             let tab = *tab;
             let index = tab as usize;
@@ -577,6 +685,7 @@ impl Render for TabStrip {
                     window.dispatch_action(Box::new(SelectTab(index)), cx);
                 })
                 .child(label)
+                .children((tab == Tab::Processes).then(|| history.take()).flatten())
         });
 
         let overflow = (!self.hidden.is_empty()).then(|| {
