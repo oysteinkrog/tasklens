@@ -134,7 +134,8 @@ const UI_SCALE_TEXT: &str = "shell-toast-ui-scale";
 const HIDING_SYSTEM_TEXT: &str = "shell-toast-hiding-system";
 const SHOWING_SYSTEM_TEXT: &str = "shell-toast-showing-system";
 const VIEW_MODE_TEXT: &str = "shell-toast-view-mode";
-const VIEW_MODE_TOOLTIP: &str = "shell-toolbar-view-mode";
+/// The cycler tooltip; the Processes toolbar reads the same key (jqk.35).
+const VIEW_MODE_TOOLTIP: &str = "processes-toolbar-cycle-mode";
 
 const SCALE_STEP: u16 = 5;
 const SCALE_MIN: u16 = 75;
@@ -524,23 +525,24 @@ fn set_view_mode(cx: &mut App, mode: TableMode) {
     push_main_toast(cx, ToastKind::Info, text, None, None);
 }
 
-/// The Fluent key of a view mode's name. The caller translates it.
+/// The Fluent key of a view mode's name, shared with the Processes toolbar. The caller
+/// translates it.
 pub fn view_mode_name(mode: TableMode) -> &'static str {
     match mode {
-        TableMode::Tree => "shell-view-mode-tree",
-        TableMode::Grouped => "shell-view-mode-grouped",
-        TableMode::Flat => "shell-view-mode-flat",
+        TableMode::Tree => "processes-toolbar-mode-tree",
+        TableMode::Grouped => "processes-toolbar-mode-grouped",
+        TableMode::Flat => "processes-toolbar-mode-flat",
     }
 }
 
 /// The view-mode cycler tooltip, "Toggle view mode (current: <name>)". In History mode the
-/// cycler shows `shell-toolbar-view-mode-history` instead; the caller picks.
+/// cycler shows `processes-toolbar-history-flat` instead; the caller picks.
 pub fn view_mode_tooltip(mode: TableMode, cx: &App) -> SharedString {
     let name = shell_text(cx, view_mode_name(mode), &[]);
     shell_text(
         cx,
         VIEW_MODE_TOOLTIP,
-        &[("name", FluentValue::from(name.as_ref()))],
+        &[("mode", FluentValue::from(name.as_ref()))],
     )
 }
 
