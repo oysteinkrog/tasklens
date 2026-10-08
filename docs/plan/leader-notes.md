@@ -847,3 +847,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 9o0.6: TreeTableDelegate::cell_element(ix, col, ctx) -> Option<AnyElement> (default None) lets a column draw a custom element (status dot via sys_status::status_cell); CellOut still drives copy, sort, tooltip.
 - 9o0.6: impact tooltip via pure impact_tooltip_lines; fork_exec_only missing from model, filed 9o0.37 (pdu-30 next).
 - crw.24: closed. Grid records the clicked value (ClickedValue global), page panel opens the one page menu with Copy value first; fixes double menu on right-click.
+- crw.45: Demand.process_top (tl-model) starts only the process sweep for the Overview Top processes box; no history window. Opt-in key in the existing Performance settings section.
