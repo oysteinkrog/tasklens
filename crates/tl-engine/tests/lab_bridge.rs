@@ -423,10 +423,10 @@ fn shutdown_clean_with_fake_workers() {
     );
 }
 
-/// Set when `BlockedCpu::sample` starts. Only `shutdown_times_out_on_blocked_job` reads it.
+/// Set when `BlockedCpu::sample` starts. Only `shutdown_clean_with_blocked_sample` reads it.
 static BLOCKED_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// A CPU worker whose first sample blocks its blocking-pool thread for 3 s.
+/// A CPU worker whose first sample blocks its sampling thread for 3 s.
 struct BlockedCpu;
 
 impl Source for BlockedCpu {
@@ -454,7 +454,7 @@ fn blocked_cpu_factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
 }
 
 #[test]
-fn shutdown_times_out_on_blocked_job() {
+fn shutdown_clean_with_blocked_sample() {
     let handle = Engine::start_with_workers(
         fixture_config(EngineMode::Full),
         EngineHooks::default(),
@@ -470,16 +470,19 @@ fn shutdown_times_out_on_blocked_job() {
     while !BLOCKED_STARTED.load(Ordering::Acquire) {
         assert!(
             begin.elapsed() < Duration::from_secs(5),
-            "the blocking job did not start within 5 s"
+            "the blocked sample did not start within 5 s"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
     let report = handle.shutdown(Duration::from_secs(2));
-    // The job is not interrupted. Teardown goes on in the background and the process would
-    // exit anyway.
-    assert!(!report.torn_down, "{report:?}");
-    assert!(!report.clean());
-    assert!(report.elapsed < Duration::from_millis(1600), "{report:?}");
+    // The sample is not interrupted, but it runs on the source's own sampling thread, not on
+    // the blocking pool. Shutdown leaves that thread detached and does not wait for it
+    // (tasklens-wlf.30).
+    assert!(report.clean(), "{report:?}");
+    assert!(
+        report.elapsed < DRAIN_BUDGET + TEARDOWN_BUDGET,
+        "{report:?}"
+    );
 }
 
 #[test]
