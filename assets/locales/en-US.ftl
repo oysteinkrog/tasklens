@@ -1046,6 +1046,11 @@ fnd-action-target-socket = { $local } to { $remote }
 shell-toast-hiding-system = Hiding system processes
 shell-toast-showing-system = Showing system processes
 shell-toast-view-mode = View mode: { $name }
+# Window picker (E20-027).
+shell-toolbar-picker = Select process by window
+shell-toast-pick-start = Click a window to select its process. Hold CTRL while clicking to terminate process. Esc cancels.
+shell-toast-pick-none = No window selected
+shell-toast-pick-failed = Could not start window picking
 processes-cell-tooltip-euid = euid { $euid }
 processes-cell-tooltip-net-shared = shared
 processes-cell-tooltip-cancelled-writes = cancelled: { $size }/s
