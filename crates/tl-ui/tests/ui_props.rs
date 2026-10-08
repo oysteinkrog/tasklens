@@ -2906,6 +2906,72 @@ mod threads {
         );
         assert_eq!(tsv_lines.next(), None, "one selected row");
     }
+
+    /// rsf.28: the main thread (TID = PID 4321) draws its Name at 500, the others at normal.
+    #[gpui_kit::test]
+    fn threads_main_thread_name_weight_500(cx: &mut TestAppContext) {
+        use gpui_kit::FontWeight;
+        use tl_ui::table::TreeTableDelegate as _;
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        let weights = cx.update(|_, cx| {
+            let table = view.read(cx).tab.read(cx).table().clone();
+            let d = &table.read(cx).delegate;
+            [4321, 4325, 4330].map(|tid| d.name_weight(d.row_index(tid).expect("shown")))
+        });
+        assert_eq!(
+            weights,
+            [FontWeight::MEDIUM, FontWeight::NORMAL, FontWeight::NORMAL]
+        );
+    }
+
+    /// rsf.28: dragging the Ctx switches boundary far left stops at its 100 px minimum
+    /// (gma.19), not at the 60 px text minimum.
+    #[gpui_kit::test]
+    fn threads_resize_stops_at_column_minimum(cx: &mut TestAppContext) {
+        use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+        use tl_ui::table::columns::TableColumn as _;
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        let table = cx.update(|_, cx| view.read(cx).tab.read(cx).table().clone());
+        let header = cx.debug_bounds("TlTreeTableHeader").expect("the header");
+        // The right boundary of Ctx switches: the widths of every column up to it.
+        let right = cx.update(|_, cx| {
+            let layout = table.read(cx).columns();
+            ThreadColumn::ALL
+                .iter()
+                .take_while(|&&c| c != ThreadColumn::WaitChannel)
+                .map(|c| layout.width(*c))
+                .fold(px(0.), |a, w| a + w)
+        });
+        let at = |x: Pixels| gpui_kit::point(header.left() + x, header.top() + px(10.));
+        cx.simulate_event(MouseDownEvent {
+            position: at(right),
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        draw(cx);
+        for x in [right - px(40.), right - px(120.)] {
+            cx.simulate_event(MouseMoveEvent {
+                position: at(x),
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::none(),
+            });
+            draw(cx);
+        }
+        cx.simulate_event(MouseUpEvent {
+            position: at(right - px(120.)),
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+        });
+        draw(cx);
+        let width = cx.update(|_, cx| table.read(cx).columns().widths[&ThreadColumn::CtxSwitches]);
+        assert_eq!(ThreadColumn::CtxSwitches.min_width(), Some(100.));
+        assert_eq!(width, px(100.), "stopped at its own minimum");
+    }
 }
 
 // ---- Memory maps tab (E23-018, UI-PWN-013) ----
@@ -3170,6 +3236,15 @@ mod maps {
             ],
             "the matching region keeps its node; the other region is hidden"
         );
+    }
+
+    /// rsf.28: the gma.23 minimum widths, logical px at 100%.
+    #[test]
+    fn maps_columns_have_minimum_widths() {
+        use tl_ui::table::columns::TableColumn as _;
+        let mins: Vec<_> = MapsColumn::ALL.iter().map(|c| c.min_width()).collect();
+        let want = [120., 110., 70., 70., 60., 80., 60., 60., 60.];
+        assert_eq!(mins, want.map(Some));
     }
 }
 

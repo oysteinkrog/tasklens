@@ -409,6 +409,8 @@ struct TDelegate {
     tip_rows: RefCell<Vec<usize>>,
     /// Every Stale tooltip `cell` built.
     tips_built: RefCell<Vec<SharedString>>,
+    /// The row whose Name text `name_weight` gives 500.
+    medium_row: Option<usize>,
 }
 
 impl TDelegate {
@@ -441,6 +443,7 @@ impl TDelegate {
             cell_calls: Cell::new(0),
             tip_rows: RefCell::new(Vec::new()),
             tips_built: RefCell::new(Vec::new()),
+            medium_row: None,
         }
     }
 
@@ -609,6 +612,13 @@ impl TreeTableDelegate for TDelegate {
     fn double_click_expands(&self) -> bool {
         self.double_expands
     }
+    fn name_weight(&self, ix: usize) -> gpui_kit::FontWeight {
+        if self.medium_row == Some(ix) {
+            gpui_kit::FontWeight::MEDIUM
+        } else {
+            gpui_kit::FontWeight::NORMAL
+        }
+    }
 }
 
 /// A fixed-size box holding the table, so the body has a known viewport.
@@ -674,6 +684,32 @@ fn tree_table_renders_visible_range_only() {
     redraw(vcx);
     let built = vcx.update(|_, cx| table.read(cx).rows_built_last_frame.get());
     assert!(built <= 27, "{built} rows built after scrolling");
+}
+
+/// rsf.28: `name_weight` sets the Name text's weight. The same name at 500 is wider than at the
+/// default, normal weight, which every other table keeps.
+#[test]
+fn name_weight_draws_the_name_at_500() {
+    let primary_width = |medium_row: Option<usize>| {
+        let mut cx = cosmic_cx();
+        let rows = vec![TRow {
+            name: "systemd-journald",
+            ..plain(1)
+        }];
+        let d = TDelegate {
+            medium_row,
+            ..TDelegate::new(rows)
+        };
+        let (_, vcx) = open_table(&mut cx, d, 600., 200.);
+        vcx.debug_bounds("TlNameCell-primary")
+            .expect("the Name text")
+            .size
+            .width
+    };
+    let normal = primary_width(None);
+    let medium = primary_width(Some(0));
+    assert!(normal > px(0.));
+    assert!(medium > normal, "500 is wider: {medium:?} vs {normal:?}");
 }
 
 #[test]
