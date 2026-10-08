@@ -1484,6 +1484,25 @@ shell-menu-theme-custom = {" "}(custom)
 shell-menu-theme-editing = {" "}(editing)
 shell-toast-theme-sync-off = Theme sync turned off
 shell-toast-theme-editor-busy = Finish or cancel the theme editor first
+# Graph Color submenu (tasklens-bj6.35, UI-SHL-085, APP-039).
+shell-graph-color-accent = Accent (theme default)
+shell-graph-color-coral = Coral
+shell-graph-color-orange = Orange
+shell-graph-color-amber = Amber
+shell-graph-color-yellow = Yellow
+shell-graph-color-lime = Lime
+shell-graph-color-green = Green
+shell-graph-color-mint = Mint
+shell-graph-color-teal = Teal
+shell-graph-color-cyan = Cyan
+shell-graph-color-blue = Blue
+shell-graph-color-indigo = Indigo
+shell-graph-color-violet = Violet
+shell-graph-color-lavender = Lavender
+shell-graph-color-fuchsia = Fuchsia
+shell-graph-color-pink = Pink
+shell-graph-color-rose = Rose
+shell-graph-color-slate = Slate
 # Settings menu, P1 rows (tasklens-bj6.7, UI-SHL-040).
 shell-menu-settings-monitoring = Monitoring
 shell-menu-settings-refresh = Refresh
