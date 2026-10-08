@@ -247,11 +247,11 @@ mod tests {
     #[test]
     fn hello_roundtrip_with_double() {
         let (mut c, h) = spawn_probe(Arc::default());
-        send(&mut c, &ProbeRequest::Hello { proto: 1 });
+        send(&mut c, &ProbeRequest::Hello { proto: PROTO });
         assert_eq!(
             recv(&mut c),
             ProbeResponse::Hello {
-                proto: 1,
+                proto: PROTO,
                 driver: "615.1".to_owned(),
                 nvml: "13.615.1".to_owned(),
                 devices: vec![device_info()],
@@ -265,11 +265,12 @@ mod tests {
     fn proto_mismatch_exits_without_backend() {
         let made = Arc::new(AtomicBool::new(false));
         let (mut c, h) = spawn_probe(made.clone());
-        send(&mut c, &ProbeRequest::Hello { proto: 2 });
+        // An engine of the previous version: refused with this probe's version.
+        send(&mut c, &ProbeRequest::Hello { proto: PROTO - 1 });
         assert_eq!(
             recv(&mut c),
             ProbeResponse::Hello {
-                proto: 1,
+                proto: PROTO,
                 driver: String::new(),
                 nvml: String::new(),
                 devices: Vec::new(),
@@ -306,7 +307,7 @@ mod tests {
     #[test]
     fn sample_echoes_seq() {
         let (mut c, h) = spawn_probe(Arc::default());
-        send(&mut c, &ProbeRequest::Hello { proto: 1 });
+        send(&mut c, &ProbeRequest::Hello { proto: PROTO });
         recv(&mut c);
         send(
             &mut c,
@@ -363,14 +364,14 @@ mod tests {
     #[test]
     fn shutdown_and_eof_exit_zero() {
         let (mut c, h) = spawn_probe(Arc::default());
-        send(&mut c, &ProbeRequest::Hello { proto: 1 });
+        send(&mut c, &ProbeRequest::Hello { proto: PROTO });
         recv(&mut c);
         send(&mut c, &ProbeRequest::Shutdown);
         assert_eq!(join_within_100ms(h), ExitCode::SUCCESS);
         assert_closed(&mut c);
 
         let (mut c, h) = spawn_probe(Arc::default());
-        send(&mut c, &ProbeRequest::Hello { proto: 1 });
+        send(&mut c, &ProbeRequest::Hello { proto: PROTO });
         recv(&mut c);
         drop(c);
         assert_eq!(join_within_100ms(h), ExitCode::SUCCESS);

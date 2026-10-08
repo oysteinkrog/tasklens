@@ -204,7 +204,8 @@ impl Backend for FakeBackend {
 
     fn hello_proto(&self) -> u16 {
         match self.script {
-            Script::ProtoMismatch => 99,
+            // A probe of the previous version, as left installed after an upgrade.
+            Script::ProtoMismatch => PROTO - 1,
             _ => PROTO,
         }
     }

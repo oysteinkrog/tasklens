@@ -119,7 +119,7 @@ impl ProbeClient {
         Ok(client)
     }
 
-    /// Sends `Hello { proto: 1 }` and reads the reply.
+    /// Sends `Hello { proto: GPU_PROTO_VERSION }` and reads the reply.
     pub fn hello(&mut self) -> Result<HelloOutcome, ProbeError> {
         let req = ProbeRequest::Hello {
             proto: GPU_PROTO_VERSION,

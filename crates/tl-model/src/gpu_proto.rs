@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::validity::Validity;
 
-/// Protocol version sent in both `Hello` messages.
-pub const GPU_PROTO_VERSION: u16 = 1;
+/// Protocol version sent in both `Hello` messages. 2 added `mem_reserved` and `enc_sessions`
+/// to `GpuDeviceSample`. The `Hello` messages keep their layout, so a probe of another version
+/// is refused at `Hello` before any sample is decoded.
+pub const GPU_PROTO_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProbeRequest {
@@ -200,8 +202,8 @@ mod tests {
     }
 
     #[test]
-    fn proto_version_one() {
-        assert_eq!(GPU_PROTO_VERSION, 1);
+    fn proto_version_two() {
+        assert_eq!(GPU_PROTO_VERSION, 2);
     }
 
     #[test]

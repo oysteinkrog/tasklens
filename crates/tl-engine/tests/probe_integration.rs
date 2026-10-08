@@ -263,7 +263,7 @@ fn client_proto_mismatch() {
     let _g = real();
     let r = start("proto-mismatch");
     assert!(
-        matches!(r, Err(ProbeError::VersionMismatch(99))),
+        matches!(r, Err(ProbeError::VersionMismatch(v)) if v == GPU_PROTO_VERSION - 1),
         "{:?}",
         r.err()
     );
