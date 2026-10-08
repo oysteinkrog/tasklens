@@ -378,7 +378,8 @@ impl Render for MinigraphCard {
         } else {
             t.divider
         };
-        let text_row = div()
+        let mut text_row = div()
+            .id("MinigraphCard-text-row")
             .absolute()
             .top_0()
             .left_0()
@@ -432,15 +433,16 @@ impl Render for MinigraphCard {
                         .clone()
                         .cached(StyleRefinement::default().size_full()),
                 ),
-            )
-            .child(text_row);
+            );
         if let Some(shadow) = card_shadow(t, s) {
             card.style().box_shadow = Some(vec![shadow]);
         }
+        // The CPU tooltip belongs to the label row only; below it the chart's hover readout
+        // takes over. The row's hitbox covers the chart there, so no readout shows under it.
         if let Some(lines) = &self.tip {
-            card = card.tooltip(TlTooltip::lines(lines.to_vec()).build());
+            text_row = text_row.tooltip(TlTooltip::lines(lines.to_vec()).build());
         }
-        card
+        card.child(text_row)
     }
 }
 
@@ -563,7 +565,8 @@ pub fn chart_spec_for(
             rounded: true,
         },
         smooth,
-        hover: false,
+        // The hover readout on every card from P2 (UI-PRF-041, PERF-023).
+        hover: true,
         stack: false,
         background: ChartBg::List,
     }

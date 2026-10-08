@@ -498,6 +498,92 @@ mod card {
         assert_eq!(shadow.offset.y, gpui_kit::px(4.));
         assert_eq!(shadow.blur_radius, gpui_kit::px(12.));
     }
+
+    /// Hover readout on the cards (tasklens-xdh.9, UI-PRF-041, PERF-023).
+    #[cfg(feature = "test-hooks")]
+    mod hover {
+        use gpui_kit::{Modifiers, point, px};
+
+        use super::*;
+
+        /// Moves the pointer to `(x, y)` in the window and draws.
+        fn move_to(vcx: &mut VisualTestContext, x: f32, y: f32) {
+            vcx.simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
+            draw(vcx);
+        }
+
+        /// (the chart pinned a sample, it drew the value box).
+        fn readout(vcx: &mut VisualTestContext, card: &Entity<MinigraphCard>) -> (bool, bool) {
+            vcx.update(|_, cx| {
+                let h = card.read(cx).chart().read(cx).hover_state();
+                (h.pinned_t_ns.is_some(), h.last_box.is_some())
+            })
+        }
+
+        fn tooltip_shown(vcx: &mut VisualTestContext) -> bool {
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(600));
+            draw(vcx);
+            draw(vcx);
+            vcx.debug_bounds("TlTooltip").is_some()
+        }
+
+        #[gpui_kit::test]
+        fn card_hover_readout(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100);
+            let (card, mut vcx) = r.card(cx, MinigraphSource::Memory, Vec::new());
+            r.publish(cx, vec![series(MEMORY, MetricId::MEM_USED, 4.0e9, 1)]);
+            draw(&mut vcx);
+            assert!(
+                vcx.update(|_, cx| card.read(cx).chart().read(cx).spec.hover),
+                "every card has the readout"
+            );
+            move_to(&mut vcx, 90., 60.);
+            assert_eq!(readout(&mut vcx, &card), (true, true));
+        }
+
+        #[gpui_kit::test]
+        fn card_cpu_tooltip_only_on_label_row(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100);
+            let (card, mut vcx) = r.card(cx, MinigraphSource::Cpu, Vec::new());
+            vcx.update(|window, _| window.activate_window());
+            r.publish(
+                cx,
+                vec![
+                    series(CPU, MetricId::CPU_TOTAL, 88.6, 1),
+                    series(CPU, MetricId::CPU_KERNEL, 4.1, 1),
+                ],
+            );
+            draw(&mut vcx);
+
+            // The label row: the two-line tooltip and no readout.
+            move_to(&mut vcx, 90., 10.);
+            assert!(
+                tooltip_shown(&mut vcx),
+                "the tooltip shows on the label row"
+            );
+            assert_eq!(readout(&mut vcx, &card), (false, false));
+
+            // Below the row: the readout and no tooltip.
+            move_to(&mut vcx, 90., 60.);
+            assert_eq!(readout(&mut vcx, &card), (true, true));
+            assert!(!tooltip_shown(&mut vcx), "no tooltip over the plot");
+        }
+
+        #[gpui_kit::test]
+        fn card_hover_clears_on_leave(cx: &mut TestAppContext) {
+            let mut r = rig(cx, 100);
+            let (card, mut vcx) = r.card(cx, MinigraphSource::Disk, Vec::new());
+            r.publish(cx, vec![series(DISKS, MetricId::DISK_ACTIVE, 30.0, 1)]);
+            draw(&mut vcx);
+            move_to(&mut vcx, 90., 60.);
+            assert_eq!(readout(&mut vcx, &card), (true, true));
+
+            // One frame after the pointer leaves, the readout is gone.
+            move_to(&mut vcx, 300., 300.);
+            assert_eq!(readout(&mut vcx, &card), (false, false));
+        }
+    }
 }
 
 /// The panel (tasklens-xdh.6, E26-004, UI-PRF-040).
