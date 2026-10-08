@@ -223,6 +223,17 @@ fn handle_app_request(req: AppRequest, cx: &mut App) {
     }
 }
 
+/// The request's variant name, for logs. The activation token is never logged.
+fn request_name(req: &AppRequest) -> &'static str {
+    match req {
+        AppRequest::Activate { .. } => "Activate",
+        AppRequest::SelectTab(_) => "SelectTab",
+        AppRequest::SelectPid(_) => "SelectPid",
+        AppRequest::Quit => "Quit",
+        AppRequest::SetLowMemoryEnabled(_) => "SetLowMemoryEnabled",
+    }
+}
+
 /// The engine client, for code that has no hub at hand.
 pub struct EngineGlobal(pub Arc<dyn EngineClient>);
 
@@ -317,7 +328,7 @@ impl TasklensUi {
 
         // 9. AppRequest loop. E20 replaces the handler Global.
         cx.set_global(AppRequestHandler(Box::new(|req, _| {
-            debug!(target: "tasklens::ui", ?req, "app request");
+            debug!(target: "tasklens::ui", request = request_name(&req), "app request");
         })));
         cx.spawn(async move |cx: &mut AsyncApp| {
             while let Ok(req) = app_requests.recv().await {
