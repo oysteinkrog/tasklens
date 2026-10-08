@@ -772,6 +772,42 @@ perf-cpu-time-unknown = <unknown>
         assert_eq!(tr_calls(), before, "60 frames make no tr call");
     }
 
+    /// A counted text has a form per plural category, and writing it makes no tr call
+    /// (o55.37).
+    #[gpui_kit::test]
+    fn counted_template_plural_forms(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::details::Template;
+
+        const KEY: &str = "perf-gpu-enc-sessions";
+        fn written(t: &Template, n: u64) -> String {
+            let mut out = String::new();
+            t.write_count(&mut out, n, &[&n])
+                .expect("a String takes the text");
+            out
+        }
+        cx.update(|cx| {
+            setup(cx);
+            init_strings(cx, "en-US");
+            let t = Template::counted(cx, KEY, &["n"], 0);
+            assert_eq!(t, Template::counted_en(KEY, &["n"], 0));
+            let before = tr_calls();
+            assert_eq!(written(&t, 0), "0 active sessions");
+            assert_eq!(written(&t, 1), "1 active session");
+            assert_eq!(written(&t, 2), "2 active sessions");
+            assert_eq!(written(&t, 21), "21 active sessions");
+            assert_eq!(tr_calls(), before, "writes make no tr call");
+
+            // The sample 0 shows twice in the other form, so the next sample marks the count.
+            set_test_catalogue(
+                cx,
+                "perf-gpu-enc-sessions = { $n ->\n    [one] <one {$n}>\n   *[other] <{$n} of 0>\n}\n",
+            );
+            let t = Template::counted(cx, KEY, &["n"], 0);
+            assert_eq!(written(&t, 1), "<one 1>");
+            assert_eq!(written(&t, 5), "<5 of 0>");
+        });
+    }
+
     /// An empty filtered grid over a grid with a titled section.
     struct OwnText;
 

@@ -1021,7 +1021,7 @@ const DOT: &str = " · ";
 pub fn gpu_details_model() -> KeyValueModel {
     let mut labels = GPU_DETAIL_ROWS.to_vec();
     labels.insert(6, ROW_ENCODE_DECODE);
-    let mut model = KeyValueModel::new(&labels).with_texts(&[(TIP_SESSIONS, &["n"])]);
+    let mut model = KeyValueModel::new(&labels).with_counted_text(TIP_SESSIONS, &["n"], 0);
     for label in GPU_DETAIL_ROWS[P1_ROWS..]
         .iter()
         .chain([&ROW_ENCODE_DECODE])
@@ -1145,7 +1145,7 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
             let tip = model.text(TIP_SESSIONS);
             changed |= if matches!(sessions.validity, Validity::Valid | Validity::Stale) {
                 set_tip(model, ROW_ENCODE, |o| {
-                    let _ = tip.write(o, &[&sessions.value]);
+                    let _ = tip.write_count(o, u64::from(sessions.value), &[&sessions.value]);
                 })
             } else {
                 clear_tip(model, ROW_ENCODE)

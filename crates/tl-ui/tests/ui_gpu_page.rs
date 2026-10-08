@@ -531,6 +531,13 @@ fn gpu_encode_sessions_tooltip(cx: &mut TestAppContext) {
     let encode = find(&rows, "Video encode").expect("encode row");
     assert_eq!(encode.2.as_deref(), Some("2 active sessions"));
 
+    // One session: the singular form (o55.37).
+    t.enc_sessions = Metric::valid(1);
+    publish_totals(&mut r, t);
+    let rows = detail_rows(&mut r);
+    let encode = find(&rows, "Video encode").expect("encode row");
+    assert_eq!(encode.2.as_deref(), Some("1 active session"));
+
     // No session count: no tooltip.
     t.enc_sessions = Metric::with(Validity::Unsupported);
     publish_totals(&mut r, t);
