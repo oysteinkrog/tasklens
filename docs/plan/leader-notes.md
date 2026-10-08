@@ -813,3 +813,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - bj6.28: PageBuilder::check_columns (keep_one refusal), PageBuilder::press test hook, restart_toast renamed info_toast and deferred (fixes lost restart toasts). Accepted.
 - bj6.14: TlMenu::indent(px) added to components/menu.rs (last Item or Disabled entry, scaled), MenuEntryInfo exposes it.
 - bj6.15: Entry::Painted gets selected: bool, new TlMenu::painted_radio_item; MenuEntryInfo.painted under test-hooks; ActivateTheme reused from theme/store.rs (no second declaration).
+- gma.23: open item decided: with Shared libraries only on, (Primary) and Outside loaded modules stay visible. Other choices accepted (row ids, filter rule, copy_text, 0x%08x offsets). Min widths go to rsf.28.
