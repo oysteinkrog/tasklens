@@ -6,6 +6,10 @@
 //! refresh on the first visit (ADR-008, R-011). `sys_body` picks what the body shows: skeleton
 //! rows before the first data of the session, then the rows or an empty or error state
 //! (UI-SYS-004, UI-SYS-005).
+//!
+//! `SysTableFrame` ties these together for one page (E27-A1, UI-SYS-001): it owns the
+//! `TlTreeTable`, the query, the page state and the action layer, installs snapshots the query
+//! accepts and draws the page root.
 
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -13,10 +17,11 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::v_flex;
 use gpui_kit::{
-    Action, AnyElement, App, Context, Entity, EntityId, EventEmitter, IntoElement,
-    ParentElement as _, Pixels, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
-    px,
+    Action, AnyElement, App, AppContext as _, Context, Entity, EntityId, EventEmitter,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, SharedString, Styled as _,
+    Subscription, WeakEntity, Window, div, px,
 };
 use rustc_hash::{FxHashMap, FxHasher};
 use smallvec::SmallVec;
@@ -27,22 +32,29 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, Tab};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceHealth, SourceId, SourceState};
+use tl_model::snapshot::{ComponentHeader, ComponentMask, Snapshot};
 use tl_model::table::{ServiceFilter, SysNodeId, SysSortSpec, SysTable, SysTableQuery};
 use tl_model::validity::Validity;
 use tracing::{debug, warn};
 
 #[cfg(any(test, feature = "test-hooks"))]
 use crate::action_tracker::PushedToast;
-use crate::action_tracker::{ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message};
+use crate::action_tracker::{
+    ActionTracker, ActionTrackerEvent, GlobalActionTracker, ToastTexts, action_words, message,
+};
 use crate::actions::RefreshCurrentTab;
 use crate::app::EngineGlobal;
 use crate::components::dialog::TlDialog;
 use crate::components::empty::{TlEmptyState, TlEmptyTone};
 use crate::components::skeleton::{TlSkeletonRows, skeleton_row_count};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
-use crate::demand::DemandAggregator;
+use crate::demand::{DemandAggregator, GlobalDemand};
+use crate::hub::GlobalHub;
 use crate::i18n::{tr, tr_args, tr_en};
-use crate::theme::UiMetrics;
+use crate::table::TreeTableDelegate;
+use crate::table::tree_table::{HEADER_H_ONE, TlTreeTable};
+use crate::theme::{UiMetrics, current, metrics};
+use crate::window::status::CHIP_H;
 
 /// Query owner for one system table. Generations start at 1 and only grow.
 pub struct SysQuery {
@@ -937,4 +949,277 @@ fn counted(cx: &App, key: &str, n: usize, ok: usize, failed: usize) -> SharedStr
         ("failed", FluentValue::from(failed)),
     ];
     tr_args(cx, key, &args)
+}
+
+// ---- The frame (E27-A1, UI-SYS-001, UI-SYS-002) ----
+
+/// What a system-table delegate adds to `TreeTableDelegate` for the frame. The reads take the
+/// incoming snapshot, so the frame can check it before anything is installed.
+pub trait SysDelegate: TreeTableDelegate {
+    /// The table's component header in `snap`.
+    fn component_header<'a>(&self, snap: &'a Snapshot) -> &'a ComponentHeader;
+    /// The table's row count in `snap`.
+    fn rows_len(&self, snap: &Snapshot) -> usize;
+    /// The `query_generation` of the table's rows in `snap`, checked with `SysQuery::accepts`.
+    fn query_generation(&self, snap: &Snapshot) -> u64;
+    /// Installs the rows of `snap`. The frame calls it only when `accepts` is true.
+    fn install(&mut self, snap: &Arc<Snapshot>);
+    /// The mask bits this table draws, for example `ComponentMask::SERVICES`.
+    fn mask(&self) -> ComponentMask;
+}
+
+/// "Loading…", the status text while the body is `Skeleton`.
+pub fn loading_status_text() -> SharedString {
+    SharedString::new_static("Loading…")
+}
+
+/// The shared frame of one system-table page. The page owns it, routes the hub's
+/// `SnapshotChanged`, the shell's `FilterChanged` and `PauseChanged` and its activation to it,
+/// and notifies itself when a method returns true. The frame never notifies the page.
+pub struct SysTableFrame<D: SysDelegate> {
+    pub table: Entity<TlTreeTable<D>>,
+    pub query: SysQuery,
+    pub state: SysPageState,
+    pub actions: Entity<SysActions>,
+    /// "ServiceTable", "StartupTable" or "ConnectionTable".
+    key_context: &'static str,
+    /// What the body shows, updated on each snapshot and filter change.
+    body: SysBody,
+    /// Ctrl-pause: the table keeps the rows it shows.
+    paused: bool,
+    #[cfg(any(test, feature = "test-hooks"))]
+    render_count: u64,
+}
+
+/// The engine's table for a system-table tab. Services for any other tab.
+fn sys_table_of(tab: Tab) -> SysTable {
+    match tab {
+        Tab::Startup => SysTable::Startup,
+        Tab::Connections => SysTable::Connections,
+        _ => SysTable::Services,
+    }
+}
+
+impl<D: SysDelegate> SysTableFrame<D> {
+    /// Builds the table around `delegate`. Nothing is sent until the first `on_activated`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        tab: Tab,
+        key_context: &'static str,
+        sources: &[SourceId],
+        delegate: D,
+        sort: SysSortSpec,
+        services: Option<ServiceFilter>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
+        let tracker = cx
+            .try_global::<GlobalActionTracker>()
+            .map(|t| t.0.clone())
+            .expect("TasklensUi::init installs the action tracker");
+        let actions = cx.new(|cx| SysActions::new(&tracker, cx));
+        Self {
+            table,
+            query: SysQuery::new(sys_table_of(tab), sort, services),
+            state: SysPageState::new(tab, sources),
+            actions,
+            key_context,
+            body: SysBody::Skeleton,
+            paused: false,
+            #[cfg(any(test, feature = "test-hooks"))]
+            render_count: 0,
+        }
+    }
+
+    /// One hub change. False unless `mask` shares a bit with the delegate's mask. Resends a
+    /// busy query, notes the first data, and installs the rows only when the query accepts
+    /// their generation and Ctrl-pause is off. True when the page must notify.
+    pub fn on_snapshot(&mut self, snap: &Arc<Snapshot>, mask: ComponentMask, cx: &mut App) -> bool {
+        let table_mask = self.table.read(cx).delegate.mask();
+        if !mask.intersects(table_mask) {
+            return false;
+        }
+        if let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0)) {
+            self.query.on_snapshot(&*client);
+        }
+        self.apply(snap, cx)
+    }
+
+    /// Notes the first data, installs `snap` when allowed and updates the body.
+    fn apply(&mut self, snap: &Arc<Snapshot>, cx: &mut App) -> bool {
+        let (validity, rows_len, generation) = {
+            let d = &self.table.read(cx).delegate;
+            (
+                d.component_header(snap).validity,
+                d.rows_len(snap),
+                d.query_generation(snap),
+            )
+        };
+        let first = self.state.note_data(validity, rows_len);
+        let install = !self.paused && self.query.accepts(generation);
+        if install {
+            self.table.update(cx, |t, cx| {
+                t.delegate.install(snap);
+                t.on_new_version(cx);
+            });
+        }
+        let body = self.body_from(snap, cx);
+        let changed = body != self.body;
+        self.body = body;
+        first || install || changed
+    }
+
+    /// The body for the rows shown, the filter and the page's source health in `snap`.
+    fn body_from(&self, snap: &Snapshot, cx: &App) -> SysBody {
+        let health = &snap.health;
+        let source = self
+            .state
+            .source_ids
+            .iter()
+            .map(|id| health.get(*id))
+            .find(|s| s.state == SourceState::Failed)
+            .or_else(|| self.state.source_ids.first().map(|id| health.get(*id)));
+        sys_body(&SysBodyInput {
+            tab: self.state.tab,
+            first_data_seen: self.state.first_data_seen,
+            rows_len: self.table.read(cx).delegate.row_count(),
+            filter_active: !self.query.query().filter.is_empty(),
+            source,
+            managers_unavailable: false,
+        })
+    }
+
+    /// Ctrl-pause from the shell's `PauseChanged` (R-042, UI-PRC-017). On release the hub's
+    /// current snapshot is installed once. True when the page must notify.
+    pub fn set_paused(&mut self, paused: bool, cx: &mut App) -> bool {
+        if paused == self.paused {
+            return false;
+        }
+        self.paused = paused;
+        self.table.update(cx, |t, _| t.paused = paused);
+        if paused {
+            return false;
+        }
+        let Some(snap) = cx
+            .try_global::<GlobalHub>()
+            .map(|h| Arc::clone(h.0.read(cx).current()))
+        else {
+            return false;
+        };
+        self.apply(&snap, cx)
+    }
+
+    /// The shell's debounced filter text for this tab.
+    pub fn on_filter_changed(&mut self, text: &str, cx: &mut App) {
+        if let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0)) {
+            self.query.set_filter(text, &*client);
+        }
+    }
+
+    /// The tab became active: demand on, and on the first visit a refresh and the query.
+    pub fn on_activated(&mut self, cx: &mut App) {
+        let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) else {
+            return;
+        };
+        self.state.on_activated(&mut self.query, &demand, cx);
+    }
+
+    /// The tab was left: demand off.
+    pub fn on_deactivated(&mut self, cx: &mut App) {
+        let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) else {
+            return;
+        };
+        self.state.on_deactivated(&demand, cx);
+    }
+
+    /// F5 (`RefreshCurrentTab`): `RefreshNow` for each source. Services adds its own toast.
+    pub fn refresh(&mut self, cx: &mut App) {
+        let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0)) else {
+            return;
+        };
+        for id in &self.state.source_ids {
+            if let Err(e) = client.send(Command::RefreshNow(*id)) {
+                debug!(target: "tasklens::ui", source = ?id, error = ?e, "refresh not sent");
+            }
+        }
+    }
+
+    pub fn body(&self) -> SysBody {
+        self.body.clone()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// `render` calls, for the page re-render tests.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn render_count(&self) -> u64 {
+        self.render_count
+    }
+
+    /// The page root (UI-SYS-001): `window_bg`, the optional strip, then the table with its
+    /// one-line header. The body ends a status-chip height above the bottom. A skeleton or an
+    /// empty state covers the table body below the header; the header still shows. The
+    /// page's key context wraps the table's "Table" context.
+    pub fn render(
+        &mut self,
+        strip: Option<AnyElement>,
+        clear_action: Box<dyn Action>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.render_count += 1;
+        }
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        let header_h = px(HEADER_H_ONE * m.ui_scale);
+        let chip_h = px(CHIP_H * m.ui_scale);
+        let cover = match &self.body {
+            SysBody::Rows => None,
+            SysBody::Skeleton => {
+                let layout = self.table.read(cx).columns();
+                let widths: SmallVec<[Pixels; 16]> = layout
+                    .visible_columns()
+                    .iter()
+                    .map(|c| layout.width(*c))
+                    .collect();
+                let viewport_h = window.viewport_size().height - header_h - chip_h;
+                Some(render_skeleton(&widths, viewport_h, &m))
+            }
+            body => Some(render_empty(body, self.state.tab, clear_action, cx)),
+        };
+        v_flex()
+            .debug_selector(|| "SysTableFrame".into())
+            .size_full()
+            .bg(theme.window_bg)
+            .key_context(self.key_context)
+            .children(strip)
+            .child(
+                div()
+                    .debug_selector(|| "SysTableFrame-table".into())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .bg(theme.list_bg)
+                    .pb(chip_h)
+                    .child(self.table.clone())
+                    .children(cover.map(|cover| {
+                        div()
+                            .debug_selector(|| "SysTableFrame-cover".into())
+                            .absolute()
+                            .top(header_h)
+                            .left_0()
+                            .right_0()
+                            .bottom(chip_h)
+                            .bg(theme.list_bg)
+                            .child(cover)
+                    })),
+            )
+            .into_any_element()
+    }
 }
