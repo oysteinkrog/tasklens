@@ -842,3 +842,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - o55.37: intl_pluralrules =7.0.2 added (already in lock via fluent-bundle); plural category from Strings::text_locale() (the bundle's language, not the requested locale).
 - gma.10: accepted (tests in ui_process_menu; shared dialog_targets with Set Affinity; initial values from the first target in view order since CapturedTargets has no clicked row).
 - Record: crw.24 commit 8597a86a also contains impl2-pdu-51's 6-line open_with fix (ui_performance.rs hunk at 1846, summary fade test); 261a566c fixes the lifetime error from 8597a86a.
+- bj6.29: PageBuilder gets action_switch, indent_next, tooltip_next (+ test readers). Settings Public IP auto-fetch dispatches TogglePublicIpAutoFetch so the privacy notice is never bypassed.
