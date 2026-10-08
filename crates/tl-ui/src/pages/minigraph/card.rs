@@ -75,6 +75,8 @@ pub struct MinigraphCard {
     /// The series device, `None` when the catalog has no device for the source.
     device: Option<DeviceIdx>,
     hover: bool,
+    /// The pointer is on the CPU card's label row, which blocks the card under it.
+    row_hover: bool,
     /// The drag look is E26-008.
     #[allow(dead_code, reason = "read from E26-008 on")]
     dragging: bool,
@@ -128,6 +130,7 @@ impl MinigraphCard {
             state: CardState::Live,
             device,
             hover: false,
+            row_hover: false,
             dragging: false,
             hub: hub.clone(),
             _hub_sub,
@@ -373,7 +376,7 @@ impl Render for MinigraphCard {
         let m = metrics(cx);
         let t = current(cx);
         let s = m.ui_scale;
-        let border = if self.hover {
+        let border = if self.hover || self.row_hover {
             t.accent.opacity(HOVER_BORDER_ALPHA)
         } else {
             t.divider
@@ -438,9 +441,25 @@ impl Render for MinigraphCard {
             card.style().box_shadow = Some(vec![shadow]);
         }
         // The CPU tooltip belongs to the label row only; below it the chart's hover readout
-        // takes over. The row's hitbox covers the chart there, so no readout shows under it.
+        // takes over. The row blocks the mouse, so the chart under it shows no readout; it then
+        // keeps the card's hover border and right-click itself.
         if let Some(lines) = &self.tip {
-            text_row = text_row.tooltip(TlTooltip::lines(lines.to_vec()).build());
+            text_row = text_row
+                .occlude()
+                .tooltip(TlTooltip::lines(lines.to_vec()).build())
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.row_hover != *hovered {
+                        this.row_hover = *hovered;
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_menu(ev.position, window, cx);
+                    }),
+                );
         }
         card.child(text_row)
     }

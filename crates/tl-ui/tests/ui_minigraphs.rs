@@ -506,8 +506,10 @@ mod card {
 
         use super::*;
 
-        /// Moves the pointer to `(x, y)` in the window and draws.
+        /// Moves the pointer to `(x, y)` in the window and draws. The chart shows the readout
+        /// only in an active window.
         fn move_to(vcx: &mut VisualTestContext, x: f32, y: f32) {
+            vcx.update(|window, _| window.activate_window());
             vcx.simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
             draw(vcx);
         }
@@ -546,7 +548,6 @@ mod card {
         fn card_cpu_tooltip_only_on_label_row(cx: &mut TestAppContext) {
             let mut r = rig(cx, 100);
             let (card, mut vcx) = r.card(cx, MinigraphSource::Cpu, Vec::new());
-            vcx.update(|window, _| window.activate_window());
             r.publish(
                 cx,
                 vec![
