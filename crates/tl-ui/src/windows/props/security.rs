@@ -125,7 +125,7 @@ pub fn cap_name(cap: u8) -> std::borrow::Cow<'static, str> {
 }
 
 /// One field of the summary, in column order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecField {
     User,
     Group,
