@@ -991,7 +991,7 @@ mod tests {
             validity: Validity::Valid,
         };
         SecurityDetail {
-            uids: valid(ids),
+            uids: valid(ids.clone()),
             uid_names: valid(names(["oystein"; 4])),
             gids: valid(ids),
             gid_names: valid(names(["oystein"; 4])),
