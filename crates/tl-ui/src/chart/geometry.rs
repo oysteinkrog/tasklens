@@ -1044,3 +1044,39 @@ fn emit_stale(
     }
     emit_cell_stroke(stale.stroke(spec), first, rest);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area(mesh: FillMesh) -> f32 {
+        let path = mesh.finish().expect("triangles");
+        path.vertices
+            .chunks_exact(3)
+            .map(|t| {
+                let p = |i: usize| (f32::from(t[i].xy_position.x), f32::from(t[i].xy_position.y));
+                let (a, b, c) = (p(0), p(1), p(2));
+                ((b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1)).abs() / 2.0
+            })
+            .sum()
+    }
+
+    /// Chains that cross inside a segment fill both lobes once, as non-zero fills them.
+    #[test]
+    fn crossing_chains_split_at_the_crossing() {
+        let top = [point(px(0.0), px(0.0)), point(px(10.0), px(10.0))];
+        let bottom = [point(px(0.0), px(10.0)), point(px(10.0), px(0.0))];
+        let mut mesh = FillMesh::default();
+        mesh.band(&top, |i, _| bottom[i]);
+        assert!((area(mesh) - 50.0).abs() < 1e-3);
+    }
+
+    /// A segment with no width adds no triangle.
+    #[test]
+    fn vertical_segment_adds_nothing() {
+        let top = [point(px(5.0), px(0.0)), point(px(5.0), px(8.0))];
+        let mut mesh = FillMesh::default();
+        mesh.band(&top, |_, p| point(p.x, px(10.0)));
+        assert!(mesh.finish().is_none());
+    }
+}

@@ -866,3 +866,125 @@ fn curve_through_collinear_points_is_straight() {
         );
     }
 }
+
+/// The summed area of a fill set's triangles. Equal to the polygon's area only when no two
+/// triangles overlap and none is missing (tasklens-wlf.33).
+fn fill_area(set: &PathSet) -> f32 {
+    set.path
+        .vertices
+        .chunks_exact(3)
+        .map(|t| {
+            let p = |i: usize| (t[i].xy_position.x.as_f32(), t[i].xy_position.y.as_f32());
+            let (a, b, c) = (p(0), p(1), p(2));
+            ((b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1)).abs() / 2.0
+        })
+        .sum()
+}
+
+/// Area between the polyline through `pts` and the baseline `h`, by trapezoids.
+fn area_under(pts: &[(f32, f32)], h: f32) -> f32 {
+    pts.windows(2)
+        .map(|w| (w[1].0 - w[0].0) * ((h - w[0].1) + (h - w[1].1)) / 2.0)
+        .sum()
+}
+
+/// Direct triangulation (tasklens-wlf.33): two triangles per segment, the exact area under the
+/// line, nothing inside a gap, so no triangle overlaps another and none is missing.
+#[test]
+fn fill_triangles_cover_the_area_under_each_run() {
+    let mut s = series(100, 100 * MS, 10 * SEC, noise);
+    s[50].flags |= SampleFlags::GAP_BEFORE;
+    let map = exact_map(&s);
+    let v = view(s.clone(), 100 * MS);
+    let cache = run_build(&[(line(Some(BLUE), RED, false), Some(&v))], map, s[99].t_ns);
+
+    let fill = &cache.fills[0];
+    let xy = |s: &Sample| (map.x_local(s.t_ns), y_of(s.value, 0.0, 100.0, 100.0));
+    let left: Vec<_> = s[..50].iter().map(xy).collect();
+    let right: Vec<_> = s[50..].iter().map(xy).collect();
+    let want = area_under(&left, 100.0) + area_under(&right, 100.0);
+    let got = fill_area(fill);
+    assert!((got - want).abs() < want * 1e-4, "area {got}, want {want}");
+    // 49 segments in each run, 2 triangles of 3 vertices each.
+    assert_eq!(fill.path.vertices.len(), 2 * 49 * 2 * 3);
+    let (x49, x50) = (map.x_local(s[49].t_ns), map.x_local(s[50].t_ns));
+    assert!(xs(fill).all(|x| x <= x49 + 0.01 || x >= x50 - 0.01));
+}
+
+/// A run of one point has no width: no fill set, but the stroke still draws its 1 px dash.
+#[test]
+fn single_point_run_has_no_fill() {
+    let mut s = series(3, 100 * MS, 10 * SEC, |_| 40.0);
+    s[1] = Sample::gap(s[1].t_ns);
+    s[2] = Sample::gap(s[2].t_ns);
+    let map = TimeMap {
+        anchor_ns: s[0].t_ns,
+        right_edge_ns: s[0].t_ns,
+        range_ns: 10 * SEC,
+        plot_width: 1_000.0,
+    };
+    let v = view(s.clone(), 100 * MS);
+    let cache = run_build(&[(line(Some(BLUE), RED, false), Some(&v))], map, s[0].t_ns);
+    assert!(cache.fills.is_empty());
+    assert_eq!(cache.strokes.len(), 1);
+}
+
+/// A stacked band fills exactly the area between its top line and its floor.
+#[test]
+fn stacked_band_area_is_top_minus_floor() {
+    let data: Vec<Vec<Sample>> = [10.0, 20.0]
+        .iter()
+        .map(|&v| series(50, 100 * MS, 10 * SEC, move |i| v + (i % 3) as f32))
+        .collect();
+    let map = exact_map(&data[0]);
+    let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), 100 * MS)).collect();
+    let spec: Vec<(ChartSeries, Option<&SeriesView>)> = views
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (line(Some(colour(i)), colour(i), false), Some(v)))
+        .collect();
+    let mut cache = ChartCache::default();
+    stack_build(
+        &spec,
+        map,
+        data[0][49].t_ns,
+        100.0,
+        &mut cache,
+        &mut Scratch::default(),
+    );
+    let pts = |k: usize| -> Vec<(f32, f32)> {
+        (0..50)
+            .map(|i| {
+                let sum: f32 = data[..=k].iter().map(|s| s[i].value).sum();
+                (map.x_local(data[0][i].t_ns), y_of(sum, 0.0, 100.0, 100.0))
+            })
+            .collect()
+    };
+    let want = area_under(&pts(1), 100.0) - area_under(&pts(0), 100.0);
+    let got = fill_area(&cache.fills[1]);
+    assert!((got - want).abs() < want * 1e-4, "area {got}, want {want}");
+}
+
+/// Rebuilding reuses the fill vertex buffers: the second build's fill keeps the capacity.
+#[test]
+fn rebuild_reuses_fill_buffers() {
+    let s = series(200, 100 * MS, 10 * SEC, noise);
+    let map = exact_map(&s);
+    let v = view(s.clone(), 100 * MS);
+    let spec = [(line(Some(BLUE), RED, false), Some(&v))];
+    let input = BuildInput {
+        series: &spec,
+        map,
+        plot_height: 100.0,
+        y_min: 0.0,
+        y_max: 100.0,
+        now_boot_ns: s[199].t_ns,
+        stack: false,
+        curved: false,
+    };
+    let (mut cache, mut scratch) = (ChartCache::default(), Scratch::default());
+    build(&input, &mut cache, &mut scratch);
+    let first = cache.fills[0].path.vertices.as_ptr();
+    build(&input, &mut cache, &mut scratch);
+    assert_eq!(cache.fills[0].path.vertices.as_ptr(), first);
+}
