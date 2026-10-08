@@ -2753,7 +2753,9 @@ mod summary {
         let copies = Rc::new(Cell::new(0));
         r.vcx.update({
             let copies = copies.clone();
-            move |_, cx| cx.on_action(move |_: &PerfCopyDeviceInfo, _| copies.set(copies.get() + 1))
+            move |_, cx| {
+                cx.on_action(move |_: &PerfCopyDeviceInfo, _| copies.set(copies.get() + 1));
+            }
         });
         r.vcx.simulate_keystrokes("ctrl-c");
         r.vcx.run_until_parked();
