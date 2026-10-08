@@ -2348,7 +2348,10 @@ mod summary {
                 (MenuEntryKind::Submenu, "Time range"),
                 (MenuEntryKind::Separator, ""),
                 (MenuEntryKind::Submenu, "Graph"),
+                (MenuEntryKind::Submenu, "Secondary graph"),
                 (MenuEntryKind::Item, "Kernel times"),
+                (MenuEntryKind::Separator, ""),
+                (MenuEntryKind::Submenu, "View"),
             ]
         );
         assert!(!list[1].3, "summary mode is off");
@@ -2367,13 +2370,12 @@ mod summary {
     }
 
     #[gpui_kit::test]
-    fn page_menu_long_ranges_disabled_before_p2(cx: &mut TestAppContext) {
+    fn page_menu_long_ranges_enabled(cx: &mut TestAppContext) {
         let mut r = open(cx, 1600., 1000., true);
         let at = page_panel(&mut r);
         right_click(r.vcx, at);
         let list = open_menu(&mut r);
         let ranges = ranges(&mut r, &list);
-        let later = Some("Available in a later version".to_owned());
         let shape: Vec<(MenuEntryKind, &str, Option<String>)> = ranges
             .iter()
             .map(|e| (e.0, e.1.as_str(), e.2.clone()))
@@ -2383,14 +2385,143 @@ mod summary {
             [
                 (MenuEntryKind::Item, "30 seconds", None),
                 (MenuEntryKind::Item, "1 minute", None),
-                (MenuEntryKind::Disabled, "5 minutes", later.clone()),
-                (MenuEntryKind::Disabled, "10 minutes", later),
+                (MenuEntryKind::Item, "5 minutes", None),
+                (MenuEntryKind::Item, "10 minutes", None),
             ]
         );
     }
 
-    /// `TlMenu` drops a trailing separator, so a page without its own items ends after the
-    /// common items with no separator at all (never two).
+    /// The View submenu of `list`.
+    fn view_items(r: &mut Rig, list: &[Entry]) -> Vec<Entry> {
+        let sub = list
+            .iter()
+            .find(|e| e.1 == "View")
+            .and_then(|e| e.4.clone())
+            .expect("a View submenu");
+        entries_of(r, &sub)
+    }
+
+    /// The rig has CPU, Memory, a GPU, disks and network cards, and no fan or battery.
+    #[gpui_kit::test]
+    fn view_submenu_disables_empty_types(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        let list = open_menu(&mut r);
+        let items = view_items(&mut r, &list);
+        assert_eq!(
+            labels(&items),
+            [
+                (MenuEntryKind::Item, "Processor"),
+                (MenuEntryKind::Item, "Memory"),
+                (MenuEntryKind::Item, "Disks"),
+                (MenuEntryKind::Item, "Graphics adapters"),
+                (MenuEntryKind::Item, "Network adapters"),
+                (MenuEntryKind::Disabled, "Fans"),
+                (MenuEntryKind::Disabled, "Batteries"),
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn view_submenu_jumps(cx: &mut TestAppContext) {
+        use tl_ui::components::menu::close_context_menu;
+        use tl_ui::pages::performance::DeviceKind;
+        use tl_ui::pages::performance::actions::PerfJumpToType;
+
+        let mut r = open(cx, 1600., 1000., true);
+        let page = r.page.clone();
+        let first_net = r.vcx.update(|_, cx| {
+            let sidebar = page.read(cx).sidebar().read(cx);
+            sidebar
+                .visible_keys()
+                .find(|k| {
+                    sidebar
+                        .card(k)
+                        .is_some_and(|c| c.row.kind == DeviceKind::Net)
+                })
+                .map(|k| k.0.to_string())
+        });
+        assert!(first_net.is_some(), "the rig has a network card");
+        r.vcx.update(|window, cx| close_context_menu(window, cx));
+        r.vcx.dispatch_action(PerfJumpToType {
+            kind: DeviceKind::Net,
+        });
+        draw(r.vcx);
+        assert_eq!(selected(&mut r), first_net);
+
+        // No fan: nothing changes.
+        r.vcx.dispatch_action(PerfJumpToType {
+            kind: DeviceKind::Fan,
+        });
+        draw(r.vcx);
+        assert_eq!(selected(&mut r), first_net);
+    }
+
+    #[gpui_kit::test]
+    fn long_range_switches_tier(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::PerfSetGraphRange;
+
+        let r = open(cx, 1600., 1000., true);
+        let id = SeriesId {
+            device: DeviceIdx(0),
+            metric: MetricId::CPU_TOTAL,
+        };
+        let view = |id: SeriesId, period_ns: u64| {
+            Arc::new(SeriesView {
+                id,
+                version: 1,
+                period_ns,
+                samples: Arc::from([Sample::valid(period_ns, 10.0)]),
+            })
+        };
+        r.engine.publish_with(|s| {
+            let mut set = SeriesSet::default();
+            set.header.version = 1;
+            set.series = Arc::from([view(id, 100_000_000)]);
+            set.slow = Arc::from([view(
+                SeriesId {
+                    metric: id.metric.with_tier_1hz(),
+                    ..id
+                },
+                1_000_000_000,
+            )]);
+            s.series = Arc::new(set);
+        });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let period = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| {
+                let sidebar = page.read(cx).sidebar().read(cx);
+                let card = sidebar
+                    .cards()
+                    .iter()
+                    .find(|c| c.row.key.0.as_ref() == "cpu")
+                    .expect("CPU card");
+                let chart = card.chart.read(cx);
+                (
+                    TlSettings::settings(cx).performance.graph_range_s,
+                    chart.resolved()[0].as_ref().map(|v| v.period_ns),
+                )
+            })
+        };
+        assert_eq!(period(r.vcx), (60, Some(100_000_000)), "60 s reads 10 Hz");
+
+        r.vcx.dispatch_action(PerfSetGraphRange { secs: 600 });
+        draw(r.vcx);
+        assert_eq!(
+            period(r.vcx),
+            (600, Some(1_000_000_000)),
+            "10 min reads 1 Hz"
+        );
+
+        r.vcx.dispatch_action(PerfSetGraphRange { secs: 300 });
+        draw(r.vcx);
+        assert_eq!(period(r.vcx).0, 300);
+    }
+
+    /// `TlMenu` drops a doubled separator, so a page without its own items has one separator
+    /// between the common items and View, never two.
     #[gpui_kit::test]
     fn page_menu_single_separator_without_page_items(cx: &mut TestAppContext) {
         let mut r = open(cx, 1600., 1000., true);
@@ -2404,6 +2535,8 @@ mod summary {
                 (MenuEntryKind::Item, "Copy"),
                 (MenuEntryKind::Item, "Graph Summary View"),
                 (MenuEntryKind::Submenu, "Time range"),
+                (MenuEntryKind::Separator, ""),
+                (MenuEntryKind::Submenu, "View"),
             ]
         );
     }
