@@ -19,12 +19,10 @@ use gpui_kit::{
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
-use std::hash::BuildHasher as _;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, Impact, ImpactDetail, Snapshot, StartupEntry, StartupKind,
     StartupSnapshot, StartupStatus,
 };
-
 use tl_model::table::{StartupColumn, StartupRef, SysColumnId, SysNodeId, SysRow, SysSortSpec};
 use tl_model::units;
 use tl_model::validity::Validity;
