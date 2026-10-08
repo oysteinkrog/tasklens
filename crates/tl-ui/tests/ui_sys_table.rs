@@ -1441,3 +1441,506 @@ mod copy {
         assert_eq!(r.clipboard().as_deref(), Some("A\n\nB"));
     }
 }
+
+#[cfg(feature = "test-hooks")]
+mod frame {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, Render, SharedString,
+        Subscription, TestAppContext, VisualTestContext, Window, WindowBounds, WindowOptions,
+        point, px, size,
+    };
+    use smallvec::SmallVec;
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::health::SourceId;
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::{ComponentHeader, ComponentMask, Snapshot, StartupSnapshot};
+    use tl_model::table::{StartupColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec};
+    use tl_model::validity::Validity;
+    use tl_ui::actions::ClearFilter;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::menu::TlMenu;
+    use tl_ui::hub::{GlobalHub, SnapshotChanged};
+    use tl_ui::pages::sys_table::{SysBody, SysDelegate, SysTableFrame, loading_status_text};
+    use tl_ui::table::actions::TABLE_CONTEXT;
+    use tl_ui::table::cells::CellOut;
+    use tl_ui::table::columns::{
+        Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
+    };
+    use tl_ui::table::tree_table::{
+        HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
+        TreeTableDelegate,
+    };
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
+    use tl_ui::window::status::CHIP_H;
+
+    const NAME: SysColumnId = SysColumnId::Startup(StartupColumn::Name);
+    const CONTEXT: &str = "StartupTable";
+
+    /// A Startup table whose rows are the `Conn` ids of `Snapshot.startup.rows`.
+    struct TestDelegate {
+        specs: Vec<ColumnSpec<SysColumnId>>,
+        layout: ColumnLayout<SysColumnId>,
+        rows: Vec<u32>,
+        version: u64,
+    }
+
+    impl TestDelegate {
+        fn new() -> Self {
+            let specs = vec![ColumnSpec {
+                id: NAME,
+                label: "Name".into(),
+                full_name: "Name".into(),
+                group: "Name".into(),
+                align: ColumnAlign::Left,
+                kind: ColumnKind::Text,
+                sortable: true,
+                template: None,
+                default_width: px(300.),
+                tooltip: None,
+                availability: Availability::Available,
+                hideable: false,
+            }];
+            Self {
+                layout: ColumnLayout::defaults(TableId::Startup, &specs, &[NAME], &[NAME]),
+                specs,
+                rows: Vec::new(),
+                version: 0,
+            }
+        }
+    }
+
+    impl TreeTableDelegate for TestDelegate {
+        type RowId = u32;
+        type Column = SysColumnId;
+        type Sort = SysSortSpec;
+
+        fn row_count(&self) -> usize {
+            self.rows.len()
+        }
+        fn row_id(&self, ix: usize) -> u32 {
+            self.rows[ix]
+        }
+        fn row_index(&self, id: u32) -> Option<usize> {
+            self.rows.iter().position(|r| *r == id)
+        }
+        fn row_kind(&self, _: usize) -> RowKind {
+            RowKind::Plain
+        }
+        fn row_depth(&self, _: usize) -> u8 {
+            0
+        }
+        fn row_expandable(&self, _: usize) -> Option<bool> {
+            None
+        }
+        fn row_flags(&self, _: usize) -> RowFlags {
+            RowFlags::default()
+        }
+        fn table_version(&self) -> u64 {
+            self.version
+        }
+        fn columns(&self) -> &ColumnLayout<SysColumnId> {
+            &self.layout
+        }
+        fn column_spec(&self, _: SysColumnId) -> &ColumnSpec<SysColumnId> {
+            &self.specs[0]
+        }
+        fn cell(&self, ix: usize, _: SysColumnId, out: &mut CellOut) {
+            out.bits = self.rows[ix] as u64;
+        }
+        fn name_cell(&self, _: usize) -> NameCell {
+            NameCell {
+                icon: NameIcon::None,
+                icon_size: IconSlot::Small,
+                primary: SharedString::new_static("entry"),
+                count_run: None,
+                secondary: None,
+                glyphs: SmallVec::new(),
+                highlight_fffd: true,
+                trailing: None,
+            }
+        }
+        fn header_total(&self, _: SysColumnId, _: &mut CellOut) -> bool {
+            false
+        }
+        fn sort(&self) -> SysSortSpec {
+            SysSortSpec {
+                column: NAME,
+                ascending: true,
+            }
+        }
+        fn selectable(&self, _: usize) -> bool {
+            true
+        }
+        fn context_menu(
+            &mut self,
+            _: &[u32],
+            _: Option<SysColumnId>,
+            menu: TlMenu,
+            _: &mut Window,
+            _: &mut Context<TlTreeTable<Self>>,
+        ) -> TlMenu {
+            menu
+        }
+        fn on_toggle_expand(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+        fn on_sort(&mut self, _: SysColumnId, _: &mut Context<TlTreeTable<Self>>) {}
+        fn on_columns_changed(
+            &mut self,
+            _: &ColumnLayout<SysColumnId>,
+            _: &mut Context<TlTreeTable<Self>>,
+        ) {
+        }
+        fn on_visible_range(&mut self, _: &[u32], _: &mut Context<TlTreeTable<Self>>) {}
+        fn on_activate(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+        fn row_tooltip(&self, _: usize) -> Option<AnyView> {
+            None
+        }
+        fn empty_text(&self) -> Option<SharedString> {
+            None
+        }
+        fn header_lines(&self) -> HeaderLines {
+            HeaderLines::One
+        }
+    }
+
+    impl SysDelegate for TestDelegate {
+        fn component_header<'a>(&self, snap: &'a Snapshot) -> &'a ComponentHeader {
+            &snap.startup.header
+        }
+        fn rows_len(&self, snap: &Snapshot) -> usize {
+            snap.startup.rows.len()
+        }
+        fn query_generation(&self, snap: &Snapshot) -> u64 {
+            snap.startup.query_generation
+        }
+        fn install(&mut self, snap: &Arc<Snapshot>) {
+            self.rows = snap
+                .startup
+                .rows
+                .iter()
+                .map(|r| match r.node {
+                    SysNodeId::Conn(n) => n as u32,
+                    _ => 0,
+                })
+                .collect();
+            self.version += 1;
+        }
+        fn mask(&self) -> ComponentMask {
+            ComponentMask::STARTUP
+        }
+    }
+
+    /// A page built on the frame, as Startup Apps is.
+    struct TestPage {
+        frame: SysTableFrame<TestDelegate>,
+        status: String,
+        _subs: Vec<Subscription>,
+    }
+
+    impl TestPage {
+        fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let sort = SysSortSpec {
+                column: NAME,
+                ascending: true,
+            };
+            let mut frame = SysTableFrame::new(
+                Tab::Startup,
+                CONTEXT,
+                &[SourceId::Startup],
+                TestDelegate::new(),
+                sort,
+                None,
+                window,
+                cx,
+            );
+            frame.on_activated(cx);
+            let hub = cx.global::<GlobalHub>().0.clone();
+            let events = cx.global::<GlobalShellEvents>().0.clone();
+            let subs = vec![
+                cx.subscribe(&hub, |this: &mut Self, hub, ev: &SnapshotChanged, cx| {
+                    let snap = Arc::clone(hub.read(cx).current());
+                    if this.frame.on_snapshot(&snap, ev.mask, cx) {
+                        cx.notify();
+                    }
+                }),
+                cx.subscribe(&events, |this: &mut Self, _, ev: &PauseChanged, cx| {
+                    if this.frame.set_paused(ev.0, cx) {
+                        cx.notify();
+                    }
+                }),
+            ];
+            Self {
+                frame,
+                status: String::new(),
+                _subs: subs,
+            }
+        }
+
+        fn status_text(&self, out: &mut String) {
+            if self.frame.body() == SysBody::Skeleton {
+                out.push_str(&loading_status_text());
+            } else {
+                out.push_str(&self.status);
+            }
+        }
+    }
+
+    impl Render for TestPage {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.frame.render(None, Box::new(ClearFilter), window, cx)
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        page: Entity<TestPage>,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_reduce_motion(true);
+        });
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(1280.), px(800.)),
+            })),
+            ..WindowOptions::default()
+        };
+        let handle = cx
+            .update(|cx| {
+                cx.open_window(options, |window, cx| cx.new(|cx| TestPage::new(window, cx)))
+            })
+            .expect("the window opens");
+        let page = handle.root(cx).expect("the page");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let mut r = Rig { engine, vcx, page };
+        r.draw();
+        r
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+            self.vcx.run_until_parked();
+        }
+
+        /// The generation of the last query the frame sent.
+        fn generation(&mut self) -> u64 {
+            let page = self.page.clone();
+            self.vcx
+                .update(|_, cx| page.read(cx).frame.query.last_sent())
+        }
+
+        /// Publishes a Startup snapshot of `rows` built for query `generation`.
+        fn publish(&mut self, rows: &[u64], generation: u64) {
+            let rows: Vec<SysRow> = rows
+                .iter()
+                .map(|n| SysRow {
+                    node: SysNodeId::Conn(*n),
+                    depth: 0,
+                    expanded: false,
+                    has_children: false,
+                    record: None,
+                })
+                .collect();
+            self.engine.publish_with(|s| {
+                let version = s.startup.header.version + 1;
+                s.startup = Arc::new(StartupSnapshot {
+                    header: ComponentHeader {
+                        version,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    rows: rows.into(),
+                    query_generation: generation,
+                    ..StartupSnapshot::clone(&s.startup)
+                });
+            });
+            self.vcx.run_until_parked();
+            self.draw();
+        }
+
+        fn rows(&mut self) -> Vec<u32> {
+            let page = self.page.clone();
+            self.vcx
+                .update(|_, cx| page.read(cx).frame.table.read(cx).delegate.rows.clone())
+        }
+
+        fn renders(&mut self) -> u64 {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| page.read(cx).frame.render_count())
+        }
+
+        fn pause(&mut self, on: bool) {
+            self.vcx.update(|_, cx| {
+                let events = cx.global::<GlobalShellEvents>().0.clone();
+                events.update(cx, |_, cx| cx.emit(PauseChanged(on)));
+            });
+            self.vcx.run_until_parked();
+            self.draw();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn sys_frame_layout_header_one_line(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let g = r.generation();
+        r.publish(&[1, 2, 3], g);
+        assert_eq!(r.rows(), [1, 2, 3]);
+        let header = r
+            .vcx
+            .debug_bounds("TlTreeTableHeader")
+            .expect("header drawn");
+        assert_eq!(header.size.height, px(HEADER_H_ONE));
+        let table = r.vcx.debug_bounds("TlTreeTable").expect("table drawn");
+        let slot = r
+            .vcx
+            .debug_bounds("SysTableFrame-table")
+            .expect("frame drawn");
+        assert_eq!(slot.size.height, px(800.), "the frame fills the window");
+        assert_eq!(
+            slot.bottom() - table.bottom(),
+            px(CHIP_H),
+            "status chip padding"
+        );
+        let page = r.page.clone();
+        let built = r.vcx.update(|_, cx| {
+            page.read(cx)
+                .frame
+                .table
+                .read(cx)
+                .rows_built_last_frame
+                .get()
+        });
+        assert_eq!(built, 3);
+        assert!(r.vcx.debug_bounds("SysTableFrame-cover").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn sys_page_not_rerendered_for_unrelated_mask(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let g = r.generation();
+        r.publish(&[1, 2, 3], g);
+        let before = r.renders();
+        let page = r.page.clone();
+        let notify = r.vcx.update(|_, cx| {
+            let snap = Arc::clone(cx.global::<GlobalHub>().0.read(cx).current());
+            page.update(cx, |p, cx| {
+                p.frame.on_snapshot(&snap, ComponentMask::SYSTEM, cx)
+            })
+        });
+        assert!(!notify);
+        r.engine.publish_with(|s| s.system = Arc::default());
+        r.vcx.run_until_parked();
+        r.draw();
+        assert_eq!(
+            r.renders(),
+            before,
+            "a SYSTEM-only change does not render the page"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn sys_frame_keeps_rows_for_stale_generation(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let g = r.generation();
+        assert!(g >= 1, "the first visit sends the query");
+        r.publish(&[1, 2, 3], g);
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.update(cx, |p, cx| p.frame.on_filter_changed("x", cx)));
+        assert_eq!(r.generation(), g + 1);
+        r.publish(&[7], g);
+        assert_eq!(r.rows(), [1, 2, 3], "a view for the old query is not shown");
+        r.publish(&[7], g + 1);
+        assert_eq!(r.rows(), [7]);
+    }
+
+    #[gpui_kit::test]
+    fn sys_frame_paused_keeps_rows(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let g = r.generation();
+        r.publish(&[1, 2, 3], g);
+        r.pause(true);
+        r.publish(&[4, 5], g);
+        assert_eq!(r.rows(), [1, 2, 3], "no install while Ctrl is held");
+        let page = r.page.clone();
+        assert!(
+            r.vcx
+                .update(|_, cx| page.read(cx).frame.table.read(cx).paused)
+        );
+        r.pause(false);
+        assert_eq!(r.rows(), [4, 5], "the latest snapshot on release");
+        assert!(
+            !r.vcx
+                .update(|_, cx| page.read(cx).frame.table.read(cx).paused)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn sys_frame_loading_status_text(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let page = r.page.clone();
+        let (body, text) = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let mut out = String::new();
+            p.status_text(&mut out);
+            (p.frame.body(), out)
+        });
+        assert_eq!(body, SysBody::Skeleton);
+        assert_eq!(text, "Loading…");
+        assert!(
+            r.vcx.debug_bounds("TlTreeTableHeader").is_some(),
+            "the header shows over the skeleton"
+        );
+        let cover = r
+            .vcx
+            .debug_bounds("SysTableFrame-cover")
+            .expect("skeleton cover");
+        assert_eq!(cover.top(), px(HEADER_H_ONE));
+        let g = r.generation();
+        r.publish(&[1], g);
+        assert_eq!(
+            r.vcx.update(|_, cx| page.read(cx).frame.body()),
+            SysBody::Rows
+        );
+        assert!(r.vcx.debug_bounds("SysTableFrame-cover").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn sys_frame_key_context_nesting(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let page = r.page.clone();
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).frame.table.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+        });
+        r.draw();
+        let stack = r.vcx.update(|window, _| window.context_stack());
+        let at = |name: &str| stack.iter().position(|c| c.contains(name));
+        let page_at = at(CONTEXT).expect("the page context");
+        let table_at = at(TABLE_CONTEXT).expect("the Table context");
+        assert!(page_at < table_at, "the frame wraps the table");
+    }
+}
