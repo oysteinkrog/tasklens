@@ -95,8 +95,12 @@ pub struct GpuDeviceSample {
     pub util_pct: Reading<u32>,
     pub mem_util_pct: Reading<u32>,
     pub mem_used: Reading<u64>,
+    /// `nvmlDeviceGetMemoryInfo_v2` `reserved`, bytes (PERF-064).
+    pub mem_reserved: Reading<u64>,
     pub enc_pct: Reading<u32>,
     pub dec_pct: Reading<u32>,
+    /// Active NVENC sessions, `nvmlDeviceGetEncoderSessions` (PERF-065).
+    pub enc_sessions: Reading<u32>,
     pub temp_c: Reading<u32>,
     pub power_mw: Reading<u32>,
     pub clock_gfx_mhz: Reading<u32>,
@@ -147,8 +151,10 @@ mod tests {
             util_pct: Reading::Ok(u32::MAX),
             mem_util_pct: Reading::Ok(u32::MAX),
             mem_used: Reading::Ok(u64::MAX),
+            mem_reserved: Reading::Ok(u64::MAX),
             enc_pct: Reading::Ok(u32::MAX),
             dec_pct: Reading::Ok(u32::MAX),
+            enc_sessions: Reading::Ok(u32::MAX),
             temp_c: Reading::Ok(u32::MAX),
             power_mw: Reading::Ok(u32::MAX),
             clock_gfx_mhz: Reading::Ok(u32::MAX),

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use nvml_wrapper::enum_wrappers::device::{Clock, PcieUtilCounter, TemperatureSensor};
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::error::NvmlError;
-use nvml_wrapper::struct_wrappers::device::{ProcessInfo, ProcessUtilizationSample};
+use nvml_wrapper::struct_wrappers::device::{MemoryInfo, ProcessInfo, ProcessUtilizationSample};
 use nvml_wrapper::{Device, Nvml, cuda_driver_version_major, cuda_driver_version_minor};
 use tl_model::gpu_proto::{GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure, Reading};
 
@@ -103,6 +103,15 @@ pub fn reading<T>(r: Result<T, NvmlError>) -> Reading<T> {
     }
 }
 
+/// Used and hardware reserved bytes from one `nvmlDeviceGetMemoryInfo_v2` call (PERF-064).
+pub fn memory_readings(r: Reading<MemoryInfo>) -> (Reading<u64>, Reading<u64>) {
+    match r {
+        Reading::Ok(m) => (Reading::Ok(m.used), Reading::Ok(m.reserved)),
+        Reading::Unsupported => (Reading::Unsupported, Reading::Unsupported),
+        Reading::Failed => (Reading::Failed, Reading::Failed),
+    }
+}
+
 /// Reads one device's metrics for a sample (PERF-063 to PERF-070). Each call is independent, so
 /// one failed metric never skips the others.
 pub fn device_sample(dev: &Device<'_>, uuid: [u8; 16]) -> GpuDeviceSample {
@@ -112,13 +121,18 @@ pub fn device_sample(dev: &Device<'_>, uuid: [u8; 16]) -> GpuDeviceSample {
         Reading::Unsupported => (Reading::Unsupported, Reading::Unsupported),
         Reading::Failed => (Reading::Failed, Reading::Failed),
     };
+    let (mem_used, mem_reserved) = memory_readings(reading(dev.memory_info()));
     GpuDeviceSample {
         uuid,
         util_pct,
         mem_util_pct,
-        mem_used: reading(dev.memory_info().map(|m| m.used)),
+        mem_used,
+        mem_reserved,
         enc_pct: reading(dev.encoder_utilization().map(|u| u.utilization)),
         dec_pct: reading(dev.decoder_utilization().map(|u| u.utilization)),
+        // The session count of nvmlDeviceGetEncoderStats, the same count
+        // nvmlDeviceGetEncoderSessions returns, without the session list.
+        enc_sessions: reading(dev.encoder_stats().map(|s| s.session_count)),
         temp_c: reading(dev.temperature(TemperatureSensor::Gpu)),
         power_mw: reading(dev.power_usage()),
         clock_gfx_mhz: reading(dev.clock_info(Clock::Graphics)),
@@ -245,8 +259,10 @@ fn failed_sample(uuid: [u8; 16]) -> GpuDeviceSample {
         util_pct: Reading::Failed,
         mem_util_pct: Reading::Failed,
         mem_used: Reading::Failed,
+        mem_reserved: Reading::Failed,
         enc_pct: Reading::Failed,
         dec_pct: Reading::Failed,
+        enc_sessions: Reading::Failed,
         temp_c: Reading::Failed,
         power_mw: Reading::Failed,
         clock_gfx_mhz: Reading::Failed,
@@ -438,6 +454,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn memory_readings_split() {
+        let info = MemoryInfo {
+            free: 0,
+            reserved: 380 << 20,
+            total: 16 << 30,
+            used: 3 << 30,
+            version: 2,
+        };
+        assert_eq!(
+            memory_readings(Reading::Ok(info)),
+            (Reading::Ok(3 << 30), Reading::Ok(380 << 20))
+        );
+        assert_eq!(
+            memory_readings(Reading::Unsupported),
+            (Reading::Unsupported, Reading::Unsupported)
+        );
+        assert_eq!(
+            memory_readings(Reading::Failed),
+            (Reading::Failed, Reading::Failed)
+        );
+    }
+
+    #[test]
+    fn failed_sample_has_no_new_value() {
+        let s = failed_sample([1; 16]);
+        assert_eq!(s.mem_reserved, Reading::Failed);
+        assert_eq!(s.enc_sessions, Reading::Failed);
+    }
+
     /// Starts NVML and returns the backend after `hello`, with one device or more.
     fn real_backend() -> NvmlBackend {
         let mut backend = NvmlBackend::new();
@@ -479,6 +525,15 @@ mod tests {
             panic!("mem_used {:?}", s.mem_used);
         };
         assert!(used <= mem_total, "{used} > {mem_total}");
+        let Reading::Ok(reserved) = s.mem_reserved else {
+            panic!("mem_reserved {:?}", s.mem_reserved);
+        };
+        assert!(reserved < mem_total, "{reserved} >= {mem_total}");
+        assert!(
+            matches!(s.enc_sessions, Reading::Ok(_)),
+            "{:?}",
+            s.enc_sessions
+        );
         // U-35: whether the owner card reports a fan speed.
         eprintln!("U-35 fan_pct = {:?}", s.fan_pct);
         assert!(

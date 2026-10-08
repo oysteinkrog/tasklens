@@ -265,9 +265,21 @@ pub struct GpuTotals {
     pub mem_total: Metric<u64>,
     pub shared_used: Metric<u64>,
     pub shared_total: Metric<u64>,
+    /// Hardware reserved memory, bytes: NVML `reserved`; Unsupported elsewhere (PERF-064).
+    pub mem_reserved: Metric<u64>,
     pub enc_pct: Metric<f32>,
     pub dec_pct: Metric<f32>,
+    /// Active NVENC sessions; Unsupported off NVIDIA (PERF-065).
+    pub enc_sessions: Metric<u32>,
+    /// Encode and decode run on one engine (AMD VCN, Intel video), so `enc_pct` and `dec_pct`
+    /// hold the same value and the UI shows one row (PERF-065).
+    pub enc_dec_shared: bool,
     pub temp_c: Metric<f32>,
+    /// amdgpu hwmon `edge`, `junction` and `mem`, for the Temperature tooltip (PERF-068);
+    /// Unsupported where the card has no such sensor.
+    pub temp_edge_c: Metric<f32>,
+    pub temp_junction_c: Metric<f32>,
+    pub temp_mem_c: Metric<f32>,
     pub power_w: Metric<f32>,
     pub power_limit_w: Metric<f32>,
     pub clock_gfx_mhz: Metric<u32>,

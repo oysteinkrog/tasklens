@@ -28,8 +28,8 @@ use tl_collect::gpu_drm::intel::{
     IntelDriver, IntelSample, fdinfo_memory, i915_engine_name, read_intel,
 };
 use tl_collect::gpu_drm::{
-    AmdSample, DrmCard, FdinfoScan, discover_cards, engine_busy, engine_busy_cycles, main_temp,
-    read_amd, scan,
+    AmdSample, AmdTemp, DrmCard, FdinfoScan, discover_cards, engine_busy, engine_busy_cycles,
+    main_temp, read_amd, scan,
 };
 use tl_collect::parse::udev::{UdevProps, pci_entry, read_udev_props};
 use tl_collect::sanitize::sanitize_text;
@@ -435,6 +435,13 @@ fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>) -> GpuTotals {
             Metric::with(Validity::WarmingUp),
         ),
     };
+    let sensor = |kind| {
+        opt(s
+            .temps
+            .iter()
+            .find(|&&(k, _)| k == kind)
+            .map(|&(_, milli)| milli as f32 / 1000.0))
+    };
     GpuTotals {
         device: DeviceIdx(0),
         util_pct: opt(s.gpu_busy_pct.map(f32::from)),
@@ -443,9 +450,16 @@ fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>) -> GpuTotals {
         mem_total: opt(s.vram_total),
         shared_used: opt(s.gtt_used),
         shared_total: opt(s.gtt_total),
+        // amdgpu has no hardware reserved figure (PERF-064).
+        mem_reserved: Metric::with(Validity::Unsupported),
         enc_pct,
         dec_pct,
+        enc_sessions: Metric::with(Validity::Unsupported),
+        enc_dec_shared: vcn.is_some(),
         temp_c: opt(main_temp(s).map(|(_, milli)| milli as f32 / 1000.0)),
+        temp_edge_c: sensor(AmdTemp::Edge),
+        temp_junction_c: sensor(AmdTemp::Junction),
+        temp_mem_c: sensor(AmdTemp::Mem),
         power_w: opt(s.power_uw.map(|uw| uw as f32 / 1e6)),
         power_limit_w: opt(s.power_cap_uw.map(|uw| uw as f32 / 1e6)),
         clock_gfx_mhz: opt(s.sclk_mhz),
@@ -527,10 +541,16 @@ fn intel(
         mem_total,
         shared_used: opt(system_used),
         shared_total: Metric::with(Validity::Unsupported),
+        mem_reserved: Metric::with(Validity::Unsupported),
         // Intel video engines both encode and decode (PERF-065).
         enc_pct: video,
         dec_pct: video,
+        enc_sessions: Metric::with(Validity::Unsupported),
+        enc_dec_shared: true,
         temp_c,
+        temp_edge_c: Metric::with(Validity::Unsupported),
+        temp_junction_c: Metric::with(Validity::Unsupported),
+        temp_mem_c: Metric::with(Validity::Unsupported),
         power_w,
         power_limit_w: opt(s.power_max_uw.map(|uw| uw as f32 / 1e6)),
         clock_gfx_mhz: opt(s.act_freq_mhz),
@@ -780,9 +800,28 @@ mod tests {
         let t = amd_totals(&s, &[]);
         assert_eq!(t.enc_pct, Metric::valid(25.0));
         assert_eq!(t.dec_pct, Metric::valid(25.0));
+        assert!(t.enc_dec_shared);
         // Missing inputs are `Unsupported`, never 0.
         assert_eq!(t.util_pct.validity, Validity::Unsupported);
         assert_eq!(t.temp_c.validity, Validity::Unsupported);
+        assert_eq!(t.temp_edge_c.validity, Validity::Unsupported);
+        assert_eq!(t.temp_junction_c.validity, Validity::Unsupported);
+        assert_eq!(t.temp_mem_c.validity, Validity::Unsupported);
+        assert_eq!(t.mem_reserved.validity, Validity::Unsupported);
+        assert_eq!(t.enc_sessions.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn amd_sensor_temperatures() {
+        let s = AmdSample {
+            temps: SmallVec::from_slice(&[(AmdTemp::Edge, 48_000), (AmdTemp::Junction, 52_500)]),
+            ..AmdSample::default()
+        };
+        let t = amd_totals(&s, &[]);
+        assert_eq!(t.temp_c, Metric::valid(52.5));
+        assert_eq!(t.temp_edge_c, Metric::valid(48.0));
+        assert_eq!(t.temp_junction_c, Metric::valid(52.5));
+        assert_eq!(t.temp_mem_c.validity, Validity::Unsupported);
     }
 
     #[test]
@@ -792,6 +831,8 @@ mod tests {
         let t = amd_totals(&s, &busy);
         assert_eq!(t.enc_pct, Metric::valid(5.0));
         assert_eq!(t.dec_pct, Metric::valid(0.0));
+        // Separate fdinfo engines: two rows.
+        assert!(!t.enc_dec_shared);
 
         let t = amd_totals(&s, &[]);
         assert_eq!(t.enc_pct.validity, Validity::WarmingUp);
@@ -819,6 +860,7 @@ mod tests {
         assert_eq!(t.util_pct, Metric::valid(40.0));
         assert_eq!(t.enc_pct, Metric::valid(10.0));
         assert_eq!(t.dec_pct, Metric::valid(10.0));
+        assert!(t.enc_dec_shared);
         assert_eq!(t.mem_util_pct.validity, Validity::Unsupported);
         assert_eq!(t.fan_pct.validity, Validity::Unsupported);
         assert_eq!(t.clock_mem_mhz.validity, Validity::Unsupported);

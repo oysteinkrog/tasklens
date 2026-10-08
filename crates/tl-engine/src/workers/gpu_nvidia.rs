@@ -334,9 +334,17 @@ pub fn to_totals(s: &GpuDeviceSample, info: &GpuDeviceInfo) -> GpuTotals {
         // NVML has no GTT (PERF-064).
         shared_used: Metric::with(Validity::Unsupported),
         shared_total: Metric::with(Validity::Unsupported),
+        mem_reserved: metric(s.mem_reserved, |v| v),
         enc_pct: pct(s.enc_pct),
         dec_pct: pct(s.dec_pct),
+        enc_sessions: metric(s.enc_sessions, |v| v),
+        // NVENC and NVDEC are separate engines.
+        enc_dec_shared: false,
         temp_c: metric(s.temp_c, |v| v as f32),
+        // NVML reads one GPU core sensor (PERF-069).
+        temp_edge_c: Metric::with(Validity::Unsupported),
+        temp_junction_c: Metric::with(Validity::Unsupported),
+        temp_mem_c: Metric::with(Validity::Unsupported),
         power_w: metric(s.power_mw, milliwatts),
         power_limit_w: match info.power_limit_mw {
             Some(mw) => Metric::valid(milliwatts(mw)),
@@ -543,8 +551,10 @@ mod tests {
             util_pct: Reading::Ok(37),
             mem_util_pct: Reading::Ok(12),
             mem_used: Reading::Ok(3 << 30),
+            mem_reserved: Reading::Ok(380 << 20),
             enc_pct: Reading::Ok(0),
             dec_pct: Reading::Unsupported,
+            enc_sessions: Reading::Ok(2),
             temp_c: Reading::Failed,
             power_mw: Reading::Ok(31_900),
             clock_gfx_mhz: Reading::Ok(2_100),
@@ -588,7 +598,11 @@ mod tests {
         assert_eq!(t.shared_total.validity, Validity::Unsupported);
         assert_eq!(t.enc_pct, Metric::valid(0.0));
         assert_eq!(t.dec_pct.validity, Validity::Unsupported);
+        assert_eq!(t.mem_reserved, Metric::valid(380 << 20));
+        assert_eq!(t.enc_sessions, Metric::valid(2));
+        assert!(!t.enc_dec_shared);
         assert_eq!(t.temp_c.validity, Validity::Failed);
+        assert_eq!(t.temp_junction_c.validity, Validity::Unsupported);
         assert_eq!(t.power_w, Metric::valid(31.9));
         assert_eq!(t.power_limit_w, Metric::valid(200.0));
         assert_eq!(t.clock_gfx_mhz, Metric::valid(2_100));
@@ -603,6 +617,15 @@ mod tests {
         };
         let t = to_totals(&device_sample(), &no_limit);
         assert_eq!(t.power_limit_w.validity, Validity::Unsupported);
+
+        let unsupported = GpuDeviceSample {
+            mem_reserved: Reading::Unsupported,
+            enc_sessions: Reading::Unsupported,
+            ..device_sample()
+        };
+        let t = to_totals(&unsupported, &info);
+        assert_eq!(t.mem_reserved.validity, Validity::Unsupported);
+        assert_eq!(t.enc_sessions.validity, Validity::Unsupported);
     }
 
     #[test]
