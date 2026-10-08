@@ -2630,7 +2630,7 @@ mod keys {
     use tl_ui::actions::FocusFilter;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::i18n::init_strings;
-    use tl_ui::pages::processes::actions::{EndProcess, EndTask};
+    use tl_ui::pages::processes::actions::{CopyDetails, EndProcess, EndTask};
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::{ProcessesPage, bind_keys_processes};
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -2804,13 +2804,20 @@ mod keys {
                     "{keys}: expected EndTask, got {got:?}"
                 );
             }
+            // The table binds Ctrl+C to CopyRow; the process table overrides it.
+            let got = resolve(cx, "ctrl-c", &["ProcessTable", "Table"]);
+            assert!(
+                got.as_ref().is_some_and(|a| a.partial_eq(&CopyDetails)),
+                "ctrl-c: expected CopyDetails, got {got:?}"
+            );
         });
     }
 
     #[gpui_kit::test]
     fn keymap_rows_match_table_b_processtable(cx: &mut TestAppContext) {
         cx.update(bind_keys_processes);
-        let rows: [(&str, &dyn Action); 4] = [
+        let rows: [(&str, &dyn Action); 5] = [
+            ("ctrl-c", &CopyDetails),
             ("delete", &EndTask),
             ("ctrl-e", &EndTask),
             ("shift-delete", &EndProcess),

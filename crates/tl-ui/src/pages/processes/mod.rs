@@ -68,13 +68,15 @@ use status::{StatusCounts, write_status};
 pub const PAGE_CONTEXT: &str = "ProcessTable";
 
 /// The ProcessTable keys (PROC-049, table (b), R-045): Delete and Ctrl+E run End Task,
-/// Shift+Delete and Ctrl+X run End Process. They dispatch the same handlers as the row menu,
+/// Shift+Delete and Ctrl+X run End Process, Ctrl+C runs Copy details in place of the table's
+/// Copy row (PROC-070). They dispatch the same handlers as the row menu,
 /// with the same confirmations and refusals. Bound before any menu is built, so the menu shows
 /// them as hints. The later binding of an action wins the hint, so Delete and Shift+Delete
 /// come last.
 pub fn bind_keys_processes(cx: &mut App) {
     let ctx = Some(PAGE_CONTEXT);
     cx.bind_keys([
+        KeyBinding::new("ctrl-c", CopyDetails, ctx),
         KeyBinding::new("ctrl-e", EndTask, ctx),
         KeyBinding::new("delete", EndTask, ctx),
         KeyBinding::new("ctrl-x", EndProcess, ctx),
