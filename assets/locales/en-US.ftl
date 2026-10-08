@@ -1560,6 +1560,25 @@ minigraph-menu-hide = Hide graph
 minigraph-menu-remove = Remove graph
 minigraph-menu-range = Time range
 minigraph-menu-reset = Reset minigraph layout
+# Settings window, Services page (tasklens-bj6.28, UI-SHL-068). The Graphs page uses the
+# shell-menu-graphs keys.
+shell-settings-services-unit-types = Unit types
+shell-settings-services-type-service = Services
+shell-settings-services-type-socket = Sockets
+shell-settings-services-type-timer = Timers
+shell-settings-services-type-mount = Mounts
+shell-settings-services-type-automount = Automounts
+shell-settings-services-type-path = Paths
+shell-settings-services-type-target = Targets
+shell-settings-services-type-swap = Swaps
+shell-settings-services-type-slice = Slices
+shell-settings-services-type-scope = Scopes
+shell-settings-services-states = Show only these states
+shell-settings-services-state-running = Running
+shell-settings-services-state-failed = Failed
+shell-settings-services-state-stopped = Stopped
+shell-settings-services-state-disabled = Disabled
+shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page (tasklens-bj6.26, UI-SHL-066).
 shell-settings-perf-group-graphs = Graphs
 shell-settings-perf-group-cpu = CPU

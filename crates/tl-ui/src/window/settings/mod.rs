@@ -16,9 +16,11 @@
 //! states are created in `SettingsWindow::new`, never in render.
 
 mod general;
+mod graphs;
 mod motion;
 mod performance;
 mod processes;
+mod services;
 mod units;
 
 use std::ops::RangeInclusive;
@@ -177,6 +179,8 @@ pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
         units::page(cx),
         processes::page(cx),
         performance::page(cx),
+        graphs::page(cx),
+        services::page(cx),
     ];
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {
@@ -252,6 +256,9 @@ pub struct PageBuilder {
     /// The empty texts the checklists show.
     #[cfg(any(test, feature = "test-hooks"))]
     empty_texts: Vec<(SettingKey, SharedString)>,
+    /// The button labels and actions.
+    #[cfg(any(test, feature = "test-hooks"))]
+    buttons: Vec<(SharedString, Rc<dyn Action>)>,
 }
 
 /// One checklist section: a sub-heading (none when empty) and its `(label, value)` checkboxes.
@@ -284,6 +291,8 @@ impl PageBuilder {
             checks: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             empty_texts: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            buttons: Vec::new(),
         }
     }
 
@@ -416,6 +425,69 @@ impl PageBuilder {
         self.push(group, key, label, None, restart, field)
     }
 
+    /// Checkboxes over the members of the StrList `key`, in `columns` side by side, each read
+    /// top to bottom, column 1 first. A checkbox is checked while its value is in the list.
+    /// The stored list keeps the option order. With `keep_one`, unchecking the last checked
+    /// option is refused: the box stays checked and `keep_one` shows as an Info toast.
+    pub fn check_columns(
+        &mut self,
+        group: impl Into<SharedString>,
+        key: SettingKey,
+        label: impl Into<SharedString>,
+        columns: Vec<Vec<(SharedString, SharedString)>>,
+        keep_one: Option<SharedString>,
+    ) -> &mut Self {
+        let restart = self.take_restart();
+        let order: Rc<[SharedString]> = columns
+            .iter()
+            .flatten()
+            .map(|(_, value)| value.clone())
+            .collect();
+        let columns: Rc<[Vec<(SharedString, SharedString, BoolSetter)>]> = columns
+            .into_iter()
+            .map(|options| {
+                options
+                    .into_iter()
+                    .map(|(label, value)| {
+                        let (order, keep_one, v) = (order.clone(), keep_one.clone(), value.clone());
+                        let set: BoolSetter = Rc::new(move |on, cx| {
+                            set_member_ordered(cx, key, &v, on, &order, keep_one.as_ref())
+                        });
+                        (label, value, set)
+                    })
+                    .collect()
+            })
+            .collect();
+        #[cfg(any(test, feature = "test-hooks"))]
+        for (_, value, set) in columns.iter().flatten() {
+            self.checks.push((key, value.clone(), set.clone()));
+        }
+        let field = SettingField::render(move |_, _, cx| {
+            let m = *metrics(cx);
+            let members = read_list(cx, key);
+            let mut row = div().flex().flex_row().gap(m.sp[6]);
+            for (i, options) in columns.iter().enumerate() {
+                let mut column = div().flex().flex_col().gap(m.sp[2]);
+                for (label, value, set) in options {
+                    let present = members.iter().any(|v| v == value.as_ref());
+                    let set = set.clone();
+                    column = column.child(
+                        TlCheckbox::new(SharedString::from(format!(
+                            "{}-{i}-{value}",
+                            key.as_str()
+                        )))
+                        .label(label.clone())
+                        .checked(Some(present))
+                        .on_change(move |on, _, cx| set(on, cx)),
+                    );
+                }
+                row = row.child(column);
+            }
+            row.into_any_element()
+        });
+        self.push(group, key, label, None, restart, field)
+    }
+
     /// Sets the description of the last item.
     pub fn description(&mut self, text: impl Into<SharedString>) -> &mut Self {
         let text = text.into();
@@ -491,7 +563,7 @@ impl PageBuilder {
             };
             TlSettings::set(cx, key, value.clone());
             if let Some(note) = &toast {
-                restart_toast(note.clone(), cx);
+                info_toast(note.clone(), cx);
             }
         });
         #[cfg(any(test, feature = "test-hooks"))]
@@ -576,7 +648,7 @@ impl PageBuilder {
             move |v: f64, cx| {
                 TlSettings::set(cx, key, SettingValue::Int(v.round() as i64));
                 if let Some(note) = &toast {
-                    restart_toast(note.clone(), cx);
+                    info_toast(note.clone(), cx);
                 }
             },
         );
@@ -613,6 +685,8 @@ impl PageBuilder {
         let label: SharedString = label.into();
         let text = label.clone();
         let action: Rc<dyn Action> = Rc::from(action);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.buttons.push((label.clone(), action.clone()));
         let item = SettingItem::new(
             label,
             SettingField::render(move |_, _, _| {
@@ -695,6 +769,14 @@ impl PageBuilder {
             .collect()
     }
 
+    /// Dispatches the action of the button labelled `label`, as a click on it would.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn press(&self, label: &str, window: &mut Window, cx: &mut App) {
+        if let Some((_, action)) = self.buttons.iter().find(|(l, _)| l.as_ref() == label) {
+            window.dispatch_action(action.boxed_clone(), cx);
+        }
+    }
+
     /// The text the checklist of `key` shows when it has no option.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn empty_text(&self, key: SettingKey) -> Option<SharedString> {
@@ -736,7 +818,7 @@ impl PageBuilder {
         let setter: BoolSetter = Rc::new(move |on, cx| {
             TlSettings::set(cx, key, SettingValue::Bool(on));
             if let Some(note) = &restart {
-                restart_toast(note.clone(), cx);
+                info_toast(note.clone(), cx);
             }
         });
         #[cfg(any(test, feature = "test-hooks"))]
@@ -831,6 +913,45 @@ fn set_member(cx: &mut App, key: SettingKey, value: &str, present: bool) {
     TlSettings::set(cx, key, SettingValue::StrList(list));
 }
 
+/// Like [`set_member`], but an added value goes to its place in `order` (values not in `order`
+/// stay at the end), and with `keep_one` a removal that would leave no value of `order` is
+/// refused with `keep_one` as an Info toast.
+fn set_member_ordered(
+    cx: &mut App,
+    key: SettingKey,
+    value: &str,
+    present: bool,
+    order: &[SharedString],
+    keep_one: Option<&SharedString>,
+) {
+    let mut members = read_list(cx, key);
+    let has = members.iter().any(|v| v == value);
+    if has == present {
+        return;
+    }
+    if present {
+        members.push(value.to_owned());
+        members.sort_by_key(|v| {
+            order
+                .iter()
+                .position(|o| o.as_ref() == v)
+                .unwrap_or(usize::MAX)
+        });
+    } else {
+        members.retain(|v| v != value);
+        if let Some(text) = keep_one
+            && !members
+                .iter()
+                .any(|v| order.iter().any(|o| o.as_ref() == v))
+        {
+            info_toast(text.clone(), cx);
+            return;
+        }
+    }
+    let list: Arc<[SharedString]> = members.into_iter().map(SharedString::from).collect();
+    TlSettings::set(cx, key, SettingValue::StrList(list));
+}
+
 fn read_bool(cx: &App, key: SettingKey) -> bool {
     read(cx, key).as_bool().unwrap_or_default()
 }
@@ -850,8 +971,8 @@ fn value_matches(v: &SettingValue, now: &serde_json::Value) -> bool {
     }
 }
 
-/// Pushes `text` ("Takes effect after restart") as an Info toast in the active window.
-fn restart_toast(text: SharedString, cx: &mut App) {
+/// Pushes `text` (such as "Takes effect after restart") as an Info toast in the active window.
+fn info_toast(text: SharedString, cx: &mut App) {
     let Some(window) = cx.active_window() else {
         return;
     };
@@ -861,7 +982,7 @@ fn restart_toast(text: SharedString, cx: &mut App) {
         }
     });
     if pushed.is_err() {
-        warn!(target: "tasklens::ui", "restart toast: the window is gone");
+        warn!(target: "tasklens::ui", "settings toast: the window is gone");
     }
 }
 
