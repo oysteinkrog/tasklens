@@ -1027,8 +1027,9 @@ mod end {
     use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::main_window_view;
-    use tl_ui::windows::actions::SetAffinity;
+    use tl_ui::windows::actions::{OpenCustomPriority, SetAffinity};
     use tl_ui::windows::affinity::AffinityDialog;
+    use tl_ui::windows::priority::PriorityDialog;
 
     use super::toasts::{actions_sent, emit, open, visible};
 
@@ -2030,7 +2031,6 @@ mod end {
             "Graph",
             "tray",
             "Go to service",
-            "Custom",
             "Realtime",
             "Idle",
         ];
@@ -2074,6 +2074,8 @@ mod end {
                     class.to_owned()
                 });
             }
+            out.push("-".to_owned());
+            out.push("Custom…".to_owned());
             out
         };
         assert_eq!(priority(&mut rig, &[0, 1]), classes(None), "nice 0 and 5");
@@ -2403,6 +2405,97 @@ mod end {
             ]
         );
         assert!(subtitle.starts_with("2 processes"), "{subtitle}");
+    }
+
+    /// The Custom priority dialog `rig.dispatch(OpenCustomPriority)` opened: its targets,
+    /// subtitle and initial values.
+    fn open_custom_priority(rig: &mut Rig) -> (Vec<ActionTarget>, String, (SchedPolicy, i8, u8)) {
+        let before = rig.windows();
+        rig.dispatch(OpenCustomPriority);
+        let id = rig
+            .windows()
+            .into_iter()
+            .find(|w| !before.contains(w))
+            .expect("the Custom priority dialog opened");
+        let handle = WindowHandle::<gpui_kit::base::Root>::new(id);
+        rig.vcx.update(|_, cx| {
+            let dialog = PriorityDialog::find(handle, cx).expect("a priority dialog");
+            let d = dialog.read(cx);
+            (d.targets().to_vec(), d.subtitle().to_string(), d.initial())
+        })
+    }
+
+    #[gpui_kit::test]
+    fn custom_priority_opens_pwn023(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let records = vec![
+            ProcessRecord {
+                nice: 5,
+                ..record(300, 1, "proc", ProcFlags::empty())
+            },
+            record(301, 1, "proc", ProcFlags::empty()),
+        ];
+        let extras = vec![
+            ProcessExtras {
+                policy: SchedPolicy::Batch,
+                rt_prio: 0,
+                ..firefox_extras()
+            },
+            firefox_extras(),
+        ];
+        let rows = vec![
+            row(NodeId::Process(key(300)), Some(0), None),
+            row(NodeId::Process(key(301)), Some(1), None),
+        ];
+        rig.publish_rows(records.clone(), extras.clone(), rows, Vec::new());
+        let menu = build_menu(&mut rig, &[0], ColumnId::Name);
+        let priority = submenu_shapes(&mut rig, &menu);
+        assert_eq!(
+            &priority[priority.len() - 2..],
+            ["-", "Custom…"],
+            "Custom… is last, after a separator"
+        );
+        // The menu opened on row A (PID 300); then the rows re-sort and the selection moves.
+        let rows = vec![
+            row(NodeId::Process(key(301)), Some(1), None),
+            row(NodeId::Process(key(300)), Some(0), None),
+        ];
+        rig.publish_rows(records, extras, rows, Vec::new());
+        rig.select_pids(&[301]);
+        let (targets, subtitle, initial) = open_custom_priority(&mut rig);
+        assert_eq!(targets, [ActionTarget::Process(key(300))], "row A's key");
+        assert_eq!(subtitle, "proc (PID 300)");
+        assert_eq!(
+            initial,
+            (SchedPolicy::Batch, 5, 0),
+            "row A's Priority cell values"
+        );
+        assert!(
+            rig.sent().is_empty(),
+            "the dialog sends on Set priority only"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn custom_priority_app_row_targets(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let records: Vec<ProcessRecord> = (0..34)
+            .map(|n| ProcessRecord {
+                group: app_key(),
+                ..record(200 + n, 1, "firefox", ProcFlags::empty())
+            })
+            .collect();
+        rig.publish(records, &[], vec![app_group(34)]);
+        rig.select(&[ProcRowId::Group(app_key())]);
+        let (targets, subtitle, _) = open_custom_priority(&mut rig);
+        assert_eq!(targets.len(), 34);
+        assert_eq!(
+            targets,
+            (200..234)
+                .map(|pid| ActionTarget::Process(key(pid)))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(subtitle, "Firefox (34 processes)");
     }
 
     fn stopped(pid: u32) -> ProcessRecord {

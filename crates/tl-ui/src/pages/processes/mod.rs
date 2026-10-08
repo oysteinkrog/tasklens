@@ -30,7 +30,9 @@ use gpui_kit::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, Signal};
+use tl_model::actions::{
+    ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, SchedPolicy, Signal,
+};
 use tl_model::client::EngineClient;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
@@ -61,7 +63,7 @@ use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::status::StatusChanged;
-use crate::windows::actions::SetAffinity;
+use crate::windows::actions::{OpenCustomPriority, SetAffinity};
 use status::{StatusCounts, write_status};
 
 /// Key context of the page div. The table inside it has `Table`.
@@ -577,70 +579,64 @@ impl ProcessesPage {
     /// Set Affinity… (UI-PRC-021): opens the dialog for the one captured row. An app or unit
     /// row gives its current member processes, at most [`MAX_TARGETS`].
     fn on_set_affinity(&mut self, _: &SetAffinity, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::windows::affinity::{AffinitySubject, subtitle};
+        use crate::windows::affinity::subtitle;
         let Some((rows, _)) = self.prune(|_| None, cx) else {
             return;
         };
         let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
         let p = &snapshot.processes;
-        let (keys, subject): (Vec<ProcessKey>, _) = match &rows[..] {
-            [t] => {
-                let keys: Vec<ProcessKey> = match (t.kind, &t.node) {
-                    (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => vec![*key],
-                    (RowKind::App | RowKind::Unit, node) => members(p, node)
-                        .into_iter()
-                        .take(MAX_TARGETS)
-                        .map(|i| p.records[i].key)
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                let Some(first) = keys.first() else {
-                    return;
-                };
-                let name = t.name.clone();
-                let subject = match t.kind {
-                    RowKind::App | RowKind::Unit => AffinitySubject::App {
-                        name,
-                        n: keys.len(),
-                    },
-                    _ => AffinitySubject::Process {
-                        name,
-                        pid: t.pid.unwrap_or(first.pid),
-                    },
-                };
-                (keys, subject)
-            }
-            // Several rows (E23-005): their processes, each once.
-            rows => {
-                let mut keys: Vec<ProcessKey> = Vec::new();
-                for t in rows {
-                    if let (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) =
-                        (t.kind, &t.node)
-                        && !keys.contains(key)
-                        && keys.len() < MAX_TARGETS
-                    {
-                        keys.push(*key);
-                    }
-                }
-                let subject = match (&keys[..], rows.first()) {
-                    ([key], Some(t)) => AffinitySubject::Process {
-                        name: t.name.clone(),
-                        pid: key.pid,
-                    },
-                    _ => AffinitySubject::Processes(keys.len()),
-                };
-                (keys, subject)
-            }
-        };
-        if keys.is_empty() {
+        let Some((keys, subject)) = dialog_targets(&rows, p) else {
             return;
-        }
+        };
         let subtitle = subtitle(&subject, cx);
         let targets = keys.into_iter().map(ActionTarget::Process).collect();
         if let Err(err) =
             crate::windows::affinity::open(targets, subtitle, window.window_handle(), cx)
         {
             warn!(target: "tasklens::ui", %err, "the Set Affinity dialog did not open");
+        }
+    }
+
+    /// Set Priority > Custom… (UI-PRC-020, UI-PWN-023): opens the Custom priority dialog for the
+    /// captured rows. It starts from the policy, nice and realtime priority of the first
+    /// captured process, the values its Priority cell shows.
+    fn on_open_custom_priority(
+        &mut self,
+        _: &OpenCustomPriority,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::windows::affinity::{AffinitySubject, subtitle};
+        let Some((rows, _)) = self.prune(|_| None, cx) else {
+            return;
+        };
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let p = &snapshot.processes;
+        let Some((keys, subject)) = dialog_targets(&rows, p) else {
+            return;
+        };
+        let initial = p.records.iter().position(|r| r.key == keys[0]).map_or(
+            (SchedPolicy::Other, 0, 0),
+            |i| {
+                let nice = p.records[i].nice;
+                match p.extras.get(i) {
+                    Some(x) => (x.policy, nice, x.rt_prio),
+                    None => (SchedPolicy::Other, nice, 0),
+                }
+            },
+        );
+        let app = matches!(subject, AffinitySubject::App { .. });
+        let subtitle = subtitle(&subject, cx);
+        let targets = keys.into_iter().map(ActionTarget::Process).collect();
+        if let Err(err) = crate::windows::priority::open_with(
+            targets,
+            subtitle,
+            initial,
+            app,
+            window.window_handle(),
+            cx,
+        ) {
+            warn!(target: "tasklens::ui", %err, "the Custom priority dialog did not open");
         }
     }
 
@@ -1156,6 +1152,64 @@ fn members(p: &ProcessSnapshot, node: &NodeId) -> Vec<usize> {
     }
 }
 
+/// The processes a dialog opened from the row menu acts on, and its subtitle subject (UI-PRC-021).
+/// One app or unit row gives its current member processes, at most [`MAX_TARGETS`]; several rows
+/// give their processes, each once.
+fn dialog_targets(
+    rows: &[CapturedTarget],
+    p: &ProcessSnapshot,
+) -> Option<(Vec<ProcessKey>, crate::windows::affinity::AffinitySubject)> {
+    use crate::windows::affinity::AffinitySubject;
+    let (keys, subject): (Vec<ProcessKey>, _) = match rows {
+        [t] => {
+            let keys: Vec<ProcessKey> = match (t.kind, &t.node) {
+                (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => vec![*key],
+                (RowKind::App | RowKind::Unit, node) => members(p, node)
+                    .into_iter()
+                    .take(MAX_TARGETS)
+                    .map(|i| p.records[i].key)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let first = keys.first()?;
+            let name = t.name.clone();
+            let subject = match t.kind {
+                RowKind::App | RowKind::Unit => AffinitySubject::App {
+                    name,
+                    n: keys.len(),
+                },
+                _ => AffinitySubject::Process {
+                    name,
+                    pid: t.pid.unwrap_or(first.pid),
+                },
+            };
+            (keys, subject)
+        }
+        // Several rows (E23-005): their processes, each once.
+        rows => {
+            let mut keys: Vec<ProcessKey> = Vec::new();
+            for t in rows {
+                if let (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) =
+                    (t.kind, &t.node)
+                    && !keys.contains(key)
+                    && keys.len() < MAX_TARGETS
+                {
+                    keys.push(*key);
+                }
+            }
+            let subject = match (&keys[..], rows.first()) {
+                ([key], Some(t)) => AffinitySubject::Process {
+                    name: t.name.clone(),
+                    pid: key.pid,
+                },
+                _ => AffinitySubject::Processes(keys.len()),
+            };
+            (keys, subject)
+        }
+    };
+    (!keys.is_empty()).then_some((keys, subject))
+}
+
 /// The live member records of an app or unit row whose parent is not a member, lowest PID
 /// first. Empty for every other node.
 fn primaries(p: &ProcessSnapshot, node: &NodeId) -> Vec<usize> {
@@ -1277,6 +1331,7 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_suspend))
             .on_action(cx.listener(Self::on_resume))
             .on_action(cx.listener(Self::on_set_priority))
+            .on_action(cx.listener(Self::on_open_custom_priority))
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_details))
             .on_action(cx.listener(Self::on_copy_all_metrics))

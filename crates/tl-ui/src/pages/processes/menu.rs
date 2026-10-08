@@ -20,7 +20,7 @@ use crate::components::menu::TlMenu;
 use crate::i18n::tr;
 use crate::table::actions::{CopyCell, CopyRowsAsTable};
 use crate::table::tree_table::RowKind;
-use crate::windows::actions::SetAffinity;
+use crate::windows::actions::{OpenCustomPriority, SetAffinity};
 
 /// Minimum width of the row and group header menus before the UI scale (R-112).
 pub const ROW_MENU_MIN_W: f32 = 240.0;
@@ -125,8 +125,9 @@ pub fn group_header_menu(menu: TlMenu, expanded: bool, id: NodeId, cx: &App) -> 
         .item(tr(cx, key), Box::new(ToggleGroupRow { node: id }))
 }
 
-/// The Set Priority submenu (UI-PRC-020): the autogroup note, then the five P1 classes. The
-/// current class has a check mark; with several targets only when every one shares it.
+/// The Set Priority submenu (UI-PRC-020): the autogroup note, the five P1 classes, a separator
+/// and Custom…. The current class has a check mark; with several targets only when every one
+/// shares it.
 pub fn priority_submenu(
     menu: TlMenu,
     targets: &CapturedTargets,
@@ -142,7 +143,10 @@ pub fn priority_submenu(
             Box::new(SetPriority { class }),
         );
     }
-    menu
+    menu.separator().item(
+        tr(cx, "processes-menu-priority-custom"),
+        Box::new(OpenCustomPriority),
+    )
 }
 
 /// The class whose nice value every target has. `None` when a target has no nice value (app,

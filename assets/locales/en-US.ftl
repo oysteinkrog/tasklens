@@ -1561,6 +1561,7 @@ processes-menu-priority-above-normal = Above normal
 processes-menu-priority-normal = Normal
 processes-menu-priority-below-normal = Below normal
 processes-menu-priority-low = Low
+processes-menu-priority-custom = Custom…
 processes-menu-copy = Copy
 processes-menu-copy-details = Copy details
 processes-menu-copy-all-metrics = Copy all metrics
