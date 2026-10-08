@@ -19,7 +19,7 @@ use gpui_kit::base::{
 
 use gpui_kit::{
     AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, ContentMask, Context,
-    Div, ElementId, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
+    Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
     Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, TextRun, UniformListScrollHandle,
@@ -144,6 +144,11 @@ pub trait TreeTableDelegate: 'static + Sized {
     /// Enter or double-click.
     fn on_activate(&mut self, id: Self::RowId, cx: &mut Context<TlTreeTable<Self>>);
     fn row_tooltip(&self, ix: usize) -> Option<AnyView>;
+    /// Weight of row `ix`'s Name text. Normal unless a table marks a row, such as the main
+    /// thread in the Threads tab (500).
+    fn name_weight(&self, _ix: usize) -> FontWeight {
+        FontWeight::NORMAL
+    }
     /// Text for an empty table (UI-PRC-024).
     fn empty_text(&self) -> Option<SharedString>;
 
@@ -784,6 +789,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 }
                 let mut cell = paint_name_cell(
                     name,
+                    self.delegate.name_weight(ix),
                     depth,
                     expandable,
                     flags,

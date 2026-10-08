@@ -58,6 +58,11 @@ pub trait TableColumn: Copy + Eq + Hash + Debug + 'static {
     /// True for the column that stays first and visible: Name on the process tables. The system
     /// tables have none.
     fn pinned_first(self) -> bool;
+    /// The column's own minimum width, logical px at 100%. [`min_width`] uses it when it is
+    /// larger than the kind's minimum. `None` (the default) leaves the kind's minimum.
+    fn min_width(self) -> Option<f32> {
+        None
+    }
 }
 
 impl TableColumn for ColumnId {
@@ -474,11 +479,27 @@ pub const NAME_MIN_WIDTH: f32 = 120.0;
 
 /// Minimum width of a column, scaled (PROC-023, UI-PRC-005). Numeric: template width + 16
 /// padding, + 12 more on the sort column for the arrow. Name (the pinned first column): 120,
-/// the R-190 depth-0 app text start 78 plus 42 of text. Other Text and Path columns: 60.
+/// the R-190 depth-0 app text start 78 plus 42 of text. Other Text and Path columns: 60. A
+/// column's own [`TableColumn::min_width`] raises it.
 ///
 /// The template is measured in the table font at `t_base` with `tnum`, so it follows scale
 /// changes. `TextMetricsCache` measures through the window's text system, hence `window`.
 pub fn min_width<C: TableColumn>(
+    spec: &ColumnSpec<C>,
+    is_sort_column: bool,
+    metrics: &mut TextMetricsCache,
+    m: &UiMetrics,
+    window: &Window,
+    cx: &App,
+) -> Pixels {
+    let kind_min = kind_min_width(spec, is_sort_column, metrics, m, window, cx);
+    match spec.id.min_width() {
+        Some(own) => kind_min.max(px(own * m.ui_scale)),
+        None => kind_min,
+    }
+}
+
+fn kind_min_width<C: TableColumn>(
     spec: &ColumnSpec<C>,
     is_sort_column: bool,
     metrics: &mut TextMetricsCache,

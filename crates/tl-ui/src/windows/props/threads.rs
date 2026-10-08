@@ -16,9 +16,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyView, App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
-    px,
+    AnyView, App, AppContext as _, ClipboardItem, Context, Entity, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, div, px,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -143,6 +143,22 @@ impl TableColumn for ThreadColumn {
 
     fn pinned_first(self) -> bool {
         false
+    }
+
+    /// The bead's minimum widths, logical px at 100% (gma.19).
+    fn min_width(self) -> Option<f32> {
+        Some(match self {
+            Self::UserTime | Self::KernelTime => 80.,
+            Self::Priority | Self::BasePriority => 70.,
+            Self::CtxSwitches => 100.,
+            Self::Tid
+            | Self::Name
+            | Self::State
+            | Self::Cpu
+            | Self::Affinity
+            | Self::LastCpu
+            | Self::WaitChannel => 60.,
+        })
     }
 }
 
@@ -361,10 +377,12 @@ pub struct ThreadsDelegate {
     /// The online CPUs as a list, for the `All` affinity form. Empty until known.
     online: String,
     words: Rc<ThreadWords>,
+    /// The process's PID: the thread with this TID is the main thread.
+    pid: u32,
 }
 
 impl ThreadsDelegate {
-    fn new(words: Rc<ThreadWords>) -> Self {
+    fn new(words: Rc<ThreadWords>, pid: u32) -> Self {
         let specs = specs(&words);
         let layout = ColumnLayout::defaults(
             TableId::Processes,
@@ -385,6 +403,7 @@ impl ThreadsDelegate {
             layout,
             online: String::new(),
             words,
+            pid,
         }
     }
 
@@ -695,6 +714,15 @@ impl TreeTableDelegate for ThreadsDelegate {
         None
     }
 
+    /// The main thread (TID = PID) in weight 500.
+    fn name_weight(&self, ix: usize) -> FontWeight {
+        if self.row(ix).tid == self.pid {
+            FontWeight::MEDIUM
+        } else {
+            FontWeight::NORMAL
+        }
+    }
+
     fn empty_text(&self) -> Option<SharedString> {
         let w = &self.words;
         Some(if self.loading {
@@ -737,7 +765,7 @@ impl ThreadsTab {
         cx: &mut Context<Self>,
     ) -> Self {
         let words = Rc::new(ThreadWords::new(cx));
-        let delegate = ThreadsDelegate::new(words.clone());
+        let delegate = ThreadsDelegate::new(words.clone(), key.pid);
         let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&filter, |this, _, ev: &FilterChanged, cx| {

@@ -855,10 +855,12 @@ pub fn name_look(flags: RowFlags, ctx: &CellCtx) -> (Hsla, f32) {
 /// `window` measures the primary text, and only when there is a secondary text. `tips` is
 /// `Some(key)` on the hovered row: the state glyphs then get their tooltips, keyed by `key`.
 /// File icons take their image source from `icons`, and a name with a count its bidi-isolated
-/// text ([`name_primary_text`]).
+/// text ([`name_primary_text`]). `weight` is the primary text's weight (normal for every row
+/// but a few, such as a process's main thread at 500).
 #[allow(clippy::too_many_arguments)]
 pub fn paint_name_cell(
     cell: NameCell,
+    weight: FontWeight,
     depth: u8,
     expandable: Option<bool>,
     flags: RowFlags,
@@ -966,7 +968,12 @@ pub fn paint_name_cell(
         icons,
     );
     let text = match runs {
-        Some(runs) => StyledText::new(shaped).with_runs(runs.into_vec()),
+        Some(mut runs) => {
+            for run in &mut runs {
+                run.font.weight = weight;
+            }
+            StyledText::new(shaped).with_runs(runs.into_vec())
+        }
         None => StyledText::new(shaped),
     };
     content = content.child(
@@ -978,6 +985,7 @@ pub fn paint_name_cell(
             .overflow_hidden()
             .text_ellipsis()
             .text_color(primary_color)
+            .font_weight(weight)
             .child(text),
     );
 
@@ -985,7 +993,10 @@ pub fn paint_name_cell(
         let font_size = m.text.base;
         let run = TextRun {
             len: cell.primary.len(),
-            font: font(UI_FAMILY),
+            font: Font {
+                weight,
+                ..font(UI_FAMILY)
+            },
             color: primary_color,
             background_color: None,
             underline: None,

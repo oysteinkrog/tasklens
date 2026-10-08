@@ -16,7 +16,9 @@
 use std::ops::Range;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::{AnyElement, App, ElementId, InteractiveElement, IntoElement, SharedString, Window};
+use gpui_kit::{
+    AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, SharedString, Window,
+};
 use smallvec::SmallVec;
 use tl_model::ids::PseudoKind;
 
@@ -163,6 +165,7 @@ pub fn render_name_cell(
     let (depth, expandable) = (d.depth, d.expandable);
     paint_name_cell(
         name_cell(d, words),
+        FontWeight::NORMAL,
         depth,
         expandable,
         flags,

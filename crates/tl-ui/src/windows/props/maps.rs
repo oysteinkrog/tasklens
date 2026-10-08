@@ -86,7 +86,7 @@ impl MapsColumn {
         Self::Package,
     ];
 
-    /// Header key, width at 100% and alignment. The table has no minimum widths per column.
+    /// Header key, width at 100% and alignment. The minimum widths are in `min_width`.
     fn meta(self) -> (&'static str, f32, ColumnAlign) {
         use ColumnAlign::{Left, Right};
         match self {
@@ -125,6 +125,17 @@ impl TableColumn for MapsColumn {
 
     fn pinned_first(self) -> bool {
         false
+    }
+
+    /// The bead's minimum widths, logical px at 100% (gma.23).
+    fn min_width(self) -> Option<f32> {
+        Some(match self {
+            Self::Name => 120.,
+            Self::Base => 110.,
+            Self::Size | Self::Rss => 70.,
+            Self::Offset => 80.,
+            Self::Perms | Self::Path | Self::Description | Self::Package => 60.,
+        })
     }
 }
 
