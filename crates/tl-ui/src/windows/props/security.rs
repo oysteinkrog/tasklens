@@ -550,6 +550,10 @@ impl SecurityTab {
         self.key
     }
 
+    pub fn filter(&self) -> &Entity<PropsFilter> {
+        &self.filter
+    }
+
     /// The fields' focus stop.
     pub fn grid_focus(&self) -> &FocusHandle {
         &self.focus
