@@ -18,8 +18,12 @@
 //!
 //! The process-view Actions `ToggleHideSystem`, `CycleViewMode` and `SetViewMode` are app-level
 //! handlers here (E20-017, UI-SHL-012, UI-SHL-013, UI-SHL-035, PROC-015, PROC-016).
+//!
+//! The requests a second `tasklens` launch forwards to this copy go to [`handle_app_request`]
+//! (E20-019, UI-SHL-112, APP-011, APP-052, ADR-010).
 
 use std::mem;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fluent_bundle::FluentValue;
@@ -33,7 +37,7 @@ use gpui_kit::{
     WindowOptions, div, point, prelude::FluentBuilder as _, px, size,
 };
 use smallvec::SmallVec;
-use tl_model::command::Tab;
+use tl_model::command::{AppRequest, Command, KWinCommand, Tab};
 use tl_model::settings::{Decorations, StartTab, WindowState};
 use tl_model::table::TableMode;
 use tl_model::time::now_boot_ns;
@@ -45,7 +49,9 @@ use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChi
 use super::tabstrip::TabStrip;
 #[cfg(any(test, feature = "test-hooks"))]
 use super::titlebar::TitleBarProbe;
-use super::titlebar::{TitleBarView, bar_height_of, is_client, minimize_main, zoom};
+use super::titlebar::{
+    TitleBarView, bar_height_of, is_client, keep_above_supported, minimize_main, zoom,
+};
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, EscapeChain, FocusFilter,
@@ -54,7 +60,10 @@ use crate::actions::{
     ToggleHideSystem, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::{AnimationDriver, FrameStats};
-use crate::app::{BootSettings, OpenHooks, StartOptions, ToastKindTag, UiExit, request_exit};
+use crate::app::{
+    AppRequestHandler, BootSettings, EngineGlobal, OpenHooks, StartOptions, ToastKindTag, UiExit,
+    request_exit,
+};
 use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
 use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
@@ -392,6 +401,7 @@ pub fn init(cx: &mut App) {
         set_view_mode(cx, next);
     });
     cx.on_action(|a: &SetViewMode, cx| set_view_mode(cx, a.0));
+    cx.set_global(AppRequestHandler(Box::new(handle_app_request)));
 }
 
 /// Hide system processes: flips `processes.hide_system` and says so in a toast. The engine
@@ -546,6 +556,79 @@ fn toggle_main_window(cx: &mut App) {
     if !toggled {
         reopen_main_window(cx);
     }
+}
+
+/// A request a second launch forwarded (E20-019). tl-app sends `Activate` before `SelectTab` and
+/// `SelectPid`, so the main window exists for those; without one they do nothing.
+/// `SetLowMemoryEnabled` never reaches here: `tl_ui::app` applies it.
+fn handle_app_request(req: AppRequest, cx: &mut App) {
+    match req {
+        // GPUI 0.3.7 has no way to pass an XDG activation token to `activate_window`, so the
+        // token is not used. It is never logged.
+        AppRequest::Activate { token: _ } => activate_main(cx),
+        // Called directly rather than dispatched: a window reopened by the `Activate` just before
+        // has no rendered frame yet, and a dispatched action would find no listener.
+        AppRequest::SelectTab(tab) => {
+            with_main_view(cx, |this, window, cx| this.select_tab(tab, window, cx));
+        }
+        AppRequest::SelectPid(pid) => {
+            with_main_view(cx, |this, window, cx| this.run_select_pid(pid, window, cx));
+        }
+        AppRequest::Quit => cx.dispatch_action(&Quit),
+        AppRequest::SetLowMemoryEnabled(_) => {}
+    }
+}
+
+/// `Activate`: brings the main window forward, or reopens it on `UiState.tabs.last_tab` when it
+/// was removed. On Wayland KWin may only flash the taskbar entry. With the KWin bridge up, an
+/// existing window is also activated through KWin.
+fn activate_main(cx: &mut App) {
+    let shown = main_handle(cx).is_some_and(|handle| {
+        handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+    });
+    if !shown {
+        reopen_main_window(cx);
+        return;
+    }
+    if keep_above_supported(cx) {
+        kwin_activate_main(cx);
+    }
+}
+
+/// Sends `KWin(Activate)` for this process's window titled [`WINDOW_TITLE`]. Nothing when the
+/// windows snapshot has no such window.
+fn kwin_activate_main(cx: &mut App) {
+    let Some(internal_id) = cx.try_global::<GlobalHub>().and_then(|hub| {
+        let windows = &hub.0.read(cx).current().windows;
+        windows
+            .for_pid(std::process::id())
+            .iter()
+            .find(|w| &*w.caption == WINDOW_TITLE)
+            .map(|w| Arc::clone(&w.internal_id))
+    }) else {
+        return;
+    };
+    let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+        return;
+    };
+    if let Err(err) = engine.send(Command::KWin(KWinCommand::Activate { internal_id })) {
+        warn!(target: "tasklens::ui", ?err, "KWin activate not sent");
+    }
+}
+
+/// Runs `f` on the main window's view inside its window. Nothing without a main window.
+fn with_main_view(
+    cx: &mut App,
+    f: impl FnOnce(&mut MainWindow, &mut Window, &mut Context<MainWindow>),
+) {
+    let (Some(handle), Some(view)) = (main_handle(cx), main_window_view(cx)) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        view.update(cx, |this, cx| f(this, window, cx))
+    });
 }
 
 /// The main window's handle. A handle whose window is gone is cleared.
