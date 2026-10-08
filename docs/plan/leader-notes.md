@@ -845,3 +845,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - bj6.29: PageBuilder gets action_switch, indent_next, tooltip_next (+ test readers). Settings Public IP auto-fetch dispatches TogglePublicIpAutoFetch so the privacy notice is never bypassed.
 - bj6.23: PageBuilder action_dropdown (theme options from menus_view::theme_rows), str_switch, restart_note_toast, slider_on_commit; menubar scale_toast_text pub(crate). All PageBuilder additions for bj6.29 and bj6.23 land in one mod.rs commit.
 - 9o0.6: TreeTableDelegate::cell_element(ix, col, ctx) -> Option<AnyElement> (default None) lets a column draw a custom element (status dot via sys_status::status_cell); CellOut still drives copy, sort, tooltip.
+- 9o0.6: impact tooltip via pure impact_tooltip_lines; fork_exec_only missing from model, filed 9o0.37 (pdu-30 next).
