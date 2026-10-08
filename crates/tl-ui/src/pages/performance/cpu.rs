@@ -6,6 +6,10 @@
 //! cached views that re-render for their own series. The settings observer reads the page's
 //! settings only when the Performance, Motion or Appearance section version moved.
 //!
+//! Under the graph area sits the secondary chart (UI-PRF-025; PERF-032, PERF-038 to PERF-040):
+//! power draw, clock speed or temperature, from `performance.cpu_secondary_graph`. When power
+//! is not available it shows temperature, else clock speed, without changing the setting.
+//!
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
 use std::cell::Cell;
@@ -24,20 +28,24 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{DeviceCatalog, DeviceIdentity};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::{CpuGraphMode, NetworkUnit};
-use tl_model::snapshot::{CpuStaticInfo, Snapshot};
+use tl_model::settings::{CpuGraphMode, CpuSecondaryGraph, NetworkUnit};
+use tl_model::snapshot::{CpuStaticInfo, RaplState, Snapshot};
 use tl_model::system::{CpuTopology, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
-use super::actions::{PerfSetCpuGraphMode, PerfToggleCpuKernel};
+use super::actions::{PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel};
 use super::cpu_details::{
     CpuLiveInputs, CpuSensor, cpu_details_model, cpu_temp_sensors, update_live, update_static,
 };
 use super::cpu_grid::CpuGrid;
 use super::details::KeyValueModel;
-use super::page::{DevicePage, DevicePageFrame, GRAPH_H_OVERALL, header_text, page_words};
+use super::page::{
+    DevicePage, DevicePageFrame, GRAPH_H_OVERALL, SECONDARY_GRAPH_H, header_text, page_words,
+};
 use super::{DeviceKey, DeviceKind, DeviceRow};
+use crate::actions::OpenAdditionalSetup;
+use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale, format_value, grid_height, grid_layout,
@@ -46,9 +54,10 @@ use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, ease_out_cubic};
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
+use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -65,6 +74,10 @@ pub const OVERALL_ID: &str = "perf-cpu-overall";
 pub const OVERLAID_ID: &str = "perf-cpu-overlaid";
 /// Debug selector of the box around the stacked chart.
 pub const STACKED_ID: &str = "perf-cpu-stacked";
+/// Debug selector of the box around the secondary chart.
+pub const SECONDARY_ID: &str = "perf-cpu-secondary";
+/// Debug selector of the fallback tooltip trigger over the secondary chart's heading.
+pub const SECONDARY_TIP_ID: &str = "perf-cpu-secondary-tip";
 
 /// Lowest line alpha in the overlaid mode (PERF-029).
 const OVERLAID_MIN_ALPHA: f32 = 0.08;
@@ -86,6 +99,15 @@ const KEY_MENU_KERNEL_TIMES: &str = "perf-cpu-menu-kernel-times";
 const KEY_UTILIZATION: &str = "perf-cpu-heading-utilization";
 const KEY_TOTAL: &str = "perf-legend-total";
 const KEY_KERNEL: &str = "perf-legend-kernel";
+const KEY_MENU_SECONDARY: &str = "perf-cpu-menu-secondary";
+const KEY_SECONDARY_NONE: &str = "perf-cpu-secondary-none";
+const KEY_SECONDARY_POWER: &str = "perf-cpu-secondary-power";
+const KEY_SECONDARY_CLOCK: &str = "perf-cpu-secondary-clock";
+const KEY_SECONDARY_TEMP: &str = "perf-cpu-secondary-temp";
+/// `{$shown}`: the name of the chart shown in place of Power draw.
+const KEY_SECONDARY_FALLBACK: &str = "perf-cpu-secondary-fallback";
+const KEY_SETUP_POWER: &str = "perf-cpu-setup-power";
+const KEY_NEEDS_SETUP: &str = "perf-tip-needs-setup";
 
 const NS_PER_S: u64 = 1_000_000_000;
 
@@ -139,6 +161,134 @@ const fn mode_index(mode: CpuGraphMode) -> usize {
     }
 }
 
+/// Whether the CPU power draw can be read (PERF-038).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerState {
+    Readable,
+    /// A RAPL zone exists but the user cannot read it.
+    NeedsSetup,
+    /// No RAPL zone.
+    NoZone,
+}
+
+/// What the secondary chart can show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecondaryAvail {
+    pub power: PowerState,
+    /// A CPU hwmon chip reports a temperature.
+    pub temperature: bool,
+    pub clock: bool,
+}
+
+impl SecondaryAvail {
+    /// From the static RAPL state, else, before the static info arrives, from the package
+    /// power's validity (Restricted is a zone the user cannot read). Temperature and clock are
+    /// available unless their validity is Unsupported or Missing.
+    pub fn read(snap: &Snapshot, info: &CpuStaticInfo) -> Self {
+        let cpu = &snap.system.cpu;
+        let power = match info.rapl {
+            Some(RaplState::Readable) => PowerState::Readable,
+            Some(RaplState::Unreadable) => PowerState::NeedsSetup,
+            Some(RaplState::NoZone) => PowerState::NoZone,
+            None => match cpu.package_power_w.validity {
+                Validity::Valid | Validity::Stale | Validity::WarmingUp => PowerState::Readable,
+                Validity::Restricted => PowerState::NeedsSetup,
+                _ => PowerState::NoZone,
+            },
+        };
+        let present = |v: Validity| !matches!(v, Validity::Unsupported | Validity::Missing);
+        Self {
+            power,
+            temperature: present(cpu.temp_c.validity),
+            clock: present(cpu.freq_mhz.validity),
+        }
+    }
+}
+
+/// The chart shown for the saved choice `saved`, and whether it stands in for Power draw
+/// (PERF-032). Power falls back to Temperature, then Clock speed. A choice that is not
+/// available, and None, show no chart.
+pub fn effective_secondary(
+    saved: CpuSecondaryGraph,
+    avail: SecondaryAvail,
+) -> Option<(CpuSecondaryGraph, bool)> {
+    use CpuSecondaryGraph as G;
+    match saved {
+        G::None => None,
+        G::Power if avail.power == PowerState::Readable => Some((G::Power, false)),
+        G::Power if avail.temperature => Some((G::Temperature, true)),
+        G::Power if avail.clock => Some((G::Clock, true)),
+        G::Power => None,
+        G::Clock => avail.clock.then_some((G::Clock, false)),
+        G::Temperature => avail.temperature.then_some((G::Temperature, false)),
+    }
+}
+
+/// One radio item of the "Secondary graph" submenu. `label` and `tooltip` are `en-US.ftl` keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecondaryItem {
+    pub choice: CpuSecondaryGraph,
+    pub label: &'static str,
+    pub enabled: bool,
+    /// Why the item is disabled.
+    pub tooltip: Option<&'static str>,
+    /// "Set up CPU power draw…" follows the item (UI-PRF-025).
+    pub setup_after: bool,
+}
+
+/// The four items in menu order. Power draw is disabled with "Needs setup" when RAPL is
+/// unreadable, and the setup item follows it; Temperature is disabled without a CPU hwmon.
+pub fn secondary_items(avail: SecondaryAvail) -> [SecondaryItem; 4] {
+    use CpuSecondaryGraph as G;
+    let needs_setup = avail.power == PowerState::NeedsSetup;
+    let item = |choice, enabled| SecondaryItem {
+        choice,
+        label: secondary_key(choice),
+        enabled,
+        tooltip: None,
+        setup_after: false,
+    };
+    [
+        item(G::None, true),
+        SecondaryItem {
+            tooltip: needs_setup.then_some(KEY_NEEDS_SETUP),
+            setup_after: needs_setup,
+            ..item(G::Power, !needs_setup)
+        },
+        item(G::Clock, true),
+        item(G::Temperature, avail.temperature),
+    ]
+}
+
+/// The `en-US.ftl` key of a secondary chart's name, also its heading.
+pub const fn secondary_key(choice: CpuSecondaryGraph) -> &'static str {
+    match choice {
+        CpuSecondaryGraph::None => KEY_SECONDARY_NONE,
+        CpuSecondaryGraph::Power => KEY_SECONDARY_POWER,
+        CpuSecondaryGraph::Clock => KEY_SECONDARY_CLOCK,
+        CpuSecondaryGraph::Temperature => KEY_SECONDARY_TEMP,
+    }
+}
+
+const fn secondary_index(choice: CpuSecondaryGraph) -> usize {
+    match choice {
+        CpuSecondaryGraph::None => 0,
+        CpuSecondaryGraph::Power => 1,
+        CpuSecondaryGraph::Clock => 2,
+        CpuSecondaryGraph::Temperature => 3,
+    }
+}
+
+/// The secondary chart as drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SecondaryShown {
+    choice: CpuSecondaryGraph,
+    /// Shown in place of Power draw.
+    fallback: bool,
+    /// `cpuinfo_max_freq` in MHz, for the Clock speed scale.
+    hw_max_mhz: Option<u32>,
+}
+
 /// The page's words, translated once per strings version.
 #[derive(Clone, Debug, Default)]
 pub struct Words {
@@ -156,6 +306,14 @@ pub struct Words {
     pub utilization: SharedString,
     pub total: SharedString,
     pub kernel: SharedString,
+    pub menu_secondary: SharedString,
+    /// In [`secondary_index`] order: None, Power draw, Clock speed, Temperature.
+    pub secondary: [SharedString; 4],
+    pub setup_power: SharedString,
+    pub needs_setup: SharedString,
+    /// "Power draw is not available. Showing Temperature." and "… Showing Clock speed."
+    pub fallback_temp: SharedString,
+    pub fallback_clock: SharedString,
 }
 
 impl Words {
@@ -178,7 +336,30 @@ impl Words {
         self.utilization = t(KEY_UTILIZATION);
         self.total = t(KEY_TOTAL);
         self.kernel = t(KEY_KERNEL);
+        self.menu_secondary = t(KEY_MENU_SECONDARY);
+        self.secondary = [
+            CpuSecondaryGraph::None,
+            CpuSecondaryGraph::Power,
+            CpuSecondaryGraph::Clock,
+            CpuSecondaryGraph::Temperature,
+        ]
+        .map(|c| t(secondary_key(c)));
+        self.setup_power = t(KEY_SETUP_POWER);
+        self.needs_setup = t(KEY_NEEDS_SETUP);
+        let fallback = |shown: &SharedString| {
+            tr_args(
+                cx,
+                KEY_SECONDARY_FALLBACK,
+                &[("shown", shown.to_string().into())],
+            )
+        };
+        self.fallback_temp = fallback(&self.secondary[3]);
+        self.fallback_clock = fallback(&self.secondary[2]);
         true
+    }
+
+    pub fn secondary(&self, choice: CpuSecondaryGraph) -> &SharedString {
+        &self.secondary[secondary_index(choice)]
     }
 
     pub fn mode(&self, mode: CpuGraphMode) -> &SharedString {
@@ -215,6 +396,35 @@ fn mode_menu(
     menu
 }
 
+/// Adds the four secondary chart radios and, under a Power draw that needs setup, the item that
+/// opens Additional Setup.
+fn secondary_menu(
+    mut menu: TlMenu,
+    saved: CpuSecondaryGraph,
+    avail: SecondaryAvail,
+    words: &Words,
+) -> TlMenu {
+    for item in secondary_items(avail) {
+        let label = words.secondary(item.choice).clone();
+        menu = if item.enabled {
+            menu.radio_item(
+                label,
+                item.choice == saved,
+                Box::new(PerfSetCpuSecondaryGraph {
+                    choice: item.choice,
+                }),
+            )
+        } else {
+            let tip = item.tooltip.map(|_| words.needs_setup.clone());
+            menu.item_disabled(label, tip)
+        };
+        if item.setup_after {
+            menu = menu.item(words.setup_power.clone(), Box::new(OpenAdditionalSetup));
+        }
+    }
+    menu
+}
+
 /// The chart settings the overlaid and stacked specs read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageSettingsView {
@@ -240,6 +450,7 @@ struct ModeFade {
 struct PageSettings {
     mode: CpuGraphMode,
     kernel: bool,
+    secondary: CpuSecondaryGraph,
     range_ns: u64,
     smooth: bool,
     rounded: bool,
@@ -259,6 +470,7 @@ impl PageSettings {
         Self {
             mode: s.performance.cpu_graph_mode,
             kernel: s.performance.cpu_kernel,
+            secondary: s.performance.cpu_secondary_graph,
             range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
@@ -329,6 +541,75 @@ fn overall_labels(kernel: bool, words: &Words) -> ChartLabels {
         range_word: words.utilization.clone(),
         legend,
         show_axis_max: false,
+    }
+}
+
+/// The secondary chart (UI-PRF-025): package watts filled with core watts dashed, average MHz
+/// filled with the fastest core dashed, or the main temperature sensor.
+fn secondary_spec(
+    device: DeviceIdx,
+    shown: SecondaryShown,
+    s: &PageSettings,
+    theme: &TlTheme,
+) -> ChartSpec {
+    let series = |metric, fill: bool, dashed| ChartSeries {
+        id: SeriesId { device, metric },
+        fill: fill.then_some(theme.graph.cpu_fill),
+        line: theme.graph.cpu_line,
+        dashed,
+        ..ChartSeries::default()
+    };
+    let (series, y) = match shown.choice {
+        CpuSecondaryGraph::Clock => (
+            smallvec![
+                series(MetricId::CPU_FREQ, true, false),
+                series(MetricId::CPU_CLOCK_MAX, false, true),
+            ],
+            YScale::StickyUp {
+                hw_max: shown.hw_max_mhz.map(|mhz| mhz as f32),
+            },
+        ),
+        CpuSecondaryGraph::Temperature => (
+            smallvec![series(MetricId::CPU_TEMP, true, false)],
+            YScale::StickyTemp,
+        ),
+        CpuSecondaryGraph::Power | CpuSecondaryGraph::None => (
+            smallvec![
+                series(MetricId::CPU_POWER_PKG, true, false),
+                series(MetricId::CPU_POWER_CORE, false, true),
+            ],
+            YScale::StickyUp { hw_max: None },
+        ),
+    };
+    ChartSpec {
+        series,
+        y,
+        range_ns: s.range_ns,
+        grid: GridStyle {
+            lines: true,
+            baseline: false,
+            outline: true,
+            rounded: s.rounded,
+        },
+        smooth: s.smooth,
+        background: ChartBg::Window,
+        ..ChartSpec::default()
+    }
+}
+
+fn secondary_labels(choice: CpuSecondaryGraph, words: &Words) -> ChartLabels {
+    let word = words.secondary(choice).clone();
+    ChartLabels {
+        heading: Some(word.clone()),
+        value_fmt: match choice {
+            CpuSecondaryGraph::Clock => ValueFormat::Mhz,
+            CpuSecondaryGraph::Temperature => ValueFormat::Celsius,
+            CpuSecondaryGraph::Power | CpuSecondaryGraph::None => ValueFormat::Watts,
+        },
+        value_align: ValueAlign::Right,
+        range_word: word,
+        legend: SmallVec::new(),
+        show_axis_max: true,
     }
 }
 
@@ -466,9 +747,12 @@ pub struct CpuPage {
     fade_generation: u32,
     /// The graph area width of the last paint, for the per-core grid height during a fade.
     area_width: Rc<Cell<Pixels>>,
-    /// E24-021.
-    #[allow(dead_code, reason = "E24-021 creates it")]
+    /// The secondary chart; `None` while no chart is shown.
     secondary: Option<Entity<ChartView>>,
+    secondary_shown: Option<SecondaryShown>,
+    avail: SecondaryAvail,
+    /// `cpuinfo_max_freq` from the inventory.
+    max_mhz: Option<u32>,
     details: KeyValueModel,
     mode: CpuGraphMode,
     kernel: bool,
@@ -563,6 +847,13 @@ impl CpuPage {
             fade_generation: 0,
             area_width: Rc::new(Cell::new(px(0.))),
             secondary: None,
+            secondary_shown: None,
+            avail: SecondaryAvail {
+                power: PowerState::Readable,
+                temperature: false,
+                clock: false,
+            },
+            max_mhz: None,
             details: cpu_details_model(),
             mode: settings.mode,
             kernel: settings.kernel,
@@ -769,6 +1060,71 @@ impl CpuPage {
         &self.words
     }
 
+    pub fn secondary(&self) -> Option<&Entity<ChartView>> {
+        self.secondary.as_ref()
+    }
+
+    /// The chart the secondary area shows, if any.
+    pub fn secondary_choice(&self) -> Option<CpuSecondaryGraph> {
+        self.secondary_shown.map(|s| s.choice)
+    }
+
+    /// The heading tooltip while the secondary chart stands in for Power draw.
+    pub fn secondary_fallback_text(&self) -> Option<&SharedString> {
+        let shown = self.secondary_shown.filter(|s| s.fallback)?;
+        Some(match shown.choice {
+            CpuSecondaryGraph::Clock => &self.words.fallback_clock,
+            _ => &self.words.fallback_temp,
+        })
+    }
+
+    pub fn secondary_avail(&self) -> SecondaryAvail {
+        self.avail
+    }
+
+    /// Creates, updates or drops the secondary chart for the saved choice and what is
+    /// available. With `force` the spec and labels are set again (settings, theme, words).
+    /// True when the page must draw again: the chart came or went, or its tooltip changed.
+    fn sync_secondary(&mut self, force: bool, cx: &mut Context<Self>) -> bool {
+        let want =
+            effective_secondary(self.settings.secondary, self.avail).map(|(choice, fallback)| {
+                SecondaryShown {
+                    choice,
+                    fallback,
+                    hw_max_mhz: if choice == CpuSecondaryGraph::Clock {
+                        self.max_mhz
+                    } else {
+                        None
+                    },
+                }
+            });
+        let old = self.secondary_shown;
+        if want == old && !force {
+            return false;
+        }
+        self.secondary_shown = want;
+        if want.map(|s| s.choice) != old.map(|s| s.choice) {
+            self.send_demand(cx);
+        }
+        let Some(shown) = want else {
+            return self.secondary.take().is_some();
+        };
+        let theme = current(cx).clone();
+        let spec = secondary_spec(self.row.idx, shown, &self.settings, &theme);
+        let labels = secondary_labels(shown.choice, &self.words);
+        match &self.secondary {
+            Some(v) => v.update(cx, |v, cx| {
+                v.set_spec(spec, cx);
+                v.set_labels(labels, cx);
+            }),
+            None => {
+                let hub = self.hub.clone();
+                self.secondary = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+            }
+        }
+        want != old || force
+    }
+
     /// This page's demand part while it is active: `PerCore` in every mode but Overall, and
     /// `cpu_fast` whatever `smooth` is (R-126).
     pub fn demand_part(&self) -> Demand {
@@ -779,6 +1135,8 @@ impl CpuPage {
                 _ => CpuDemand::PerCore,
             },
             cpu_fast: true,
+            // The CPU worker reads RAPL and the clocks; the temperature needs the sensors.
+            sensors: self.secondary_choice() == Some(CpuSecondaryGraph::Temperature),
             ..Demand::default()
         }
     }
@@ -843,6 +1201,14 @@ impl CpuPage {
             changed |= update_static(&mut self.details, &self.static_info);
             self.grid.set_prefcore(&self.static_info.prefcore_rank, cx);
         }
+        if mask.contains(ComponentMask::INVENTORY) {
+            let max = &snap.inventory.processor.max_mhz;
+            self.max_mhz = (max.validity == Validity::Valid).then_some(max.value);
+        }
+        if system || mask.intersects(ComponentMask::DEVICE_DETAILS | ComponentMask::INVENTORY) {
+            self.avail = SecondaryAvail::read(snap, &self.static_info);
+            changed |= self.sync_secondary(false, cx);
+        }
         if mask.contains(ComponentMask::HEALTH) {
             let state = health_state(snap);
             self.overall.update(cx, |v, cx| v.set_state(state, cx));
@@ -894,6 +1260,7 @@ impl CpuPage {
             self.start_fade(old.mode, cx);
             self.send_demand(cx);
         }
+        self.sync_secondary(true, cx);
         cx.notify();
     }
 
@@ -922,6 +1289,7 @@ impl CpuPage {
         let spec = overall_spec(self.row.idx, &s, &theme);
         self.overall.update(cx, |v, cx| v.set_spec(spec, cx));
         self.rebuild_mode_specs(cx);
+        self.sync_secondary(true, cx);
         cx.notify();
     }
 
@@ -954,6 +1322,54 @@ impl CpuPage {
         self.sync_settings(cx);
     }
 
+    fn on_set_secondary(
+        &mut self,
+        a: &PerfSetCpuSecondaryGraph,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let choice = a.choice;
+        TlSettings::update(cx, |d| d.settings.performance.cpu_secondary_graph = choice);
+        self.sync_settings(cx);
+    }
+
+    /// The secondary chart in a full-width box of `SECONDARY_GRAPH_H`. While it stands in for
+    /// Power draw, a trigger over its heading row shows why.
+    fn secondary_element(
+        &self,
+        view: &Entity<ChartView>,
+        m: &UiMetrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let mut root = div()
+            .debug_selector(|| SECONDARY_ID.into())
+            .relative()
+            .w_full()
+            .h(px(SECONDARY_GRAPH_H * m.ui_scale))
+            .child(view.clone().cached(StyleRefinement::default().size_full()));
+        if let Some(text) = self.secondary_fallback_text() {
+            let trigger = div()
+                .debug_selector(|| SECONDARY_TIP_ID.into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_1_2()
+                .h(px(LABEL_ROW * m.ui_scale) + m.sp[3]);
+            let state = HoverTooltip::state(SECONDARY_TIP_ID, window, cx);
+            let trigger = HoverTooltip::attach(
+                &state,
+                trigger,
+                DELAY_CONTROL,
+                TlTooltip::text(text.clone()).build(),
+                window,
+                cx,
+            );
+            root = root.child(trigger);
+        }
+        root.into_any_element()
+    }
+
     fn on_toggle_kernel(
         &mut self,
         _: &PerfToggleCpuKernel,
@@ -964,6 +1380,68 @@ impl CpuPage {
             d.settings.performance.cpu_kernel = !d.settings.performance.cpu_kernel;
         });
         self.sync_settings(cx);
+    }
+
+    /// The graph area of the current mode, cross-fading during a mode change.
+    fn mode_area(&self, m: &UiMetrics, window: &mut Window, cx: &mut App) -> AnyElement {
+        let m = *m;
+        #[cfg(feature = "bench")]
+        if self.bench_show_both {
+            return v_flex()
+                .w_full()
+                .child(self.overall_element(m.ui_scale))
+                .child(div().h(m.sp[4]))
+                .child(self.grid.element(window, cx))
+                .into_any_element();
+        }
+        let measure = {
+            let cell = Rc::clone(&self.area_width);
+            canvas(move |b, _, _| cell.set(b.size.width), |_, _, _, _| {})
+                .absolute()
+                .inset_0()
+        };
+        let Some(ModeFade { from, generation }) = self.fade else {
+            return div()
+                .relative()
+                .w_full()
+                .child(self.mode_element(self.mode, window, cx))
+                .child(measure)
+                .into_any_element();
+        };
+        // Cross-fade: both areas in one box whose height moves from the old to the new one.
+        let (h0, h1) = (
+            self.area_height(from, m.ui_scale, cx),
+            self.area_height(self.mode, m.ui_scale, cx),
+        );
+        let anim = || Animation::new(M_BASE).with_easing(ease_out_cubic);
+        let id = |part: &'static str| (part, generation as usize);
+        let old = div()
+            .debug_selector(|| FADE_OLD_ID.into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .child(self.mode_element(from, window, cx))
+            .with_animation(id("perf-cpu-fade-old"), anim(), |el, t| el.opacity(1. - t));
+        let new = div()
+            .debug_selector(|| FADE_NEW_ID.into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .child(self.mode_element(self.mode, window, cx))
+            .with_animation(id("perf-cpu-fade-new"), anim(), |el, t| el.opacity(t));
+        div()
+            .relative()
+            .w_full()
+            .overflow_hidden()
+            .child(old)
+            .child(new)
+            .child(measure)
+            .with_animation(id("perf-cpu-fade-h"), anim(), move |el, t| {
+                el.h(h0 + (h1 - h0) * t)
+            })
+            .into_any_element()
     }
 
     /// The Overall chart in a full-width box of `GRAPH_H_OVERALL`.
@@ -1046,62 +1524,15 @@ impl DevicePage for CpuPage {
 
     fn graphs(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         let m = *metrics(cx);
-        #[cfg(feature = "bench")]
-        if self.bench_show_both {
-            return v_flex()
-                .w_full()
-                .child(self.overall_element(m.ui_scale))
-                .child(div().h(m.sp[4]))
-                .child(self.grid.element(window, cx))
-                .into_any_element();
-        }
-        let measure = {
-            let cell = Rc::clone(&self.area_width);
-            canvas(move |b, _, _| cell.set(b.size.width), |_, _, _, _| {})
-                .absolute()
-                .inset_0()
+        let area = self.mode_area(&m, window, cx);
+        let Some(view) = &self.secondary else {
+            return area;
         };
-        let Some(ModeFade { from, generation }) = self.fade else {
-            return div()
-                .relative()
-                .w_full()
-                .child(self.mode_element(self.mode, window, cx))
-                .child(measure)
-                .into_any_element();
-        };
-        // Cross-fade: both areas in one box whose height moves from the old to the new one.
-        let (h0, h1) = (
-            self.area_height(from, m.ui_scale, cx),
-            self.area_height(self.mode, m.ui_scale, cx),
-        );
-        let anim = || Animation::new(M_BASE).with_easing(ease_out_cubic);
-        let id = |part: &'static str| (part, generation as usize);
-        let old = div()
-            .debug_selector(|| FADE_OLD_ID.into())
-            .absolute()
-            .top_0()
-            .left_0()
+        v_flex()
             .w_full()
-            .child(self.mode_element(from, window, cx))
-            .with_animation(id("perf-cpu-fade-old"), anim(), |el, t| el.opacity(1. - t));
-        let new = div()
-            .debug_selector(|| FADE_NEW_ID.into())
-            .absolute()
-            .top_0()
-            .left_0()
-            .w_full()
-            .child(self.mode_element(self.mode, window, cx))
-            .with_animation(id("perf-cpu-fade-new"), anim(), |el, t| el.opacity(t));
-        div()
-            .relative()
-            .w_full()
-            .overflow_hidden()
-            .child(old)
-            .child(new)
-            .child(measure)
-            .with_animation(id("perf-cpu-fade-h"), anim(), move |el, t| {
-                el.h(h0 + (h1 - h0) * t)
-            })
+            .child(area)
+            .child(div().h(m.sp[4]))
+            .child(self.secondary_element(view, &m, window, cx))
             .into_any_element()
     }
 
@@ -1117,9 +1548,12 @@ impl DevicePage for CpuPage {
         let w = &self.words;
         let mode = self.mode;
         let (labels, later) = (w.modes.clone(), w.later.clone());
-        // E24-021: the "Secondary graph >" submenu.
+        let (avail, saved, words) = (self.avail, self.settings.secondary, w.clone());
         menu.submenu(w.menu_graph.clone(), window, cx, move |menu, _, _| {
             mode_menu(menu, mode, &labels, &later)
+        })
+        .submenu(w.menu_secondary.clone(), window, cx, move |menu, _, _| {
+            secondary_menu(menu, saved, avail, &words)
         })
         .check_item(
             w.menu_kernel_times.clone(),
@@ -1184,6 +1618,7 @@ impl Render for CpuPage {
             self.overall.update(cx, |v, cx| v.set_labels(labels, cx));
             let snap = Arc::clone(self.hub.read(cx).current());
             self.apply_snapshot(&snap, ComponentMask::INVENTORY, cx);
+            self.sync_secondary(true, cx);
         }
         let m = *metrics(cx);
         let theme = current(cx).clone();
@@ -1192,6 +1627,7 @@ impl Render for CpuPage {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_set_mode))
             .on_action(cx.listener(Self::on_toggle_kernel))
+            .on_action(cx.listener(Self::on_set_secondary))
             .child(
                 DevicePageFrame {
                     page: self,
