@@ -38,6 +38,7 @@ use super::registry::WindowKey;
 use super::toolbar::{DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{CloseWindow, MinimizeWindow, ZoomWindow};
 use crate::components::icons::{AppIcon, TlIcon};
+use crate::components::shield::TlShield;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
@@ -675,10 +676,15 @@ impl TitleBarView {
     ) -> Stateful<Div> {
         let s = metrics(cx).ui_scale;
         let page = self.content.buttons(&self.model, window, cx);
+        // Slot 1 (E20-026): the shield on every tab while the helper is installed.
+        let shield = self
+            .model
+            .helper_installed
+            .then(|| TlShield::new(self.model.helper).into_any_element());
         let toolbar = no_drag(
             div()
                 .flex_none()
-                .child(Toolbar::new(self.model.clone(), page)),
+                .child(Toolbar::new(self.model.clone(), page).shield(shield)),
         );
         div()
             .id("TitleBar")

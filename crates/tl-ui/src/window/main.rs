@@ -19,6 +19,10 @@
 //! The process-view Actions `ToggleHideSystem`, `CycleViewMode` and `SetViewMode` are app-level
 //! handlers here (E20-017, UI-SHL-012, UI-SHL-013, UI-SHL-035, PROC-015, PROC-016).
 //!
+//! The shield sits in toolbar slot 1 when the privileged helper is installed, and the helper
+//! session starts once after the first frame when asked for at launch (E20-026, UI-SHL-011,
+//! APP-003, APP-049).
+//!
 //! `ToggleAlwaysOnTop` for the main window flips `window.always_on_top` and sends `KeepAbove`
 //! through the KWin bridge; a window that opens with the setting on gets it once the bridge is up
 //! (E20-022, UI-SHL-005, APP-008, APP-009, R-073, R-176).
@@ -71,6 +75,7 @@ use crate::app::{
 };
 use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
 use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
+use crate::components::shield::StartHelperSession;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::demand::GlobalDemand;
@@ -378,6 +383,20 @@ struct FirstFrameLogged;
 
 impl Global for FirstFrameLogged {}
 
+/// Where the privileged helper is installed (ADR-006).
+const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
+
+/// The privileged helper is installed: [`HELPER_PATH`] exists. Checked once per process in
+/// [`init`]; a test may set it first.
+pub struct HelperInstalled(pub bool);
+
+impl Global for HelperInstalled {}
+
+/// Set once the launch unlock dispatched `StartHelperSession` (E20-026).
+struct LaunchUnlockRequested;
+
+impl Global for LaunchUnlockRequested {}
+
 /// Set once the startup public IP fetch was considered, so a reopened window does not fetch
 /// again (E20-024).
 struct PublicIpAutoFetched;
@@ -449,6 +468,9 @@ pub fn init(cx: &mut App) {
     });
     cx.on_action(|a: &SetViewMode, cx| set_view_mode(cx, a.0));
     cx.set_global(AppRequestHandler(Box::new(handle_app_request)));
+    if !cx.has_global::<HelperInstalled>() {
+        cx.set_global(HelperInstalled(std::path::Path::new(HELPER_PATH).exists()));
+    }
     cx.on_action(on_toggle_always_on_top);
     // A closed secondary window forgets its pin (E20-029).
     if let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
@@ -1228,6 +1250,10 @@ impl MainWindow {
                 |this: &mut Self, hub, ev: &SnapshotChanged, window, cx| {
                     if ev.mask.contains(ComponentMask::HEALTH) {
                         this.sync_health(cx);
+                        // The shield follows the helper state; set_model notifies only on a
+                        // change.
+                        let model = this.toolbar_model(cx);
+                        this.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
                     }
                     this.note_next_frame(hub.clone(), window, cx);
                 },
@@ -1790,7 +1816,23 @@ impl MainWindow {
         model.history_mode = TlSettings::state(cx).processes.history_mode;
         model.hide_system = settings.processes.hide_system;
         model.mode = settings.processes.mode;
+        model.helper_installed = cx.try_global::<HelperInstalled>().is_some_and(|h| h.0);
+        if let Some(hub) = cx.try_global::<GlobalHub>() {
+            model.helper = hub.0.read(cx).current().health.helper;
+        }
         model
+    }
+
+    /// Starts the helper session at launch (APP-049): once per process, and only when the
+    /// helper is installed. Step 11 calls it for `privilege.unlock_at_launch` or Shift held at
+    /// launch; E29 calls it for Shift seen on Wayland (U-43).
+    pub fn request_launch_unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let installed = cx.try_global::<HelperInstalled>().is_some_and(|h| h.0);
+        if !installed || cx.has_global::<LaunchUnlockRequested>() {
+            return;
+        }
+        cx.set_global(LaunchUnlockRequested);
+        window.dispatch_action(Box::new(StartHelperSession), cx);
     }
 
     /// Passes the active page's status text and actions to the chip.
@@ -1964,6 +2006,9 @@ impl MainWindow {
             }
         }
         // step 11: helper unlock at launch (E20-026)
+        if TlSettings::settings(cx).privilege.unlock_at_launch || options.shift_held {
+            self.request_launch_unlock(window, cx);
+        }
         // step 11: public IP auto-fetch (E20-024), once per process
         if !cx.has_global::<PublicIpAutoFetched>() {
             cx.set_global(PublicIpAutoFetched);
