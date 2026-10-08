@@ -8128,6 +8128,7 @@ dependencies = [
  "fluent-bundle",
  "gpui-kit",
  "image",
+ "intl_pluralrules",
  "jiff",
  "proptest",
  "rustc-hash 2.1.3",
