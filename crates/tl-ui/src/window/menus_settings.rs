@@ -11,18 +11,26 @@
 //! launch" in Window & startup, and "All settings…" above Reset. Turning the auto-fetch on goes
 //! through the public IP notice ([`request_public_ip_fetch`]), so the key is set only once the
 //! user has accepted it; turning it off needs no notice.
+//!
+//! P2 rows (E21-011): "Start at login" and the indented "Start minimized" in Window & startup,
+//! before "Default tab". tl-ui writes no file (ADR-011): both go through
+//! `AppEnv.set_autostart(enabled, minimized)` (R-171, R-236), and a key changes only when that
+//! call succeeds. On failure the Error toast "Could not change the autostart entry" shows.
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{App, Entity, FocusHandle, SharedString, Window};
 use tl_model::command::Tab;
 use tl_model::settings::{NetworkUnit, PROCESS_INTERVAL_MENU_MS, Settings, StartTab};
+use tracing::warn;
 
 use super::confirm::ResetSettings;
 use super::main::ShellState;
 use super::menubar::{MenuSliders, TAB_SWITCH};
 use super::public_ip::request_public_ip_fetch;
 use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
+use crate::app::AppEnv;
 use crate::components::menu::{TlMenu, TlMenuPopup};
+use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 
@@ -41,10 +49,38 @@ pub(crate) const REFRESH_KEYS: [&str; 6] = [
 pub(crate) const SHIPPED_LANGUAGES: [(&str, &str); 1] =
     [("en-US", "shell-menu-settings-language-en-us")];
 
-gpui_kit::actions!(tasklens, [TogglePublicIpAutoFetch]);
+gpui_kit::actions!(
+    tasklens,
+    [
+        TogglePublicIpAutoFetch,
+        /// Writes or deletes the autostart entry, then flips `startup.start_at_login`.
+        ToggleStartAtLogin,
+        /// Flips `startup.start_minimized`; rewrites the entry while Start at login is on.
+        ToggleStartMinimized,
+    ]
+);
 
-/// Registers the "Auto-fetch Public IP on launch" handler. `menubar::init` calls it.
+/// Registers the "Auto-fetch Public IP on launch" and autostart handlers. `menubar::init` calls
+/// it.
 pub fn init(cx: &mut App) {
+    cx.on_action(|_: &ToggleStartAtLogin, cx| {
+        let startup = settings_now(cx).startup;
+        let on = !startup.start_at_login;
+        if write_autostart(cx, on, startup.start_minimized) {
+            TlSettings::set(cx, SettingKey::StartupStartAtLogin, SettingValue::Bool(on));
+        }
+    });
+    cx.on_action(|_: &ToggleStartMinimized, cx| {
+        let startup = settings_now(cx).startup;
+        let minimized = !startup.start_minimized;
+        if !startup.start_at_login || write_autostart(cx, true, minimized) {
+            TlSettings::set(
+                cx,
+                SettingKey::StartupStartMinimized,
+                SettingValue::Bool(minimized),
+            );
+        }
+    });
     cx.on_action(|_: &TogglePublicIpAutoFetch, cx| {
         if settings_now(cx).network.auto_fetch_public_ip {
             TlSettings::update(cx, |d| d.settings.network.auto_fetch_public_ip = false);
@@ -75,7 +111,8 @@ pub fn build(
     let tab_switch = sliders.tab_switch.clone();
     TlMenu::build(window, cx, return_focus.clone(), move |menu, window, cx| {
         let s = settings_now(cx);
-        menu.header(tr(cx, "shell-menu-settings-monitoring"))
+        let menu = menu
+            .header(tr(cx, "shell-menu-settings-monitoring"))
             .submenu(
                 tr(cx, "shell-menu-settings-refresh"),
                 window,
@@ -121,28 +158,68 @@ pub fn build(
                 toggle(SettingKey::WindowCloseWithEsc),
             )
             .header(tr(cx, "shell-menu-settings-window-startup"))
-            .submenu(
-                tr(cx, "shell-menu-settings-default-tab"),
-                window,
-                cx,
-                default_tab_submenu,
-            )
             .check_item(
-                tr(cx, "shell-menu-settings-public-ip"),
-                s.network.auto_fetch_public_ip,
-                Box::new(TogglePublicIpAutoFetch),
+                tr(cx, "shell-menu-settings-start-at-login"),
+                s.startup.start_at_login,
+                Box::new(ToggleStartAtLogin),
+            );
+        let minimized = tr(cx, "shell-menu-settings-start-minimized");
+        let menu = if s.startup.start_at_login {
+            menu.check_item(
+                minimized,
+                s.startup.start_minimized,
+                Box::new(ToggleStartMinimized),
             )
-            .header(tr(cx, "shell-menu-settings-language-group"))
-            .submenu(
-                tr(cx, "shell-menu-settings-language"),
-                window,
-                cx,
-                language_submenu,
-            )
-            .separator()
-            .item(tr(cx, "shell-menu-settings-all"), Box::new(OpenSettings))
-            .item(tr(cx, "shell-menu-settings-reset"), Box::new(ResetSettings))
+        } else {
+            menu.item_disabled(minimized, None)
+        };
+        menu.submenu(
+            tr(cx, "shell-menu-settings-default-tab"),
+            window,
+            cx,
+            default_tab_submenu,
+        )
+        .check_item(
+            tr(cx, "shell-menu-settings-public-ip"),
+            s.network.auto_fetch_public_ip,
+            Box::new(TogglePublicIpAutoFetch),
+        )
+        .header(tr(cx, "shell-menu-settings-language-group"))
+        .submenu(
+            tr(cx, "shell-menu-settings-language"),
+            window,
+            cx,
+            language_submenu,
+        )
+        .separator()
+        .item(tr(cx, "shell-menu-settings-all"), Box::new(OpenSettings))
+        .item(tr(cx, "shell-menu-settings-reset"), Box::new(ResetSettings))
     })
+}
+
+/// Calls `AppEnv.set_autostart(enabled, minimized)`. On failure (or with no `AppEnv`) pushes
+/// the Error toast and returns false.
+fn write_autostart(cx: &mut App, enabled: bool, minimized: bool) -> bool {
+    let result = match cx.try_global::<AppEnv>() {
+        Some(env) => (env.set_autostart.clone())(enabled, minimized),
+        None => Err("no AppEnv".to_owned()),
+    };
+    let Err(err) = result else {
+        return true;
+    };
+    warn!(target: "tasklens::ui", %err, enabled, minimized, "autostart entry not changed");
+    let text = tr(cx, "shell-toast-autostart-failed");
+    if let Some(handle) = cx.active_window() {
+        // The window is busy dispatching the menu action.
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                if let Some(queue) = ToastQueue::of_window(window, cx) {
+                    queue.update(cx, |q, cx| q.push(ToastKind::Error, text, None, None, cx));
+                }
+            });
+        });
+    }
+    false
 }
 
 fn settings_now(cx: &App) -> Settings {

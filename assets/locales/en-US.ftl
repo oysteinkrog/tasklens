@@ -1475,6 +1475,10 @@ shell-menu-settings-reset = Reset Settings to Defaults
 shell-menu-settings-tab-switch = Tab Switch
 shell-menu-settings-tab-switch-ms = { $ms } ms
 shell-menu-settings-public-ip = Auto-fetch Public IP on launch
+# Settings menu, Start at login rows (tasklens-bj6.14, UI-SHL-040, APP-048).
+shell-menu-settings-start-at-login = Start at login
+shell-menu-settings-start-minimized = Start minimized
+shell-toast-autostart-failed = Could not change the autostart entry
 shell-menu-settings-all = All settings…
 # Process row menu and group header menu (tasklens-pdu.2, UI-PRC-013, UI-PRC-020)
 processes-menu-end-task = End Task
