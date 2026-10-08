@@ -1238,6 +1238,8 @@ mod sys_actions {
     }
 }
 
+// `ToastQueue::visible_texts` is a test hook.
+#[cfg(feature = "test-hooks")]
 mod copy {
     use gpui_kit::base::Root;
     use gpui_kit::{
