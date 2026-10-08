@@ -7,7 +7,7 @@
 //! nothing. The display form of each Location (`$HOME` shown as `~`) is built once per snapshot.
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
+use std::hash::BuildHasher as _;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,13 +17,15 @@ use gpui_kit::{
     AnyView, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     SharedString, Window, div, px,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
+use std::hash::BuildHasher as _;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, Impact, ImpactDetail, Snapshot, StartupEntry, StartupKind,
     StartupSnapshot, StartupStatus,
 };
-use tl_model::table::{StartupColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec};
+
+use tl_model::table::{StartupColumn, StartupRef, SysColumnId, SysNodeId, SysRow, SysSortSpec};
 use tl_model::units;
 use tl_model::validity::Validity;
 
@@ -341,6 +343,12 @@ pub fn startup_specs(w: &StartupWords) -> Vec<ColumnSpec<SysColumnId>> {
         .collect()
 }
 
+/// The table row id of `node`: a hash of its `StartupRef`, so a selection survives a rescan
+/// (R-082). The `TreeTableDelegate` row id must be `Copy`.
+pub fn row_key(node: &SysNodeId) -> u64 {
+    FxBuildHasher.hash_one(node)
+}
+
 /// The hovered row's tooltip lines, shared between the delegate and [`StartupRowTip`].
 #[derive(Default)]
 struct RowTipState {
@@ -374,7 +382,8 @@ impl Render for StartupRowTip {
 pub struct StartupDelegate {
     snap: Option<Arc<StartupSnapshot>>,
     rows: Arc<[SysRow]>,
-    index: FxHashMap<SysNodeId, usize>,
+    /// Row index by [`row_key`].
+    index: FxHashMap<u64, usize>,
     /// Display form of each entry's Location, by entry index.
     locations: Vec<Arc<str>>,
     query_generation: u64,
@@ -435,6 +444,14 @@ impl StartupDelegate {
     /// The sort the user picked since the last call, for the page to send to the engine.
     pub fn take_sort_request(&mut self) -> Option<SysSortSpec> {
         self.sort_request.take()
+    }
+
+    /// The `StartupRef` of row `ix`, for the page's actions.
+    pub fn startup_ref(&self, ix: usize) -> Option<&StartupRef> {
+        match &self.rows.get(ix)?.node {
+            SysNodeId::Startup(r) => Some(r),
+            _ => None,
+        }
     }
 
     /// The entry of row `ix`.
@@ -506,7 +523,8 @@ impl StartupDelegate {
 }
 
 impl TreeTableDelegate for StartupDelegate {
-    type RowId = SysNodeId;
+    /// [`row_key`] of the row's `StartupRef`: kept across rescans (R-082).
+    type RowId = u64;
     type Column = SysColumnId;
     type Sort = SysSortSpec;
 
@@ -514,11 +532,11 @@ impl TreeTableDelegate for StartupDelegate {
         self.rows.len()
     }
 
-    fn row_id(&self, ix: usize) -> SysNodeId {
-        self.rows[ix].node.clone()
+    fn row_id(&self, ix: usize) -> u64 {
+        row_key(&self.rows[ix].node)
     }
 
-    fn row_index(&self, id: SysNodeId) -> Option<usize> {
+    fn row_index(&self, id: u64) -> Option<usize> {
         self.index.get(&id).copied()
     }
 
@@ -652,7 +670,7 @@ impl TreeTableDelegate for StartupDelegate {
 
     fn context_menu(
         &mut self,
-        _: &[SysNodeId],
+        _: &[u64],
         _: Option<SysColumnId>,
         menu: TlMenu,
         _: &mut Window,
@@ -661,7 +679,7 @@ impl TreeTableDelegate for StartupDelegate {
         menu
     }
 
-    fn on_toggle_expand(&mut self, _: SysNodeId, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_toggle_expand(&mut self, _: u64, _: &mut Context<TlTreeTable<Self>>) {}
 
     /// A second click on the sort column flips the direction; another column sorts ascending.
     fn on_sort(&mut self, col: SysColumnId, cx: &mut Context<TlTreeTable<Self>>) {
@@ -686,11 +704,11 @@ impl TreeTableDelegate for StartupDelegate {
         self.layout = layout.clone();
     }
 
-    fn on_visible_range(&mut self, _: &[SysNodeId], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_visible_range(&mut self, _: &[u64], _: &mut Context<TlTreeTable<Self>>) {}
 
     /// Enter, Alt+Enter and Ctrl+I reach the page as `OpenProperties`, which opens Startup
     /// Properties for the focus row.
-    fn on_activate(&mut self, _: SysNodeId, cx: &mut Context<TlTreeTable<Self>>) {
+    fn on_activate(&mut self, _: u64, cx: &mut Context<TlTreeTable<Self>>) {
         cx.propagate();
     }
 
@@ -762,7 +780,7 @@ impl SysDelegate for StartupDelegate {
             .rows
             .iter()
             .enumerate()
-            .map(|(ix, r)| (r.node.clone(), ix))
+            .map(|(ix, r)| (row_key(&r.node), ix))
             .collect();
         self.locations = startup
             .entries
