@@ -113,7 +113,7 @@ const FEATURE_MEMORY_ENCRYPTION: &str = "perf-cpu-feature-memory-encryption";
 const FEATURE_SHADOW_STACK: &str = "perf-cpu-feature-shadow-stack";
 const FEATURE_IOMMU: &str = "perf-cpu-feature-iommu";
 /// The tooltip texts and value words, and their arguments.
-const TEXTS: [(&str, &[&str]); 22] = [
+const TEXTS: [(&str, &[&str]); 21] = [
     (TIP_FASTEST, &["mhz"]),
     (TIP_BOGOMIPS, &[]),
     (TIP_HANDLES, &[]),
