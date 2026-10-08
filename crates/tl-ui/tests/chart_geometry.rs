@@ -872,7 +872,9 @@ fn curve_through_collinear_points_is_straight() {
 fn fill_area(set: &PathSet) -> f32 {
     set.path
         .vertices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| {
             let p = |i: usize| (t[i].xy_position.x.as_f32(), t[i].xy_position.y.as_f32());
             let (a, b, c) = (p(0), p(1), p(2));

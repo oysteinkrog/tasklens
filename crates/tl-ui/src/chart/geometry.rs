@@ -1058,7 +1058,9 @@ mod tests {
     fn area(mesh: FillMesh) -> f32 {
         let path = mesh.finish().expect("triangles");
         path.vertices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|t| {
                 let p = |i: usize| (f32::from(t[i].xy_position.x), f32::from(t[i].xy_position.y));
                 let (a, b, c) = (p(0), p(1), p(2));
