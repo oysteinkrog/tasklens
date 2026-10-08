@@ -972,18 +972,21 @@ fn value_matches(v: &SettingValue, now: &serde_json::Value) -> bool {
 }
 
 /// Pushes `text` (such as "Takes effect after restart") as an Info toast in the active window.
+/// Deferred: a setter runs while the window handles the click, so the window is busy.
 fn info_toast(text: SharedString, cx: &mut App) {
     let Some(window) = cx.active_window() else {
         return;
     };
-    let pushed = window.update(cx, |_, window, cx| {
-        if let Some(queue) = ToastQueue::of_window(window, cx) {
-            queue.update(cx, |q, cx| q.push(ToastKind::Info, text, None, None, cx));
+    cx.defer(move |cx| {
+        let pushed = window.update(cx, |_, window, cx| {
+            if let Some(queue) = ToastQueue::of_window(window, cx) {
+                queue.update(cx, |q, cx| q.push(ToastKind::Info, text, None, None, cx));
+            }
+        });
+        if pushed.is_err() {
+            warn!(target: "tasklens::ui", "settings toast: the window is gone");
         }
     });
-    if pushed.is_err() {
-        warn!(target: "tasklens::ui", "settings toast: the window is gone");
-    }
 }
 
 /// The Settings window content.
