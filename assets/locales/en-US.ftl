@@ -12,6 +12,7 @@ fnd-validity-unsupported = Not available on this device
 fnd-validity-missing = No longer present
 fnd-validity-failed = Could not read: { $error }
 fnd-menu-no-items = No items
+fnd-menu-selected = { $label }, selected
 fnd-pin-off = Always on top
 fnd-pin-on = Always on top (on)
 fnd-pin-unsupported = Not supported by this desktop

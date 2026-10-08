@@ -30,6 +30,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use fluent_bundle::FluentValue;
 use gpui_kit::base::POPUP_PRIORITY;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::actions::{
@@ -51,7 +52,7 @@ use super::icons::{TlIcon, icon};
 use super::motion::{M_FAST, ease_out_cubic};
 use super::slider::{KeyMove, MENU_ROW_HEIGHT, TlSlider, key_move};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{t_base, t_xs};
 use crate::theme::{UiMetrics, current, metrics};
@@ -125,6 +126,8 @@ enum Entry {
         fg: Hsla,
         suffix_icon: Option<TlIcon>,
         action: Box<dyn Action>,
+        /// The radio dot of [`TlMenu::painted_radio_item`].
+        selected: bool,
     },
     Submenu {
         label: SharedString,
@@ -412,6 +415,30 @@ impl TlMenu {
             fg,
             suffix_icon,
             action,
+            selected: false,
+        });
+        self
+    }
+
+    /// A [`painted_item`](Self::painted_item) with a radio dot in the mark column when
+    /// `selected`; its accessible name then ends in ", selected".
+    pub fn painted_radio_item(
+        mut self,
+        label: impl Into<SharedString>,
+        bg: Hsla,
+        fg: Hsla,
+        suffix_icon: Option<TlIcon>,
+        selected: bool,
+        action: Box<dyn Action>,
+    ) -> Self {
+        self.has_mark_column = true;
+        self.entries.push(Entry::Painted {
+            label: label.into(),
+            bg,
+            fg,
+            suffix_icon,
+            action,
+            selected,
         });
         self
     }
@@ -445,6 +472,8 @@ pub struct MenuEntryInfo {
     pub keep_open: bool,
     /// The space before the label of an item or disabled item ([`TlMenu::indent`]).
     pub indent: Pixels,
+    /// The background and text colour of a painted row.
+    pub painted: Option<(Hsla, Hsla)>,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -516,6 +545,10 @@ impl TlMenuPopup {
                         ..
                     }
                 );
+                let painted = match e {
+                    Entry::Painted { bg, fg, .. } => Some((*bg, *fg)),
+                    _ => None,
+                };
                 let indent = match e {
                     Entry::Item { indent, .. } | Entry::Disabled { indent, .. } => *indent,
                     _ => px(0.),
@@ -536,10 +569,12 @@ impl TlMenuPopup {
                     Entry::Disabled { tooltip, .. } => {
                         (MenuEntryKind::Disabled, tooltip.clone(), false, None, None)
                     }
-                    Entry::Painted { action, .. } => (
+                    Entry::Painted {
+                        action, selected, ..
+                    } => (
                         MenuEntryKind::Item,
                         None,
-                        false,
+                        *selected,
                         Some(action.boxed_clone()),
                         None,
                     ),
@@ -568,6 +603,7 @@ impl TlMenuPopup {
                     slider,
                     keep_open,
                     indent,
+                    painted,
                 }
             })
             .collect()
@@ -1074,8 +1110,17 @@ impl TlMenuPopup {
                 bg,
                 fg,
                 suffix_icon,
+                selected,
                 ..
             } => row(Some(label))
+                .when(*selected, |d| {
+                    d.aria_label(tr_args(
+                        cx,
+                        "fnd-menu-selected",
+                        &[("label", FluentValue::from(label.as_ref()))],
+                    ))
+                })
+                .children(mark_column(Mark::Radio(*selected)))
                 .child(painted_row(
                     label.clone(),
                     *bg,
