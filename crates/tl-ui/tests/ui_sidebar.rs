@@ -1460,9 +1460,8 @@ mod sidebar {
 
     #[gpui_kit::test]
     fn overview_card_first_by_default(cx: &mut TestAppContext) {
-        let mut s = with_overview();
-        s.performance.device_overrides.clear();
-        let mut r = open(cx, nine(), s, UiState::default());
+        // `with_overview` only stops `open_in` from hiding the card; Show is the type default.
+        let mut r = open(cx, nine(), with_overview(), UiState::default());
         let shown = keys(&mut r);
         assert_eq!(shown[..2], ["overview", "cpu"]);
         assert_eq!(shown.len(), 10);
@@ -1494,6 +1493,14 @@ mod sidebar {
         draw(r.vcx);
         let hide = open_menu_hide(&mut r).expect("the Overview card's menu is open");
         assert!(hide.partial_eq(&set_visible(OVERVIEW, false)));
+        // Close the menu and focus the list again, so the action reaches the sidebar.
+        r.vcx.simulate_keystrokes("escape");
+        let sidebar = r.sidebar.clone();
+        r.vcx.update(|window, cx| {
+            let focus = sidebar.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+        });
+        draw(r.vcx);
         r.vcx.dispatch_action(set_visible(OVERVIEW, false));
         draw(r.vcx);
         assert_eq!(overview_override(&mut r), Some(DeviceVisibility::Hide));
