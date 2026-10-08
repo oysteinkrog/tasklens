@@ -716,6 +716,61 @@ fn cpu_update_appends_series() {
     assert_eq!(rig.latest().system.cpu_topology.online, cpus(2));
 }
 
+/// A CPU sample with the secondary chart's values: package and core watts and the fastest core.
+fn cpu_secondary_msg(t_ns: TimeNs, pkg: Metric<f32>, core: Metric<f32>) -> EngineMsg {
+    let mut msg = cpu_msg(t_ns, 50.0, false);
+    if let EngineMsg::Source(SourceUpdate::Cpu(s)) = &mut msg {
+        s.totals.package_power_w = pkg;
+        s.totals.core_power_w = core;
+        s.totals.freq_fastest_mhz = Metric::valid(5050);
+    }
+    msg
+}
+
+#[test]
+fn cpu_secondary_series_fill() {
+    let mut rig = Rig::new();
+    rig.run(vec![cpu_msg(100 * MS, 50.0, true)])
+        .expect("no invariant violation");
+    let pkg = rig.idx(&DeviceIdentity::CpuPackage);
+    let id = |metric| SeriesId {
+        device: pkg,
+        metric,
+    };
+    rig.run(vec![cpu_secondary_msg(
+        200 * MS,
+        Metric::valid(31.9),
+        Metric::valid(18.2),
+    )])
+    .expect("no invariant violation");
+    for (metric, want) in [
+        (MetricId::CPU_POWER_PKG, 31.9),
+        (MetricId::CPU_POWER_CORE, 18.2),
+        (MetricId::CPU_CLOCK_MAX, 5050.0),
+    ] {
+        let last = rig.last_sample(id(metric));
+        assert_eq!(last.value, want, "{metric:?}");
+        assert!(last.flags.contains(SampleFlags::VALID), "{metric:?}");
+    }
+
+    // Restricted or Unsupported RAPL is a gap, never a measured zero.
+    rig.run(vec![cpu_secondary_msg(
+        300 * MS,
+        Metric::with(Validity::Restricted),
+        Metric::with(Validity::Unsupported),
+    )])
+    .expect("no invariant violation");
+    for metric in [MetricId::CPU_POWER_PKG, MetricId::CPU_POWER_CORE] {
+        let last = rig.last_sample(id(metric));
+        assert!(!last.flags.contains(SampleFlags::VALID), "{metric:?}");
+    }
+    assert!(
+        rig.last_sample(id(MetricId::CPU_CLOCK_MAX))
+            .flags
+            .contains(SampleFlags::VALID)
+    );
+}
+
 /// Copies the fixture trees in `parts` over each other into a fresh dir.
 fn cpu_fixture(name: &str, parts: &[&str]) -> PathBuf {
     fn copy_tree(src: &Path, dst: &Path) {

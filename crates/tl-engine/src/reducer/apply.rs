@@ -220,6 +220,9 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
             MetricId::CPU_KERNEL,
             MetricId::CPU_FREQ,
             MetricId::CPU_TEMP,
+            MetricId::CPU_POWER_PKG,
+            MetricId::CPU_POWER_CORE,
+            MetricId::CPU_CLOCK_MAX,
         ],
         DeviceKind::CpuLogical => &[
             MetricId::CPU_TOTAL,
@@ -957,6 +960,23 @@ impl Reducer {
             t,
             s.temp_c.unwrap_or(0.0),
             temp_ok,
+            period,
+        );
+        // The secondary chart's series (UI-PRF-025). A power reading that is not Valid, such
+        // as Restricted or Unsupported RAPL, is a gap.
+        for (metric, m) in [
+            (MetricId::CPU_POWER_PKG, totals.package_power_w),
+            (MetricId::CPU_POWER_CORE, totals.core_power_w),
+        ] {
+            self.push(pkg, metric, t, m.value, ok && m.validity.is_valid(), period);
+        }
+        let fastest = totals.freq_fastest_mhz;
+        self.push(
+            pkg,
+            MetricId::CPU_CLOCK_MAX,
+            t,
+            fastest.value as f32,
+            ok && fastest.validity.is_valid(),
             period,
         );
         for core in &s.per_cpu {
