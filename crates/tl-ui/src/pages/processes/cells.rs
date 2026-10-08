@@ -446,6 +446,9 @@ pub struct CellWords {
     /// Copy details labels that are not column labels: "Private bytes", "Working set".
     pub copy_private_bytes: Arc<str>,
     pub copy_working_set: Arc<str>,
+    /// The pseudo row names (PROC-012), shown in place of the engine's text.
+    pub pseudo_interrupts: Arc<str>,
+    pub pseudo_memory_compression: Arc<str>,
 }
 
 impl CellWords {
@@ -485,6 +488,8 @@ impl CellWords {
             labels: PROCESS_COLUMNS.iter().map(|c| text(c.label)).collect(),
             copy_private_bytes: text("processes-copy-private-bytes"),
             copy_working_set: text("processes-copy-working-set"),
+            pseudo_interrupts: text("processes-pseudo-interrupts"),
+            pseudo_memory_compression: text("processes-pseudo-memory-compression"),
         }
     }
 
@@ -495,6 +500,16 @@ impl CellWords {
             .position(|c| c.id == id)
             .and_then(|i| self.labels.get(i))
             .map_or("", |l| l.as_ref())
+    }
+
+    /// The translated name of a group row: the pseudo rows by kind, every other row as the
+    /// engine names it.
+    pub fn group_name<'a>(&'a self, g: &'a GroupRow) -> &'a Arc<str> {
+        match g.node {
+            NodeId::Pseudo(PseudoKind::Interrupts) => &self.pseudo_interrupts,
+            NodeId::Pseudo(PseudoKind::MemoryCompression) => &self.pseudo_memory_compression,
+            _ => &g.name,
+        }
     }
 }
 
@@ -1116,7 +1131,7 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
             .desktop_path
             .as_ref()
             .map_or(Value::Glyph(Validity::Unsupported), Value::Arc),
-        C::Name | C::NameDisplay => Value::Arc(&g.name),
+        C::Name | C::NameDisplay => Value::Arc(w.group_name(g)),
         C::User if g.kind == GroupRowKind::Pseudo => Value::Arc(root_user()),
         C::Type => Value::Arc(match g.kind {
             GroupRowKind::App => &w.type_app,
@@ -1389,7 +1404,7 @@ impl<'a> Details<'a> {
                     }
                 };
                 Self {
-                    name: &g.name,
+                    name: ctx.words.group_name(g),
                     pid: None,
                     ppid: None,
                     cpu: Field(g.cpu_pct, v(F::Cpu)),

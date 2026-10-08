@@ -3821,8 +3821,9 @@ mod live {
         assert!(vcx.debug_bounds("TlCell-numeric").is_some());
     }
 
-    /// Both pseudo rows as the engine sends them (PROC-012): Interrupts with CPU 1.5%, Memory
-    /// compression with 64 MiB Memory and 2 MiB/s disk. Every other field is Unsupported.
+    /// Both pseudo rows as the engine sends them (PROC-012), with names the UI must not show:
+    /// Interrupts with CPU 1.5%, Memory compression with 64 MiB Memory and 2 MiB/s disk. Every
+    /// other field is Unsupported.
     fn pseudo_rows() -> Arc<Snapshot> {
         use tl_model::ids::PseudoKind;
         use tl_model::process::GroupRow;
@@ -3841,10 +3842,10 @@ mod live {
             validity: FieldValidity::all(Validity::Unsupported),
             ..group(GroupRowKind::Pseudo)
         };
-        let mut irq = pseudo(PseudoKind::Interrupts, "Interrupts");
+        let mut irq = pseudo(PseudoKind::Interrupts, "engine-irq");
         irq.cpu_pct = 1.5;
         irq.validity.set(F::Cpu, Validity::Valid);
-        let mut zram = pseudo(PseudoKind::MemoryCompression, "Memory compression (zram)");
+        let mut zram = pseudo(PseudoKind::MemoryCompression, "engine-zram");
         zram.rss_anon_bytes = 64 << 20;
         zram.memory_bytes = 64 << 20;
         zram.io_read_bps = 2.0 * 1_048_576.0;
@@ -3907,7 +3908,8 @@ mod live {
                 matches!(name_cell.icon_size, IconSlot::Small),
                 "{name}: 16 px"
             );
-            assert_eq!(name_cell.primary.as_ref(), name);
+            assert_eq!(name_cell.primary.as_ref(), name, "translated by kind");
+            assert_eq!(shown(&cell(vcx, &table, ix, ColumnId::Name)), name);
             assert_eq!(expandable, None, "{name}: no chevron");
 
             let pid = cell(vcx, &table, ix, ColumnId::Pid);

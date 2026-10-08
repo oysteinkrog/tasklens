@@ -1137,7 +1137,7 @@ impl TreeTableDelegate for ProcessDelegate {
                     .as_ref()
                     .map_or(NameIcon::None, |i| NameIcon::File(Arc::clone(i))),
             };
-            d.primary = SharedString::from(&g.name);
+            d.primary = SharedString::from(self.cell_words.group_name(g));
         } else if let Some(r) = row
             .record
             .and_then(|i| self.snapshot.processes.records.get(i as usize))
