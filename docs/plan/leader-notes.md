@@ -794,3 +794,8 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - wlf.32 plan approved: the setting is motion.save_power_on_battery.
 - Owner, 2026-10-08: wlf.30 uses a thread per source. ADR-004 is amended, the shared pool stays for actions and the journal, and a hung source shows Late. The pdu-51 agent implements it, but the profile comes first whenever the session unlocks.
 - 2026-10-08 morning: overnight the impl2 agents closed crw.40, wlf.32, gma.21, pdu.29, pdu.55, xdh.1, fut.20 and o55.8, then stopped. Started 6 impl3 agents: crw.41 then crw.42 and crw.43; bj6.6 then bj6.28; pdu.30 then pdu.33; jqk.21 then hk6.1; gma.9 then gma.23; crw.22 then o55.36. impl2-pdu-51 continues on wlf.30 and the wlf.27/28 profile. Count: 727 of 985.
+- Overnight reports, handled 2026-10-08:
+  - Profile (wlf.27, 23:47): lyon fill tessellation is 48.5% of CPU in static and 33.6% in perf-cpu, plus 14 to 16% in malloc. The fix is wlf.33 (P0), direct triangulation of the monotone fills, owned by pdu-51 and done before wlf.30.
+  - crw.40 found that smoothing re-renders OverviewPage every animation frame. Decision: Overview charts step at the sample rate (crw.46), revisit after wlf.31. crw.40 notes for crw.41: embed the page cached, and Ctrl+C uses copy_all.
+  - Accepted: crw.40, fut.20 (d12552aa), the o55.8 focus follow-up (fd083283, 3ac07b06), xdh.1, pdu.55, pdu.29, wlf.32, gma.21 (four gaps).
+  - All-targets clippy fails in the kv_grid and link tests. Fixed by fut.21, owned by impl3-crw-22.
