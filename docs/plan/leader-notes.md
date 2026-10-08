@@ -818,3 +818,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - bj6.14: Start minimized dispatches ToggleStartMinimized (set_autostart first, key only on Ok); bj6.29 reuses it. Failure toast via cx.defer.
 - o55.36: sessions from encoder_stats().session_count; separate Video encode/decode row (29 rows) shown when shared; GPU_PROTO_VERSION bumped to 2 (follow-up); sessions tooltip must pluralise via a Fluent selector if the helper passes numbers.
 - o55.36: GPU_PROTO_VERSION 2 (902601ac). Plural in Details tooltips needs Template plural support: filed o55.37 (no per-n separate keys).
+- crw.23: engine now records CPU_POWER_PKG, CPU_POWER_CORE, CPU_CLOCK_MAX in apply_cpu and metrics_of(Cpu) (chain edit under crw.23); unreadable power is a gap, not zero.
