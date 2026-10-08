@@ -325,7 +325,10 @@ pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), Wor
 
         let started = cx.now();
         let (s, update) = if cx.blocking_pool_handle().is_none() {
-            src.sample()
+            match std::panic::catch_unwind(AssertUnwindSafe(|| src.sample())) {
+                Ok(done) => done,
+                Err(_) => return Outcome::Panicked(PanicPayload::new("sample panicked")),
+            }
         } else {
             let thread = match &mut sampler {
                 Some(thread) => thread,
