@@ -18,7 +18,7 @@
 //! call succeeds. On failure the Error toast "Could not change the autostart entry" shows.
 
 use fluent_bundle::FluentValue;
-use gpui_kit::{App, Entity, FocusHandle, SharedString, Window};
+use gpui_kit::{App, Entity, FocusHandle, SharedString, Window, px};
 use tl_model::command::Tab;
 use tl_model::settings::{NetworkUnit, PROCESS_INTERVAL_MENU_MS, Settings, StartTab};
 use tracing::warn;
@@ -48,6 +48,9 @@ pub(crate) const REFRESH_KEYS: [&str; 6] = [
 /// label key with the locale's own name. English only this round (R-132).
 pub(crate) const SHIPPED_LANGUAGES: [(&str, &str); 1] =
     [("en-US", "shell-menu-settings-language-en-us")];
+
+/// "Start minimized" sits under "Start at login", indented by 16 before the UI scale.
+const START_MINIMIZED_INDENT: f32 = 16.;
 
 gpui_kit::actions!(
     tasklens,
@@ -172,7 +175,8 @@ pub fn build(
             )
         } else {
             menu.item_disabled(minimized, None)
-        };
+        }
+        .indent(px(START_MINIMIZED_INDENT));
         menu.submenu(
             tr(cx, "shell-menu-settings-default-tab"),
             window,
