@@ -607,7 +607,15 @@ impl PerformancePage {
                 else {
                     return false;
                 };
-                let view = page::build_page(&key, &row, &self.hub, &self.demand, cx);
+                // The Overview page reads the sidebar's cards, so it is built here.
+                let view = if row.kind == DeviceKind::Overview {
+                    let (hub, demand) = (self.hub.clone(), self.demand.clone());
+                    let sidebar = &self.sidebar;
+                    cx.new(|cx| overview::OverviewPage::new(key.clone(), hub, demand, sidebar, cx))
+                        .into()
+                } else {
+                    page::build_page(&key, &row, &self.hub, &self.demand, cx)
+                };
                 self.pages.insert(key.clone(), view.clone());
                 view
             }
@@ -778,6 +786,7 @@ fn page_focus(view: &AnyView, cx: &App) -> Option<FocusHandle> {
         .or_else(|| of::<disk::DiskPage>(view, cx))
         .or_else(|| of::<net::NetPage>(view, cx))
         .or_else(|| of::<gpu::GpuPage>(view, cx))
+        .or_else(|| of::<overview::OverviewPage>(view, cx))
 }
 
 fn update_page(view: &AnyView, cx: &mut App, f: impl FnOnce(&mut dyn DevicePage, &mut App)) {
@@ -798,6 +807,10 @@ fn update_page(view: &AnyView, cx: &mut App, f: impl FnOnce(&mut dyn DevicePage,
         Err(view) => view,
     };
     let view = match view.downcast::<gpu::GpuPage>() {
+        Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
+        Err(view) => view,
+    };
+    let view = match view.downcast::<overview::OverviewPage>() {
         Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
         Err(view) => view,
     };
@@ -825,6 +838,10 @@ fn page_focus_order(view: &AnyView, cx: &App) -> SmallVec<[FocusHandle; 4]> {
         Err(view) => view,
     };
     let view = match view.downcast::<gpu::GpuPage>() {
+        Ok(e) => return e.read(cx).focus_order(),
+        Err(view) => view,
+    };
+    let view = match view.downcast::<overview::OverviewPage>() {
         Ok(e) => return e.read(cx).focus_order(),
         Err(view) => view,
     };

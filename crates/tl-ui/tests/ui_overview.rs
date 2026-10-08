@@ -1647,3 +1647,353 @@ mod page {
         assert_eq!(r.merged(), Demand::default());
     }
 }
+
+/// The Overview page inside `PerformancePage` in the main window, reached through the sidebar
+/// (crw.42).
+mod wired {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, FocusHandle, IntoElement, Modifiers, MouseButton,
+        MouseDownEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext, Window, div, px,
+        size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::demand::{CpuDemand, Demand};
+    use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+    use tl_model::ids::DeviceIdx;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
+    use tl_ui::components::kv_grid;
+    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
+    use tl_ui::pages::performance::page::DevicePage as _;
+    use tl_ui::pages::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{
+        self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
+    };
+    use tl_ui::window::titlebar::TitleBarProbe;
+
+    fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from("dev"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind,
+        }
+    }
+
+    /// CPU, memory, a disk and a wired interface. The disk and net cards are hidden by
+    /// [`open`], so only the Overview part asks for disks and nets.
+    fn catalog() -> Vec<DeviceEntry> {
+        vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+            entry(
+                3,
+                DeviceIdentity::Disk {
+                    major: 8,
+                    minor: 0,
+                    name: Arc::from("sda"),
+                    wwn_or_serial: None,
+                },
+                None,
+            ),
+            entry(
+                5,
+                DeviceIdentity::Net {
+                    netns_ino: 1,
+                    ifindex: 2,
+                    name: Arc::from("eth0"),
+                },
+                Some(NetKind::Wired),
+            ),
+        ]
+    }
+
+    struct FakeProcesses(FocusHandle);
+
+    impl gpui_kit::EventEmitter<tl_ui::window::status::StatusChanged> for FakeProcesses {}
+
+    impl Render for FakeProcesses {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use gpui_kit::{InteractiveElement as _, Styled as _};
+            div().track_focus(&self.0).size_full()
+        }
+    }
+
+    impl shell::ShellPage for FakeProcesses {
+        fn primary_focus(&self) -> FocusHandle {
+            self.0.clone()
+        }
+    }
+
+    struct Rig<'a> {
+        page: Entity<PerformancePage>,
+        demand: Entity<DemandAggregator>,
+        vcx: &'a mut VisualTestContext,
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
+
+    /// The main window, 1600 × 1000, on the Performance tab with CPU selected and the sidebar
+    /// focused. Animations are off.
+    fn open(cx: &mut TestAppContext) -> Rig<'_> {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| {
+            s.devices = Arc::new(DeviceCatalog {
+                version: 1,
+                entries: Arc::from(catalog()),
+            });
+        });
+        let client: Arc<dyn EngineClient> = engine;
+        let demand = cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+            kv_grid::init(cx);
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            let mut settings = Settings::default();
+            settings.performance.show_disks = false;
+            settings.performance.show_network_wired = false;
+            cx.set_global(BootSettings {
+                settings,
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            cx.set_global(GlobalHub(hub));
+            cx.set_global(GlobalDemand(demand.clone()));
+            tl_ui::components::toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            tl_ui::pages::performance::actions::bind_keys_performance(cx);
+            cx.set_global(StartOptions::default());
+            set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
+                let page = cx.new(|cx| FakeProcesses(cx.focus_handle().tab_stop(true)));
+                PageSlot::new(page, cx)
+            });
+            cx.set_global(TitleBarProbe {
+                client: Some(true),
+                ..TitleBarProbe::default()
+            });
+            tl_ui::window::menubar::init(cx);
+            shell::init(cx);
+            demand
+        });
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let vcx = VisualTestContext::from_window(handle.into(), cx).into_mut();
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(1600.), px(1000.)));
+        vcx.update(|window, _| window.activate_window());
+        draw(vcx);
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        vcx.dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+        draw(vcx);
+        let page = vcx
+            .read_entity(&main, |m, _| {
+                m.page_entity::<PerformancePage>(Tab::Performance)
+            })
+            .expect("PerformancePage built");
+        Rig { page, demand, vcx }
+    }
+
+    fn key(s: &str) -> DeviceKey {
+        DeviceKey(Arc::from(s))
+    }
+
+    fn select(r: &mut Rig, k: &str) {
+        let page = r.page.clone();
+        let k = key(k);
+        r.vcx.update(|_, cx| {
+            let sidebar = page.read(cx).sidebar().clone();
+            sidebar.update(cx, |s, cx| s.select(k, cx));
+        });
+        draw(r.vcx);
+    }
+
+    fn selected(r: &mut Rig) -> Option<String> {
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.read(cx).selected().map(|k| k.0.to_string()))
+    }
+
+    fn overview(r: &mut Rig) -> Option<Entity<OverviewPage>> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            page.read(cx)
+                .page(&key(OVERVIEW_KEY))
+                .and_then(|v| v.clone().downcast::<OverviewPage>().ok())
+        })
+    }
+
+    fn merged(r: &mut Rig) -> Demand {
+        let demand = r.demand.clone();
+        r.vcx.update(|_, cx| demand.read(cx).merged())
+    }
+
+    /// The Overview part is in the merged demand: only it asks for disks, nets and GPUs here.
+    fn has_overview_part(d: &Demand) -> bool {
+        d.cpu == CpuDemand::PerCore && d.cpu_fast && d.disks && d.nets && d.gpus
+    }
+
+    fn mouse(
+        cx: &mut VisualTestContext,
+        button: MouseButton,
+        at: gpui_kit::Point<gpui_kit::Pixels>,
+    ) {
+        cx.simulate_event(MouseDownEvent {
+            button,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn overview_built_on_select(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+        assert!(overview(&mut r).is_none(), "built on first visit only");
+        // The Overview card is the first card: sp4 (8 px) below the sidebar top.
+        let panel = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("the sidebar");
+        let card = r.vcx.debug_bounds("perf-card").expect("a card");
+        let at = gpui_kit::point(
+            card.center().x,
+            panel.top() + px(8.) + card.size.height / 2.,
+        );
+        mouse(r.vcx, MouseButton::Left, at);
+        draw(r.vcx);
+        assert_eq!(selected(&mut r).as_deref(), Some(OVERVIEW_KEY));
+        let page = overview(&mut r).expect("an OverviewPage");
+        assert!(r.vcx.read_entity(&page, |p, _| p.is_active()));
+    }
+
+    #[gpui_kit::test]
+    fn overview_demand_follows_selection(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        select(&mut r, OVERVIEW_KEY);
+        assert!(has_overview_part(&merged(&mut r)), "{:?}", merged(&mut r));
+        select(&mut r, "cpu");
+        let on_cpu = merged(&mut r);
+        assert!(!on_cpu.disks && !on_cpu.nets && !on_cpu.gpus, "{on_cpu:?}");
+        assert!(on_cpu.cpu_fast, "the CPU page part is sent");
+        let page = overview(&mut r).expect("kept");
+        assert!(!r.vcx.read_entity(&page, |p, _| p.is_active()));
+        select(&mut r, OVERVIEW_KEY);
+        assert!(has_overview_part(&merged(&mut r)));
+    }
+
+    #[gpui_kit::test]
+    fn overview_demand_withdrawn_on_tab_leave(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        select(&mut r, OVERVIEW_KEY);
+        assert!(has_overview_part(&merged(&mut r)));
+        r.vcx
+            .dispatch_action(tl_ui::actions::SelectTab(Tab::Processes as usize));
+        draw(r.vcx);
+        let away = merged(&mut r);
+        assert!(!away.disks && !away.cpu_fast, "{away:?}");
+        r.vcx
+            .dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+        draw(r.vcx);
+        assert!(has_overview_part(&merged(&mut r)));
+    }
+
+    #[gpui_kit::test]
+    fn overview_summary_round_trip(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        select(&mut r, OVERVIEW_KEY);
+        r.vcx.simulate_keystrokes("ctrl-m");
+        draw(r.vcx);
+        let page = r.page.clone();
+        assert!(r.vcx.read_entity(&page, |p, _| p.summary().is_some()));
+        let during = merged(&mut r);
+        assert!(!during.disks && !during.nets, "{during:?}");
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        assert!(r.vcx.read_entity(&page, |p, _| p.summary().is_none()));
+        assert_eq!(selected(&mut r).as_deref(), Some(OVERVIEW_KEY));
+        assert!(has_overview_part(&merged(&mut r)));
+    }
+
+    #[gpui_kit::test]
+    fn overview_page_menu_and_copy(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        select(&mut r, OVERVIEW_KEY);
+        let at = r
+            .vcx
+            .debug_bounds(PAGE_PANEL_ID)
+            .expect("the page panel")
+            .center();
+        mouse(r.vcx, MouseButton::Right, at);
+        let labels: Vec<(MenuEntryKind, String)> = r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("a context menu is open");
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| (e.kind, e.label.map(|l| l.to_string()).unwrap_or_default()))
+                .collect()
+        });
+        assert_eq!(
+            labels[..3],
+            [
+                (MenuEntryKind::Item, "Copy".to_owned()),
+                (MenuEntryKind::Item, "Graph Summary View".to_owned()),
+                (MenuEntryKind::Submenu, "Time range".to_owned()),
+            ]
+        );
+        let page = overview(&mut r).expect("an OverviewPage");
+        let mut text = String::new();
+        r.vcx.read_entity(&page, |p, _| p.copy_text(&mut text));
+        assert!(text.starts_with("Overview"), "{text:?}");
+    }
+
+    #[gpui_kit::test]
+    fn overview_page_kept(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        select(&mut r, OVERVIEW_KEY);
+        let first = overview(&mut r).expect("an OverviewPage").entity_id();
+        let page = r.page.clone();
+        let count = r.vcx.read_entity(&page, |p, _| p.page_count());
+        select(&mut r, "cpu");
+        select(&mut r, OVERVIEW_KEY);
+        assert_eq!(overview(&mut r).expect("kept").entity_id(), first);
+        assert_eq!(r.vcx.read_entity(&page, |p, _| p.page_count()), count);
+    }
+}
