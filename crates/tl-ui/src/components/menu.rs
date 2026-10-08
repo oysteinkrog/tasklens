@@ -111,10 +111,13 @@ enum Entry {
         tooltip: Option<SharedString>,
         /// Running it leaves the menu open ([`TlMenu::keep_open`]).
         keep_open: bool,
+        /// Space before the label ([`TlMenu::indent`]), already scaled.
+        indent: Pixels,
     },
     Disabled {
         label: SharedString,
         tooltip: Option<SharedString>,
+        indent: Pixels,
     },
     Painted {
         label: SharedString,
@@ -248,6 +251,7 @@ impl TlMenu {
             mark: Mark::None,
             tooltip: None,
             keep_open: false,
+            indent: px(0.),
         });
         self
     }
@@ -261,7 +265,20 @@ impl TlMenu {
         self.entries.push(Entry::Disabled {
             label: label.into(),
             tooltip,
+            indent: px(0.),
         });
+        self
+    }
+
+    /// Moves the label of the item or disabled item added last right by `w` before the UI
+    /// scale, for a row that depends on the one above it (UI-SHL-040). On other rows this does
+    /// nothing.
+    pub fn indent(mut self, w: Pixels) -> Self {
+        if let Some(Entry::Item { indent, .. } | Entry::Disabled { indent, .. }) =
+            self.entries.last_mut()
+        {
+            *indent = w * self.ui_scale;
+        }
         self
     }
 
@@ -294,6 +311,7 @@ impl TlMenu {
             mark,
             tooltip: None,
             keep_open: false,
+            indent: px(0.),
         });
         self
     }
@@ -425,6 +443,8 @@ pub struct MenuEntryInfo {
     pub slider: Option<Entity<SliderState>>,
     /// A check item that leaves the menu open when run.
     pub keep_open: bool,
+    /// The space before the label of an item or disabled item ([`TlMenu::indent`]).
+    pub indent: Pixels,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -496,6 +516,10 @@ impl TlMenuPopup {
                         ..
                     }
                 );
+                let indent = match e {
+                    Entry::Item { indent, .. } | Entry::Disabled { indent, .. } => *indent,
+                    _ => px(0.),
+                };
                 let (kind, tooltip, checked, action, submenu) = match e {
                     Entry::Item {
                         action,
@@ -543,6 +567,7 @@ impl TlMenuPopup {
                     submenu,
                     slider,
                     keep_open,
+                    indent,
                 }
             })
             .collect()
@@ -1000,6 +1025,7 @@ impl TlMenuPopup {
                 action,
                 mark,
                 tooltip,
+                indent,
                 ..
             } => {
                 let hint =
@@ -1025,6 +1051,7 @@ impl TlMenuPopup {
                 };
                 item.px(m.sp[4])
                     .children(mark_column(*mark))
+                    .when(*indent > px(0.), |d| d.child(div().flex_none().w(*indent)))
                     .child(text)
                     .children(hint)
                     .on_click(
@@ -1032,9 +1059,14 @@ impl TlMenuPopup {
                     )
                     .into_any_element()
             }
-            Entry::Disabled { label, tooltip } => row(Some(label))
+            Entry::Disabled {
+                label,
+                tooltip,
+                indent,
+            } => row(Some(label))
                 .px(m.sp[4])
                 .children(mark_column(Mark::None))
+                .when(*indent > px(0.), |d| d.child(div().flex_none().w(*indent)))
                 .child(menu_label(label.clone(), tooltip.clone(), true, window, cx))
                 .into_any_element(),
             Entry::Painted {
