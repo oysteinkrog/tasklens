@@ -640,16 +640,75 @@ enum Value<'a> {
 /// Fills `out` for one cell. Sets `bits` and `validity` always; writes `text` only when
 /// `out.want_text` is set and the cell has a value to show, so a cache hit formats nothing
 /// (ADR-009). Arc texts go to `out.arc` and never to `text`.
+///
+/// A Σ column of a row with a [`subtree_total`] shows the engine's subtree sum (PROC-019).
 pub fn fill_cell(row: RowRef, col: &ProcColumn, ctx: &CellCtx, out: &mut CellOut) {
     let value = match row {
         RowRef::Group(_, RowKind::GroupHeader) => Value::Blank,
         RowRef::Group(g, _) => group_value(g, col.id, ctx),
-        RowRef::Record(r, t, _) => {
-            let x = t.record.and_then(|i| ctx.extras.get(i as usize));
-            record_value(r, t, x, col.id, ctx)
-        }
+        RowRef::Record(r, t, _) => match subtree_total(row, ctx) {
+            Some(g) if subtree_column(col.id) => group_value(g, col.id, ctx),
+            _ => {
+                let x = t.record.and_then(|i| ctx.extras.get(i as usize));
+                record_value(r, t, x, col.id, ctx)
+            }
+        },
     };
     write_value(value, ctx, out);
+}
+
+// ---- Subtree totals (PROC-019, R-005, UI-PRC-002) ----
+
+/// Drawn in `text_secondary` before a subtree sum: U+03A3 and a space.
+pub const SUBTREE_PREFIX: &str = "\u{03a3} ";
+
+/// The columns that show a subtree sum: CPU (all percent kinds), Disk and its rates, Network,
+/// GPU, GPU dedicated memory, Threads, Handles and Memory. These are the columns the engine's
+/// subtree row holds a sum for; the others keep the process's own value and get no prefix.
+pub fn subtree_column(id: ColumnId) -> bool {
+    use ColumnId as C;
+    matches!(
+        id,
+        C::Cpu
+            | C::CpuKernel
+            | C::CpuUser
+            | C::CpuRelative
+            | C::Memory
+            | C::Disk
+            | C::DiskReadRate
+            | C::DiskWriteRate
+            | C::DiskTotalRate
+            | C::Network
+            | C::NetSendRate
+            | C::NetRecvRate
+            | C::Gpu
+            | C::GpuMemDedicated
+            | C::Threads
+            | C::Handles
+    )
+}
+
+/// The engine's subtree sum for `row`: `Some` only for a process row with children while
+/// `processes.subtree_totals` is on and the view holds its sum. App, unit, pseudo and group
+/// rows always aggregate and have none. The UI never sums.
+pub fn subtree_total<'a>(row: RowRef<'a>, ctx: &CellCtx<'a>) -> Option<&'a GroupRow> {
+    let RowRef::Record(_, t, _) = row else {
+        return None;
+    };
+    if !ctx.settings.processes.subtree_totals || !t.has_children {
+        return None;
+    }
+    t.subtree.and_then(|i| ctx.view.subtree.get(i as usize))
+}
+
+/// The colour of [`SUBTREE_PREFIX`]: `text_secondary`, or `text_selected_secondary` on a
+/// selected row.
+pub fn subtree_prefix_color(st: PaintState, theme: &TlTheme) -> Hsla {
+    if st.selected {
+        theme.text_selected_secondary
+    } else {
+        theme.text_secondary
+    }
 }
 
 /// Splits PID cell text into the PID and the " +N" part drawn in `text_secondary`.
@@ -1618,6 +1677,8 @@ pub struct PaintState {
     pub heat_intensity_pct: u8,
     /// `tables.dim_zero_values` (R-075).
     pub dim_zero: bool,
+    /// The row has a [`subtree_total`]: its [`subtree_column`] cells draw [`SUBTREE_PREFIX`].
+    pub subtree: bool,
 }
 
 /// Text opacity of a measured zero when `tables.dim_zero_values` is on (PROC-041).
@@ -1861,6 +1922,15 @@ pub fn render_metric_cell(
     cell = cell
         .debug_selector(|| "TlProcCell-text".into())
         .text_color(colors.main);
+    if st.subtree && subtree_column(col.id) {
+        cell = cell.child(
+            div()
+                .debug_selector(|| "TlProcCell-subtree".into())
+                .flex_none()
+                .text_color(subtree_prefix_color(st, theme))
+                .child(SharedString::new_static(SUBTREE_PREFIX)),
+        );
+    }
     if colors.split >= text.len() {
         return cell.child(text);
     }

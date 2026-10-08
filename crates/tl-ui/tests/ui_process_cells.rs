@@ -250,6 +250,7 @@ mod values {
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, fill_cell, process_column, split_pid_text,
+        subtree_column, subtree_total,
     };
     use tl_ui::table::cells::CellOut;
     use tl_ui::table::tree_table::RowKind;
@@ -674,6 +675,68 @@ mod values {
         assert_ne!(collapsed.bits, expanded.bits);
     }
 
+    /// Subtree totals (PROC-019, pdu.33): with `processes.subtree_totals` on, only a process row
+    /// with children shows the engine's subtree sum in its Σ columns.
+    #[test]
+    fn subtree_totals_prefix_only_with_children() {
+        let mut f = Fixture::new(record(), key_words());
+        // The engine's sum: CPU 12.5%, 40 threads. The record alone has 3.3%.
+        f.view.subtree = Arc::from(vec![group(GroupRowKind::App)]);
+        f.settings.processes.subtree_totals = true;
+        let parent = TableRow {
+            subtree: Some(0),
+            ..table_row(true, true, 3)
+        };
+        let leaf = table_row(false, false, 0);
+        let has_total = |f: &Fixture, t: &TableRow| {
+            subtree_total(RowRef::Record(&f.records[0], t, RowKind::Process), &f.ctx()).is_some()
+        };
+
+        // On, a parent: the Σ columns show the sum, the others the process's own value.
+        assert!(has_total(&f, &parent));
+        assert_eq!(shown(&f.record_cell(&parent, ColumnId::Cpu)), "12.5%");
+        assert_eq!(shown(&f.record_cell(&parent, ColumnId::Threads)), "40");
+        assert_eq!(
+            shown(&f.record_cell(&parent, ColumnId::CpuTime)),
+            f.text(ColumnId::CpuTime)
+        );
+        assert_eq!(shown(&f.record_cell(&parent, ColumnId::Pid)), "11528");
+
+        // On, a leaf: no sum, so no prefix.
+        assert!(!has_total(&f, &leaf));
+        assert_eq!(shown(&f.record_cell(&leaf, ColumnId::Cpu)), "3.3%");
+
+        // An app row aggregates by itself and never takes a subtree sum.
+        let app = group(GroupRowKind::App);
+        assert!(subtree_total(RowRef::Group(&app, RowKind::App), &f.ctx()).is_none());
+
+        // Off, a parent the engine still sent a sum for (a collapsed one): no sum, no prefix.
+        f.settings.processes.subtree_totals = false;
+        assert!(!has_total(&f, &parent));
+        assert_eq!(shown(&f.record_cell(&parent, ColumnId::Cpu)), "3.3%");
+
+        for id in [
+            ColumnId::Cpu,
+            ColumnId::CpuRelative,
+            ColumnId::Memory,
+            ColumnId::Disk,
+            ColumnId::Network,
+            ColumnId::Gpu,
+            ColumnId::Threads,
+            ColumnId::Handles,
+        ] {
+            assert!(subtree_column(id), "{}", id.as_str());
+        }
+        for id in [
+            ColumnId::Name,
+            ColumnId::Pid,
+            ColumnId::CpuTime,
+            ColumnId::User,
+        ] {
+            assert!(!subtree_column(id), "{}", id.as_str());
+        }
+    }
+
     #[gpui_kit::test]
     fn app_and_unit_rows_blank_pid_and_type_text(cx: &mut TestAppContext) {
         let words = cx.update(|cx| {
@@ -890,7 +953,7 @@ mod paint {
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, DIM_ZERO_OPACITY, GroupMembers, PaintState, dims_zero, heat_alpha,
         heat_background, metric_text_colors, metric_text_style, process_column, render_metric_cell,
-        text_colors,
+        subtree_prefix_color, text_colors,
     };
     use tl_ui::table::cells::CellOut;
     use tl_ui::text::style::TNUM;
@@ -962,6 +1025,7 @@ mod paint {
         heat_on: true,
         heat_intensity_pct: 50,
         dim_zero: false,
+        subtree: false,
     };
 
     /// A Valid CPU-style cell holding `value` as f32 bits.
@@ -1347,6 +1411,7 @@ mod paint {
         heat_on: false,
         heat_intensity_pct: 0,
         dim_zero: true,
+        subtree: false,
     };
 
     /// The main text alpha of `out` in `col`, as a share of `text_primary`'s alpha.
@@ -1453,6 +1518,80 @@ mod paint {
         );
         assert!(bounds(vcx, "TlProcCell-glyph").is_some(), "the glyph path");
         assert!(bounds(vcx, "TlProcCell-text").is_none());
+    }
+
+    /// The Σ prefix (UI-PRC-002, pdu.33): drawn before the value of a Σ column on a row with a
+    /// subtree total, in `text_secondary`; never on other columns, other rows or glyph cells.
+    #[gpui_kit::test]
+    fn subtree_prefix_drawn_before_the_value(cx: &mut TestAppContext) {
+        let t = theme(cx);
+        let on = PaintState {
+            subtree: true,
+            ..PaintState::default()
+        };
+        assert_eq!(subtree_prefix_color(on, &t), t.text_secondary);
+        let selected = PaintState {
+            selected: true,
+            ..on
+        };
+        assert_eq!(
+            subtree_prefix_color(selected, &t),
+            t.text_selected_secondary
+        );
+
+        let (view, vcx) = open(
+            cx,
+            Host {
+                out: pct_out(12.5),
+                text: "12.5%".into(),
+                col: ColumnId::Cpu,
+                st: on,
+            },
+        );
+        let cell = bounds(vcx, "TlProcCell-text").expect("text cell");
+        let prefix = bounds(vcx, "TlProcCell-subtree").expect("the prefix");
+        assert!(prefix.size.width > px(0.));
+        assert!(prefix.left() >= cell.left() && prefix.right() < cell.right() - px(8.));
+
+        let mut set = |host: Host| {
+            view.update(vcx, |h, cx| {
+                *h = host;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            bounds(vcx, "TlProcCell-subtree")
+        };
+        // A row without a subtree total.
+        let none = set(Host {
+            out: pct_out(3.3),
+            text: "3.3%".into(),
+            col: ColumnId::Cpu,
+            st: PaintState::default(),
+        });
+        assert!(none.is_none(), "no prefix without a subtree total");
+        // A column without a sum.
+        let pid = set(Host {
+            out: CellOut {
+                bits: 11528,
+                validity: Validity::Valid,
+                ..CellOut::default()
+            },
+            text: "11528".into(),
+            col: ColumnId::Pid,
+            st: on,
+        });
+        assert!(pid.is_none(), "no prefix on PID");
+        // A glyph cell.
+        let glyph = set(Host {
+            out: CellOut {
+                validity: Validity::WarmingUp,
+                ..pct_out(0.0)
+            },
+            text: "0%".into(),
+            col: ColumnId::Cpu,
+            st: on,
+        });
+        assert!(glyph.is_none(), "no prefix on a glyph");
     }
 }
 
