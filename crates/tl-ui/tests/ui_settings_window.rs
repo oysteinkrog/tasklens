@@ -693,7 +693,7 @@ fn graphs_reset_button(cx: &mut TestAppContext) {
             move |_: &tl_ui::pages::minigraph::actions::ResetMinigraphLayout, _| {
                 count.set(count.get() + 1)
             },
-        )
+        );
     });
     let (_, mut vcx) = open(cx, 1);
     let graphs = page(cx, PageId::Graphs);
