@@ -28,10 +28,10 @@ use std::sync::Arc;
 use gpui_kit::component::{ResizableState, h_flex, h_resizable, resizable_panel};
 use gpui_kit::private::schemars::JsonSchema;
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyView, App, AppContext as _, AsyncApp, Context, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, Point, Render, StyleRefinement, Styled as _,
-    Subscription, WeakEntity, Window, div, px,
+    Animation, AnimationExt as _, AnyView, App, AppContext as _, AsyncApp, ClipboardItem, Context,
+    Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -41,9 +41,10 @@ use tl_model::ids::DeviceIdx;
 use tl_model::settings::DeviceVisibility;
 
 use self::actions::{
-    PERFORMANCE_CONTEXT, PerfJumpToType, PerfSelectDevice, PerfSetGraphRange, PerfToggleSidebar,
-    PerfToggleSummaryMode,
+    PERFORMANCE_CONTEXT, PerfCopyValue, PerfJumpToType, PerfSelectDevice, PerfSetGraphRange,
+    PerfToggleSidebar, PerfToggleSummaryMode,
 };
+use self::details::ClickedValue;
 use self::menu::{PageMenuCtx, VIEW_KINDS, page_menu};
 use self::page::DevicePage;
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -338,6 +339,8 @@ pub struct PerformancePage {
     demand: Entity<DemandAggregator>,
     /// Key context "Performance".
     pub(crate) focus: FocusHandle,
+    /// The Details value the open page menu was opened on, for "Copy value".
+    clicked_value: Option<SharedString>,
     _subs: SmallVec<[Subscription; 1]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -375,6 +378,7 @@ impl PerformancePage {
             hub,
             demand,
             focus: cx.focus_handle(),
+            clicked_value: None,
             summary: None,
             summary_sub: None,
             leaving: None,
@@ -701,10 +705,17 @@ impl PerformancePage {
         let focus = page_focus(&view, cx).unwrap_or_else(|| self.focus.clone());
         let summary_on = self.summary.is_some();
         let sidebar = self.sidebar.clone();
+        // Taken, so a later menu opened another way does not see an old value.
+        self.clicked_value = cx
+            .has_global::<ClickedValue>()
+            .then(|| cx.remove_global::<ClickedValue>().0)
+            .flatten();
+        let clicked_value = self.clicked_value.is_some();
         let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
             let types = view_types(sidebar.read(cx));
             let ctx = PageMenuCtx {
                 view_types: Some(&types),
+                clicked_value,
                 ..page_menu_ctx(summary_on, cx)
             };
             let mut slot = Some(menu);
@@ -715,6 +726,14 @@ impl PerformancePage {
             slot.expect("the menu")
         });
         open_context_menu_at(at, window, cx, menu);
+    }
+
+    /// `PerfCopyValue` ("Copy value" in the page menu): copies the value the menu was opened on,
+    /// with no toast (UI-PRF-020).
+    fn on_copy_value(&mut self, _: &PerfCopyValue, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = &self.clicked_value {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        }
     }
 
     /// `PerfJumpToType`: selects the first visible card of `kind`.
@@ -772,6 +791,7 @@ pub fn page_menu_ctx(summary_on: bool, cx: &App) -> PageMenuCtx<'static> {
         summary_on,
         ranges_long_enabled: true,
         view_types: None,
+        clicked_value: false,
         tray_available: None,
     }
 }
@@ -916,14 +936,21 @@ impl Render for PerformancePage {
         let page = div()
             .debug_selector(|| PAGE_PANEL_ID.into())
             .size_full()
-            // Right-click anywhere on the device page: the page menu (UI-PRF-015).
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.open_page_menu(ev.position, window, cx);
-                }),
-            )
+            // Right-click anywhere on the device page: the page menu (UI-PRF-015). The press is
+            // seen here before the Details grid takes it, and the menu opens once the grid has
+            // named the value under the pointer in `ClickedValue`. The grid stops a press on a
+            // value, so it opens no menu of its own and this one opens once.
+            .capture_any_mouse_down(cx.listener(|_, ev: &MouseDownEvent, window, cx| {
+                if ev.button != MouseButton::Right {
+                    return;
+                }
+                cx.set_global(ClickedValue(None));
+                let at = ev.position;
+                cx.defer_in(window, move |this, window, cx| {
+                    this.open_page_menu(at, window, cx)
+                });
+            }))
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .children(
                 self.selected_view()
                     .map(|v| v.cached(StyleRefinement::default().size_full())),
@@ -982,6 +1009,7 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_select_device))
             .on_action(cx.listener(Self::on_toggle_summary))
             .on_action(cx.listener(Self::on_set_graph_range))
+            .on_action(cx.listener(Self::on_copy_value))
             .size_full()
             .children(animated)
             .child(split);

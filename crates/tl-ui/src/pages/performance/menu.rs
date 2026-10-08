@@ -5,8 +5,8 @@
 use gpui_kit::{App, SharedString, Window};
 
 use super::actions::{
-    PerfAddTrayGraph, PerfCopyDeviceInfo, PerfEnterEditMode, PerfJumpToType, PerfSetGraphRange,
-    PerfSetPageVisible, PerfToggleSummaryMode,
+    PerfAddTrayGraph, PerfCopyDeviceInfo, PerfCopyValue, PerfEnterEditMode, PerfJumpToType,
+    PerfSetGraphRange, PerfSetPageVisible, PerfToggleSummaryMode,
 };
 use super::page::DevicePage;
 use super::{DeviceKey, DeviceKind};
@@ -76,6 +76,8 @@ pub struct PageMenuCtx<'a> {
     /// Device kinds for the "View >" submenu in [`VIEW_KINDS`] order, with whether a device of
     /// that kind is visible. `None` leaves the submenu out (a summary tile's menu).
     pub view_types: Option<&'a [(DeviceKind, bool)]>,
+    /// The right-click landed on a Details value: "Copy value" comes first (UI-PRF-020).
+    pub clicked_value: bool,
     /// `None` before P3 leaves the tray item out.
     pub tray_available: Option<bool>,
 }
@@ -100,8 +102,8 @@ pub const VIEW_KINDS: [(DeviceKind, &str); 7] = [
     (DeviceKind::Battery, "perf-group-batteries"),
 ];
 
-/// The page menu of `page`: the common items, then the page's own items, then "View >" and the
-/// later slots.
+/// The page menu of `page`: "Copy value" on a Details value, the common items, then the page's
+/// own items, then "View >" and the later slots.
 pub fn page_menu(
     menu: TlMenu,
     page: &dyn DevicePage,
@@ -109,6 +111,11 @@ pub fn page_menu(
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
+    let menu = if ctx.clicked_value {
+        menu.item(tr(cx, "perf-menu-copy-value"), Box::new(PerfCopyValue))
+    } else {
+        menu
+    };
     let menu = page_menu_common(menu, ctx, window, cx).separator();
     // `TlMenu` drops a doubled or trailing separator, so a page with no items leaves one.
     let menu = page.menu_items(menu, window, cx).separator();

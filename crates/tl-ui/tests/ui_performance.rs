@@ -1846,6 +1846,12 @@ mod summary {
         let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
         vcx.dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
         draw(vcx);
+        // Let the tab switch fade (`motion.tab_switch_ms`, timed on the test clock) end, or it
+        // asks for a frame on every later draw.
+        let tab_ms = vcx.update(|_, cx| TlSettings::settings(cx).motion.tab_switch_ms);
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(u64::from(tab_ms)));
+        draw(vcx);
         let page = vcx
             .read_entity(&main, |m, _| {
                 m.page_entity::<PerformancePage>(Tab::Performance)
@@ -2668,5 +2674,142 @@ mod summary {
         let hub = r.hub.clone();
         assert!(r.vcx.read_entity(&hub, |h, _| h.is_hidden()));
         assert_eq!(merged(&mut r), Demand::default());
+    }
+
+    /// Publishes a CPU speed of 4631 MHz and returns the bounds of the CPU page's Speed value.
+    fn speed_value(r: &mut Rig) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        use tl_ui::pages::performance::cpu::CpuPage;
+        use tl_ui::pages::performance::cpu_details::ROW_SPEED;
+        use tl_ui::pages::performance::page::DevicePage as _;
+
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.cpu.freq_mhz = tl_model::system::Metric::valid(4631);
+        });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let n = r.vcx.update(|_, cx| {
+            let cpu = page
+                .read(cx)
+                .page(&key("cpu"))
+                .expect("CPU page built")
+                .clone()
+                .downcast::<CpuPage>()
+                .expect("a CpuPage");
+            cpu.read(cx)
+                .details()
+                .rows
+                .iter()
+                .filter(|row| !row.hidden)
+                .position(|row| row.label == ROW_SPEED)
+                .expect("a Speed row")
+        });
+        let selector: &'static str = format!("TlKv-value-{n}").leak();
+        r.vcx.debug_bounds(selector).expect("Speed value drawn")
+    }
+
+    fn clipboard(r: &mut Rig) -> Option<String> {
+        r.vcx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    /// Details values are selectable text (U-46): a drag over the Speed value and Ctrl+C copy
+    /// the value alone.
+    #[gpui_kit::test]
+    fn value_drag_select_ctrl_c_copies_value(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let value = speed_value(&mut r);
+        let (from, to) = (
+            gpui_kit::point(value.left() + px(1.), value.center().y),
+            gpui_kit::point(value.right() - px(1.), value.center().y),
+        );
+        r.vcx
+            .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        r.vcx
+            .simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+        r.vcx
+            .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        draw(r.vcx);
+        r.vcx.simulate_keystrokes("ctrl-c");
+        r.vcx.run_until_parked();
+        assert_eq!(clipboard(&mut r).as_deref(), Some("4631 MHz"));
+    }
+
+    /// Without a selection, Ctrl+C on the page goes on to the page's Copy (E24-016), and the
+    /// grid copies nothing.
+    #[gpui_kit::test]
+    fn copy_without_selection_goes_to_page_copy(cx: &mut TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use tl_ui::pages::performance::actions::PerfCopyDeviceInfo;
+
+        let mut r = open(cx, 1600., 1000., true);
+        let value = speed_value(&mut r);
+        // A click focuses the grid but selects nothing.
+        r.vcx.simulate_click(value.center(), Modifiers::none());
+        draw(r.vcx);
+        let copies = Rc::new(Cell::new(0));
+        r.vcx.update({
+            let copies = copies.clone();
+            move |_, cx| cx.on_action(move |_: &PerfCopyDeviceInfo, _| copies.set(copies.get() + 1))
+        });
+        r.vcx.simulate_keystrokes("ctrl-c");
+        r.vcx.run_until_parked();
+        assert_eq!(copies.get(), 1, "PerfCopyDeviceInfo dispatched");
+        assert_eq!(clipboard(&mut r), None, "the grid copied nothing");
+    }
+
+    /// A right-click on a value opens the page menu with "Copy value" first; it copies the
+    /// value.
+    #[gpui_kit::test]
+    fn copy_value_context_item(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let value = speed_value(&mut r);
+        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        right_click(r.vcx, value.center());
+        let list = open_menu(&mut r);
+        assert_eq!(
+            labels(&list)[..2],
+            [
+                (MenuEntryKind::Item, "Copy value"),
+                (MenuEntryKind::Item, "Copy"),
+            ]
+        );
+        r.vcx.simulate_keystrokes("down enter");
+        r.vcx.run_until_parked();
+        assert_eq!(clipboard(&mut r).as_deref(), Some("4631 MHz"));
+
+        // A right-click off the values has no "Copy value".
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        let list = open_menu(&mut r);
+        assert_eq!(labels(&list)[0], (MenuEntryKind::Item, "Copy"));
+    }
+
+    /// A right-click on a value opens only the page menu: the grid's own menu (Copy value,
+    /// Copy row, Copy section) stays shut, and the page menu has the focus.
+    #[gpui_kit::test]
+    fn right_click_value_opens_one_menu(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let value = speed_value(&mut r);
+        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        right_click(r.vcx, value.center());
+        draw(r.vcx);
+        let menu = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("the page menu is open");
+        let focused = r
+            .vcx
+            .update(|window, cx| menu.read(cx).focus_handle(cx).contains_focused(window, cx));
+        assert!(
+            focused,
+            "the page menu has the focus, no other menu took it"
+        );
+        // The second item of the grid's menu is "Copy row"; the page menu's is "Copy", which
+        // copies nothing here.
+        r.vcx.simulate_keystrokes("down down enter");
+        r.vcx.run_until_parked();
+        assert_eq!(clipboard(&mut r), None, "no grid menu item ran");
     }
 }

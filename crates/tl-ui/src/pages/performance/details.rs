@@ -11,16 +11,17 @@
 
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
+use std::rc::Rc;
 
 use fluent_bundle::FluentValue;
-use gpui_kit::{Action, App, SharedString, px};
+use gpui_kit::{Action, App, Global, SharedString, px};
 use smallvec::SmallVec;
 use tl_model::units::short_age;
 use tl_model::validity::Validity;
 
 use crate::actions::OpenAdditionalSetup;
 use crate::components::kv_grid::{
-    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
+    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, value_copy_form,
 };
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::theme::UiMetrics;
@@ -614,17 +615,28 @@ fn strip_template<'a>(template: &Template, text: &'a str) -> &'a str {
         .unwrap_or(text)
 }
 
+/// The copy form of the Details value under the last right-click, for the page menu's "Copy
+/// value" (UI-PRF-020). The Performance tab clears it when a right press starts and reads it
+/// once the press is handled; `None` when the press was not on a value.
+#[derive(Default)]
+pub struct ClickedValue(pub Option<SharedString>);
+
+impl Global for ClickedValue {}
+
 /// The Details grid: stacked label over value, three columns `sp6` apart, pairs `kv_row_h`
 /// apart, filled left to right and top to bottom in model order. Translates the labels first if
-/// needed.
+/// needed. Values are selectable text (U-46). A right-click on a value names it in
+/// [`ClickedValue`] instead of opening the grid's own menu, so only the page menu opens.
 pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyValueGrid {
     model.refresh_labels(cx);
+    let rows: Vec<TlKvRow> = model.to_kv_rows().collect();
+    let values: Rc<[SharedString]> = rows.iter().map(|r| r.value.text.clone()).collect();
     let section = TlKvSection {
         title: None,
         blocks: vec![TlKvBlock {
             indent: None,
             heading: None,
-            rows: model.to_kv_rows().collect(),
+            rows,
         }],
     };
     // The grid's row height is half a stacked pair.
@@ -633,6 +645,12 @@ pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyVa
         .columns(3)
         .column_gap(m.sp[6])
         .row_height(px(KV_ROW_H / 2. * m.ui_scale))
+        .on_context_menu(move |n, _, _, cx| {
+            let value = values
+                .get(n)
+                .map(|v| SharedString::from(value_copy_form(v).into_owned()));
+            cx.set_global(ClickedValue(value));
+        })
 }
 
 #[cfg(test)]
