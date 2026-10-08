@@ -834,3 +834,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - summary_fades_page_out_then_tiles_in fails (frame per draw after fade): pdu-51 to investigate after the wlf.34 bench.
 - crw.24: U-46 found real selection (gpui-kit SelectableText in TlKeyValueGrid); fallback dropped. Right-click on a Details value opens the page menu with Copy value first (page.rs hook); Esc unchanged.
 - wlf.34 closed on profile (bounds win; paint copy stays, gpui paint_path copies). Phase table on wlf.28. Filed wlf.36 (P0): cached card views, notify only changed cards. wlf.35 deferred to P2.
+- gma.26: accepted (Value is the name column for the eye slot; tab writes its own Copy as table; Space toggles reveal; masked rows filter by name only and copy as dots; env_mask toggle re-masks all windows).
