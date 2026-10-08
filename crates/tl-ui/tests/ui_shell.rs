@@ -5452,4 +5452,158 @@ mod startup_items {
         cx.run_until_parked();
         assert_eq!(r.ip_fetches(), 1, "sent again 1 s later");
     }
+
+    // ---- Shield slot and unlock at launch (E20-026) ----
+
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui_kit::{AppContext as _, Context as GpuiContext, FocusHandle, Render, Window, div};
+    use tl_model::health::HelperState;
+    use tl_ui::components::shield::StartHelperSession;
+    use tl_ui::window::main::{HelperInstalled, PageSlot, ShellPage, set_test_page};
+    use tl_ui::window::status::StatusChanged;
+
+    /// A blank page for the tabs that have no page arm yet.
+    struct BlankPage(FocusHandle);
+
+    impl gpui_kit::EventEmitter<StatusChanged> for BlankPage {}
+
+    impl Render for BlankPage {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut GpuiContext<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            div()
+        }
+    }
+
+    impl ShellPage for BlankPage {
+        fn primary_focus(&self) -> FocusHandle {
+            self.0.clone()
+        }
+    }
+
+    fn blank_page(_: &mut Window, cx: &mut GpuiContext<MainWindow>) -> PageSlot {
+        let page = cx.new(|cx| BlankPage(cx.focus_handle()));
+        PageSlot::new(page, cx)
+    }
+
+    /// `init` with the helper `installed`, `privilege.unlock_at_launch`, Shift held at launch,
+    /// blank pages for the unbuilt tabs, and a counter of `StartHelperSession`.
+    fn helper_rig(
+        cx: &mut TestAppContext,
+        installed: bool,
+        unlock: bool,
+        shift: bool,
+    ) -> (Rig, Rc<Cell<u32>>) {
+        let start = StartOptions {
+            shift_held: shift,
+            ..StartOptions::default()
+        };
+        let r = init(cx, Vec::new(), false, start);
+        let starts = Rc::new(Cell::new(0));
+        let count = starts.clone();
+        cx.update(|cx| {
+            cx.set_global(HelperInstalled(installed));
+            TlSettings::update(cx, |d| d.settings.privilege.unlock_at_launch = unlock);
+            for tab in [Tab::Services, Tab::Startup, Tab::Connections] {
+                set_test_page(cx, tab, blank_page);
+            }
+            cx.on_action(move |_: &StartHelperSession, _| count.set(count.get() + 1));
+        });
+        (r, starts)
+    }
+
+    impl Rig {
+        fn publish_helper(&self, cx: &mut TestAppContext, helper: HelperState) {
+            self.engine.publish_with(|s| {
+                let health = Arc::make_mut(&mut s.health);
+                health.helper = helper;
+                health.version += 1;
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    fn select(vcx: &mut VisualTestContext, cx: &mut TestAppContext, tab: Tab) {
+        let main = main_window(cx);
+        vcx.update(|window, cx| main.update(cx, |m, cx| m.select_tab(tab, window, cx)));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    #[gpui_kit::test]
+    fn shield_slot_every_tab(cx: &mut TestAppContext) {
+        let (r, _) = helper_rig(cx, true, false, false);
+        let mut vcx = open(cx);
+        r.publish_helper(cx, HelperState::Locked);
+        for tab in Tab::ALL {
+            select(&mut vcx, cx, tab);
+            assert_eq!(main_window(cx).read_with(cx, |m, _| m.active_tab()), tab);
+            assert!(vcx.debug_bounds("TlShield").is_some(), "shield on {tab:?}");
+        }
+
+        // Not installed: no shield and no slot.
+        cx.update(|cx| cx.set_global(HelperInstalled(false)));
+        select(&mut vcx, cx, Tab::Processes);
+        assert!(vcx.debug_bounds("TlShield").is_none());
+        let toolbar_installed_off = vcx.debug_bounds("Toolbar").map(|b| b.size.width);
+        cx.update(|cx| cx.set_global(HelperInstalled(true)));
+        select(&mut vcx, cx, Tab::Performance);
+        select(&mut vcx, cx, Tab::Processes);
+        let toolbar_installed_on = vcx.debug_bounds("Toolbar").map(|b| b.size.width);
+        assert!(
+            toolbar_installed_off < toolbar_installed_on,
+            "no space without the helper: {toolbar_installed_off:?} < {toolbar_installed_on:?}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn unlock_at_launch_once(cx: &mut TestAppContext) {
+        let (_r, starts) = helper_rig(cx, true, true, false);
+        let vcx = open(cx);
+        assert_eq!(starts.get(), 1);
+        let _vcx = reopen(vcx, cx);
+        assert_eq!(starts.get(), 1, "not again on a reopened window");
+    }
+
+    #[gpui_kit::test]
+    fn shift_at_launch_unlocks(cx: &mut TestAppContext) {
+        let (_r, starts) = helper_rig(cx, true, false, true);
+        let _vcx = open(cx);
+        assert_eq!(starts.get(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn unlock_needs_helper(cx: &mut TestAppContext) {
+        let (_r, starts) = helper_rig(cx, false, true, false);
+        let _vcx = open(cx);
+        assert_eq!(starts.get(), 0);
+    }
+
+    #[gpui_kit::test]
+    fn request_launch_unlock_once(cx: &mut TestAppContext) {
+        let (_r, starts) = helper_rig(cx, true, true, false);
+        let mut vcx = open(cx);
+        assert_eq!(starts.get(), 1);
+        let main = main_window(cx);
+        vcx.update(|window, cx| main.update(cx, |m, cx| m.request_launch_unlock(window, cx)));
+        vcx.run_until_parked();
+        assert_eq!(starts.get(), 1, "E29's later call does nothing");
+    }
+
+    #[gpui_kit::test]
+    fn shield_follows_helper_state(cx: &mut TestAppContext) {
+        let (r, _) = helper_rig(cx, true, false, false);
+        let mut vcx = open(cx);
+        r.publish_helper(cx, HelperState::Locked);
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(vcx.debug_bounds("TlShield-icon-shield").is_some());
+        r.publish_helper(cx, HelperState::Unlocked);
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(vcx.debug_bounds("TlShield-icon-unlocked").is_some());
+        assert!(vcx.debug_bounds("TlShield-icon-shield").is_none());
+    }
 }
