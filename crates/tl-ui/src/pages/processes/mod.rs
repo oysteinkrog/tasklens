@@ -76,7 +76,9 @@ pub const PAGE_CONTEXT: &str = "ProcessTable";
 pub fn bind_keys_processes(cx: &mut App) {
     let ctx = Some(PAGE_CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("ctrl-c", CopyDetails, ctx),
+        // The table's own `Table` context is deeper and binds Ctrl+C to CopyRow. This binding
+        // matches at that depth and, bound later, wins.
+        KeyBinding::new("ctrl-c", CopyDetails, Some("ProcessTable > Table")),
         KeyBinding::new("ctrl-e", EndTask, ctx),
         KeyBinding::new("delete", EndTask, ctx),
         KeyBinding::new("ctrl-x", EndProcess, ctx),
