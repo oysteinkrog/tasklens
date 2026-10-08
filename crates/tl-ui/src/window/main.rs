@@ -50,7 +50,7 @@ use tracing::{debug, error, info, warn};
 use super::filter::{FilterBox, ReturnFocus, shown_on};
 use super::registry::{GlobalRegistry, WindowKey};
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
-use super::tabstrip::TabStrip;
+use super::tabstrip::{TabStrip, tween_progress};
 #[cfg(any(test, feature = "test-hooks"))]
 use super::titlebar::TitleBarProbe;
 use super::titlebar::{
@@ -82,7 +82,7 @@ use crate::pages::performance::{PerformancePage, SummaryToggled};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toolbar::ProcessesToolbar;
-use crate::settings_global::{Section, TlSettings};
+use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::table::actions::TABLE_CONTEXT;
 use crate::text::style::numeric_style;
 use crate::theme::store::apply_metrics;
@@ -1010,6 +1010,14 @@ pub struct MainWindow {
     _subs: SmallVec<[Subscription; 8]>,
     /// `--select-pid` waiting for its process (E20-018).
     pending_pid: Option<PendingPid>,
+    /// The page fade-in after a tab switch: start and duration (E20-021).
+    fade: Option<(Instant, Duration)>,
+    /// The page container's opacity at the last render.
+    #[cfg(any(test, feature = "test-hooks"))]
+    page_opacity: f32,
+    /// Animation frames the fade asked for.
+    #[cfg(any(test, feature = "test-hooks"))]
+    fade_frames: u32,
     #[cfg(any(test, feature = "test-hooks"))]
     first_frames: u32,
     /// `select_by_pid` calls made by `run_select_pid`.
@@ -1178,6 +1186,11 @@ impl MainWindow {
             _health_tick: None,
             _subs: subs,
             pending_pid: None,
+            fade: None,
+            #[cfg(any(test, feature = "test-hooks"))]
+            page_opacity: 1.0,
+            #[cfg(any(test, feature = "test-hooks"))]
+            fade_frames: 0,
             #[cfg(any(test, feature = "test-hooks"))]
             first_frames: 0,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1211,7 +1224,43 @@ impl MainWindow {
         if tab == self.active || factory_for(tab, cx).is_none() {
             return;
         }
+        self.begin_switch_animation(cx);
         self.switch_to(tab, true, window, cx);
+    }
+
+    /// The tab switch animation (E20-021, UI-SHL-021): the outline slides from where it is now
+    /// and the new page fades in, over `motion.tab_switch_ms`. Nothing with animations off,
+    /// reduced motion or 0 ms.
+    fn begin_switch_animation(&mut self, cx: &mut Context<Self>) {
+        let ms = TlSettings::settings(cx).motion.tab_switch_ms;
+        if !animations_on(cx) || ms == 0 {
+            self.fade = None;
+            return;
+        }
+        let duration = Duration::from_millis(u64::from(ms));
+        if let Some(from) = self.tabstrip.read(cx).outline_bounds() {
+            self.tabstrip
+                .update(cx, |strip, cx| strip.begin_switch(from, duration, cx));
+        }
+        self.fade = Some((cx.background_executor().now(), duration));
+    }
+
+    /// The page container's opacity at the last render.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn page_opacity(&self) -> f32 {
+        self.page_opacity
+    }
+
+    /// Animation frames the page fade asked for.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn fade_frames(&self) -> u32 {
+        self.fade_frames
+    }
+
+    /// The tab strip, for the animation tests.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn tabstrip_view(&self) -> &Entity<TabStrip> {
+        &self.tabstrip
     }
 
     pub fn active_tab(&self) -> Tab {
@@ -1999,10 +2048,35 @@ impl Render for MainWindow {
         }
         let chip_w = (window.viewport_size().width - px(CHIP_RESERVE * s)).max(px(0.));
 
+        // The fade-in after a tab switch. The page is drawn uncached while it runs, so the
+        // container's opacity reaches every frame of it.
+        let opacity = self.fade.and_then(|(start, duration)| {
+            let t = tween_progress(start, duration, cx.background_executor().now());
+            if t.is_none() {
+                self.fade = None;
+            }
+            t
+        });
+        if opacity.is_some() {
+            window.request_animation_frame();
+            #[cfg(any(test, feature = "test-hooks"))]
+            {
+                self.fade_frames += 1;
+            }
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.page_opacity = opacity.unwrap_or(1.0);
+        }
         let page = self.pages[self.active as usize].as_ref().map(|slot| {
-            slot.view
-                .clone()
-                .cached(StyleRefinement::default().size_full())
+            if opacity.is_some() {
+                slot.view.clone().into_any_element()
+            } else {
+                slot.view
+                    .clone()
+                    .cached(StyleRefinement::default().size_full())
+                    .into_any_element()
+            }
         });
         // Graph summary mode: the summary view takes the place of the tab strip and the page.
         let summary = (self.active == Tab::Performance)
@@ -2064,6 +2138,7 @@ impl Render for MainWindow {
                         .relative()
                         .flex_1()
                         .min_h_0()
+                        .when_some(opacity, |el, t| el.opacity(t))
                         .children(page)
                         // Painted after the page, so the chip's actions come last in Tab order
                         // (UI-SHL-121).

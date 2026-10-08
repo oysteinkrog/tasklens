@@ -13,9 +13,15 @@
 //! and history mode change, and the filter box's final width, so no tab moves while the box
 //! animates. The strip and filter widths come from the last prepaint; when one of them changed,
 //! the strip asks for one more frame.
+//!
+//! A tab switch can slide the outline from the old tab to the new one over
+//! `motion.tab_switch_ms` with `ease_out_cubic` (E20-021, UI-SHL-021). The progress comes from
+//! the executor clock, not the element animation's wall clock, so tests can step it. The path is
+//! rebuilt each frame only while the slide runs; frames stop when it ends.
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::{
@@ -49,6 +55,31 @@ pub const FILTER_GAP: f32 = 16.0;
 pub const OVERFLOW_SLOT: f32 = 28.0;
 /// The overflow button's size, × ui_scale.
 pub const OVERFLOW_BUTTON: f32 = 24.0;
+
+/// `1 − (1 − t)³` (UI-SHL-021).
+pub fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Eased progress of a one-shot animation that started at `start`: `None` once `duration` has
+/// passed, so the caller stops asking for frames.
+pub fn tween_progress(start: Instant, duration: Duration, now: Instant) -> Option<f32> {
+    let elapsed = now.saturating_duration_since(start);
+    if duration.is_zero() || elapsed >= duration {
+        return None;
+    }
+    Some(ease_out_cubic(
+        elapsed.as_secs_f32() / duration.as_secs_f32(),
+    ))
+}
+
+/// An outline slide from `from` to the active tab.
+#[derive(Clone, Copy, Debug)]
+struct TabAnim {
+    from: Bounds<Pixels>,
+    start: Instant,
+    duration: Duration,
+}
 
 /// Control point factor of a cubic Bézier that follows a quarter circle.
 const QUARTER_ARC_K: f32 = 0.552_284_8;
@@ -146,6 +177,8 @@ pub struct TabStrip {
     /// Where the overflow menu's items go when no element has focus.
     menu_focus: FocusHandle,
     rule: Option<(AccentRuleKey, Path<Pixels>)>,
+    /// The outline slide in progress (E20-021).
+    anim: Option<TabAnim>,
     layout: Rc<Cell<RuleLayout>>,
     style_version: u64,
     strings_version: u64,
@@ -156,6 +189,9 @@ pub struct TabStrip {
     rule_builds: u32,
     #[cfg(any(test, feature = "test-hooks"))]
     label_shapes: u32,
+    /// Animation frames the slide asked for.
+    #[cfg(any(test, feature = "test-hooks"))]
+    anim_frames: u32,
 }
 
 fn history_mode(cx: &App) -> bool {
@@ -223,6 +259,7 @@ impl TabStrip {
             fit: FitInputs::default(),
             menu_focus: cx.focus_handle(),
             rule: None,
+            anim: None,
             layout: Rc::new(Cell::new(RuleLayout::default())),
             style_version: metrics(cx).style_version,
             strings_version: strings_version(cx),
@@ -233,7 +270,46 @@ impl TabStrip {
             rule_builds: 0,
             #[cfg(any(test, feature = "test-hooks"))]
             label_shapes: 0,
+            #[cfg(any(test, feature = "test-hooks"))]
+            anim_frames: 0,
         }
+    }
+
+    /// Slides the outline from `from_bounds` to the active tab over `duration`. Call it before
+    /// `set_active` moves the active tab; a switch during a slide passes the current
+    /// [`Self::outline_bounds`].
+    pub fn begin_switch(
+        &mut self,
+        from_bounds: Bounds<Pixels>,
+        duration: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        self.anim = Some(TabAnim {
+            from: from_bounds,
+            start: cx.background_executor().now(),
+            duration,
+        });
+        cx.notify();
+    }
+
+    /// The outline's bounds as last drawn, mid-slide included. `None` before the first frame or
+    /// while the active tab is not shown.
+    pub fn outline_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.rule
+            .as_ref()
+            .map(|(key, _)| key.active)
+            .filter(|b| b.size.width > px(0.))
+    }
+
+    /// True while an outline slide runs.
+    pub fn is_animating(&self) -> bool {
+        self.anim.is_some()
+    }
+
+    /// Animation frames the slide asked for.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn anim_frames(&self) -> u32 {
+        self.anim_frames
     }
 
     /// Marks `tab` active. Notifies only when it changed.
@@ -658,8 +734,37 @@ impl Element for AccentRule {
             inset: window.viewport_size().width - bounds.size.width,
             filter: filter_w,
         };
+        let now = cx.background_executor().now();
+        let target = layout.active.unwrap_or_default();
+        let active = self.strip.update(cx, |strip, _| {
+            let Some(anim) = strip.anim else {
+                return target;
+            };
+            let progress = (target.size.width > px(0.))
+                .then(|| tween_progress(anim.start, anim.duration, now))
+                .flatten();
+            let Some(t) = progress else {
+                strip.anim = None;
+                return target;
+            };
+            #[cfg(any(test, feature = "test-hooks"))]
+            {
+                strip.anim_frames += 1;
+            }
+            let lerp = |a: Pixels, b: Pixels| a + (b - a) * t;
+            Bounds {
+                origin: point(lerp(anim.from.origin.x, target.origin.x), target.origin.y),
+                size: gpui_kit::size(
+                    lerp(anim.from.size.width, target.size.width),
+                    target.size.height,
+                ),
+            }
+        });
+        if self.strip.read(cx).anim.is_some() {
+            window.request_animation_frame();
+        }
         let key = AccentRuleKey {
-            active: layout.active.unwrap_or_default(),
+            active,
             end_x: layout
                 .filter
                 .map_or(bounds.right(), |f| (f.left() + inset).min(f.right())),
