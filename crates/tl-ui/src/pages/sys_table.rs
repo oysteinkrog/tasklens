@@ -968,9 +968,10 @@ pub trait SysDelegate: TreeTableDelegate {
     fn mask(&self) -> ComponentMask;
 }
 
-/// "Loading…", the status text while the body is `Skeleton`.
-pub fn loading_status_text() -> SharedString {
-    SharedString::new_static("Loading…")
+/// "Loading…", the status text while the body is `Skeleton`, translated (R-132). Pages keep it
+/// per strings version, since `status_text` has no `cx`.
+pub fn loading_status_text(cx: &App) -> SharedString {
+    tr(cx, "sys-loading")
 }
 
 /// The shared frame of one system-table page. The page owns it, routes the hub's

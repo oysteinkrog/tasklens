@@ -699,6 +699,8 @@ sys-sys005-no-connections = No connections
 sys-sys005-could-not-load-services = Could not load services
 sys-sys005-could-not-load-startup-entries = Could not load startup entries
 sys-sys005-could-not-load-connections = Could not load connections
+# Status text while a system table waits for its first data (tasklens-hk6.1).
+sys-loading = Loading…
 
 # System table copy commands (UI-SYS-006, tasklens-hk6.8)
 sys-sys006-copied-value = Copied: { $value }

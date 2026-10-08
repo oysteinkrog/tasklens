@@ -1447,8 +1447,8 @@ mod frame {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
-        SharedString, StyleRefinement, Styled as _, Subscription, TestAppContext,
+        AnyView, App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _,
+        Render, SharedString, StyleRefinement, Styled as _, Subscription, TestAppContext,
         VisualTestContext, Window, WindowBounds, WindowOptions, div, point, px, size,
     };
     use smallvec::SmallVec;
@@ -1679,9 +1679,9 @@ mod frame {
             }
         }
 
-        fn status_text(&self, out: &mut String) {
+        fn status_text(&self, out: &mut String, cx: &App) {
             if self.frame.body() == SysBody::Skeleton {
-                out.push_str(&loading_status_text());
+                out.push_str(&loading_status_text(cx));
             } else {
                 out.push_str(&self.status);
             }
@@ -1923,7 +1923,7 @@ mod frame {
         let (body, text) = r.vcx.update(|_, cx| {
             let p = page.read(cx);
             let mut out = String::new();
-            p.status_text(&mut out);
+            p.status_text(&mut out, cx);
             (p.frame.body(), out)
         });
         assert_eq!(body, SysBody::Skeleton);
