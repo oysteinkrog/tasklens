@@ -35,9 +35,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Edges, Element, ElementId,
     Entity, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, Path, PathBuilder, Pixels,
-    Point, Render, SharedString, Size, Style, Subscription, TransformationMatrix, Window, point,
-    px, quad, relative, size, transparent_black,
+    IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Render,
+    SharedString, Size, Style, Subscription, TransformationMatrix, Window, point, px, quad,
+    relative, size, transparent_black,
 };
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
