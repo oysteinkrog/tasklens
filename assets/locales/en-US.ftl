@@ -386,6 +386,7 @@ perf-overview-mem-swap = Swap
 perf-overview-mem-no-swap = No swap
 perf-overview-box-disks = Disks
 perf-overview-box-network = Network
+perf-overview-box-processes = Top processes
 perf-overview-gpu-vram = VRAM
 perf-overview-more = +{$n} more
 perf-overview-since-boot = {$size} since boot

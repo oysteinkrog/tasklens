@@ -5,6 +5,9 @@
 //! frame, and one module per box its view. [`OverviewPage`] places the box views and sends one
 //! demand part while it is shown.
 //!
+//! [`procs_box`] is the opt-in Top processes box: `performance.overview_top_processes` places it
+//! in a third row, and only then does the page ask for the process sweep (`process_top`).
+//!
 //! Render contract (D-022, crw.34): the page never notifies on a sample. Each box is a cached
 //! child view that notifies only when its own text or bars change. The page re-renders on a
 //! resize, when a GPU or disk card comes or goes, and (from GPUI's ancestor marking) when a box
@@ -17,6 +20,7 @@ pub mod layout;
 pub mod mem_box;
 pub mod net_box;
 pub mod parts;
+pub mod procs_box;
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
@@ -37,6 +41,7 @@ use self::gpu_box::GpuBox;
 use self::layout::{BoxKind, OverviewLayout, Placement, place};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
+use self::procs_box::ProcsBox;
 use super::details::KeyValueModel;
 use super::page::DevicePage;
 use super::sidebar::DeviceSidebar;
@@ -45,6 +50,7 @@ use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
+use crate::settings_global::TlSettings;
 use crate::theme::metrics;
 
 /// The Overview page's key.
@@ -82,6 +88,21 @@ fn first_card(sidebar: &Entity<DeviceSidebar>, kind: DeviceKind, cx: &App) -> Op
         .map(|c| c.row.key.clone())
 }
 
+/// `performance.overview_top_processes`; off before settings load.
+fn top_procs_on(cx: &App) -> bool {
+    cx.has_global::<TlSettings>() && TlSettings::settings(cx).performance.overview_top_processes
+}
+
+/// The layout for the Top processes setting. Until the layout editor exists the setting is the
+/// only way to place the box (crw.45).
+fn layout_for(top_procs: bool) -> OverviewLayout {
+    if top_procs {
+        OverviewLayout::with_top_procs()
+    } else {
+        OverviewLayout::btop_default()
+    }
+}
+
 /// The Overview page.
 pub struct OverviewPage {
     key: DeviceKey,
@@ -93,6 +114,8 @@ pub struct OverviewPage {
     gpu: Entity<GpuBox>,
     disk: Entity<DiskBox>,
     net: Entity<NetBox>,
+    /// The Top processes box, built only while the layout places it.
+    procs: Option<Entity<ProcsBox>>,
     sidebar: Entity<DeviceSidebar>,
     gpu_keys: SmallVec<[DeviceKey; 4]>,
     disk_keys: SmallVec<[DeviceKey; 8]>,
@@ -108,7 +131,7 @@ pub struct OverviewPage {
     header: (SharedString, SharedString),
     details: KeyValueModel,
     focus: FocusHandle,
-    _subs: SmallVec<[Subscription; 3]>,
+    _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -146,6 +169,11 @@ impl OverviewPage {
 
         let mut subs = SmallVec::new();
         subs.push(cx.observe(sidebar, |this, _, cx| this.sync_cards(cx)));
+        subs.push(cx.observe_global::<TlSettings>(Self::sync_layout));
+        let layout = layout_for(top_procs_on(cx));
+        let procs = layout
+            .has(BoxKind::TopProcs)
+            .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -153,7 +181,7 @@ impl OverviewPage {
 
         Self {
             key,
-            layout: OverviewLayout::btop_default(),
+            layout,
             placement: Placement::default(),
             area: size(px(0.), px(0.)),
             cpu,
@@ -161,6 +189,7 @@ impl OverviewPage {
             gpu,
             disk,
             net,
+            procs,
             sidebar: sidebar.clone(),
             gpu_keys: gpu_cards.iter().map(|c| c.0.clone()).collect(),
             disk_keys: disk_cards.iter().map(|c| c.0.clone()).collect(),
@@ -182,9 +211,11 @@ impl OverviewPage {
         }
     }
 
-    /// Everything the boxes draw, CPU per core at 10 Hz.
+    /// Everything the boxes draw, CPU per core at 10 Hz, and the process sweep while the Top
+    /// processes box is placed.
     pub fn demand_part(&self) -> Demand {
         Demand {
+            process_top: self.procs.is_some(),
             any_surface_visible: true,
             cpu: CpuDemand::PerCore,
             cpu_fast: true,
@@ -228,6 +259,11 @@ impl OverviewPage {
         &self.net
     }
 
+    /// The Top processes box while the layout places it.
+    pub fn procs_box(&self) -> Option<&Entity<ProcsBox>> {
+        self.procs.as_ref()
+    }
+
     /// The hub the boxes read.
     pub fn hub(&self) -> &Entity<SnapshotHub> {
         &self.hub
@@ -237,18 +273,24 @@ impl OverviewPage {
         match kind {
             BoxKind::Gpu => !self.gpu_keys.is_empty(),
             BoxKind::Disk => !self.disk_keys.is_empty(),
+            BoxKind::TopProcs => self.procs.is_some(),
             _ => true,
         }
     }
 
     fn relayout(&mut self, cx: &App) {
         let s = metrics(cx).ui_scale;
-        let (gpu, disk) = (!self.gpu_keys.is_empty(), !self.disk_keys.is_empty());
+        let (gpu, disk, procs) = (
+            !self.gpu_keys.is_empty(),
+            !self.disk_keys.is_empty(),
+            self.procs.is_some(),
+        );
         self.placement = place(
             &self.layout,
             |k| match k {
                 BoxKind::Gpu => gpu,
                 BoxKind::Disk => disk,
+                BoxKind::TopProcs => procs,
                 _ => true,
             },
             self.area,
@@ -290,6 +332,23 @@ impl OverviewPage {
         }
     }
 
+    /// `performance.overview_top_processes` changed: the Top processes box comes or goes, with
+    /// a new layout, demand and one render. Any other settings change does nothing here.
+    fn sync_layout(&mut self, cx: &mut Context<Self>) {
+        let on = top_procs_on(cx);
+        if on == self.procs.is_some() {
+            return;
+        }
+        self.layout = layout_for(on);
+        self.procs = on.then(|| {
+            let hub = self.hub.clone();
+            cx.new(|cx| ProcsBox::new(&hub, cx))
+        });
+        self.relayout(cx);
+        self.send_demand(cx);
+        self.notify(cx);
+    }
+
     fn notify(&self, cx: &mut Context<Self>) {
         #[cfg(any(test, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
@@ -313,6 +372,10 @@ impl OverviewPage {
             BoxKind::Gpu => self.gpu.clone().cached(cached).into_any_element(),
             BoxKind::Disk => self.disk.clone().cached(cached).into_any_element(),
             BoxKind::Net => self.net.clone().cached(cached).into_any_element(),
+            BoxKind::TopProcs => match &self.procs {
+                Some(procs) => procs.clone().cached(cached).into_any_element(),
+                None => div().into_any_element(),
+            },
         }
     }
 }
@@ -382,6 +445,11 @@ impl OverviewPage {
                 BoxKind::Gpu => self.gpu.read(cx).copy_text(out),
                 BoxKind::Disk => self.disk.read(cx).copy_text(out),
                 BoxKind::Net => self.net.read(cx).copy_text(out),
+                BoxKind::TopProcs => {
+                    if let Some(procs) = &self.procs {
+                        procs.read(cx).copy_text(out);
+                    }
+                }
             }
         }
     }

@@ -16,7 +16,8 @@ const GAP: f32 = 8.;
 /// Below this page width the boxes stack in one column, logical px.
 pub const STACK_W: f32 = 720.;
 
-/// The five Overview boxes.
+/// The Overview boxes: the five of the default layout and the opt-in Top processes box
+/// (crw.45).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum BoxKind {
     Cpu,
@@ -24,6 +25,7 @@ pub enum BoxKind {
     Gpu,
     Disk,
     Net,
+    TopProcs,
 }
 
 /// One box: its kind, its row, its first column and how many columns it spans.
@@ -94,6 +96,27 @@ impl OverviewLayout {
                 b(BoxKind::Net, 1, 2, 1),
             ],
         }
+    }
+
+    /// [`Self::btop_default`] with a third row, weight 2 and at least 260 px, that holds the Top
+    /// processes box across all columns (crw.45).
+    pub fn with_top_procs() -> Self {
+        let mut layout = Self::btop_default();
+        layout.rows.push(RowSpec {
+            weight: 2,
+            min_h: 260.,
+        });
+        layout.boxes.push(BoxSpec {
+            kind: BoxKind::TopProcs,
+            row: 2,
+            col: 0,
+            col_span: 3,
+        });
+        layout
+    }
+
+    pub fn has(&self, kind: BoxKind) -> bool {
+        self.boxes.iter().any(|b| b.kind == kind)
     }
 
     pub fn validate(&self) -> Result<(), LayoutError> {
@@ -275,6 +298,26 @@ mod tests {
     #[test]
     fn overview_default_layout_validates() {
         assert_eq!(OverviewLayout::btop_default().validate(), Ok(()));
+        assert!(!OverviewLayout::btop_default().has(BoxKind::TopProcs));
+    }
+
+    #[test]
+    fn overview_top_procs_layout_adds_a_full_row() {
+        let layout = OverviewLayout::with_top_procs();
+        assert_eq!(layout.validate(), Ok(()));
+        assert!(layout.has(BoxKind::TopProcs));
+        let p = place(&layout, |_| true, size(px(1200.), px(1000.)), 1.);
+        let procs = p.boxes.last().expect("placed");
+        assert_eq!(procs.kind, BoxKind::TopProcs);
+        let cpu = p.boxes.first().expect("placed");
+        let net = p
+            .boxes
+            .iter()
+            .find(|b| b.kind == BoxKind::Net)
+            .expect("placed");
+        assert_eq!(procs.bounds.left(), cpu.bounds.left());
+        assert_eq!(procs.bounds.right(), net.bounds.right());
+        assert!(procs.bounds.size.height >= px(260.));
     }
 
     #[test]
