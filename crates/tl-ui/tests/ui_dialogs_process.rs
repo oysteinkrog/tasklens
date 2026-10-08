@@ -1244,3 +1244,384 @@ mod virustotal {
         assert!(!all.contains("secret-tool"), "{all}");
     }
 }
+
+// ---- Custom Set Priority and the Realtime confirmation (tasklens-gma.9, UI-PWN-023) ----
+
+mod priority {
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window, WindowHandle, div, px,
+    };
+    use smallvec::smallvec;
+    use tl_model::actions::{
+        ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, SchedPolicy,
+    };
+    use tl_model::command::Command;
+    use tl_ui::action_tracker::GlobalActionTracker;
+    use tl_ui::components::dialog::TlDialogView;
+    use tl_ui::components::toast::{ToastKey, ToastQueue};
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::windows::actions::PriorityApply;
+    use tl_ui::windows::priority::{self, PriorityDialog};
+
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("content")
+        }
+    }
+
+    struct Rig {
+        cx: TestAppContext,
+        engine: Arc<FakeEngine>,
+        handle: WindowHandle<Root>,
+        vcx: VisualTestContext,
+        dialog: Entity<PriorityDialog>,
+        queue: Entity<ToastQueue>,
+        parent_id: gpui_kit::WindowId,
+    }
+
+    /// The dialog for `firefox (PID 4321)` with `initial`, from a parent window with toasts.
+    fn open(cx: &mut TestAppContext, initial: (SchedPolicy, i8, u8)) -> Rig {
+        let engine = super::setup(cx);
+        let parent = cx.add_window(|window, cx| {
+            let host = cx.new(|_| Host);
+            Root::new(host, window, cx)
+        });
+        let mut pcx = VisualTestContext::from_window(parent.into(), cx);
+        let queue = pcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
+        pcx.run_until_parked();
+        let targets = smallvec![ActionTarget::Process(super::key())];
+        let handle = cx
+            .update(|cx| {
+                priority::open(
+                    targets,
+                    "firefox (PID 4321)".into(),
+                    initial,
+                    parent.into(),
+                    cx,
+                )
+            })
+            .expect("dialog opens");
+        let dialog = cx
+            .update(|cx| PriorityDialog::find(handle, cx))
+            .expect("dialog content");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let mut rig = Rig {
+            cx: cx.clone(),
+            engine,
+            handle,
+            vcx,
+            dialog,
+            queue,
+            parent_id: parent.window_id(),
+        };
+        rig.draw();
+        rig
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        fn update(
+            &mut self,
+            f: impl FnOnce(&mut PriorityDialog, &mut Window, &mut Context<PriorityDialog>),
+        ) {
+            let dialog = self.dialog.clone();
+            self.vcx
+                .update(|window, cx| dialog.update(cx, |d, cx| f(d, window, cx)));
+            self.vcx.run_until_parked();
+            self.draw();
+        }
+
+        fn read<T>(&mut self, f: impl FnOnce(&PriorityDialog, &gpui_kit::App) -> T) -> T {
+            let dialog = self.dialog.clone();
+            self.vcx.read(|cx| f(dialog.read(cx), cx))
+        }
+
+        /// Presses "Set priority". The window may close, so nothing draws after.
+        fn apply(&mut self) {
+            let dialog = self.dialog.clone();
+            self.vcx
+                .update(|window, cx| dialog.update(cx, |d, cx| d.apply(window, cx)));
+            self.cx.run_until_parked();
+            if self.is_open() {
+                self.draw();
+            }
+        }
+
+        fn sent(&self) -> Vec<ActionRequest> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Action(request) => Some(request),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn succeed(&mut self, request: &ActionRequest) {
+            self.engine.emit(ActionEvent {
+                id: request.id,
+                target: None,
+                state: ActionState::Succeeded,
+            });
+            self.cx.run_until_parked();
+        }
+
+        fn is_open(&mut self) -> bool {
+            let id = self.handle.window_id();
+            self.cx
+                .update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
+        }
+
+        /// The Realtime confirmation window, drawn, if it is open.
+        fn confirmation(&mut self) -> Option<(VisualTestContext, Entity<TlDialogView>)> {
+            let skip = [self.parent_id, self.handle.window_id()];
+            let any: AnyWindowHandle = self
+                .cx
+                .update(|cx| cx.windows())
+                .into_iter()
+                .find(|w| !skip.contains(&w.window_id()))?;
+            let handle = any.downcast::<Root>()?;
+            let frame = self
+                .cx
+                .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))?;
+            let view = self.cx.update(|cx| frame.read(cx).content().clone());
+            let mut vcx = VisualTestContext::from_window(any, &self.cx);
+            vcx.update(|window, _| window.activate_window());
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            Some((vcx, view))
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            let queue = self.queue.clone();
+            self.cx.read(|cx| {
+                queue
+                    .read(cx)
+                    .visible_texts()
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect()
+            })
+        }
+    }
+
+    const NORMAL: (SchedPolicy, i8, u8) = (SchedPolicy::Other, 0, 0);
+
+    #[gpui_kit::test]
+    fn priority_dialog_enables_fields_by_policy(cx: &mut TestAppContext) {
+        let mut rig = open(cx, NORMAL);
+        assert!(rig.read(|d, cx| d.nice_enabled(cx)));
+        assert!(!rig.read(|d, cx| d.rt_enabled(cx)));
+        assert!(rig.vcx.debug_bounds("PriorityWarning").is_none());
+        assert_eq!(
+            rig.read(|d, cx| d.nice_tooltip(cx)).as_ref(),
+            "With autogroup on, nice only orders processes within the same session."
+        );
+
+        rig.update(|d, _, cx| d.set_policy(SchedPolicy::Idle, cx));
+        assert!(!rig.read(|d, cx| d.nice_enabled(cx)));
+        assert!(!rig.read(|d, cx| d.rt_enabled(cx)));
+        assert_eq!(
+            rig.read(|d, cx| d.nice_tooltip(cx)).as_ref(),
+            "Not used by this policy"
+        );
+        assert!(rig.vcx.debug_bounds("PriorityWarning").is_none());
+
+        rig.update(|d, _, cx| d.set_policy(SchedPolicy::Fifo, cx));
+        assert!(!rig.read(|d, cx| d.nice_enabled(cx)));
+        assert!(rig.read(|d, cx| d.rt_enabled(cx)));
+        assert!(rig.read(|d, cx| d.warning_shown(cx)));
+        assert!(rig.vcx.debug_bounds("PriorityWarning").is_some());
+
+        rig.update(|d, _, cx| d.set_policy(SchedPolicy::Batch, cx));
+        assert!(rig.read(|d, cx| d.nice_enabled(cx)));
+        assert!(!rig.read(|d, cx| d.rt_enabled(cx)));
+    }
+
+    #[gpui_kit::test]
+    fn priority_dialog_slider_page_up_steps_five(cx: &mut TestAppContext) {
+        let mut rig = open(cx, NORMAL);
+        // Tab from the policy select to the slider.
+        rig.vcx.simulate_keystrokes("tab");
+        rig.draw();
+        rig.vcx.simulate_keystrokes("pageup");
+        rig.draw();
+        assert_eq!(rig.read(|d, cx| d.nice(cx)), 5);
+        rig.vcx.simulate_keystrokes("right");
+        rig.draw();
+        assert_eq!(rig.read(|d, cx| d.nice(cx)), 6);
+        rig.vcx.simulate_keystrokes("pagedown pagedown");
+        rig.draw();
+        assert_eq!(rig.read(|d, cx| d.nice(cx)), -4);
+        rig.vcx.simulate_keystrokes("end");
+        rig.draw();
+        assert_eq!(rig.read(|d, cx| d.nice(cx)), 19);
+    }
+
+    #[gpui_kit::test]
+    fn priority_dialog_dispatch_same_policy_nice_only(cx: &mut TestAppContext) {
+        let mut rig = open(cx, NORMAL);
+        rig.update(|d, window, cx| d.set_nice(5, window, cx));
+        rig.apply();
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].kind, ActionKind::SetNice(5));
+        assert_eq!(&sent[0].targets[..], &[ActionTarget::Process(super::key())]);
+        assert!(!sent[0].privileged);
+        assert!(!rig.is_open());
+        rig.succeed(&sent[0]);
+        assert_eq!(rig.toasts(), ["Priority updated"]);
+    }
+
+    #[gpui_kit::test]
+    fn priority_dialog_policy_change_then_nice(cx: &mut TestAppContext) {
+        let mut rig = open(cx, NORMAL);
+        rig.update(|d, window, cx| {
+            d.set_policy(SchedPolicy::Batch, cx);
+            d.set_nice(3, window, cx);
+        });
+        rig.apply();
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 1, "nice waits for the policy: {sent:?}");
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::SetSched {
+                policy: SchedPolicy::Batch,
+                rt_prio: 0
+            }
+        );
+        assert!(!rig.is_open());
+
+        rig.succeed(&sent[0]);
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(sent[1].kind, ActionKind::SetNice(3));
+        rig.succeed(&sent[1]);
+
+        let pushed = rig.cx.read(|cx| {
+            cx.global::<GlobalActionTracker>()
+                .0
+                .read(cx)
+                .pushed()
+                .iter()
+                .map(|p| (p.text.to_string(), p.key))
+                .collect::<Vec<_>>()
+        });
+        let key = Some(ToastKey(sent[0].id.0));
+        assert_eq!(
+            pushed,
+            [("Priority updated".to_string(), key)],
+            "one toast id"
+        );
+        assert_eq!(rig.toasts(), ["Priority updated"]);
+    }
+
+    #[gpui_kit::test]
+    fn priority_dialog_policy_change_fails_no_nice(cx: &mut TestAppContext) {
+        let mut rig = open(cx, NORMAL);
+        rig.update(|d, _, cx| d.set_policy(SchedPolicy::Batch, cx));
+        rig.apply();
+        let first = rig.sent().remove(0);
+        rig.engine.emit(ActionEvent {
+            id: first.id,
+            target: None,
+            state: ActionState::Failed(tl_model::actions::ActionError::PermissionDenied),
+        });
+        rig.cx.run_until_parked();
+        assert_eq!(rig.sent().len(), 1, "no nice after a failed policy change");
+    }
+
+    #[gpui_kit::test]
+    fn priority_dialog_realtime_confirms_first(cx: &mut TestAppContext) {
+        let mut rig = open(cx, NORMAL);
+        rig.update(|d, _, cx| {
+            d.set_policy(SchedPolicy::Rr, cx);
+            d.set_rt_prio(10, cx);
+        });
+        rig.apply();
+        assert!(rig.sent().is_empty(), "nothing before the confirmation");
+        assert!(rig.is_open());
+        let (mut vcx, view) = rig.confirmation().expect("confirmation open");
+        let (text, destructive) = vcx.update(|_, cx| {
+            let dialog = view.read(cx).dialog();
+            (dialog.text().to_string(), dialog.is_destructive())
+        });
+        assert_eq!(
+            text,
+            "Realtime priority can freeze the desktop if the process spins. Set it anyway?"
+        );
+        assert!(destructive, "Set realtime is a danger button");
+        // Focus starts on Cancel: Tab to "Set realtime", then Enter.
+        vcx.simulate_keystrokes("tab");
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        rig.cx.run_until_parked();
+
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::SetSched {
+                policy: SchedPolicy::Rr,
+                rt_prio: 10
+            }
+        );
+        assert!(!rig.is_open(), "the dialog closes once sent");
+    }
+
+    #[gpui_kit::test]
+    fn realtime_from_custom_dialog_confirms_first(cx: &mut TestAppContext) {
+        // FIFO already, Enter in the dialog: realtime always asks first.
+        let mut rig = open(cx, (SchedPolicy::Fifo, 0, 50));
+        assert_eq!(rig.read(|d, _| d.rt_prio()), 50);
+        rig.vcx.dispatch_action(PriorityApply);
+        rig.vcx.run_until_parked();
+        rig.cx.run_until_parked();
+        assert!(rig.sent().is_empty());
+        assert!(rig.read(|d, _| d.is_confirming()));
+        let (mut vcx, _) = rig.confirmation().expect("confirmation open");
+        vcx.simulate_keystrokes("tab");
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        rig.cx.run_until_parked();
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::SetSched {
+                policy: SchedPolicy::Fifo,
+                rt_prio: 50
+            }
+        );
+    }
+
+    #[gpui_kit::test]
+    fn realtime_cancel_sends_nothing(cx: &mut TestAppContext) {
+        let mut rig = open(cx, NORMAL);
+        rig.update(|d, _, cx| d.set_policy(SchedPolicy::Fifo, cx));
+        rig.apply();
+        let (mut vcx, _) = rig.confirmation().expect("confirmation open");
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        rig.cx.run_until_parked();
+        assert!(rig.sent().is_empty());
+        assert!(rig.is_open(), "the dialog stays open");
+        assert!(rig.confirmation().is_none());
+        assert!(!rig.read(|d, _| d.is_confirming()));
+    }
+}
