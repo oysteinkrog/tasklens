@@ -1876,6 +1876,10 @@ shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar
 shell-settings-device-order = Device order and visibility
+# Settings window, Startup and window page (tasklens-bj6.29, UI-SHL-069).
+shell-settings-group-window = Window
+shell-settings-group-login = Login
+shell-settings-group-network = Network
 shell-settings-device-default = Default
 shell-settings-device-show = Show
 shell-settings-device-hide = Hide

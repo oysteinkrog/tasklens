@@ -21,6 +21,7 @@ mod motion;
 mod performance;
 mod processes;
 mod services;
+mod startup_window;
 mod units;
 
 use std::ops::RangeInclusive;
@@ -184,6 +185,7 @@ pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
         performance::page(cx),
         graphs::page(cx),
         services::page(cx),
+        startup_window::page(cx),
     ];
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {

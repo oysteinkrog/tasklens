@@ -1167,7 +1167,9 @@ fn page_builder_action_switch_dispatches(cx: &mut TestAppContext) {
     setup(cx);
     let count = Rc::new(Cell::new(0));
     let seen = count.clone();
-    cx.update(|cx| cx.on_action(move |_: &FlipAnimations, _| seen.set(seen.get() + 1)));
+    cx.update(|cx| {
+        cx.on_action(move |_: &FlipAnimations, _| seen.set(seen.get() + 1));
+    });
     let mut page = PageBuilder::new(PageId::Advanced);
     page.action_switch("G", SettingKey::MotionAnimations, "Animations", || {
         Box::new(FlipAnimations)
@@ -1192,7 +1194,9 @@ fn page_builder_action_dropdown_dispatches(cx: &mut TestAppContext) {
     setup(cx);
     let picked = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
     let seen = picked.clone();
-    cx.update(|cx| cx.on_action(move |a: &PickName, _| seen.borrow_mut().push(a.name.to_string())));
+    cx.update(|cx| {
+        cx.on_action(move |a: &PickName, _| seen.borrow_mut().push(a.name.to_string()));
+    });
     let mut page = PageBuilder::new(PageId::Advanced);
     page.action_dropdown(
         "G",
@@ -1326,4 +1330,155 @@ fn page_builder_slider_on_commit(cx: &mut TestAppContext) {
     cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Commit(6.))));
     cx.run_until_parked();
     assert_eq!(COMMITTED.load(std::sync::atomic::Ordering::SeqCst), 6);
+}
+
+// Startup and window page (E21-026).
+
+/// Publishes a windows snapshot with `validity` (the KWin bridge state keep-above reads).
+fn set_kwin(engine: &FakeEngine, cx: &mut TestAppContext, validity: tl_model::validity::Validity) {
+    engine.publish_with(|s| {
+        let w = Arc::make_mut(&mut s.windows);
+        w.header.validity = validity;
+        w.header.version += 1;
+    });
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn startup_window_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    assert_eq!(
+        page(cx, PageId::StartupWindow).keys(),
+        [
+            SettingKey::WindowCloseWithEsc,
+            SettingKey::WindowAlwaysOnTop,
+            SettingKey::StartupStartAtLogin,
+            SettingKey::StartupStartMinimized,
+            SettingKey::NetworkAutoFetchPublicIp
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn startup_window_start_minimized_disabled(cx: &mut TestAppContext) {
+    setup(cx);
+    assert!(!cx.update(|cx| TlSettings::settings(cx).startup.start_at_login));
+    let startup = page(cx, PageId::StartupWindow);
+    assert!(startup.is_disabled(SettingKey::StartupStartMinimized));
+    assert_eq!(startup.indent_of(SettingKey::StartupStartMinimized), 16.);
+
+    cx.update(|cx| {
+        TlSettings::set(
+            cx,
+            SettingKey::StartupStartAtLogin,
+            SettingValue::Bool(true),
+        )
+    });
+    let startup = page(cx, PageId::StartupWindow);
+    assert!(!startup.is_disabled(SettingKey::StartupStartMinimized));
+    assert_eq!(startup.indent_of(SettingKey::StartupStartMinimized), 16.);
+}
+
+#[gpui_kit::test]
+fn startup_window_start_at_login_dispatch(cx: &mut TestAppContext) {
+    setup(cx);
+    let count = Rc::new(Cell::new(0));
+    let seen = count.clone();
+    cx.update(|cx| {
+        cx.on_action(
+            move |_: &tl_ui::window::menus_settings::ToggleStartAtLogin, _| {
+                seen.set(seen.get() + 1)
+            },
+        );
+    });
+    let startup = page(cx, PageId::StartupWindow);
+    cx.update(|cx| startup.set_bool(SettingKey::StartupStartAtLogin, true, cx));
+    cx.run_until_parked();
+    assert_eq!(count.get(), 1, "ToggleStartAtLogin dispatched once");
+    assert!(
+        cx.update(|cx| TlSettings::settings(cx).startup.start_at_login),
+        "the handler wrote the key after the autostart entry"
+    );
+
+    // Start minimized goes through its own action while Start at login is on.
+    let startup = page(cx, PageId::StartupWindow);
+    cx.update(|cx| startup.set_bool(SettingKey::StartupStartMinimized, true, cx));
+    cx.run_until_parked();
+    assert!(cx.update(|cx| TlSettings::settings(cx).startup.start_minimized));
+}
+
+#[gpui_kit::test]
+fn startup_window_always_on_top_dispatch(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    set_kwin(&engine, cx, tl_model::validity::Validity::Valid);
+    let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = seen.clone();
+    cx.update(|cx| {
+        cx.on_action(
+            move |a: &tl_ui::components::window_frame::ToggleAlwaysOnTop, _| {
+                log.borrow_mut()
+                    .push((a.window.clone(), a.caption.to_string()))
+            },
+        );
+    });
+    let startup = page(cx, PageId::StartupWindow);
+    assert!(!startup.is_disabled(SettingKey::WindowAlwaysOnTop));
+    assert_eq!(startup.tooltip_of(SettingKey::WindowAlwaysOnTop), None);
+    cx.update(|cx| startup.set_bool(SettingKey::WindowAlwaysOnTop, true, cx));
+    cx.run_until_parked();
+    assert_eq!(*seen.borrow(), [(WindowKey::Main, "tasklens".to_string())]);
+}
+
+#[gpui_kit::test]
+fn startup_window_always_on_top_unsupported(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    set_kwin(&engine, cx, tl_model::validity::Validity::Unsupported);
+    let startup = page(cx, PageId::StartupWindow);
+    assert!(startup.is_disabled(SettingKey::WindowAlwaysOnTop));
+    assert_eq!(
+        startup.tooltip_of(SettingKey::WindowAlwaysOnTop).as_deref(),
+        Some("Not supported by this desktop")
+    );
+}
+
+#[gpui_kit::test]
+fn startup_window_public_ip_asks_first(cx: &mut TestAppContext) {
+    setup(cx);
+    let (_, mut vcx) = open(cx, 1);
+    let windows = cx.update(|cx| cx.windows().len());
+    let startup = page(cx, PageId::StartupWindow);
+    vcx.update(|_, cx| startup.set_bool(SettingKey::NetworkAutoFetchPublicIp, true, cx));
+    vcx.run_until_parked();
+    assert!(
+        !cx.update(|cx| TlSettings::settings(cx).network.auto_fetch_public_ip),
+        "not before the notice is accepted"
+    );
+    assert_eq!(
+        cx.update(|cx| cx.windows().len()),
+        windows + 1,
+        "the public IP notice opened"
+    );
+}
+
+#[gpui_kit::test]
+fn startup_window_public_ip_accepted_and_off(cx: &mut TestAppContext) {
+    setup(cx);
+    cx.update(|cx| {
+        TlSettings::set(
+            cx,
+            SettingKey::NetworkPublicIpNoticeAccepted,
+            SettingValue::Bool(true),
+        )
+    });
+    let (_, mut vcx) = open(cx, 1);
+    let startup = page(cx, PageId::StartupWindow);
+    vcx.update(|_, cx| startup.set_bool(SettingKey::NetworkAutoFetchPublicIp, true, cx));
+    vcx.run_until_parked();
+    assert!(cx.update(|cx| TlSettings::settings(cx).network.auto_fetch_public_ip));
+    vcx.update(|_, cx| startup.set_bool(SettingKey::NetworkAutoFetchPublicIp, false, cx));
+    vcx.run_until_parked();
+    assert!(
+        !cx.update(|cx| TlSettings::settings(cx).network.auto_fetch_public_ip),
+        "off needs no notice"
+    );
 }
