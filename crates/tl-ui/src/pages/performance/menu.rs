@@ -5,8 +5,8 @@
 use gpui_kit::{App, SharedString, Window};
 
 use super::actions::{
-    PerfAddTrayGraph, PerfCopyDeviceInfo, PerfEnterEditMode, PerfSetGraphRange, PerfSetPageVisible,
-    PerfToggleSummaryMode,
+    PerfAddTrayGraph, PerfCopyDeviceInfo, PerfEnterEditMode, PerfJumpToType, PerfSetGraphRange,
+    PerfSetPageVisible, PerfToggleSummaryMode,
 };
 use super::page::DevicePage;
 use super::{DeviceKey, DeviceKind};
@@ -71,10 +71,10 @@ pub struct PageMenuCtx<'a> {
     /// `performance.graph_range_s`.
     pub range_s: u16,
     pub summary_on: bool,
-    /// The 5 and 10 minute ranges; false before E24-019.
+    /// The 5 and 10 minute ranges.
     pub ranges_long_enabled: bool,
-    /// Device kinds for the "View >" submenu, with whether a device of that kind is visible.
-    /// `None` before E24-017.
+    /// Device kinds for the "View >" submenu in [`VIEW_KINDS`] order, with whether a device of
+    /// that kind is visible. `None` leaves the submenu out (a summary tile's menu).
     pub view_types: Option<&'a [(DeviceKind, bool)]>,
     /// `None` before P3 leaves the tray item out.
     pub tray_available: Option<bool>,
@@ -88,7 +88,20 @@ const RANGES: [(u16, &str); 4] = [
     (600, "perf-range-10m"),
 ];
 
-/// The page menu of `page`: the common items, then the page's own items, then the later slots.
+/// The "View >" items in order (UI-PRF-015 item 7): the device kind and the `en-US.ftl` key of
+/// its type name, the group names of edit mode.
+pub const VIEW_KINDS: [(DeviceKind, &str); 7] = [
+    (DeviceKind::Cpu, "perf-group-processor"),
+    (DeviceKind::Memory, "perf-group-memory"),
+    (DeviceKind::Disk, "perf-group-disks"),
+    (DeviceKind::Gpu, "perf-group-gpus"),
+    (DeviceKind::Net, "perf-group-nets"),
+    (DeviceKind::Fan, "perf-group-fans"),
+    (DeviceKind::Battery, "perf-group-batteries"),
+];
+
+/// The page menu of `page`: the common items, then the page's own items, then "View >" and the
+/// later slots.
 pub fn page_menu(
     menu: TlMenu,
     page: &dyn DevicePage,
@@ -98,7 +111,43 @@ pub fn page_menu(
 ) -> TlMenu {
     let menu = page_menu_common(menu, ctx, window, cx).separator();
     // `TlMenu` drops a doubled or trailing separator, so a page with no items leaves one.
-    page.menu_items(menu, window, cx).separator()
+    let menu = page.menu_items(menu, window, cx).separator();
+    match ctx.view_types {
+        Some(types) => view_menu(menu, types, window, cx),
+        None => menu,
+    }
+}
+
+/// "View >": one item per type that jumps to its first visible device; a type with no visible
+/// device is disabled (PERF-007).
+fn view_menu(
+    menu: TlMenu,
+    types: &[(DeviceKind, bool)],
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let items: Vec<(DeviceKind, SharedString, bool)> = VIEW_KINDS
+        .iter()
+        .map(|&(kind, key)| {
+            let visible = types.iter().any(|&(k, v)| k == kind && v);
+            (kind, tr(cx, key), visible)
+        })
+        .collect();
+    menu.submenu(
+        tr(cx, "perf-menu-view"),
+        window,
+        cx,
+        move |mut menu, _, _| {
+            for (kind, word, visible) in &items {
+                menu = if *visible {
+                    menu.item(word.clone(), Box::new(PerfJumpToType { kind: *kind }))
+                } else {
+                    menu.item_disabled(word.clone(), None)
+                };
+            }
+            menu
+        },
+    )
 }
 
 /// Copy, Graph Summary View and Time range (UI-PRF-015 items 1 to 3). A

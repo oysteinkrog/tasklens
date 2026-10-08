@@ -44,7 +44,7 @@ use self::actions::{
     PERFORMANCE_CONTEXT, PerfJumpToType, PerfSelectDevice, PerfSetGraphRange, PerfToggleSidebar,
     PerfToggleSummaryMode,
 };
-use self::menu::{PageMenuCtx, page_menu};
+use self::menu::{PageMenuCtx, VIEW_KINDS, page_menu};
 use self::page::DevicePage;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
@@ -700,8 +700,13 @@ impl PerformancePage {
         };
         let focus = page_focus(&view, cx).unwrap_or_else(|| self.focus.clone());
         let summary_on = self.summary.is_some();
+        let sidebar = self.sidebar.clone();
         let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
-            let ctx = page_menu_ctx(summary_on, cx);
+            let types = view_types(sidebar.read(cx));
+            let ctx = PageMenuCtx {
+                view_types: Some(&types),
+                ..page_menu_ctx(summary_on, cx)
+            };
             let mut slot = Some(menu);
             update_page(&view, cx, |p, cx| {
                 let menu = slot.take().expect("one page");
@@ -714,13 +719,11 @@ impl PerformancePage {
 
     /// `PerfJumpToType`: selects the first visible card of `kind`.
     fn on_jump_to_type(&mut self, a: &PerfJumpToType, _: &mut Window, cx: &mut Context<Self>) {
-        let key = self
-            .sidebar
-            .read(cx)
-            .cards()
-            .iter()
-            .find(|c| c.row.kind == a.kind)
-            .map(|c| c.row.key.clone());
+        let sidebar = self.sidebar.read(cx);
+        let key = sidebar
+            .visible_keys()
+            .find(|k| sidebar.card(k).is_some_and(|c| c.row.kind == a.kind))
+            .cloned();
         if let Some(key) = key {
             self.sidebar.update(cx, |s, cx| s.select(key, cx));
         }
@@ -754,9 +757,9 @@ impl PerformancePage {
 
 /// Runs `f` on the device page behind `view`. Each page type `page::build_page` creates has a
 /// line here (chain edit with its `build_page` arm, E25-010).
-/// Writes `performance.graph_range_s` (PERF-016). 300 and 600 wait for E24-019.
+/// Writes `performance.graph_range_s` (PERF-016). 300 and 600 read the 1 Hz tier (E19-013).
 pub fn set_graph_range(secs: u16, cx: &mut App) {
-    if !matches!(secs, 30 | 60) {
+    if !matches!(secs, 30 | 60 | 300 | 600) {
         return;
     }
     TlSettings::update(cx, |d| d.settings.performance.graph_range_s = secs);
@@ -767,10 +770,20 @@ pub fn page_menu_ctx(summary_on: bool, cx: &App) -> PageMenuCtx<'static> {
     PageMenuCtx {
         range_s: TlSettings::settings(cx).performance.graph_range_s,
         summary_on,
-        ranges_long_enabled: false,
+        ranges_long_enabled: true,
         view_types: None,
         tray_available: None,
     }
+}
+
+/// For each [`VIEW_KINDS`] kind, whether the sidebar shows a card of it.
+fn view_types(sidebar: &sidebar::DeviceSidebar) -> [(DeviceKind, bool); 7] {
+    VIEW_KINDS.map(|(kind, _)| {
+        let visible = sidebar
+            .visible_keys()
+            .any(|k| sidebar.card(k).is_some_and(|c| c.row.kind == kind));
+        (kind, visible)
+    })
 }
 
 /// The page's own focus handle; its actions are handled on the page's root.
