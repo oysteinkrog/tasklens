@@ -726,6 +726,31 @@ mod sidebar {
         assert_eq!(renders(&mut r), before);
     }
 
+    /// A sidebar re-render for one card's text re-renders no card chart: each chart is a cached
+    /// view, and none of their series changed (tasklens-wlf.36).
+    #[gpui_kit::test]
+    fn sidebar_rerender_reuses_card_charts(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let charts: Vec<_> = keys(&mut r).iter().map(|k| chart_of(&mut r, k)).collect();
+        let chart_renders = |r: &mut Rig| -> Vec<u32> {
+            charts
+                .iter()
+                .map(|c| r.vcx.read_entity(c, |v, _| v.render_count.get()))
+                .collect()
+        };
+        let (sidebar_before, before) = (renders(&mut r), chart_renders(&mut r));
+
+        r.engine.publish_with(|s| s.system = Arc::new(system(20)));
+        draw(r.vcx);
+
+        assert_eq!(
+            renders(&mut r),
+            sidebar_before + 1,
+            "the memory text changed"
+        );
+        assert_eq!(chart_renders(&mut r), before, "no chart rendered again");
+    }
+
     #[gpui_kit::test]
     fn demand_follows_visible_kinds(cx: &mut TestAppContext) {
         let devices = vec![
