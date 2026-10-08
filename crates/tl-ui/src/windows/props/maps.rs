@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
-    px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, div, px,
 };
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
@@ -40,6 +40,7 @@ use crate::components::checkbox::TlCheckbox;
 use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
+use crate::components::validity::copy_text;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -493,11 +494,16 @@ impl MapsDelegate {
     }
 
     /// The text of the `col` cell of `id`, `None` when the row is not shown.
+    /// It is the copy form: an RSS still warming up reads `…`.
     pub fn cell_text(&self, id: MapsRowId, col: MapsColumn) -> Option<String> {
         let ix = self.row_index(id)?;
-        let mut out = String::new();
-        self.write_text(ix, col, &mut out);
-        Some(out)
+        let mut out = CellOut {
+            want_text: true,
+            ..CellOut::default()
+        };
+        self.cell(ix, col, &mut out);
+        let text = SharedString::from(std::mem::take(&mut out.text));
+        Some(copy_text(out.validity, &text).to_string())
     }
 
     /// Whether node `id` is expanded.

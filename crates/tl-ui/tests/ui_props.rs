@@ -2209,6 +2209,31 @@ mod window {
     }
 
     #[gpui_kit::test]
+    fn maps_restricted_access_block(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        publish_detail(cx, &engine, 4321, |d| {
+            d.tabs[DetailTab::Maps.index()].validity = Validity::Restricted;
+        });
+        vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(DetailTab::Maps, window, cx)));
+        draw(&mut vcx);
+        assert!(vcx.debug_bounds("PropsAccessBlock").is_some());
+        assert!(
+            vcx.debug_bounds("PropsMaps").is_none(),
+            "no tree behind the block"
+        );
+        let words = cx.update(props_words);
+        assert_eq!(
+            words.access(ACCESS_MAPS).as_ref(),
+            "Needs administrator access."
+        );
+    }
+
+    #[gpui_kit::test]
     fn fds_copy_formats(cx: &mut TestAppContext) {
         let mut rig = fds_rig(cx);
         select_fds(&mut rig, &[4, 3]);
@@ -2543,5 +2568,270 @@ mod threads {
             "{first}"
         );
         assert_eq!(tsv_lines.next(), None, "one selected row");
+    }
+}
+
+// ---- Memory maps tab (E23-018, UI-PWN-013) ----
+
+mod maps {
+    use tl_model::details::{MapNode, MapRegion, MapsDetail};
+    use tl_ui::windows::props::maps::{MapsColumn, MapsTab};
+
+    use super::*;
+
+    struct MapsHost {
+        tab: Entity<MapsTab>,
+        filter: Entity<PropsFilter>,
+    }
+
+    impl Render for MapsHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(1600.))
+                .h(px(600.))
+                .flex()
+                .flex_col()
+                .child(filter_bar(&self.filter, None, cx))
+                .child(div().flex_1().child(self.tab.clone()))
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> (Entity<MapsHost>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui::table::actions::bind_keys_table(cx);
+        });
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let filter = cx.new(|cx| PropsFilter::new("Memory maps", window, cx));
+            let tab = cx.new(|cx| MapsTab::new(KEY, filter.clone(), window, cx));
+            MapsHost { tab, filter }
+        });
+        draw(cx);
+        (view, cx)
+    }
+
+    fn rss(validity: Validity) -> Total<u64> {
+        Total {
+            value: 8192,
+            validity,
+        }
+    }
+
+    fn node(name: &str, base: u64, regions: std::ops::Range<u32>, shared: bool) -> MapNode {
+        node_with(name, base, regions, shared, Validity::Valid)
+    }
+
+    fn node_with(
+        name: &str,
+        base: u64,
+        regions: std::ops::Range<u32>,
+        shared: bool,
+        validity: Validity,
+    ) -> MapNode {
+        MapNode {
+            name: text(name),
+            path: Some(text(&format!("/usr/lib/{name}"))),
+            primary: false,
+            outside: false,
+            shared_object: shared,
+            base,
+            size_bytes: 0x21000,
+            rss_bytes: rss(validity),
+            description: None,
+            package: Some(text("glibc 2.42-1")),
+            regions,
+        }
+    }
+
+    fn region(start: u64, label: Option<&str>, validity: Validity) -> MapRegion {
+        MapRegion {
+            start,
+            end: start + 0x21000,
+            perms: *b"r-xp",
+            offset: 0x1a000,
+            rss_bytes: rss(validity),
+            label: label.map(text),
+        }
+    }
+
+    /// firefox (primary), libc.so.6, kernel32.dll (a Wine mapping the engine counts as shared),
+    /// data.bin (not shared) and the outside node with [heap] and a memfd.
+    fn payload(validity: Validity) -> Arc<TabPayload> {
+        let mut primary = node("firefox", 0x55d3_f000_0000, 0..1, false);
+        primary.primary = true;
+        primary.path = Some(text("/usr/lib/firefox/firefox"));
+        let mut outside = node("", 0x1000, 4..6, false);
+        outside.outside = true;
+        outside.path = None;
+        outside.package = None;
+        let detail = MapsDetail {
+            nodes: Arc::from(vec![
+                outside,
+                node_with("libc.so.6", 0x7f3a_2c00_0000, 1..3, true, validity),
+                node("kernel32.dll", 0x7b00_0000_0000, 3..4, true),
+                node("data.bin", 0x7f00_0000_0000, 4..4, false),
+                primary,
+            ]),
+            regions: Arc::from(vec![
+                region(0x55d3_f000_0000, None, validity),
+                region(0x7f3a_2c00_0000, None, validity),
+                region(0x7f3a_2c02_1000, None, validity),
+                region(0x7b00_0000_0000, None, validity),
+                region(0x55d3_f1a0_0000, Some("[heap]"), validity),
+                region(0x7f10_0000_0000, Some("memfd:wayland-shm"), validity),
+            ]),
+        };
+        Arc::new(TabPayload::Maps(Arc::new(detail)))
+    }
+
+    fn feed(view: &Entity<MapsHost>, cx: &mut VisualTestContext, p: Arc<TabPayload>) {
+        let tab = cx.update(|_, cx| view.read(cx).tab.clone());
+        cx.update(|_, cx| tab.update(cx, |t, cx| t.set_payload(Some(&p), cx)));
+        draw(cx);
+    }
+
+    fn names(view: &Entity<MapsHost>, cx: &mut VisualTestContext) -> Vec<String> {
+        cx.update(|_, cx| {
+            let tab = view.read(cx).tab.clone();
+            let table = tab.read(cx).table().clone();
+            table.read(cx).delegate.row_names()
+        })
+    }
+
+    fn toggle(view: &Entity<MapsHost>, cx: &mut VisualTestContext, name: &str) {
+        let tab = cx.update(|_, cx| view.read(cx).tab.clone());
+        let id = cx
+            .update(|_, cx| {
+                let table = tab.read(cx).table().clone();
+                table.read(cx).delegate.node_named(name)
+            })
+            .expect("node shown");
+        cx.update(|_, cx| tab.update(cx, |t, cx| t.toggle(id, cx)));
+        draw(cx);
+    }
+
+    #[gpui_kit::test]
+    fn maps_primary_first_outside_last(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, payload(Validity::Valid));
+        assert_eq!(
+            names(&view, cx),
+            [
+                "firefox (Primary)",
+                "kernel32.dll",
+                "libc.so.6",
+                "Outside loaded modules"
+            ]
+        );
+        let base = cx.update(|_, cx| {
+            let tab = view.read(cx).tab.clone();
+            let table = tab.read(cx).table().clone();
+            let d = &table.read(cx).delegate;
+            let id = d.node_named("libc.so.6").expect("libc");
+            d.cell_text(id, MapsColumn::Base)
+        });
+        assert_eq!(base.as_deref(), Some("0x7f3a2c000000"));
+        let count = cx.update(|_, cx| view.read(cx).tab.read(cx).count(cx));
+        assert_eq!(count, 4);
+    }
+
+    #[gpui_kit::test]
+    fn maps_shared_only_filter_includes_wine_dll(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, payload(Validity::Valid));
+        let shown = names(&view, cx);
+        assert!(shown.iter().any(|n| n == "kernel32.dll"), "{shown:?}");
+        assert!(!shown.iter().any(|n| n == "data.bin"), "{shown:?}");
+        let tab = cx.update(|_, cx| view.read(cx).tab.clone());
+        cx.update(|_, cx| tab.update(cx, |t, cx| t.set_shared_only(false, cx)));
+        draw(cx);
+        assert!(names(&view, cx).iter().any(|n| n == "data.bin"));
+    }
+
+    /// Assumption until the leader answers the open item: with the switch on, "(Primary)" and
+    /// "Outside loaded modules" stay visible.
+    #[gpui_kit::test]
+    fn maps_shared_only_keeps_primary_and_outside(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, payload(Validity::Valid));
+        let shown = names(&view, cx);
+        assert_eq!(shown.first().map(String::as_str), Some("firefox (Primary)"));
+        assert_eq!(
+            shown.last().map(String::as_str),
+            Some("Outside loaded modules")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn maps_rss_warming_up_glyph(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, payload(Validity::WarmingUp));
+        toggle(&view, cx, "libc.so.6");
+        let shown = names(&view, cx);
+        assert!(
+            shown.iter().any(|n| n == "7f3a2c000000-7f3a2c021000"),
+            "{shown:?}"
+        );
+        let rss = cx.update(|_, cx| {
+            let tab = view.read(cx).tab.clone();
+            let table = tab.read(cx).table().clone();
+            let d = &table.read(cx).delegate;
+            let id = d.node_named("libc.so.6").expect("libc");
+            let region = (id.0, 0x7f3a_2c00_0000);
+            (
+                d.cell_text(id, MapsColumn::Rss),
+                d.cell_text(region, MapsColumn::Rss),
+                d.cell_text(region, MapsColumn::Perms),
+                d.cell_text(region, MapsColumn::Offset),
+            )
+        });
+        assert_eq!(rss.0.as_deref(), Some("\u{2026}"));
+        assert_eq!(rss.1.as_deref(), Some("\u{2026}"));
+        assert_eq!(rss.2.as_deref(), Some("r-xp"));
+        assert_eq!(rss.3.as_deref(), Some("0x0001a000"));
+    }
+
+    #[gpui_kit::test]
+    fn maps_expand_state_survives_refresh(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, payload(Validity::Valid));
+        assert_eq!(names(&view, cx).len(), 4, "all nodes start collapsed");
+        toggle(&view, cx, "libc.so.6");
+        assert_eq!(names(&view, cx).len(), 6);
+        // A new payload (a new Arc) keeps libc expanded.
+        feed(&view, cx, payload(Validity::Valid));
+        let shown = names(&view, cx);
+        assert_eq!(shown.len(), 6, "{shown:?}");
+        let ix = shown.iter().position(|n| n == "libc.so.6").expect("libc");
+        assert_eq!(shown[ix + 1], "7f3a2c000000-7f3a2c021000");
+    }
+
+    #[gpui_kit::test]
+    fn maps_filter_keeps_parent(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, payload(Validity::Valid));
+        toggle(&view, cx, "Outside loaded modules");
+        let filter = cx.update(|_, cx| view.read(cx).filter.clone());
+        cx.update(|window, cx| {
+            let input = filter.read(cx).input.clone();
+            input.update(cx, |s, cx| s.insert("wayland".to_owned(), window, cx));
+        });
+        cx.executor().advance_clock(Duration::from_millis(150));
+        draw(cx);
+        assert_eq!(
+            names(&view, cx),
+            [
+                "Outside loaded modules",
+                "memfd:wayland-shm 7f1000000000-7f1000021000"
+            ],
+            "the matching region keeps its node; the other region is hidden"
+        );
     }
 }
