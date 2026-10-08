@@ -824,3 +824,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.57: validity glyphs align like their column (left for Text/Path, right for Numeric) in every table; foundation.md:1147 reworded.
 - jqk.24: pin is a plain caption cell (no Tab stop); KeepAbove armed per window open, one Busy retry. jqk.23: animation timed from background_executor().now() with ease_out_cubic (gpui with_animation uses the wall clock), frames only while t < 1.
 - bj6.35: GraphColor::hsla(theme) in pages/minigraph/mod.rs is the single colour map (cards reuse it); TlMenu::swatch_radio_item added; labels from shell-graph-color-* keys.
+- wlf.33: static 25.8 to 18.0% CPU, perf-cpu 37.4 to 27.5%, p99 39.6 to 18.2 ms; static gate still fails. Filed wlf.34 (bounds once per path, no translated clone) and wlf.35 (cache strokes). Bench lock check uses session 3, not auto.
