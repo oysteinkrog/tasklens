@@ -806,7 +806,7 @@ fn shapes(cx: &mut VisualTestContext) -> Vec<String> {
         .collect()
 }
 
-const SETTINGS_ROOT: [&str; 17] = [
+const SETTINGS_ROOT: [&str; 19] = [
     "header:Monitoring",
     "item:Refresh",
     "item:Network transfer unit",
@@ -818,6 +818,8 @@ const SETTINGS_ROOT: [&str; 17] = [
     "item:Tab Switch 250 ms",
     "item:Close with Esc",
     "header:Window & startup",
+    "item:Start at login",
+    "item:Start minimized",
     "item:Default tab",
     "item:Auto-fetch Public IP on launch",
     "header:Language",
@@ -903,8 +905,11 @@ fn default_tab_lists_built_tabs(cx: &mut TestAppContext) {
         cx.global_mut::<ShellState>().built_tabs =
             [Tab::Processes, Tab::Performance].into_iter().collect();
     });
-    // Default tab is the ninth item.
-    keys(r.cx, "alt-s down down down down down down down down right");
+    // Default tab is the tenth enabled item ("Start minimized" is disabled).
+    keys(
+        r.cx,
+        "alt-s down down down down down down down down down right",
+    );
     assert_eq!(
         settings_sub(r.cx),
         ["Processes", "Performance", "Last used"]
@@ -980,7 +985,12 @@ fn settings_menu_p2_order(cx: &mut TestAppContext) {
     );
     assert_eq!(
         group(r.cx, "Window & startup"),
-        ["Default tab", "Auto-fetch Public IP on launch"]
+        [
+            "Start at login",
+            "Start minimized",
+            "Default tab",
+            "Auto-fetch Public IP on launch"
+        ]
     );
     let tail: Vec<String> = shapes(r.cx).into_iter().rev().take(3).collect();
     assert_eq!(
@@ -1590,4 +1600,124 @@ fn reset_minigraph_dispatch(cx: &mut TestAppContext) {
     keys(r.cx, "enter");
     assert_eq!(resets.get(), 1, "ResetMinigraphLayout dispatched once");
     assert_eq!(open_menu(r.cx), None);
+}
+
+// Settings menu: Start at login and Start minimized (E21-011).
+
+/// The calls of the fake autostart writer, `(enabled, minimized)`.
+type AutostartCalls = Rc<RefCell<Vec<(bool, bool)>>>;
+
+/// Installs an `AppEnv` whose `set_autostart` records each call and fails when `fail` is set.
+fn fake_autostart(cx: &mut VisualTestContext, fail: bool) -> AutostartCalls {
+    let calls: AutostartCalls = Rc::new(RefCell::new(Vec::new()));
+    let log = calls.clone();
+    cx.update(|_, cx| {
+        cx.set_global(tl_ui::app::AppEnv {
+            set_autostart: Arc::new(move |enabled, minimized| {
+                log.borrow_mut().push((enabled, minimized));
+                if fail {
+                    Err("read-only file system".to_owned())
+                } else {
+                    Ok(())
+                }
+            }),
+            ..tl_ui::app::AppEnv::test()
+        })
+    });
+    calls
+}
+
+fn set_start_at_login(cx: &mut VisualTestContext, on: bool) {
+    cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.startup.start_at_login = on));
+}
+
+#[gpui_kit::test]
+fn start_minimized_disabled(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    assert!(!settings(r.cx).startup.start_at_login);
+    keys(r.cx, "alt-s");
+    let row = entries(r.cx)
+        .into_iter()
+        .find(|e| e.label() == Some("Start minimized"))
+        .expect("Start minimized drawn");
+    let built = {
+        let bar = bar(r.cx);
+        r.cx.update(|window, cx| {
+            let popup = bar.read(cx).popup().expect("menu open").clone();
+            popup
+                .read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .find(|e| e.label.as_deref() == Some("Start minimized"))
+                .map(|e| e.kind)
+        })
+    };
+    assert_eq!(
+        built,
+        Some(tl_ui::components::menu::MenuEntryKind::Disabled)
+    );
+    assert_ne!(row.selected(), Some(true));
+    // Nine Downs from Refresh pass "Start at login" and skip the disabled row.
+    keys(r.cx, "down down down down down down down down down");
+    assert_eq!(
+        entries(r.cx)
+            .into_iter()
+            .find(|e| e.selected() == Some(true))
+            .and_then(|e| e.label().map(str::to_owned))
+            .as_deref(),
+        Some("Default tab")
+    );
+}
+
+#[gpui_kit::test]
+fn start_at_login_success(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let calls = fake_autostart(r.cx, false);
+    keys(r.cx, "alt-s");
+    click_label(r.cx, "Start at login");
+    assert_eq!(*calls.borrow(), [(true, false)]);
+    assert!(settings(r.cx).startup.start_at_login);
+    assert_eq!(open_menu(r.cx), None);
+
+    // Activated again: the entry is deleted and the key turns off.
+    keys(r.cx, "alt-s");
+    click_label(r.cx, "Start at login");
+    assert_eq!(*calls.borrow(), [(true, false), (false, false)]);
+    assert!(!settings(r.cx).startup.start_at_login);
+}
+
+#[gpui_kit::test]
+fn start_at_login_failure_reverts(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    let calls = fake_autostart(r.cx, true);
+    keys(r.cx, "alt-s");
+    click_label(r.cx, "Start at login");
+    draw(r.cx);
+    assert_eq!(*calls.borrow(), [(true, false)]);
+    assert!(
+        !settings(r.cx).startup.start_at_login,
+        "the key stays false"
+    );
+    assert_eq!(
+        toast_texts(&mut r),
+        ["Could not change the autostart entry"]
+    );
+}
+
+#[gpui_kit::test]
+fn start_minimized_rewrites_entry(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let calls = fake_autostart(r.cx, false);
+    set_start_at_login(r.cx, true);
+    keys(r.cx, "alt-s");
+    click_label(r.cx, "Start minimized");
+    assert!(settings(r.cx).startup.start_minimized);
+    assert_eq!(*calls.borrow(), [(true, true)], "the entry is rewritten");
+
+    // With Start at login off only the key changes.
+    set_start_at_login(r.cx, false);
+    r.cx.update(|_, cx| cx.dispatch_action(&tl_ui::window::menus_settings::ToggleStartMinimized));
+    draw(r.cx);
+    assert!(!settings(r.cx).startup.start_minimized);
+    assert_eq!(calls.borrow().len(), 1, "no writer call");
 }
