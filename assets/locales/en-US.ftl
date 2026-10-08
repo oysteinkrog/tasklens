@@ -1418,6 +1418,23 @@ pwn-general-toast-opening = Opening file location
 pwn-general-toast-open-failed = Could not open file location.
 # Security tab (UI-PWN-014). Unused in v1: a clipboard failure cannot be detected (R-199).
 pwn-security-toast-copy-failed = Could not copy token summary value.
+# Environment tab (UI-PWN-016, R-099).
+pwn-env-col-name = Name
+pwn-env-col-value = Value
+pwn-env-loading = Loading environment...
+pwn-env-empty = No environment variables.
+pwn-env-unavailable = Environment block unavailable
+pwn-env-read-failed = (read failed)
+pwn-env-masked-tooltip = Hidden because the name looks like a secret
+pwn-env-reveal = Reveal value
+pwn-env-hide = Hide value
+pwn-env-at-start = Environment at process start
+pwn-env-refresh = Refresh
+pwn-env-truncated = Showing the first 1 MiB of the environment.
+pwn-env-menu-copy-name = Copy name
+pwn-env-menu-copy-value = Copy value
+pwn-env-menu-copy-all = Copy all as NAME=value
+pwn-env-toast-copied = Copied to clipboard
 pwn-general-cmdline-label = Command line
 # View menu and View > Columns (tasklens-bj6.4, UI-SHL-033, UI-SHL-034).
 shell-menu-view-columns = Columns
