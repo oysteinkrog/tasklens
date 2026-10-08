@@ -5,7 +5,9 @@
 //! publishes them like the real bridge (ADR-005): replace the latest snapshot, then send one wake
 //! token. In the `bridge` scene the CPU total and kernel series come from a real client. In the
 //! `table-2000` scene only the process table changes, once per second. In the `soak` scene the
-//! same synthetic samples as `perf-cpu` are published once per second, ten at a time.
+//! same synthetic samples as `perf-cpu` are published once per second, ten at a time. The
+//! `perf-overview` scene adds memory, disk, network and GPU totals, five more 1 Hz series and the
+//! disk and network aggregates to the `perf-cpu` data.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,7 +22,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::details::DetailsSnapshot;
-use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::history::HistoryView;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::journal::{JournalHandle, JournalQuery};
@@ -30,14 +32,17 @@ use tl_model::snapshot::{
     ComponentHeader, ConnectionsSnapshot, InventorySnapshot, ProcessSnapshot, SeriesSet,
     ServicesSnapshot, Snapshot, StartupSnapshot, SystemSnapshot, WindowsSnapshot,
 };
-use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology, CpuTotals, MemoryTotals, Metric};
+use tl_model::system::{
+    CoreInfo, CoreKind, CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState,
+    MemoryTotals, Metric, NetTotals,
+};
 use tl_model::table::ProcessTableView;
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
 use super::synth::{
-    BenchRng, CORES, CpuFrame, CpuSynth, DeviceSynth, PrefilledSeries, StatsFrame, StatsSynth,
-    TableSynth, prefill, seconds,
+    BenchRng, CORES, CpuFrame, CpuSynth, DeviceFrame, DeviceSynth, PrefilledSeries, StatsFrame,
+    StatsSynth, TableSynth, prefill, seconds,
 };
 
 const PERIOD_10HZ_NS: u64 = 100_000_000;
@@ -81,10 +86,42 @@ const TR_FIRST_DISK: usize = TR_GPU + 1;
 const TR_FIRST_NET: usize = TR_FIRST_DISK + 4;
 const TRACKS: usize = TR_FIRST_NET + 4;
 
+/// perf-overview: the disk and network aggregates, after the 41 catalog entries.
+const DEV_AGG_DISK: u16 = DEV_FIRST_NET + NET_NAMES.len() as u16;
+const DEV_AGG_NET: u16 = DEV_AGG_DISK + 1;
+/// perf-overview memory totals: 8 GiB swap at 5% used, page cache at 20% of the total.
+const SWAP_TOTAL_BYTES: u64 = 8 << 30;
+const SWAP_USED_BYTES: u64 = SWAP_TOTAL_BYTES / 20;
+const CACHED_BYTES: u64 = MEM_TOTAL_BYTES / 5;
+/// perf-overview GPU memory size (16 GiB).
+const VRAM_TOTAL_BYTES: u64 = 16 << 30;
+/// perf-overview disks: each second a read burst and a write burst each start with this chance,
+/// at up to 500 MB/s.
+const DISK_BURST_P: f32 = 0.1;
+const DISK_BURST_MAX_BPS: f32 = 500_000_000.0;
+/// perf-overview disk size (2 TB).
+const DISK_CAPACITY_BYTES: u64 = 2_000_000_000_000;
+/// perf-overview link speed of the wired interface.
+const WIRED_LINK_MBPS: u32 = 1_000;
+
+/// perf-overview track indexes, sorted by `SeriesId` like the tracks above.
+const OX_SWAP: usize = 0;
+const OX_CACHED: usize = 1;
+const OX_GPU_MEM: usize = 2;
+/// Disk `d` has its read rate at `OX_FIRST_DISK + 2d` and its write rate right after.
+const OX_FIRST_DISK: usize = 3;
+const OX_AGG_DISK: usize = OX_FIRST_DISK + 8;
+const OX_AGG_NET: usize = OX_AGG_DISK + 2;
+const OX_TRACKS: usize = OX_AGG_NET + 2;
+
 /// Where the CPU total comes from.
 pub enum BenchFeed {
     /// Every series synthetic (perf-cpu, static).
     Synthetic,
+    /// perf-overview: the `Synthetic` series plus memory, disk, network and GPU totals, the
+    /// DISK_READ, DISK_WRITE, MEM_CACHED, SWAP_USED and GPU_MEM series, and the disk and
+    /// network aggregates with their summed rates.
+    Overview,
     /// table-2000: the prefilled series never change; once per second a new [`TableSynth`]
     /// table replaces the PROCESSES and TABLE components, and nothing else is published.
     Table,
@@ -157,6 +194,7 @@ impl BenchEngine {
         };
         let (mut publisher, real) = match feed {
             BenchFeed::Synthetic | BenchFeed::Soak => (Publisher::new(seed, t0, None, false), None),
+            BenchFeed::Overview => (Publisher::build(seed, t0, None, false, true), None),
             BenchFeed::Table => (Publisher::new(seed, t0, None, true), None),
             BenchFeed::Bridge(client) => {
                 let wake = client.wake();
@@ -413,21 +451,39 @@ struct Publisher {
     table_synth: Option<TableSynth>,
     processes: Arc<ProcessSnapshot>,
     table: Arc<ProcessTableView>,
+    /// Some in perf-overview only.
+    overview: Option<OverviewSynth>,
 }
 
 impl Publisher {
     fn new(seed: u64, t0: TimeNs, bridge: Option<Arc<dyn EngineClient>>, table: bool) -> Self {
+        Self::build(seed, t0, bridge, table, false)
+    }
+
+    /// `overview` adds the perf-overview extras. They draw from their own PRNG with the same
+    /// seed, so the CPU and card series are those of perf-cpu.
+    fn build(
+        seed: u64,
+        t0: TimeNs,
+        bridge: Option<Arc<dyn EngineClient>>,
+        table: bool,
+        overview: bool,
+    ) -> Self {
         let mut rng = BenchRng::new(seed);
         let mut cpu = CpuSynth::new(&mut rng);
         let mut devices = DeviceSynth::new();
         let pre = prefill(&mut cpu, &mut devices, &mut rng, t0);
+        let overview = overview.then(|| OverviewSynth::new(seed, &pre));
         let stats = StatsSynth::new(seconds(t0));
         let system = Arc::new(SystemSnapshot {
             header: header(0, t0, Validity::WarmingUp),
             cpu_topology: Arc::new(topology()),
             ..SystemSnapshot::default()
         });
-        let template = template();
+        let mut template = template();
+        if overview.is_some() {
+            template.devices = Arc::new(overview_catalog());
+        }
         let mut this = Self {
             processes: Arc::clone(&template.processes),
             table: Arc::clone(&template.table),
@@ -444,6 +500,7 @@ impl Publisher {
             bridge,
             cursor: BridgeCursor::default(),
             table_synth: None,
+            overview,
         };
         if table {
             this.table_synth = Some(TableSynth::new(&mut this.rng));
@@ -520,14 +577,18 @@ impl Publisher {
 
         let s = self.stats.sample_1hz(&mut self.rng, seconds(t_ns), f);
         let version = self.system.header.version + 1;
-        self.system = Arc::new(SystemSnapshot {
+        let mut system = SystemSnapshot {
             header: header(version, t_ns, Validity::Valid),
             cpu: cpu_totals(&s),
             memory: memory_totals(mem_used),
             cpu_topology: Arc::clone(&self.system.cpu_topology),
             boot_time_s: boot_time_s(s.up_time_s),
             ..SystemSnapshot::default()
-        });
+        };
+        if let Some(o) = &mut self.overview {
+            o.tick_1hz(t_ns, &d, &mut system);
+        }
+        self.system = Arc::new(system);
     }
 
     /// Copies the real client's new CPU_TOTAL and CPU_KERNEL samples of its `CpuPackage` device.
@@ -575,12 +636,17 @@ impl Publisher {
     /// their `Arc<SeriesView>`.
     fn snapshot(&mut self) -> Snapshot {
         let mut newest = 0;
-        for t in &mut self.tracks {
+        let extra: &mut [Track] = match &mut self.overview {
+            Some(o) => &mut o.tracks,
+            None => &mut [],
+        };
+        for t in self.tracks.iter_mut().chain(extra.iter_mut()) {
             t.refresh();
         }
-        let views: Arc<[Arc<SeriesView>]> = self
+        let mut views: Vec<Arc<SeriesView>> = self
             .tracks
             .iter()
+            .chain(extra.iter())
             .map(|t| {
                 if let Some(s) = t.view.samples.last() {
                     newest = newest.max(s.t_ns);
@@ -588,6 +654,11 @@ impl Publisher {
                 Arc::clone(&t.view)
             })
             .collect();
+        if !extra.is_empty() {
+            // `SeriesSet::get` searches by `SeriesId`.
+            views.sort_unstable_by_key(|v| v.id);
+        }
+        let views: Arc<[Arc<SeriesView>]> = views.into();
         let series = Arc::new(SeriesSet {
             header: header(self.series_version, newest, Validity::Valid),
             series: views,
@@ -605,6 +676,189 @@ impl Publisher {
             ..self.template.clone()
         }
     }
+}
+
+/// The perf-overview extras: the totals the Overview boxes read and their 1 Hz series.
+struct OverviewSynth {
+    rng: BenchRng,
+    /// [`OX_TRACKS`] tracks, sorted by `SeriesId`.
+    tracks: Vec<Track>,
+    /// Bytes read and written since boot, per disk.
+    disk_totals: [(u64, u64); 4],
+    /// Bytes received (and sent) since boot, per interface.
+    net_totals: [u64; 2],
+}
+
+/// One second of perf-overview extras.
+struct OverviewFrame {
+    /// Read and write bytes per second of Disk 0 to Disk 3.
+    disk_bps: [(f32, f32); 4],
+    vram_used: u64,
+    gpu_temp_c: f32,
+    gpu_power_w: f32,
+}
+
+impl OverviewSynth {
+    /// Prefills the extra series at the 1 Hz times of `pre`.
+    fn new(seed: u64, pre: &PrefilledSeries) -> Self {
+        let mut this = Self {
+            rng: BenchRng::new(seed),
+            tracks: overview_tracks(),
+            disk_totals: [(0, 0); 4],
+            net_totals: [0; 2],
+        };
+        // pre.devices is Memory, GPU 0, Disk 0 to Disk 3, enp38s0, tailscale0.
+        for (i, s) in pre.devices[0].iter().enumerate() {
+            let f = this.sample();
+            let mbps = [pre.devices[6][i].value, pre.devices[7][i].value];
+            this.push(s.t_ns, &f, mbps);
+        }
+        this
+    }
+
+    fn sample(&mut self) -> OverviewFrame {
+        let rng = &mut self.rng;
+        let mut disk_bps = [(0.0, 0.0); 4];
+        for d in &mut disk_bps {
+            for v in [&mut d.0, &mut d.1] {
+                if rng.next_f32_unit() < DISK_BURST_P {
+                    *v = rng.uniform(0.0, DISK_BURST_MAX_BPS);
+                }
+            }
+        }
+        // VRAM 30% +- 5, temperature 52 +- 2, power 120 +- 20: a fresh draw each second.
+        let vram_pct = rng.uniform(25.0, 35.0);
+        OverviewFrame {
+            disk_bps,
+            vram_used: (f64::from(vram_pct) / 100.0 * VRAM_TOTAL_BYTES as f64) as u64,
+            gpu_temp_c: rng.uniform(50.0, 54.0),
+            gpu_power_w: rng.uniform(100.0, 140.0),
+        }
+    }
+
+    /// Appends one second at `t_ns`; `net_mbps` are the two interfaces' rates.
+    fn push(&mut self, t_ns: TimeNs, f: &OverviewFrame, net_mbps: [f32; 2]) {
+        let mut push = |i: usize, v: f32| self.tracks[i].push(Sample::valid(t_ns, v));
+        push(OX_SWAP, SWAP_USED_BYTES as f32);
+        push(OX_CACHED, CACHED_BYTES as f32);
+        push(OX_GPU_MEM, f.vram_used as f32);
+        let (mut read, mut write) = (0.0, 0.0);
+        for (d, &(r, w)) in f.disk_bps.iter().enumerate() {
+            push(OX_FIRST_DISK + 2 * d, r);
+            push(OX_FIRST_DISK + 2 * d + 1, w);
+            read += r;
+            write += w;
+        }
+        push(OX_AGG_DISK, read);
+        push(OX_AGG_DISK + 1, write);
+        // Each interface sends what it receives, as in the card series.
+        let bps = net_mbps.iter().sum::<f32>() * BYTES_PER_S_PER_MBPS;
+        push(OX_AGG_NET, bps);
+        push(OX_AGG_NET + 1, bps);
+    }
+
+    /// One second: the extra series and the memory, disk, network and GPU totals of `system`.
+    fn tick_1hz(&mut self, t_ns: TimeNs, d: &DeviceFrame, system: &mut SystemSnapshot) {
+        let f = self.sample();
+        self.push(t_ns, &f, d.net_mbps);
+
+        let mem = &mut system.memory;
+        mem.cached = CACHED_BYTES;
+        mem.swap_total = SWAP_TOTAL_BYTES;
+        mem.swap_free = SWAP_TOTAL_BYTES - SWAP_USED_BYTES;
+
+        let none = || Metric::with(Validity::Unsupported);
+        let mut disks = Vec::with_capacity(4);
+        for (i, (&(r, w), totals)) in f.disk_bps.iter().zip(&mut self.disk_totals).enumerate() {
+            totals.0 += r as u64;
+            totals.1 += w as u64;
+            let device = DeviceIdx(DEV_FIRST_DISK + i as u16);
+            let row = DiskTotals {
+                device,
+                active_pct: Metric::valid(d.disk_pct[i]),
+                read_bps: Metric::valid(f64::from(r)),
+                write_bps: Metric::valid(f64::from(w)),
+                response_ms: none(),
+                read_total: totals.0,
+                written_total: totals.1,
+                capacity: DISK_CAPACITY_BYTES,
+                temp_c: none(),
+            };
+            disks.push((device, row));
+        }
+        system.disks = disks.into();
+
+        let mut nets = Vec::with_capacity(NET_NAMES.len());
+        for (i, (&mbps, total)) in d.net_mbps.iter().zip(&mut self.net_totals).enumerate() {
+            let bps = f64::from(mbps * BYTES_PER_S_PER_MBPS);
+            *total += bps as u64;
+            let device = DeviceIdx(DEV_FIRST_NET + i as u16);
+            let row = NetTotals {
+                device,
+                rx_bps: Metric::valid(bps),
+                tx_bps: Metric::valid(bps),
+                rx_total: *total,
+                tx_total: *total,
+                // Only the wired interface reports a speed.
+                link_speed_mbps: if i == 0 {
+                    Metric::valid(WIRED_LINK_MBPS)
+                } else {
+                    Metric::with(Validity::Unsupported)
+                },
+                state: LinkState::Up,
+            };
+            nets.push((device, row));
+        }
+        system.nets = nets.into();
+
+        let gpu = DeviceIdx(DEV_GPU);
+        let row = GpuTotals {
+            device: gpu,
+            util_pct: Metric::valid(d.gpu_pct),
+            mem_util_pct: none(),
+            mem_used: Metric::valid(f.vram_used),
+            mem_total: Metric::valid(VRAM_TOTAL_BYTES),
+            shared_used: Metric::with(Validity::Unsupported),
+            shared_total: Metric::with(Validity::Unsupported),
+            enc_pct: none(),
+            dec_pct: none(),
+            temp_c: Metric::valid(f.gpu_temp_c),
+            power_w: Metric::valid(f.gpu_power_w),
+            power_limit_w: none(),
+            clock_gfx_mhz: Metric::with(Validity::Unsupported),
+            clock_mem_mhz: Metric::with(Validity::Unsupported),
+            fan_pct: none(),
+            pcie_rx_bps: none(),
+            pcie_tx_bps: none(),
+        };
+        system.gpus = Arc::from([(gpu, row)]);
+    }
+}
+
+/// The perf-overview extra series, sorted by `SeriesId`, with no samples yet.
+fn overview_tracks() -> Vec<Track> {
+    let slow = |device: u16, metric: MetricId| {
+        let id = SeriesId {
+            device: DeviceIdx(device),
+            metric,
+        };
+        Track::new(id, PERIOD_1HZ_NS, CAP_1HZ, &[])
+    };
+    let mut out = Vec::with_capacity(OX_TRACKS);
+    out.push(slow(DEV_MEMORY, MetricId::SWAP_USED));
+    out.push(slow(DEV_MEMORY, MetricId::MEM_CACHED));
+    out.push(slow(DEV_GPU, MetricId::GPU_MEM));
+    for d in 0..4 {
+        out.push(slow(DEV_FIRST_DISK + d, MetricId::DISK_READ));
+        out.push(slow(DEV_FIRST_DISK + d, MetricId::DISK_WRITE));
+    }
+    out.push(slow(DEV_AGG_DISK, MetricId::DISK_READ));
+    out.push(slow(DEV_AGG_DISK, MetricId::DISK_WRITE));
+    out.push(slow(DEV_AGG_NET, MetricId::NET_RX));
+    out.push(slow(DEV_AGG_NET, MetricId::NET_TX));
+    debug_assert_eq!(out.len(), OX_TRACKS);
+    debug_assert!(out.windows(2).all(|w| w[0].view.id < w[1].view.id));
+    out
 }
 
 /// The samples after `*cursor`, oldest first, and moves the cursor to the newest. With no cursor
@@ -736,6 +990,37 @@ fn catalog() -> DeviceCatalog {
     }
     DeviceCatalog {
         version: 1,
+        entries: entries.into(),
+    }
+}
+
+/// perf-overview catalog: the 41 entries of [`catalog`], then the disk and network aggregates.
+fn overview_catalog() -> DeviceCatalog {
+    let base = catalog();
+    let mut entries = base.entries.to_vec();
+    for (idx, kind, name, key) in [
+        (
+            DEV_AGG_DISK,
+            AggregateKind::Disks,
+            "Disks",
+            "aggregate:disk",
+        ),
+        (DEV_AGG_NET, AggregateKind::Nets, "Network", "aggregate:net"),
+    ] {
+        debug_assert_eq!(usize::from(idx), entries.len());
+        entries.push(DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity: DeviceIdentity::Aggregate(kind),
+            generation: 0,
+            display_name: Arc::from(name),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(key),
+            net_kind: None,
+        });
+    }
+    DeviceCatalog {
+        version: base.version,
         entries: entries.into(),
     }
 }
@@ -1111,6 +1396,54 @@ mod tests {
             .expect("core 0");
         assert!(core0.samples.iter().all(|s| s.value <= 100.0));
         assert_eq!(engine.bridge_origin(1), None);
+    }
+
+    #[test]
+    fn overview_feed_fills_totals_and_aggregates() {
+        let shared = quiet_shared();
+        let t0 = 3_600 * PERIOD_1HZ_NS;
+        let mut p = Publisher::build(42, t0, None, false, true);
+        let first = p.snapshot();
+        assert_eq!(first.devices.entries.len(), 43);
+        assert_eq!(catalog().entries.len(), 41, "perf-cpu keeps 41 entries");
+        assert_eq!(first.series.series.len(), TRACKS + OX_TRACKS);
+        assert!(first.series.series.windows(2).all(|w| w[0].id < w[1].id));
+        for k in 1..=10 {
+            p.tick(k, &shared);
+        }
+        let snap = p.snapshot();
+        let sys = &snap.system;
+        assert_eq!((sys.disks.len(), sys.nets.len(), sys.gpus.len()), (4, 2, 1));
+        assert_eq!(sys.memory.swap_total, SWAP_TOTAL_BYTES);
+        assert_eq!(sys.memory.cached, CACHED_BYTES);
+        let last = |device: u16, metric| {
+            snap.series
+                .get(SeriesId {
+                    device: DeviceIdx(device),
+                    metric,
+                })
+                .and_then(|v| v.samples.last().map(|s| s.value))
+                .expect("series")
+        };
+        let read: f32 = (0..4)
+            .map(|d| last(DEV_FIRST_DISK + d, MetricId::DISK_READ))
+            .sum();
+        assert_eq!(last(DEV_AGG_DISK, MetricId::DISK_READ), read);
+        let rx: f64 = sys.nets.iter().map(|(_, n)| n.rx_bps.value).sum();
+        assert!((f64::from(last(DEV_AGG_NET, MetricId::NET_RX)) - rx).abs() < 1.0);
+        let vram = sys.gpus[0].1.mem_used.value as f64 / VRAM_TOTAL_BYTES as f64;
+        assert!((0.25..0.35).contains(&vram), "{vram}");
+
+        // The CPU series are those of perf-cpu.
+        let mut plain = Publisher::new(42, t0, None, false);
+        for k in 1..=10 {
+            plain.tick(k, &shared);
+        }
+        let plain = plain.snapshot();
+        assert_eq!(
+            plain.series.get(total_id()).map(|v| v.samples.clone()),
+            snap.series.get(total_id()).map(|v| v.samples.clone())
+        );
     }
 
     #[test]

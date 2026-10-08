@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
+use tl_model::demand::CpuDemand;
 use tl_model::ids::{NodeId, ProcessKey};
 use tl_model::table::ProcessTableView;
 use tl_model::time::now_boot_ns;
@@ -20,8 +21,10 @@ use tl_ui::bench::synth::{
     BenchRng, SEED, TABLE_GROUP_SIZE, TABLE_GROUPS, TABLE_PROCESSES, TableSynth,
 };
 use tl_ui::bench::{BenchClocks, BenchError, BenchOptions, BenchScene, run};
+use tl_ui::demand::GlobalDemand;
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::cpu::CpuPage;
+use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
 use tl_ui::testing::fake_engine::FakeEngine;
 
 static FAKE_CPU: AtomicU64 = AtomicU64::new(0);
@@ -114,6 +117,10 @@ fn scene_names_round_trip() {
         Some(BenchScene::Table2000)
     );
     assert_eq!(BenchScene::from_arg("soak"), Some(BenchScene::Soak));
+    assert_eq!(
+        BenchScene::from_arg("perf-overview"),
+        Some(BenchScene::PerfOverview)
+    );
     assert_eq!(BenchScene::from_arg("charts"), None);
     let opts = BenchOptions::default();
     assert_eq!((opts.duration_s, opts.warmup_s, opts.json), (30, 5, None));
@@ -159,6 +166,43 @@ fn bench_scene_perf_cpu_builds_32_cells_and_9_cards(cx: &mut TestAppContext) {
     );
     assert!(both, "overall chart above the grid");
     assert_eq!(selected.as_deref(), Some(DeviceKey::CPU));
+    engine.stop();
+}
+
+#[gpui_kit::test]
+fn bench_scene_perf_overview_builds_five_boxes(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let engine = BenchEngine::start(BenchFeed::Overview, SEED, now_boot_ns());
+    let window = cx
+        .update(|cx| open_scene(cx, BenchScene::PerfOverview, engine.clone()))
+        .expect("the scene window opens");
+    let mut vcx = VisualTestContext::from_window(window.handle, cx);
+    draw(&mut vcx);
+
+    let view = window.view.clone();
+    let (selected, boxes, bars, cpu_built) = vcx.update(|_, cx| {
+        let page = view.read(cx).page().expect("the Performance tab").read(cx);
+        let overview = page
+            .page(&DeviceKey(Arc::from(OVERVIEW_KEY)))
+            .expect("Overview page built")
+            .clone()
+            .downcast::<OverviewPage>()
+            .expect("an OverviewPage")
+            .read(cx);
+        (
+            page.selected().map(|k| k.0.to_string()),
+            overview.placement().boxes.len(),
+            overview.cpu_box().read(cx).bars().values.len(),
+            page.page(&DeviceKey(Arc::from(DeviceKey::CPU))).is_some(),
+        )
+    });
+    assert_eq!(selected.as_deref(), Some(OVERVIEW_KEY));
+    assert_eq!(boxes, 5, "CPU, memory, GPU, disk and network");
+    assert_eq!(bars, 32, "one bar per logical CPU");
+    assert!(!cpu_built, "the CPU page is not built");
+    let merged = vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged());
+    assert_eq!(merged.cpu, CpuDemand::PerCore);
+    assert!(merged.cpu_fast, "{merged:?}");
     engine.stop();
 }
 

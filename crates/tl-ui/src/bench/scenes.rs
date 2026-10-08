@@ -70,6 +70,9 @@ pub const TABLE_SCROLL_PX_PER_S: f32 = 1_200.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BenchScene {
     PerfCpu,
+    /// The Overview page (D-022). Not in xtask's default scenes; run with `--scene
+    /// perf-overview`.
+    PerfOverview,
     Table2000,
     Bridge,
     Static,
@@ -77,15 +80,16 @@ pub enum BenchScene {
 }
 
 impl BenchScene {
-    pub const ALL: [BenchScene; 5] = [
+    pub const ALL: [BenchScene; 6] = [
         Self::PerfCpu,
+        Self::PerfOverview,
         Self::Table2000,
         Self::Bridge,
         Self::Static,
         Self::Soak,
     ];
 
-    /// "perf-cpu", "table-2000", "bridge", "static" or "soak".
+    /// "perf-cpu", "perf-overview", "table-2000", "bridge", "static" or "soak".
     pub fn from_arg(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|scene| scene.as_str() == s)
     }
@@ -93,6 +97,7 @@ impl BenchScene {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PerfCpu => "perf-cpu",
+            Self::PerfOverview => "perf-overview",
             Self::Table2000 => "table-2000",
             Self::Bridge => "bridge",
             Self::Static => "static",
@@ -148,7 +153,8 @@ impl std::error::Error for BenchError {}
 
 /// The fixture settings of `scene` (UI-PRF-053 common fixture): Default Dark, 100% UI scale,
 /// 60 s graph range, kernel overlays on, smooth graphs except in `static`, CPU page selected
-/// with the sidebar at 252 px. `table-2000` shows the Power column after R-006's nine default
+/// with the sidebar at 252 px. The Overview card is hidden, except in `perf-overview`, which
+/// selects the Overview page. `table-2000` shows the Power column after R-006's nine default
 /// process columns (R-160 OI-7).
 pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
     // The default theme is Default Dark without follow-system, so `init` activates it with no
@@ -158,14 +164,18 @@ pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
     settings.motion.smooth_graphs = scene != BenchScene::Static;
     settings.performance.graph_range_s = 60;
     settings.performance.cpu_kernel = true;
-    // The Overview card stays hidden, so the scenes keep the phase-0 card count (D-022).
-    settings
-        .performance
-        .device_overrides
-        .insert(DeviceKey::OVERVIEW.to_owned(), DeviceVisibility::Hide);
     let mut state = UiState::default();
     state.performance.nav_width = 252;
-    state.performance.selected_device = DeviceKey::CPU.to_owned();
+    if scene == BenchScene::PerfOverview {
+        state.performance.selected_device = DeviceKey::OVERVIEW.to_owned();
+    } else {
+        // The Overview card stays hidden, so the scenes keep the phase-0 card count (D-022).
+        settings
+            .performance
+            .device_overrides
+            .insert(DeviceKey::OVERVIEW.to_owned(), DeviceVisibility::Hide);
+        state.performance.selected_device = DeviceKey::CPU.to_owned();
+    }
     if scene == BenchScene::Table2000 {
         let columns = &mut state.columns.processes;
         for list in [&mut columns.order, &mut columns.visible] {
@@ -211,6 +221,7 @@ impl SceneView {
         let handle = window.window_handle();
         demand.update(cx, |d, _| d.set_main_window(handle));
         let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
+        // In perf-overview the CPU page is not built, so `bench_show_both` stays off.
         let cpu = page
             .read(cx)
             .page(&DeviceKey(Arc::from(DeviceKey::CPU)))
@@ -458,6 +469,7 @@ pub fn run(
     let feed = match (scene, real) {
         (BenchScene::Table2000, _) => BenchFeed::Table,
         (BenchScene::Soak, _) => BenchFeed::Soak,
+        (BenchScene::PerfOverview, _) => BenchFeed::Overview,
         (BenchScene::Bridge, Some(real)) => BenchFeed::Bridge(real),
         (BenchScene::Bridge, None) => {
             return Task::ready(Err(BenchError("bridge: no real engine client".to_owned())));
