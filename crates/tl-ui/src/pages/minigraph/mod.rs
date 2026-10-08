@@ -7,9 +7,12 @@ pub mod menu;
 pub mod panel;
 pub mod sources;
 
-use gpui_kit::SharedString;
 use gpui_kit::private::schemars::JsonSchema;
+use gpui_kit::{Hsla, SharedString};
 use serde::{Deserialize, Serialize};
+
+use crate::theme::TlTheme;
+use crate::theme::palette::accent_color;
 
 /// A card's graph colour (R-263, R-083): the accent colour or one of the 17 APP-039 names. One
 /// type for E26 and the E21-032 Graph Color submenu. Its JSON form is [`GraphColor::as_str`].
@@ -100,6 +103,15 @@ impl GraphColor {
         }
         label.extend(chars);
         SharedString::from(label)
+    }
+
+    /// The colour to draw with: the theme accent for `Accent`, else the APP-039 colour from
+    /// the one table in `theme::palette::ACCENT_COLORS`.
+    pub fn hsla(&self, theme: &TlTheme) -> Hsla {
+        match self {
+            Self::Accent => theme.accent,
+            named => accent_color(named.as_str()).unwrap_or(theme.accent),
+        }
     }
 }
 
