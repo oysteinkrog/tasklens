@@ -2320,10 +2320,10 @@ mod group_fields {
                 id.as_str()
             );
         }
-        // Pseudo rows have no extras sums.
+        // Pseudo rows have no extras sums: n/a (PROC-012).
         let pseudo = group(GroupRowKind::Pseudo);
         let out = Env::new().cell(&pseudo, RowKind::Pseudo, ColumnId::Commit);
-        assert!(out.validity == Validity::Valid && shown(&out).is_empty());
+        assert_eq!(out.validity, Validity::Unsupported);
     }
 }
 
