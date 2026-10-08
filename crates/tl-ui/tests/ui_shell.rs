@@ -4388,6 +4388,121 @@ mod main_window {
             assert_eq!(tip.as_ref(), "Toggle view mode (current: List View)");
         }
     }
+
+    // ---- Tab switch animation (E20-021) ----
+
+    /// The outline's x as last drawn and the page opacity.
+    fn anim_state(vcx: &mut VisualTestContext) -> (Pixels, f32) {
+        let main = main(vcx);
+        vcx.update(|_, cx| {
+            let m = main.read(cx);
+            let rule = m
+                .tabstrip_view()
+                .read(cx)
+                .accent_rule()
+                .expect("rule drawn");
+            (rule.active.origin.x, m.page_opacity())
+        })
+    }
+
+    fn tab_x(vcx: &mut VisualTestContext, selector: &'static str) -> Pixels {
+        bounds(vcx, selector).origin.x
+    }
+
+    fn animating(vcx: &mut VisualTestContext) -> bool {
+        let main = main(vcx);
+        vcx.update(|_, cx| main.read(cx).tabstrip_view().read(cx).is_animating())
+    }
+
+    /// Animation frames asked for by the outline slide and the page fade together.
+    fn anim_frames(vcx: &mut VisualTestContext) -> u32 {
+        let main = main(vcx);
+        vcx.update(|_, cx| {
+            let m = main.read(cx);
+            m.tabstrip_view().read(cx).anim_frames() + m.fade_frames()
+        })
+    }
+
+    fn advance(vcx: &mut VisualTestContext, ms: u64) {
+        vcx.executor().advance_clock(Duration::from_millis(ms));
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    #[gpui_kit::test]
+    fn tab_switch_animates(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let old = tab_x(&mut vcx, "TabStrip-processes");
+        let new = tab_x(&mut vcx, "TabStrip-performance");
+        assert_eq!(anim_state(&mut vcx).0, old);
+        act(&mut vcx, SelectTab(1));
+        assert_eq!(active(&mut vcx), Tab::Performance);
+        advance(&mut vcx, 125);
+        let (x, opacity) = anim_state(&mut vcx);
+        assert!(old < x && x < new, "{old:?} < {x:?} < {new:?}");
+        assert!(0. < opacity && opacity < 1., "{opacity}");
+        advance(&mut vcx, 125);
+        assert_eq!(anim_state(&mut vcx), (new, 1.0));
+        assert!(!animating(&mut vcx));
+    }
+
+    #[gpui_kit::test]
+    fn tab_switch_instant_when_reduced_motion(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        vcx.update(|_, cx| cx.set_reduce_motion(true));
+        let new = tab_x(&mut vcx, "TabStrip-performance");
+        act(&mut vcx, SelectTab(1));
+        frame(&mut vcx);
+        draw(&mut vcx);
+        assert_eq!(anim_state(&mut vcx), (new, 1.0));
+        assert!(!animating(&mut vcx));
+        assert_eq!(anim_frames(&mut vcx), 0, "no animation runs");
+    }
+
+    #[gpui_kit::test]
+    fn tab_switch_zero_ms_instant(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        vcx.update(|_, cx| TlSettings::update(cx, |d| d.settings.motion.tab_switch_ms = 0));
+        let new = tab_x(&mut vcx, "TabStrip-performance");
+        act(&mut vcx, SelectTab(1));
+        assert_eq!(anim_state(&mut vcx), (new, 1.0));
+        assert_eq!(anim_frames(&mut vcx), 0);
+    }
+
+    #[gpui_kit::test]
+    fn tab_switch_restarts_from_current(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        act(&mut vcx, SelectTab(1));
+        advance(&mut vcx, 125);
+        let (mid, _) = anim_state(&mut vcx);
+        act(&mut vcx, SelectTab(2));
+        assert_eq!(active(&mut vcx), Tab::Services);
+        assert_eq!(
+            anim_state(&mut vcx).0,
+            mid,
+            "the new slide starts where the old one is"
+        );
+        let target = tab_x(&mut vcx, "TabStrip-services");
+        advance(&mut vcx, 125);
+        let (x, _) = anim_state(&mut vcx);
+        assert!(mid < x && x < target, "{mid:?} < {x:?} < {target:?}");
+        advance(&mut vcx, 125);
+        assert_eq!(anim_state(&mut vcx), (target, 1.0));
+    }
+
+    #[gpui_kit::test]
+    fn tab_switch_no_frames_after_end(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        act(&mut vcx, SelectTab(1));
+        advance(&mut vcx, 250);
+        let frames = anim_frames(&mut vcx);
+        assert!(frames > 0, "the switch animated");
+        for _ in 0..4 {
+            advance(&mut vcx, 250);
+        }
+        assert_eq!(anim_frames(&mut vcx), frames, "no frame after the end");
+        assert!(!animating(&mut vcx));
+    }
 }
 
 /// Startup step 11 after the first frame (tasklens-jqk.20, UI-SHL-110, UI-SHL-093, APP-048).
