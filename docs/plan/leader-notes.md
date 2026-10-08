@@ -840,3 +840,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.46 effect (rough, load 16 to 31): perf-overview CPU 27.6/34.3% to 24.7/23.7%, p50 4.2-6.0 to 3.7-4.0 ms; perf-overview-static 6.8% (gate 2%). Overview zero-size first frame fixed under crw.44 (deferred notify or prepaint layout).
 - summary fade test failure caused by jqk.23 tab fade on the test clock; test rigs default motion.tab_switch_ms = 0 (jqk.23 follow-up). crw.24 8597a86a swept another agent's hunk and broke ui_performance:2754; crw-22 fixing.
 - o55.37: intl_pluralrules =7.0.2 added (already in lock via fluent-bundle); plural category from Strings::text_locale() (the bundle's language, not the requested locale).
+- gma.10: accepted (tests in ui_process_menu; shared dialog_targets with Set Affinity; initial values from the first target in view order since CapturedTargets has no clicked row).
