@@ -966,16 +966,22 @@ mod page {
     };
     use tl_model::client::EngineClient;
     use tl_model::demand::{CpuDemand, Demand};
+    use tl_model::settings::CpuSecondaryGraph;
     use tl_model::settings::{AppearanceSettings, CpuGraphMode, Settings, ThemeSettings, UiState};
     use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::chart::YScale;
     use tl_ui::chart::grid_element::grid_layout;
+    use tl_ui::chart::scale::{ScaleState, compute};
     use tl_ui::components::kv_grid;
     use tl_ui::demand::DemandAggregator;
     use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::performance::actions::{PerfSetCpuGraphMode, PerfToggleCpuKernel};
+    use tl_ui::pages::performance::actions::{
+        PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel,
+    };
     use tl_ui::pages::performance::cpu::{
         CPU_EXTRA_MODES_ENABLED, CpuPage, FADE_NEW_ID, FADE_OLD_ID, OVERALL_ID, OVERLAID_ID,
-        PageSettingsView, STACKED_ID, mode_items, overlaid_spec,
+        PageSettingsView, PowerState, SECONDARY_ID, STACKED_ID, SecondaryAvail, mode_items,
+        overlaid_spec, secondary_items,
     };
     use tl_ui::pages::performance::cpu_grid::GRID_ID;
     use tl_ui::pages::performance::page::DevicePage as _;
@@ -1530,5 +1536,224 @@ mod page {
         let (text, second) = tip(&mut r, 2);
         assert_eq!(text.as_deref(), Some("Core 2, thread 0, 4500 MHz"));
         assert_ne!(second, first);
+    }
+
+    // Secondary graph (E24-021, UI-PRF-025; PERF-032).
+
+    /// Publishes the CPU values the secondary chart reads: package power, the temperature, the
+    /// clock, the static RAPL state and `cpuinfo_max_freq`.
+    fn publish_secondary(
+        r: &mut Rig,
+        power: Validity,
+        temp: Validity,
+        rapl: Option<RaplState>,
+        max_mhz: Option<u32>,
+    ) {
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.cpu.package_power_w = Metric::with(power);
+            sys.cpu.temp_c = Metric::with(temp);
+            sys.cpu.freq_mhz = Metric::valid(4631);
+            let dd = Arc::make_mut(&mut s.device_details);
+            dd.header.version += 1;
+            dd.cpu = Arc::new(CpuStaticInfo {
+                rapl,
+                ..CpuStaticInfo::default()
+            });
+            let inv = Arc::make_mut(&mut s.inventory);
+            inv.header.version += 1;
+            if let Some(mhz) = max_mhz {
+                inv.processor.max_mhz = tl_model::snapshot::InvField {
+                    value: mhz,
+                    validity: Validity::Valid,
+                };
+            }
+        });
+        draw(r.vcx);
+    }
+
+    fn saved_secondary(r: &mut Rig) -> CpuSecondaryGraph {
+        r.vcx
+            .update(|_, cx| TlSettings::settings(cx).performance.cpu_secondary_graph)
+    }
+
+    #[gpui_kit::test]
+    fn secondary_fallback_without_power(cx: &mut TestAppContext) {
+        let mut r = open(cx, Settings::default());
+        publish_secondary(&mut r, Validity::Unsupported, Validity::Valid, None, None);
+        let page = r.page.clone();
+        let (heading, tip) = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let view = p.secondary().expect("secondary chart").read(cx);
+            (
+                view.labels.heading.as_ref().map(|h| h.to_string()),
+                p.secondary_fallback_text().map(|t| t.to_string()),
+            )
+        });
+        assert_eq!(heading.as_deref(), Some("Temperature"));
+        assert_eq!(
+            tip.as_deref(),
+            Some("Power draw is not available. Showing Temperature.")
+        );
+        assert_eq!(saved_secondary(&mut r), CpuSecondaryGraph::Power);
+        assert!(r.vcx.debug_bounds(SECONDARY_ID).is_some());
+
+        // No temperature either: Clock speed.
+        publish_secondary(
+            &mut r,
+            Validity::Unsupported,
+            Validity::Unsupported,
+            None,
+            None,
+        );
+        let tip = r.vcx.update(|_, cx| {
+            page.read(cx)
+                .secondary_fallback_text()
+                .map(|t| t.to_string())
+        });
+        assert_eq!(
+            tip.as_deref(),
+            Some("Power draw is not available. Showing Clock speed.")
+        );
+
+        // A readable zone: Power draw, no tooltip.
+        publish_secondary(
+            &mut r,
+            Validity::Valid,
+            Validity::Valid,
+            Some(RaplState::Readable),
+            None,
+        );
+        let (choice, tip) = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            (p.secondary_choice(), p.secondary_fallback_text().cloned())
+        });
+        assert_eq!(choice, Some(CpuSecondaryGraph::Power));
+        assert_eq!(tip, None);
+    }
+
+    #[gpui_kit::test]
+    fn secondary_menu_disabled_needs_setup(cx: &mut TestAppContext) {
+        let mut r = open(cx, Settings::default());
+        publish_secondary(
+            &mut r,
+            Validity::Restricted,
+            Validity::Valid,
+            Some(RaplState::Unreadable),
+            None,
+        );
+        let page = r.page.clone();
+        let (avail, words) = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            (p.secondary_avail(), p.words().clone())
+        });
+        assert_eq!(avail.power, PowerState::NeedsSetup);
+        let items = secondary_items(avail);
+        let choices: Vec<CpuSecondaryGraph> = items.iter().map(|i| i.choice).collect();
+        assert_eq!(
+            choices,
+            [
+                CpuSecondaryGraph::None,
+                CpuSecondaryGraph::Power,
+                CpuSecondaryGraph::Clock,
+                CpuSecondaryGraph::Temperature,
+            ]
+        );
+        let power = items[1];
+        assert!(!power.enabled);
+        assert_eq!(power.tooltip, Some("perf-tip-needs-setup"));
+        assert!(power.setup_after, "the setup item follows Power draw");
+        assert!(items.iter().filter(|i| i.setup_after).count() == 1);
+        assert_eq!(words.needs_setup.as_ref(), "Needs setup");
+        assert_eq!(words.setup_power.as_ref(), "Set up CPU power draw…");
+        assert_eq!(words.menu_secondary.as_ref(), "Secondary graph");
+
+        // Readable: every item enabled, no setup item. No CPU hwmon: Temperature disabled.
+        let readable = SecondaryAvail {
+            power: PowerState::Readable,
+            temperature: false,
+            clock: true,
+        };
+        let items = secondary_items(readable);
+        assert!(items[1].enabled && !items[1].setup_after);
+        assert!(!items[3].enabled);
+    }
+
+    #[gpui_kit::test]
+    fn secondary_none_hides_chart(cx: &mut TestAppContext) {
+        let mut r = open(cx, Settings::default());
+        publish_secondary(
+            &mut r,
+            Validity::Valid,
+            Validity::Valid,
+            Some(RaplState::Readable),
+            None,
+        );
+        assert!(r.vcx.debug_bounds(SECONDARY_ID).is_some());
+        r.vcx.dispatch_action(PerfSetCpuSecondaryGraph {
+            choice: CpuSecondaryGraph::None,
+        });
+        draw(r.vcx);
+        let page = r.page.clone();
+        assert!(r.vcx.update(|_, cx| page.read(cx).secondary().is_none()));
+        assert!(r.vcx.debug_bounds(SECONDARY_ID).is_none());
+        assert_eq!(saved_secondary(&mut r), CpuSecondaryGraph::None);
+    }
+
+    #[gpui_kit::test]
+    fn secondary_clock_hw_max(cx: &mut TestAppContext) {
+        let mut s = Settings::default();
+        s.performance.cpu_secondary_graph = CpuSecondaryGraph::Clock;
+        let mut r = open(cx, s);
+        publish_secondary(&mut r, Validity::Valid, Validity::Valid, None, Some(5050));
+        let page = r.page.clone();
+        let (y, labels) = r.vcx.update(|_, cx| {
+            let view = page.read(cx).secondary().expect("clock chart").read(cx);
+            (view.spec.y, view.labels.clone())
+        });
+        assert_eq!(
+            y,
+            YScale::StickyUp {
+                hw_max: Some(5050.0)
+            }
+        );
+        assert!(labels.show_axis_max);
+        assert_eq!(labels.heading.as_deref(), Some("Clock speed"));
+        let mut axis = String::new();
+        compute(
+            &y,
+            0.0,
+            4631.0,
+            0,
+            &mut ScaleState::default(),
+            labels.value_fmt,
+            tl_model::settings::NetworkUnit::Bits,
+            &mut axis,
+        );
+        assert_eq!(axis, "5050 MHz");
+    }
+
+    #[gpui_kit::test]
+    fn secondary_temperature_demands_sensors(cx: &mut TestAppContext) {
+        let mut s = Settings::default();
+        s.performance.cpu_secondary_graph = CpuSecondaryGraph::Temperature;
+        let mut r = open(cx, s);
+        publish_secondary(
+            &mut r,
+            Validity::Valid,
+            Validity::Valid,
+            Some(RaplState::Readable),
+            None,
+        );
+        set_active(&mut r, true);
+        draw(r.vcx);
+        assert!(merged(&mut r).sensors, "Temperature asks for sensors");
+
+        r.vcx.dispatch_action(PerfSetCpuSecondaryGraph {
+            choice: CpuSecondaryGraph::Power,
+        });
+        draw(r.vcx);
+        assert!(!merged(&mut r).sensors, "Power draw does not");
     }
 }
