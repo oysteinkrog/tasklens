@@ -306,7 +306,11 @@ perf-gpu-row-location = Physical location
 perf-gpu-row-vbios = VBIOS version
 perf-gpu-row-uuid = UUID
 perf-gpu-row-arch = Architecture
-perf-gpu-enc-sessions = {$n} active sessions
+perf-gpu-enc-sessions =
+    { $n ->
+        [one] {$n} active session
+       *[other] {$n} active sessions
+    }
 perf-mem-heading-physical = Physical memory
 perf-mem-heading-commit = Commit
 perf-mem-heading-swap = Swap
