@@ -5146,7 +5146,6 @@ mod startup_items {
     // ---- Secondary-window pins (E20-029) ----
 
     use tl_ui::components::window_frame::ToggleAlwaysOnTop;
-    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::window::settings::open_settings;
 
     impl Rig {
