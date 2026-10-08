@@ -153,7 +153,19 @@ pub fn glyph(
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
-    base(validity, value_text, selected, m, theme).into_any_element()
+    base(validity, value_text, selected, false, m, theme).into_any_element()
+}
+
+/// [`glyph`] at the start (left) of the cell, for a left-aligned column, so the glyph sits where
+/// the value it replaces would.
+pub fn glyph_start(
+    validity: Validity,
+    value_text: &SharedString,
+    selected: bool,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    base(validity, value_text, selected, true, m, theme).into_any_element()
 }
 
 /// [`glyph`] with the validity tooltip after [`DELAY_CONTROL`], through [`HoverTooltip`]. `id`
@@ -171,7 +183,7 @@ pub fn glyph_with_tooltip(
     cx: &mut App,
 ) -> AnyElement {
     let id = id.into();
-    let cell = base(validity, value_text, selected, m, theme)
+    let cell = base(validity, value_text, selected, false, m, theme)
         .relative()
         .id(id.clone());
     if validity.is_valid() {
@@ -190,18 +202,24 @@ pub fn glyph_with_tooltip(
     HoverTooltip::attach(&state, cell, DELAY_CONTROL, build, window, cx).into_any_element()
 }
 
+/// The glyph content, at the end of the cell or at its `start`.
 fn base(
     validity: Validity,
     value_text: &SharedString,
     selected: bool,
+    start: bool,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> gpui_kit::Div {
     let (content, color) = glyph_parts(validity, value_text, selected, theme);
-    let mut cell = h_flex()
+    let cell = h_flex()
         .debug_selector(|| "TlValidityGlyph".into())
-        .w_full()
-        .justify_end();
+        .w_full();
+    let mut cell = if start {
+        cell.justify_start()
+    } else {
+        cell.justify_end()
+    };
     *cell.text_style() = numeric_style(m, m.base_text);
     let inner = match content {
         GlyphContent::Text(text) => div()

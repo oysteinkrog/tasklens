@@ -1144,8 +1144,8 @@ Build:               …                                          label ends wit
 | Missing | `-` (U+002D) | `text_secondary` | "No longer present" |
 | Failed | `!` | `status.warning` | "Could not read: {last_error}" |
 
-  Glyph cells keep the column's numeric alignment (right) and width, so a change from `…` to a
-  number does not move anything. On a selected row the secondary colour becomes
+  Glyph cells keep the column's alignment (right for numeric, left for text) and width, so a
+  change from `…` to a number does not move anything. On a selected row the secondary colour becomes
   `text_selected_secondary`. Heat colouring applies only to Valid cells (a glyph cell never gets a
   tint). Charts: Valid drawn; Stale drawn at 50% alpha after the last fresh sample then a gap; all
   others a gap (ADR-003), handled by the chart element, not this component.

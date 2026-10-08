@@ -44,7 +44,7 @@ use smallvec::SmallVec;
 use tl_model::validity::Validity;
 
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::validity::{glyph, glyph_allows_heat};
+use crate::components::validity::{glyph, glyph_allows_heat, glyph_start};
 use crate::table::columns::ColumnKind;
 use crate::table::tree_table::{
     CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NAME_PAD, NameCell, NameIcon, RowFlags,
@@ -188,8 +188,9 @@ pub fn numeric_cell(
     value_cell(ColumnKind::Numeric, text, &out, clipped, ctx)
 }
 
-/// Every filled cell of a tree table other than Name: a [`glyph_cell`] for a validity other
-/// than Valid and Stale (and `clipped` cleared), else the [`text_cell`], [`path_cell`] or
+/// Every filled cell of a tree table other than Name: for a validity other than Valid and
+/// Stale, a [`glyph_cell`] (numeric) or [`glyph_cell_start`] (text, path) with `clipped`
+/// cleared, else the [`text_cell`], [`path_cell`] or
 /// [`numeric_cell`] of `kind`. [`CellOut::prefix`] goes before the value in its own colour and
 /// [`CellOut::suffix`] colours the end of the text; both use `text_selected_secondary`
 /// (the prefix) or the suffix's selected colour on a selected row. The table applies
@@ -203,7 +204,10 @@ pub fn value_cell(
 ) -> Div {
     if !matches!(out.validity, Validity::Valid | Validity::Stale) {
         clipped.set(false);
-        return glyph_cell(out.validity, &text, ctx);
+        return match kind {
+            ColumnKind::Numeric => glyph_cell(out.validity, &text, ctx),
+            ColumnKind::Text | ColumnKind::Path => glyph_cell_start(out.validity, &text, ctx),
+        };
     }
     let suffix = out.suffix.map(|s| SuffixRun {
         len: s.len,
@@ -267,6 +271,20 @@ pub fn glyph_cell(validity: Validity, value_text: &SharedString, ctx: &CellCtx) 
     cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
         .debug_selector(|| "TlCell-glyph".into())
         .child(glyph(validity, value_text, ctx.selected, ctx.m, ctx.theme))
+}
+
+/// [`glyph_cell`] for a left-aligned (text or path) column: the glyph sits at the left padding
+/// edge, where the text it replaces starts.
+pub fn glyph_cell_start(validity: Validity, value_text: &SharedString, ctx: &CellCtx) -> Div {
+    cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
+        .debug_selector(|| "TlCell-glyph".into())
+        .child(glyph_start(
+            validity,
+            value_text,
+            ctx.selected,
+            ctx.m,
+            ctx.theme,
+        ))
 }
 
 /// The tooltip for a cell whose text was cut: `TlTooltip::text(full)` when `truncated` is set,

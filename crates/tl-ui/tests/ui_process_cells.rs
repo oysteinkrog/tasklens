@@ -1332,6 +1332,8 @@ mod paint {
                     assert_eq!(lock.size.width, px(12.), "the lock is 12 px");
                     if col == ColumnId::Cpu {
                         assert_eq!(lock.right(), cell.right() - px(8.), "right like CPU");
+                    } else {
+                        assert_eq!(lock.left(), cell.left() + px(8.), "left like Image path");
                     }
                 }
             }
