@@ -623,7 +623,7 @@ mod tests {
             enc_sessions: Reading::Unsupported,
             ..device_sample()
         };
-        let t = to_totals(&unsupported, &info);
+        let t = to_totals(&unsupported, &device_info());
         assert_eq!(t.mem_reserved.validity, Validity::Unsupported);
         assert_eq!(t.enc_sessions.validity, Validity::Unsupported);
     }
