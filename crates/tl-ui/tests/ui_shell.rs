@@ -4394,19 +4394,29 @@ mod startup_items {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, SystemTime};
 
+    use gpui_kit::{AppContext as _, Context, FocusHandle, IntoElement, Render, Window, div};
     use gpui_kit::{SharedString, TestAppContext, VisualTestContext};
     use tl_model::client::EngineClient;
-    use tl_model::command::Tab;
+    use tl_model::command::{AppRequest, Command, KWinCommand, Tab};
     use tl_model::ids::ProcessKey;
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::settings::{Settings, UiState};
-    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::snapshot::{
+        ComponentHeader, FrameGeometry, ProcessSnapshot, WindowEntry, WindowsSnapshot,
+    };
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::app::{AppEnv, CrashReport, StartOptions, TasklensUi, ToastKindTag, UiInit};
+    use tl_ui::app::{
+        AppEnv, CrashReport, StartOptions, TasklensUi, ToastKindTag, UiExit, UiExitSlot, UiInit,
+    };
+    use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
-    use tl_ui::window::main::{MainWindow, SELECT_PID_WAIT, main_window_view, open_main_window};
+    use tl_ui::window::main::{
+        CloseOutcome, MainWindow, PageSlot, SELECT_PID_WAIT, ShellPage, main_window_view,
+        open_main_window, set_test_page,
+    };
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui::window::status::StatusChanged;
     use tl_ui::window::titlebar::TitleBarProbe;
 
     const PID: u32 = 4242;
@@ -4416,6 +4426,8 @@ mod startup_items {
         /// `mark_crash_seen` calls.
         seen: Arc<AtomicU32>,
         version: u64,
+        /// The sender tl-app keeps for `UiInit.app_requests`.
+        requests: async_channel::Sender<AppRequest>,
     }
 
     /// `TasklensUi::init` with `toasts` queued, a pending crash report when `crash`, and
@@ -4428,7 +4440,7 @@ mod startup_items {
     ) -> Rig {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
+        let (requests, rx) = async_channel::bounded(4);
         let seen = Arc::new(AtomicU32::new(0));
         let mut env = AppEnv::test();
         if crash {
@@ -4462,6 +4474,7 @@ mod startup_items {
             engine,
             seen,
             version: 0,
+            requests,
         }
     }
 
@@ -4682,5 +4695,181 @@ mod startup_items {
                 .get(&WindowKey::CrashReport)
         });
         assert!(crash.is_none());
+    }
+
+    // ---- AppRequest handler (E20-019) ----
+
+    impl Rig {
+        /// Sends `req` as a second launch does and runs the app until idle.
+        fn request(&self, cx: &mut TestAppContext, req: AppRequest) {
+            self.requests.try_send(req).expect("the request is queued");
+            cx.run_until_parked();
+        }
+
+        /// Publishes a windows snapshot with `validity` and one window of this process.
+        fn publish_windows(&self, cx: &mut TestAppContext, validity: Validity, caption: &str) {
+            let entry = WindowEntry {
+                internal_id: Arc::from("abc"),
+                pid: std::process::id(),
+                caption: Arc::from(caption),
+                resource_class: Arc::from("tasklens"),
+                desktop_file_name: Arc::from("io.github.oysteinkrog.Tasklens"),
+                minimized: false,
+                maximized: false,
+                keep_above: false,
+                frame_geometry: FrameGeometry::default(),
+                window_type: 0,
+            };
+            self.engine.publish_with(|s| {
+                s.windows = Arc::new(WindowsSnapshot {
+                    header: ComponentHeader {
+                        version: 1,
+                        validity,
+                        ..ComponentHeader::default()
+                    },
+                    windows: vec![entry].into(),
+                    pick: None,
+                });
+            });
+            cx.run_until_parked();
+        }
+
+        fn kwin_activates(&self) -> Vec<Arc<str>> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::KWin(KWinCommand::Activate { internal_id }) => Some(internal_id),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    const ACTIVATE: AppRequest = AppRequest::Activate { token: None };
+
+    /// A blank page for tabs that have no page arm yet.
+    struct Blank(FocusHandle);
+
+    impl gpui_kit::EventEmitter<StatusChanged> for Blank {}
+
+    impl Render for Blank {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    impl ShellPage for Blank {
+        fn primary_focus(&self) -> FocusHandle {
+            self.0.clone()
+        }
+    }
+
+    fn blank(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+        let page = cx.new(|cx| Blank(cx.focus_handle()));
+        PageSlot::new(page, cx)
+    }
+
+    fn active_tab(cx: &mut TestAppContext) -> Tab {
+        let main = main_window(cx);
+        cx.update(|cx| main.read(cx).active_tab())
+    }
+
+    #[gpui_kit::test]
+    fn activate_reopens_hidden_window(cx: &mut TestAppContext) {
+        let r = init(cx, Vec::new(), false, StartOptions::default());
+        let mut vcx = open(cx);
+        let first = main_window(cx);
+        vcx.update(|window, cx| {
+            first.update(cx, |this, cx| {
+                this.apply_close_for_test(CloseOutcome::RemoveWindow, window, cx)
+            })
+        });
+        vcx.run_until_parked();
+        cx.update(|cx| {
+            assert!(main_window_view(cx).is_none(), "the window was removed");
+            TlSettings::update(cx, |d| d.state.tabs.last_tab = Tab::Information);
+        });
+
+        r.request(cx, ACTIVATE);
+        let second = main_window(cx);
+        assert_ne!(first.entity_id(), second.entity_id(), "a new main window");
+        assert_eq!(active_tab(cx), Tab::Information, "opened on last_tab");
+        assert!(r.kwin_activates().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn activate_brings_window_forward(cx: &mut TestAppContext) {
+        let r = init(cx, Vec::new(), false, StartOptions::default());
+        let mut vcx = open(cx);
+        let main = main_window(cx);
+        vcx.deactivate_window();
+        vcx.run_until_parked();
+        assert!(!vcx.update(|window, _| window.is_window_active()));
+
+        r.request(cx, ACTIVATE);
+        assert!(vcx.update(|window, _| window.is_window_active()));
+        assert_eq!(main.entity_id(), main_window(cx).entity_id(), "same window");
+        assert!(
+            r.kwin_activates().is_empty(),
+            "the KWin bridge is not up, so no KWin command"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn activate_sends_kwin_activate(cx: &mut TestAppContext) {
+        let r = init(cx, Vec::new(), false, StartOptions::default());
+        let _vcx = open(cx);
+        r.publish_windows(cx, Validity::Valid, "other caption");
+        r.request(cx, ACTIVATE);
+        assert!(r.kwin_activates().is_empty(), "no window titled tasklens");
+
+        r.publish_windows(cx, Validity::Valid, "tasklens");
+        r.request(cx, ACTIVATE);
+        assert_eq!(r.kwin_activates(), [Arc::<str>::from("abc")]);
+    }
+
+    #[gpui_kit::test]
+    fn app_request_select_tab(cx: &mut TestAppContext) {
+        let r = init(cx, Vec::new(), false, StartOptions::default());
+        cx.update(|cx| set_test_page(cx, Tab::Services, blank));
+        let _vcx = open(cx);
+        assert_ne!(active_tab(cx), Tab::Services);
+
+        r.request(cx, ACTIVATE);
+        r.request(cx, AppRequest::SelectTab(Tab::Services));
+        assert_eq!(active_tab(cx), Tab::Services);
+    }
+
+    #[gpui_kit::test]
+    fn app_request_select_pid(cx: &mut TestAppContext) {
+        let start = StartOptions {
+            tab: Some(tl_model::settings::StartTab::Performance),
+            ..StartOptions::default()
+        };
+        let mut r = init(cx, Vec::new(), false, start);
+        let _vcx = open(cx);
+        assert_eq!(active_tab(cx), Tab::Performance);
+
+        r.request(cx, AppRequest::SelectPid(77));
+        assert_eq!(active_tab(cx), Tab::Processes);
+        assert_eq!(jumps(cx), 0, "no record yet");
+        cx.executor().advance_clock(Duration::from_millis(500));
+        r.publish(cx, &[1, 77]);
+        assert_eq!(jumps(cx), 1);
+        r.publish(cx, &[1, 77, 9]);
+        assert_eq!(jumps(cx), 1, "the jump runs once");
+        cx.executor().advance_clock(SELECT_PID_WAIT);
+        cx.run_until_parked();
+        assert!(toasts(cx).iter().all(|t| !t.contains("not found")));
+    }
+
+    #[gpui_kit::test]
+    fn app_request_quit(cx: &mut TestAppContext) {
+        let r = init(cx, Vec::new(), false, StartOptions::default());
+        let _vcx = open(cx);
+        r.request(cx, AppRequest::Quit);
+        let exit = cx.read(|cx| cx.try_global::<UiExitSlot>().and_then(|s| s.0.clone()));
+        assert_eq!(exit, Some(UiExit::Quit));
     }
 }
