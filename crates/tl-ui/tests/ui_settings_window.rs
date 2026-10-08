@@ -654,3 +654,179 @@ fn performance_page_keys(cx: &mut TestAppContext) {
         ]
     );
 }
+
+// Graphs and Services pages (E21-025).
+
+fn json(
+    cx: &mut TestAppContext,
+    f: impl FnOnce(&Settings) -> serde_json::Value,
+) -> serde_json::Value {
+    cx.update(|cx| f(TlSettings::settings(cx)))
+}
+
+fn unit_types(cx: &mut TestAppContext) -> serde_json::Value {
+    json(cx, |s| {
+        serde_json::to_value(&s.services.unit_types).expect("serialize")
+    })
+}
+
+#[gpui_kit::test]
+fn graphs_page_switches(cx: &mut TestAppContext) {
+    setup(cx);
+    let graphs = page(cx, PageId::Graphs);
+    assert!(cx.update(|cx| TlSettings::settings(cx).graphs.minigraph_vram));
+    cx.update(|cx| graphs.set_bool(SettingKey::GraphsMinigraphVram, false, cx));
+    let g = cx.update(|cx| TlSettings::settings(cx).graphs.clone());
+    assert!(!g.minigraph_vram);
+    assert!(g.minigraph_gpu, "the other switches keep their values");
+    cx.update(|cx| graphs.set_bool(SettingKey::GraphsMinigraphGpuTemperature, true, cx));
+    assert!(cx.update(|cx| TlSettings::settings(cx).graphs.minigraph_gpu_temperature));
+}
+
+#[gpui_kit::test]
+fn graphs_reset_button(cx: &mut TestAppContext) {
+    setup(cx);
+    let resets = Rc::new(Cell::new(0));
+    let count = resets.clone();
+    cx.update(|cx| {
+        cx.on_action(
+            move |_: &tl_ui::pages::minigraph::actions::ResetMinigraphLayout, _| {
+                count.set(count.get() + 1)
+            },
+        )
+    });
+    let (_, mut vcx) = open(cx, 1);
+    let graphs = page(cx, PageId::Graphs);
+    vcx.update(|window, cx| graphs.press("Reset Minigraph Layout", window, cx));
+    vcx.run_until_parked();
+    assert_eq!(resets.get(), 1, "ResetMinigraphLayout dispatched once");
+}
+
+#[gpui_kit::test]
+fn services_unit_types_order(cx: &mut TestAppContext) {
+    setup(cx);
+    let services = page(cx, PageId::Services);
+    assert_eq!(
+        services.check_values(SettingKey::ServicesUnitTypes),
+        [
+            "service",
+            "socket",
+            "timer",
+            "mount",
+            "automount",
+            "path",
+            "target",
+            "swap",
+            "slice",
+            "scope"
+        ],
+        "column 1, then column 2"
+    );
+    assert_eq!(
+        unit_types(cx),
+        serde_json::json!(["service", "socket", "timer", "mount"])
+    );
+    cx.update(|cx| services.set_check(SettingKey::ServicesUnitTypes, "path", true, cx));
+    assert_eq!(
+        unit_types(cx),
+        serde_json::json!(["service", "socket", "timer", "mount", "path"])
+    );
+    // A box checked again goes back to its place, not to the end.
+    cx.update(|cx| services.set_check(SettingKey::ServicesUnitTypes, "socket", false, cx));
+    cx.update(|cx| services.set_check(SettingKey::ServicesUnitTypes, "scope", true, cx));
+    cx.update(|cx| services.set_check(SettingKey::ServicesUnitTypes, "socket", true, cx));
+    assert_eq!(
+        unit_types(cx),
+        serde_json::json!(["service", "socket", "timer", "mount", "path", "scope"])
+    );
+}
+
+#[gpui_kit::test]
+fn services_last_unit_type_refused(cx: &mut TestAppContext) {
+    setup(cx);
+    cx.update(|cx| {
+        TlSettings::set(
+            cx,
+            SettingKey::ServicesUnitTypes,
+            SettingValue::StrList(Arc::from(["service".into()])),
+        )
+    });
+    let (_, mut vcx) = open(cx, 1);
+    let services = page(cx, PageId::Services);
+    vcx.update(|_, cx| services.set_check(SettingKey::ServicesUnitTypes, "service", false, cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        unit_types(cx),
+        serde_json::json!(["service"]),
+        "it stays checked"
+    );
+    let toasts = vcx.update(|window, cx| {
+        let queue =
+            ToastQueue::of_window(window, cx).expect("the Settings window has a toast layer");
+        let q = queue.read(cx);
+        let mut all = q.visible_texts().to_vec();
+        all.extend(q.waiting_texts().iter().cloned());
+        all.iter().map(|t| t.to_string()).collect::<Vec<_>>()
+    });
+    assert_eq!(toasts, ["At least one unit type must stay selected"]);
+
+    // With a second type checked, the first can go.
+    vcx.update(|_, cx| services.set_check(SettingKey::ServicesUnitTypes, "timer", true, cx));
+    vcx.update(|_, cx| services.set_check(SettingKey::ServicesUnitTypes, "service", false, cx));
+    assert_eq!(unit_types(cx), serde_json::json!(["timer"]));
+}
+
+#[gpui_kit::test]
+fn services_filter_states(cx: &mut TestAppContext) {
+    setup(cx);
+    let services = page(cx, PageId::Services);
+    let states = |cx: &mut TestAppContext| {
+        json(cx, |s| {
+            serde_json::to_value(&s.services.filter_states).expect("serialize")
+        })
+    };
+    assert_eq!(
+        services.check_values(SettingKey::ServicesFilterStates),
+        ["running", "failed", "stopped", "disabled"]
+    );
+    assert_eq!(states(cx), serde_json::json!([]), "none checked means all");
+    cx.update(|cx| services.set_check(SettingKey::ServicesFilterStates, "failed", true, cx));
+    assert_eq!(states(cx), serde_json::json!(["failed"]));
+    cx.update(|cx| services.set_check(SettingKey::ServicesFilterStates, "running", true, cx));
+    assert_eq!(states(cx), serde_json::json!(["running", "failed"]));
+    // Unchecking every state is allowed.
+    cx.update(|cx| services.set_check(SettingKey::ServicesFilterStates, "running", false, cx));
+    cx.update(|cx| services.set_check(SettingKey::ServicesFilterStates, "failed", false, cx));
+    assert_eq!(states(cx), serde_json::json!([]));
+}
+
+#[gpui_kit::test]
+fn graphs_services_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    assert_eq!(
+        page(cx, PageId::Graphs).keys(),
+        [
+            SettingKey::GraphsMinigraphCpu,
+            SettingKey::GraphsMinigraphMemory,
+            SettingKey::GraphsMinigraphDisk,
+            SettingKey::GraphsMinigraphNetwork,
+            SettingKey::GraphsMinigraphGpu,
+            SettingKey::GraphsMinigraphVram,
+            SettingKey::GraphsMinigraphGpuTemperature
+        ]
+    );
+    assert_eq!(
+        page(cx, PageId::Services).keys(),
+        [
+            SettingKey::ServicesUnitTypes,
+            SettingKey::ServicesFilterStates
+        ]
+    );
+    // Page order: Graphs and Services follow Performance.
+    let ids: Vec<PageId> = cx.update(all_pages).iter().map(|p| p.id()).collect();
+    let perf = ids
+        .iter()
+        .position(|id| *id == PageId::Performance)
+        .expect("Performance listed");
+    assert_eq!(ids[perf + 1..perf + 3], [PageId::Graphs, PageId::Services]);
+}
