@@ -1458,6 +1458,14 @@ shell-menu-graphs-gpu = GPU Graph
 shell-menu-graphs-vram = VRAM Graph
 shell-menu-graphs-gpu-temp = GPU Temperature Graph
 shell-menu-graphs-reset = Reset Minigraph Layout
+# View > Theme (tasklens-bj6.15, UI-SHL-038, UI-SHL-080). Theme names are data, not translated.
+shell-menu-theme-sync = Sync theme with system
+shell-menu-theme-light = Preferred Light Theme
+shell-menu-theme-dark = Preferred Dark Theme
+shell-menu-theme-custom = {" "}(custom)
+shell-menu-theme-editing = {" "}(editing)
+shell-toast-theme-sync-off = Theme sync turned off
+shell-toast-theme-editor-busy = Finish or cancel the theme editor first
 # Settings menu, P1 rows (tasklens-bj6.7, UI-SHL-040).
 shell-menu-settings-monitoring = Monitoring
 shell-menu-settings-refresh = Refresh

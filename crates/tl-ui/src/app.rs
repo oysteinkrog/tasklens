@@ -346,6 +346,7 @@ impl TasklensUi {
         crate::pages::processes::bind_keys_processes(cx);
         actions::register_global_handlers(cx);
         crate::window::menubar::init(cx);
+        crate::window::menus_view::init(cx);
         kv_grid::init(cx);
         // Before any window, so every Root mounts the toast layer.
         toast::init(cx);

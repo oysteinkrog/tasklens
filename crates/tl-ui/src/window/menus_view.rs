@@ -11,7 +11,14 @@
 //! and intensity slider rows and two checks that keep the menu open; the menu bar owns the
 //! slider states and saves their values. View > Graphs (E21-003, UI-SHL-039, R-089) holds the
 //! seven minigraph checks and "Reset Minigraph Layout"; the GPU checks are disabled when the
-//! device catalog has no GPU.
+//! device catalog has no GPU. View > Theme (E21-012, UI-SHL-038, UI-SHL-080) lists every theme
+//! painted in its own colours, then "Sync theme with system" and the two preferred-theme
+//! submenus. `ActivateTheme` (declared in `theme/store.rs`) is handled here: an explicit choice
+//! writes `theme.active` and turns sync off; turning sync on applies the preferred theme of the
+//! current portal scheme at once.
+
+use std::cell::Cell;
+use std::rc::Rc;
 
 use gpui_kit::{App, Entity, FocusHandle, SharedString, Window};
 use tl_model::command::Tab;
@@ -25,6 +32,7 @@ use super::registry::WindowKey;
 use super::titlebar::keep_above_supported;
 use crate::actions::{SetSetting, SetViewMode, ToggleSetting};
 use crate::components::menu::{TlMenu, TlMenuPopup};
+use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::hub::GlobalHub;
 use crate::i18n::tr;
@@ -32,6 +40,68 @@ use crate::pages::minigraph::actions::ResetMinigraphLayout;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::{CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
 use crate::table::columns::TableId;
+use crate::theme::store::{self, ActivateSource, ActivateTheme, ThemeError, ThemeStore};
+
+/// Registers the `ActivateTheme` handler and the follow-system observer. `TasklensUi::init`
+/// calls it after `TlSettings::init`.
+pub fn init(cx: &mut App) {
+    cx.on_action(|a: &ActivateTheme, cx| activate_theme(&a.name, cx));
+    let following = Rc::new(Cell::new(follow_system(cx)));
+    cx.observe_global::<TlSettings>(move |cx| {
+        let now = follow_system(cx);
+        if following.replace(now) || !now {
+            return;
+        }
+        let theme = TlSettings::settings(cx).theme.clone();
+        if let Some(Err(e)) = store::on_follow_system_enabled(&theme, cx) {
+            tracing::warn!(target: "tasklens::ui", ?e, "follow-system theme not applied");
+        }
+    })
+    .detach();
+}
+
+fn follow_system(cx: &App) -> bool {
+    cx.try_global::<TlSettings>()
+        .is_some_and(|_| TlSettings::settings(cx).theme.follow_system)
+}
+
+/// An explicit theme choice (UI-SHL-080). Refused while the Theme Editor previews a theme.
+/// Writes `theme.active`, and turns sync off with an Info toast when it was on, so the next
+/// portal change does not overwrite the choice. The switch itself shows no toast.
+fn activate_theme(name: &str, cx: &mut App) {
+    match store::activate(name, ActivateSource::User, cx) {
+        Ok(_) => {
+            let was_following = follow_system(cx);
+            TlSettings::update(cx, |d| {
+                d.settings.theme.active = name.to_owned();
+                d.settings.theme.follow_system = false;
+            });
+            if was_following {
+                toast(ToastKind::Info, "shell-toast-theme-sync-off", cx);
+            }
+        }
+        Err(ThemeError::PreviewActive) => {
+            toast(ToastKind::Info, "shell-toast-theme-editor-busy", cx);
+        }
+        Err(e) => tracing::warn!(target: "tasklens::ui", ?e, name, "theme not activated"),
+    }
+}
+
+/// Pushes the toast `key` in the active window. Deferred: the window is busy dispatching the
+/// menu action.
+fn toast(kind: ToastKind, key: &str, cx: &mut App) {
+    let text = tr(cx, key);
+    let Some(handle) = cx.active_window() else {
+        return;
+    };
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| {
+            if let Some(queue) = ToastQueue::of_window(window, cx) {
+                queue.update(cx, |q, cx| q.push(kind, text, None, None, cx));
+            }
+        });
+    });
+}
 
 /// Builds the View menu. Item actions go to `return_focus`; the slider rows use `sliders`.
 pub fn build(
@@ -63,6 +133,7 @@ pub fn build(
             cx,
             move |menu, _, cx| appearance_submenu(menu, &sliders, cx),
         )
+        .submenu(tr(cx, "shell-menu-view-theme"), window, cx, theme_submenu)
         .submenu(tr(cx, "shell-menu-view-graphs"), window, cx, graphs_submenu)
     })
 }
@@ -352,4 +423,119 @@ fn graphs_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
         tr(cx, "shell-menu-graphs-reset"),
         Box::new(ResetMinigraphLayout),
     )
+}
+
+/// One theme row: its name as stored, its menu label, row colours and whether it carries the
+/// radio mark.
+pub struct ThemeRow {
+    pub name: SharedString,
+    pub label: SharedString,
+    pub bg: gpui_kit::Hsla,
+    pub fg: gpui_kit::Hsla,
+    pub selected: bool,
+}
+
+/// The theme rows in menu order: built-ins in TaskSlinger order, then user themes in file order.
+/// A user theme with a built-in name reads "<name> (custom)". The theme that renders carries
+/// the mark; while the Theme Editor previews it, it reads "<name> (editing)".
+pub fn theme_rows(cx: &App) -> Vec<ThemeRow> {
+    let theme_store = cx.global::<ThemeStore>();
+    let shown = store::current(cx);
+    let editing = theme_store.preview.is_some();
+    let (custom, editing_suffix) = (
+        tr(cx, "shell-menu-theme-custom"),
+        tr(cx, "shell-menu-theme-editing"),
+    );
+    store::names(cx)
+        .into_iter()
+        .filter_map(|(name, builtin)| {
+            let def = if builtin {
+                theme_store.builtin.iter().find(|d| d.name == name)
+            } else {
+                theme_store.user.iter().find(|d| d.name == name)
+            }?;
+            let shadows = !builtin && theme_store.builtin.iter().any(|d| d.name == name);
+            let selected = shown.name == name && shown.builtin == builtin;
+            let mut label = name.to_string();
+            if shadows {
+                label.push_str(&custom);
+            }
+            if selected && editing {
+                label.push_str(&editing_suffix);
+            }
+            Some(ThemeRow {
+                name: SharedString::from(name.to_string()),
+                label: label.into(),
+                bg: def.slots[crate::theme::ThemeSlot::MenuBg as usize],
+                fg: def.slots[crate::theme::ThemeSlot::TextPrimary as usize],
+                selected,
+            })
+        })
+        .collect()
+}
+
+/// Every theme name once, in menu order, for the preferred-theme radios.
+fn theme_names(cx: &App) -> Vec<SharedString> {
+    let mut names: Vec<SharedString> = Vec::new();
+    for (name, _) in store::names(cx) {
+        if !names.iter().any(|n| n.as_ref() == &*name) {
+            names.push(SharedString::from(name.to_string()));
+        }
+    }
+    names
+}
+
+/// The theme rows, a separator, "Sync theme with system" and the two preferred-theme
+/// submenus. E21-013 and E21-031 add the per-theme items and "Import theme".
+fn theme_submenu(mut menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+    for row in theme_rows(cx) {
+        menu = menu.painted_radio_item(
+            row.label,
+            row.bg,
+            row.fg,
+            None,
+            row.selected,
+            Box::new(ActivateTheme { name: row.name }),
+        );
+    }
+    let follow = TlSettings::settings(cx).theme.follow_system;
+    menu.separator()
+        .check_item(
+            tr(cx, "shell-menu-theme-sync"),
+            follow,
+            Box::new(ToggleSetting(SettingKey::ThemeFollowSystem)),
+        )
+        .submenu(
+            tr(cx, "shell-menu-theme-light"),
+            window,
+            cx,
+            |menu, _, cx| preferred_submenu(menu, SettingKey::ThemeLight, cx),
+        )
+        .submenu(
+            tr(cx, "shell-menu-theme-dark"),
+            window,
+            cx,
+            |menu, _, cx| preferred_submenu(menu, SettingKey::ThemeDark, cx),
+        )
+}
+
+/// Every theme name as a radio bound to `theme.light` or `theme.dark`.
+fn preferred_submenu(mut menu: TlMenu, key: SettingKey, cx: &mut App) -> TlMenu {
+    let theme = &TlSettings::settings(cx).theme;
+    let current = match key {
+        SettingKey::ThemeLight => theme.light.clone(),
+        _ => theme.dark.clone(),
+    };
+    for name in theme_names(cx) {
+        let on = name.as_ref() == current;
+        menu = menu.radio_item(
+            name.clone(),
+            on,
+            Box::new(SetSetting {
+                key,
+                value: SettingValue::Str(name),
+            }),
+        );
+    }
+    menu
 }
