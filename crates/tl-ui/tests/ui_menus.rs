@@ -56,7 +56,8 @@ struct Host {
 }
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let context_menu = tl_ui::components::menu::context_menu_layer(window, cx);
         div()
             .key_context("Global")
             .flex()
@@ -72,6 +73,7 @@ impl Render for Host {
                     .on_action(move |_: &CollapseAll, _, _| collapses.set(collapses.get() + 1))
                     .size_full()
             })
+            .children(context_menu)
     }
 }
 
@@ -1984,5 +1986,121 @@ fn preferred_theme_radios(cx: &mut TestAppContext) {
         active_theme(r.cx),
         "Default Dark",
         "no switch with sync off"
+    );
+}
+
+// Graph Color submenu (E21-032).
+
+use tl_ui::pages::minigraph::GraphColor;
+use tl_ui::pages::minigraph::actions::MinigraphSetColor;
+use tl_ui::pages::minigraph::sources::MinigraphId;
+
+fn set_color(color: GraphColor) -> Box<dyn gpui_kit::Action> {
+    Box::new(MinigraphSetColor {
+        id: MinigraphId(7),
+        color,
+    })
+}
+
+/// Opens a context menu filled by `graph_color_menu` with the mark on `current`, and returns
+/// its built entries.
+fn open_graph_colors(
+    r: &mut Rig<'_>,
+    current: GraphColor,
+) -> Vec<tl_ui::components::menu::MenuEntryInfo> {
+    let table = r.table.clone();
+    let popup = r.cx.update(|window, cx| {
+        let popup =
+            tl_ui::components::menu::TlMenu::build(window, cx, table, move |menu, _, cx| {
+                menubar::graph_color_menu(menu, current, set_color, cx)
+            });
+        tl_ui::components::menu::open_context_menu_at(
+            gpui_kit::point(px(100.), px(40.)),
+            window,
+            cx,
+            popup.clone(),
+        );
+        popup
+    });
+    draw(r.cx);
+    r.cx.update(|window, cx| popup.read(cx).entries_for_test(window))
+}
+
+const COLOR_LABELS: [&str; 18] = [
+    "Accent (theme default)",
+    "Coral",
+    "Orange",
+    "Amber",
+    "Yellow",
+    "Lime",
+    "Green",
+    "Mint",
+    "Teal",
+    "Cyan",
+    "Blue",
+    "Indigo",
+    "Violet",
+    "Lavender",
+    "Fuchsia",
+    "Pink",
+    "Rose",
+    "Slate",
+];
+
+#[gpui_kit::test]
+fn graph_color_menu_rows(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    let rows = open_graph_colors(&mut r, GraphColor::Teal);
+    let names: Vec<String> = rows
+        .iter()
+        .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
+        .collect();
+    assert_eq!(names, COLOR_LABELS);
+    let marked: Vec<&str> = rows
+        .iter()
+        .zip(COLOR_LABELS)
+        .filter(|(e, _)| e.checked)
+        .map(|(_, l)| l)
+        .collect();
+    assert_eq!(marked, ["Teal"]);
+    assert!(
+        rows.iter().all(|e| e.swatch.is_some()),
+        "every row has a swatch"
+    );
+    let teal: gpui_kit::Hsla = gpui_kit::rgb(0x14A098).into();
+    assert_eq!(rows[8].swatch, Some(teal));
+    // The rows are drawn, top to bottom.
+    let drawn = labels(r.cx);
+    assert_eq!(drawn, COLOR_LABELS);
+}
+
+#[gpui_kit::test]
+fn graph_color_accent_swatch(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    let rows = open_graph_colors(&mut r, GraphColor::Accent);
+    let accent = r.cx.update(|_, cx| tl_ui::theme::current(cx).accent);
+    let default_dark: gpui_kit::Hsla = gpui_kit::rgb(0x0277A6).into();
+    assert_eq!(accent, default_dark, "Default Dark is active");
+    assert_eq!(rows[0].swatch, Some(default_dark));
+    assert!(rows[0].checked);
+}
+
+#[gpui_kit::test]
+fn graph_color_dispatch(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    let picked = Rc::new(RefCell::new(Vec::new()));
+    let sink = picked.clone();
+    r.cx.update(|_, cx| {
+        cx.on_action(move |a: &MinigraphSetColor, _| sink.borrow_mut().push(a.clone()));
+    });
+    open_graph_colors(&mut r, GraphColor::Accent);
+    // Accent is highlighted; End reaches Slate, Up reaches Rose.
+    keys(r.cx, "end up enter");
+    assert_eq!(
+        *picked.borrow(),
+        [MinigraphSetColor {
+            id: MinigraphId(7),
+            color: GraphColor::Rose
+        }]
     );
 }
