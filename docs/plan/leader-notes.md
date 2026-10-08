@@ -803,3 +803,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.30: ctrl-c to CopyDetails in bind_keys_processes added as a chain edit under pdu.30. pdu.33: Σ only on columns GroupRow sums; the live-table gap (no Σ prefix, no dim zeros) filed as pdu.56.
 - bj6.6: with no GlobalHub, View > Graphs treats the machine as having no GPU (GPU, VRAM, GPU Temperature items disabled). Accepted.
 - pdu.56: scope is CellOut prefix and dim plus deleting ProcessRowCells::render; render_metric_cell stays until pdu.57 moves the +N and (deleted) runs to the live path and ports the paint tests.
+- crw.42: closed without the clipboard check (no PerfCopyDeviceInfo handler until crw.18); crw.18 adds the Overview clipboard check.
