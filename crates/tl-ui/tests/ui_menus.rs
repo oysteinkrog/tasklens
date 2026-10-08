@@ -1756,6 +1756,23 @@ const P2_THEMES: [&str; 12] = [
     "Catppuccin Latte",
 ];
 
+/// The built-in names in menu order. The embedded file holds the P1 pair until the P2 themes
+/// land; then this is all twelve.
+fn builtin_names(cx: &mut VisualTestContext) -> Vec<String> {
+    let present: Vec<String> = cx.update(|_, cx| {
+        cx.global::<tl_ui::theme::ThemeStore>()
+            .builtin
+            .iter()
+            .map(|d| d.name.to_string())
+            .collect()
+    });
+    P2_THEMES
+        .iter()
+        .filter(|n| present.iter().any(|p| p == *n))
+        .map(|n| n.to_string())
+        .collect()
+}
+
 /// Opens View > Theme from the keyboard (the item above Graphs).
 fn open_theme(cx: &mut VisualTestContext) {
     keys(cx, "alt-v end up right");
@@ -1796,33 +1813,39 @@ fn activate(cx: &mut VisualTestContext, name: &str) {
 #[gpui_kit::test]
 fn theme_rows_painted(cx: &mut TestAppContext) {
     let r = rig(cx);
+    let builtin = builtin_names(r.cx);
+    let n = builtin.len();
+    assert!(n == 2 || n == 12, "P1 or P2 built-ins: {builtin:?}");
     open_theme(r.cx);
     let rows = theme_entries(r.cx);
     let labels: Vec<String> = rows
         .iter()
-        .take(12)
+        .take(n)
         .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
         .collect();
-    assert_eq!(labels, P2_THEMES);
+    assert_eq!(labels, builtin);
     assert!(rows[0].checked, "the active theme carries the mark");
-    assert!(rows[1..12].iter().all(|e| !e.checked));
-    let dracula = rows[5].painted.expect("painted row");
+    assert!(rows[1..n].iter().all(|e| !e.checked));
+    // Dracula in a P2 build, Default Light in a P1 build: a theme that is not active.
+    let other = if n == 12 { "Dracula" } else { "Default Light" };
+    let ix = builtin.iter().position(|b| b == other).expect("listed");
+    let painted = rows[ix].painted.expect("painted row");
     keys(r.cx, "escape escape");
-    // The Dracula theme's own colours, as built when it is active.
+    // That theme's own colours, as built when it is active.
     r.cx.update(|_, cx| {
-        tl_ui::theme::store::activate("Dracula", tl_ui::theme::ActivateSource::User, cx)
-            .expect("Dracula exists");
+        tl_ui::theme::store::activate(other, tl_ui::theme::ActivateSource::User, cx)
+            .expect("theme exists");
     });
     let (menu_bg, text) = r.cx.update(|_, cx| {
         let t = tl_ui::theme::current(cx);
         (t.menu_bg, t.text_primary)
     });
-    assert_eq!(dracula, (menu_bg, text));
+    assert_eq!(painted, (menu_bg, text));
     // Then sync, and the two preferred-theme submenus.
     open_theme(r.cx);
     let tail: Vec<String> = theme_entries(r.cx)
         .iter()
-        .skip(12)
+        .skip(n)
         .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
         .collect();
     assert_eq!(
@@ -1840,13 +1863,13 @@ fn theme_rows_painted(cx: &mut TestAppContext) {
 fn set_theme_turns_off_sync(cx: &mut TestAppContext) {
     let mut r = rig_with_toasts(cx);
     set_follow(r.cx, true);
-    activate(r.cx, "Dracula");
+    activate(r.cx, "Default Light");
     assert!(
         !theme(r.cx).follow_system,
         "an explicit choice turns sync off"
     );
-    assert_eq!(theme(r.cx).active, "Dracula");
-    assert_eq!(active_theme(r.cx), "Dracula");
+    assert_eq!(theme(r.cx).active, "Default Light");
+    assert_eq!(active_theme(r.cx), "Default Light");
     assert_eq!(toast_texts(&mut r), ["Theme sync turned off"]);
 }
 
@@ -1854,30 +1877,35 @@ fn set_theme_turns_off_sync(cx: &mut TestAppContext) {
 fn set_theme_no_toast_without_sync(cx: &mut TestAppContext) {
     let mut r = rig_with_toasts(cx);
     assert!(!theme(r.cx).follow_system);
-    // From the menu: Vivid Nightfall is the second row.
+    // From the menu: the second row.
+    let second = builtin_names(r.cx)[1].clone();
     open_theme(r.cx);
     keys(r.cx, "down enter");
-    assert_eq!(theme(r.cx).active, "Vivid Nightfall");
-    assert_eq!(active_theme(r.cx), "Vivid Nightfall");
+    assert_eq!(theme(r.cx).active, second);
+    assert_eq!(active_theme(r.cx), second);
     assert!(toast_texts(&mut r).is_empty());
 }
 
 #[gpui_kit::test]
 fn theme_custom_suffix(cx: &mut TestAppContext) {
     let r = rig(cx);
-    r.cx.update(|_, cx| {
-        let dracula = cx
+    // A user theme named like a built-in one (Dracula in the bead; any built-in name works).
+    let builtin = builtin_names(r.cx);
+    let name = builtin.last().expect("built-ins").clone();
+    let shadow = name.clone();
+    r.cx.update(move |_, cx| {
+        let def = cx
             .global::<tl_ui::theme::ThemeStore>()
             .builtin
             .iter()
-            .find(|d| &*d.name == "Dracula")
-            .expect("built-in Dracula")
+            .find(|d| *d.name == *shadow)
+            .expect("built-in")
             .clone();
         tl_ui::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
-            vec![dracula],
+            vec![def],
         );
     });
     let rows: Vec<String> =
@@ -1885,12 +1913,13 @@ fn theme_custom_suffix(cx: &mut TestAppContext) {
             .into_iter()
             .map(|row| row.label.to_string())
             .collect();
-    assert_eq!(rows.len(), 13);
-    assert_eq!(rows[5], "Dracula");
-    assert_eq!(rows[12], "Dracula (custom)");
+    let custom = format!("{name} (custom)");
+    assert_eq!(rows.len(), builtin.len() + 1);
+    assert_eq!(rows[builtin.len() - 1], name, "both rows exist");
+    assert_eq!(rows[builtin.len()], custom);
     open_theme(r.cx);
     let drawn = labels(r.cx);
-    assert!(drawn.iter().any(|l| l == "Dracula (custom)"), "{drawn:?}");
+    assert!(drawn.iter().any(|l| *l == custom), "{drawn:?}");
 }
 
 #[gpui_kit::test]
@@ -1900,7 +1929,7 @@ fn activate_refused_while_editing(cx: &mut TestAppContext) {
         let store = cx.global_mut::<tl_ui::theme::ThemeStore>();
         store.preview = Some(store.active.clone());
     });
-    activate(r.cx, "Dracula");
+    activate(r.cx, "Default Light");
     assert_eq!(active_theme(r.cx), "Default Dark", "unchanged");
     assert_eq!(theme(r.cx).active, "Default Dark");
     assert_eq!(
@@ -1939,8 +1968,17 @@ fn preferred_theme_radios(cx: &mut TestAppContext) {
         "the first radio is highlighted: {:?}",
         sub_highlighted(r.cx)
     );
-    keys(r.cx, "down down down down down down enter");
-    assert_eq!(theme(r.cx).dark, "OLED Black");
+    // "OLED Black" in a P2 build; the last built-in here.
+    let builtin = builtin_names(r.cx);
+    let target = if builtin.len() == 12 {
+        "OLED Black".to_owned()
+    } else {
+        builtin.last().expect("built-ins").clone()
+    };
+    let downs = builtin.iter().position(|b| *b == target).expect("listed");
+    keys(r.cx, &vec!["down"; downs].join(" "));
+    keys(r.cx, "enter");
+    assert_eq!(theme(r.cx).dark, target);
     assert_eq!(theme(r.cx).light, "Default Light", "the other key is kept");
     assert_eq!(
         active_theme(r.cx),
