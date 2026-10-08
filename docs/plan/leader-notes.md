@@ -804,3 +804,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - bj6.6: with no GlobalHub, View > Graphs treats the machine as having no GPU (GPU, VRAM, GPU Temperature items disabled). Accepted.
 - pdu.56: scope is CellOut prefix and dim plus deleting ProcessRowCells::render; render_metric_cell stays until pdu.57 moves the +N and (deleted) runs to the live path and ports the paint tests.
 - crw.42: closed without the clipboard check (no PerfCopyDeviceInfo handler until crw.18); crw.18 adds the Overview clipboard check.
+- jqk.21: SelectTab calls MainWindow::select_tab directly; KWin Activate only for a window that already existed; token unused (GPUI 0.3.7 has no API). Accepted. jqk.21 agent also fixes the ui_shell key count (wlf.32) and stops the default AppRequest handler logging the token.
