@@ -1,4 +1,6 @@
-//! Performance tab Overview page (E24, UI-PRF-017, D-022): the drawing parts.
+//! Performance tab Overview page (E24, UI-PRF-017, D-022): the drawing parts. Run with
+//! `--features test-hooks`.
+#![cfg(feature = "test-hooks")]
 
 use gpui_kit::px;
 use tl_ui::pages::performance::overview::parts::{CoreBarsModel, core_bars_layout, meter_fill_w};
