@@ -1919,7 +1919,7 @@ fn theme_custom_suffix(cx: &mut TestAppContext) {
     assert_eq!(rows[builtin.len()], custom);
     open_theme(r.cx);
     let drawn = labels(r.cx);
-    assert!(drawn.iter().any(|l| *l == custom), "{drawn:?}");
+    assert!(drawn.contains(&custom), "{drawn:?}");
 }
 
 #[gpui_kit::test]
