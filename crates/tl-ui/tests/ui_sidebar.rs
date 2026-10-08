@@ -1506,7 +1506,7 @@ mod sidebar {
 
     #[gpui_kit::test]
     fn overview_selection_persists(cx: &mut TestAppContext) {
-        let mut r = open(cx, nine(), with_overview(), saved("cpu"));
+        let r = open(cx, nine(), with_overview(), saved("cpu"));
         let sidebar = r.sidebar.clone();
         r.vcx.update(|_, cx| {
             sidebar.update(cx, |s, cx| s.select(DeviceKey(Arc::from(OVERVIEW)), cx))
