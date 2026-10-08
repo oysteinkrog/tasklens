@@ -2443,7 +2443,7 @@ mod summary {
                 .map(|k| k.0.to_string())
         });
         assert!(first_net.is_some(), "the rig has a network card");
-        r.vcx.update(|window, cx| close_context_menu(window, cx));
+        r.vcx.update(close_context_menu);
         r.vcx.dispatch_action(PerfJumpToType {
             kind: DeviceKind::Net,
         });
