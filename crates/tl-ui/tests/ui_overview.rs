@@ -1332,6 +1332,11 @@ mod page {
     /// Overview page filling the window. Smooth graphs are off, so a live chart draws once per
     /// sample and not on every frame.
     fn open(cx: &mut TestAppContext, gpu: bool, w: f32, h: f32) -> Rig<'_> {
+        open_with(cx, gpu, w, h, false)
+    }
+
+    /// [`open`] with `smooth_graphs` set to `smooth`.
+    fn open_with(cx: &mut TestAppContext, gpu: bool, w: f32, h: f32, smooth: bool) -> Rig<'_> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| s.devices = Arc::new(catalog(gpu)));
         let client: Arc<dyn EngineClient> = engine.clone();
@@ -1348,7 +1353,7 @@ mod page {
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             let mut settings = Settings::default();
-            settings.motion.smooth_graphs = false;
+            settings.motion.smooth_graphs = smooth;
             cx.set_global(BootSettings {
                 settings,
                 state: UiState::default(),
@@ -1588,6 +1593,83 @@ mod page {
             draw(r.vcx);
         }
         assert_eq!(r.counts(), before, "processes only: nothing renders");
+    }
+
+    /// crw.46: with smooth graphs on, the Overview charts still step at the sample rate, so
+    /// the animation frames between ticks render nothing. The sidebar cards keep sliding.
+    #[gpui_kit::test]
+    fn overview_charts_step_with_smooth_graphs_on(cx: &mut TestAppContext) {
+        let mut r = open_with(cx, true, 1200., 900., true);
+        r.set_active(true);
+        r.cpu_tick();
+        draw(r.vcx);
+        let page = r.page.clone();
+        let renders = |r: &mut Rig| r.vcx.read_entity(&page, |p, _| p.render_count.get());
+        let before = renders(&mut r);
+        for _ in 0..3 {
+            r.cpu_tick();
+            for _ in 0..5 {
+                r.vcx.executor().advance_clock(Duration::from_millis(16));
+                draw(r.vcx);
+            }
+        }
+        let n = renders(&mut r) - before;
+        assert!(n <= 3, "page renders {n}: at most one per tick");
+        let host = r.host.clone();
+        let (overview_smooth, card_smooth) = r.vcx.update(|_, cx| {
+            let chart = page.read(cx).cpu_box().read(cx).total_chart().clone();
+            let sidebar = host.read(cx).sidebar.clone();
+            let card = sidebar.read(cx).cards()[0].chart.clone();
+            (chart.read(cx).spec.smooth, card.read(cx).spec.smooth)
+        });
+        assert!(!overview_smooth, "the Overview CPU chart steps");
+        assert!(card_smooth, "the sidebar card keeps sliding");
+    }
+
+    /// crw.43 (TMOG): about 200 pointer moves over every box render no page and no box, and
+    /// build no chart geometry.
+    #[gpui_kit::test]
+    fn overview_pointer_sweep_renders_nothing(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.cpu_tick();
+        draw(r.vcx);
+        let before = r.counts();
+        let kinds = [
+            BoxKind::Cpu,
+            BoxKind::Memory,
+            BoxKind::Gpu,
+            BoxKind::Disk,
+            BoxKind::Net,
+        ];
+        let mut moves = 0;
+        for kind in kinds {
+            let b = r.vcx.debug_bounds(box_id(kind)).expect("box drawn");
+            // A 8 x 5 raster over the box, inside its edges.
+            for i in 0..8 {
+                for j in 0..5 {
+                    let x = b.left() + b.size.width * ((i as f32 + 0.5) / 8.);
+                    let y = b.top() + b.size.height * ((j as f32 + 0.5) / 5.);
+                    r.vcx.simulate_event(gpui_kit::MouseMoveEvent {
+                        position: gpui_kit::point(x, y),
+                        pressed_button: None,
+                        modifiers: gpui_kit::Modifiers::none(),
+                    });
+                    moves += 1;
+                }
+            }
+            draw(r.vcx);
+        }
+        assert_eq!(moves, 200);
+        let after = r.counts();
+        assert_eq!(
+            after[..12],
+            before[..12],
+            "page and box renders and notifies"
+        );
+        // Chart pairs from index 12: (renders, geometry builds).
+        for i in (13..after.len()).step_by(2) {
+            assert_eq!(after[i], before[i], "chart {} built geometry", (i - 12) / 2);
+        }
     }
 
     #[gpui_kit::test]

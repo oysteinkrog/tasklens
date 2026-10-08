@@ -21,6 +21,7 @@ the tasklens theme, laid out from data (UI-PRF-017). The leader recorded these d
 - **Profiles.** New profiles keep `selected_device = "cpu"`.
 - **GPU and Disk boxes** list the visible sidebar cards only.
 - **Graph summary mode** gets no Overview tile. The page has no header row.
+- **Chart motion.** The Overview charts step at the sample rate; smooth sliding is off for them only (crw.46). Revisit after wlf.31.
 - **Later.** Saving the layout and the layout editor come in later beads.
 - **Fixed values.** `STACK_W` 720 px; row minimums 280 and 220 px; row weights 3:2; core bar cell
   140 px; at most 2 GPUs and 8 disk rows; the per-core percent is an integer and its text is

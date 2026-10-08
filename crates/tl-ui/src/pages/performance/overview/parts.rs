@@ -559,6 +559,8 @@ pub fn split_body(chart: AnyElement, side: AnyElement, wide: bool, m: &UiMetrics
 pub struct ChartSettings {
     pub kernel: bool,
     pub range_ns: u64,
+    /// Always false: the Overview charts step at the sample rate (crw.46). A sliding chart
+    /// notifies every animation frame, and GPUI then re-renders its box and the page too.
     pub smooth: bool,
     pub rounded: bool,
 }
@@ -574,7 +576,7 @@ impl From<&Settings> for ChartSettings {
         Self {
             kernel: s.performance.cpu_kernel,
             range_ns: u64::from(s.performance.graph_range_s) * 1_000_000_000,
-            smooth: s.motion.smooth_graphs,
+            smooth: false,
             rounded: s.appearance.rounded_corners,
         }
     }
