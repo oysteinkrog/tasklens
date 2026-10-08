@@ -1447,9 +1447,9 @@ mod frame {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, Render, SharedString,
-        Subscription, TestAppContext, VisualTestContext, Window, WindowBounds, WindowOptions,
-        point, px, size,
+        AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
+        SharedString, StyleRefinement, Styled as _, Subscription, TestAppContext,
+        VisualTestContext, Window, WindowBounds, WindowOptions, div, point, px, size,
     };
     use smallvec::SmallVec;
     use tl_model::client::EngineClient;
@@ -1694,6 +1694,20 @@ mod frame {
         }
     }
 
+    /// The window root. It embeds the page cached, as `MainWindow` does, so a window draw
+    /// renders the page only when the page notified.
+    struct Host {
+        page: Entity<TestPage>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                AnyView::from(self.page.clone()).cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
     struct Rig {
         engine: Arc<FakeEngine>,
         vcx: VisualTestContext,
@@ -1727,10 +1741,14 @@ mod frame {
         };
         let handle = cx
             .update(|cx| {
-                cx.open_window(options, |window, cx| cx.new(|cx| TestPage::new(window, cx)))
+                cx.open_window(options, |window, cx| {
+                    let page = cx.new(|cx| TestPage::new(window, cx));
+                    cx.new(|_| Host { page })
+                })
             })
             .expect("the window opens");
-        let page = handle.root(cx).expect("the page");
+        let host = handle.root(cx).expect("the host");
+        let page = cx.read(|cx| host.read(cx).page.clone());
         let mut vcx = VisualTestContext::from_window(handle.into(), cx);
         vcx.update(|window, _| window.activate_window());
         vcx.run_until_parked();
