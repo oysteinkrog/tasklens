@@ -806,3 +806,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.42: closed without the clipboard check (no PerfCopyDeviceInfo handler until crw.18); crw.18 adds the Overview clipboard check.
 - jqk.21: SelectTab calls MainWindow::select_tab directly; KWin Activate only for a window that already existed; token unused (GPUI 0.3.7 has no API). Accepted. jqk.21 agent also fixes the ui_shell key count (wlf.32) and stops the default AppRequest handler logging the token.
 - hk6.1: overlay skeleton and empty states below the 28 px header; set_paused called by the page on Ctrl-pause; sort type SysSortSpec. Accepted.
+- crw.22: Power draw row shown from CpuStaticInfo.rapl (hidden for NoZone); Restricted and Unsupported both show Needs setup; value-word ftl keys added; both lockdown modes read Kernel lockdown. Accepted.
