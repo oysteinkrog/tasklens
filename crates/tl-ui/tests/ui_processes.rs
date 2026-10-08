@@ -2793,6 +2793,21 @@ mod keys {
     }
 
     #[gpui_kit::test]
+    fn init_binds_processes_keys(cx: &mut TestAppContext) {
+        // `open` runs `TasklensUi::init` and never calls `bind_keys_processes` itself.
+        let (_engine, mut vcx) = open(cx);
+        vcx.update(|_, cx| {
+            for keys in ["delete", "ctrl-e"] {
+                let got = resolve(cx, keys, &["ProcessTable", "Table"]);
+                assert!(
+                    got.as_ref().is_some_and(|a| a.partial_eq(&EndTask)),
+                    "{keys}: expected EndTask, got {got:?}"
+                );
+            }
+        });
+    }
+
+    #[gpui_kit::test]
     fn keymap_rows_match_table_b_processtable(cx: &mut TestAppContext) {
         cx.update(bind_keys_processes);
         let rows: [(&str, &dyn Action); 4] = [
