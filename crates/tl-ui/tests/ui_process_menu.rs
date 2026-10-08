@@ -2104,7 +2104,7 @@ mod end {
         let format = |key: &str| Kbd::format(&Keystroke::parse(key).expect("a keystroke"));
         assert_eq!(hint("End Task"), Some(format("delete")));
         assert_eq!(hint("End Process"), Some(format("shift-delete")));
-        assert_eq!(hint("Copy details"), None, "no binding, no hint");
+        assert_eq!(hint("Copy details"), Some(format("ctrl-c")));
     }
 
     #[gpui_kit::test]
