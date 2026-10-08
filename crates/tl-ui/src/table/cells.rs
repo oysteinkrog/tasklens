@@ -34,10 +34,10 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    App, Bounds, ContentMask, Div, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla,
-    ImageSource, InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement,
-    Pixels, Point, SharedString, Style, Styled, StyledImage, StyledText, TextRun,
-    TextStyleRefinement, Window, div, font, img, point, px, relative, size, svg,
+    App, Bounds, ContentMask, Div, Element, ElementId, Font, FontWeight, GlobalElementId,
+    HighlightStyle, Hsla, ImageSource, InspectorElementId, InteractiveElement, IntoElement,
+    LayoutId, ParentElement, Pixels, Point, SharedString, Style, Styled, StyledImage, StyledText,
+    TextRun, TextStyleRefinement, Window, div, font, img, point, px, relative, size, svg,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -45,6 +45,7 @@ use tl_model::validity::Validity;
 
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::{glyph, glyph_allows_heat};
+use crate::table::columns::ColumnKind;
 use crate::table::tree_table::{
     CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NAME_PAD, NameCell, NameIcon, RowFlags,
     STALE_OPACITY,
@@ -76,11 +77,23 @@ pub struct CellOut {
     /// Drawn before a numeric value in its own colour (the process table's "Σ ", UI-PRC-002).
     /// `text_selected_secondary` on a selected row. Never drawn on glyphs.
     pub prefix: Option<(SharedString, Hsla)>,
+    /// The end of the text in its own colour (the PID's " +N", an Image path's " (deleted)").
+    pub suffix: Option<CellSuffix>,
     /// Optional explicit cell tooltip.
     pub tooltip: Option<SharedString>,
     /// Set by the table only on the hovered row, once its tooltips can show. A delegate
     /// formats a tooltip that allocates (an age, an error) only when this is set.
     pub want_tooltip: bool,
+}
+
+/// The last `len` bytes of a cell's text, drawn in their own colour (UI-PRC-004). The rest of
+/// the text keeps the cell's colour. Ignored when `len` is not a char boundary of the text.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct CellSuffix {
+    pub len: usize,
+    pub color: Hsla,
+    /// The colour on a selected row.
+    pub selected_color: Hsla,
 }
 
 impl CellOut {
@@ -95,6 +108,7 @@ impl CellOut {
         self.text_color = None;
         self.dim = false;
         self.prefix = None;
+        self.suffix = None;
         self.tooltip = None;
         self.want_tooltip = false;
     }
@@ -167,44 +181,83 @@ pub fn numeric_cell(
     clipped: Rc<Cell<bool>>,
     ctx: &CellCtx,
 ) -> Div {
-    numeric_cell_prefixed(text, validity, None, clipped, ctx)
+    let out = CellOut {
+        validity,
+        ..CellOut::default()
+    };
+    value_cell(ColumnKind::Numeric, text, &out, clipped, ctx)
 }
 
-/// [`numeric_cell`] with [`CellOut::prefix`] drawn before a Valid or Stale value, in its own
-/// colour (`text_selected_secondary` on a selected row). The value keeps the rest of the width.
-pub fn numeric_cell_prefixed(
+/// Every filled cell of a tree table other than Name: a [`glyph_cell`] for a validity other
+/// than Valid and Stale (and `clipped` cleared), else the [`text_cell`], [`path_cell`] or
+/// [`numeric_cell`] of `kind`. [`CellOut::prefix`] goes before the value in its own colour and
+/// [`CellOut::suffix`] colours the end of the text; both use `text_selected_secondary`
+/// (the prefix) or the suffix's selected colour on a selected row. The table applies
+/// [`cell_text_color`] and [`cell_background`] on top.
+pub fn value_cell(
+    kind: ColumnKind,
     text: SharedString,
-    validity: Validity,
-    prefix: Option<(SharedString, Hsla)>,
+    out: &CellOut,
     clipped: Rc<Cell<bool>>,
     ctx: &CellCtx,
 ) -> Div {
-    let color = match validity {
-        Validity::Valid => ctx.primary(),
-        Validity::Stale => ctx.secondary(),
-        _ => {
-            clipped.set(false);
-            return glyph_cell(validity, &text, ctx);
+    if !matches!(out.validity, Validity::Valid | Validity::Stale) {
+        clipped.set(false);
+        return glyph_cell(out.validity, &text, ctx);
+    }
+    let suffix = out.suffix.map(|s| SuffixRun {
+        len: s.len,
+        color: if ctx.selected {
+            s.selected_color
+        } else {
+            s.color
+        },
+    });
+    let mut cell = match kind {
+        ColumnKind::Text => {
+            debug_assert_clean(&text);
+            cell_box(t_base(ctx.m), ctx)
+                .debug_selector(|| "TlCell-text".into())
+                .text_color(ctx.primary())
+                .text_ellipsis()
+        }
+        ColumnKind::Path => {
+            debug_assert_clean(&text);
+            cell_box(t_base(ctx.m), ctx)
+                .debug_selector(|| "TlCell-path".into())
+                .text_color(ctx.primary())
+        }
+        ColumnKind::Numeric => {
+            let color = if out.validity == Validity::Stale {
+                ctx.secondary()
+            } else {
+                ctx.primary()
+            };
+            cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
+                .debug_selector(|| "TlCell-numeric".into())
+                .text_color(color)
         }
     };
-    let mut cell = cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
-        .debug_selector(|| "TlCell-numeric".into())
-        .text_color(color);
-    if let Some((prefix, prefix_color)) = prefix {
-        let prefix_color = if ctx.selected {
+    if let Some((prefix, color)) = &out.prefix {
+        let color = if ctx.selected {
             ctx.theme.text_selected_secondary
         } else {
-            prefix_color
+            *color
         };
         cell = cell.child(
             div()
                 .debug_selector(|| "TlCell-prefix".into())
                 .flex_none()
-                .text_color(prefix_color)
-                .child(prefix),
+                .text_color(color)
+                .child(prefix.clone()),
         );
     }
-    cell.child(CellText::new(text, Align::End, Fit::Clip, Some(clipped)))
+    let text = match kind {
+        ColumnKind::Text => CellText::new(text, Align::Start, Fit::Ellipsis, Some(clipped)),
+        ColumnKind::Path => CellText::new(text, Align::Start, Fit::Clip, None),
+        ColumnKind::Numeric => CellText::new(text, Align::End, Fit::Clip, Some(clipped)),
+    };
+    cell.child(text.with_suffix(suffix))
 }
 
 /// A cell showing `TlValidityGlyph`: the glyph for any validity other than Valid, right-aligned
@@ -307,6 +360,13 @@ enum Fit {
     Clip,
 }
 
+/// The end of a [`CellText`] in its own colour, already chosen for the row's selection.
+#[derive(Clone, Copy)]
+struct SuffixRun {
+    len: usize,
+    color: Hsla,
+}
+
 /// One line of cell text that fills the cell's content width. It positions the shaped text
 /// itself (no wrapper `div`), clips it to the content box and reports whether it was cut.
 struct CellText {
@@ -326,6 +386,27 @@ impl CellText {
             fit,
             cut,
         }
+    }
+
+    /// Draws the last `suffix.len` bytes in `suffix.color`; the rest inherits the cell's text
+    /// style. No change when the length is 0, too long or not on a char boundary.
+    fn with_suffix(mut self, suffix: Option<SuffixRun>) -> Self {
+        let Some(suffix) = suffix else {
+            return self;
+        };
+        let len = self.text.len();
+        let Some(start) = len.checked_sub(suffix.len) else {
+            return self;
+        };
+        if suffix.len == 0 || !self.text.is_char_boundary(start) {
+            return self;
+        }
+        let style = HighlightStyle {
+            color: Some(suffix.color),
+            ..HighlightStyle::default()
+        };
+        self.inner = StyledText::new(self.text.clone()).with_highlights([(start..len, style)]);
+        self
     }
 
     /// Whether GPUI replaced the end of the text with the ellipsis. `shown_len` and
@@ -1030,6 +1111,11 @@ mod tests {
             text_color: Some(gpui_kit::red()),
             dim: true,
             prefix: Some(("Σ ".into(), gpui_kit::red())),
+            suffix: Some(CellSuffix {
+                len: 3,
+                color: gpui_kit::red(),
+                selected_color: gpui_kit::red(),
+            }),
             tooltip: Some("tip".into()),
             want_tooltip: true,
         };
@@ -1039,7 +1125,7 @@ mod tests {
         assert_eq!(out.validity, Validity::WarmingUp);
         assert!(out.arc.is_none() && out.background.is_none() && out.text_color.is_none());
         assert!(out.tooltip.is_none() && !out.want_text && !out.want_tooltip);
-        assert!(!out.dim && out.prefix.is_none());
+        assert!(!out.dim && out.prefix.is_none() && out.suffix.is_none());
         assert!(out.text.is_empty());
         assert!(out.text.capacity() >= 64, "the scratch keeps its capacity");
     }

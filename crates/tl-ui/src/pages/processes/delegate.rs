@@ -44,8 +44,8 @@ use tl_model::validity::{FieldValidity, Validity};
 use super::actions::CapturedTargets;
 use super::cells::{
     CellCtx, CellTipWords, CellWords, DEFAULT_VISIBLE, GroupMembers, PROCESS_COLUMNS, PaintState,
-    PowerSensor, ProcColumn, RowRef, SUBTREE_PREFIX, TipCtx, cell_tooltip, dims_zero, fill_cell,
-    heat_background, process_column, row_tint, subtree_column, subtree_prefix_color, subtree_total,
+    PowerSensor, ProcColumn, RowRef, SUBTREE_PREFIX, TipCtx, cell_suffix, cell_tooltip, dims_zero,
+    fill_cell, heat_background, process_column, row_tint, subtree_column, subtree_total,
     tint_deadline,
 };
 use super::header_totals::header_total;
@@ -210,8 +210,9 @@ pub struct ProcessRowCells;
 impl ProcessRowCells {
     /// Fills `out` for one cell (E22-003): the value through `fill_cell`, the heat fill in
     /// `out.background`, a dimmed zero in `out.dim` (PROC-041), the "Σ " of a subtree total in
-    /// `out.prefix` (UI-PRC-002) and the validity tooltip in `out.tooltip`. The table attaches
-    /// the tooltip on the hovered row only. Allocates nothing unless `out.want_text` is set.
+    /// `out.prefix` (UI-PRC-002), the " +N" or " (deleted)" in `out.suffix` (UI-PRC-004) and the
+    /// validity tooltip in `out.tooltip`. The table attaches the tooltip on the hovered row only.
+    /// Allocates nothing unless `out.want_text` is set.
     pub fn fill(
         row: RowRef,
         col: ColumnId,
@@ -228,9 +229,10 @@ impl ProcessRowCells {
         out.prefix = (st.subtree && subtree_column(col)).then(|| {
             (
                 SharedString::new_static(SUBTREE_PREFIX),
-                subtree_prefix_color(st, theme),
+                theme.text_secondary,
             )
         });
+        out.suffix = cell_suffix(col, out, theme);
         out.tooltip = tips.get(out.validity);
     }
 }

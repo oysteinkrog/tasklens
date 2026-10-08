@@ -941,6 +941,8 @@ mod values {
 mod paint {
     use std::sync::Arc;
 
+    use std::rc::Rc;
+
     use gpui_kit::{
         App, Background, Context, Entity, Hsla, IntoElement, ParentElement, Pixels, Render,
         SharedString, Styled, TestAppContext, VisualTestContext, Window, div, px,
@@ -951,13 +953,16 @@ mod paint {
     use tl_model::table::ProcessTableView;
     use tl_model::validity::Validity;
     use tl_ui::pages::processes::cells::{
-        CellCtx, CellWords, DIM_ZERO_OPACITY, GroupMembers, PaintState, dims_zero, heat_alpha,
-        heat_background, metric_text_colors, metric_text_style, process_column, render_metric_cell,
-        subtree_prefix_color, text_colors,
+        CellCtx, CellWords, DELETED_SUFFIX, GroupMembers, PaintState, ProcColumn, SUBTREE_PREFIX,
+        cell_suffix, dims_zero, heat_alpha, heat_background, process_column,
     };
-    use tl_ui::table::cells::CellOut;
-    use tl_ui::text::style::TNUM;
-    use tl_ui::theme::{TlTheme, current};
+    use tl_ui::table::cells::{
+        CellCtx as PaintCtx, CellOut, CellSuffix, DIM_OPACITY, cell_text_color, value_cell,
+        with_overrides,
+    };
+    use tl_ui::table::columns::{ColumnAlign, ColumnKind};
+    use tl_ui::table::tree_table::{RowFlags, STALE_OPACITY, metric_cell_opacity};
+    use tl_ui::theme::{TlTheme, current, metrics};
 
     struct Env {
         view: ProcessTableView,
@@ -1118,19 +1123,30 @@ mod paint {
         st: PaintState,
     }
 
+    /// The column kind the process delegate gives `col`: left aligned is Text, right Numeric.
+    fn kind(col: &ProcColumn) -> ColumnKind {
+        match col.align() {
+            ColumnAlign::Left => ColumnKind::Text,
+            ColumnAlign::Right => ColumnKind::Numeric,
+        }
+    }
+
+    /// The live table's painter: `value_cell` with the page overrides, 120 px wide, on a row
+    /// that is neither hovered nor selected unless `st.selected`.
     impl Render for Host {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = current(cx).clone();
-            let cell = render_metric_cell(
-                &self.out,
-                self.text.clone(),
-                process_column(self.col),
-                px(120.),
-                self.st,
-                &theme,
-                cx,
-            );
-            div().size(px(400.)).child(cell)
+            let ctx = PaintCtx {
+                m: metrics(cx),
+                theme: &theme,
+                selected: self.st.selected,
+                width: px(120.),
+            };
+            let col = process_column(self.col);
+            let cell = value_cell(kind(col), self.text.clone(), &self.out, Rc::default(), &ctx);
+            div()
+                .size(px(400.))
+                .child(with_overrides(cell, &self.out, &ctx))
         }
     }
 
@@ -1153,6 +1169,8 @@ mod paint {
         })
     }
 
+    /// Heat quads drawn for `out` in `col` under `st`. The background is what
+    /// `ProcessRowCells::fill` sets; the colour counted is the one heat would have when on.
     fn heat_count(
         cx: &mut TestAppContext,
         col: ColumnId,
@@ -1161,13 +1179,12 @@ mod paint {
     ) -> usize {
         let theme = theme(cx);
         let env = Env::new();
-        // The fill is built with heat on, so only the painter's own rules can hide it.
-        let fill = heat_background(&out, process_column(col), &env.ctx(), HEAT_ON, &theme)
-            .unwrap_or(Hsla {
-                a: 0.5,
-                ..theme.value_heat
-            });
-        out.background = Some(fill);
+        let spec = process_column(col);
+        let fill = heat_background(&out, spec, &env.ctx(), HEAT_ON, &theme).unwrap_or(Hsla {
+            a: 0.5,
+            ..theme.value_heat
+        });
+        out.background = heat_background(&out, spec, &env.ctx(), st, &theme);
         let (_, vcx) = open(
             cx,
             Host {
@@ -1261,6 +1278,15 @@ mod paint {
         cx.debug_bounds(selector)
     }
 
+    /// The selector of the live text cell for `col`.
+    fn text_selector(col: ColumnId) -> &'static str {
+        match kind(process_column(col)) {
+            ColumnKind::Numeric => "TlCell-numeric",
+            ColumnKind::Text => "TlCell-text",
+            ColumnKind::Path => "TlCell-path",
+        }
+    }
+
     #[gpui_kit::test]
     fn validity_glyph_per_state(cx: &mut TestAppContext) {
         let all = [
@@ -1290,13 +1316,13 @@ mod paint {
                 });
                 vcx.run_until_parked();
                 let shows_text = matches!(validity, Validity::Valid | Validity::Stale);
-                let text = bounds(vcx, "TlProcCell-text");
-                let glyph = bounds(vcx, "TlProcCell-glyph");
+                let text = bounds(vcx, text_selector(col));
+                let glyph = bounds(vcx, "TlCell-glyph");
                 assert_eq!(text.is_some(), shows_text, "{col:?} {validity:?}");
                 assert_eq!(glyph.is_some(), !shows_text, "{col:?} {validity:?}");
                 let cell = text.or(glyph).expect("cell drawn");
                 assert_eq!(cell.size.width, px(120.));
-                let lock = bounds(vcx, "TlProcCell-lock");
+                let lock = bounds(vcx, "TlValidityGlyph-lock");
                 assert_eq!(
                     lock.is_some(),
                     validity == Validity::Restricted,
@@ -1306,8 +1332,6 @@ mod paint {
                     assert_eq!(lock.size.width, px(12.), "the lock is 12 px");
                     if col == ColumnId::Cpu {
                         assert_eq!(lock.right(), cell.right() - px(8.), "right like CPU");
-                    } else {
-                        assert_eq!(lock.left(), cell.left() + px(8.), "left like Image path");
                     }
                 }
             }
@@ -1316,82 +1340,145 @@ mod paint {
 
     #[gpui_kit::test]
     fn stale_text_dimmed_60(cx: &mut TestAppContext) {
-        let theme = theme(cx);
-        let cpu = process_column(ColumnId::Cpu);
-        let c = text_colors("3.3%", cpu, Validity::Stale, PaintState::default(), &theme);
-        assert_eq!(c.split, 4);
-        assert!(close(c.main.a, theme.text_primary.a * 0.6));
-        assert_eq!(c.main, theme.text_primary.opacity(0.6));
-        let v = text_colors("3.3%", cpu, Validity::Valid, PaintState::default(), &theme);
-        assert_eq!(v.main, theme.text_primary);
+        // The table dims a STALE row's metric cells as a whole, once.
+        assert_eq!(STALE_OPACITY, 0.6);
+        assert_eq!(metric_cell_opacity(RowFlags::STALE), STALE_OPACITY);
+        assert_eq!(metric_cell_opacity(RowFlags::default()), 1.0);
+
+        // A Stale value still draws its text; a WarmingUp cell draws its glyph, never dimmed,
+        // with the setting on.
+        let (view, vcx) = open(
+            cx,
+            Host {
+                out: CellOut {
+                    validity: Validity::Stale,
+                    ..pct_out(3.3)
+                },
+                text: "3.3%".into(),
+                col: ColumnId::Cpu,
+                st: DIM_ON,
+            },
+        );
+        assert!(
+            bounds(vcx, "TlCell-numeric").is_some(),
+            "Stale shows its value"
+        );
+        view.update(vcx, |host, cx| {
+            host.out = CellOut {
+                validity: Validity::WarmingUp,
+                ..pct_out(0.0)
+            };
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(bounds(vcx, "TlCell-glyph").is_some(), "the glyph path");
+        assert!(bounds(vcx, "TlCell-numeric").is_none());
+    }
+
+    fn arc_out(text: &str) -> CellOut {
+        CellOut {
+            arc: Some(Arc::from(text)),
+            validity: Validity::Valid,
+            ..CellOut::default()
+        }
     }
 
     #[gpui_kit::test]
     fn deleted_suffix_danger_colour(cx: &mut TestAppContext) {
         let theme = theme(cx);
-        let path = process_column(ColumnId::ImagePath);
         let text = "/usr/bin/foo (deleted)";
-        let c = text_colors(text, path, Validity::Valid, PaintState::default(), &theme);
-        assert_eq!(&text[c.split..], " (deleted)");
-        assert_eq!(c.tail, theme.status.danger);
-        assert_eq!(c.main, theme.text_primary);
-        let plain = text_colors(
-            "/usr/bin/foo",
-            path,
-            Validity::Valid,
-            PaintState::default(),
-            &theme,
+        let suffix = cell_suffix(ColumnId::ImagePath, &arc_out(text), &theme).expect("suffix");
+        assert_eq!(&text[text.len() - suffix.len..], DELETED_SUFFIX);
+        assert_eq!(suffix.color, theme.status.danger);
+        assert_eq!(suffix.selected_color, theme.status.danger);
+        assert!(cell_suffix(ColumnId::ImagePath, &arc_out("/usr/bin/foo"), &theme).is_none());
+        // Only Image path: a name that ends in " (deleted)" is plain text.
+        assert!(cell_suffix(ColumnId::Name, &arc_out(text), &theme).is_none());
+
+        // The live text cell draws it.
+        let (_, vcx) = open(
+            cx,
+            Host {
+                out: CellOut {
+                    suffix: Some(suffix),
+                    ..arc_out(text)
+                },
+                text: text.into(),
+                col: ColumnId::ImagePath,
+                st: PaintState::default(),
+            },
         );
-        assert_eq!(plain.split, "/usr/bin/foo".len());
+        assert!(bounds(vcx, "TlCell-text").is_some());
+    }
+
+    /// A PID cell's bits: the PID, and N of " +N" in the high half.
+    fn pid_out(pid: u32, plus: u32) -> CellOut {
+        CellOut {
+            bits: u64::from(pid) | u64::from(plus) << 32,
+            validity: Validity::Valid,
+            ..CellOut::default()
+        }
     }
 
     #[gpui_kit::test]
     fn pid_plus_and_row_state_colours(cx: &mut TestAppContext) {
         let theme = theme(cx);
-        let pid = process_column(ColumnId::Pid);
-        let c = text_colors(
-            "11528 +18",
-            pid,
-            Validity::Valid,
-            PaintState::default(),
-            &theme,
-        );
-        assert_eq!(c.split, 5);
-        assert_eq!((c.main, c.tail), (theme.text_primary, theme.text_secondary));
-        let selected = PaintState {
-            selected: true,
-            ..PaintState::default()
-        };
-        let s = text_colors("11528 +18", pid, Validity::Valid, selected, &theme);
+        let s = cell_suffix(ColumnId::Pid, &pid_out(11528, 18), &theme).expect("+18");
         assert_eq!(
-            (s.main, s.tail),
-            (theme.text_selected_primary, theme.text_selected_secondary)
+            s,
+            CellSuffix {
+                len: " +18".len(),
+                color: theme.text_secondary,
+                selected_color: theme.text_selected_secondary,
+            }
         );
-        let exited = PaintState {
-            exited: true,
-            ..PaintState::default()
+        for (plus, text) in [(1, " +1"), (9, " +9"), (10, " +10"), (1000, " +1000")] {
+            let s = cell_suffix(ColumnId::Pid, &pid_out(7, plus), &theme).expect("suffix");
+            assert_eq!(s.len, text.len(), "{plus}");
+        }
+        assert!(cell_suffix(ColumnId::Pid, &pid_out(11528, 0), &theme).is_none());
+        let warming = CellOut {
+            validity: Validity::WarmingUp,
+            ..pid_out(11528, 18)
         };
-        let e = text_colors("11528 +18", pid, Validity::Valid, exited, &theme);
-        assert_eq!(
-            (e.main, e.tail),
-            (theme.text_secondary, theme.text_secondary)
+        assert!(cell_suffix(ColumnId::Pid, &warming, &theme).is_none());
+
+        // An exited row draws all its text in `text_secondary`; the suffix is secondary too.
+        let exited = CellOut {
+            text_color: Some(theme.text_secondary),
+            ..pid_out(11528, 18)
+        };
+        let ctx = cx.update(|cx| *metrics(cx));
+        let paint = PaintCtx {
+            m: &ctx,
+            theme: &theme,
+            selected: false,
+            width: px(120.),
+        };
+        assert_eq!(cell_text_color(&exited, &paint), Some(theme.text_secondary));
+
+        let (_, vcx) = open(
+            cx,
+            Host {
+                out: CellOut {
+                    suffix: Some(s),
+                    ..pid_out(11528, 18)
+                },
+                text: "11528 +18".into(),
+                col: ColumnId::Pid,
+                st: PaintState::default(),
+            },
         );
+        assert!(bounds(vcx, "TlCell-numeric").is_some());
     }
 
     #[gpui_kit::test]
     fn cpu_text_right_aligned_tnum(cx: &mut TestAppContext) {
-        cx.update(setup);
-        let m = cx.update(|cx| *tl_ui::theme::metrics(cx));
-        let cpu = metric_text_style(process_column(ColumnId::Cpu), &m);
-        let features = cpu.font_features.expect("tnum");
-        assert!(Arc::ptr_eq(&features.0, &TNUM.0));
-        assert_eq!(cpu.font_size, Some(px(13.).into()));
-        assert!(
-            metric_text_style(process_column(ColumnId::ImagePath), &m)
-                .font_features
-                .is_none()
+        assert_eq!(process_column(ColumnId::Cpu).align(), ColumnAlign::Right);
+        assert_eq!(
+            process_column(ColumnId::ImagePath).align(),
+            ColumnAlign::Left
         );
-
         let (_, vcx) = open(
             cx,
             Host {
@@ -1401,7 +1488,7 @@ mod paint {
                 st: PaintState::default(),
             },
         );
-        let cell = bounds(vcx, "TlProcCell-text").expect("text cell");
+        let cell = bounds(vcx, "TlCell-numeric").expect("numeric cell");
         assert_eq!(cell.size.width, px(120.));
     }
 
@@ -1414,10 +1501,24 @@ mod paint {
         subtree: false,
     };
 
-    /// The main text alpha of `out` in `col`, as a share of `text_primary`'s alpha.
-    fn main_alpha(out: &CellOut, text: &str, col: ColumnId, st: PaintState, t: &TlTheme) -> f32 {
-        let colors = metric_text_colors(out, text, process_column(col), st, t);
-        colors.main.a / t.text_primary.a
+    /// The live text alpha of `out` in `col` under `st`, as a share of the row's primary
+    /// colour: `ProcessRowCells::fill` sets `dim`, the table applies `cell_text_color`.
+    fn main_alpha(cx: &mut TestAppContext, out: &CellOut, col: ColumnId, st: PaintState) -> f32 {
+        let t = theme(cx);
+        let m = cx.update(|cx| *metrics(cx));
+        let ctx = PaintCtx {
+            m: &m,
+            theme: &t,
+            selected: st.selected,
+            width: px(120.),
+        };
+        let filled = CellOut {
+            bits: out.bits,
+            validity: out.validity,
+            dim: dims_zero(out, process_column(col), st),
+            ..CellOut::default()
+        };
+        cell_text_color(&filled, &ctx).map_or(1.0, |c| c.a / ctx.primary().a)
     }
 
     fn int_out(value: u64) -> CellOut {
@@ -1430,13 +1531,12 @@ mod paint {
 
     #[gpui_kit::test]
     fn dim_zero_only_for_measured_zero(cx: &mut TestAppContext) {
-        let t = theme(cx);
         let zero = pct_out(0.0);
         assert!(close(
-            main_alpha(&zero, "0%", ColumnId::Cpu, DIM_ON, &t),
-            DIM_ZERO_OPACITY
+            main_alpha(cx, &zero, ColumnId::Cpu, DIM_ON),
+            DIM_OPACITY
         ));
-        assert_eq!(DIM_ZERO_OPACITY, 0.3);
+        assert_eq!(DIM_OPACITY, 0.3);
         // Every dimmed kind: Percent, MemorySize, DiskRate, NetRate, Count, BytesCumulative.
         for col in [
             ColumnId::Memory,
@@ -1451,7 +1551,7 @@ mod paint {
         }
         // Not zero, not Valid, or not a measured kind: full opacity.
         assert!(close(
-            main_alpha(&pct_out(0.1), "0.1%", ColumnId::Cpu, DIM_ON, &t),
+            main_alpha(cx, &pct_out(0.1), ColumnId::Cpu, DIM_ON),
             1.0
         ));
         for validity in [Validity::WarmingUp, Validity::Stale, Validity::Restricted] {
@@ -1477,15 +1577,14 @@ mod paint {
             !dims_zero(&int_out(0), process_column(ColumnId::User), DIM_ON),
             "text columns never dim"
         );
-        // A selected or exited row dims its own colour.
+        // A selected row dims its own colour.
         let selected = PaintState {
             selected: true,
             ..DIM_ON
         };
-        let colors = metric_text_colors(&zero, "0%", process_column(ColumnId::Cpu), selected, &t);
         assert!(close(
-            colors.main.a,
-            t.text_selected_primary.a * DIM_ZERO_OPACITY
+            main_alpha(cx, &zero, ColumnId::Cpu, selected),
+            DIM_OPACITY
         ));
     }
 
@@ -1493,105 +1592,56 @@ mod paint {
     fn dim_zero_off_by_default(cx: &mut TestAppContext) {
         assert!(!Settings::default().tables.dim_zero_values);
         assert!(!PaintState::default().dim_zero);
-        let t = theme(cx);
         let off = PaintState {
             dim_zero: false,
             ..DIM_ON
         };
         assert!(close(
-            main_alpha(&pct_out(0.0), "0%", ColumnId::Cpu, off, &t),
+            main_alpha(cx, &pct_out(0.0), ColumnId::Cpu, off),
             1.0
         ));
-
-        // A WarmingUp cell draws its glyph, never dimmed, with the setting on.
-        let (_, vcx) = open(
-            cx,
-            Host {
-                out: CellOut {
-                    validity: Validity::WarmingUp,
-                    ..pct_out(0.0)
-                },
-                text: "0%".into(),
-                col: ColumnId::Cpu,
-                st: DIM_ON,
-            },
-        );
-        assert!(bounds(vcx, "TlProcCell-glyph").is_some(), "the glyph path");
-        assert!(bounds(vcx, "TlProcCell-text").is_none());
     }
 
     /// The Σ prefix (UI-PRC-002, pdu.33): drawn before the value of a Σ column on a row with a
-    /// subtree total, in `text_secondary`; never on other columns, other rows or glyph cells.
+    /// subtree total; never on a row without one or on glyph cells.
     #[gpui_kit::test]
     fn subtree_prefix_drawn_before_the_value(cx: &mut TestAppContext) {
         let t = theme(cx);
-        let on = PaintState {
-            subtree: true,
-            ..PaintState::default()
+        let prefixed = |out: CellOut| CellOut {
+            prefix: Some((SharedString::new_static(SUBTREE_PREFIX), t.text_secondary)),
+            ..out
         };
-        assert_eq!(subtree_prefix_color(on, &t), t.text_secondary);
-        let selected = PaintState {
-            selected: true,
-            ..on
-        };
-        assert_eq!(
-            subtree_prefix_color(selected, &t),
-            t.text_selected_secondary
-        );
-
         let (view, vcx) = open(
             cx,
             Host {
-                out: pct_out(12.5),
+                out: prefixed(pct_out(12.5)),
                 text: "12.5%".into(),
                 col: ColumnId::Cpu,
-                st: on,
+                st: PaintState::default(),
             },
         );
-        let cell = bounds(vcx, "TlProcCell-text").expect("text cell");
-        let prefix = bounds(vcx, "TlProcCell-subtree").expect("the prefix");
+        let cell = bounds(vcx, "TlCell-numeric").expect("numeric cell");
+        let prefix = bounds(vcx, "TlCell-prefix").expect("the prefix");
         assert!(prefix.size.width > px(0.));
         assert!(prefix.left() >= cell.left() && prefix.right() < cell.right() - px(8.));
 
-        let mut set = |host: Host| {
+        let mut set = |out: CellOut| {
             view.update(vcx, |h, cx| {
-                *h = host;
+                h.out = out;
                 cx.notify();
             });
             vcx.run_until_parked();
-            bounds(vcx, "TlProcCell-subtree")
+            bounds(vcx, "TlCell-prefix")
         };
-        // A row without a subtree total.
-        let none = set(Host {
-            out: pct_out(3.3),
-            text: "3.3%".into(),
-            col: ColumnId::Cpu,
-            st: PaintState::default(),
+        assert!(
+            set(pct_out(3.3)).is_none(),
+            "no prefix without a subtree total"
+        );
+        let glyph = prefixed(CellOut {
+            validity: Validity::WarmingUp,
+            ..pct_out(0.0)
         });
-        assert!(none.is_none(), "no prefix without a subtree total");
-        // A column without a sum.
-        let pid = set(Host {
-            out: CellOut {
-                bits: 11528,
-                validity: Validity::Valid,
-                ..CellOut::default()
-            },
-            text: "11528".into(),
-            col: ColumnId::Pid,
-            st: on,
-        });
-        assert!(pid.is_none(), "no prefix on PID");
-        // A glyph cell.
-        let glyph = set(Host {
-            out: CellOut {
-                validity: Validity::WarmingUp,
-                ..pct_out(0.0)
-            },
-            text: "0%".into(),
-            col: ColumnId::Cpu,
-            st: on,
-        });
-        assert!(glyph.is_none(), "no prefix on a glyph");
+        assert!(set(glyph).is_none(), "no prefix on a glyph");
     }
 }
 
@@ -3527,9 +3577,9 @@ mod live {
     use tl_model::time::BootId;
     use tl_model::validity::Validity;
     use tl_ui::i18n::init_strings;
-    use tl_ui::pages::processes::cells::SUBTREE_PREFIX;
+    use tl_ui::pages::processes::cells::{DELETED_SUFFIX, SUBTREE_PREFIX};
     use tl_ui::pages::processes::delegate::ProcessDelegate;
-    use tl_ui::table::cells::{CellCtx, CellOut, DIM_OPACITY, cell_text_color};
+    use tl_ui::table::cells::{CellCtx, CellOut, CellSuffix, DIM_OPACITY, cell_text_color};
     use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
     use tl_ui::theme::{current, metrics};
 
@@ -3593,7 +3643,7 @@ mod live {
     fn open(
         cx: &mut TestAppContext,
         settings: Settings,
-        leaf: bool,
+        snap: Arc<Snapshot>,
     ) -> (Entity<TlTreeTable<ProcessDelegate>>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -3606,7 +3656,6 @@ mod live {
             );
             init_strings(cx, "en-US");
         });
-        let snap = snapshot(leaf);
         let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
         let out = slot.clone();
         let (_, vcx) = cx.add_window_view(move |window, cx| {
@@ -3650,7 +3699,7 @@ mod live {
 
     #[gpui_kit::test]
     fn live_table_draws_subtree_prefix_and_dim_zero(cx: &mut TestAppContext) {
-        let (table, vcx) = open(cx, on(), false);
+        let (table, vcx) = open(cx, on(), snapshot(false));
         assert!(prefix_drawn(vcx), "the parent's CPU cell draws the prefix");
 
         let theme = vcx.update(|_, cx| current(cx).clone());
@@ -3679,7 +3728,7 @@ mod live {
 
     #[gpui_kit::test]
     fn live_table_no_prefix_when_off_or_leaf(cx: &mut TestAppContext) {
-        let (table, vcx) = open(cx, Settings::default(), false);
+        let (table, vcx) = open(cx, Settings::default(), snapshot(false));
         assert!(!prefix_drawn(vcx), "setting off");
         let parent = cell(vcx, &table, 0, ColumnId::Cpu);
         assert_eq!(parent.text, "3.3%", "the process's own value");
@@ -3688,7 +3737,81 @@ mod live {
 
     #[gpui_kit::test]
     fn live_table_no_prefix_on_a_leaf(cx: &mut TestAppContext) {
-        let (_, vcx) = open(cx, on(), true);
+        let (_, vcx) = open(cx, on(), snapshot(true));
         assert!(!prefix_drawn(vcx));
+    }
+
+    /// PID 10 collapsed over 3 descendants, its executable deleted.
+    fn collapsed_deleted() -> Arc<Snapshot> {
+        let mut parent = record();
+        parent.key = key(10);
+        parent.meta = Arc::new(tl_model::process::ProcessMeta {
+            exe: Some(Arc::from(format!(
+                "/usr/lib/firefox/firefox{DELETED_SUFFIX}"
+            ))),
+            ..(*parent.meta).clone()
+        });
+        let mut s = Snapshot::empty(BootId(0), 0);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: vec![TableRow {
+                node: NodeId::Process(key(10)),
+                depth: 0,
+                expanded: false,
+                has_children: true,
+                record: Some(0),
+                group: None,
+                descendants: 3,
+                subtree: None,
+            }]
+            .into(),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot {
+            records: vec![parent].into(),
+            extras: vec![extras()].into(),
+            ..ProcessSnapshot::default()
+        });
+        Arc::new(s)
+    }
+
+    /// UI-PRC-004 on the live table: the PID's " +N" in `text_secondary` and the Image path's
+    /// " (deleted)" in `status.danger`, as the coloured end of the cell text.
+    #[gpui_kit::test]
+    fn live_table_pid_plus_and_deleted_suffix(cx: &mut TestAppContext) {
+        let (table, vcx) = open(cx, Settings::default(), collapsed_deleted());
+        let theme = vcx.update(|_, cx| current(cx).clone());
+        let pid = cell(vcx, &table, 0, ColumnId::Pid);
+        assert_eq!(pid.text, "10 +3");
+        assert_eq!(
+            pid.suffix,
+            Some(CellSuffix {
+                len: " +3".len(),
+                color: theme.text_secondary,
+                selected_color: theme.text_selected_secondary,
+            })
+        );
+        let path = cell(vcx, &table, 0, ColumnId::ImagePath);
+        assert!(
+            path.arc
+                .as_deref()
+                .is_some_and(|p| p.ends_with(DELETED_SUFFIX))
+        );
+        assert_eq!(
+            path.suffix,
+            Some(CellSuffix {
+                len: DELETED_SUFFIX.len(),
+                color: theme.status.danger,
+                selected_color: theme.status.danger,
+            })
+        );
+        assert!(cell(vcx, &table, 0, ColumnId::Cpu).suffix.is_none());
+        // The table draws the row with both suffixes.
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(vcx.debug_bounds("TlCell-numeric").is_some());
     }
 }

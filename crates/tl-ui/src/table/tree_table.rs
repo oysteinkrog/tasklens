@@ -45,8 +45,7 @@ use crate::table::actions::{
 };
 use crate::table::cells::{
     CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
-    glyph_cell, guide_quads, icon_px, name_indent, numeric_cell_prefixed, paint_group_header_cell,
-    paint_name_cell, path_cell, text_cell,
+    guide_quads, icon_px, name_indent, paint_group_header_cell, paint_name_cell, value_cell,
 };
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn,
@@ -1010,19 +1009,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             Some(arc) => self.text_cache.get_or_insert_arc(id, col, &arc),
             None => self.formatted_text(ix, id, col),
         };
-        let validity = self.out.validity;
-        let cell = if !matches!(validity, Validity::Valid | Validity::Stale) {
-            glyph_cell(validity, &text, ctx)
-        } else {
-            match kind {
-                ColumnKind::Text => text_cell(text.clone(), ctx, flag),
-                ColumnKind::Path => path_cell(text.clone(), ctx),
-                ColumnKind::Numeric => {
-                    let prefix = self.out.prefix.clone();
-                    numeric_cell_prefixed(text.clone(), validity, prefix, flag, ctx)
-                }
-            }
-        };
+        let cell = value_cell(kind, text.clone(), &self.out, flag, ctx);
         (cell, text)
     }
 

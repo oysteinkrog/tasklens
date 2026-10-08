@@ -9,10 +9,7 @@ use std::fmt::Write;
 use std::hash::BuildHasher;
 use std::sync::{Arc, OnceLock};
 
-use gpui_kit::{
-    App, Div, Font, Hsla, InteractiveElement, ParentElement, Pixels, SharedString, Styled,
-    StyledText, TextRun, TextStyleRefinement, div, font,
-};
+use gpui_kit::{App, Hsla, SharedString};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use tl_model::actions::SchedPolicy;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
@@ -27,17 +24,14 @@ use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
 
-use crate::components::icons::{TlIcon, icon};
 use crate::components::motion::{M_SLOW, ease_out_cubic};
-use crate::components::validity::{GlyphContent, copy_text, glyph_parts};
+use crate::components::validity::copy_text;
 use crate::i18n::{tr, tr_en};
 use crate::pages::performance::details::Template;
-use crate::table::cells::CellOut;
+use crate::table::cells::{CellOut, CellSuffix};
 use crate::table::columns::ColumnAlign;
-use crate::table::tree_table::{RowKind, STALE_OPACITY};
-use crate::text::fonts::UI_FAMILY;
-use crate::text::style::{TNUM, numeric_style, t_base};
-use crate::theme::{TlTheme, UiMetrics, metrics};
+use crate::table::tree_table::RowKind;
+use crate::theme::TlTheme;
 
 /// What a process cell holds. The cell formatter dispatches on it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -701,13 +695,34 @@ pub fn subtree_total<'a>(row: RowRef<'a>, ctx: &CellCtx<'a>) -> Option<&'a Group
     t.subtree.and_then(|i| ctx.view.subtree.get(i as usize))
 }
 
-/// The colour of [`SUBTREE_PREFIX`]: `text_secondary`, or `text_selected_secondary` on a
-/// selected row.
-pub fn subtree_prefix_color(st: PaintState, theme: &TlTheme) -> Hsla {
-    if st.selected {
-        theme.text_selected_secondary
-    } else {
-        theme.text_secondary
+/// The coloured end of a filled cell's text (UI-PRC-004): the PID's " +N" of a collapsed parent
+/// in `text_secondary` (`text_selected_secondary` when selected), an Image path's " (deleted)"
+/// in `status.danger`. Reads `out.bits` and `out.arc`, so it needs no text. Call after
+/// [`fill_cell`].
+pub fn cell_suffix(col: ColumnId, out: &CellOut, theme: &TlTheme) -> Option<CellSuffix> {
+    if !shows_value(out.validity) {
+        return None;
+    }
+    match col {
+        ColumnId::Pid => {
+            let plus = (out.bits >> 32) as u32;
+            (plus > 0).then(|| CellSuffix {
+                // " +" and the digits of N.
+                len: 2 + plus.checked_ilog10().unwrap_or(0) as usize + 1,
+                color: theme.text_secondary,
+                selected_color: theme.text_selected_secondary,
+            })
+        }
+        ColumnId::ImagePath => out
+            .arc
+            .as_deref()
+            .filter(|path| path.ends_with(DELETED_SUFFIX))
+            .map(|_| CellSuffix {
+                len: DELETED_SUFFIX.len(),
+                color: theme.status.danger,
+                selected_color: theme.status.danger,
+            }),
+        _ => None,
     }
 }
 
@@ -1681,9 +1696,6 @@ pub struct PaintState {
     pub subtree: bool,
 }
 
-/// Text opacity of a measured zero when `tables.dim_zero_values` is on (PROC-041).
-pub const DIM_ZERO_OPACITY: f32 = crate::table::cells::DIM_OPACITY;
-
 /// The kinds whose zero is dimmed: Percent, MemorySize, DiskRate, NetRate, Count and
 /// BytesCumulative. Text, ids, durations, times and power classes never are.
 pub fn dim_zero_kind(kind: ProcColumnKind) -> bool {
@@ -1773,187 +1785,6 @@ pub fn heat_background(
         a: alpha,
         ..theme.value_heat
     })
-}
-
-/// The colours of a cell's text: `main` for the first `split` bytes, `tail` for the rest
-/// (the PID's " +N" or an Image path's " (deleted)"). `split` is the text length when there is
-/// no tail.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct TextColors {
-    pub split: usize,
-    pub main: Hsla,
-    pub tail: Hsla,
-}
-
-/// [`text_colors`] for `out`, at [`DIM_ZERO_OPACITY`] when the cell [`dims_zero`]. Only the
-/// colours change, so a dimmed cell costs no extra element or allocation.
-pub fn metric_text_colors(
-    out: &CellOut,
-    text: &str,
-    col: &ProcColumn,
-    st: PaintState,
-    theme: &TlTheme,
-) -> TextColors {
-    let colors = text_colors(text, col, out.validity, st, theme);
-    if !dims_zero(out, col, st) {
-        return colors;
-    }
-    TextColors {
-        main: colors.main.opacity(DIM_ZERO_OPACITY),
-        tail: colors.tail.opacity(DIM_ZERO_OPACITY),
-        ..colors
-    }
-}
-
-/// The text colours of a Valid or Stale cell (UI-PRC-002, UI-PRC-004): `text_primary` and
-/// `text_secondary`, their selected forms on a selected row, `text_secondary` throughout on an
-/// exited row, " (deleted)" in `status.danger`, everything at 60 % opacity when Stale.
-pub fn text_colors(
-    text: &str,
-    col: &ProcColumn,
-    validity: Validity,
-    st: PaintState,
-    theme: &TlTheme,
-) -> TextColors {
-    let secondary = if st.selected {
-        theme.text_selected_secondary
-    } else {
-        theme.text_secondary
-    };
-    let main = match (st.exited, st.selected) {
-        (true, _) => secondary,
-        (false, true) => theme.text_selected_primary,
-        (false, false) => theme.text_primary,
-    };
-    let (split, tail) = match col.id {
-        ColumnId::Pid => (split_pid_text(text).0.len(), secondary),
-        ColumnId::ImagePath if text.ends_with(DELETED_SUFFIX) => {
-            (text.len() - DELETED_SUFFIX.len(), theme.status.danger)
-        }
-        _ => (text.len(), main),
-    };
-    let dim = |c: Hsla| {
-        if validity == Validity::Stale {
-            c.opacity(STALE_OPACITY)
-        } else {
-            c
-        }
-    };
-    TextColors {
-        split,
-        main: dim(main),
-        tail: dim(tail),
-    }
-}
-
-/// `t_base` 13 regular; numeric kinds (right-aligned) add `tnum`.
-pub fn metric_text_style(col: &ProcColumn, m: &UiMetrics) -> TextStyleRefinement {
-    if col.align() == ColumnAlign::Right {
-        numeric_style(m, m.text.base)
-    } else {
-        t_base(m)
-    }
-}
-
-/// A filled process-table cell other than Name (UI-PRC-004): a `width` × `row_height` box with
-/// 8 px padding, clipped, one line, end ellipsis, aligned like the column. `text` is the cached
-/// display text of `out`.
-///
-/// Valid and Stale cells draw `text` in [`text_colors`]. Every other validity draws its
-/// `TlValidityGlyph` content (`…`, the 12 px lock, `n/a`, `-`, `!`) in place of the text. The
-/// cell carries no tooltip: the owner attaches `components::validity::tooltip_text` on the
-/// hovered row, since that needs the `Window`.
-///
-/// Heat is `out.background` (from [`heat_background`]) as the cell's own fill, one quad over
-/// the whole cell, only when `st.heat_on`, the row is not selected, the kind can carry heat and
-/// the cell is Valid. The row draws zebra and hover tints under the cell and no selection fill
-/// over it, so a selected row draws no heat.
-pub fn render_metric_cell(
-    out: &CellOut,
-    text: SharedString,
-    col: &ProcColumn,
-    width: Pixels,
-    st: PaintState,
-    theme: &TlTheme,
-    cx: &App,
-) -> Div {
-    let m = metrics(cx);
-    let right = col.align() == ColumnAlign::Right;
-    let mut cell = div();
-    *cell.text_style() = metric_text_style(col, m);
-    cell = cell
-        .w(width)
-        .h(m.row_height)
-        .flex()
-        .items_center()
-        .px(m.sp[4])
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis();
-    if right {
-        cell = cell.justify_end().text_right();
-    }
-    if st.heat_on
-        && !st.selected
-        && heat_kind(col.kind)
-        && out.validity == Validity::Valid
-        && let Some(bg) = out.background
-    {
-        cell = cell.bg(bg);
-    }
-
-    if !matches!(out.validity, Validity::Valid | Validity::Stale) {
-        let (content, color) = glyph_parts(out.validity, &text, st.selected, theme);
-        return match content {
-            GlyphContent::Text(glyph) => cell
-                .debug_selector(|| "TlProcCell-glyph".into())
-                .text_color(color)
-                .child(glyph),
-            GlyphContent::Lock => cell.debug_selector(|| "TlProcCell-glyph".into()).child(
-                div()
-                    .debug_selector(|| "TlProcCell-lock".into())
-                    .flex_none()
-                    .child(icon(TlIcon::Lock, m.icon.xs, color)),
-            ),
-        };
-    }
-
-    let colors = metric_text_colors(out, &text, col, st, theme);
-    cell = cell
-        .debug_selector(|| "TlProcCell-text".into())
-        .text_color(colors.main);
-    if st.subtree && subtree_column(col.id) {
-        cell = cell.child(
-            div()
-                .debug_selector(|| "TlProcCell-subtree".into())
-                .flex_none()
-                .text_color(subtree_prefix_color(st, theme))
-                .child(SharedString::new_static(SUBTREE_PREFIX)),
-        );
-    }
-    if colors.split >= text.len() {
-        return cell.child(text);
-    }
-    let mut run_font = font(UI_FAMILY);
-    if right {
-        run_font = Font {
-            features: TNUM.clone(),
-            ..run_font
-        };
-    }
-    let run = |len: usize, color: Hsla| TextRun {
-        len,
-        font: run_font.clone(),
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let runs = vec![
-        run(colors.split, colors.main),
-        run(text.len() - colors.split, colors.tail),
-    ];
-    cell.child(StyledText::new(text).with_runs(runs))
 }
 
 // ---- NEW and EXITED highlight (PROC-043, UI-PRC-011) ----
