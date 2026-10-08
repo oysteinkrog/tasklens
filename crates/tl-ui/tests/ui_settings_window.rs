@@ -650,7 +650,9 @@ fn performance_page_keys(cx: &mut TestAppContext) {
             SettingKey::PerformanceShowNetworkWireless,
             SettingKey::PerformanceShowNetworkVpn,
             SettingKey::PerformanceShowNetworkVirtual,
-            SettingKey::PerformanceShowNetworkOther
+            SettingKey::PerformanceShowNetworkOther,
+            SettingKey::PerformanceDeviceOrder,
+            SettingKey::PerformanceDeviceOverrides
         ]
     );
 }
