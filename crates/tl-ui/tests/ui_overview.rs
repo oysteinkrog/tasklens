@@ -2120,7 +2120,9 @@ mod wired {
         }
         let page = overview(&mut r).expect("an OverviewPage");
         let renders = r.vcx.read_entity(&page, |p, _| p.render_count.get());
-        assert_eq!(renders, 2, "the empty measuring render, then the boxes");
+        // The empty measuring render, the boxes, and at most one more when a box's width
+        // probe picks its wide or narrow layout after its first frame.
+        assert!((2..=3).contains(&renders), "page renders {renders}");
     }
 
     /// crw.44: a click on a box title opens that device's page; a disk row opens its disk.
