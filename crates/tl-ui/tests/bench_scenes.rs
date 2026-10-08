@@ -219,6 +219,15 @@ fn static_scene_requests_no_frames(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn perf_overview_static_requests_no_frames(cx: &mut TestAppContext) {
+    // Like `static`: the run fails if the driver requested a frame.
+    let report = run_scene(cx, BenchScene::PerfOverviewStatic, 2, None, None, true)
+        .expect("perf-overview-static passes");
+    assert_eq!(report.scene, "perf-overview-static");
+    assert!(report.frames > 0, "the window painted");
+}
+
+#[gpui_kit::test]
 fn static_scene_counts_no_paints_without_frames(cx: &mut TestAppContext) {
     let report = run_scene(cx, BenchScene::Static, 1, None, None, false).expect("static passes");
     assert_eq!(report.frames, 0);

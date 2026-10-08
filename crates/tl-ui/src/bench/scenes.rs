@@ -73,6 +73,9 @@ pub enum BenchScene {
     /// The Overview page (D-022). Not in xtask's default scenes; run with `--scene
     /// perf-overview`.
     PerfOverview,
+    /// `perf-overview` with smooth graphs off, held to the `static` idle gate. Not in xtask's
+    /// default scenes either.
+    PerfOverviewStatic,
     Table2000,
     Bridge,
     Static,
@@ -80,16 +83,18 @@ pub enum BenchScene {
 }
 
 impl BenchScene {
-    pub const ALL: [BenchScene; 6] = [
+    pub const ALL: [BenchScene; 7] = [
         Self::PerfCpu,
         Self::PerfOverview,
+        Self::PerfOverviewStatic,
         Self::Table2000,
         Self::Bridge,
         Self::Static,
         Self::Soak,
     ];
 
-    /// "perf-cpu", "perf-overview", "table-2000", "bridge", "static" or "soak".
+    /// "perf-cpu", "perf-overview", "perf-overview-static", "table-2000", "bridge", "static" or
+    /// "soak".
     pub fn from_arg(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|scene| scene.as_str() == s)
     }
@@ -98,11 +103,23 @@ impl BenchScene {
         match self {
             Self::PerfCpu => "perf-cpu",
             Self::PerfOverview => "perf-overview",
+            Self::PerfOverviewStatic => "perf-overview-static",
             Self::Table2000 => "table-2000",
             Self::Bridge => "bridge",
             Self::Static => "static",
             Self::Soak => "soak",
         }
+    }
+
+    /// `static` and `perf-overview-static`: smooth graphs off, so the driver must request no
+    /// frames, and the window's paints count as frames.
+    pub fn is_static(self) -> bool {
+        matches!(self, Self::Static | Self::PerfOverviewStatic)
+    }
+
+    /// The scenes that show the Overview page.
+    fn overview(self) -> bool {
+        matches!(self, Self::PerfOverview | Self::PerfOverviewStatic)
     }
 }
 
@@ -152,21 +169,21 @@ impl fmt::Display for BenchError {
 impl std::error::Error for BenchError {}
 
 /// The fixture settings of `scene` (UI-PRF-053 common fixture): Default Dark, 100% UI scale,
-/// 60 s graph range, kernel overlays on, smooth graphs except in `static`, CPU page selected
-/// with the sidebar at 252 px. The Overview card is hidden, except in `perf-overview`, which
-/// selects the Overview page. `table-2000` shows the Power column after R-006's nine default
+/// 60 s graph range, kernel overlays on, smooth graphs except in `static` and
+/// `perf-overview-static`, CPU page selected with the sidebar at 252 px. The Overview card is
+/// hidden, except in the two Overview scenes, which select the Overview page. `table-2000` shows the Power column after R-006's nine default
 /// process columns (R-160 OI-7).
 pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
     // The default theme is Default Dark without follow-system, so `init` activates it with no
     // crossfade.
     let mut settings = Settings::default();
     settings.appearance.ui_scale_pct = 100;
-    settings.motion.smooth_graphs = scene != BenchScene::Static;
+    settings.motion.smooth_graphs = !scene.is_static();
     settings.performance.graph_range_s = 60;
     settings.performance.cpu_kernel = true;
     let mut state = UiState::default();
     state.performance.nav_width = 252;
-    if scene == BenchScene::PerfOverview {
+    if scene.overview() {
         state.performance.selected_device = DeviceKey::OVERVIEW.to_owned();
     } else {
         // The Overview card stays hidden, so the scenes keep the phase-0 card count (D-022).
@@ -474,7 +491,7 @@ pub fn run(
     let feed = match (scene, real) {
         (BenchScene::Table2000, _) => BenchFeed::Table,
         (BenchScene::Soak, _) => BenchFeed::Soak,
-        (BenchScene::PerfOverview, _) => BenchFeed::Overview,
+        (BenchScene::PerfOverview | BenchScene::PerfOverviewStatic, _) => BenchFeed::Overview,
         (BenchScene::Bridge, Some(real)) => BenchFeed::Bridge(real),
         (BenchScene::Bridge, None) => {
             return Task::ready(Err(BenchError("bridge: no real engine client".to_owned())));
@@ -571,7 +588,7 @@ async fn measure(
     // The probe arms `on_next_frame` every frame, so `static` runs without it, and `soak` too:
     // forced frames would hide the zed#64499 stall it looks for.
     let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, PROBE_CAPACITY)));
-    if scene != BenchScene::Static && !soak {
+    if !scene.is_static() && !soak {
         let probe = Rc::clone(&probe);
         window
             .handle
@@ -657,10 +674,11 @@ async fn measure(
         }
     }
 
-    if scene == BenchScene::Static && requested != 0 {
-        return Err(BenchError(
-            "static scene requested animation frames".to_owned(),
-        ));
+    if scene.is_static() && requested != 0 {
+        return Err(BenchError(format!(
+            "{}: the scene requested animation frames",
+            scene.as_str()
+        )));
     }
     if bridge {
         let needed = BRIDGE_MIN_SAMPLES_30S * u64::from(opts.duration_s) / 30;
@@ -677,14 +695,14 @@ async fn measure(
     // without the probe, the window's paints.
     let frames = if soak {
         driver_frames
-    } else if scene == BenchScene::Static {
+    } else if scene.is_static() {
         paints
     } else {
         intervals.len() as u64
     };
     // A moving scene with no frame callback at all (a locked screen, an occluded window or the
     // zed#64499 stall) must not pass as a report.
-    if scene != BenchScene::Static && frames == 0 {
+    if !scene.is_static() && frames == 0 {
         return Err(BenchError(format!(
             "{}: 0 frames drawn; possible frame-callback stall",
             scene.as_str()

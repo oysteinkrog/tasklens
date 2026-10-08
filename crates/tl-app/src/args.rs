@@ -82,13 +82,14 @@ impl TabArg {
     }
 }
 
-/// Values of `--bench`. CLI names: perf-cpu, perf-overview, table-2000, bridge, static,
-/// history-scrub, soak.
+/// Values of `--bench`. CLI names: perf-cpu, perf-overview, perf-overview-static, table-2000,
+/// bridge, static, history-scrub, soak.
 #[cfg(feature = "bench")]
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchScene {
     PerfCpu,
     PerfOverview,
+    PerfOverviewStatic,
     #[value(name = "table-2000")]
     Table2000,
     Bridge,
@@ -203,6 +204,7 @@ mod tests {
         let pairs = [
             ("perf-cpu", BenchScene::PerfCpu),
             ("perf-overview", BenchScene::PerfOverview),
+            ("perf-overview-static", BenchScene::PerfOverviewStatic),
             ("table-2000", BenchScene::Table2000),
             ("bridge", BenchScene::Bridge),
             ("static", BenchScene::Static),
