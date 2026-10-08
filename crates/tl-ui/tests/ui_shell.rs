@@ -5458,37 +5458,9 @@ mod startup_items {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui_kit::{AppContext as _, Context as GpuiContext, FocusHandle, Render, Window, div};
     use tl_model::health::HelperState;
     use tl_ui::components::shield::StartHelperSession;
-    use tl_ui::window::main::{HelperInstalled, PageSlot, ShellPage, set_test_page};
-    use tl_ui::window::status::StatusChanged;
-
-    /// A blank page for the tabs that have no page arm yet.
-    struct BlankPage(FocusHandle);
-
-    impl gpui_kit::EventEmitter<StatusChanged> for BlankPage {}
-
-    impl Render for BlankPage {
-        fn render(
-            &mut self,
-            _: &mut Window,
-            _: &mut GpuiContext<Self>,
-        ) -> impl gpui_kit::IntoElement {
-            div()
-        }
-    }
-
-    impl ShellPage for BlankPage {
-        fn primary_focus(&self) -> FocusHandle {
-            self.0.clone()
-        }
-    }
-
-    fn blank_page(_: &mut Window, cx: &mut GpuiContext<MainWindow>) -> PageSlot {
-        let page = cx.new(|cx| BlankPage(cx.focus_handle()));
-        PageSlot::new(page, cx)
-    }
+    use tl_ui::window::main::HelperInstalled;
 
     /// `init` with the helper `installed`, `privilege.unlock_at_launch`, Shift held at launch,
     /// blank pages for the unbuilt tabs, and a counter of `StartHelperSession`.
@@ -5509,7 +5481,7 @@ mod startup_items {
             cx.set_global(HelperInstalled(installed));
             TlSettings::update(cx, |d| d.settings.privilege.unlock_at_launch = unlock);
             for tab in [Tab::Services, Tab::Startup, Tab::Connections] {
-                set_test_page(cx, tab, blank_page);
+                set_test_page(cx, tab, blank);
             }
             cx.on_action(move |_: &StartHelperSession, _| count.set(count.get() + 1));
         });
