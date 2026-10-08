@@ -808,3 +808,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - hk6.1: overlay skeleton and empty states below the 28 px header; set_paused called by the page on Ctrl-pause; sort type SysSortSpec. Accepted.
 - crw.22: Power draw row shown from CpuStaticInfo.rapl (hidden for NoZone); Restricted and Unsupported both show Needs setup; value-word ftl keys added; both lockdown modes read Kernel lockdown. Accepted.
 - o55.36: GpuDeviceSample gets mem_reserved and enc_sessions (Reading); GpuTotals gets mem_reserved, enc_sessions, enc_dec_shared, temp_edge_c, temp_junction_c, temp_mem_c (Unsupported where absent). Literal sites in ~15 files get the new fields, no Default; model plus literals land in one atomic commit.
+- wlf.30: thread per source accepted; LabRuntime keeps spawn_blocking; lab_bridge test renamed shutdown_clean_with_blocked_sample.
