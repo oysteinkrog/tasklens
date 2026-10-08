@@ -5,8 +5,10 @@
 //! `build_runtime` always sets it.
 //!
 //! Never call `RuntimeBuilder::current_thread()`. Never call
-//! `RuntimeHandle::spawn_blocking`. All blocking work uses `Cx::spawn_blocking`
-//! and is joined with `TaskHandle::join`.
+//! `RuntimeHandle::spawn_blocking`. Actions, the launcher, the opener and the
+//! journal use `Cx::spawn_blocking` and join with `TaskHandle::join`. Periodic
+//! samples do not use the pool: each source has its own sampling thread, so a
+//! hung sample stalls only its own source (ADR-004, tasklens-wlf.30).
 //!
 //! Banned asupersync APIs in tl-engine production code (ADR-004): `AppSpec`,
 //! `GenServer`, `actor`, `race!`, `select!`, `race_drained`,
@@ -21,7 +23,8 @@ use asupersync::runtime::{Runtime, RuntimeBuilder};
 pub const WORKER_THREADS: usize = 1;
 /// Blocking threads kept alive. Idle threads above this retire after 10 s.
 pub const BLOCKING_THREADS_MIN: usize = 1;
-/// At most 4 blocking jobs run at once.
+/// At most 4 blocking jobs run at once. Periodic samples run on their own threads, outside
+/// this limit.
 pub const BLOCKING_THREADS_MAX: usize = 4;
 pub const GLOBAL_QUEUE_LIMIT: usize = 256;
 pub const THREAD_NAME_PREFIX: &str = "tl-engine";

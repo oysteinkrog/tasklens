@@ -769,7 +769,9 @@ let rt = RuntimeBuilder::new()
     .build()?;
 ```
 
-Never `current_thread()`. Never `RuntimeHandle::spawn_blocking`. All blocking work uses `Cx::spawn_blocking(..)` and is joined with `TaskHandle::join(&mut self, &cx)`. One worker does a whole sweep inside one `spawn_blocking` closure (never one pool job per file).
+Never `current_thread()`. Never `RuntimeHandle::spawn_blocking`. Blocking work other than periodic samples (actions, the launcher, the opener, the journal) uses `Cx::spawn_blocking(..)` and is joined with `TaskHandle::join(&mut self, &cx)`.
+
+**Sampling threads** (owner decision 2026-10-08, tasklens-wlf.30). Periodic samples do not use the blocking pool. Each periodic source has its own sampling thread, started at its first sample and asleep between samples. One source does a whole sweep in one sample (never one job per file). A sample that never returns, such as a drive query on an empty card reader (TMOG feedback #1004), stalls only its own source: its health goes `Late`, and every other source keeps its rate. With samples on the shared 4-thread pool, 4 hung samples stopped every graph. When the worker ends, its sampling thread ends; a thread stuck in a sample is never joined, so it never holds up shutdown, and it ends when that sample returns. Under `LabRuntime`, which has no blocking pool, samples run inline.
 
 **Banned asupersync APIs in tl-engine production code:** `AppSpec`, `GenServer`, `actor`, `race!`, `select!`, `race_drained`, `Cx::race_timeout`, `asupersync::signal`, `ctrl_c`, `asupersync::process`, `asupersync::fs`, `Cx::for_request`, `Cx::for_testing`, `ChildSpec::depends_on`, `JoinHandle` from `RuntimeHandle::spawn` (use `spawn_checked`), `Budget::with_poll_quota` on long-lived tasks. `xtask check-deps` greps `crates/tl-engine/src` for these names (excluding `tests/` and `#[cfg(test)]` modules) and fails on a match.
 
@@ -896,8 +898,8 @@ async fn run(cx: Cx, io: WorkerIo, mut src: impl Source) -> Outcome<(), WorkerEr
         iv.tick(cx.now());
         // re-read demand; rebuild iv if the period changed
         let Some(p) = period else { continue };                 // source off: recheck every IDLE_RECHECK
-        let job = cx.spawn_blocking(move |_| src.sample())?;   // whole sweep in one job
-        let (s, update) = job.join(&cx).await?;                  // await; never start a second job
+        let done = sampler.start(src)?;                         // whole sweep, on this source's thread
+        let (s, update) = wait(&cx, done, p * LATE_COUNT).await?; // Late if still running; never start a second job
         src = s;
         io.updates.send(&cx, EngineMsg::Source(update)).await?;
     }
@@ -906,14 +908,14 @@ async fn run(cx: Cx, io: WorkerIo, mut src: impl Source) -> Outcome<(), WorkerEr
 
 - `IDLE_RECHECK = 500 ms`: an off source wakes twice a second to read demand, does no I/O, and costs nothing measurable.
 - Demand changes take effect at the next wake (at most 500 ms, or one period).
-- A job that runs past its period is not interrupted. The worker skips the missed ticks and the health becomes `Late` after 3 consecutive jobs longer than 0.8 × period.
+- A job that runs past its period is not interrupted. The worker skips the missed ticks and the health becomes `Late` after 3 consecutive jobs longer than 0.8 × period, or as soon as one job has run for 3 periods. The next job that ends within 0.8 × period sets it back to `Running`.
 - The `Source` trait lives in `tl-engine` and wraps synchronous `tl-collect` samplers:
 
 ```rust
 pub trait Source: Send + 'static {
     fn id(&self) -> SourceId;
     fn period(&self, demand: &Demand, settings: &EngineSettings) -> Option<Duration>; // None = off
-    fn sample(self) -> (Self, SourceUpdate) where Self: Sized;   // runs on the blocking pool
+    fn sample(self) -> (Self, SourceUpdate) where Self: Sized;   // runs on the source's sampling thread
     fn take_extra(&mut self) -> Option<SourceUpdate> { None }   // device lists and details; drained after each sample and sent first (R-139)
 }
 ```
