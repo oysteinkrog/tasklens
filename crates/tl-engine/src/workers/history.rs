@@ -1067,6 +1067,26 @@ mod tests {
         (slot, rx)
     }
 
+    /// The Overview Top processes box starts the process sweep but not the rolling window
+    /// (crw.45).
+    #[test]
+    fn process_top_sweeps_without_history() {
+        let d = Demand {
+            any_surface_visible: true,
+            process_top: true,
+            ..Demand::default()
+        };
+        let s = EngineSettings {
+            interval_ms: 1000,
+            ..EngineSettings::default()
+        };
+        assert_eq!(wanted(&d, &s), Wanted::Off);
+        assert_eq!(
+            crate::workers::processes::processes_period(&d, &s),
+            Some(Duration::from_secs(1))
+        );
+    }
+
     #[test]
     fn sink_without_sender_drops() {
         let mut sink = HistorySink::new(Arc::new(ArcSwapOption::empty()));

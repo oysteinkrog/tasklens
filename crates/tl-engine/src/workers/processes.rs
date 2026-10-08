@@ -56,9 +56,11 @@ pub const MIN_INTERVAL_MS: u32 = 250;
 pub const MAX_INTERVAL_MS: u32 = 10_000;
 
 /// The process rate table (ADR-008 row "Process table"): on while any process consumer is
-/// visible or recording is on. Graph targets keep it on with the table hidden (R-154 item 2).
+/// visible or recording is on. Graph targets keep it on with the table hidden (R-154 item 2),
+/// and so does the Overview Top processes box (`process_top`, crw.45).
 pub fn processes_period(d: &Demand, s: &EngineSettings) -> Option<Duration> {
     let wanted = d.process_table
+        || d.process_top
         || !d.detail_keys.is_empty()
         || d.gpu_process
         || d.recording

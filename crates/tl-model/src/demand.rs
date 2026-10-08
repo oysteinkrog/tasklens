@@ -100,6 +100,9 @@ pub struct Demand {
     pub gpus: bool,
     pub sensors: bool,
     pub process_table: bool,
+    /// The Overview Top processes box is placed: the process sweep runs at
+    /// `processes.interval_ms`, with no table history window (crw.45).
+    pub process_top: bool,
     pub process_columns: ColumnSet,
     /// Visible rows plus one viewport of overscan, max `DETAIL_KEYS_MAX`.
     pub detail_keys: Arc<[ProcessKey]>,
@@ -280,6 +283,7 @@ mod tests {
             d.gpus,
             d.sensors,
             d.process_table,
+            d.process_top,
             d.gpu_process,
             d.connections,
             d.services,

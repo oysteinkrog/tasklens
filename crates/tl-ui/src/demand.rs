@@ -211,6 +211,7 @@ fn merge<'a>(parts: impl Iterator<Item = &'a Demand> + Clone) -> Demand {
         m.gpus |= p.gpus;
         m.sensors |= p.sensors;
         m.process_table |= p.process_table;
+        m.process_top |= p.process_top;
         for (word, part) in m.process_columns.0.iter_mut().zip(p.process_columns.0) {
             *word |= part;
         }
