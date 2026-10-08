@@ -36,6 +36,12 @@ pub struct Strings {
 impl Global for Strings {}
 
 impl Strings {
+    /// The locale of the text: the catalogue's locale, which is en-US while `locale` has no
+    /// catalogue of its own. Plural forms follow it.
+    pub fn text_locale(&self) -> &LanguageIdentifier {
+        &self.bundle.locales[0]
+    }
+
     fn new(locale: LanguageIdentifier, strings_version: u64) -> Self {
         let bundle = match catalogue(&locale) {
             Some(ftl) => build_bundle(locale.clone(), ftl),

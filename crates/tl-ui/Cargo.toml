@@ -15,6 +15,7 @@ tracing = { workspace = true }
 async-channel = { workspace = true }
 jiff = { workspace = true }
 fluent-bundle = { workspace = true }
+intl_pluralrules = { workspace = true }
 unic-langid = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }   # render-tests only (R-291)
 unicode-segmentation = { workspace = true }
