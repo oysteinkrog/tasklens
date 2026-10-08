@@ -9,7 +9,7 @@
 //! samples (ADR-004, tasklens-wlf.30). A hung `sample` stalls only that source: after
 //! `LATE_COUNT` periods its health goes `Late`, and the other sources keep their rate. The
 //! shared blocking pool is for actions, the launcher, the opener and the journal. Without a
-//! blocking pool (LabRuntime) the sample runs inline, as `spawn_blocking` would run it.
+//! blocking pool (LabRuntime) the sample goes through `spawn_blocking`, which runs it inline.
 //!
 //! Never hold a `watch` `Ref` across another channel call. This module only uses
 //! `borrow_and_clone()` (bead `c11v6v`).
@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use asupersync::channel::{mpsc, oneshot, watch};
+use asupersync::runtime::JoinError;
 use asupersync::time::{Interval, MissedTickBehavior, interval, sleep_until, timeout};
 use asupersync::{Cx, Outcome, PanicPayload};
 use tl_model::command::{DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
@@ -325,9 +326,24 @@ pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), Wor
 
         let started = cx.now();
         let (s, update) = if cx.blocking_pool_handle().is_none() {
-            match std::panic::catch_unwind(AssertUnwindSafe(|| src.sample())) {
+            // LabRuntime: `spawn_blocking` runs the sample inline in a child task, which keeps
+            // the lab's schedule and catches a panic.
+            let mut job = match cx.spawn_blocking(move |_| src.sample()) {
+                Ok(job) => job,
+                Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
+            };
+            match job.join(&cx).await {
                 Ok(done) => done,
-                Err(_) => return Outcome::Panicked(PanicPayload::new("sample panicked")),
+                Err(JoinError::Cancelled(reason)) => {
+                    if cx.checkpoint().is_err() {
+                        return Outcome::Ok(());
+                    }
+                    return Outcome::Cancelled(reason);
+                }
+                Err(JoinError::Panicked(payload)) => return Outcome::Panicked(payload),
+                Err(JoinError::PolledAfterCompletion) => {
+                    return Outcome::Err(WorkerError::Other("job polled after completion".into()));
+                }
             }
         } else {
             let thread = match &mut sampler {
