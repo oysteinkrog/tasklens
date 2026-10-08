@@ -3895,16 +3895,19 @@ mod live {
             (0, IconName::Activity, "Interrupts"),
             (1, IconName::Archive, "Memory compression (zram)"),
         ] {
-            let (cell, expandable) = vcx.update(|_, cx| {
+            let (name_cell, expandable) = vcx.update(|_, cx| {
                 let d = &table.read(cx).delegate;
                 (d.name_cell(ix), d.row_expandable(ix))
             });
             assert!(
-                matches!(cell.icon, NameIcon::Lucide(i) if i == icon),
+                matches!(name_cell.icon, NameIcon::Lucide(i) if i == icon),
                 "{name}: the Lucide icon"
             );
-            assert!(matches!(cell.icon_size, IconSlot::Small), "{name}: 16 px");
-            assert_eq!(cell.primary.as_ref(), name);
+            assert!(
+                matches!(name_cell.icon_size, IconSlot::Small),
+                "{name}: 16 px"
+            );
+            assert_eq!(name_cell.primary.as_ref(), name);
             assert_eq!(expandable, None, "{name}: no chevron");
 
             let pid = cell(vcx, &table, ix, ColumnId::Pid);
