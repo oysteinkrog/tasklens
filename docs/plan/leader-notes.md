@@ -821,3 +821,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.23: engine now records CPU_POWER_PKG, CPU_POWER_CORE, CPU_CLOCK_MAX in apply_cpu and metrics_of(Cpu) (chain edit under crw.23); unreadable power is a gap, not zero.
 - crw.41/42: accepted (fixtures opt in to Overview with Show; menu closed with Escape before Hide; missed GpuTotals literal fixed). crw.18 Copy on Overview calls copy_all. Benches run one at a time.
 - pdu.30: ProcessTable Ctrl+C bound in context "ProcessTable > Table" so it beats Table's CopyRow; one-line ui_process_menu hint change accepted. pdu.56 accepted (DIM_OPACITY 0.3, numeric_cell_prefixed, render deleted).
+- pdu.57: validity glyphs align like their column (left for Text/Path, right for Numeric) in every table; foundation.md:1147 reworded.
