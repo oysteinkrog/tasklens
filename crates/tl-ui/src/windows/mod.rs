@@ -7,6 +7,7 @@ pub mod connection_properties;
 pub mod frame;
 pub mod low_memory;
 pub mod notices;
+pub mod priority;
 pub mod props;
 pub mod run;
 pub mod run_history;
