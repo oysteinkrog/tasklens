@@ -846,3 +846,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - bj6.23: PageBuilder action_dropdown (theme options from menus_view::theme_rows), str_switch, restart_note_toast, slider_on_commit; menubar scale_toast_text pub(crate). All PageBuilder additions for bj6.29 and bj6.23 land in one mod.rs commit.
 - 9o0.6: TreeTableDelegate::cell_element(ix, col, ctx) -> Option<AnyElement> (default None) lets a column draw a custom element (status dot via sys_status::status_cell); CellOut still drives copy, sort, tooltip.
 - 9o0.6: impact tooltip via pure impact_tooltip_lines; fork_exec_only missing from model, filed 9o0.37 (pdu-30 next).
+- crw.24: closed. Grid records the clicked value (ClickedValue global), page panel opens the one page menu with Copy value first; fixes double menu on right-click.
