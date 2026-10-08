@@ -85,7 +85,7 @@ fn hello_real_or_init_failed_on(c: &mut UnixStream) {
             nvml,
             devices,
         } => {
-            assert_eq!(proto, 1);
+            assert_eq!(proto, PROTO);
             assert!(!devices.is_empty(), "Hello with no devices");
             let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
             eprintln!("Hello in {took:?}: driver {driver}, nvml {nvml}, devices {names:?}");

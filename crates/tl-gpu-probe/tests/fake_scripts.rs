@@ -114,11 +114,11 @@ fn normal_hello_and_samples() {
 }
 
 #[test]
-fn proto_mismatch_99() {
+fn proto_mismatch_previous_version() {
     let (mut c, mut child) = spawn("proto-mismatch");
     send(&mut c, &ProbeRequest::Hello { proto: PROTO });
     match recv(&mut c) {
-        ProbeResponse::Hello { proto, .. } => assert_eq!(proto, 99),
+        ProbeResponse::Hello { proto, .. } => assert_eq!(proto, PROTO - 1),
         other => panic!("unexpected response {other:?}"),
     }
     send(&mut c, &ProbeRequest::Shutdown);
