@@ -2004,9 +2004,3 @@ shell-settings-group-size = Size
 shell-settings-group-look = Look
 shell-settings-decorations = Use system title bar
 shell-toast-decorations-restart = Restart tasklens to apply the title bar change
-# Settings window, Appearance page (tasklens-bj6.23, UI-SHL-062).
-shell-settings-group-theme = Theme
-shell-settings-group-size = Size
-shell-settings-group-look = Look
-shell-settings-decorations = Use system title bar
-shell-toast-decorations-restart = Restart tasklens to apply the title bar change
