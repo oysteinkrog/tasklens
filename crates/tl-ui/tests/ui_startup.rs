@@ -385,7 +385,6 @@ mod page {
     use std::time::Duration;
 
     use super::*;
-    use gpui_kit::base::Root;
     use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
         MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render, StyleRefinement,
@@ -408,7 +407,6 @@ mod page {
     use tl_ui::pages::startup::{REFRESH_TOAST_AFTER, StartupPage};
     use tl_ui::pages::sys_table::SysBody;
     use tl_ui::table::actions::OpenProperties;
-    use tl_ui::table::tree_table::TreeTableDelegate as _;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{
@@ -488,7 +486,7 @@ mod page {
                     let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
                     *page_slot.borrow_mut() = Some(page.clone());
                     let host = cx.new(|_| Host { page, opened });
-                    Root::new(host, window, cx)
+                    host
                 })
             })
             .expect("the window opens");
