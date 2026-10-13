@@ -2,10 +2,10 @@
 //! emission into `ChartCache` (part 2) (ADR-009 rules 2 to 7; UI-PRF-001; UI-PRF-005;
 //! UI-PRF-007; PERF-022; PERF-026; R-051).
 //!
-//! Every function here is pure and allocation-free given the caller's buffers, except that `build`
-//! allocates inside lyon's stroke tessellator. Fills skip lyon: they are monotone in x, so
-//! `FillMesh` triangulates them directly (tasklens-wlf.33). Time math is `u64` and the pixel
-//! scale is `f64`: 60 s in ns against 1,600 px loses precision in `f32`.
+//! Every function here is pure and allocation-free given the caller's buffers. Fills and strokes
+//! skip lyon: chart lines are monotone in x, so `FillMesh` and `StrokeMesh` triangulate them
+//! directly (tasklens-wlf.33, tasklens-wlf.35). Time math is `u64` and the pixel scale is `f64`:
+//! 60 s in ns against 1,600 px loses precision in `f32`.
 
 use gpui_kit::{Bounds, Hsla, Path, PathBuilder, PathVertex, Pixels, Point, point, px, size};
 use smallvec::SmallVec;
@@ -263,14 +263,23 @@ pub struct Scratch {
     line: Line,
     live: Builders,
     stale: Builders,
+    /// Grid cells merge their live total and overlay strokes into these two meshes. The public
+    /// grid API still accepts `PathBuilder`s so its caller does not need a chain edit.
+    grid_stroke: StrokeMesh,
+    grid_overlay: StrokeMesh,
 }
 
 impl Scratch {
     /// An empty fill for a grid build. Takes back `cache`'s fill paths first, so the new fill
     /// reuses their vertex buffers.
     pub fn take_fill(&mut self, cache: &mut ChartCache) -> FillMesh {
-        self.live.reclaim(&mut cache.fills);
-        self.stale.reclaim(&mut cache.stale_fills);
+        self.live.reclaim_fills(&mut cache.fills);
+        self.stale.reclaim_fills(&mut cache.stale_fills);
+        self.stale.reclaim_strokes(&mut cache.stale_strokes);
+        let stroke = (!cache.strokes.is_empty()).then(|| cache.strokes.remove(0).path);
+        let overlay = (!cache.strokes.is_empty()).then(|| cache.strokes.remove(0).path);
+        self.grid_stroke = StrokeMesh::reusing(stroke, 1.0, false);
+        self.grid_overlay = StrokeMesh::reusing(overlay, 1.0, false);
         self.live.mesh()
     }
 
@@ -574,15 +583,340 @@ struct Line {
 /// Dash pattern for dashed series (PERF-026).
 const DASH: [gpui_kit::Pixels; 2] = [px(5.0), px(5.0)];
 
+/// A chart stroke built directly as triangles. Each segment is a quad. Adjacent quads share a
+/// miter cross-section, or use a bevel when the default lyon miter limit of 4 would be exceeded.
+/// Butt caps and the 5/5 dash pattern match `PathBuilder::stroke` as used by charts.
+struct StrokeMesh {
+    path: Option<Path<Pixels>>,
+    spare: Option<Path<Pixels>>,
+    min: (f32, f32),
+    max: (f32, f32),
+    half_width: f32,
+    dashed: bool,
+    dash_on: bool,
+    dash_left: f32,
+    dash_points: Vec<Point<Pixels>>,
+}
+
+impl Default for StrokeMesh {
+    fn default() -> Self {
+        Self::reusing(None, 1.0, false)
+    }
+}
+
+impl StrokeMesh {
+    fn reusing(spare: Option<Path<Pixels>>, width: f32, dashed: bool) -> Self {
+        Self {
+            path: None,
+            spare,
+            min: (f32::MAX, f32::MAX),
+            max: (f32::MIN, f32::MIN),
+            half_width: width.max(0.0) / 2.0,
+            dashed,
+            dash_on: true,
+            dash_left: f32::from(DASH[0]),
+            dash_points: Vec::new(),
+        }
+    }
+
+    fn tri(&mut self, a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels>) {
+        let path = self.path.get_or_insert_with(|| match self.spare.take() {
+            Some(mut path) => {
+                path.vertices.clear();
+                path
+            }
+            None => Path::new(a),
+        });
+        for p in [a, b, c] {
+            let (x, y) = (f32::from(p.x), f32::from(p.y));
+            self.min = (self.min.0.min(x), self.min.1.min(y));
+            self.max = (self.max.0.max(x), self.max.1.max(y));
+            path.vertices.push(PathVertex {
+                xy_position: p,
+                st_position: INSIDE,
+                content_mask: Default::default(),
+            });
+        }
+    }
+
+    fn stroke(&mut self, points: &[Point<Pixels>]) {
+        let Some((&first, rest)) = points.split_first() else {
+            return;
+        };
+        if rest.is_empty() {
+            self.stroke_line(&[first, point(first.x + px(1.0), first.y)]);
+        } else if self.dashed {
+            self.stroke_dashed(points);
+        } else {
+            self.stroke_line(points);
+        }
+    }
+
+    fn stroke_dashed(&mut self, points: &[Point<Pixels>]) {
+        self.dash_points.clear();
+        let mut cursor = points[0];
+        if self.dash_on {
+            self.dash_points.push(cursor);
+        }
+        for &end in &points[1..] {
+            let dx = f32::from(end.x - cursor.x);
+            let dy = f32::from(end.y - cursor.y);
+            let mut segment_left = (dx * dx + dy * dy).sqrt();
+            if segment_left <= f32::EPSILON {
+                cursor = end;
+                continue;
+            }
+            let unit = (dx / segment_left, dy / segment_left);
+            while segment_left > f32::EPSILON {
+                let take = segment_left.min(self.dash_left);
+                let next = point(cursor.x + px(unit.0 * take), cursor.y + px(unit.1 * take));
+                if self.dash_on {
+                    if self.dash_points.is_empty() {
+                        self.dash_points.push(cursor);
+                    }
+                    self.dash_points.push(next);
+                }
+                cursor = next;
+                segment_left -= take;
+                self.dash_left -= take;
+                if self.dash_left <= f32::EPSILON {
+                    if self.dash_on {
+                        self.flush_dash();
+                    }
+                    self.dash_on = !self.dash_on;
+                    self.dash_left = f32::from(DASH[usize::from(!self.dash_on)]);
+                }
+            }
+            cursor = end;
+        }
+        if self.dash_on {
+            self.flush_dash();
+        } else {
+            self.dash_points.clear();
+        }
+    }
+
+    fn flush_dash(&mut self) {
+        if self.dash_points.len() < 2 {
+            self.dash_points.clear();
+            return;
+        }
+        let points = std::mem::take(&mut self.dash_points);
+        self.stroke_line(&points);
+        self.dash_points = points;
+        self.dash_points.clear();
+    }
+
+    fn stroke_line(&mut self, points: &[Point<Pixels>]) {
+        if self.half_width <= 0.0 || points.len() < 2 {
+            return;
+        }
+        let Some((mut direction, mut normal)) =
+            segment_frame(points[0], points[1], self.half_width)
+        else {
+            return;
+        };
+        let mut start = offset_pair(points[0], normal);
+        for i in 0..points.len() - 1 {
+            let raw_start = start;
+            let segment_direction = direction;
+            let p = points[i + 1];
+            let last = i + 2 == points.len();
+            let (mut end, next_start, bevel) = if let Some(&next) = points.get(i + 2) {
+                match segment_frame(p, next, self.half_width) {
+                    Some((next_direction, next_normal)) => {
+                        let join = stroke_join(
+                            p,
+                            direction,
+                            normal,
+                            next_direction,
+                            next_normal,
+                            self.half_width,
+                        );
+                        direction = next_direction;
+                        normal = next_normal;
+                        join
+                    }
+                    None => {
+                        let pair = offset_pair(p, normal);
+                        (pair, pair, None)
+                    }
+                }
+            } else {
+                let pair = offset_pair(p, normal);
+                (pair, pair, None)
+            };
+            if i == 0 {
+                start = butt_cap(points[0], start, end, segment_direction, true);
+            }
+            if last {
+                end = butt_cap(p, end, raw_start, segment_direction, false);
+            }
+            self.quad(start, end);
+            if let Some((a, b, c)) = bevel {
+                self.tri(a, b, c);
+            }
+            start = next_start;
+        }
+    }
+
+    fn quad(&mut self, start: (Point<Pixels>, Point<Pixels>), end: (Point<Pixels>, Point<Pixels>)) {
+        self.tri(start.1, start.0, end.0);
+        self.tri(start.1, end.0, end.1);
+    }
+
+    fn finish(&mut self) -> Option<Path<Pixels>> {
+        let mut path = self.path.take().filter(|p| !p.vertices.is_empty())?;
+        path.bounds = Bounds {
+            origin: point(px(self.min.0), px(self.min.1)),
+            size: size(px(self.max.0 - self.min.0), px(self.max.1 - self.min.1)),
+        };
+        Some(path)
+    }
+}
+
+fn segment_frame(
+    a: Point<Pixels>,
+    b: Point<Pixels>,
+    half_width: f32,
+) -> Option<((f32, f32), (f32, f32))> {
+    let (dx, dy) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
+    let len = (dx * dx + dy * dy).sqrt();
+    (len > f32::EPSILON).then(|| {
+        let direction = (dx / len, dy / len);
+        let normal = (-direction.1 * half_width, direction.0 * half_width);
+        (direction, normal)
+    })
+}
+
+fn offset_pair(p: Point<Pixels>, normal: (f32, f32)) -> (Point<Pixels>, Point<Pixels>) {
+    (
+        point(p.x + px(normal.0), p.y + px(normal.1)),
+        point(p.x - px(normal.0), p.y - px(normal.1)),
+    )
+}
+
+fn butt_cap(
+    p: Point<Pixels>,
+    pair: (Point<Pixels>, Point<Pixels>),
+    other: (Point<Pixels>, Point<Pixels>),
+    direction: (f32, f32),
+    start: bool,
+) -> (Point<Pixels>, Point<Pixels>) {
+    let normal = if start {
+        (-direction.0, -direction.1)
+    } else {
+        direction
+    };
+    let cap_vector = (-normal.1, normal.0);
+    (
+        cap_intersection(p, cap_vector, pair.0, other.0),
+        cap_intersection(p, cap_vector, pair.1, other.1),
+    )
+}
+
+/// Intersects in f64 and converts back to f32, matching Lyon's butt-cap path exactly.
+fn cap_intersection(
+    cap_point: Point<Pixels>,
+    cap_vector: (f32, f32),
+    side_point: Point<Pixels>,
+    other_side: Point<Pixels>,
+) -> Point<Pixels> {
+    let cap = (f32::from(cap_point.x) as f64, f32::from(cap_point.y) as f64);
+    let cap_v = (cap_vector.0 as f64, cap_vector.1 as f64);
+    let side = (
+        f32::from(side_point.x) as f64,
+        f32::from(side_point.y) as f64,
+    );
+    let side_v = (
+        (f32::from(side_point.x) - f32::from(other_side.x)) as f64,
+        (f32::from(side_point.y) - f32::from(other_side.y)) as f64,
+    );
+    let cross = |a: (f64, f64), b: (f64, f64)| a.0 * b.1 - a.1 * b.0;
+    let det = cross(cap_v, side_v);
+    if det.abs() <= f64::EPSILON {
+        return side_point;
+    }
+    let cap_p2 = (cap.0 + cap_v.0, cap.1 + cap_v.1);
+    let side_p2 = (side.0 + side_v.0, side.1 + side_v.1);
+    let a = cross(cap, cap_p2);
+    let b = cross(side, side_p2);
+    let inv_det = 1.0 / det;
+    point(
+        px(((b * cap_v.0 - a * side_v.0) * inv_det) as f32),
+        px(((b * cap_v.1 - a * side_v.1) * inv_det) as f32),
+    )
+}
+
+type StrokeJoin = (
+    (Point<Pixels>, Point<Pixels>),
+    (Point<Pixels>, Point<Pixels>),
+    Option<(Point<Pixels>, Point<Pixels>, Point<Pixels>)>,
+);
+
+fn stroke_join(
+    p: Point<Pixels>,
+    direction: (f32, f32),
+    previous_normal: (f32, f32),
+    next_direction: (f32, f32),
+    next_normal: (f32, f32),
+    half_width: f32,
+) -> StrokeJoin {
+    let tangent = (
+        direction.0 + next_direction.0,
+        direction.1 + next_direction.1,
+    );
+    let tangent_sq = tangent.0 * tangent.0 + tangent.1 * tangent.1;
+    let previous_unit_normal = (-direction.1, direction.0);
+    let miter_normal = if tangent_sq < 1e-4 {
+        (0.0, 0.0)
+    } else {
+        let tangent_len = tangent_sq.sqrt();
+        let unit = (-tangent.1 / tangent_len, tangent.0 / tangent_len);
+        let inv_len = unit.0 * previous_unit_normal.0 + unit.1 * previous_unit_normal.1;
+        if inv_len.abs() < 1e-4 {
+            previous_unit_normal
+        } else {
+            (unit.0 / inv_len, unit.1 / inv_len)
+        }
+    };
+    let miter = (miter_normal.0 * half_width, miter_normal.1 * half_width);
+    let miter_pair = offset_pair(p, miter);
+    // Lyon defines the miter ratio against the full stroke width, so its default limit of 4
+    // permits a normal up to 8 times the half width.
+    if miter_normal.0 * miter_normal.0 + miter_normal.1 * miter_normal.1 <= 4.0 * 4.0 * 4.0 {
+        return (miter_pair, miter_pair, None);
+    }
+
+    let previous = offset_pair(p, previous_normal);
+    let next = offset_pair(p, next_normal);
+    let cross = direction.0 * next_direction.1 - direction.1 * next_direction.0;
+    if cross >= 0.0 {
+        (
+            (miter_pair.0, previous.1),
+            (miter_pair.0, next.1),
+            Some((previous.1, miter_pair.0, next.1)),
+        )
+    } else {
+        (
+            (previous.0, miter_pair.1),
+            (next.0, miter_pair.1),
+            Some((miter_pair.1, previous.0, next.0)),
+        )
+    }
+}
+
 /// Builders keyed by colour (and dash for strokes) in insertion order (rule 7). Created on first
 /// use, so a colour with no points adds no set. Kept in `Scratch` so the lists do not reallocate
 /// per build when a stacked chart has more colours than the inline size.
 #[derive(Default)]
 struct Builders {
     fills: SmallVec<[(Hsla, FillMesh); 2]>,
-    strokes: SmallVec<[(Hsla, bool, PathBuilder); 3]>,
+    strokes: SmallVec<[(Hsla, bool, StrokeMesh); 3]>,
     /// Fill paths of the previous build, kept for their vertex buffers.
     spare: Vec<Path<Pixels>>,
+    /// Stroke paths of the previous build, kept for their vertex buffers.
+    stroke_spare: Vec<Path<Pixels>>,
 }
 
 impl Builders {
@@ -603,11 +937,15 @@ impl Builders {
     }
 
     /// Keeps the fill paths of `sets` for reuse and empties it.
-    fn reclaim(&mut self, sets: &mut SmallVec<[PathSet; 2]>) {
+    fn reclaim_fills(&mut self, sets: &mut SmallVec<[PathSet; 2]>) {
         self.spare.extend(sets.drain(..).map(|set| set.path));
     }
 
-    fn stroke(&mut self, s: &ChartSeries) -> &mut PathBuilder {
+    fn reclaim_strokes(&mut self, sets: &mut SmallVec<[PathSet; 3]>) {
+        self.stroke_spare.extend(sets.drain(..).map(|set| set.path));
+    }
+
+    fn stroke(&mut self, s: &ChartSeries) -> &mut StrokeMesh {
         let i = match self
             .strokes
             .iter()
@@ -615,11 +953,9 @@ impl Builders {
         {
             Some(i) => i,
             None => {
-                let mut b = PathBuilder::stroke(s.line_width);
-                if s.dashed {
-                    b = b.dash_array(&DASH);
-                }
-                self.strokes.push((s.line, s.dashed, b));
+                let mesh =
+                    StrokeMesh::reusing(self.stroke_spare.pop(), f32::from(s.line_width), s.dashed);
+                self.strokes.push((s.line, s.dashed, mesh));
                 self.strokes.len() - 1
             }
         };
@@ -644,7 +980,7 @@ impl Builders {
             floor_pts,
         } = buf;
         emit_run(pts, input.curved, input, tangents, line);
-        let Some((&p0, rest)) = line.split_first() else {
+        let Some((_, rest)) = line.split_first() else {
             return;
         };
         let h = px(input.plot_height);
@@ -668,14 +1004,13 @@ impl Builders {
                 None => self.fill(fill).band(line, |_, p| point(p.x, h)),
             }
         }
-        emit_cell_stroke(self.stroke(s), p0, rest);
+        self.stroke(s).stroke(line);
     }
 
-    /// Tessellates every stroke builder into `strokes`, moves the fills into `fills` and leaves
-    /// the builder lists empty. A failed or empty path adds no set.
+    /// Moves the finished direct meshes into the cache and leaves the builder lists empty.
     fn finish(&mut self, fills: &mut SmallVec<[PathSet; 2]>, strokes: &mut SmallVec<[PathSet; 3]>) {
-        self.reclaim(fills);
-        strokes.clear();
+        self.reclaim_fills(fills);
+        self.reclaim_strokes(strokes);
         fills.extend(
             self.fills
                 .drain(..)
@@ -684,7 +1019,7 @@ impl Builders {
         strokes.extend(
             self.strokes
                 .drain(..)
-                .filter_map(|(color, dashed, b)| set(color, dashed, b)),
+                .filter_map(|(color, dashed, mut mesh)| stroke_set(color, dashed, &mut mesh)),
         );
     }
 }
@@ -697,12 +1032,11 @@ fn fill_set(color: Hsla, mesh: FillMesh) -> Option<PathSet> {
     })
 }
 
-fn set(color: Hsla, dashed: bool, b: PathBuilder) -> Option<PathSet> {
-    let path = b.build().ok()?;
-    (!path.vertices.is_empty()).then_some(PathSet {
+fn stroke_set(color: Hsla, dashed: bool, mesh: &mut StrokeMesh) -> Option<PathSet> {
+    Some(PathSet {
         color,
         dashed,
-        path,
+        path: mesh.finish()?,
     })
 }
 
@@ -734,9 +1068,11 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         ..
     } = scratch;
     cache.gaps.clear();
-    // The old fill paths' vertex buffers serve this build's fills.
-    live.reclaim(&mut cache.fills);
-    stale.reclaim(&mut cache.stale_fills);
+    // The old path vertex buffers serve this build's direct meshes.
+    live.reclaim_fills(&mut cache.fills);
+    live.reclaim_strokes(&mut cache.strokes);
+    stale.reclaim_fills(&mut cache.stale_fills);
+    stale.reclaim_strokes(&mut cache.stale_strokes);
     let bucket = bucket_ns(map.range_ns, map.plot_width.max(1.0).round() as u32);
     let grid = input.stack.then(|| StackGrid::new(input, acc));
 
@@ -860,7 +1196,7 @@ fn for_each_stretch(samples: &[Sample], run: Run, mut f: impl FnMut(Run, bool)) 
 /// `fill` (when it has a fill colour) and `stroke`; series 1, when present, goes to `overlay`
 /// as a stroke only; further series are ignored. Every vertex is moved by `origin` (physical px,
 /// the cell's plot corner relative to the element). `STALE` stretches and the stale tail go to
-/// the scratch's stale builders, which `finish_grid` tessellates.
+/// the scratch's stale builders, which `finish_grid` finishes.
 ///
 /// One content mask covers the whole grid, so x is clipped at build time to the `clip_w` wide
 /// window that `map` puts on screen (chart-local `−map.dx(clip_w) ..` that plus `clip_w`):
@@ -873,10 +1209,11 @@ pub fn build_cell(
     origin: (f32, f32),
     clip_w: f32,
     fill: &mut FillMesh,
-    stroke: &mut PathBuilder,
-    mut overlay: Option<&mut PathBuilder>,
+    _stroke: &mut PathBuilder,
+    overlay: Option<&mut PathBuilder>,
     scratch: &mut Scratch,
 ) {
+    let has_overlay = overlay.is_some();
     let map = &input.map;
     let Scratch {
         runs,
@@ -885,6 +1222,8 @@ pub fn build_cell(
         clipped,
         cell_gaps,
         stale,
+        grid_stroke,
+        grid_overlay,
         ..
     } = scratch;
     cell_gaps.clear();
@@ -921,9 +1260,9 @@ pub fn build_cell(
                     emit_stale(stale, spec, si == 0, clipped, &place, input);
                 } else if si == 0 {
                     let f = spec.fill.is_some().then_some(&mut *fill);
-                    emit_cell(f, stroke, clipped, &place, input);
-                } else if let Some(o) = overlay.as_deref_mut() {
-                    emit_cell(None, o, clipped, &place, input);
+                    emit_cell(f, grid_stroke, clipped, &place, input);
+                } else if has_overlay {
+                    emit_cell(None, grid_overlay, clipped, &place, input);
                 }
             });
         }
@@ -948,10 +1287,10 @@ pub fn build_cell(
     }
 }
 
-/// Tessellates a grid's shared builders into `cache`: `fills[0]` from `fill`, `strokes[0]` from
-/// `stroke` and `strokes[1]` from `overlay`, plus the stale sets from `scratch`. Empty paths add
-/// no set. Also stores the time map and y range the geometry was built for. Take `fill` from
-/// `Scratch::take_fill` so it reuses the old fill's vertex buffer.
+/// Finishes a grid's shared direct meshes into `cache`: `fills[0]` from `fill`, `strokes[0]` from
+/// the total mesh and `strokes[1]` from the overlay mesh, plus the stale sets from `scratch`.
+/// Empty paths add no set. Also stores the time map and y range the geometry was built for. Take
+/// `fill` from `Scratch::take_fill` so all three live meshes reuse their old vertex buffers.
 pub fn finish_grid(
     input: &BuildInput,
     fill: (Hsla, FillMesh),
@@ -960,13 +1299,17 @@ pub fn finish_grid(
     cache: &mut ChartCache,
     scratch: &mut Scratch,
 ) {
-    scratch.live.reclaim(&mut cache.fills);
+    scratch.live.reclaim_fills(&mut cache.fills);
     cache.strokes.clear();
     cache.gaps.clear();
     cache.fills.extend(fill_set(fill.0, fill.1));
-    cache.strokes.extend(set(stroke.0, false, stroke.1));
-    if let Some((color, b)) = overlay {
-        cache.strokes.extend(set(color, false, b));
+    cache
+        .strokes
+        .extend(stroke_set(stroke.0, false, &mut scratch.grid_stroke));
+    if let Some((color, _)) = overlay {
+        cache
+            .strokes
+            .extend(stroke_set(color, false, &mut scratch.grid_overlay));
     }
     scratch
         .stale
@@ -1028,34 +1371,23 @@ impl CellPlace {
 /// points) and a stroke along `pts`. A single point strokes 1 px to the right.
 fn emit_cell(
     fill: Option<&mut FillMesh>,
-    stroke: &mut PathBuilder,
+    stroke: &mut StrokeMesh,
     pts: &[Point<Pixels>],
     place: &CellPlace,
     input: &BuildInput,
 ) {
-    let Some((&first, rest)) = pts.split_first() else {
+    let Some((&_first, _rest)) = pts.split_first() else {
         return;
     };
     if let Some(b) = fill {
         emit_cell_fill(b, pts, place.baseline(input));
     }
-    emit_cell_stroke(stroke, first, rest);
+    stroke.stroke(pts);
 }
 
 /// The fill under `pts` down to `baseline`.
 fn emit_cell_fill(b: &mut FillMesh, pts: &[Point<Pixels>], baseline: Pixels) {
     b.band(pts, |_, p| point(p.x, baseline));
-}
-
-fn emit_cell_stroke(b: &mut PathBuilder, first: Point<Pixels>, rest: &[Point<Pixels>]) {
-    b.move_to(first);
-    if rest.is_empty() {
-        b.line_to(point(first.x + px(1.0), first.y));
-    } else {
-        for &p in rest {
-            b.line_to(p);
-        }
-    }
 }
 
 /// `emit_cell` into the stale builders: series 0 (`main`) gets its fill when it has one; the
@@ -1068,13 +1400,13 @@ fn emit_stale(
     place: &CellPlace,
     input: &BuildInput,
 ) {
-    let Some((&first, rest)) = pts.split_first() else {
+    if pts.is_empty() {
         return;
-    };
+    }
     if main && let Some(color) = spec.fill {
         emit_cell_fill(stale.fill(color), pts, place.baseline(input));
     }
-    emit_cell_stroke(stale.stroke(spec), first, rest);
+    stale.stroke(spec).stroke(pts);
 }
 
 #[cfg(test)]

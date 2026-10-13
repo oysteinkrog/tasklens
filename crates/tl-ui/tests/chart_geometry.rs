@@ -913,6 +913,36 @@ fn fill_triangles_cover_the_area_under_each_run() {
     assert!(xs(fill).all(|x| x <= x49 + 0.01 || x >= x50 - 0.01));
 }
 
+/// Direct stroke triangulation (tasklens-wlf.35): a straight 1 px line is two triangles per
+/// segment, with no overlap and the exact rectangular area.
+#[test]
+fn stroke_triangles_cover_a_straight_line() {
+    let s = series(11, 100 * MS, 10 * SEC, |_| 50.0);
+    let map = exact_map(&s);
+    let v = view(s.clone(), 100 * MS);
+    let cache = run_build(&[(line(None, RED, false), Some(&v))], map, s[10].t_ns);
+
+    let stroke = &cache.strokes[0];
+    assert_eq!(stroke.path.vertices.len(), 10 * 2 * 3);
+    assert!((fill_area(stroke) - 100.0).abs() < 0.001);
+    assert_eq!(stroke.path.bounds.origin.x.as_f32(), -100.0);
+    assert_eq!(stroke.path.bounds.size.width.as_f32(), 100.0);
+    assert_eq!(stroke.path.bounds.size.height.as_f32(), 1.0);
+}
+
+#[test]
+fn dashed_stroke_has_five_pixel_segments() {
+    let s = series(11, 100 * MS, 10 * SEC, |_| 50.0);
+    let map = exact_map(&s);
+    let v = view(s.clone(), 100 * MS);
+    let cache = run_build(&[(line(None, RED, true), Some(&v))], map, s[10].t_ns);
+
+    let stroke = &cache.strokes[0];
+    assert!(stroke.dashed);
+    assert_eq!(stroke.path.vertices.len(), 10 * 2 * 3);
+    assert!((fill_area(stroke) - 50.0).abs() < 0.001);
+}
+
 /// A run of one point has no width: no fill set, but the stroke still draws its 1 px dash.
 #[test]
 fn single_point_run_has_no_fill() {
@@ -989,4 +1019,28 @@ fn rebuild_reuses_fill_buffers() {
     let first = cache.fills[0].path.vertices.as_ptr();
     build(&input, &mut cache, &mut scratch);
     assert_eq!(cache.fills[0].path.vertices.as_ptr(), first);
+}
+
+/// Rebuilding reuses the direct stroke vertex buffer too.
+#[test]
+fn rebuild_reuses_stroke_buffers() {
+    let s = series(200, 100 * MS, 10 * SEC, noise);
+    let map = exact_map(&s);
+    let v = view(s.clone(), 100 * MS);
+    let spec = [(line(None, RED, false), Some(&v))];
+    let input = BuildInput {
+        series: &spec,
+        map,
+        plot_height: 100.0,
+        y_min: 0.0,
+        y_max: 100.0,
+        now_boot_ns: s[199].t_ns,
+        stack: false,
+        curved: false,
+    };
+    let (mut cache, mut scratch) = (ChartCache::default(), Scratch::default());
+    build(&input, &mut cache, &mut scratch);
+    let first = cache.strokes[0].path.vertices.as_ptr();
+    build(&input, &mut cache, &mut scratch);
+    assert_eq!(cache.strokes[0].path.vertices.as_ptr(), first);
 }
