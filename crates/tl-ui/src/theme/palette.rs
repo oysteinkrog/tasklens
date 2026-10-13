@@ -20,6 +20,30 @@ pub struct GraphPalette {
     pub chart_bg: Hsla,
 }
 
+/// The five device colour families used by Performance surfaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceAccent {
+    Cpu,
+    Memory,
+    Gpu,
+    Disk,
+    Net,
+}
+
+impl GraphPalette {
+    /// The line colour is the device accent. Overview frames, charts, meters and sidebar cards
+    /// all resolve through this table, so a theme cannot give one device two competing hues.
+    pub const fn device_accent(&self, device: DeviceAccent) -> Hsla {
+        match device {
+            DeviceAccent::Cpu => self.cpu_line,
+            DeviceAccent::Memory => self.mem_line,
+            DeviceAccent::Gpu => self.gpu_line,
+            DeviceAccent::Disk => self.disk_line,
+            DeviceAccent::Net => self.net_line,
+        }
+    }
+}
+
 /// The graph colour setting value that means "use the theme accent".
 pub const GRAPH_COLOR_ACCENT: &str = "accent";
 
@@ -76,5 +100,30 @@ mod tests {
             let lower = name.to_ascii_lowercase();
             assert_eq!(accent_color(&lower), Some(rgb(hex).into()));
         }
+    }
+
+    #[test]
+    fn device_accents_are_graph_line_tokens() {
+        let color = |n| rgb(n).into();
+        let p = GraphPalette {
+            cpu_fill: color(1),
+            cpu_line: color(2),
+            kernel_line: color(3),
+            mem_fill: color(4),
+            mem_line: color(5),
+            gpu_fill: color(6),
+            gpu_line: color(7),
+            disk_fill: color(8),
+            disk_line: color(9),
+            net_fill: color(10),
+            net_line: color(11),
+            grid: color(12),
+            chart_bg: color(13),
+        };
+        assert_eq!(p.device_accent(DeviceAccent::Cpu), p.cpu_line);
+        assert_eq!(p.device_accent(DeviceAccent::Memory), p.mem_line);
+        assert_eq!(p.device_accent(DeviceAccent::Gpu), p.gpu_line);
+        assert_eq!(p.device_accent(DeviceAccent::Disk), p.disk_line);
+        assert_eq!(p.device_accent(DeviceAccent::Net), p.net_line);
     }
 }

@@ -27,6 +27,8 @@ use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current};
 
+use super::layout::BoxKind;
+
 /// The meter bar height, logical px before `ui_scale`.
 pub const METER_H: f32 = 6.;
 
@@ -424,9 +426,22 @@ pub fn title_row_id(box_id: &str) -> String {
     format!("{box_id}-title")
 }
 
-/// One Overview box: a `list_bg` card with a 24 px title row (title, a one-line summary that
-/// ellipsizes, and the headline value at the right) above `body`, which fills the rest. A click
-/// on the title row opens `target`'s page.
+/// The debug selector of the title tab inset into a box's top border.
+pub fn title_tab_id(box_id: &str) -> String {
+    format!("{box_id}-title-tab")
+}
+
+/// The one accent used by an Overview box frame and all of that device's data marks.
+pub fn box_accent(box_id: &str, theme: &TlTheme) -> Hsla {
+    let kind = BoxKind::from_frame_id(box_id)
+        .unwrap_or_else(|| panic!("unknown Overview box frame id {box_id:?}"));
+    theme.graph.device_accent(kind.accent())
+}
+
+/// One Overview box: a `list_bg` card with a thin rounded device-accent frame. Its 24 px title
+/// line sits in the top border: an accent title tab, a one-line summary that ellipsizes and the
+/// headline value at the right. `body` fills the rest. A click on the title line opens
+/// `target`'s page.
 #[allow(
     clippy::too_many_arguments,
     reason = "one call per box, all positional parts"
@@ -441,8 +456,21 @@ pub fn box_frame(
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> Div {
+    let accent = box_accent(id, theme);
     let mut title_el = div()
+        .debug_selector(move || title_tab_id(id))
+        .h_full()
+        .flex()
+        .items_center()
         .flex_none()
+        .px(m.sp[4])
+        .bg(theme.list_bg)
+        .border_l_1()
+        .border_r_1()
+        .border_b_1()
+        .border_color(accent)
+        .rounded_bl(m.radius_small)
+        .rounded_br(m.radius_small)
         .whitespace_nowrap()
         .text_color(theme.text_primary)
         .child(title);
@@ -469,9 +497,8 @@ pub fn box_frame(
         .overflow_hidden()
         .bg(theme.list_bg)
         .border_1()
-        .border_color(theme.divider)
+        .border_color(accent)
         .rounded(m.radius_card)
-        .p(m.sp[5])
         .child(opens_device(
             div()
                 .debug_selector(move || title_row_id(id))
@@ -481,12 +508,22 @@ pub fn box_frame(
                 .items_center()
                 .gap(m.sp[4])
                 .h(px(TITLE_ROW * m.ui_scale))
+                .mx(m.sp[5])
                 .child(title_el)
                 .child(line_el)
                 .child(value_el),
             target,
         ))
-        .child(div().flex_1().min_h_0().w_full().child(body))
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .px(m.sp[5])
+                .pt(m.sp[2])
+                .pb(m.sp[5])
+                .child(body),
+        )
 }
 
 /// Box widths from here up put the chart and its side part next to each other; narrower boxes

@@ -1,9 +1,10 @@
 //! The Performance tab's Overview page (UI-PRF-017, D-022): five btop-style boxes (CPU, MEM,
 //! GPU, DISK, NET) in the tasklens theme, laid out from data so a later editor can change them.
 //!
-//! [`layout`] holds the layout model and its placement, [`parts`] the meter, core bars and box
-//! frame, and one module per box its view. [`OverviewPage`] places the box views and sends one
-//! demand part while it is shown.
+//! [`layout`] holds the layout model, placement and device accent family. [`parts`] holds the
+//! meter, core bars and the shared accent frame with its inset title line. One module per box
+//! owns its view. [`OverviewPage`] places the box views and sends one demand part while it is
+//! shown.
 //!
 //! [`procs_box`] is the opt-in Top processes box: `performance.overview_top_processes` places it
 //! in a third row, and only then does the page ask for the process sweep (`process_top`).

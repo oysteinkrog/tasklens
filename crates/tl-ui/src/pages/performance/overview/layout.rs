@@ -9,6 +9,7 @@ use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::{SmallVec, smallvec};
 
 use super::super::page::PAGE_PAD;
+use crate::theme::DeviceAccent;
 
 /// The gap between boxes and rows (`sp4`), logical px.
 const GAP: f32 = 8.;
@@ -26,6 +27,33 @@ pub enum BoxKind {
     Disk,
     Net,
     TopProcs,
+}
+
+impl BoxKind {
+    /// The colour family shared by this box, its charts and its sidebar card. The optional Top
+    /// processes box uses the CPU family because its only measure is CPU utilization.
+    pub const fn accent(self) -> DeviceAccent {
+        match self {
+            Self::Cpu | Self::TopProcs => DeviceAccent::Cpu,
+            Self::Memory => DeviceAccent::Memory,
+            Self::Gpu => DeviceAccent::Gpu,
+            Self::Disk => DeviceAccent::Disk,
+            Self::Net => DeviceAccent::Net,
+        }
+    }
+
+    /// Resolves the stable frame selector passed by every Overview box.
+    pub fn from_frame_id(id: &str) -> Option<Self> {
+        match id.strip_prefix("perf-overview-box-")? {
+            "cpu" => Some(Self::Cpu),
+            "memory" => Some(Self::Memory),
+            "gpu" => Some(Self::Gpu),
+            "disk" => Some(Self::Disk),
+            "net" => Some(Self::Net),
+            "processes" => Some(Self::TopProcs),
+            _ => None,
+        }
+    }
 }
 
 /// One box: its kind, its row, its first column and how many columns it spans.
@@ -299,6 +327,24 @@ mod tests {
     fn overview_default_layout_validates() {
         assert_eq!(OverviewLayout::btop_default().validate(), Ok(()));
         assert!(!OverviewLayout::btop_default().has(BoxKind::TopProcs));
+    }
+
+    #[test]
+    fn overview_frame_ids_resolve_device_accents() {
+        use DeviceAccent::*;
+
+        for (id, kind, accent) in [
+            ("perf-overview-box-cpu", BoxKind::Cpu, Cpu),
+            ("perf-overview-box-memory", BoxKind::Memory, Memory),
+            ("perf-overview-box-gpu", BoxKind::Gpu, Gpu),
+            ("perf-overview-box-disk", BoxKind::Disk, Disk),
+            ("perf-overview-box-net", BoxKind::Net, Net),
+            ("perf-overview-box-processes", BoxKind::TopProcs, Cpu),
+        ] {
+            assert_eq!(BoxKind::from_frame_id(id), Some(kind));
+            assert_eq!(kind.accent(), accent);
+        }
+        assert_eq!(BoxKind::from_frame_id("perf-overview-box-other"), None);
     }
 
     #[test]

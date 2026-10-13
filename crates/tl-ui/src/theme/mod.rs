@@ -21,7 +21,7 @@ use tl_model::settings::AppearanceSettings;
 
 pub use derived::{Derived, rebuild_derived};
 pub use metrics::{UiMetrics, bump_style_version, metrics};
-pub use palette::GraphPalette;
+pub use palette::{DeviceAccent, GraphPalette};
 pub use store::{ActivateSource, ActivateTheme, ThemeError, ThemeEvent, ThemeStore, current};
 
 /// Dark or light. A theme file stores it as `"dark"` or `"light"`.

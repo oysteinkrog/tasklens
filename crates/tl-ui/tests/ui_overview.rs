@@ -1834,7 +1834,7 @@ mod wired {
     use tl_ui::pages::performance::overview::gpu_box::GPU_BOX_ID;
     use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
-    use tl_ui::pages::performance::overview::parts::title_row_id;
+    use tl_ui::pages::performance::overview::parts::{box_accent, title_row_id, title_tab_id};
     use tl_ui::pages::performance::overview::procs_box::{
         PROC_ROW_ID_PREFIX, PROCS_BOX_ID, ProcsBox,
     };
@@ -1843,6 +1843,7 @@ mod wired {
     use tl_ui::pages::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::theme::current;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
     };
@@ -2202,6 +2203,32 @@ mod wired {
         // The empty measuring render, the boxes, and at most one more when a box's width
         // probe picks its wide or narrow layout after its first frame.
         assert!((2..=3).contains(&renders), "page renders {renders}");
+    }
+
+    /// crw.52: every device box uses the shared inset-title frame and its graph line token as
+    /// the frame accent.
+    #[gpui_kit::test]
+    fn overview_title_lines_and_device_accents(cx: &mut TestAppContext) {
+        let mut r = open_with(cx, true);
+        select(&mut r, OVERVIEW_KEY);
+        let theme = r.vcx.update(|_, cx| current(cx).clone());
+        for (id, want) in [
+            (CPU_BOX_ID, theme.graph.cpu_line),
+            (MEM_BOX_ID, theme.graph.mem_line),
+            (GPU_BOX_ID, theme.graph.gpu_line),
+            (DISK_BOX_ID, theme.graph.disk_line),
+            (NET_BOX_ID, theme.graph.net_line),
+        ] {
+            let frame = r.vcx.debug_bounds(id).expect("box frame");
+            let row_id: &'static str = Box::leak(title_row_id(id).into_boxed_str());
+            let tab_id: &'static str = Box::leak(title_tab_id(id).into_boxed_str());
+            let row = r.vcx.debug_bounds(row_id).expect("title line");
+            let tab = r.vcx.debug_bounds(tab_id).expect("inset title tab");
+            assert_eq!(row.top(), frame.top(), "{id}: title line in top border");
+            assert_eq!(tab.top(), frame.top(), "{id}: title tab in top border");
+            assert_eq!(tab.size.height, row.size.height, "{id}: full title height");
+            assert_eq!(box_accent(id, &theme), want, "{id}: device accent");
+        }
     }
 
     /// crw.44: a click on a box title opens that device's page; a disk row opens its disk.
