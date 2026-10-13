@@ -157,6 +157,8 @@ fn rows_fit(body: Size<Pixels>, rows: usize, total: usize, m: &UiMetrics) -> usi
 /// The Disk box.
 pub struct DiskBox {
     hub: Entity<SnapshotHub>,
+    /// The latest disk cards from the sidebar, including any entry whose parent was not known yet.
+    disks: SmallVec<[(DeviceKey, DeviceIdx, SharedString); 8]>,
     rows: SmallVec<[DiskRow; 8]>,
     /// Disks past `MAX_DISK_ROWS`.
     more: usize,
@@ -199,6 +201,7 @@ impl DiskBox {
         let io_chart = box_chart(spec, labels, hub, cx);
         let mut this = Self {
             hub: hub.clone(),
+            disks: disks.iter().cloned().collect(),
             rows: SmallVec::new(),
             more: 0,
             more_texts: SmallVec::new(),
@@ -226,7 +229,7 @@ impl DiskBox {
             #[cfg(any(test, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         };
-        this.build_rows(disks, cx);
+        this.build_rows(&snap, cx);
         this
     }
 
@@ -236,17 +239,13 @@ impl DiskBox {
         disks: &[(DeviceKey, DeviceIdx, SharedString)],
         cx: &mut Context<Self>,
     ) {
-        let snap = Arc::clone(self.hub.read(cx).current());
-        let filtered: SmallVec<[_; 8]> = whole_disks(disks, &snap.devices).collect();
-        let same = filtered.len() == self.rows.len() + self.more
-            && filtered
-                .iter()
-                .zip(&self.rows)
-                .all(|((k, i, n), r)| *k == r.key && *i == r.idx && *n == r.name);
-        if same {
+        if self.disks.as_slice() == disks {
             return;
         }
-        self.build_rows(disks, cx);
+        self.disks.clear();
+        self.disks.extend(disks.iter().cloned());
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.build_rows(&snap, cx);
         #[cfg(any(test, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
@@ -298,13 +297,8 @@ impl DiskBox {
         }
     }
 
-    fn build_rows(
-        &mut self,
-        disks: &[(DeviceKey, DeviceIdx, SharedString)],
-        cx: &mut Context<Self>,
-    ) {
-        let snap = Arc::clone(self.hub.read(cx).current());
-        let disks: SmallVec<[_; 8]> = whole_disks(disks, &snap.devices).cloned().collect();
+    fn build_rows(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        let disks: SmallVec<[_; 8]> = whole_disks(&self.disks, &snap.devices).cloned().collect();
         self.rows.clear();
         self.rows.extend(
             disks
@@ -321,7 +315,7 @@ impl DiskBox {
         );
         self.more = disks.len().saturating_sub(MAX_DISK_ROWS);
         self.sync_more_texts(cx);
-        self.sync_text(&snap, true);
+        self.sync_text(snap, true);
     }
 
     /// "+n more" for each number of rows shown.
@@ -349,6 +343,7 @@ impl DiskBox {
             return;
         }
         let snap = Arc::clone(hub.read(cx).current());
+        let mut rebuilt = false;
         if devices && snap.devices.version != self.catalog_version {
             self.catalog_version = snap.devices.version;
             let aggregate = aggregate(&snap.devices);
@@ -356,8 +351,10 @@ impl DiskBox {
                 self.aggregate = aggregate;
                 self.rebuild_spec(cx);
             }
+            self.build_rows(&snap, cx);
+            rebuilt = true;
         }
-        if self.sync_text(&snap, false) {
+        if rebuilt || self.sync_text(&snap, false) {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
@@ -681,5 +678,38 @@ mod tests {
             .map(|(_, _, name)| name.as_ref())
             .collect();
         assert_eq!(names, ["mmcblk0", "nvme0n1", "sda", "sdb", "sr0", "vda"]);
+    }
+
+    #[test]
+    fn late_parent_assignment_refilters_existing_disk_inputs() {
+        let inputs = vec![
+            (
+                DeviceKey(Arc::from("disk:sda")),
+                DeviceIdx(0),
+                SharedString::from("sda"),
+            ),
+            (
+                DeviceKey(Arc::from("disk:sda1")),
+                DeviceIdx(1),
+                SharedString::from("sda1"),
+            ),
+        ];
+        let before = DeviceCatalog {
+            version: 1,
+            entries: Arc::from([disk(0, 8, 0, "sda", None), disk(1, 8, 1, "sda1", None)]),
+        };
+        let after = DeviceCatalog {
+            version: 2,
+            entries: Arc::from([
+                disk(0, 8, 0, "sda", None),
+                disk(1, 8, 1, "sda1", Some(DeviceIdx(0))),
+            ]),
+        };
+
+        assert_eq!(whole_disks(&inputs, &before).count(), 2);
+        let names: Vec<&str> = whole_disks(&inputs, &after)
+            .map(|(_, _, name)| name.as_ref())
+            .collect();
+        assert_eq!(names, ["sda"]);
     }
 }
