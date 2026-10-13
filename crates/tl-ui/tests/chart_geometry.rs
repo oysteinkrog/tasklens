@@ -7,8 +7,8 @@ use gpui_kit::{Hsla, hsla};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_ui::chart::geometry::{
-    BuildInput, Pt, Run, Scratch, TimeMap, bucket_ns, build, decimate, emit_run, is_stale,
-    right_edge_ns, split_runs, stale_age_ns, window_start, y_of,
+    BuildInput, Pt, Run, Scratch, TimeMap, bucket_ns, build, build_cell, decimate, emit_run,
+    finish_grid, is_stale, right_edge_ns, split_runs, stale_age_ns, window_start, y_of,
 };
 use tl_ui::chart::{ChartCache, ChartSeries, ChartSpec, PathSet, YScale};
 
@@ -1042,5 +1042,56 @@ fn rebuild_reuses_stroke_buffers() {
     build(&input, &mut cache, &mut scratch);
     let first = cache.strokes[0].path.vertices.as_ptr();
     build(&input, &mut cache, &mut scratch);
+    assert_eq!(cache.strokes[0].path.vertices.as_ptr(), first);
+}
+
+/// A missing total series leaves only the overlay path in the cache. Its buffer must return to
+/// the overlay mesh on the next grid build instead of being consumed by the empty total mesh.
+#[test]
+fn grid_rebuild_reuses_overlay_buffer_when_total_is_absent() {
+    let s = series(200, 100 * MS, 10 * SEC, noise);
+    let map = exact_map(&s);
+    let v = view(s.clone(), 100 * MS);
+    let spec = [
+        (line(Some(BLUE), RED, false), None),
+        (line(None, BLUE, false), Some(&v)),
+    ];
+    let input = BuildInput {
+        series: &spec,
+        map,
+        plot_height: 100.0,
+        y_min: 0.0,
+        y_max: 100.0,
+        now_boot_ns: s[199].t_ns,
+        stack: false,
+        curved: false,
+    };
+    let (mut cache, mut scratch) = (ChartCache::default(), Scratch::default());
+
+    let mut fill = scratch.take_grid(&mut cache);
+    build_cell(&input, (0.0, 0.0), 1_000.0, &mut fill, &mut scratch);
+    finish_grid(
+        &input,
+        (BLUE, fill),
+        RED,
+        Some(BLUE),
+        &mut cache,
+        &mut scratch,
+    );
+    assert_eq!(cache.strokes.len(), 1);
+    assert_eq!(cache.strokes[0].color, BLUE);
+    let first = cache.strokes[0].path.vertices.as_ptr();
+
+    let mut fill = scratch.take_grid(&mut cache);
+    build_cell(&input, (0.0, 0.0), 1_000.0, &mut fill, &mut scratch);
+    finish_grid(
+        &input,
+        (BLUE, fill),
+        RED,
+        Some(BLUE),
+        &mut cache,
+        &mut scratch,
+    );
+    assert_eq!(cache.strokes.len(), 1);
     assert_eq!(cache.strokes[0].path.vertices.as_ptr(), first);
 }

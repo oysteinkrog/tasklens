@@ -7,7 +7,7 @@
 //! directly (tasklens-wlf.33, tasklens-wlf.35). Time math is `u64` and the pixel scale is `f64`:
 //! 60 s in ns against 1,600 px loses precision in `f32`.
 
-use gpui_kit::{Bounds, Hsla, Path, PathBuilder, PathVertex, Pixels, Point, point, px, size};
+use gpui_kit::{Bounds, Hsla, Path, PathVertex, Pixels, Point, point, px, size};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 
@@ -241,8 +241,7 @@ pub struct BuildInput<'a> {
     pub curved: bool,
 }
 
-/// Buffers reused across rebuilds so the steady state allocates only inside lyon's stroke
-/// tessellator.
+/// Buffers reused across geometry rebuilds.
 #[derive(Default)]
 pub struct Scratch {
     runs: SmallVec<[Run; 8]>,
@@ -263,21 +262,30 @@ pub struct Scratch {
     line: Line,
     live: Builders,
     stale: Builders,
-    /// Grid cells merge their live total and overlay strokes into these two meshes. The public
-    /// grid API still accepts `PathBuilder`s so its caller does not need a chain edit.
+    /// Grid cells merge their live total and overlay strokes into these two meshes.
     grid_stroke: StrokeMesh,
     grid_overlay: StrokeMesh,
+    /// Which grid meshes produced the paths currently held by `ChartCache::strokes`. Empty
+    /// meshes add no path, so positions in that list alone cannot identify the owner.
+    grid_stroke_cached: bool,
+    grid_overlay_cached: bool,
 }
 
 impl Scratch {
-    /// An empty fill for a grid build. Takes back `cache`'s fill paths first, so the new fill
-    /// reuses their vertex buffers.
-    pub fn take_fill(&mut self, cache: &mut ChartCache) -> FillMesh {
+    /// Starts a grid build and takes back the previous fill and stroke paths so their vertex
+    /// buffers can be reused. This must run before `finish_grid`.
+    pub fn take_grid(&mut self, cache: &mut ChartCache) -> FillMesh {
         self.live.reclaim_fills(&mut cache.fills);
         self.stale.reclaim_fills(&mut cache.stale_fills);
         self.stale.reclaim_strokes(&mut cache.stale_strokes);
-        let stroke = (!cache.strokes.is_empty()).then(|| cache.strokes.remove(0).path);
-        let overlay = (!cache.strokes.is_empty()).then(|| cache.strokes.remove(0).path);
+        let mut strokes = cache.strokes.drain(..);
+        let stroke = self.grid_stroke_cached.then(|| strokes.next()).flatten();
+        let overlay = self.grid_overlay_cached.then(|| strokes.next()).flatten();
+        debug_assert!(strokes.next().is_none(), "grid cache has an unowned stroke");
+        self.grid_stroke_cached = false;
+        self.grid_overlay_cached = false;
+        let stroke = stroke.map(|set| set.path);
+        let overlay = overlay.map(|set| set.path);
         self.grid_stroke = StrokeMesh::reusing(stroke, 1.0, false);
         self.grid_overlay = StrokeMesh::reusing(overlay, 1.0, false);
         self.live.mesh()
@@ -1209,11 +1217,8 @@ pub fn build_cell(
     origin: (f32, f32),
     clip_w: f32,
     fill: &mut FillMesh,
-    _stroke: &mut PathBuilder,
-    overlay: Option<&mut PathBuilder>,
     scratch: &mut Scratch,
 ) {
-    let has_overlay = overlay.is_some();
     let map = &input.map;
     let Scratch {
         runs,
@@ -1261,7 +1266,7 @@ pub fn build_cell(
                 } else if si == 0 {
                     let f = spec.fill.is_some().then_some(&mut *fill);
                     emit_cell(f, grid_stroke, clipped, &place, input);
-                } else if has_overlay {
+                } else {
                     emit_cell(None, grid_overlay, clipped, &place, input);
                 }
             });
@@ -1290,12 +1295,12 @@ pub fn build_cell(
 /// Finishes a grid's shared direct meshes into `cache`: `fills[0]` from `fill`, `strokes[0]` from
 /// the total mesh and `strokes[1]` from the overlay mesh, plus the stale sets from `scratch`.
 /// Empty paths add no set. Also stores the time map and y range the geometry was built for. Take
-/// `fill` from `Scratch::take_fill` so all three live meshes reuse their old vertex buffers.
+/// `fill` from `Scratch::take_grid` so all three live meshes reuse their old vertex buffers.
 pub fn finish_grid(
     input: &BuildInput,
     fill: (Hsla, FillMesh),
-    stroke: (Hsla, PathBuilder),
-    overlay: Option<(Hsla, PathBuilder)>,
+    stroke: Hsla,
+    overlay: Option<Hsla>,
     cache: &mut ChartCache,
     scratch: &mut Scratch,
 ) {
@@ -1303,13 +1308,15 @@ pub fn finish_grid(
     cache.strokes.clear();
     cache.gaps.clear();
     cache.fills.extend(fill_set(fill.0, fill.1));
-    cache
-        .strokes
-        .extend(stroke_set(stroke.0, false, &mut scratch.grid_stroke));
-    if let Some((color, _)) = overlay {
-        cache
-            .strokes
-            .extend(stroke_set(color, false, &mut scratch.grid_overlay));
+    if let Some(set) = stroke_set(stroke, false, &mut scratch.grid_stroke) {
+        scratch.grid_stroke_cached = true;
+        cache.strokes.push(set);
+    }
+    if let Some(color) = overlay
+        && let Some(set) = stroke_set(color, false, &mut scratch.grid_overlay)
+    {
+        scratch.grid_overlay_cached = true;
+        cache.strokes.push(set);
     }
     scratch
         .stale

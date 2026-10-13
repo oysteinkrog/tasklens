@@ -35,9 +35,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Edges, Element, ElementId,
     Entity, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Render,
-    SharedString, Size, Style, Subscription, TransformationMatrix, Window, point, px, quad,
-    relative, size, transparent_black,
+    IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, Pixels, Render, SharedString,
+    Size, Style, Subscription, TransformationMatrix, Window, point, px, quad, relative, size,
+    transparent_black,
 };
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
@@ -1265,13 +1265,12 @@ fn build_cells(
     gaps: &mut Vec<(usize, Range<f32>)>,
 ) {
     gaps.clear();
-    let mut fill = scratch.take_fill(cache);
-    let mut stroke = PathBuilder::stroke(px(1.0));
-    let mut overlay = spec
+    let mut fill = scratch.take_grid(cache);
+    let overlay = spec
         .cells
         .iter()
         .any(|c| c.overlay_series.is_some())
-        .then(|| PathBuilder::stroke(px(1.0)));
+        .then_some(spec.overlay_line);
     let total = ChartSeries {
         fill: Some(spec.fill),
         line: spec.line,
@@ -1305,25 +1304,10 @@ fn build_cells(
             series: &pairs,
             ..base
         };
-        geometry::build_cell(
-            &input,
-            origin,
-            map.plot_width,
-            &mut fill,
-            &mut stroke,
-            overlay.as_mut(),
-            scratch,
-        );
+        geometry::build_cell(&input, origin, map.plot_width, &mut fill, scratch);
         gaps.extend(scratch.cell_gaps().iter().map(|g| (i, g.clone())));
     }
-    geometry::finish_grid(
-        &base,
-        (spec.fill, fill),
-        (spec.line, stroke),
-        overlay.map(|b| (spec.overlay_line, b)),
-        cache,
-        scratch,
-    );
+    geometry::finish_grid(&base, (spec.fill, fill), spec.line, overlay, cache, scratch);
 }
 
 /// Newest valid value of `series` and its validity at `now`: Missing when absent, WarmingUp

@@ -1613,8 +1613,8 @@ mod labels {
     }
 }
 
-// Geometry key compared in place: no key rebuild and no geometry build per frame for an
-// unchanged chart, even past the inline series size (tasklens-yrf.19).
+// Geometry key compared in place: no key rebuild and no geometry triangulation per repaint for an
+// unchanged chart, even past the inline series size (tasklens-yrf.19, tasklens-wlf.35).
 mod key_in_place {
     use std::sync::Arc;
 
@@ -1672,7 +1672,7 @@ mod key_in_place {
     }
 
     #[gpui_kit::test]
-    fn unchanged_16_series_chart_rebuilds_nothing(cx: &mut TestAppContext) {
+    fn unchanged_16_series_repaints_do_not_retriangulate(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             tl_ui::theme::store::init(
