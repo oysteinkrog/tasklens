@@ -803,6 +803,7 @@ fn to_model(r: &RawRecord) -> ConnRecord {
         uid: s.uid,
         inode: s.inode,
         ifindex: s.ifindex,
+        interface: r.interface.clone(),
         recv_q: s.rqueue,
         send_q: s.wqueue,
         // Unit resolution for a socket owner is not part of this worker.
@@ -965,6 +966,7 @@ mod tests {
         tcp: Vec<SockRecord>,
         udp: Vec<SockRecord>,
         owners: Vec<(u64, Vec<ProcessKey>)>,
+        ifnames: IfNames,
         /// `Some` builds the map from this fixture root instead of `owners`.
         root: Option<SysRoot>,
         udp_calls: Arc<AtomicU32>,
@@ -999,7 +1001,7 @@ mod tests {
         }
 
         fn if_names(&mut self) -> IfNames {
-            IfNames::default()
+            self.ifnames.clone()
         }
     }
 
@@ -1189,6 +1191,27 @@ mod tests {
             SmallVec::<[ProcessKey; 1]>::from_slice(&[key(100)])
         );
         assert_eq!(second.records[0].owner_validity, Validity::Valid);
+    }
+
+    #[test]
+    fn interface_name_is_resolved_before_model_publish() {
+        let mut host = tcp(7, 55, 0, 0);
+        host.ifindex = 2;
+        let zero = tcp(8, 56, 0, 0);
+        let fake = Fake {
+            tcp: vec![host.clone(), zero],
+            ifnames: IfNames([(2, Arc::from("eth0"))].into_iter().collect()),
+            ..Fake::default()
+        };
+        let src = ConnectionsSource::new(fake);
+        let (_, update) = sample(src, &tab(), at(10, 10));
+        assert_eq!(update.records[0].interface.as_deref(), Some("eth0"));
+        assert_eq!(update.records[1].interface, None);
+
+        // A table built for another network namespace does not receive the host name map.
+        let mut table = ConnectionTable::new();
+        table.update(&[host], &SocketMap::new(), &IfNames::default());
+        assert_eq!(to_model(&table.records[0]).interface, None);
     }
 
     #[test]

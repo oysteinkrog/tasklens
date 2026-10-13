@@ -734,6 +734,9 @@ pub struct ConnRecord {
     pub uid: u32,
     pub inode: u64,
     pub ifindex: u32,
+    /// The host interface name, resolved once by the engine. `None` for index 0, an unknown
+    /// index, or a socket from another network namespace.
+    pub interface: Option<Arc<str>>,
     pub recv_q: u32,
     pub send_q: u32,
     pub unit: Option<UnitRef>,

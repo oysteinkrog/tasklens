@@ -2424,6 +2424,7 @@ fn conn(cookie: u64, proto: Proto, state: ConnState) -> ConnRecord {
         uid: 0,
         inode: cookie,
         ifindex: 0,
+        interface: None,
         recv_q: 0,
         send_q: 0,
         unit: None,
