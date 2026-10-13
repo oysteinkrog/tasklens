@@ -16,6 +16,7 @@ use gpui_kit::{
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
+use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
@@ -27,7 +28,7 @@ use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::parts::{
     ChartSettings, Meter, SPLIT_W, box_chart, box_frame, chart_section_versions, is_wide,
-    split_body, width_probe,
+    split_body_fixed_side, width_probe,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -226,11 +227,22 @@ impl MemBox {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        if !ev.mask.contains(ComponentMask::SYSTEM) {
+        if !ev
+            .mask
+            .intersects(ComponentMask::SYSTEM | ComponentMask::DEVICES)
+        {
             return;
         }
         let snap: Arc<Snapshot> = Arc::clone(hub.read(cx).current());
-        if self.sync_text(&snap.system.memory, false, cx) {
+        if ev.mask.contains(ComponentMask::DEVICES)
+            && let Some(entry) = snap.devices.find(&DeviceIdentity::Memory)
+            && entry.idx != self.memory
+        {
+            self.memory = entry.idx;
+            self.rebuild_spec(cx);
+        }
+        if ev.mask.contains(ComponentMask::SYSTEM) && self.sync_text(&snap.system.memory, false, cx)
+        {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
@@ -407,7 +419,9 @@ impl Render for MemBox {
             .size_full()
             .children(self.rows.iter().map(|r| meter_row(r, &m, &theme)))
             .into_any_element();
-        let body = split_body(chart, meters, self.wide, &m).into_any_element();
+        let meters_h = px(KEY_ROWS.len() as f32 * LABEL_ROW * m.ui_scale
+            + (KEY_ROWS.len() - 1) as f32 * f32::from(m.sp[2]));
+        let body = split_body_fixed_side(chart, meters, self.wide, meters_h, &m).into_any_element();
         box_frame(
             MEM_BOX_ID,
             Some(DeviceKey(DeviceKey::MEMORY.into())),

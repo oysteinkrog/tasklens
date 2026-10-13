@@ -555,6 +555,28 @@ pub fn is_wide(width: Pixels, scale: f32) -> bool {
 /// The body of a box: `chart` on the left (55%) and `side` on the right, or `chart` above
 /// `side` when not `wide`.
 pub fn split_body(chart: AnyElement, side: AnyElement, wide: bool, m: &UiMetrics) -> Div {
+    split_body_with_side_height(chart, side, wide, None, m)
+}
+
+/// The body of a box whose stacked side has a fixed height. Wide boxes still use the same 55%
+/// chart split as [`split_body`].
+pub fn split_body_fixed_side(
+    chart: AnyElement,
+    side: AnyElement,
+    wide: bool,
+    side_height: Pixels,
+    m: &UiMetrics,
+) -> Div {
+    split_body_with_side_height(chart, side, wide, Some(side_height), m)
+}
+
+fn split_body_with_side_height(
+    chart: AnyElement,
+    side: AnyElement,
+    wide: bool,
+    side_height: Option<Pixels>,
+    m: &UiMetrics,
+) -> Div {
     if wide {
         div()
             .flex()
@@ -570,13 +592,18 @@ pub fn split_body(chart: AnyElement, side: AnyElement, wide: bool, m: &UiMetrics
             )
             .child(div().flex_1().min_w_0().h_full().child(side))
     } else {
+        let side = div().w_full().child(side);
+        let side = match side_height {
+            Some(height) => side.flex_none().h(height),
+            None => side.flex_1().min_h_0(),
+        };
         div()
             .flex()
             .flex_col()
             .size_full()
             .gap(m.sp[5])
             .child(div().flex_1().min_h_0().w_full().child(chart))
-            .child(div().flex_1().min_h_0().w_full().child(side))
+            .child(side)
     }
 }
 

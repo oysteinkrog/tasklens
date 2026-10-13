@@ -301,6 +301,10 @@ mod boxes {
     }
 
     fn open(cx: &mut TestAppContext) -> Rig<'_> {
+        open_with_memory(cx, DeviceIdx(1))
+    }
+
+    fn open_with_memory(cx: &mut TestAppContext, memory: DeviceIdx) -> Rig<'_> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| s.devices = Arc::new(catalog()));
         let client: Arc<dyn EngineClient> = engine.clone();
@@ -326,7 +330,7 @@ mod boxes {
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let (host, vcx) = cx.add_window_view(move |_, cx| Host {
             cpu: cx.new(|cx| CpuBox::new(&hub, DeviceIdx(0), cx)),
-            mem: cx.new(|cx| MemBox::new(&hub, DeviceIdx(1), cx)),
+            mem: cx.new(|cx| MemBox::new(&hub, memory, cx)),
             cpu_w: 800.,
         });
         vcx.simulate_scale_factor_change(1.0);
@@ -384,6 +388,35 @@ mod boxes {
                         ..ComponentHeader::default()
                     },
                     series: views.into(),
+                    slow: Arc::from([]),
+                });
+            });
+        }
+
+        /// `ticks` one-second `MEM_USED` samples, ending now.
+        fn publish_memory_history(&mut self, ticks: u64, bytes: u64) {
+            self.version += 1;
+            let version = self.version;
+            let newest = now_boot_ns();
+            let view = Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(1),
+                    metric: MetricId::MEM_USED,
+                },
+                version,
+                period_ns: 1_000_000_000,
+                samples: (0..ticks)
+                    .map(|k| Sample::valid(newest - (ticks - 1 - k) * 1_000_000_000, bytes as f32))
+                    .collect::<Vec<_>>()
+                    .into(),
+            });
+            self.publish(|s| {
+                s.series = Arc::new(SeriesSet {
+                    header: ComponentHeader {
+                        version,
+                        ..ComponentHeader::default()
+                    },
+                    series: Arc::from([view]),
                     slow: Arc::from([]),
                 });
             });
@@ -528,6 +561,37 @@ mod boxes {
         let swap = r.vcx.update(|_, cx| mem.read(cx).rows()[3].clone());
         assert_eq!(swap.fraction, Some(0.25));
         assert_eq!(swap.value.as_ref(), "2.00 GiB");
+    }
+
+    #[gpui_kit::test]
+    fn mem_box_draws_used_history(cx: &mut TestAppContext) {
+        // The Overview can be constructed before the memory source adds its device. The first
+        // device update must retarget the chart from its missing sentinel to the memory device.
+        let mut r = open_with_memory(cx, DeviceIdx(u16::MAX));
+        r.system(|s| {
+            s.memory.validity = Validity::Valid;
+            s.memory.total = 64 * GIB;
+            s.memory.used = 32 * GIB;
+        });
+        r.publish(|s| {
+            let mut devices = catalog();
+            devices.version = 2;
+            s.devices = Arc::new(devices);
+        });
+        r.publish_memory_history(8, 32 * GIB);
+        draw(r.vcx);
+
+        let mem = r.mem();
+        r.vcx.update(|_, cx| {
+            let chart = mem.read(cx).chart().read(cx);
+            let used = chart.resolved()[0].as_ref().expect("MEM_USED resolved");
+            assert_eq!(used.samples.len(), 8, "fixture history reached the chart");
+            assert_ne!(
+                chart.cached_fill_stroke_counts(),
+                (0, 0),
+                "used history built fill and stroke paths"
+            );
+        });
     }
 
     #[gpui_kit::test]
