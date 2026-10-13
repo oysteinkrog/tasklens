@@ -1,7 +1,7 @@
 //! The `Inventory` worker (ADR-004, ADR-008): fills `InventorySnapshot` for the Information tab.
 //!
-//! It scans when the tab opens (`Demand.inventory` goes from false to true) and on
-//! `RefreshNow(Inventory)` while the tab is visible. It does no I/O otherwise. It runs its own
+//! It scans when the Information tab opens or a CPU surface becomes visible, and on
+//! `RefreshNow(Inventory)` while either is visible. It does no I/O otherwise. It runs its own
 //! event loop instead of `source::run`, because later beads add async D-Bus reads to a scan.
 //!
 //! This module reads the file sections: Operating System, Processor, Memory (static rows),
@@ -55,6 +55,7 @@ use tl_collect::sanitize::sanitize_text;
 use tl_collect::sysroot::{read_file, read_trimmed, read_u64};
 use tl_collect::{CollectError, SysRoot};
 use tl_model::command::DeviceCommand;
+use tl_model::demand::CpuDemand;
 use tl_model::devices::NetKind;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::settings::EngineSettings;
@@ -229,7 +230,8 @@ where
             return Outcome::Ok(());
         }
 
-        let visible = io.demand.borrow_and_clone().inventory;
+        let demand = io.demand.borrow_and_clone();
+        let visible = demand.inventory || demand.cpu != CpuDemand::Off;
         let opened = visible && !was_visible;
         was_visible = visible;
 
@@ -1294,6 +1296,7 @@ mod tests {
         control: watch::Sender<WorkerControl>,
         scans: Arc<AtomicU32>,
         fetches: Arc<AtomicU32>,
+        scan_result: Arc<InventorySnapshot>,
         io: WorkerIo,
         root: asupersync::types::RegionId,
         out: Ended,
@@ -1310,12 +1313,19 @@ mod tests {
 
     impl Rig {
         fn start(inventory: bool) -> Rig {
+            Self::start_with(
+                Demand {
+                    inventory,
+                    ..Demand::default()
+                },
+                InventorySnapshot::default(),
+            )
+        }
+
+        fn start_with(initial_demand: Demand, scan_result: InventorySnapshot) -> Rig {
             let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(10_000_000));
             let (updates, rx) = mpsc::channel::<EngineMsg>(256);
-            let (demand, demand_rx) = watch::channel(Demand {
-                inventory,
-                ..Demand::default()
-            });
+            let (demand, demand_rx) = watch::channel(initial_demand);
             let (_settings_tx, settings) = watch::channel(EngineSettings::default());
             let (control, control_rx) = watch::channel(WorkerControl::default());
             let io = WorkerIo::new(
@@ -1327,9 +1337,10 @@ mod tests {
             );
             let scans = Arc::new(AtomicU32::new(0));
             let fetches = Arc::new(AtomicU32::new(0));
+            let scan_result = Arc::new(scan_result);
             let out = Ended::default();
             let root = lab.state.create_root_region(Budget::INFINITE);
-            let handle = Self::spawn(&mut lab, root, &io, &scans, &fetches, &out);
+            let handle = Self::spawn(&mut lab, root, &io, &scans, &fetches, &scan_result, &out);
             Rig {
                 lab,
                 rx,
@@ -1337,6 +1348,7 @@ mod tests {
                 control,
                 scans,
                 fetches,
+                scan_result,
                 io,
                 root,
                 out,
@@ -1351,12 +1363,14 @@ mod tests {
             io: &WorkerIo,
             scans: &Arc<AtomicU32>,
             fetches: &Arc<AtomicU32>,
+            scan_result: &Arc<InventorySnapshot>,
             out: &Ended,
         ) -> asupersync::runtime::TaskHandle<()> {
             let counter = Arc::clone(scans);
+            let result = Arc::clone(scan_result);
             let scan = move || {
                 counter.fetch_add(1, Ordering::SeqCst);
-                InventorySnapshot::default()
+                (*result).clone()
             };
             let counter = Arc::clone(fetches);
             let fetch_ip = move || {
@@ -1396,6 +1410,7 @@ mod tests {
                 &self.io,
                 &self.scans,
                 &self.fetches,
+                &self.scan_result,
                 &self.out,
             );
         }
@@ -1424,6 +1439,16 @@ mod tests {
                 }
             }
             n
+        }
+
+        fn processor_names(&mut self) -> Vec<Arc<str>> {
+            let mut names = Vec::new();
+            while let Ok(msg) = self.rx.try_recv() {
+                if let EngineMsg::Source(SourceUpdate::Inventory(snap)) = msg {
+                    names.push(Arc::clone(&snap.processor.name.value));
+                }
+            }
+            names
         }
 
         fn set_inventory(&mut self, on: bool) {
@@ -1521,6 +1546,32 @@ mod tests {
         rig.run_for(1);
         assert_eq!(rig.scans(), 2);
         assert_eq!(rig.inventory_msgs(), 1);
+        rig.finish();
+    }
+
+    #[test]
+    fn cpu_demand_publishes_model_from_cpuinfo_fixture() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tl-collect/tests/fixtures/owner-desktop");
+        let snap = scan_files(&InventoryPaths::under(&fixture), &SysRoot::at(&fixture));
+        assert_eq!(
+            snap.processor.name.value.as_ref(),
+            "AMD Ryzen 9 5950X 16-Core Processor"
+        );
+
+        let mut rig = Rig::start_with(
+            Demand {
+                cpu: CpuDemand::Total,
+                ..Demand::default()
+            },
+            snap,
+        );
+        rig.advance(IDLE_RECHECK);
+        assert_eq!(rig.scans(), 1);
+        assert_eq!(
+            rig.processor_names(),
+            [Arc::<str>::from("AMD Ryzen 9 5950X 16-Core Processor")]
+        );
         rig.finish();
     }
 
