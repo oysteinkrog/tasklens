@@ -857,3 +857,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - Owner 2026-10-09: Overview GPU box gets a mini history chart per GPU engine (filed). Also: running a copied release build needs tl-gpu-probe next to the binary (or TASKLENS_GPU_PROBE / /usr/lib/tasklens).
 - 2026-10-13 leader decision: ConnRecord gets interface: Option<Arc<str>>, filled by the engine once per cookie (SYS-028 if_indextoname, None for ifindex 0 or another netns). Bead tasklens-as2.39; 9o0.14 waits for it.
 - 2026-10-13 leader decision: gma.2 signal_submenu uses TlMenu with window and cx (TlMenu::submenu needs them); PopupMenu in UI-PWN text is out of date. process-windows.md line 942 updated by gma.2.
+- 2026-10-14 leader decision: crw.51 keeps Commit = Committed_AS/CommitLimit (can pass 100%), label 'Commit {pct} of limit' plus tooltip on the sidebar card.
