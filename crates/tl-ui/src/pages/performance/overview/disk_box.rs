@@ -65,6 +65,21 @@ fn aggregate(catalog: &DeviceCatalog) -> DeviceIdx {
         .map_or(DeviceIdx(u16::MAX), |e| e.idx)
 }
 
+/// Disk inputs whose catalog entry is a whole disk. Unknown inputs are retained because the
+/// page may update its card list before the matching catalog snapshot reaches this entity.
+fn whole_disks<'a>(
+    disks: &'a [(DeviceKey, DeviceIdx, SharedString)],
+    catalog: &'a DeviceCatalog,
+) -> impl Iterator<Item = &'a (DeviceKey, DeviceIdx, SharedString)> {
+    disks.iter().filter(|(_, idx, _)| {
+        catalog
+            .entries
+            .iter()
+            .find(|entry| entry.idx == *idx)
+            .is_none_or(|entry| entry.parent.is_none())
+    })
+}
+
 /// One disk's row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiskRow {
@@ -221,8 +236,10 @@ impl DiskBox {
         disks: &[(DeviceKey, DeviceIdx, SharedString)],
         cx: &mut Context<Self>,
     ) {
-        let same = disks.len() == self.rows.len() + self.more
-            && disks
+        let snap = Arc::clone(self.hub.read(cx).current());
+        let filtered: SmallVec<[_; 8]> = whole_disks(disks, &snap.devices).collect();
+        let same = filtered.len() == self.rows.len() + self.more
+            && filtered
                 .iter()
                 .zip(&self.rows)
                 .all(|((k, i, n), r)| *k == r.key && *i == r.idx && *n == r.name);
@@ -286,6 +303,8 @@ impl DiskBox {
         disks: &[(DeviceKey, DeviceIdx, SharedString)],
         cx: &mut Context<Self>,
     ) {
+        let snap = Arc::clone(self.hub.read(cx).current());
+        let disks: SmallVec<[_; 8]> = whole_disks(disks, &snap.devices).cloned().collect();
         self.rows.clear();
         self.rows.extend(
             disks
@@ -302,7 +321,6 @@ impl DiskBox {
         );
         self.more = disks.len().saturating_sub(MAX_DISK_ROWS);
         self.sync_more_texts(cx);
-        let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_text(&snap, true);
     }
 
@@ -598,5 +616,70 @@ impl Render for DiskBox {
             &theme,
         )
         .size_full()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tl_model::devices::DeviceEntry;
+
+    fn disk(
+        idx: u16,
+        major: u32,
+        minor: u32,
+        name: &str,
+        parent: Option<DeviceIdx>,
+    ) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity: DeviceIdentity::Disk {
+                major,
+                minor,
+                name: Arc::from(name),
+                wwn_or_serial: None,
+            },
+            generation: 0,
+            display_name: Arc::from(name),
+            present: true,
+            parent,
+            persistent_key: Arc::from(format!("disk:{name}")),
+            net_kind: None,
+        }
+    }
+
+    #[test]
+    fn disk_partitions_dm_fixture_has_only_whole_disk_box_inputs() {
+        // This is the exact block topology of tl-collect's disk-partitions-dm fixture.
+        let catalog = DeviceCatalog {
+            version: 1,
+            entries: Arc::from([
+                disk(0, 179, 0, "mmcblk0", None),
+                disk(1, 259, 0, "nvme0n1", None),
+                disk(2, 8, 0, "sda", None),
+                disk(3, 8, 1, "sda1", Some(DeviceIdx(2))),
+                disk(4, 8, 2, "sda2", Some(DeviceIdx(2))),
+                disk(5, 254, 0, "dm-0", Some(DeviceIdx(2))),
+                disk(6, 8, 16, "sdb", None),
+                disk(7, 11, 0, "sr0", None),
+                disk(8, 253, 0, "vda", None),
+            ]),
+        };
+        let inputs: Vec<_> = catalog
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    DeviceKey::from_identity(&entry.identity).expect("disk key"),
+                    entry.idx,
+                    SharedString::from(entry.display_name.to_string()),
+                )
+            })
+            .collect();
+
+        let names: Vec<&str> = whole_disks(&inputs, &catalog)
+            .map(|(_, _, name)| name.as_ref())
+            .collect();
+        assert_eq!(names, ["mmcblk0", "nvme0n1", "sda", "sdb", "sr0", "vda"]);
     }
 }

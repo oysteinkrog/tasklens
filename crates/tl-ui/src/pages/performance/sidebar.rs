@@ -73,6 +73,19 @@ const UPLOAD_TINT: f32 = 0.3;
 const FAN_COLOR: &str = "violet";
 const BATTERY_COLOR: &str = "mint";
 
+/// Removes disk children from a sidebar list. The engine keeps partitions and device-mapper
+/// devices in the catalog for attribution, but only their whole parent disks get cards.
+fn retain_whole_disks(rows: &mut Vec<DeviceRow>, catalog: &tl_model::devices::DeviceCatalog) {
+    rows.retain(|row| {
+        row.kind != DeviceKind::Disk
+            || catalog
+                .entries
+                .iter()
+                .find(|entry| entry.idx == row.idx)
+                .is_none_or(|entry| entry.parent.is_none())
+    });
+}
+
 /// Element id of the scrolling card list.
 pub const LIST_ID: &str = "perf-sidebar-list";
 
@@ -624,6 +637,7 @@ impl DeviceSidebar {
         cx: &mut Context<Self>,
     ) -> Option<Vec<DeviceRow>> {
         sidebar_order(&snap.devices, &self.settings.view(), &mut self.rows);
+        retain_whole_disks(&mut self.rows, &snap.devices);
         let visible: Vec<DeviceRow> = visible_rows(&self.rows, &self.settings.view())
             .cloned()
             .collect();
@@ -1169,5 +1183,81 @@ impl Render for DeviceSidebar {
                     .children(cards),
             )
             .vertical_scrollbar(&self.scroll)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
+    use tl_model::ids::DeviceIdx;
+
+    fn disk(
+        idx: u16,
+        major: u32,
+        minor: u32,
+        name: &str,
+        parent: Option<DeviceIdx>,
+    ) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity: DeviceIdentity::Disk {
+                major,
+                minor,
+                name: Arc::from(name),
+                wwn_or_serial: None,
+            },
+            generation: 0,
+            display_name: Arc::from(name),
+            present: true,
+            parent,
+            persistent_key: Arc::from(format!("disk:{name}")),
+            net_kind: None,
+        }
+    }
+
+    #[test]
+    fn disk_partitions_dm_fixture_has_only_whole_disk_rows() {
+        // This is the exact block topology of tl-collect's disk-partitions-dm fixture.
+        let catalog = DeviceCatalog {
+            version: 1,
+            entries: Arc::from([
+                disk(0, 179, 0, "mmcblk0", None),
+                disk(1, 259, 0, "nvme0n1", None),
+                disk(2, 8, 0, "sda", None),
+                disk(3, 8, 1, "sda1", Some(DeviceIdx(2))),
+                disk(4, 8, 2, "sda2", Some(DeviceIdx(2))),
+                disk(5, 254, 0, "dm-0", Some(DeviceIdx(2))),
+                disk(6, 8, 16, "sdb", None),
+                disk(7, 11, 0, "sr0", None),
+                disk(8, 253, 0, "vda", None),
+            ]),
+        };
+        let mut rows: Vec<_> = catalog
+            .entries
+            .iter()
+            .map(|entry| DeviceRow {
+                key: DeviceKey::from_identity(&entry.identity).expect("disk key"),
+                kind: DeviceKind::Disk,
+                idx: entry.idx,
+                generation: 0,
+                net_class: None,
+            })
+            .collect();
+
+        retain_whole_disks(&mut rows, &catalog);
+
+        let names: Vec<&str> = rows.iter().map(|row| &*row.key.0).collect();
+        assert_eq!(
+            names,
+            [
+                "disk:mmcblk0",
+                "disk:nvme0n1",
+                "disk:sda",
+                "disk:sdb",
+                "disk:sr0",
+                "disk:vda"
+            ]
+        );
     }
 }
