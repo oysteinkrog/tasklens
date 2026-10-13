@@ -15,6 +15,7 @@
 //! (`ComponentMask::DEVICES`, for the Performance page lists), never on other snapshots. Slider
 //! states are created in `SettingsWindow::new`, never in render.
 
+mod appearance;
 mod general;
 mod graphs;
 mod motion;
@@ -179,6 +180,7 @@ pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
     #[allow(unused_mut, reason = "test-hooks appends the test pages")]
     let mut pages: Vec<PageBuilder> = vec![
         general::page(cx),
+        appearance::page(cx),
         motion::page(cx),
         units::page(cx),
         processes::page(cx),

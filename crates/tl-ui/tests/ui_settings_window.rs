@@ -1483,3 +1483,106 @@ fn startup_window_public_ip_accepted_and_off(cx: &mut TestAppContext) {
         "off needs no notice"
     );
 }
+
+// Appearance page (E21-020).
+
+#[gpui_kit::test]
+fn appearance_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    assert_eq!(
+        page(cx, PageId::Appearance).keys(),
+        [
+            SettingKey::ThemeActive,
+            SettingKey::ThemeFollowSystem,
+            SettingKey::ThemeLight,
+            SettingKey::ThemeDark,
+            SettingKey::AppearanceUiScalePct,
+            SettingKey::AppearanceRowHeightPct,
+            SettingKey::AppearanceRoundedCorners,
+            SettingKey::AppearanceHeatColoring,
+            SettingKey::AppearanceHeatIntensityPct,
+            SettingKey::AppearanceShadowIntensityPct,
+            SettingKey::AppearanceDecorations
+        ]
+    );
+    // Page order: Appearance is the second page.
+    let ids: Vec<PageId> = cx.update(all_pages).iter().map(|p| p.id()).collect();
+    assert_eq!(ids[..2], [PageId::General, PageId::Appearance]);
+}
+
+#[gpui_kit::test]
+fn settings_restart_toast(cx: &mut TestAppContext) {
+    setup(cx);
+    let (_, mut vcx) = open(cx, 1);
+    let appearance = page(cx, PageId::Appearance);
+    assert_eq!(
+        appearance
+            .description_of(SettingKey::AppearanceDecorations)
+            .as_deref(),
+        Some("Takes effect after restart")
+    );
+    vcx.update(|_, cx| appearance.set_bool(SettingKey::AppearanceDecorations, true, cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).appearance.decorations),
+        tl_model::settings::Decorations::Server
+    );
+    assert_eq!(
+        window_toasts(&mut vcx),
+        ["Restart tasklens to apply the title bar change"]
+    );
+}
+
+#[gpui_kit::test]
+fn appearance_theme_dropdown_dispatches_activate(cx: &mut TestAppContext) {
+    setup(cx);
+    let (_, mut vcx) = open(cx, 1);
+    cx.update(|cx| TlSettings::update(cx, |d| d.settings.theme.follow_system = true));
+    let appearance = page(cx, PageId::Appearance);
+    let labels = appearance.dropdown_labels(SettingKey::ThemeActive);
+    assert_eq!(labels.first().map(|l| l.as_ref()), Some("Default Dark"));
+    // "Dracula" is not a shipped built-in yet (E17-005), so this picks "Default Light".
+    assert!(labels.iter().any(|l| l == "Default Light"));
+    vcx.update(|_, cx| appearance.pick(SettingKey::ThemeActive, "Default Light", cx));
+    vcx.run_until_parked();
+    let theme = cx.update(|cx| TlSettings::settings(cx).theme.clone());
+    assert_eq!(theme.active, "Default Light");
+    assert!(!theme.follow_system, "an explicit choice turns sync off");
+    assert_eq!(
+        cx.update(|cx| tl_ui::theme::current(cx).name.to_string()),
+        "Default Light"
+    );
+    assert_eq!(window_toasts(&mut vcx), ["Theme sync turned off"]);
+}
+
+#[gpui_kit::test]
+fn appearance_ui_scale_release_toast(cx: &mut TestAppContext) {
+    let (_, persists) = setup(cx);
+    let (frame, mut vcx) = open(cx, 1);
+    let state = vcx
+        .read(|cx| {
+            frame
+                .read(cx)
+                .content()
+                .read(cx)
+                .slider_state(SettingKey::AppearanceUiScalePct)
+                .cloned()
+        })
+        .expect("UI Scale slider state");
+    let before = persists.get();
+    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Preview(120.))));
+    cx.run_until_parked();
+    assert_eq!(persists.get(), before, "Change writes in memory only");
+    assert!(
+        window_toasts(&mut vcx).is_empty(),
+        "no toast before release"
+    );
+    cx.update(|cx| state.update(cx, |_, cx| cx.emit(TlSliderEvent::Commit(125.))));
+    cx.run_until_parked();
+    assert_eq!(persists.get(), before + 1, "Release persists once");
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).appearance.ui_scale_pct),
+        125
+    );
+    assert_eq!(window_toasts(&mut vcx), ["UI scale changed to 125%"]);
+}
