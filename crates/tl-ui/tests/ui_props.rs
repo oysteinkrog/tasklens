@@ -3300,8 +3300,9 @@ mod security {
         CapRow, Elevated, GroupMembershipRow, NsKind, NsRow, NsState, SecurityDetail,
     };
     use tl_ui::windows::props::security::{
-        NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
+        CapColumn, NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
     };
+    use tl_ui::{table::cells::CellOut, table::tree_table::TreeTableDelegate as _};
 
     use super::*;
 
@@ -3362,6 +3363,26 @@ mod security {
             primary: false,
             root_equivalent,
             admin,
+        }
+    }
+
+    fn cap(
+        cap: u8,
+        effective: bool,
+        permitted: bool,
+        inheritable: bool,
+        bounding: bool,
+        ambient: bool,
+        risky: bool,
+    ) -> CapRow {
+        CapRow {
+            cap,
+            effective,
+            permitted,
+            inheritable,
+            bounding,
+            ambient,
+            risky,
         }
     }
 
@@ -3502,5 +3523,140 @@ mod security {
         });
         assert_eq!(failed.1.as_ref(), "Could not copy token summary value.");
         assert_eq!(ok.1.as_ref(), "Process property value copied.");
+    }
+
+    #[gpui_kit::test]
+    fn caps_rows_exclude_bounding_only(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.caps = Arc::from(vec![
+            cap(21, false, false, false, true, false, true),
+            cap(13, true, false, false, true, false, false),
+            cap(0, false, true, false, true, false, true),
+        ]);
+        feed(&view, cx, d);
+        let ids = cx.update(|_, cx| {
+            let tab = view.read(cx).tab.read(cx);
+            tab.caps_table()
+                .expect("table")
+                .read(cx)
+                .delegate
+                .view_ids()
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(ids, [13, 0], "effective first; bounding-only omitted");
+    }
+
+    #[gpui_kit::test]
+    fn caps_risky_name_colour(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.caps = Arc::from(vec![cap(21, true, true, false, true, false, true)]);
+        feed(&view, cx, d);
+        cx.update(|_, cx| {
+            let tab = view.read(cx).tab.read(cx);
+            let table = tab.caps_table().expect("table").read(cx);
+            let mut out = CellOut {
+                want_text: true,
+                ..CellOut::default()
+            };
+            table.delegate.cell(0, CapColumn::Name, &mut out);
+            assert_eq!(out.text, "CAP_SYS_ADMIN");
+            assert_eq!(out.tooltip.as_deref(), Some("Risky capability"));
+            assert_eq!(
+                out.text_color,
+                Some(tl_ui::theme::current(cx).status.warning)
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn groups_kind_marks(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.groups = Arc::from(vec![
+            GroupMembershipRow {
+                name: text("oystein"),
+                gid: 1000,
+                primary: true,
+                root_equivalent: false,
+                admin: false,
+            },
+            group("docker", 965, false, true),
+            group("wheel", 998, true, false),
+        ]);
+        feed(&view, cx, d);
+        cx.update(|_, cx| {
+            let tab = view.read(cx).tab.read(cx);
+            let d = &tab.groups_table().expect("table").read(cx).delegate;
+            assert_eq!(d.kind(1000).as_deref(), Some("Primary"));
+            assert_eq!(
+                d.kind(965).as_deref(),
+                Some("Supplementary (root-equivalent)")
+            );
+            assert_eq!(d.kind(998).as_deref(), Some("Supplementary (admin)"));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn security_tables_none_reported(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.groups = Arc::from(Vec::<GroupMembershipRow>::new());
+        feed(&view, cx, d);
+        cx.update(|_, cx| {
+            let tab = view.read(cx).tab.read(cx);
+            assert_eq!(
+                tab.caps_table()
+                    .expect("table")
+                    .read(cx)
+                    .delegate
+                    .empty_text()
+                    .as_deref(),
+                Some("None reported")
+            );
+            assert_eq!(
+                tab.groups_table()
+                    .expect("table")
+                    .read(cx)
+                    .delegate
+                    .empty_text()
+                    .as_deref(),
+                Some("None reported")
+            );
+        });
+        assert!(cx.debug_bounds("TlTreeTable-empty").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn security_caps_ctrl_c_uses_yes(cx: &mut TestAppContext) {
+        use tl_ui::table::actions::CopyRow;
+
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.caps = Arc::from(vec![cap(13, true, false, false, true, false, false)]);
+        feed(&view, cx, d);
+        let (table, focus) = cx.update(|_, cx| {
+            let table = view
+                .read(cx)
+                .tab
+                .read(cx)
+                .caps_table()
+                .expect("table")
+                .clone();
+            let focus = table.read(cx).focus_handle().clone();
+            table.update(cx, |t, _| t.selection.click(13));
+            (table, focus)
+        });
+        let _ = table;
+        cx.update(|window, cx| focus.focus(window, cx));
+        draw(cx);
+        cx.dispatch_action(CopyRow);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("CAP_NET_RAW\tYes\t\t\tYes\t\tUse raw and packet sockets")
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! The Security tab of Process Properties: the summary of identity, capabilities, flags, LSM
 //! label, sessions and namespaces in two key/value columns (UI-PWN-014, UI-PWN-018, PROC-082,
-//! R-050). The Capabilities and Groups tables under it are E23-022.
+//! R-050), followed by the Capabilities and Groups tables (UI-PWN-015).
 //!
 //! `PropsWindow` feeds the tab its payload and the exited state. The about 21 value strings are
 //! built only when the payload changes; the filter only re-picks the rows. Labels and value
@@ -15,6 +15,7 @@
 //!
 //! The security label is untrusted text: control characters are escaped (E15).
 
+use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,11 +23,17 @@ use std::sync::Arc;
 use gpui_kit::base::input::Copy;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    App, BorrowAppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point, px, relative,
+    AnyView, App, BorrowAppContext as _, ClipboardItem, Context, Entity, FocusHandle, FontWeight,
+    Global, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point,
+    px, relative,
 };
-use tl_model::details::{Elevated, IdTriple, NsKind, NsState, Seccomp, SecurityDetail, TabPayload};
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
+use tl_model::details::{
+    CapRow, Elevated, GroupMembershipRow, IdTriple, NsKind, NsState, Seccomp, SecurityDetail,
+    TabPayload,
+};
 use tl_model::ids::ProcessKey;
 use tl_model::table::Total;
 use tl_model::units;
@@ -45,8 +52,18 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
+use crate::table::actions::CopyRow;
+use crate::table::cells::CellOut;
+use crate::table::columns::{
+    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
+};
+use crate::table::tree_table::{
+    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
+    TreeTableDelegate, TreeTableEvent,
+};
 use crate::text::metrics::TextMetricsCache;
-use crate::theme::{UiMetrics, metrics};
+use crate::text::style::label_style;
+use crate::theme::{UiMetrics, current, metrics};
 use crate::util::clipboard_write;
 use crate::windows::actions::{
     KV_GRID_CONTEXT, PropsActivateField, PropsCopyAllFields, PropsCopyValue, PropsFieldDown,
@@ -60,10 +77,13 @@ const LABEL_MIN: f32 = 96.;
 const LABEL_MAX: f32 = 150.;
 /// The summary takes at most this share of the body.
 const SUMMARY_MAX: f32 = 0.45;
+const SECTION_HEADER_HEIGHT: f32 = 24.;
 /// `None` in the audit session and login UID files.
 pub const NO_ID: u32 = u32::MAX;
 
 const KEY_COPY_FAILED: &str = "pwn-security-toast-copy-failed";
+
+gpui_kit::actions!(tasklens_security, [SecurityCopyCell]);
 /// The en-US tooltips, for tests. The tab shows `pwn-security-risky-tooltip` and
 /// `pwn-security-ns-tip-*`.
 pub const RISKY_TOOLTIP: &str = "Capabilities that allow taking over the system";
@@ -239,6 +259,20 @@ pub struct SecurityWords {
     elevated: [SharedString; 4],
     none_reported: SharedString,
     none: SharedString,
+    cap_title: Template,
+    group_title: Template,
+    cap_headers: [SharedString; 7],
+    group_headers: [SharedString; 3],
+    cap_descriptions: [SharedString; 41],
+    yes: SharedString,
+    risky_capability: SharedString,
+    primary: SharedString,
+    supplementary: SharedString,
+    admin: SharedString,
+    copy: SharedString,
+    copy_row: SharedString,
+    collecting: SharedString,
+    copied: SharedString,
 }
 
 impl SecurityWords {
@@ -277,6 +311,74 @@ impl SecurityWords {
             ],
             none_reported: t("pwn-security-none-reported"),
             none: t("pwn-security-none"),
+            cap_title: tmpl("pwn-security-caps-title", &["n"]),
+            group_title: tmpl("pwn-security-groups-title", &["n"]),
+            cap_headers: [
+                t("pwn-security-caps-col-name"),
+                t("pwn-security-caps-col-effective"),
+                t("pwn-security-caps-col-permitted"),
+                t("pwn-security-caps-col-inheritable"),
+                t("pwn-security-caps-col-bounding"),
+                t("pwn-security-caps-col-ambient"),
+                t("pwn-security-caps-col-description"),
+            ],
+            group_headers: [
+                t("pwn-security-groups-col-name"),
+                t("pwn-security-groups-col-gid"),
+                t("pwn-security-groups-col-kind"),
+            ],
+            cap_descriptions: [
+                t("pwn-security-cap-desc-chown"),
+                t("pwn-security-cap-desc-dac-override"),
+                t("pwn-security-cap-desc-dac-read-search"),
+                t("pwn-security-cap-desc-fowner"),
+                t("pwn-security-cap-desc-fsetid"),
+                t("pwn-security-cap-desc-kill"),
+                t("pwn-security-cap-desc-setgid"),
+                t("pwn-security-cap-desc-setuid"),
+                t("pwn-security-cap-desc-setpcap"),
+                t("pwn-security-cap-desc-linux-immutable"),
+                t("pwn-security-cap-desc-net-bind-service"),
+                t("pwn-security-cap-desc-net-broadcast"),
+                t("pwn-security-cap-desc-net-admin"),
+                t("pwn-security-cap-desc-net-raw"),
+                t("pwn-security-cap-desc-ipc-lock"),
+                t("pwn-security-cap-desc-ipc-owner"),
+                t("pwn-security-cap-desc-sys-module"),
+                t("pwn-security-cap-desc-sys-rawio"),
+                t("pwn-security-cap-desc-sys-chroot"),
+                t("pwn-security-cap-desc-sys-ptrace"),
+                t("pwn-security-cap-desc-sys-pacct"),
+                t("pwn-security-cap-desc-sys-admin"),
+                t("pwn-security-cap-desc-sys-boot"),
+                t("pwn-security-cap-desc-sys-nice"),
+                t("pwn-security-cap-desc-sys-resource"),
+                t("pwn-security-cap-desc-sys-time"),
+                t("pwn-security-cap-desc-sys-tty-config"),
+                t("pwn-security-cap-desc-mknod"),
+                t("pwn-security-cap-desc-lease"),
+                t("pwn-security-cap-desc-audit-write"),
+                t("pwn-security-cap-desc-audit-control"),
+                t("pwn-security-cap-desc-setfcap"),
+                t("pwn-security-cap-desc-mac-override"),
+                t("pwn-security-cap-desc-mac-admin"),
+                t("pwn-security-cap-desc-syslog"),
+                t("pwn-security-cap-desc-wake-alarm"),
+                t("pwn-security-cap-desc-block-suspend"),
+                t("pwn-security-cap-desc-audit-read"),
+                t("pwn-security-cap-desc-perfmon"),
+                t("pwn-security-cap-desc-bpf"),
+                t("pwn-security-cap-desc-checkpoint-restore"),
+            ],
+            yes: t("pwn-security-yes"),
+            risky_capability: t("pwn-security-risky-capability"),
+            primary: t("pwn-security-kind-primary"),
+            supplementary: t("pwn-security-kind-supplementary"),
+            admin: t("pwn-security-kind-admin"),
+            copy: t("pwn-security-menu-copy"),
+            copy_row: t("pwn-security-menu-copy-row"),
+            collecting: t("pwn-general-collecting"),
+            copied: t("pwn-general-toast-copied"),
         }
     }
 
@@ -628,6 +730,802 @@ fn login_text(d: &SecurityDetail, uid: u32) -> String {
     }
 }
 
+// ---- Capabilities table ----
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum CapColumn {
+    Name,
+    Effective,
+    Permitted,
+    Inheritable,
+    Bounding,
+    Ambient,
+    Description,
+}
+
+impl CapColumn {
+    pub const ALL: [Self; 7] = [
+        Self::Name,
+        Self::Effective,
+        Self::Permitted,
+        Self::Inheritable,
+        Self::Bounding,
+        Self::Ambient,
+        Self::Description,
+    ];
+
+    fn width(self) -> f32 {
+        match self {
+            Self::Name => 180.,
+            Self::Effective
+            | Self::Permitted
+            | Self::Inheritable
+            | Self::Bounding
+            | Self::Ambient => 84.,
+            Self::Description => 320.,
+        }
+    }
+}
+
+impl TableColumn for CapColumn {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Name => "cap-name",
+            Self::Effective => "cap-effective",
+            Self::Permitted => "cap-permitted",
+            Self::Inheritable => "cap-inheritable",
+            Self::Bounding => "cap-bounding",
+            Self::Ambient => "cap-ambient",
+            Self::Description => "cap-description",
+        }
+    }
+
+    fn parse(_: TableId, _: &str) -> Option<Self> {
+        None
+    }
+
+    fn pinned_first(self) -> bool {
+        false
+    }
+
+    fn min_width(self) -> Option<f32> {
+        Some(match self {
+            Self::Name => 120.,
+            Self::Effective
+            | Self::Permitted
+            | Self::Inheritable
+            | Self::Bounding
+            | Self::Ambient => 64.,
+            Self::Description => 160.,
+        })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CapSort {
+    pub column: CapColumn,
+    pub ascending: bool,
+}
+
+impl Default for CapSort {
+    fn default() -> Self {
+        Self {
+            column: CapColumn::Effective,
+            ascending: false,
+        }
+    }
+}
+
+impl TableSort<CapColumn> for CapSort {
+    fn column(&self) -> CapColumn {
+        self.column
+    }
+
+    fn ascending(&self) -> bool {
+        self.ascending
+    }
+}
+
+fn full_cap_name(cap: u8) -> String {
+    match CAP_NAMES.get(usize::from(cap)) {
+        Some(name) => format!("CAP_{name}"),
+        None => format!("CAP_{cap}"),
+    }
+}
+
+pub struct CapDelegate {
+    rows: Arc<[CapRow]>,
+    view: Vec<u8>,
+    index: FxHashMap<u8, u32>,
+    needle: SharedString,
+    loading: bool,
+    version: u64,
+    sort: CapSort,
+    specs: Vec<ColumnSpec<CapColumn>>,
+    layout: ColumnLayout<CapColumn>,
+    words: Rc<SecurityWords>,
+    warning: Hsla,
+    menu_cell: Option<(u8, CapColumn)>,
+}
+
+impl CapDelegate {
+    fn new(words: Rc<SecurityWords>, warning: Hsla) -> Self {
+        let specs = cap_specs(&words);
+        let layout =
+            ColumnLayout::defaults(TableId::Processes, &specs, &CapColumn::ALL, &CapColumn::ALL);
+        Self {
+            rows: Arc::from([]),
+            view: Vec::new(),
+            index: FxHashMap::default(),
+            needle: SharedString::default(),
+            loading: true,
+            version: 0,
+            sort: CapSort::default(),
+            specs,
+            layout,
+            words,
+            warning,
+            menu_cell: None,
+        }
+    }
+
+    fn row(&self, cap: u8) -> Option<&CapRow> {
+        self.rows.iter().find(|r| r.cap == cap)
+    }
+
+    fn description(&self, cap: u8) -> &str {
+        self.words
+            .cap_descriptions
+            .get(usize::from(cap))
+            .map_or("", SharedString::as_str)
+    }
+
+    fn set_detail(&mut self, detail: Option<&SecurityDetail>) {
+        match detail {
+            Some(detail) => {
+                self.rows = detail.caps.clone();
+                self.loading = false;
+            }
+            None => {
+                self.rows = Arc::from([]);
+                self.loading = true;
+            }
+        }
+        self.rebuild();
+    }
+
+    fn set_filter(&mut self, needle: SharedString) {
+        if self.needle != needle {
+            self.needle = needle;
+            self.rebuild();
+        }
+    }
+
+    fn compare(&self, a: u8, b: u8) -> Ordering {
+        let (Some(a), Some(b)) = (self.row(a), self.row(b)) else {
+            return a.cmp(&b);
+        };
+        let by = match self.sort.column {
+            CapColumn::Name => full_cap_name(a.cap).cmp(&full_cap_name(b.cap)),
+            CapColumn::Effective => a.effective.cmp(&b.effective),
+            CapColumn::Permitted => a.permitted.cmp(&b.permitted),
+            CapColumn::Inheritable => a.inheritable.cmp(&b.inheritable),
+            CapColumn::Bounding => a.bounding.cmp(&b.bounding),
+            CapColumn::Ambient => a.ambient.cmp(&b.ambient),
+            CapColumn::Description => self.description(a.cap).cmp(self.description(b.cap)),
+        };
+        let by = if self.sort.ascending {
+            by
+        } else {
+            by.reverse()
+        };
+        by.then_with(|| full_cap_name(a.cap).cmp(&full_cap_name(b.cap)))
+    }
+
+    fn rebuild(&mut self) {
+        let mut view: Vec<u8> = self
+            .rows
+            .iter()
+            .filter(|r| r.effective || r.permitted || r.inheritable || r.ambient)
+            .filter(|r| {
+                self.needle.is_empty() || {
+                    let hay = lowercase(&format!(
+                        "{} {}",
+                        full_cap_name(r.cap),
+                        self.description(r.cap)
+                    ));
+                    matches(&hay, &self.needle)
+                }
+            })
+            .map(|r| r.cap)
+            .collect();
+        view.sort_by(|&a, &b| self.compare(a, b));
+        self.view = view;
+        self.index.clear();
+        for (i, &cap) in self.view.iter().enumerate() {
+            self.index.insert(cap, i as u32);
+        }
+        self.version += 1;
+    }
+
+    pub fn view_ids(&self) -> impl Iterator<Item = u8> + '_ {
+        self.view.iter().copied()
+    }
+
+    pub fn row_tsv(&self, cap: u8) -> Option<String> {
+        let row = self.row(cap)?;
+        let mut out = full_cap_name(cap);
+        for set in [
+            row.effective,
+            row.permitted,
+            row.inheritable,
+            row.bounding,
+            row.ambient,
+        ] {
+            out.push('\t');
+            if set {
+                out.push_str(&self.words.yes);
+            }
+        }
+        out.push('\t');
+        out.push_str(self.description(cap));
+        Some(out)
+    }
+
+    fn cell_text(&self, cap: u8, col: CapColumn, copy: bool) -> Option<String> {
+        let row = self.row(cap)?;
+        Some(match col {
+            CapColumn::Name => full_cap_name(cap),
+            CapColumn::Effective => mark_text(row.effective, copy, &self.words.yes),
+            CapColumn::Permitted => mark_text(row.permitted, copy, &self.words.yes),
+            CapColumn::Inheritable => mark_text(row.inheritable, copy, &self.words.yes),
+            CapColumn::Bounding => mark_text(row.bounding, copy, &self.words.yes),
+            CapColumn::Ambient => mark_text(row.ambient, copy, &self.words.yes),
+            CapColumn::Description => self.description(cap).to_owned(),
+        })
+    }
+}
+
+fn mark_text(set: bool, copy: bool, yes: &str) -> String {
+    if !set {
+        String::new()
+    } else if copy {
+        yes.to_owned()
+    } else {
+        "✓".to_owned()
+    }
+}
+
+fn cap_specs(words: &SecurityWords) -> Vec<ColumnSpec<CapColumn>> {
+    CapColumn::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| {
+            let label = words.cap_headers[i].clone();
+            ColumnSpec {
+                id,
+                label: label.clone(),
+                full_name: label.clone(),
+                group: label,
+                align: ColumnAlign::Left,
+                kind: ColumnKind::Text,
+                sortable: true,
+                template: None,
+                default_width: px(id.width()),
+                tooltip: None,
+                availability: Availability::Available,
+                hideable: false,
+            }
+        })
+        .collect()
+}
+
+impl TreeTableDelegate for CapDelegate {
+    type RowId = u8;
+    type Column = CapColumn;
+    type Sort = CapSort;
+
+    fn row_count(&self) -> usize {
+        self.view.len()
+    }
+    fn row_id(&self, ix: usize) -> u8 {
+        self.view[ix]
+    }
+    fn row_index(&self, id: u8) -> Option<usize> {
+        self.index.get(&id).map(|&i| i as usize)
+    }
+    fn row_kind(&self, _: usize) -> RowKind {
+        RowKind::Plain
+    }
+    fn row_depth(&self, _: usize) -> u8 {
+        0
+    }
+    fn row_expandable(&self, _: usize) -> Option<bool> {
+        None
+    }
+    fn row_flags(&self, _: usize) -> RowFlags {
+        RowFlags::default()
+    }
+    fn table_version(&self) -> u64 {
+        self.version
+    }
+    fn columns(&self) -> &ColumnLayout<CapColumn> {
+        &self.layout
+    }
+    fn column_spec(&self, id: CapColumn) -> &ColumnSpec<CapColumn> {
+        &self.specs[CapColumn::ALL.iter().position(|c| *c == id).unwrap_or(0)]
+    }
+    fn cell(&self, ix: usize, col: CapColumn, out: &mut CellOut) {
+        let cap = self.view[ix];
+        let Some(row) = self.row(cap) else {
+            return;
+        };
+        out.bits = u64::from(cap)
+            | (u64::from(row.effective) << 8)
+            | (u64::from(row.permitted) << 9)
+            | (u64::from(row.inheritable) << 10)
+            | (u64::from(row.bounding) << 11)
+            | (u64::from(row.ambient) << 12);
+        out.validity = Validity::Valid;
+        if col == CapColumn::Name && row.risky {
+            out.text_color = Some(self.warning);
+            out.tooltip = Some(self.words.risky_capability.clone());
+        }
+        let set = match col {
+            CapColumn::Effective => Some(row.effective),
+            CapColumn::Permitted => Some(row.permitted),
+            CapColumn::Inheritable => Some(row.inheritable),
+            CapColumn::Bounding => Some(row.bounding),
+            CapColumn::Ambient => Some(row.ambient),
+            _ => None,
+        };
+        if set == Some(true) {
+            out.tooltip = Some(self.words.yes.clone());
+        }
+        if out.want_text
+            && let Some(text) = self.cell_text(cap, col, false)
+        {
+            out.text.push_str(&text);
+        }
+    }
+    fn name_cell(&self, ix: usize) -> NameCell {
+        let cap = self.view[ix];
+        NameCell {
+            icon: NameIcon::None,
+            icon_size: IconSlot::Small,
+            primary: self.description(cap).to_owned().into(),
+            count_run: None,
+            secondary: None,
+            glyphs: SmallVec::new(),
+            highlight_fffd: true,
+            trailing: None,
+        }
+    }
+    fn name_column(&self) -> Option<CapColumn> {
+        // Name needs a per-cell warning colour and tooltip. Description is the flat table's
+        // navigation anchor, leaving Name to the normal cell painter.
+        Some(CapColumn::Description)
+    }
+    fn header_total(&self, _: CapColumn, _: &mut CellOut) -> bool {
+        false
+    }
+    fn sort(&self) -> CapSort {
+        self.sort
+    }
+    fn selectable(&self, _: usize) -> bool {
+        true
+    }
+    fn context_menu(
+        &mut self,
+        targets: &[u8],
+        col: Option<CapColumn>,
+        menu: TlMenu,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> TlMenu {
+        self.menu_cell = targets
+            .first()
+            .copied()
+            .map(|id| (id, col.unwrap_or(CapColumn::Name)));
+        menu.item(self.words.copy.clone(), Box::new(SecurityCopyCell))
+            .item(self.words.copy_row.clone(), Box::new(CopyRow))
+    }
+    fn on_toggle_expand(&mut self, _: u8, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_sort(&mut self, col: CapColumn, cx: &mut Context<TlTreeTable<Self>>) {
+        self.sort = CapSort {
+            column: col,
+            ascending: self.sort.column != col || !self.sort.ascending,
+        };
+        self.rebuild();
+        cx.notify();
+    }
+    fn on_columns_changed(
+        &mut self,
+        layout: &ColumnLayout<CapColumn>,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) {
+        self.layout = layout.clone();
+    }
+    fn on_visible_range(&mut self, _: &[u8], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_activate(&mut self, _: u8, _: &mut Context<TlTreeTable<Self>>) {}
+    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
+        None
+    }
+    fn empty_text(&self) -> Option<SharedString> {
+        Some(if self.loading {
+            self.words.collecting.clone()
+        } else {
+            self.words.none_reported.clone()
+        })
+    }
+    fn header_lines(&self) -> HeaderLines {
+        HeaderLines::One
+    }
+    fn columns_fixed(&self) -> bool {
+        true
+    }
+}
+
+// ---- Groups table ----
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum GroupColumn {
+    Name,
+    Gid,
+    Kind,
+}
+
+impl GroupColumn {
+    pub const ALL: [Self; 3] = [Self::Name, Self::Gid, Self::Kind];
+}
+
+impl TableColumn for GroupColumn {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Name => "group-name",
+            Self::Gid => "group-gid",
+            Self::Kind => "group-kind",
+        }
+    }
+    fn parse(_: TableId, _: &str) -> Option<Self> {
+        None
+    }
+    fn pinned_first(self) -> bool {
+        false
+    }
+    fn min_width(self) -> Option<f32> {
+        Some(match self {
+            Self::Name => 80.,
+            Self::Gid => 60.,
+            Self::Kind => 120.,
+        })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GroupSort {
+    pub column: GroupColumn,
+    pub ascending: bool,
+}
+
+impl Default for GroupSort {
+    fn default() -> Self {
+        Self {
+            column: GroupColumn::Name,
+            ascending: true,
+        }
+    }
+}
+
+impl TableSort<GroupColumn> for GroupSort {
+    fn column(&self) -> GroupColumn {
+        self.column
+    }
+    fn ascending(&self) -> bool {
+        self.ascending
+    }
+}
+
+pub struct GroupDelegate {
+    rows: Arc<[GroupMembershipRow]>,
+    view: Vec<u32>,
+    index: FxHashMap<u32, u32>,
+    needle: SharedString,
+    loading: bool,
+    version: u64,
+    sort: GroupSort,
+    specs: Vec<ColumnSpec<GroupColumn>>,
+    layout: ColumnLayout<GroupColumn>,
+    words: Rc<SecurityWords>,
+    menu_cell: Option<(u32, GroupColumn)>,
+}
+
+impl GroupDelegate {
+    fn new(words: Rc<SecurityWords>) -> Self {
+        let specs = group_specs(&words);
+        let layout = ColumnLayout::defaults(
+            TableId::Processes,
+            &specs,
+            &GroupColumn::ALL,
+            &GroupColumn::ALL,
+        );
+        Self {
+            rows: Arc::from([]),
+            view: Vec::new(),
+            index: FxHashMap::default(),
+            needle: SharedString::default(),
+            loading: true,
+            version: 0,
+            sort: GroupSort::default(),
+            specs,
+            layout,
+            words,
+            menu_cell: None,
+        }
+    }
+
+    fn row(&self, gid: u32) -> Option<&GroupMembershipRow> {
+        self.rows.iter().find(|r| r.gid == gid)
+    }
+
+    pub fn kind(&self, gid: u32) -> Option<String> {
+        let row = self.row(gid)?;
+        let mut out = if row.primary {
+            self.words.primary.to_string()
+        } else {
+            self.words.supplementary.to_string()
+        };
+        if row.root_equivalent {
+            out.push(' ');
+            out.push_str(&self.words.root_equivalent);
+        } else if row.admin {
+            out.push(' ');
+            out.push_str(&self.words.admin);
+        }
+        Some(out)
+    }
+
+    fn set_detail(&mut self, detail: Option<&SecurityDetail>) {
+        match detail {
+            Some(detail) => {
+                self.rows = detail.groups.clone();
+                self.loading = false;
+            }
+            None => {
+                self.rows = Arc::from([]);
+                self.loading = true;
+            }
+        }
+        self.rebuild();
+    }
+
+    fn set_filter(&mut self, needle: SharedString) {
+        if self.needle != needle {
+            self.needle = needle;
+            self.rebuild();
+        }
+    }
+
+    fn compare(&self, a: u32, b: u32) -> Ordering {
+        let (Some(a), Some(b)) = (self.row(a), self.row(b)) else {
+            return a.cmp(&b);
+        };
+        let by = match self.sort.column {
+            GroupColumn::Name => a.name.cmp(&b.name),
+            GroupColumn::Gid => a.gid.cmp(&b.gid),
+            GroupColumn::Kind => self.kind(a.gid).cmp(&self.kind(b.gid)),
+        };
+        let by = if self.sort.ascending {
+            by
+        } else {
+            by.reverse()
+        };
+        by.then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.gid.cmp(&b.gid))
+    }
+
+    fn rebuild(&mut self) {
+        let mut view: Vec<u32> = self
+            .rows
+            .iter()
+            .filter(|row| {
+                self.needle.is_empty()
+                    || matches(
+                        &lowercase(&format!("{} {}", row.name, row.gid)),
+                        &self.needle,
+                    )
+            })
+            .map(|row| row.gid)
+            .collect();
+        view.sort_by(|&a, &b| self.compare(a, b));
+        self.view = view;
+        self.index.clear();
+        for (i, &gid) in self.view.iter().enumerate() {
+            self.index.insert(gid, i as u32);
+        }
+        self.version += 1;
+    }
+
+    pub fn view_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.view.iter().copied()
+    }
+
+    pub fn row_tsv(&self, gid: u32) -> Option<String> {
+        let row = self.row(gid)?;
+        Some(format!("{}\t{}\t{}", row.name, row.gid, self.kind(gid)?))
+    }
+
+    fn cell_text(&self, gid: u32, col: GroupColumn) -> Option<String> {
+        let row = self.row(gid)?;
+        Some(match col {
+            GroupColumn::Name => row.name.to_string(),
+            GroupColumn::Gid => row.gid.to_string(),
+            GroupColumn::Kind => self.kind(gid)?,
+        })
+    }
+}
+
+fn group_specs(words: &SecurityWords) -> Vec<ColumnSpec<GroupColumn>> {
+    GroupColumn::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| {
+            let label = words.group_headers[i].clone();
+            ColumnSpec {
+                id,
+                label: label.clone(),
+                full_name: label.clone(),
+                group: label,
+                align: match id {
+                    GroupColumn::Gid => ColumnAlign::Right,
+                    _ => ColumnAlign::Left,
+                },
+                kind: match id {
+                    GroupColumn::Gid => ColumnKind::Numeric,
+                    _ => ColumnKind::Text,
+                },
+                sortable: true,
+                template: (id == GroupColumn::Gid).then_some("000000"),
+                default_width: px(match id {
+                    GroupColumn::Name => 200.,
+                    GroupColumn::Gid => 90.,
+                    GroupColumn::Kind => 320.,
+                }),
+                tooltip: None,
+                availability: Availability::Available,
+                hideable: false,
+            }
+        })
+        .collect()
+}
+
+impl TreeTableDelegate for GroupDelegate {
+    type RowId = u32;
+    type Column = GroupColumn;
+    type Sort = GroupSort;
+
+    fn row_count(&self) -> usize {
+        self.view.len()
+    }
+    fn row_id(&self, ix: usize) -> u32 {
+        self.view[ix]
+    }
+    fn row_index(&self, id: u32) -> Option<usize> {
+        self.index.get(&id).map(|&i| i as usize)
+    }
+    fn row_kind(&self, _: usize) -> RowKind {
+        RowKind::Plain
+    }
+    fn row_depth(&self, _: usize) -> u8 {
+        0
+    }
+    fn row_expandable(&self, _: usize) -> Option<bool> {
+        None
+    }
+    fn row_flags(&self, _: usize) -> RowFlags {
+        RowFlags::default()
+    }
+    fn table_version(&self) -> u64 {
+        self.version
+    }
+    fn columns(&self) -> &ColumnLayout<GroupColumn> {
+        &self.layout
+    }
+    fn column_spec(&self, id: GroupColumn) -> &ColumnSpec<GroupColumn> {
+        &self.specs[GroupColumn::ALL.iter().position(|c| *c == id).unwrap_or(0)]
+    }
+    fn cell(&self, ix: usize, col: GroupColumn, out: &mut CellOut) {
+        let gid = self.view[ix];
+        let Some(row) = self.row(gid) else {
+            return;
+        };
+        out.bits = u64::from(gid)
+            | (u64::from(row.primary) << 32)
+            | (u64::from(row.root_equivalent) << 33)
+            | (u64::from(row.admin) << 34);
+        out.validity = Validity::Valid;
+        if out.want_text
+            && let Some(text) = self.cell_text(gid, col)
+        {
+            out.text.push_str(&text);
+        }
+    }
+    fn name_cell(&self, ix: usize) -> NameCell {
+        let gid = self.view[ix];
+        NameCell {
+            icon: NameIcon::None,
+            icon_size: IconSlot::Small,
+            primary: self.row(gid).map_or("", |r| &*r.name).to_owned().into(),
+            count_run: None,
+            secondary: None,
+            glyphs: SmallVec::new(),
+            highlight_fffd: true,
+            trailing: None,
+        }
+    }
+    fn name_column(&self) -> Option<GroupColumn> {
+        Some(GroupColumn::Name)
+    }
+    fn header_total(&self, _: GroupColumn, _: &mut CellOut) -> bool {
+        false
+    }
+    fn sort(&self) -> GroupSort {
+        self.sort
+    }
+    fn selectable(&self, _: usize) -> bool {
+        true
+    }
+    fn context_menu(
+        &mut self,
+        targets: &[u32],
+        col: Option<GroupColumn>,
+        menu: TlMenu,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> TlMenu {
+        self.menu_cell = targets
+            .first()
+            .copied()
+            .map(|id| (id, col.unwrap_or(GroupColumn::Name)));
+        menu.item(self.words.copy.clone(), Box::new(SecurityCopyCell))
+            .item(self.words.copy_row.clone(), Box::new(CopyRow))
+    }
+    fn on_toggle_expand(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_sort(&mut self, col: GroupColumn, cx: &mut Context<TlTreeTable<Self>>) {
+        self.sort = GroupSort {
+            column: col,
+            ascending: self.sort.column != col || !self.sort.ascending,
+        };
+        self.rebuild();
+        cx.notify();
+    }
+    fn on_columns_changed(
+        &mut self,
+        layout: &ColumnLayout<GroupColumn>,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) {
+        self.layout = layout.clone();
+    }
+    fn on_visible_range(&mut self, _: &[u32], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_activate(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
+        None
+    }
+    fn empty_text(&self) -> Option<SharedString> {
+        Some(if self.loading {
+            self.words.collecting.clone()
+        } else {
+            self.words.none_reported.clone()
+        })
+    }
+    fn header_lines(&self) -> HeaderLines {
+        HeaderLines::One
+    }
+    fn columns_fixed(&self) -> bool {
+        true
+    }
+}
+
 // ---- The tab ----
 
 /// The Security tab view. `PropsWindow` builds it with the process key and the tab's filter.
@@ -650,6 +1548,8 @@ pub struct SecurityTab {
     copy_failed: SharedString,
     focus: FocusHandle,
     filter: Entity<PropsFilter>,
+    caps_table: Option<Entity<TlTreeTable<CapDelegate>>>,
+    groups_table: Option<Entity<TlTreeTable<GroupDelegate>>>,
     _subs: Vec<Subscription>,
 }
 
@@ -659,6 +1559,7 @@ impl SecurityTab {
             if filter.update(cx, |f, _| f.accept(event.generation)) {
                 this.needle = event.needle.clone();
                 this.apply_filter();
+                this.apply_table_filter(cx);
                 cx.notify();
             }
         });
@@ -679,6 +1580,8 @@ impl SecurityTab {
             copy_failed: tr(cx, KEY_COPY_FAILED),
             focus: cx.focus_handle().tab_stop(true),
             filter,
+            caps_table: None,
+            groups_table: None,
             _subs: vec![sub],
         };
         tab.apply_filter();
@@ -696,6 +1599,55 @@ impl SecurityTab {
     /// The fields' focus stop.
     pub fn grid_focus(&self) -> &FocusHandle {
         &self.focus
+    }
+
+    pub fn caps_table(&self) -> Option<&Entity<TlTreeTable<CapDelegate>>> {
+        self.caps_table.as_ref()
+    }
+
+    pub fn groups_table(&self) -> Option<&Entity<TlTreeTable<GroupDelegate>>> {
+        self.groups_table.as_ref()
+    }
+
+    fn detail(&self) -> Option<&SecurityDetail> {
+        self.payload.as_deref().and_then(|p| match p {
+            TabPayload::Security(detail) => Some(&**detail),
+            _ => None,
+        })
+    }
+
+    fn init_tables(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.caps_table.is_some() {
+            return;
+        }
+        let mut caps = CapDelegate::new(self.sec_words.clone(), current(cx).status.warning);
+        let mut groups = GroupDelegate::new(self.sec_words.clone());
+        caps.set_detail(self.detail());
+        groups.set_detail(self.detail());
+        caps.set_filter(self.needle.clone());
+        groups.set_filter(self.needle.clone());
+        let caps_table = cx.new(|cx| TlTreeTable::new(caps, window, cx));
+        let groups_table = cx.new(|cx| TlTreeTable::new(groups, window, cx));
+        self._subs.push(cx.subscribe_in(
+            &caps_table,
+            window,
+            |this, _, event: &TreeTableEvent, window, cx| {
+                if matches!(event, TreeTableEvent::CopiedRows { .. }) {
+                    this.toast_copied(window, cx);
+                }
+            },
+        ));
+        self._subs.push(cx.subscribe_in(
+            &groups_table,
+            window,
+            |this, _, event: &TreeTableEvent, window, cx| {
+                if matches!(event, TreeTableEvent::CopiedRows { .. }) {
+                    this.toast_copied(window, cx);
+                }
+            },
+        ));
+        self.caps_table = Some(caps_table);
+        self.groups_table = Some(groups_table);
     }
 
     /// Takes the Security payload. The same `Arc` again does nothing; while exited the values
@@ -727,6 +1679,18 @@ impl SecurityTab {
         }
         self.columns = build(&self.sec_words, detail.as_deref());
         self.apply_filter();
+        if let Some(table) = &self.caps_table {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().set_detail(detail.as_deref());
+                table.on_new_version(cx);
+            });
+        }
+        if let Some(table) = &self.groups_table {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().set_detail(detail.as_deref());
+                table.on_new_version(cx);
+            });
+        }
         cx.notify();
     }
 
@@ -813,6 +1777,21 @@ impl SecurityTab {
             let len = self.visible[col].len();
             (len > 0).then(|| (col, row.min(len - 1)))
         });
+    }
+
+    fn apply_table_filter(&mut self, cx: &mut Context<Self>) {
+        if let Some(table) = &self.caps_table {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().set_filter(self.needle.clone());
+                table.on_new_version(cx);
+            });
+        }
+        if let Some(table) = &self.groups_table {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().set_filter(self.needle.clone());
+                table.on_new_version(cx);
+            });
+        }
     }
 
     // ---- Cursor ----
@@ -1018,6 +1997,127 @@ impl SecurityTab {
         self.label_widths = Some((m.style_version, widths));
         widths
     }
+
+    fn focused_table(&self, window: &Window, cx: &App) -> Option<bool> {
+        if self
+            .caps_table
+            .as_ref()
+            .is_some_and(|t| t.read(cx).focus_handle().contains_focused(window, cx))
+        {
+            Some(true)
+        } else if self
+            .groups_table
+            .as_ref()
+            .is_some_and(|t| t.read(cx).focus_handle().contains_focused(window, cx))
+        {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    fn selected_rows_tsv(&self, caps: bool, cx: &App) -> String {
+        if caps {
+            let Some(table) = &self.caps_table else {
+                return String::new();
+            };
+            let table = table.read(cx);
+            let d = &table.delegate;
+            let mut rows: Vec<(usize, u8)> = table
+                .selection
+                .ids()
+                .filter_map(|id| d.row_index(id).map(|ix| (ix, id)))
+                .collect();
+            rows.sort_unstable();
+            rows.into_iter()
+                .filter_map(|(_, id)| d.row_tsv(id))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            let Some(table) = &self.groups_table else {
+                return String::new();
+            };
+            let table = table.read(cx);
+            let d = &table.delegate;
+            let mut rows: Vec<(usize, u32)> = table
+                .selection
+                .ids()
+                .filter_map(|id| d.row_index(id).map(|ix| (ix, id)))
+                .collect();
+            rows.sort_unstable();
+            rows.into_iter()
+                .filter_map(|(_, id)| d.row_tsv(id))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+
+    fn on_copy_table_rows(&mut self, _: &CopyRow, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(caps) = self.focused_table(window, cx) else {
+            return;
+        };
+        let text = self.selected_rows_tsv(caps, cx);
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.toast_copied(window, cx);
+    }
+
+    fn on_copy_table_cell(
+        &mut self,
+        _: &SecurityCopyCell,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = match self.focused_table(window, cx) {
+            Some(true) => self.caps_table.as_ref().and_then(|table| {
+                let d = &table.read(cx).delegate;
+                d.menu_cell.and_then(|(id, col)| d.cell_text(id, col, true))
+            }),
+            Some(false) => self.groups_table.as_ref().and_then(|table| {
+                let d = &table.read(cx).delegate;
+                d.menu_cell.and_then(|(id, col)| d.cell_text(id, col))
+            }),
+            None => None,
+        };
+        let Some(text) = text else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.toast_copied(window, cx);
+    }
+
+    fn toast_copied(&self, window: &mut Window, cx: &mut App) {
+        window_toast(
+            window,
+            cx,
+            ToastKind::Success,
+            self.sec_words.copied.clone(),
+        );
+    }
+
+    fn table_title(&self, caps: bool, cx: &App) -> String {
+        let count = if caps {
+            self.caps_table
+                .as_ref()
+                .map_or(0, |t| t.read(cx).delegate.row_count())
+        } else {
+            self.groups_table
+                .as_ref()
+                .map_or(0, |t| t.read(cx).delegate.row_count())
+        };
+        let mut n = String::new();
+        units::count(&mut n, count as u64);
+        let mut out = String::new();
+        let template = if caps {
+            &self.sec_words.cap_title
+        } else {
+            &self.sec_words.group_title
+        };
+        let _ = template.write(&mut out, &[&n]);
+        out
+    }
 }
 
 /// A toast in `window`'s own stack.
@@ -1030,7 +2130,9 @@ fn window_toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: Shared
 
 impl Render for SecurityTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.init_tables(window, cx);
         let m = *metrics(cx);
+        let theme = current(cx).clone();
         let widths = self.label_widths(&m, window, cx);
         let row_height = px(ROW_HEIGHT * m.ui_scale);
         let focused = self.focus.contains_focused(window, cx);
@@ -1098,11 +2200,50 @@ impl Render for SecurityTab {
             .px(m.sp[5])
             .pt(m.sp[4])
             .child(h_flex().w_full().items_start().gap(m.sp[4]).children(grids));
-        // E23-022 adds the Capabilities (60%) and Groups (40%) sections under the summary.
+        let caps_title = self.table_title(true, cx);
+        let groups_title = self.table_title(false, cx);
+        let section_header = |title: String| {
+            let mut label = div();
+            *label.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
+            label
+                .h(px(SECTION_HEADER_HEIGHT * m.ui_scale))
+                .flex_none()
+                .flex()
+                .items_center()
+                .pl(m.sp[5])
+                .bg(theme.row_hover)
+                .text_color(theme.text_secondary)
+                .child(title)
+        };
+        let caps = v_flex()
+            .debug_selector(|| "SecurityCapabilities".into())
+            .h(relative(0.6))
+            .min_h_0()
+            .child(section_header(caps_title))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.caps_table.as_ref().expect("initialized").clone()),
+            );
+        let groups = v_flex()
+            .debug_selector(|| "SecurityGroups".into())
+            .flex_1()
+            .min_h_0()
+            .child(section_header(groups_title))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.groups_table.as_ref().expect("initialized").clone()),
+            );
         v_flex()
             .debug_selector(|| "PropsSecurity".into())
             .size_full()
+            .on_action(cx.listener(Self::on_copy_table_rows))
+            .on_action(cx.listener(Self::on_copy_table_cell))
             .child(summary)
+            .child(v_flex().flex_1().min_h_0().child(caps).child(groups))
     }
 }
 
