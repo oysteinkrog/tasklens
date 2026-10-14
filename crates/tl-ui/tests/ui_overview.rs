@@ -2281,8 +2281,8 @@ mod wired {
         r.vcx.debug_bounds(id).expect(id).center()
     }
 
-    /// crw.44: the page measures its size during the first frame and lays out after it, so the
-    /// frames that follow a select show all five boxes with nothing else notifying the page.
+    /// crw.44, wlf.37: the page measures its size during the first frame and lays out after it.
+    /// Its uncached traversal can continue, but all five cached boxes are settled after select.
     #[gpui_kit::test]
     fn overview_first_frame_after_select_shows_all_boxes(cx: &mut TestAppContext) {
         let mut r = open_with(cx, true);
@@ -2290,11 +2290,9 @@ mod wired {
         for id in [CPU_BOX_ID, MEM_BOX_ID, GPU_BOX_ID, DISK_BOX_ID, NET_BOX_ID] {
             assert!(r.vcx.debug_bounds(id).is_some(), "{id} drawn");
         }
-        let page = overview(&mut r).expect("an OverviewPage");
-        let renders = r.vcx.read_entity(&page, |p, _| p.render_count.get());
-        // The empty measuring render, the boxes, and at most one more when a box's width
-        // probe picks its wide or narrow layout after its first frame.
-        assert!((2..=3).contains(&renders), "page renders {renders}");
+        let before = overview_render_counts(&mut r);
+        draw(r.vcx);
+        assert_eq!(overview_render_counts(&mut r), before, "box caches settled");
     }
 
     /// wlf.37: the real main-window nesting leaves Overview's box and chart caches independent.
@@ -2502,7 +2500,6 @@ mod wired {
             r.vcx.update(|_, cx| {
                 let p = page.read(cx);
                 [
-                    p.render_count.get(),
                     p.cpu_box().read(cx).render_count.get(),
                     p.mem_box().read(cx).render_count.get(),
                     p.gpu_box().read(cx).render_count.get(),
