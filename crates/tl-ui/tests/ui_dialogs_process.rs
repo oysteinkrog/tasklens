@@ -1727,16 +1727,18 @@ mod signal {
 
         fn confirmation(&mut self) -> (VisualTestContext, Entity<TlDialogView>) {
             let parent = self.parent.window_id();
-            let any: AnyWindowHandle = self
+            let (any, frame): (AnyWindowHandle, _) = self
                 .cx
-                .update(|cx| cx.windows())
-                .into_iter()
-                .find(|window| window.window_id() != parent)
-                .expect("confirmation window");
-            let handle = any.downcast::<Root>().expect("root window");
-            let frame = self
-                .cx
-                .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+                .update(|cx| {
+                    cx.windows().into_iter().find_map(|window| {
+                        if window.window_id() == parent {
+                            return None;
+                        }
+                        let handle = window.downcast::<Root>()?;
+                        let frame = TlSecondaryWindow::<TlDialogView>::find(handle, cx)?;
+                        Some((window, frame))
+                    })
+                })
                 .expect("confirmation frame");
             let view = self.cx.read(|cx| frame.read(cx).content().clone());
             let mut vcx = VisualTestContext::from_window(any, &self.cx);
