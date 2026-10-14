@@ -371,7 +371,7 @@ impl AppGeneralTab {
         self.usage
             .first()
             .and_then(|s| s.blocks.first())
-            .and_then(|b| b.rows.get(2))
+            .and_then(|b| b.rows.iter().find(|row| row.label == self.words.labels[8]))
             .map_or_else(SharedString::default, |r| r.value.text.clone())
     }
 
