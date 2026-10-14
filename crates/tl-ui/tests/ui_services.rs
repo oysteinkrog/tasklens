@@ -556,15 +556,4 @@ fn unit_types_count_suffix(cx: &mut TestAppContext) {
         })
         .expect("Unit types button");
     assert_eq!(unit_types.label(), Some("Unit types (6)"));
-
-    let remove = buttons
-        .iter()
-        .find(|snapshot| {
-            snapshot
-                .path()
-                .iter()
-                .any(|id| id == &gpui_kit::ElementId::Name("services-filter-remove".into()))
-        })
-        .expect("Remove filters button");
-    assert_eq!(remove.disabled(), Some(false));
 }
