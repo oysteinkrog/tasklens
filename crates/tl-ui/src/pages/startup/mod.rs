@@ -178,6 +178,11 @@ impl StartupPage {
         self.menu_targets = Some(targets);
     }
 
+    /// Forgets the stored menu snapshot.
+    pub(super) fn clear_menu_targets(&mut self) {
+        self.menu_targets = None;
+    }
+
     /// Captures the selection at command time. Menu actions call [`Self::take_targets`] first.
     pub(super) fn capture_targets(&self, cx: &App) -> StartupMenuTargets {
         let table = self.frame.table.read(cx);

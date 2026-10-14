@@ -1005,6 +1005,21 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn startup_menu_close_drops_captured_targets(cx: &mut TestAppContext) {
+        let a = super::entry("a", StartupKind::AutostartUser);
+        let mut rig = menu_rig(cx, vec![a]);
+        let ids = rig.row_ids(1);
+        let _menu = rig.build_menu(&ids, Some(SysColumnId::Startup(StartupColumn::Name)));
+        let table = rig.table();
+        rig.vcx
+            .update(|_, cx| table.update(cx, |table, cx| table.delegate.on_menu_closed(cx)));
+        let refs = rig
+            .vcx
+            .update(|_, cx| rig.page.read(cx).menu_target_refs_for_test().to_vec());
+        assert!(refs.is_empty());
+    }
+
+    #[gpui_kit::test]
     fn startup_menu_keyboard_hides_copy_cell(cx: &mut TestAppContext) {
         let mut rig = menu_rig(cx, vec![super::entry("a", StartupKind::AutostartUser)]);
         let ids = rig.row_ids(1);

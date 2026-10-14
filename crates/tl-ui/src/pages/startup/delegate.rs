@@ -721,6 +721,14 @@ impl TreeTableDelegate for StartupDelegate {
         row_menu(menu, &captured, window, cx)
     }
 
+    /// Drops the snapshot taken when the menu opened, so a dismissed menu cannot feed a later
+    /// keyboard command.
+    fn on_menu_closed(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
+        if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
+            page.update(cx, |page, _| page.clear_menu_targets());
+        }
+    }
+
     fn on_toggle_expand(&mut self, _: u64, _: &mut Context<TlTreeTable<Self>>) {}
 
     /// A second click on the sort column flips the direction; another column sorts ascending.
