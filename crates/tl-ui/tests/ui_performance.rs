@@ -2478,6 +2478,7 @@ mod summary {
     /// crw.2: the P1 sidebar actions work together in one app and persist only durable state.
     #[gpui_kit::test]
     fn sidebar_p1_flow(cx: &mut TestAppContext) {
+        use tl_ui::components::menu::close_context_menu;
         use tl_ui::pages::performance::actions::{
             PerfOpenCardMenu, PerfSetGraphRange, PerfToggleSidebar,
         };
@@ -2497,6 +2498,7 @@ mod summary {
                 .and_then(|entry| entry.action)
                 .expect("Hide This Page has an action")
         });
+        r.vcx.update(close_context_menu);
         r.vcx.update(|window, cx| window.dispatch_action(hide, cx));
         draw(r.vcx);
         assert_eq!(
