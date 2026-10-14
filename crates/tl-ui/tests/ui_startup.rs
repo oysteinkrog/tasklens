@@ -849,6 +849,7 @@ mod page {
             },
         );
         rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
+        rig.vcx.run_until_parked();
         rig.vcx.executor().advance_clock(Duration::from_millis(500));
         rig.publish(
             &["Discord"],
@@ -867,7 +868,10 @@ mod page {
         rig.vcx.executor().advance_clock(Duration::from_secs(10));
         rig.vcx.run_until_parked();
         rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
-        rig.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
+        rig.vcx.run_until_parked();
+        rig.vcx
+            .executor()
+            .advance_clock(REFRESH_TOAST_AFTER + Duration::from_millis(1));
         rig.vcx.run_until_parked();
         assert_eq!(rig.refresh_toasts(), 1, "fallback toast at two seconds");
     }
@@ -956,6 +960,14 @@ mod page {
 
         rig.double_click(point(frame.center().x, frame.origin.y + px(14.)));
         assert_eq!(rig.opened.get(), 1, "header with selection double-click");
+
+        rig.vcx.simulate_event(MouseMoveEvent {
+            position: point(frame.center().x, frame.origin.y + px(28. + 42.)),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        rig.double_click_press(point(frame.center().x, frame.origin.y + px(28. + 42.)));
+        assert_eq!(rig.opened.get(), 1, "unselected row double-click");
 
         rig.double_click(point(frame.center().x, frame.origin.y + px(28. + 80.)));
         assert_eq!(rig.opened.get(), 1, "empty body double-click");

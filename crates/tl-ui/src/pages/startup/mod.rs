@@ -249,19 +249,17 @@ impl Render for StartupPage {
         let table = self.frame.table.clone();
         div()
             .size_full()
-            // The table stops row mouse events. StartupDelegate propagates only activation,
-            // which lets a selected row's double-click take the same OpenProperties route as
-            // Enter. Header and empty-body handlers stop their mouse events at the table.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |_, ev: &MouseDownEvent, window, cx| {
-                    let table = table.read(cx);
-                    let row_activated = table.selection.ids().next().is_some();
-                    if ev.click_count == 2 && row_activated {
-                        window.dispatch_action(Box::new(OpenProperties), cx);
-                    }
-                }),
-            )
+            // Capture before the table stops the row event. The first click selects the row;
+            // the second opens Properties only when it is still over that selected row.
+            .capture_any_mouse_down(cx.listener(move |_, ev: &MouseDownEvent, window, cx| {
+                let table = table.read(cx);
+                let row_activated = table
+                    .hover_row()
+                    .is_some_and(|index| table.selection.contains(&table.delegate.row_id(index)));
+                if ev.button == MouseButton::Left && ev.click_count == 2 && row_activated {
+                    window.dispatch_action(Box::new(OpenProperties), cx);
+                }
+            }))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }
