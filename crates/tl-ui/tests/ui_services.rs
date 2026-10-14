@@ -40,13 +40,6 @@ fn service_id(column: ServiceColumn) -> SysColumnId {
     SysColumnId::Services(column)
 }
 
-fn delegate_table(
-    cx: &mut TestAppContext,
-    state: UiState,
-) -> Entity<TlTreeTable<ServicesDelegate>> {
-    delegate_table_with_engine(cx, state).0
-}
-
 fn delegate_table_with_engine(
     cx: &mut TestAppContext,
     state: UiState,
