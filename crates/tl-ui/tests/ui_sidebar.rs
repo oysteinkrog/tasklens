@@ -392,11 +392,22 @@ mod sidebar {
     const GPU: &str = "gpu:pci:0000:2d:00.0";
     const CPU_MODEL: &str = "AMD Ryzen 7 7800X3D 8-Core Processor";
 
-    struct SidebarHost(Entity<DeviceSidebar>);
+    struct SidebarHost {
+        sidebar: Entity<DeviceSidebar>,
+        global_escapes: Rc<RefCell<u32>>,
+    }
 
     impl Render for SidebarHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().w(px(260.)).h(px(900.)).child(self.0.clone())
+            let global_escapes = Rc::clone(&self.global_escapes);
+            div()
+                .key_context(tl_ui::actions::GLOBAL_CONTEXT)
+                .on_action(move |_: &tl_ui::actions::EscapeChain, _, _| {
+                    *global_escapes.borrow_mut() += 1
+                })
+                .w(px(260.))
+                .h(px(900.))
+                .child(self.sidebar.clone())
         }
     }
 
@@ -408,6 +419,7 @@ mod sidebar {
         events: Rc<RefCell<Vec<SidebarEvent>>>,
         /// The window's toast queue, when the rig has a kit `Root`.
         toasts: Option<Entity<ToastQueue>>,
+        global_escapes: Rc<RefCell<u32>>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -533,17 +545,25 @@ mod sidebar {
             .detach();
         });
         let host = sidebar.clone();
+        let global_escapes = Rc::new(RefCell::new(0));
+        let host_escapes = Rc::clone(&global_escapes);
         let (vcx, toasts) = if rooted {
             cx.update(tl_ui::components::toast::init);
             let window = cx.add_window(move |window, cx| {
-                let host = cx.new(|_| SidebarHost(host));
+                let host = cx.new(|_| SidebarHost {
+                    sidebar: host,
+                    global_escapes: host_escapes,
+                });
                 gpui_kit::base::Root::new(host, window, cx)
             });
             let vcx = VisualTestContext::from_window(window.into(), cx).into_mut();
             let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.))));
             (vcx, Some(queue))
         } else {
-            let (_, vcx) = cx.add_window_view(move |_, _| SidebarHost(host));
+            let (_, vcx) = cx.add_window_view(move |_, _| SidebarHost {
+                sidebar: host,
+                global_escapes: host_escapes,
+            });
             (vcx, None)
         };
         vcx.simulate_scale_factor_change(1.0);
@@ -557,6 +577,7 @@ mod sidebar {
             engine,
             events,
             toasts,
+            global_escapes,
             vcx,
         }
     }
@@ -1329,7 +1350,8 @@ mod sidebar {
     use tl_model::settings::DeviceVisibility;
     use tl_ui::components::menu::{MenuEntryKind, TlMenu, open_context_menu};
     use tl_ui::pages::performance::actions::{
-        PerfAddTrayGraph, PerfEnterEditMode, PerfSetPageVisible, bind_keys_performance,
+        PerfAddTrayGraph, PerfDisableAllPages, PerfEnableAllPages, PerfEnterEditMode,
+        PerfResetPagesToDefault, PerfSetPageVisible, bind_keys_performance,
     };
     use tl_ui::pages::performance::menu::card_menu;
 
@@ -1425,6 +1447,188 @@ mod sidebar {
             .device_overrides
             .insert(OVERVIEW.to_owned(), DeviceVisibility::Show);
         s
+    }
+
+    fn edit_fixture() -> Vec<DeviceEntry> {
+        vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+            disk(2, "sda"),
+            disk(3, "sdb"),
+            net(4, "eth0"),
+            net(5, "eth1"),
+        ]
+    }
+
+    fn enter_edit(r: &mut Rig) {
+        r.vcx.dispatch_action(PerfEnterEditMode);
+        draw(r.vcx);
+        let sidebar = r.sidebar.clone();
+        assert!(r.vcx.update(|_, cx| sidebar.read(cx).edit_mode()));
+    }
+
+    #[gpui_kit::test]
+    fn edit_mode_groups_and_empty_states(cx: &mut TestAppContext) {
+        let mut r = open(cx, edit_fixture(), Settings::default(), UiState::default());
+        enter_edit(&mut r);
+        let mut previous = px(0.);
+        let selectors = [
+            "perf-edit-group-0",
+            "perf-edit-group-1",
+            "perf-edit-group-2",
+            "perf-edit-group-3",
+            "perf-edit-group-4",
+            "perf-edit-group-5",
+            "perf-edit-group-6",
+        ];
+        for (group, selector) in selectors.into_iter().enumerate() {
+            let bounds = r.vcx.debug_bounds(selector).expect("group header");
+            assert!(bounds.top() >= previous, "group {group} is ordered");
+            previous = bounds.top();
+        }
+        assert!(r.vcx.debug_bounds("perf-edit-group-7").is_none());
+        assert!(r.vcx.debug_bounds("perf-edit-empty-3").is_some());
+        assert!(r.vcx.debug_bounds("perf-edit-empty-5").is_some());
+        assert!(r.vcx.debug_bounds("perf-edit-empty-6").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn edit_mode_hidden_card_switch_off(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings
+            .performance
+            .device_overrides
+            .insert("disk:sdb".into(), DeviceVisibility::Hide);
+        let mut r = open(cx, edit_fixture(), settings, UiState::default());
+        enter_edit(&mut r);
+        let sidebar = r.sidebar.clone();
+        let rows = r.vcx.update(|_, cx| sidebar.read(cx).edit_rows_for_test());
+        let disk = rows
+            .iter()
+            .find(|(key, _, _)| &*key.0 == "disk:sdb")
+            .expect("hidden disk remains in edit mode");
+        assert!(!disk.2, "the switch is rendered unchecked");
+        let opacity = r.vcx.update(|_, cx| {
+            sidebar
+                .read(cx)
+                .edit_card_opacity_for_test(&key("disk:sdb"))
+                .expect("edit card")
+        });
+        assert_eq!(opacity, 0.6);
+        assert!(r.vcx.debug_bounds("perf-edit-row-disk:sdb").is_some());
+        let card = r.vcx.debug_bounds("perf-card").expect("edit card");
+        assert_eq!(card.size.height, px(80.));
+    }
+
+    #[gpui_kit::test]
+    fn disable_all_keeps_selected_and_toasts_once(cx: &mut TestAppContext) {
+        let mut r = open_in(
+            cx,
+            edit_fixture(),
+            Settings::default(),
+            saved("memory"),
+            true,
+        );
+        enter_edit(&mut r);
+        r.vcx.dispatch_action(PerfDisableAllPages);
+        draw(r.vcx);
+        assert_eq!(selected(&mut r).as_deref(), Some("memory"));
+        assert_eq!(
+            overrides(&mut r),
+            [
+                ("cpu".into(), DeviceVisibility::Hide),
+                ("disk:sda".into(), DeviceVisibility::Hide),
+                ("disk:sdb".into(), DeviceVisibility::Hide),
+                ("net:eth0".into(), DeviceVisibility::Hide),
+                ("net:eth1".into(), DeviceVisibility::Hide),
+            ]
+        );
+        let queue = r.toasts.clone().expect("toast queue");
+        let shown = r.vcx.update(|_, cx| queue.read(cx).visible_texts());
+        assert_eq!(shown, ["At least one performance page must stay visible"]);
+    }
+
+    #[gpui_kit::test]
+    fn enable_all_writes_show_for_off_defaults(cx: &mut TestAppContext) {
+        let mut devices = edit_fixture();
+        devices.push(entry(
+            6,
+            DeviceIdentity::Net {
+                netns_ino: 1,
+                ifindex: 6,
+                name: Arc::from("veth0"),
+            },
+            Some(NetKind::Virtual),
+        ));
+        let mut settings = Settings::default();
+        settings.performance.show_network_virtual = false;
+        settings
+            .performance
+            .device_overrides
+            .insert("disk:sda".into(), DeviceVisibility::Hide);
+        let mut r = open(cx, devices, settings, UiState::default());
+        enter_edit(&mut r);
+        r.vcx.dispatch_action(PerfEnableAllPages);
+        draw(r.vcx);
+        let values = overrides(&mut r);
+        assert!(
+            values.contains(&("net:veth0".into(), DeviceVisibility::Show)),
+            "an off-by-default virtual interface gets Show"
+        );
+        assert!(
+            values
+                .iter()
+                .all(|(_, value)| *value != DeviceVisibility::Hide),
+            "all Hide overrides are gone"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn reset_clears_order_and_overrides(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.performance.device_order = vec!["disk:sdb".into(), "cpu".into()];
+        settings
+            .performance
+            .device_overrides
+            .insert("disk:sda".into(), DeviceVisibility::Hide);
+        let mut r = open(cx, edit_fixture(), settings, UiState::default());
+        enter_edit(&mut r);
+        r.vcx.dispatch_action(PerfResetPagesToDefault);
+        draw(r.vcx);
+        let (order, overrides) = r.vcx.update(|_, cx| {
+            let settings = &TlSettings::settings(cx).performance;
+            (
+                settings.device_order.clone(),
+                settings.device_overrides.clone(),
+            )
+        });
+        assert!(order.is_empty());
+        assert!(overrides.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn edit_mode_esc_exits_before_global_chain(cx: &mut TestAppContext) {
+        let mut r = open(cx, edit_fixture(), Settings::default(), UiState::default());
+        r.vcx.update(|_, cx| {
+            tl_ui::actions::bind_keys_global(cx);
+            bind_keys_performance(cx);
+        });
+        enter_edit(&mut r);
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        let sidebar = r.sidebar.clone();
+        assert!(!r.vcx.update(|_, cx| sidebar.read(cx).edit_mode()));
+        assert_eq!(*r.global_escapes.borrow(), 0, "global Esc did not run");
+    }
+
+    #[gpui_kit::test]
+    fn edit_mode_header_instant_under_reduced_motion(cx: &mut TestAppContext) {
+        let r = open(cx, edit_fixture(), Settings::default(), UiState::default());
+        r.vcx.update(|_, cx| cx.set_reduce_motion(true));
+        r.vcx.dispatch_action(PerfEnterEditMode);
+        draw(r.vcx);
+        let header = r.vcx.debug_bounds("perf-edit-header").expect("edit header");
+        assert_eq!(header.size.height, px(64.));
     }
 
     #[gpui_kit::test]

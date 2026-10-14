@@ -21,14 +21,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::v_flex;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity,
-    EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, WeakEntity,
-    Window, canvas, div, px, white,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
+    Context, ElementId, Entity, EntityId, EventEmitter, FocusHandle, Focusable, FontWeight,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Point, Render, ScrollHandle, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+    Subscription, WeakEntity, Window, canvas, div, px, white,
 };
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -39,13 +42,14 @@ use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
 use super::actions::{
-    PERFORMANCE_CONTEXT, PerfOpenCardMenu, PerfSelectDevice, PerfSelectFirstDevice,
-    PerfSelectLastDevice, PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice,
-    PerfSetPageVisible,
+    PERFORMANCE_CONTEXT, PERFORMANCE_EDIT_CONTEXT, PerfDisableAllPages, PerfEnableAllPages,
+    PerfEnterEditMode, PerfExitEditMode, PerfOpenCardMenu, PerfResetPagesToDefault,
+    PerfSelectDevice, PerfSelectFirstDevice, PerfSelectLastDevice, PerfSelectNextDevice,
+    PerfSelectPrevDevice, PerfSelectVisibleDevice, PerfSetPageVisible,
 };
 use super::card::{
-    CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, card_chart_grid,
-    card_chart_labels, card_words, update_card_lines,
+    CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, DeviceCard,
+    card_chart_grid, card_chart_labels, card_words, update_card_lines,
 };
 use super::menu::card_menu;
 use super::{
@@ -53,8 +57,11 @@ use super::{
     sidebar_order, type_number, visible_rows,
 };
 use crate::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::motion::{M_BASE, ease_out_cubic};
+use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
+use crate::components::switch::TlSwitch;
 use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
@@ -86,11 +93,65 @@ fn retain_whole_disks(rows: &mut Vec<DeviceRow>, catalog: &tl_model::devices::De
     });
 }
 
+/// Edit-mode group. Overview shares Processor because it is derived from the CPU package and the
+/// edit-mode specification has no separate Overview group.
+fn edit_group(kind: DeviceKind) -> usize {
+    match kind {
+        DeviceKind::Overview | DeviceKind::Cpu => 0,
+        DeviceKind::Memory => 1,
+        DeviceKind::Disk => 2,
+        DeviceKind::Gpu => 3,
+        DeviceKind::Net => 4,
+        DeviceKind::Fan => 5,
+        DeviceKind::Battery => 6,
+        DeviceKind::AggregateDisk | DeviceKind::AggregateGpu => 7,
+    }
+}
+
 /// Element id of the scrolling card list.
 pub const LIST_ID: &str = "perf-sidebar-list";
 
 /// The "At least one performance page must stay visible" toast, one at a time (R-232).
 pub const LAST_PAGE_TOAST: ToastKey = ToastKey(FIXED_KEY_BASE | 0x0401);
+
+struct EditWords {
+    groups: [gpui_kit::SharedString; 8],
+    empty: [gpui_kit::SharedString; 5],
+    title: gpui_kit::SharedString,
+    enable_all: gpui_kit::SharedString,
+    disable_all: gpui_kit::SharedString,
+    reset: gpui_kit::SharedString,
+    done: gpui_kit::SharedString,
+    tip: gpui_kit::SharedString,
+}
+
+fn edit_words(cx: &App) -> Rc<EditWords> {
+    Rc::new(EditWords {
+        groups: [
+            tr(cx, "perf-group-processor"),
+            tr(cx, "perf-group-memory"),
+            tr(cx, "perf-group-disks"),
+            tr(cx, "perf-group-gpus"),
+            tr(cx, "perf-group-nets"),
+            tr(cx, "perf-group-fans"),
+            tr(cx, "perf-group-batteries"),
+            tr(cx, "perf-group-aggregate"),
+        ],
+        empty: [
+            tr(cx, "perf-empty-disk"),
+            tr(cx, "perf-empty-gpu"),
+            tr(cx, "perf-empty-net"),
+            tr(cx, "perf-empty-fan"),
+            tr(cx, "perf-empty-battery"),
+        ],
+        title: tr(cx, "perf-edit-title"),
+        enable_all: tr(cx, "perf-edit-enable-all"),
+        disable_all: tr(cx, "perf-edit-disable-all"),
+        reset: tr(cx, "perf-edit-reset"),
+        done: tr(cx, "perf-edit-done"),
+        tip: tr(cx, "perf-tip-edit"),
+    })
+}
 
 /// The snapshot components the card text reads.
 const TEXT_MASK: ComponentMask = ComponentMask(
@@ -411,6 +472,13 @@ pub struct DeviceSidebar {
     pub(crate) scroll: ScrollHandle,
     /// E24-013.
     pub(crate) edit_mode: bool,
+    /// The row that owns keyboard focus in edit mode. E24-014 uses it for reordering.
+    pub(crate) edit_focus_row: Option<DeviceKey>,
+    /// Every row gets a card while edit mode is mounted, including hidden rows.
+    edit_cards: Vec<CardState>,
+    /// Keeps the edit surface mounted while its leave animation runs.
+    edit_leaving: bool,
+    edit_generation: u64,
     pub(crate) hub: Entity<SnapshotHub>,
     pub(crate) demand: Entity<DemandAggregator>,
     id: EntityId,
@@ -429,9 +497,11 @@ pub struct DeviceSidebar {
     scratch: String,
     /// The card words for the current strings version.
     words: Rc<CardWords>,
+    edit_words: Rc<EditWords>,
     _subs: SmallVec<[Subscription; 4]>,
     /// Focus in and out of the list redraw the focus ring. Set on the first render.
     focus_subs: Option<[Subscription; 2]>,
+    cards_focused: bool,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
@@ -469,6 +539,10 @@ impl DeviceSidebar {
             focus: cx.focus_handle().tab_stop(true),
             scroll: ScrollHandle::new(),
             edit_mode: false,
+            edit_focus_row: None,
+            edit_cards: Vec::new(),
+            edit_leaving: false,
+            edit_generation: 0,
             hub,
             demand,
             id,
@@ -481,8 +555,10 @@ impl DeviceSidebar {
             card_width: Rc::new(Cell::new(card_width)),
             scratch: String::new(),
             words: card_words(cx),
+            edit_words: edit_words(cx),
             _subs: subs,
             focus_subs: None,
+            cards_focused: false,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
@@ -552,6 +628,39 @@ impl DeviceSidebar {
 
     pub fn edit_mode(&self) -> bool {
         self.edit_mode
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn edit_rows_for_test(&self) -> Vec<(DeviceKey, DeviceKind, bool)> {
+        self.edit_cards
+            .iter()
+            .map(|card| {
+                (
+                    card.row.key.clone(),
+                    card.row.kind,
+                    is_visible(&card.row, &self.settings.view()),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn edit_card_opacity_for_test(&self, key: &DeviceKey) -> Option<f32> {
+        let card = self.edit_cards.iter().find(|card| card.row.key == *key)?;
+        let visible = is_visible(&card.row, &self.settings.view());
+        Some(
+            DeviceCard {
+                key: card.row.key.clone(),
+                chart: card.chart.clone(),
+                lines: card.lines.clone(),
+                selected: self.selected.as_ref() == Some(key),
+                focused: false,
+                edit_mode: true,
+                hidden_in_edit: !visible,
+                width: px(0.),
+            }
+            .opacity(),
+        )
     }
 
     /// This surface's demand part: CPU total and memory always, and each device class that has
@@ -885,9 +994,13 @@ impl DeviceSidebar {
         {
             self.catalog_version = snap.devices.version;
             changed |= self.sync_rows(&snap, cx);
+            if self.edit_mode || self.edit_leaving {
+                self.rebuild_edit_cards(&snap, cx);
+            }
         }
         self.sync_charts(&snap, false, cx);
         self.refresh_lines(&snap, cx);
+        self.refresh_edit_lines(&snap);
         if changed {
             cx.notify();
         }
@@ -906,9 +1019,12 @@ impl DeviceSidebar {
         }
         self.settings = new;
         let snap = Arc::clone(self.hub.read(cx).current());
-        let mut changed = self.sync_rows(&snap, cx);
+        let changed = self.sync_rows(&snap, cx);
         self.sync_charts(&snap, true, cx);
         self.refresh_lines(&snap, cx);
+        if self.edit_mode || self.edit_leaving {
+            self.rebuild_edit_cards(&snap, cx);
+        }
         if changed {
             cx.notify();
         }
@@ -923,6 +1039,16 @@ impl DeviceSidebar {
         self.style_version = version;
         let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_charts(&snap, true, cx);
+        let theme = current(cx).clone();
+        for card in &mut self.edit_cards {
+            let scale = scale_input(&card.row, &snap, &self.settings);
+            card.scale = scale;
+            let (spec, fmt) = card_spec(&card.row, scale, &self.settings, &theme);
+            card.chart.update(cx, |v, cx| {
+                v.set_spec(spec, cx);
+                v.set_labels(card_chart_labels(fmt), cx);
+            });
+        }
         for card in &self.cards {
             card.view.update(cx, CardView::invalidate_style);
         }
@@ -936,8 +1062,10 @@ impl DeviceSidebar {
             return;
         }
         self.words = words;
+        self.edit_words = edit_words(cx);
         let snap = Arc::clone(self.hub.read(cx).current());
         self.refresh_lines(&snap, cx);
+        self.refresh_edit_lines(&snap);
     }
 
     /// Whether `key`'s page shows when no override is set: its type's setting (PERF-002).
@@ -948,6 +1076,167 @@ impl DeviceSidebar {
             ..self.settings.view()
         };
         is_visible(row, &view)
+    }
+
+    /// Rebuilds the short-lived edit cards from every present row. Edit mode has at most 15
+    /// rows, so rebuilding on a device or visibility setting change is cheaper and clearer than
+    /// maintaining a second hotplug state machine.
+    fn rebuild_edit_cards(&mut self, snap: &Snapshot, cx: &mut App) {
+        let rows = self.rows.clone();
+        self.edit_cards = rows
+            .iter()
+            .map(|row| {
+                self.new_card(
+                    row,
+                    type_number(&rows, &row.key),
+                    CardAnim::Steady,
+                    snap,
+                    cx,
+                )
+            })
+            .collect();
+        self.refresh_edit_lines(snap);
+    }
+
+    fn refresh_edit_lines(&mut self, snap: &Snapshot) {
+        for card in &mut self.edit_cards {
+            let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == card.row.idx) else {
+                continue;
+            };
+            let input = CardTextInput {
+                words: &self.words,
+                kind: card.row.kind,
+                number: card.number,
+                entry,
+                snap,
+                network_unit: self.settings.network_unit,
+                auto_scale: self.settings.network_auto_scale,
+                fan_label: self.settings.fan_labels.get(&card.row.key).map(|l| &**l),
+                fan_temp: None,
+            };
+            update_card_lines(&mut card.lines, &input, &mut self.scratch);
+        }
+    }
+
+    fn enter_edit_mode(&mut self, cx: &mut Context<Self>) {
+        if self.edit_mode {
+            return;
+        }
+        self.edit_generation += 1;
+        self.edit_mode = true;
+        self.edit_leaving = false;
+        self.edit_focus_row = self.selected.clone();
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.rebuild_edit_cards(&snap, cx);
+        cx.notify();
+    }
+
+    fn leave_edit_mode(&mut self, cx: &mut Context<Self>) {
+        if !self.edit_mode {
+            return;
+        }
+        self.edit_generation += 1;
+        self.edit_mode = false;
+        self.edit_focus_row = None;
+        if !animations_on(cx) {
+            self.edit_leaving = false;
+            self.edit_cards.clear();
+            cx.notify();
+            return;
+        }
+        self.edit_leaving = true;
+        let generation = self.edit_generation;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(M_BASE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.edit_leaving && this.edit_generation == generation {
+                    this.edit_leaving = false;
+                    this.edit_cards.clear();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn on_enter_edit(&mut self, _: &PerfEnterEditMode, _: &mut Window, cx: &mut Context<Self>) {
+        self.enter_edit_mode(cx);
+    }
+
+    fn on_exit_edit(&mut self, _: &PerfExitEditMode, _: &mut Window, cx: &mut Context<Self>) {
+        self.leave_edit_mode(cx);
+    }
+
+    fn on_enable_all(&mut self, _: &PerfEnableAllPages, _: &mut Window, cx: &mut Context<Self>) {
+        let values: Vec<_> = self
+            .rows
+            .iter()
+            .map(|row| (row.key.0.to_string(), self.type_default(row)))
+            .collect();
+        TlSettings::update(cx, |d| {
+            let overrides = &mut d.settings.performance.device_overrides;
+            overrides.retain(|_, value| *value != DeviceVisibility::Hide);
+            for (key, default_on) in values {
+                if default_on {
+                    overrides.remove(&key);
+                } else {
+                    overrides.insert(key, DeviceVisibility::Show);
+                }
+            }
+        });
+    }
+
+    fn on_disable_all(
+        &mut self,
+        _: &PerfDisableAllPages,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self.selected.clone();
+        let values: Vec<_> = self
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.key.clone(),
+                    row.key.0.to_string(),
+                    self.type_default(row),
+                )
+            })
+            .collect();
+        TlSettings::update(cx, |d| {
+            let overrides = &mut d.settings.performance.device_overrides;
+            for (key, name, default_on) in values {
+                if Some(&key) == selected.as_ref() {
+                    if default_on {
+                        overrides.remove(&name);
+                    } else {
+                        overrides.insert(name, DeviceVisibility::Show);
+                    }
+                } else {
+                    overrides.insert(name, DeviceVisibility::Hide);
+                }
+            }
+        });
+        let text = tr(cx, "perf-toast-last-page");
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |q, cx| {
+                q.push(ToastKind::Info, text, Some(LAST_PAGE_TOAST), None, cx)
+            });
+        }
+    }
+
+    fn on_reset_pages(
+        &mut self,
+        _: &PerfResetPagesToDefault,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        TlSettings::update(cx, |d| {
+            d.settings.performance.device_order.clear();
+            d.settings.performance.device_overrides.clear();
+        });
     }
 
     /// `PerfSetPageVisible` (PERF-002). Hiding the only visible page is refused with an Info
@@ -1127,47 +1416,278 @@ impl Render for DeviceSidebar {
                 }),
             ]);
         }
+        let focused = self.focus.is_focused(window);
+        if focused != self.cards_focused {
+            self.cards_focused = focused;
+            self.sync_card_focus(focused, cx);
+        }
 
         let m = *metrics(cx);
         let theme = current(cx);
         let width = self.card_width.get();
         let card_h = CARD_H * m.ui_scale;
-        let cards = self.cards.iter().map(|c| {
-            let menu_key = c.row.key.clone();
-            // Right-click opens the card menu and leaves the selection alone (UI-PRF-014).
-            let on_right = cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                this.open_card_menu(&menu_key, ev.position, window, cx);
-            });
-            let card = div()
-                .flex_none()
-                .on_mouse_down(MouseButton::Right, on_right)
-                .child(
-                    c.view
-                        .clone()
-                        .cached(StyleRefinement::default().w(width).h(px(card_h))),
-                );
-            let showing = match c.anim {
-                CardAnim::Steady => return card.into_any_element(),
-                CardAnim::Inserting { .. } => true,
-                CardAnim::Removing { .. } => false,
-            };
-            // Cards below move with the flex layout as the height changes.
-            div()
+        let normal_cards: Vec<AnyElement> = self
+            .cards
+            .iter()
+            .map(|c| {
+                let menu_key = c.row.key.clone();
+                // Right-click opens the card menu and leaves the selection alone (UI-PRF-014).
+                let on_right = cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_card_menu(&menu_key, ev.position, window, cx);
+                });
+                let card = div()
+                    .flex_none()
+                    .on_mouse_down(MouseButton::Right, on_right)
+                    .child(
+                        c.view
+                            .clone()
+                            .cached(StyleRefinement::default().w(width).h(px(card_h))),
+                    );
+                let showing = match c.anim {
+                    CardAnim::Steady => return card.into_any_element(),
+                    CardAnim::Inserting { .. } => true,
+                    CardAnim::Removing { .. } => false,
+                };
+                // Cards below move with the flex layout as the height changes.
+                div()
+                    .flex_none()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(card)
+                    .with_animation(
+                        ("perf-card-anim", c.anim_seq as usize),
+                        Animation::new(M_BASE).with_easing(ease_out_cubic),
+                        move |el, t| {
+                            let t = if showing { t } else { 1. - t };
+                            el.h(px(card_h * t)).opacity(t)
+                        },
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let edit_present = self.edit_mode || self.edit_leaving;
+        let content: AnyElement = if edit_present {
+            let entering = self.edit_mode;
+            let animate_edit = animations_on(cx);
+            let edit_generation = self.edit_generation as usize;
+            let edit_card_w = (width - px(52. * m.ui_scale) - m.sp[4] * 2.).max(px(0.));
+            let mut edit_groups: Vec<AnyElement> = Vec::new();
+            let specs = [
+                None,
+                None,
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                None,
+            ];
+            for (group, empty_index) in specs.into_iter().enumerate() {
+                let members: Vec<_> = self
+                    .edit_cards
+                    .iter()
+                    .filter(|card| edit_group(card.row.kind) == group)
+                    .collect();
+                if group == 7 && members.is_empty() {
+                    continue;
+                }
+                let label = div()
+                    .debug_selector(move || format!("perf-edit-group-{group}"))
+                    .mt(m.sp[4])
+                    .text_size(m.text.xs)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_secondary)
+                    .child(self.edit_words.groups[group].to_uppercase());
+                // gpui-pre 0.3.7 does not expose letter spacing on div text.
+                let mut section = v_flex().w_full().gap(m.sp[4]).child(label);
+                if members.is_empty() {
+                    if let Some(empty_index) = empty_index {
+                        section = section.child(
+                            div()
+                                .debug_selector(move || format!("perf-edit-empty-{group}"))
+                                .pl(m.sp[4])
+                                .text_size(m.text.sm)
+                                .text_color(theme.text_secondary)
+                                .child(self.edit_words.empty[empty_index].clone()),
+                        );
+                    }
+                } else {
+                    for card in members {
+                        let key = card.row.key.clone();
+                        let menu_key = key.clone();
+                        let checked = is_visible(&card.row, &self.settings.view());
+                        let on_right = cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_card_menu(&menu_key, ev.position, window, cx);
+                        });
+                        let action_key = key.clone();
+                        let switch = TlSwitch::new(ElementId::Name(
+                            format!("perf-edit-switch-{}", key.0).into(),
+                        ))
+                        .checked(checked)
+                        .on_change(move |visible, window, cx| {
+                            window.dispatch_action(
+                                Box::new(PerfSetPageVisible {
+                                    key: action_key.clone(),
+                                    visible,
+                                }),
+                                cx,
+                            );
+                        });
+                        let row = div()
+                            .debug_selector({
+                                let key = key.clone();
+                                move || format!("perf-edit-row-{}", key.0)
+                            })
+                            .flex()
+                            .items_center()
+                            .gap(m.sp[4])
+                            .w_full()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(24. * m.ui_scale))
+                                    .cursor_grab()
+                                    .child(
+                                        Icon::new(IconName::GripVertical)
+                                            .size(px(16. * m.ui_scale))
+                                            .text_color(theme.text_secondary),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .on_mouse_down(MouseButton::Right, on_right)
+                                    .child(DeviceCard {
+                                        key,
+                                        chart: card.chart.clone(),
+                                        lines: card.lines.clone(),
+                                        selected: self.selected.as_ref() == Some(&card.row.key),
+                                        focused: self.focus.is_focused(window),
+                                        edit_mode: true,
+                                        hidden_in_edit: !checked,
+                                        width: edit_card_w,
+                                    }),
+                            )
+                            .child(div().flex_none().w(px(28. * m.ui_scale)).child(switch));
+                        let row: AnyElement = if animate_edit {
+                            row.with_animation(
+                                ("perf-edit-row", edit_generation),
+                                Animation::new(M_FAST).with_easing(ease_out_cubic),
+                                move |row, t| row.opacity(if entering { t } else { 1. - t }),
+                            )
+                            .into_any_element()
+                        } else {
+                            row.into_any_element()
+                        };
+                        section = section.child(row);
+                    }
+                }
+                edit_groups.push(section.into_any_element());
+            }
+
+            let header = v_flex()
+                .debug_selector(|| "perf-edit-header".into())
                 .flex_none()
                 .w_full()
-                .overflow_hidden()
-                .child(card)
-                .with_animation(
-                    ("perf-card-anim", c.anim_seq as usize),
-                    Animation::new(M_BASE).with_easing(ease_out_cubic),
-                    move |el, t| {
-                        let t = if showing { t } else { 1. - t };
-                        el.h(px(card_h * t)).opacity(t)
-                    },
+                .px(m.sp[4])
+                .border_b(UiMetrics::hairline(window))
+                .border_color(theme.divider)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(32. * m.ui_scale))
+                        .child(
+                            div()
+                                .text_size(m.text.md)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_primary)
+                                .child(self.edit_words.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(m.sp[2])
+                                .child(
+                                    TlButton::new("perf-edit-enable-all", TlButtonKind::Ghost)
+                                        .size(TlButtonSize::Sm)
+                                        .label(self.edit_words.enable_all.clone())
+                                        .action(Box::new(PerfEnableAllPages)),
+                                )
+                                .child(
+                                    TlButton::new("perf-edit-disable-all", TlButtonKind::Ghost)
+                                        .size(TlButtonSize::Sm)
+                                        .label(self.edit_words.disable_all.clone())
+                                        .action(Box::new(PerfDisableAllPages)),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(32. * m.ui_scale))
+                        .child(
+                            TlButton::new("perf-edit-reset", TlButtonKind::Ghost)
+                                .size(TlButtonSize::Sm)
+                                .label(self.edit_words.reset.clone())
+                                .action(Box::new(PerfResetPagesToDefault)),
+                        )
+                        .child(
+                            TlButton::new("perf-edit-done", TlButtonKind::Primary)
+                                .size(TlButtonSize::Sm)
+                                .label(self.edit_words.done.clone())
+                                .action(Box::new(PerfExitEditMode)),
+                        ),
+                );
+            let header: AnyElement = if edit_present && animate_edit {
+                header
+                    .with_animation(
+                        ("perf-edit-header", edit_generation),
+                        Animation::new(M_BASE).with_easing(ease_out_cubic),
+                        move |header, t| {
+                            let t = if entering { t } else { 1. - t };
+                            header.h(px(64. * m.ui_scale * t)).opacity(t)
+                        },
+                    )
+                    .into_any_element()
+            } else {
+                header.h(px(64. * m.ui_scale)).into_any_element()
+            };
+
+            v_flex()
+                .size_full()
+                .child(header)
+                .child(
+                    v_flex()
+                        .id(LIST_ID)
+                        .flex_1()
+                        .min_h_0()
+                        .p(m.sp[4])
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .children(edit_groups),
                 )
                 .into_any_element()
-        });
+        } else {
+            v_flex()
+                .id(LIST_ID)
+                .size_full()
+                .p(m.sp[4])
+                .gap(m.sp[4])
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .children(normal_cards)
+                .into_any_element()
+        };
 
         // The cards have a fixed width: measure the sidebar each paint and redraw when it moved.
         let measured = Rc::clone(&self.card_width);
@@ -1189,6 +1709,7 @@ impl Render for DeviceSidebar {
         div()
             .id("perf-sidebar")
             .key_context(PERFORMANCE_CONTEXT)
+            .when(edit_present, |el| el.key_context(PERFORMANCE_EDIT_CONTEXT))
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_select))
             .on_action(cx.listener(Self::on_select_visible))
@@ -1198,20 +1719,27 @@ impl Render for DeviceSidebar {
             .on_action(cx.listener(Self::on_last))
             .on_action(cx.listener(Self::on_set_page_visible))
             .on_action(cx.listener(Self::on_open_card_menu))
+            .on_action(cx.listener(Self::on_enter_edit))
+            .on_action(cx.listener(Self::on_exit_edit))
+            .on_action(cx.listener(Self::on_enable_all))
+            .on_action(cx.listener(Self::on_disable_all))
+            .on_action(cx.listener(Self::on_reset_pages))
             .relative()
             .size_full()
             .bg(theme.window_bg)
             .child(measure)
-            .child(
-                v_flex()
-                    .id(LIST_ID)
-                    .size_full()
-                    .p(m.sp[4])
-                    .gap(m.sp[4])
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .children(cards),
-            )
+            .child(div().size_full().child(content))
+            .when(!edit_present, |root| {
+                root.child(
+                    div().absolute().top(m.sp[4]).right(m.sp[4]).child(
+                        TlButton::new("perf-edit-open", TlButtonKind::Icon)
+                            .size(TlButtonSize::Sm)
+                            .icon(TlIcon::Pencil)
+                            .tooltip(self.edit_words.tip.clone())
+                            .action(Box::new(PerfEnterEditMode)),
+                    ),
+                )
+            })
             .vertical_scrollbar(&self.scroll)
     }
 }

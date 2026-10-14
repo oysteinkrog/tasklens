@@ -45,10 +45,11 @@ pub enum TlIcon {
     Rows2,
     ListTree,
     List,
+    Pencil,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -81,6 +82,7 @@ impl TlIcon {
         Self::Rows2,
         Self::ListTree,
         Self::List,
+        Self::Pencil,
     ];
 
     /// The kit name for this icon.
@@ -118,6 +120,7 @@ impl TlIcon {
             Self::Rows2 => IconName::Rows2,
             Self::ListTree => IconName::ListTree,
             Self::List => IconName::List,
+            Self::Pencil => IconName::Pencil,
         }
     }
 }

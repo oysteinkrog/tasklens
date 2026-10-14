@@ -20,6 +20,8 @@ use super::{DeviceKey, DeviceKind};
 
 /// Key context of the Performance tab.
 pub const PERFORMANCE_CONTEXT: &str = "Performance";
+/// Key context while the sidebar page picker is open.
+pub const PERFORMANCE_EDIT_CONTEXT: &str = "PerformanceEdit";
 /// Key context of the Summary mode view (PERF-010).
 pub const PERFORMANCE_SUMMARY_CONTEXT: &str = "PerformanceSummary";
 
@@ -273,6 +275,7 @@ json_mirror!(
 /// Binds the Performance rows of canonical table (b).
 pub fn bind_keys_performance(cx: &mut App) {
     let perf = Some(PERFORMANCE_CONTEXT);
+    let edit = Some(PERFORMANCE_EDIT_CONTEXT);
     let summary = Some(PERFORMANCE_SUMMARY_CONTEXT);
     let mut bindings = Vec::new();
     for i in 0..8u8 {
@@ -301,6 +304,7 @@ pub fn bind_keys_performance(cx: &mut App) {
         KeyBinding::new("alt-down", PerfMoveFocusedDevice { delta: 1 }, perf),
         KeyBinding::new("shift-f10", PerfOpenCardMenu, perf),
         KeyBinding::new("menu", PerfOpenCardMenu, perf),
+        KeyBinding::new("escape", PerfExitEditMode, edit),
         KeyBinding::new("escape", PerfToggleSummaryMode, summary),
         KeyBinding::new("ctrl-m", PerfToggleSummaryMode, summary),
         KeyBinding::new("ctrl-tab", NoOp, summary),
