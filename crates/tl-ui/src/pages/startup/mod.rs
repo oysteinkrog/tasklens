@@ -148,8 +148,9 @@ impl StartupPage {
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REFRESH_TOAST_AFTER).await;
             let _ = this.update(cx, |this, cx| {
-                if this.refresh.take().is_some() {
+                if this.refresh.is_some() {
                     this.show_refreshed(cx);
+                    this.refresh = None;
                 }
             });
         });

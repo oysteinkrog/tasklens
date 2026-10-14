@@ -437,7 +437,7 @@ mod page {
     struct Rig {
         engine: Arc<FakeEngine>,
         page: Entity<StartupPage>,
-        queue: Entity<ToastQueue>,
+        _queue: Entity<ToastQueue>,
         opened: Rc<Cell<u32>>,
         vcx: VisualTestContext,
         version: u64,
@@ -500,7 +500,7 @@ mod page {
         let mut rig = Rig {
             engine,
             page,
-            queue,
+            _queue: queue,
             opened,
             vcx,
             version: 0,
@@ -687,8 +687,9 @@ mod page {
         }
 
         fn refresh_toasts(&mut self) -> usize {
-            self.vcx.update(|_, cx| {
-                self.queue
+            self.vcx.update(|window, cx| {
+                ToastQueue::of_window(window, cx)
+                    .expect("the window has a toast queue")
                     .read(cx)
                     .visible_texts()
                     .iter()
