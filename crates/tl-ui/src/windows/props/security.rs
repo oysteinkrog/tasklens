@@ -23,10 +23,10 @@ use std::sync::Arc;
 use gpui_kit::base::input::Copy;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyView, App, BorrowAppContext as _, ClipboardItem, Context, Entity, FocusHandle, FontWeight,
-    Global, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point,
-    px, relative,
+    AnyView, App, AppContext as _, BorrowAppContext as _, ClipboardItem, Context, Entity,
+    FocusHandle, FontWeight, Global, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, point, px, relative,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
