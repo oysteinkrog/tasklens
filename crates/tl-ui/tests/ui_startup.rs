@@ -1592,7 +1592,7 @@ mod page {
 
     impl Rig {
         fn page_window_id(&mut self) -> gpui_kit::WindowId {
-            self.vcx.window_handle().window_id()
+            gpui_kit::VisualContext::window_handle(&self.vcx).window_id()
         }
 
         /// Dispatches Delete and returns the confirmation window, if one opened.
@@ -1783,7 +1783,7 @@ mod page {
         entries: &[StartupEntry],
         skipped: usize,
     ) -> tl_ui::windows::confirm_startup_delete::DeleteTexts {
-        cx.update(super::setup);
+        cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
         cx.update(|cx| delete_texts(&views(entries), skipped, cx))
     }
 
