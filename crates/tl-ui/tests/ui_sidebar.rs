@@ -1625,4 +1625,110 @@ mod sidebar {
         let hide = open_menu_hide(&mut r).expect("a menu is open");
         assert!(hide.partial_eq(&set_visible("disk:sdb", false)));
     }
+
+    /// crw.2: Home and End select the first and the last visible card.
+    #[gpui_kit::test]
+    fn home_end_select_first_last(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::{PerfSelectFirstDevice, PerfSelectLastDevice};
+
+        let mut r = open(cx, nine(), Settings::default(), saved("disk:sdb"));
+        assert_eq!(keys(&mut r)[4], "disk:sdb", "the fifth of nine cards");
+        assert_eq!(selected(&mut r).as_deref(), Some("disk:sdb"));
+        r.vcx.dispatch_action(PerfSelectFirstDevice);
+        r.vcx.run_until_parked();
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+        r.vcx.dispatch_action(PerfSelectLastDevice);
+        r.vcx.run_until_parked();
+        assert_eq!(selected(&mut r).as_deref(), Some("net:eth1"));
+        assert_eq!(
+            *r.events.borrow(),
+            [
+                SidebarEvent::Selected(DeviceKey(Arc::from("cpu"))),
+                SidebarEvent::Selected(DeviceKey(Arc::from("net:eth1"))),
+            ]
+        );
+    }
+
+    /// crw.2: `show_disks` off in the settings removes the four disk cards through their
+    /// collapse, and the selected disk hands the selection to the next visible card. On again,
+    /// they come back through the insert animation.
+    #[gpui_kit::test]
+    fn type_switch_hides_cards_and_moves_selection(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), saved("disk:sdb"));
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.performance.show_disks = false);
+        });
+        draw(r.vcx);
+        let disks = |a: &[(String, CardAnim)]| -> Vec<bool> {
+            a.iter()
+                .filter(|(k, _)| k.starts_with("disk:"))
+                .map(|(_, anim)| is_removing(anim))
+                .collect()
+        };
+        assert_eq!(disks(&anims(&mut r)), [true; 4], "the disks collapse");
+        assert_eq!(selected(&mut r).as_deref(), Some("net:eth0"));
+        settle(&mut r);
+        assert_eq!(keys(&mut r), ["cpu", "memory", GPU, "net:eth0", "net:eth1"]);
+        assert!(disks(&anims(&mut r)).is_empty(), "the disk cards are gone");
+
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.performance.show_disks = true);
+        });
+        draw(r.vcx);
+        let inserting: Vec<String> = anims(&mut r)
+            .into_iter()
+            .filter(|(_, a)| is_inserting(a))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(inserting, ["disk:sda", "disk:sdb", "disk:sdc", "disk:sdd"]);
+        assert_eq!(selected(&mut r).as_deref(), Some("net:eth0"), "kept");
+    }
+
+    /// crw.2, UI-PRF-011: a network card's tooltip is line 1, then the NetworkManager
+    /// connection name on its own line. With no name it is line 1 alone.
+    #[gpui_kit::test]
+    fn network_card_tooltip_connection_name(cx: &mut TestAppContext) {
+        use tl_model::snapshot::NetDetails;
+
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let details = |idx: u16, connection: Option<&str>| {
+            (
+                DeviceIdx(idx),
+                NetDetails {
+                    type_label: Arc::from("Ethernet"),
+                    connection: connection.map(Arc::from),
+                    adapter_name: Total {
+                        value: Arc::from("Intel I350"),
+                        validity: Validity::Valid,
+                    },
+                    driver: Total::default(),
+                    mac: Total::default(),
+                    ifindex: u32::from(idx),
+                    link_speed_mbps: Total::default(),
+                    state: LinkState::Up,
+                    addresses: Arc::from([]),
+                    kind: NetKind::Wired,
+                    wifi: None,
+                },
+            )
+        };
+        r.engine.publish_with(|s| {
+            let d = Arc::make_mut(&mut s.device_details);
+            d.header.version += 1;
+            d.nets = Arc::from(vec![
+                details(7, Some("Wired connection 1")),
+                details(8, None),
+            ]);
+        });
+        draw(r.vcx);
+        let eth0 = lines(&mut r, "net:eth0");
+        assert_eq!(eth0.line1, "Ethernet");
+        let tip = eth0.tooltip.expect("a tooltip");
+        assert_eq!(
+            tip.lines().collect::<Vec<_>>(),
+            ["Ethernet", "Wired connection 1"]
+        );
+        let eth1 = lines(&mut r, "net:eth1");
+        assert_eq!(eth1.tooltip.as_deref(), Some("Ethernet"), "line 1 only");
+    }
 }
