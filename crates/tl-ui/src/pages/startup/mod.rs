@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
+    Context, Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render,
+    Styled as _, Subscription, Task, Window, div,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
@@ -33,6 +33,7 @@ use crate::i18n::{tr, tr_args};
 use crate::pages::sys_table::{SysBody, SysTableFrame, loading_status_text};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::OpenProperties;
+use crate::table::tree_table::TreeTableEvent;
 use crate::window::main::{FilterChanged, GlobalShellEvents, ShellPage};
 use crate::window::status::StatusChanged;
 
@@ -100,6 +101,25 @@ impl StartupPage {
                 }
             }));
         }
+        subs.push(cx.subscribe(&table, |_, table, ev: &TreeTableEvent, cx| {
+            let TreeTableEvent::Activate { row_index } = ev else {
+                return;
+            };
+            let table = table.read(cx);
+            let row = table.delegate.row_id(*row_index);
+            let selected = table.selection.contains(&row);
+            if !selected {
+                return;
+            }
+            let Some(window) = cx.active_window() else {
+                return;
+            };
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(OpenProperties), cx);
+                });
+            });
+        }));
         subs.push(cx.observe(&table, |this, _, cx| this.on_table_changed(cx)));
         Self {
             frame,
@@ -247,20 +267,8 @@ impl StartupPage {
 
 impl Render for StartupPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let table = self.frame.table.clone();
         div()
             .size_full()
-            // Capture before the table stops the row event. The first click selects the row;
-            // the second opens Properties only when it is still over that selected row.
-            .capture_any_mouse_down(cx.listener(move |_, ev: &MouseDownEvent, window, cx| {
-                let table = table.read(cx);
-                let row_activated = table
-                    .hover_row()
-                    .is_some_and(|index| table.selection.contains(&table.delegate.row_id(index)));
-                if ev.button == MouseButton::Left && ev.click_count == 2 && row_activated {
-                    window.dispatch_action(Box::new(OpenProperties), cx);
-                }
-            }))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }

@@ -253,6 +253,9 @@ pub const EMPTY_STATE_TOP: f32 = 96.0;
 /// and "Failed to copy to clipboard" (APP-044).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TreeTableEvent {
+    /// A leaf row was double-clicked. Owners that open a page-specific Properties window handle
+    /// this event; keyboard activation continues through the shared `OpenProperties` action.
+    Activate { row_index: usize },
     /// "Copy rows as table" put `rows` rows on the clipboard.
     CopiedRows { rows: usize },
     /// The clipboard write failed. gpui's `write_to_clipboard` reports no error, so the table
@@ -1106,6 +1109,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         }
         if double {
             if !self.delegate.double_click_expands() {
+                cx.emit(TreeTableEvent::Activate { row_index: ix });
                 self.delegate.on_activate(id, cx);
             } else if self.delegate.row_expandable(ix).is_some() {
                 self.delegate.on_toggle_expand(id, cx);

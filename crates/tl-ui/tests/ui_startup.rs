@@ -698,22 +698,46 @@ mod page {
         }
 
         fn double_click_first_row(&mut self) {
+            let table = self
+                .vcx
+                .read_entity(&self.page, |page, _| page.table().clone());
+            table.update(&mut self.vcx, |table, cx| {
+                table.selection.click(table.delegate.row_id(0));
+                cx.notify();
+            });
+            let focus = self
+                .vcx
+                .read_entity(&table, |table, _| table.focus_handle().clone());
+            self.vcx.update(|window, cx| window.focus(&focus, cx));
+            self.draw();
             let frame = self
                 .vcx
                 .debug_bounds("SysTableFrame-table")
                 .expect("table frame drawn");
             let at = point(frame.center().x, frame.origin.y + px(28. + 14.));
-            self.double_click(at);
-        }
-
-        fn double_click(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
             self.vcx.simulate_event(MouseMoveEvent {
                 position: at,
                 pressed_button: None,
                 modifiers: Modifiers::none(),
             });
             self.draw();
-            self.vcx.simulate_click(at, Modifiers::none());
+            assert_eq!(
+                self.vcx.read_entity(&table, |table, _| (
+                    table.hover_row(),
+                    table.selection.len()
+                )),
+                (Some(0), 1),
+                "selected row is under the pointer"
+            );
+            self.double_click_press(at);
+        }
+
+        fn hover_and_double_click(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
+            self.vcx.simulate_event(MouseMoveEvent {
+                position: at,
+                pressed_button: None,
+                modifiers: Modifiers::none(),
+            });
             self.draw();
             self.double_click_press(at);
         }
@@ -948,7 +972,7 @@ mod page {
             .debug_bounds("SysTableFrame-table")
             .expect("table frame drawn");
 
-        rig.double_click(point(frame.center().x, frame.origin.y + px(14.)));
+        rig.hover_and_double_click(point(frame.center().x, frame.origin.y + px(14.)));
         assert_eq!(rig.opened.get(), 0, "header double-click");
 
         rig.publish(
@@ -963,19 +987,13 @@ mod page {
         rig.double_click_first_row();
         assert_eq!(rig.opened.get(), 1, "row double-click");
 
-        rig.double_click(point(frame.center().x, frame.origin.y + px(14.)));
+        rig.hover_and_double_click(point(frame.center().x, frame.origin.y + px(14.)));
         assert_eq!(rig.opened.get(), 1, "header with selection double-click");
 
-        rig.vcx.simulate_event(MouseMoveEvent {
-            position: point(frame.center().x, frame.origin.y + px(28. + 42.)),
-            pressed_button: None,
-            modifiers: Modifiers::none(),
-        });
-        rig.draw();
-        rig.double_click_press(point(frame.center().x, frame.origin.y + px(28. + 42.)));
+        rig.hover_and_double_click(point(frame.center().x, frame.origin.y + px(28. + 42.)));
         assert_eq!(rig.opened.get(), 1, "unselected row double-click");
 
-        rig.double_click(point(frame.center().x, frame.origin.y + px(28. + 80.)));
+        rig.hover_and_double_click(point(frame.center().x, frame.origin.y + px(28. + 80.)));
         assert_eq!(rig.opened.get(), 1, "empty body double-click");
     }
 
