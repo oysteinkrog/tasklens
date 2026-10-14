@@ -1414,7 +1414,7 @@ mod window {
             "banner drawn"
         );
         assert_eq!(
-            cx.read(|cx| view.read(cx).exited_banner_text()),
+            cx.read(|cx| view.read(cx).exited_banner_text().to_owned()),
             APP_EXITED_BANNER
         );
         assert!(demanded(cx).is_empty(), "demand removed");
