@@ -496,7 +496,7 @@ fn zram_mem(orig: u64, compr: u64) -> MemoryTotals {
     MemoryTotals {
         validity: Validity::Valid,
         total: 64 * GIB,
-        zram: tl_model::table::Total {
+        zram: tl_model::system::Metric {
             value: ZramTotals {
                 orig_data: orig,
                 compr_data: compr,
