@@ -685,7 +685,8 @@ fn unit_types_last_item_refused(cx: &mut TestAppContext) {
         toasts[0].as_ref(),
         "At least one unit type must stay selected"
     );
-    assert!(!rig.menu_open(), "a refusal closes the stale menu");
+    assert!(rig.menu_open(), "a refusal keeps the menu open");
+    assert!(rig.entries()[0].checked, "the refused item stays checked");
 }
 
 #[gpui_kit::test]

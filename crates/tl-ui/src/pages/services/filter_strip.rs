@@ -16,7 +16,7 @@ use super::actions::{
 };
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, close_context_menu};
+use crate::components::menu::{TlMenu, set_open_menu_check};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{tr, tr_args};
 use crate::pages::sys_table::SysQuery;
@@ -273,8 +273,8 @@ pub fn unit_types_menu(
 ) -> TlMenu {
     for kind in ALL_UNIT_TYPES {
         // Every row keeps the menu open and the menu flips its mark. The menu is built once, so
-        // it cannot know which row is the last checked one later. A refused toggle closes the
-        // menu instead (see `apply_toggle_unit_type`), and the next open shows the real state.
+        // it cannot know which row is the last checked one later. A refused toggle puts the
+        // mark back (see `apply_toggle_unit_type`).
         menu = menu
             .check_item(
                 tr(cx, unit_type_label(&kind)),
@@ -328,7 +328,7 @@ pub fn apply_toggle_manager(
 }
 
 /// Handler for `ServicesToggleUnitType`. Refusing the last checked type sends nothing, writes
-/// nothing, shows the Warning toast and closes the menu, whose marks are stale. Returns whether
+/// nothing, shows the Warning toast and keeps the menu open with the type still checked. Returns whether
 /// the toggle was applied.
 pub fn apply_toggle_unit_type(
     state: &mut ServiceFilterState,
@@ -338,14 +338,19 @@ pub fn apply_toggle_unit_type(
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    if !state.toggle_unit_type(kind) {
+    if !state.toggle_unit_type(kind.clone()) {
         let text = tr(cx, "services-sys012-at-least-one-unit-type");
         if let Some(queue) = ToastQueue::of_window(window, cx) {
             queue.update(cx, |queue, cx| {
                 queue.push(ToastKind::Warning, text, None, None, cx);
             });
         }
-        close_context_menu(window, cx);
+        if let Some(ix) = ALL_UNIT_TYPES
+            .iter()
+            .position(|candidate| candidate == &kind)
+        {
+            set_open_menu_check(ix, true, window, cx);
+        }
         return false;
     }
     send_filter(state, query, client);

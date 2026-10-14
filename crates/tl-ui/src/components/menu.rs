@@ -1726,6 +1726,29 @@ pub fn open_context_menu(window: &Window, cx: &App) -> Option<Entity<TlMenuPopup
         .map(|o| o.menu.clone())
 }
 
+/// Sets the check mark of entry `ix` in the context menu open in this window. A keep-open item
+/// flips its mark before its action runs, so a handler that refuses the change puts it back.
+pub fn set_open_menu_check(ix: usize, checked: bool, window: &mut Window, cx: &mut App) {
+    let window_id = window.window_handle().window_id();
+    let Some(menu) = cx
+        .try_global::<OpenMenus>()
+        .and_then(|open| open.0.iter().find(|o| o.window == window_id))
+        .map(|o| o.menu.clone())
+    else {
+        return;
+    };
+    menu.update(cx, |menu, cx| {
+        if let Some(Entry::Item {
+            mark: Mark::Check(mark),
+            ..
+        }) = menu.entries.get_mut(ix)
+        {
+            *mark = checked;
+            cx.notify();
+        }
+    });
+}
+
 /// Whether a context menu from [`open_context_menu_at`] is open in this window.
 pub fn context_menu_open(window: &Window, cx: &App) -> bool {
     let window_id = window.window_handle().window_id();
