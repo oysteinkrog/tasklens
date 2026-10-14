@@ -461,7 +461,7 @@ pub fn paint(
     }
 
     // Range label: bottom-left.
-    if tall && wide {
+    if tall && wide && !p.labels.range_word.is_empty() {
         scratch.clear();
         range_label(&p.labels.range_word, p.spec.range_ns, scratch);
         let shaped = cache.range.sync(window, scratch, secondary);

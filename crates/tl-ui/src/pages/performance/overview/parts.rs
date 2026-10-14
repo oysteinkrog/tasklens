@@ -24,7 +24,7 @@ use crate::hub::SnapshotHub;
 use crate::pages::performance::DeviceKey;
 use crate::pages::performance::actions::PerfSelectDevice;
 use crate::settings_global::{Section, TlSettings};
-use crate::text::style::{numeric_style, t_md, t_sm};
+use crate::text::style::{numeric_style, t_md, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current};
 
 use super::layout::BoxKind;
@@ -48,6 +48,9 @@ const MIN_ROW_H: f32 = 12.;
 const LABELS_MIN_ROW_H: f32 = 14.;
 /// The box title row, logical px before `ui_scale`.
 const TITLE_ROW: f32 = 24.;
+/// The two labels on the one time axis shared by every device box.
+pub const TIME_AXIS_START: &str = "60 seconds ago";
+pub const TIME_AXIS_END: &str = "Now";
 
 /// `buckets` entry for a core with no valid sample.
 const NO_BUCKET: u16 = u16::MAX;
@@ -431,6 +434,16 @@ pub fn title_tab_id(box_id: &str) -> String {
     format!("{box_id}-title-tab")
 }
 
+/// The debug selector of the one time axis below a device box's charts.
+pub fn time_axis_id(box_id: &str) -> String {
+    format!("{box_id}-time-axis")
+}
+
+/// The debug selector of a device box's left or right time-axis label.
+pub fn time_axis_label_id(box_id: &str, end: &str) -> String {
+    format!("{box_id}-time-axis-{end}")
+}
+
 /// The one accent used by an Overview box frame and all of that device's data marks.
 pub fn box_accent(box_id: &str, theme: &TlTheme) -> Hsla {
     let kind = BoxKind::from_frame_id(box_id)
@@ -457,6 +470,7 @@ pub fn box_frame(
     theme: &TlTheme,
 ) -> Div {
     let accent = box_accent(id, theme);
+    let draws_time_axis = BoxKind::from_frame_id(id) != Some(BoxKind::TopProcs);
     let mut title_el = div()
         .debug_selector(move || title_tab_id(id))
         .h_full()
@@ -514,16 +528,44 @@ pub fn box_frame(
                 .child(value_el),
             target,
         ))
-        .child(
-            div()
+        .child({
+            let mut body_el = div()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .px(m.sp[5])
                 .pt(m.sp[2])
-                .pb(m.sp[5])
-                .child(body),
-        )
+                .pb(m.sp[5]);
+            if draws_time_axis {
+                let mut ago = div()
+                    .debug_selector(move || time_axis_label_id(id, "start"))
+                    .child(TIME_AXIS_START);
+                *ago.text_style() = t_xs(m);
+                let mut now = div()
+                    .debug_selector(move || time_axis_label_id(id, "end"))
+                    .child(TIME_AXIS_END);
+                *now.text_style() = t_xs(m);
+                body_el = body_el
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h_0().w_full().child(body))
+                    .child(
+                        div()
+                            .debug_selector(move || time_axis_id(id))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_between()
+                            .h(px(LABEL_ROW * m.ui_scale))
+                            .text_color(theme.text_secondary)
+                            .child(ago)
+                            .child(now),
+                    );
+            } else {
+                body_el = body_el.child(body);
+            }
+            body_el
+        })
 }
 
 /// Box widths from here up put the chart and its side part next to each other; narrower boxes
@@ -686,10 +728,13 @@ pub fn chart_section_versions(cx: &App) -> [u64; 3] {
 /// the plot's top-left corner.
 pub fn box_chart<T: 'static>(
     spec: ChartSpec,
-    labels: ChartLabels,
+    mut labels: ChartLabels,
     hub: &Entity<SnapshotHub>,
     cx: &mut Context<T>,
 ) -> Entity<ChartView> {
+    // The shared box frame draws one time axis. Individual charts must not repeat their range
+    // caption, especially in the GPU and Network boxes that can contain several charts.
+    labels.range_word = SharedString::default();
     cx.new(|cx| {
         let mut view = ChartView::new(spec, labels, hub, cx);
         view.set_compact_scale(true, cx);

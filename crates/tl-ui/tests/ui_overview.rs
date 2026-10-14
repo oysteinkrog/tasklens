@@ -1824,6 +1824,7 @@ mod wired {
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
+    use tl_ui::chart::labels::LabelKind;
     use tl_ui::components::kv_grid;
     use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
@@ -1834,13 +1835,18 @@ mod wired {
     use tl_ui::pages::performance::overview::gpu_box::GPU_BOX_ID;
     use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
-    use tl_ui::pages::performance::overview::parts::{box_accent, title_row_id, title_tab_id};
+    use tl_ui::pages::performance::overview::parts::{
+        TIME_AXIS_END, TIME_AXIS_START, box_accent, time_axis_id, time_axis_label_id, title_row_id,
+        title_tab_id,
+    };
     use tl_ui::pages::performance::overview::procs_box::{
         PROC_ROW_ID_PREFIX, PROCS_BOX_ID, ProcsBox,
     };
     use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
     use tl_ui::pages::performance::page::DevicePage as _;
-    use tl_ui::pages::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
+    use tl_ui::pages::performance::{
+        DeviceKey, DeviceKind, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID,
+    };
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::current;
@@ -1950,6 +1956,14 @@ mod wired {
 
     /// [`open`]; with `all_cards` every card is shown.
     fn open_with(cx: &mut TestAppContext, all_cards: bool) -> Rig<'_> {
+        open_with_theme(cx, all_cards, "Default Dark")
+    }
+
+    fn open_with_theme<'a>(
+        cx: &'a mut TestAppContext,
+        all_cards: bool,
+        theme_name: &str,
+    ) -> Rig<'a> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             s.devices = Arc::new(DeviceCatalog {
@@ -1962,9 +1976,11 @@ mod wired {
         let demand = cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_reduce_motion(true);
+            let mut theme_settings = ThemeSettings::default();
+            theme_settings.active = theme_name.to_owned();
             tl_ui::theme::store::init(
                 cx,
-                &ThemeSettings::default(),
+                &theme_settings,
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
@@ -1973,6 +1989,7 @@ mod wired {
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             let mut settings = Settings::default();
+            settings.theme = theme_settings;
             settings.performance.show_disks = all_cards;
             settings.performance.show_gpus = all_cards;
             settings.performance.show_network_wired = all_cards;
@@ -2205,11 +2222,7 @@ mod wired {
         assert!((2..=3).contains(&renders), "page renders {renders}");
     }
 
-    /// crw.52: every device box uses the shared inset-title frame and its graph line token as
-    /// the frame accent.
-    #[gpui_kit::test]
-    fn overview_title_lines_and_device_accents(cx: &mut TestAppContext) {
-        let mut r = open_with(cx, true);
+    fn assert_overview_frame_anatomy(r: &mut Rig) {
         select(&mut r, OVERVIEW_KEY);
         let theme = r.vcx.update(|_, cx| current(cx).clone());
         for (id, want) in [
@@ -2236,7 +2249,97 @@ mod wired {
             );
             assert_eq!(tab.size.height, row.size.height, "{id}: full title height");
             assert_eq!(box_accent(id, &theme), want, "{id}: device accent");
+            assert!(
+                r.vcx.debug_bounds(&time_axis_id(id)).is_some(),
+                "{id}: one box time axis"
+            );
+            assert!(
+                r.vcx
+                    .debug_bounds(&time_axis_label_id(id, "start"))
+                    .is_some(),
+                "{id}: {TIME_AXIS_START}"
+            );
+            assert!(
+                r.vcx.debug_bounds(&time_axis_label_id(id, "end")).is_some(),
+                "{id}: {TIME_AXIS_END}"
+            );
         }
+
+        let overview = overview(r).expect("an OverviewPage");
+        let charts = r.vcx.update(|_, cx| {
+            let page = overview.read(cx);
+            let cpu = page.cpu_box().read(cx).total_chart().clone();
+            let memory = page.mem_box().read(cx).chart().clone();
+            let gpu = page.gpu_box().read(cx).sections()[0].chart.clone();
+            let disk = page.disk_box().read(cx).io_chart().clone();
+            let net = page.net_box().read(cx);
+            [
+                cpu,
+                memory,
+                gpu,
+                disk,
+                net.down_chart().clone(),
+                net.up_chart().clone(),
+            ]
+        });
+        for chart in charts {
+            r.vcx.read_entity(&chart, |chart, _| {
+                assert!(
+                    chart.labels.range_word.is_empty(),
+                    "internal caption removed"
+                );
+                assert!(
+                    chart.label_cache().painted(LabelKind::Range).is_none(),
+                    "internal caption not painted"
+                );
+                assert!(chart.spec.grid.lines, "faint grid enabled");
+            });
+        }
+
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let sidebar_entity = page.read(cx).sidebar().clone();
+            let sidebar = sidebar_entity.read(cx);
+            for card in sidebar.cards() {
+                let want = match card.row.kind {
+                    DeviceKind::Overview | DeviceKind::Cpu => Some(theme.graph.cpu_line),
+                    DeviceKind::Memory => Some(theme.graph.mem_line),
+                    DeviceKind::Gpu => Some(theme.graph.gpu_line),
+                    DeviceKind::Disk => Some(theme.graph.disk_line),
+                    DeviceKind::Net => Some(theme.graph.net_line),
+                    DeviceKind::Fan
+                    | DeviceKind::Battery
+                    | DeviceKind::AggregateDisk
+                    | DeviceKind::AggregateGpu => None,
+                };
+                if let Some(want) = want {
+                    assert_eq!(
+                        card.chart.read(cx).spec.series[0].line,
+                        want,
+                        "{:?} sidebar mini-chart accent",
+                        card.row.kind
+                    );
+                }
+            }
+        });
+    }
+
+    /// crw.52: Default Dark uses the shared title frame, device accent and one box time axis.
+    #[gpui_kit::test]
+    fn overview_title_lines_and_device_accents(cx: &mut TestAppContext) {
+        let mut r = open_with(cx, true);
+        assert_overview_frame_anatomy(&mut r);
+    }
+
+    /// crw.52: Default Light uses the same frame anatomy and device token mapping.
+    #[gpui_kit::test]
+    fn overview_title_lines_and_device_accents_light(cx: &mut TestAppContext) {
+        let mut r = open_with_theme(cx, true, "Default Light");
+        assert_eq!(
+            &*r.vcx.update(|_, cx| current(cx).name.clone()),
+            "Default Light"
+        );
+        assert_overview_frame_anatomy(&mut r);
     }
 
     /// crw.44: a click on a box title opens that device's page; a disk row opens its disk.
@@ -2435,6 +2538,20 @@ mod wired {
         set_top_procs(&mut r, true);
         let procs = procs_box(&mut r).expect("the Top processes box");
         assert!(r.vcx.debug_bounds(PROCS_BOX_ID).is_some(), "placed");
+        assert!(
+            r.vcx.debug_bounds(&title_row_id(PROCS_BOX_ID)).is_some(),
+            "shared title line"
+        );
+        assert!(
+            r.vcx.debug_bounds(&title_tab_id(PROCS_BOX_ID)).is_some(),
+            "shared title tab"
+        );
+        let theme = r.vcx.update(|_, cx| current(cx).clone());
+        assert_eq!(box_accent(PROCS_BOX_ID, &theme), theme.graph.cpu_line);
+        assert!(
+            r.vcx.debug_bounds(&time_axis_id(PROCS_BOX_ID)).is_none(),
+            "a table-only box has no chart axis"
+        );
         let d = merged(&mut r);
         assert!(d.process_top && !d.process_table, "{d:?}");
 
