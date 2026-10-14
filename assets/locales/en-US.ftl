@@ -832,6 +832,11 @@ connections-menu-go-service = Go to service
 connections-menu-properties = Properties
 connections-menu-no-owning-process = No owning process for this connection
 connections-menu-needs-administrator = Needs administrator access.
+connections-copy-row-ok = Connection copied
+connections-copy-failed = Failed to copy to clipboard
+connections-copy-nothing-selected = Select a connection row first.
+connections-copy-local-ok = Local address copied
+connections-copy-foreign-ok = Foreign address copied
 
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.
@@ -1540,6 +1545,31 @@ pwn-general-toast-value-copied = Process property value copied.
 pwn-general-toast-copied = Copied to clipboard
 pwn-general-toast-opening = Opening file location
 pwn-general-toast-open-failed = Could not open file location.
+
+# App Properties (UI-PWN-019).
+pwn-app-props-tab-general = General
+pwn-app-props-tab-processes = Processes
+pwn-app-props-tab-general-tooltip = General (Alt+1)
+pwn-app-props-tab-processes-tooltip = Processes (Alt+2)
+pwn-app-props-too-many-windows = Too many app properties windows are already open
+pwn-app-props-exited-banner = This app has no running processes. Values are frozen at the last update.
+pwn-app-props-kind-app = App
+pwn-app-props-kind-unit = Unit
+pwn-app-props-label-app-id = App ID:
+pwn-app-props-label-type = Type:
+pwn-app-props-label-desktop-file = Desktop file:
+pwn-app-props-label-unit = Unit:
+pwn-app-props-label-cgroup = Cgroup:
+pwn-app-props-label-processes = Processes:
+pwn-app-props-label-cpu = CPU:
+pwn-app-props-label-memory = Memory:
+pwn-app-props-label-swap = Swap:
+pwn-app-props-label-disk = Disk:
+pwn-app-props-label-network = Network:
+pwn-app-props-label-gpu = GPU:
+pwn-app-props-label-vram = VRAM:
+pwn-app-props-command-line = Command line (primary process)
+pwn-app-props-copy = Copy
 # General tab field labels and value words (UI-PWN-007 to UI-PWN-009, R-132).
 pwn-general-label-process = Process:
 pwn-general-label-pid = PID:

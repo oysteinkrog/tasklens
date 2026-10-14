@@ -1,0 +1,8 @@
+Protocol: TCP
+Local address: 192.168.1.10
+Local port: 51234
+Foreign address: 140.82.112.4
+Foreign port: 443
+State: ESTABLISHED
+PID: 4321
+Process: firefox

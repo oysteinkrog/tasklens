@@ -5,6 +5,7 @@
 //! keyed by socket cookie, so a refresh may reorder the view without losing selected sockets.
 
 pub mod actions;
+mod copy;
 pub mod delegate;
 mod menu;
 
@@ -13,8 +14,8 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, Subscription, Task,
-    Window,
+    App, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
@@ -31,8 +32,13 @@ use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
+use crate::pages::processes::actions::CopyDetails;
+use crate::pages::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
 use crate::pages::sys_table::{SysBody, SysTableFrame, loading_status_text};
 use crate::table::TreeTableDelegate as _;
+use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable};
+use crate::table::tree_table::TreeTableEvent;
+use crate::util::clipboard_write;
 use crate::window::main::{FilterChanged, GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::status::StatusChanged;
 
@@ -50,6 +56,8 @@ pub struct ConnectionsPage {
     last_status: (u32, u32, u32, u32, u32, usize),
     refresh: Option<(u64, Task<()>)>,
     menu_targets: Option<ConnMenuTargets>,
+    copy_texts: CopyTexts,
+    copy_prepared: copy::PreparedCopy,
     _subs: SmallVec<[Subscription; 3]>,
 }
 
@@ -112,6 +120,11 @@ impl ConnectionsPage {
             }));
         }
         subs.push(cx.observe(&table, |this, _, cx| this.on_table_changed(cx)));
+        subs.push(cx.subscribe(&table, |this, _, event: &TreeTableEvent, cx| {
+            if matches!(event, TreeTableEvent::CopiedRows { .. }) {
+                this.show_copy_toast(ToastKind::Success, this.copy_texts.row_ok.clone(), cx);
+            }
+        }));
         Self {
             frame,
             focus,
@@ -119,6 +132,12 @@ impl ConnectionsPage {
             last_status: STATUS_UNSET,
             refresh: None,
             menu_targets: None,
+            copy_texts: CopyTexts {
+                row_ok: tr(cx, "connections-copy-row-ok"),
+                row_failed: tr(cx, "connections-copy-failed"),
+                nothing_selected: tr(cx, "connections-copy-nothing-selected"),
+            },
+            copy_prepared: copy::PreparedCopy::default(),
             _subs: subs,
         }
     }
@@ -309,11 +328,125 @@ impl ConnectionsPage {
             }
         });
     }
+
+    fn on_copy_cell(&mut self, _: &CopyCell, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        if let Some((cookie, column)) = targets.cell {
+            self.prepare_copy(cx, Some(cookie));
+            if let tl_model::table::SysColumnId::Connections(column) = column {
+                copy_cell(self, cookie, copy::column_alias(column), window, cx);
+            }
+        }
+    }
+
+    fn on_copy_details(&mut self, _: &CopyDetails, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_targets = None;
+        self.prepare_copy(cx, None);
+        copy_row(self, window, cx);
+    }
+
+    fn on_copy_row(&mut self, _: &CopyRow, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_copy_details(&CopyDetails, window, cx);
+    }
+
+    #[allow(dead_code)]
+    fn on_copy_rows_as_table(
+        &mut self,
+        _: &CopyRowsAsTable,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_targets = None;
+        self.prepare_copy(cx, None);
+        copy_rows_as_table(self, window, cx);
+    }
+
+    fn on_copy_local(
+        &mut self,
+        _: &actions::ConnectionCopyLocal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.take_targets(cx);
+        if let [record] = targets.records.as_slice() {
+            self.copy_address(
+                record.local.as_ref(),
+                "connections-copy-local-ok",
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn on_copy_foreign(
+        &mut self,
+        _: &actions::ConnectionCopyForeign,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.take_targets(cx);
+        if let [record] = targets.records.as_slice() {
+            self.copy_address(
+                record.foreign.as_ref(),
+                "connections-copy-foreign-ok",
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn copy_address(
+        &self,
+        value: &str,
+        success_key: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (kind, text) = match clipboard_write(cx, value.to_owned()) {
+            Ok(()) => (ToastKind::Success, tr(cx, success_key)),
+            Err(()) => (ToastKind::Error, self.copy_texts.row_failed.clone()),
+        };
+        self.show_copy_toast_on_window(kind, text, window, cx);
+    }
+
+    fn show_copy_toast(
+        &self,
+        kind: ToastKind,
+        text: gpui_kit::SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            self.show_copy_toast_on_window(kind, text, window, cx);
+        });
+    }
+
+    fn show_copy_toast_on_window(
+        &self,
+        kind: ToastKind,
+        text: gpui_kit::SharedString,
+        window: &Window,
+        cx: &mut App,
+    ) {
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |queue, cx| queue.push(kind, text, None, None, cx));
+        }
+    }
 }
 
 impl Render for ConnectionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.frame.render(None, Box::new(ClearFilter), window, cx)
+        div()
+            .size_full()
+            .on_action(cx.listener(Self::on_copy_cell))
+            .on_action(cx.listener(Self::on_copy_details))
+            .on_action(cx.listener(Self::on_copy_row))
+            .on_action(cx.listener(Self::on_copy_rows_as_table))
+            .on_action(cx.listener(Self::on_copy_local))
+            .on_action(cx.listener(Self::on_copy_foreign))
+            .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }
 

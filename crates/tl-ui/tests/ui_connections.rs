@@ -470,7 +470,7 @@ mod page {
     use super::*;
     use gpui_kit::base::Root;
     use gpui_kit::{
-        AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
+        Action, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
         StyleRefinement, Styled as _, VisualTestContext, Window, WindowBounds, WindowOptions, div,
         point, size,
     };
@@ -489,7 +489,9 @@ mod page {
     use tl_ui::demand::{DEMAND_COALESCE, GlobalDemand};
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::connections::actions::bind_keys_connections;
+    use tl_ui::pages::connections::actions::{ConnectionCopyForeign, ConnectionCopyLocal};
     use tl_ui::pages::connections::{ConnectionsPage, REFRESH_TOAST_AFTER};
+    use tl_ui::pages::processes::actions::CopyDetails;
     use tl_ui::pages::sys_table::SysBody;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
@@ -698,6 +700,15 @@ mod page {
         }
 
         fn publish_records(&mut self, records: Vec<ConnRecord>, counts: ConnCounts) {
+            self.publish_records_and_processes(records, Vec::new(), counts);
+        }
+
+        fn publish_records_and_processes(
+            &mut self,
+            records: Vec<ConnRecord>,
+            mut processes: Vec<ProcessRecord>,
+            counts: ConnCounts,
+        ) {
             self.version += 1;
             let generation = self.generation();
             let rows = records
@@ -706,6 +717,7 @@ mod page {
                 .map(|(index, record)| row(record.cookie, index))
                 .collect::<Vec<_>>();
             let version = self.version;
+            processes.sort_unstable_by_key(|process| process.key);
             self.engine.publish_with(|snapshot| {
                 snapshot.connections = Arc::new(ConnectionsSnapshot {
                     header: ComponentHeader {
@@ -718,6 +730,10 @@ mod page {
                     records: records.into(),
                     counts,
                     ..ConnectionsSnapshot::default()
+                });
+                snapshot.processes = Arc::new(ProcessSnapshot {
+                    records: processes.into(),
+                    ..ProcessSnapshot::default()
                 });
             });
             self.vcx.run_until_parked();
@@ -770,6 +786,49 @@ mod page {
                     .iter()
                     .filter(|text| text.as_ref() == "Connections refreshed.")
                     .count()
+            })
+        }
+
+        fn select(&mut self, cookies: &[u64]) {
+            let table = self.table();
+            table.update(&mut self.vcx, |table, cx| {
+                for (position, cookie) in cookies.iter().enumerate() {
+                    if position == 0 {
+                        table.selection.click(*cookie);
+                    } else {
+                        table.selection.ctrl_click(*cookie);
+                    }
+                }
+                cx.notify();
+            });
+            self.vcx.run_until_parked();
+        }
+
+        fn dispatch(&mut self, action: impl Action) {
+            let table = self.table();
+            self.vcx
+                .update(|window, cx| table.read(cx).focus_handle().clone().focus(window, cx));
+            self.draw();
+            self.vcx.dispatch_action(action);
+            self.vcx.run_until_parked();
+        }
+
+        fn clipboard(&mut self) -> Option<String> {
+            self.vcx.read_from_clipboard().and_then(|item| item.text())
+        }
+
+        fn copy_toasts(&mut self) -> Vec<String> {
+            self.vcx.update(|window, cx| {
+                ToastQueue::of_window(window, cx)
+                    .map(|queue| {
+                        queue
+                            .read(cx)
+                            .visible_texts()
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default()
             })
         }
     }
@@ -935,6 +994,136 @@ mod page {
                 .iter()
                 .all(|entry| { entry.label.as_deref() != Some("Close TCP connection") })
         );
+    }
+
+    #[gpui_kit::test]
+    fn conn_copy_block_golden(cx: &mut TestAppContext) {
+        let mut record = super::connection(1, SmallVec::from_slice(&[super::key(4321)]));
+        record.four_tuple = FourTuple {
+            local: "192.168.1.10:51234".parse().unwrap(),
+            remote: "140.82.112.4:443".parse().unwrap(),
+        };
+        record.local = Arc::from("192.168.1.10:51234");
+        record.foreign = Arc::from("140.82.112.4:443");
+        let mut rig = menu_rig(cx, vec![record]);
+        rig.publish_records_and_processes(
+            vec![{
+                let mut record = super::connection(1, SmallVec::from_slice(&[super::key(4321)]));
+                record.four_tuple = FourTuple {
+                    local: "192.168.1.10:51234".parse().unwrap(),
+                    remote: "140.82.112.4:443".parse().unwrap(),
+                };
+                record.local = Arc::from("192.168.1.10:51234");
+                record.foreign = Arc::from("140.82.112.4:443");
+                record
+            }],
+            vec![super::process(4321, "firefox", "alice", 1000)],
+            ConnCounts::default(),
+        );
+        rig.select(&[1]);
+        rig.dispatch(CopyDetails);
+        let expected = include_str!("golden/conn_copy_block.txt").trim_end_matches('\n');
+        assert_eq!(rig.clipboard().as_deref(), Some(expected));
+        assert_eq!(
+            rig.copy_toasts().last().map(String::as_str),
+            Some("Connection copied")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_copy_ipv6_and_wildcards(cx: &mut TestAppContext) {
+        let mut record = super::connection(1, SmallVec::new());
+        record.family = Family::Inet6;
+        record.local = Arc::from("[::1]:631");
+        record.foreign = Arc::from("*:*");
+        record.state = ConnState::Listening;
+        record.inode = 0;
+        let mut rig = menu_rig(cx, vec![record]);
+        rig.select(&[1]);
+        rig.dispatch(CopyDetails);
+        let copied = rig.clipboard().unwrap();
+        assert!(copied.contains("Local address: ::1\nLocal port: 631"));
+        assert!(copied.contains("Foreign address: *\nForeign port: *"));
+    }
+
+    #[gpui_kit::test]
+    fn conn_copy_shared_all_pids(cx: &mut TestAppContext) {
+        let processes = [
+            super::process(5000, "five", "alice", 1000),
+            super::process(4321, "first", "alice", 1000),
+            super::process(4400, "second", "alice", 1000),
+        ];
+        let owners = SmallVec::from_vec(processes.iter().map(|process| process.key).collect());
+        let mut rig = menu_rig(cx, vec![super::connection(1, owners.clone())]);
+        rig.publish_records_and_processes(
+            vec![super::connection(1, owners)],
+            processes.into(),
+            ConnCounts::default(),
+        );
+        rig.select(&[1]);
+        rig.dispatch(CopyDetails);
+        assert!(rig.clipboard().unwrap().contains("PID: 4321, 4400, 5000"));
+    }
+
+    #[gpui_kit::test]
+    fn conn_copy_kernel_and_restricted(cx: &mut TestAppContext) {
+        let mut kernel = super::connection(1, SmallVec::new());
+        kernel.inode = 0;
+        let mut restricted = super::connection(2, SmallVec::new());
+        restricted.owner_validity = Validity::Restricted;
+        let mut rig = menu_rig(cx, vec![kernel, restricted]);
+        rig.select(&[1, 2]);
+        rig.dispatch(CopyDetails);
+        let copied = rig.clipboard().unwrap();
+        assert!(copied.contains("PID: -\nProcess: No owner (kernel)"));
+        assert!(copied.contains("PID: ?\nProcess: Restricted"));
+    }
+
+    #[gpui_kit::test]
+    fn conn_copy_nothing_selected(cx: &mut TestAppContext) {
+        let mut rig = menu_rig(cx, vec![super::connection(1, SmallVec::new())]);
+        rig.dispatch(CopyDetails);
+        assert_eq!(
+            rig.copy_toasts().last().map(String::as_str),
+            Some("Select a connection row first.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_copy_local_and_foreign_toasts(cx: &mut TestAppContext) {
+        let mut record = super::connection(1, SmallVec::new());
+        record.local = Arc::from("192.168.1.10:51234");
+        let mut rig = menu_rig(cx, vec![record]);
+        let _ = rig.build_menu(&[1], Some(SysColumnId::Connections(ConnColumn::Local)));
+        rig.dispatch(ConnectionCopyLocal);
+        assert_eq!(rig.clipboard().as_deref(), Some("192.168.1.10:51234"));
+        assert_eq!(
+            rig.copy_toasts().last().map(String::as_str),
+            Some("Local address copied")
+        );
+
+        let _ = rig.build_menu(&[1], Some(SysColumnId::Connections(ConnColumn::Foreign)));
+        rig.dispatch(ConnectionCopyForeign);
+        assert_eq!(rig.clipboard().as_deref(), Some("10.0.0.1:443"));
+        assert_eq!(
+            rig.copy_toasts().last().map(String::as_str),
+            Some("Foreign address copied")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_copy_tsv_glyph_empty(cx: &mut TestAppContext) {
+        let mut record = super::connection(1, SmallVec::new());
+        record.owner_validity = Validity::Restricted;
+        let mut rig = menu_rig(cx, vec![record]);
+        rig.select(&[1]);
+        rig.dispatch(tl_ui::table::actions::CopyRowsAsTable);
+        let copied = rig.clipboard().unwrap();
+        assert_eq!(
+            copied.lines().next(),
+            Some("Proto\tAddress local\tAddress foreign\tState\tPID\tProcess")
+        );
+        assert!(copied.lines().nth(1).unwrap().ends_with("\t?\t"));
     }
 
     #[gpui_kit::test]
