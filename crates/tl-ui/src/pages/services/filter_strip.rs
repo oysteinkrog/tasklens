@@ -140,7 +140,7 @@ pub fn render_strip(
     disabled: bool,
     menu_open: bool,
     openrc: bool,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let theme = current(cx).clone();
