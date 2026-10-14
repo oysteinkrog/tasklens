@@ -618,6 +618,9 @@ impl DeviceSidebar {
         let Some(&ix) = self.index.get(&key) else {
             return;
         };
+        if self.edit_mode {
+            self.edit_focus_row = Some(key.clone());
+        }
         if self.selected.as_ref() == Some(&key) {
             return;
         }
@@ -1569,9 +1572,6 @@ impl DeviceSidebar {
     }
 
     fn on_select(&mut self, a: &PerfSelectDevice, _: &mut Window, cx: &mut Context<Self>) {
-        if self.edit_mode {
-            self.edit_focus_row = Some(a.key.clone());
-        }
         self.select(a.key.clone(), cx);
     }
 

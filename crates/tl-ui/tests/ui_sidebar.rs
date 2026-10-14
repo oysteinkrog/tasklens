@@ -1714,16 +1714,7 @@ mod sidebar {
             "indicator over a disk row"
         );
 
-        let eth = row(&mut r, "net:eth0");
-        r.vcx
-            .simulate_mouse_move(eth.center(), MouseButton::Left, Modifiers::none());
-        draw(r.vcx);
-        assert!(
-            r.vcx.debug_bounds("perf-drop-indicator").is_none(),
-            "no indicator over another group"
-        );
-
-        let empty = r.vcx.debug_bounds("perf-edit-empty-3").expect("fans hint");
+        let empty = r.vcx.debug_bounds("perf-edit-empty-5").expect("fans hint");
         r.vcx.simulate_mouse_move(
             point(empty.left() + px(2.), empty.center().y),
             MouseButton::Left,
@@ -1734,6 +1725,26 @@ mod sidebar {
             r.vcx.debug_bounds("perf-drop-indicator").is_none(),
             "no indicator over the empty hint"
         );
+
+        r.vcx.simulate_mouse_move(
+            point(sda.center().x, sda.top() + px(3.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        assert!(
+            r.vcx.debug_bounds("perf-drop-indicator").is_some(),
+            "indicator returns over a disk row"
+        );
+        let eth = row(&mut r, "net:eth0");
+        r.vcx
+            .simulate_mouse_move(eth.center(), MouseButton::Left, Modifiers::none());
+        draw(r.vcx);
+        assert!(
+            r.vcx.debug_bounds("perf-drop-indicator").is_none(),
+            "no indicator over another group"
+        );
+
         r.vcx.simulate_mouse_up(
             point(empty.left() + px(2.), empty.center().y),
             MouseButton::Left,
@@ -1782,6 +1793,28 @@ mod sidebar {
                 .collect::<Vec<_>>(),
             ["disk:sda", "disk:sdb", "disk:sdc"]
         );
+    }
+
+    #[gpui_kit::test]
+    fn alt_up_down_follows_arrow_selection(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            saved("disk:sda"),
+        );
+        r.vcx.update(|_, cx| bind_keys_performance(cx));
+        enter_edit(&mut r);
+
+        r.vcx.simulate_keystrokes("down");
+        draw(r.vcx);
+        r.vcx.simulate_keystrokes("alt-up");
+        draw(r.vcx);
+        let disks = keys(&mut r)
+            .into_iter()
+            .filter(|key| key.starts_with("disk:"))
+            .collect::<Vec<_>>();
+        assert_eq!(disks, ["disk:sdb", "disk:sda", "disk:sdc"]);
     }
 
     #[gpui_kit::test]
