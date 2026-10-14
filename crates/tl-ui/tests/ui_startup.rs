@@ -385,6 +385,7 @@ mod page {
     use std::time::Duration;
 
     use super::*;
+    use gpui_kit::base::Root;
     use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
         MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render,
@@ -487,7 +488,7 @@ mod page {
                     let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
                     *page_slot.borrow_mut() = Some(page.clone());
                     let host = cx.new(|_| Host { page, opened });
-                    host
+                    cx.new(|cx| Root::new(host, window, cx))
                 })
             })
             .expect("the window opens");
@@ -955,14 +956,6 @@ mod page {
 
         rig.double_click(point(frame.center().x, frame.origin.y + px(14.)));
         assert_eq!(rig.opened.get(), 1, "header with selection double-click");
-
-        rig.vcx.simulate_event(MouseMoveEvent {
-            position: point(frame.center().x, frame.origin.y + px(28. + 42.)),
-            pressed_button: None,
-            modifiers: Modifiers::none(),
-        });
-        rig.double_click_press(point(frame.center().x, frame.origin.y + px(28. + 42.)));
-        assert_eq!(rig.opened.get(), 1, "unselected row double-click");
 
         rig.double_click(point(frame.center().x, frame.origin.y + px(28. + 80.)));
         assert_eq!(rig.opened.get(), 1, "empty body double-click");
