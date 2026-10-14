@@ -1968,6 +1968,7 @@ impl Render for DeviceSidebar {
 
         div()
             .id("perf-sidebar")
+            .debug_selector(|| "perf-sidebar".into())
             .key_context(if edit_present {
                 "Performance PerformanceEdit"
             } else {
