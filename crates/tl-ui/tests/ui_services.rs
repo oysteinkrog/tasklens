@@ -665,10 +665,7 @@ fn unit_types_last_item_refused(cx: &mut TestAppContext) {
     let mut rig = open_menu_rig(cx, only_services);
     let entries = rig.entries();
     assert!(entries[0].checked);
-    assert!(
-        !entries[0].keep_open,
-        "the last checked row must not flip its mark"
-    );
+    assert!(entries[0].keep_open);
 
     rig.cx.simulate_keystrokes("down enter");
     rig.cx.run_until_parked();
@@ -688,6 +685,23 @@ fn unit_types_last_item_refused(cx: &mut TestAppContext) {
         toasts[0].as_ref(),
         "At least one unit type must stay selected"
     );
+    assert!(!rig.menu_open(), "a refusal closes the stale menu");
+}
+
+#[gpui_kit::test]
+fn unit_types_menu_stays_open_after_state_changes(cx: &mut TestAppContext) {
+    let only_timers = ServicesSettings {
+        unit_types: vec![UnitType::Timer],
+        ..ServicesSettings::default()
+    };
+    let mut rig = open_menu_rig(cx, only_timers);
+    // Enable Services, then disable Timers: both are valid, so the menu stays open.
+    rig.cx.simulate_keystrokes("down enter");
+    rig.cx.run_until_parked();
+    rig.cx.simulate_keystrokes("down down enter");
+    rig.cx.run_until_parked();
+    assert!(rig.menu_open(), "a valid toggle keeps the menu open");
+    assert_eq!(rig.strip().unit_types.as_slice(), [UnitTypeArg::Service]);
 }
 
 #[gpui_kit::test]

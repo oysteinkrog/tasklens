@@ -16,7 +16,7 @@ use super::actions::{
 };
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
-use crate::components::menu::TlMenu;
+use crate::components::menu::{TlMenu, close_context_menu};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{tr, tr_args};
 use crate::pages::sys_table::SysQuery;
@@ -271,19 +271,17 @@ pub fn unit_types_menu(
     _window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
-    let last_checked = state.unit_types.len() == 1;
     for kind in ALL_UNIT_TYPES {
-        let checked = state.unit_types.contains(&kind);
-        menu = menu.check_item(
-            tr(cx, unit_type_label(&kind)),
-            checked,
-            Box::new(ServicesToggleUnitType { kind }),
-        );
-        // The menu flips a kept-open mark by itself. The last checked type is refused, so its
-        // mark must not flip: that row closes the menu and keeps the mark instead.
-        if !(checked && last_checked) {
-            menu = menu.keep_open();
-        }
+        // Every row keeps the menu open and the menu flips its mark. The menu is built once, so
+        // it cannot know which row is the last checked one later. A refused toggle closes the
+        // menu instead (see `apply_toggle_unit_type`), and the next open shows the real state.
+        menu = menu
+            .check_item(
+                tr(cx, unit_type_label(&kind)),
+                state.unit_types.contains(&kind),
+                Box::new(ServicesToggleUnitType { kind }),
+            )
+            .keep_open();
     }
     menu.separator().item(
         tr(cx, "services-sys012-reset-to-default"),
@@ -330,7 +328,8 @@ pub fn apply_toggle_manager(
 }
 
 /// Handler for `ServicesToggleUnitType`. Refusing the last checked type sends nothing, writes
-/// nothing and shows the Warning toast. Returns whether the toggle was applied.
+/// nothing, shows the Warning toast and closes the menu, whose marks are stale. Returns whether
+/// the toggle was applied.
 pub fn apply_toggle_unit_type(
     state: &mut ServiceFilterState,
     kind: UnitTypeArg,
@@ -346,6 +345,7 @@ pub fn apply_toggle_unit_type(
                 queue.push(ToastKind::Warning, text, None, None, cx);
             });
         }
+        close_context_menu(window, cx);
         return false;
     }
     send_filter(state, query, client);
