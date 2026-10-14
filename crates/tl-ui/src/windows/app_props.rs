@@ -13,11 +13,11 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::Root;
 use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _,
-    ClipboardItem, Context, Entity, EntityId, FocusHandle, Focusable as _, FontWeight, ImageSource,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, StyledImage as _, Subscription,
-    Window, WindowHandle, canvas, div, img, prelude::FluentBuilder as _, px,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity,
+    EntityId, FocusHandle, Focusable as _, FontWeight, ImageSource, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, StyledImage as _, Subscription, Window, WindowHandle, canvas,
+    div, img, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest};
@@ -730,7 +730,7 @@ impl Render for AppGeneralTab {
                 .inset_0(),
             )
             .child(
-                div().size_full().overflow_y_scroll().child(
+                div().size_full().overflow_y_scrollbar().child(
                     v_flex().w_full().child(self.header(cx)).child(
                         v_flex()
                             .w_full()
