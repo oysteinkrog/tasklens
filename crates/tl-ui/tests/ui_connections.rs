@@ -186,7 +186,25 @@ fn connections_columns_default_and_optional(cx: &mut TestAppContext) {
     let minimums = [
         60., 120., 120., 90., 60., 60., 60., 60., 60., 60., 60., 60., 60., 60., 60.,
     ];
-    for (column, minimum) in CONNECTION_COLUMNS.into_iter().zip(minimums) {
+    let templates = [
+        None,
+        None,
+        None,
+        None,
+        Some("999999 +99"),
+        None,
+        None,
+        None,
+        Some("99999"),
+        Some("99999"),
+        Some("999999"),
+        Some("999999"),
+        None,
+        Some("9999999999"),
+        None,
+    ];
+    for ((column, minimum), template) in CONNECTION_COLUMNS.into_iter().zip(minimums).zip(templates)
+    {
         assert_eq!(
             delegate.columns().widths[&id(column)],
             px(default_width(column))
@@ -196,6 +214,11 @@ fn connections_columns_default_and_optional(cx: &mut TestAppContext) {
             DEFAULT_COLUMNS.contains(&column)
         );
         assert_eq!(id(column).min_width(), Some(minimum), "{column:?}");
+        assert_eq!(
+            delegate.column_spec(id(column)).template,
+            template,
+            "{column:?}"
+        );
     }
 }
 
@@ -255,6 +278,7 @@ fn conn_row_restricted_lock(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg(feature = "test-hooks")]
 fn conn_restricted_tooltip_is_localized(cx: &mut TestAppContext) {
     let mut delegate = cx.update(|cx| {
         setup(cx);
