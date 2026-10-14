@@ -1633,9 +1633,8 @@ mod signal {
 
     use gpui_kit::base::Root;
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Context, Entity, Focusable as _, IntoElement,
-        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
-        WindowHandle, div, px,
+        AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window, WindowHandle, div, px,
     };
     use smallvec::{SmallVec, smallvec};
     use tl_model::actions::{
@@ -1646,6 +1645,7 @@ mod signal {
     use tl_ui::components::menu::{MenuEntryKind, TlMenu, TlMenuPopup};
     use tl_ui::components::toast::ToastQueue;
     use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::signal::{self, RtSignalDialog, SIGNALS, SignalRefusal, TargetNames};
 
@@ -1821,16 +1821,28 @@ mod signal {
         let mut hup = rig(cx);
         hup.send(1, Rig::targets(4), TargetNames::processes(4));
         let (mut vcx, view) = hup.confirmation();
-        let (heading, text, danger, focused) = vcx.update(|window, cx| {
+        let expected_heading = vcx.update(|_, cx| {
+            confirm_texts(
+                &ConfirmKind::SignalMany {
+                    count: 4,
+                    signal_name: "HUP".into(),
+                    ends_process: true,
+                },
+                cx,
+            )
+            .title
+            .to_string()
+        });
+        let (text, danger, focused) = vcx.update(|window, cx| {
             let dialog = view.read(cx).dialog();
             (
-                dialog.heading_text().map(ToString::to_string),
                 dialog.text().to_string(),
                 dialog.is_destructive(),
                 view.read(cx).focused_button(window),
             )
         });
-        assert_eq!(heading.as_deref(), Some("Send signal to 4 processes?"));
+        assert_eq!(expected_heading, "Send signal to 4 processes?");
+        assert!(vcx.debug_bounds("TlDialogHeading").is_some());
         assert_eq!(text, "Send SIGHUP to 4 selected processes?");
         assert!(danger);
         assert_eq!(focused, Some(DialogButton::Cancel));
