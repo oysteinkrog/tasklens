@@ -2692,7 +2692,6 @@ mod threads {
     fn open(cx: &mut TestAppContext) -> (Entity<ThreadsHost>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::table::actions::bind_keys_table(cx);
             tl_ui::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
@@ -3448,6 +3447,7 @@ mod security {
     fn open(cx: &mut TestAppContext) -> (Entity<SecurityHost>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
+            tl_ui::table::actions::bind_keys_table(cx);
             tl_ui::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
