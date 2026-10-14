@@ -549,10 +549,9 @@ fn unit_types_count_suffix(cx: &mut TestAppContext) {
     let unit_types = buttons
         .iter()
         .find(|snapshot| {
-            snapshot
-                .path()
-                .iter()
-                .any(|id| id == &gpui_kit::ElementId::Name("services-filter-unit-types".into()))
+            snapshot.path().last().is_some_and(|id| {
+                id == &gpui_kit::ElementId::Name("services-filter-unit-types".into())
+            })
         })
         .expect("Unit types button");
     assert_eq!(unit_types.label(), Some("Unit types (6)"));

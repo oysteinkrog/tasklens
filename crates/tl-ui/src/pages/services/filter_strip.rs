@@ -151,7 +151,6 @@ pub fn render_strip(
             .flex_none()
             .w(px(1.))
             .h(px(16. * m.ui_scale))
-            .mx(m.sp[3])
             .bg(theme.divider)
     };
     let segment = |id, label, on, action| {
