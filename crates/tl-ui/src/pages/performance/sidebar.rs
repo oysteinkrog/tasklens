@@ -1332,7 +1332,7 @@ impl DeviceSidebar {
             None => order
                 .iter()
                 .rposition(|candidate| candidate.kind() == kind)
-                .map_or(0, |at| at + 1),
+                .map_or(from, |at| at + 1),
         };
         order.insert(insert_at, moved);
         let saved: Vec<String> = order.iter().map(|key| key.0.to_string()).collect();

@@ -1648,6 +1648,29 @@ mod sidebar {
     }
 
     #[gpui_kit::test]
+    fn move_lone_group_device_to_end_keeps_position(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            UiState::default(),
+        );
+        enter_edit(&mut r);
+        r.vcx.dispatch_action(PerfMoveDevice {
+            key: key("memory"),
+            before: None,
+        });
+        draw(r.vcx);
+
+        assert_eq!(
+            saved_order(&mut r),
+            [
+                "overview", "cpu", "memory", "disk:sda", "disk:sdb", "disk:sdc", "net:eth0"
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
     fn reorder_within_group_only(cx: &mut TestAppContext) {
         let mut r = open(
             cx,
