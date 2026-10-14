@@ -109,6 +109,12 @@ fn edit_group(kind: DeviceKind) -> usize {
     }
 }
 
+/// Opacity of an edit-mode row: the dragged row stays at 0.3 through the edit-mode fade
+/// (UI-PRF-013), so `fade` scales it rather than replacing it.
+fn edit_row_opacity(dragging: bool, fade: f32) -> f32 {
+    if dragging { 0.3 * fade } else { fade }
+}
+
 /// Element id of the scrolling card list.
 pub const LIST_ID: &str = "perf-sidebar-list";
 
@@ -613,14 +619,15 @@ impl DeviceSidebar {
 
     /// Selects the card of `key`: scrolls it into view, saves it as `selected_device`, emits
     /// `Selected` and redraws. Nothing happens for a key without a visible card or for the
-    /// selected key.
+    /// selected key. In edit mode the key becomes the Alt+Up and Alt+Down row first, hidden
+    /// rows included, since edit mode lists them too.
     pub fn select(&mut self, key: DeviceKey, cx: &mut Context<Self>) {
+        if self.edit_mode && self.rows.iter().any(|row| row.key == key) {
+            self.edit_focus_row = Some(key.clone());
+        }
         let Some(&ix) = self.index.get(&key) else {
             return;
         };
-        if self.edit_mode {
-            self.edit_focus_row = Some(key.clone());
-        }
         if self.selected.as_ref() == Some(&key) {
             return;
         }
@@ -1859,7 +1866,7 @@ impl Render for DeviceSidebar {
                             .items_center()
                             .gap(m.sp[4])
                             .w_full()
-                            .opacity(if dragging { 0.3 } else { 1.0 })
+                            .opacity(edit_row_opacity(dragging, 1.))
                             .on_drag_move(cx.listener(
                                 move |this, event: &DragMoveEvent<DraggedCard>, _, cx| {
                                     this.drag_over_row(&target_key, group_index, event, cx);
@@ -1900,7 +1907,10 @@ impl Render for DeviceSidebar {
                             row.with_animation(
                                 ("perf-edit-row", edit_generation),
                                 Animation::new(M_FAST).with_easing(ease_out_cubic),
-                                move |row, t| row.opacity(if entering { t } else { 1. - t }),
+                                move |row, t| {
+                                    let fade = if entering { t } else { 1. - t };
+                                    row.opacity(edit_row_opacity(dragging, fade))
+                                },
                             )
                             .into_any_element()
                         } else {
@@ -2111,6 +2121,14 @@ mod tests {
             persistent_key: Arc::from(format!("disk:{name}")),
             net_kind: None,
         }
+    }
+
+    #[test]
+    fn dragged_row_keeps_its_opacity_through_the_fade() {
+        assert_eq!(edit_row_opacity(true, 1.), 0.3);
+        assert_eq!(edit_row_opacity(true, 0.5), 0.15);
+        assert_eq!(edit_row_opacity(false, 1.), 1.);
+        assert_eq!(edit_row_opacity(false, 0.5), 0.5);
     }
 
     #[test]

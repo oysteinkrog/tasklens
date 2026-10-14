@@ -1914,6 +1914,33 @@ mod sidebar {
     }
 
     #[gpui_kit::test]
+    fn alt_up_moves_clicked_hidden_row(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings
+            .performance
+            .device_overrides
+            .insert("disk:sdb".into(), DeviceVisibility::Hide);
+        let mut r = open(cx, reorder_fixture(), settings, saved("disk:sda"));
+        r.vcx.update(|_, cx| bind_keys_performance(cx));
+        r.vcx.update(|_, cx| cx.set_reduce_motion(true));
+        enter_edit(&mut r);
+
+        let row = r
+            .vcx
+            .debug_bounds("perf-edit-row-disk:sdb")
+            .expect("hidden row in edit mode");
+        r.vcx.simulate_click(row.center(), Modifiers::none());
+        draw(r.vcx);
+        r.vcx.simulate_keystrokes("alt-up");
+        draw(r.vcx);
+        let disks = saved_order(&mut r)
+            .into_iter()
+            .filter(|key| key.starts_with("disk:"))
+            .collect::<Vec<_>>();
+        assert_eq!(disks, ["disk:sdb", "disk:sda", "disk:sdc"]);
+    }
+
+    #[gpui_kit::test]
     fn drop_indicator_geometry(cx: &mut TestAppContext) {
         let mut r = open(
             cx,
