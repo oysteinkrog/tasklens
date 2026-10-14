@@ -2510,6 +2510,7 @@ mod main_window {
                 let engine = FakeEngine::new();
                 let client: Arc<dyn EngineClient> = engine;
                 cx.set_global(EngineGlobal(client.clone()));
+                tl_ui::action_tracker::install(client.clone(), cx);
                 let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
                 let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
                 cx.set_global(GlobalHub(hub));
@@ -2763,8 +2764,8 @@ mod main_window {
             cx,
             Opts {
                 pages: &[Tab::Processes, Tab::Services],
-                // Startup has no page arm; Performance has one since E24-A1.
-                start_tab: StartTab::Startup,
+                // Connections has no page arm yet; Startup and Performance have one.
+                start_tab: StartTab::Connections,
                 ..Opts::default()
             },
         );
@@ -2802,7 +2803,7 @@ mod main_window {
         act(&mut vcx, PrevTab);
         assert_eq!(active(&mut vcx), Tab::Information);
 
-        // Information has a real page arm (tasklens-9o0.27), so it needs the engine globals.
+        // Startup and Information have real page arms (tasklens-9o0.13, 9o0.27), so they need the engine globals.
         let mut vcx = rig(
             cx_b,
             Opts {
@@ -2815,9 +2816,11 @@ mod main_window {
         act(&mut vcx, NextTab);
         assert_eq!(
             active(&mut vcx),
-            Tab::Information,
-            "Services, Startup and Connections are skipped"
+            Tab::Startup,
+            "Services and Connections are skipped"
         );
+        act(&mut vcx, NextTab);
+        assert_eq!(active(&mut vcx), Tab::Information);
         act(&mut vcx, NextTab);
         assert_eq!(active(&mut vcx), Tab::Processes);
         act(&mut vcx, SelectTab(2));

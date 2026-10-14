@@ -1062,3 +1062,58 @@ fn startup_keymap(cx: &mut TestAppContext) {
         }));
     });
 }
+
+/// `TasklensUi::init` binds the Startup keys and the shell builds `StartupPage` for its tab
+/// (tasklens-9o0.13).
+#[cfg(feature = "test-hooks")]
+#[gpui_kit::test]
+fn startup_keymap_registered(cx: &mut TestAppContext) {
+    use gpui_kit::{AppContext as _, VisualTestContext};
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::settings::{Settings, StartTab, UiState};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::pages::startup::StartupPage;
+    use tl_ui::pages::startup::actions::StartupDelete;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window};
+
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (_tx, rx) = async_channel::bounded(4);
+    let mut settings = Settings::default();
+    settings.general.start_tab = StartTab::Startup;
+    let init = UiInit {
+        settings,
+        state: UiState::default(),
+        themes_json: None,
+        persist: Box::new(|_, _| {}),
+        persist_themes: Box::new(|_| {}),
+        app_requests: rx,
+        startup_toasts: Vec::new(),
+        env: AppEnv::test(),
+    };
+    cx.update(|cx| TasklensUi::init(cx, client, init));
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        assert!(
+            keymap.bindings_for_action(&StartupDelete).any(|b| {
+                b.keystrokes().len() == 1
+                    && b.keystrokes()[0].unparse() == "delete"
+                    && b.predicate()
+                        .is_some_and(|p| p.to_string() == "StartupTable")
+            }),
+            "delete in StartupTable maps to StartupDelete"
+        );
+    });
+
+    let handle = cx.update(open_main_window).expect("the main window opens");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.run_until_parked();
+    let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+    let page = vcx.read_entity(&main, |m, _| m.page_entity::<StartupPage>(Tab::Startup));
+    assert!(page.is_some(), "the Startup tab builds a StartupPage");
+}

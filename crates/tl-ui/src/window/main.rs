@@ -89,6 +89,7 @@ use crate::pages::performance::{PerformancePage, SummaryToggled};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toolbar::ProcessesToolbar;
+use crate::pages::startup::StartupPage;
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::table::actions::TABLE_CONTEXT;
 use crate::text::style::numeric_style;
@@ -273,6 +274,13 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
                 cx.notify();
             })
             .detach();
+            PageSlot::new(page, cx)
+        }),
+        Tab::Startup => Some(|window, cx| {
+            let hub = cx.global::<GlobalHub>().0.clone();
+            let demand = cx.global::<GlobalDemand>().0.clone();
+            let client = cx.global::<EngineGlobal>().0.clone();
+            let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
             PageSlot::new(page, cx)
         }),
         Tab::Information => Some(|window, cx| {
