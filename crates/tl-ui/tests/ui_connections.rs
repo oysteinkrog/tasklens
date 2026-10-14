@@ -659,7 +659,11 @@ mod page {
 
     impl Rig {
         fn draw(&mut self) {
-            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+            self.vcx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let hub = cx.global::<GlobalHub>().0.clone();
+                hub.update(cx, |hub, cx| hub.note_render(cx));
+            });
             self.vcx.run_until_parked();
         }
 
