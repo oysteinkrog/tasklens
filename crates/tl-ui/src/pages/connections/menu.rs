@@ -116,7 +116,7 @@ pub fn row_menu(
             (false, Some(tr(cx, "connections-menu-needs-administrator")))
         }
         [record] if !record.owners.is_empty() => (true, None),
-        [record] => (false, Some(tr(cx, "connections-menu-no-owning-process"))),
+        [_] => (false, Some(tr(cx, "connections-menu-no-owning-process"))),
         _ => (false, None),
     };
     menu = item_enabled(
