@@ -1096,14 +1096,14 @@ mod window {
     use tl_model::snapshot::ProcessSnapshot;
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::{MenuEntryKind, TlMenu};
+    use tl_ui::components::menu::TlMenu;
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::demand::GlobalDemand;
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
-    use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
+    use tl_ui::table::tree_table::RowKind;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
