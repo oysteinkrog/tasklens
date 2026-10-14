@@ -3,8 +3,7 @@
 use fluent_bundle::FluentValue;
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    AnyElement, App, IntoElement, ParentElement, Styled, Window, div, prelude::FluentBuilder as _,
-    px,
+    AnyElement, App, InteractiveElement, IntoElement, ParentElement, Styled, Window, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::settings::ServicesSettings;
