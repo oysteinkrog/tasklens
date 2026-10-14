@@ -482,8 +482,9 @@ mod page {
     use tl_model::journal::{JournalHandle, JournalQuery};
     use tl_model::settings::{EngineSettings, Settings, UiState};
     use tl_model::snapshot::{ConnCounts, Snapshot};
-    use tl_model::table::SysTable;
+    use tl_model::table::{Manager, SysColumnId, SysTable, UnitRef};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup};
     use tl_ui::components::toast::ToastQueue;
     use tl_ui::demand::{DEMAND_COALESCE, GlobalDemand};
     use tl_ui::hub::GlobalHub;
@@ -689,16 +690,20 @@ mod page {
         }
 
         fn publish(&mut self, cookies: &[u64], counts: ConnCounts) {
-            self.version += 1;
-            let generation = self.generation();
             let records = cookies
                 .iter()
                 .map(|cookie| super::connection(*cookie, SmallVec::new()))
                 .collect::<Vec<_>>();
-            let rows = cookies
+            self.publish_records(records, counts);
+        }
+
+        fn publish_records(&mut self, records: Vec<ConnRecord>, counts: ConnCounts) {
+            self.version += 1;
+            let generation = self.generation();
+            let rows = records
                 .iter()
                 .enumerate()
-                .map(|(index, cookie)| row(*cookie, index))
+                .map(|(index, record)| row(record.cookie, index))
                 .collect::<Vec<_>>();
             let version = self.version;
             self.engine.publish_with(|snapshot| {
@@ -717,6 +722,23 @@ mod page {
             });
             self.vcx.run_until_parked();
             self.draw();
+        }
+
+        fn build_menu(&mut self, targets: &[u64], col: Option<SysColumnId>) -> Entity<TlMenuPopup> {
+            let table = self.table();
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    table.update(cx, |table, cx| {
+                        table.delegate.context_menu(targets, col, menu, window, cx)
+                    })
+                })
+            })
+        }
+
+        fn menu_entries(&mut self, menu: &Entity<TlMenuPopup>) -> Vec<MenuEntryInfo> {
+            self.vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window))
         }
 
         fn status(&mut self) -> String {
@@ -750,6 +772,169 @@ mod page {
                     .count()
             })
         }
+    }
+
+    fn menu_shape(entries: &[MenuEntryInfo]) -> Vec<(MenuEntryKind, String)> {
+        entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind,
+                    entry.label.as_deref().unwrap_or("separator").to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn menu_rig(cx: &mut TestAppContext, records: Vec<ConnRecord>) -> Rig {
+        let total = records.len() as u32;
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        rig.publish_records(
+            records,
+            ConnCounts {
+                total,
+                tcp: total,
+                ..ConnCounts::default()
+            },
+        );
+        rig
+    }
+
+    #[gpui_kit::test]
+    fn conn_menu_order(cx: &mut TestAppContext) {
+        let mut record = super::connection(77, SmallVec::from_slice(&[super::key(4321)]));
+        record.unit = Some(UnitRef {
+            manager: Manager::User,
+            name: Arc::from("firefox.service"),
+        });
+        let mut rig = menu_rig(cx, vec![record]);
+        let menu = rig.build_menu(&[77], Some(SysColumnId::Connections(ConnColumn::Local)));
+        assert_eq!(
+            menu_shape(&rig.menu_entries(&menu)),
+            [
+                (MenuEntryKind::Item, "Copy".into()),
+                (MenuEntryKind::Item, "Copy row".into()),
+                (MenuEntryKind::Item, "Copy rows as table".into()),
+                (MenuEntryKind::Item, "Copy local address".into()),
+                (MenuEntryKind::Item, "Copy foreign address".into()),
+                (MenuEntryKind::Separator, "separator".into()),
+                (MenuEntryKind::Item, "Jump to process".into()),
+                (MenuEntryKind::Item, "Go to service".into()),
+                (MenuEntryKind::Item, "Properties".into()),
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_menu_foreign_disabled_for_listener(cx: &mut TestAppContext) {
+        let mut record = super::connection(1, SmallVec::new());
+        record.state = ConnState::Listening;
+        record.foreign = Arc::from("*:*");
+        let mut rig = menu_rig(cx, vec![record]);
+        let menu = rig.build_menu(&[1], None);
+        let entries = rig.menu_entries(&menu);
+        assert_eq!(entries[3].label.as_deref(), Some("Copy foreign address"));
+        assert_eq!(entries[3].kind, MenuEntryKind::Disabled);
+    }
+
+    #[gpui_kit::test]
+    fn conn_menu_jump_disabled_no_owner(cx: &mut TestAppContext) {
+        let mut record = super::connection(1, SmallVec::new());
+        record.state = ConnState::TimeWait;
+        record.inode = 0;
+        let mut rig = menu_rig(cx, vec![record]);
+        let menu = rig.build_menu(&[1], None);
+        let entries = rig.menu_entries(&menu);
+        let jump = entries
+            .iter()
+            .find(|entry| entry.label.as_deref() == Some("Jump to process"))
+            .unwrap();
+        assert_eq!(jump.kind, MenuEntryKind::Disabled);
+        assert_eq!(
+            jump.tooltip.as_deref(),
+            Some("No owning process for this connection")
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.label.as_deref() != Some("Go to service"))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_menu_jump_disabled_restricted(cx: &mut TestAppContext) {
+        let mut record = super::connection(1, SmallVec::new());
+        record.owner_validity = Validity::Restricted;
+        let mut rig = menu_rig(cx, vec![record]);
+        let menu = rig.build_menu(&[1], None);
+        let entries = rig.menu_entries(&menu);
+        let jump = entries
+            .iter()
+            .find(|entry| entry.label.as_deref() == Some("Jump to process"))
+            .unwrap();
+        assert_eq!(jump.kind, MenuEntryKind::Disabled);
+        assert_eq!(jump.tooltip.as_deref(), Some("Needs administrator access."));
+    }
+
+    #[gpui_kit::test]
+    fn conn_menu_multi_select_rules(cx: &mut TestAppContext) {
+        let records = [1, 2]
+            .map(|cookie| {
+                let mut record =
+                    super::connection(cookie, SmallVec::from_slice(&[super::key(cookie as u32)]));
+                record.unit = Some(UnitRef {
+                    manager: Manager::User,
+                    name: Arc::from("example.service"),
+                });
+                record
+            })
+            .to_vec();
+        let mut rig = menu_rig(cx, records);
+        let menu = rig.build_menu(&[1, 2], None);
+        let entries = rig.menu_entries(&menu);
+        for label in [
+            "Copy local address",
+            "Copy foreign address",
+            "Jump to process",
+        ] {
+            assert_eq!(
+                entries
+                    .iter()
+                    .find(|entry| entry.label.as_deref() == Some(label))
+                    .unwrap()
+                    .kind,
+                MenuEntryKind::Disabled
+            );
+        }
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.label.as_deref() != Some("Go to service"))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_menu_targets_captured_at_open(cx: &mut TestAppContext) {
+        let mut rig = menu_rig(cx, vec![super::connection(77, SmallVec::new())]);
+        let _menu = rig.build_menu(&[77], Some(SysColumnId::Connections(ConnColumn::Local)));
+        rig.publish(&[88, 77], ConnCounts::default());
+        assert_eq!(
+            rig.vcx
+                .update(|_, cx| rig.page.read(cx).menu_target_cookies_for_test().to_vec()),
+            [77]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_menu_close_hidden_before_p3(cx: &mut TestAppContext) {
+        let mut rig = menu_rig(cx, vec![super::connection(1, SmallVec::new())]);
+        let menu = rig.build_menu(&[1], None);
+        assert!(
+            rig.menu_entries(&menu)
+                .iter()
+                .all(|entry| { entry.label.as_deref() != Some("Close TCP connection") })
+        );
     }
 
     #[gpui_kit::test]

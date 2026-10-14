@@ -6,13 +6,15 @@
 
 pub mod actions;
 pub mod delegate;
+mod menu;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, Subscription, Task, Window,
+    App, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, Subscription, Task,
+    Window,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
@@ -22,6 +24,7 @@ use tl_model::snapshot::{ConnCounts, ConnectionsSnapshot};
 use tl_model::units;
 
 use self::delegate::{ConnectionsDelegate, DEFAULT_SORT};
+use self::menu::ConnMenuTargets;
 use crate::actions::ClearFilter;
 use crate::app::EngineGlobal;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
@@ -46,7 +49,7 @@ pub struct ConnectionsPage {
     status_buf: String,
     last_status: (u32, u32, u32, u32, u32, usize),
     refresh: Option<(u64, Task<()>)>,
-    // E28-021: menu_targets: Option<ConnMenuTargets>
+    menu_targets: Option<ConnMenuTargets>,
     _subs: SmallVec<[Subscription; 3]>,
 }
 
@@ -60,11 +63,13 @@ impl ConnectionsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut delegate = ConnectionsDelegate::new(cx);
+        delegate.set_page(cx.weak_entity());
         let frame = SysTableFrame::new(
             Tab::Connections,
             "ConnectionTable",
             &[SourceId::Connections],
-            ConnectionsDelegate::new(cx),
+            delegate,
             DEFAULT_SORT,
             None,
             window,
@@ -113,6 +118,7 @@ impl ConnectionsPage {
             status_buf: loading_status_text(cx).to_string(),
             last_status: STATUS_UNSET,
             refresh: None,
+            menu_targets: None,
             _subs: subs,
         }
     }
@@ -158,6 +164,40 @@ impl ConnectionsPage {
 
     pub fn is_paused(&self) -> bool {
         self.frame.is_paused()
+    }
+
+    /// Stores the records captured when the row menu opened.
+    pub(super) fn set_menu_targets(&mut self, targets: ConnMenuTargets) {
+        self.menu_targets = Some(targets);
+    }
+
+    /// Captures the selection at command time. Menu actions call [`Self::take_targets`] first.
+    #[allow(dead_code)]
+    pub(super) fn capture_targets(&self, cx: &App) -> ConnMenuTargets {
+        let table = self.frame.table.read(cx);
+        let delegate = &table.delegate;
+        let mut cookies: Vec<u64> = table
+            .selection
+            .ids()
+            .filter(|cookie| delegate.row_index(*cookie).is_some())
+            .collect();
+        cookies.sort_unstable_by_key(|cookie| delegate.row_index(*cookie));
+        delegate.capture_menu_targets(&cookies, None)
+    }
+
+    /// Takes the menu-open snapshot, or reads the current selection for a keyboard command.
+    #[allow(dead_code)]
+    pub(super) fn take_targets(&mut self, cx: &App) -> ConnMenuTargets {
+        self.menu_targets
+            .take()
+            .unwrap_or_else(|| self.capture_targets(cx))
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn menu_target_cookies_for_test(&self) -> &[u64] {
+        self.menu_targets
+            .as_ref()
+            .map_or(&[], |targets| targets.cookies.as_slice())
     }
 
     fn on_table_changed(&mut self, cx: &mut Context<Self>) {

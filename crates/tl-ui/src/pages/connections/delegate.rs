@@ -11,7 +11,7 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     AnyView, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Window, div, px,
+    SharedString, WeakEntity, Window, div, px,
 };
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -38,6 +38,9 @@ use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
 use crate::theme::{TlTheme, current};
+
+use super::ConnectionsPage;
+use super::menu::{ConnMenuTargets, ConnRecordRef, row_menu};
 
 /// The P2 columns in display order. Remote host and Namespace are added by their P4 beads.
 pub const CONNECTION_COLUMNS: [ConnColumn; 15] = [
@@ -366,6 +369,7 @@ pub struct ConnectionsDelegate {
     version: u64,
     tip: Rc<RefCell<TipState>>,
     tip_view: Option<AnyView>,
+    page: Option<WeakEntity<ConnectionsPage>>,
 }
 
 impl ConnectionsDelegate {
@@ -390,6 +394,38 @@ impl ConnectionsDelegate {
             version: 0,
             tip: Rc::default(),
             tip_view: None,
+            page: None,
+        }
+    }
+
+    /// The page where a row menu stores the targets captured at open time.
+    pub fn set_page(&mut self, page: WeakEntity<ConnectionsPage>) {
+        self.page = Some(page);
+    }
+
+    /// Captures the current values of `targets` in their supplied view order.
+    pub fn capture_menu_targets(
+        &self,
+        targets: &[u64],
+        clicked_col: Option<SysColumnId>,
+    ) -> ConnMenuTargets {
+        let records: SmallVec<[ConnRecordRef; 1]> = targets
+            .iter()
+            .filter_map(|cookie| {
+                self.row_index(*cookie)
+                    .and_then(|ix| self.record(ix))
+                    .map(ConnRecordRef::from)
+            })
+            .collect();
+        let cookies = records.iter().map(|record| record.cookie).collect();
+        // A pointer-opened menu normally has one target. If an already-selected row belongs to
+        // a multi-selection, the table API supplies the selection in view order but not the
+        // pressed row separately, so its first row owns the cell action.
+        let cell = clicked_col.and_then(|col| records.first().map(|record| (record.cookie, col)));
+        ConnMenuTargets {
+            cookies,
+            records,
+            cell,
         }
     }
 
@@ -733,13 +769,21 @@ impl TreeTableDelegate for ConnectionsDelegate {
 
     fn context_menu(
         &mut self,
-        _: &[u64],
-        _: Option<SysColumnId>,
+        targets: &[u64],
+        clicked_col: Option<SysColumnId>,
         menu: TlMenu,
-        _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
-        menu
+        let captured = self.capture_menu_targets(targets, clicked_col);
+        if captured.records.is_empty() {
+            return menu;
+        }
+        if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
+            let stored = captured.clone();
+            page.update(cx, |page, _| page.set_menu_targets(stored));
+        }
+        row_menu(menu, &captured, window, cx)
     }
 
     fn on_toggle_expand(&mut self, _: u64, _: &mut Context<TlTreeTable<Self>>) {}
