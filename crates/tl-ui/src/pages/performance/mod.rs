@@ -1,6 +1,10 @@
 //! Performance tab: device keys, sidebar order and visibility rules, and the `PerformancePage`
 //! entity (docs/ui/performance.md UI-PRF-010, UI-PRF-012; PERF-002, PERF-004, PERF-005,
 //! PERF-008).
+//!
+//! E25 device pages implement [`page::DevicePage`], add their kind to [`page::build_page`],
+//! register their demand surface from `DevicePage::set_active`, and update every chart with
+//! `ChartView::set_state` from `Snapshot.health`.
 
 pub mod actions;
 pub mod card;

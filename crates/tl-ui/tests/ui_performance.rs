@@ -1645,6 +1645,8 @@ mod tab {
 
 #[cfg(feature = "test-hooks")]
 mod summary {
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1757,6 +1759,8 @@ mod summary {
         demand: Entity<DemandAggregator>,
         hub: Entity<SnapshotHub>,
         engine: Arc<FakeEngine>,
+        /// The last value handed to the `state.toml` persistence callback.
+        persisted_state: Rc<RefCell<Option<UiState>>>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -1799,6 +1803,8 @@ mod summary {
             });
         });
         let client: Arc<dyn EngineClient> = engine.clone();
+        let persisted_state = Rc::new(RefCell::new(None));
+        let persisted = Rc::clone(&persisted_state);
         let (hub, demand) = cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_reduce_motion(reduce_motion);
@@ -1815,7 +1821,9 @@ mod summary {
             cx.set_global(BootSettings {
                 settings,
                 state: UiState::default(),
-                persist: None,
+                persist: Some(Box::new(move |_, state| {
+                    *persisted.borrow_mut() = Some(state.clone());
+                })),
                 startup_toasts: Vec::new(),
             });
             TlSettings::init(cx);
@@ -1865,6 +1873,7 @@ mod summary {
             demand,
             hub,
             engine,
+            persisted_state,
             vcx,
         }
     }
@@ -2432,7 +2441,7 @@ mod summary {
     }
 
     #[gpui_kit::test]
-    fn view_submenu_jumps(cx: &mut TestAppContext) {
+    fn jump_to_type_selects_first_visible(cx: &mut TestAppContext) {
         use tl_ui::components::menu::close_context_menu;
         use tl_ui::pages::performance::DeviceKind;
         use tl_ui::pages::performance::actions::PerfJumpToType;
@@ -2464,6 +2473,76 @@ mod summary {
         });
         draw(r.vcx);
         assert_eq!(selected(&mut r), first_net);
+    }
+
+    /// crw.2: the P1 sidebar actions work together in one app and persist only durable state.
+    #[gpui_kit::test]
+    fn sidebar_p1_flow(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::{
+            PerfOpenCardMenu, PerfSetGraphRange, PerfToggleSidebar,
+        };
+
+        let mut r = open(cx, 1600., 1000., true);
+        select(&mut r, "disk:sdb");
+
+        // Open the selected card's menu, then run its Hide This Page action.
+        r.vcx.dispatch_action(PerfOpenCardMenu);
+        draw(r.vcx);
+        let hide = r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the card menu is open");
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .find(|entry| entry.label.as_deref() == Some("Hide This Page"))
+                .and_then(|entry| entry.action)
+                .expect("Hide This Page has an action")
+        });
+        r.vcx.update(|window, cx| window.dispatch_action(hide, cx));
+        draw(r.vcx);
+        assert_eq!(
+            selected(&mut r).as_deref(),
+            Some("disk:sdc"),
+            "selection moves to the next card"
+        );
+
+        r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let ranges = r.vcx.update(|_, cx| {
+            page.read(cx)
+                .sidebar()
+                .read(cx)
+                .cards()
+                .iter()
+                .map(|card| card.chart.read(cx).spec.range_ns)
+                .collect::<Vec<_>>()
+        });
+        assert!(!ranges.is_empty());
+        assert!(
+            ranges.iter().all(|&range| range == 30_000_000_000),
+            "every sidebar chart has the 30 s range: {ranges:?}"
+        );
+
+        r.vcx.dispatch_action(PerfToggleSidebar);
+        draw(r.vcx);
+        let page = r.page.clone();
+        let sidebar_visible = r.vcx.update(|_, cx| page.read(cx).sidebar_visible());
+        assert!(!sidebar_visible, "the sidebar is hidden");
+
+        let state = r
+            .persisted_state
+            .borrow()
+            .clone()
+            .expect("state.toml persistence ran");
+        assert_eq!(state.performance.selected_device, "disk:sdc");
+        assert_eq!(
+            state.performance,
+            tl_model::settings::PerformanceState {
+                nav_width: 252,
+                selected_device: "disk:sdc".to_owned(),
+            },
+            "state.toml has no transient sidebar visibility value"
+        );
     }
 
     #[gpui_kit::test]
