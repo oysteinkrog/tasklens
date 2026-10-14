@@ -256,6 +256,8 @@ pub fn render_strip(
         .child(
             TlButton::new("services-filter-remove", TlButtonKind::Ghost)
                 .size(TlButtonSize::Sm)
+                .icon(TlIcon::FunnelX)
+                .icon_size(m.icon.sm)
                 .label(tr(cx, "services-sys011-remove-filters"))
                 .action(Box::new(ServicesRemoveFilters))
                 .tooltip(tr(cx, "services-sys011-show-all-units"))

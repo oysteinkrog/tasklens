@@ -46,10 +46,11 @@ pub enum TlIcon {
     ListTree,
     List,
     Pencil,
+    FunnelX,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -83,6 +84,7 @@ impl TlIcon {
         Self::ListTree,
         Self::List,
         Self::Pencil,
+        Self::FunnelX,
     ];
 
     /// The kit name for this icon.
@@ -121,6 +123,7 @@ impl TlIcon {
             Self::ListTree => IconName::ListTree,
             Self::List => IconName::List,
             Self::Pencil => IconName::Pencil,
+            Self::FunnelX => IconName::FunnelX,
         }
     }
 }
@@ -196,14 +199,16 @@ impl IconNamed for AppIcon {
 // (E23-A1). `Activity` to `SlidersHorizontal` are the Settings window page icons (E21-018).
 // `RotateCcw` is the Set Affinity Reset button (E23-005). `Archive` is the Memory compression
 // pseudo row (UI-PRC-002). `Cog` and `FileCode` are Startup Apps Name icon fallbacks
-// (UI-SYS-041).
+// (UI-SYS-041). `FunnelX` is the Services Remove filters button and the system tables' No matches
+// icon (UI-SYS-011, UI-SYS-005).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
         X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, RotateCcw, ArrowUp, ArrowDown,
         Square,
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
-        Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive, Cog, FileCode
+        Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive, Cog, FileCode,
+        FunnelX
     ]
 );
 
