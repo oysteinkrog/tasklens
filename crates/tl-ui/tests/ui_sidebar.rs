@@ -1734,5 +1734,18 @@ mod sidebar {
             Some("Intel I350"),
             "adapter name only"
         );
+
+        let before = renders(&mut r);
+        r.engine.publish_with(|s| {
+            let mut sys = system(10);
+            sys.header.version += 1;
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+        assert_eq!(
+            renders(&mut r),
+            before,
+            "an unchanged tooltip does not redraw on the next snapshot tick"
+        );
     }
 }

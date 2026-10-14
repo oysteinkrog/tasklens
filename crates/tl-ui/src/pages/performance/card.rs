@@ -199,7 +199,8 @@ pub struct CardLines {
     pub line2: SharedString,
     /// Line 2 in `accent`: a connected interface's rate (R-055).
     pub line2_accent: bool,
-    /// The full line 1; network cards add the NetworkManager connection on a second line.
+    /// The full line 1; network cards use the adapter name and add the NetworkManager
+    /// connection on a second line.
     pub tooltip: Option<SharedString>,
     /// A network interface that is not connected. The card draws at opacity 0.6.
     pub disconnected: bool,
@@ -266,10 +267,8 @@ pub fn update_card_lines(
     changed |= set_if_changed(&mut lines.line2_accent, &connected);
     changed |= set_if_changed(&mut lines.disconnected, &disconnected);
 
-    let connection = (input.kind == DeviceKind::Net)
-        .then(|| net_connection(input))
-        .flatten();
-    changed |= match (input.kind, connection) {
+    let net_names = (input.kind == DeviceKind::Net).then(|| net_names(input));
+    changed |= match (input.kind, net_names) {
         (DeviceKind::Memory, _) => match &mut lines.tooltip {
             Some(tip) => keep_or_set(tip, &input.words.commit_tip),
             None => {
@@ -277,11 +276,11 @@ pub fn update_card_lines(
                 true
             }
         },
-        (DeviceKind::Net, Some(name)) => {
+        (DeviceKind::Net, Some((adapter, Some(connection)))) => {
             scratch.clear();
-            scratch.push_str(&lines.line1);
+            scratch.push_str(adapter.unwrap_or(&lines.line1));
             scratch.push('\n');
-            scratch.push_str(name);
+            scratch.push_str(connection);
             match &mut lines.tooltip {
                 Some(tip) => keep_or_set(tip, scratch),
                 None => {
@@ -290,6 +289,13 @@ pub fn update_card_lines(
                 }
             }
         }
+        (DeviceKind::Net, Some((Some(adapter), None))) => match &mut lines.tooltip {
+            Some(tip) => keep_or_set(tip, adapter),
+            None => {
+                lines.tooltip = Some(adapter.to_owned().into());
+                true
+            }
+        },
         _ if lines.line1.is_empty() => lines.tooltip.take().is_some(),
         // Shares line 1's allocation.
         _ if lines.tooltip.as_deref() == Some(&*lines.line1) => false,
@@ -648,17 +654,25 @@ fn net_type_word<'a>(input: &CardTextInput<'a>) -> &'a str {
     })
 }
 
-/// The NetworkManager connection name, when known.
-fn net_connection<'a>(input: &CardTextInput<'a>) -> Option<&'a str> {
+/// The adapter and NetworkManager connection names, when known.
+fn net_names<'a>(input: &CardTextInput<'a>) -> (Option<&'a str>, Option<&'a str>) {
     let idx = input.entry.idx;
-    input
+    let Some((_, details)) = input
         .snap
         .device_details
         .nets
         .iter()
         .find(|(i, _)| *i == idx)
-        .and_then(|(_, n)| n.connection.as_deref())
-        .and_then(|c| shown(c, Validity::Valid))
+    else {
+        return (None, None);
+    };
+    (
+        shown(&details.adapter_name.value, details.adapter_name.validity),
+        details
+            .connection
+            .as_deref()
+            .and_then(|connection| shown(connection, Validity::Valid)),
+    )
 }
 
 fn ifname(entry: &DeviceEntry) -> &str {
@@ -1253,7 +1267,10 @@ mod tests {
         assert_eq!(strs(&l), ("enp38s0", "Ethernet", "↓ 1.2 Mbps ↑ 0.3 Mbps"));
         assert!(l.line2_accent);
         assert!(!l.disconnected);
-        assert_eq!(l.tooltip.as_deref(), Some("Ethernet\nWired connection 1"));
+        assert_eq!(
+            l.tooltip.as_deref(),
+            Some("Intel I225-V\nWired connection 1")
+        );
     }
 
     #[test]
