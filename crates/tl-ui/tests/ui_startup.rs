@@ -714,6 +714,7 @@ mod page {
             });
             self.draw();
             self.vcx.simulate_click(at, Modifiers::none());
+            self.draw();
             self.double_click_press(at);
         }
 
@@ -851,6 +852,17 @@ mod page {
         );
         rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
         rig.vcx.run_until_parked();
+        rig.vcx
+            .executor()
+            .advance_clock(REFRESH_TOAST_AFTER + Duration::from_millis(1));
+        rig.vcx.run_until_parked();
+        assert_eq!(rig.refresh_toasts(), 1, "fallback toast at two seconds");
+        rig.vcx.executor().advance_clock(Duration::from_secs(1));
+        rig.vcx.run_until_parked();
+        assert_eq!(rig.refresh_toasts(), 1, "fallback toast is one shot");
+
+        rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
+        rig.vcx.run_until_parked();
         rig.vcx.executor().advance_clock(Duration::from_millis(500));
         rig.publish(
             &["Discord"],
@@ -862,19 +874,11 @@ mod page {
             },
         );
         assert_eq!(rig.refresh_toasts(), 1);
-        rig.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
-        rig.vcx.run_until_parked();
-        assert_eq!(rig.refresh_toasts(), 1, "one toast for the new version");
-
-        rig.vcx.executor().advance_clock(Duration::from_secs(10));
-        rig.vcx.run_until_parked();
-        rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
-        rig.vcx.run_until_parked();
         rig.vcx
             .executor()
             .advance_clock(REFRESH_TOAST_AFTER + Duration::from_millis(1));
         rig.vcx.run_until_parked();
-        assert_eq!(rig.refresh_toasts(), 1, "fallback toast at two seconds");
+        assert_eq!(rig.refresh_toasts(), 1, "one toast for the new version");
     }
 
     #[gpui_kit::test]
