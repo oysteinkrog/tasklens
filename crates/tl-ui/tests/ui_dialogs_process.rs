@@ -1793,34 +1793,34 @@ mod signal {
 
     #[gpui_kit::test]
     fn signal_toast_single_multi_app(cx: &mut TestAppContext) {
-        let mut rig = rig(cx);
-        rig.send(1, Rig::targets(1), TargetNames::process("firefox", 1234));
-        let request = rig.sent().pop().expect("single request");
+        let mut single = rig(cx);
+        single.send(1, Rig::targets(1), TargetNames::process("firefox", 1234));
+        let request = single.sent().pop().expect("single request");
         assert_eq!(request.kind, ActionKind::Signal(Signal::Hup));
-        rig.succeed(&request);
-        assert_eq!(rig.toasts(), ["Sent SIGHUP to firefox (1234)"]);
+        single.succeed(&request);
+        assert_eq!(single.toasts(), ["Sent SIGHUP to firefox (1234)"]);
 
-        let mut rig = rig(cx);
-        rig.send(1, Rig::targets(4), TargetNames::processes(4));
-        assert!(rig.sent().is_empty());
-        rig.confirm();
-        let request = rig.sent().pop().expect("multi request");
-        rig.succeed(&request);
-        assert_eq!(rig.toasts(), ["Sent SIGHUP to 4 processes"]);
+        let mut multiple = rig(cx);
+        multiple.send(1, Rig::targets(4), TargetNames::processes(4));
+        assert!(multiple.sent().is_empty());
+        multiple.confirm();
+        let request = multiple.sent().pop().expect("multi request");
+        multiple.succeed(&request);
+        assert_eq!(multiple.toasts(), ["Sent SIGHUP to 4 processes"]);
 
-        let mut rig = rig(cx);
-        rig.send(1, Rig::targets(3), TargetNames::app("Firefox", 3));
-        rig.confirm();
-        let request = rig.sent().pop().expect("app request");
-        rig.succeed(&request);
-        assert_eq!(rig.toasts(), ["Sent SIGHUP to Firefox (3 processes)"]);
+        let mut app = rig(cx);
+        app.send(1, Rig::targets(3), TargetNames::app("Firefox", 3));
+        app.confirm();
+        let request = app.sent().pop().expect("app request");
+        app.succeed(&request);
+        assert_eq!(app.toasts(), ["Sent SIGHUP to Firefox (3 processes)"]);
     }
 
     #[gpui_kit::test]
     fn signal_multi_target_confirmation_text_and_focus(cx: &mut TestAppContext) {
-        let mut rig = rig(cx);
-        rig.send(1, Rig::targets(4), TargetNames::processes(4));
-        let (mut vcx, view) = rig.confirmation();
+        let mut hup = rig(cx);
+        hup.send(1, Rig::targets(4), TargetNames::processes(4));
+        let (mut vcx, view) = hup.confirmation();
         let (heading, text, danger, focused) = vcx.update(|window, cx| {
             let dialog = view.read(cx).dialog();
             (
@@ -1836,12 +1836,12 @@ mod signal {
         assert_eq!(focused, Some(DialogButton::Cancel));
         vcx.simulate_keystrokes("tab enter");
         vcx.run_until_parked();
-        rig.cx.run_until_parked();
-        assert_eq!(rig.sent().len(), 1);
+        hup.cx.run_until_parked();
+        assert_eq!(hup.sent().len(), 1);
 
-        let mut rig = rig(cx);
-        rig.send(18, Rig::targets(4), TargetNames::processes(4));
-        let (mut vcx, view) = rig.confirmation();
+        let mut cont = rig(cx);
+        cont.send(18, Rig::targets(4), TargetNames::processes(4));
+        let (mut vcx, view) = cont.confirmation();
         assert!(!vcx.update(|_, cx| view.read(cx).dialog().is_destructive()));
         assert_eq!(
             vcx.update(|window, cx| view.read(cx).focused_button(window)),
