@@ -387,8 +387,9 @@ mod page {
     use super::*;
     use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
-        MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render, StyleRefinement,
-        Styled as _, VisualTestContext, Window, WindowBounds, WindowOptions, div, point, size,
+        MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render,
+        StyleRefinement, Styled as _, VisualTestContext, Window, WindowBounds, WindowOptions, div,
+        point, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, CommandError, Tab};
@@ -701,6 +702,15 @@ mod page {
                 .debug_bounds("SysTableFrame-table")
                 .expect("table frame drawn");
             let at = point(frame.center().x, frame.origin.y + px(28. + 14.));
+            self.double_click(at);
+        }
+
+        fn double_click(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
+            self.vcx.simulate_event(MouseMoveEvent {
+                position: at,
+                pressed_button: None,
+                modifiers: Modifiers::none(),
+            });
             self.vcx.simulate_click(at, Modifiers::none());
             self.vcx.simulate_event(MouseDownEvent {
                 position: at,
@@ -913,6 +923,34 @@ mod page {
         );
         rig.double_click_first_row();
         assert_eq!(rig.opened.get(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn startup_double_click_outside_row_does_nothing(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        let frame = rig
+            .vcx
+            .debug_bounds("SysTableFrame-table")
+            .expect("table frame drawn");
+
+        rig.double_click(point(frame.center().x, frame.origin.y + px(14.)));
+        assert_eq!(rig.opened.get(), 0, "header double-click");
+
+        rig.publish(
+            &["Discord"],
+            1,
+            StartupCounts {
+                total: 1,
+                enabled: 1,
+                disabled: 0,
+            },
+        );
+        rig.double_click_first_row();
+        assert_eq!(rig.opened.get(), 1, "row double-click");
+
+        rig.double_click(point(frame.center().x, frame.origin.y + px(28. + 80.)));
+        assert_eq!(rig.opened.get(), 1, "empty body double-click");
     }
 
     #[gpui_kit::test]

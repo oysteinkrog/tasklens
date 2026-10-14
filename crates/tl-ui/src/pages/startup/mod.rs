@@ -246,14 +246,19 @@ impl StartupPage {
 
 impl Render for StartupPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let table = self.frame.table.clone();
         div()
             .size_full()
             // The table stops row mouse events. StartupDelegate propagates only activation,
-            // which lets a row double-click take the same OpenProperties route as Enter.
+            // which lets a row double-click take the same OpenProperties route as Enter. Check
+            // the hover and selection so a double-click on the header or empty body does nothing.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, ev: &MouseDownEvent, window, cx| {
-                    if ev.click_count == 2 {
+                cx.listener(move |_, ev: &MouseDownEvent, window, cx| {
+                    let table = table.read(cx);
+                    let row_activated =
+                        table.hover_row().is_some() && table.selection.ids().next().is_some();
+                    if ev.click_count == 2 && row_activated {
                         window.dispatch_action(Box::new(OpenProperties), cx);
                     }
                 }),
