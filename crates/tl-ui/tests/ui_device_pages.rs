@@ -21,11 +21,23 @@ use tl_ui::components::kv_grid;
 use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
+use tl_ui::pages::performance::actions::PerfSetGraphRange;
 use tl_ui::pages::performance::cpu::CpuPage;
-use tl_ui::pages::performance::disk::DiskPage;
-use tl_ui::pages::performance::gpu::GpuPage;
-use tl_ui::pages::performance::memory::MemoryPage;
-use tl_ui::pages::performance::net::NetPage;
+use tl_ui::pages::performance::disk::{
+    DiskPage, ROW_ACTIVE, ROW_CAPACITY, ROW_READ, ROW_RESPONSE, ROW_WRITE,
+};
+use tl_ui::pages::performance::gpu::{
+    GpuPage, ROW_DECODE, ROW_DEDICATED, ROW_ENCODE, ROW_RESERVED, ROW_SHARED, ROW_TEMP_SOURCE,
+    ROW_TEMPERATURE, ROW_UTILIZATION,
+};
+use tl_ui::pages::performance::memory::{
+    MemoryPage, ROW_AVAILABLE, ROW_CACHED, ROW_COMMITTED, ROW_COMPRESSED, ROW_HUGE_PAGES,
+    ROW_IN_USE, ROW_SAVINGS, ROW_SLAB_RECLAIMABLE, ROW_SLAB_UNRECLAIMABLE, ROW_SWAP_AVAILABLE,
+    ROW_SWAP_USED,
+};
+use tl_ui::pages::performance::net::{
+    NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
+};
 use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage, build_page};
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow, PerformancePage};
 use tl_ui::settings_global::TlSettings;
@@ -212,6 +224,133 @@ fn last_demand(r: &Rig) -> Demand {
         .last()
         .cloned()
         .expect("a demand was sent")
+}
+
+fn assert_rows<T: DevicePage>(page: &T, expected: &[&str]) {
+    let labels: Vec<_> = page.details().rows.iter().map(|row| row.label).collect();
+    for label in expected {
+        assert!(
+            labels.contains(label),
+            "missing Details row {label}: {labels:?}"
+        );
+    }
+}
+
+/// Every P1 device page renders through the real 1280 x 800 Performance tab with its header,
+/// charts and Details rows present.
+#[gpui_kit::test]
+fn device_pages_render_smoke(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+
+    select(&mut r, "memory");
+    let memory = view_of(&mut r, "memory")
+        .downcast::<MemoryPage>()
+        .expect("a MemoryPage");
+    r.vcx.update(|_, cx| {
+        let page = memory.read(cx);
+        assert_eq!(page.header().0.as_ref(), "Memory");
+        for chart in [page.physical(), page.commit(), page.swap()] {
+            assert!(!chart.read(cx).spec.series.is_empty());
+        }
+        assert_rows(
+            page,
+            &[
+                ROW_IN_USE,
+                ROW_AVAILABLE,
+                ROW_COMMITTED,
+                ROW_CACHED,
+                ROW_SLAB_RECLAIMABLE,
+                ROW_SLAB_UNRECLAIMABLE,
+                ROW_SWAP_USED,
+                ROW_SWAP_AVAILABLE,
+                ROW_COMPRESSED,
+                ROW_SAVINGS,
+                ROW_HUGE_PAGES,
+            ],
+        );
+    });
+
+    select(&mut r, DISKS[0]);
+    let disk = view_of(&mut r, DISKS[0])
+        .downcast::<DiskPage>()
+        .expect("a DiskPage");
+    r.vcx.update(|_, cx| {
+        let page = disk.read(cx);
+        assert_eq!(page.header().0.as_ref(), "Disk 0");
+        assert!(!page.active_chart().read(cx).spec.series.is_empty());
+        assert!(!page.transfer_chart().read(cx).spec.series.is_empty());
+        assert_rows(
+            page,
+            &[ROW_ACTIVE, ROW_RESPONSE, ROW_READ, ROW_WRITE, ROW_CAPACITY],
+        );
+    });
+
+    select(&mut r, "net:enp38s0");
+    let net = view_of(&mut r, "net:enp38s0")
+        .downcast::<NetPage>()
+        .expect("a NetPage");
+    r.vcx.update(|_, cx| {
+        let page = net.read(cx);
+        assert_eq!(page.header().0.as_ref(), "enp38s0");
+        assert_eq!(page.throughput().read(cx).spec.series.len(), 2);
+        assert_rows(
+            page,
+            &[
+                ROW_DOWNLOAD,
+                ROW_UPLOAD,
+                ROW_TOTAL_DOWN,
+                ROW_TOTAL_UP,
+                ROW_DISPLAY_UNIT,
+            ],
+        );
+    });
+
+    select(&mut r, GPU);
+    let gpu = view_of(&mut r, GPU)
+        .downcast::<GpuPage>()
+        .expect("a GpuPage");
+    r.vcx.update(|_, cx| {
+        let page = gpu.read(cx);
+        assert_eq!(page.header().0.as_ref(), "Graphics adapter");
+        assert_eq!(page.engines().read(cx).spec.cells.len(), 3);
+        assert!(!page.memory().read(cx).spec.series.is_empty());
+        assert!(!page.temperature().read(cx).spec.series.is_empty());
+        assert_rows(
+            page,
+            &[
+                ROW_UTILIZATION,
+                ROW_DEDICATED,
+                ROW_SHARED,
+                ROW_RESERVED,
+                ROW_ENCODE,
+                ROW_DECODE,
+                ROW_TEMPERATURE,
+                ROW_TEMP_SOURCE,
+            ],
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn range_change_reaches_device_pages(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, "memory");
+    let memory = view_of(&mut r, "memory")
+        .downcast::<MemoryPage>()
+        .expect("a MemoryPage");
+
+    r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
+    draw(r.vcx);
+
+    let ranges = r.vcx.update(|_, cx| {
+        let page = memory.read(cx);
+        [
+            page.physical().read(cx).spec.range_ns,
+            page.commit().read(cx).spec.range_ns,
+            page.swap().read(cx).spec.range_ns,
+        ]
+    });
+    assert_eq!(ranges, [30_000_000_000; 3]);
 }
 
 #[gpui_kit::test]
