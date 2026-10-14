@@ -164,6 +164,7 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
         idx: GPU,
         generation: 0,
         net_class: None,
+        fan_connected: None,
     };
     let (h, d) = (hub.clone(), demand.clone());
     let page = cx.new(|cx| GpuPage::new(key, row, h, d, cx));

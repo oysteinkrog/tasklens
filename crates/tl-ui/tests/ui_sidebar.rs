@@ -2413,4 +2413,77 @@ mod sidebar {
             "an unchanged tooltip keeps the same card text on the next snapshot tick"
         );
     }
+
+    fn fan(idx: u16) -> DeviceEntry {
+        entry(
+            idx,
+            DeviceIdentity::Fan {
+                chip: Arc::from("nct6797"),
+                index: idx,
+            },
+            None,
+        )
+    }
+
+    /// Publishes one Fan reading for `idx` and bumps the SYSTEM version.
+    fn spin(r: &mut Rig, idx: u16, rpm: f32) {
+        use tl_model::system::{SensorKind, SensorReading};
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.sensors = Arc::from(vec![(
+                DeviceIdx(idx),
+                SensorReading {
+                    device: DeviceIdx(idx),
+                    kind: SensorKind::Fan,
+                    value: Metric::valid(rpm),
+                    pwm_pct: Metric::with(Validity::Unsupported),
+                    fan_control: None,
+                    fan_connected: true,
+                },
+            )]);
+        });
+        draw(r.vcx);
+    }
+
+    fn with_fan() -> Vec<DeviceEntry> {
+        let mut entries = cpu_and_memory();
+        entries.push(fan(5));
+        entries
+    }
+
+    #[gpui_kit::test]
+    fn fan_appears_when_it_spins(cx: &mut TestAppContext) {
+        let mut r = open(cx, with_fan(), Settings::default(), UiState::default());
+        assert!(!keys(&mut r).iter().any(|k| k.starts_with("fan:")));
+        spin(&mut r, 5, 800.);
+        let a = anims(&mut r);
+        let at = a
+            .iter()
+            .position(|(k, _)| k == "fan:nct6797:5")
+            .expect("fan card");
+        assert!(is_inserting(&a[at].1), "{a:?}");
+
+        settle(&mut r);
+        assert_eq!(anims(&mut r)[at].1, CardAnim::Steady);
+    }
+
+    #[gpui_kit::test]
+    fn fan_flip_keeps_card_when_shown(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.performance.show_disconnected_fans = true;
+        let mut r = open(cx, with_fan(), settings, UiState::default());
+        assert!(keys(&mut r).contains(&"fan:nct6797:5".to_owned()));
+        spin(&mut r, 5, 800.);
+        settle(&mut r);
+        let a = anims(&mut r);
+        let fan = a.iter().find(|(k, _)| k == "fan:nct6797:5").expect("card");
+        assert_eq!(fan.1, CardAnim::Steady);
+        assert!(
+            !r.events
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, SidebarEvent::Removed(_)))
+        );
+    }
 }

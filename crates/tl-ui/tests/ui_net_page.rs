@@ -164,6 +164,7 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
         idx: NET,
         generation: 0,
         net_class: None,
+        fan_connected: None,
     };
     let (h, d) = (hub.clone(), demand.clone());
     let page = cx.new(|cx| NetPage::new(key, row, h, d, cx));

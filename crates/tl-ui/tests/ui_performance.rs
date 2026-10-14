@@ -710,6 +710,7 @@ mod page_frame {
             idx: DeviceIdx(1),
             generation: 0,
             net_class: None,
+            fan_connected: None,
         };
         let view = cx.update(|cx| build_page(&key, &row, &hub, &demand, cx));
         let (_, vcx) = cx.add_window_view(move |_, _| Host(view));

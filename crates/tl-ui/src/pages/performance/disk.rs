@@ -390,6 +390,7 @@ fn disk_number(key: &DeviceKey, snap: &Snapshot, cx: &App) -> u16 {
         show_disks: p.show_disks,
         show_gpus: p.show_gpus,
         show_fans: p.show_fans,
+        show_disconnected_fans: p.show_disconnected_fans,
         show_batteries: p.show_batteries,
         show_network_wired: p.show_network_wired,
         show_network_wireless: p.show_network_wireless,
@@ -398,7 +399,7 @@ fn disk_number(key: &DeviceKey, snap: &Snapshot, cx: &App) -> u16 {
         show_network_other: p.show_network_other,
     };
     let mut rows = Vec::new();
-    sidebar_order(&snap.devices, &view, &mut rows);
+    sidebar_order(&snap.devices, &snap.system.sensors, &view, &mut rows);
     let visible: Vec<DeviceRow> = visible_rows(&rows, &view).cloned().collect();
     type_number(&visible, key)
 }

@@ -476,6 +476,7 @@ fn build_page_placeholder_for_fan_before_p2(cx: &mut TestAppContext) {
         idx: DeviceIdx(9),
         generation: 0,
         net_class: None,
+        fan_connected: None,
     };
     let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
     assert!(view.downcast::<PlaceholderPage>().is_ok());

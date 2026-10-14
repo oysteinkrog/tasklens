@@ -43,6 +43,7 @@ use smallvec::SmallVec;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::DeviceVisibility;
+use tl_model::system::{SensorKind, SensorReading};
 
 use self::actions::{
     PERFORMANCE_CONTEXT, PerfCopyDeviceInfo, PerfCopyValue, PerfJumpToType, PerfSelectDevice,
@@ -167,6 +168,8 @@ pub struct PerformanceSettingsView<'a> {
     pub show_disks: bool,
     pub show_gpus: bool,
     pub show_fans: bool,
+    /// Show a fan that never spun this session and has no label (PERF-076).
+    pub show_disconnected_fans: bool,
     pub show_batteries: bool,
     pub show_network_wired: bool,
     pub show_network_wireless: bool,
@@ -185,6 +188,15 @@ pub struct DeviceRow {
     pub generation: u32,
     /// `Some` for `Net` rows.
     pub net_class: Option<NetClass>,
+    /// `Some` for `Fan` rows: the fan record's `connected` flag (PERF-076).
+    pub fan_connected: Option<bool>,
+}
+
+/// The `fan_connected` flag of the fan reading at `idx`; false when there is none.
+pub fn fan_connected(sensors: &[(DeviceIdx, SensorReading)], idx: DeviceIdx) -> bool {
+    sensors
+        .iter()
+        .any(|(i, r)| *i == idx && r.kind == SensorKind::Fan && r.fan_connected)
 }
 
 /// Fills `out` with the present devices: keys in `settings.order` first, in that order, then
@@ -194,6 +206,7 @@ pub struct DeviceRow {
 /// changes only.
 pub fn sidebar_order(
     catalog: &DeviceCatalog,
+    sensors: &[(DeviceIdx, SensorReading)],
     settings: &PerformanceSettingsView,
     out: &mut Vec<DeviceRow>,
 ) {
@@ -205,12 +218,14 @@ pub fn sidebar_order(
         let Some(key) = DeviceKey::from_identity(&entry.identity) else {
             continue;
         };
+        let kind = key.kind();
         out.push(DeviceRow {
-            kind: key.kind(),
+            kind,
             key,
             idx: entry.idx,
             generation: entry.generation,
             net_class: entry.net_kind,
+            fan_connected: (kind == DeviceKind::Fan).then(|| fan_connected(sensors, entry.idx)),
         });
     }
     if let Some(cpu) = catalog
@@ -224,6 +239,7 @@ pub fn sidebar_order(
             idx: cpu.idx,
             generation: 0,
             net_class: None,
+            fan_connected: None,
         });
     }
     // Stable sort, so rows of one kind keep catalog order.
@@ -245,7 +261,10 @@ pub fn is_visible(row: &DeviceRow, settings: &PerformanceSettingsView) -> bool {
         DeviceKind::Cpu | DeviceKind::Memory | DeviceKind::Overview => true,
         DeviceKind::Gpu => settings.show_gpus,
         DeviceKind::Disk => settings.show_disks,
-        DeviceKind::Fan => settings.show_fans,
+        DeviceKind::Fan => {
+            settings.show_fans
+                && (row.fan_connected != Some(false) || settings.show_disconnected_fans)
+        }
         DeviceKind::Battery => settings.show_batteries,
         DeviceKind::Net => match row.net_class {
             Some(NetClass::Wired) => settings.show_network_wired,
@@ -1132,6 +1151,7 @@ mod tests {
             show_disks: true,
             show_gpus: true,
             show_fans: true,
+            show_disconnected_fans: false,
             show_batteries: true,
             show_network_wired: true,
             show_network_wireless: true,
@@ -1149,6 +1169,7 @@ mod tests {
             idx: DeviceIdx(0),
             generation: 0,
             net_class: None,
+            fan_connected: None,
         }
     }
 
@@ -1254,7 +1275,7 @@ mod tests {
         let order = [key("net:enp38s0"), key("disk:Y"), key("disk:not-present")];
         let overrides = HashMap::new();
         let mut out = Vec::new();
-        sidebar_order(&cat, &view(&order, &overrides), &mut out);
+        sidebar_order(&cat, &[], &view(&order, &overrides), &mut out);
         let keys: Vec<&str> = out.iter().map(|r| &*r.key.0).collect();
         assert_eq!(
             keys,
@@ -1281,21 +1302,92 @@ mod tests {
         ]);
         let overrides = HashMap::new();
         let mut out = Vec::new();
-        sidebar_order(&cat, &view(&[], &overrides), &mut out);
+        sidebar_order(&cat, &[], &view(&[], &overrides), &mut out);
         let keys: Vec<&str> = out.iter().map(|r| &*r.key.0).collect();
         assert_eq!(keys, ["overview", "cpu", "memory"]);
         assert_eq!(out[0].kind, DeviceKind::Overview);
         assert_eq!(out[0].idx, DeviceIdx(0));
 
         let order = [key("cpu"), key("overview")];
-        sidebar_order(&cat, &view(&order, &overrides), &mut out);
+        sidebar_order(&cat, &[], &view(&order, &overrides), &mut out);
         let keys: Vec<&str> = out.iter().map(|r| &*r.key.0).collect();
         assert_eq!(keys, ["cpu", "overview", "memory"]);
         assert!(is_visible(&out[1], &view(&order, &overrides)));
 
         let no_cpu = catalog(vec![entry(1, DeviceIdentity::Memory, true)]);
-        sidebar_order(&no_cpu, &view(&[], &overrides), &mut out);
+        sidebar_order(&no_cpu, &[], &view(&[], &overrides), &mut out);
         assert!(out.iter().all(|r| r.kind != DeviceKind::Overview));
+    }
+
+    fn fan_entries() -> DeviceCatalog {
+        catalog(
+            (1..=7)
+                .map(|i| {
+                    entry(
+                        i,
+                        DeviceIdentity::Fan {
+                            chip: Arc::from("nct6797"),
+                            index: i,
+                        },
+                        true,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn fan_reading(idx: u16, connected: bool) -> (DeviceIdx, SensorReading) {
+        use tl_model::system::Metric;
+        use tl_model::validity::Validity;
+        (
+            DeviceIdx(idx),
+            SensorReading {
+                device: DeviceIdx(idx),
+                kind: SensorKind::Fan,
+                value: Metric::with(Validity::Unsupported),
+                pwm_pct: Metric::with(Validity::Unsupported),
+                fan_control: None,
+                fan_connected: connected,
+            },
+        )
+    }
+
+    fn visible_fans(
+        sensors: &[(DeviceIdx, SensorReading)],
+        settings: &PerformanceSettingsView,
+    ) -> usize {
+        let mut out = Vec::new();
+        sidebar_order(&fan_entries(), sensors, settings, &mut out);
+        visible_rows(&out, settings)
+            .filter(|r| r.kind == DeviceKind::Fan)
+            .count()
+    }
+
+    #[test]
+    fn disconnected_fans_hidden_by_default() {
+        let order = [];
+        let mut overrides = HashMap::new();
+        // Fans 1 to 4 spun; 5 to 7 never did.
+        let sensors: Vec<_> = (1..=7).map(|i| fan_reading(i, i <= 4)).collect();
+        assert_eq!(visible_fans(&sensors, &view(&order, &overrides)), 4);
+        let all = PerformanceSettingsView {
+            show_disconnected_fans: true,
+            ..view(&order, &overrides)
+        };
+        assert_eq!(visible_fans(&sensors, &all), 7);
+        overrides.insert(key("fan:nct6797:6"), DeviceVisibility::Show);
+        assert_eq!(visible_fans(&sensors, &view(&order, &overrides)), 5);
+    }
+
+    #[test]
+    fn disconnected_fan_with_label_visible() {
+        // A label makes the engine set `fan_connected` even at 0 RPM.
+        let order = [];
+        let overrides = HashMap::new();
+        let sensors = [fan_reading(1, true)];
+        assert_eq!(visible_fans(&sensors, &view(&order, &overrides)), 1);
+        // No reading at all counts as not connected.
+        assert_eq!(visible_fans(&[], &view(&order, &overrides)), 0);
     }
 
     #[test]

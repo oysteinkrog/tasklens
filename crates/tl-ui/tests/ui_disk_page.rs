@@ -140,6 +140,7 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
         idx: DISK,
         generation: 0,
         net_class: None,
+        fan_connected: None,
     };
     let (h, d) = (hub.clone(), demand.clone());
     let page = cx.new(|cx| DiskPage::new(key, row, h, d, cx));

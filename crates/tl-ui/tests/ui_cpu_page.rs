@@ -1063,6 +1063,7 @@ mod page {
             idx: DeviceIdx(0),
             generation: 0,
             net_class: None,
+            fan_connected: None,
         };
         let (h, d) = (hub.clone(), demand.clone());
         let page = cx.new(|cx| CpuPage::new(key, row, h, d, cx));

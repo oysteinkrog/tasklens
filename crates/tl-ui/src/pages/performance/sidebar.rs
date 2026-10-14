@@ -53,8 +53,8 @@ use super::card::{
 };
 use super::menu::card_menu;
 use super::{
-    DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, initial_selection, is_visible,
-    sidebar_order, type_number, visible_rows,
+    DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, fan_connected, initial_selection,
+    is_visible, sidebar_order, type_number, visible_rows,
 };
 use crate::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -257,6 +257,7 @@ struct SidebarSettings {
     show_disks: bool,
     show_gpus: bool,
     show_fans: bool,
+    show_disconnected_fans: bool,
     show_batteries: bool,
     show_network_wired: bool,
     show_network_wireless: bool,
@@ -288,6 +289,7 @@ impl SidebarSettings {
             show_disks: p.show_disks,
             show_gpus: p.show_gpus,
             show_fans: p.show_fans,
+            show_disconnected_fans: p.show_disconnected_fans,
             show_batteries: p.show_batteries,
             show_network_wired: p.show_network_wired,
             show_network_wireless: p.show_network_wireless,
@@ -315,6 +317,7 @@ impl SidebarSettings {
             show_disks: self.show_disks,
             show_gpus: self.show_gpus,
             show_fans: self.show_fans,
+            show_disconnected_fans: self.show_disconnected_fans,
             show_batteries: self.show_batteries,
             show_network_wired: self.show_network_wired,
             show_network_wireless: self.show_network_wireless,
@@ -817,11 +820,30 @@ impl DeviceSidebar {
         animate: bool,
         cx: &mut Context<Self>,
     ) -> Option<Vec<DeviceRow>> {
-        sidebar_order(&snap.devices, &self.settings.view(), &mut self.rows);
+        sidebar_order(
+            &snap.devices,
+            &snap.system.sensors,
+            &self.settings.view(),
+            &mut self.rows,
+        );
         retain_whole_disks(&mut self.rows, &snap.devices);
         let visible: Vec<DeviceRow> = visible_rows(&self.rows, &self.settings.view())
             .cloned()
             .collect();
+        // A fan whose `connected` flag flipped while it is shown keeps its card: only the
+        // stored row changes, so the card does not collapse and re-insert.
+        for card in &mut self.cards {
+            if card.is_removing() {
+                continue;
+            }
+            if let Some(row) = visible.iter().find(|r| {
+                r.key == card.row.key
+                    && r.idx == card.row.idx
+                    && r.generation == card.row.generation
+            }) {
+                card.row = row.clone();
+            }
+        }
         let before: Vec<DeviceRow> = self.visible();
         if visible == before {
             return None;
@@ -1060,6 +1082,16 @@ impl DeviceSidebar {
         if ev.mask.contains(ComponentMask::DEVICES) && snap.devices.version != self.catalog_version
         {
             self.catalog_version = snap.devices.version;
+            changed |= self.sync_rows(&snap, cx);
+            if self.edit_mode || self.edit_leaving {
+                self.rebuild_edit_cards(&snap, cx);
+            }
+        } else if ev.mask.contains(ComponentMask::SYSTEM)
+            && self.rows.iter().any(|r| {
+                r.fan_connected
+                    .is_some_and(|c| c != fan_connected(&snap.system.sensors, r.idx))
+            })
+        {
             changed |= self.sync_rows(&snap, cx);
             if self.edit_mode || self.edit_leaving {
                 self.rebuild_edit_cards(&snap, cx);
@@ -2157,6 +2189,7 @@ mod tests {
                 idx: entry.idx,
                 generation: 0,
                 net_class: None,
+                fan_connected: None,
             })
             .collect();
 
