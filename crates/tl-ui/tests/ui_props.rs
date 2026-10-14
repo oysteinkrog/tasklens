@@ -3711,6 +3711,7 @@ mod security {
         );
     }
 
+    #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn security_cap_checks_are_lucide_size_and_centred(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
