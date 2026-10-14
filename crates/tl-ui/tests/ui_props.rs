@@ -3461,6 +3461,7 @@ mod security {
             let tab = cx.new(|cx| SecurityTab::new(KEY, filter.clone(), cx));
             SecurityHost { tab, filter }
         });
+        cx.update(|window, _| window.activate_window());
         draw(cx);
         (view, cx)
     }
