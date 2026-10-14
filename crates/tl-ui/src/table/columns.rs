@@ -101,10 +101,11 @@ impl TableColumn for SysColumnId {
         false
     }
 
-    /// The Startup Apps minimums (UI-SYS-041).
+    /// The system-table minimums (UI-SYS-041 and UI-SYS-061).
     fn min_width(self) -> Option<f32> {
         match self {
             SysColumnId::Startup(c) => Some(crate::pages::startup::delegate::min_width(c)),
+            SysColumnId::Connections(c) => Some(crate::pages::connections::delegate::min_width(c)),
             _ => None,
         }
     }

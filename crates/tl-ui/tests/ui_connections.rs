@@ -19,10 +19,11 @@ use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::pages::connections::delegate::{
     CONNECTION_COLUMNS, ConnectionsDelegate, DEFAULT_COLUMNS, default_width, id, state_class,
 };
-use tl_ui::pages::sys_status::{ConnStateClass, LabelTone, conn_state_tone};
 use tl_ui::pages::sys_table::SysDelegate as _;
 use tl_ui::table::cells::CellOut;
+use tl_ui::table::columns::TableColumn as _;
 use tl_ui::table::tree_table::{NameIcon, TreeTableDelegate as _};
+use tl_ui::theme::current;
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
@@ -153,12 +154,16 @@ fn delegate(
 }
 
 fn cell(delegate: &ConnectionsDelegate, column: ConnColumn) -> CellOut {
+    cell_at(delegate, 0, column)
+}
+
+fn cell_at(delegate: &ConnectionsDelegate, row: usize, column: ConnColumn) -> CellOut {
     let mut out = CellOut {
         want_text: true,
         want_tooltip: true,
         ..CellOut::default()
     };
-    delegate.cell(0, id(column), &mut out);
+    delegate.cell(row, id(column), &mut out);
     out
 }
 
@@ -178,7 +183,10 @@ fn connections_columns_default_and_optional(cx: &mut TestAppContext) {
         delegate.columns().order,
         CONNECTION_COLUMNS.map(id).as_slice()
     );
-    for column in CONNECTION_COLUMNS {
+    let minimums = [
+        60., 120., 120., 90., 60., 60., 60., 60., 60., 60., 60., 60., 60., 60., 60.,
+    ];
+    for (column, minimum) in CONNECTION_COLUMNS.into_iter().zip(minimums) {
         assert_eq!(
             delegate.columns().widths[&id(column)],
             px(default_width(column))
@@ -187,6 +195,7 @@ fn connections_columns_default_and_optional(cx: &mut TestAppContext) {
             delegate.columns().visible.contains(&id(column)),
             DEFAULT_COLUMNS.contains(&column)
         );
+        assert_eq!(id(column).min_width(), Some(minimum), "{column:?}");
     }
 }
 
@@ -245,25 +254,96 @@ fn conn_row_restricted_lock(cx: &mut TestAppContext) {
     );
 }
 
-#[test]
-fn conn_state_labels_and_tones() {
-    assert_eq!(ConnState::Listening.label(), "LISTENING");
+#[gpui_kit::test]
+fn conn_restricted_tooltip_is_localized(cx: &mut TestAppContext) {
+    let mut delegate = cx.update(|cx| {
+        setup(cx);
+        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui::i18n::set_test_catalogue(
+            cx,
+            "connections-owner-restricted-tip = Socket de { $user } requires helper",
+        );
+        ConnectionsDelegate::new(cx)
+    });
+    let mut record = connection(1, SmallVec::new());
+    record.owner_validity = Validity::Restricted;
+    record.uid = 1001;
+    let snapshot = cx.update(|_| {
+        let mut snapshot = Snapshot::empty(BootId(1), 1);
+        snapshot.connections = Arc::new(ConnectionsSnapshot {
+            rows: vec![SysRow {
+                node: SysNodeId::Conn(1),
+                depth: 0,
+                expanded: false,
+                has_children: false,
+                record: Some(0),
+            }]
+            .into(),
+            records: vec![record].into(),
+            ..ConnectionsSnapshot::default()
+        });
+        snapshot.processes = Arc::new(ProcessSnapshot {
+            records: vec![process(9, "hidden", "bob", 1001)].into(),
+            ..ProcessSnapshot::default()
+        });
+        Arc::new(snapshot)
+    });
+    delegate.install(&snapshot);
     assert_eq!(
-        conn_state_tone(state_class(ConnState::Listening)),
-        LabelTone::Info
+        delegate.owner_tooltip_lines(0).unwrap()[0],
+        "Socket de bob requires helper"
     );
-    assert_eq!(ConnState::SynReceived.label(), "SYN-RECEIVED");
-    assert_eq!(ConnState::Closed.label(), "CLOSED");
-    assert_eq!(
-        conn_state_tone(state_class(ConnState::Closed)),
-        LabelTone::Secondary
-    );
-    assert_eq!(ConnState::Unknown.label(), "UNKNOWN");
-    assert_eq!(state_class(ConnState::Unknown), ConnStateClass::Unknown);
-    assert_eq!(
-        conn_state_tone(state_class(ConnState::Unknown)),
-        LabelTone::Warning
-    );
+}
+
+#[gpui_kit::test]
+fn conn_state_labels_and_tones(cx: &mut TestAppContext) {
+    let states = [
+        ConnState::from_tcp_state(10),
+        ConnState::from_tcp_state(12),
+        ConnState::from_tcp_state(7),
+        ConnState::from_tcp_state(13),
+    ];
+    let records = states
+        .into_iter()
+        .enumerate()
+        .map(|(ix, state)| {
+            let mut record = connection(ix as u64 + 1, SmallVec::new());
+            record.state = state;
+            record
+        })
+        .collect();
+    let delegate = delegate(cx, records, Vec::new());
+    let theme = cx.update(|cx| current(cx).clone());
+    let cells = (0..states.len())
+        .map(|row| cell_at(&delegate, row, ConnColumn::State))
+        .collect::<Vec<_>>();
+
+    assert_eq!(text(&cells[0]), "LISTENING");
+    assert_eq!(cells[0].text_color, Some(theme.status.info));
+    assert_eq!(text(&cells[1]), "SYN-RECEIVED");
+    assert_eq!(cells[1].text_color, None);
+    assert_eq!(text(&cells[2]), "CLOSED");
+    assert_eq!(cells[2].text_color, Some(theme.text_secondary));
+    assert_eq!(text(&cells[3]), "UNKNOWN");
+    assert_eq!(cells[3].text_color, Some(theme.status.warning));
+    assert_eq!(state_class(states[1]), state_class(ConnState::SynReceived));
+}
+
+#[gpui_kit::test]
+fn conn_foreign_wildcard_ports_are_empty(cx: &mut TestAppContext) {
+    let records = ["*:*", "0.0.0.0:*", "[::]:*"]
+        .into_iter()
+        .enumerate()
+        .map(|(ix, foreign)| {
+            let mut record = connection(ix as u64 + 1, SmallVec::new());
+            record.foreign = Arc::from(foreign);
+            record
+        })
+        .collect();
+    let delegate = delegate(cx, records, Vec::new());
+    for row in 0..3 {
+        assert_eq!(text(&cell_at(&delegate, row, ConnColumn::ForeignPort)), "");
+    }
 }
 
 #[gpui_kit::test]

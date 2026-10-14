@@ -27,7 +27,7 @@ use tl_model::validity::Validity;
 
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
-use crate::i18n::{Strings, tr, tr_en};
+use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::sys_status::{ConnStateClass, LabelTone, conn_state_tone};
 use crate::pages::sys_table::SysDelegate;
 use crate::table::cells::{CellOut, CellSuffix};
@@ -148,32 +148,54 @@ pub struct ConnectionWords {
     pub states: [Arc<str>; 14],
     pub no_owner: Arc<str>,
     pub restricted_glyph_tip: SharedString,
+    restricted_owner_tip: SharedString,
 }
+
+const OWNER_SENTINEL: &str = "\u{fdd0}";
 
 impl ConnectionWords {
     pub fn new(cx: &App) -> Self {
         match cx.try_global::<Strings>() {
-            Some(strings) => Self::build(Some(strings.strings_version), |key| tr(cx, key)),
+            Some(strings) => Self::build(
+                Some(strings.strings_version),
+                |key| tr(cx, key),
+                |key| tr_args(cx, key, &[("user", OWNER_SENTINEL.into())]),
+            ),
             None => Self::en(),
         }
     }
 
     pub fn en() -> Self {
-        Self::build(None, |key| tr_en(key, &[]))
+        Self::build(
+            None,
+            |key| tr_en(key, &[]),
+            |key| tr_en(key, &[("user", OWNER_SENTINEL.into())]),
+        )
     }
 
-    fn build(version: Option<u64>, text: impl Fn(&str) -> SharedString) -> Self {
+    fn build(
+        version: Option<u64>,
+        text: impl Fn(&str) -> SharedString,
+        text_with_user: impl Fn(&str) -> SharedString,
+    ) -> Self {
         Self {
             version,
             columns: COLUMN_KEYS.map(&text),
             states: STATE_KEYS.map(|key| Arc::from(&*text(key))),
             no_owner: Arc::from(&*text("connections-owner-kernel")),
             restricted_glyph_tip: text("connections-owner-restricted-glyph-tip"),
+            restricted_owner_tip: text_with_user("connections-owner-restricted-tip"),
         }
     }
 
     pub fn state(&self, state: ConnState) -> &Arc<str> {
         &self.states[state_index(state)]
+    }
+
+    fn restricted_owner_tip(&self, user: &str) -> SharedString {
+        self.restricted_owner_tip
+            .replace(OWNER_SENTINEL, user)
+            .into()
     }
 }
 
@@ -350,10 +372,7 @@ impl ConnectionsDelegate {
             let user = self
                 .user(record)
                 .map_or_else(|| record.uid.to_string(), ToString::to_string);
-            return Some(vec![
-                format!("Owned by {user}. Needs the tasklens helper to identify the process")
-                    .into(),
-            ]);
+            return Some(vec![self.words.restricted_owner_tip(&user)]);
         }
         if record.owners.len() <= 1 {
             return None;
@@ -568,7 +587,7 @@ impl TreeTableDelegate for ConnectionsDelegate {
                 write_u64(out, u64::from(record.four_tuple.local.port()), false)
             }
             ConnColumn::ForeignPort => {
-                if &*record.foreign != "*:*" {
+                if !record.foreign.ends_with(":*") {
                     write_u64(out, u64::from(record.four_tuple.remote.port()), false);
                 }
             }
@@ -673,6 +692,9 @@ impl TreeTableDelegate for ConnectionsDelegate {
 
     fn on_visible_range(&mut self, _: &[u64], _: &mut Context<TlTreeTable<Self>>) {}
 
+    /// Enter, Alt+Enter and Ctrl+I arrive here as `OpenProperties`, which continues to the
+    /// owning Connections page. The page also converts a propagated row double-click into the
+    /// same action, as the Startup page does. The Connections page is tasklens-9o0.15.
     fn on_activate(&mut self, _: u64, cx: &mut Context<TlTreeTable<Self>>) {
         cx.propagate();
     }
