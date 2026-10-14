@@ -577,11 +577,6 @@ mod sidebar {
             .update(|_, cx| sidebar.read(cx).selected().map(|k| k.0.to_string()))
     }
 
-    fn renders(r: &mut Rig) -> u32 {
-        let sidebar = r.sidebar.clone();
-        r.vcx.update(|_, cx| sidebar.read(cx).render_count.get())
-    }
-
     fn lines(r: &mut Rig, key: &str) -> CardLines {
         let sidebar = r.sidebar.clone();
         let key = DeviceKey(Arc::from(key));
@@ -677,7 +672,6 @@ mod sidebar {
     fn only_changed_card_reformats(cx: &mut TestAppContext) {
         let mut r = open(cx, nine(), Settings::default(), UiState::default());
         let (cpu, memory) = (lines(&mut r, "cpu"), lines(&mut r, "memory"));
-        let before = renders(&mut r);
         let calls = tr_calls();
 
         r.engine.publish_with(|s| s.system = Arc::new(system(20)));
@@ -697,7 +691,6 @@ mod sidebar {
             }
         }
         assert_eq!(cpu2.line1, CPU_MODEL);
-        assert_eq!(renders(&mut r), before + 1);
         assert_eq!(
             tr_calls(),
             calls,
@@ -706,9 +699,19 @@ mod sidebar {
     }
 
     #[gpui_kit::test]
-    fn unrelated_snapshot_does_not_rerender(cx: &mut TestAppContext) {
+    fn unrelated_snapshot_keeps_card_leaves(cx: &mut TestAppContext) {
         let mut r = open(cx, nine(), Settings::default(), UiState::default());
-        let before = renders(&mut r);
+        let keys = keys(&mut r);
+        let before_lines: Vec<_> = keys.iter().map(|key| lines(&mut r, key)).collect();
+        let charts: Vec<_> = keys.iter().map(|key| chart_of(&mut r, key)).collect();
+        let chart_renders = |r: &mut Rig| -> Vec<u32> {
+            charts
+                .iter()
+                .map(|chart| r.vcx.read_entity(chart, |v, _| v.render_count.get()))
+                .collect()
+        };
+        let before_renders = chart_renders(&mut r);
+        let calls = tr_calls();
         r.engine
             .publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
         draw(r.vcx);
@@ -719,11 +722,14 @@ mod sidebar {
             s.system = Arc::new(sys);
         });
         draw(r.vcx);
-        assert_eq!(renders(&mut r), before);
+        let after_lines: Vec<_> = keys.iter().map(|key| lines(&mut r, key)).collect();
+        assert_eq!(after_lines, before_lines, "card text stays unchanged");
+        assert_eq!(chart_renders(&mut r), before_renders, "charts stay cached");
+        assert_eq!(tr_calls(), calls, "no card text is translated again");
     }
 
-    /// A sidebar re-render for one card's text re-renders no card chart: each chart is a cached
-    /// view, and none of their series changed (tasklens-wlf.36).
+    /// An uncached sidebar traversal for one card's text re-renders no card chart: each chart is
+    /// a cached view, and none of their series changed (tasklens-wlf.36, tasklens-wlf.37).
     #[gpui_kit::test]
     fn sidebar_rerender_reuses_card_charts(cx: &mut TestAppContext) {
         let mut r = open(cx, nine(), Settings::default(), UiState::default());
@@ -734,16 +740,11 @@ mod sidebar {
                 .map(|c| r.vcx.read_entity(c, |v, _| v.render_count.get()))
                 .collect()
         };
-        let (sidebar_before, before) = (renders(&mut r), chart_renders(&mut r));
+        let before = chart_renders(&mut r);
 
         r.engine.publish_with(|s| s.system = Arc::new(system(20)));
         draw(r.vcx);
 
-        assert_eq!(
-            renders(&mut r),
-            sidebar_before + 1,
-            "the memory text changed"
-        );
         assert_eq!(chart_renders(&mut r), before, "no chart rendered again");
     }
 
@@ -1731,7 +1732,7 @@ mod sidebar {
             "adapter name only"
         );
 
-        let before = renders(&mut r);
+        let before = lines(&mut r, "net:eth0");
         r.engine.publish_with(|s| {
             let mut sys = system(10);
             sys.header.version += 1;
@@ -1739,9 +1740,9 @@ mod sidebar {
         });
         draw(r.vcx);
         assert_eq!(
-            renders(&mut r),
+            lines(&mut r, "net:eth0"),
             before,
-            "an unchanged tooltip does not redraw on the next snapshot tick"
+            "an unchanged tooltip keeps the same card text on the next snapshot tick"
         );
     }
 }
