@@ -2317,7 +2317,7 @@ mod wired {
     /// wlf.37: the Performance exception does not remove page caching from another tab.
     #[gpui_kit::test]
     fn processes_page_remains_cached(cx: &mut TestAppContext) {
-        let mut r = open(cx);
+        let r = open(cx);
         r.vcx
             .dispatch_action(tl_ui::actions::SelectTab(Tab::Processes as usize));
         draw(r.vcx);
