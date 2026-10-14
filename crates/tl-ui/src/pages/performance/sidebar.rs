@@ -42,10 +42,10 @@ use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
 use super::actions::{
-    PERFORMANCE_CONTEXT, PERFORMANCE_EDIT_CONTEXT, PerfDisableAllPages, PerfEnableAllPages,
-    PerfEnterEditMode, PerfExitEditMode, PerfOpenCardMenu, PerfResetPagesToDefault,
-    PerfSelectDevice, PerfSelectFirstDevice, PerfSelectLastDevice, PerfSelectNextDevice,
-    PerfSelectPrevDevice, PerfSelectVisibleDevice, PerfSetPageVisible,
+    PERFORMANCE_CONTEXT, PerfDisableAllPages, PerfEnableAllPages, PerfEnterEditMode,
+    PerfExitEditMode, PerfOpenCardMenu, PerfResetPagesToDefault, PerfSelectDevice,
+    PerfSelectFirstDevice, PerfSelectLastDevice, PerfSelectNextDevice, PerfSelectPrevDevice,
+    PerfSelectVisibleDevice, PerfSetPageVisible,
 };
 use super::card::{
     CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, DeviceCard,
@@ -1708,8 +1708,11 @@ impl Render for DeviceSidebar {
 
         div()
             .id("perf-sidebar")
-            .key_context(PERFORMANCE_CONTEXT)
-            .when(edit_present, |el| el.key_context(PERFORMANCE_EDIT_CONTEXT))
+            .key_context(if edit_present {
+                "Performance PerformanceEdit"
+            } else {
+                PERFORMANCE_CONTEXT
+            })
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_select))
             .on_action(cx.listener(Self::on_select_visible))
