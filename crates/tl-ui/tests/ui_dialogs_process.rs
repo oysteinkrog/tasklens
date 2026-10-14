@@ -1683,7 +1683,7 @@ mod signal {
     impl Rig {
         fn targets(n: u32) -> SmallVec<[ActionTarget; 1]> {
             (0..n)
-                .map(|i| ActionTarget::Process(super::key_of(i + 1)))
+                .map(|i| ActionTarget::Process(super::key_of(10_000 + i)))
                 .collect()
         }
 
@@ -1863,22 +1863,27 @@ mod signal {
 
     #[gpui_kit::test]
     fn signal_refusals_send_nothing(cx: &mut TestAppContext) {
-        for (refusal, text) in [
-            (SignalRefusal::Tasklens, "Refusing to end tasklens itself."),
-            (SignalRefusal::Pid1, "PID 1 (systemd) cannot be ended."),
+        for (pid, refusal, text) in [
+            (std::process::id(), None, "Refusing to end tasklens itself."),
+            (1, None, "PID 1 (systemd) cannot be ended."),
             (
-                SignalRefusal::KernelThread,
+                10_000,
+                Some(SignalRefusal::KernelThread),
                 "Kernel threads cannot be signalled.",
             ),
         ] {
             let mut rig = rig(cx);
+            let mut names = TargetNames::process("target", pid);
+            if let Some(refusal) = refusal {
+                names = names.with_refusal(refusal);
+            }
             rig.send(
                 1,
-                Rig::targets(1),
-                TargetNames::process("target", 1).with_refusal(refusal),
+                smallvec![ActionTarget::Process(super::key_of(pid))],
+                names,
             );
-            assert!(rig.sent().is_empty(), "{refusal:?}");
-            assert_eq!(rig.toasts(), [text], "{refusal:?}");
+            assert!(rig.sent().is_empty(), "PID {pid}");
+            assert_eq!(rig.toasts(), [text], "PID {pid}");
         }
     }
 
