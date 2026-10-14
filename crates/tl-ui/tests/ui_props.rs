@@ -1090,12 +1090,20 @@ mod window {
     use tl_model::command::{Command, Tab};
     use tl_model::demand::DetailDemand;
     use tl_model::details::{DetailTab, DetailTarget, TargetDetail};
-    use tl_model::ids::NodeId;
+    use tl_model::ids::{ColumnId, NodeId};
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind};
     use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::ProcessSnapshot;
+    use tl_model::table::{ProcessTableView, TableRow};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::menu::{MenuEntryKind, TlMenu};
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::demand::GlobalDemand;
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
+    use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
+    use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
@@ -1218,6 +1226,227 @@ mod window {
             table.header.version += 1;
         });
         cx.run_until_parked();
+    }
+
+    fn processes_page(main: &mut VisualTestContext) -> Entity<ProcessesPage> {
+        main.update(|_, cx| {
+            main_window_view(cx)
+                .and_then(|view| view.read(cx).page_entity::<ProcessesPage>(Tab::Processes))
+                .expect("the Processes page is built")
+        })
+    }
+
+    fn table_row(node: NodeId, record: Option<u32>, group: Option<u32>) -> TableRow {
+        TableRow {
+            node,
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record,
+            group,
+            descendants: 0,
+            subtree: None,
+        }
+    }
+
+    fn publish_table(
+        engine: &FakeEngine,
+        main: &mut VisualTestContext,
+        records: Vec<ProcessRecord>,
+        groups: Vec<GroupRow>,
+        rows: Vec<TableRow>,
+    ) {
+        let page = processes_page(main);
+        let generation =
+            main.update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation());
+        engine.publish_with(|snapshot| {
+            snapshot.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                records: records.into(),
+                ..ProcessSnapshot::default()
+            });
+            snapshot.table = Arc::new(ProcessTableView {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                query_generation: generation,
+                rows: rows.into(),
+                groups: groups.into(),
+                ..ProcessTableView::default()
+            });
+        });
+        main.run_until_parked();
+    }
+
+    fn select_and_focus(
+        main: &mut VisualTestContext,
+        page: &Entity<ProcessesPage>,
+        ids: &[ProcRowId],
+    ) {
+        let table = main.update(|_, cx| page.read(cx).table().clone());
+        main.update(|_, cx| {
+            table.update(cx, |table, cx| {
+                for (index, id) in ids.iter().enumerate() {
+                    if index == 0 {
+                        table.selection.click(*id);
+                    } else {
+                        table.selection.ctrl_click(*id);
+                    }
+                }
+                cx.notify();
+            })
+        });
+        let page = page.clone();
+        main.update(|window, cx| page.update(cx, |page, cx| page.focus_table(window, cx)));
+        draw(main);
+    }
+
+    #[gpui_kit::test]
+    fn enter_on_process_row_opens_properties(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        publish_table(
+            &engine,
+            &mut main,
+            vec![rec(101, ProcFlags::empty())],
+            Vec::new(),
+            vec![table_row(NodeId::Process(key(101)), Some(0), None)],
+        );
+        let page = processes_page(&mut main);
+        select_and_focus(&mut main, &page, &[ProcRowId::Process(key(101))]);
+
+        main.simulate_keystrokes("enter");
+        main.run_until_parked();
+
+        assert!(cx.update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::Properties(key(101)))
+                .is_some()
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_i_on_app_row_opens_app_properties(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let group = app_group("Firefox", GroupRowKind::App, 1);
+        let mut process = rec(101, ProcFlags::empty());
+        process.group = group.key;
+        publish_table(
+            &engine,
+            &mut main,
+            vec![process],
+            vec![group.clone()],
+            vec![table_row(group.node.clone(), None, Some(0))],
+        );
+        let page = processes_page(&mut main);
+        select_and_focus(&mut main, &page, &[ProcRowId::Group(group.key)]);
+
+        main.simulate_keystrokes("ctrl-i");
+        main.run_until_parked();
+
+        assert!(cx.update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::AppProperties(group.key))
+                .is_some()
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn multi_select_opens_one_window_each(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let pids = [101, 102, 103];
+        publish_table(
+            &engine,
+            &mut main,
+            pids.iter()
+                .map(|&pid| rec(pid, ProcFlags::empty()))
+                .collect(),
+            Vec::new(),
+            pids.iter()
+                .enumerate()
+                .map(|(index, &pid)| table_row(NodeId::Process(key(pid)), Some(index as u32), None))
+                .collect(),
+        );
+        let page = processes_page(&mut main);
+        let ids: Vec<_> = pids
+            .iter()
+            .map(|&pid| ProcRowId::Process(key(pid)))
+            .collect();
+        select_and_focus(&mut main, &page, &ids);
+
+        main.simulate_keystrokes("alt-enter");
+        main.run_until_parked();
+
+        assert_eq!(props_count(cx), 3);
+        for pid in pids {
+            assert!(cx.update(|cx| {
+                cx.global::<GlobalRegistry>()
+                    .0
+                    .read(cx)
+                    .get(&WindowKey::Properties(key(pid)))
+                    .is_some()
+            }));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_properties_item_states(cx: &mut TestAppContext) {
+        let (_engine, mut main) = setup(cx);
+        let page = processes_page(&mut main);
+        let target = |flags| CapturedTarget {
+            node: NodeId::Process(key(101)),
+            kind: RowKind::Process,
+            name: "process".into(),
+            pid: Some(101),
+            uid: 1000,
+            user: "user".into(),
+            flags,
+            member_count: 1,
+            stopped: false,
+            ppid: 1,
+            nice: Some(0),
+            exe_deleted: false,
+        };
+        let build = |targets: CapturedTargets, main: &mut VisualTestContext| {
+            let focus = main.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
+            main.update(|window, cx| {
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                })
+            })
+        };
+
+        let live = build(
+            CapturedTargets::new([target(ProcFlags::empty())], Some(ColumnId::Name)),
+            &mut main,
+        );
+        let live_entries = main.update(|window, cx| live.read(cx).entries_for_test(window));
+        let item = live_entries
+            .iter()
+            .find(|entry| entry.label.as_deref() == Some("Properties"))
+            .expect("Properties item");
+        assert_eq!(item.kind, MenuEntryKind::Item);
+
+        let exited = build(
+            CapturedTargets::new([target(ProcFlags::EXITED)], Some(ColumnId::Name)),
+            &mut main,
+        );
+        let exited_entries = main.update(|window, cx| exited.read(cx).entries_for_test(window));
+        let item = exited_entries
+            .iter()
+            .find(|entry| entry.label.as_deref() == Some("Properties"))
+            .expect("disabled Properties item");
+        assert_eq!(item.kind, MenuEntryKind::Disabled);
+        assert_eq!(item.tooltip.as_deref(), Some("Process exited"));
     }
 
     /// Edits the detail of `pid` and publishes it.

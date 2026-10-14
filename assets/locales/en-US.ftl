@@ -1977,6 +1977,7 @@ processes-menu-copy = Copy
 processes-menu-copy-details = Copy details
 processes-menu-copy-all-metrics = Copy all metrics
 processes-menu-copy-rows-as-table = Copy rows as table
+processes-menu-properties = Properties
 processes-menu-open-file-location = Open file location
 processes-menu-executable-deleted = Executable deleted
 processes-menu-go-to-parent = Go to parent process

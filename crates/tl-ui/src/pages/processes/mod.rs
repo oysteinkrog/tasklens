@@ -57,11 +57,12 @@ use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::panel::MinigraphPanel;
 use crate::settings_global::{Section, TlSettings};
-use crate::table::actions::{CollapseAll, CopyCell};
+use crate::table::actions::{CollapseAll, CopyCell, OpenProperties};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{GlobalShellEvents, PauseChanged, ShellPage};
+use crate::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::window::status::StatusChanged;
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
 use crate::windows::signal::{
@@ -427,6 +428,62 @@ impl ProcessesPage {
         self.menu_targets
             .take()
             .unwrap_or_else(|| self.capture_targets(None, cx))
+    }
+
+    /// Opens one Properties window for each captured process, app or unit row, in selection
+    /// order (D-008, UI-PRC-013 item 19). Group headers and pseudo rows do nothing.
+    fn on_open_properties(&mut self, _: &OpenProperties, _: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        let unit_groups: FxHashMap<NodeId, tl_model::ids::GroupKey> = self
+            .table
+            .read(cx)
+            .delegate
+            .snapshot()
+            .table
+            .groups
+            .iter()
+            .filter(|group| group.kind == tl_model::process::GroupRowKind::Unit)
+            .map(|group| (group.node.clone(), group.key))
+            .collect();
+        let mut process_cap_notified = false;
+        let mut app_cap_notified = false;
+        for target in targets.items {
+            match (target.kind, target.node) {
+                (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => {
+                    if should_attempt_properties(
+                        &WindowKey::Properties(key),
+                        CapClass::ProcessProps,
+                        &mut process_cap_notified,
+                        cx,
+                    ) {
+                        crate::windows::props::open_process_properties(key, cx);
+                    }
+                }
+                (RowKind::App, NodeId::Group(group)) => {
+                    if should_attempt_properties(
+                        &WindowKey::AppProperties(group),
+                        CapClass::AppProps,
+                        &mut app_cap_notified,
+                        cx,
+                    ) {
+                        crate::windows::app_props::open_app_properties(group, cx);
+                    }
+                }
+                (RowKind::Unit, node @ NodeId::Unit(_)) => {
+                    if let Some(group) = unit_groups.get(&node) {
+                        if should_attempt_properties(
+                            &WindowKey::AppProperties(*group),
+                            CapClass::AppProps,
+                            &mut app_cap_notified,
+                            cx,
+                        ) {
+                            crate::windows::app_props::open_app_properties(*group, cx);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn on_end_task(&mut self, _: &EndTask, window: &mut Window, cx: &mut Context<Self>) {
@@ -1449,6 +1506,7 @@ impl Render for ProcessesPage {
             .flex()
             .flex_col()
             .on_action(cx.listener(Self::on_collapse_all))
+            .on_action(cx.listener(Self::on_open_properties))
             .on_action(cx.listener(Self::on_toggle_group_row))
             .on_action(cx.listener(Self::on_end_task))
             .on_action(cx.listener(Self::on_end_process))
@@ -1478,6 +1536,29 @@ impl Render for ProcessesPage {
                         panel.cached(StyleRefinement::default().absolute().inset_0())
                     })),
             )
+    }
+}
+
+/// Lets the first over-cap open call show its toast, then suppresses the same cap toast for the
+/// rest of this action. An already-open key still gets focused when the class is full.
+fn should_attempt_properties(
+    key: &WindowKey,
+    class: CapClass,
+    cap_notified: &mut bool,
+    cx: &App,
+) -> bool {
+    let Some(registry) = cx.try_global::<GlobalRegistry>() else {
+        return true;
+    };
+    let registry = registry.0.read(cx);
+    if registry.get(key).is_some() || registry.count(class) < class.cap() {
+        return true;
+    }
+    if *cap_notified {
+        false
+    } else {
+        *cap_notified = true;
+        true
     }
 }
 

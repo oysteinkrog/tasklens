@@ -18,7 +18,7 @@ use super::actions::{
 use super::{SuspendLabel, suspend_or_resume};
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
-use crate::table::actions::{CopyCell, CopyRowsAsTable};
+use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::RowKind;
 use crate::windows::actions::{OpenCustomPriority, SetAffinity};
 use crate::windows::signal::signal_submenu;
@@ -110,6 +110,7 @@ pub fn row_menu(
     menu = add_copy_all_metrics(menu, cx);
     menu = add_copy_rows_as_table(menu, cx);
     menu = menu.separator();
+    menu = add_properties(menu, shape, cx);
     menu = add_open_file_location(menu, targets, shape, cx);
     menu = menu.separator();
     add_go_to_parent(menu, targets, shape, cx)
@@ -217,6 +218,17 @@ fn add_end_process_tree(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
     }
     let label = tr(cx, "processes-menu-end-process-tree");
     exitable(menu, shape, label, Box::new(EndProcessTree), cx)
+}
+
+/// Item 19: Process Properties for process rows and App Properties for app and unit rows.
+fn add_properties(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
+    exitable(
+        menu,
+        shape,
+        tr(cx, "processes-menu-properties"),
+        Box::new(OpenProperties),
+        cx,
+    )
 }
 
 /// Item 4: Suspend or Resume, by State T. Not on app and unit rows in P1.
