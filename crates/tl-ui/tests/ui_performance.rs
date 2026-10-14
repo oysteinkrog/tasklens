@@ -2505,7 +2505,7 @@ mod summary {
                 })
             );
         });
-        r.vcx.simulate_keystrokes("down enter");
+        r.vcx.simulate_keystrokes("down down enter");
         draw(r.vcx);
         assert_eq!(
             selected(&mut r).as_deref(),
