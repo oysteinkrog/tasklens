@@ -3,11 +3,11 @@
 //! (docs/ui/performance.md UI-PRF-010, UI-PRF-011, UI-PRF-012; PERF-001, PERF-007; ADR-008,
 //! ADR-009).
 //!
-//! The sidebar re-renders only when a card's text, the card list or the selection changes. The
-//! charts are cached views that re-render for their own series. Card text is read from the
-//! snapshot on `SYSTEM`, `INVENTORY`, `DEVICE_DETAILS` and `DEVICES` changes and kept when its
-//! text is unchanged ([`update_card_lines`]). The card text reads no series, so `SERIES` alone
-//! formats nothing. The card words are translated once per strings version ([`card_words`]).
+//! Each complete card is a persistent cached view. A card re-renders only when its own chart,
+//! text or presentation changes. Card text is read from the snapshot on `SYSTEM`, `INVENTORY`,
+//! `DEVICE_DETAILS` and `DEVICES` changes and kept when its text is unchanged
+//! ([`update_card_lines`]). The card text reads no series, so `SERIES` alone formats nothing.
+//! The card words are translated once per strings version ([`card_words`]).
 //!
 //! Hotplug (UI-PRF-012): a new card grows in at its place and a removed card collapses where it
 //! was, over `m_base`. A removed card keeps rendering until then, but it is out of the
@@ -27,8 +27,8 @@ use gpui_kit::{
     Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity,
     EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
-    px, white,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, WeakEntity,
+    Window, canvas, div, px, white,
 };
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -44,7 +44,7 @@ use super::actions::{
     PerfSetPageVisible,
 };
 use super::card::{
-    CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardWords, DeviceCard, card_chart_grid,
+    CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, card_chart_grid,
     card_chart_labels, card_words, update_card_lines,
 };
 use super::menu::card_menu;
@@ -118,6 +118,7 @@ pub enum CardAnim {
 pub struct CardState {
     pub row: DeviceRow,
     pub chart: Entity<ChartView>,
+    pub view: Entity<CardView>,
     pub lines: CardLines,
     /// Index among the visible cards of its kind: "Disk 0".
     pub number: u16,
@@ -487,8 +488,9 @@ impl DeviceSidebar {
         };
         // The first cards are there at once.
         this.sync_cards(&snap, false, cx);
-        this.refresh_lines(&snap);
+        this.refresh_lines(&snap, cx);
         this.selected = initial_selection(&this.visible(), Some(&saved_selection(cx)));
+        this.sync_card_selection(cx);
         if let Some(ix) = this.selected_index() {
             this.scroll.scroll_to_item(ix);
         }
@@ -511,8 +513,8 @@ impl DeviceSidebar {
             let saved = key.0.to_string();
             TlSettings::update(cx, |d| d.state.performance.selected_device = saved);
         }
+        self.sync_card_selection(cx);
         cx.emit(SidebarEvent::Selected(key));
-        cx.notify();
     }
 
     /// The keys of the visible cards, in sidebar order. Collapsing cards are not visible.
@@ -612,9 +614,12 @@ impl DeviceSidebar {
         let (spec, fmt) = card_spec(row, scale, &self.settings, current(cx));
         let hub = self.hub.clone();
         let chart = cx.new(|cx| ChartView::new(spec, card_chart_labels(fmt), &hub, cx));
+        let view =
+            cx.new(|_| CardView::new(row.key.clone(), chart.clone(), Rc::clone(&self.card_width)));
         CardState {
             row: row.clone(),
             chart,
+            view,
             lines: CardLines::default(),
             number,
             anim,
@@ -799,11 +804,12 @@ impl DeviceSidebar {
         if let Some(next) = next {
             self.select(next, cx);
         }
+        self.sync_card_selection(cx);
         true
     }
 
     /// Re-formats every card's text. True when any line changed.
-    fn refresh_lines(&mut self, snap: &Snapshot) -> bool {
+    fn refresh_lines(&mut self, snap: &Snapshot, cx: &mut App) -> bool {
         let mut changed = false;
         for card in &mut self.cards {
             let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == card.row.idx) else {
@@ -821,9 +827,30 @@ impl DeviceSidebar {
                 // P3 (PERF-077) pairs a temperature sensor with a fan.
                 fan_temp: None,
             };
-            changed |= update_card_lines(&mut card.lines, &input, &mut self.scratch);
+            if update_card_lines(&mut card.lines, &input, &mut self.scratch) {
+                changed = true;
+                let lines = card.lines.clone();
+                card.view.update(cx, |view, cx| view.set_lines(lines, cx));
+            }
         }
         changed
+    }
+
+    /// Pushes selection into the persistent card leaves.
+    fn sync_card_selection(&mut self, cx: &mut App) {
+        for card in &mut self.cards {
+            let selected = !card.is_removing() && self.selected.as_ref() == Some(&card.row.key);
+            card.view
+                .update(cx, |view, cx| view.set_selected(selected, cx));
+        }
+    }
+
+    /// Pushes list focus into every card because it changes only their focus rings.
+    fn sync_card_focus(&mut self, focused: bool, cx: &mut App) {
+        for card in &self.cards {
+            card.view
+                .update(cx, |view, cx| view.set_focused(focused, cx));
+        }
     }
 
     /// Rebuilds the chart of each card whose scale input moved, or of every card with `all`.
@@ -860,7 +887,7 @@ impl DeviceSidebar {
             changed |= self.sync_rows(&snap, cx);
         }
         self.sync_charts(&snap, false, cx);
-        changed |= self.refresh_lines(&snap);
+        self.refresh_lines(&snap, cx);
         if changed {
             cx.notify();
         }
@@ -881,7 +908,7 @@ impl DeviceSidebar {
         let snap = Arc::clone(self.hub.read(cx).current());
         let mut changed = self.sync_rows(&snap, cx);
         self.sync_charts(&snap, true, cx);
-        changed |= self.refresh_lines(&snap);
+        self.refresh_lines(&snap, cx);
         if changed {
             cx.notify();
         }
@@ -896,6 +923,9 @@ impl DeviceSidebar {
         self.style_version = version;
         let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_charts(&snap, true, cx);
+        for card in &self.cards {
+            card.view.update(cx, CardView::invalidate_style);
+        }
         cx.notify();
     }
 
@@ -907,9 +937,7 @@ impl DeviceSidebar {
         }
         self.words = words;
         let snap = Arc::clone(self.hub.read(cx).current());
-        if self.refresh_lines(&snap) {
-            cx.notify();
-        }
+        self.refresh_lines(&snap, cx);
     }
 
     /// Whether `key`'s page shows when no override is set: its type's setting (PERF-002).
@@ -1091,14 +1119,17 @@ impl Render for DeviceSidebar {
         }
         if self.focus_subs.is_none() {
             self.focus_subs = Some([
-                cx.on_focus(&self.focus, window, |_, _, cx| cx.notify()),
-                cx.on_blur(&self.focus, window, |_, _, cx| cx.notify()),
+                cx.on_focus(&self.focus, window, |this, _, cx| {
+                    this.sync_card_focus(true, cx)
+                }),
+                cx.on_blur(&self.focus, window, |this, _, cx| {
+                    this.sync_card_focus(false, cx)
+                }),
             ]);
         }
 
         let m = *metrics(cx);
         let theme = current(cx);
-        let focused = self.focus.is_focused(window);
         let width = self.card_width.get();
         let card_h = CARD_H * m.ui_scale;
         let cards = self.cards.iter().map(|c| {
@@ -1108,20 +1139,14 @@ impl Render for DeviceSidebar {
                 cx.stop_propagation();
                 this.open_card_menu(&menu_key, ev.position, window, cx);
             });
-            let card = DeviceCard {
-                key: c.row.key.clone(),
-                chart: c.chart.clone(),
-                lines: c.lines.clone(),
-                selected: !c.is_removing() && self.selected.as_ref() == Some(&c.row.key),
-                focused,
-                edit_mode: self.edit_mode,
-                hidden_in_edit: false,
-                width,
-            };
             let card = div()
                 .flex_none()
                 .on_mouse_down(MouseButton::Right, on_right)
-                .child(card);
+                .child(
+                    c.view
+                        .clone()
+                        .cached(StyleRefinement::default().w(width).h(px(card_h))),
+                );
             let showing = match c.anim {
                 CardAnim::Steady => return card.into_any_element(),
                 CardAnim::Inserting { .. } => true,

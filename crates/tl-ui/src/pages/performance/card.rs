@@ -11,9 +11,9 @@ use std::sync::LazyLock;
 
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, ElementId, Entity, FontWeight, Global, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div, px,
+    AnyElement, App, Context, ElementId, Entity, FontWeight, Global, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, canvas, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
@@ -783,6 +783,103 @@ pub fn card_chart_grid() -> GridStyle {
 
 /// The surface a card's mini graph sits on.
 pub const CARD_CHART_BG: ChartBg = ChartBg::List;
+
+/// Persistent view for one complete sidebar card. The sidebar embeds this entity with
+/// [`gpui_kit::Entity::cached`], so a clean sibling reuses its text, background and chart paint.
+pub struct CardView {
+    key: DeviceKey,
+    chart: Entity<ChartView>,
+    lines: CardLines,
+    selected: bool,
+    focused: bool,
+    edit_mode: bool,
+    hidden_in_edit: bool,
+    width: Rc<std::cell::Cell<Pixels>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub render_count: std::cell::Cell<u32>,
+    /// Whole-card paint callbacks. A cached paint replay does not increment this counter.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub paint_count: Rc<std::cell::Cell<u32>>,
+}
+
+impl CardView {
+    pub fn new(
+        key: DeviceKey,
+        chart: Entity<ChartView>,
+        width: Rc<std::cell::Cell<Pixels>>,
+    ) -> Self {
+        Self {
+            key,
+            chart,
+            lines: CardLines::default(),
+            selected: false,
+            focused: false,
+            edit_mode: false,
+            hidden_in_edit: false,
+            width,
+            #[cfg(any(test, feature = "test-hooks"))]
+            render_count: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            paint_count: Rc::new(std::cell::Cell::new(0)),
+        }
+    }
+
+    /// Replaces the formatted text and invalidates only this card.
+    pub fn set_lines(&mut self, lines: CardLines, cx: &mut Context<Self>) {
+        if self.lines != lines {
+            self.lines = lines;
+            cx.notify();
+        }
+    }
+
+    pub fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
+        if self.selected != selected {
+            self.selected = selected;
+            cx.notify();
+        }
+    }
+
+    pub fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
+        if self.focused != focused {
+            self.focused = focused;
+            cx.notify();
+        }
+    }
+
+    /// Invalidates theme-dependent text and surfaces without notifying the sidebar.
+    pub fn invalidate_style(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+}
+
+impl Render for CardView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let card = DeviceCard {
+            key: self.key.clone(),
+            chart: self.chart.clone(),
+            lines: self.lines.clone(),
+            selected: self.selected,
+            focused: self.focused,
+            edit_mode: self.edit_mode,
+            hidden_in_edit: self.hidden_in_edit,
+            width: self.width.get(),
+        };
+
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            let paints = Rc::clone(&self.paint_count);
+            return div().relative().size_full().child(card).child(
+                canvas(|_, _, _| {}, move |_, _, _, _| paints.set(paints.get() + 1))
+                    .absolute()
+                    .inset_0(),
+            );
+        }
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        card
+    }
+}
 
 /// One sidebar card. Built by its owner's render; the chart entity is the owner's.
 #[derive(IntoElement)]

@@ -371,6 +371,7 @@ mod sidebar {
     use tl_model::ids::{MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
     use tl_ui::anim::AnimationDriver;
     use tl_ui::app::{BootSettings, EngineGlobal};
@@ -589,6 +590,78 @@ mod sidebar {
         })
     }
 
+    fn card_counts(r: &mut Rig) -> Vec<(String, u32, u32)> {
+        let sidebar = r.sidebar.clone();
+        r.vcx.update(|_, cx| {
+            sidebar
+                .read(cx)
+                .cards()
+                .iter()
+                .filter(|card| !card.is_removing())
+                .map(|card| {
+                    let view = card.view.read(cx);
+                    (
+                        card.row.key.0.to_string(),
+                        view.render_count.get(),
+                        view.paint_count.get(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn publish_cpu_series(r: &mut Rig) {
+        let newest = now_boot_ns();
+        r.engine.publish_with(|s| {
+            let version = s.series.header.version + 1;
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: Arc::from([Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(0),
+                        metric: MetricId::CPU_TOTAL,
+                    },
+                    version,
+                    period_ns: 100_000_000,
+                    samples: Arc::from([
+                        Sample::valid(newest - 100_000_000, 20.),
+                        Sample::valid(newest, 30.),
+                    ]),
+                })]),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+    }
+
+    fn cpu_series_card_deltas(
+        cx: &mut TestAppContext,
+        mut settings: Settings,
+    ) -> Vec<(String, u32, u32)> {
+        settings.motion.animations = false;
+        settings.motion.smooth_graphs = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        draw(r.vcx);
+        let before = card_counts(&mut r);
+
+        publish_cpu_series(&mut r);
+
+        let after = card_counts(&mut r);
+        before
+            .into_iter()
+            .zip(after)
+            .map(
+                |((key, renders, paints), (after_key, after_renders, after_paints))| {
+                    assert_eq!(after_key, key);
+                    (key, after_renders - renders, after_paints - paints)
+                },
+            )
+            .collect()
+    }
+
     fn no_disks() -> Settings {
         let mut s = Settings::default();
         s.performance.show_disks = false;
@@ -728,24 +801,24 @@ mod sidebar {
         assert_eq!(tr_calls(), calls, "no card text is translated again");
     }
 
-    /// An uncached sidebar traversal for one card's text re-renders no card chart: each chart is
-    /// a cached view, and none of their series changed (tasklens-wlf.36, tasklens-wlf.37).
     #[gpui_kit::test]
-    fn sidebar_rerender_reuses_card_charts(cx: &mut TestAppContext) {
-        let mut r = open(cx, nine(), Settings::default(), UiState::default());
-        let charts: Vec<_> = keys(&mut r).iter().map(|k| chart_of(&mut r, k)).collect();
-        let chart_renders = |r: &mut Rig| -> Vec<u32> {
-            charts
-                .iter()
-                .map(|c| r.vcx.read_entity(c, |v, _| v.render_count.get()))
-                .collect()
-        };
-        let before = chart_renders(&mut r);
+    fn cpu_series_renders_and_paints_only_cpu_card_when_overview_hidden(cx: &mut TestAppContext) {
+        let deltas = cpu_series_card_deltas(cx, Settings::default());
+        for (key, renders, paints) in deltas {
+            let expected = u32::from(key == "cpu");
+            assert_eq!(renders, expected, "{key} render delta");
+            assert_eq!(paints, expected, "{key} paint delta");
+        }
+    }
 
-        r.engine.publish_with(|s| s.system = Arc::new(system(20)));
-        draw(r.vcx);
-
-        assert_eq!(chart_renders(&mut r), before, "no chart rendered again");
+    #[gpui_kit::test]
+    fn cpu_series_renders_and_paints_cpu_and_overview_cards(cx: &mut TestAppContext) {
+        let deltas = cpu_series_card_deltas(cx, with_overview());
+        for (key, renders, paints) in deltas {
+            let expected = u32::from(key == "cpu" || key == OVERVIEW);
+            assert_eq!(renders, expected, "{key} render delta");
+            assert_eq!(paints, expected, "{key} paint delta");
+        }
     }
 
     #[gpui_kit::test]
