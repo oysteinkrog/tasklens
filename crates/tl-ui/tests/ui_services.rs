@@ -1,5 +1,7 @@
 //! Services delegate, action and key binding tests.
 
+#![cfg(feature = "test-hooks")]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;

@@ -2935,6 +2935,7 @@ mod window {
 
 // ---- Threads tab (E23-016, UI-PWN-010) ----
 
+#[cfg(feature = "test-hooks")]
 mod threads {
     use tl_model::actions::ActionTarget;
     use tl_model::details::ThreadRow;
@@ -3694,8 +3695,10 @@ mod security {
         CapRow, Elevated, GroupMembershipRow, NsKind, NsRow, NsState, SecurityDetail,
     };
     use tl_ui::components::tooltip::DELAY_CONTROL;
+    #[cfg(feature = "test-hooks")]
+    use tl_ui::windows::props::security::CAP_CHECK_SIZE;
     use tl_ui::windows::props::security::{
-        CAP_CHECK_SIZE, CapColumn, NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
+        CapColumn, NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
     };
     use tl_ui::{table::cells::CellOut, table::tree_table::TreeTableDelegate as _};
 
