@@ -63,7 +63,7 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
 use crate::components::switch::TlSwitch;
 use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
-use crate::components::tooltip::TlTooltip;
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
@@ -1736,6 +1736,11 @@ impl Render for DeviceSidebar {
                         let ghost_chart = card.chart.clone();
                         let ghost_lines = card.lines.clone();
                         let sidebar = cx.weak_entity();
+                        let tip = HoverTooltip::state(
+                            ElementId::Name(format!("perf-drag-tip-{}", key.0).into()),
+                            window,
+                            cx,
+                        );
                         let handle = div()
                             .flex()
                             .flex_none()
@@ -1743,7 +1748,6 @@ impl Render for DeviceSidebar {
                             .justify_center()
                             .w(px(24. * m.ui_scale))
                             .cursor_grab()
-                            .tooltip(TlTooltip::text("Drag to reorder").build())
                             .on_drag(
                                 DraggedCard { key: key.clone() },
                                 move |dragged, _, _, cx| {
@@ -1769,6 +1773,14 @@ impl Render for DeviceSidebar {
                                     .size(px(16. * m.ui_scale))
                                     .text_color(theme.text_secondary),
                             );
+                        let handle = HoverTooltip::attach(
+                            &tip,
+                            handle,
+                            DELAY_CONTROL,
+                            TlTooltip::text("Drag to reorder").build(),
+                            window,
+                            cx,
+                        );
                         let target_key = key.clone();
                         let mut row = div()
                             .debug_selector({
