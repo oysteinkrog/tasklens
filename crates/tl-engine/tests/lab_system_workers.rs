@@ -704,6 +704,17 @@ fn memory_no_zram_unsupported() {
     assert_eq!(s.totals.validity, Validity::Valid);
 }
 
+/// A zram device whose `mm_stat` cannot be parsed gives no zram totals, not a valid 0.
+#[test]
+fn memory_zram_failed_mm_stat_not_valid() {
+    let dir = fixture_copy("mem-composition", None);
+    fs::write(dir.join("sys/block/zram0/mm_stat"), "1 2\n").expect("write mm_stat");
+    let (_, s) = memory_sample(MemorySource::new(SysRoot::at(&dir)), SEC);
+    assert_eq!(s.zram.len(), 1);
+    assert_eq!(s.totals.zram.validity, Validity::Failed);
+    assert_eq!(s.totals.validity, Validity::Valid);
+}
+
 #[test]
 fn memory_zram_rescan_every_5s() {
     let (dir, zram0) = memory_without_zram();

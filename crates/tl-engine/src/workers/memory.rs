@@ -99,8 +99,12 @@ impl MemorySource {
         let r = &self.reading;
         let info = &r.info;
 
+        // The sum covers the devices whose `mm_stat` was read. When none was, it is not a
+        // value: the first device's validity says why.
         let zram = if r.zram.is_empty() {
             Metric::with(Validity::Unsupported)
+        } else if r.zram.iter().all(|z| z.mm.validity != Validity::Valid) {
+            Metric::with(r.zram[0].mm.validity)
         } else {
             let (orig_data, compr_data) = r
                 .zram

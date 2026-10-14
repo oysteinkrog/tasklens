@@ -590,6 +590,26 @@ fn zram_ratio_dash_when_zero() {
     assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "-");
 }
 
+/// The engine sends a non-valid zram total when the device's `mm_stat` read failed. The rows
+/// built from it read Unavailable, not 0.
+#[test]
+fn zram_failed_mm_stat_is_unavailable() {
+    let mut mem = zram_mem(0, 0);
+    mem.zram = tl_model::system::Metric::with(Validity::Failed);
+    let block = build(&mem, &zram_details());
+    let z = &block.zram[0];
+    for label in [
+        ROW_ZRAM_STORED,
+        ROW_ZRAM_COMPRESSED,
+        ROW_ZRAM_MEM_USED,
+        ROW_ZRAM_RATIO,
+    ] {
+        assert_eq!(value_of(z, label), "Unavailable", "{label}");
+    }
+    assert_eq!(value_of(z, ROW_ZRAM_DEVICE), "/dev/zram0");
+    assert_eq!(value_of(z, ROW_ZRAM_SIZE), "8.00 GiB");
+}
+
 /// `MemoryPage::blocks` returns no block while no zram device exists and zswap is off, and one
 /// block once a zram device appears.
 #[gpui_kit::test]

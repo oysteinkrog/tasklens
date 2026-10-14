@@ -624,7 +624,8 @@ fn text_bits(s: &str) -> u64 {
 }
 
 /// Fills one zram grid. The `mm_stat` totals are summed over all devices, so they belong to a
-/// device only when it is the only one; with more devices those rows read Unavailable.
+/// device only when it is the only one. With more devices, or when its `mm_stat` read failed
+/// (`stats` is `None`), those rows read Unavailable.
 fn update_zram_grid(
     model: &mut KeyValueModel,
     dev: &tl_model::snapshot::ZramDetail,
