@@ -14,11 +14,11 @@ use gpui_kit::base::Root;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity,
-    EntityId, FocusHandle, Focusable as _, FontWeight, ImageSource, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, StyledImage as _, Subscription, Window, WindowHandle, canvas,
-    div, img, prelude::FluentBuilder as _, px,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, Context,
+    Entity, EntityId, FocusHandle, Focusable as _, FontWeight, ImageSource,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, StyledImage as _, Subscription,
+    Window, WindowHandle, canvas, div, img, point, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest};
@@ -34,7 +34,9 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::actions::{
-    PROPS_WINDOW_CONTEXT, PropsCloseWindow, PropsEscape, PropsFocusFilter, PropsNextTab,
+    KV_GRID_CONTEXT, PROPS_WINDOW_CONTEXT, PropsActivateField, PropsCloseWindow,
+    PropsCopyAllFields, PropsCopyValue, PropsEscape, PropsFieldDown, PropsFieldEnd, PropsFieldHome,
+    PropsFieldLeft, PropsFieldMenu, PropsFieldRight, PropsFieldUp, PropsFocusFilter, PropsNextTab,
     PropsPrevTab, PropsRefreshNow, PropsSelectTab,
 };
 use super::frame::{EscStep, PwnWindow, app_props_title, esc_step, open_pwn};
@@ -45,9 +47,12 @@ use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
-    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
+    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord, kv_words,
+    row_copy_text, section_copy_text, shown_text_in, value_copy_form,
 };
-use crate::components::menu::{close_context_menu, context_menu_open};
+use crate::components::menu::{
+    TlMenu, close_context_menu, context_menu_open, open_context_menu_at,
+};
 use crate::components::tabs::{TlTabSpec, TlTabs};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::TlSecondaryWindow;
@@ -60,7 +65,14 @@ use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
-gpui_kit::actions!(tasklens, [AppGeneralOpenDesktop]);
+gpui_kit::actions!(
+    tasklens,
+    [
+        AppGeneralOpenDesktop,
+        AppGeneralCopyRow,
+        AppGeneralCopyPanel
+    ]
+);
 
 const TABS: [DetailTab; 2] = [DetailTab::AppGeneral, DetailTab::AppProcesses];
 const PANEL_BREAKPOINT: f32 = 640.;
@@ -274,6 +286,9 @@ pub struct AppGeneralTab {
     exited: bool,
     network_unit: NetUnit,
     copy_focus: FocusHandle,
+    grid_focus: FocusHandle,
+    cursor: Option<(usize, usize)>,
+    panel_bounds: Rc<[Cell<Bounds<Pixels>>; 2]>,
     cmdline_text: SharedString,
     cmdline_validity: Validity,
     _subs: Vec<Subscription>,
@@ -310,6 +325,9 @@ impl AppGeneralTab {
             exited: false,
             network_unit,
             copy_focus: cx.focus_handle(),
+            grid_focus: cx.focus_handle(),
+            cursor: None,
+            panel_bounds: Rc::new(std::array::from_fn(|_| Cell::new(Bounds::default()))),
             cmdline_text: SharedString::default(),
             cmdline_validity: Validity::WarmingUp,
             _subs: vec![sub],
@@ -408,6 +426,193 @@ impl AppGeneralTab {
 
     pub fn panels_are_side_by_side(&self) -> bool {
         self.side_by_side
+    }
+
+    fn rows(&self, panel: usize) -> &[TlKvRow] {
+        let sections = if panel == 0 {
+            &self.identity
+        } else {
+            &self.usage
+        };
+        sections
+            .first()
+            .and_then(|section| section.blocks.first())
+            .map_or(&[], |block| block.rows.as_slice())
+    }
+
+    fn set_cursor(&mut self, panel: usize, row: usize, cx: &mut Context<Self>) {
+        let len = self.rows(panel).len();
+        if len == 0 {
+            return;
+        }
+        let next = Some((panel, row.min(len - 1)));
+        if self.cursor != next {
+            self.cursor = next;
+            cx.notify();
+        }
+    }
+
+    fn ensure_cursor(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.cursor.is_some() {
+            return false;
+        }
+        if let Some(panel) = (0..2).find(|&panel| !self.rows(panel).is_empty()) {
+            self.set_cursor(panel, 0, cx);
+        }
+        true
+    }
+
+    fn step_row(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.ensure_cursor(cx) {
+            return;
+        }
+        if let Some((panel, row)) = self.cursor {
+            self.set_cursor(panel, row.saturating_add_signed(delta), cx);
+        }
+    }
+
+    fn step_panel(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.ensure_cursor(cx) {
+            return;
+        }
+        let Some((panel, row)) = self.cursor else {
+            return;
+        };
+        let next = if forward {
+            (panel + 1..2).find(|&p| !self.rows(p).is_empty())
+        } else {
+            (0..panel).rev().find(|&p| !self.rows(p).is_empty())
+        };
+        if let Some(next) = next {
+            self.set_cursor(next, row, cx);
+        }
+    }
+
+    fn row_end(&mut self, last: bool, cx: &mut Context<Self>) {
+        self.ensure_cursor(cx);
+        if let Some((panel, _)) = self.cursor {
+            self.set_cursor(panel, if last { usize::MAX } else { 0 }, cx);
+        }
+    }
+
+    fn cursor_row(&self) -> Option<&TlKvRow> {
+        let (panel, row) = self.cursor?;
+        self.rows(panel).get(row)
+    }
+
+    fn copy(&self, text: String, value: bool, window: &mut Window, cx: &mut App) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let toast = if value {
+            self.words.copied.clone()
+        } else {
+            tr(cx, "pwn-general-toast-copied")
+        };
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |q, cx| {
+                q.push(ToastKind::Success, toast, None, None, cx)
+            });
+        }
+    }
+
+    fn value_text(&self, row: &TlKvRow, cx: &mut App) -> String {
+        shown_text_in(&row.value, &kv_words(cx))
+            .map(|text| value_copy_form(&text).into_owned())
+            .unwrap_or_default()
+    }
+
+    fn copy_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.cursor_row().map(|row| self.value_text(row, cx)) {
+            self.copy(text, true, window, cx);
+        }
+    }
+
+    fn copy_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .cursor_row()
+            .and_then(|row| row_copy_text(row, &kv_words(cx)))
+        {
+            self.copy(text, false, window, cx);
+        }
+    }
+
+    fn copy_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((panel, _)) = self.cursor else {
+            return;
+        };
+        let sections = if panel == 0 {
+            &self.identity
+        } else {
+            &self.usage
+        };
+        let text = sections.first().map_or_else(String::new, |section| {
+            section_copy_text(section, &kv_words(cx))
+        });
+        self.copy(text, false, window, cx);
+    }
+
+    fn copy_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let words = kv_words(cx);
+        let mut lines = Vec::new();
+        for panel in 0..2 {
+            for row in self.rows(panel) {
+                if let Some(text) = row_copy_text(row, &words) {
+                    lines.push(text);
+                }
+            }
+        }
+        lines.push(format!("{}: {}", self.words.cmdline, self.cmdline_text));
+        self.copy(lines.join("\n"), false, window, cx);
+    }
+
+    fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let desktop = self
+            .cursor_row()
+            .is_some_and(|row| row.label == self.words.labels[2] && row.value.link.is_some());
+        if desktop {
+            self.open_desktop(window, cx);
+        } else {
+            self.copy_value(window, cx);
+        }
+    }
+
+    fn open_field_menu_at(
+        &mut self,
+        panel: usize,
+        row: usize,
+        position: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.rows(panel).get(row).is_none() {
+            return;
+        }
+        self.set_cursor(panel, row, cx);
+        let position = position.unwrap_or_else(|| {
+            let m = metrics(cx);
+            let bounds = self.panel_bounds[panel].get();
+            point(
+                bounds.left() + m.sp[4] * 2.,
+                bounds.top() + m.sp[3] + px(ROW_HEIGHT * m.ui_scale) * (row + 1) as f32,
+            )
+        });
+        let menu = TlMenu::build(window, cx, self.grid_focus.clone(), |menu, _, cx| {
+            menu.item(tr(cx, "pwn-general-copy-value"), Box::new(PropsCopyValue))
+                .item(tr(cx, "pwn-general-copy-row"), Box::new(AppGeneralCopyRow))
+                .item(
+                    tr(cx, "pwn-general-copy-section"),
+                    Box::new(AppGeneralCopyPanel),
+                )
+                .separator()
+                .item(tr(cx, "pwn-general-copy-all"), Box::new(PropsCopyAllFields))
+        });
+        open_context_menu_at(position, window, cx, menu);
+    }
+
+    fn on_menu_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_cursor(cx);
+        if let Some((panel, row)) = self.cursor {
+            self.open_field_menu_at(panel, row, None, window, cx);
+        }
     }
 
     fn shown(&self, label: SharedString, mut value: TlValue) -> Option<TlKvRow> {
@@ -534,6 +739,10 @@ impl AppGeneralTab {
         }
         self.identity = section(identity.into_iter().flatten().collect());
         self.usage = section(usage.into_iter().flatten().collect());
+        self.cursor = self.cursor.and_then(|(panel, row)| {
+            let len = self.rows(panel).len();
+            (len > 0).then(|| (panel, row.min(len - 1)))
+        });
     }
 
     fn open_desktop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -709,13 +918,23 @@ impl Render for AppGeneralTab {
         let label_width =
             px((LABEL_MAX * m.ui_scale).min((body_width_f32 / 4.).max(LABEL_MIN * m.ui_scale)));
         let copied = self.words.copied.clone();
-        let grid = |id, sections: &[TlKvSection]| {
+        let focused = self.grid_focus.contains_focused(window, cx);
+        let cursor = self.cursor;
+        let view = cx.entity().downgrade();
+        let grid = |id, panel_ix: usize, sections: &[TlKvSection]| {
             let copied = copied.clone();
+            let view_for_press = view.clone();
+            let view_for_menu = view.clone();
             TlKeyValueGrid::new(id, KvLayout::Inline)
                 .sections(sections)
                 .row_height(px(ROW_HEIGHT * m.ui_scale))
                 .label_width(label_width)
                 .copy_on_click(true)
+                .cursor(
+                    cursor
+                        .filter(|(panel, _)| *panel == panel_ix && focused)
+                        .map(|(_, row)| row),
+                )
                 .on_copied(move |_, window, cx| {
                     if let Some(queue) = ToastQueue::of_window(window, cx) {
                         queue.update(cx, |q, cx| {
@@ -723,10 +942,22 @@ impl Render for AppGeneralTab {
                         });
                     }
                 })
+                .on_value_mouse_down(move |row, _, cx| {
+                    let _ =
+                        view_for_press.update(cx, |this, cx| this.set_cursor(panel_ix, row, cx));
+                })
+                .on_context_menu(move |row, position, window, cx| {
+                    let _ = view_for_menu.update(cx, |this, cx| {
+                        this.open_field_menu_at(panel_ix, row, Some(position), window, cx);
+                    });
+                })
         };
-        let panel = |id: &'static str, grid: TlKeyValueGrid| {
+        let panel_bounds = self.panel_bounds.clone();
+        let panel = |id: &'static str, panel_ix: usize, grid: TlKeyValueGrid| {
+            let bounds = panel_bounds.clone();
             div()
                 .debug_selector(move || id.into())
+                .relative()
                 .min_w_0()
                 .when(self.side_by_side, |d| d.flex_1().flex_basis(px(0.)))
                 .when(!self.side_by_side, |d| d.w_full())
@@ -734,14 +965,23 @@ impl Render for AppGeneralTab {
                 .rounded(m.radius_small)
                 .px(m.sp[4])
                 .py(m.sp[3])
+                .child(
+                    canvas(
+                        move |value, _, _| bounds[panel_ix].set(value),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .child(grid)
                 .into_any_element()
         };
         let identity = panel(
             "AppGeneralTab-identity",
-            grid("app-identity", &self.identity),
+            0,
+            grid("app-identity", 0, &self.identity),
         );
-        let usage = panel("AppGeneralTab-usage", grid("app-usage", &self.usage));
+        let usage = panel("AppGeneralTab-usage", 1, grid("app-usage", 1, &self.usage));
         let panels: AnyElement = if self.side_by_side {
             h_flex()
                 .w_full()
@@ -788,7 +1028,61 @@ impl Render for AppGeneralTab {
                             .w_full()
                             .px(m.sp[5])
                             .py(m.sp[4])
-                            .child(panels)
+                            .child(
+                                div()
+                                    .id("app-general-fields")
+                                    .key_context(KV_GRID_CONTEXT)
+                                    .track_focus(&self.grid_focus)
+                                    .on_action(cx.listener(|this, _: &PropsFieldUp, _, cx| {
+                                        this.step_row(-1, cx)
+                                    }))
+                                    .on_action(cx.listener(|this, _: &PropsFieldDown, _, cx| {
+                                        this.step_row(1, cx)
+                                    }))
+                                    .on_action(cx.listener(|this, _: &PropsFieldLeft, _, cx| {
+                                        this.step_panel(false, cx)
+                                    }))
+                                    .on_action(cx.listener(|this, _: &PropsFieldRight, _, cx| {
+                                        this.step_panel(true, cx)
+                                    }))
+                                    .on_action(cx.listener(|this, _: &PropsFieldHome, _, cx| {
+                                        this.row_end(false, cx)
+                                    }))
+                                    .on_action(cx.listener(|this, _: &PropsFieldEnd, _, cx| {
+                                        this.row_end(true, cx)
+                                    }))
+                                    .on_action(cx.listener(
+                                        |this, _: &PropsActivateField, window, cx| {
+                                            this.activate(window, cx)
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &PropsCopyValue, window, cx| {
+                                            this.copy_value(window, cx)
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &AppGeneralCopyRow, window, cx| {
+                                            this.copy_row(window, cx)
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &AppGeneralCopyPanel, window, cx| {
+                                            this.copy_panel(window, cx)
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &PropsCopyAllFields, window, cx| {
+                                            this.copy_all(window, cx)
+                                        },
+                                    ))
+                                    .on_action(cx.listener(
+                                        |this, _: &PropsFieldMenu, window, cx| {
+                                            this.on_menu_key(window, cx)
+                                        },
+                                    ))
+                                    .child(panels),
+                            )
                             .child(div().mt(m.sp[4]).child(self.command_line(cx))),
                     ),
                 ),
