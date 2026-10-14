@@ -2692,6 +2692,7 @@ mod threads {
     fn open(cx: &mut TestAppContext) -> (Entity<ThreadsHost>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
+            tl_ui::table::actions::bind_keys_table(cx);
             tl_ui::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
@@ -3693,9 +3694,9 @@ mod security {
             .debug_bounds("SecurityCapabilities")
             .expect("capabilities region");
         let position = point(caps.left() + px(60.), caps.top() + px(24. + 28. + 13.));
-        for _ in 0..3 {
+        for dx in [0., 1., 2.] {
             cx.simulate_event(MouseMoveEvent {
-                position,
+                position: point(position.x + px(dx), position.y),
                 pressed_button: None,
                 modifiers: Modifiers::none(),
             });
