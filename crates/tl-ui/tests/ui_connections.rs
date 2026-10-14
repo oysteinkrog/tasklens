@@ -908,7 +908,9 @@ mod page {
         rig.publish(&[1], ConnCounts::default());
         rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
         rig.vcx.run_until_parked();
-        rig.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
+        rig.vcx
+            .executor()
+            .advance_clock(REFRESH_TOAST_AFTER + Duration::from_millis(1));
         rig.vcx.run_until_parked();
         assert_eq!(rig.refresh_toasts(), 1);
         rig.vcx.executor().advance_clock(Duration::from_secs(10));
@@ -924,7 +926,9 @@ mod page {
             1,
             "new version replaces the old toast"
         );
-        rig.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
+        rig.vcx
+            .executor()
+            .advance_clock(REFRESH_TOAST_AFTER + Duration::from_millis(1));
         rig.vcx.run_until_parked();
         assert_eq!(rig.refresh_toasts(), 1, "new-version toast is one shot");
     }
