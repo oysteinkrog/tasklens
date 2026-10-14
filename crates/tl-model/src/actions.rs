@@ -164,6 +164,11 @@ pub enum Signal {
     Other(u8),
 }
 
+/// glibc's first real-time signal on Linux. Kernel signals 32 and 33 are reserved by glibc.
+pub const SIGRTMIN: i32 = 34;
+/// The last real-time signal on Linux.
+pub const SIGRTMAX: i32 = 64;
+
 impl Signal {
     /// Linux signal number: Term 15, Kill 9, Hup 1, Int 2, Quit 3, Stop 19, Cont 18, Usr1 10,
     /// Usr2 12, Other(n) n.

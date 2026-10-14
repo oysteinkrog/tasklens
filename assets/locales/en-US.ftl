@@ -1424,6 +1424,21 @@ processes-confirm-action-end-process = End process
 processes-confirm-action-suspend = Suspend
 processes-confirm-action-resume = Resume
 processes-confirm-action-set-priority = Set priority
+
+# Send Signal menu and real-time dialog (tasklens-gma.2, UI-PWN-026, UI-PWN-027).
+pwn-signal-title = tasklens Send Signal
+pwn-signal-other-signals = Other signals
+pwn-signal-realtime = Real-time signal…
+pwn-signal-ends-process = (ends process)
+pwn-signal-field = Signal
+pwn-signal-note = Real-time signals end the process unless it handles them.
+pwn-signal-cancel = Cancel
+pwn-signal-send = Send signal
+pwn-signal-toast-process = Sent { $signal } to { $name } ({ $pid })
+pwn-signal-toast-many = Sent { $signal } to { $count } processes
+pwn-signal-toast-app = Sent { $signal } to { $name } ({ $count } processes)
+pwn-signal-toast-partial = Sent { $signal } to { $ok } of { $total } processes. { $failed } failed: { $reason }
+pwn-signal-toast-failure = Could not send signal.
 # tasklens-pdu.22: the copy commands (PROC-070, UI-PRC-015).
 processes-copy-private-bytes = Private bytes
 processes-copy-working-set = Working set

@@ -930,7 +930,7 @@ Other signals                           >
 Real-time signal…
 ```
 
-  - "Other signals" submenu, in this order, label `{NAME} ({number})` with x86-64 numbers [spec list, chosen format]: ABRT (6), ALRM (14), BUS (7), CHLD (17), FPE (8), ILL (4), IO/POLL (29), PIPE (13), PROF (27), PWR (30), SEGV (11), STKFLT (16), SYS (31), TRAP (5), TSTP (20), TTIN (21), TTOU (22), URG (23), VTALRM (26), WINCH (28), XCPU (24), XFSZ (25). Numbers come from `libc` constants at build time, so another architecture shows its own numbers.
+  - "Other signals" submenu, in this order, label `{NAME} ({number})` with Linux x86-64 numbers [spec list, chosen format]: ABRT (6), ALRM (14), BUS (7), CHLD (17), FPE (8), ILL (4), IO/POLL (29), PIPE (13), PROF (27), PWR (30), SEGV (11), STKFLT (16), SYS (31), TRAP (5), TSTP (20), TTIN (21), TTOU (22), URG (23), VTALRM (26), WINCH (28), XCPU (24), XFSZ (25). The table uses literals, following `tl_model::actions::Signal::number`; `tl-model` defines SIGRTMIN as 34 and SIGRTMAX as 64.
   - "(ends process)" appears on signals whose default action terminates (with or without a core): TERM, KILL, HUP, INT, QUIT, USR1, USR2, ABRT, ALRM, BUS, FPE, ILL, IO/POLL, PIPE, PROF, PWR, SEGV, STKFLT, SYS, TRAP, VTALRM, XCPU, XFSZ. Not on STOP, CONT, CHLD, TSTP, TTIN, TTOU, URG, WINCH.
 - **States:** hover `menu_hover`; keyboard highlight the same; disabled: the whole "Send Signal" item is disabled with tooltip "Kernel threads cannot be signalled." when every target is a kernel thread [chosen; PROC-059 otherwise refuses with that toast].
 - **Interaction:**
@@ -939,7 +939,7 @@ Real-time signal…
   - Refusals (tasklens itself, PID 1, kernel threads) show the PROC-059 toasts.
   - Toasts: one process "Sent SIGHUP to firefox (1234)" [spec]; several "Sent SIGHUP to 4 processes" [chosen]; app row "Sent SIGHUP to Firefox (3 processes)" [chosen]; failures in the PROC-058 forms.
 - **Data binding:** `Command::Action(ActionRequest { kind: Signal(sig), .. })`.
-- **Build:** `crates/tl-ui/src/windows/signal.rs`, `pub fn signal_submenu(menu: PopupMenu, targets: &CapturedTargets, cx) -> PopupMenu`; signal names and default actions in a static table `SIGNALS: [SignalInfo; 31]` (`name`, `number`, `label`, `ends_process`).
+- **Build:** `crates/tl-ui/src/windows/signal.rs`, `pub fn signal_submenu(menu: TlMenu, all_kernel_threads: bool, window: &mut Window, cx: &mut App) -> TlMenu`; signal names and default actions in a static table `SIGNALS: [SignalInfo; 31]` (`name`, `number`, `label`, `ends_process`, `top_level`).
 - **Performance:** built on menu open only.
 - **Accessibility:** keyboard navigation of nested kit menus (Right opens, Left closes); the "(ends process)" suffix is part of the item's accessible text.
 - **Tests:** `signal_menu_labels_and_suffixes` (TERM has the suffix, STOP and CHLD do not); `signal_other_numbers_match_libc`; `signal_toast_single_multi_app`.
@@ -964,7 +964,7 @@ Real-time signal…
 ```
 
   - `WindowKind::Dialog`, modal to its parent, title "tasklens Send Signal" [chosen]. TlStepper width 72, range 34..=64 [spec], then the name `t_base` `text_primary`: `SIGRTMIN+{n - 34}`, and for 64 `SIGRTMIN+30 (SIGRTMAX)` [chosen].
-  - The range comes from `libc::SIGRTMIN()` and `libc::SIGRTMAX()` at run time; on this system 34 and 64.
+  - The range comes from `tl_model::actions::{SIGRTMIN, SIGRTMAX}`: 34 to 64 on Linux.
 - **States:** default value: the last value sent in this session, else 34 [chosen]. Typed values outside the range clamp on blur.
 - **Interaction:** Up and Down step; Enter triggers "Send signal" (Primary, default button); Esc cancels. Sends `Signal::Other(n)` with the same confirmation rules and toasts as UI-PWN-026 ("Sent SIGRTMIN+2 to firefox (1234)").
 - **Build:** `signal.rs`, `pub struct RtSignalDialog` (Entity).

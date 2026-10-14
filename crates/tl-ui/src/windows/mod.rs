@@ -12,4 +12,5 @@ pub mod props;
 pub mod run;
 pub mod run_history;
 pub mod service_properties;
+pub mod signal;
 pub mod startup_properties;
