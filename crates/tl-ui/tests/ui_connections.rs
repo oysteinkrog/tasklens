@@ -1123,7 +1123,10 @@ mod page {
             copied.lines().next(),
             Some("Proto\tAddress local\tAddress foreign\tState\tPID\tProcess")
         );
-        assert!(copied.lines().nth(1).unwrap().ends_with("\t?\t"));
+        assert_eq!(
+            copied.lines().nth(1).unwrap().split('\t').next_back(),
+            Some("")
+        );
     }
 
     #[gpui_kit::test]
