@@ -5,7 +5,7 @@
 //! strings only when their source values change.
 
 use std::cell::Cell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -15,15 +15,16 @@ use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity,
     EntityId, FocusHandle, Focusable as _, FontWeight, ImageSource, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, StyleRefinement, Styled as _,
-    Subscription, Window, WindowHandle, canvas, div, img, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, StyledImage as _, Subscription, Window, WindowHandle, canvas,
+    div, img, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest};
 use tl_model::demand::{Demand, DetailDemand};
 use tl_model::details::{AppGeneralDetail, AppKind, DetailTab, DetailTarget, TabPayload};
 use tl_model::ids::GroupKey;
-use tl_model::process::{GroupRow, GroupRowKind};
+use tl_model::process::GroupRow;
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::table::Total;
@@ -42,7 +43,7 @@ use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
-    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
+    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
 };
 use crate::components::menu::{close_context_menu, context_menu_open};
 use crate::components::tabs::{TlTabSpec, TlTabs};
@@ -52,7 +53,7 @@ use crate::demand::GlobalDemand;
 use crate::hub::{GlobalHub, SnapshotChanged};
 use crate::i18n::tr;
 use crate::settings_global::TlSettings;
-use crate::text::style::{label_style, t_lg, t_sm};
+use crate::text::style::{label_style, t_sm};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
@@ -201,13 +202,16 @@ fn place_toasts(handle: WindowHandle<Root>, cx: &mut App) {
         return;
     };
     let scale = metrics(cx).ui_scale;
-    let frame = frame.read(cx);
-    let bar = if frame.has_title_bar() {
-        TITLE_BAR_HEIGHT
-    } else {
-        0.
+    let (bar, toasts) = {
+        let frame = frame.read(cx);
+        let bar = if frame.has_title_bar() {
+            TITLE_BAR_HEIGHT
+        } else {
+            0.
+        };
+        (bar, frame.toasts().clone())
     };
-    frame.toasts().update(cx, |q, cx| {
+    toasts.update(cx, |q, cx| {
         q.set_top(px((bar + STRIP_HEIGHT + TOAST_GAP) * scale), cx)
     });
 }
@@ -549,10 +553,12 @@ impl AppGeneralTab {
                 .into_any_element()
         };
         let icon = icon_path.map_or_else(fallback, |path| {
-            img(ImageSource::from(PathBuf::from(path.as_ref())))
-                .size(icon_size)
-                .with_fallback(fallback)
-                .into_any_element()
+            img(ImageSource::from(Arc::<Path>::from(Path::new(
+                path.as_ref(),
+            ))))
+            .size(icon_size)
+            .with_fallback(fallback)
+            .into_any_element()
         });
         let mut title = div().truncate().text_color(theme.text_primary);
         *title.text_style() = label_style(&m, m.text.lg, FontWeight::SEMIBOLD);
@@ -645,9 +651,10 @@ impl Render for AppGeneralTab {
         } else {
             window.viewport_size().width - m.sp[5] * 2.
         };
-        self.side_by_side = panels_side_by_side(body_width.0, m.ui_scale);
+        let body_width_f32 = f32::from(body_width);
+        self.side_by_side = panels_side_by_side(body_width_f32, m.ui_scale);
         let label_width =
-            px((LABEL_MAX * m.ui_scale).min((body_width.0 / 4.).max(LABEL_MIN * m.ui_scale)));
+            px((LABEL_MAX * m.ui_scale).min((body_width_f32 / 4.).max(LABEL_MIN * m.ui_scale)));
         let copied = self.words.copied.clone();
         let grid = |id, sections: &[TlKvSection]| {
             let copied = copied.clone();
@@ -892,10 +899,8 @@ impl AppPropsWindow {
 
     fn focus_filter(&self, window: &mut Window, cx: &mut Context<Self>) {
         let filter = &self.filters[usize::from(self.active == DetailTab::AppProcesses)];
-        filter
-            .read(cx)
-            .input
-            .update(cx, |input, cx| input.focus(window, cx));
+        let input = filter.read(cx).input.clone();
+        input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn take_snapshot(
