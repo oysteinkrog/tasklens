@@ -1357,7 +1357,7 @@ mod page {
 #[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn connections_page_registered(cx: &mut TestAppContext) {
-    use gpui_kit::VisualTestContext;
+    use gpui_kit::{AppContext as _, VisualTestContext};
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::settings::{Settings, StartTab, UiState};
