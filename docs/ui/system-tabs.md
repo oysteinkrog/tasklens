@@ -1531,12 +1531,12 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 ### UI-SYS-047 Delete startup entry confirmation
 
 - **Implements**: SYS-024, APP-045.
-- **Anatomy**: `TlDialog` modal window titled "tasklens Delete Startup Entry" (spec), width 440
-  (chosen), height fits content:
+- **Anatomy**: `TlDialog` modal window titled "tasklens Delete Startup Entry" (spec), width 420
+  (the `TlDialog` width), height fits content:
 
   ```
   ┌ tasklens Delete Startup Entry                          📌 ✕ ┐
-  │  ⚠  Delete startup entry                                    │  heading t_md semibold
+  │  ⚠  Delete startup entry                                    │  heading t_md medium
   │     Permanently remove this startup entry?                  │  t_base
   │     The autostart file will be deleted. The app stays       │  type line, t_base text_secondary
   │     installed.                                              │
@@ -1555,8 +1555,10 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   <n> startup entries?" (new), then up to 5 names, then "and <n> more" (new). Entries that cannot
   be deleted are left out and a line says "<n> entries cannot be deleted and are skipped." (new).
 - **States**: focus starts on "Cancel" (chosen); Enter triggers the focused button; Esc cancels.
-  While deleting, both buttons are disabled and "Delete" shows a 14 px spinner (static with reduced
-  motion); the window closes on the result.
+  "Delete" closes the window at once and sends one `StartupDelete` request; there is no busy state
+  (leader decision, tasklens-9o0.10). The result toast in the main window reports the outcome. A
+  second delete on an entry that is still pending shows the busy toast ("A startup action is
+  already in progress.").
 - **Interaction**: results "Startup entry deleted." / "Failed to delete startup entry" (spec) in the
   main window.
 - **Data binding**: `ActionKind::StartupDelete` (ADR-005, R-119).

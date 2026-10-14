@@ -26,7 +26,6 @@ use tl_model::snapshot::{StartupCounts, StartupSnapshot};
 use tl_model::table::{StartupColumn, SysColumnId, SysSortSpec};
 use tl_model::units;
 
-use self::actions::StartupDelete;
 use self::delegate::StartupDelegate;
 use self::menu::StartupMenuTargets;
 use crate::actions::ClearFilter;
@@ -217,27 +216,6 @@ impl StartupPage {
         self.menu_targets
             .as_ref()
             .map_or(&[], |targets| targets.refs.as_slice())
-    }
-
-    /// Delete key and "Delete entry…". Nothing opens when no target can be deleted; the
-    /// confirmation dialog comes with the delete flow.
-    fn on_startup_delete(
-        &mut self,
-        _: &StartupDelete,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let targets = self.take_targets(cx);
-        if targets.any_can_delete() {
-            return;
-        }
-        let text = tr(cx, "startup-delete-not-allowed");
-        let key = ToastKey(cx.entity_id().as_u64() ^ 1);
-        if let Some(queue) = ToastQueue::of_window(window, cx) {
-            queue.update(cx, |q, cx| {
-                q.push(ToastKind::Warning, text, Some(key), None, cx)
-            });
-        }
     }
 
     /// An Enable or Disable started or finished on `target`: its Status cell shows or drops

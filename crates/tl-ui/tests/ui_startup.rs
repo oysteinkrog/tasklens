@@ -1563,6 +1563,270 @@ mod page {
             .expect("filter query sent");
         assert_eq!(query.filter.as_ref(), "d");
     }
+
+    // Delete confirmation and flow (tasklens-9o0.10, UI-SYS-047).
+
+    use tl_ui::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::pages::startup::actions::StartupDelete;
+    use tl_ui::windows::confirm_startup_delete::{StartupEntryView, delete_texts};
+
+    /// A deletable user entry of `kind` at its own path.
+    fn deletable(name: &str, kind: StartupKind) -> StartupEntry {
+        let mut e = super::entry(name, kind);
+        e.source_path = Arc::from(format!("/home/u/.config/autostart/{name}.desktop"));
+        e
+    }
+
+    fn system_entry(name: &str) -> StartupEntry {
+        let mut e = super::entry(name, StartupKind::AutostartSystem);
+        e.id.source = StartupSource::AutostartSystem;
+        e.can_delete = false;
+        e
+    }
+
+    struct Dialog {
+        window: gpui_kit::WindowHandle<Root>,
+        view: Entity<TlDialogView>,
+    }
+
+    impl Rig {
+        fn page_window_id(&mut self) -> gpui_kit::WindowId {
+            self.vcx.window_handle().window_id()
+        }
+
+        /// Dispatches Delete and returns the confirmation window, if one opened.
+        fn open_delete(&mut self) -> Option<Dialog> {
+            let parent = self.page_window_id();
+            self.dispatch(Box::new(StartupDelete));
+            self.dialog(parent)
+        }
+
+        fn dialog(&mut self, parent: gpui_kit::WindowId) -> Option<Dialog> {
+            let window = self
+                .vcx
+                .update(|_, cx| cx.windows().into_iter().find(|w| w.window_id() != parent))?
+                .downcast::<Root>()?;
+            let frame = self
+                .vcx
+                .update(|_, cx| TlSecondaryWindow::<TlDialogView>::find(window, cx))?;
+            let view = self.vcx.read(|cx| frame.read(cx).content().clone());
+            Some(Dialog { window, view })
+        }
+
+        fn is_open(&mut self, d: &Dialog) -> bool {
+            let id = d.window.window_id();
+            self.vcx
+                .update(|_, cx| cx.windows().iter().any(|w| w.window_id() == id))
+        }
+
+        fn focused_button(&mut self, d: &Dialog, cx: &mut TestAppContext) -> Option<DialogButton> {
+            let id = d.window.window_id();
+            let view = d.view.clone();
+            let window = cx
+                .update(|cx| cx.windows().into_iter().find(|w| w.window_id() == id))
+                .expect("dialog window");
+            let mut vcx = VisualTestContext::from_window(window, cx);
+            vcx.update(|window, cx| view.read(cx).focused_button(window))
+        }
+    }
+
+    fn views(entries: &[StartupEntry]) -> Vec<StartupEntryView> {
+        entries
+            .iter()
+            .map(|e| StartupEntryView {
+                name: e.name.to_string().into(),
+                source_path: e.source_path.to_string().into(),
+                kind: e.kind,
+            })
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn delete_dialog_texts_per_type(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(
+            cx,
+            vec![deletable("Discord", StartupKind::AutostartUser)],
+            &[0],
+        );
+        let dialog = rig.open_delete().expect("the dialog opens");
+        let (title, text) = rig.vcx.read(|cx| {
+            let view = dialog.view.read(cx);
+            (
+                view.dialog().window_title().to_string(),
+                view.dialog().text().to_string(),
+            )
+        });
+        assert_eq!(title, "tasklens Delete Startup Entry");
+        assert_eq!(text, "Permanently remove this startup entry?");
+        assert!(
+            rig.vcx
+                .read(|cx| dialog.view.read(cx).dialog().is_destructive())
+        );
+
+        let one = |kind| {
+            let entry = deletable("Discord", kind);
+            rig.vcx.read(|cx| delete_texts(&views(&[entry]), 0, cx))
+        };
+        let xdg = one(StartupKind::AutostartUser);
+        assert_eq!(xdg.heading, "Delete startup entry");
+        assert_eq!(
+            xdg.type_line.as_deref(),
+            Some("The autostart file will be deleted. The app stays installed.")
+        );
+        assert_eq!(xdg.names, ["Discord"]);
+        assert_eq!(
+            xdg.path.as_deref(),
+            Some("/home/u/.config/autostart/Discord.desktop")
+        );
+        assert_eq!(
+            one(StartupKind::UserUnit).type_line.as_deref(),
+            Some("The unit will be disabled and its unit file deleted.")
+        );
+        for kind in [StartupKind::PlasmaPreStartup, StartupKind::PlasmaLogout] {
+            assert_eq!(
+                one(kind).type_line.as_deref(),
+                Some("The script file will be deleted.")
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn delete_dialog_focus_on_cancel(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![deletable("a", StartupKind::AutostartUser)], &[0]);
+        let dialog = rig.open_delete().expect("the dialog opens");
+        assert_eq!(rig.focused_button(&dialog, cx), Some(DialogButton::Cancel));
+        // A stray Enter cancels and sends nothing.
+        let window = dialog.window;
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(!rig.is_open(&dialog));
+        assert!(rig.requests().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn delete_dialog_sends_and_closes_on_result(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![deletable("a", StartupKind::AutostartUser)], &[0]);
+        let dialog = rig.open_delete().expect("the dialog opens");
+        let mut vcx = VisualTestContext::from_window(dialog.window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.simulate_keystrokes("tab enter");
+        vcx.run_until_parked();
+        // Leader decision: the window closes at once and exactly one request is sent.
+        assert!(!rig.is_open(&dialog));
+        let sent = rig.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].kind, ActionKind::StartupDelete);
+        assert_eq!(sent[0].targets.as_slice(), [startup_target("a")]);
+        rig.finish_action(sent[0].id, &[ActionState::Succeeded]);
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "Startup entry deleted.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn delete_second_on_pending_shows_busy(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![deletable("a", StartupKind::AutostartUser)], &[0]);
+        for _ in 0..2 {
+            let dialog = rig.open_delete().expect("the dialog opens");
+            let mut vcx = VisualTestContext::from_window(dialog.window.into(), cx);
+            vcx.update(|window, _| window.activate_window());
+            vcx.simulate_keystrokes("tab enter");
+            vcx.run_until_parked();
+            rig.draw();
+            let table = rig.table();
+            rig.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+            });
+        }
+        assert_eq!(rig.requests().len(), 1);
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "A startup action is already in progress.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn delete_multi_skips_undeletable(cx: &mut TestAppContext) {
+        let mut entries: Vec<StartupEntry> = (0..5)
+            .map(|i| deletable(&format!("u{i}"), StartupKind::AutostartUser))
+            .collect();
+        entries.push(system_entry("s0"));
+        entries.push(system_entry("s1"));
+        let texts = rig_texts(cx, &entries[..5], 2);
+        assert_eq!(texts.heading, "Delete startup entries");
+        assert_eq!(texts.text, "Permanently remove these 5 startup entries?");
+        assert_eq!(texts.names.len(), 5);
+        assert!(texts.more.is_none());
+        assert!(texts.type_line.is_none() && texts.path.is_none());
+        assert_eq!(
+            texts.skipped.as_deref(),
+            Some("2 entries cannot be deleted and are skipped.")
+        );
+        // Through the page: 7 selected, only the 5 deletable ones are sent.
+        let mut rig = flow_rig(cx, entries, &[0, 1, 2, 3, 4, 5, 6]);
+        let dialog = rig.open_delete().expect("the dialog opens");
+        let text = rig
+            .vcx
+            .read(|cx| dialog.view.read(cx).dialog().text().to_string());
+        assert_eq!(text, "Permanently remove these 5 startup entries?");
+    }
+
+    fn rig_texts(
+        cx: &mut TestAppContext,
+        entries: &[StartupEntry],
+        skipped: usize,
+    ) -> tl_ui::windows::confirm_startup_delete::DeleteTexts {
+        cx.update(super::setup);
+        cx.update(|cx| delete_texts(&views(entries), skipped, cx))
+    }
+
+    #[gpui_kit::test]
+    fn delete_multi_and_more(cx: &mut TestAppContext) {
+        let entries: Vec<StartupEntry> = (0..8)
+            .map(|i| deletable(&format!("u{i}"), StartupKind::AutostartUser))
+            .collect();
+        let texts = rig_texts(cx, &entries, 0);
+        assert_eq!(texts.names, ["u0", "u1", "u2", "u3", "u4"]);
+        assert_eq!(texts.more.as_deref(), Some("and 3 more"));
+        assert!(texts.skipped.is_none());
+    }
+
+    #[gpui_kit::test]
+    fn delete_escape_cancels(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![deletable("a", StartupKind::AutostartUser)], &[0]);
+        let dialog = rig.open_delete().expect("the dialog opens");
+        let mut vcx = VisualTestContext::from_window(dialog.window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert!(!rig.is_open(&dialog));
+        assert!(rig.requests().is_empty());
+    }
+
+    /// Security regression: a system entry in the selection never reaches the request.
+    #[gpui_kit::test]
+    fn delete_never_targets_system_entry(cx: &mut TestAppContext) {
+        let entries = vec![
+            deletable("mine", StartupKind::AutostartUser),
+            system_entry("sys"),
+        ];
+        let mut rig = flow_rig(cx, entries, &[0, 1]);
+        let dialog = rig.open_delete().expect("the dialog opens");
+        let mut vcx = VisualTestContext::from_window(dialog.window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.simulate_keystrokes("tab enter");
+        vcx.run_until_parked();
+        let sent = rig.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].targets.as_slice(), [startup_target("mine")]);
+    }
 }
 
 #[gpui_kit::test]

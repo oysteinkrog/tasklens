@@ -1480,6 +1480,24 @@ startup-menu-reason-system-entry = System entries cannot be deleted. Use Disable
 startup-menu-reason-package-unit = This unit belongs to a package. Use Disable instead.
 startup-delete-not-allowed = This startup entry cannot be deleted
 
+# Startup Apps delete confirmation and flow (tasklens-9o0.10, UI-SYS-047).
+startup-delete-title = tasklens Delete Startup Entry
+startup-delete-heading-one = Delete startup entry
+startup-delete-heading-many = Delete startup entries
+startup-delete-text-one = Permanently remove this startup entry?
+startup-delete-text-many = Permanently remove these { $n } startup entries?
+startup-delete-type-xdg = The autostart file will be deleted. The app stays installed.
+startup-delete-type-unit = The unit will be disabled and its unit file deleted.
+startup-delete-type-script = The script file will be deleted.
+startup-delete-more = and { $m } more
+startup-delete-skipped = { $n } entries cannot be deleted and are skipped.
+startup-delete-confirm = Delete
+startup-delete-cancel = Cancel
+startup-delete-done = Startup entry deleted.
+startup-delete-done-n = { $n } startup entries deleted
+startup-delete-partial = { $ok } of { $n } startup entries deleted. { $failed } failed.
+startup-delete-failed = Failed to delete startup entry
+
 # Startup Apps Enable, Disable and Run now flows (tasklens-9o0.9, UI-SYS-045, UI-SYS-046).
 startup-status-updating = Updating…
 startup-action-enabled = Startup entry enabled.
