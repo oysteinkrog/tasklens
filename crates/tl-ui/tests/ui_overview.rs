@@ -2201,8 +2201,12 @@ mod wired {
         assert!(text.starts_with("Overview"), "{text:?}");
     }
 
+    fn selector_id(id: String) -> &'static str {
+        Box::leak(id.into_boxed_str())
+    }
+
     fn center_of(r: &mut Rig, id: &str) -> gpui_kit::Point<gpui_kit::Pixels> {
-        let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+        let id = selector_id(id.to_owned());
         r.vcx.debug_bounds(id).expect(id).center()
     }
 
@@ -2223,7 +2227,7 @@ mod wired {
     }
 
     fn assert_overview_frame_anatomy(r: &mut Rig) {
-        select(&mut r, OVERVIEW_KEY);
+        select(r, OVERVIEW_KEY);
         let theme = r.vcx.update(|_, cx| current(cx).clone());
         for (id, want) in [
             (CPU_BOX_ID, theme.graph.cpu_line),
@@ -2249,18 +2253,19 @@ mod wired {
             );
             assert_eq!(tab.size.height, row.size.height, "{id}: full title height");
             assert_eq!(box_accent(id, &theme), want, "{id}: device accent");
+            let axis_id = selector_id(time_axis_id(id));
+            let axis_start_id = selector_id(time_axis_label_id(id, "start"));
+            let axis_end_id = selector_id(time_axis_label_id(id, "end"));
             assert!(
-                r.vcx.debug_bounds(&time_axis_id(id)).is_some(),
+                r.vcx.debug_bounds(axis_id).is_some(),
                 "{id}: one box time axis"
             );
             assert!(
-                r.vcx
-                    .debug_bounds(&time_axis_label_id(id, "start"))
-                    .is_some(),
+                r.vcx.debug_bounds(axis_start_id).is_some(),
                 "{id}: {TIME_AXIS_START}"
             );
             assert!(
-                r.vcx.debug_bounds(&time_axis_label_id(id, "end")).is_some(),
+                r.vcx.debug_bounds(axis_end_id).is_some(),
                 "{id}: {TIME_AXIS_END}"
             );
         }
@@ -2538,18 +2543,15 @@ mod wired {
         set_top_procs(&mut r, true);
         let procs = procs_box(&mut r).expect("the Top processes box");
         assert!(r.vcx.debug_bounds(PROCS_BOX_ID).is_some(), "placed");
-        assert!(
-            r.vcx.debug_bounds(&title_row_id(PROCS_BOX_ID)).is_some(),
-            "shared title line"
-        );
-        assert!(
-            r.vcx.debug_bounds(&title_tab_id(PROCS_BOX_ID)).is_some(),
-            "shared title tab"
-        );
+        let title_row = selector_id(title_row_id(PROCS_BOX_ID));
+        let title_tab = selector_id(title_tab_id(PROCS_BOX_ID));
+        let time_axis = selector_id(time_axis_id(PROCS_BOX_ID));
+        assert!(r.vcx.debug_bounds(title_row).is_some(), "shared title line");
+        assert!(r.vcx.debug_bounds(title_tab).is_some(), "shared title tab");
         let theme = r.vcx.update(|_, cx| current(cx).clone());
         assert_eq!(box_accent(PROCS_BOX_ID, &theme), theme.graph.cpu_line);
         assert!(
-            r.vcx.debug_bounds(&time_axis_id(PROCS_BOX_ID)).is_none(),
+            r.vcx.debug_bounds(time_axis).is_none(),
             "a table-only box has no chart axis"
         );
         let d = merged(&mut r);
