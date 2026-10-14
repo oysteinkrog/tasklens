@@ -470,15 +470,15 @@ impl ProcessesPage {
                     }
                 }
                 (RowKind::Unit, node @ NodeId::Unit(_)) => {
-                    if let Some(group) = unit_groups.get(&node) {
-                        if should_attempt_properties(
+                    if let Some(group) = unit_groups.get(&node)
+                        && should_attempt_properties(
                             &WindowKey::AppProperties(*group),
                             CapClass::AppProps,
                             &mut app_cap_notified,
                             cx,
-                        ) {
-                            crate::windows::app_props::open_app_properties(*group, cx);
-                        }
+                        )
+                    {
+                        crate::windows::app_props::open_app_properties(*group, cx);
                     }
                 }
                 _ => {}
