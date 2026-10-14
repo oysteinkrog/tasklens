@@ -16,6 +16,9 @@ use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_model::snapshot::{InvField, MemoryDetails, ZramDetail, ZswapInfo};
+use tl_model::system::{MemoryTotals, ZramTotals};
+use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::kv_grid;
 use tl_ui::demand::DemandAggregator;
@@ -31,9 +34,11 @@ use tl_ui::pages::performance::gpu::{
     ROW_TEMPERATURE, ROW_UTILIZATION,
 };
 use tl_ui::pages::performance::memory::{
-    MemoryPage, ROW_AVAILABLE, ROW_CACHED, ROW_COMMITTED, ROW_COMPRESSED, ROW_HUGE_PAGES,
-    ROW_IN_USE, ROW_SAVINGS, ROW_SLAB_RECLAIMABLE, ROW_SLAB_UNRECLAIMABLE, ROW_SWAP_AVAILABLE,
-    ROW_SWAP_USED,
+    CompressedBlock, CompressedInputs, MemoryPage, ROW_AVAILABLE, ROW_CACHED, ROW_COMMITTED,
+    ROW_COMPRESSED, ROW_HUGE_PAGES, ROW_IN_USE, ROW_SAVINGS, ROW_SLAB_RECLAIMABLE,
+    ROW_SLAB_UNRECLAIMABLE, ROW_SWAP_AVAILABLE, ROW_SWAP_USED, ROW_ZRAM_ALGORITHM,
+    ROW_ZRAM_COMPRESSED, ROW_ZRAM_DEVICE, ROW_ZRAM_MEM_USED, ROW_ZRAM_RATIO, ROW_ZRAM_SIZE,
+    ROW_ZRAM_STORED, ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, update_compressed_block,
 };
 use tl_ui::pages::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
@@ -473,4 +478,113 @@ fn build_page_placeholder_for_fan_before_p2(cx: &mut TestAppContext) {
     };
     let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
     assert!(view.downcast::<PlaceholderPage>().is_ok());
+}
+
+const GIB: u64 = 1 << 30;
+
+fn value_of(model: &tl_ui::pages::performance::details::KeyValueModel, label: &str) -> String {
+    model
+        .rows
+        .iter()
+        .find(|r| r.label == label)
+        .unwrap_or_else(|| panic!("no row {label}"))
+        .value
+        .to_string()
+}
+
+fn zram_mem(orig: u64, compr: u64) -> MemoryTotals {
+    MemoryTotals {
+        validity: Validity::Valid,
+        total: 64 * GIB,
+        zram: tl_model::table::Total {
+            value: ZramTotals {
+                orig_data: orig,
+                compr_data: compr,
+                mem_used: compr + GIB / 10,
+            },
+            validity: Validity::Valid,
+        },
+        ..MemoryTotals::default()
+    }
+}
+
+fn zram_details() -> MemoryDetails {
+    MemoryDetails {
+        zram: Arc::from([ZramDetail {
+            name: Arc::from("zram0"),
+            disksize: 8 * GIB,
+            algorithm: Some(Arc::from("zstd")),
+        }]),
+        ..MemoryDetails::default()
+    }
+}
+
+fn build(mem: &MemoryTotals, details: &MemoryDetails) -> CompressedBlock {
+    let mut block = CompressedBlock::new();
+    update_compressed_block(&mut block, &CompressedInputs { mem, details });
+    block
+}
+
+#[test]
+fn compressed_block_rows() {
+    let orig = GIB * 340 / 100;
+    let block = build(&zram_mem(orig, GIB), &zram_details());
+    assert!(!block.is_hidden());
+    assert_eq!(block.names, ["zram0"]);
+    let z = &block.zram[0];
+    assert_eq!(value_of(z, ROW_ZRAM_DEVICE), "/dev/zram0");
+    assert_eq!(value_of(z, ROW_ZRAM_SIZE), "8.00 GiB");
+    assert_eq!(value_of(z, ROW_ZRAM_STORED), "3.40 GiB");
+    assert_eq!(value_of(z, ROW_ZRAM_COMPRESSED), "1.00 GiB");
+    assert_eq!(value_of(z, ROW_ZRAM_MEM_USED), "1.10 GiB");
+    assert_eq!(value_of(z, ROW_ZRAM_RATIO), "3.4 : 1");
+    assert_eq!(value_of(z, ROW_ZRAM_ALGORITHM), "zstd");
+    assert_eq!(value_of(&block.zswap, ROW_ZSWAP_ENABLED), "No");
+}
+
+#[test]
+fn compressed_block_hidden_without_zram_or_zswap() {
+    let block = build(&zram_mem(0, 0), &MemoryDetails::default());
+    assert!(block.is_hidden());
+    let disabled = MemoryDetails {
+        zswap: InvField {
+            value: Some(ZswapInfo {
+                enabled: false,
+                compressor: None,
+                max_pool_percent: Some(20),
+            }),
+            validity: Validity::Valid,
+        },
+        ..MemoryDetails::default()
+    };
+    assert!(build(&zram_mem(0, 0), &disabled).is_hidden());
+}
+
+#[test]
+fn zswap_pool_size() {
+    let details = MemoryDetails {
+        zswap: InvField {
+            value: Some(ZswapInfo {
+                enabled: true,
+                compressor: None,
+                max_pool_percent: Some(20),
+            }),
+            validity: Validity::Valid,
+        },
+        ..MemoryDetails::default()
+    };
+    let mut mem = zram_mem(0, 0);
+    mem.zswapped = 2 * GIB;
+    let block = build(&mem, &details);
+    assert!(!block.is_hidden());
+    assert_eq!(value_of(&block.zswap, ROW_ZSWAP_ENABLED), "Yes");
+    assert_eq!(value_of(&block.zswap, ROW_ZSWAP_POOL), "12.80 GiB");
+    assert_eq!(value_of(&block.zswap, ROW_ZRAM_STORED), "2.00 GiB");
+    assert!(block.zswap.rows.iter().all(|r| !r.hidden));
+}
+
+#[test]
+fn zram_ratio_dash_when_zero() {
+    let block = build(&zram_mem(GIB, 0), &zram_details());
+    assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "-");
 }

@@ -16,22 +16,22 @@ use std::sync::Arc;
 use gpui_kit::component::v_flex;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
-    Context, ElementId, Entity, EntityId, FocusHandle, Focusable, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
-    Subscription, WeakEntity, Window, div, px,
+    Context, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::Snapshot;
+use tl_model::snapshot::{MemoryDetails, Snapshot};
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::actions::{PerfToggleMemoryComposition, PerfToggleMemorySwapGraph};
-use super::details::{Fallback, KeyValueModel};
+use super::details::{Fallback, KeyValueModel, render_details};
 use super::memory_bar::{Composition, CompositionBarView};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_words};
 use super::{DeviceKey, DeviceRow};
@@ -46,6 +46,7 @@ use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, TlSettings, animations_on};
+use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Debug selectors of the chart boxes.
@@ -63,6 +64,8 @@ const KEY_MENU_COMPOSITION: &str = "perf-mem-menu-composition";
 const KEY_MENU_SWAP: &str = "perf-mem-menu-swap";
 const KEY_RANGE_MEMORY: &str = "perf-mem-range-memory";
 const KEY_RANGE_SWAP: &str = "perf-mem-range-swap";
+const KEY_BLOCK_COMPRESSED: &str = "perf-mem-block-compressed";
+const KEY_ZSWAP: &str = "perf-mem-zswap";
 
 const NS_PER_S: u64 = 1_000_000_000;
 /// Alpha of the dirty-bytes line against `mem_line`.
@@ -83,6 +86,8 @@ pub struct Words {
     pub menu_swap: SharedString,
     pub range_memory: SharedString,
     pub range_swap: SharedString,
+    pub block_compressed: SharedString,
+    pub zswap: SharedString,
 }
 
 impl Words {
@@ -104,6 +109,8 @@ impl Words {
         self.menu_swap = t(KEY_MENU_SWAP);
         self.range_memory = t(KEY_RANGE_MEMORY);
         self.range_swap = t(KEY_RANGE_SWAP);
+        self.block_compressed = t(KEY_BLOCK_COMPRESSED);
+        self.zswap = t(KEY_ZSWAP);
         true
     }
 }
@@ -512,6 +519,237 @@ pub fn update_memory_details(model: &mut KeyValueModel, inp: &MemoryDetailInputs
     changed
 }
 
+// ---- "Compressed memory" block (UI-PRF-028 block 1, PERF-044) ----
+
+pub const ROW_ZRAM_DEVICE: &str = "perf-mem-zram-device";
+pub const ROW_ZRAM_SIZE: &str = "perf-mem-zram-size";
+pub const ROW_ZRAM_STORED: &str = "perf-mem-zram-stored";
+pub const ROW_ZRAM_COMPRESSED: &str = "perf-mem-zram-compressed";
+pub const ROW_ZRAM_MEM_USED: &str = "perf-mem-zram-mem-used";
+pub const ROW_ZRAM_RATIO: &str = "perf-mem-zram-ratio";
+pub const ROW_ZRAM_ALGORITHM: &str = "perf-mem-zram-algorithm";
+pub const ROW_ZSWAP_ENABLED: &str = "perf-mem-zswap-enabled";
+pub const ROW_ZSWAP_POOL: &str = "perf-mem-zswap-pool";
+/// The zswap grid's Stored row has the zram Stored label.
+pub const ROW_ZSWAP_STORED: &str = ROW_ZRAM_STORED;
+
+/// "{$ratio} : 1".
+const KEY_RATIO_VALUE: &str = "perf-mem-ratio-value";
+const KEY_YES: &str = "perf-mem-yes";
+const KEY_NO: &str = "perf-mem-no";
+
+const ZRAM_ROWS: [&str; 7] = [
+    ROW_ZRAM_DEVICE,
+    ROW_ZRAM_SIZE,
+    ROW_ZRAM_STORED,
+    ROW_ZRAM_COMPRESSED,
+    ROW_ZRAM_MEM_USED,
+    ROW_ZRAM_RATIO,
+    ROW_ZRAM_ALGORITHM,
+];
+
+/// The Details grids of the "Compressed memory" block: one per zram device, then zswap.
+/// `names` holds the sub-heading of each zram grid (`zram0`).
+pub struct CompressedBlock {
+    pub zram: Vec<KeyValueModel>,
+    pub zswap: KeyValueModel,
+    pub names: Vec<SharedString>,
+    /// The zswap grid is enabled; with no zram device it decides whether the block shows.
+    zswap_enabled: bool,
+}
+
+impl Default for CompressedBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn zram_model() -> KeyValueModel {
+    KeyValueModel::new(&ZRAM_ROWS).with_texts(&[(KEY_RATIO_VALUE, &["ratio"])])
+}
+
+fn zswap_model() -> KeyValueModel {
+    let mut model = KeyValueModel::new(&[ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, ROW_ZSWAP_STORED])
+        .with_texts(&[(KEY_YES, &[]), (KEY_NO, &[])]);
+    model.hide(ROW_ZSWAP_POOL);
+    model.hide(ROW_ZSWAP_STORED);
+    model
+}
+
+impl CompressedBlock {
+    /// An empty block, which is hidden.
+    pub fn new() -> Self {
+        Self {
+            zram: Vec::new(),
+            zswap: zswap_model(),
+            names: Vec::new(),
+            zswap_enabled: false,
+        }
+    }
+
+    /// The block shows when there is a zram device or zswap is enabled.
+    pub fn is_hidden(&self) -> bool {
+        self.zram.is_empty() && !self.zswap_enabled
+    }
+
+    /// Translates the words of every grid when the strings changed. True when they did.
+    pub fn refresh_strings(&mut self, cx: &App) -> bool {
+        let mut changed = self.zswap.refresh_strings(cx);
+        for model in &mut self.zram {
+            changed |= model.refresh_strings(cx);
+        }
+        changed
+    }
+}
+
+/// What the block is read from.
+#[derive(Clone, Copy)]
+pub struct CompressedInputs<'a> {
+    pub mem: &'a MemoryTotals,
+    pub details: &'a MemoryDetails,
+}
+
+/// FNV-1a over the bytes of a name, the bits of a text row.
+fn text_bits(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Fills one zram grid. The `mm_stat` totals are summed over all devices, so they belong to a
+/// device only when it is the only one; with more devices those rows read Unavailable.
+fn update_zram_grid(
+    model: &mut KeyValueModel,
+    dev: &tl_model::snapshot::ZramDetail,
+    stats: Option<ZramTotals>,
+) -> bool {
+    let mut changed = false;
+    changed |= model.set_valid(ROW_ZRAM_DEVICE, text_bits(&dev.name), |o| {
+        o.push_str("/dev/");
+        o.push_str(&dev.name);
+    });
+    let size = dev.disksize;
+    changed |= model.set_valid(ROW_ZRAM_SIZE, size, |o| units::bytes(o, size));
+    match dev.algorithm.as_deref() {
+        Some(a) => {
+            changed |= model.set_valid(ROW_ZRAM_ALGORITHM, text_bits(a), |o| o.push_str(a));
+        }
+        None => {
+            changed |= model.set_fallback(
+                ROW_ZRAM_ALGORITHM,
+                Validity::Unsupported,
+                Fallback::NotReported,
+                None,
+            );
+        }
+    }
+    let Some(z) = stats else {
+        for label in [
+            ROW_ZRAM_STORED,
+            ROW_ZRAM_COMPRESSED,
+            ROW_ZRAM_MEM_USED,
+            ROW_ZRAM_RATIO,
+        ] {
+            changed |= model.set_fallback(label, Validity::Failed, Fallback::Unavailable, None);
+        }
+        return changed;
+    };
+    changed |= model.set_valid(ROW_ZRAM_STORED, z.orig_data, |o| {
+        units::bytes(o, z.orig_data)
+    });
+    changed |= model.set_valid(ROW_ZRAM_COMPRESSED, z.compr_data, |o| {
+        units::bytes(o, z.compr_data)
+    });
+    changed |= model.set_valid(ROW_ZRAM_MEM_USED, z.mem_used, |o| {
+        units::bytes(o, z.mem_used)
+    });
+    if z.compr_data == 0 {
+        changed |= model.set_text(ROW_ZRAM_RATIO, "-");
+    } else {
+        let template = model.text(KEY_RATIO_VALUE);
+        let bits = z.orig_data.rotate_left(32) ^ z.compr_data;
+        changed |= model.set_valid(ROW_ZRAM_RATIO, bits, |o| {
+            template.write_each(o, |_, o| {
+                let _ = write!(o, "{:.1}", z.orig_data as f64 / z.compr_data as f64);
+            });
+        });
+    }
+    changed
+}
+
+/// Brings the block up to date with the zram devices, `mm_stat` totals and zswap parameters
+/// (PERF-044). A grid formats a value again only when its raw bytes changed. True when
+/// anything shown changed, or a grid was added or removed.
+pub fn update_compressed_block(block: &mut CompressedBlock, inp: &CompressedInputs) -> bool {
+    let mut changed = false;
+    let devices = &inp.details.zram;
+    let same_names = block.names.len() == devices.len()
+        && block
+            .names
+            .iter()
+            .zip(devices.iter())
+            .all(|(n, d)| n == &*d.name);
+    if !same_names {
+        block.names = devices
+            .iter()
+            .map(|d| SharedString::from(d.name.to_string()))
+            .collect();
+        block.zram = devices.iter().map(|_| zram_model()).collect();
+        changed = true;
+    }
+    let stats = match inp.mem.zram.validity {
+        Validity::Valid | Validity::Stale if devices.len() == 1 => Some(inp.mem.zram.value),
+        _ => None,
+    };
+    for (model, dev) in block.zram.iter_mut().zip(devices.iter()) {
+        changed |= update_zram_grid(model, dev, stats);
+    }
+
+    let z = &mut block.zswap;
+    let zswap = &inp.details.zswap;
+    let info = match zswap.validity {
+        Validity::Valid | Validity::Stale => zswap.value.as_ref(),
+        _ => None,
+    };
+    let enabled = info.is_some_and(|i| i.enabled);
+    changed |= enabled != block.zswap_enabled;
+    block.zswap_enabled = enabled;
+    if zswap.validity == Validity::Failed {
+        changed |= z.set_fallback(
+            ROW_ZSWAP_ENABLED,
+            Validity::Failed,
+            Fallback::Unavailable,
+            None,
+        );
+    } else {
+        let key = if enabled { KEY_YES } else { KEY_NO };
+        let word = z.text(key).text().clone();
+        changed |= z.set_text(ROW_ZSWAP_ENABLED, &word);
+    }
+    changed |= set_hidden(z, ROW_ZSWAP_POOL, !enabled);
+    changed |= set_hidden(z, ROW_ZSWAP_STORED, !enabled);
+    if enabled {
+        let m = inp.mem;
+        match info.and_then(|i| i.max_pool_percent) {
+            Some(pct) => {
+                let pool = (u128::from(m.total) * u128::from(pct) / 100) as u64;
+                changed |= z.set_valid(ROW_ZSWAP_POOL, pool, |o| units::bytes(o, pool));
+            }
+            None => {
+                changed |= z.set_fallback(
+                    ROW_ZSWAP_POOL,
+                    Validity::Unsupported,
+                    Fallback::NotReported,
+                    None,
+                );
+            }
+        }
+        let stored = m.zswapped;
+        changed |= z.set_valid(ROW_ZSWAP_STORED, stored, |o| units::bytes(o, stored));
+    }
+    changed
+}
+
 /// The Swap chart's height animation (UI-PRF-026).
 #[derive(Clone, Copy, Debug)]
 struct SwapAnim {
@@ -535,6 +773,8 @@ pub struct MemoryPage {
     composition: Option<Composition>,
     /// E25-003 fills the rows.
     details: KeyValueModel,
+    /// The "Compressed memory" block under the Details grid.
+    compressed: CompressedBlock,
     /// `performance.memory_composition`.
     show_composition: bool,
     /// `performance.memory_swap_graph`.
@@ -623,6 +863,7 @@ impl MemoryPage {
             bar: None,
             composition,
             details: memory_details_model(),
+            compressed: CompressedBlock::new(),
             show_composition: settings.composition,
             show_swap: settings.swap,
             swap_total: totals.swap,
@@ -662,6 +903,19 @@ impl MemoryPage {
         if update_memory_details(&mut self.details, &inputs) {
             cx.notify();
         }
+        let inputs = CompressedInputs {
+            mem: &snap.system.memory,
+            details: &snap.device_details.memory,
+        };
+        let changed = update_compressed_block(&mut self.compressed, &inputs);
+        if self.compressed.refresh_strings(cx) || changed {
+            cx.notify();
+        }
+    }
+
+    /// The "Compressed memory" block's models.
+    pub fn compressed(&self) -> &CompressedBlock {
+        &self.compressed
     }
 
     /// The composition bar view, once it has been shown.
@@ -752,10 +1006,9 @@ impl MemoryPage {
         cx: &mut Context<Self>,
     ) {
         let snap = Arc::clone(hub.read(cx).current());
-        if ev
-            .mask
-            .intersects(ComponentMask::SYSTEM | ComponentMask::HEALTH)
-        {
+        if ev.mask.intersects(
+            ComponentMask::SYSTEM | ComponentMask::HEALTH | ComponentMask::DEVICE_DETAILS,
+        ) {
             self.sync_details(&snap, cx);
         }
         if ev.mask.contains(ComponentMask::SYSTEM) {
@@ -1015,8 +1268,30 @@ impl DevicePage for MemoryPage {
         &self.details
     }
 
-    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
-        SmallVec::new()
+    fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
+        if self.compressed.is_hidden() {
+            return SmallVec::new();
+        }
+        let (m, theme) = (metrics(cx), current(cx));
+        let heading = |text: SharedString, style| {
+            let mut el = div().text_color(theme.text_primary).child(text);
+            *el.text_style() = style;
+            el
+        };
+        let md = label_style(m, m.text.md, FontWeight::MEDIUM);
+        let sm = label_style(m, m.text.sm, FontWeight::MEDIUM);
+        let mut block = v_flex()
+            .gap(m.sp[4])
+            .child(heading(self.words.block_compressed.clone(), md));
+        for (name, model) in self.compressed.names.iter().zip(&self.compressed.zram) {
+            block = block
+                .child(heading(name.clone(), sm.clone()))
+                .child(render_details(model, m, cx));
+        }
+        block = block
+            .child(heading(self.words.zswap.clone(), sm))
+            .child(render_details(&self.compressed.zswap, m, cx));
+        smallvec![block.into_any_element()]
     }
 
     fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
@@ -1075,6 +1350,7 @@ impl Render for MemoryPage {
             self.send_demand(cx);
         }
         self.details.refresh_strings(cx);
+        self.compressed.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
         div()
