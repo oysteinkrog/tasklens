@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyView, App, AppContext as _, Entity, SharedString, TestAppContext, VisualTestContext, px,
-    size,
+    AnyView, App, AppContext as _, Entity, Focusable as _, SharedString, TestAppContext,
+    VisualTestContext, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
@@ -339,17 +339,25 @@ fn range_change_reaches_device_pages(cx: &mut TestAppContext) {
         .downcast::<MemoryPage>()
         .expect("a MemoryPage");
 
+    let performance = r.page.clone();
+    r.vcx.update(|window, cx| {
+        performance.read(cx).focus_handle(cx).focus(window, cx);
+    });
     r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
     draw(r.vcx);
 
-    let ranges = r.vcx.update(|_, cx| {
+    let (setting, ranges) = r.vcx.update(|_, cx| {
         let page = memory.read(cx);
-        [
-            page.physical().read(cx).spec.range_ns,
-            page.commit().read(cx).spec.range_ns,
-            page.swap().read(cx).spec.range_ns,
-        ]
+        (
+            TlSettings::settings(cx).performance.graph_range_s,
+            [
+                page.physical().read(cx).spec.range_ns,
+                page.commit().read(cx).spec.range_ns,
+                page.swap().read(cx).spec.range_ns,
+            ],
+        )
     });
+    assert_eq!(setting, 30);
     assert_eq!(ranges, [30_000_000_000; 3]);
 }
 
