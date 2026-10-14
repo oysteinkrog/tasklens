@@ -1821,7 +1821,7 @@ fn add_custom_theme(cx: &mut VisualTestContext, name: &str, base: &str) {
             .global::<tl_ui::theme::ThemeStore>()
             .builtin
             .iter()
-            .find(|d| &*d.name == base)
+            .find(|d| d.name.as_ref() == base)
             .expect("base theme")
             .clone();
         def.name = name.clone().into();
