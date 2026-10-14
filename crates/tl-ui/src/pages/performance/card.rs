@@ -82,8 +82,10 @@ pub struct CardWords {
     /// "{$k} adapters".
     pub adapters_count: Template,
     pub multiple: SharedString,
-    /// "Commit {$pct}".
+    /// "Commit {$pct} of limit".
     pub commit: Template,
+    /// Why commit can pass 100%.
+    pub commit_tip: SharedString,
     pub unknown_processor: SharedString,
     pub unknown_gpu: SharedString,
     /// PERF-054 state words.
@@ -133,6 +135,7 @@ impl CardWords {
             adapters_count: template("perf-card-adapters-count", &["k"]),
             multiple: t("perf-card-multiple"),
             commit: template("perf-card-commit", &["pct"]),
+            commit_tip: t("perf-card-commit-tooltip"),
             unknown_processor: t("perf-unknown-processor"),
             unknown_gpu: t("perf-unknown-gpu"),
             disconnected: t("perf-net-state-disconnected"),
@@ -266,8 +269,15 @@ pub fn update_card_lines(
     let connection = (input.kind == DeviceKind::Net)
         .then(|| net_connection(input))
         .flatten();
-    changed |= match connection {
-        Some(name) => {
+    changed |= match (input.kind, connection) {
+        (DeviceKind::Memory, _) => match &mut lines.tooltip {
+            Some(tip) => keep_or_set(tip, &input.words.commit_tip),
+            None => {
+                lines.tooltip = Some(input.words.commit_tip.clone());
+                true
+            }
+        },
+        (DeviceKind::Net, Some(name)) => {
             scratch.clear();
             scratch.push_str(&lines.line1);
             scratch.push('\n');
@@ -280,10 +290,10 @@ pub fn update_card_lines(
                 }
             }
         }
-        None if lines.line1.is_empty() => lines.tooltip.take().is_some(),
+        _ if lines.line1.is_empty() => lines.tooltip.take().is_some(),
         // Shares line 1's allocation.
-        None if lines.tooltip.as_deref() == Some(&*lines.line1) => false,
-        None => {
+        _ if lines.tooltip.as_deref() == Some(&*lines.line1) => false,
+        _ => {
             lines.tooltip = Some(lines.line1.clone());
             true
         }
@@ -1146,8 +1156,8 @@ mod tests {
         sys.memory.validity = Validity::Valid;
         sys.memory.used = (34.68 * GIB) as u64;
         sys.memory.total = (63.16 * GIB) as u64;
-        sys.memory.committed = 69;
-        sys.memory.commit_limit = 100;
+        sys.memory.committed = 2_443;
+        sys.memory.commit_limit = 1_000;
         let s = snap(
             sys,
             InventorySnapshot::default(),
@@ -1156,7 +1166,14 @@ mod tests {
         let l = lines(&input(DeviceKind::Memory, &mem, &s));
         assert_eq!(
             strs(&l),
-            ("Memory", "34.68 GiB / 63.16 GiB", "Commit 69.0%")
+            ("Memory", "34.68 GiB / 63.16 GiB", "Commit 244.3% of limit")
+        );
+        assert_eq!(
+            l.tooltip.as_deref(),
+            Some(
+                "Memory the system has promised to programs, as a share of the commit limit. \
+                 It can pass 100% because Linux allows overcommit."
+            )
         );
 
         let s = snap(
@@ -1165,7 +1182,7 @@ mod tests {
             DeviceDetailsSnapshot::default(),
         );
         let l = lines(&input(DeviceKind::Memory, &mem, &s));
-        assert_eq!(strs(&l), ("Memory", "…", "Commit …"));
+        assert_eq!(strs(&l), ("Memory", "…", "Commit … of limit"));
     }
 
     fn net_entry(kind: Option<NetKind>) -> DeviceEntry {

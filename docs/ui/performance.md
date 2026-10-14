@@ -354,7 +354,7 @@ element height = rows × cell_h + (rows − 1) × gap
 | Kind | Heading | Line 1 | Line 2 | Graph series | Value |
 |---|---|---|---|---|---|
 | CPU | "CPU" | model, or "Unknown processor" | "4631 MHz · 52 °C" (temperature omitted when no CPU hwmon) | total CPU, kernel overlay when `cpu_kernel` | `11.9%` |
-| Memory | "Memory" | "34.68 GiB / 63.16 GiB" | "Commit 69.0%" | used (filled), committed dashed | `55.0%` (used/total) |
+| Memory | "Memory" | "34.68 GiB / 63.16 GiB" | "Commit 69.0% of limit" | used (filled), committed dashed | `55.0%` (used/total) |
 | GPU | "GPU N" | name, or "Unknown GPU" | "52 °C" | 3D/Compute engine (or the max engine, PERF-009 rule) | `10.9%` |
 | Disk | "Disk N" | "NVMe - /" (kind, " - ", primary mount; no mount: kind only) | model; from P2 "<model> · 41 °C" | active time | `0.1%` |
 | Network | `<ifname>` | type ("Ethernet", "Wi-Fi", "Tunnel", …) | `↓ 1.2 Mbps ↑ 0.3 Mbps` when both non-zero, else total rate, in `accent`; disconnected: the state word ("Disconnected") in `text_secondary` | download filled, upload dashed | total rate, e.g. `0.01 Mbps` |
@@ -364,7 +364,7 @@ element height = rows × cell_h + (rows − 1) × gap
 
   - Numbering: "Disk N", "GPU N", "Fan N" count from 0 in sidebar order (`performance.png` shows "GPU 0", "Disk 0"), re-numbered when the order changes.
   - Disconnected interface: the whole card at opacity 0.6 (PERF-001).
-  - Tooltip (`TlTooltip`, 500 ms): the full model on line 1 when it is truncated; network cards add the NetworkManager connection name on its own line when known.
+  - Tooltip (`TlTooltip`, 500 ms): the full model on line 1 when it is truncated; network cards add the NetworkManager connection name on its own line when known. The Memory card says "Memory the system has promised to programs, as a share of the commit limit. It can pass 100% because Linux allows overcommit."
 - **States**:
   - Default: bg `list_bg`, border 1 px `divider`.
   - Hover: bg `row_hover`.
@@ -735,7 +735,7 @@ sp4
 │ Memory usage over 60 seconds                                  │  scale FixedTotal(MemTotal)
 └───────────────────────────────────────────────────────────────┘
 ┌ Commit                                                 69.0% ┐  value = Committed_AS / CommitLimit
-│ fill mem_fill; scale Commit(limit); axis max text when > 100% │  heading tooltip "Committed memory against the commit limit. It can exceed 100%."
+│ fill mem_fill; scale Commit(limit); axis max text when > 100% │  heading tooltip "Memory the system has promised to programs, as a share of the commit limit. It can pass 100% because Linux allows overcommit."
 │ Commit over 60 seconds                                        │
 └───────────────────────────────────────────────────────────────┘
 ┌ Swap                                                 1.20 GiB ┐  hidden when SwapTotal = 0 or memory_swap_graph = false
