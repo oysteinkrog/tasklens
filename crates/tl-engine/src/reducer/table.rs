@@ -1793,6 +1793,8 @@ fn grouped_rows(
         let mut g = aggregate(records, members, None, unit_stat(input.unit_stats, unit));
         add_extras_sums(&mut g, input.extras, n, members);
         g.node = NodeId::Unit((*unit).clone());
+        // Its own key, not the class key, so App Properties shows this unit only.
+        g.key = unit.key();
         g.kind = GroupRowKind::Unit;
         g.class = if *c == GroupClass::Background {
             GroupKind::Background

@@ -1591,6 +1591,64 @@ mod window {
         );
     }
 
+    /// Two units of the System class have their own row keys, so Ctrl+I on both opens two
+    /// App Properties windows, one per unit (tasklens-8q0.40).
+    #[gpui_kit::test]
+    fn ctrl_i_on_two_system_units_opens_two_windows(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let unit_row = |name: &str| {
+            let unit = tl_model::table::UnitRef {
+                manager: tl_model::table::Manager::System,
+                name: Arc::from(name),
+            };
+            GroupRow {
+                node: NodeId::Unit(unit.clone()),
+                key: unit.key(),
+                class: GroupKind::System,
+                ..app_group(name, GroupRowKind::Unit, 2)
+            }
+        };
+        let foo = unit_row("foo.service");
+        let bar = unit_row("bar.service");
+        assert_ne!(foo.key, bar.key);
+        publish_table(
+            &engine,
+            &mut main,
+            Vec::new(),
+            vec![foo.clone(), bar.clone()],
+            vec![
+                table_row(foo.node.clone(), None, Some(0)),
+                table_row(bar.node.clone(), None, Some(1)),
+            ],
+        );
+        let page = processes_page(&mut main);
+        let ids: Vec<ProcRowId> = main.update(|_, cx| {
+            let table = page.read(cx).table().read(cx);
+            [&foo.node, &bar.node]
+                .into_iter()
+                .map(|node| table.delegate.id_of(node).expect("the unit row is shown"))
+                .collect()
+        });
+        select_and_focus(&mut main, &page, &ids);
+
+        main.simulate_keystrokes("ctrl-i");
+        main.run_until_parked();
+
+        assert_eq!(app_props_count(cx), 2, "one window per unit");
+        for (row, title) in [
+            (&foo, "App Properties - foo.service"),
+            (&bar, "App Properties - bar.service"),
+        ] {
+            let handle = cx
+                .update(|cx| {
+                    let registry = cx.global::<GlobalRegistry>().0.clone();
+                    registry.read(cx).get(&WindowKey::AppProperties(row.key))
+                })
+                .expect("the unit has its own window");
+            assert_eq!(app_title(cx, handle), title);
+        }
+    }
+
     #[gpui_kit::test]
     fn app_props_ninth_window_toast(cx: &mut TestAppContext) {
         let (engine, mut main) = setup(cx);

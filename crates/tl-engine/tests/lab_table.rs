@@ -30,7 +30,7 @@ use tl_model::health::ManagerState;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras,
-    ProcessMeta, ProcessRecord,
+    ProcessMeta, ProcessRecord, is_row_member,
 };
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
@@ -758,6 +758,75 @@ fn unit_rows_fold_multi_process_units() {
             row("System processes", 0),
         ]
     );
+}
+
+/// Two System units get their own row keys, so App Properties lists and focuses each unit
+/// alone (tasklens-8q0.40). `is_row_member` answers for both unit and app keys, and app rows keep
+/// the app's class key.
+#[test]
+fn unit_rows_have_unique_keys() {
+    let records = vec![
+        in_unit(rec(10, 1, "foo", 1.0), "system.slice", "foo.service"),
+        in_unit(
+            rec(11, 10, "foo-worker", 1.0),
+            "system.slice",
+            "foo.service",
+        ),
+        in_unit(rec(20, 1, "bar", 1.0), "system.slice", "bar.service"),
+        in_unit(
+            rec(21, 20, "bar-worker", 1.0),
+            "system.slice",
+            "bar.service",
+        ),
+        in_app(rec(30, 1, "Firefox", 1.0), "firefox"),
+    ];
+    let unit = |name: &str| UnitRef {
+        manager: Manager::System,
+        name: name.into(),
+    };
+    let (foo, bar) = (unit("foo.service"), unit("bar.service"));
+    let view = build(
+        &records,
+        &query(TableMode::Grouped, "pid", true, "", &headers()),
+        &settings(),
+    );
+
+    let row = |node: NodeId| {
+        view.groups
+            .iter()
+            .find(|g| g.node == node)
+            .expect("the group has a row")
+    };
+    let foo_row = row(NodeId::Unit(foo.clone()));
+    let bar_row = row(NodeId::Unit(bar.clone()));
+    assert_eq!(foo_row.class, GroupKind::System);
+    assert_eq!(bar_row.class, GroupKind::System);
+    assert_eq!(foo_row.key, foo.key());
+    assert_eq!(bar_row.key, bar.key());
+    assert_ne!(foo_row.key, bar_row.key);
+    assert_ne!(foo_row.key, GroupKind::System.key());
+    // Records keep their class key.
+    assert!(
+        records[..4]
+            .iter()
+            .all(|r| r.group == GroupKind::System.key())
+    );
+
+    let app = row(NodeId::Group(app_key("firefox")));
+    assert_eq!(app.key, app_key("firefox"));
+
+    let extras: Vec<ProcessExtras> = records.iter().map(extras).collect();
+    let members = |key: GroupKey| -> Vec<u32> {
+        records
+            .iter()
+            .zip(&extras)
+            .filter(|(r, x)| is_row_member(r, Some(x), key))
+            .map(|(r, _)| r.key.pid)
+            .collect()
+    };
+    assert_eq!(members(foo_row.key), [10, 11]);
+    assert_eq!(members(bar_row.key), [20, 21]);
+    assert_eq!(members(app.key), [30]);
 }
 
 #[test]

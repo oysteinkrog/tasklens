@@ -15,7 +15,7 @@ use smallvec::SmallVec;
 use crate::actions::{CgroupRef, SchedPolicy};
 use crate::ids::{GroupKey, NodeId, ProcessKey};
 use crate::system::CpuSet;
-use crate::table::UnitRef;
+use crate::table::{Manager, UnitRef};
 use crate::time::TimeNs;
 use crate::validity::FieldValidity;
 
@@ -179,6 +179,37 @@ impl GroupKind {
     }
 }
 
+impl UnitRef {
+    /// Row key of the unit's group row: FxHash of discriminant byte 5, the manager byte
+    /// (`System` 1, `User` 2) and the unit name bytes. Byte 5 keeps it apart from every
+    /// `GroupKind` key, so `ProcessRecord.group` classing is unchanged. Each unit gets its own key,
+    /// so App Properties lists and focuses that unit only.
+    pub fn key(&self) -> GroupKey {
+        let mut hasher = rustc_hash::FxHasher::default();
+        hasher.write_u8(5);
+        hasher.write_u8(match self.manager {
+            Manager::System => 1,
+            Manager::User => 2,
+        });
+        hasher.write(self.name.as_bytes());
+        GroupKey(hasher.finish())
+    }
+}
+
+/// True when a record belongs to the group row with key `key`: an app row when
+/// `record.group == key`, a unit row when the record's unit (`extras.unit`) has that key.
+/// `extras` is the record's entry in `ProcessSnapshot.extras` (same index).
+pub fn is_row_member(
+    record: &ProcessRecord,
+    extras: Option<&ProcessExtras>,
+    key: GroupKey,
+) -> bool {
+    record.group == key
+        || extras
+            .and_then(|x| x.unit.as_ref())
+            .is_some_and(|unit| unit.key() == key)
+}
+
 /// What a group row of the table is (R-141 item 3). GroupKind stays the four PROC-004 classes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum GroupRowKind {
@@ -194,6 +225,8 @@ pub enum GroupRowKind {
 pub struct GroupRow {
     /// Table identity of the row (R-141 item 3).
     pub node: NodeId,
+    /// App row: the app's `GroupKind` key. Unit row: `UnitRef::key`. Kernel threads row: the
+    /// `System` key.
     pub key: GroupKey,
     /// App, Unit, KernelThreads or Pseudo (R-141 item 3).
     pub kind: GroupRowKind,
@@ -529,6 +562,28 @@ mod tests {
         assert_eq!(a.key(), b.key());
         assert_ne!(GroupKind::Background.key(), a.key());
         assert_ne!(GroupKind::Background.key(), b.key());
+    }
+
+    #[test]
+    fn unit_key_unique_per_unit() {
+        let unit = |manager, name: &str| UnitRef {
+            manager,
+            name: name.into(),
+        };
+        let foo = unit(Manager::System, "foo.service");
+        assert_eq!(foo.key(), unit(Manager::System, "foo.service").key());
+        assert_ne!(foo.key(), unit(Manager::System, "bar.service").key());
+        assert_ne!(foo.key(), unit(Manager::User, "foo.service").key());
+        for kind in [
+            GroupKind::Background,
+            GroupKind::System,
+            GroupKind::Ungrouped,
+            GroupKind::App {
+                app_id: "foo.service".into(),
+            },
+        ] {
+            assert_ne!(foo.key(), kind.key());
+        }
     }
 
     #[test]
