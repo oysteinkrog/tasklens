@@ -3,6 +3,8 @@
 #![cfg(feature = "test-hooks")]
 
 use std::cell::Cell;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -11,7 +13,9 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels,
     Render, Styled as _, TestAppContext, VisualTestContext, Window, WindowHandle, div, px, size,
 };
+use tl_model::actions::ActionKind;
 use tl_model::client::EngineClient;
+use tl_model::command::Command;
 use tl_model::command::Tab;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
@@ -19,6 +23,7 @@ use tl_model::settings::{NetworkUnit, Settings, StartTab, UiState};
 use tl_model::table::TableMode;
 use tl_ui::actions::OpenSettings;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::slider::TlSliderEvent;
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
@@ -56,6 +61,90 @@ fn test_pages(_: &mut gpui_kit::App) -> Vec<PageBuilder> {
         );
     vec![page]
 }
+
+fn no_test_pages(_: &mut gpui_kit::App) -> Vec<PageBuilder> {
+    Vec::new()
+}
+
+fn p2_pages(cx: &mut TestAppContext) -> Vec<PageBuilder> {
+    cx.update(|cx| {
+        cx.set_global(TestPages(no_test_pages));
+        all_pages(cx)
+    })
+}
+
+const E21_P2_KEYS: &[SettingKey] = &[
+    SettingKey::GeneralStartTab,
+    SettingKey::GeneralLanguage,
+    SettingKey::ThemeActive,
+    SettingKey::ThemeFollowSystem,
+    SettingKey::ThemeLight,
+    SettingKey::ThemeDark,
+    SettingKey::AppearanceUiScalePct,
+    SettingKey::AppearanceRowHeightPct,
+    SettingKey::AppearanceDecorations,
+    SettingKey::AppearanceRoundedCorners,
+    SettingKey::AppearanceHeatColoring,
+    SettingKey::AppearanceHeatIntensityPct,
+    SettingKey::AppearanceShadowIntensityPct,
+    SettingKey::MotionAnimations,
+    SettingKey::MotionSmoothGraphs,
+    SettingKey::MotionSmoothScroll,
+    SettingKey::MotionSmoothScrollAmount,
+    SettingKey::MotionTabSwitchMs,
+    SettingKey::MotionSavePowerOnBattery,
+    SettingKey::UnitsNetwork,
+    SettingKey::UnitsNetworkAutoScale,
+    SettingKey::ProcessesIntervalMs,
+    SettingKey::ProcessesMode,
+    SettingKey::ProcessesTreeGuideLines,
+    SettingKey::ProcessesHighlightNewExited,
+    SettingKey::ProcessesFilterIncludeChildren,
+    SettingKey::ProcessesHideSystem,
+    SettingKey::ProcessesSubtreeTotals,
+    SettingKey::TablesColumnResize,
+    SettingKey::TablesDimZeroValues,
+    SettingKey::PropertiesHideUnnamedHandles,
+    SettingKey::PropertiesSharedObjectsOnly,
+    SettingKey::PropertiesEnvMask,
+    SettingKey::PerformanceGraphRangeS,
+    SettingKey::PerformanceCurvedLines,
+    SettingKey::PerformanceNetworkDynamicScale,
+    SettingKey::PerformanceCpuGraphMode,
+    SettingKey::PerformanceCpuKernel,
+    SettingKey::PerformanceCpuSecondaryGraph,
+    SettingKey::PerformanceMemoryComposition,
+    SettingKey::PerformanceMemorySwapGraph,
+    SettingKey::PerformanceGpuOptionalGraphs,
+    SettingKey::PerformanceHiddenGpuEngines,
+    SettingKey::PerformanceShowDisks,
+    SettingKey::PerformanceShowGpus,
+    SettingKey::PerformanceShowFans,
+    SettingKey::PerformanceShowBatteries,
+    SettingKey::PerformanceShowNetworkWired,
+    SettingKey::PerformanceShowNetworkWireless,
+    SettingKey::PerformanceShowNetworkVpn,
+    SettingKey::PerformanceShowNetworkVirtual,
+    SettingKey::PerformanceShowNetworkOther,
+    SettingKey::PerformanceDeviceOrder,
+    SettingKey::PerformanceDeviceOverrides,
+    SettingKey::GraphsMinigraphCpu,
+    SettingKey::GraphsMinigraphMemory,
+    SettingKey::GraphsMinigraphDisk,
+    SettingKey::GraphsMinigraphNetwork,
+    SettingKey::GraphsMinigraphGpu,
+    SettingKey::GraphsMinigraphVram,
+    SettingKey::GraphsMinigraphGpuTemperature,
+    SettingKey::WindowCloseWithEsc,
+    SettingKey::WindowAlwaysOnTop,
+    SettingKey::StartupStartAtLogin,
+    SettingKey::StartupStartMinimized,
+    SettingKey::NetworkAutoFetchPublicIp,
+    SettingKey::NetworkPublicIpNoticeAccepted,
+    SettingKey::ServicesUnitTypes,
+    SettingKey::ServicesFilterStates,
+    SettingKey::DebugShowFps,
+];
 
 /// `TasklensUi::init` with a persist counter and the test page. Returns the engine and the
 /// number of persist calls.
@@ -1482,6 +1571,135 @@ fn startup_window_public_ip_accepted_and_off(cx: &mut TestAppContext) {
     assert!(
         !cx.update(|cx| TlSettings::settings(cx).network.auto_fetch_public_ip),
         "off needs no notice"
+    );
+}
+
+// Advanced page and P2 window invariants (E21-A2).
+
+#[gpui_kit::test]
+fn settings_no_key_twice(cx: &mut TestAppContext) {
+    setup(cx);
+    let mut seen = HashSet::new();
+    for key in p2_pages(cx).iter().flat_map(|page| page.keys()) {
+        assert!(
+            seen.insert(*key),
+            "{} is bound more than once",
+            key.as_str()
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn settings_only_settings_toml_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    let canonical: HashSet<SettingKey> = SettingKey::ALL.into_iter().collect();
+    for key in p2_pages(cx).iter().flat_map(|page| page.keys()) {
+        assert!(
+            canonical.contains(key),
+            "{} is not a canonical settings.toml key",
+            key.as_str()
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn settings_p2_keys_present(cx: &mut TestAppContext) {
+    setup(cx);
+    let bound: HashSet<SettingKey> = p2_pages(cx)
+        .iter()
+        .flat_map(|page| page.keys())
+        .copied()
+        .collect();
+    let missing: Vec<&str> = E21_P2_KEYS
+        .iter()
+        .filter(|key| !bound.contains(key))
+        .map(|key| key.as_str())
+        .collect();
+    assert!(missing.is_empty(), "P2 keys not bound: {missing:?}");
+}
+
+#[gpui_kit::test]
+fn advanced_show_fps_switch(cx: &mut TestAppContext) {
+    setup(cx);
+    let advanced = page(cx, PageId::Advanced);
+    assert!(!cx.update(|cx| TlSettings::settings(cx).debug.show_fps));
+    cx.update(|cx| advanced.set_bool(SettingKey::DebugShowFps, true, cx));
+    assert!(cx.update(|cx| TlSettings::settings(cx).debug.show_fps));
+}
+
+#[gpui_kit::test]
+fn advanced_reset_opens_confirm(cx: &mut TestAppContext) {
+    setup(cx);
+    let (_, mut vcx) = open(cx, 1);
+    let settings_id = vcx.update(|window, _| window.window_handle().window_id());
+    let advanced = page(cx, PageId::Advanced);
+    vcx.update(|window, cx| advanced.press("Reset Settings to Defaults", window, cx));
+    vcx.run_until_parked();
+
+    let handle = cx
+        .update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find(|window| window.window_id() != settings_id)
+        })
+        .and_then(|window| window.downcast::<Root>())
+        .expect("reset confirmation window");
+    let view = cx
+        .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+        .map(|frame| cx.read(|cx| frame.read(cx).content().clone()))
+        .expect("reset confirmation dialog");
+    let mut confirm = VisualTestContext::from_window(handle.into(), cx);
+    confirm.update(|window, _| window.activate_window());
+    confirm.run_until_parked();
+    assert_eq!(
+        confirm.update(|window, cx| view.read(cx).focused_button(window)),
+        Some(DialogButton::Cancel)
+    );
+}
+
+#[gpui_kit::test]
+fn advanced_open_settings_folder(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    cx.update(|cx| {
+        cx.global_mut::<AppEnv>().config_dir = PathBuf::from("/home/u/.config/tasklens");
+    });
+    let (_, mut vcx) = open(cx, 1);
+    let advanced = page(cx, PageId::Advanced);
+    let before = engine.commands().len();
+    vcx.update(|window, cx| advanced.press("Open settings folder", window, cx));
+    vcx.run_until_parked();
+    let uris: Vec<String> = engine.commands()[before..]
+        .iter()
+        .filter_map(|command| match command {
+            Command::Action(request) => match &request.kind {
+                ActionKind::OpenUri(uri) => Some(uri.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(uris, ["file:///home/u/.config/tasklens"]);
+    assert!(uris[0].ends_with("/tasklens"));
+}
+
+#[gpui_kit::test]
+fn settings_p2_page_list(cx: &mut TestAppContext) {
+    setup(cx);
+    let ids: Vec<PageId> = p2_pages(cx).iter().map(PageBuilder::id).collect();
+    assert_eq!(
+        ids,
+        [
+            PageId::General,
+            PageId::Appearance,
+            PageId::Motion,
+            PageId::Units,
+            PageId::Processes,
+            PageId::Performance,
+            PageId::Graphs,
+            PageId::Services,
+            PageId::StartupWindow,
+            PageId::Advanced,
+        ]
     );
 }
 

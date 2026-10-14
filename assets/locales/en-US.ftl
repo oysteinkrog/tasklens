@@ -822,6 +822,16 @@ connections-owner-restricted-glyph-tip = Needs the tasklens helper to identify t
 connections-owner-restricted-tip = Owned by { $user }. Needs the tasklens helper to identify the process
 connections-owner-line = PID { $pid }  { $name }
 connections-owner-more = and { $count } more
+connections-menu-copy = Copy
+connections-menu-copy-row = Copy row
+connections-menu-copy-rows-table = Copy rows as table
+connections-menu-copy-local = Copy local address
+connections-menu-copy-foreign = Copy foreign address
+connections-menu-jump-process = Jump to process
+connections-menu-go-service = Go to service
+connections-menu-properties = Properties
+connections-menu-no-owning-process = No owning process for this connection
+connections-menu-needs-administrator = Needs administrator access.
 
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.
@@ -2033,6 +2043,10 @@ shell-settings-group-window = Window
 shell-settings-group-login = Login
 shell-settings-group-network = Network
 shell-settings-device-default = Default
+# Settings window, Advanced page (tasklens-bj6.2, UI-SHL-071).
+shell-settings-public-ip-notice = Do not ask again for public IP fetches
+shell-settings-show-fps = Show FPS
+shell-settings-open-folder = Open settings folder
 shell-settings-device-show = Show
 shell-settings-device-hide = Hide
 shell-settings-device-reset-order = Reset order

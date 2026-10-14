@@ -15,6 +15,7 @@
 //! (`ComponentMask::DEVICES`, for the Performance page lists), never on other snapshots. Slider
 //! states are created in `SettingsWindow::new`, never in render.
 
+mod advanced;
 mod appearance;
 mod general;
 mod graphs;
@@ -71,6 +72,7 @@ const RESTART_NOTE: &str = "shell-settings-restart-note";
 
 /// Registers the `OpenSettings` handler. `TasklensUi::init` calls it.
 pub fn init(cx: &mut App) {
+    advanced::init(cx);
     // Deferred: from a menu the main window is mid-update.
     cx.on_action(|_: &OpenSettings, cx| cx.defer(open_settings));
 }
@@ -188,6 +190,7 @@ pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
         graphs::page(cx),
         services::page(cx),
         startup_window::page(cx),
+        advanced::page(cx),
     ];
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {
