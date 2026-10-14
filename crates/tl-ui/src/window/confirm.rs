@@ -9,7 +9,7 @@
 //! in `TlSettings` and re-apply the default theme. `state.toml`, `themes.json` and history are
 //! never touched. No setting value is logged.
 
-use gpui_kit::{App, Window};
+use gpui_kit::{App, SharedString, Window};
 use tl_model::settings::Settings;
 use tracing::warn;
 
@@ -18,7 +18,7 @@ use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::tr;
 use crate::settings_global::TlSettings;
-use crate::theme::store::{ActivateSource, activate};
+use crate::theme::store::{ActivateSource, ThemeEvent, ThemeStore, activate};
 
 gpui_kit::actions!(tasklens, [ResetSettings]);
 
@@ -58,6 +58,47 @@ pub fn confirm_reset_settings(window: &mut Window, cx: &mut App) {
     });
     if opened.is_err() {
         warn!(target: "tasklens::ui", "reset settings confirmation did not open");
+    }
+}
+
+/// Opens the destructive confirmation for a custom theme. Cancel and Esc leave it untouched.
+pub fn confirm_delete_theme(name: SharedString, window: &mut Window, cx: &mut App) {
+    let dialog = TlDialog::confirm(
+        tr(cx, "shell-confirm-delete-theme-text"),
+        tr(cx, "shell-confirm-delete-button"),
+    )
+    .title(tr(cx, "shell-confirm-title"))
+    .cancel_label(tr(cx, "shell-confirm-cancel"))
+    .destructive();
+    let opened = dialog.open(window, cx, move |result, window, cx| {
+        if let DialogResult::Confirmed { .. } = result {
+            delete_theme(&name, window, cx);
+        }
+    });
+    if opened.is_err() {
+        warn!(target: "tasklens::ui", "delete theme confirmation did not open");
+    }
+}
+
+fn delete_theme(name: &str, window: &mut Window, cx: &mut App) {
+    match ThemeStore::delete_theme(name, cx) {
+        Ok(ThemeEvent::Deleted { .. }) => {
+            let active = cx.global::<ThemeStore>().active.name.to_string();
+            TlSettings::update(cx, |d| {
+                if d.settings.theme.dark == name {
+                    d.settings.theme.dark = "Default Dark".to_owned();
+                }
+                if d.settings.theme.light == name {
+                    d.settings.theme.light = "Default Light".to_owned();
+                }
+                if d.settings.theme.active == name {
+                    d.settings.theme.active = active;
+                }
+            });
+            toast(window, cx, ToastKind::Success, "shell-toast-theme-deleted");
+        }
+        Err(e) => warn!(target: "tasklens::ui", ?e, name, "theme was not deleted"),
+        Ok(event) => warn!(target: "tasklens::ui", ?event, "unexpected delete event"),
     }
 }
 

@@ -12,10 +12,10 @@ use gpui_kit::base::Root;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
-    AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle, InteractiveElement,
-    IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, Role, Styled, TestAppContext, VisualTestContext, Window,
-    div, px, size,
+    AnyWindowHandle, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
+    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, Role, Styled, TestAppContext,
+    VisualTestContext, Window, WindowHandle, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
@@ -28,8 +28,10 @@ use tl_ui::actions::{
     register_global_handlers,
 };
 use tl_ui::app::{BootSettings, EngineGlobal};
+use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::slider::TlSliderEvent;
 use tl_ui::components::toast::ToastQueue;
+use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::actions::{
     CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, TABLE_CONTEXT, bind_keys_table,
@@ -37,9 +39,11 @@ use tl_ui::table::actions::{
 use tl_ui::table::columns::TableId;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
+use tl_ui::theme::user_store::{PersistTheme, ThemePersist};
 use tl_ui::window::confirm::ResetSettings;
 use tl_ui::window::main::ShellState;
 use tl_ui::window::menubar::{self, MenuBar, menu_bar_for};
+use tl_ui::window::menus_view::{CopyTheme, DeleteTheme};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
 use tl_ui::window::{menus_settings, menus_view};
 
@@ -90,6 +94,8 @@ struct Rig<'a> {
     resets: Rc<Cell<u32>>,
     /// Calls of the settings persist callback.
     persists: Rc<Cell<u32>>,
+    /// Requests to write themes.json.
+    theme_persists: Rc<RefCell<Vec<PersistTheme>>>,
     /// The window's toast queue, in a rig made by `rig_with_toasts`.
     toasts: Option<Entity<ToastQueue>>,
 }
@@ -119,6 +125,8 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
     let reset_count = resets.clone();
     let persists = Rc::new(Cell::new(0));
     let persist_count = persists.clone();
+    let theme_persists = Rc::new(RefCell::new(Vec::new()));
+    let theme_persist_sink = theme_persists.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
         if toasts {
@@ -130,6 +138,9 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
             &AppearanceSettings::default(),
             Vec::new(),
         );
+        cx.set_global(ThemePersist(Box::new(move |request| {
+            theme_persist_sink.borrow_mut().push(request);
+        })));
         tl_ui::i18n::init_strings(cx, "en-US");
         cx.set_global(TitleBarProbe {
             client: Some(true),
@@ -207,6 +218,7 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
         engine,
         resets,
         persists,
+        theme_persists,
         toasts,
     }
 }
@@ -1801,6 +1813,52 @@ fn active_theme(cx: &mut VisualTestContext) -> String {
     cx.update(|_, cx| tl_ui::theme::current(cx).name.to_string())
 }
 
+fn add_custom_theme(cx: &mut VisualTestContext, name: &str, base: &str) {
+    let name = name.to_owned();
+    let base = base.to_owned();
+    cx.update(move |_, cx| {
+        let mut def = cx
+            .global::<tl_ui::theme::ThemeStore>()
+            .builtin
+            .iter()
+            .find(|d| &*d.name == base)
+            .expect("base theme")
+            .clone();
+        def.name = name.clone().into();
+        cx.global_mut::<tl_ui::theme::ThemeStore>().user.push(def);
+    });
+}
+
+fn user_theme_names(cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|_, cx| {
+        cx.global::<tl_ui::theme::ThemeStore>()
+            .user
+            .iter()
+            .map(|d| d.name.to_string())
+            .collect()
+    })
+}
+
+fn window_count(cx: &mut VisualTestContext) -> usize {
+    cx.update(|_, cx| cx.windows().len())
+}
+
+fn delete_dialog_handle(cx: &mut VisualTestContext) -> WindowHandle<Root> {
+    let parent = cx.update(|window, _| window.window_handle().window_id());
+    cx.update(|_, cx| cx.windows().into_iter().find(|w| w.window_id() != parent))
+        .and_then(|w: AnyWindowHandle| w.downcast::<Root>())
+        .expect("delete confirmation window")
+}
+
+fn delete_dialog_view(
+    cx: &mut VisualTestContext,
+    handle: WindowHandle<Root>,
+) -> Entity<TlDialogView> {
+    cx.update(|_, cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+        .map(|frame| cx.read(|cx| frame.read(cx).content().clone()))
+        .expect("delete dialog view")
+}
+
 fn set_follow(cx: &mut VisualTestContext, on: bool) {
     cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.theme.follow_system = on));
 }
@@ -1854,10 +1912,182 @@ fn theme_rows_painted(cx: &mut TestAppContext) {
         tail,
         [
             "",
+            "Create copy",
+            "Delete theme",
+            "",
             "Sync theme with system",
             "Preferred Light Theme",
             "Preferred Dark Theme"
         ]
+    );
+}
+
+#[gpui_kit::test]
+fn copy_theme_names_increment(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    r.cx.dispatch_action(CopyTheme {
+        name: "Dracula".into(),
+    });
+    draw(r.cx);
+    r.cx.dispatch_action(CopyTheme {
+        name: "Dracula".into(),
+    });
+    draw(r.cx);
+    assert_eq!(user_theme_names(r.cx), ["Dracula copy", "Dracula copy 2"]);
+    assert_eq!(active_theme(r.cx), "Dracula copy 2");
+    assert_eq!(theme(r.cx).active, "Dracula copy 2");
+    assert_eq!(toast_texts(&mut r), ["Theme copied", "Theme copied"]);
+    assert_eq!(r.theme_persists.borrow().len(), 2);
+}
+
+#[gpui_kit::test]
+fn copy_icon_copies_row_theme(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    open_theme(r.cx);
+    let row = entries(r.cx)
+        .into_iter()
+        .find(|e| e.role() == Some(Role::MenuItem) && e.label() == Some("Dracula"))
+        .expect("Dracula row");
+    let suffix =
+        r.cx.update(|window, _| snapshots(window))
+            .into_iter()
+            .find(|s| {
+                s.role() == Some(Role::Button)
+                    && s.label() == Some("Create copy")
+                    && row.bounds().contains(&s.bounds().center())
+            })
+            .expect("Dracula copy suffix");
+    click(r.cx, suffix.bounds().center());
+    assert_eq!(user_theme_names(r.cx), ["Dracula copy"]);
+    assert_eq!(active_theme(r.cx), "Dracula copy");
+    assert_eq!(open_menu(r.cx), Some(MenuId::View), "the menu stays open");
+    assert_eq!(toast_texts(&mut r), ["Theme copied"]);
+}
+
+#[gpui_kit::test]
+fn delete_builtin_toast(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    let before = window_count(r.cx);
+    r.cx.dispatch_action(DeleteTheme {
+        name: "Default Dark".into(),
+    });
+    draw(r.cx);
+    assert_eq!(window_count(r.cx), before, "no confirmation opens");
+    assert_eq!(toast_texts(&mut r), ["Built-in themes cannot be deleted"]);
+    assert!(r.theme_persists.borrow().is_empty());
+}
+
+#[gpui_kit::test]
+fn delete_active_falls_back_to_preferred(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    add_custom_theme(r.cx, "Mine", "Default Dark");
+    activate(r.cx, "Mine");
+    r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.theme.dark = "Mine".to_owned()));
+    r.cx.dispatch_action(DeleteTheme {
+        name: "Mine".into(),
+    });
+    r.cx.run_until_parked();
+    let handle = delete_dialog_handle(r.cx);
+    let persists = r.theme_persists.clone();
+    let queue = r.toasts.clone().expect("toast queue");
+    drop(r);
+
+    let mut dialog = VisualTestContext::from_window(handle.into(), cx);
+    dialog.run_until_parked();
+    dialog.update(|window, cx| window.draw(cx).clear(cx));
+    let at = dialog.debug_bounds("TlDialogAction").expect("Delete drawn");
+    dialog.simulate_click(at.center(), Modifiers::none());
+    dialog.run_until_parked();
+    drop(dialog);
+
+    let (names, active, settings) = cx.update(|cx| {
+        let names = cx
+            .global::<tl_ui::theme::ThemeStore>()
+            .user
+            .iter()
+            .map(|d| d.name.to_string())
+            .collect::<Vec<_>>();
+        let active = current(cx).name.to_string();
+        (names, active, TlSettings::settings(cx).theme.clone())
+    });
+    assert!(names.is_empty());
+    assert_eq!(active, "Default Dark");
+    assert_eq!(settings.active, "Default Dark");
+    assert_eq!(settings.dark, "Default Dark");
+    assert_eq!(persists.borrow().len(), 1);
+    assert_eq!(
+        cx.read(|cx| queue.read(cx).visible_texts()[0].to_string()),
+        "Theme deleted"
+    );
+}
+
+#[gpui_kit::test]
+fn delete_resets_preferred_key(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    add_custom_theme(r.cx, "Mine", "Default Dark");
+    r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.theme.dark = "Mine".to_owned()));
+    r.cx.dispatch_action(DeleteTheme {
+        name: "Mine".into(),
+    });
+    r.cx.run_until_parked();
+    let handle = delete_dialog_handle(r.cx);
+    drop(r);
+
+    let mut dialog = VisualTestContext::from_window(handle.into(), cx);
+    dialog.run_until_parked();
+    dialog.update(|window, cx| window.draw(cx).clear(cx));
+    let at = dialog.debug_bounds("TlDialogAction").expect("Delete drawn");
+    dialog.simulate_click(at.center(), Modifiers::none());
+    dialog.run_until_parked();
+    drop(dialog);
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).theme.dark.clone()),
+        "Default Dark"
+    );
+}
+
+#[gpui_kit::test]
+fn delete_confirm_focuses_cancel(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    add_custom_theme(r.cx, "Mine", "Default Dark");
+    r.cx.dispatch_action(DeleteTheme {
+        name: "Mine".into(),
+    });
+    r.cx.run_until_parked();
+    let handle = delete_dialog_handle(r.cx);
+    let view = delete_dialog_view(r.cx, handle);
+    drop(r);
+
+    let mut dialog = VisualTestContext::from_window(handle.into(), cx);
+    dialog.update(|window, _| window.activate_window());
+    dialog.run_until_parked();
+    let (title, text, destructive) = dialog.read(|cx| {
+        let dialog = view.read(cx).dialog();
+        (
+            dialog.window_title().to_string(),
+            dialog.text().to_string(),
+            dialog.is_destructive(),
+        )
+    });
+    assert_eq!(title, "tasklens");
+    assert_eq!(text, "Delete this custom theme?");
+    assert!(destructive);
+    assert_eq!(
+        dialog.update(|window, cx| view.read(cx).focused_button(window)),
+        Some(DialogButton::Cancel)
+    );
+    dialog.simulate_keystrokes("escape");
+    dialog.run_until_parked();
+    drop(dialog);
+    assert_eq!(
+        cx.update(|cx| {
+            cx.global::<tl_ui::theme::ThemeStore>()
+                .user
+                .iter()
+                .map(|d| d.name.to_string())
+                .collect::<Vec<_>>()
+        }),
+        ["Mine"]
     );
 }
 

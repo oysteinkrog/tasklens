@@ -20,7 +20,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui_kit::{App, Entity, FocusHandle, SharedString, Window};
+use gpui_kit::gpui::private::schemars::JsonSchema;
+use gpui_kit::{Action, App, Entity, FocusHandle, SharedString, Window, gpui};
+use serde::Deserialize;
 use tl_model::command::Tab;
 use tl_model::devices::DeviceKind;
 use tl_model::settings::{ColumnResize, ProcessesSettings};
@@ -31,7 +33,8 @@ use super::menubar::{HEAT_INTENSITY, MenuSliders, ROW_HEIGHT, SHADOW_INTENSITY, 
 use super::registry::WindowKey;
 use super::titlebar::keep_above_supported;
 use crate::actions::{SetSetting, SetViewMode, ToggleSetting};
-use crate::components::menu::{TlMenu, TlMenuPopup};
+use crate::components::icons::TlIcon;
+use crate::components::menu::{MenuSuffixAction, TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::hub::GlobalHub;
@@ -41,11 +44,28 @@ use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::{CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
 use crate::table::columns::TableId;
 use crate::theme::store::{self, ActivateSource, ActivateTheme, ThemeError, ThemeStore};
+use crate::window::confirm::confirm_delete_theme;
+
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct CopyTheme {
+    pub name: SharedString,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct DeleteTheme {
+    pub name: SharedString,
+}
 
 /// Registers the `ActivateTheme` handler and the follow-system observer. `TasklensUi::init`
 /// calls it after `TlSettings::init`.
 pub fn init(cx: &mut App) {
     cx.on_action(|a: &ActivateTheme, cx| activate_theme(&a.name, cx));
+    cx.on_action(|a: &CopyTheme, cx| copy_theme(&a.name, cx));
+    cx.on_action(|a: &DeleteTheme, cx| delete_theme(&a.name, cx));
     let following = Rc::new(Cell::new(follow_system(cx)));
     cx.observe_global::<TlSettings>(move |cx| {
         let now = follow_system(cx);
@@ -58,6 +78,44 @@ pub fn init(cx: &mut App) {
         }
     })
     .detach();
+}
+
+fn copy_theme(name: &str, cx: &mut App) {
+    match ThemeStore::copy_theme(name, cx) {
+        Ok(crate::theme::ThemeEvent::Copied { name }) => {
+            TlSettings::update(cx, |d| d.settings.theme.active = name.to_string());
+            toast(ToastKind::Success, "shell-toast-theme-copied", cx);
+        }
+        Err(ThemeError::PreviewActive) => {
+            toast(ToastKind::Info, "shell-toast-theme-editor-busy", cx);
+        }
+        Err(e) => tracing::warn!(target: "tasklens::ui", ?e, name, "theme not copied"),
+        Ok(event) => tracing::warn!(target: "tasklens::ui", ?event, "unexpected copy event"),
+    }
+}
+
+fn delete_theme(name: &str, cx: &mut App) {
+    let Some((_, builtin)) = cx.global::<ThemeStore>().resolve(name) else {
+        tracing::warn!(target: "tasklens::ui", name, "theme to delete does not exist");
+        return;
+    };
+    if builtin {
+        toast(ToastKind::Warning, "shell-toast-theme-builtin-delete", cx);
+        return;
+    }
+    let Some(window) = cx.active_window() else {
+        tracing::warn!(target: "tasklens::ui", "no window for the delete theme confirmation");
+        return;
+    };
+    let name: SharedString = name.to_owned().into();
+    cx.defer(move |cx| {
+        if window
+            .update(cx, |_, window, cx| confirm_delete_theme(name, window, cx))
+            .is_err()
+        {
+            tracing::warn!(target: "tasklens::ui", "delete theme: the window is gone");
+        }
+    });
 }
 
 fn follow_system(cx: &App) -> bool {
@@ -485,21 +543,40 @@ fn theme_names(cx: &App) -> Vec<SharedString> {
     names
 }
 
-/// The theme rows, a separator, "Sync theme with system" and the two preferred-theme
-/// submenus. E21-013 and E21-031 add the per-theme items and "Import theme".
+/// The theme rows, copy and delete actions, then sync and the preferred-theme submenus.
 fn theme_submenu(mut menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+    let copy_label = tr(cx, "shell-menu-theme-create-copy");
     for row in theme_rows(cx) {
+        let copy = CopyTheme {
+            name: row.name.clone(),
+        };
         menu = menu.painted_radio_item(
             row.label,
             row.bg,
             row.fg,
-            None,
+            Some(TlIcon::Copy),
+            Some(
+                MenuSuffixAction::new(Box::new(copy), copy_label.clone(), copy_label.clone())
+                    .keep_open(),
+            ),
             row.selected,
             Box::new(ActivateTheme { name: row.name }),
         );
     }
+    let active: SharedString = store::current(cx).name.to_string().into();
     let follow = TlSettings::settings(cx).theme.follow_system;
     menu.separator()
+        .item(
+            copy_label,
+            Box::new(CopyTheme {
+                name: active.clone(),
+            }),
+        )
+        .item(
+            tr(cx, "shell-menu-theme-delete"),
+            Box::new(DeleteTheme { name: active }),
+        )
+        .separator()
         .check_item(
             tr(cx, "shell-menu-theme-sync"),
             follow,

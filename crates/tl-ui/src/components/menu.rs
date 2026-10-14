@@ -129,6 +129,7 @@ enum Entry {
         bg: Hsla,
         fg: Hsla,
         suffix_icon: Option<TlIcon>,
+        suffix_action: Option<MenuSuffixAction>,
         action: Box<dyn Action>,
         /// The radio dot of [`TlMenu::painted_radio_item`].
         selected: bool,
@@ -194,6 +195,35 @@ pub struct TlMenu {
     min_w: Pixels,
     action_context: FocusHandle,
     ui_scale: f32,
+}
+
+/// An independent action on the suffix icon of a painted menu row.
+pub struct MenuSuffixAction {
+    action: Box<dyn Action>,
+    tooltip: SharedString,
+    accessible_name: SharedString,
+    keep_open: bool,
+}
+
+impl MenuSuffixAction {
+    pub fn new(
+        action: Box<dyn Action>,
+        tooltip: impl Into<SharedString>,
+        accessible_name: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            action,
+            tooltip: tooltip.into(),
+            accessible_name: accessible_name.into(),
+            keep_open: false,
+        }
+    }
+
+    /// Leaves the menu open after the suffix action is dispatched.
+    pub fn keep_open(mut self) -> Self {
+        self.keep_open = true;
+        self
+    }
 }
 
 impl TlMenu {
@@ -439,6 +469,7 @@ impl TlMenu {
             bg,
             fg,
             suffix_icon,
+            suffix_action: None,
             action,
             selected: false,
             radio: false,
@@ -454,6 +485,7 @@ impl TlMenu {
         bg: Hsla,
         fg: Hsla,
         suffix_icon: Option<TlIcon>,
+        suffix_action: Option<MenuSuffixAction>,
         selected: bool,
         action: Box<dyn Action>,
     ) -> Self {
@@ -463,6 +495,7 @@ impl TlMenu {
             bg,
             fg,
             suffix_icon,
+            suffix_action,
             action,
             selected,
             radio: true,
@@ -492,6 +525,8 @@ pub struct MenuEntryInfo {
     /// The shortcut hint drawn at the right.
     pub hint: Option<SharedString>,
     pub action: Option<Box<dyn Action>>,
+    /// The independent action on a painted row's suffix icon.
+    pub suffix_action: Option<Box<dyn Action>>,
     pub submenu: Option<Entity<TlMenuPopup>>,
     /// The slider of a slider row.
     pub slider: Option<Entity<SliderState>>,
@@ -622,6 +657,13 @@ impl TlMenuPopup {
                     Entry::Separator => (MenuEntryKind::Separator, None, false, None, None),
                     Entry::Header(_) => (MenuEntryKind::Header, None, false, None, None),
                 };
+                let suffix_action = match e {
+                    Entry::Painted {
+                        suffix_action: Some(suffix),
+                        ..
+                    } => Some(suffix.action.boxed_clone()),
+                    _ => None,
+                };
                 let hint = action
                     .as_deref()
                     .and_then(|a| shortcut_hint(a, &self.action_context, window));
@@ -632,6 +674,7 @@ impl TlMenuPopup {
                     checked,
                     hint,
                     action,
+                    suffix_action,
                     submenu,
                     slider,
                     keep_open,
@@ -819,6 +862,27 @@ impl TlMenuPopup {
         };
         self.action_context.focus(window, cx);
         // The dispatch target is taken from the focus now; the action runs later.
+        window.dispatch_action(action, cx);
+        if keep_open {
+            self.focus.focus(window, cx);
+            cx.notify();
+        } else {
+            self.dismiss(window, cx);
+        }
+    }
+
+    /// Dispatches only the suffix action of a painted row.
+    fn run_suffix(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Entry::Painted {
+            suffix_action: Some(suffix),
+            ..
+        }) = self.entries.get(ix)
+        else {
+            return;
+        };
+        let action = suffix.action.boxed_clone();
+        let keep_open = suffix.keep_open;
+        self.action_context.focus(window, cx);
         window.dispatch_action(action, cx);
         if keep_open {
             self.focus.focus(window, cx);
@@ -1068,7 +1132,7 @@ impl TlMenuPopup {
             *text.text_style() = t_base(m);
             text
         };
-        let row = |label: Option<&SharedString>| {
+        let row = |label: Option<&SharedString>, cx: &mut Context<Self>| {
             div()
                 .id(ix)
                 .test_support()
@@ -1115,7 +1179,7 @@ impl TlMenuPopup {
                         *hint.text_style() = t_xs(m);
                         hint
                     });
-                let item = row(Some(label));
+                let item = row(Some(label), cx);
                 let text = match tooltip {
                     Some(tip) => menu_label(label.clone(), Some(tip.clone()), false, window, cx),
                     None => label_text(label).into_any_element(),
@@ -1144,7 +1208,7 @@ impl TlMenuPopup {
                 label,
                 tooltip,
                 indent,
-            } => row(Some(label))
+            } => row(Some(label), cx)
                 .px(m.sp[4])
                 .children(mark_column(Mark::None))
                 .when(*indent > px(0.), |d| d.child(div().flex_none().w(*indent)))
@@ -1155,36 +1219,79 @@ impl TlMenuPopup {
                 bg,
                 fg,
                 suffix_icon,
+                suffix_action,
                 selected,
                 radio,
                 ..
-            } => row(Some(label))
-                .when(*selected, |d| {
-                    d.aria_label(tr_args(
+            } => {
+                let suffix = suffix_icon.map(|name| {
+                    let icon = icon(name, m.icon.sm, *fg);
+                    let Some(suffix) = suffix_action else {
+                        return icon.into_any_element();
+                    };
+                    let tooltip = suffix.tooltip.clone();
+                    let accessible_name = suffix.accessible_name.clone();
+                    let state = HoverTooltip::state(
+                        ElementId::Name(format!("tl-menu-painted-suffix-tip-{ix}").into()),
+                        window,
                         cx,
-                        "fnd-menu-selected",
-                        &[("label", FluentValue::from(label.as_ref()))],
+                    );
+                    let button = div()
+                        .id(("tl-menu-painted-suffix", ix))
+                        .test_support()
+                        .role(Role::Button)
+                        .aria_label(accessible_name)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(m.icon.sm + m.sp[2] * 2.)
+                        .rounded(m.radius_small)
+                        .hover(|d| d.bg(fg.opacity(0.15)))
+                        .child(icon)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.run_suffix(ix, window, cx);
+                        }));
+                    HoverTooltip::attach(
+                        &state,
+                        button,
+                        DELAY_CONTROL,
+                        TlTooltip::text(tooltip).build(),
+                        window,
+                        cx,
+                    )
+                    .into_any_element()
+                });
+                row(Some(label), cx)
+                    .when(*selected, |d| {
+                        d.aria_label(tr_args(
+                            cx,
+                            "fnd-menu-selected",
+                            &[("label", FluentValue::from(label.as_ref()))],
+                        ))
+                    })
+                    .when(*radio, |d| d.children(mark_column(Mark::Radio(*selected))))
+                    .child(painted_row(
+                        label.clone(),
+                        *bg,
+                        *fg,
+                        suffix,
+                        highlighted.then_some(t.accent),
+                        window,
+                        cx,
                     ))
-                })
-                .when(*radio, |d| d.children(mark_column(Mark::Radio(*selected))))
-                .child(painted_row(
-                    label.clone(),
-                    *bg,
-                    *fg,
-                    *suffix_icon,
-                    highlighted.then_some(t.accent),
-                    window,
-                    cx,
-                ))
-                .on_click(cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)))
-                .into_any_element(),
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)),
+                    )
+                    .into_any_element()
+            }
             Entry::Submenu {
                 label,
                 menu,
                 tooltip,
             } => {
                 let open = self.open_sub == Some(ix);
-                let item = row(Some(label));
+                let item = row(Some(label), cx);
                 let text = match tooltip {
                     Some(tip) => menu_label(label.clone(), Some(tip.clone()), false, window, cx),
                     None => label_text(label).into_any_element(),
@@ -1212,7 +1319,7 @@ impl TlMenuPopup {
                 value_text,
             } => {
                 let value = value_text(state.read(cx).value().end());
-                row(None)
+                row(None, cx)
                     .aria_label(SharedString::from(format!("{label} {value}")))
                     .h(s(MENU_ROW_HEIGHT))
                     .px(m.sp[4])
@@ -1486,7 +1593,7 @@ fn painted_row(
     label: SharedString,
     bg: Hsla,
     fg: Hsla,
-    suffix_icon: Option<TlIcon>,
+    suffix: Option<AnyElement>,
     ring: Option<Hsla>,
     window: &mut Window,
     cx: &mut App,
@@ -1517,7 +1624,7 @@ fn painted_row(
         .text_color(fg)
         .when_some(ring, |d, ring| d.border_1().border_color(ring))
         .child(text)
-        .children(suffix_icon.map(|name| icon(name, m.icon.sm, fg)));
+        .children(suffix);
     if truncated {
         let state = HoverTooltip::state(
             ElementId::Name(format!("tl-menu-painted-tip-{label}").into()),
@@ -1702,12 +1809,14 @@ mod tests {
             window.set_rem_size(px(13.));
             let pressed = self.row_pressed.clone();
             let ran = self.ran.clone();
+            let ran_b = self.ran.clone();
             let ran_c = self.ran.clone();
             div()
                 .size(px(800.))
                 .key_context("MenuHost")
                 .track_focus(&self.focus)
                 .on_action(move |_: &RunA, _, _| ran.borrow_mut().push("A"))
+                .on_action(move |_: &RunB, _, _| ran_b.borrow_mut().push("B"))
                 .on_action(move |_: &RunC, _, _| ran_c.borrow_mut().push("C"))
                 .child(
                     div()
@@ -1933,6 +2042,32 @@ mod tests {
         for row in rows {
             assert_eq!(row.bounds().size.height, px(MENU_ITEM_H), "{row:?}");
         }
+    }
+
+    #[gpui_kit::test]
+    fn painted_suffix_dispatches_only_suffix_action(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(100.), px(100.)), |menu, _, _| {
+            menu.painted_radio_item(
+                "Theme",
+                gpui_kit::black(),
+                gpui_kit::white(),
+                Some(TlIcon::Copy),
+                Some(
+                    MenuSuffixAction::new(Box::new(RunB), "Create copy", "Create copy").keep_open(),
+                ),
+                false,
+                Box::new(RunA),
+            )
+        });
+        let suffix = all(cx)
+            .into_iter()
+            .find(|s| s.role() == Some(Role::Button) && s.label() == Some("Create copy"))
+            .expect("suffix button");
+        cx.simulate_click(suffix.bounds().center(), Modifiers::none());
+        draw(cx);
+        assert_eq!(*view.read_with(cx, |h, _| h.ran.clone()).borrow(), ["B"]);
+        assert!(cx.update(|window, cx| context_menu_open(window, cx)));
     }
 
     #[gpui_kit::test]
