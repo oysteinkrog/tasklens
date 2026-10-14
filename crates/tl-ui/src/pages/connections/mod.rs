@@ -21,7 +21,7 @@ use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::SourceId;
-use tl_model::snapshot::{ConnCounts, ConnectionsSnapshot};
+use tl_model::snapshot::{ConnCounts, ConnectionsSnapshot, ProcessSnapshot};
 use tl_model::units;
 
 use self::delegate::{ConnectionsDelegate, DEFAULT_SORT};
@@ -58,6 +58,8 @@ pub struct ConnectionsPage {
     menu_targets: Option<ConnMenuTargets>,
     copy_texts: CopyTexts,
     copy_prepared: copy::PreparedCopy,
+    copy_connections: Arc<ConnectionsSnapshot>,
+    copy_processes: Arc<ProcessSnapshot>,
     _subs: SmallVec<[Subscription; 3]>,
 }
 
@@ -96,6 +98,10 @@ impl ConnectionsPage {
             {
                 this.finish_refresh_if_new(snap.connections.header.version, cx);
             }
+            if accepted && !this.frame.is_paused() {
+                this.copy_connections = Arc::clone(&snap.connections);
+                this.copy_processes = Arc::clone(&snap.processes);
+            }
             if changed {
                 if accepted && !this.frame.is_paused() {
                     this.refresh_status(&snap.connections, cx);
@@ -114,6 +120,10 @@ impl ConnectionsPage {
                     if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
                         let snap = Arc::clone(hub.read(cx).current());
                         this.refresh_status(&snap.connections, cx);
+                        if !ev.0 {
+                            this.copy_connections = Arc::clone(&snap.connections);
+                            this.copy_processes = Arc::clone(&snap.processes);
+                        }
                     }
                     cx.notify();
                 }
@@ -138,6 +148,8 @@ impl ConnectionsPage {
                 nothing_selected: tr(cx, "connections-copy-nothing-selected"),
             },
             copy_prepared: copy::PreparedCopy::default(),
+            copy_connections: Arc::new(ConnectionsSnapshot::default()),
+            copy_processes: Arc::new(ProcessSnapshot::default()),
             _subs: subs,
         }
     }
