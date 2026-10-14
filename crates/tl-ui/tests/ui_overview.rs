@@ -1094,9 +1094,10 @@ mod bottom {
             "600 px: all 8 rows"
         );
         // 200 px: 200 - 2·12 padding - 2 border - 24 title = 150 body; minus the 48 px chart,
-        // a 12 px gap and the 18 px header leaves 72 px: 4 rows, one goes to "+n more".
+        // 12 px gap, 18 px header and 18 px time axis leaves 54 px: 3 rows, one goes to
+        // "+n more".
         r.heights(200., 200.);
-        assert_eq!(state(&mut r), (8, 2, 3, "+7 more".into()));
+        assert_eq!(state(&mut r), (8, 2, 2, "+8 more".into()));
     }
 
     #[gpui_kit::test]
