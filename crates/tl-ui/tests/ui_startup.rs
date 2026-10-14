@@ -712,6 +712,10 @@ mod page {
                 modifiers: Modifiers::none(),
             });
             self.vcx.simulate_click(at, Modifiers::none());
+            self.double_click_press(at);
+        }
+
+        fn double_click_press(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
             self.vcx.simulate_event(MouseDownEvent {
                 position: at,
                 modifiers: Modifiers::none(),
@@ -938,16 +942,27 @@ mod page {
         assert_eq!(rig.opened.get(), 0, "header double-click");
 
         rig.publish(
-            &["Discord"],
-            1,
+            &["Discord", "Steam"],
+            2,
             StartupCounts {
-                total: 1,
-                enabled: 1,
+                total: 2,
+                enabled: 2,
                 disabled: 0,
             },
         );
         rig.double_click_first_row();
         assert_eq!(rig.opened.get(), 1, "row double-click");
+
+        rig.double_click(point(frame.center().x, frame.origin.y + px(14.)));
+        assert_eq!(rig.opened.get(), 1, "header with selection double-click");
+
+        rig.vcx.simulate_event(MouseMoveEvent {
+            position: point(frame.center().x, frame.origin.y + px(28. + 42.)),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        rig.double_click_press(point(frame.center().x, frame.origin.y + px(28. + 42.)));
+        assert_eq!(rig.opened.get(), 1, "unselected row double-click");
 
         rig.double_click(point(frame.center().x, frame.origin.y + px(28. + 80.)));
         assert_eq!(rig.opened.get(), 1, "empty body double-click");

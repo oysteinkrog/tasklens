@@ -256,8 +256,9 @@ impl Render for StartupPage {
                 MouseButton::Left,
                 cx.listener(move |_, ev: &MouseDownEvent, window, cx| {
                     let table = table.read(cx);
-                    let row_activated =
-                        table.hover_row().is_some() && table.selection.ids().next().is_some();
+                    let row_activated = table.hover_row().is_some_and(|index| {
+                        table.selection.contains(&table.delegate.row_id(index))
+                    });
                     if ev.click_count == 2 && row_activated {
                         window.dispatch_action(Box::new(OpenProperties), cx);
                     }
