@@ -54,6 +54,13 @@ pub const PHYSICAL_ID: &str = "perf-mem-physical";
 pub const COMMIT_ID: &str = "perf-mem-commit";
 pub const SWAP_ID: &str = "perf-mem-swap";
 
+/// Element ids and debug selectors of the grids in the "Compressed memory" block. Each zram
+/// grid adds its index. Every grid sits in a parent with its own id, because `render_details`
+/// gives all grids the same id and GPUI keys element state by the whole id path: without the
+/// parent, the grids would share focus, hover and text selection with the Details grid.
+pub const ZRAM_GRID_ID: &str = "perf-mem-zram-grid";
+pub const ZSWAP_GRID_ID: &str = "perf-mem-zswap-grid";
+
 const KEY_PHYSICAL: &str = "perf-mem-heading-physical";
 const KEY_COMMIT: &str = "perf-mem-heading-commit";
 const KEY_SWAP: &str = "perf-mem-heading-swap";
@@ -1284,14 +1291,32 @@ impl DevicePage for MemoryPage {
         let mut block = v_flex()
             .gap(m.sp[4])
             .child(heading(self.words.block_compressed.clone(), md));
-        for (name, model) in self.compressed.names.iter().zip(&self.compressed.zram) {
-            block = block
-                .child(heading(name.clone(), sm.clone()))
-                .child(render_details(model, m, cx));
+        let grid = |id: ElementId, selector: String, model: &KeyValueModel| {
+            div()
+                .id(id)
+                .debug_selector(move || selector)
+                .child(render_details(model, m, cx))
+        };
+        for (n, (name, model)) in self
+            .compressed
+            .names
+            .iter()
+            .zip(&self.compressed.zram)
+            .enumerate()
+        {
+            block = block.child(heading(name.clone(), sm.clone())).child(grid(
+                (ZRAM_GRID_ID, n).into(),
+                format!("{ZRAM_GRID_ID}-{n}"),
+                model,
+            ));
         }
         block = block
             .child(heading(self.words.zswap.clone(), sm))
-            .child(render_details(&self.compressed.zswap, m, cx));
+            .child(grid(
+                ZSWAP_GRID_ID.into(),
+                ZSWAP_GRID_ID.to_owned(),
+                &self.compressed.zswap,
+            ));
         smallvec![block.into_any_element()]
     }
 

@@ -38,7 +38,8 @@ use tl_ui::pages::performance::memory::{
     ROW_COMPRESSED, ROW_HUGE_PAGES, ROW_IN_USE, ROW_SAVINGS, ROW_SLAB_RECLAIMABLE,
     ROW_SLAB_UNRECLAIMABLE, ROW_SWAP_AVAILABLE, ROW_SWAP_USED, ROW_ZRAM_ALGORITHM,
     ROW_ZRAM_COMPRESSED, ROW_ZRAM_DEVICE, ROW_ZRAM_MEM_USED, ROW_ZRAM_RATIO, ROW_ZRAM_SIZE,
-    ROW_ZRAM_STORED, ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, update_compressed_block,
+    ROW_ZRAM_STORED, ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, ZRAM_GRID_ID, ZSWAP_GRID_ID,
+    update_compressed_block,
 };
 use tl_ui::pages::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
@@ -629,6 +630,55 @@ fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
     r.vcx
         .update(|_, cx| assert!(!memory.read(cx).compressed().is_hidden()));
     assert_eq!(blocks(&mut r), 1, "one block with a zram device");
+}
+
+/// Every grid of the block is drawn inside its own parent id, so two zram grids and the zswap
+/// grid do not share element state with each other or with the Details grid.
+#[gpui_kit::test]
+fn compressed_grids_have_own_ids(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, "memory");
+    let zram = |name: &str| ZramDetail {
+        name: Arc::from(name),
+        disksize: 8 * GIB,
+        algorithm: Some(Arc::from("zstd")),
+    };
+    r.engine.publish_with(|s| {
+        let system = Arc::make_mut(&mut s.system);
+        system.header.version += 1;
+        system.memory = zram_mem(GIB, GIB / 2);
+        let details = Arc::make_mut(&mut s.device_details);
+        details.header.version += 1;
+        details.memory = Arc::new(MemoryDetails {
+            zram: Arc::from([zram("zram0"), zram("zram1")]),
+            zswap: InvField {
+                value: Some(ZswapInfo {
+                    enabled: true,
+                    compressor: None,
+                    max_pool_percent: Some(20),
+                }),
+                validity: Validity::Valid,
+            },
+            ..MemoryDetails::default()
+        });
+    });
+    draw(r.vcx);
+    assert_eq!(ZRAM_GRID_ID, "perf-mem-zram-grid");
+    let ids = [
+        "perf-mem-zram-grid-0",
+        "perf-mem-zram-grid-1",
+        ZSWAP_GRID_ID,
+    ];
+    let bounds: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            r.vcx
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} is drawn"))
+        })
+        .collect();
+    assert!(bounds[0].origin.y < bounds[1].origin.y);
+    assert!(bounds[1].origin.y < bounds[2].origin.y);
 }
 
 /// Two ratios whose old cache keys matched (4 GiB : 1 GiB and 12 GiB : 1 GiB + 2 bytes) both
