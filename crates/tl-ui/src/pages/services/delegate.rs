@@ -324,12 +324,7 @@ impl ServicesDelegate {
     }
 
     fn requested_expanded(&self) -> Arc<[SysNodeId]> {
-        self.rows
-            .iter()
-            .map(|row| &row.node)
-            .filter(|node| self.expanded.contains(*node))
-            .cloned()
-            .collect()
+        self.expanded.iter().cloned().collect()
     }
 }
 

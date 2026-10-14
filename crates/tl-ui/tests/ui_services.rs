@@ -9,19 +9,24 @@ use gpui_kit::{
     Action, AppContext as _, Context, Entity, IntoElement, KeyContext, Render, TestAppContext,
     VisualTestContext, Window, div,
 };
+use tl_model::client::EngineClient;
+use tl_model::command::Command;
 use tl_model::health::ManagerState;
 use tl_model::ids::ProcessKey;
 use tl_model::settings::UiState;
 use tl_model::snapshot::{ServicesSnapshot, Snapshot};
-use tl_model::table::{Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, UnitRef};
+use tl_model::table::{Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, SysTable, UnitRef};
 use tl_model::time::BootId;
-use tl_ui::app::BootSettings;
+use tl_ui::app::{BootSettings, EngineGlobal};
+use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+use tl_ui::hub::SnapshotHub;
 use tl_ui::pages::services::actions::*;
 use tl_ui::pages::services::delegate::{ServicesDelegate, services_columns};
-use tl_ui::pages::sys_table::SysDelegate;
+use tl_ui::pages::sys_table::{SysDelegate, SysQuery};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::columns::ColumnLayout;
 use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
+use tl_ui::testing::fake_engine::FakeEngine;
 
 struct Host;
 
@@ -39,6 +44,15 @@ fn delegate_table(
     cx: &mut TestAppContext,
     state: UiState,
 ) -> Entity<TlTreeTable<ServicesDelegate>> {
+    delegate_table_with_engine(cx, state).0
+}
+
+fn delegate_table_with_engine(
+    cx: &mut TestAppContext,
+    state: UiState,
+) -> (Entity<TlTreeTable<ServicesDelegate>>, Arc<FakeEngine>) {
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         cx.set_global(BootSettings {
             settings: Default::default(),
@@ -47,6 +61,10 @@ fn delegate_table(
             startup_toasts: Vec::new(),
         });
         TlSettings::init(cx);
+        cx.set_global(EngineGlobal(client.clone()));
+        let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        cx.set_global(GlobalDemand(demand));
     });
     let slot = Rc::new(RefCell::new(None));
     let keep = Rc::clone(&slot);
@@ -55,7 +73,8 @@ fn delegate_table(
         *keep.borrow_mut() = Some(table.clone());
         Root::new(table, window, cx)
     });
-    slot.borrow().clone().expect("delegate table")
+    let table = slot.borrow().clone().expect("delegate table");
+    (table, engine)
 }
 
 fn install_rows(delegate: &mut ServicesDelegate) {
@@ -143,10 +162,11 @@ fn services_row_kinds_and_selectable() {
 
 #[gpui_kit::test]
 fn services_cgroup_demand_follows_columns(cx: &mut TestAppContext) {
-    let table = delegate_table(cx, UiState::default());
+    let (table, engine) = delegate_table_with_engine(cx, UiState::default());
     cx.update(|cx| {
         table.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
+            delegate.set_active(true, cx);
             assert!(!delegate.demand_part().service_cgroup_stats);
             let mut layout: ColumnLayout<SysColumnId> = delegate.default_layout();
             layout
@@ -154,18 +174,40 @@ fn services_cgroup_demand_follows_columns(cx: &mut TestAppContext) {
                 .expect("show memory");
             delegate.on_columns_changed(&layout, cx);
             assert!(delegate.demand_part().service_cgroup_stats);
+        });
+    });
+    cx.executor().advance_clock(DEMAND_COALESCE * 2);
+    cx.run_until_parked();
+    assert!(
+        engine
+            .demands()
+            .last()
+            .is_some_and(|demand| demand.service_cgroup_stats)
+    );
+
+    cx.update(|cx| {
+        table.update(cx, |table, cx| {
+            let delegate = table.delegate_mut();
+            let mut layout = delegate.columns().clone();
             layout
                 .set_visible(service_id(ServiceColumn::Memory), false)
                 .expect("hide memory");
             delegate.on_columns_changed(&layout, cx);
-            assert!(!delegate.demand_part().service_cgroup_stats);
         });
     });
+    cx.executor().advance_clock(DEMAND_COALESCE * 2);
+    cx.run_until_parked();
+    assert!(
+        engine
+            .demands()
+            .last()
+            .is_some_and(|demand| !demand.service_cgroup_stats)
+    );
 }
 
 #[gpui_kit::test]
 fn services_sort_persists_and_sends_query(cx: &mut TestAppContext) {
-    let table = delegate_table(cx, UiState::default());
+    let (table, engine) = delegate_table_with_engine(cx, UiState::default());
     cx.update(|cx| {
         table.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
@@ -173,16 +215,29 @@ fn services_sort_persists_and_sends_query(cx: &mut TestAppContext) {
             let request = delegate.take_sort_request().expect("sort request");
             assert_eq!(request.column, service_id(ServiceColumn::Status));
             assert!(request.ascending);
+            let mut query = SysQuery::new(SysTable::Services, delegate.sort(), None);
+            query.set_sort(request, engine.as_ref());
         });
         let saved = &TlSettings::state(cx).sort.services;
         assert_eq!(saved.column, "status");
         assert!(saved.ascending);
     });
+    let queries: Vec<_> = engine
+        .commands()
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetSysTableQuery(query) => Some(query),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].sort.column, service_id(ServiceColumn::Status));
+    assert!(queries[0].sort.ascending);
 }
 
 #[gpui_kit::test]
 fn group_expand_state_persisted(cx: &mut TestAppContext) {
-    let table = delegate_table(cx, UiState::default());
+    let (table, engine) = delegate_table_with_engine(cx, UiState::default());
     cx.update(|cx| {
         table.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
@@ -191,9 +246,25 @@ fn group_expand_state_persisted(cx: &mut TestAppContext) {
             delegate.on_toggle_expand(system, cx);
             let request = delegate.take_expanded_request().expect("expand request");
             assert!(!request.contains(&SysNodeId::ServiceGroup(Manager::System)));
+            let mut query = SysQuery::new(SysTable::Services, delegate.sort(), None);
+            query.set_expanded(request, engine.as_ref());
         });
         assert!(!TlSettings::state(cx).services.group_expanded.system);
     });
+    let queries: Vec<_> = engine
+        .commands()
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetSysTableQuery(query) => Some(query),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(queries.len(), 1);
+    assert!(
+        !queries[0]
+            .expanded
+            .contains(&SysNodeId::ServiceGroup(Manager::System))
+    );
 }
 
 fn assert_window_binding(
