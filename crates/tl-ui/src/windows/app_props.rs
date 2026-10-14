@@ -44,7 +44,7 @@ use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
-    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
+    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
 };
 use crate::components::menu::{close_context_menu, context_menu_open};
 use crate::components::tabs::{TlTabSpec, TlTabs};
@@ -219,6 +219,9 @@ fn place_toasts(handle: WindowHandle<Root>, cx: &mut App) {
 
 #[derive(Clone)]
 struct LiveUsage {
+    name: Arc<str>,
+    kind: AppKind,
+    icon_path: Option<Arc<str>>,
     cpu_pct: f32,
     net_rx_bps: f32,
     net_tx_bps: f32,
@@ -338,6 +341,13 @@ impl AppGeneralTab {
 
     pub fn set_group(&mut self, row: Option<&GroupRow>, cx: &mut Context<Self>) {
         let next = row.map(|row| LiveUsage {
+            name: row.name.clone(),
+            kind: if row.kind == tl_model::process::GroupRowKind::Unit {
+                AppKind::Unit
+            } else {
+                AppKind::App
+            },
+            icon_path: row.icon.clone(),
             cpu_pct: row.cpu_pct,
             net_rx_bps: row.net_rx_bps,
             net_tx_bps: row.net_tx_bps,
@@ -345,7 +355,10 @@ impl AppGeneralTab {
             vram_bytes: row.gpu_mem_bytes,
         });
         let unchanged = self.live.as_ref().zip(next.as_ref()).is_some_and(|(a, b)| {
-            a.cpu_pct.to_bits() == b.cpu_pct.to_bits()
+            Arc::ptr_eq(&a.name, &b.name)
+                && a.kind == b.kind
+                && a.icon_path == b.icon_path
+                && a.cpu_pct.to_bits() == b.cpu_pct.to_bits()
                 && a.net_rx_bps.to_bits() == b.net_rx_bps.to_bits()
                 && a.net_tx_bps.to_bits() == b.net_tx_bps.to_bits()
                 && a.gpu_pct.to_bits() == b.gpu_pct.to_bits()
@@ -401,33 +414,44 @@ impl AppGeneralTab {
         )
     }
 
+    fn not_reported(&self, index: usize, path: bool) -> Option<TlKvRow> {
+        let mut value = value(SharedString::default(), Validity::Unsupported);
+        value.word = Some(UnsupportedWord::NotReported);
+        value.path = path;
+        self.shown(self.words.labels[index].clone(), value)
+    }
+
     fn rebuild(&mut self) {
         let mut identity = Vec::with_capacity(6);
         let mut usage = Vec::with_capacity(7);
         if let Some(detail) = &self.payload {
-            identity.extend([
-                self.plain(0, detail.app_id.clone().unwrap_or_default()),
-                self.plain(
-                    1,
-                    match detail.kind {
-                        AppKind::App => self.words.app.clone(),
-                        AppKind::Unit => self.words.unit.clone(),
-                    },
-                ),
-            ]);
+            identity.push(match &detail.app_id {
+                Some(id) => self.plain(0, id.clone()),
+                None => self.not_reported(0, false),
+            });
+            identity.push(self.plain(
+                1,
+                match detail.kind {
+                    AppKind::App => self.words.app.clone(),
+                    AppKind::Unit => self.words.unit.clone(),
+                },
+            ));
             if let Some(path) = &detail.desktop_file {
                 let mut desktop = TlValue::new(SharedString::from(path));
                 desktop.path = true;
                 desktop.link = Some(Box::new(AppGeneralOpenDesktop));
                 identity.push(self.shown(self.words.labels[2].clone(), desktop));
+            } else {
+                identity.push(self.not_reported(2, true));
             }
             if let Some(unit) = &detail.unit {
                 identity.push(self.plain(3, unit.name.clone()));
             }
-            identity.extend([
-                self.plain(4, detail.cgroup.clone().unwrap_or_default()),
-                self.plain(5, detail.processes.to_string()),
-            ]);
+            identity.push(match &detail.cgroup {
+                Some(cgroup) => self.plain(4, cgroup.clone()),
+                None => self.not_reported(4, true),
+            });
+            identity.push(self.plain(5, detail.processes.to_string()));
             usage.push(self.live.as_ref().and_then(|live| {
                 let mut text = String::new();
                 units::percent(&mut text, live.cpu_pct);
@@ -534,7 +558,17 @@ impl AppGeneralTab {
         let theme = current(cx);
         let scale = m.ui_scale;
         let (name, kind, icon_path) = self.payload.as_ref().map_or_else(
-            || (SharedString::default(), self.words.app.clone(), None),
+            || match &self.live {
+                Some(live) => (
+                    SharedString::from(&live.name),
+                    match live.kind {
+                        AppKind::App => self.words.app.clone(),
+                        AppKind::Unit => self.words.unit.clone(),
+                    },
+                    live.icon_path.clone(),
+                ),
+                None => (SharedString::default(), self.words.app.clone(), None),
+            },
             |detail| {
                 (
                     SharedString::from(&detail.name),
@@ -546,6 +580,7 @@ impl AppGeneralTab {
                 )
             },
         );
+        let icon_text: SharedString = format!("{name} icon").into();
         let icon_size = px(ICON_SIZE * scale);
         let fallback_color = theme.text_secondary;
         let fallback = move || {
@@ -572,7 +607,7 @@ impl AppGeneralTab {
             .px(m.sp[5])
             .gap(m.sp[4])
             .items_center()
-            .child(icon)
+            .child(div().aria_label(icon_text).child(icon))
             .child(
                 v_flex()
                     .min_w_0()
