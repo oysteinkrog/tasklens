@@ -867,3 +867,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 owner decision: beads are prepared by Opus and labelled model:sonnet|opus|fable per docs/plan/bead-model-rubric.md; the runner runs an Opus prep step before each unlabelled bead and escalates a Sonnet bead to Opus after two failed reviews.
 - 2026-10-15 leader decision: 9o0.9 adds Rejected(AlreadyRunning) -> Info 'Already running' in SysActions::final_toast (R-255 over UI-SYS-007); already-running counts as failed in the 4+ target summary.
 - 2026-10-15 leader decision: gma.30 option C; tasklens-8q0.40 gives unit rows a unique GroupKey (Opus) and a member helper; gma.30 after it.
+- 2026-10-15 leader decision: 9o0.10 option B, the startup delete confirmation has no busy state; UI-SYS-047 States updated by that bead.
