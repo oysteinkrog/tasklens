@@ -468,6 +468,7 @@ mod page {
     use std::time::Duration;
 
     use super::*;
+    use gpui_kit::base::Root;
     use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
         StyleRefinement, Styled as _, VisualTestContext, Window, WindowBounds, WindowOptions, div,
@@ -556,7 +557,8 @@ mod page {
                     let demand = cx.global::<GlobalDemand>().0.clone();
                     let page = cx.new(|cx| ConnectionsPage::new(&hub, &demand, client, window, cx));
                     *page_slot.borrow_mut() = Some(page.clone());
-                    cx.new(|_| Host { page })
+                    let host = cx.new(|_| Host { page });
+                    cx.new(|cx| Root::new(host, window, cx))
                 })
             })
             .expect("the window opens");
@@ -908,6 +910,10 @@ mod page {
     #[gpui_kit::test]
     fn connections_refresh_toast(cx: &mut TestAppContext) {
         let mut rig = rig(cx);
+        assert!(
+            rig.vcx
+                .update(|window, cx| ToastQueue::of_window(window, cx).is_some())
+        );
         rig.set_active(true);
         rig.publish(&[1], ConnCounts::default());
         rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
