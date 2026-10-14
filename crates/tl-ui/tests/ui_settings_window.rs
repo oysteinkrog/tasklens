@@ -24,6 +24,7 @@ use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui::theme::ThemeStore;
 use tl_ui::window::main::ShellState;
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::{
@@ -1537,20 +1538,40 @@ fn settings_restart_toast(cx: &mut TestAppContext) {
 fn appearance_theme_dropdown_dispatches_activate(cx: &mut TestAppContext) {
     setup(cx);
     let (_, mut vcx) = open(cx, 1);
-    cx.update(|cx| TlSettings::update(cx, |d| d.settings.theme.follow_system = true));
+    cx.update(|cx| {
+        let builtin = cx.global::<ThemeStore>().builtin[0].clone();
+        let mut dracula = builtin.clone();
+        dracula.name = "Dracula".into();
+        let mut shadow = builtin;
+        shadow.name = "Default Dark".into();
+        cx.global_mut::<ThemeStore>().user.extend([dracula, shadow]);
+        TlSettings::update(cx, |d| d.settings.theme.follow_system = true);
+    });
     let appearance = page(cx, PageId::Appearance);
     let labels = appearance.dropdown_labels(SettingKey::ThemeActive);
     assert_eq!(labels.first().map(|l| l.as_ref()), Some("Default Dark"));
-    // "Dracula" is not a shipped built-in yet (E17-005), so this picks "Default Light".
-    assert!(labels.iter().any(|l| l == "Default Light"));
-    vcx.update(|_, cx| appearance.pick(SettingKey::ThemeActive, "Default Light", cx));
+    assert!(labels.iter().any(|l| l == "Dracula"));
+    for key in [
+        SettingKey::ThemeActive,
+        SettingKey::ThemeLight,
+        SettingKey::ThemeDark,
+    ] {
+        assert!(
+            appearance
+                .dropdown_labels(key)
+                .iter()
+                .any(|label| label == "Default Dark (custom)"),
+            "shadowing custom theme is labelled in {key:?}"
+        );
+    }
+    vcx.update(|_, cx| appearance.pick(SettingKey::ThemeActive, "Dracula", cx));
     vcx.run_until_parked();
     let theme = cx.update(|cx| TlSettings::settings(cx).theme.clone());
-    assert_eq!(theme.active, "Default Light");
+    assert_eq!(theme.active, "Dracula");
     assert!(!theme.follow_system, "an explicit choice turns sync off");
     assert_eq!(
         cx.update(|cx| tl_ui::theme::current(cx).name.to_string()),
-        "Default Light"
+        "Dracula"
     );
     assert_eq!(window_toasts(&mut vcx), ["Theme sync turned off"]);
 }

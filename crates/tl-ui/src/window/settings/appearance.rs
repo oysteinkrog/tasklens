@@ -35,14 +35,10 @@ pub fn page(cx: &mut App) -> PageBuilder {
         .iter()
         .map(|r| (r.label.clone(), SettingValue::Str(r.name.clone())))
         .collect();
-    // The preferred themes store a name only, so a custom theme that shadows a built-in is one
-    // option, as in the menu.
-    let mut names: Vec<(SharedString, SettingValue)> = Vec::new();
-    for r in &rows {
-        if !names.iter().any(|(n, _)| *n == r.name) {
-            names.push((r.name.clone(), SettingValue::Str(r.name.clone())));
-        }
-    }
+    let names: Vec<(SharedString, SettingValue)> = rows
+        .iter()
+        .map(|r| (r.label.clone(), SettingValue::Str(r.name.clone())))
+        .collect();
 
     page.action_dropdown(
         theme.clone(),
