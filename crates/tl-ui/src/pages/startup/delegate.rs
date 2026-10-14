@@ -15,7 +15,7 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     AnyView, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Window, div, px,
+    SharedString, WeakEntity, Window, div, px,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
@@ -27,6 +27,8 @@ use tl_model::table::{StartupColumn, StartupRef, SysColumnId, SysNodeId, SysRow,
 use tl_model::units;
 use tl_model::validity::Validity;
 
+use super::StartupPage;
+use super::menu::{StartupMenuTargets, row_menu};
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::i18n::{Strings, tr, tr_en};
@@ -397,6 +399,7 @@ pub struct StartupDelegate {
     version: u64,
     tip: Rc<RefCell<RowTipState>>,
     tip_view: Option<AnyView>,
+    page: Option<WeakEntity<StartupPage>>,
 }
 
 impl StartupDelegate {
@@ -422,6 +425,39 @@ impl StartupDelegate {
             version: 0,
             tip: Rc::default(),
             tip_view: None,
+            page: None,
+        }
+    }
+
+    /// The page where a row menu stores the targets captured at open time.
+    pub(super) fn set_page(&mut self, page: WeakEntity<StartupPage>) {
+        self.page = Some(page);
+    }
+
+    /// Captures the current entries of `ids` in their supplied view order.
+    pub(super) fn capture_menu_targets(
+        &self,
+        ids: &[u64],
+        clicked_col: Option<SysColumnId>,
+    ) -> StartupMenuTargets {
+        let mut refs: SmallVec<[StartupRef; 1]> = SmallVec::new();
+        let mut entries: SmallVec<[StartupEntry; 1]> = SmallVec::new();
+        for id in ids {
+            let Some(ix) = self.row_index(*id) else {
+                continue;
+            };
+            if let (Some(r), Some(entry)) = (self.startup_ref(ix), self.entry(ix)) {
+                refs.push(r.clone());
+                entries.push(entry.clone());
+            }
+        }
+        // The table API supplies the selection in view order but not the pressed row, so the
+        // first row owns the cell action.
+        let cell = clicked_col.and_then(|col| refs.first().map(|r| (r.clone(), col)));
+        StartupMenuTargets {
+            refs,
+            entries,
+            cell,
         }
     }
 
@@ -668,13 +704,21 @@ impl TreeTableDelegate for StartupDelegate {
 
     fn context_menu(
         &mut self,
-        _: &[u64],
-        _: Option<SysColumnId>,
+        targets: &[u64],
+        clicked_col: Option<SysColumnId>,
         menu: TlMenu,
-        _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
-        menu
+        let captured = self.capture_menu_targets(targets, clicked_col);
+        if captured.entries.is_empty() {
+            return menu;
+        }
+        if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
+            let stored = captured.clone();
+            page.update(cx, |page, _| page.set_menu_targets(stored));
+        }
+        row_menu(menu, &captured, window, cx)
     }
 
     fn on_toggle_expand(&mut self, _: u64, _: &mut Context<TlTreeTable<Self>>) {}

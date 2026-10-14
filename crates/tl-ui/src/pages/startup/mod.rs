@@ -6,14 +6,15 @@
 
 pub mod actions;
 pub mod delegate;
+pub mod menu;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyWindowHandle, Context, Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _,
-    Render, Styled as _, Subscription, Task, Window, div,
+    AnyWindowHandle, App, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
@@ -23,7 +24,9 @@ use tl_model::snapshot::{StartupCounts, StartupSnapshot};
 use tl_model::table::{StartupColumn, SysColumnId, SysSortSpec};
 use tl_model::units;
 
+use self::actions::StartupDelete;
 use self::delegate::StartupDelegate;
+use self::menu::StartupMenuTargets;
 use crate::actions::ClearFilter;
 use crate::app::EngineGlobal;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
@@ -50,6 +53,7 @@ pub struct StartupPage {
     status_buf: String,
     last_status: (u32, u32, u32, usize),
     refresh: Option<(u64, Task<()>)>,
+    menu_targets: Option<StartupMenuTargets>,
     _subs: SmallVec<[Subscription; 3]>,
 }
 
@@ -63,7 +67,8 @@ impl StartupPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let delegate = StartupDelegate::new(StartupDelegate::env_home(), cx);
+        let mut delegate = StartupDelegate::new(StartupDelegate::env_home(), cx);
+        delegate.set_page(cx.weak_entity());
         let sort = SysSortSpec {
             column: SysColumnId::Startup(StartupColumn::Status),
             ascending: true,
@@ -123,6 +128,7 @@ impl StartupPage {
             status_buf: loading_status_text(cx).to_string(),
             last_status: STATUS_UNSET,
             refresh: None,
+            menu_targets: None,
             _subs: subs,
         }
     }
@@ -165,6 +171,59 @@ impl StartupPage {
 
     pub fn body(&self) -> SysBody {
         self.frame.body()
+    }
+
+    /// Stores the entries captured when the row menu opened.
+    pub(super) fn set_menu_targets(&mut self, targets: StartupMenuTargets) {
+        self.menu_targets = Some(targets);
+    }
+
+    /// Captures the selection at command time. Menu actions call [`Self::take_targets`] first.
+    pub(super) fn capture_targets(&self, cx: &App) -> StartupMenuTargets {
+        let table = self.frame.table.read(cx);
+        let delegate = &table.delegate;
+        let mut ids: Vec<u64> = table
+            .selection
+            .ids()
+            .filter(|id| delegate.row_index(*id).is_some())
+            .collect();
+        ids.sort_unstable_by_key(|id| delegate.row_index(*id));
+        delegate.capture_menu_targets(&ids, None)
+    }
+
+    /// Takes the menu-open snapshot, or reads the current selection for a keyboard command.
+    pub(super) fn take_targets(&mut self, cx: &App) -> StartupMenuTargets {
+        self.menu_targets
+            .take()
+            .unwrap_or_else(|| self.capture_targets(cx))
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn menu_target_refs_for_test(&self) -> &[tl_model::table::StartupRef] {
+        self.menu_targets
+            .as_ref()
+            .map_or(&[], |targets| targets.refs.as_slice())
+    }
+
+    /// Delete key and "Delete entry…". Nothing opens when no target can be deleted; the
+    /// confirmation dialog comes with the delete flow.
+    fn on_startup_delete(
+        &mut self,
+        _: &StartupDelete,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.take_targets(cx);
+        if targets.any_can_delete() {
+            return;
+        }
+        let text = tr(cx, "startup-delete-not-allowed");
+        let key = ToastKey(cx.entity_id().as_u64() ^ 1);
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |q, cx| {
+                q.push(ToastKind::Warning, text, Some(key), None, cx)
+            });
+        }
     }
 
     fn on_table_changed(&mut self, cx: &mut Context<Self>) {
@@ -263,6 +322,7 @@ impl Render for StartupPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .on_action(cx.listener(Self::on_startup_delete))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }

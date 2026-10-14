@@ -385,7 +385,9 @@ mod page {
     use std::time::Duration;
 
     use super::*;
+    use gpui_kit::Keystroke;
     use gpui_kit::base::Root;
+    use gpui_kit::component::kbd::Kbd;
     use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
         MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
@@ -402,6 +404,9 @@ mod page {
     use tl_model::snapshot::{Snapshot, StartupCounts};
     use tl_model::{actions::ActionEvent, table::SysTable};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::menu::{
+        MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup, open_context_menu,
+    };
     use tl_ui::components::toast::{ToastKey, ToastQueue};
     use tl_ui::demand::{DEMAND_COALESCE, GlobalDemand};
     use tl_ui::hub::GlobalHub;
@@ -628,8 +633,6 @@ mod page {
         }
 
         fn publish(&mut self, names: &[&str], enabled: usize, counts: StartupCounts) {
-            self.version += 1;
-            let generation = self.generation();
             let entries: Vec<StartupEntry> = names
                 .iter()
                 .enumerate()
@@ -643,6 +646,12 @@ mod page {
                     entry
                 })
                 .collect();
+            self.publish_entries(entries, counts);
+        }
+
+        fn publish_entries(&mut self, entries: Vec<StartupEntry>, counts: StartupCounts) {
+            self.version += 1;
+            let generation = self.generation();
             let rows: Vec<SysRow> = entries
                 .iter()
                 .enumerate()
@@ -670,6 +679,50 @@ mod page {
             });
             self.vcx.run_until_parked();
             self.draw();
+        }
+
+        fn table(&self) -> Entity<tl_ui::table::tree_table::TlTreeTable<StartupDelegate>> {
+            self.vcx
+                .read_entity(&self.page, |page, _| page.table().clone())
+        }
+
+        fn build_menu(&mut self, targets: &[u64], col: Option<SysColumnId>) -> Entity<TlMenuPopup> {
+            let table = self.table();
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    table.update(cx, |table, cx| {
+                        table.delegate.context_menu(targets, col, menu, window, cx)
+                    })
+                })
+            })
+        }
+
+        fn menu_entries(&mut self, menu: &Entity<TlMenuPopup>) -> Vec<MenuEntryInfo> {
+            self.vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window))
+        }
+
+        fn row_ids(&mut self, count: usize) -> Vec<u64> {
+            let table = self.table();
+            self.vcx.read_entity(&table, |table, _| {
+                (0..count).map(|ix| table.delegate.row_id(ix)).collect()
+            })
+        }
+
+        fn toast_texts(&mut self) -> Vec<String> {
+            self.vcx.update(|window, cx| {
+                ToastQueue::of_window(window, cx)
+                    .map(|queue| {
+                        queue
+                            .read(cx)
+                            .visible_texts()
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
         }
 
         fn status(&mut self) -> String {
@@ -757,6 +810,223 @@ mod page {
                     .collect()
             })
         }
+    }
+
+    fn menu_shape(entries: &[MenuEntryInfo]) -> Vec<(MenuEntryKind, String)> {
+        entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind,
+                    entry.label.as_deref().unwrap_or("separator").to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn counts_for(entries: &[StartupEntry]) -> StartupCounts {
+        let enabled = entries
+            .iter()
+            .filter(|e| e.status == StartupStatus::Enabled)
+            .count() as u32;
+        StartupCounts {
+            total: entries.len() as u32,
+            enabled,
+            disabled: entries.len() as u32 - enabled,
+        }
+    }
+
+    fn menu_rig(cx: &mut TestAppContext, entries: Vec<StartupEntry>) -> Rig {
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        let counts = counts_for(&entries);
+        rig.publish_entries(entries, counts);
+        rig
+    }
+
+    #[gpui_kit::test]
+    fn startup_menu_order(cx: &mut TestAppContext) {
+        let mut rig = menu_rig(cx, vec![super::entry("a", StartupKind::AutostartUser)]);
+        let ids = rig.row_ids(1);
+        let menu = rig.build_menu(&ids, Some(SysColumnId::Startup(StartupColumn::Name)));
+        let all = rig.menu_entries(&menu);
+        let item = MenuEntryKind::Item;
+        let sep = MenuEntryKind::Separator;
+        let expected: Vec<(MenuEntryKind, String)> = [
+            (item, "Disable"),
+            (item, "Run now"),
+            (sep, "separator"),
+            (item, "Copy"),
+            (item, "Copy row"),
+            (item, "Copy rows as table"),
+            (item, "Copy command"),
+            (item, "Open file location"),
+            (item, "Properties"),
+            (sep, "separator"),
+            (item, "Delete entry\u{2026}"),
+        ]
+        .into_iter()
+        .map(|(kind, label)| (kind, label.to_owned()))
+        .collect();
+        assert_eq!(menu_shape(&all), expected);
+        let hint = |label: &str| {
+            all.iter()
+                .find(|e| e.label.as_deref() == Some(label))
+                .and_then(|e| e.hint.clone())
+                .map(|h| h.to_string())
+        };
+        let format = |key: &str| Kbd::format(&Keystroke::parse(key).expect("a keystroke"));
+        assert_eq!(hint("Copy row"), Some(format("ctrl-c")));
+        assert_eq!(hint("Copy rows as table"), Some(format("ctrl-shift-c")));
+        assert_eq!(hint("Properties"), Some(format("enter")));
+        assert_eq!(hint("Delete entry\u{2026}"), Some(format("delete")));
+    }
+
+    #[gpui_kit::test]
+    fn startup_menu_mixed_shows_both(cx: &mut TestAppContext) {
+        let on = super::entry("a", StartupKind::AutostartUser);
+        let mut off = super::entry("b", StartupKind::AutostartUser);
+        off.status = StartupStatus::Disabled;
+        let mut rig = menu_rig(cx, vec![on, off]);
+        let ids = rig.row_ids(2);
+        let menu = rig.build_menu(&ids, Some(SysColumnId::Startup(StartupColumn::Name)));
+        let all = rig.menu_entries(&menu);
+        let kind = |label: &str| {
+            all.iter()
+                .find(|e| e.label.as_deref() == Some(label))
+                .map(|e| e.kind)
+        };
+        assert_eq!(all[0].label.as_deref(), Some("Disable"));
+        assert_eq!(all[1].label.as_deref(), Some("Enable"));
+        assert_eq!(kind("Disable"), Some(MenuEntryKind::Item));
+        assert_eq!(kind("Enable"), Some(MenuEntryKind::Item));
+        assert_eq!(kind("Copy command"), Some(MenuEntryKind::Disabled));
+        assert_eq!(kind("Open file location"), Some(MenuEntryKind::Disabled));
+    }
+
+    #[gpui_kit::test]
+    fn startup_menu_reason_tooltips(cx: &mut TestAppContext) {
+        let mut not_here = super::entry("a", StartupKind::AutostartUser);
+        not_here.status = StartupStatus::NotInThisDesktop;
+        not_here.can_toggle = false;
+        let mut missing = super::entry("b", StartupKind::AutostartUser);
+        missing.status = StartupStatus::MissingProgram;
+        missing.can_toggle = false;
+        let mut masked = super::entry("c", StartupKind::UserUnit);
+        masked.status = StartupStatus::Masked;
+        masked.can_toggle = false;
+        let mut system = super::entry("d", StartupKind::AutostartSystem);
+        system.can_delete = false;
+        let mut package = super::entry("e", StartupKind::UserUnit);
+        package.can_delete = false;
+        let cases: [(StartupEntry, &str, &str); 5] = [
+            (
+                not_here,
+                "Enable",
+                "This entry is not used in this desktop (OnlyShowIn or NotShowIn).",
+            ),
+            (
+                missing,
+                "Enable",
+                "The program for this entry is not installed (TryExec).",
+            ),
+            (
+                masked,
+                "Enable",
+                "This unit is masked. Change its startup type in the Services tab.",
+            ),
+            (
+                system,
+                "Delete entry\u{2026}",
+                "System entries cannot be deleted. Use Disable instead.",
+            ),
+            (
+                package,
+                "Delete entry\u{2026}",
+                "This unit belongs to a package. Use Disable instead.",
+            ),
+        ];
+        for (entry, label, tip) in cases {
+            let mut rig = menu_rig(cx, vec![entry]);
+            let ids = rig.row_ids(1);
+            let menu = rig.build_menu(&ids, Some(SysColumnId::Startup(StartupColumn::Name)));
+            let all = rig.menu_entries(&menu);
+            let found = all
+                .iter()
+                .find(|e| e.label.as_deref() == Some(label))
+                .expect("the item exists");
+            assert_eq!(found.kind, MenuEntryKind::Disabled, "{label}");
+            assert_eq!(found.tooltip.as_deref(), Some(tip));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn delete_key_on_system_entry_toast(cx: &mut TestAppContext) {
+        let mut system = super::entry("sys", StartupKind::AutostartSystem);
+        system.can_delete = false;
+        let mut rig = menu_rig(cx, vec![system]);
+        let ids = rig.row_ids(1);
+        let table = rig.table();
+        table.update(&mut rig.vcx, |table, cx| {
+            table.selection.click(ids[0]);
+            cx.notify();
+        });
+        rig.vcx.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+        });
+        rig.draw();
+        let windows = rig.vcx.update(|_, cx| cx.windows().len());
+        rig.vcx.simulate_keystrokes("delete");
+        rig.vcx.run_until_parked();
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|text| text == "This startup entry cannot be deleted")
+        );
+        assert_eq!(rig.vcx.update(|_, cx| cx.windows().len()), windows);
+    }
+
+    #[gpui_kit::test]
+    fn startup_menu_targets_captured_at_open(cx: &mut TestAppContext) {
+        let a = super::entry("a", StartupKind::AutostartUser);
+        let b = super::entry("b", StartupKind::AutostartUser);
+        let a_ref = a.id.clone();
+        let mut rig = menu_rig(cx, vec![a.clone()]);
+        let ids = rig.row_ids(1);
+        let _menu = rig.build_menu(&ids, Some(SysColumnId::Startup(StartupColumn::Name)));
+        let both = vec![b, a];
+        let counts = counts_for(&both);
+        rig.publish_entries(both, counts);
+        let refs = rig
+            .vcx
+            .update(|_, cx| rig.page.read(cx).menu_target_refs_for_test().to_vec());
+        assert_eq!(refs, [a_ref]);
+    }
+
+    #[gpui_kit::test]
+    fn startup_menu_keyboard_hides_copy_cell(cx: &mut TestAppContext) {
+        let mut rig = menu_rig(cx, vec![super::entry("a", StartupKind::AutostartUser)]);
+        let ids = rig.row_ids(1);
+        let table = rig.table();
+        table.update(&mut rig.vcx, |table, cx| {
+            table.selection.click(ids[0]);
+            cx.notify();
+        });
+        rig.vcx.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+        });
+        rig.draw();
+        rig.vcx.simulate_keystrokes("shift-f10");
+        rig.vcx.run_until_parked();
+        let menu = rig
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("the keyboard opened the menu");
+        let all = rig.menu_entries(&menu);
+        assert!(all.iter().any(|e| e.label.as_deref() == Some("Copy row")));
+        assert!(all.iter().all(|e| e.label.as_deref() != Some("Copy")));
     }
 
     #[gpui_kit::test]
