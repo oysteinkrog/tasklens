@@ -862,3 +862,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-14 leader decision: bj6.16 may chain-edit components/menu.rs: optional suffix action on TlMenu::painted_radio_item, callers unchanged.
 - 2026-10-14 leader decision: wlf.36 split per docs/plan/design/wlf36-cached-cards.md (Astra). Prerequisite tasklens-wlf.37 uncaches the Performance container, sidebar and page embeds; wlf.36 AC revised to 'only the cards that show the changed data'.
 - 2026-10-14 leader rule: wiring lines a bead clearly implies (mod lines, page registration, bind_keys calls, settings page list entries) may be chain-edited in unnamed files, only those lines, listed in the report. 9o0.20 waits for wlf.37 (both edit window/main.rs).
+- 2026-10-14 leader decision: hk6.11 split per docs/plan/design/hk611-services-cells.md (Fable consult; Astra rate-limited): tasklens-hk6.36 per-manager counts, tasklens-rsf.29 table hooks, hk6.11 cells after both.
