@@ -26,6 +26,7 @@ pub type ColumnId = SysColumnId;
 
 /// Values one Connections command may need after the snapshot that supplied the row is gone.
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // The following E28 beads consume these captured handler values.
 pub struct ConnRecordRef {
     pub cookie: u64,
     pub proto: Proto,
