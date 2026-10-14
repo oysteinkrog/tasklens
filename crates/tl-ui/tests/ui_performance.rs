@@ -1833,6 +1833,7 @@ mod summary {
             cx.set_global(GlobalDemand(demand.clone()));
             tl_ui::components::toast::init(cx);
             tl_ui::actions::bind_keys_global(cx);
+            tl_ui::components::menu::bind_keys(cx);
             tl_ui::pages::performance::actions::bind_keys_performance(cx);
             cx.set_global(StartOptions::default());
             set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
@@ -2478,7 +2479,6 @@ mod summary {
     /// crw.2: the P1 sidebar actions work together in one app and persist only durable state.
     #[gpui_kit::test]
     fn sidebar_p1_flow(cx: &mut TestAppContext) {
-        use tl_ui::components::menu::close_context_menu;
         use tl_ui::pages::performance::actions::{
             PerfOpenCardMenu, PerfSetGraphRange, PerfToggleSidebar,
         };
@@ -2489,17 +2489,23 @@ mod summary {
         // Open the selected card's menu, then run its Hide This Page action.
         r.vcx.dispatch_action(PerfOpenCardMenu);
         draw(r.vcx);
-        let hide = r.vcx.update(|window, cx| {
+        r.vcx.update(|window, cx| {
             let menu = open_context_menu(window, cx).expect("the card menu is open");
-            menu.read(cx)
+            let hide = menu
+                .read(cx)
                 .entries_for_test(window)
                 .into_iter()
                 .find(|entry| entry.label.as_deref() == Some("Hide This Page"))
                 .and_then(|entry| entry.action)
-                .expect("Hide This Page has an action")
+                .expect("Hide This Page has an action");
+            assert!(
+                hide.partial_eq(&tl_ui::pages::performance::actions::PerfSetPageVisible {
+                    key: key("disk:sdb"),
+                    visible: false,
+                })
+            );
         });
-        r.vcx.update(close_context_menu);
-        r.vcx.update(|window, cx| window.dispatch_action(hide, cx));
+        r.vcx.simulate_keystrokes("down enter");
         draw(r.vcx);
         assert_eq!(
             selected(&mut r).as_deref(),
