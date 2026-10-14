@@ -1925,17 +1925,25 @@ fn theme_rows_painted(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn copy_theme_names_increment(cx: &mut TestAppContext) {
     let mut r = rig_with_toasts(cx);
+    let source = if builtin_names(r.cx).iter().any(|n| n == "Dracula") {
+        "Dracula"
+    } else {
+        "Default Light"
+    };
     r.cx.dispatch_action(CopyTheme {
-        name: "Dracula".into(),
+        name: source.into(),
     });
     draw(r.cx);
     r.cx.dispatch_action(CopyTheme {
-        name: "Dracula".into(),
+        name: source.into(),
     });
     draw(r.cx);
-    assert_eq!(user_theme_names(r.cx), ["Dracula copy", "Dracula copy 2"]);
-    assert_eq!(active_theme(r.cx), "Dracula copy 2");
-    assert_eq!(theme(r.cx).active, "Dracula copy 2");
+    assert_eq!(
+        user_theme_names(r.cx),
+        [format!("{source} copy"), format!("{source} copy 2")]
+    );
+    assert_eq!(active_theme(r.cx), format!("{source} copy 2"));
+    assert_eq!(theme(r.cx).active, format!("{source} copy 2"));
     assert_eq!(toast_texts(&mut r), ["Theme copied", "Theme copied"]);
     assert_eq!(r.theme_persists.borrow().len(), 2);
 }
@@ -1943,11 +1951,16 @@ fn copy_theme_names_increment(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn copy_icon_copies_row_theme(cx: &mut TestAppContext) {
     let mut r = rig_with_toasts(cx);
+    let source = if builtin_names(r.cx).iter().any(|n| n == "Dracula") {
+        "Dracula"
+    } else {
+        "Default Light"
+    };
     open_theme(r.cx);
     let row = entries(r.cx)
         .into_iter()
-        .find(|e| e.role() == Some(Role::MenuItem) && e.label() == Some("Dracula"))
-        .expect("Dracula row");
+        .find(|e| e.role() == Some(Role::MenuItem) && e.label() == Some(source))
+        .expect("source theme row");
     let suffix =
         r.cx.update(|window, _| snapshots(window))
             .into_iter()
@@ -1956,10 +1969,10 @@ fn copy_icon_copies_row_theme(cx: &mut TestAppContext) {
                     && s.label() == Some("Create copy")
                     && row.bounds().contains(&s.bounds().center())
             })
-            .expect("Dracula copy suffix");
+            .expect("theme copy suffix");
     click(r.cx, suffix.bounds().center());
-    assert_eq!(user_theme_names(r.cx), ["Dracula copy"]);
-    assert_eq!(active_theme(r.cx), "Dracula copy");
+    assert_eq!(user_theme_names(r.cx), [format!("{source} copy")]);
+    assert_eq!(active_theme(r.cx), format!("{source} copy"));
     assert_eq!(open_menu(r.cx), Some(MenuId::View), "the menu stays open");
     assert_eq!(toast_texts(&mut r), ["Theme copied"]);
 }
