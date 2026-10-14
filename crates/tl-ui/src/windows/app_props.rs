@@ -607,7 +607,12 @@ impl AppGeneralTab {
             .px(m.sp[5])
             .gap(m.sp[4])
             .items_center()
-            .child(div().aria_label(icon_text).child(icon))
+            .child(
+                div()
+                    .id("app-general-icon")
+                    .aria_label(icon_text)
+                    .child(icon),
+            )
             .child(
                 v_flex()
                     .min_w_0()
