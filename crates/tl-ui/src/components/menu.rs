@@ -485,7 +485,6 @@ impl TlMenu {
         bg: Hsla,
         fg: Hsla,
         suffix_icon: Option<TlIcon>,
-        suffix_action: Option<MenuSuffixAction>,
         selected: bool,
         action: Box<dyn Action>,
     ) -> Self {
@@ -495,11 +494,24 @@ impl TlMenu {
             bg,
             fg,
             suffix_icon,
-            suffix_action,
+            suffix_action: None,
             action,
             selected,
             radio: true,
         });
+        self
+    }
+
+    /// Makes the suffix icon on the painted row added last independently actionable.
+    pub fn painted_suffix_action(mut self, suffix: MenuSuffixAction) -> Self {
+        if let Some(Entry::Painted {
+            suffix_icon: Some(_),
+            suffix_action,
+            ..
+        }) = self.entries.last_mut()
+        {
+            *suffix_action = Some(suffix);
+        }
         self
     }
 }
@@ -2053,11 +2065,11 @@ mod tests {
                 gpui_kit::black(),
                 gpui_kit::white(),
                 Some(TlIcon::Copy),
-                Some(
-                    MenuSuffixAction::new(Box::new(RunB), "Create copy", "Create copy").keep_open(),
-                ),
                 false,
                 Box::new(RunA),
+            )
+            .painted_suffix_action(
+                MenuSuffixAction::new(Box::new(RunB), "Create copy", "Create copy").keep_open(),
             )
         });
         let suffix = all(cx)

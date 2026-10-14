@@ -550,18 +550,19 @@ fn theme_submenu(mut menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu 
         let copy = CopyTheme {
             name: row.name.clone(),
         };
-        menu = menu.painted_radio_item(
-            row.label,
-            row.bg,
-            row.fg,
-            Some(TlIcon::Copy),
-            Some(
+        menu = menu
+            .painted_radio_item(
+                row.label,
+                row.bg,
+                row.fg,
+                Some(TlIcon::Copy),
+                row.selected,
+                Box::new(ActivateTheme { name: row.name }),
+            )
+            .painted_suffix_action(
                 MenuSuffixAction::new(Box::new(copy), copy_label.clone(), copy_label.clone())
                     .keep_open(),
-            ),
-            row.selected,
-            Box::new(ActivateTheme { name: row.name }),
-        );
+            );
     }
     let active: SharedString = store::current(cx).name.to_string().into();
     let follow = TlSettings::settings(cx).theme.follow_system;

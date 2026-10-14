@@ -1944,7 +1944,7 @@ fn copy_theme_names_increment(cx: &mut TestAppContext) {
     );
     assert_eq!(active_theme(r.cx), format!("{source} copy 2"));
     assert_eq!(theme(r.cx).active, format!("{source} copy 2"));
-    assert_eq!(toast_texts(&mut r), ["Theme copied", "Theme copied"]);
+    assert_eq!(toast_texts(&mut r), ["Theme copied (×2)"]);
     assert_eq!(r.theme_persists.borrow().len(), 2);
 }
 
@@ -1992,7 +1992,7 @@ fn delete_builtin_toast(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn delete_active_falls_back_to_preferred(cx: &mut TestAppContext) {
-    let mut r = rig_with_toasts(cx);
+    let r = rig_with_toasts(cx);
     add_custom_theme(r.cx, "Mine", "Default Dark");
     activate(r.cx, "Mine");
     r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.theme.dark = "Mine".to_owned()));
