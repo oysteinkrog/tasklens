@@ -1607,7 +1607,7 @@ impl Render for DeviceSidebar {
         }
 
         let m = *metrics(cx);
-        let theme = current(cx);
+        let theme = current(cx).clone();
         let width = self.card_width.get();
         let card_h = CARD_H * m.ui_scale;
         let normal_cards: Vec<AnyElement> = self
