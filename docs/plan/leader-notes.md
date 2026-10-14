@@ -859,3 +859,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-13 leader decision: gma.2 signal_submenu uses TlMenu with window and cx (TlMenu::submenu needs them); PopupMenu in UI-PWN text is out of date. process-windows.md line 942 updated by gma.2.
 - 2026-10-14 leader decision: crw.51 keeps Commit = Committed_AS/CommitLimit (can pass 100%), label 'Commit {pct} of limit' plus tooltip on the sidebar card.
 - 2026-10-14 leader decision: gma.2 uses literal x86-64 signal numbers and tl-model consts SIGRTMIN=34, SIGRTMAX=64; no libc in tl-ui.
+- 2026-10-14 leader decision: bj6.16 may chain-edit components/menu.rs: optional suffix action on TlMenu::painted_radio_item, callers unchanged.
