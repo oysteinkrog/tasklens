@@ -83,6 +83,7 @@ use crate::demand::GlobalDemand;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
+use crate::pages::connections::ConnectionsPage;
 use crate::pages::information::InformationPage;
 use crate::pages::performance::details::Template;
 use crate::pages::performance::{PerformancePage, SummaryToggled};
@@ -281,6 +282,13 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
             let demand = cx.global::<GlobalDemand>().0.clone();
             let client = cx.global::<EngineGlobal>().0.clone();
             let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
+            PageSlot::new(page, cx)
+        }),
+        Tab::Connections => Some(|window, cx| {
+            let hub = cx.global::<GlobalHub>().0.clone();
+            let demand = cx.global::<GlobalDemand>().0.clone();
+            let client = cx.global::<EngineGlobal>().0.clone();
+            let page = cx.new(|cx| ConnectionsPage::new(&hub, &demand, client, window, cx));
             PageSlot::new(page, cx)
         }),
         Tab::Information => Some(|window, cx| {

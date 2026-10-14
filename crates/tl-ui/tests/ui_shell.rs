@@ -2763,9 +2763,9 @@ mod main_window {
         let mut vcx = rig(
             cx,
             Opts {
-                pages: &[Tab::Processes, Tab::Services],
-                // Connections has no page arm yet; Startup and Performance have one.
-                start_tab: StartTab::Connections,
+                pages: &[Tab::Processes],
+                // Services has no page arm yet.
+                start_tab: StartTab::Services,
                 ..Opts::default()
             },
         );
@@ -2803,7 +2803,7 @@ mod main_window {
         act(&mut vcx, PrevTab);
         assert_eq!(active(&mut vcx), Tab::Information);
 
-        // Startup and Information have real page arms (tasklens-9o0.13, 9o0.27), so they need the engine globals.
+        // Startup, Connections and Information have real page arms (tasklens-9o0.13, 9o0.20, 9o0.27), so they need the engine globals.
         let mut vcx = rig(
             cx_b,
             Opts {
@@ -2814,11 +2814,9 @@ mod main_window {
             },
         );
         act(&mut vcx, NextTab);
-        assert_eq!(
-            active(&mut vcx),
-            Tab::Startup,
-            "Services and Connections are skipped"
-        );
+        assert_eq!(active(&mut vcx), Tab::Startup, "Services is skipped");
+        act(&mut vcx, NextTab);
+        assert_eq!(active(&mut vcx), Tab::Connections);
         act(&mut vcx, NextTab);
         assert_eq!(active(&mut vcx), Tab::Information);
         act(&mut vcx, NextTab);

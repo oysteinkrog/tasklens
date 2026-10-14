@@ -1351,3 +1351,48 @@ mod page {
         assert!(query.generation > before);
     }
 }
+
+/// `TasklensUi::init` binds the Connections keys and the shell builds `ConnectionsPage` for its
+/// tab (tasklens-9o0.20).
+#[cfg(feature = "test-hooks")]
+#[gpui_kit::test]
+fn connections_page_registered(cx: &mut TestAppContext) {
+    use gpui_kit::VisualTestContext;
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::settings::{Settings, StartTab, UiState};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::pages::connections::ConnectionsPage;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window};
+
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (_tx, rx) = async_channel::bounded(4);
+    let mut settings = Settings::default();
+    settings.general.start_tab = StartTab::Connections;
+    let init = UiInit {
+        settings,
+        state: UiState::default(),
+        themes_json: None,
+        persist: Box::new(|_, _| {}),
+        persist_themes: Box::new(|_| {}),
+        app_requests: rx,
+        startup_toasts: Vec::new(),
+        env: AppEnv::test(),
+    };
+    cx.update(|cx| TasklensUi::init(cx, client, init));
+    cx.run_until_parked();
+
+    let handle = cx.update(open_main_window).expect("the main window opens");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.run_until_parked();
+    let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+    let page = vcx.read_entity(&main, |m, _| {
+        m.page_entity::<ConnectionsPage>(Tab::Connections)
+    });
+    assert!(
+        page.is_some(),
+        "the Connections tab builds a ConnectionsPage"
+    );
+}
