@@ -13,7 +13,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::health::ManagerState;
 use tl_model::ids::ProcessKey;
-use tl_model::settings::{AppearanceSettings, UiState};
+use tl_model::settings::{AppearanceSettings, ThemeSettings, UiState};
 use tl_model::snapshot::{ServicesSnapshot, Snapshot};
 use tl_model::table::{Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, SysTable, UnitRef};
 use tl_model::time::BootId;
@@ -47,7 +47,13 @@ fn delegate_table_with_engine(
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
         cx.set_global(BootSettings {
             settings: Default::default(),
             state: state.clone(),
