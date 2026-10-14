@@ -1570,6 +1570,10 @@ pwn-app-props-label-gpu = GPU:
 pwn-app-props-label-vram = VRAM:
 pwn-app-props-command-line = Command line (primary process)
 pwn-app-props-copy = Copy
+pwn-app-props-rate-read = Read
+pwn-app-props-rate-write = write
+pwn-app-props-rate-receive = Receive
+pwn-app-props-rate-send = send
 # General tab field labels and value words (UI-PWN-007 to UI-PWN-009, R-132).
 pwn-general-label-process = Process:
 pwn-general-label-pid = PID:

@@ -111,6 +111,10 @@ struct AppWords {
     copied: SharedString,
     opening: SharedString,
     open_failed: SharedString,
+    read: SharedString,
+    write: SharedString,
+    receive: SharedString,
+    send: SharedString,
 }
 
 impl AppWords {
@@ -145,6 +149,10 @@ impl AppWords {
             copied: t("pwn-general-toast-value-copied"),
             opening: t("pwn-general-toast-opening"),
             open_failed: t("pwn-general-toast-open-failed"),
+            read: t("pwn-app-props-rate-read"),
+            write: t("pwn-app-props-rate-write"),
+            receive: t("pwn-app-props-rate-receive"),
+            send: t("pwn-app-props-rate-send"),
         })
     }
 }
@@ -699,22 +707,28 @@ impl AppGeneralTab {
                         ),
                     },
                     |(read, write), out| {
-                        out.push_str("Read ");
+                        out.push_str(&self.words.read);
+                        out.push(' ');
                         units::rate_mib_fixed(out, *read);
-                        out.push_str(", write ");
+                        out.push_str(", ");
+                        out.push_str(&self.words.write);
+                        out.push(' ');
                         units::rate_mib_fixed(out, *write);
                     },
                 ),
             ));
             usage.push(self.live.as_ref().and_then(|live| {
-                let mut text = String::from("Receive ");
+                let mut text = self.words.receive.to_string();
+                text.push(' ');
                 units::net_rate(
                     &mut text,
                     f64::from(live.net_rx_bps),
                     self.network_unit,
                     false,
                 );
-                text.push_str(", send ");
+                text.push_str(", ");
+                text.push_str(&self.words.send);
+                text.push(' ');
                 units::net_rate(
                     &mut text,
                     f64::from(live.net_tx_bps),
@@ -1184,6 +1198,10 @@ impl AppPropsWindow {
 
     pub fn exited(&self) -> bool {
         self.exited
+    }
+
+    pub fn exited_banner_text(&self) -> &str {
+        &self.words.exited
     }
 
     pub fn general(&self) -> &Entity<AppGeneralTab> {

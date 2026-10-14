@@ -990,11 +990,7 @@ fn run_size_scales_with_ui_scale(cx: &mut TestAppContext) {
 
 mod app_props {
     use tl_model::details::{AppGeneralDetail, AppKind};
-    use tl_ui::window::registry::CAP_APP_PROPS;
-    use tl_ui::windows::app_props::{
-        APP_EXITED_BANNER, AppGeneralTab, TOO_MANY_APP_WINDOWS, panels_side_by_side,
-    };
-    use tl_ui::windows::frame::app_props_title;
+    use tl_ui::windows::app_props::AppGeneralTab;
 
     use super::*;
 
@@ -1054,18 +1050,6 @@ mod app_props {
         (host, cx)
     }
 
-    #[test]
-    fn app_props_title_for_app_and_unit() {
-        assert_eq!(
-            app_props_title("Firefox", false).as_ref(),
-            "App Properties - Firefox"
-        );
-        assert_eq!(
-            app_props_title("foo.service", false).as_ref(),
-            "App Properties - foo.service"
-        );
-    }
-
     #[gpui_kit::test]
     fn app_props_swap_updates_live(cx: &mut TestAppContext) {
         let (host, cx) = open(cx, 700.);
@@ -1077,35 +1061,19 @@ mod app_props {
         }
     }
 
-    #[test]
-    fn app_props_ninth_window_toast() {
-        assert_eq!(CAP_APP_PROPS, 8);
-        assert_eq!(
-            TOO_MANY_APP_WINDOWS,
-            "Too many app properties windows are already open"
-        );
-    }
-
     #[gpui_kit::test]
     fn app_props_two_panels_breakpoint(cx: &mut TestAppContext) {
-        assert!(panels_side_by_side(700., 1.));
-        assert!(!panels_side_by_side(600., 1.));
-
         let (wide, cx) = open(cx, 700.);
         draw(cx);
         assert!(cx.update(|_, cx| wide.read(cx).tab.read(cx).panels_are_side_by_side()));
-    }
-
-    #[test]
-    fn app_props_exited_banner() {
-        assert_eq!(
-            APP_EXITED_BANNER,
-            "This app has no running processes. Values are frozen at the last update."
-        );
-        assert_eq!(
-            app_props_title("Firefox", true).as_ref(),
-            "App Properties - Firefox (not running)"
-        );
+        cx.update(|_, cx| {
+            wide.update(cx, |host, cx| {
+                host.width = 600.;
+                cx.notify();
+            })
+        });
+        draw(cx);
+        assert!(!cx.update(|_, cx| wide.read(cx).tab.read(cx).panels_are_side_by_side()));
     }
 }
 
@@ -1122,6 +1090,8 @@ mod window {
     use tl_model::command::{Command, Tab};
     use tl_model::demand::DetailDemand;
     use tl_model::details::{DetailTab, DetailTarget, TargetDetail};
+    use tl_model::ids::NodeId;
+    use tl_model::process::{GroupKind, GroupRow, GroupRowKind};
     use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::window_frame::TlSecondaryWindow;
@@ -1129,6 +1099,7 @@ mod window {
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui::windows::app_props::{APP_EXITED_BANNER, AppPropsWindow, open_app_properties};
     use tl_ui::windows::props::{
         ACCESS_ENV, ACCESS_FDS, ACCESS_MAPS, ACCESS_SECURITY, ACCESS_STRINGS, PropsWindow,
         open_process_properties, props_words,
@@ -1191,6 +1162,64 @@ mod window {
         cx.run_until_parked();
     }
 
+    fn app_group(name: &str, kind: GroupRowKind, members: u32) -> GroupRow {
+        let class = GroupKind::App {
+            app_id: Arc::from(name.to_lowercase()),
+        };
+        let key = class.key();
+        GroupRow {
+            node: NodeId::Group(key),
+            key,
+            kind,
+            class,
+            name: Arc::from(name),
+            icon: None,
+            members,
+            pids: members,
+            note: None,
+            memory_bytes: 0,
+            disk_bps: 0.0,
+            net_bps: 0.0,
+            gpu_pct: 0.0,
+            cpu_pct: 1.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            threads: 0,
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            commit_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            handles: None,
+            desktop_path: None,
+            description: None,
+            user: None,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn publish_groups(cx: &mut TestAppContext, engine: &FakeEngine, groups: Vec<GroupRow>) {
+        engine.publish_with(|s| {
+            let table = Arc::make_mut(&mut s.table);
+            table.groups = Arc::from(groups);
+            table.header.version += 1;
+        });
+        cx.run_until_parked();
+    }
+
     /// Edits the detail of `pid` and publishes it.
     fn publish_detail(
         cx: &mut TestAppContext,
@@ -1222,9 +1251,23 @@ mod window {
         })
     }
 
+    fn open_app(cx: &mut TestAppContext, group: GroupKey) -> Option<AnyWindowHandle> {
+        cx.update(|cx| open_app_properties(group, cx));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.read(cx).get(&WindowKey::AppProperties(group))
+        })
+    }
+
     fn props(cx: &mut TestAppContext, handle: AnyWindowHandle) -> Entity<PropsWindow> {
         cx.update(|cx| PropsWindow::find(handle, cx))
             .expect("props window")
+    }
+
+    fn app_props(cx: &mut TestAppContext, handle: AnyWindowHandle) -> Entity<AppPropsWindow> {
+        cx.update(|cx| AppPropsWindow::find(handle, cx))
+            .expect("app props window")
     }
 
     fn draw(vcx: &mut VisualTestContext) {
@@ -1236,6 +1279,13 @@ mod window {
         cx.update(|cx| {
             let registry = cx.global::<GlobalRegistry>().0.clone();
             registry.read(cx).count(CapClass::ProcessProps)
+        })
+    }
+
+    fn app_props_count(cx: &mut TestAppContext) -> usize {
+        cx.update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.read(cx).count(CapClass::AppProps)
         })
     }
 
@@ -1263,11 +1313,112 @@ mod window {
         })
     }
 
+    fn app_title(cx: &mut TestAppContext, handle: AnyWindowHandle) -> String {
+        cx.update(|cx| {
+            let frame = TlSecondaryWindow::<AppPropsWindow>::find(
+                WindowHandle::new(handle.window_id()),
+                cx,
+            )
+            .expect("app frame");
+            frame.read(cx).title().to_string()
+        })
+    }
+
     fn general_demand(pid: u32, tab: DetailTab) -> DetailDemand {
         DetailDemand {
             target: DetailTarget::Process(key(pid)),
             tab,
         }
+    }
+
+    fn app_demand(group: GroupKey, tab: DetailTab) -> DetailDemand {
+        DetailDemand {
+            target: DetailTarget::App(group),
+            tab,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn app_props_title_for_app_and_unit(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let app = app_group("Firefox", GroupRowKind::App, 34);
+        let unit = app_group("foo.service", GroupRowKind::Unit, 1);
+        publish_groups(cx, &engine, vec![app.clone(), unit.clone()]);
+
+        let app_handle = open_app(cx, app.key).expect("app window opened");
+        let unit_handle = open_app(cx, unit.key).expect("unit window opened");
+        assert_eq!(app_title(cx, app_handle), "App Properties - Firefox");
+        assert_eq!(app_title(cx, unit_handle), "App Properties - foo.service");
+
+        main.update(|window, _| window.activate_window());
+        main.run_until_parked();
+        let again = open_app(cx, app.key).expect("existing app window");
+        assert_eq!(again.window_id(), app_handle.window_id());
+        assert_eq!(app_props_count(cx), 2, "one window per group");
+        assert_eq!(
+            cx.update(|cx| cx.active_window().map(|w| w.window_id())),
+            Some(app_handle.window_id()),
+            "opening twice activates the existing window"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn app_props_ninth_window_toast(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let groups: Vec<_> = (0..9)
+            .map(|i| app_group(&format!("App {i}"), GroupRowKind::App, 1))
+            .collect();
+        let keys: Vec<_> = groups.iter().map(|group| group.key).collect();
+        publish_groups(cx, &engine, groups);
+        for &group in &keys[..8] {
+            assert!(open_app(cx, group).is_some(), "window opened");
+        }
+        main.update(|window, _| window.activate_window());
+        main.run_until_parked();
+
+        assert!(open_app(cx, keys[8]).is_none(), "ninth window refused");
+        assert_eq!(app_props_count(cx), 8);
+        assert!(
+            main_toasts(&mut main)
+                .iter()
+                .any(|text| text == "Too many app properties windows are already open"),
+            "{:?}",
+            main_toasts(&mut main)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn app_props_exited_banner(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        let app = app_group("Firefox", GroupRowKind::App, 34);
+        publish_groups(cx, &engine, vec![app.clone()]);
+        let handle = open_app(cx, app.key).expect("app window opened");
+        let view = app_props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        draw(&mut vcx);
+        assert_eq!(
+            demanded(cx),
+            vec![app_demand(app.key, DetailTab::AppGeneral)]
+        );
+
+        publish_groups(cx, &engine, Vec::new());
+        draw(&mut vcx);
+
+        assert!(cx.read(|cx| view.read(cx).exited()));
+        assert_eq!(
+            app_title(cx, handle),
+            "App Properties - Firefox (not running)"
+        );
+        assert!(
+            vcx.debug_bounds("AppPropsExitedBanner").is_some(),
+            "banner drawn"
+        );
+        assert_eq!(
+            cx.read(|cx| view.read(cx).exited_banner_text()),
+            APP_EXITED_BANNER
+        );
+        assert!(demanded(cx).is_empty(), "demand removed");
+        assert_eq!(app_props_count(cx), 1, "window stays open");
     }
 
     #[gpui_kit::test]
