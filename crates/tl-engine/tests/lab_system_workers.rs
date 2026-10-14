@@ -1813,12 +1813,14 @@ fn memory_details_first_sample() {
             max_pool_percent: Some(20),
         })
     );
+    assert!(d.zram[0].stats.is_some(), "mm_stat read for zram0");
     assert_eq!(
         &*d.zram,
         [ZramDetail {
             name: Arc::from("zram0"),
             disksize: 67_331_162_112,
             algorithm: Some(Arc::from("zstd")),
+            stats: d.zram[0].stats,
         }]
     );
     assert_eq!(src.details_reads(), 1);

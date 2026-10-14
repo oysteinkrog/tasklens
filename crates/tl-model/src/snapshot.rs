@@ -1073,6 +1073,8 @@ pub struct ZramDetail {
     pub name: Arc<str>,
     pub disksize: u64,
     pub algorithm: Option<Arc<str>>,
+    /// This device's `mm_stat` fields; `None` when its `mm_stat` could not be read.
+    pub stats: Option<crate::system::ZramTotals>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

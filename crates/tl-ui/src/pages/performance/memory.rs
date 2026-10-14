@@ -616,13 +616,9 @@ fn text_bits(s: &str) -> u64 {
     })
 }
 
-/// Fills one zram grid. The `mm_stat` totals are summed over all devices, so they belong to a
-/// device only when it is the only one; with more devices those rows read Unavailable.
-fn update_zram_grid(
-    model: &mut KeyValueModel,
-    dev: &tl_model::snapshot::ZramDetail,
-    stats: Option<ZramTotals>,
-) -> bool {
+/// Fills one zram grid. The `mm_stat` rows read Unavailable when this device's `mm_stat`
+/// could not be read.
+fn update_zram_grid(model: &mut KeyValueModel, dev: &tl_model::snapshot::ZramDetail) -> bool {
     let mut changed = false;
     changed |= model.set_valid(ROW_ZRAM_DEVICE, text_bits(&dev.name), |o| {
         o.push_str("/dev/");
@@ -643,7 +639,7 @@ fn update_zram_grid(
             );
         }
     }
-    let Some(z) = stats else {
+    let Some(z) = dev.stats else {
         for label in [
             ROW_ZRAM_STORED,
             ROW_ZRAM_COMPRESSED,
@@ -698,12 +694,8 @@ pub fn update_compressed_block(block: &mut CompressedBlock, inp: &CompressedInpu
         block.zram = devices.iter().map(|_| zram_model()).collect();
         changed = true;
     }
-    let stats = match inp.mem.zram.validity {
-        Validity::Valid | Validity::Stale if devices.len() == 1 => Some(inp.mem.zram.value),
-        _ => None,
-    };
     for (model, dev) in block.zram.iter_mut().zip(devices.iter()) {
-        changed |= update_zram_grid(model, dev, stats);
+        changed |= update_zram_grid(model, dev);
     }
 
     let z = &mut block.zswap;
