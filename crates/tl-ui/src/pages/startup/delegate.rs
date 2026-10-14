@@ -17,7 +17,7 @@ use gpui_kit::{
     AnyView, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     SharedString, WeakEntity, Window, div, px,
 };
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, Impact, ImpactDetail, Snapshot, StartupEntry, StartupKind,
@@ -33,7 +33,7 @@ use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
-use crate::pages::sys_status::{LabelTone, SysStatus, status_look};
+use crate::pages::sys_status::{DotStyle, LabelTone, StatusLook, SysStatus, status_look};
 use crate::pages::sys_table::SysDelegate;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -215,6 +215,8 @@ pub struct StartupWords {
     pub statuses: [Arc<str>; 5],
     /// The Publisher of a user's own entry.
     pub user: Arc<str>,
+    /// The Status label of an entry with an Enable or Disable in flight.
+    pub updating: Arc<str>,
     pub activation: Template,
     pub started: Template,
     pub cpu: Template,
@@ -256,6 +258,7 @@ impl StartupWords {
             impacts: IMPACT_KEYS.map(arc),
             statuses: STATUSES.map(|s| arc(sys_status(s).key())),
             user: arc("startup-publisher-user"),
+            updating: arc("startup-status-updating"),
             activation: template("startup-tooltip-activation", &["ms"]),
             started: template("startup-tooltip-started", &["seconds"]),
             cpu: template("startup-tooltip-cpu", &["time"]),
@@ -400,7 +403,15 @@ pub struct StartupDelegate {
     tip: Rc<RefCell<RowTipState>>,
     tip_view: Option<AnyView>,
     page: Option<WeakEntity<StartupPage>>,
+    /// Entries with an Enable or Disable in flight (UI-SYS-042).
+    updating: FxHashSet<StartupRef>,
 }
+
+/// The Status cell look of an entry with an Enable or Disable in flight: a filled info dot.
+pub const UPDATING_LOOK: StatusLook = StatusLook {
+    dot: DotStyle::Filled(LabelTone::Info),
+    label: LabelTone::Primary,
+};
 
 impl StartupDelegate {
     /// An empty table. `home` is `$HOME`, shown as `~` in the Location column.
@@ -426,7 +437,25 @@ impl StartupDelegate {
             tip: Rc::default(),
             tip_view: None,
             page: None,
+            updating: FxHashSet::default(),
         }
+    }
+
+    /// Marks `entry` as having an Enable or Disable in flight, or clears the mark.
+    pub(super) fn set_updating(&mut self, entry: &StartupRef, on: bool) {
+        let changed = if on {
+            self.updating.insert(entry.clone())
+        } else {
+            self.updating.remove(entry)
+        };
+        if changed {
+            self.version += 1;
+        }
+    }
+
+    /// True while `entry` shows "Updating…".
+    pub fn is_updating(&self, entry: &StartupRef) -> bool {
+        self.updating.contains(entry)
     }
 
     /// The page where a row menu stores the targets captured at open time.
@@ -629,6 +658,9 @@ impl TreeTableDelegate for StartupDelegate {
                 Some(p) => out.arc = Some(p.clone()),
                 None => {}
             },
+            StartupColumn::Status if self.updating.contains(&e.id) => {
+                out.arc = Some(w.updating.clone());
+            }
             StartupColumn::Status => {
                 out.arc = Some(w.status(e.status).clone());
                 if status_look(sys_status(e.status)).label == LabelTone::Secondary {

@@ -6,6 +6,7 @@
 
 pub mod actions;
 pub mod delegate;
+mod flows;
 pub mod menu;
 
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use gpui_kit::{
     IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
 };
 use smallvec::SmallVec;
+use tl_model::actions::ActionTarget;
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::SourceId;
@@ -33,7 +35,9 @@ use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
-use crate::pages::sys_table::{SysBody, SysTableFrame, loading_status_text};
+use crate::pages::sys_table::{
+    ActionKindTag, SysActionsEvent, SysBody, SysTableFrame, loading_status_text,
+};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::OpenProperties;
 use crate::table::tree_table::TreeTableEvent;
@@ -54,7 +58,7 @@ pub struct StartupPage {
     last_status: (u32, u32, u32, usize),
     refresh: Option<(u64, Task<()>)>,
     menu_targets: Option<StartupMenuTargets>,
-    _subs: SmallVec<[Subscription; 3]>,
+    _subs: SmallVec<[Subscription; 4]>,
 }
 
 impl EventEmitter<StatusChanged> for StartupPage {}
@@ -121,6 +125,11 @@ impl StartupPage {
             });
         }));
         subs.push(cx.observe(&table, |this, _, cx| this.on_table_changed(cx)));
+        let actions = frame.actions.clone();
+        subs.push(cx.subscribe(&actions, |this, _, ev: &SysActionsEvent, cx| {
+            let SysActionsEvent::PendingChanged { target } = ev;
+            this.on_pending_changed(target, cx);
+        }));
         Self {
             frame,
             focus,
@@ -231,6 +240,30 @@ impl StartupPage {
         }
     }
 
+    /// An Enable or Disable started or finished on `target`: its Status cell shows or drops
+    /// "Updating…". Run now changes no row.
+    fn on_pending_changed(&mut self, target: &ActionTarget, cx: &mut Context<Self>) {
+        let ActionTarget::Startup(entry) = target else {
+            return;
+        };
+        let updating = self
+            .frame
+            .actions
+            .read(cx)
+            .pending_tag(target)
+            .is_some_and(|tag| {
+                matches!(
+                    tag,
+                    ActionKindTag::StartupEnable | ActionKindTag::StartupDisable
+                )
+            });
+        self.frame.table.update(cx, |table, cx| {
+            table.delegate.set_updating(entry, updating);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn on_table_changed(&mut self, cx: &mut Context<Self>) {
         let sort = self
             .frame
@@ -328,6 +361,9 @@ impl Render for StartupPage {
         div()
             .size_full()
             .on_action(cx.listener(Self::on_startup_delete))
+            .on_action(cx.listener(Self::on_startup_enable))
+            .on_action(cx.listener(Self::on_startup_disable))
+            .on_action(cx.listener(Self::on_startup_run_now))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }

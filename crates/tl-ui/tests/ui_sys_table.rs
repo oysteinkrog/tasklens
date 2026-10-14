@@ -1096,6 +1096,16 @@ mod sys_actions {
     }
 
     #[gpui_kit::test]
+    fn already_running_rejection_is_an_info_toast(cx: &mut TestAppContext) {
+        use tl_model::actions::RejectReason;
+        let mut r = rig(cx);
+        let id = start(&mut r, vec![unit("sshd.service")]);
+        r.finish(id, &[ActionState::Rejected(RejectReason::AlreadyRunning)]);
+        assert_eq!(r.visible(), ["Already running"]);
+        assert_eq!(r.pushed().last().map(|t| t.kind), Some(ToastKind::Info));
+    }
+
+    #[gpui_kit::test]
     fn three_targets_three_toasts(cx: &mut TestAppContext) {
         let mut r = rig(cx);
         let id = start(&mut r, units(3));

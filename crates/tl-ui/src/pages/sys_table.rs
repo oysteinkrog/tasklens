@@ -929,6 +929,12 @@ fn final_toast(
             (ToastKind::Error, text, button)
         }
         ActionState::Rejected(RejectReason::Busy) => (ToastKind::Warning, texts.busy.clone(), None),
+        // R-255: the engine's "already running" answer is information, not a failure.
+        ActionState::Rejected(RejectReason::AlreadyRunning) => (
+            ToastKind::Info,
+            action_words(cx).reject(RejectReason::AlreadyRunning).1,
+            None,
+        ),
         ActionState::Rejected(reason) => {
             let reason = action_words(cx).reject(*reason).1;
             let text = format!("{}: {reason}", texts.failed_prefix).into();

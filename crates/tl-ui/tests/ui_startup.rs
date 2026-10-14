@@ -1004,6 +1004,242 @@ mod page {
         assert_eq!(refs, [a_ref]);
     }
 
+    // ---- Enable, Disable and Run now (tasklens-9o0.9) ----
+
+    use tl_model::actions::{ActionError, ActionEvent as FlowEvent, ActionId, ActionRequest};
+    use tl_model::actions::{ActionKind, ActionState, ActionTarget, RejectReason};
+    use tl_ui::pages::startup::actions::{StartupDisable, StartupEnable, StartupRunNow};
+
+    fn with_status(name: &str, status: StartupStatus) -> StartupEntry {
+        let mut e = super::entry(name, StartupKind::AutostartUser);
+        e.status = status;
+        e
+    }
+
+    /// A rig with `entries` published and the rows at `selected` selected and focused.
+    fn flow_rig(cx: &mut TestAppContext, entries: Vec<StartupEntry>, selected: &[usize]) -> Rig {
+        let mut rig = menu_rig(cx, entries);
+        let ids = rig.row_ids(selected.iter().copied().max().map_or(0, |m| m + 1));
+        let table = rig.table();
+        table.update(&mut rig.vcx, |table, cx| {
+            for (n, ix) in selected.iter().enumerate() {
+                if n == 0 {
+                    table.selection.click(ids[*ix]);
+                } else {
+                    table.selection.ctrl_click(ids[*ix]);
+                }
+            }
+            cx.notify();
+        });
+        rig.vcx.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+        });
+        rig.draw();
+        rig
+    }
+
+    impl Rig {
+        fn dispatch(&mut self, action: Box<dyn gpui_kit::Action>) {
+            self.vcx
+                .update(|window, cx| window.dispatch_action(action, cx));
+            self.vcx.run_until_parked();
+        }
+
+        fn requests(&self) -> Vec<ActionRequest> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Action(r) => Some(r),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn emit_action(&mut self, id: ActionId, target: Option<u16>, state: ActionState) {
+            self.engine.emit(FlowEvent { id, target, state });
+            self.vcx.run_until_parked();
+        }
+
+        /// `Started`, one state per target, then the summary.
+        fn finish_action(&mut self, id: ActionId, states: &[ActionState]) {
+            self.emit_action(id, None, ActionState::Started);
+            for (i, state) in states.iter().enumerate() {
+                self.emit_action(id, Some(i as u16), state.clone());
+            }
+            self.emit_action(id, None, ActionState::summarize(states));
+            self.draw();
+        }
+
+        fn status_cell(&mut self, ix: usize) -> String {
+            let table = self.table();
+            self.vcx.read_entity(&table, |table, _| {
+                let mut out = CellOut::default();
+                table.delegate.cell(ix, id(StartupColumn::Status), &mut out);
+                text(&out).to_owned()
+            })
+        }
+    }
+
+    fn startup_target(name: &str) -> ActionTarget {
+        ActionTarget::Startup(super::entry(name, StartupKind::AutostartUser).id)
+    }
+
+    #[gpui_kit::test]
+    fn startup_enable_toast(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![with_status("a", StartupStatus::Disabled)], &[0]);
+        rig.dispatch(Box::new(StartupEnable));
+        let sent = rig.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].kind, ActionKind::StartupEnable);
+        assert_eq!(sent[0].targets.as_slice(), [startup_target("a")]);
+        assert!(
+            !rig.toast_texts().iter().any(|t| t.contains("Enabling")),
+            "no pending toast"
+        );
+        rig.finish_action(sent[0].id, &[ActionState::Succeeded]);
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "Startup entry enabled.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_enable_failure_text(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![with_status("a", StartupStatus::Disabled)], &[0]);
+        rig.dispatch(Box::new(StartupEnable));
+        let id = rig.requests()[0].id;
+        rig.finish_action(id, &[ActionState::Failed(ActionError::PermissionDenied)]);
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "Failed to update startup entry: not authorized"),
+            "{:?}",
+            rig.toast_texts()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_disable_skips_already_disabled(cx: &mut TestAppContext) {
+        let entries = vec![
+            with_status("a", StartupStatus::Disabled),
+            with_status("b", StartupStatus::Disabled),
+            with_status("c", StartupStatus::Enabled),
+        ];
+        let mut rig = flow_rig(cx, entries, &[0, 1, 2]);
+        rig.dispatch(Box::new(StartupDisable));
+        let sent = rig.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].kind, ActionKind::StartupDisable);
+        assert_eq!(sent[0].targets.as_slice(), [startup_target("c")]);
+    }
+
+    #[gpui_kit::test]
+    fn startup_toggle_empty_is_noop(cx: &mut TestAppContext) {
+        let entries = vec![
+            with_status("a", StartupStatus::Disabled),
+            with_status("b", StartupStatus::Disabled),
+        ];
+        let mut rig = flow_rig(cx, entries, &[0, 1]);
+        rig.dispatch(Box::new(StartupDisable));
+        assert!(rig.requests().is_empty());
+        assert!(rig.toast_texts().is_empty(), "{:?}", rig.toast_texts());
+    }
+
+    #[gpui_kit::test]
+    fn startup_enable_summary_at_4(cx: &mut TestAppContext) {
+        let entries: Vec<StartupEntry> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|n| with_status(n, StartupStatus::Disabled))
+            .collect();
+        let mut rig = flow_rig(cx, entries, &[0, 1, 2, 3]);
+        rig.dispatch(Box::new(StartupEnable));
+        let sent = rig.requests();
+        assert_eq!(sent[0].targets.len(), 4);
+        let ok = ActionState::Succeeded;
+        let fail = ActionState::Failed(ActionError::PermissionDenied);
+        rig.finish_action(sent[0].id, &[ok.clone(), ok.clone(), ok, fail]);
+        assert_eq!(
+            rig.toast_texts(),
+            ["3 of 4 startup entries enabled. 1 failed."]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_updating_status_while_pending(cx: &mut TestAppContext) {
+        use tl_ui::pages::startup::delegate::UPDATING_LOOK;
+        let mut rig = flow_rig(cx, vec![with_status("a", StartupStatus::Disabled)], &[0]);
+        assert_eq!(rig.status_cell(0), "Disabled");
+        rig.dispatch(Box::new(StartupEnable));
+        assert_eq!(rig.status_cell(0), "Updating\u{2026}");
+        assert_eq!(UPDATING_LOOK.dot, DotStyle::Filled(LabelTone::Info));
+        let id = rig.requests()[0].id;
+        rig.finish_action(id, &[ActionState::Succeeded]);
+        assert_eq!(rig.status_cell(0), "Disabled");
+    }
+
+    #[gpui_kit::test]
+    fn run_now_any_status(cx: &mut TestAppContext) {
+        let mut masked = with_status("a", StartupStatus::Masked);
+        masked.can_toggle = false;
+        let mut rig = flow_rig(cx, vec![masked], &[0]);
+        rig.dispatch(Box::new(StartupRunNow));
+        let sent = rig.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].kind, ActionKind::StartupRunNow);
+        assert_eq!(sent[0].targets.as_slice(), [startup_target("a")]);
+        assert_eq!(rig.status_cell(0), "Masked", "Run now changes no row");
+    }
+
+    #[gpui_kit::test]
+    fn run_now_already_running_toast(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![with_status("a", StartupStatus::Enabled)], &[0]);
+        rig.dispatch(Box::new(StartupRunNow));
+        let id = rig.requests()[0].id;
+        rig.finish_action(id, &[ActionState::Rejected(RejectReason::AlreadyRunning)]);
+        assert_eq!(rig.toast_texts(), ["Already running"]);
+    }
+
+    #[gpui_kit::test]
+    fn startup_busy_toast(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![with_status("a", StartupStatus::Disabled)], &[0]);
+        rig.dispatch(Box::new(StartupEnable));
+        rig.dispatch(Box::new(StartupEnable));
+        assert_eq!(rig.requests().len(), 1);
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "A startup action is already in progress.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_enable_targets_only_captured_refs(cx: &mut TestAppContext) {
+        let a = with_status("a", StartupStatus::Disabled);
+        let b = with_status("b", StartupStatus::Disabled);
+        let mut rig = menu_rig(cx, vec![a.clone()]);
+        let ids = rig.row_ids(1);
+        let _menu = rig.build_menu(&ids, Some(SysColumnId::Startup(StartupColumn::Name)));
+        let both = vec![b, a];
+        let counts = counts_for(&both);
+        rig.publish_entries(both, counts);
+        let table = rig.table();
+        rig.vcx.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+        });
+        rig.dispatch(Box::new(StartupEnable));
+        let sent = rig.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].targets.as_slice(),
+            [startup_target("a")],
+            "only the entry captured at menu open"
+        );
+    }
+
     #[gpui_kit::test]
     fn startup_menu_close_drops_captured_targets(cx: &mut TestAppContext) {
         let a = super::entry("a", StartupKind::AutostartUser);

@@ -1480,6 +1480,22 @@ startup-menu-reason-system-entry = System entries cannot be deleted. Use Disable
 startup-menu-reason-package-unit = This unit belongs to a package. Use Disable instead.
 startup-delete-not-allowed = This startup entry cannot be deleted
 
+# Startup Apps Enable, Disable and Run now flows (tasklens-9o0.9, UI-SYS-045, UI-SYS-046).
+startup-status-updating = Updating…
+startup-action-enabled = Startup entry enabled.
+startup-action-disabled = Startup entry disabled.
+startup-action-launched = Startup entry launched.
+startup-action-enabled-n = { $n } startup entries enabled
+startup-action-disabled-n = { $n } startup entries disabled
+startup-action-launched-n = { $n } startup entries launched
+startup-action-enabled-partial = { $ok } of { $n } startup entries enabled. { $failed } failed.
+startup-action-disabled-partial = { $ok } of { $n } startup entries disabled. { $failed } failed.
+startup-action-launched-partial = { $ok } of { $n } startup entries launched. { $failed } failed.
+startup-action-update-failed = Failed to update startup entry
+startup-action-launch-failed = Failed to launch startup entry
+startup-action-unknown = Outcome unknown
+startup-action-busy = A startup action is already in progress.
+
 # Connections page status and refresh toast (tasklens-9o0.15, UI-SYS-067).
 connections-status-total = { $total } Total | { $tcp } TCP | { $udp } UDP | { $established } EST | { $listening } LISTEN
 connections-status-selected = { $selected } selected
