@@ -864,3 +864,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-14 leader rule: wiring lines a bead clearly implies (mod lines, page registration, bind_keys calls, settings page list entries) may be chain-edited in unnamed files, only those lines, listed in the report. 9o0.20 waits for wlf.37 (both edit window/main.rs).
 - 2026-10-14 leader decision: hk6.11 split per docs/plan/design/hk611-services-cells.md (Fable consult; Astra rate-limited): tasklens-hk6.36 per-manager counts, tasklens-rsf.29 table hooks, hk6.11 cells after both.
 - 2026-10-14 leader decision: o55.12 adds InventorySnapshot.slots_total (model + inventory worker); memory module rows show Not reported, no Restricted case.
+- 2026-10-15 owner decision: beads are prepared by Opus and labelled model:sonnet|opus|fable per docs/plan/bead-model-rubric.md; the runner runs an Opus prep step before each unlabelled bead and escalates a Sonnet bead to Opus after two failed reviews.
