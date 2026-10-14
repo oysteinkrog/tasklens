@@ -712,6 +712,7 @@ mod page {
                 pressed_button: None,
                 modifiers: Modifiers::none(),
             });
+            self.draw();
             self.vcx.simulate_click(at, Modifiers::none());
             self.double_click_press(at);
         }
@@ -966,6 +967,7 @@ mod page {
             pressed_button: None,
             modifiers: Modifiers::none(),
         });
+        rig.draw();
         rig.double_click_press(point(frame.center().x, frame.origin.y + px(28. + 42.)));
         assert_eq!(rig.opened.get(), 1, "unselected row double-click");
 
