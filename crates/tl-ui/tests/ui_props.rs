@@ -3415,11 +3415,13 @@ mod maps {
 // ---- Security tab summary (E23-020, UI-PWN-014) ----
 
 mod security {
+    use gpui_kit::{Modifiers, MouseMoveEvent, point};
     use tl_model::details::{
         CapRow, Elevated, GroupMembershipRow, NsKind, NsRow, NsState, SecurityDetail,
     };
+    use tl_ui::components::tooltip::DELAY_CONTROL;
     use tl_ui::windows::props::security::{
-        CapColumn, NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
+        CAP_CHECK_SIZE, CapColumn, NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
     };
     use tl_ui::{table::cells::CellOut, table::tree_table::TreeTableDelegate as _};
 
@@ -3687,6 +3689,72 @@ mod security {
                 Some(tl_ui::theme::current(cx).status.warning)
             );
         });
+        let caps = cx
+            .debug_bounds("SecurityCapabilities")
+            .expect("capabilities region");
+        let position = point(caps.left() + px(60.), caps.top() + px(24. + 28. + 13.));
+        for _ in 0..3 {
+            cx.simulate_event(MouseMoveEvent {
+                position,
+                pressed_button: None,
+                modifiers: Modifiers::none(),
+            });
+            draw(cx);
+        }
+        cx.executor().advance_clock(DELAY_CONTROL * 2);
+        draw(cx);
+        assert!(
+            cx.debug_bounds("TlTooltip").is_some(),
+            "the drawn risky name shows its tooltip"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn security_cap_checks_are_lucide_size_and_centred(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.caps = Arc::from(vec![cap(13, true, true, true, true, true, false)]);
+        feed(&view, cx, d);
+        assert!(
+            cx.debug_bounds("SecurityCapabilityChecks").is_some(),
+            "the check-icon canvas is drawn"
+        );
+        let canvas = cx
+            .debug_bounds("SecurityCapabilityChecks")
+            .expect("check-icon canvas");
+        cx.update(|_, cx| {
+            let tab = view.read(cx).tab.read(cx);
+            let table = tab.caps_table().expect("table").read(cx);
+            let columns = [
+                CapColumn::Effective,
+                CapColumn::Permitted,
+                CapColumn::Inheritable,
+                CapColumn::Bounding,
+                CapColumn::Ambient,
+            ];
+            let marks = table.delegate.check_icon_bounds.borrow();
+            assert_eq!(marks.len(), 5, "one Lucide check for every set column");
+            for (mark, col) in marks.iter().zip(columns) {
+                assert_eq!(mark.size.width, px(CAP_CHECK_SIZE));
+                assert_eq!(mark.size.height, px(CAP_CHECK_SIZE));
+                let layout = table.delegate.columns();
+                let pos = layout
+                    .visible_columns()
+                    .iter()
+                    .position(|shown| *shown == col)
+                    .expect("visible set column");
+                assert_eq!(
+                    mark.center().x,
+                    canvas.left() + layout.offsets()[pos] + layout.width(col) / 2.,
+                    "the Lucide check is centred in {col:?}"
+                );
+            }
+            assert!(
+                marks
+                    .windows(2)
+                    .all(|pair| pair[1].center().y == pair[0].center().y)
+            );
+        });
     }
 
     #[gpui_kit::test]
@@ -3720,6 +3788,28 @@ mod security {
     #[gpui_kit::test]
     fn security_tables_none_reported(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
+        cx.update(|_, cx| {
+            let tab = view.read(cx).tab.read(cx);
+            assert_eq!(
+                tab.caps_table()
+                    .expect("table")
+                    .read(cx)
+                    .delegate
+                    .empty_text()
+                    .as_deref(),
+                Some("Collecting\u{2026}")
+            );
+            assert_eq!(
+                tab.groups_table()
+                    .expect("table")
+                    .read(cx)
+                    .delegate
+                    .empty_text()
+                    .as_deref(),
+                Some("Collecting\u{2026}")
+            );
+        });
+        assert!(cx.debug_bounds("TlTreeTable-empty").is_some());
         let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
         d.groups = Arc::from(Vec::<GroupMembershipRow>::new());
         feed(&view, cx, d);
@@ -3749,8 +3839,6 @@ mod security {
 
     #[gpui_kit::test]
     fn security_caps_ctrl_c_uses_yes(cx: &mut TestAppContext) {
-        use tl_ui::table::actions::CopyRow;
-
         let (view, cx) = open(cx);
         let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
         d.caps = Arc::from(vec![cap(13, true, false, false, true, false, false)]);
@@ -3770,7 +3858,7 @@ mod security {
         let _ = table;
         cx.update(|window, cx| focus.focus(window, cx));
         draw(cx);
-        cx.dispatch_action(CopyRow);
+        cx.simulate_keystrokes("ctrl-c");
         assert_eq!(
             cx.read_from_clipboard()
                 .and_then(|item| item.text())

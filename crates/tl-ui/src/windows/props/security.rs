@@ -23,10 +23,11 @@ use std::sync::Arc;
 use gpui_kit::base::input::Copy;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyView, App, AppContext as _, BorrowAppContext as _, ClipboardItem, Context, Entity,
-    FocusHandle, FontWeight, Global, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, point, px, relative,
+    AnyView, App, AppContext as _, BorrowAppContext as _, ClipboardItem, ContentMask, Context,
+    Entity, FocusHandle, FontWeight, Global, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathBuilder, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div, point, px,
+    relative,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -58,8 +59,8 @@ use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
 use crate::table::tree_table::{
-    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
-    TreeTableDelegate, TreeTableEvent,
+    HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort,
+    TlTreeTable, TreeTableDelegate, TreeTableEvent,
 };
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::label_style;
@@ -78,6 +79,8 @@ const LABEL_MAX: f32 = 150.;
 /// The summary takes at most this share of the body.
 const SUMMARY_MAX: f32 = 0.45;
 const SECTION_HEADER_HEIGHT: f32 = 24.;
+/// The Lucide `check` viewport size in capability cells.
+pub const CAP_CHECK_SIZE: f32 = 14.;
 /// `None` in the audit session and login UID files.
 pub const NO_ID: u32 = u32::MAX;
 
@@ -846,6 +849,8 @@ pub struct CapDelegate {
     words: Rc<SecurityWords>,
     warning: Hsla,
     menu_cell: Option<(u8, CapColumn)>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub check_icon_bounds: Rc<std::cell::RefCell<Vec<gpui_kit::Bounds<Pixels>>>>,
 }
 
 impl CapDelegate {
@@ -866,6 +871,8 @@ impl CapDelegate {
             words,
             warning,
             menu_cell: None,
+            #[cfg(any(test, feature = "test-hooks"))]
+            check_icon_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
         }
     }
 
@@ -992,7 +999,7 @@ fn mark_text(set: bool, copy: bool, yes: &str) -> String {
     } else if copy {
         yes.to_owned()
     } else {
-        "✓".to_owned()
+        String::new()
     }
 }
 
@@ -1007,6 +1014,8 @@ fn cap_specs(words: &SecurityWords) -> Vec<ColumnSpec<CapColumn>> {
                 label: label.clone(),
                 full_name: label.clone(),
                 group: label,
+                // Set cells are empty text cells. `cap_checks` paints their icon at the exact
+                // column centre from this layout; the remaining cells use normal left text.
                 align: ColumnAlign::Left,
                 kind: ColumnKind::Text,
                 sortable: true,
@@ -2128,6 +2137,94 @@ fn window_toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: Shared
     }
 }
 
+/// The generic table paints metric cells as text. Capability marks are the Lucide `check`
+/// path, so this transparent canvas paints them over the otherwise-empty set cells. It reads
+/// the table's live layout and scroll handle during paint, which keeps the 14 px marks centred
+/// after column resizing and while either axis scrolls.
+fn cap_checks(table: Entity<TlTreeTable<CapDelegate>>, m: UiMetrics) -> impl IntoElement {
+    let row_h = px(ROW_HEIGHT * m.ui_scale);
+    let icon = px(CAP_CHECK_SIZE * m.ui_scale);
+    let stroke = px(CAP_CHECK_SIZE / 12. * m.ui_scale);
+    let header_h = px(HEADER_H_ONE * m.ui_scale);
+    div()
+        .debug_selector(|| "SecurityCapabilityChecks".into())
+        .absolute()
+        .top(header_h)
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, (), window, cx| {
+                    let table = table.read(cx);
+                    let scroll = table.scroll_handle();
+                    let scroll_offset = scroll.0.borrow().base_handle.offset();
+                    let x_offset = table.x_offset();
+                    let d = &table.delegate;
+                    let layout = d.columns();
+                    let color = current(cx).text_primary;
+                    let columns = [
+                        CapColumn::Effective,
+                        CapColumn::Permitted,
+                        CapColumn::Inheritable,
+                        CapColumn::Bounding,
+                        CapColumn::Ambient,
+                    ];
+                    #[cfg(any(test, feature = "test-hooks"))]
+                    d.check_icon_bounds.borrow_mut().clear();
+                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                        for ix in table.visible_range() {
+                            let Some(row) = d.view.get(ix).and_then(|&cap| d.row(cap)) else {
+                                continue;
+                            };
+                            let cy = bounds.top() + scroll_offset.y + row_h * (ix as f32 + 0.5);
+                            for (col, set) in columns.iter().copied().zip([
+                                row.effective,
+                                row.permitted,
+                                row.inheritable,
+                                row.bounding,
+                                row.ambient,
+                            ]) {
+                                if !set {
+                                    continue;
+                                }
+                                let Some(pos) = layout
+                                    .visible_columns()
+                                    .iter()
+                                    .position(|shown| *shown == col)
+                                else {
+                                    continue;
+                                };
+                                let cx =
+                                    bounds.left() + layout.offsets()[pos] + layout.width(col) / 2.
+                                        - x_offset;
+                                let origin = point(cx - icon / 2., cy - icon / 2.);
+                                #[cfg(any(test, feature = "test-hooks"))]
+                                d.check_icon_bounds.borrow_mut().push(gpui_kit::Bounds::new(
+                                    origin,
+                                    gpui_kit::size(icon, icon),
+                                ));
+                                let at = |x: f32, y: f32| {
+                                    origin + point(icon * (x / 24.), icon * (y / 24.))
+                                };
+                                // Lucide `check`: M20 6 9 17l-5-5, viewBox 24, stroke 2.
+                                let mut path = PathBuilder::stroke(stroke);
+                                path.move_to(at(20., 6.));
+                                path.line_to(at(9., 17.));
+                                path.line_to(at(4., 12.));
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, color);
+                                }
+                            }
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+}
+
 impl Render for SecurityTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.init_tables(window, cx);
@@ -2215,6 +2312,7 @@ impl Render for SecurityTab {
                 .text_color(theme.text_secondary)
                 .child(title)
         };
+        let caps_table = self.caps_table.as_ref().expect("initialized").clone();
         let caps = v_flex()
             .debug_selector(|| "SecurityCapabilities".into())
             .h(relative(0.6))
@@ -2222,9 +2320,11 @@ impl Render for SecurityTab {
             .child(section_header(caps_title))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(self.caps_table.as_ref().expect("initialized").clone()),
+                    .child(caps_table.clone())
+                    .child(cap_checks(caps_table, m)),
             );
         let groups = v_flex()
             .debug_selector(|| "SecurityGroups".into())
