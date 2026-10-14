@@ -1351,7 +1351,7 @@ mod sidebar {
     use tl_ui::components::menu::{MenuEntryKind, TlMenu, open_context_menu};
     use tl_ui::pages::performance::actions::{
         PerfAddTrayGraph, PerfDisableAllPages, PerfEnableAllPages, PerfEnterEditMode,
-        PerfResetPagesToDefault, PerfSetPageVisible, bind_keys_performance,
+        PerfMoveDevice, PerfResetPagesToDefault, PerfSetPageVisible, bind_keys_performance,
     };
     use tl_ui::pages::performance::menu::card_menu;
 
@@ -1458,6 +1458,22 @@ mod sidebar {
             net(4, "eth0"),
             net(5, "eth1"),
         ]
+    }
+
+    fn reorder_fixture() -> Vec<DeviceEntry> {
+        vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+            disk(2, "sda"),
+            disk(3, "sdb"),
+            disk(4, "sdc"),
+            net(5, "eth0"),
+        ]
+    }
+
+    fn saved_order(r: &mut Rig) -> Vec<String> {
+        r.vcx
+            .update(|_, cx| TlSettings::settings(cx).performance.device_order.clone())
     }
 
     fn enter_edit(r: &mut Rig) {
@@ -1604,6 +1620,145 @@ mod sidebar {
         });
         assert!(order.is_empty());
         assert!(overrides.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn move_device_rewrites_order_and_numbering(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            UiState::default(),
+        );
+        enter_edit(&mut r);
+        r.vcx.dispatch_action(PerfMoveDevice {
+            key: key("disk:sdc"),
+            before: Some(key("disk:sda")),
+        });
+        draw(r.vcx);
+
+        assert_eq!(
+            saved_order(&mut r),
+            [
+                "overview", "cpu", "memory", "disk:sdc", "disk:sda", "disk:sdb", "net:eth0"
+            ]
+        );
+        assert_eq!(lines(&mut r, "disk:sdc").heading, "Disk 0");
+        assert_eq!(lines(&mut r, "disk:sda").heading, "Disk 1");
+    }
+
+    #[gpui_kit::test]
+    fn reorder_within_group_only(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            UiState::default(),
+        );
+        enter_edit(&mut r);
+        let before = keys(&mut r);
+        r.vcx.dispatch_action(PerfMoveDevice {
+            key: key("disk:sdc"),
+            before: Some(key("net:eth0")),
+        });
+        draw(r.vcx);
+
+        assert_eq!(keys(&mut r), before);
+        assert!(
+            saved_order(&mut r).is_empty(),
+            "cross-group drop is ignored"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn alt_up_down_moves_focused_row(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            saved("disk:sdb"),
+        );
+        r.vcx.update(|_, cx| bind_keys_performance(cx));
+        enter_edit(&mut r);
+
+        r.vcx.simulate_keystrokes("alt-up");
+        draw(r.vcx);
+        let disks = keys(&mut r)
+            .into_iter()
+            .filter(|key| key.starts_with("disk:"))
+            .collect::<Vec<_>>();
+        assert_eq!(disks, ["disk:sdb", "disk:sda", "disk:sdc"]);
+
+        r.vcx.simulate_keystrokes("alt-up");
+        draw(r.vcx);
+        let after_end = saved_order(&mut r);
+        r.vcx.simulate_keystrokes("alt-down");
+        draw(r.vcx);
+        assert_ne!(saved_order(&mut r), after_end, "Alt+Down moves it back");
+        assert_eq!(
+            keys(&mut r)
+                .into_iter()
+                .filter(|key| key.starts_with("disk:"))
+                .collect::<Vec<_>>(),
+            ["disk:sda", "disk:sdb", "disk:sdc"]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn drop_indicator_geometry(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            UiState::default(),
+        );
+        enter_edit(&mut r);
+        let sidebar = r.sidebar.clone();
+        r.vcx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_drag_for_test(key("disk:sdb"), Some(1));
+                cx.notify();
+            });
+        });
+        draw(r.vcx);
+
+        let line = r
+            .vcx
+            .debug_bounds("perf-drop-indicator")
+            .expect("drop indicator");
+        let sidebar = r.vcx.debug_bounds("perf-sidebar").expect("sidebar");
+        assert_eq!(line.size.height, px(3.));
+        assert_eq!(line.left(), sidebar.left());
+        assert_eq!(line.right(), sidebar.right());
+    }
+
+    #[gpui_kit::test]
+    fn saved_order_survives_replug(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            UiState::default(),
+        );
+        enter_edit(&mut r);
+        r.vcx.dispatch_action(PerfMoveDevice {
+            key: key("disk:sdc"),
+            before: Some(key("disk:sda")),
+        });
+        draw(r.vcx);
+
+        let unplugged = reorder_fixture()
+            .into_iter()
+            .filter(|entry| entry.idx != DeviceIdx(4))
+            .collect();
+        plug(&mut r, 2, unplugged);
+        settle(&mut r);
+        plug(&mut r, 3, reorder_fixture());
+        let disks = keys(&mut r)
+            .into_iter()
+            .filter(|key| key.starts_with("disk:"))
+            .collect::<Vec<_>>();
+        assert_eq!(disks, ["disk:sdc", "disk:sda", "disk:sdb"]);
     }
 
     #[gpui_kit::test]

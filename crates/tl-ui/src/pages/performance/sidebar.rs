@@ -28,10 +28,10 @@ use gpui_kit::component::v_flex;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
-    Context, ElementId, Entity, EntityId, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Point, Render, ScrollHandle, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Subscription, WeakEntity, Window, canvas, div, px, white,
+    Context, DragMoveEvent, ElementId, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
+    FontWeight, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Point, Render, ScrollHandle, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, Subscription, WeakEntity, Window, canvas, div, px, white,
 };
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -43,9 +43,9 @@ use tl_model::validity::Validity;
 
 use super::actions::{
     PERFORMANCE_CONTEXT, PerfDisableAllPages, PerfEnableAllPages, PerfEnterEditMode,
-    PerfExitEditMode, PerfOpenCardMenu, PerfResetPagesToDefault, PerfSelectDevice,
-    PerfSelectFirstDevice, PerfSelectLastDevice, PerfSelectNextDevice, PerfSelectPrevDevice,
-    PerfSelectVisibleDevice, PerfSetPageVisible,
+    PerfExitEditMode, PerfMoveDevice, PerfMoveFocusedDevice, PerfOpenCardMenu,
+    PerfResetPagesToDefault, PerfSelectDevice, PerfSelectFirstDevice, PerfSelectLastDevice,
+    PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice, PerfSetPageVisible,
 };
 use super::card::{
     CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, DeviceCard,
@@ -63,6 +63,7 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
 use crate::components::switch::TlSwitch;
 use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
+use crate::components::tooltip::TlTooltip;
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
@@ -205,6 +206,41 @@ pub enum SidebarEvent {
     /// The card left the list: the device went away, came back with a new generation, or was
     /// hidden.
     Removed(DeviceKey),
+}
+
+#[derive(Clone, Debug)]
+struct DraggedCard {
+    key: DeviceKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DragState {
+    key: DeviceKey,
+    group: DeviceKind,
+    /// Drop boundary inside `group`, from zero through the group length.
+    over: Option<usize>,
+}
+
+struct DragGhost {
+    key: DeviceKey,
+    chart: Entity<ChartView>,
+    lines: CardLines,
+    width: Pixels,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().opacity(0.8).child(DeviceCard {
+            key: self.key.clone(),
+            chart: self.chart.clone(),
+            lines: self.lines.clone(),
+            selected: false,
+            focused: false,
+            edit_mode: true,
+            hidden_in_edit: false,
+            width: self.width,
+        })
+    }
 }
 
 /// The settings the sidebar draws from.
@@ -474,6 +510,7 @@ pub struct DeviceSidebar {
     pub(crate) edit_mode: bool,
     /// The row that owns keyboard focus in edit mode. E24-014 uses it for reordering.
     pub(crate) edit_focus_row: Option<DeviceKey>,
+    drag: Option<DragState>,
     /// Every row gets a card while edit mode is mounted, including hidden rows.
     edit_cards: Vec<CardState>,
     /// Keeps the edit surface mounted while its leave animation runs.
@@ -540,6 +577,7 @@ impl DeviceSidebar {
             scroll: ScrollHandle::new(),
             edit_mode: false,
             edit_focus_row: None,
+            drag: None,
             edit_cards: Vec::new(),
             edit_leaving: false,
             edit_generation: 0,
@@ -628,6 +666,15 @@ impl DeviceSidebar {
 
     pub fn edit_mode(&self) -> bool {
         self.edit_mode
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_drag_for_test(&mut self, key: DeviceKey, over: Option<usize>) {
+        self.drag = Some(DragState {
+            group: key.kind(),
+            key,
+            over,
+        });
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -1138,6 +1185,7 @@ impl DeviceSidebar {
         self.edit_generation += 1;
         self.edit_mode = false;
         self.edit_focus_row = None;
+        self.drag = None;
         if !animations_on(cx) {
             self.edit_leaving = false;
             self.edit_cards.clear();
@@ -1237,6 +1285,139 @@ impl DeviceSidebar {
             d.settings.performance.device_order.clear();
             d.settings.performance.device_overrides.clear();
         });
+    }
+
+    /// Writes a complete order of every present row after moving `key` before `before`, or to
+    /// the end of its device group. Cross-group moves are ignored.
+    fn move_device(&mut self, key: &DeviceKey, before: Option<&DeviceKey>, cx: &mut Context<Self>) {
+        let Some(moved) = self.rows.iter().find(|row| row.key == *key) else {
+            return;
+        };
+        if before == Some(key) {
+            return;
+        }
+        let kind = moved.kind;
+        if before.is_some_and(|before| {
+            !self
+                .rows
+                .iter()
+                .any(|row| row.key == *before && row.kind == kind)
+        }) {
+            return;
+        }
+
+        let mut order: Vec<DeviceKey> = self.rows.iter().map(|row| row.key.clone()).collect();
+        let Some(from) = order.iter().position(|candidate| candidate == key) else {
+            return;
+        };
+        let moved = order.remove(from);
+        let insert_at = match before {
+            Some(before) => order
+                .iter()
+                .position(|candidate| candidate == before)
+                .expect("validated present key"),
+            None => order
+                .iter()
+                .rposition(|candidate| candidate.kind() == kind)
+                .map_or(0, |at| at + 1),
+        };
+        order.insert(insert_at, moved);
+        let saved: Vec<String> = order.iter().map(|key| key.0.to_string()).collect();
+        if saved == TlSettings::settings(cx).performance.device_order {
+            return;
+        }
+        TlSettings::update(cx, |d| d.settings.performance.device_order = saved);
+    }
+
+    fn on_move_device(&mut self, action: &PerfMoveDevice, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_device(&action.key, action.before.as_ref(), cx);
+    }
+
+    fn on_move_focused_device(
+        &mut self,
+        action: &PerfMoveFocusedDevice,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.edit_mode || action.delta == 0 {
+            return;
+        }
+        let Some(key) = self.edit_focus_row.clone() else {
+            return;
+        };
+        let kind = key.kind();
+        let group: Vec<DeviceKey> = self
+            .rows
+            .iter()
+            .filter(|row| row.kind == kind)
+            .map(|row| row.key.clone())
+            .collect();
+        let Some(at) = group.iter().position(|candidate| *candidate == key) else {
+            return;
+        };
+        let before = if action.delta < 0 {
+            let Some(previous) = at.checked_sub(1) else {
+                return;
+            };
+            Some(group[previous].clone())
+        } else {
+            if at + 1 >= group.len() {
+                return;
+            }
+            group.get(at + 2).cloned()
+        };
+        self.move_device(&key, before.as_ref(), cx);
+    }
+
+    fn drag_over_row(
+        &mut self,
+        target: &DeviceKey,
+        group_index: usize,
+        event: &DragMoveEvent<DraggedCard>,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.bounds.contains(&event.event.position) {
+            return;
+        }
+        let dragged = event.drag(cx);
+        let group = dragged.key.kind();
+        let over = (target.kind() == group)
+            .then(|| group_index + usize::from(event.event.position.y >= event.bounds.center().y));
+        let next = DragState {
+            key: dragged.key.clone(),
+            group,
+            over,
+        };
+        if self.drag.as_ref() != Some(&next) {
+            self.drag = Some(next);
+            cx.notify();
+        }
+    }
+
+    fn drop_dragged_card(&mut self, dragged: &DraggedCard, cx: &mut Context<Self>) {
+        let state = self.drag.take();
+        let Some(DragState {
+            key,
+            group,
+            over: Some(over),
+        }) = state
+        else {
+            cx.notify();
+            return;
+        };
+        if key != dragged.key || key.kind() != group {
+            cx.notify();
+            return;
+        }
+        let group_keys: Vec<DeviceKey> = self
+            .rows
+            .iter()
+            .filter(|row| row.kind == group)
+            .map(|row| row.key.clone())
+            .collect();
+        let before = group_keys.get(over).cloned();
+        self.move_device(&key, before.as_ref(), cx);
+        cx.notify();
     }
 
     /// `PerfSetPageVisible` (PERF-002). Hiding the only visible page is refused with an Info
@@ -1354,6 +1535,9 @@ impl DeviceSidebar {
     }
 
     fn on_select(&mut self, a: &PerfSelectDevice, _: &mut Window, cx: &mut Context<Self>) {
+        if self.edit_mode {
+            self.edit_focus_row = Some(a.key.clone());
+        }
         self.select(a.key.clone(), cx);
     }
 
@@ -1514,10 +1698,22 @@ impl Render for DeviceSidebar {
                         );
                     }
                 } else {
-                    for card in members {
+                    let member_count = members.len();
+                    for (group_index, card) in members.into_iter().enumerate() {
                         let key = card.row.key.clone();
                         let menu_key = key.clone();
                         let checked = is_visible(&card.row, &self.settings.view());
+                        let dragging = self
+                            .drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.key == card.row.key);
+                        let indicator_before = self.drag.as_ref().is_some_and(|drag| {
+                            drag.group == card.row.kind && drag.over == Some(group_index)
+                        });
+                        let indicator_after = group_index + 1 == member_count
+                            && self.drag.as_ref().is_some_and(|drag| {
+                                drag.group == card.row.kind && drag.over == Some(member_count)
+                            });
                         let on_right = cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             this.open_card_menu(&menu_key, ev.position, window, cx);
@@ -1536,29 +1732,64 @@ impl Render for DeviceSidebar {
                                 cx,
                             );
                         });
-                        let row = div()
+                        let ghost_key = key.clone();
+                        let ghost_chart = card.chart.clone();
+                        let ghost_lines = card.lines.clone();
+                        let sidebar = cx.weak_entity();
+                        let handle = div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .w(px(24. * m.ui_scale))
+                            .cursor_grab()
+                            .tooltip(TlTooltip::text("Drag to reorder").build())
+                            .on_drag(
+                                DraggedCard { key: key.clone() },
+                                move |dragged, _, _, cx| {
+                                    let state = DragState {
+                                        key: dragged.key.clone(),
+                                        group: dragged.key.kind(),
+                                        over: None,
+                                    };
+                                    let _ = sidebar.update(cx, |this, cx| {
+                                        this.drag = Some(state);
+                                        cx.notify();
+                                    });
+                                    cx.new(|_| DragGhost {
+                                        key: ghost_key.clone(),
+                                        chart: ghost_chart.clone(),
+                                        lines: ghost_lines.clone(),
+                                        width: edit_card_w,
+                                    })
+                                },
+                            )
+                            .child(
+                                Icon::new(IconName::GripVertical)
+                                    .size(px(16. * m.ui_scale))
+                                    .text_color(theme.text_secondary),
+                            );
+                        let target_key = key.clone();
+                        let mut row = div()
                             .debug_selector({
                                 let key = key.clone();
                                 move || format!("perf-edit-row-{}", key.0)
                             })
+                            .relative()
                             .flex()
                             .items_center()
                             .gap(m.sp[4])
                             .w_full()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .justify_center()
-                                    .w(px(24. * m.ui_scale))
-                                    .cursor_grab()
-                                    .child(
-                                        Icon::new(IconName::GripVertical)
-                                            .size(px(16. * m.ui_scale))
-                                            .text_color(theme.text_secondary),
-                                    ),
-                            )
+                            .opacity(if dragging { 0.3 } else { 1.0 })
+                            .on_drag_move(cx.listener(
+                                move |this, event: &DragMoveEvent<DraggedCard>, _, cx| {
+                                    this.drag_over_row(&target_key, group_index, event, cx);
+                                },
+                            ))
+                            .on_drop(cx.listener(|this, dragged: &DraggedCard, _, cx| {
+                                this.drop_dragged_card(dragged, cx);
+                            }))
+                            .child(handle)
                             .child(
                                 div()
                                     .flex_none()
@@ -1570,11 +1801,25 @@ impl Render for DeviceSidebar {
                                         selected: self.selected.as_ref() == Some(&card.row.key),
                                         focused: self.focus.is_focused(window),
                                         edit_mode: true,
-                                        hidden_in_edit: !checked,
+                                        hidden_in_edit: !checked && !dragging,
                                         width: edit_card_w,
                                     }),
                             )
                             .child(div().flex_none().w(px(28. * m.ui_scale)).child(switch));
+                        if indicator_before || indicator_after {
+                            let line = div()
+                                .debug_selector(|| "perf-drop-indicator".into())
+                                .absolute()
+                                .left(-m.sp[4])
+                                .right(-m.sp[4])
+                                .h(px(3.))
+                                .bg(theme.accent);
+                            row = row.child(if indicator_before {
+                                line.top(px(-1.5))
+                            } else {
+                                line.bottom(px(-1.5))
+                            });
+                        }
                         let row: AnyElement = if animate_edit {
                             row.with_animation(
                                 ("perf-edit-row", edit_generation),
@@ -1727,6 +1972,8 @@ impl Render for DeviceSidebar {
             .on_action(cx.listener(Self::on_enable_all))
             .on_action(cx.listener(Self::on_disable_all))
             .on_action(cx.listener(Self::on_reset_pages))
+            .on_action(cx.listener(Self::on_move_device))
+            .on_action(cx.listener(Self::on_move_focused_device))
             .relative()
             .size_full()
             .bg(theme.window_bg)
