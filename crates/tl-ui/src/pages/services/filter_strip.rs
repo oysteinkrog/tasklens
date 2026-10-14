@@ -6,6 +6,7 @@ use gpui_kit::{
     AnyElement, App, InteractiveElement, IntoElement, ParentElement, Styled, Window, div, px,
 };
 use smallvec::SmallVec;
+use tl_model::client::EngineClient;
 use tl_model::settings::ServicesSettings;
 use tl_model::table::{ServiceFilter, ServiceStateFilter, UnitType};
 
@@ -16,7 +17,10 @@ use super::actions::{
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::TlMenu;
+use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{tr, tr_args};
+use crate::pages::sys_table::SysQuery;
+use crate::settings_global::TlSettings;
 use crate::theme::{current, metrics};
 
 gpui_kit::gpui::actions!(tasklens, [ServicesOpenUnitTypes]);
@@ -77,7 +81,10 @@ impl ServiceFilterState {
 
     pub fn is_default(&self) -> bool {
         self.states.is_empty()
-            && self.unit_types.as_slice() == DEFAULT_UNIT_TYPES.as_slice()
+            && self.unit_types.len() == DEFAULT_UNIT_TYPES.len()
+            && DEFAULT_UNIT_TYPES
+                .iter()
+                .all(|kind| self.unit_types.contains(kind))
             && self.system
             && self.user
     }
@@ -264,20 +271,110 @@ pub fn unit_types_menu(
     _window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
+    let last_checked = state.unit_types.len() == 1;
     for kind in ALL_UNIT_TYPES {
         let checked = state.unit_types.contains(&kind);
-        menu = menu
-            .check_item(
-                tr(cx, unit_type_label(&kind)),
-                checked,
-                Box::new(ServicesToggleUnitType { kind }),
-            )
-            .keep_open();
+        menu = menu.check_item(
+            tr(cx, unit_type_label(&kind)),
+            checked,
+            Box::new(ServicesToggleUnitType { kind }),
+        );
+        // The menu flips a kept-open mark by itself. The last checked type is refused, so its
+        // mark must not flip: that row closes the menu and keeps the mark instead.
+        if !(checked && last_checked) {
+            menu = menu.keep_open();
+        }
     }
     menu.separator().item(
         tr(cx, "services-sys012-reset-to-default"),
         Box::new(ServicesResetUnitTypes),
     )
+}
+
+/// Sends the strip's filter at once, with no debounce.
+fn send_filter(state: &ServiceFilterState, query: &mut SysQuery, client: &dyn EngineClient) {
+    query.set_services_filter(state.to_filter(), client);
+}
+
+/// Writes states and unit types to `settings.toml`. System and User are never persisted.
+fn persist(state: &ServiceFilterState, cx: &mut App) {
+    let filter = state.to_filter();
+    TlSettings::update(cx, |data| {
+        data.settings.services.filter_states = filter.states.into_vec();
+        data.settings.services.unit_types = filter.unit_types.into_vec();
+    });
+}
+
+/// Handler for `ServicesToggleStateFilter`: send the query, then persist.
+pub fn apply_toggle_state(
+    state: &mut ServiceFilterState,
+    arg: StateFilterArg,
+    query: &mut SysQuery,
+    client: &dyn EngineClient,
+    cx: &mut App,
+) {
+    state.toggle_state(arg);
+    send_filter(state, query, client);
+    persist(state, cx);
+}
+
+/// Handler for `ServicesToggleManagerFilter`: send the query. Nothing is persisted.
+pub fn apply_toggle_manager(
+    state: &mut ServiceFilterState,
+    manager: ManagerArg,
+    query: &mut SysQuery,
+    client: &dyn EngineClient,
+) {
+    state.toggle_manager(manager);
+    send_filter(state, query, client);
+}
+
+/// Handler for `ServicesToggleUnitType`. Refusing the last checked type sends nothing, writes
+/// nothing and shows the Warning toast. Returns whether the toggle was applied.
+pub fn apply_toggle_unit_type(
+    state: &mut ServiceFilterState,
+    kind: UnitTypeArg,
+    query: &mut SysQuery,
+    client: &dyn EngineClient,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if !state.toggle_unit_type(kind) {
+        let text = tr(cx, "services-sys012-at-least-one-unit-type");
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |queue, cx| {
+                queue.push(ToastKind::Warning, text, None, None, cx);
+            });
+        }
+        return false;
+    }
+    send_filter(state, query, client);
+    persist(state, cx);
+    true
+}
+
+/// Handler for `ServicesResetUnitTypes`.
+pub fn apply_reset_unit_types(
+    state: &mut ServiceFilterState,
+    query: &mut SysQuery,
+    client: &dyn EngineClient,
+    cx: &mut App,
+) {
+    state.reset_unit_types();
+    send_filter(state, query, client);
+    persist(state, cx);
+}
+
+/// Handler for `ServicesRemoveFilters`. The text filter lives in `query` and is kept.
+pub fn apply_remove_filters(
+    state: &mut ServiceFilterState,
+    query: &mut SysQuery,
+    client: &dyn EngineClient,
+    cx: &mut App,
+) {
+    state.remove_filters();
+    send_filter(state, query, client);
+    persist(state, cx);
 }
 
 fn toggle_member<T: PartialEq>(items: &mut SmallVec<[T; 4]>, item: T) {

@@ -9,8 +9,9 @@ use std::sync::Arc;
 use gpui_kit::base::Root;
 use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
-    Action, AppContext as _, Context, Entity, IntoElement, KeyContext, Render, TestAppContext,
-    VisualTestContext, Window, div,
+    Action, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyContext, ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+    div, point, px,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::Command;
@@ -24,11 +25,16 @@ use tl_model::table::{
 };
 use tl_model::time::BootId;
 use tl_ui::app::{BootSettings, EngineGlobal};
+use tl_ui::components::menu::{self, TlMenu};
+use tl_ui::components::toast::{self, ToastQueue};
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
 use tl_ui::hub::SnapshotHub;
 use tl_ui::pages::services::actions::*;
 use tl_ui::pages::services::delegate::{ServicesDelegate, services_columns};
-use tl_ui::pages::services::filter_strip::{ServiceFilterState, render_strip, unit_types_menu};
+use tl_ui::pages::services::filter_strip::{
+    ServiceFilterState, apply_remove_filters, apply_reset_unit_types, apply_toggle_manager,
+    apply_toggle_state, apply_toggle_unit_type, render_strip, unit_types_menu,
+};
 use tl_ui::pages::sys_table::{SysDelegate, SysQuery};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::columns::ColumnLayout;
@@ -412,28 +418,29 @@ fn strip_state_or_text_and() {
 }
 
 #[test]
-fn remove_filters_restores_defaults() {
+fn is_default_ignores_type_order() {
     let mut strip = ServiceFilterState::default();
-    strip.toggle_state(StateFilterArg::Failed);
-    strip.toggle_unit_type(UnitTypeArg::Automount);
-    strip.toggle_manager(ManagerArg::System);
-    strip.toggle_manager(ManagerArg::User);
-    let text_filter = "ssh";
-
-    strip.remove_filters();
-
-    assert!(strip.is_default());
-    assert_eq!(
-        text_filter, "ssh",
-        "strip reset does not own the text filter"
-    );
+    strip.toggle_unit_type(UnitTypeArg::Service);
+    assert!(!strip.is_default());
+    strip.toggle_unit_type(UnitTypeArg::Service);
+    assert_eq!(strip.unit_types.last(), Some(&UnitTypeArg::Service));
+    assert!(strip.is_default(), "the default four in any order");
 }
 
-#[gpui_kit::test]
-fn strip_persists_states_and_types(cx: &mut TestAppContext) {
-    let persists = Rc::new(RefCell::new(Vec::new()));
-    let saved = Rc::clone(&persists);
+fn boot_settings(cx: &mut TestAppContext, saved: &Rc<RefCell<Vec<ServicesSettings>>>) {
+    let saved = Rc::clone(saved);
     cx.update(|cx| {
+        gpui_kit::init(cx);
+        toast::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        tl_ui::i18n::init_strings(cx, "en-US");
+        menu::bind_keys(cx);
+        cx.set_reduce_motion(true);
         cx.set_global(BootSettings {
             settings: Default::default(),
             state: Default::default(),
@@ -443,76 +450,278 @@ fn strip_persists_states_and_types(cx: &mut TestAppContext) {
             startup_toasts: Vec::new(),
         });
         TlSettings::init(cx);
+    });
+}
 
-        let mut strip = ServiceFilterState::default();
-        strip.toggle_state(StateFilterArg::Failed);
-        strip.toggle_unit_type(UnitTypeArg::Automount);
-        TlSettings::update(cx, |data| {
-            data.settings.services.filter_states = strip.to_filter().states.into_vec();
-            data.settings.services.unit_types = strip.to_filter().unit_types.into_vec();
-        });
-        strip.toggle_manager(ManagerArg::User);
+fn services_query(strip: &ServiceFilterState) -> SysQuery {
+    let sort = tl_model::table::SysSortSpec {
+        column: service_id(ServiceColumn::Name),
+        ascending: true,
+    };
+    SysQuery::new(SysTable::Services, sort, Some(strip.to_filter()))
+}
+
+fn sent_queries(engine: &FakeEngine) -> Vec<tl_model::table::SysTableQuery> {
+    engine
+        .commands()
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetSysTableQuery(query) => Some(query),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui_kit::test]
+fn remove_filters_restores_defaults(cx: &mut TestAppContext) {
+    let saved = Rc::default();
+    boot_settings(cx, &saved);
+    let engine = FakeEngine::new();
+    let mut strip = ServiceFilterState::default();
+    let mut query = services_query(&strip);
+    query.set_filter("ssh", engine.as_ref());
+    cx.update(|cx| {
+        apply_toggle_state(
+            &mut strip,
+            StateFilterArg::Failed,
+            &mut query,
+            engine.as_ref(),
+            cx,
+        );
+        apply_toggle_manager(&mut strip, ManagerArg::System, &mut query, engine.as_ref());
+        apply_toggle_manager(&mut strip, ManagerArg::User, &mut query, engine.as_ref());
+        assert!(!strip.is_default());
+
+        apply_remove_filters(&mut strip, &mut query, engine.as_ref(), cx);
     });
 
-    let writes = persists.borrow();
-    assert_eq!(writes.len(), 1, "manager state is session-only");
-    assert_eq!(writes[0].filter_states, [ServiceStateFilter::Failed]);
+    assert!(strip.is_default());
+    let last = sent_queries(&engine).pop().expect("a query was sent");
+    assert_eq!(last.filter.as_ref(), "ssh", "the text filter survives");
     assert_eq!(
-        writes[0].unit_types,
+        last.services,
+        Some(ServiceFilterState::default().to_filter())
+    );
+    assert_eq!(query.query().filter.as_ref(), "ssh");
+}
+
+#[gpui_kit::test]
+fn strip_persists_states_and_types(cx: &mut TestAppContext) {
+    let saved = Rc::default();
+    boot_settings(cx, &saved);
+    let engine = FakeEngine::new();
+    let mut strip = ServiceFilterState::default();
+    let mut query = services_query(&strip);
+
+    cx.update(|cx| {
+        apply_toggle_state(
+            &mut strip,
+            StateFilterArg::Failed,
+            &mut query,
+            engine.as_ref(),
+            cx,
+        );
+    });
+    {
+        let writes = saved.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].filter_states, [ServiceStateFilter::Failed]);
+    }
+
+    apply_toggle_manager(&mut strip, ManagerArg::User, &mut query, engine.as_ref());
+    assert_eq!(saved.borrow().len(), 1, "manager state is session-only");
+    assert!(!strip.user);
+    assert_eq!(sent_queries(&engine).len(), 2, "each toggle sends a query");
+
+    cx.update(|cx| {
+        apply_reset_unit_types(&mut strip, &mut query, engine.as_ref(), cx);
+    });
+    let writes = saved.borrow();
+    let last = writes.last().expect("reset writes types");
+    assert_eq!(
+        last.unit_types,
         [
             UnitType::Service,
             UnitType::Socket,
             UnitType::Timer,
-            UnitType::Mount,
-            UnitType::Automount,
+            UnitType::Mount
         ]
     );
 }
 
-#[test]
-fn unit_types_last_item_refused() {
-    let settings = ServicesSettings {
+/// A window with the page's action handlers for the unit type menu and a toast queue.
+struct MenuHost {
+    focus: FocusHandle,
+    strip: Rc<RefCell<ServiceFilterState>>,
+    query: Rc<RefCell<SysQuery>>,
+    engine: Arc<FakeEngine>,
+}
+
+impl Render for MenuHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let strip = Rc::clone(&self.strip);
+        let query = Rc::clone(&self.query);
+        let engine = Arc::clone(&self.engine);
+        div()
+            .size(px(800.))
+            .key_context("ServicesHost")
+            .track_focus(&self.focus)
+            .on_action(move |action: &ServicesToggleUnitType, window, cx| {
+                apply_toggle_unit_type(
+                    &mut strip.borrow_mut(),
+                    action.kind.clone(),
+                    &mut query.borrow_mut(),
+                    engine.as_ref(),
+                    window,
+                    cx,
+                );
+            })
+            .children(menu::context_menu_layer(window, cx))
+    }
+}
+
+struct MenuRig {
+    cx: VisualTestContext,
+    host: Entity<MenuHost>,
+    menu: Entity<menu::TlMenuPopup>,
+    engine: Arc<FakeEngine>,
+    queue: Entity<ToastQueue>,
+    saved: Rc<RefCell<Vec<ServicesSettings>>>,
+}
+
+fn open_menu_rig(cx: &mut TestAppContext, settings: ServicesSettings) -> MenuRig {
+    let saved = Rc::default();
+    boot_settings(cx, &saved);
+    let engine = FakeEngine::new();
+    let strip = ServiceFilterState::from_settings(&settings);
+    let query = Rc::new(RefCell::new(services_query(&strip)));
+    let strip = Rc::new(RefCell::new(strip));
+    let slot = Rc::new(RefCell::new(None));
+    let keep = Rc::clone(&slot);
+    let (host_strip, host_query, host_engine) =
+        (Rc::clone(&strip), Rc::clone(&query), Arc::clone(&engine));
+    let handle = cx.add_window(move |window, cx| {
+        let host = cx.new(|cx| MenuHost {
+            focus: cx.focus_handle(),
+            strip: host_strip,
+            query: host_query,
+            engine: host_engine,
+        });
+        *keep.borrow_mut() = Some(host.clone());
+        Root::new(host, window, cx)
+    });
+    let host = slot.borrow().clone().expect("host");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    let queue = vcx.update(|window, cx| {
+        let top = tl_ui::theme::metrics(cx).sp[4];
+        cx.new(|cx| ToastQueue::new(window, cx, top))
+    });
+    let menu = vcx.update(|window, cx| {
+        let focus = host.read(cx).focus.clone();
+        window.focus(&focus, cx);
+        let state = strip.borrow().clone();
+        let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
+            unit_types_menu(&state, menu, window, cx)
+        });
+        menu::open_context_menu_at(point(px(100.), px(100.)), window, cx, menu.clone());
+        menu
+    });
+    vcx.run_until_parked();
+    MenuRig {
+        cx: vcx,
+        host,
+        menu,
+        engine,
+        queue,
+        saved,
+    }
+}
+
+impl MenuRig {
+    fn entries(&mut self) -> Vec<menu::MenuEntryInfo> {
+        let menu = self.menu.clone();
+        self.cx
+            .update(|window, cx| menu.read(cx).entries_for_test(window))
+    }
+
+    fn menu_open(&mut self) -> bool {
+        self.cx
+            .update(|window, cx| menu::context_menu_open(window, cx))
+    }
+
+    fn strip(&mut self) -> ServiceFilterState {
+        self.host
+            .read_with(&self.cx, |host, _| host.strip.borrow().clone())
+    }
+}
+
+#[gpui_kit::test]
+fn unit_types_last_item_refused(cx: &mut TestAppContext) {
+    let only_services = ServicesSettings {
         unit_types: vec![UnitType::Service],
         ..ServicesSettings::default()
     };
-    let mut strip = ServiceFilterState::from_settings(&settings);
+    let mut rig = open_menu_rig(cx, only_services);
+    let entries = rig.entries();
+    assert!(entries[0].checked);
+    assert!(
+        !entries[0].keep_open,
+        "the last checked row must not flip its mark"
+    );
 
-    assert!(!strip.toggle_unit_type(UnitTypeArg::Service));
-    assert_eq!(strip.unit_types.as_slice(), [UnitTypeArg::Service]);
+    rig.cx.simulate_keystrokes("down enter");
+    rig.cx.run_until_parked();
+
+    assert_eq!(
+        rig.strip().unit_types.as_slice(),
+        [UnitTypeArg::Service],
+        "state is unchanged"
+    );
+    assert!(sent_queries(&rig.engine).is_empty(), "no query is sent");
+    assert!(rig.saved.borrow().is_empty(), "nothing is saved");
+    let toasts = rig
+        .queue
+        .read_with(&rig.cx, |queue, _| queue.visible_texts());
+    assert_eq!(toasts.len(), 1);
+    assert_eq!(
+        toasts[0].as_ref(),
+        "At least one unit type must stay selected"
+    );
 }
 
 #[gpui_kit::test]
 fn unit_types_menu_stays_open_on_toggle(cx: &mut TestAppContext) {
-    let slot = Rc::new(RefCell::new(None));
-    let keep = Rc::clone(&slot);
-    cx.update(|cx| {
-        gpui_kit::init(cx);
-        tl_ui::theme::store::init(
-            cx,
-            &ThemeSettings::default(),
-            &AppearanceSettings::default(),
-            Vec::new(),
-        );
-        tl_ui::i18n::init_strings(cx, "en-US");
-    });
-    let handle = cx.add_window(move |window, cx| {
-        let focus = cx.focus_handle();
-        let state = ServiceFilterState::default();
-        let menu =
-            tl_ui::components::menu::TlMenu::build(window, cx, focus, move |menu, window, cx| {
-                unit_types_menu(&state, menu, window, cx)
-            });
-        *keep.borrow_mut() = Some(menu);
-        Root::new(cx.new(|_| Host), window, cx)
-    });
-    let menu = slot.borrow().clone().expect("unit types menu");
-    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-    vcx.update(|window, cx| {
-        let entries = menu.read(cx).entries_for_test(window);
-        assert_eq!(entries.len(), 12);
-        assert!(entries[..10].iter().all(|entry| entry.keep_open));
-        assert_eq!(entries[2].label.as_deref(), Some("Timers"));
-    });
+    let mut rig = open_menu_rig(cx, ServicesSettings::default());
+    let entries = rig.entries();
+    assert_eq!(entries.len(), 12);
+    assert!(entries[..10].iter().all(|entry| entry.keep_open));
+    assert_eq!(entries[2].label.as_deref(), Some("Timers"));
+    assert!(entries[2].checked);
+
+    rig.cx.simulate_keystrokes("down down down enter");
+    rig.cx.run_until_parked();
+
+    assert!(rig.menu_open(), "the menu stays open");
+    let entries = rig.entries();
+    assert!(!entries[2].checked, "Timers toggled off");
+    assert!(entries[0].checked && entries[1].checked);
+    assert!(!rig.strip().unit_types.contains(&UnitTypeArg::Timer));
+    let queries = sent_queries(&rig.engine);
+    assert_eq!(queries.len(), 1);
+    assert!(
+        !queries[0]
+            .services
+            .as_ref()
+            .expect("services filter")
+            .unit_types
+            .contains(&UnitType::Timer)
+    );
+    let saved = rig.saved.borrow();
+    assert_eq!(
+        saved.last().expect("saved types").unit_types,
+        [UnitType::Service, UnitType::Socket, UnitType::Mount]
+    );
 }
 
 struct FilterStripHost {
