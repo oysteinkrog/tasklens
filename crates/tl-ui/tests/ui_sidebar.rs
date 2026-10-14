@@ -8,7 +8,7 @@ use std::sync::Arc;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render, Styled as _,
-    TestAppContext, VisualTestContext, Window, div, px,
+    TestAppContext, VisualTestContext, Window, div, point, px,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
@@ -1667,6 +1667,86 @@ mod sidebar {
         assert!(
             saved_order(&mut r).is_empty(),
             "cross-group drop is ignored"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn drag_cross_group_and_outside_release(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            UiState::default(),
+        );
+        r.vcx.update(|_, cx| cx.set_reduce_motion(true));
+        enter_edit(&mut r);
+        draw(r.vcx);
+        let before = keys(&mut r);
+        let row = |r: &mut Rig, name: &str| {
+            let id: &'static str = Box::leak(format!("perf-edit-row-{name}").into_boxed_str());
+            r.vcx.debug_bounds(id).expect("row")
+        };
+        let sdc = row(&mut r, "disk:sdc");
+        let sda = row(&mut r, "disk:sda");
+        let handle = point(sdc.left() + px(12.), sdc.center().y);
+        r.vcx
+            .simulate_mouse_down(handle, MouseButton::Left, Modifiers::none());
+        r.vcx.simulate_mouse_move(
+            point(handle.x + px(8.), handle.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        r.vcx.simulate_mouse_move(
+            point(sda.center().x, sda.top() + px(2.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        r.vcx.simulate_mouse_move(
+            point(sda.center().x, sda.top() + px(3.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        assert!(
+            r.vcx.debug_bounds("perf-drop-indicator").is_some(),
+            "indicator over a disk row"
+        );
+
+        let eth = row(&mut r, "net:eth0");
+        r.vcx
+            .simulate_mouse_move(eth.center(), MouseButton::Left, Modifiers::none());
+        draw(r.vcx);
+        assert!(
+            r.vcx.debug_bounds("perf-drop-indicator").is_none(),
+            "no indicator over another group"
+        );
+
+        let empty = r.vcx.debug_bounds("perf-edit-empty-3").expect("fans hint");
+        r.vcx.simulate_mouse_move(
+            point(empty.left() + px(2.), empty.center().y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        assert!(
+            r.vcx.debug_bounds("perf-drop-indicator").is_none(),
+            "no indicator over the empty hint"
+        );
+        r.vcx.simulate_mouse_up(
+            point(empty.left() + px(2.), empty.center().y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds("perf-drop-indicator").is_none());
+        assert_eq!(keys(&mut r), before);
+        assert!(saved_order(&mut r).is_empty(), "nothing saved");
+        let sidebar = r.sidebar.clone();
+        assert!(
+            r.vcx.update(|_, cx| !sidebar.read(cx).dragging_for_test()),
+            "drag state cleared after the release"
         );
     }
 

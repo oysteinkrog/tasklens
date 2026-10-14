@@ -678,6 +678,16 @@ impl DeviceSidebar {
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
+    pub fn dragging_for_test(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn drag_over_for_test(&self) -> Option<Option<usize>> {
+        self.drag.as_ref().map(|drag| drag.over)
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn edit_rows_for_test(&self) -> Vec<(DeviceKey, DeviceKind, bool)> {
         self.edit_cards
             .iter()
@@ -1394,6 +1404,30 @@ impl DeviceSidebar {
         }
     }
 
+    /// The pointer is over a group header or an empty-group hint: no drop target.
+    fn drag_over_none(&mut self, event: &DragMoveEvent<DraggedCard>, cx: &mut Context<Self>) {
+        if !event.bounds.contains(&event.event.position) {
+            return;
+        }
+        let key = event.drag(cx).key.clone();
+        let next = DragState {
+            group: key.kind(),
+            key,
+            over: None,
+        };
+        if self.drag.as_ref() != Some(&next) {
+            self.drag = Some(next);
+            cx.notify();
+        }
+    }
+
+    /// A release anywhere outside a card ends the drag without moving anything.
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn drop_dragged_card(&mut self, dragged: &DraggedCard, cx: &mut Context<Self>) {
         let state = self.drag.take();
         let Some(DragState {
@@ -1683,6 +1717,11 @@ impl Render for DeviceSidebar {
                     .text_size(m.text.xs)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_secondary)
+                    .on_drag_move(
+                        cx.listener(|this, event: &DragMoveEvent<DraggedCard>, _, cx| {
+                            this.drag_over_none(event, cx);
+                        }),
+                    )
                     .child(self.edit_words.groups[group].to_uppercase());
                 // gpui-pre 0.3.7 does not expose letter spacing on div text.
                 let mut section = v_flex().w_full().gap(m.sp[4]).child(label);
@@ -1694,6 +1733,11 @@ impl Render for DeviceSidebar {
                                 .pl(m.sp[4])
                                 .text_size(m.text.sm)
                                 .text_color(theme.text_secondary)
+                                .on_drag_move(cx.listener(
+                                    |this, event: &DragMoveEvent<DraggedCard>, _, cx| {
+                                        this.drag_over_none(event, cx);
+                                    },
+                                ))
                                 .child(self.edit_words.empty[empty_index].clone()),
                         );
                     }
@@ -1934,6 +1978,11 @@ impl Render for DeviceSidebar {
                         .p(m.sp[4])
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
+                        .on_drop(cx.listener(|this, _: &DraggedCard, _, cx| this.end_drag(cx)))
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| this.end_drag(cx)),
+                        )
                         .children(edit_groups),
                 )
                 .into_any_element()
