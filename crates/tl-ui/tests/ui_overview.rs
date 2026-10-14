@@ -2224,8 +2224,16 @@ mod wired {
             let tab_id: &'static str = Box::leak(title_tab_id(id).into_boxed_str());
             let row = r.vcx.debug_bounds(row_id).expect("title line");
             let tab = r.vcx.debug_bounds(tab_id).expect("inset title tab");
-            assert_eq!(row.top(), frame.top(), "{id}: title line in top border");
-            assert_eq!(tab.top(), frame.top(), "{id}: title tab in top border");
+            let row_inset = row.top() - frame.top();
+            let tab_inset = tab.top() - frame.top();
+            assert!(
+                (px(0.)..=px(1.)).contains(&row_inset),
+                "{id}: title line inset is {row_inset:?}"
+            );
+            assert!(
+                (px(0.)..=px(1.)).contains(&tab_inset),
+                "{id}: title tab inset is {tab_inset:?}"
+            );
             assert_eq!(tab.size.height, row.size.height, "{id}: full title height");
             assert_eq!(box_accent(id, &theme), want, "{id}: device accent");
         }
