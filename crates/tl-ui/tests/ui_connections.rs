@@ -114,8 +114,9 @@ fn connection(cookie: u64, owners: SmallVec<[ProcessKey; 1]>) -> ConnRecord {
 fn delegate(
     cx: &mut TestAppContext,
     records: Vec<ConnRecord>,
-    processes: Vec<ProcessRecord>,
+    mut processes: Vec<ProcessRecord>,
 ) -> ConnectionsDelegate {
+    processes.sort_unstable_by_key(|process| process.key);
     cx.update(|cx| {
         setup(cx);
         let mut delegate = ConnectionsDelegate::new(cx);
