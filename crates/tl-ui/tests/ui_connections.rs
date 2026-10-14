@@ -459,3 +459,502 @@ fn conn_row_ids_stable_by_cookie(cx: &mut TestAppContext) {
     assert_eq!(delegate.row_index(11), Some(1));
     assert_eq!(delegate.row_index(22), Some(0));
 }
+
+/// The ConnectionsPage entity (tasklens-9o0.15, UI-SYS-060 and UI-SYS-067).
+#[cfg(feature = "test-hooks")]
+mod page {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use super::*;
+    use gpui_kit::{
+        AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
+        StyleRefinement, Styled as _, VisualTestContext, Window, WindowBounds, WindowOptions, div,
+        point, size,
+    };
+    use tl_model::actions::ActionEvent;
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, CommandError, Tab};
+    use tl_model::demand::Demand;
+    use tl_model::health::SourceId;
+    use tl_model::journal::{JournalHandle, JournalQuery};
+    use tl_model::settings::{EngineSettings, Settings, UiState};
+    use tl_model::snapshot::{ConnCounts, Snapshot};
+    use tl_model::table::SysTable;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::toast::ToastQueue;
+    use tl_ui::demand::{DEMAND_COALESCE, GlobalDemand};
+    use tl_ui::hub::GlobalHub;
+    use tl_ui::pages::connections::actions::bind_keys_connections;
+    use tl_ui::pages::connections::{ConnectionsPage, REFRESH_TOAST_AFTER};
+    use tl_ui::pages::sys_table::SysBody;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
+
+    struct Host {
+        page: Entity<ConnectionsPage>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.page
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        page: Entity<ConnectionsPage>,
+        queue: Entity<ToastQueue>,
+        vcx: VisualTestContext,
+        version: u64,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        rig_with_client(cx, engine.clone(), engine)
+    }
+
+    fn rig_with_client(
+        cx: &mut TestAppContext,
+        engine: Arc<FakeEngine>,
+        client: Arc<dyn EngineClient>,
+    ) -> Rig {
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client.clone(), init);
+            bind_keys_connections(cx);
+            cx.set_reduce_motion(true);
+        });
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(1280.), px(800.)),
+            })),
+            ..WindowOptions::default()
+        };
+        let page_slot = Rc::new(RefCell::new(None));
+        let handle = cx
+            .update(|cx| {
+                let page_slot = Rc::clone(&page_slot);
+                cx.open_window(options, move |window, cx| {
+                    let hub = cx.global::<GlobalHub>().0.clone();
+                    let demand = cx.global::<GlobalDemand>().0.clone();
+                    let page = cx.new(|cx| ConnectionsPage::new(&hub, &demand, client, window, cx));
+                    *page_slot.borrow_mut() = Some(page.clone());
+                    cx.new(|_| Host { page })
+                })
+            })
+            .expect("the window opens");
+        let page = page_slot.borrow_mut().take().expect("the page opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.))));
+        let mut rig = Rig {
+            engine,
+            page,
+            queue,
+            vcx,
+            version: 0,
+        };
+        rig.draw();
+        rig
+    }
+
+    /// Publishes connection data only after the page sends a complete visible-surface demand.
+    /// This matches the real worker's start condition from the leader decision.
+    struct DemandDrivenEngine {
+        inner: Arc<FakeEngine>,
+    }
+
+    impl EngineClient for DemandDrivenEngine {
+        fn latest(&self) -> Arc<Snapshot> {
+            self.inner.latest()
+        }
+
+        fn wake(&self) -> async_channel::Receiver<()> {
+            self.inner.wake()
+        }
+
+        fn action_events(&self) -> async_channel::Receiver<ActionEvent> {
+            self.inner.action_events()
+        }
+
+        fn set_demand(&self, demand: Demand) {
+            self.inner.set_demand(demand.clone());
+            if !demand.any_surface_visible || !demand.connections {
+                return;
+            }
+            let generation = self
+                .inner
+                .commands()
+                .into_iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::SetSysTableQuery(query) if query.table == SysTable::Connections => {
+                        Some(query.generation)
+                    }
+                    _ => None,
+                })
+                .expect("connections query precedes demand flush");
+            let record = super::connection(7, SmallVec::new());
+            self.inner.publish_with(|snapshot| {
+                snapshot.connections = Arc::new(ConnectionsSnapshot {
+                    header: ComponentHeader {
+                        version: 1,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    rows: vec![row(7, 0)].into(),
+                    query_generation: generation,
+                    records: vec![record].into(),
+                    counts: ConnCounts {
+                        total: 1,
+                        tcp: 1,
+                        established: 1,
+                        ..ConnCounts::default()
+                    },
+                    ..ConnectionsSnapshot::default()
+                });
+            });
+        }
+
+        fn set_settings(&self, settings: EngineSettings) {
+            self.inner.set_settings(settings);
+        }
+
+        fn send(&self, command: Command) -> Result<(), CommandError> {
+            self.inner.send(command)
+        }
+
+        fn journal(&self, query: JournalQuery) -> JournalHandle {
+            self.inner.journal(query)
+        }
+    }
+
+    fn row(cookie: u64, record: usize) -> SysRow {
+        SysRow {
+            node: SysNodeId::Conn(cookie),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(record as u32),
+        }
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+            self.vcx.run_until_parked();
+        }
+
+        fn set_active(&mut self, active: bool) {
+            self.page
+                .update(&mut self.vcx, |page, cx| page.set_active(active, cx));
+            self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+            self.vcx.run_until_parked();
+        }
+
+        fn generation(&self) -> u64 {
+            self.engine
+                .commands()
+                .into_iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::SetSysTableQuery(query) => Some(query.generation),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        }
+
+        fn publish(&mut self, cookies: &[u64], counts: ConnCounts) {
+            self.version += 1;
+            let generation = self.generation();
+            let records = cookies
+                .iter()
+                .map(|cookie| super::connection(*cookie, SmallVec::new()))
+                .collect::<Vec<_>>();
+            let rows = cookies
+                .iter()
+                .enumerate()
+                .map(|(index, cookie)| row(*cookie, index))
+                .collect::<Vec<_>>();
+            let version = self.version;
+            self.engine.publish_with(|snapshot| {
+                snapshot.connections = Arc::new(ConnectionsSnapshot {
+                    header: ComponentHeader {
+                        version,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    rows: rows.into(),
+                    query_generation: generation,
+                    records: records.into(),
+                    counts,
+                    ..ConnectionsSnapshot::default()
+                });
+            });
+            self.vcx.run_until_parked();
+            self.draw();
+        }
+
+        fn status(&mut self) -> String {
+            self.vcx.update(|_, cx| {
+                let mut out = String::new();
+                self.page.read(cx).status_text(&mut out);
+                out
+            })
+        }
+
+        fn table(&self) -> Entity<tl_ui::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
+            self.vcx
+                .read_entity(&self.page, |page, _| page.table().clone())
+        }
+
+        fn set_paused(&mut self, paused: bool) {
+            self.vcx.update(|_, cx| {
+                let events = cx.global::<GlobalShellEvents>().0.clone();
+                events.update(cx, |_, cx| cx.emit(PauseChanged(paused)));
+            });
+            self.vcx.run_until_parked();
+        }
+
+        fn refresh_toasts(&mut self) -> usize {
+            self.vcx.update(|_, cx| {
+                self.queue
+                    .read(cx)
+                    .visible_texts()
+                    .iter()
+                    .filter(|text| text.as_ref() == "Connections refreshed.")
+                    .count()
+            })
+        }
+    }
+
+    #[gpui_kit::test]
+    fn connections_status_text(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        rig.publish(
+            &[1, 2, 3],
+            ConnCounts {
+                total: 214,
+                tcp: 168,
+                udp: 46,
+                established: 97,
+                listening: 31,
+            },
+        );
+        assert_eq!(
+            rig.status(),
+            "214 Total | 168 TCP | 46 UDP | 97 EST | 31 LISTEN"
+        );
+        let table = rig.table();
+        table.update(&mut rig.vcx, |table, cx| {
+            table.selection.click(1);
+            table.selection.ctrl_click(2);
+            table.selection.ctrl_click(3);
+            cx.notify();
+        });
+        rig.vcx.run_until_parked();
+        assert!(rig.status().ends_with(" | 3 selected"));
+
+        rig.publish(
+            &[1, 2, 3],
+            ConnCounts {
+                total: 12_345,
+                tcp: 10_001,
+                udp: 2_344,
+                established: 9_999,
+                listening: 31,
+            },
+        );
+        assert!(
+            rig.status()
+                .starts_with("12\u{2009}345 Total | 10\u{2009}001 TCP")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn connections_demand_and_first_visit_refresh(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        assert!(
+            rig.engine
+                .demands()
+                .last()
+                .is_some_and(|d| d.any_surface_visible && d.connections)
+        );
+        rig.set_active(false);
+        assert_eq!(rig.engine.demands().last(), Some(&Demand::default()));
+        rig.set_active(true);
+        let refreshes = rig
+            .engine
+            .commands()
+            .iter()
+            .filter(|command| matches!(command, Command::RefreshNow(SourceId::Connections)))
+            .count();
+        assert_eq!(refreshes, 1);
+    }
+
+    #[gpui_kit::test]
+    fn connections_data_arrives_from_demand_driven_engine(cx: &mut TestAppContext) {
+        let inner = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = Arc::new(DemandDrivenEngine {
+            inner: Arc::clone(&inner),
+        });
+        let mut rig = rig_with_client(cx, inner, client);
+        assert_eq!(
+            rig.vcx.read_entity(&rig.page, |page, _| page.body()),
+            SysBody::Skeleton
+        );
+        rig.set_active(true);
+        rig.draw();
+        assert_eq!(
+            rig.vcx.read_entity(&rig.page, |page, _| page.body()),
+            SysBody::Rows
+        );
+        assert_eq!(rig.status(), "1 Total | 1 TCP | 0 UDP | 1 EST | 0 LISTEN");
+    }
+
+    #[gpui_kit::test]
+    fn connections_selection_stable_across_refresh(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        let cookies = (1..=50).collect::<Vec<_>>();
+        rig.publish(&cookies, ConnCounts::default());
+        let table = rig.table();
+        table.update(&mut rig.vcx, |table, cx| {
+            assert!(table.jump_to(30, cx));
+        });
+        rig.draw();
+        let before = rig
+            .vcx
+            .read_entity(&table, |table, _| table.first_visible_row().unwrap());
+
+        let mut reordered = cookies.clone();
+        reordered.swap(9, 10);
+        reordered.swap(29, 30);
+        rig.publish(&reordered, ConnCounts::default());
+        let (selected, after, visible, selected_index) = rig.vcx.read_entity(&table, |table, _| {
+            (
+                table.selection.contains(&30),
+                table.first_visible_row().unwrap(),
+                table.visible_range(),
+                table.delegate.row_index(30).unwrap(),
+            )
+        });
+        assert!(selected);
+        assert_eq!(after.0, before.0, "scroll anchor keeps the same cookie");
+        assert!(visible.contains(&selected_index));
+    }
+
+    #[gpui_kit::test]
+    fn connections_paused_on_ctrl(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        rig.publish(
+            &[11],
+            ConnCounts {
+                total: 1,
+                tcp: 1,
+                ..ConnCounts::default()
+            },
+        );
+        rig.set_paused(true);
+        rig.publish(
+            &[22],
+            ConnCounts {
+                total: 1,
+                udp: 1,
+                ..ConnCounts::default()
+            },
+        );
+        let table = rig.table();
+        assert_eq!(
+            rig.vcx
+                .read_entity(&table, |table, _| table.delegate.row_id(0)),
+            11
+        );
+        assert_eq!(rig.status(), "1 Total | 1 TCP | 0 UDP | 0 EST | 0 LISTEN");
+        rig.set_paused(false);
+        assert_eq!(
+            rig.vcx
+                .read_entity(&table, |table, _| table.delegate.row_id(0)),
+            22
+        );
+        assert_eq!(rig.status(), "1 Total | 0 TCP | 1 UDP | 0 EST | 0 LISTEN");
+    }
+
+    #[gpui_kit::test]
+    fn connections_refresh_toast(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        rig.publish(&[1], ConnCounts::default());
+        rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
+        rig.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
+        rig.vcx.run_until_parked();
+        assert_eq!(rig.refresh_toasts(), 1);
+        rig.vcx.executor().advance_clock(Duration::from_secs(10));
+        rig.vcx.run_until_parked();
+        assert_eq!(rig.refresh_toasts(), 1, "fallback toast is one shot");
+
+        rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
+        rig.vcx.executor().advance_clock(Duration::from_millis(100));
+        rig.publish(&[1], ConnCounts::default());
+        assert_eq!(
+            rig.refresh_toasts(),
+            1,
+            "new version replaces the old toast"
+        );
+        rig.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
+        rig.vcx.run_until_parked();
+        assert_eq!(rig.refresh_toasts(), 1, "new-version toast is one shot");
+    }
+
+    #[gpui_kit::test]
+    fn connections_filter_matches_port(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.set_active(true);
+        let before = rig.generation();
+        rig.vcx.update(|_, cx| {
+            let events = cx.global::<GlobalShellEvents>().0.clone();
+            events.update(cx, |_, cx| {
+                cx.emit(tl_ui::window::main::FilterChanged {
+                    tab: Tab::Connections,
+                    text: "443".into(),
+                });
+            });
+        });
+        rig.vcx.run_until_parked();
+        let query = rig
+            .engine
+            .commands()
+            .into_iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::SetSysTableQuery(query) if query.table == SysTable::Connections => {
+                    Some(query)
+                }
+                _ => None,
+            })
+            .expect("connections filter query sent");
+        assert_eq!(query.filter.as_ref(), "443");
+        assert!(query.generation > before);
+    }
+}

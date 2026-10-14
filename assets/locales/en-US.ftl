@@ -1402,6 +1402,11 @@ startup-status-total = { $total } Total | { $enabled } Enabled | { $disabled } D
 startup-status-selected = { $selected } selected
 startup-refreshed = Startup entries refreshed.
 
+# Connections page status and refresh toast (tasklens-9o0.15, UI-SYS-067).
+connections-status-total = { $total } Total | { $tcp } TCP | { $udp } UDP | { $established } EST | { $listening } LISTEN
+connections-status-selected = { $selected } selected
+connections-refreshed = Connections refreshed.
+
 # Process Properties window (E23-A1)
 pwn-props-tab-general = General
 pwn-props-tab-threads = Threads
