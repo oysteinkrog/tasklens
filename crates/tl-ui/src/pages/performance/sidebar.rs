@@ -822,6 +822,28 @@ impl DeviceSidebar {
                 fan_temp: None,
             };
             changed |= update_card_lines(&mut card.lines, &input, &mut self.scratch);
+            if card.row.kind == DeviceKind::Net
+                && let Some((_, net)) = snap
+                    .device_details
+                    .nets
+                    .iter()
+                    .find(|(idx, _)| *idx == card.row.idx)
+                && matches!(net.adapter_name.validity, Validity::Valid | Validity::Stale)
+                && !net.adapter_name.value.trim().is_empty()
+            {
+                self.scratch.clear();
+                self.scratch.push_str(net.adapter_name.value.trim());
+                if let Some(connection) = net.connection.as_deref().map(str::trim)
+                    && !connection.is_empty()
+                {
+                    self.scratch.push('\n');
+                    self.scratch.push_str(connection);
+                }
+                if card.lines.tooltip.as_deref() != Some(&self.scratch) {
+                    card.lines.tooltip = Some(self.scratch.clone().into());
+                    changed = true;
+                }
+            }
         }
         changed
     }

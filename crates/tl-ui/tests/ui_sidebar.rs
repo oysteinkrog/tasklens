@@ -1726,9 +1726,13 @@ mod sidebar {
         let tip = eth0.tooltip.expect("a tooltip");
         assert_eq!(
             tip.lines().collect::<Vec<_>>(),
-            ["Ethernet", "Wired connection 1"]
+            ["Intel I350", "Wired connection 1"]
         );
         let eth1 = lines(&mut r, "net:eth1");
-        assert_eq!(eth1.tooltip.as_deref(), Some("Ethernet"), "line 1 only");
+        assert_eq!(
+            eth1.tooltip.as_deref(),
+            Some("Intel I350"),
+            "adapter name only"
+        );
     }
 }
