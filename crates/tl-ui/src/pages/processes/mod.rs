@@ -424,6 +424,12 @@ impl ProcessesPage {
         self.menu_targets = Some(targets);
     }
 
+    /// Drops the stored menu targets once the menu has closed, so a later keyboard command
+    /// reads the current selection instead of the rows of a dismissed menu.
+    pub fn clear_menu_targets(&mut self) {
+        self.menu_targets = None;
+    }
+
     fn take_targets(&mut self, cx: &App) -> CapturedTargets {
         self.menu_targets
             .take()

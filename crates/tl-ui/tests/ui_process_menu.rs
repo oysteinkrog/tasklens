@@ -1951,6 +1951,40 @@ mod end {
         );
     }
 
+    /// A dismissed menu leaves no targets: a later key command acts on the new selection.
+    #[gpui_kit::test]
+    fn dismissed_menu_targets_do_not_leak_to_keyboard_commands(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        rig.select_pids(&[300]);
+        let page = rig.page.clone();
+        rig.vcx
+            .update(|window, cx| page.update(cx, |p, cx| p.focus_table(window, cx)));
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        rig.vcx.simulate_keystrokes("shift-f10");
+        rig.vcx.run_until_parked();
+        assert!(
+            rig.vcx
+                .update(|window, cx| open_context_menu(window, cx))
+                .is_some()
+        );
+        rig.vcx.simulate_keystrokes("escape");
+        rig.vcx.run_until_parked();
+        assert!(
+            rig.vcx
+                .update(|window, cx| open_context_menu(window, cx))
+                .is_none()
+        );
+
+        rig.select_pids(&[301]);
+        assert!(rig.dispatch(EndTask).is_none());
+        assert_eq!(
+            rig.sent(),
+            [(ActionKind::Signal(Signal::Term), vec![301])],
+            "the selected row, not the dismissed menu's row"
+        );
+    }
+
     /// A right-click on a CPU cell opens the menu with Copy, which copies that cell.
     #[gpui_kit::test]
     fn right_click_cpu_cell_copies_that_cell(cx: &mut TestAppContext) {

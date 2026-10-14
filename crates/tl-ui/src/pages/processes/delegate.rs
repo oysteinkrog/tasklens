@@ -1213,6 +1213,12 @@ impl TreeTableDelegate for ProcessDelegate {
         row_menu(menu, &captured, &self.menu_caps, window, cx)
     }
 
+    fn on_menu_closed(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
+        if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
+            page.update(cx, |p, _| p.clear_menu_targets());
+        }
+    }
+
     fn on_toggle_expand(&mut self, id: ProcRowId, cx: &mut Context<TlTreeTable<Self>>) {
         self.toggle(id, cx);
     }

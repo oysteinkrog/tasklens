@@ -19,9 +19,9 @@ use gpui_kit::base::{
 
 use gpui_kit::{
     AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, ContentMask, Context,
-    Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-    Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
+    DismissEvent, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ParentElement, Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, TextRun, UniformListScrollHandle,
     WeakEntity, Window, canvas, div, fill, font, point, px, size, uniform_list,
 };
@@ -131,6 +131,8 @@ pub trait TreeTableDelegate: 'static + Sized {
         window: &mut Window,
         cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu;
+    /// The row menu closed, after any item it ran has been dispatched.
+    fn on_menu_closed(&mut self, _cx: &mut Context<TlTreeTable<Self>>) {}
     fn on_toggle_expand(&mut self, id: Self::RowId, cx: &mut Context<TlTreeTable<Self>>);
     fn on_sort(&mut self, col: Self::Column, cx: &mut Context<TlTreeTable<Self>>);
     /// The delegate persists the layout.
@@ -1393,6 +1395,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     ) {
         let focus = self.focus.clone();
         let table = cx.entity();
+        let table_closed = table.clone();
         // Built once this update ends: the delegate needs the table's own context, and
         // `TlMenu::build` hands its closure a plain `App`.
         window.defer(cx, move |window, cx| {
@@ -1401,6 +1404,14 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     this.delegate.context_menu(&targets, col, menu, window, cx)
                 })
             });
+            let sub = window.subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
+                // The item's action is queued before the dismiss, so queue behind it.
+                let table = table_closed.clone();
+                window.defer(cx, move |_, cx| {
+                    table.update(cx, |this, cx| this.delegate.on_menu_closed(cx));
+                });
+            });
+            sub.detach();
             open_context_menu_at(at, window, cx, menu);
         });
     }
