@@ -59,6 +59,7 @@ impl From<&ConnRecord> for ConnRecordRef {
 
 /// Connections rows and optional pointer cell captured when a row menu opens.
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)] // The following E28 beads consume the captured cookie list.
 pub struct ConnMenuTargets {
     pub cookies: SmallVec<[u64; 1]>,
     pub records: SmallVec<[ConnRecordRef; 1]>,
