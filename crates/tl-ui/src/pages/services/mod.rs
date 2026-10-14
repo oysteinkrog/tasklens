@@ -2,3 +2,4 @@
 
 pub mod actions;
 pub mod delegate;
+pub mod filter_strip;

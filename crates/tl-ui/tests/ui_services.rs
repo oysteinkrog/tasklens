@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::base::Root;
+use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
     Action, AppContext as _, Context, Entity, IntoElement, KeyContext, Render, TestAppContext,
     VisualTestContext, Window, div,
@@ -15,15 +16,19 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::health::ManagerState;
 use tl_model::ids::ProcessKey;
-use tl_model::settings::{AppearanceSettings, ThemeSettings, UiState};
+use tl_model::settings::{AppearanceSettings, ServicesSettings, ThemeSettings, UiState};
 use tl_model::snapshot::{ServicesSnapshot, Snapshot};
-use tl_model::table::{Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, SysTable, UnitRef};
+use tl_model::table::{
+    Manager, ServiceColumn, ServiceStateFilter, SysColumnId, SysNodeId, SysRow, SysTable, UnitRef,
+    UnitType,
+};
 use tl_model::time::BootId;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
 use tl_ui::hub::SnapshotHub;
 use tl_ui::pages::services::actions::*;
 use tl_ui::pages::services::delegate::{ServicesDelegate, services_columns};
+use tl_ui::pages::services::filter_strip::{ServiceFilterState, render_strip, unit_types_menu};
 use tl_ui::pages::sys_table::{SysDelegate, SysQuery};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::columns::ColumnLayout;
@@ -374,4 +379,186 @@ fn unit_type_arg_round_trip() {
         assert_eq!(UnitTypeArg::from_setting(value.as_setting()), Some(value));
     }
     assert_eq!(UnitTypeArg::from_setting("device"), None);
+}
+
+#[test]
+fn strip_state_or_text_and() {
+    let engine = FakeEngine::new();
+    let mut strip = ServiceFilterState::default();
+    strip.toggle_state(StateFilterArg::Running);
+    strip.toggle_state(StateFilterArg::Failed);
+    let sort = tl_model::table::SysSortSpec {
+        column: service_id(ServiceColumn::Name),
+        ascending: true,
+    };
+    let mut query = SysQuery::new(SysTable::Services, sort, Some(strip.to_filter()));
+    query.set_filter("ssh", engine.as_ref());
+    query.set_services_filter(strip.to_filter(), engine.as_ref());
+
+    let sent = engine.commands();
+    let Command::SetSysTableQuery(query) = sent.last().expect("services query") else {
+        panic!("expected a system table query");
+    };
+    assert_eq!(query.filter.as_ref(), "ssh");
+    assert_eq!(
+        query.services.as_ref().expect("services filter").states,
+        [ServiceStateFilter::Running, ServiceStateFilter::Failed]
+    );
+}
+
+#[test]
+fn remove_filters_restores_defaults() {
+    let mut strip = ServiceFilterState::default();
+    strip.toggle_state(StateFilterArg::Failed);
+    strip.toggle_unit_type(UnitTypeArg::Automount);
+    strip.toggle_manager(ManagerArg::System);
+    strip.toggle_manager(ManagerArg::User);
+    let text_filter = "ssh";
+
+    strip.remove_filters();
+
+    assert!(strip.is_default());
+    assert_eq!(
+        text_filter, "ssh",
+        "strip reset does not own the text filter"
+    );
+}
+
+#[gpui_kit::test]
+fn strip_persists_states_and_types(cx: &mut TestAppContext) {
+    let persists = Rc::new(RefCell::new(Vec::new()));
+    let saved = Rc::clone(&persists);
+    cx.update(|cx| {
+        cx.set_global(BootSettings {
+            settings: Default::default(),
+            state: Default::default(),
+            persist: Some(Box::new(move |settings, _| {
+                saved.borrow_mut().push(settings.services.clone());
+            })),
+            startup_toasts: Vec::new(),
+        });
+        TlSettings::init(cx);
+
+        let mut strip = ServiceFilterState::default();
+        strip.toggle_state(StateFilterArg::Failed);
+        strip.toggle_unit_type(UnitTypeArg::Automount);
+        TlSettings::update(cx, |data| {
+            data.settings.services.filter_states = strip.to_filter().states.into_vec();
+            data.settings.services.unit_types = strip.to_filter().unit_types.into_vec();
+        });
+        strip.toggle_manager(ManagerArg::User);
+    });
+
+    let writes = persists.borrow();
+    assert_eq!(writes.len(), 1, "manager state is session-only");
+    assert_eq!(writes[0].filter_states, [ServiceStateFilter::Failed]);
+    assert_eq!(
+        writes[0].unit_types,
+        [
+            UnitType::Service,
+            UnitType::Socket,
+            UnitType::Timer,
+            UnitType::Mount,
+            UnitType::Automount,
+        ]
+    );
+}
+
+#[test]
+fn unit_types_last_item_refused() {
+    let settings = ServicesSettings {
+        unit_types: vec![UnitType::Service],
+        ..ServicesSettings::default()
+    };
+    let mut strip = ServiceFilterState::from_settings(&settings);
+
+    assert!(!strip.toggle_unit_type(UnitTypeArg::Service));
+    assert_eq!(strip.unit_types, [UnitTypeArg::Service]);
+}
+
+#[gpui_kit::test]
+fn unit_types_menu_stays_open_on_toggle(cx: &mut TestAppContext) {
+    let slot = Rc::new(RefCell::new(None));
+    let keep = Rc::clone(&slot);
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        tl_ui::i18n::init_strings(cx, "en-US");
+    });
+    cx.add_window(move |window, cx| {
+        let focus = cx.focus_handle();
+        let state = ServiceFilterState::default();
+        let menu =
+            tl_ui::components::menu::TlMenu::build(window, cx, focus, move |menu, window, cx| {
+                unit_types_menu(&state, menu, window, cx)
+            });
+        *keep.borrow_mut() = Some(menu);
+        Root::new(cx.new(|_| Host), window, cx)
+    });
+    let menu = slot.borrow().clone().expect("unit types menu");
+    cx.update(|window, cx| {
+        let entries = menu.read(cx).entries_for_test(window);
+        assert_eq!(entries.len(), 12);
+        assert!(entries[..10].iter().all(|entry| entry.keep_open));
+        assert_eq!(entries[2].label.as_deref(), Some("Timers"));
+    });
+}
+
+struct FilterStripHost {
+    state: ServiceFilterState,
+}
+
+impl Render for FilterStripHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_strip(&self.state, false, false, false, window, cx)
+    }
+}
+
+#[gpui_kit::test]
+fn unit_types_count_suffix(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        tl_ui::i18n::init_strings(cx, "en-US");
+    });
+    cx.add_window(|window, cx| {
+        let mut state = ServiceFilterState::default();
+        state.toggle_unit_type(UnitTypeArg::Automount);
+        state.toggle_unit_type(UnitTypeArg::Path);
+        Root::new(cx.new(|_| FilterStripHost { state }), window, cx)
+    });
+    let mut vcx = VisualTestContext::from_window(*cx.windows().last().expect("window"), cx);
+    vcx.draw();
+    let buttons = vcx.update(|window, _| snapshots(window));
+    let unit_types = buttons
+        .iter()
+        .find(|snapshot| {
+            snapshot
+                .path()
+                .iter()
+                .any(|id| id == &gpui_kit::ElementId::Name("services-filter-unit-types".into()))
+        })
+        .expect("Unit types button");
+    assert_eq!(unit_types.label(), Some("Unit types (6)"));
+
+    let remove = buttons
+        .iter()
+        .find(|snapshot| {
+            snapshot
+                .path()
+                .iter()
+                .any(|id| id == &gpui_kit::ElementId::Name("services-filter-remove".into()))
+        })
+        .expect("Remove filters button");
+    assert_eq!(remove.disabled(), Some(false));
 }

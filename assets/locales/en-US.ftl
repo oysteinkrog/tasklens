@@ -2081,6 +2081,30 @@ shell-settings-services-state-running = Running
 shell-settings-services-state-failed = Failed
 shell-settings-services-state-stopped = Stopped
 shell-settings-services-state-disabled = Disabled
+
+# Services filter strip (UI-SYS-011, UI-SYS-012)
+services-sys011-running = Running
+services-sys011-failed = Failed
+services-sys011-stopped = Stopped
+services-sys011-disabled = Disabled
+services-sys011-unit-types = Unit types
+services-sys011-unit-types-count = Unit types ({ $count })
+services-sys011-system = System
+services-sys011-user = User
+services-sys011-remove-filters = Remove filters
+services-sys011-show-all-units = Show all units
+services-sys012-services = Services
+services-sys012-sockets = Sockets
+services-sys012-timers = Timers
+services-sys012-mounts = Mounts
+services-sys012-automounts = Automounts
+services-sys012-paths = Paths
+services-sys012-targets = Targets
+services-sys012-swaps = Swaps
+services-sys012-slices = Slices
+services-sys012-scopes = Scopes
+services-sys012-reset-to-default = Reset to default
+services-sys012-at-least-one-unit-type = At least one unit type must stay selected
 shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar
