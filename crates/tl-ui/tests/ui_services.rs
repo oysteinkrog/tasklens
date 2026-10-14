@@ -401,7 +401,12 @@ fn strip_state_or_text_and() {
     };
     assert_eq!(query.filter.as_ref(), "ssh");
     assert_eq!(
-        query.services.as_ref().expect("services filter").states,
+        query
+            .services
+            .as_ref()
+            .expect("services filter")
+            .states
+            .as_slice(),
         [ServiceStateFilter::Running, ServiceStateFilter::Failed]
     );
 }
@@ -473,7 +478,7 @@ fn unit_types_last_item_refused() {
     let mut strip = ServiceFilterState::from_settings(&settings);
 
     assert!(!strip.toggle_unit_type(UnitTypeArg::Service));
-    assert_eq!(strip.unit_types, [UnitTypeArg::Service]);
+    assert_eq!(strip.unit_types.as_slice(), [UnitTypeArg::Service]);
 }
 
 #[gpui_kit::test]
@@ -490,7 +495,7 @@ fn unit_types_menu_stays_open_on_toggle(cx: &mut TestAppContext) {
         );
         tl_ui::i18n::init_strings(cx, "en-US");
     });
-    cx.add_window(move |window, cx| {
+    let handle = cx.add_window(move |window, cx| {
         let focus = cx.focus_handle();
         let state = ServiceFilterState::default();
         let menu =
@@ -501,7 +506,8 @@ fn unit_types_menu_stays_open_on_toggle(cx: &mut TestAppContext) {
         Root::new(cx.new(|_| Host), window, cx)
     });
     let menu = slot.borrow().clone().expect("unit types menu");
-    cx.update(|window, cx| {
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, cx| {
         let entries = menu.read(cx).entries_for_test(window);
         assert_eq!(entries.len(), 12);
         assert!(entries[..10].iter().all(|entry| entry.keep_open));
@@ -531,14 +537,14 @@ fn unit_types_count_suffix(cx: &mut TestAppContext) {
         );
         tl_ui::i18n::init_strings(cx, "en-US");
     });
-    cx.add_window(|window, cx| {
+    let handle = cx.add_window(|window, cx| {
         let mut state = ServiceFilterState::default();
         state.toggle_unit_type(UnitTypeArg::Automount);
         state.toggle_unit_type(UnitTypeArg::Path);
         Root::new(cx.new(|_| FilterStripHost { state }), window, cx)
     });
-    let mut vcx = VisualTestContext::from_window(*cx.windows().last().expect("window"), cx);
-    vcx.draw();
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
     let buttons = vcx.update(|window, _| snapshots(window));
     let unit_types = buttons
         .iter()
