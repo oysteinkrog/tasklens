@@ -399,12 +399,12 @@ impl ConnectionsDelegate {
     }
 
     /// The page where a row menu stores the targets captured at open time.
-    pub fn set_page(&mut self, page: WeakEntity<ConnectionsPage>) {
+    pub(super) fn set_page(&mut self, page: WeakEntity<ConnectionsPage>) {
         self.page = Some(page);
     }
 
     /// Captures the current values of `targets` in their supplied view order.
-    pub fn capture_menu_targets(
+    pub(super) fn capture_menu_targets(
         &self,
         targets: &[u64],
         clicked_col: Option<SysColumnId>,
