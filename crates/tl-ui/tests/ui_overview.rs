@@ -1976,8 +1976,10 @@ mod wired {
         let demand = cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_reduce_motion(true);
-            let mut theme_settings = ThemeSettings::default();
-            theme_settings.active = theme_name.to_owned();
+            let theme_settings = ThemeSettings {
+                active: theme_name.to_owned(),
+                ..ThemeSettings::default()
+            };
             tl_ui::theme::store::init(
                 cx,
                 &theme_settings,
@@ -1988,8 +1990,10 @@ mod wired {
             init_strings(cx, "en-US");
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
-            let mut settings = Settings::default();
-            settings.theme = theme_settings;
+            let mut settings = Settings {
+                theme: theme_settings,
+                ..Settings::default()
+            };
             settings.performance.show_disks = all_cards;
             settings.performance.show_gpus = all_cards;
             settings.performance.show_network_wired = all_cards;
