@@ -1,11 +1,27 @@
-//! Services action and key binding tests (tasklens-hk6.34, canonical table (b)).
+//! Services delegate, action and key binding tests.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    Action, AppContext as _, Context, IntoElement, KeyContext, Render, TestAppContext,
+    Action, AppContext as _, Context, Entity, IntoElement, KeyContext, Render, TestAppContext,
     VisualTestContext, Window, div,
 };
+use tl_model::health::ManagerState;
+use tl_model::ids::ProcessKey;
+use tl_model::settings::UiState;
+use tl_model::snapshot::{ServicesSnapshot, Snapshot};
+use tl_model::table::{Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, UnitRef};
+use tl_model::time::BootId;
+use tl_ui::app::BootSettings;
 use tl_ui::pages::services::actions::*;
+use tl_ui::pages::services::delegate::{ServicesDelegate, services_columns};
+use tl_ui::pages::sys_table::SysDelegate;
+use tl_ui::settings_global::TlSettings;
+use tl_ui::table::columns::ColumnLayout;
+use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
 
 struct Host;
 
@@ -13,6 +29,171 @@ impl Render for Host {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+fn service_id(column: ServiceColumn) -> SysColumnId {
+    SysColumnId::Services(column)
+}
+
+fn delegate_table(
+    cx: &mut TestAppContext,
+    state: UiState,
+) -> Entity<TlTreeTable<ServicesDelegate>> {
+    cx.update(|cx| {
+        cx.set_global(BootSettings {
+            settings: Default::default(),
+            state: state.clone(),
+            persist: Some(Box::new(|_, _| {})),
+            startup_toasts: Vec::new(),
+        });
+        TlSettings::init(cx);
+    });
+    let slot = Rc::new(RefCell::new(None));
+    let keep = Rc::clone(&slot);
+    cx.add_window(move |window, cx| {
+        let table = cx.new(|cx| TlTreeTable::new(ServicesDelegate::new(&state), window, cx));
+        *keep.borrow_mut() = Some(table.clone());
+        Root::new(table, window, cx)
+    });
+    slot.borrow().clone().expect("delegate table")
+}
+
+fn install_rows(delegate: &mut ServicesDelegate) {
+    let unit = UnitRef {
+        manager: Manager::System,
+        name: Arc::from("sshd.service"),
+    };
+    let process = ProcessKey {
+        start_ticks: 10,
+        boot_id: BootId(1),
+        pid: 812,
+    };
+    let rows: Arc<[SysRow]> = Arc::from([
+        SysRow {
+            node: SysNodeId::ServiceGroup(Manager::System),
+            depth: 0,
+            expanded: true,
+            has_children: true,
+            record: None,
+        },
+        SysRow {
+            node: SysNodeId::Unit(unit.clone()),
+            depth: 1,
+            expanded: true,
+            has_children: true,
+            record: Some(0),
+        },
+        SysRow {
+            node: SysNodeId::UnitProcess(unit, process),
+            depth: 2,
+            expanded: false,
+            has_children: false,
+            record: Some(0),
+        },
+        SysRow {
+            node: SysNodeId::ServiceGroup(Manager::User),
+            depth: 0,
+            expanded: true,
+            has_children: true,
+            record: None,
+        },
+    ]);
+    let mut snapshot = Snapshot::empty(BootId(1), 1);
+    snapshot.services = Arc::new(ServicesSnapshot {
+        rows,
+        managers: [ManagerState::Connected, ManagerState::Unavailable],
+        ..ServicesSnapshot::default()
+    });
+    delegate.install(&Arc::new(snapshot));
+}
+
+#[test]
+fn services_default_columns_and_widths() {
+    let visible: Vec<_> = services_columns()
+        .iter()
+        .filter(|column| column.visible)
+        .map(|column| (column.label, column.default_width))
+        .collect();
+    assert_eq!(
+        visible,
+        [
+            ("Name", 250.0),
+            ("Display name", 300.0),
+            ("Status", 100.0),
+            ("Startup type", 120.0),
+            ("PID", 80.0),
+            ("User", 200.0),
+            ("Path", 260.0),
+        ]
+    );
+}
+
+#[test]
+fn services_row_kinds_and_selectable() {
+    let mut delegate = ServicesDelegate::new(&UiState::default());
+    install_rows(&mut delegate);
+    assert_eq!(delegate.row_kind(0), RowKind::GroupHeader);
+    assert_eq!(delegate.row_kind(1), RowKind::Unit);
+    assert_eq!(delegate.row_kind(2), RowKind::Process);
+    assert!(!delegate.selectable(0));
+    assert!(delegate.selectable(1));
+    assert!(delegate.selectable(2));
+    assert_eq!(delegate.row_expandable(3), None);
+}
+
+#[gpui_kit::test]
+fn services_cgroup_demand_follows_columns(cx: &mut TestAppContext) {
+    let table = delegate_table(cx, UiState::default());
+    cx.update(|cx| {
+        table.update(cx, |table, cx| {
+            let delegate = table.delegate_mut();
+            assert!(!delegate.demand_part().service_cgroup_stats);
+            let mut layout: ColumnLayout<SysColumnId> = delegate.default_layout();
+            layout
+                .set_visible(service_id(ServiceColumn::Memory), true)
+                .expect("show memory");
+            delegate.on_columns_changed(&layout, cx);
+            assert!(delegate.demand_part().service_cgroup_stats);
+            layout
+                .set_visible(service_id(ServiceColumn::Memory), false)
+                .expect("hide memory");
+            delegate.on_columns_changed(&layout, cx);
+            assert!(!delegate.demand_part().service_cgroup_stats);
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn services_sort_persists_and_sends_query(cx: &mut TestAppContext) {
+    let table = delegate_table(cx, UiState::default());
+    cx.update(|cx| {
+        table.update(cx, |table, cx| {
+            let delegate = table.delegate_mut();
+            delegate.on_sort(service_id(ServiceColumn::Status), cx);
+            let request = delegate.take_sort_request().expect("sort request");
+            assert_eq!(request.column, service_id(ServiceColumn::Status));
+            assert!(request.ascending);
+        });
+        let saved = &TlSettings::state(cx).sort.services;
+        assert_eq!(saved.column, "status");
+        assert!(saved.ascending);
+    });
+}
+
+#[gpui_kit::test]
+fn group_expand_state_persisted(cx: &mut TestAppContext) {
+    let table = delegate_table(cx, UiState::default());
+    cx.update(|cx| {
+        table.update(cx, |table, cx| {
+            let delegate = table.delegate_mut();
+            install_rows(delegate);
+            let system = delegate.row_id(0);
+            delegate.on_toggle_expand(system, cx);
+            let request = delegate.take_expanded_request().expect("expand request");
+            assert!(!request.contains(&SysNodeId::ServiceGroup(Manager::System)));
+        });
+        assert!(!TlSettings::state(cx).services.group_expanded.system);
+    });
 }
 
 fn assert_window_binding(
