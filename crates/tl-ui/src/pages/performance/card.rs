@@ -9,11 +9,13 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
+#[cfg(any(test, feature = "test-hooks"))]
+use gpui_kit::canvas;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, Context, ElementId, Entity, FontWeight, Global, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, Render, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, canvas, div, px,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
@@ -870,11 +872,11 @@ impl Render for CardView {
         #[cfg(any(test, feature = "test-hooks"))]
         {
             let paints = Rc::clone(&self.paint_count);
-            return div().relative().size_full().child(card).child(
+            div().relative().size_full().child(card).child(
                 canvas(|_, _, _| {}, move |_, _, _, _| paints.set(paints.get() + 1))
                     .absolute()
                     .inset_0(),
-            );
+            )
         }
         #[cfg(not(any(test, feature = "test-hooks")))]
         card
