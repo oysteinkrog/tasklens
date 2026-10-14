@@ -2492,6 +2492,8 @@ impl RowFlags {
     /// The row sits under a group header: the level-0 guide line hangs from the header's
     /// chevron centre, x 16 (UI-PRC-003).
     pub const IN_GROUP: u16 = 128;
+    /// The Name cell's primary text uses the secondary text colour.
+    pub const SECONDARY_NAME: u16 = 256;
 
     pub fn has(self, f: u16) -> bool {
         self.bits & f != 0

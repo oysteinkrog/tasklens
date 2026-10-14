@@ -20,10 +20,10 @@ use tl_ui::pages::connections::delegate::{
     CONNECTION_COLUMNS, ConnectionsDelegate, DEFAULT_COLUMNS, default_width, id, state_class,
 };
 use tl_ui::pages::sys_table::SysDelegate as _;
-use tl_ui::table::cells::CellOut;
+use tl_ui::table::cells::{CellCtx, CellOut, name_look};
 use tl_ui::table::columns::TableColumn as _;
-use tl_ui::table::tree_table::{NameIcon, TreeTableDelegate as _};
-use tl_ui::theme::current;
+use tl_ui::table::tree_table::{NameIcon, RowFlags, TreeTableDelegate as _};
+use tl_ui::theme::{current, metrics};
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
@@ -232,6 +232,10 @@ fn conn_row_shared_pid_plus_n(cx: &mut TestAppContext) {
     let owners = SmallVec::from_vec(processes.iter().map(|p| p.key).collect());
     let delegate = delegate(cx, vec![connection(1, owners)], processes);
     assert_eq!(text(&cell(&delegate, ConnColumn::Pid)), "4321 +2");
+    let pid_tip = cell(&delegate, ConnColumn::Pid).tooltip.unwrap();
+    let process_tip = cell(&delegate, ConnColumn::Process).tooltip.unwrap();
+    assert_eq!(pid_tip, process_tip);
+    assert_eq!(pid_tip.lines().count(), 3);
     assert_eq!(delegate.name_cell(0).primary, "first");
     assert_eq!(
         delegate.owner_tooltip_lines(0).unwrap(),
@@ -261,6 +265,26 @@ fn conn_row_kernel_owner(cx: &mut TestAppContext) {
     let name = delegate.name_cell(0);
     assert_eq!(name.primary, "No owner (kernel)");
     assert!(matches!(name.icon, NameIcon::None));
+    let flags = delegate.row_flags(0);
+    assert!(flags.has(RowFlags::SECONDARY_NAME));
+    cx.update(|cx| {
+        let theme = current(cx).clone();
+        let ctx = CellCtx {
+            m: metrics(cx),
+            theme: &theme,
+            selected: false,
+            width: px(180.),
+        };
+        assert_eq!(name_look(flags, &ctx), (theme.text_secondary, 1.0));
+    });
+}
+
+#[gpui_kit::test]
+fn conn_row_unresolved_owner_is_question_mark(cx: &mut TestAppContext) {
+    let record = connection(1, SmallVec::new());
+    let delegate = delegate(cx, vec![record], Vec::new());
+    assert_eq!(text(&cell(&delegate, ConnColumn::Pid)), "?");
+    assert_eq!(delegate.name_cell(0).primary, "?");
 }
 
 #[gpui_kit::test]
@@ -271,8 +295,15 @@ fn conn_row_restricted_lock(cx: &mut TestAppContext) {
     let delegate = delegate(cx, vec![record], vec![process(9, "hidden", "bob", 1001)]);
     assert_eq!(text(&cell(&delegate, ConnColumn::Pid)), "?");
     assert_eq!(delegate.name_cell(0).glyphs[0].0, IconName::Lock);
+    let pid_tip = cell(&delegate, ConnColumn::Pid).tooltip.unwrap();
+    let process_tip = cell(&delegate, ConnColumn::Process).tooltip.unwrap();
+    assert_eq!(pid_tip, process_tip);
     assert_eq!(
         delegate.owner_tooltip_lines(0).unwrap()[0],
+        "Owned by bob. Needs the tasklens helper to identify the process"
+    );
+    assert_eq!(
+        pid_tip,
         "Owned by bob. Needs the tasklens helper to identify the process"
     );
 }

@@ -836,11 +836,14 @@ impl IconSourceCache {
 }
 
 /// The primary text colour and the icon opacity of a Name cell: `text_secondary` (or
-/// `text_selected_secondary`) and [`STALE_OPACITY`] on an `EXITED` row (UI-PRC-003), else
-/// `text_primary` (or `text_selected_primary`) and 1. The chevron is the same on both.
+/// `text_selected_secondary`) and [`STALE_OPACITY`] on an `EXITED` row (UI-PRC-003),
+/// `text_secondary` at full opacity on a `SECONDARY_NAME` row, else `text_primary` (or the
+/// corresponding selected colour) and 1. The chevron is the same on all three.
 pub fn name_look(flags: RowFlags, ctx: &CellCtx) -> (Hsla, f32) {
     if flags.has(RowFlags::EXITED) {
         (ctx.secondary(), STALE_OPACITY)
+    } else if flags.has(RowFlags::SECONDARY_NAME) {
+        (ctx.secondary(), 1.0)
     } else {
         (ctx.primary(), 1.0)
     }

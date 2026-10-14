@@ -802,6 +802,8 @@ connections-state-connected = CONNECTED
 connections-owner-kernel = No owner (kernel)
 connections-owner-restricted-glyph-tip = Needs the tasklens helper to identify the process
 connections-owner-restricted-tip = Owned by { $user }. Needs the tasklens helper to identify the process
+connections-owner-line = PID { $pid }  { $name }
+connections-owner-more = and { $count } more
 
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.

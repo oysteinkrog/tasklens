@@ -149,9 +149,14 @@ pub struct ConnectionWords {
     pub no_owner: Arc<str>,
     pub restricted_glyph_tip: SharedString,
     restricted_owner_tip: SharedString,
+    owner_line: SharedString,
+    owner_more: SharedString,
 }
 
 const OWNER_SENTINEL: &str = "\u{fdd0}";
+const PID_SENTINEL: &str = "\u{fdd1}";
+const NAME_SENTINEL: &str = "\u{fdd2}";
+const COUNT_SENTINEL: &str = "\u{fdd3}";
 
 impl ConnectionWords {
     pub fn new(cx: &App) -> Self {
@@ -159,7 +164,27 @@ impl ConnectionWords {
             Some(strings) => Self::build(
                 Some(strings.strings_version),
                 |key| tr(cx, key),
-                |key| tr_args(cx, key, &[("user", OWNER_SENTINEL.into())]),
+                || {
+                    tr_args(
+                        cx,
+                        "connections-owner-restricted-tip",
+                        &[("user", OWNER_SENTINEL.into())],
+                    )
+                },
+                || {
+                    tr_args(
+                        cx,
+                        "connections-owner-line",
+                        &[("pid", PID_SENTINEL.into()), ("name", NAME_SENTINEL.into())],
+                    )
+                },
+                || {
+                    tr_args(
+                        cx,
+                        "connections-owner-more",
+                        &[("count", COUNT_SENTINEL.into())],
+                    )
+                },
             ),
             None => Self::en(),
         }
@@ -169,14 +194,33 @@ impl ConnectionWords {
         Self::build(
             None,
             |key| tr_en(key, &[]),
-            |key| tr_en(key, &[("user", OWNER_SENTINEL.into())]),
+            || {
+                tr_en(
+                    "connections-owner-restricted-tip",
+                    &[("user", OWNER_SENTINEL.into())],
+                )
+            },
+            || {
+                tr_en(
+                    "connections-owner-line",
+                    &[("pid", PID_SENTINEL.into()), ("name", NAME_SENTINEL.into())],
+                )
+            },
+            || {
+                tr_en(
+                    "connections-owner-more",
+                    &[("count", COUNT_SENTINEL.into())],
+                )
+            },
         )
     }
 
     fn build(
         version: Option<u64>,
         text: impl Fn(&str) -> SharedString,
-        text_with_user: impl Fn(&str) -> SharedString,
+        restricted_owner_tip: impl Fn() -> SharedString,
+        owner_line: impl Fn() -> SharedString,
+        owner_more: impl Fn() -> SharedString,
     ) -> Self {
         Self {
             version,
@@ -184,7 +228,9 @@ impl ConnectionWords {
             states: STATE_KEYS.map(|key| Arc::from(&*text(key))),
             no_owner: Arc::from(&*text("connections-owner-kernel")),
             restricted_glyph_tip: text("connections-owner-restricted-glyph-tip"),
-            restricted_owner_tip: text_with_user("connections-owner-restricted-tip"),
+            restricted_owner_tip: restricted_owner_tip(),
+            owner_line: owner_line(),
+            owner_more: owner_more(),
         }
     }
 
@@ -195,6 +241,19 @@ impl ConnectionWords {
     fn restricted_owner_tip(&self, user: &str) -> SharedString {
         self.restricted_owner_tip
             .replace(OWNER_SENTINEL, user)
+            .into()
+    }
+
+    fn owner_line(&self, pid: u32, name: &str) -> SharedString {
+        self.owner_line
+            .replace(PID_SENTINEL, &pid.to_string())
+            .replace(NAME_SENTINEL, name)
+            .into()
+    }
+
+    fn owner_more(&self, count: usize) -> SharedString {
+        self.owner_more
+            .replace(COUNT_SENTINEL, &count.to_string())
             .into()
     }
 }
@@ -385,10 +444,10 @@ impl ConnectionsDelegate {
             let name = self
                 .process(*key)
                 .map_or_else(|| "?".to_owned(), |p| p.meta.name.to_string());
-            lines.push(format!("PID {}  {name}", key.pid).into());
+            lines.push(self.words.owner_line(key.pid, &name));
         }
         if owners.len() > shown {
-            lines.push(format!("and {} more", owners.len() - shown).into());
+            lines.push(self.words.owner_more(owners.len() - shown));
         }
         Some(lines)
     }
@@ -502,14 +561,17 @@ impl TreeTableDelegate for ConnectionsDelegate {
         None
     }
 
-    fn row_flags(&self, _: usize) -> RowFlags {
-        if self.stale() {
-            RowFlags {
-                bits: RowFlags::STALE,
-                ..RowFlags::default()
-            }
-        } else {
-            RowFlags::default()
+    fn row_flags(&self, ix: usize) -> RowFlags {
+        let mut bits = if self.stale() { RowFlags::STALE } else { 0 };
+        if self
+            .record(ix)
+            .is_some_and(|record| Self::kernel_owned(record) || self.owner(record).is_none())
+        {
+            bits |= RowFlags::SECONDARY_NAME;
+        }
+        RowFlags {
+            bits,
+            ..RowFlags::default()
         }
     }
 
@@ -571,7 +633,7 @@ impl TreeTableDelegate for ConnectionsDelegate {
                         });
                     }
                 } else {
-                    out.arc = Some(Arc::from("-"));
+                    out.arc = Some(Arc::from("?"));
                     out.text_color = Some(self.theme.text_secondary);
                 }
                 if out.want_tooltip {
@@ -580,7 +642,13 @@ impl TreeTableDelegate for ConnectionsDelegate {
                         .map(|lines| lines.join("\n").into());
                 }
             }
-            ConnColumn::Process => {}
+            ConnColumn::Process => {
+                if out.want_tooltip {
+                    out.tooltip = self
+                        .owner_tooltip_lines(ix)
+                        .map(|lines| lines.join("\n").into());
+                }
+            }
             ConnColumn::User => out.arc = self.user(record).cloned(),
             ConnColumn::Family => out.arc = Some(Arc::from(family(record.family))),
             ConnColumn::LocalPort => {
@@ -619,13 +687,18 @@ impl TreeTableDelegate for ConnectionsDelegate {
                 trailing: None,
             };
         }
-        if Self::kernel_owned(record) || self.owner(record).is_none() {
+        if Self::kernel_owned(record) {
             return NameCell {
                 primary: SharedString::from(self.words.no_owner.clone()),
                 ..empty_name_cell()
             };
         }
-        let owner = self.owner(record).expect("checked above");
+        let Some(owner) = self.owner(record) else {
+            return NameCell {
+                primary: "?".into(),
+                ..empty_name_cell()
+            };
+        };
         NameCell {
             icon: owner
                 .meta
