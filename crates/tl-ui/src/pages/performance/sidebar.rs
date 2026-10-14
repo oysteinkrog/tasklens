@@ -50,7 +50,7 @@ use super::card::{
 use super::menu::card_menu;
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, initial_selection, is_visible,
-    selection_after_removal, sidebar_order, type_number, visible_rows,
+    sidebar_order, type_number, visible_rows,
 };
 use crate::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -785,8 +785,13 @@ impl DeviceSidebar {
                 before
                     .iter()
                     .position(|r| r.key == selected)
-                    .and_then(|at| selection_after_removal(&before, at))
-                    .filter(|k| self.index.contains_key(k))
+                    .and_then(|at| {
+                        before[at + 1..]
+                            .iter()
+                            .chain(before[..at].iter().rev())
+                            .find(|row| self.index.contains_key(&row.key))
+                            .map(|row| row.key.clone())
+                    })
                     .or_else(|| self.live().next().map(|c| c.row.key.clone()))
             }
             None => initial_selection(&self.visible(), Some(&saved_selection(cx))),
