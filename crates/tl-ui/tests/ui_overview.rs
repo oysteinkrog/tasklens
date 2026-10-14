@@ -700,7 +700,7 @@ mod bottom {
     use tl_ui::pages::performance::overview::disk_box::DiskBox;
     use tl_ui::pages::performance::overview::gpu_box::GpuBox;
     use tl_ui::pages::performance::overview::net_box::NetBox;
-    use tl_ui::settings_global::TlSettings;
+    use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
     use tl_ui::testing::fake_engine::FakeEngine;
 
     const GIB: u64 = 1 << 30;
@@ -990,7 +990,7 @@ mod bottom {
 
     #[gpui_kit::test]
     fn gpu_box_caps_at_two_with_more(cx: &mut TestAppContext) {
-        let r = open(cx, devices("gpu", &[10, 11, 12]), Vec::new(), (400., 200.));
+        let r = open(cx, devices("gpu", &[10, 11, 12]), Vec::new(), (450., 200.));
         let (gpu, _, _) = r.boxes();
         let (sections, more, text, shown) = r.vcx.update(|_, cx| {
             let g = gpu.read(cx);
@@ -1003,7 +1003,10 @@ mod bottom {
         });
         assert_eq!((sections, more), (2, 1));
         assert_eq!(text, "+1 more");
-        assert_eq!(shown, 2, "400 px fits both sections");
+        // 450 - 60 = 390 px body. Without totals each section has 3 engine rows and VRAM:
+        // 48 + 4 × 22 = 136, the second adds a 22 px heading, plus 12 px between sections and
+        // 12 + 18 for "+n more": 336.
+        assert_eq!(shown, 2, "450 px fits both sections");
         let mut copy = String::new();
         r.vcx.update(|_, cx| gpu.read(cx).copy_text(&mut copy));
         assert!(copy.ends_with("+1 more\n"), "{copy}");
@@ -1011,13 +1014,16 @@ mod bottom {
 
     #[gpui_kit::test]
     fn gpu_box_second_section_only_when_both_fit(cx: &mut TestAppContext) {
-        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (400., 200.));
+        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (450., 200.));
         let (gpu, _, _) = r.boxes();
         let shown = |r: &mut Rig| r.vcx.update(|_, cx| gpu.read(cx).shown());
         assert_eq!(shown(&mut r), 2);
+        // 344 px, the default 1200 × 900 row: a 284 px body is below the 306 px two need.
+        r.heights(344., 200.);
+        assert_eq!(shown(&mut r), 1, "344 px: one section");
         r.heights(150., 200.);
         assert_eq!(shown(&mut r), 1, "150 px: one section");
-        r.heights(400., 200.);
+        r.heights(450., 200.);
         assert_eq!(shown(&mut r), 2, "back to both");
     }
 
@@ -1052,6 +1058,134 @@ mod bottom {
             s.gpus = Arc::from([(DeviceIdx(10), t)]);
         });
         assert_eq!(section(&mut r).1, format!("62 °C · {watts}"));
+    }
+
+    /// GPU 10 with 3D, encode and decode at 25, 10 and 5 percent.
+    fn gpu_engines(shared: bool) -> GpuTotals {
+        let mut t = gpu_totals(10);
+        t.enc_pct = Metric::valid(10.);
+        t.dec_pct = Metric::valid(if shared { 10. } else { 5. });
+        t.enc_dec_shared = shared;
+        t
+    }
+
+    /// The first section's engine rows: (key, label, value, fraction).
+    fn engine_rows(r: &mut Rig) -> Vec<(&'static str, String, String, Option<f32>)> {
+        let (gpu, _, _) = r.boxes();
+        r.vcx.update(|_, cx| {
+            gpu.read(cx).sections()[0]
+                .engines
+                .iter()
+                .map(|e| {
+                    (
+                        e.key,
+                        e.meter.label.to_string(),
+                        e.meter.value.to_string(),
+                        e.meter.fraction,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn gpu_box_engine_rows_three(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (300., 200.));
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
+        let rows = engine_rows(&mut r);
+        assert_eq!(
+            rows,
+            [
+                ("gpu", "3D / Compute".into(), "25.0%".into(), Some(0.25)),
+                ("enc", "Video Encode".into(), "10.0%".into(), Some(0.1)),
+                ("dec", "Video Decode".into(), "5.0%".into(), Some(0.05)),
+            ]
+        );
+        let (gpu, _, _) = r.boxes();
+        let metrics: Vec<Vec<SeriesId>> = r.vcx.update(|_, cx| {
+            gpu.read(cx).sections()[0]
+                .engines
+                .iter()
+                .map(|e| e.chart.read(cx).series_ids().collect())
+                .collect()
+        });
+        let id = |metric| SeriesId {
+            device: DeviceIdx(10),
+            metric,
+        };
+        assert_eq!(
+            metrics,
+            [
+                vec![id(MetricId::GPU_UTIL)],
+                vec![id(MetricId::GPU_ENC)],
+                vec![id(MetricId::GPU_DEC)],
+            ],
+            "one sparkline per engine series"
+        );
+        let mut copy = String::new();
+        r.vcx.update(|_, cx| gpu.read(cx).copy_text(&mut copy));
+        assert!(
+            copy.contains("3D / Compute\t25.0%\nVideo Encode\t10.0%\nVideo Decode\t5.0%\n"),
+            "{copy}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn gpu_box_hidden_engine_not_drawn(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (300., 200.));
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let charts = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                gpu.read(cx).sections()[0]
+                    .engines
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.key,
+                            e.chart.entity_id(),
+                            e.chart.read(cx).build_count.get(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = charts(&mut r);
+        assert_eq!(before.len(), 3);
+        r.vcx.update(|_, cx| {
+            TlSettings::set(
+                cx,
+                SettingKey::PerformanceHiddenGpuEngines,
+                SettingValue::StrList(Arc::from(["dec".into()])),
+            )
+        });
+        draw(r.vcx);
+        let after = charts(&mut r);
+        assert_eq!(
+            after,
+            before[..2],
+            "the decode row is gone; the kept rows keep their charts and build nothing"
+        );
+        assert!(engine_rows(&mut r).iter().all(|row| row.0 != "dec"));
+    }
+
+    #[gpui_kit::test]
+    fn gpu_box_shared_enc_dec_one_row(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (300., 200.));
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(true))]));
+        let rows = engine_rows(&mut r);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].1, "3D / Compute");
+        assert_eq!(
+            rows[1],
+            (
+                "enc",
+                "Video Encode/Decode".into(),
+                "10.0%".into(),
+                Some(0.1)
+            )
+        );
     }
 
     #[gpui_kit::test]
@@ -1203,7 +1337,7 @@ mod bottom {
             r.vcx.update(|_, cx| {
                 let (g, d, n) = (gpu.read(cx), disk.read(cx), net.read(cx));
                 let builds = |v: &Entity<tl_ui::chart::ChartView>| v.read(cx).build_count.get();
-                [
+                let mut counts = vec![
                     g.render_count.get(),
                     g.notify_count.get(),
                     builds(&g.sections()[0].chart),
@@ -1214,10 +1348,13 @@ mod bottom {
                     n.notify_count.get(),
                     builds(n.down_chart()),
                     builds(n.up_chart()),
-                ]
+                ];
+                counts.extend(g.sections()[0].engines.iter().map(|e| builds(&e.chart)));
+                counts
             })
         };
         let before = counts(&mut r);
+        assert_eq!(before.len(), 13, "three engine sparklines");
         r.version += 1;
         let version = r.version;
         let newest = now_boot_ns();

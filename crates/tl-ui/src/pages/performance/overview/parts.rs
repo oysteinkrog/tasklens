@@ -1,5 +1,5 @@
-//! The Overview boxes' drawing parts (UI-PRF-017, D-022): a meter bar, a per-core bar grid and the
-//! box frame.
+//! The Overview boxes' drawing parts (UI-PRF-017, D-022): a meter bar, a per-core bar grid, the
+//! box frame and the sparkline rows.
 //!
 //! [`Meter`] and [`CoreBars`] follow the custom `Element` pattern of `memory_bar.rs`
 //! (UI-PRF-027): quads plus cached shaped text, no child elements. `TlProgress` is not allowed in
@@ -13,12 +13,13 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Corners, Div, Element, ElementId, Entity,
     EntityId, FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, MouseButton, ParentElement as _, Pixels, SharedString, Size, Style,
-    Styled as _, Window, canvas, div, fill, point, px, relative, size,
+    StyleRefinement, Styled as _, Window, canvas, div, fill, point, px, relative, size,
 };
+use smallvec::SmallVec;
 use tl_model::settings::Settings;
 
 use crate::chart::labels::{self, CachedLine, LABEL_ROW, LineStyle, WARMING};
-use crate::chart::{ChartLabels, ChartSpec, ChartView};
+use crate::chart::{ChartLabels, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat};
 use crate::components::progress::bucket;
 use crate::hub::SnapshotHub;
 use crate::pages::performance::DeviceKey;
@@ -28,6 +29,7 @@ use crate::text::style::{numeric_style, t_md, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current};
 
 use super::layout::BoxKind;
+use super::mem_box::{MeterRow, meter_row};
 
 /// The meter bar height, logical px before `ui_scale`.
 pub const METER_H: f32 = 6.;
@@ -740,4 +742,63 @@ pub fn box_chart<T: 'static>(
         view.set_compact_scale(true, cx);
         view
     })
+}
+
+/// The sparkline column at the right of a spark row, logical px before `ui_scale`.
+pub const SPARK_W: f32 = 96.;
+
+/// The grid of a sparkline: grid lines, no outline and no rounding.
+pub const SPARK_GRID: GridStyle = GridStyle {
+    lines: true,
+    baseline: false,
+    outline: false,
+    rounded: false,
+};
+
+/// A sparkline chart for a spark row: no heading, no value, no range word, no scale label.
+pub fn spark_chart<T: 'static>(
+    spec: ChartSpec,
+    value_fmt: ValueFormat,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut Context<T>,
+) -> Entity<ChartView> {
+    let labels = ChartLabels {
+        heading: None,
+        value_fmt,
+        value_align: ValueAlign::Hidden,
+        range_word: SharedString::default(),
+        legend: SmallVec::new(),
+        show_axis_max: false,
+    };
+    cx.new(|cx| ChartView::new(spec, labels, hub, cx))
+}
+
+/// A meter row with a sparkline column at the right: label, meter, value, then `chart` in a
+/// `SPARK_W` column. `None` leaves the column empty, so the meters of rows with and without a
+/// sparkline line up. The chart is a cached child view: the row builds no chart geometry.
+pub fn spark_row(
+    row: &MeterRow,
+    chart: Option<&Entity<ChartView>>,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    let s = m.ui_scale;
+    let mut spark = div()
+        .relative()
+        .flex_none()
+        .w(px(SPARK_W * s))
+        .h(px(LABEL_ROW * s));
+    if let Some(chart) = chart {
+        spark = spark.child(chart.clone().cached(StyleRefinement::default().size_full()));
+    }
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(m.sp[4])
+        .h(px(LABEL_ROW * s))
+        .child(div().flex_1().min_w_0().child(meter_row(row, m, theme)))
+        .child(spark)
+        .into_any_element()
 }

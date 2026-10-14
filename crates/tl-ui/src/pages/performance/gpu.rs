@@ -146,10 +146,10 @@ pub fn probe_state(vendor: GpuVendor, snap: &Snapshot) -> ProbeState {
 
 /// One engine: its settings key, its name's `en-US.ftl` key and its series.
 #[derive(Clone, Copy, Debug)]
-struct Engine {
-    key: &'static str,
-    name: &'static str,
-    metric: MetricId,
+pub(crate) struct Engine {
+    pub(crate) key: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) metric: MetricId,
     /// The engine's bit in the reported-engine mask.
     bit: u8,
 }
@@ -196,6 +196,21 @@ pub fn engine_cells(
         .filter(|e| !hidden.iter().any(|k| &**k == e.key))
         .map(|e| (Arc::from(e.key), tr_en(e.name, &[])))
         .collect()
+}
+
+/// The engines of a GPU of `vendor` with `totals` that are reported and not in `hidden`
+/// (`performance.hidden_gpu_engines`), in the vendor's order. The Overview GPU box draws one row
+/// per engine from here (crw.47).
+pub(crate) fn shown_engines<'a, H: AsRef<str>>(
+    vendor: GpuVendor,
+    totals: Option<&GpuTotals>,
+    hidden: &'a [H],
+) -> impl Iterator<Item = &'static Engine> + 'a {
+    let reported = reported_bits(totals);
+    vendor_engines(vendor)
+        .iter()
+        .filter(move |e| reported & e.bit != 0)
+        .filter(move |e| !hidden.iter().any(|k| k.as_ref() == e.key))
 }
 
 /// Every engine `device` reports, (key, name), in the vendor's order, hidden ones included.
@@ -1309,7 +1324,7 @@ fn fallback(model: &mut KeyValueModel, label: &'static str, v: Validity) -> bool
 }
 
 /// The record of `device` in the snapshot.
-fn gpu_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&GpuTotals> {
+pub(crate) fn gpu_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&GpuTotals> {
     let gpus = &snap.system.gpus;
     gpus.binary_search_by_key(&device, |(i, _)| *i)
         .ok()

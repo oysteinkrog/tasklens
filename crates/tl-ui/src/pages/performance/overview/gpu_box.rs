@@ -1,10 +1,12 @@
 //! The Overview page's GPU box (UI-PRF-017, D-022, UI-PRF-029): one section per shown GPU, at most
-//! two, each a utilization chart, a VRAM meter and the temperature and power.
+//! two, each a utilization chart, one row per engine (label, meter, percent and a sparkline), a
+//! VRAM meter row and a temperature and power row.
 //!
 //! The page hands in the GPUs of the sidebar's visible cards. The box formats its text only when
-//! the inputs' hash changes and notifies only then. The second section shows only when both fit
-//! the box height with charts of at least 48 px (TMOG); a resize re-renders the box only when
-//! that changes. Pointer movement never notifies.
+//! the inputs' hash changes and notifies only then. Engine rows and their sparkline charts are
+//! built only when the shown engine list changes (crw.47). The second section shows only when
+//! both fit the box height with charts of at least 48 px (TMOG); a resize re-renders the box only
+//! when that changes. Pointer movement never notifies.
 
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
@@ -26,10 +28,12 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
+use super::super::gpu::{GpuVendor, gpu_totals, shown_engines};
 use super::cpu_box::value_text;
-use super::mem_box::{MeterRow, meter_row};
+use super::mem_box::MeterRow;
 use super::parts::{
-    ChartSettings, MIN_CHART_H, box_chart, box_frame, chart_section_versions, class_probe,
+    ChartSettings, MIN_CHART_H, SPARK_GRID, box_chart, box_frame, chart_section_versions,
+    class_probe, spark_chart, spark_row,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -49,6 +53,8 @@ pub const GPU_BOX_ID: &str = "perf-overview-box-gpu";
 pub const MAX_GPUS: usize = 2;
 
 const KEY_VRAM: &str = "perf-overview-gpu-vram";
+/// The one row of a shared encode/decode engine.
+const KEY_ENC_DEC: &str = "perf-overview-gpu-enc-dec";
 const KEY_MORE: &str = "perf-overview-more";
 const KEY_RANGE: &str = "perf-gpu-row-utilization";
 
@@ -63,9 +69,98 @@ pub struct GpuSection {
     pub chart: Entity<ChartView>,
     /// Utilization.
     pub value: SharedString,
+    /// One row per shown engine, in the vendor's order.
+    pub engines: SmallVec<[EngineRow; 4]>,
     pub vram: MeterRow,
     /// Temperature and power, each only when known.
     pub line: SharedString,
+}
+
+/// One engine row: label, meter and percent in `meter`, and a sparkline of the engine's series.
+pub struct EngineRow {
+    /// The engine's `performance.hidden_gpu_engines` key ("enc" for a shared encode/decode row).
+    pub key: &'static str,
+    /// The label's `en-US.ftl` key.
+    name: &'static str,
+    pub metric: MetricId,
+    pub meter: MeterRow,
+    pub chart: Entity<ChartView>,
+}
+
+/// An engine row as the snapshot and the settings ask for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct EngineWant {
+    key: &'static str,
+    name: &'static str,
+    metric: MetricId,
+}
+
+/// The engine rows of GPU `idx`: every reported engine that is not hidden, in the vendor's order.
+/// A shared encode/decode engine (`enc_dec_shared`) is one row at the place of the first of the
+/// two; it is hidden only when both "enc" and "dec" are.
+fn engine_wants(snap: &Snapshot, idx: DeviceIdx, hidden: &[String]) -> SmallVec<[EngineWant; 4]> {
+    let totals = gpu_totals(snap, idx);
+    let shared = totals.is_some_and(|t| t.enc_dec_shared);
+    let mut merged = false;
+    let mut out = SmallVec::new();
+    for e in shown_engines(GpuVendor::of(snap, idx), totals, hidden) {
+        let want = if shared && matches!(e.key, "enc" | "dec") {
+            if merged {
+                continue;
+            }
+            merged = true;
+            EngineWant {
+                key: "enc",
+                name: KEY_ENC_DEC,
+                metric: MetricId::GPU_ENC,
+            }
+        } else {
+            EngineWant {
+                key: e.key,
+                name: e.name,
+                metric: e.metric,
+            }
+        };
+        out.push(want);
+    }
+    out
+}
+
+/// The current value of an engine's series in `t`.
+fn engine_metric(t: &GpuTotals, metric: MetricId) -> Metric<f32> {
+    if metric == MetricId::GPU_UTIL {
+        t.util_pct
+    } else if metric == MetricId::GPU_ENC {
+        t.enc_pct
+    } else if metric == MetricId::GPU_DEC {
+        t.dec_pct
+    } else {
+        Metric::with(Validity::Unsupported)
+    }
+}
+
+/// An engine row's sparkline: filled, 0..100, over the box's time range.
+fn engine_spec(gpu: DeviceIdx, metric: MetricId, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+    ChartSpec {
+        series: smallvec![ChartSeries {
+            id: SeriesId {
+                device: gpu,
+                metric,
+            },
+            fill: Some(theme.graph.gpu_fill),
+            line: theme.graph.gpu_line,
+            ..ChartSeries::default()
+        }],
+        y: YScale::Fixed {
+            min: 0.0,
+            max: 100.0,
+        },
+        range_ns: s.range_ns,
+        grid: SPARK_GRID,
+        smooth: s.smooth,
+        background: ChartBg::List,
+        ..ChartSpec::default()
+    }
 }
 
 /// The utilization chart: filled, 0..100.
@@ -127,17 +222,25 @@ fn spacing(m: &UiMetrics) -> (f32, f32, f32) {
     )
 }
 
-/// How many sections fit a body of `body` (0 before the first paint shows them all). The first
-/// section is a chart and the VRAM row (its heading and line are the box title row); later ones
-/// add a heading row and a line row. The "+n more" row counts when GPUs are left over.
-fn sections_fit(body: Size<Pixels>, count: usize, hidden: usize, m: &UiMetrics) -> usize {
+/// The body rows under a section's chart: the engines, VRAM and, when known, temperature and
+/// power.
+fn body_rows(s: &GpuSection) -> usize {
+    s.engines.len() + 1 + usize::from(!s.line.is_empty())
+}
+
+/// How many sections fit a body of `body` (0 before the first paint shows them all). `rows` has
+/// each section's body rows. The first section is a chart and its rows (its heading is the box
+/// title row); later ones add a heading row. The "+n more" row counts when GPUs are left over.
+fn sections_fit(body: Size<Pixels>, rows: &[usize], hidden: usize, m: &UiMetrics) -> usize {
+    let count = rows.len();
     if body.height == px(0.) || count < 2 {
         return count;
     }
     let (row, gap, section_gap) = spacing(m);
     let chart = MIN_CHART_H * m.ui_scale;
-    let first = chart + gap + row;
-    let next = row + gap + chart + gap + row + gap + row;
+    let section = |n: usize| chart + n as f32 * (gap + row);
+    let first = section(rows[0]);
+    let next = row + gap + section(rows[1]);
     let more = if hidden > 0 { section_gap + row } else { 0. };
     if f32::from(body.height) >= first + section_gap + next + more {
         2
@@ -156,6 +259,8 @@ pub struct GpuBox {
     more_text: SharedString,
     more_text_fit: SharedString,
     text_bits: u64,
+    /// `performance.hidden_gpu_engines`.
+    hidden: Vec<String>,
     /// The body size of the last paint, and how many sections the last render showed.
     body: Rc<Cell<Size<Pixels>>>,
     shown: usize,
@@ -183,6 +288,10 @@ impl GpuBox {
             more_text: SharedString::default(),
             more_text_fit: SharedString::default(),
             text_bits: 0,
+            hidden: TlSettings::settings(cx)
+                .performance
+                .hidden_gpu_engines
+                .clone(),
             body: Rc::new(Cell::new(size(px(0.), px(0.)))),
             shown: 0,
             settings: ChartSettings::read(cx),
@@ -242,13 +351,20 @@ impl GpuBox {
         self.shown
     }
 
-    /// "GPU 0\t12%", then the VRAM and the line, per section; then "+n more".
+    /// "GPU 0\t12%", then one line per engine, the VRAM and the line, per section; then
+    /// "+n more".
     pub fn copy_text(&self, out: &mut String) {
         for s in &self.sections {
             out.push_str(&s.heading);
             out.push('\t');
             out.push_str(&s.value);
             out.push('\n');
+            for e in &s.engines {
+                out.push_str(&e.meter.label);
+                out.push('\t');
+                out.push_str(&e.meter.value);
+                out.push('\n');
+            }
             out.push_str(&s.vram.label);
             out.push('\t');
             out.push_str(&s.vram.value);
@@ -279,6 +395,10 @@ impl GpuBox {
                         s.idx = *idx;
                         let spec = chart_spec(*idx, &self.settings, &theme);
                         s.chart.update(cx, |v, cx| v.set_spec(spec, cx));
+                        for e in &s.engines {
+                            let spec = engine_spec(*idx, e.metric, &self.settings, &theme);
+                            e.chart.update(cx, |v, cx| v.set_spec(spec, cx));
+                        }
                     }
                     s.heading = heading.clone();
                     s
@@ -293,6 +413,7 @@ impl GpuBox {
                         heading: heading.clone(),
                         chart: box_chart(spec, labels, &hub, cx),
                         value: SharedString::default(),
+                        engines: SmallVec::new(),
                         vram: MeterRow {
                             label: tr(cx, KEY_VRAM),
                             value: SharedString::default(),
@@ -308,7 +429,69 @@ impl GpuBox {
         self.more = gpus.len().saturating_sub(MAX_GPUS);
         self.sync_more_text(cx);
         let snap = Arc::clone(self.hub.read(cx).current());
+        self.sync_engines(&snap, cx);
         self.sync_text(&snap, true);
+    }
+
+    /// Rebuilds the engine rows of every section whose shown engine list changed. A row whose
+    /// key is unchanged keeps its chart; text changes never build a chart. True when a list
+    /// changed.
+    fn sync_engines(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
+        let theme = current(cx).clone();
+        let mut changed = false;
+        for i in 0..self.sections.len() {
+            let idx = self.sections[i].idx;
+            let wants = engine_wants(snap, idx, &self.hidden);
+            let same = {
+                let rows = &self.sections[i].engines;
+                rows.len() == wants.len()
+                    && rows
+                        .iter()
+                        .zip(&wants)
+                        .all(|(r, w)| r.key == w.key && r.name == w.name && r.metric == w.metric)
+            };
+            if same {
+                continue;
+            }
+            changed = true;
+            let mut old = std::mem::take(&mut self.sections[i].engines);
+            let mut rows = SmallVec::new();
+            for w in wants {
+                let row = match old.iter().position(|r| r.key == w.key) {
+                    Some(j) => {
+                        let mut r = old.remove(j);
+                        if r.name != w.name {
+                            r.name = w.name;
+                            r.meter.label = tr(cx, w.name);
+                        }
+                        if r.metric != w.metric {
+                            r.metric = w.metric;
+                            let spec = engine_spec(idx, w.metric, &self.settings, &theme);
+                            r.chart.update(cx, |v, cx| v.set_spec(spec, cx));
+                        }
+                        r
+                    }
+                    None => {
+                        let spec = engine_spec(idx, w.metric, &self.settings, &theme);
+                        EngineRow {
+                            key: w.key,
+                            name: w.name,
+                            metric: w.metric,
+                            meter: MeterRow {
+                                label: tr(cx, w.name),
+                                value: SharedString::default(),
+                                fraction: None,
+                                color: theme.graph.gpu_line,
+                            },
+                            chart: spark_chart(spec, ValueFormat::Percent, &self.hub, cx),
+                        }
+                    }
+                };
+                rows.push(row);
+            }
+            self.sections[i].engines = rows;
+        }
+        changed
     }
 
     fn sync_more_text(&mut self, cx: &mut Context<Self>) {
@@ -329,12 +512,13 @@ impl GpuBox {
     ) {
         if !ev
             .mask
-            .intersects(ComponentMask::SYSTEM | ComponentMask::DEVICES)
+            .intersects(ComponentMask::SYSTEM | ComponentMask::DEVICES | ComponentMask::INVENTORY)
         {
             return;
         }
         let snap = Arc::clone(hub.read(cx).current());
-        if self.sync_text(&snap, false) {
+        let rows = self.sync_engines(&snap, cx);
+        if self.sync_text(&snap, rows) {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
@@ -359,6 +543,9 @@ impl GpuBox {
                 continue;
             };
             hash_metric(&mut h, &t.util_pct, |v| u64::from(v.to_bits()));
+            hash_metric(&mut h, &t.enc_pct, |v| u64::from(v.to_bits()));
+            hash_metric(&mut h, &t.dec_pct, |v| u64::from(v.to_bits()));
+            t.enc_dec_shared.hash(&mut h);
             hash_metric(&mut h, &t.mem_used, |v| v);
             hash_metric(&mut h, &t.mem_total, |v| v);
             hash_metric(&mut h, &t.temp_c, |v| u64::from(v.to_bits()));
@@ -375,13 +562,24 @@ impl GpuBox {
         true
     }
 
-    /// Applies the chart settings when one of their sections changed.
+    /// Applies the chart settings and the hidden engines when one of their sections changed.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
         let versions = chart_section_versions(cx);
         if versions == self.settings_versions {
             return;
         }
         self.settings_versions = versions;
+        let hidden = &TlSettings::settings(cx).performance.hidden_gpu_engines;
+        if *hidden != self.hidden {
+            self.hidden = hidden.clone();
+            let snap = Arc::clone(self.hub.read(cx).current());
+            if self.sync_engines(&snap, cx) {
+                self.sync_text(&snap, true);
+                #[cfg(any(test, feature = "test-hooks"))]
+                self.notify_count.set(self.notify_count.get() + 1);
+                cx.notify();
+            }
+        }
         let new = ChartSettings::read(cx);
         if new == self.settings {
             return;
@@ -400,6 +598,9 @@ impl GpuBox {
         let line = current(cx).graph.gpu_line;
         for s in &mut self.sections {
             s.vram.color = line;
+            for e in &mut s.engines {
+                e.meter.color = line;
+            }
         }
         self.rebuild_specs(cx);
         cx.notify();
@@ -415,6 +616,9 @@ impl GpuBox {
         let (vram, range) = (tr(cx, KEY_VRAM), tr(cx, KEY_RANGE));
         for s in &mut self.sections {
             s.vram.label = vram.clone();
+            for e in &mut s.engines {
+                e.meter.label = tr(cx, e.name);
+            }
             let labels = chart_labels(range.clone());
             s.chart.update(cx, |v, cx| v.set_labels(labels, cx));
         }
@@ -427,15 +631,23 @@ impl GpuBox {
         for s in &self.sections {
             let spec = chart_spec(s.idx, &self.settings, &theme);
             s.chart.update(cx, |v, cx| v.set_spec(spec, cx));
+            for e in &s.engines {
+                let spec = engine_spec(s.idx, e.metric, &self.settings, &theme);
+                e.chart.update(cx, |v, cx| v.set_spec(spec, cx));
+            }
         }
     }
 }
 
-/// One section's value ("12%"), VRAM ("3.20 GiB / 16.00 GiB" and its fill) and line
-/// ("62 °C · 120 W"). A GPU with no totals in the snapshot shows the Missing glyph.
+/// One section's value ("12%"), engine percents and fills, VRAM ("3.20 GiB / 16.00 GiB" and its
+/// fill) and line ("62 °C · 120 W"). A GPU with no totals in the snapshot shows the Missing glyph.
 fn format_section(s: &mut GpuSection, t: Option<&GpuTotals>) {
     let Some(t) = t else {
         let missing = value_text(Validity::Missing, |_| {});
+        for e in &mut s.engines {
+            e.meter.value = missing.clone();
+            e.meter.fraction = None;
+        }
         s.value = missing.clone();
         s.vram.value = missing;
         s.vram.fraction = None;
@@ -446,6 +658,13 @@ fn format_section(s: &mut GpuSection, t: Option<&GpuTotals>) {
     s.value = value_text(t.util_pct.validity, |out| {
         format_value(ValueFormat::Percent, t.util_pct.value, unit, out);
     });
+    for e in &mut s.engines {
+        let v = engine_metric(t, e.metric);
+        e.meter.value = value_text(v.validity, |out| {
+            format_value(ValueFormat::Percent, v.value, unit, out);
+        });
+        e.meter.fraction = shown(v.validity).then(|| v.value / 100.);
+    }
     let vram_known = shown(t.mem_used.validity) && shown(t.mem_total.validity);
     s.vram.value = if vram_known {
         let mut out = String::new();
@@ -497,7 +716,8 @@ impl Render for GpuBox {
         let row_h = px(LABEL_ROW * s);
         let count = self.sections.len();
         let more = self.more;
-        self.shown = sections_fit(self.body.get(), count, more, &m);
+        let rows: SmallVec<[usize; MAX_GPUS]> = self.sections.iter().map(body_rows).collect();
+        self.shown = sections_fit(self.body.get(), &rows, more, &m);
 
         let mut body = div().relative().flex().flex_col().size_full().gap(m.sp[5]);
         for (i, section) in self.sections.iter().take(self.shown).enumerate() {
@@ -541,8 +761,14 @@ impl Render for GpuBox {
                         .w_full()
                         .child(chart_element(section)),
                 )
-                .child(meter_row(&section.vram, &m, &theme));
-            if i > 0 && !section.line.is_empty() {
+                .children(
+                    section
+                        .engines
+                        .iter()
+                        .map(|e| spark_row(&e.meter, Some(&e.chart), &m, &theme)),
+                )
+                .child(spark_row(&section.vram, None, &m, &theme));
+            if !section.line.is_empty() {
                 let mut line = div()
                     .flex_none()
                     .h(row_h)
@@ -575,7 +801,7 @@ impl Render for GpuBox {
         body = body.child(class_probe(
             Rc::clone(&self.body),
             shown,
-            move |b| sections_fit(b, count, more, &probe_m) as u32,
+            move |b| sections_fit(b, &rows, more, &probe_m) as u32,
             cx.entity_id(),
         ));
 
@@ -586,7 +812,7 @@ impl Render for GpuBox {
             first.map(|s| s.key.clone()),
             pick(|s| &s.heading),
             pick(|s| &s.value),
-            pick(|s| &s.line),
+            SharedString::default(),
             body.into_any_element(),
             &m,
             &theme,
