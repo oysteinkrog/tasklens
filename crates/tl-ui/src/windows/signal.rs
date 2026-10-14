@@ -816,7 +816,7 @@ pub fn open_rt_signal(
 }
 
 impl Render for RtSignalDialog {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         let m = *metrics(cx);
         let s = m.ui_scale;
@@ -968,10 +968,10 @@ mod tests {
                 ("XFSZ", 25),
             ]
         );
-        for signal in SIGNALS.iter().filter(|s| s.top_level) {
+        for info in SIGNALS.iter().filter(|s| s.top_level) {
             assert_eq!(
-                signal(signal.number).expect("known signal").number(),
-                signal.number
+                signal(info.number).expect("known signal").number(),
+                info.number
             );
         }
     }
