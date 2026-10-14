@@ -39,6 +39,7 @@ use super::actions::{
 };
 use super::frame::{EscStep, PwnWindow, app_props_title, esc_step, open_pwn};
 use super::props::filter::{FilterChanged, PropsFilter, filter_bar, lowercase, matches, on_clear};
+use super::props::general::escape_controls;
 use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -273,6 +274,8 @@ pub struct AppGeneralTab {
     exited: bool,
     network_unit: NetUnit,
     copy_focus: FocusHandle,
+    cmdline_text: SharedString,
+    cmdline_validity: Validity,
     _subs: Vec<Subscription>,
 }
 
@@ -307,6 +310,8 @@ impl AppGeneralTab {
             exited: false,
             network_unit,
             copy_focus: cx.focus_handle(),
+            cmdline_text: SharedString::default(),
+            cmdline_validity: Validity::WarmingUp,
             _subs: vec![sub],
         };
         this.rebuild();
@@ -335,6 +340,19 @@ impl AppGeneralTab {
             return;
         }
         self.payload = next;
+        let (cmdline_text, cmdline_validity) = self.payload.as_ref().map_or_else(
+            || (SharedString::default(), Validity::WarmingUp),
+            |detail| {
+                let validity = detail.primary_cmdline.validity;
+                let mut shown = String::new();
+                if validity.is_valid() || validity == Validity::Stale {
+                    escape_controls(&mut shown, &detail.primary_cmdline.value);
+                }
+                (shown.into(), validity)
+            },
+        );
+        self.cmdline_text = cmdline_text;
+        self.cmdline_validity = cmdline_validity;
         self.rebuild();
         cx.notify();
     }
@@ -625,15 +643,8 @@ impl AppGeneralTab {
     fn command_line(&self, cx: &App) -> AnyElement {
         let m = *metrics(cx);
         let theme = current(cx);
-        let (text, validity) = self.payload.as_ref().map_or_else(
-            || (SharedString::default(), Validity::WarmingUp),
-            |d| {
-                (
-                    SharedString::from(&d.primary_cmdline.value),
-                    d.primary_cmdline.validity,
-                )
-            },
-        );
+        let text = self.cmdline_text.clone();
+        let validity = self.cmdline_validity;
         let valid = validity.is_valid() || validity == Validity::Stale;
         let copy_text = text.clone();
         let copied = self.words.copied.clone();
