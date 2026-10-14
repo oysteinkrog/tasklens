@@ -4,8 +4,9 @@
 //! R-107).
 //!
 //! Top to bottom: the title bar, the tab strip and the page area. The page area holds the active
-//! page and the floating status chip at its bottom-left. Each part is a cached view, so a page
-//! that redraws does not redraw the shell and the shell does not redraw the page.
+//! page and the floating status chip at its bottom-left. Shell parts and non-Performance pages
+//! are cached views. The Performance page keeps its traversal container uncached so its leaf
+//! caches can invalidate independently.
 //!
 //! Pages are built on their first visit through [`page_factory`] and kept for the window's life
 //! (ADR-009). A tab whose page has no arm in the match is not shown (R-023). Each page epic adds
@@ -2315,7 +2316,7 @@ impl Render for MainWindow {
             self.page_opacity = opacity.unwrap_or(1.0);
         }
         let page = self.pages[self.active as usize].as_ref().map(|slot| {
-            if opacity.is_some() {
+            if opacity.is_some() || self.active == Tab::Performance {
                 slot.view.clone().into_any_element()
             } else {
                 slot.view

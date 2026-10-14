@@ -365,7 +365,7 @@ fn card_selected_and_focus_outlines(cx: &mut TestAppContext) {
 /// The `DeviceSidebar` entity: cards, selection, keys, change-only text and demand (E24-004,
 /// UI-PRF-011, UI-PRF-012).
 mod sidebar {
-    use gpui_kit::{Focusable as _, StyleRefinement};
+    use gpui_kit::Focusable as _;
     use tl_model::demand::{CpuDemand, Demand};
     use tl_model::devices::DeviceCatalog;
     use tl_model::ids::{MetricId, SeriesId};
@@ -395,11 +395,7 @@ mod sidebar {
 
     impl Render for SidebarHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().w(px(260.)).h(px(900.)).child(
-                self.0
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            )
+            div().w(px(260.)).h(px(900.)).child(self.0.clone())
         }
     }
 

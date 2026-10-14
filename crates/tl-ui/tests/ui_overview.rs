@@ -1806,6 +1806,7 @@ mod page {
 /// The Overview page inside `PerformancePage` in the main window, reached through the sidebar
 /// (crw.42).
 mod wired {
+    use std::cell::Cell;
     use std::sync::Arc;
 
     use gpui_kit::{
@@ -1817,11 +1818,12 @@ mod wired {
     use tl_model::command::Tab;
     use tl_model::demand::{CpuDemand, Demand};
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
-    use tl_model::ids::{DeviceIdx, GroupKey, ProcessKey};
+    use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
-    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
-    use tl_model::time::BootId;
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, SeriesSet};
+    use tl_model::time::{BootId, now_boot_ns};
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
     use tl_ui::chart::labels::LabelKind;
@@ -1914,24 +1916,29 @@ mod wired {
         ]
     }
 
-    struct FakeProcesses(FocusHandle);
+    struct FakeProcesses {
+        focus: FocusHandle,
+        render_count: Cell<u32>,
+    }
 
     impl gpui_kit::EventEmitter<tl_ui::window::status::StatusChanged> for FakeProcesses {}
 
     impl Render for FakeProcesses {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             use gpui_kit::{InteractiveElement as _, Styled as _};
-            div().track_focus(&self.0).size_full()
+            self.render_count.set(self.render_count.get() + 1);
+            div().track_focus(&self.focus).size_full()
         }
     }
 
     impl shell::ShellPage for FakeProcesses {
         fn primary_focus(&self) -> FocusHandle {
-            self.0.clone()
+            self.focus.clone()
         }
     }
 
     struct Rig<'a> {
+        main: Entity<MainWindow>,
         page: Entity<PerformancePage>,
         demand: Entity<DemandAggregator>,
         engine: Arc<FakeEngine>,
@@ -2013,7 +2020,10 @@ mod wired {
             tl_ui::pages::performance::actions::bind_keys_performance(cx);
             cx.set_global(StartOptions::default());
             set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
-                let page = cx.new(|cx| FakeProcesses(cx.focus_handle().tab_stop(true)));
+                let page = cx.new(|cx| FakeProcesses {
+                    focus: cx.focus_handle().tab_stop(true),
+                    render_count: Cell::new(0),
+                });
                 PageSlot::new(page, cx)
             });
             cx.set_global(TitleBarProbe {
@@ -2039,6 +2049,7 @@ mod wired {
             })
             .expect("PerformancePage built");
         Rig {
+            main,
             page,
             demand,
             engine: fake,
@@ -2078,6 +2089,62 @@ mod wired {
     fn merged(r: &mut Rig) -> Demand {
         let demand = r.demand.clone();
         r.vcx.update(|_, cx| demand.read(cx).merged())
+    }
+
+    fn overview_render_counts(r: &mut Rig) -> ([u32; 5], [u32; 6]) {
+        let page = overview(r).expect("an OverviewPage");
+        r.vcx.update(|_, cx| {
+            let page = page.read(cx);
+            let cpu = page.cpu_box().read(cx);
+            let memory = page.mem_box().read(cx);
+            let gpu = page.gpu_box().read(cx);
+            let disk = page.disk_box().read(cx);
+            let net = page.net_box().read(cx);
+            (
+                [
+                    cpu.render_count.get(),
+                    memory.render_count.get(),
+                    gpu.render_count.get(),
+                    disk.render_count.get(),
+                    net.render_count.get(),
+                ],
+                [
+                    cpu.total_chart().read(cx).render_count.get(),
+                    memory.chart().read(cx).render_count.get(),
+                    gpu.sections()[0].chart.read(cx).render_count.get(),
+                    disk.io_chart().read(cx).render_count.get(),
+                    net.down_chart().read(cx).render_count.get(),
+                    net.up_chart().read(cx).render_count.get(),
+                ],
+            )
+        })
+    }
+
+    fn publish_cpu_series(r: &mut Rig) {
+        let newest = now_boot_ns();
+        r.engine.publish_with(|s| {
+            let version = s.series.header.version + 1;
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: Arc::from([Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(0),
+                        metric: MetricId::CPU_TOTAL,
+                    },
+                    version,
+                    period_ns: 100_000_000,
+                    samples: Arc::from([
+                        Sample::valid(newest - 100_000_000, 20.),
+                        Sample::valid(newest, 30.),
+                    ]),
+                })]),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
     }
 
     /// The Overview part is in the merged demand: only it asks for disks, nets and GPUs here.
@@ -2228,6 +2295,47 @@ mod wired {
         // The empty measuring render, the boxes, and at most one more when a box's width
         // probe picks its wide or narrow layout after its first frame.
         assert!((2..=3).contains(&renders), "page renders {renders}");
+    }
+
+    /// wlf.37: the real main-window nesting leaves Overview's box and chart caches independent.
+    #[gpui_kit::test]
+    fn cpu_series_renders_only_overview_cpu_box_and_chart(cx: &mut TestAppContext) {
+        let mut r = open_with(cx, true);
+        select(&mut r, OVERVIEW_KEY);
+        draw(r.vcx);
+        let before = overview_render_counts(&mut r);
+
+        publish_cpu_series(&mut r);
+
+        let after = overview_render_counts(&mut r);
+        let box_delta = std::array::from_fn::<_, 5, _>(|i| after.0[i] - before.0[i]);
+        let chart_delta = std::array::from_fn::<_, 6, _>(|i| after.1[i] - before.1[i]);
+        assert_eq!(box_delta, [1, 0, 0, 0, 0], "box render deltas");
+        assert_eq!(chart_delta, [1, 0, 0, 0, 0, 0], "chart render deltas");
+    }
+
+    /// wlf.37: the Performance exception does not remove page caching from another tab.
+    #[gpui_kit::test]
+    fn processes_page_remains_cached(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        r.vcx
+            .dispatch_action(tl_ui::actions::SelectTab(Tab::Processes as usize));
+        draw(r.vcx);
+        let main = r.main.clone();
+        let page = r
+            .vcx
+            .read_entity(&main, |m, _| m.page_entity::<FakeProcesses>(Tab::Processes))
+            .expect("Processes page built");
+        let before = r.vcx.read_entity(&page, |p, _| p.render_count.get());
+
+        r.vcx.update(|_, cx| main.update(cx, |_, cx| cx.notify()));
+        draw(r.vcx);
+
+        assert_eq!(
+            r.vcx.read_entity(&page, |p, _| p.render_count.get()),
+            before,
+            "clean non-Performance page cache reused"
+        );
     }
 
     fn assert_overview_frame_anatomy(r: &mut Rig) {

@@ -35,7 +35,7 @@ use gpui_kit::{
     Animation, AnimationExt as _, AnyView, App, AppContext as _, AsyncApp, ClipboardItem, Context,
     Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px,
+    Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -934,9 +934,7 @@ impl Render for PerformancePage {
         let sidebar = div()
             .debug_selector(|| SIDEBAR_PANEL_ID.into())
             .size_full()
-            .child(
-                AnyView::from(self.sidebar.clone()).cached(StyleRefinement::default().size_full()),
-            );
+            .child(self.sidebar.clone());
         let page = div()
             .debug_selector(|| PAGE_PANEL_ID.into())
             .size_full()
@@ -955,10 +953,7 @@ impl Render for PerformancePage {
                 });
             }))
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .children(
-                self.selected_view()
-                    .map(|v| v.cached(StyleRefinement::default().size_full())),
-            );
+            .children(self.selected_view());
 
         // While the width animates, the sidebar sits in a clipping box before the split and the
         // split's own sidebar panel is hidden. The page panel keeps its place in the tree.
