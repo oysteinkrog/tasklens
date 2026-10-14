@@ -1641,11 +1641,19 @@ mod signal {
         ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, Signal,
     };
     use tl_model::command::Command;
+    use tl_model::ids::NodeId;
+    use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::snapshot::ProcessSnapshot;
+    use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::menu::{MenuEntryKind, TlMenu, TlMenuPopup};
     use tl_ui::components::toast::ToastQueue;
     use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
+    use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
+    use tl_ui::pages::processes::signal_targets_for_test;
+    use tl_ui::table::tree_table::RowKind;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::signal::{self, RtSignalDialog, SIGNALS, SignalRefusal, TargetNames};
 
@@ -1762,6 +1770,172 @@ mod signal {
             vcx.run_until_parked();
             self.cx.run_until_parked();
         }
+    }
+
+    fn captured(pid: u32, kind: RowKind, flags: ProcFlags) -> CapturedTarget {
+        CapturedTarget {
+            node: NodeId::Process(super::key_of(pid)),
+            kind,
+            name: format!("process-{pid}").into(),
+            pid: Some(pid),
+            uid: 1000,
+            user: "me".into(),
+            flags,
+            member_count: 1,
+            stopped: false,
+            ppid: 1,
+            nice: Some(0),
+            exe_deleted: false,
+        }
+    }
+
+    fn process_record(pid: u32, ppid: u32, group: tl_model::ids::GroupKey) -> ProcessRecord {
+        let text = |value: &str| Arc::<str>::from(value);
+        let name = format!("process-{pid}");
+        ProcessRecord {
+            key: super::key_of(pid),
+            ppid,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: text(&name),
+                name: text(&name),
+                exe: Some(text(&format!("/usr/bin/{name}"))),
+                cmdline: None,
+                user: text("me"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: text(&name),
+            }),
+            group,
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_send_signal_item_and_kernel_thread_rule(cx: &mut TestAppContext) {
+        super::setup(cx);
+        let handle = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        let build = |vcx: &mut VisualTestContext, target: CapturedTarget| {
+            vcx.update(|window, cx| {
+                let focus = cx.focus_handle();
+                let targets = CapturedTargets::new([target], None);
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                })
+            })
+        };
+
+        let process = build(
+            &mut vcx,
+            captured(4321, RowKind::Process, ProcFlags::empty()),
+        );
+        let entries = vcx.update(|window, cx| process.read(cx).entries_for_test(window));
+        let signal = entries
+            .iter()
+            .find(|entry| entry.label.as_deref() == Some("Send Signal"))
+            .expect("Send Signal item");
+        assert_eq!(signal.kind, MenuEntryKind::Submenu);
+        let submenu = signal.submenu.clone().expect("signal submenu");
+        let labels: Vec<_> = vcx
+            .update(|window, cx| submenu.read(cx).entries_for_test(window))
+            .into_iter()
+            .filter_map(|entry| entry.label.map(|label| label.to_string()))
+            .collect();
+        assert!(labels.contains(&"Hangup (HUP) (ends process)".to_owned()));
+        assert!(labels.contains(&"Real-time signal…".to_owned()));
+
+        let kernel = build(
+            &mut vcx,
+            captured(2, RowKind::KernelThread, ProcFlags::KERNEL_THREAD),
+        );
+        let entries = vcx.update(|window, cx| kernel.read(cx).entries_for_test(window));
+        let signal = entries
+            .iter()
+            .find(|entry| entry.label.as_deref() == Some("Send Signal"))
+            .expect("disabled Send Signal item");
+        assert_eq!(signal.kind, MenuEntryKind::Disabled);
+        assert_eq!(
+            signal.tooltip.as_deref(),
+            Some("Kernel threads cannot be signalled.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_signal_app_row_targets_primaries(cx: &mut TestAppContext) {
+        super::setup(cx);
+        let group = GroupKind::App {
+            app_id: Arc::from("firefox"),
+        }
+        .key();
+        let snapshot = ProcessSnapshot {
+            records: vec![
+                process_record(100, 1, group),
+                process_record(101, 100, group),
+                process_record(200, 1, group),
+            ]
+            .into(),
+            ..ProcessSnapshot::default()
+        };
+        let app = CapturedTarget {
+            node: NodeId::Group(group),
+            kind: RowKind::App,
+            name: "Firefox".into(),
+            pid: None,
+            uid: 1000,
+            user: "me".into(),
+            flags: ProcFlags::empty(),
+            member_count: 3,
+            stopped: false,
+            ppid: 0,
+            nice: None,
+            exe_deleted: false,
+        };
+        let (targets, names) = signal_targets_for_test(&[app], &snapshot).expect("signal targets");
+        assert_eq!(
+            &targets[..],
+            &[
+                ActionTarget::Process(super::key_of(100)),
+                ActionTarget::Process(super::key_of(200)),
+            ]
+        );
+        assert_eq!(names.subtitle().as_ref(), "Firefox (2 processes)");
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_realtime_signal_opens_dialog(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let before = rig.cx.update(|cx| cx.windows().len());
+        let (handle, dialog, _) = open_rt(&mut rig);
+        assert_eq!(rig.cx.update(|cx| cx.windows().len()), before + 1);
+        assert!((34..=64).contains(&rig.cx.read(|cx| dialog.read(cx).value())));
+        let id = handle.window_id();
+        assert!(
+            rig.cx
+                .update(|cx| cx.windows().iter().any(|window| window.window_id() == id))
+        );
     }
 
     #[gpui_kit::test]

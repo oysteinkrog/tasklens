@@ -63,7 +63,10 @@ use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::status::StatusChanged;
-use crate::windows::actions::{OpenCustomPriority, SetAffinity};
+use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
+use crate::windows::signal::{
+    OtherUserTarget, SignalRefusal, TargetNames, open_rt_signal, send_signal,
+};
 use status::{StatusCounts, write_status};
 
 /// Key context of the page div. The table inside it has `Table`.
@@ -640,6 +643,39 @@ impl ProcessesPage {
         }
     }
 
+    /// Send Signal (UI-PRC-013 item 5): process rows map directly to process targets. App and
+    /// unit rows use the same primary-process and bwrap resolution as End Task (PROC-065).
+    fn on_send_signal(&mut self, action: &SendSignal, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((rows, _)) = self.prune(|_| None, cx) else {
+            return;
+        };
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let Some((targets, names)) = signal_targets(&rows, &snapshot.processes) else {
+            return;
+        };
+        send_signal(action.signo, targets, names, window, cx);
+    }
+
+    /// Real-time signal… uses the same captured targets and subtitle subject as Send Signal,
+    /// then opens UI-PWN-027 modal to the main window.
+    fn on_signal_open_realtime(
+        &mut self,
+        _: &SignalOpenRealtime,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((rows, _)) = self.prune(|_| None, cx) else {
+            return;
+        };
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let Some((targets, names)) = signal_targets(&rows, &snapshot.processes) else {
+            return;
+        };
+        if let Err(err) = open_rt_signal(targets, names, window.window_handle(), cx) {
+            warn!(target: "tasklens::ui", %err, "the real-time signal dialog did not open");
+        }
+    }
+
     /// Go to parent process (PROC-071): selects the live record whose PID is the target's
     /// parent PID through the jump target. Nothing for a parent PID of 0 or several targets.
     fn on_go_to_parent(&mut self, _: &GoToParent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1210,6 +1246,95 @@ fn dialog_targets(
     (!keys.is_empty()).then_some((keys, subject))
 }
 
+/// Process action targets and display/protection metadata for Send Signal. One app or unit row
+/// resolves to its primary processes, including E22's bwrap unwrapping. Several rows keep view
+/// order, remove duplicate process keys and stop at [`MAX_TARGETS`].
+fn signal_targets(
+    rows: &[CapturedTarget],
+    p: &ProcessSnapshot,
+) -> Option<(SmallVec<[ActionTarget; 1]>, TargetNames)> {
+    let forest = Forest::new(&p.records);
+    let mut seen = FxHashSet::default();
+    let mut resolved: Vec<CapturedTarget> = Vec::new();
+    for row in rows {
+        match (row.kind, &row.node) {
+            (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => {
+                if seen.insert(*key) {
+                    resolved.push(row.clone());
+                }
+            }
+            (RowKind::App | RowKind::Unit, node) => {
+                for i in primaries(p, node) {
+                    let i = forest.unwrap_bwrap(i);
+                    let record = &p.records[i];
+                    if seen.insert(record.key) {
+                        resolved.push(record_target(record));
+                    }
+                    if resolved.len() == MAX_TARGETS {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if resolved.len() == MAX_TARGETS {
+            break;
+        }
+    }
+    if resolved.is_empty() {
+        return None;
+    }
+
+    let mut names = match rows {
+        [row] if matches!(row.kind, RowKind::App | RowKind::Unit) => {
+            TargetNames::app(row.name.clone(), resolved.len() as u32)
+        }
+        [row] => TargetNames::process(
+            row.name.clone(),
+            row.pid
+                .unwrap_or_else(|| resolved[0].pid.unwrap_or_default()),
+        ),
+        _ => TargetNames::processes(resolved.len() as u32),
+    };
+    if rows.iter().any(|row| row.kind == RowKind::KernelThread) {
+        names = names.with_refusal(SignalRefusal::KernelThread);
+    }
+    if let Some(row) = rows
+        .iter()
+        .chain(resolved.iter())
+        .find(|row| row.flags.contains(ProcFlags::PROTECTED))
+    {
+        names = names.with_protected(row.name.clone());
+    }
+    if let Some(row) = resolved
+        .iter()
+        .find(|row| row.flags.contains(ProcFlags::OTHER_USER))
+    {
+        names = names.with_other_user(OtherUserTarget {
+            name: row.name.clone(),
+            pid: row.pid.unwrap_or_default(),
+            user: row.user.clone(),
+        });
+    }
+    let targets = resolved
+        .into_iter()
+        .filter_map(|row| match row.node {
+            NodeId::Process(key) => Some(ActionTarget::Process(key)),
+            _ => None,
+        })
+        .collect();
+    Some((targets, names))
+}
+
+/// Test hook for the row-menu adapter. Production callers use the two page action handlers.
+#[cfg(feature = "test-hooks")]
+pub fn signal_targets_for_test(
+    rows: &[CapturedTarget],
+    p: &ProcessSnapshot,
+) -> Option<(SmallVec<[ActionTarget; 1]>, TargetNames)> {
+    signal_targets(rows, p)
+}
+
 /// The live member records of an app or unit row whose parent is not a member, lowest PID
 /// first. Empty for every other node.
 fn primaries(p: &ProcessSnapshot, node: &NodeId) -> Vec<usize> {
@@ -1336,6 +1461,8 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_copy_details))
             .on_action(cx.listener(Self::on_copy_all_metrics))
             .on_action(cx.listener(Self::on_set_affinity))
+            .on_action(cx.listener(Self::on_send_signal))
+            .on_action(cx.listener(Self::on_signal_open_realtime))
             .on_action(cx.listener(Self::on_go_to_parent))
             .on_action(cx.listener(Self::on_open_file_location))
             .child(

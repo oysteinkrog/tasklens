@@ -1962,6 +1962,7 @@ shell-public-ip-line-3 = Continue only if you want this computer to contact that
 shell-public-ip-dont-ask = Do not ask again for public IP fetches
 shell-public-ip-continue = Continue
 # Set Affinity… row menu item (tasklens-gma.7, UI-PRC-013 item 7)
+processes-menu-send-signal = Send Signal
 processes-menu-set-affinity = Set Affinity…
 processes-affinity-subtitle = { $name } (PID { $pid })
 # Minigraph cards (tasklens-xdh.5, PERF-080, UI-PRF-041).

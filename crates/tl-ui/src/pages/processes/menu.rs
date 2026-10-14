@@ -21,6 +21,7 @@ use crate::i18n::tr;
 use crate::table::actions::{CopyCell, CopyRowsAsTable};
 use crate::table::tree_table::RowKind;
 use crate::windows::actions::{OpenCustomPriority, SetAffinity};
+use crate::windows::signal::signal_submenu;
 
 /// Minimum width of the row and group header menus before the UI scale (R-112).
 pub const ROW_MENU_MIN_W: f32 = 240.0;
@@ -100,6 +101,7 @@ pub fn row_menu(
     menu = add_end_process_tree(menu, shape, cx);
     menu = menu.separator();
     menu = add_suspend(menu, targets, shape, cx);
+    menu = add_send_signal(menu, targets, shape, window, cx);
     menu = add_set_priority(menu, targets, shape, window, cx);
     menu = add_set_affinity(menu, shape, cx);
     menu = menu.separator();
@@ -236,6 +238,32 @@ fn add_suspend(menu: TlMenu, targets: &CapturedTargets, shape: Shape, cx: &App) 
         ),
     };
     exitable(menu, shape, tr(cx, key), action, cx)
+}
+
+/// Item 5: Send Signal, built on open from UI-PWN-026. App and unit rows are resolved to
+/// primary processes by the action handler.
+fn add_send_signal(
+    menu: TlMenu,
+    targets: &CapturedTargets,
+    shape: Shape,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let label = tr(cx, "processes-menu-send-signal");
+    if shape.exited {
+        return menu.item_disabled(label, Some(tr(cx, "processes-menu-process-exited")));
+    }
+    let all_kernel_threads = !targets.items.is_empty()
+        && targets
+            .items
+            .iter()
+            .all(|target| target.kind == RowKind::KernelThread);
+    if all_kernel_threads {
+        return menu.item_disabled(label, Some(tr(cx, "fnd-action-reject-kernel-thread")));
+    }
+    menu.submenu(label, window, cx, move |submenu, window, cx| {
+        signal_submenu(submenu, all_kernel_threads, window, cx)
+    })
 }
 
 /// Item 6: the Set Priority submenu. On an app or unit row it says it applies to the app's
