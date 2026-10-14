@@ -45,19 +45,21 @@ use tl_model::ids::DeviceIdx;
 use tl_model::settings::DeviceVisibility;
 
 use self::actions::{
-    PERFORMANCE_CONTEXT, PerfCopyValue, PerfJumpToType, PerfSelectDevice, PerfSetGraphRange,
-    PerfToggleSidebar, PerfToggleSummaryMode,
+    PERFORMANCE_CONTEXT, PerfCopyDeviceInfo, PerfCopyValue, PerfJumpToType, PerfSelectDevice,
+    PerfSetGraphRange, PerfToggleSidebar, PerfToggleSummaryMode,
 };
 use self::details::ClickedValue;
 use self::menu::{PageMenuCtx, VIEW_KINDS, page_menu};
 use self::page::DevicePage;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
+use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::settings_global::{TlSettings, animations_on};
 use crate::theme::metrics;
+use crate::util::clipboard_write;
 use crate::window::main::{ShellPage, WINDOW_TITLE};
 use crate::window::status::StatusChanged;
 
@@ -732,6 +734,35 @@ impl PerformancePage {
         open_context_menu_at(at, window, cx, menu);
     }
 
+    /// `PerfCopyDeviceInfo` (Ctrl+C, menu "Copy"): copies the shown page as text and pushes the
+    /// "Copied metrics to clipboard" toast (PERF-011, UI-PRF-022). A selected Details value is
+    /// copied by the grid before the action gets here.
+    fn on_copy_device_info(
+        &mut self,
+        _: &PerfCopyDeviceInfo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.selected_view() else {
+            return;
+        };
+        let mut text = String::new();
+        match view.clone().downcast::<overview::OverviewPage>() {
+            Ok(page) => page.read(cx).copy_all(&mut text, cx),
+            Err(view) => update_page(&view, cx, |p, _| p.copy_text(&mut text)),
+        }
+        if text.is_empty() {
+            return;
+        }
+        let _ = clipboard_write(cx, text);
+        let toast = tr(cx, "perf-toast-copied");
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |q, cx| {
+                q.push(ToastKind::Info, toast, Some(PERF_COPY_TOAST), None, cx)
+            });
+        }
+    }
+
     /// `PerfCopyValue` ("Copy value" in the page menu): copies the value the menu was opened on,
     /// with no toast (UI-PRF-020).
     fn on_copy_value(&mut self, _: &PerfCopyValue, _: &mut Window, cx: &mut Context<Self>) {
@@ -825,6 +856,9 @@ fn page_focus(view: &AnyView, cx: &App) -> Option<FocusHandle> {
         .or_else(|| of::<gpu::GpuPage>(view, cx))
         .or_else(|| of::<overview::OverviewPage>(view, cx))
 }
+
+/// The "Copied metrics to clipboard" toast, one at a time.
+pub const PERF_COPY_TOAST: ToastKey = ToastKey(FIXED_KEY_BASE | 0x0402);
 
 fn update_page(view: &AnyView, cx: &mut App, f: impl FnOnce(&mut dyn DevicePage, &mut App)) {
     let view = match view.clone().downcast::<cpu::CpuPage>() {
@@ -1009,6 +1043,7 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_toggle_summary))
             .on_action(cx.listener(Self::on_set_graph_range))
             .on_action(cx.listener(Self::on_copy_value))
+            .on_action(cx.listener(Self::on_copy_device_info))
             .size_full()
             .children(animated)
             .child(split);

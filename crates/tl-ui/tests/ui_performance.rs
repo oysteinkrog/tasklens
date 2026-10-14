@@ -1665,6 +1665,8 @@ mod summary {
         AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
     };
     use tl_model::snapshot::SeriesSet;
+    use tl_model::system::Metric;
+    use tl_model::validity::Validity;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
     use tl_ui::components::kv_grid;
     use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
@@ -2824,30 +2826,19 @@ mod summary {
         assert_eq!(clipboard(&mut r).as_deref(), Some("4631 MHz"));
     }
 
-    /// Without a selection, Ctrl+C on the page goes on to the page's Copy (E24-016), and the
-    /// grid copies nothing.
+    /// Without a selection, Ctrl+C on the page goes on to the page's Copy (E24-016), which
+    /// copies the page text.
     #[gpui_kit::test]
     fn copy_without_selection_goes_to_page_copy(cx: &mut TestAppContext) {
-        use std::cell::Cell;
-        use std::rc::Rc;
-        use tl_ui::pages::performance::actions::PerfCopyDeviceInfo;
-
         let mut r = open(cx, 1600., 1000., true);
         let value = speed_value(&mut r);
         // A click focuses the grid but selects nothing.
         r.vcx.simulate_click(value.center(), Modifiers::none());
         draw(r.vcx);
-        let copies = Rc::new(Cell::new(0));
-        r.vcx.update({
-            let copies = copies.clone();
-            move |_, cx| {
-                cx.on_action(move |_: &PerfCopyDeviceInfo, _| copies.set(copies.get() + 1));
-            }
-        });
         r.vcx.simulate_keystrokes("ctrl-c");
         r.vcx.run_until_parked();
-        assert_eq!(copies.get(), 1, "PerfCopyDeviceInfo dispatched");
-        assert_eq!(clipboard(&mut r), None, "the grid copied nothing");
+        let text = clipboard(&mut r).expect("the page copied");
+        assert!(text.starts_with("Processor\n"), "the page copy ran: {text}");
     }
 
     /// A right-click on a value opens the page menu with "Copy value" first; it copies the
@@ -2877,6 +2868,200 @@ mod summary {
         assert_eq!(labels(&list)[0], (MenuEntryKind::Item, "Copy"));
     }
 
+    /// Publishes the fake CPU values of the copy tests: a model name, every Details value
+    /// Valid, and the caches.
+    fn publish_cpu(r: &mut Rig, temp: Validity) {
+        use tl_model::snapshot::{
+            CacheInfo, CacheLevelInfo, CpuStaticInfo, InvField, SystemSnapshot, VirtState,
+        };
+
+        fn inv<T>(value: T) -> InvField<T> {
+            InvField {
+                value,
+                validity: Validity::Valid,
+            }
+        }
+        fn level(instances: u16, instance_kib: u64) -> Option<CacheLevelInfo> {
+            Some(CacheLevelInfo {
+                instances,
+                instance_kib,
+                total_kib: u64::from(instances) * instance_kib,
+            })
+        }
+        r.engine.publish_with(|s| {
+            let sys: &mut SystemSnapshot = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.header.validity = Validity::Valid;
+            let c = &mut sys.cpu;
+            c.util_pct = Metric::valid(18.6);
+            c.kernel_pct = Metric::valid(2.3);
+            c.freq_mhz = Metric::valid(4631);
+            c.base_mhz = Metric::valid(4200);
+            c.temp_c = if temp == Validity::Valid {
+                Metric::valid(52.0)
+            } else {
+                Metric::with(temp)
+            };
+            c.processes = Metric::valid(295);
+            c.threads = Metric::valid(5596);
+            c.handles = Metric::valid(253_248);
+            c.load_avg = Metric::valid([1.24, 0.98, 0.87]);
+            c.sockets = Metric::valid(1);
+            let dd = Arc::make_mut(&mut s.device_details);
+            dd.header.version += 1;
+            dd.cpu = Arc::new(CpuStaticInfo {
+                cores: 8,
+                logical: 16,
+                caches: CacheInfo {
+                    l1d: level(8, 32),
+                    l1i: level(8, 32),
+                    l2: level(8, 1024),
+                    l3: level(1, 98_304),
+                    ..CacheInfo::default()
+                },
+                driver: inv(Arc::from("amd-pstate-epp")),
+                governor: inv(Arc::from("powersave")),
+                epp: inv(Arc::from("balance_performance")),
+                platform_profile: inv(Arc::from("balanced")),
+                virtualization: inv(VirtState::EnabledKvm),
+                running_in_vm: inv(Arc::from("")),
+                microcode: inv(Arc::from("0xa601206")),
+                rapl: None,
+                ..CpuStaticInfo::default()
+            });
+            let invt = Arc::make_mut(&mut s.inventory);
+            invt.header.version += 1;
+            invt.processor.name = inv(Arc::from("AMD Ryzen 7 7800X3D 8-Core Processor"));
+        });
+        draw(r.vcx);
+    }
+
+    /// The Up time value the CPU page shows (it comes from the real boot clock).
+    fn up_time(r: &mut Rig) -> String {
+        use tl_ui::pages::performance::cpu::CpuPage;
+        use tl_ui::pages::performance::cpu_details::ROW_UP_TIME;
+        use tl_ui::pages::performance::page::DevicePage as _;
+
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let cpu = page
+                .read(cx)
+                .page(&key("cpu"))
+                .expect("CPU page built")
+                .clone()
+                .downcast::<CpuPage>()
+                .expect("a CpuPage");
+            cpu.read(cx)
+                .details()
+                .rows
+                .iter()
+                .find(|row| row.label == ROW_UP_TIME)
+                .expect("an Up time row")
+                .value
+                .to_string()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn copy_text_cpu_format(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::PerfCopyDeviceInfo;
+
+        let mut r = open(cx, 1600., 1000., true);
+        publish_cpu(&mut r, Validity::Valid);
+        let up = up_time(&mut r);
+        r.vcx.dispatch_action(PerfCopyDeviceInfo);
+        r.vcx.run_until_parked();
+        let expected = format!(
+            "Processor\nAMD Ryzen 7 7800X3D 8-Core Processor\n\
+             \x20   Utilization: 18.6%\n\
+             \x20   Kernel time: 2.3%\n\
+             \x20   Speed: 4631 MHz\n\
+             \x20   Processes: 295\n\
+             \x20   Threads: 5\u{2009}596\n\
+             \x20   Handles: 253\u{2009}248\n\
+             \x20   Up time: {up}\n\
+             \x20   Base speed: 4200 MHz\n\
+             \x20   Sockets: 1\n\
+             \x20   Temperature: 52 \u{b0}C\n\
+             \x20   Load average: 1.24 0.98 0.87\n\
+             \x20   Cores: 8\n\
+             \x20   Logical processors: 16\n\
+             \x20   Virtualization: Enabled (KVM available)\n\
+             \x20   Running in VM: No\n\
+             \x20   Security features: None\n\
+             \x20   Hypervisor: None\n\
+             \x20   L1 cache: 512 KiB\n\
+             \x20   L2 cache: 8 MiB\n\
+             \x20   L3 cache: 96 MiB\n\
+             \x20   Cpufreq driver: amd-pstate-epp\n\
+             \x20   Governor: powersave\n\
+             \x20   Power preference: balance_performance\n\
+             \x20   Platform profile: balanced\n\
+             \x20   Microcode: 0xa601206\n"
+        );
+        assert_eq!(clipboard(&mut r).as_deref(), Some(expected.as_str()));
+    }
+
+    #[gpui_kit::test]
+    fn copy_text_fallback_words(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::PerfCopyDeviceInfo;
+
+        let mut r = open(cx, 1600., 1000., true);
+        publish_cpu(&mut r, Validity::Restricted);
+        r.vcx.dispatch_action(PerfCopyDeviceInfo);
+        r.vcx.run_until_parked();
+        let text = clipboard(&mut r).expect("copied");
+        assert!(
+            text.lines().any(|l| l == "    Temperature: Restricted"),
+            "{text}"
+        );
+    }
+
+    /// Ctrl+C and the menu's Copy put the same text on the clipboard; each pushes the toast
+    /// once.
+    #[gpui_kit::test]
+    fn copy_pushes_toast_once(cx: &mut TestAppContext) {
+        use tl_ui::components::toast::ToastQueue;
+        use tl_ui::pages::performance::actions::PerfCopyDeviceInfo;
+
+        fn toasts(r: &mut Rig) -> Vec<String> {
+            r.vcx.update(|window, cx| {
+                let queue = ToastQueue::of_window(window, cx).expect("a toast queue");
+                queue
+                    .read(cx)
+                    .visible_texts()
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect()
+            })
+        }
+
+        let mut r = open(cx, 1600., 1000., true);
+        publish_cpu(&mut r, Validity::Valid);
+        assert!(toasts(&mut r).is_empty());
+        r.vcx.dispatch_action(PerfCopyDeviceInfo);
+        r.vcx.run_until_parked();
+        assert_eq!(toasts(&mut r), ["Copied metrics to clipboard"]);
+        let by_action = clipboard(&mut r).expect("copied");
+
+        // The menu's Copy (the first item off the values) copies the same text.
+        r.vcx.update(|_, cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()))
+        });
+        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        draw(r.vcx);
+        r.vcx.simulate_keystrokes("down enter");
+        r.vcx.run_until_parked();
+        assert_eq!(clipboard(&mut r).as_deref(), Some(by_action.as_str()));
+        assert_eq!(
+            toasts(&mut r),
+            ["Copied metrics to clipboard"],
+            "one toast at a time"
+        );
+    }
+
     /// A right-click on a value opens only the page menu: the grid's own menu (Copy value,
     /// Copy row, Copy section) stays shut, and the page menu has the focus.
     #[gpui_kit::test]
@@ -2898,9 +3083,13 @@ mod summary {
             "the page menu has the focus, no other menu took it"
         );
         // The second item of the grid's menu is "Copy row"; the page menu's is "Copy", which
-        // copies nothing here.
+        // copies the page.
         r.vcx.simulate_keystrokes("down down enter");
         r.vcx.run_until_parked();
-        assert_eq!(clipboard(&mut r), None, "no grid menu item ran");
+        let text = clipboard(&mut r).expect("the page Copy ran");
+        assert!(
+            text.starts_with("Processor\n"),
+            "no grid menu item ran: {text}"
+        );
     }
 }

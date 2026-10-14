@@ -1562,16 +1562,21 @@ impl DevicePage for CpuPage {
         )
     }
 
-    /// E24-016 replaces this with the full CPU copy text.
+    /// The CPU copy text (PERF-011): the header word and the model on their own lines, then
+    /// every Details row indented. The CPU page has no blocks.
     fn copy_text(&self, out: &mut String) {
         let (word, model) = &self.header;
         out.push_str(word);
-        if !model.is_empty() {
-            out.push(' ');
-            out.push_str(model);
-        }
         out.push('\n');
+        if !model.is_empty() {
+            out.push_str(model);
+            out.push('\n');
+        }
+        let rows_from = out.len();
         self.details.copy_into(out);
+        if out.len() > rows_from {
+            out.push('\n');
+        }
     }
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {

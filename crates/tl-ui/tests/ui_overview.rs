@@ -2271,6 +2271,16 @@ mod wired {
         let mut text = String::new();
         r.vcx.read_entity(&page, |p, _| p.copy_text(&mut text));
         assert!(text.starts_with("Overview"), "{text:?}");
+
+        // Copy puts every box on the clipboard (copy_all), not the title alone.
+        let mut all = String::new();
+        r.vcx.update(|_, cx| page.read(cx).copy_all(&mut all, cx));
+        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        r.vcx.simulate_keystrokes("down enter");
+        r.vcx.run_until_parked();
+        let copied = r.vcx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(copied.as_deref(), Some(all.as_str()));
+        assert!(all.len() > text.len(), "copy_all adds the boxes");
     }
 
     fn selector_id(id: String) -> &'static str {

@@ -429,6 +429,7 @@ perf-menu-hide-page = Hide This Page
 perf-menu-show-page = Show This Page
 perf-menu-add-tray = Add tray icon graph
 perf-toast-last-page = At least one performance page must stay visible
+perf-toast-copied = Copied metrics to clipboard
 perf-tip-no-tray = No system tray available
 perf-menu-copy = Copy
 perf-menu-copy-value = Copy value
@@ -1460,6 +1461,24 @@ information-filter-empty = No information matches the filter.
 startup-status-total = { $total } Total | { $enabled } Enabled | { $disabled } Disabled
 startup-status-selected = { $selected } selected
 startup-refreshed = Startup entries refreshed.
+
+# Startup Apps row context menu (tasklens-9o0.8, UI-SYS-044).
+startup-menu-disable = Disable
+startup-menu-enable = Enable
+startup-menu-run-now = Run now
+startup-menu-copy = Copy
+startup-menu-copy-row = Copy row
+startup-menu-copy-rows-table = Copy rows as table
+startup-menu-copy-command = Copy command
+startup-menu-open-location = Open file location
+startup-menu-properties = Properties
+startup-menu-delete = Delete entry…
+startup-menu-reason-not-in-desktop = This entry is not used in this desktop (OnlyShowIn or NotShowIn).
+startup-menu-reason-missing-program = The program for this entry is not installed (TryExec).
+startup-menu-reason-masked = This unit is masked. Change its startup type in the Services tab.
+startup-menu-reason-system-entry = System entries cannot be deleted. Use Disable instead.
+startup-menu-reason-package-unit = This unit belongs to a package. Use Disable instead.
+startup-delete-not-allowed = This startup entry cannot be deleted
 
 # Connections page status and refresh toast (tasklens-9o0.15, UI-SYS-067).
 connections-status-total = { $total } Total | { $tcp } TCP | { $udp } UDP | { $established } EST | { $listening } LISTEN
