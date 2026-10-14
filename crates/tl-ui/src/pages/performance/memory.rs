@@ -31,7 +31,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::actions::{PerfToggleMemoryComposition, PerfToggleMemorySwapGraph};
-use super::details::{Fallback, KeyValueModel, render_details};
+use super::details::{Fallback, KeyValueModel, render_details_in};
 use super::memory_bar::{Composition, CompositionBarView};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_words};
 use super::{DeviceKey, DeviceRow};
@@ -667,10 +667,11 @@ fn update_zram_grid(
         changed |= model.set_text(ROW_ZRAM_RATIO, "-");
     } else {
         let template = model.text(KEY_RATIO_VALUE);
-        let bits = z.orig_data.rotate_left(32) ^ z.compr_data;
+        let ratio = z.orig_data as f64 / z.compr_data as f64;
+        let bits = ratio.to_bits();
         changed |= model.set_valid(ROW_ZRAM_RATIO, bits, |o| {
             template.write_each(o, |_, o| {
-                let _ = write!(o, "{:.1}", z.orig_data as f64 / z.compr_data as f64);
+                let _ = write!(o, "{ratio:.1}");
             });
         });
     }
@@ -1283,14 +1284,25 @@ impl DevicePage for MemoryPage {
         let mut block = v_flex()
             .gap(m.sp[4])
             .child(heading(self.words.block_compressed.clone(), md));
-        for (name, model) in self.compressed.names.iter().zip(&self.compressed.zram) {
+        for (n, (name, model)) in self
+            .compressed
+            .names
+            .iter()
+            .zip(&self.compressed.zram)
+            .enumerate()
+        {
             block = block
                 .child(heading(name.clone(), sm.clone()))
-                .child(render_details(model, m, cx));
+                .child(render_details_in(("perf-mem-zram-grid", n), model, m, cx));
         }
         block = block
             .child(heading(self.words.zswap.clone(), sm))
-            .child(render_details(&self.compressed.zswap, m, cx));
+            .child(render_details_in(
+                "perf-mem-zswap-grid",
+                &self.compressed.zswap,
+                m,
+                cx,
+            ));
         smallvec![block.into_any_element()]
     }
 

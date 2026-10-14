@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
-use gpui_kit::{Action, App, Global, SharedString, px};
+use gpui_kit::{Action, App, ElementId, Global, SharedString, px};
 use intl_pluralrules::{PluralCategory, PluralRuleType, PluralRules};
 use smallvec::SmallVec;
 use tl_model::units::short_age;
@@ -823,6 +823,17 @@ impl Global for ClickedValue {}
 /// needed. Values are selectable text (U-46). A right-click on a value names it in
 /// [`ClickedValue`] instead of opening the grid's own menu, so only the page menu opens.
 pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyValueGrid {
+    render_details_in(GRID_ID, model, m, cx)
+}
+
+/// [`render_details`] with its own grid id, for a page that shows more than one grid, so each
+/// keeps its own selection and interaction state.
+pub fn render_details_in(
+    id: impl Into<ElementId>,
+    model: &KeyValueModel,
+    m: &UiMetrics,
+    cx: &App,
+) -> TlKeyValueGrid {
     model.refresh_labels(cx);
     let rows: Vec<TlKvRow> = model.to_kv_rows().collect();
     let values: Rc<[SharedString]> = rows.iter().map(|r| r.value.text.clone()).collect();
@@ -835,7 +846,7 @@ pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyVa
         }],
     };
     // The grid's row height is half a stacked pair.
-    TlKeyValueGrid::new(GRID_ID, KvLayout::Stacked)
+    TlKeyValueGrid::new(id, KvLayout::Stacked)
         .sections(&[section])
         .columns(3)
         .column_gap(m.sp[6])

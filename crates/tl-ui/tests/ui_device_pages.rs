@@ -588,3 +588,63 @@ fn zram_ratio_dash_when_zero() {
     let block = build(&zram_mem(GIB, 0), &zram_details());
     assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "-");
 }
+
+/// `MemoryPage::blocks` returns no block while no zram device exists and zswap is off, and one
+/// block once a zram device appears.
+#[gpui_kit::test]
+fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, "memory");
+    let memory = view_of(&mut r, "memory")
+        .downcast::<MemoryPage>()
+        .expect("a MemoryPage");
+    let blocks = |r: &mut Rig| {
+        let memory = memory.clone();
+        r.vcx
+            .update(|window, cx| memory.update(cx, |page, cx| page.blocks(window, cx).len()))
+    };
+
+    r.engine.publish_with(|s| {
+        Arc::make_mut(&mut s.system).memory = zram_mem(0, 0);
+        Arc::make_mut(&mut s.device_details).memory = Arc::new(MemoryDetails::default());
+    });
+    draw(r.vcx);
+    r.vcx
+        .update(|_, cx| assert!(memory.read(cx).compressed().is_hidden()));
+    assert_eq!(blocks(&mut r), 0, "no block without zram or zswap");
+
+    r.engine.publish_with(|s| {
+        Arc::make_mut(&mut s.system).memory = zram_mem(GIB, GIB / 2);
+        Arc::make_mut(&mut s.device_details).memory = Arc::new(zram_details());
+    });
+    draw(r.vcx);
+    r.vcx
+        .update(|_, cx| assert!(!memory.read(cx).compressed().is_hidden()));
+    assert_eq!(blocks(&mut r), 1, "one block with a zram device");
+}
+
+/// Two ratios whose old cache keys matched (4 GiB : 1 GiB and 12 GiB : 1 GiB + 2 bytes) both
+/// show their own text.
+#[test]
+fn zram_ratio_key_has_no_collisions() {
+    let mut block = CompressedBlock::new();
+    let details = zram_details();
+    let mem = zram_mem(4 * GIB, GIB);
+    update_compressed_block(
+        &mut block,
+        &CompressedInputs {
+            mem: &mem,
+            details: &details,
+        },
+    );
+    assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "4.0 : 1");
+    let mem = zram_mem(12 * GIB, GIB + 2);
+    update_compressed_block(
+        &mut block,
+        &CompressedInputs {
+            mem: &mem,
+            details: &details,
+        },
+    );
+    assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "12.0 : 1");
+}
