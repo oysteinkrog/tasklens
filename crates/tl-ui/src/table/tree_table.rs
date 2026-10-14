@@ -1113,6 +1113,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             if !self.delegate.double_click_expands() {
                 cx.emit(TreeTableEvent::Activate { row_index: ix });
                 self.delegate.on_activate(id, cx);
+                // A delegate that propagates for the keyboard path must not let the press reach
+                // the body, which would clear the selection Properties opens on.
+                cx.stop_propagation();
             } else if self.delegate.row_expandable(ix).is_some() {
                 self.delegate.on_toggle_expand(id, cx);
             }

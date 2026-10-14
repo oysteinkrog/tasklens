@@ -597,8 +597,14 @@ mod page {
     }
 
     impl Rig {
+        /// Draws a frame and tells the hub the main window rendered, as `MainWindow::render`
+        /// does. Without it the hub goes hidden after 1 s and drops Info toasts.
         fn draw(&mut self) {
-            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+            self.vcx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let hub = cx.global::<GlobalHub>().0.clone();
+                hub.update(cx, |hub, cx| hub.note_render(cx));
+            });
             self.vcx.run_until_parked();
         }
 
@@ -959,18 +965,20 @@ mod page {
         let second_row = point(x, body.origin.y + px(row_h * 1.5));
         let below_rows = point(x, body.origin.y + px(row_h * 2. + 40.));
 
-        rig.double_click(header);
-        assert_eq!(rig.opened.get(), 0, "header double-click");
+        rig.double_click(below_rows);
+        assert_eq!(rig.opened.get(), 0, "empty body double-click");
 
         rig.double_click(second_row);
+        assert_eq!(
+            rig.selected_names(),
+            ["Steam"],
+            "the click hit the second row"
+        );
         assert_eq!(rig.opened.get(), 1, "row double-click opens Properties");
-        assert_eq!(rig.selected_names(), ["Steam"], "for the clicked row");
 
+        // Last, because a header click sorts and sends a new query.
         rig.double_click(header);
         assert_eq!(rig.opened.get(), 1, "header double-click with a selection");
-
-        rig.double_click(below_rows);
-        assert_eq!(rig.opened.get(), 1, "empty body double-click");
     }
 
     #[gpui_kit::test]
