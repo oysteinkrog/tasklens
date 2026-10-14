@@ -430,14 +430,14 @@ impl TreeTableDelegate for ServicesDelegate {
         if !self.expanded.remove(&node) {
             self.expanded.insert(node.clone());
         }
-        if let SysNodeId::ServiceGroup(manager) = node {
-            if cx.has_global::<TlSettings>() {
-                let expanded = self.expanded.contains(&SysNodeId::ServiceGroup(manager));
-                TlSettings::update(cx, |data| match manager {
-                    Manager::System => data.state.services.group_expanded.system = expanded,
-                    Manager::User => data.state.services.group_expanded.user = expanded,
-                });
-            }
+        if let SysNodeId::ServiceGroup(manager) = node
+            && cx.has_global::<TlSettings>()
+        {
+            let expanded = self.expanded.contains(&SysNodeId::ServiceGroup(manager));
+            TlSettings::update(cx, |data| match manager {
+                Manager::System => data.state.services.group_expanded.system = expanded,
+                Manager::User => data.state.services.group_expanded.user = expanded,
+            });
         }
         self.expanded_request = Some(self.requested_expanded());
         cx.notify();
