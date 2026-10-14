@@ -1742,6 +1742,9 @@ impl Render for DeviceSidebar {
                             cx,
                         );
                         let handle = div()
+                            .id(ElementId::Name(
+                                format!("perf-drag-handle-{}", key.0).into(),
+                            ))
                             .flex()
                             .flex_none()
                             .items_center()
