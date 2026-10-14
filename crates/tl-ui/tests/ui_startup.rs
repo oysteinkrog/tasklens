@@ -821,6 +821,10 @@ mod page {
     #[gpui_kit::test]
     fn startup_refresh_toast(cx: &mut TestAppContext) {
         let mut rig = rig(cx);
+        assert!(
+            rig.vcx
+                .update(|window, cx| ToastQueue::of_window(window, cx).is_some())
+        );
         rig.set_active(true);
         rig.publish(
             &["Discord"],
