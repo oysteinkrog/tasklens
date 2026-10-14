@@ -986,6 +986,129 @@ fn run_size_scales_with_ui_scale(cx: &mut TestAppContext) {
     assert_eq!(min, size(px(600.), px(310.)));
 }
 
+// ---- App Properties General (E23-026, UI-PWN-019) ----
+
+mod app_props {
+    use tl_model::details::{AppGeneralDetail, AppKind};
+    use tl_ui::window::registry::CAP_APP_PROPS;
+    use tl_ui::windows::app_props::{
+        APP_EXITED_BANNER, AppGeneralTab, TOO_MANY_APP_WINDOWS, panels_side_by_side,
+    };
+    use tl_ui::windows::frame::app_props_title;
+
+    use super::*;
+
+    struct AppHost {
+        tab: Entity<AppGeneralTab>,
+        filter: Entity<PropsFilter>,
+        width: f32,
+    }
+
+    impl Render for AppHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(self.width))
+                .h(px(560.))
+                .flex()
+                .flex_col()
+                .child(filter_bar(&self.filter, None, cx))
+                .child(div().flex_1().child(self.tab.clone()))
+        }
+    }
+
+    fn app_detail(swap: u64) -> AppGeneralDetail {
+        AppGeneralDetail {
+            name: text("Firefox"),
+            kind: AppKind::App,
+            icon_path: None,
+            app_id: Some(text("org.mozilla.firefox")),
+            desktop_file: Some(text("/usr/share/applications/firefox.desktop")),
+            unit: None,
+            cgroup: Some(text("/user.slice/app-firefox.scope")),
+            processes: 34,
+            memory_anon_bytes: valid(1_310_720_000),
+            swap_bytes: valid(swap),
+            disk_read_bps: valid(0.4 * 1024. * 1024.),
+            disk_write_bps: valid(0.1 * 1024. * 1024.),
+            primary_cmdline: valid(text("/usr/lib/firefox/firefox")),
+        }
+    }
+
+    fn open(cx: &mut TestAppContext, width: f32) -> (Entity<AppHost>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+        });
+        let (host, cx) = cx.add_window_view(move |window, cx| {
+            let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
+            let tab = cx.new(|cx| AppGeneralTab::new(GroupKey(77), filter.clone(), cx));
+            AppHost { tab, filter, width }
+        });
+        draw(cx);
+        (host, cx)
+    }
+
+    #[test]
+    fn app_props_title_for_app_and_unit() {
+        assert_eq!(
+            app_props_title("Firefox", false).as_ref(),
+            "App Properties - Firefox"
+        );
+        assert_eq!(
+            app_props_title("foo.service", false).as_ref(),
+            "App Properties - foo.service"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn app_props_swap_updates_live(cx: &mut TestAppContext) {
+        let (host, cx) = open(cx, 700.);
+        let tab = cx.update(|_, cx| host.read(cx).tab.clone());
+        for (bytes, expected) in [(0, "0 B"), (12 * 1024 * 1024, "12.00 MiB")] {
+            let payload = Arc::new(TabPayload::AppGeneral(Arc::new(app_detail(bytes))));
+            cx.update(|_, cx| tab.update(cx, |tab, cx| tab.set_payload(Some(&payload), cx)));
+            assert_eq!(cx.update(|_, cx| tab.read(cx).swap_text()), expected);
+        }
+    }
+
+    #[test]
+    fn app_props_ninth_window_toast() {
+        assert_eq!(CAP_APP_PROPS, 8);
+        assert_eq!(
+            TOO_MANY_APP_WINDOWS,
+            "Too many app properties windows are already open"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn app_props_two_panels_breakpoint(cx: &mut TestAppContext) {
+        assert!(panels_side_by_side(700., 1.));
+        assert!(!panels_side_by_side(600., 1.));
+
+        let (wide, cx) = open(cx, 700.);
+        draw(cx);
+        assert!(cx.update(|_, cx| wide.read(cx).tab.read(cx).panels_are_side_by_side()));
+    }
+
+    #[test]
+    fn app_props_exited_banner() {
+        assert_eq!(
+            APP_EXITED_BANNER,
+            "This app has no running processes. Values are frozen at the last update."
+        );
+        assert_eq!(
+            app_props_title("Firefox", true).as_ref(),
+            "App Properties - Firefox (not running)"
+        );
+    }
+}
+
 /// The Process Properties window over the real app globals and main window (E23-A1, UI-PWN-002
 /// to UI-PWN-004, UI-PWN-018). Needs `--features test-hooks` for `AppEnv::test`.
 #[cfg(feature = "test-hooks")]

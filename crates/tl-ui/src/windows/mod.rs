@@ -2,6 +2,7 @@
 
 pub mod actions;
 pub mod affinity;
+pub mod app_props;
 pub mod confirm_startup_delete;
 pub mod connection_properties;
 pub mod frame;
