@@ -2,8 +2,8 @@
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    Action, Context, IntoElement, KeyContext, Render, TestAppContext, VisualTestContext, Window,
-    div,
+    Action, AppContext as _, Context, IntoElement, KeyContext, Render, TestAppContext,
+    VisualTestContext, Window, div,
 };
 use tl_ui::pages::services::actions::*;
 
@@ -21,8 +21,8 @@ fn assert_window_binding(
     context: &str,
     keys: &str,
 ) {
-    let context = KeyContext::parse(context).expect("key context");
-    let bindings = vcx.update(|window, _| window.bindings_for_action_in_context(action, context));
+    let parsed = KeyContext::parse(context).expect("key context");
+    let bindings = vcx.update(|window, _| window.bindings_for_action_in_context(action, parsed));
     assert!(
         bindings.iter().any(|binding| {
             binding.keystrokes().len() == 1 && binding.keystrokes()[0].unparse() == keys
