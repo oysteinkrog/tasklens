@@ -3,27 +3,27 @@
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::base::Root;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable as _,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window, WindowHandle, div,
-    px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
+    WeakEntity, Window, WindowHandle, div, px, size,
 };
 use smallvec::SmallVec;
-use tl_model::actions::{
-    ActionKind, ActionRequest, ActionState, ActionTarget, SIGRTMAX, SIGRTMIN, Signal,
-};
+use tl_model::actions::{ActionKind, ActionRequest, ActionTarget, SIGRTMAX, SIGRTMIN, Signal};
 use tracing::warn;
 
-use crate::action_tracker::{GlobalActionTracker, SummaryTexts, ToastTexts, short_reason};
+use crate::action_tracker::{
+    ActionWords, GlobalActionTracker, SummaryTexts, ToastTexts, action_words,
+};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::menu::TlMenu;
 use crate::components::stepper::TlStepper;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::TlSecondaryWindow;
-use crate::i18n::{tr, tr_args};
+use crate::i18n::tr;
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
 use crate::text::style::{t_base, t_sm};
@@ -499,7 +499,12 @@ impl SignalWords {
     }
 }
 
-fn toast_texts(words: Rc<SignalWords>, signo: i32, names: TargetNames) -> ToastTexts {
+fn toast_texts(
+    words: Rc<SignalWords>,
+    action_words: Rc<ActionWords>,
+    signo: i32,
+    names: TargetNames,
+) -> ToastTexts {
     let label = signal_label(signo);
     let success = words.success(&label, &names);
     let mut texts = ToastTexts::new(success.clone(), words.failure.clone());
@@ -513,10 +518,7 @@ fn toast_texts(words: Rc<SignalWords>, signo: i32, names: TargetNames) -> ToastT
         move |ok, total, failures| {
             let reason = failures
                 .iter()
-                .find_map(|(_, state)| match state {
-                    ActionState::Failed(err) => Some(short_reason(err)),
-                    _ => action_words_placeholder(state),
-                })
+                .find_map(|(_, state)| action_words.short_reason(state))
                 .unwrap_or_default();
             let mut out = String::new();
             let failed = total - ok;
@@ -532,14 +534,6 @@ fn toast_texts(words: Rc<SignalWords>, signo: i32, names: TargetNames) -> ToastT
         },
     ));
     texts
-}
-
-fn action_words_placeholder(state: &ActionState) -> Option<SharedString> {
-    match state {
-        ActionState::Rejected(reason) => Some(format!("{reason:?}").into()),
-        ActionState::OutcomeUnknown(text) => Some(text.to_string().into()),
-        ActionState::Started | ActionState::Succeeded | ActionState::Failed(_) => None,
-    }
 }
 
 fn refusal_text(refusal: SignalRefusal, cx: &App) -> SharedString {
@@ -574,6 +568,7 @@ fn track_signal(
         return;
     };
     let words = Rc::new(SignalWords::new(cx));
+    let action_words = action_words(cx);
     tracker.update(cx, |tracker, cx| {
         tracker.track_or_toast(
             ActionRequest {
@@ -583,7 +578,7 @@ fn track_signal(
                 privileged: false,
             },
             queue,
-            toast_texts(words, signo, names),
+            toast_texts(words, action_words, signo, names),
             cx,
         );
     });
@@ -597,7 +592,23 @@ pub fn send_signal(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if let Some(refusal) = names.refusal {
+    let process_pid = |target: &ActionTarget| match target {
+        ActionTarget::Process(key) => Some(key.pid),
+        ActionTarget::Thread { process, .. } => Some(process.pid),
+        _ => None,
+    };
+    let inferred = if targets
+        .iter()
+        .filter_map(process_pid)
+        .any(|pid| pid == std::process::id())
+    {
+        Some(SignalRefusal::Tasklens)
+    } else if targets.iter().filter_map(process_pid).any(|pid| pid == 1) {
+        Some(SignalRefusal::Pid1)
+    } else {
+        None
+    };
+    if let Some(refusal) = inferred.or(names.refusal) {
         push_warning(refusal_text(refusal, cx), window, cx);
         return;
     }
@@ -638,10 +649,13 @@ pub fn send_signal(
         track_signal(signo, targets, names, queue, cx);
         return;
     };
-    confirm(ask, window.window_handle(), cx, move |result, cx| {
-        if result == ConfirmResult::Confirmed {
-            track_signal(signo, targets, names, queue, cx);
-        }
+    let parent = window.window_handle();
+    cx.defer(move |cx| {
+        confirm(ask, parent, cx, move |result, cx| {
+            if result == ConfirmResult::Confirmed {
+                track_signal(signo, targets, names, queue, cx);
+            }
+        });
     });
 }
 
@@ -681,15 +695,39 @@ impl RtSignalDialog {
         };
         let input = cx.new(|cx| InputState::new(window, cx));
         let view = cx.entity().downgrade();
+        let event_input = input.clone();
         let events = cx.subscribe_in(
             &input,
             window,
             move |_, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    let view = view.clone();
-                    cx.defer_in(window, move |_, window, cx| {
-                        let _ = view.update(cx, |this, cx| this.apply(window, cx));
-                    });
+                let typed = || {
+                    event_input
+                        .read(cx)
+                        .text()
+                        .to_string()
+                        .trim()
+                        .parse::<i32>()
+                        .ok()
+                };
+                match event {
+                    InputEvent::PressEnter { .. }
+                        if typed().is_some_and(|v| (SIGRTMIN..=SIGRTMAX).contains(&v)) =>
+                    {
+                        let view = view.clone();
+                        cx.defer_in(window, move |_, window, cx| {
+                            let _ = view.update(cx, |this, cx| this.apply(window, cx));
+                        });
+                    }
+                    InputEvent::Blur => {
+                        if let Some(value) = typed() {
+                            let value = value.clamp(SIGRTMIN, SIGRTMAX);
+                            let _ = view.update(cx, |this, cx| this.set_value(value, cx));
+                            event_input.update(cx, |input, cx| {
+                                input.set_value(value.to_string(), window, cx);
+                            });
+                        }
+                    }
+                    InputEvent::PressEnter { .. } | InputEvent::Change | InputEvent::Focus => {}
                 }
             },
         );

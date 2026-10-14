@@ -1625,3 +1625,334 @@ mod priority {
         assert!(!rig.read(|d, _| d.is_confirming()));
     }
 }
+
+// ---- Send Signal and real-time signal dialog (tasklens-gma.2, UI-PWN-026, UI-PWN-027) ----
+
+mod signal {
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Context, Entity, Focusable as _, IntoElement,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+        WindowHandle, div, px,
+    };
+    use smallvec::{SmallVec, smallvec};
+    use tl_model::actions::{
+        ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, Signal,
+    };
+    use tl_model::command::Command;
+    use tl_ui::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui::components::menu::{MenuEntryKind, TlMenu, TlMenuPopup};
+    use tl_ui::components::toast::ToastQueue;
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::windows::signal::{self, RtSignalDialog, SIGNALS, SignalRefusal, TargetNames};
+
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("content")
+        }
+    }
+
+    struct Rig {
+        cx: TestAppContext,
+        engine: Arc<FakeEngine>,
+        parent: WindowHandle<Root>,
+        pcx: VisualTestContext,
+        queue: Entity<ToastQueue>,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let engine = super::setup(cx);
+        let parent = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
+        let mut pcx = VisualTestContext::from_window(parent.into(), cx);
+        let queue = pcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
+        pcx.run_until_parked();
+        Rig {
+            cx: cx.clone(),
+            engine,
+            parent,
+            pcx,
+            queue,
+        }
+    }
+
+    impl Rig {
+        fn targets(n: u32) -> SmallVec<[ActionTarget; 1]> {
+            (0..n)
+                .map(|i| ActionTarget::Process(super::key_of(i + 1)))
+                .collect()
+        }
+
+        fn send(&mut self, signo: i32, targets: SmallVec<[ActionTarget; 1]>, names: TargetNames) {
+            self.pcx
+                .update(|window, cx| signal::send_signal(signo, targets, names, window, cx));
+            self.pcx.run_until_parked();
+            self.cx.run_until_parked();
+        }
+
+        fn sent(&self) -> Vec<ActionRequest> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Action(request) => Some(request),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn succeed(&mut self, request: &ActionRequest) {
+            self.engine.emit(ActionEvent {
+                id: request.id,
+                target: None,
+                state: ActionState::Succeeded,
+            });
+            self.cx.run_until_parked();
+        }
+
+        fn toasts(&self) -> Vec<String> {
+            self.cx.read(|cx| {
+                self.queue
+                    .read(cx)
+                    .visible_texts()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
+        }
+
+        fn confirmation(&mut self) -> (VisualTestContext, Entity<TlDialogView>) {
+            let parent = self.parent.window_id();
+            let any: AnyWindowHandle = self
+                .cx
+                .update(|cx| cx.windows())
+                .into_iter()
+                .find(|window| window.window_id() != parent)
+                .expect("confirmation window");
+            let handle = any.downcast::<Root>().expect("root window");
+            let frame = self
+                .cx
+                .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+                .expect("confirmation frame");
+            let view = self.cx.read(|cx| frame.read(cx).content().clone());
+            let mut vcx = VisualTestContext::from_window(any, &self.cx);
+            vcx.update(|window, _| window.activate_window());
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            (vcx, view)
+        }
+
+        fn confirm(&mut self) {
+            let (mut vcx, view) = self.confirmation();
+            let destructive = vcx.update(|_, cx| view.read(cx).dialog().is_destructive());
+            if destructive {
+                assert_eq!(
+                    vcx.update(|window, cx| view.read(cx).focused_button(window)),
+                    Some(DialogButton::Cancel)
+                );
+                vcx.simulate_keystrokes("tab");
+            }
+            vcx.simulate_keystrokes("enter");
+            vcx.run_until_parked();
+            self.cx.run_until_parked();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn signal_menu_labels_and_suffixes(cx: &mut TestAppContext) {
+        super::setup(cx);
+        let handle = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        let menu: Entity<TlMenuPopup> = vcx.update(|window, cx| {
+            let focus = cx.focus_handle();
+            TlMenu::build(window, cx, focus, |menu, window, cx| {
+                signal::signal_submenu(menu, false, window, cx)
+            })
+        });
+        let entries = vcx.update(|window, cx| menu.read(cx).entries_for_test(window));
+        let labels: Vec<_> = entries.iter().filter_map(|e| e.label.as_deref()).collect();
+        assert!(labels.contains(&"Terminate (TERM) (ends process)"));
+        assert!(labels.contains(&"Stop (STOP)"));
+        let other = entries
+            .iter()
+            .find(|entry| entry.kind == MenuEntryKind::Submenu)
+            .and_then(|entry| entry.submenu.clone())
+            .expect("Other signals submenu");
+        let other = vcx.update(|window, cx| other.read(cx).entries_for_test(window));
+        let chld = other
+            .iter()
+            .find(|entry| entry.label.as_deref() == Some("CHLD (17)"))
+            .expect("CHLD");
+        assert_eq!(chld.kind, MenuEntryKind::Item);
+        assert!(!chld.label.as_deref().unwrap().contains("ends process"));
+    }
+
+    #[gpui_kit::test]
+    fn signal_toast_single_multi_app(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.send(1, Rig::targets(1), TargetNames::process("firefox", 1234));
+        let request = rig.sent().pop().expect("single request");
+        assert_eq!(request.kind, ActionKind::Signal(Signal::Hup));
+        rig.succeed(&request);
+        assert_eq!(rig.toasts(), ["Sent SIGHUP to firefox (1234)"]);
+
+        let mut rig = rig(cx);
+        rig.send(1, Rig::targets(4), TargetNames::processes(4));
+        assert!(rig.sent().is_empty());
+        rig.confirm();
+        let request = rig.sent().pop().expect("multi request");
+        rig.succeed(&request);
+        assert_eq!(rig.toasts(), ["Sent SIGHUP to 4 processes"]);
+
+        let mut rig = rig(cx);
+        rig.send(1, Rig::targets(3), TargetNames::app("Firefox", 3));
+        rig.confirm();
+        let request = rig.sent().pop().expect("app request");
+        rig.succeed(&request);
+        assert_eq!(rig.toasts(), ["Sent SIGHUP to Firefox (3 processes)"]);
+    }
+
+    #[gpui_kit::test]
+    fn signal_multi_target_confirmation_text_and_focus(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.send(1, Rig::targets(4), TargetNames::processes(4));
+        let (mut vcx, view) = rig.confirmation();
+        let (heading, text, danger, focused) = vcx.update(|window, cx| {
+            let dialog = view.read(cx).dialog();
+            (
+                dialog.heading_text().map(ToString::to_string),
+                dialog.text().to_string(),
+                dialog.is_destructive(),
+                view.read(cx).focused_button(window),
+            )
+        });
+        assert_eq!(heading.as_deref(), Some("Send signal to 4 processes?"));
+        assert_eq!(text, "Send SIGHUP to 4 selected processes?");
+        assert!(danger);
+        assert_eq!(focused, Some(DialogButton::Cancel));
+        vcx.simulate_keystrokes("tab enter");
+        vcx.run_until_parked();
+        rig.cx.run_until_parked();
+        assert_eq!(rig.sent().len(), 1);
+
+        let mut rig = rig(cx);
+        rig.send(18, Rig::targets(4), TargetNames::processes(4));
+        let (mut vcx, view) = rig.confirmation();
+        assert!(!vcx.update(|_, cx| view.read(cx).dialog().is_destructive()));
+        assert_eq!(
+            vcx.update(|window, cx| view.read(cx).focused_button(window)),
+            Some(DialogButton::Action)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn signal_refusals_send_nothing(cx: &mut TestAppContext) {
+        for (refusal, text) in [
+            (SignalRefusal::Tasklens, "Refusing to end tasklens itself."),
+            (SignalRefusal::Pid1, "PID 1 (systemd) cannot be ended."),
+            (
+                SignalRefusal::KernelThread,
+                "Kernel threads cannot be signalled.",
+            ),
+        ] {
+            let mut rig = rig(cx);
+            rig.send(
+                1,
+                Rig::targets(1),
+                TargetNames::process("target", 1).with_refusal(refusal),
+            );
+            assert!(rig.sent().is_empty(), "{refusal:?}");
+            assert_eq!(rig.toasts(), [text], "{refusal:?}");
+        }
+    }
+
+    fn open_rt(
+        rig: &mut Rig,
+    ) -> (
+        WindowHandle<Root>,
+        Entity<RtSignalDialog>,
+        VisualTestContext,
+    ) {
+        let handle = rig
+            .cx
+            .update(|cx| {
+                signal::open_rt_signal(
+                    smallvec![ActionTarget::Process(super::key())],
+                    TargetNames::process("firefox", 4321),
+                    rig.parent.into(),
+                    cx,
+                )
+            })
+            .expect("real-time dialog");
+        let dialog = rig
+            .cx
+            .read(|cx| RtSignalDialog::find(handle, cx))
+            .expect("dialog content");
+        let mut vcx = VisualTestContext::from_window(handle.into(), &rig.cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        (handle, dialog, vcx)
+    }
+
+    #[gpui_kit::test]
+    fn rt_signal_label_for_34_and_64(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let (_, dialog, mut vcx) = open_rt(&mut rig);
+        vcx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.set_value(34, cx)));
+        assert_eq!(
+            vcx.read(|cx| dialog.read(cx).label().to_string()),
+            "SIGRTMIN+0"
+        );
+        vcx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.set_value(64, cx)));
+        assert_eq!(
+            vcx.read(|cx| dialog.read(cx).label().to_string()),
+            "SIGRTMIN+30 (SIGRTMAX)"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn rt_signal_remembers_last_value(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let (_, dialog, mut vcx) = open_rt(&mut rig);
+        vcx.update(|window, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.set_value(36, cx);
+                dialog.apply(window, cx);
+            })
+        });
+        rig.cx.run_until_parked();
+        let (_, again, _) = open_rt(&mut rig);
+        assert_eq!(rig.cx.read(|cx| again.read(cx).value()), 36);
+    }
+
+    #[test]
+    fn signals_table_has_expected_effects() {
+        assert_eq!(SIGNALS.len(), 31);
+        assert!(
+            SIGNALS
+                .iter()
+                .find(|s| s.name == "TERM")
+                .unwrap()
+                .ends_process
+        );
+        assert!(
+            !SIGNALS
+                .iter()
+                .find(|s| s.name == "STOP")
+                .unwrap()
+                .ends_process
+        );
+        assert!(
+            !SIGNALS
+                .iter()
+                .find(|s| s.name == "CHLD")
+                .unwrap()
+                .ends_process
+        );
+    }
+}
