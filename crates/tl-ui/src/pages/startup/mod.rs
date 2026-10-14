@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    Context, Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Task, Window, div,
+    AnyWindowHandle, Context, Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _,
+    Render, Styled as _, Subscription, Task, Window, div,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
@@ -46,6 +46,7 @@ const STATUS_UNSET: (u32, u32, u32, usize) = (u32::MAX, u32::MAX, u32::MAX, usiz
 pub struct StartupPage {
     frame: SysTableFrame<StartupDelegate>,
     focus: FocusHandle,
+    window: AnyWindowHandle,
     status_buf: String,
     last_status: (u32, u32, u32, usize),
     refresh: Option<(u64, Task<()>)>,
@@ -101,13 +102,13 @@ impl StartupPage {
                 }
             }));
         }
-        subs.push(cx.subscribe(&table, |_, _, ev: &TreeTableEvent, cx| {
+        // A double-click reaches the page as an event; the mouse handler cannot raise
+        // OpenProperties by propagating.
+        subs.push(cx.subscribe(&table, |this, _, ev: &TreeTableEvent, cx| {
             let TreeTableEvent::Activate { .. } = ev else {
                 return;
             };
-            let Some(window) = cx.active_window() else {
-                return;
-            };
+            let window = this.window;
             cx.defer(move |cx| {
                 let _ = window.update(cx, |_, window, cx| {
                     window.dispatch_action(Box::new(OpenProperties), cx);
@@ -118,6 +119,7 @@ impl StartupPage {
         Self {
             frame,
             focus,
+            window: window.window_handle(),
             status_buf: loading_status_text(cx).to_string(),
             last_status: STATUS_UNSET,
             refresh: None,
@@ -246,10 +248,8 @@ impl StartupPage {
     fn show_refreshed(&self, cx: &mut Context<Self>) {
         let text = tr(cx, "startup-refreshed");
         let key = ToastKey(cx.entity_id().as_u64());
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        let _ = window.update(cx, |_, window, cx| {
+        // The page's own window: the timer may fire while a Properties window is active.
+        let _ = self.window.update(cx, |_, window, cx| {
             if let Some(queue) = ToastQueue::of_window(window, cx) {
                 queue.update(cx, |q, cx| {
                     q.push(ToastKind::Info, text, Some(key), None, cx)

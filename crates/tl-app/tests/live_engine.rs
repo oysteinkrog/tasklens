@@ -6,7 +6,8 @@
 //! `owner-desktop` fixture with `process-edge` laid over it (as the engine lab tests use), runs
 //! `TasklensUi::init` with the engine as the client, opens the main window on the Processes tab
 //! and waits for a filled process table with CPU and Memory totals. The Startup test activates
-//! the Startup page state and waits for the view built for its query.
+//! the Startup page state and waits for the view built for its query. The Startup page test opens
+//! the main window on the Startup tab and waits for the page's table and status text.
 //!
 //! GPUI's test scheduler fails a test when another thread wakes one of its tasks, so the UI gets
 //! the engine through `Pumped`, whose wake channel the test thread feeds.
@@ -16,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{TestAppContext, VisualTestContext};
+use gpui_kit::{AppContext as _, Context, TestAppContext, VisualTestContext, Window};
 use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
 use tl_engine::EngineHandle;
@@ -31,15 +32,19 @@ use tl_model::settings::EngineSettings;
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::Snapshot;
 use tl_model::table::{StartupColumn, SysColumnId, SysSortSpec, SysTable};
+use tl_model::units;
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::demand::GlobalDemand;
 use tl_ui::hub::GlobalHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::processes::ProcessesPage;
-use tl_ui::pages::sys_table::{SysPageState, SysQuery};
+use tl_ui::pages::startup::StartupPage;
+use tl_ui::pages::sys_table::{SysBody, SysPageState, SysQuery};
 use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
-use tl_ui::window::main::{main_window_view, open_main_window_on};
+use tl_ui::window::main::{
+    MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
+};
 
 /// How long the engine gets to fill the table. The bead asks for 2 s in the real app; a debug
 /// test build under a loaded machine gets more.
@@ -368,5 +373,91 @@ fn startup_view_arrives_from_real_engine(cx: &mut TestAppContext) {
     assert!(query.accepts(generation), "the view is for the query sent");
     assert_eq!(validity, Validity::Valid, "the startup scan ran");
     assert!(page.note_data(validity, rows), "first data seen");
+    assert!(report.drained, "engine drained on shutdown");
+}
+
+/// The Startup arm of the page match, until tasklens-9o0.13 registers it in `app.rs`.
+fn startup_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+    let hub = cx.global::<GlobalHub>().0.clone();
+    let demand = cx.global::<GlobalDemand>().0.clone();
+    let client = Arc::clone(&cx.global::<tl_ui::app::EngineGlobal>().0);
+    let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
+    PageSlot::new(page, cx)
+}
+
+/// The Startup page against the real engine (tasklens-9o0.7, leader comment 159): the main window
+/// opens on the Startup tab, the page turns its demand on, and its table and status text fill
+/// from the engine's scan. The scan reads the host's autostart folders, so the rows and counts are
+/// compared with the engine's own view, not with fixed numbers.
+#[gpui_kit::test]
+fn startup_page_fills_from_real_engine(cx: &mut TestAppContext) {
+    let (dir, root) = fixture_root();
+    let mut cpu_ticks = CpuTicks::new(&root);
+    let engine = start_engine(dir.path(), &root);
+    let pumped = Arc::new(Pumped::new(engine.clone()));
+    init_ui(cx, pumped.clone());
+    cx.update(|cx| set_test_page(cx, Tab::Startup, startup_page));
+    let handle = cx
+        .update(|cx| open_main_window_on(Tab::Startup, cx))
+        .expect("the main window opens");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+
+    let page = vcx.update(|_, cx| {
+        main_window_view(cx)
+            .expect("main window")
+            .read(cx)
+            .page_entity::<StartupPage>(Tab::Startup)
+            .expect("the Startup page is built")
+    });
+    // Page body, page status text, page rows, then the hub's startup rows and counts.
+    let read = |vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| {
+            let page = page.read(cx);
+            let mut status = String::new();
+            page.status_text(&mut status);
+            let rows = page.table().read(cx).delegate.row_count();
+            let snap = cx.global::<GlobalHub>().0.read(cx).current().clone();
+            (
+                page.body(),
+                status,
+                rows,
+                snap.startup.rows.len(),
+                snap.startup.counts,
+            )
+        })
+    };
+
+    let begin = Instant::now();
+    let mut last = read(&mut vcx);
+    while begin.elapsed() < DEADLINE {
+        let (body, status, ..) = &last;
+        if *body != SysBody::Skeleton && status != "Loading…" {
+            break;
+        }
+        step(&mut vcx, &mut cpu_ticks, &pumped);
+        last = read(&mut vcx);
+    }
+    let demand_on = vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged());
+    let report = engine.shutdown(Duration::from_millis(1500));
+
+    let (body, status, rows, hub_rows, counts) = last;
+    eprintln!("body {body:?}, status {status:?}, rows {rows}, hub rows {hub_rows}, {counts:?}");
+    assert!(
+        demand_on.any_surface_visible && demand_on.startup,
+        "the Startup tab sends startup demand"
+    );
+    assert!(
+        matches!(body, SysBody::Rows | SysBody::NoEntries),
+        "the page left the skeleton for data"
+    );
+    assert_eq!(rows, hub_rows, "the table shows the engine's rows");
+    let mut total = String::new();
+    units::count(&mut total, u64::from(counts.total));
+    assert!(
+        status.starts_with(&format!("{total} Total | ")),
+        "the status text shows the engine's counts"
+    );
     assert!(report.drained, "engine drained on shutdown");
 }

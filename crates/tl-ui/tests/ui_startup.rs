@@ -387,9 +387,10 @@ mod page {
     use super::*;
     use gpui_kit::base::Root;
     use gpui_kit::{
-        AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement,
-        ParentElement as _, Render, StyleRefinement, Styled as _, VisualTestContext, Window,
-        WindowBounds, WindowOptions, div, point, size,
+        AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
+        MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
+        StyleRefinement, Styled as _, VisualTestContext, Window, WindowBounds, WindowOptions, div,
+        point, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, CommandError, Tab};
@@ -401,14 +402,13 @@ mod page {
     use tl_model::snapshot::{Snapshot, StartupCounts};
     use tl_model::{actions::ActionEvent, table::SysTable};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::toast::ToastQueue;
+    use tl_ui::components::toast::{ToastKey, ToastQueue};
     use tl_ui::demand::{DEMAND_COALESCE, GlobalDemand};
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::startup::actions::bind_keys_startup;
     use tl_ui::pages::startup::{REFRESH_TOAST_AFTER, StartupPage};
     use tl_ui::pages::sys_table::SysBody;
     use tl_ui::table::actions::OpenProperties;
-    use tl_ui::table::tree_table::TreeTableEvent;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{
@@ -511,6 +511,8 @@ mod page {
 
     /// A demand-responsive client. It publishes startup data only when the page sends a complete
     /// visible-surface demand, matching the real worker's start condition from leader comment 159.
+    /// The page against the real engine is `startup_page_fills_from_real_engine` in
+    /// `tl-app/tests/live_engine.rs`.
     struct DemandDrivenEngine {
         inner: Arc<FakeEngine>,
     }
@@ -698,23 +700,56 @@ mod page {
             })
         }
 
-        fn activate_first_row(&mut self) {
+        /// Closes the refresh toast, so a later push shows it again and a duplicate is counted.
+        fn dismiss_refresh_toast(&mut self) {
+            let key = ToastKey(self.page.entity_id().as_u64());
+            self.vcx.update(|window, cx| {
+                ToastQueue::of_window(window, cx)
+                    .expect("the window has a toast queue")
+                    .update(cx, |queue, cx| queue.remove(key, cx));
+            });
+            self.vcx.run_until_parked();
+            assert_eq!(self.refresh_toasts(), 0, "the refresh toast closed");
+        }
+
+        fn advance(&mut self, by: Duration) {
+            self.vcx.executor().advance_clock(by);
+            self.vcx.run_until_parked();
+        }
+
+        /// A real double-click: a single click, then a press and release with click count 2.
+        fn double_click(&mut self, at: Point<Pixels>) {
+            self.vcx.simulate_click(at, Modifiers::none());
+            self.vcx.simulate_event(MouseDownEvent {
+                position: at,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count: 2,
+                first_mouse: false,
+            });
+            self.vcx.simulate_event(MouseUpEvent {
+                position: at,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count: 2,
+            });
+            self.vcx.run_until_parked();
+            self.draw();
+        }
+
+        fn selected_names(&mut self) -> Vec<String> {
             let table = self
                 .vcx
                 .read_entity(&self.page, |page, _| page.table().clone());
-            table.update(&mut self.vcx, |table, cx| {
-                table.selection.click(table.delegate.row_id(0));
-                cx.notify();
-            });
-            let focus = self
-                .vcx
-                .read_entity(&table, |table, _| table.focus_handle().clone());
-            self.vcx.update(|window, cx| window.focus(&focus, cx));
-            self.draw();
-            table.update(&mut self.vcx, |_, cx| {
-                cx.emit(TreeTableEvent::Activate { row_index: 0 });
-            });
-            self.vcx.run_until_parked();
+            self.vcx.read_entity(&table, |table, _| {
+                table
+                    .selection
+                    .ids()
+                    .filter_map(|id| table.delegate.row_index(id))
+                    .filter_map(|index| table.delegate.entry(index))
+                    .map(|entry| entry.name.to_string())
+                    .collect()
+            })
         }
     }
 
@@ -821,50 +856,49 @@ mod page {
 
     #[gpui_kit::test]
     fn startup_refresh_toast(cx: &mut TestAppContext) {
+        let counts = StartupCounts {
+            total: 1,
+            enabled: 1,
+            disabled: 0,
+        };
         let mut rig = rig(cx);
         assert!(
             rig.vcx
                 .update(|window, cx| ToastQueue::of_window(window, cx).is_some())
         );
         rig.set_active(true);
-        rig.publish(
-            &["Discord"],
-            1,
-            StartupCounts {
-                total: 1,
-                enabled: 1,
-                disabled: 0,
-            },
-        );
-        rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
-        rig.vcx.run_until_parked();
-        rig.vcx
-            .executor()
-            .advance_clock(REFRESH_TOAST_AFTER + Duration::from_millis(1));
-        rig.vcx.run_until_parked();
-        assert_eq!(rig.refresh_toasts(), 1, "fallback toast at two seconds");
-        rig.vcx.executor().advance_clock(Duration::from_secs(1));
-        rig.vcx.run_until_parked();
-        assert_eq!(rig.refresh_toasts(), 1, "fallback toast is one shot");
+        rig.publish(&["Discord"], 1, counts);
 
+        // No new version: the toast shows at 2 s, once.
         rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
         rig.vcx.run_until_parked();
-        rig.vcx.executor().advance_clock(Duration::from_millis(500));
-        rig.publish(
-            &["Discord"],
-            1,
-            StartupCounts {
-                total: 1,
-                enabled: 1,
-                disabled: 0,
-            },
-        );
-        assert_eq!(rig.refresh_toasts(), 1);
-        rig.vcx
-            .executor()
-            .advance_clock(REFRESH_TOAST_AFTER + Duration::from_millis(1));
+        rig.advance(REFRESH_TOAST_AFTER - Duration::from_millis(1));
+        assert_eq!(rig.refresh_toasts(), 0, "no toast before two seconds");
+        rig.advance(Duration::from_millis(1));
+        assert_eq!(rig.refresh_toasts(), 1, "fallback toast at two seconds");
+        rig.dismiss_refresh_toast();
+        rig.advance(REFRESH_TOAST_AFTER + Duration::from_secs(1));
+        assert_eq!(rig.refresh_toasts(), 0, "the fallback toast is pushed once");
+
+        // A new version 500 ms after F5: the toast shows then, and the 2 s timer adds none.
+        rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
         rig.vcx.run_until_parked();
-        assert_eq!(rig.refresh_toasts(), 1, "one toast for the new version");
+        rig.advance(Duration::from_millis(500));
+        assert_eq!(rig.refresh_toasts(), 0, "no toast before the new version");
+        rig.publish(&["Discord"], 1, counts);
+        assert_eq!(
+            rig.refresh_toasts(),
+            1,
+            "toast when the new version arrives"
+        );
+        rig.dismiss_refresh_toast();
+        rig.publish(&["Discord"], 1, counts);
+        rig.advance(REFRESH_TOAST_AFTER);
+        assert_eq!(
+            rig.refresh_toasts(),
+            0,
+            "no second toast from a later version or the timer"
+        );
     }
 
     #[gpui_kit::test]
@@ -896,16 +930,7 @@ mod page {
                 disabled: 0,
             },
         );
-        let selected = rig.vcx.read_entity(&table, |table, _| {
-            table
-                .selection
-                .ids()
-                .filter_map(|id| table.delegate.row_index(id))
-                .filter_map(|index| table.delegate.entry(index))
-                .map(|entry| entry.name.to_string())
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(selected, ["Discord"]);
+        assert_eq!(rig.selected_names(), ["Discord"]);
     }
 
     #[gpui_kit::test]
@@ -913,16 +938,39 @@ mod page {
         let mut rig = rig(cx);
         rig.set_active(true);
         rig.publish(
-            &["Discord"],
-            1,
+            &["Discord", "Steam"],
+            2,
             StartupCounts {
-                total: 1,
-                enabled: 1,
+                total: 2,
+                enabled: 2,
                 disabled: 0,
             },
         );
-        rig.activate_first_row();
-        assert_eq!(rig.opened.get(), 1);
+        let table = rig.vcx.debug_bounds("TlTreeTable").expect("table drawn");
+        let body = rig
+            .vcx
+            .debug_bounds("TlTreeTable-body")
+            .expect("table body drawn");
+        assert!(body.origin.y > table.origin.y, "the table has a header");
+        // Inside the Name column, clear of the column borders.
+        let x = body.origin.x + px(60.);
+        let header = point(x, table.origin.y + (body.origin.y - table.origin.y) * 0.5);
+        let row_h = 28.;
+        let second_row = point(x, body.origin.y + px(row_h * 1.5));
+        let below_rows = point(x, body.origin.y + px(row_h * 2. + 40.));
+
+        rig.double_click(header);
+        assert_eq!(rig.opened.get(), 0, "header double-click");
+
+        rig.double_click(second_row);
+        assert_eq!(rig.opened.get(), 1, "row double-click opens Properties");
+        assert_eq!(rig.selected_names(), ["Steam"], "for the clicked row");
+
+        rig.double_click(header);
+        assert_eq!(rig.opened.get(), 1, "header double-click with a selection");
+
+        rig.double_click(below_rows);
+        assert_eq!(rig.opened.get(), 1, "empty body double-click");
     }
 
     #[gpui_kit::test]
