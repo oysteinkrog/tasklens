@@ -605,8 +605,12 @@ fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
     };
 
     r.engine.publish_with(|s| {
-        Arc::make_mut(&mut s.system).memory = zram_mem(0, 0);
-        Arc::make_mut(&mut s.device_details).memory = Arc::new(MemoryDetails::default());
+        let system = Arc::make_mut(&mut s.system);
+        system.header.version += 1;
+        system.memory = zram_mem(0, 0);
+        let details = Arc::make_mut(&mut s.device_details);
+        details.header.version += 1;
+        details.memory = Arc::new(MemoryDetails::default());
     });
     draw(r.vcx);
     r.vcx
@@ -614,8 +618,12 @@ fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
     assert_eq!(blocks(&mut r), 0, "no block without zram or zswap");
 
     r.engine.publish_with(|s| {
-        Arc::make_mut(&mut s.system).memory = zram_mem(GIB, GIB / 2);
-        Arc::make_mut(&mut s.device_details).memory = Arc::new(zram_details());
+        let system = Arc::make_mut(&mut s.system);
+        system.header.version += 1;
+        system.memory = zram_mem(GIB, GIB / 2);
+        let details = Arc::make_mut(&mut s.device_details);
+        details.header.version += 1;
+        details.memory = Arc::new(zram_details());
     });
     draw(r.vcx);
     r.vcx
