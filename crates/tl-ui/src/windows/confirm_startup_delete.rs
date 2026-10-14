@@ -124,18 +124,21 @@ fn lines(texts: &DeleteTexts, cx: &mut App) -> AnyElement {
         } else {
             theme.text_primary
         };
-        let mut line = div().text_color(color);
+        let mut line = div();
         *line.text_style() = if medium {
             label_style(&m, m.text.base, FontWeight::MEDIUM)
         } else {
             t_base(&m)
         };
-        out = out.child(line.child(text));
+        out = out.child(line.text_color(color).child(text));
     }
     if let Some(path) = &texts.path {
-        let mut line = div().text_color(theme.text_secondary);
+        let mut line = div();
         *line.text_style() = t_sm(&m);
-        out = out.child(line.child(SelectableText::new("startup-delete-path", path.clone())));
+        out = out.child(
+            line.text_color(theme.text_secondary)
+                .child(SelectableText::new("startup-delete-path", path.clone())),
+        );
     }
     out.into_any_element()
 }
