@@ -281,7 +281,10 @@ impl Scratch {
         let mut strokes = cache.strokes.drain(..);
         let stroke = self.grid_stroke_cached.then(|| strokes.next()).flatten();
         let overlay = self.grid_overlay_cached.then(|| strokes.next()).flatten();
-        debug_assert!(strokes.next().is_none(), "grid cache has an unowned stroke");
+        // A caller may reuse a cache that an ordinary chart build populated. The ownership flags
+        // deliberately ignore those paths; draining and dropping them makes the cache a grid
+        // cache without a debug-only panic.
+        drop(strokes);
         self.grid_stroke_cached = false;
         self.grid_overlay_cached = false;
         let stroke = stroke.map(|set| set.path);
@@ -601,6 +604,8 @@ struct StrokeMesh {
     max: (f32, f32),
     half_width: f32,
     dashed: bool,
+    /// GPUI 0.3.7 measures all subpaths as one path before applying the dash array, so these
+    /// carry across `stroke` calls to preserve the old `PathBuilder` output.
     dash_on: bool,
     dash_left: f32,
     dash_points: Vec<Point<Pixels>>,

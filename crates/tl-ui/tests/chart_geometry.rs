@@ -943,6 +943,32 @@ fn dashed_stroke_has_five_pixel_segments() {
     assert!((fill_area(stroke) - 50.0).abs() < 0.001);
 }
 
+/// GPUI's former dashed `PathBuilder` measured all subpaths as one path. The second run therefore
+/// continues the first run's dash phase instead of starting with a fresh 5 px dash.
+#[test]
+fn dashed_stroke_phase_continues_across_runs() {
+    let mut s = vec![
+        Sample::valid(0, 50.0),
+        Sample::valid(60 * MS, 50.0),
+        Sample::valid(100 * MS, 50.0),
+        Sample::valid(160 * MS, 50.0),
+    ];
+    s[2].flags |= SampleFlags::GAP_BEFORE;
+    let map = TimeMap {
+        anchor_ns: 0,
+        right_edge_ns: 160 * MS,
+        range_ns: 1_000 * MS,
+        plot_width: 100.0,
+    };
+    let v = view(s, 100 * MS);
+    let cache = run_build(&[(line(None, RED, true), Some(&v))], map, 160 * MS);
+
+    let stroke = &cache.strokes[0];
+    // Each run is 6 px. The aggregate 5-on/5-off pattern draws 5 px in the first run and the
+    // final 2 px in the second: 7 px by the 1 px stroke width.
+    assert!((fill_area(stroke) - 7.0).abs() < 0.001);
+}
+
 /// A run of one point has no width: no fill set, but the stroke still draws its 1 px dash.
 #[test]
 fn single_point_run_has_no_fill() {
@@ -1094,4 +1120,33 @@ fn grid_rebuild_reuses_overlay_buffer_when_total_is_absent() {
     );
     assert_eq!(cache.strokes.len(), 1);
     assert_eq!(cache.strokes[0].path.vertices.as_ptr(), first);
+}
+
+/// `Scratch` and `ChartCache` are reusable public buffers. Switching them from an ordinary chart
+/// build to a grid build discards the ordinary stroke instead of tripping a debug assertion.
+#[test]
+fn grid_build_accepts_cache_from_ordinary_chart() {
+    let s = series(20, 100 * MS, 10 * SEC, noise);
+    let map = exact_map(&s);
+    let v = view(s.clone(), 100 * MS);
+    let spec = [(line(None, RED, false), Some(&v))];
+    let input = BuildInput {
+        series: &spec,
+        map,
+        plot_height: 100.0,
+        y_min: 0.0,
+        y_max: 100.0,
+        now_boot_ns: s[19].t_ns,
+        stack: false,
+        curved: false,
+    };
+    let (mut cache, mut scratch) = (ChartCache::default(), Scratch::default());
+    build(&input, &mut cache, &mut scratch);
+    assert_eq!(cache.strokes.len(), 1);
+
+    let mut fill = scratch.take_grid(&mut cache);
+    build_cell(&input, (0.0, 0.0), 1_000.0, &mut fill, &mut scratch);
+    finish_grid(&input, (BLUE, fill), RED, None, &mut cache, &mut scratch);
+    assert_eq!(cache.strokes.len(), 1);
+    assert_eq!(cache.strokes[0].color, RED);
 }
