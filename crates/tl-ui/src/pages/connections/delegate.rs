@@ -259,14 +259,10 @@ struct OwnerTip {
 impl Render for OwnerTip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.borrow();
-        if state
-            .key
-            .is_some_and(|key| self.built.as_ref().is_some_and(|v| v.0 != key))
-            || self.built.is_none()
+        if let Some(key) = state.key
+            && self.built.as_ref().is_none_or(|built| built.0 != key)
         {
-            if let Some(key) = state.key {
-                self.built = Some((key, cx.new(|_| TlTooltip::lines(state.lines.clone()))));
-            }
+            self.built = Some((key, cx.new(|_| TlTooltip::lines(state.lines.clone()))));
         }
         div().children(self.built.as_ref().map(|(_, view)| view.clone()))
     }
