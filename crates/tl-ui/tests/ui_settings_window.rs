@@ -1640,9 +1640,9 @@ fn advanced_reset_opens_confirm(cx: &mut TestAppContext) {
         .update(|cx| {
             cx.windows()
                 .into_iter()
-                .find(|window| window.window_id() != settings_id)
+                .filter(|window| window.window_id() != settings_id)
+                .find_map(|window| window.downcast::<Root>())
         })
-        .and_then(|window| window.downcast::<Root>())
         .expect("reset confirmation window");
     let view = cx
         .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
