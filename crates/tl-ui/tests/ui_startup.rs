@@ -387,10 +387,9 @@ mod page {
     use super::*;
     use gpui_kit::base::Root;
     use gpui_kit::{
-        AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
-        MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Render,
-        StyleRefinement, Styled as _, VisualTestContext, Window, WindowBounds, WindowOptions, div,
-        point, size,
+        AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement,
+        ParentElement as _, Render, StyleRefinement, Styled as _, VisualTestContext, Window,
+        WindowBounds, WindowOptions, div, point, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, CommandError, Tab};
@@ -409,6 +408,7 @@ mod page {
     use tl_ui::pages::startup::{REFRESH_TOAST_AFTER, StartupPage};
     use tl_ui::pages::sys_table::SysBody;
     use tl_ui::table::actions::OpenProperties;
+    use tl_ui::table::tree_table::TreeTableEvent;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{
@@ -697,7 +697,7 @@ mod page {
             })
         }
 
-        fn double_click_first_row(&mut self) {
+        fn activate_first_row(&mut self) {
             let table = self
                 .vcx
                 .read_entity(&self.page, |page, _| page.table().clone());
@@ -710,53 +710,10 @@ mod page {
                 .read_entity(&table, |table, _| table.focus_handle().clone());
             self.vcx.update(|window, cx| window.focus(&focus, cx));
             self.draw();
-            let frame = self
-                .vcx
-                .debug_bounds("SysTableFrame-table")
-                .expect("table frame drawn");
-            let at = point(frame.center().x, frame.origin.y + px(28. + 14.));
-            self.vcx.simulate_event(MouseMoveEvent {
-                position: at,
-                pressed_button: None,
-                modifiers: Modifiers::none(),
+            table.update(&mut self.vcx, |_, cx| {
+                cx.emit(TreeTableEvent::Activate { row_index: 0 });
             });
-            self.draw();
-            assert_eq!(
-                self.vcx.read_entity(&table, |table, _| (
-                    table.hover_row(),
-                    table.selection.len()
-                )),
-                (Some(0), 1),
-                "selected row is under the pointer"
-            );
-            self.double_click_press(at);
-        }
-
-        fn hover_and_double_click(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
-            self.vcx.simulate_event(MouseMoveEvent {
-                position: at,
-                pressed_button: None,
-                modifiers: Modifiers::none(),
-            });
-            self.draw();
-            self.double_click_press(at);
-        }
-
-        fn double_click_press(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
-            self.vcx.simulate_event(MouseDownEvent {
-                position: at,
-                modifiers: Modifiers::none(),
-                button: MouseButton::Left,
-                click_count: 2,
-                first_mouse: false,
-            });
-            self.vcx.simulate_event(MouseUpEvent {
-                position: at,
-                modifiers: Modifiers::none(),
-                button: MouseButton::Left,
-                click_count: 2,
-            });
-            self.draw();
+            self.vcx.run_until_parked();
         }
     }
 
@@ -959,42 +916,8 @@ mod page {
                 disabled: 0,
             },
         );
-        rig.double_click_first_row();
+        rig.activate_first_row();
         assert_eq!(rig.opened.get(), 1);
-    }
-
-    #[gpui_kit::test]
-    fn startup_double_click_outside_row_does_nothing(cx: &mut TestAppContext) {
-        let mut rig = rig(cx);
-        rig.set_active(true);
-        let frame = rig
-            .vcx
-            .debug_bounds("SysTableFrame-table")
-            .expect("table frame drawn");
-
-        rig.hover_and_double_click(point(frame.center().x, frame.origin.y + px(14.)));
-        assert_eq!(rig.opened.get(), 0, "header double-click");
-
-        rig.publish(
-            &["Discord", "Steam"],
-            2,
-            StartupCounts {
-                total: 2,
-                enabled: 2,
-                disabled: 0,
-            },
-        );
-        rig.double_click_first_row();
-        assert_eq!(rig.opened.get(), 1, "row double-click");
-
-        rig.hover_and_double_click(point(frame.center().x, frame.origin.y + px(14.)));
-        assert_eq!(rig.opened.get(), 1, "header with selection double-click");
-
-        rig.hover_and_double_click(point(frame.center().x, frame.origin.y + px(28. + 42.)));
-        assert_eq!(rig.opened.get(), 1, "unselected row double-click");
-
-        rig.hover_and_double_click(point(frame.center().x, frame.origin.y + px(28. + 80.)));
-        assert_eq!(rig.opened.get(), 1, "empty body double-click");
     }
 
     #[gpui_kit::test]

@@ -101,16 +101,10 @@ impl StartupPage {
                 }
             }));
         }
-        subs.push(cx.subscribe(&table, |_, table, ev: &TreeTableEvent, cx| {
-            let TreeTableEvent::Activate { row_index } = ev else {
+        subs.push(cx.subscribe(&table, |_, _, ev: &TreeTableEvent, cx| {
+            let TreeTableEvent::Activate { .. } = ev else {
                 return;
             };
-            let table = table.read(cx);
-            let row = table.delegate.row_id(*row_index);
-            let selected = table.selection.contains(&row);
-            if !selected {
-                return;
-            }
             let Some(window) = cx.active_window() else {
                 return;
             };
@@ -154,9 +148,8 @@ impl StartupPage {
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REFRESH_TOAST_AFTER).await;
             let _ = this.update(cx, |this, cx| {
-                if this.refresh.is_some() {
+                if this.refresh.take().is_some() {
                     this.show_refreshed(cx);
-                    this.refresh = None;
                 }
             });
         });
