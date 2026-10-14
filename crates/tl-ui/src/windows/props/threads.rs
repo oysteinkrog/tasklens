@@ -16,13 +16,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyView, App, AppContext as _, ClipboardItem, Context, Entity, FontWeight,
+    Action, AnyView, App, AppContext as _, ClipboardItem, Context, Entity, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
     Subscription, Window, div, px,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use tl_model::actions::SchedPolicy;
+use tl_model::actions::{ActionKind, ActionRequest, ActionTarget, SchedPolicy, Signal};
 use tl_model::details::{TabPayload, ThreadRow};
 use tl_model::ids::ProcessKey;
 use tl_model::process::ProcState;
@@ -31,10 +31,13 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::filter::{FilterChanged, NO_MATCH_THREADS, PropsFilter, lowercase};
+use crate::action_tracker::{GlobalActionTracker, SummaryTexts, ToastTexts, action_words};
 use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::hub::GlobalHub;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
+use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -44,6 +47,25 @@ use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate, TreeTableEvent,
 };
+use crate::windows::actions::{
+    OpenCustomPriority, SetAffinity, SetThreadNice, SetThreadSched, SignalThread,
+};
+use crate::windows::affinity::{self, AffinitySubject, MAX_CPU, parse_cpu_list};
+use crate::windows::{priority, signal};
+
+const THREAD_MENU_MIN_W: f32 = 220.;
+const MAX_TARGETS: usize = 256;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = tasklens, no_json)]
+struct ThreadCopyCell(ThreadColumn);
+
+#[derive(Clone)]
+struct CapturedThreads {
+    targets: SmallVec<[ActionTarget; 1]>,
+    rows: SmallVec<[ThreadRow; 1]>,
+    cell: Option<String>,
+}
 
 /// The columns of the Threads table, in their fixed order.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -379,10 +401,13 @@ pub struct ThreadsDelegate {
     words: Rc<ThreadWords>,
     /// The process's PID: the thread with this TID is the main thread.
     pid: u32,
+    key: ProcessKey,
+    exited: bool,
+    captured: Option<CapturedThreads>,
 }
 
 impl ThreadsDelegate {
-    fn new(words: Rc<ThreadWords>, pid: u32) -> Self {
+    fn new(words: Rc<ThreadWords>, key: ProcessKey) -> Self {
         let specs = specs(&words);
         let layout = ColumnLayout::defaults(
             TableId::Processes,
@@ -403,7 +428,10 @@ impl ThreadsDelegate {
             layout,
             online: String::new(),
             words,
-            pid,
+            pid: key.pid,
+            key,
+            exited: false,
+            captured: None,
         }
     }
 
@@ -423,6 +451,14 @@ impl ThreadsDelegate {
         let mut out = String::new();
         self.write_text(self.row(ix), col, &mut out);
         Some(out)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn captured_targets_for_test(&self) -> SmallVec<[ActionTarget; 1]> {
+        self.captured
+            .as_ref()
+            .map(|captured| captured.targets.clone())
+            .unwrap_or_default()
     }
 
     fn row(&self, ix: usize) -> &ThreadRow {
@@ -666,16 +702,80 @@ impl TreeTableDelegate for ThreadsDelegate {
         true
     }
 
-    /// E23-017 adds the row menu.
     fn context_menu(
         &mut self,
-        _: &[u32],
-        _: Option<ThreadColumn>,
-        menu: TlMenu,
-        _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        ids: &[u32],
+        clicked_col: Option<ThreadColumn>,
+        mut menu: TlMenu,
+        window: &mut Window,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
-        menu
+        let rows: SmallVec<[ThreadRow; 1]> = ids
+            .iter()
+            .take(MAX_TARGETS)
+            .filter_map(|tid| self.row_index(*tid).map(|ix| self.row(ix).clone()))
+            .collect();
+        if rows.is_empty() {
+            return menu;
+        }
+        let targets = rows
+            .iter()
+            .map(|row| ActionTarget::Thread {
+                process: self.key,
+                tid: row.tid,
+            })
+            .collect();
+        let cell = clicked_col.and_then(|col| self.cell_text(rows[0].tid, col));
+        self.captured = Some(CapturedThreads {
+            targets,
+            rows: rows.clone(),
+            cell,
+        });
+
+        menu = menu.min_w(px(THREAD_MENU_MIN_W));
+        let labels = [
+            tr(cx, "pwn-threads-menu-copy"),
+            tr(cx, "pwn-threads-menu-priority"),
+            tr(cx, "pwn-threads-menu-affinity"),
+            tr(cx, "pwn-threads-menu-signal"),
+        ];
+        if self.exited {
+            let tip = tr(cx, "pwn-threads-menu-exited");
+            for label in labels {
+                menu = menu.item_disabled(label, Some(tip.clone()));
+            }
+            return menu;
+        }
+        if let Some(col) = clicked_col {
+            menu = menu.item(labels[0].clone(), Box::new(ThreadCopyCell(col)));
+        }
+        let current = common_priority_class(&rows);
+        menu = menu.submenu(labels[1].clone(), window, cx, move |mut sub, _, cx| {
+            for (key, class, action) in priority_items() {
+                sub = sub.check_item(tr(cx, key), current == Some(class), action);
+            }
+            sub.separator().item(
+                tr(cx, "pwn-threads-menu-priority-custom"),
+                Box::new(OpenCustomPriority),
+            )
+        });
+        menu = menu.item(labels[2].clone(), Box::new(SetAffinity));
+        menu.submenu(labels[3].clone(), window, cx, |mut sub, _, cx| {
+            let suffix = tr(cx, "pwn-signal-ends-process");
+            for (key, signo) in [
+                ("pwn-threads-menu-signal-term", 15),
+                ("pwn-threads-menu-signal-kill", 9),
+                ("pwn-threads-menu-signal-usr1", 10),
+                ("pwn-threads-menu-signal-usr2", 12),
+            ] {
+                sub = sub.item(
+                    format!("{} {suffix}", tr(cx, key)),
+                    Box::new(SignalThread { signo }),
+                );
+            }
+            sub
+        })
+        .tooltip(tr(cx, "pwn-threads-menu-signal-tip"))
     }
 
     fn on_toggle_expand(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
@@ -765,7 +865,7 @@ impl ThreadsTab {
         cx: &mut Context<Self>,
     ) -> Self {
         let words = Rc::new(ThreadWords::new(cx));
-        let delegate = ThreadsDelegate::new(words.clone(), key.pid);
+        let delegate = ThreadsDelegate::new(words.clone(), key);
         let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&filter, |this, _, ev: &FilterChanged, cx| {
@@ -876,6 +976,8 @@ impl ThreadsTab {
     pub fn set_exited(&mut self, exited: bool, cx: &mut Context<Self>) {
         if self.exited != exited {
             self.exited = exited;
+            self.table
+                .update(cx, |table, _| table.delegate_mut().exited = exited);
             cx.notify();
         }
     }
@@ -936,6 +1038,160 @@ impl ThreadsTab {
             queue.update(cx, |q, cx| q.push(ToastKind::Success, text, None, None, cx));
         }
     }
+
+    fn captured(&self, cx: &App) -> Option<CapturedThreads> {
+        self.table.read(cx).delegate.captured.clone()
+    }
+
+    fn on_copy_cell(&mut self, _: &ThreadCopyCell, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.captured(cx).and_then(|c| c.cell) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.toast_copied(window, cx);
+    }
+
+    fn on_set_nice(&mut self, action: &SetThreadNice, window: &mut Window, cx: &mut Context<Self>) {
+        self.track(
+            ActionKind::SetNice(action.0),
+            priority_toasts(cx),
+            window,
+            cx,
+        );
+    }
+
+    fn on_set_sched(
+        &mut self,
+        action: &SetThreadSched,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = ActionKind::SetSched {
+            policy: action.policy.into(),
+            rt_prio: action.rt_prio,
+        };
+        if action.policy == crate::windows::actions::SchedPolicyWire::Rr {
+            let targets = self.captured(cx).map(|c| c.targets);
+            let parent = window.window_handle();
+            cx.defer(move |cx| {
+                confirm(ConfirmKind::Realtime, parent, cx, move |result, cx| {
+                    if result == ConfirmResult::Confirmed
+                        && let Some(targets) = targets
+                    {
+                        track_request(targets, kind, priority_toasts(cx), parent, cx);
+                    }
+                });
+            });
+        } else {
+            self.track(kind, priority_toasts(cx), window, cx);
+        }
+    }
+
+    fn on_custom_priority(
+        &mut self,
+        _: &OpenCustomPriority,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(captured) = self.captured(cx) else {
+            return;
+        };
+        let Some(first) = captured.rows.first() else {
+            return;
+        };
+        let subtitle = thread_subtitle(&captured.rows, self.process_name(cx), self.key.pid, cx);
+        let _ = priority::open(
+            captured.targets,
+            subtitle,
+            (first.policy, first.nice, first.rt_prio),
+            window.window_handle(),
+            cx,
+        );
+    }
+
+    fn on_affinity(&mut self, _: &SetAffinity, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(captured) = self.captured(cx) else {
+            return;
+        };
+        let masks = captured
+            .rows
+            .iter()
+            .map(|row| parse_cpu_list(&row.cpus, MAX_CPU).unwrap_or_default())
+            .collect();
+        let subtitle = thread_subtitle(&captured.rows, self.process_name(cx), self.key.pid, cx);
+        let _ = affinity::open_with_masks(
+            captured.targets,
+            subtitle,
+            Some(masks),
+            window.window_handle(),
+            cx,
+        );
+    }
+
+    fn on_signal(&mut self, action: &SignalThread, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(captured) = self.captured(cx) else {
+            return;
+        };
+        let Some(kind) = signal_kind(action.signo) else {
+            return;
+        };
+        if let Some(text) = signal_refusal(self.key, cx) {
+            if let Some(queue) = ToastQueue::of_window(window, cx) {
+                queue.update(cx, |queue, cx| {
+                    queue.push(ToastKind::Warning, text, None, None, cx)
+                });
+            }
+            return;
+        }
+        let ask = signal_confirmation(action.signo, captured.targets.len(), self.key, cx);
+        if let Some(ask) = ask {
+            let parent = window.window_handle();
+            let targets = captured.targets;
+            let texts = signal_toasts(action.signo, &captured.rows, cx);
+            cx.defer(move |cx| {
+                confirm(ask, parent, cx, move |result, cx| {
+                    if result == ConfirmResult::Confirmed {
+                        track_request(targets, kind, texts, parent, cx);
+                    }
+                });
+            });
+        } else {
+            self.track(
+                kind,
+                signal_toasts(action.signo, &captured.rows, cx),
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn process_name(&self, cx: &App) -> SharedString {
+        cx.try_global::<GlobalHub>()
+            .and_then(|hub| {
+                hub.0
+                    .read(cx)
+                    .current()
+                    .processes
+                    .get(self.key)
+                    .map(|record| SharedString::from(record.meta.name.clone()))
+            })
+            .or_else(|| {
+                self.table
+                    .read(cx)
+                    .delegate
+                    .rows
+                    .iter()
+                    .find(|row| row.tid == self.key.pid)
+                    .map(|row| SharedString::from(row.comm.clone()))
+            })
+            .unwrap_or_else(|| self.key.pid.to_string().into())
+    }
+
+    fn track(&self, kind: ActionKind, texts: ToastTexts, window: &Window, cx: &mut App) {
+        if let Some(captured) = self.captured(cx) {
+            track_request(captured.targets, kind, texts, window.window_handle(), cx);
+        }
+    }
 }
 
 impl Render for ThreadsTab {
@@ -944,8 +1200,289 @@ impl Render for ThreadsTab {
             .debug_selector(|| "PropsThreads".into())
             .size_full()
             .on_action(cx.listener(Self::on_copy_row))
+            .on_action(cx.listener(Self::on_copy_cell))
+            .on_action(cx.listener(Self::on_set_nice))
+            .on_action(cx.listener(Self::on_set_sched))
+            .on_action(cx.listener(Self::on_custom_priority))
+            .on_action(cx.listener(Self::on_affinity))
+            .on_action(cx.listener(Self::on_signal))
             .child(self.table.clone())
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThreadPriorityClass {
+    Realtime,
+    Nice(i8),
+    Idle,
+}
+
+fn common_priority_class(rows: &[ThreadRow]) -> Option<ThreadPriorityClass> {
+    let class = |row: &ThreadRow| match row.policy {
+        SchedPolicy::Fifo | SchedPolicy::Rr => Some(ThreadPriorityClass::Realtime),
+        SchedPolicy::Idle => Some(ThreadPriorityClass::Idle),
+        SchedPolicy::Other | SchedPolicy::Batch => [-10, -5, 0, 5, 19]
+            .contains(&row.nice)
+            .then_some(ThreadPriorityClass::Nice(row.nice)),
+    };
+    let first = class(rows.first()?)?;
+    rows.iter()
+        .all(|row| class(row) == Some(first))
+        .then_some(first)
+}
+
+fn priority_items() -> [(&'static str, ThreadPriorityClass, Box<dyn Action>); 7] {
+    use crate::windows::actions::SchedPolicyWire;
+    [
+        (
+            "pwn-threads-menu-priority-realtime",
+            ThreadPriorityClass::Realtime,
+            Box::new(SetThreadSched {
+                policy: SchedPolicyWire::Rr,
+                rt_prio: 1,
+            }),
+        ),
+        (
+            "pwn-threads-menu-priority-high",
+            ThreadPriorityClass::Nice(-10),
+            Box::new(SetThreadNice(-10)),
+        ),
+        (
+            "pwn-threads-menu-priority-above",
+            ThreadPriorityClass::Nice(-5),
+            Box::new(SetThreadNice(-5)),
+        ),
+        (
+            "pwn-threads-menu-priority-normal",
+            ThreadPriorityClass::Nice(0),
+            Box::new(SetThreadNice(0)),
+        ),
+        (
+            "pwn-threads-menu-priority-below",
+            ThreadPriorityClass::Nice(5),
+            Box::new(SetThreadNice(5)),
+        ),
+        (
+            "pwn-threads-menu-priority-low",
+            ThreadPriorityClass::Nice(19),
+            Box::new(SetThreadNice(19)),
+        ),
+        (
+            "pwn-threads-menu-priority-idle",
+            ThreadPriorityClass::Idle,
+            Box::new(SetThreadSched {
+                policy: SchedPolicyWire::Idle,
+                rt_prio: 0,
+            }),
+        ),
+    ]
+}
+
+fn thread_subtitle(rows: &[ThreadRow], name: SharedString, pid: u32, cx: &mut App) -> SharedString {
+    let subject = if let [row] = rows {
+        AffinitySubject::Thread {
+            tid: row.tid,
+            name,
+            pid,
+        }
+    } else {
+        AffinitySubject::Threads {
+            n: rows.len(),
+            name,
+            pid,
+        }
+    };
+    affinity::subtitle(&subject, cx)
+}
+
+fn priority_toasts(cx: &mut App) -> ToastTexts {
+    setting_toasts(
+        tr(cx, "pwn-priority-toast-threads"),
+        tr(cx, "pwn-priority-toast-failure"),
+        "Priority",
+        cx,
+    )
+}
+
+fn signal_toasts(signo: i32, rows: &[ThreadRow], cx: &mut App) -> ToastTexts {
+    let tids: SmallVec<[u32; 1]> = rows.iter().map(|row| row.tid).collect();
+    let label = signal::signal_label(signo);
+    let success = signal_success(signo, &tids);
+    let partial_label = label.clone();
+    let words = action_words(cx);
+    let mut texts = ToastTexts::new(success.clone(), tr(cx, "pwn-signal-toast-failure"));
+    texts.retry_as_admin = true;
+    texts.summary_min_targets = 2;
+    texts.summary = Some(SummaryTexts::new(
+        "",
+        success,
+        move |ok, total, failures| {
+            let reason = failures
+                .iter()
+                .find_map(|(_, state)| words.short_reason(state))
+                .unwrap_or_default();
+            let failed = total - ok;
+            (
+                if ok == 0 {
+                    ToastKind::Error
+                } else {
+                    ToastKind::Warning
+                },
+                format!(
+                    "Sent {partial_label} to {ok} of {total} threads. {failed} failed: {reason}"
+                )
+                .into(),
+            )
+        },
+    ));
+    texts
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn signal_success_for_test(signo: i32, tids: &[u32]) -> SharedString {
+    signal_success(signo, tids)
+}
+
+fn signal_success(signo: i32, tids: &[u32]) -> SharedString {
+    let label = signal::signal_label(signo);
+    match tids {
+        [tid] => format!("Sent {label} to thread {tid}").into(),
+        _ => format!("Sent {label} to {} threads", tids.len()).into(),
+    }
+}
+
+fn setting_toasts(
+    success: SharedString,
+    failure: SharedString,
+    noun: &'static str,
+    cx: &mut App,
+) -> ToastTexts {
+    let words = action_words(cx);
+    let mut texts = ToastTexts::new(success.clone(), failure);
+    texts.retry_as_admin = true;
+    texts.summary_min_targets = 2;
+    texts.summary = Some(SummaryTexts::new(
+        "",
+        success,
+        move |ok, total, failures| {
+            let reason = failures
+                .iter()
+                .find_map(|(_, state)| words.short_reason(state))
+                .unwrap_or_default();
+            let failed = total - ok;
+            (
+                if ok == 0 {
+                    ToastKind::Error
+                } else {
+                    ToastKind::Warning
+                },
+                format!("{noun} updated for {ok} of {total} threads. {failed} failed: {reason}")
+                    .into(),
+            )
+        },
+    ));
+    texts
+}
+
+fn signal_kind(signo: i32) -> Option<ActionKind> {
+    Some(ActionKind::Signal(match signo {
+        15 => Signal::Term,
+        9 => Signal::Kill,
+        10 => Signal::Usr1,
+        12 => Signal::Usr2,
+        _ => return None,
+    }))
+}
+
+fn signal_confirmation(signo: i32, count: usize, key: ProcessKey, cx: &App) -> Option<ConfirmKind> {
+    let record = cx
+        .try_global::<GlobalHub>()
+        .and_then(|hub| hub.0.read(cx).current().processes.get(key).cloned());
+    let action = tr(cx, "pwn-signal-send");
+    if let Some(record) = record {
+        if record
+            .flags
+            .contains(tl_model::process::ProcFlags::PROTECTED)
+        {
+            return Some(ConfirmKind::Protected {
+                action,
+                name: SharedString::from(record.meta.name.clone()),
+                tree_count: None,
+            });
+        }
+        if record
+            .flags
+            .contains(tl_model::process::ProcFlags::OTHER_USER)
+        {
+            return Some(ConfirmKind::OtherUser {
+                action,
+                name: SharedString::from(record.meta.name.clone()),
+                pid: key.pid,
+                user: SharedString::from(record.meta.user.clone()),
+                destructive: true,
+            });
+        }
+    }
+    (count > 1).then(|| ConfirmKind::SignalMany {
+        count: count as u32,
+        signal_name: signal::signal_label(signo).trim_start_matches("SIG").into(),
+        ends_process: true,
+    })
+}
+
+fn signal_refusal(key: ProcessKey, cx: &App) -> Option<SharedString> {
+    let record = cx
+        .try_global::<GlobalHub>()
+        .and_then(|hub| hub.0.read(cx).current().processes.get(key).cloned());
+    if key.pid == std::process::id()
+        || record
+            .as_ref()
+            .is_some_and(|record| record.flags.contains(tl_model::process::ProcFlags::IS_SELF))
+    {
+        Some(tr(cx, "processes-toast-refuse-self"))
+    } else if key.pid == 1 {
+        Some(tr(cx, "processes-toast-refuse-pid1"))
+    } else if record.as_ref().is_some_and(|record| {
+        record
+            .flags
+            .contains(tl_model::process::ProcFlags::KERNEL_THREAD)
+    }) {
+        Some(tr(cx, "fnd-action-reject-kernel-thread"))
+    } else {
+        None
+    }
+}
+
+fn track_request(
+    targets: SmallVec<[ActionTarget; 1]>,
+    kind: ActionKind,
+    texts: ToastTexts,
+    parent: gpui_kit::AnyWindowHandle,
+    cx: &mut App,
+) {
+    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        return;
+    };
+    let Some(queue) = parent
+        .update(cx, |_, window, cx| ToastQueue::of_window(window, cx))
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    tracker.update(cx, |tracker, cx| {
+        tracker.track_or_toast(
+            ActionRequest {
+                id: tracker.next_id(),
+                kind,
+                targets,
+                privileged: false,
+            },
+            queue.downgrade(),
+            texts,
+            cx,
+        );
+    });
 }
 
 #[cfg(test)]

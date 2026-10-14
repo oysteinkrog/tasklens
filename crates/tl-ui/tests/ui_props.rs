@@ -2662,8 +2662,12 @@ mod window {
 // ---- Threads tab (E23-016, UI-PWN-010) ----
 
 mod threads {
+    use tl_model::actions::ActionTarget;
     use tl_model::details::ThreadRow;
+    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup};
+    use tl_ui::table::TreeTableDelegate as _;
     use tl_ui::table::actions::{CopyRow, CopyRowsAsTable};
+    use tl_ui::windows::actions::{SchedPolicyWire, SetThreadSched};
     use tl_ui::windows::props::threads::{ThreadColumn, ThreadsTab};
 
     use super::*;
@@ -2764,6 +2768,27 @@ mod threads {
             let d = &table.read(cx).delegate;
             (d.row_count() == 0).then(|| d.empty_text().map(|t| t.to_string()))?
         })
+    }
+
+    fn menu(
+        view: &Entity<ThreadsHost>,
+        cx: &mut VisualTestContext,
+        tids: &[u32],
+        col: Option<ThreadColumn>,
+    ) -> Entity<TlMenuPopup> {
+        let table = cx.update(|_, cx| view.read(cx).tab.read(cx).table().clone());
+        cx.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            TlMenu::build(window, cx, focus, |menu, window, cx| {
+                table.update(cx, |table, cx| {
+                    table.delegate.context_menu(tids, col, menu, window, cx)
+                })
+            })
+        })
+    }
+
+    fn menu_entries(menu: &Entity<TlMenuPopup>, cx: &mut VisualTestContext) -> Vec<MenuEntryInfo> {
+        cx.update(|window, cx| menu.read(cx).entries_for_test(window))
     }
 
     fn sample() -> Vec<ThreadRow> {
@@ -3016,6 +3041,100 @@ mod threads {
         let width = cx.update(|_, cx| table.read(cx).columns().widths[&ThreadColumn::CtxSwitches]);
         assert_eq!(ThreadColumn::CtxSwitches.min_width(), Some(100.));
         assert_eq!(width, px(100.), "stopped at its own minimum");
+    }
+
+    #[gpui_kit::test]
+    fn thread_menu_captures_thread_targets(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut rows = sample();
+        rows.push(row(4326, "Renderer 2", SchedPolicy::Other, 0, 2.));
+        feed(&view, cx, Some(threads(rows)));
+        let built = menu(&view, cx, &[4325, 4326], Some(ThreadColumn::Name));
+        let _ = built;
+        let targets = cx.update(|_, cx| {
+            let table = view.read(cx).tab.read(cx).table().clone();
+            table.read(cx).delegate.captured_targets_for_test()
+        });
+        assert_eq!(
+            targets.as_slice(),
+            [
+                ActionTarget::Thread {
+                    process: KEY,
+                    tid: 4325,
+                },
+                ActionTarget::Thread {
+                    process: KEY,
+                    tid: 4326,
+                },
+            ]
+        );
+
+        let normal_menu = menu(&view, cx, &[4321], Some(ThreadColumn::Name));
+        let priority = menu_entries(&normal_menu, cx)
+            .into_iter()
+            .find(|entry| entry.label.as_deref() == Some("Set thread priority"))
+            .and_then(|entry| entry.submenu)
+            .expect("priority submenu");
+        let normal = menu_entries(&priority, cx)
+            .into_iter()
+            .find(|entry| entry.label.as_deref() == Some("Normal"))
+            .expect("Normal item");
+        assert!(normal.checked);
+    }
+
+    #[gpui_kit::test]
+    fn thread_signal_toast_text_single_and_multi(cx: &mut TestAppContext) {
+        cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
+        use tl_ui::windows::props::threads::signal_success_for_test;
+        assert_eq!(
+            signal_success_for_test(10, &[4325]),
+            "Sent SIGUSR1 to thread 4325"
+        );
+        assert_eq!(
+            signal_success_for_test(10, &[4325, 4326]),
+            "Sent SIGUSR1 to 2 threads"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn thread_menu_disabled_when_exited(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        let tab = cx.update(|_, cx| view.read(cx).tab.clone());
+        cx.update(|_, cx| tab.update(cx, |tab, cx| tab.set_exited(true, cx)));
+        let built = menu(&view, cx, &[4325], Some(ThreadColumn::Name));
+        let entries = menu_entries(&built, cx);
+        assert_eq!(entries.len(), 4);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.kind == MenuEntryKind::Disabled)
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| { entry.tooltip.as_deref() == Some("The process is not running.") })
+        );
+    }
+
+    #[gpui_kit::test]
+    fn thread_realtime_confirms_first(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        let built = menu(&view, cx, &[4325], Some(ThreadColumn::Name));
+        let _ = built;
+        let table = cx.update(|_, cx| view.read(cx).tab.read(cx).table().clone());
+        cx.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+        });
+        let before = cx.update(|_, cx| cx.windows().len());
+        cx.dispatch_action(SetThreadSched {
+            policy: SchedPolicyWire::Rr,
+            rt_prio: 1,
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| cx.windows().len()), before + 1);
     }
 }
 
