@@ -907,6 +907,7 @@ mod page {
         rig.set_active(true);
         rig.publish(&[1], ConnCounts::default());
         rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
+        rig.vcx.run_until_parked();
         rig.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
         rig.vcx.run_until_parked();
         assert_eq!(rig.refresh_toasts(), 1);
@@ -915,6 +916,7 @@ mod page {
         assert_eq!(rig.refresh_toasts(), 1, "fallback toast is one shot");
 
         rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
+        rig.vcx.run_until_parked();
         rig.vcx.executor().advance_clock(Duration::from_millis(100));
         rig.publish(&[1], ConnCounts::default());
         assert_eq!(
