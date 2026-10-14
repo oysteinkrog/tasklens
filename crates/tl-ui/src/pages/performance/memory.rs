@@ -31,7 +31,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::actions::{PerfToggleMemoryComposition, PerfToggleMemorySwapGraph};
-use super::details::{Fallback, KeyValueModel, render_details_in};
+use super::details::{Fallback, KeyValueModel, render_details};
 use super::memory_bar::{Composition, CompositionBarView};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_words};
 use super::{DeviceKey, DeviceRow};
@@ -616,9 +616,13 @@ fn text_bits(s: &str) -> u64 {
     })
 }
 
-/// Fills one zram grid. The `mm_stat` rows read Unavailable when this device's `mm_stat`
-/// could not be read.
-fn update_zram_grid(model: &mut KeyValueModel, dev: &tl_model::snapshot::ZramDetail) -> bool {
+/// Fills one zram grid. The `mm_stat` totals are summed over all devices, so they belong to a
+/// device only when it is the only one; with more devices those rows read Unavailable.
+fn update_zram_grid(
+    model: &mut KeyValueModel,
+    dev: &tl_model::snapshot::ZramDetail,
+    stats: Option<ZramTotals>,
+) -> bool {
     let mut changed = false;
     changed |= model.set_valid(ROW_ZRAM_DEVICE, text_bits(&dev.name), |o| {
         o.push_str("/dev/");
@@ -639,7 +643,7 @@ fn update_zram_grid(model: &mut KeyValueModel, dev: &tl_model::snapshot::ZramDet
             );
         }
     }
-    let Some(z) = dev.stats else {
+    let Some(z) = stats else {
         for label in [
             ROW_ZRAM_STORED,
             ROW_ZRAM_COMPRESSED,
@@ -694,8 +698,12 @@ pub fn update_compressed_block(block: &mut CompressedBlock, inp: &CompressedInpu
         block.zram = devices.iter().map(|_| zram_model()).collect();
         changed = true;
     }
+    let stats = match inp.mem.zram.validity {
+        Validity::Valid | Validity::Stale if devices.len() == 1 => Some(inp.mem.zram.value),
+        _ => None,
+    };
     for (model, dev) in block.zram.iter_mut().zip(devices.iter()) {
-        changed |= update_zram_grid(model, dev);
+        changed |= update_zram_grid(model, dev, stats);
     }
 
     let z = &mut block.zswap;
@@ -1276,25 +1284,14 @@ impl DevicePage for MemoryPage {
         let mut block = v_flex()
             .gap(m.sp[4])
             .child(heading(self.words.block_compressed.clone(), md));
-        for (n, (name, model)) in self
-            .compressed
-            .names
-            .iter()
-            .zip(&self.compressed.zram)
-            .enumerate()
-        {
+        for (name, model) in self.compressed.names.iter().zip(&self.compressed.zram) {
             block = block
                 .child(heading(name.clone(), sm.clone()))
-                .child(render_details_in(("perf-mem-zram-grid", n), model, m, cx));
+                .child(render_details(model, m, cx));
         }
         block = block
             .child(heading(self.words.zswap.clone(), sm))
-            .child(render_details_in(
-                "perf-mem-zswap-grid",
-                &self.compressed.zswap,
-                m,
-                cx,
-            ));
+            .child(render_details(&self.compressed.zswap, m, cx));
         smallvec![block.into_any_element()]
     }
 

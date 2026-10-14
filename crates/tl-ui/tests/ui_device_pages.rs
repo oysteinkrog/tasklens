@@ -492,30 +492,29 @@ fn value_of(model: &tl_ui::pages::performance::details::KeyValueModel, label: &s
         .to_string()
 }
 
-fn zram_mem() -> MemoryTotals {
+fn zram_mem(orig: u64, compr: u64) -> MemoryTotals {
     MemoryTotals {
         validity: Validity::Valid,
         total: 64 * GIB,
+        zram: tl_model::system::Metric {
+            value: ZramTotals {
+                orig_data: orig,
+                compr_data: compr,
+                mem_used: compr + GIB / 10,
+            },
+            validity: Validity::Valid,
+        },
         ..MemoryTotals::default()
     }
 }
 
-fn zram_dev(name: &str, orig: u64, compr: u64) -> ZramDetail {
-    ZramDetail {
-        name: Arc::from(name),
-        disksize: 8 * GIB,
-        algorithm: Some(Arc::from("zstd")),
-        stats: Some(ZramTotals {
-            orig_data: orig,
-            compr_data: compr,
-            mem_used: compr + GIB / 10,
-        }),
-    }
-}
-
-fn zram_details(orig: u64, compr: u64) -> MemoryDetails {
+fn zram_details() -> MemoryDetails {
     MemoryDetails {
-        zram: Arc::from([zram_dev("zram0", orig, compr)]),
+        zram: Arc::from([ZramDetail {
+            name: Arc::from("zram0"),
+            disksize: 8 * GIB,
+            algorithm: Some(Arc::from("zstd")),
+        }]),
         ..MemoryDetails::default()
     }
 }
@@ -529,7 +528,7 @@ fn build(mem: &MemoryTotals, details: &MemoryDetails) -> CompressedBlock {
 #[test]
 fn compressed_block_rows() {
     let orig = GIB * 340 / 100;
-    let block = build(&zram_mem(), &zram_details(orig, GIB));
+    let block = build(&zram_mem(orig, GIB), &zram_details());
     assert!(!block.is_hidden());
     assert_eq!(block.names, ["zram0"]);
     let z = &block.zram[0];
@@ -545,7 +544,7 @@ fn compressed_block_rows() {
 
 #[test]
 fn compressed_block_hidden_without_zram_or_zswap() {
-    let block = build(&zram_mem(), &MemoryDetails::default());
+    let block = build(&zram_mem(0, 0), &MemoryDetails::default());
     assert!(block.is_hidden());
     let disabled = MemoryDetails {
         zswap: InvField {
@@ -558,7 +557,7 @@ fn compressed_block_hidden_without_zram_or_zswap() {
         },
         ..MemoryDetails::default()
     };
-    assert!(build(&zram_mem(), &disabled).is_hidden());
+    assert!(build(&zram_mem(0, 0), &disabled).is_hidden());
 }
 
 #[test]
@@ -574,7 +573,7 @@ fn zswap_pool_size() {
         },
         ..MemoryDetails::default()
     };
-    let mut mem = zram_mem();
+    let mut mem = zram_mem(0, 0);
     mem.zswapped = 2 * GIB;
     let block = build(&mem, &details);
     assert!(!block.is_hidden());
@@ -586,7 +585,7 @@ fn zswap_pool_size() {
 
 #[test]
 fn zram_ratio_dash_when_zero() {
-    let block = build(&zram_mem(), &zram_details(GIB, 0));
+    let block = build(&zram_mem(GIB, 0), &zram_details());
     assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "-");
 }
 
@@ -608,7 +607,7 @@ fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
     r.engine.publish_with(|s| {
         let system = Arc::make_mut(&mut s.system);
         system.header.version += 1;
-        system.memory = zram_mem();
+        system.memory = zram_mem(0, 0);
         let details = Arc::make_mut(&mut s.device_details);
         details.header.version += 1;
         details.memory = Arc::new(MemoryDetails::default());
@@ -621,10 +620,10 @@ fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
     r.engine.publish_with(|s| {
         let system = Arc::make_mut(&mut s.system);
         system.header.version += 1;
-        system.memory = zram_mem();
+        system.memory = zram_mem(GIB, GIB / 2);
         let details = Arc::make_mut(&mut s.device_details);
         details.header.version += 1;
-        details.memory = Arc::new(zram_details(GIB, GIB / 2));
+        details.memory = Arc::new(zram_details());
     });
     draw(r.vcx);
     r.vcx
@@ -637,8 +636,8 @@ fn compressed_blocks_follow_visibility(cx: &mut TestAppContext) {
 #[test]
 fn zram_ratio_key_has_no_collisions() {
     let mut block = CompressedBlock::new();
-    let mem = zram_mem();
-    let details = zram_details(4 * GIB, GIB);
+    let details = zram_details();
+    let mem = zram_mem(4 * GIB, GIB);
     update_compressed_block(
         &mut block,
         &CompressedInputs {
@@ -647,7 +646,7 @@ fn zram_ratio_key_has_no_collisions() {
         },
     );
     assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "4.0 : 1");
-    let details = zram_details(12 * GIB, GIB + 2);
+    let mem = zram_mem(12 * GIB, GIB + 2);
     update_compressed_block(
         &mut block,
         &CompressedInputs {
@@ -656,43 +655,4 @@ fn zram_ratio_key_has_no_collisions() {
         },
     );
     assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "12.0 : 1");
-}
-
-/// A device whose `mm_stat` failed shows Unavailable rows, not zeros.
-#[test]
-fn zram_failed_mm_stat_is_unavailable() {
-    let mut dev = zram_dev("zram0", GIB, GIB / 2);
-    dev.stats = None;
-    let details = MemoryDetails {
-        zram: Arc::from([dev]),
-        ..MemoryDetails::default()
-    };
-    let block = build(&zram_mem(), &details);
-    let z = &block.zram[0];
-    for label in [
-        ROW_ZRAM_STORED,
-        ROW_ZRAM_COMPRESSED,
-        ROW_ZRAM_MEM_USED,
-        ROW_ZRAM_RATIO,
-    ] {
-        assert_eq!(value_of(z, label), "Unavailable", "{label}");
-    }
-    assert_eq!(value_of(z, ROW_ZRAM_DEVICE), "/dev/zram0");
-}
-
-/// Each of several devices shows its own `mm_stat` values.
-#[test]
-fn zram_multiple_devices_show_own_stats() {
-    let details = MemoryDetails {
-        zram: Arc::from([
-            zram_dev("zram0", 4 * GIB, GIB),
-            zram_dev("zram1", 6 * GIB, 2 * GIB),
-        ]),
-        ..MemoryDetails::default()
-    };
-    let block = build(&zram_mem(), &details);
-    assert_eq!(block.names, ["zram0", "zram1"]);
-    assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "4.0 : 1");
-    assert_eq!(value_of(&block.zram[1], ROW_ZRAM_RATIO), "3.0 : 1");
-    assert_eq!(value_of(&block.zram[1], ROW_ZRAM_STORED), "6.00 GiB");
 }
