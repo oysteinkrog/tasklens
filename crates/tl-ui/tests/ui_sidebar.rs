@@ -1785,6 +1785,79 @@ mod sidebar {
     }
 
     #[gpui_kit::test]
+    fn drag_gaps_follow_the_indicator(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            reorder_fixture(),
+            Settings::default(),
+            UiState::default(),
+        );
+        r.vcx.update(|_, cx| cx.set_reduce_motion(true));
+        enter_edit(&mut r);
+        draw(r.vcx);
+        let row = |r: &mut Rig, name: &str| {
+            let id: &'static str = Box::leak(format!("perf-edit-row-{name}").into_boxed_str());
+            r.vcx.debug_bounds(id).expect("row")
+        };
+        let indicator = |r: &mut Rig| r.vcx.debug_bounds("perf-drop-indicator").is_some();
+        let move_to = |r: &mut Rig, at| {
+            r.vcx
+                .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+            draw(r.vcx);
+        };
+        let start_drag = |r: &mut Rig, name: &str| {
+            let card = row(r, name);
+            let handle = point(card.left() + px(12.), card.center().y);
+            r.vcx
+                .simulate_mouse_down(handle, MouseButton::Left, Modifiers::none());
+            move_to(r, point(handle.x + px(8.), handle.y));
+        };
+
+        // A disk row, then another group's padding: the indicator goes away.
+        start_drag(&mut r, "disk:sdc");
+        let sda = row(&mut r, "disk:sda");
+        let eth = row(&mut r, "net:eth0");
+        move_to(&mut r, point(sda.center().x, sda.top() + px(2.)));
+        move_to(&mut r, point(sda.center().x, sda.top() + px(3.)));
+        assert!(indicator(&mut r), "indicator over a disk row");
+        let net_side = point(eth.left() - px(4.), eth.center().y);
+        move_to(&mut r, net_side);
+        assert!(!indicator(&mut r), "no indicator beside the network row");
+        move_to(&mut r, point(sda.center().x, sda.top() + px(3.)));
+        assert!(indicator(&mut r), "indicator returns over a disk row");
+        let net_gap = point(eth.center().x, eth.top() - px(2.));
+        move_to(&mut r, net_gap);
+        assert!(!indicator(&mut r), "no indicator above the network row");
+        r.vcx
+            .simulate_mouse_up(net_gap, MouseButton::Left, Modifiers::none());
+        draw(r.vcx);
+        assert!(saved_order(&mut r).is_empty(), "nothing saved");
+
+        // A release in the gap between two disk rows drops at the indicator there.
+        start_drag(&mut r, "disk:sdc");
+        let sda = row(&mut r, "disk:sda");
+        let sdb = row(&mut r, "disk:sdb");
+        move_to(&mut r, point(sda.center().x, sda.bottom() - px(3.)));
+        move_to(&mut r, point(sda.center().x, sda.bottom() - px(2.)));
+        assert!(indicator(&mut r), "indicator between sda and sdb");
+        let gap = point(sda.center().x, (sda.bottom() + sdb.top()) / 2.);
+        assert!(gap.y > sda.bottom() && gap.y < sdb.top(), "rows have a gap");
+        move_to(&mut r, gap);
+        assert!(indicator(&mut r), "the gap keeps the indicator");
+        r.vcx
+            .simulate_mouse_up(gap, MouseButton::Left, Modifiers::none());
+        draw(r.vcx);
+        assert_eq!(
+            saved_order(&mut r),
+            [
+                "overview", "cpu", "memory", "disk:sda", "disk:sdc", "disk:sdb", "net:eth0"
+            ]
+        );
+        let sidebar = r.sidebar.clone();
+        assert!(r.vcx.update(|_, cx| !sidebar.read(cx).dragging_for_test()));
+    }
+
+    #[gpui_kit::test]
     fn alt_up_down_moves_focused_row(cx: &mut TestAppContext) {
         let mut r = open(
             cx,

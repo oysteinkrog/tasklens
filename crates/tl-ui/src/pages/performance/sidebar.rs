@@ -1424,13 +1424,29 @@ impl DeviceSidebar {
         }
     }
 
-    /// A release anywhere outside a card ends the drag without moving anything.
+    /// The pointer is inside the section of edit group `group`. In another type's section,
+    /// including its gaps and padding, nothing is a drop target. In the dragged card's own
+    /// section the rows decide, and a gap between rows keeps the last indicator.
+    fn drag_over_group(
+        &mut self,
+        group: usize,
+        event: &DragMoveEvent<DraggedCard>,
+        cx: &mut Context<Self>,
+    ) {
+        if edit_group(event.drag(cx).key.kind()) != group {
+            self.drag_over_none(event, cx);
+        }
+    }
+
+    /// A release outside the card list ends the drag without moving anything.
     fn end_drag(&mut self, cx: &mut Context<Self>) {
         if self.drag.take().is_some() {
             cx.notify();
         }
     }
 
+    /// A release anywhere in the card list drops the card where the indicator shows. With no
+    /// indicator it only ends the drag.
     fn drop_dragged_card(&mut self, dragged: &DraggedCard, cx: &mut Context<Self>) {
         let state = self.drag.take();
         let Some(DragState {
@@ -1724,7 +1740,16 @@ impl Render for DeviceSidebar {
                     )
                     .child(self.edit_words.groups[group].to_uppercase());
                 // gpui-pre 0.3.7 does not expose letter spacing on div text.
-                let mut section = v_flex().w_full().gap(m.sp[4]).child(label);
+                let mut section = v_flex()
+                    .w_full()
+                    .px(m.sp[4])
+                    .gap(m.sp[4])
+                    .on_drag_move(cx.listener(
+                        move |this, event: &DragMoveEvent<DraggedCard>, _, cx| {
+                            this.drag_over_group(group, event, cx);
+                        },
+                    ))
+                    .child(label);
                 if members.is_empty() {
                     if let Some(empty_index) = empty_index {
                         section = section.child(
@@ -1733,11 +1758,6 @@ impl Render for DeviceSidebar {
                                 .pl(m.sp[4])
                                 .text_size(m.text.sm)
                                 .text_color(theme.text_secondary)
-                                .on_drag_move(cx.listener(
-                                    |this, event: &DragMoveEvent<DraggedCard>, _, cx| {
-                                        this.drag_over_none(event, cx);
-                                    },
-                                ))
                                 .child(self.edit_words.empty[empty_index].clone()),
                         );
                     }
@@ -1845,9 +1865,6 @@ impl Render for DeviceSidebar {
                                     this.drag_over_row(&target_key, group_index, event, cx);
                                 },
                             ))
-                            .on_drop(cx.listener(|this, dragged: &DraggedCard, _, cx| {
-                                this.drop_dragged_card(dragged, cx);
-                            }))
                             .child(handle)
                             .child(
                                 div()
@@ -1897,6 +1914,11 @@ impl Render for DeviceSidebar {
 
             let header = v_flex()
                 .debug_selector(|| "perf-edit-header".into())
+                .on_drag_move(
+                    cx.listener(|this, event: &DragMoveEvent<DraggedCard>, _, cx| {
+                        this.drag_over_none(event, cx);
+                    }),
+                )
                 .flex_none()
                 .w_full()
                 .px(m.sp[4])
@@ -1975,10 +1997,12 @@ impl Render for DeviceSidebar {
                         .id(LIST_ID)
                         .flex_1()
                         .min_h_0()
-                        .p(m.sp[4])
+                        .py(m.sp[4])
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
-                        .on_drop(cx.listener(|this, _: &DraggedCard, _, cx| this.end_drag(cx)))
+                        .on_drop(cx.listener(|this, dragged: &DraggedCard, _, cx| {
+                            this.drop_dragged_card(dragged, cx);
+                        }))
                         .on_mouse_up_out(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| this.end_drag(cx)),
