@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Root;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Icon, h_flex, v_flex};
-use gpui_kit::gpui_component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity,
     EntityId, FocusHandle, Focusable as _, FontWeight, ImageSource, InteractiveElement as _,
