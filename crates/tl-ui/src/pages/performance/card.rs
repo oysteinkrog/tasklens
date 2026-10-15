@@ -1234,7 +1234,7 @@ pub struct CardPrepared {
 /// commit note, a network adapter and connection). An owner tooltip that only repeats line 1
 /// shows only when line 1 is cut. Empty when there is nothing to show.
 pub fn card_tooltip(lines: &CardLines, layout: &CardTextLayout) -> SmallVec<[SharedString; 3]> {
-    let mut out = SmallVec::new();
+    let mut out: SmallVec<[SharedString; 3]> = SmallVec::new();
     for (text, line) in [
         (&lines.heading, &layout.heading),
         (&lines.line1, &layout.line1),
