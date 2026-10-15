@@ -535,7 +535,7 @@ mod details {
         );
     }
 
-    /// A click on the Display unit value opens the unit menu under it; choosing Bytes per
+    /// A click on the Display unit value (visible row 14 with the P2 rows shown) opens the unit menu under it; choosing Bytes per
     /// second sets `units.network` and the row re-reads `MiB/s`.
     #[gpui_kit::test]
     fn display_unit_menu_sets_global(cx: &mut TestAppContext) {
@@ -544,7 +544,7 @@ mod details {
         let r = open(cx, with_unit(NetworkUnit::Bits), sys);
         let link = r
             .vcx
-            .debug_bounds("TlKv-value-4")
+            .debug_bounds("TlKv-value-14")
             .expect("Display unit value drawn");
         r.vcx.simulate_click(link.center(), Modifiers::none());
         draw(r.vcx);
@@ -618,8 +618,19 @@ mod details {
         let r = open(cx, with_unit(NetworkUnit::Bits), sys);
         let page = r.page.clone();
         let read = |vcx: &mut VisualTestContext| {
+            // The P1 rows; the P2 rows between them and Display unit are not under test here.
             vcx.update(|_, cx| rows(page.read(cx).details()))
                 .into_iter()
+                .filter(|(l, _)| {
+                    [
+                        "Download speed",
+                        "Upload speed",
+                        "Total downloaded",
+                        "Total uploaded",
+                        "Display unit",
+                    ]
+                    .contains(&l.as_str())
+                })
                 .map(|(_, v)| v)
                 .collect::<Vec<_>>()
         };
