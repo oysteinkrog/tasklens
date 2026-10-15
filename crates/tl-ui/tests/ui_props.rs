@@ -3531,7 +3531,8 @@ mod window {
     use tl_model::details::{ScanId, ScanPhase, StringEncoding, StringHit, StringScanState};
     use tl_ui::table::TreeTableDelegate as _;
     use tl_ui::windows::actions::{PropsCancelStringScan, PropsStartStringScan};
-    use tl_ui::windows::props::strings::{StringsTab, VALUE_CUT};
+    use tl_ui::windows::props::filter::DEBOUNCE;
+    use tl_ui::windows::props::strings::{StringsColumn, StringsTab, VALUE_CUT};
 
     struct StrRig {
         engine: Arc<FakeEngine>,
@@ -3828,6 +3829,59 @@ mod window {
         select_str_row(&mut rig, 0);
         rig.vcx.dispatch_action(CopyRow);
         assert_eq!(clip(&mut rig.vcx), "a\tb\nc");
+    }
+
+    fn str_view(rig: &mut StrRig) -> Vec<u32> {
+        rig.vcx.read(|cx| {
+            let table = rig.tab.read(cx).table().clone();
+            table.read(cx).delegate.view_ids()
+        })
+    }
+
+    /// Review fix: chunks that arrive after Cancel, while a sort and a filter are on, are sorted
+    /// and filtered with the rest instead of disappearing.
+    #[gpui_kit::test]
+    fn strings_late_chunks_after_cancel_sorted_and_filtered(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        let scan = start_scan(&mut rig);
+        let c0: Arc<[StringHit]> =
+            Arc::from(vec![str_hit(0x1000, "beta"), str_hit(0x2000, "alpha")]);
+        let state = scan_state(scan, 30, vec![c0.clone()], ScanPhase::Scanning);
+        publish_strings(&mut rig, cx, state);
+        rig.vcx.dispatch_action(PropsCancelStringScan);
+        draw(&mut rig.vcx);
+
+        // Sort by Value, then filter on "a".
+        let table = rig.vcx.read(|cx| rig.tab.read(cx).table().clone());
+        rig.vcx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                t.delegate_mut().on_sort(StringsColumn::Value, cx)
+            });
+        });
+        rig.vcx.run_until_parked();
+        assert_eq!(str_view(&mut rig), [1, 0], "alpha, beta");
+        let filter = rig.vcx.read(|cx| rig.tab.read(cx).filter().clone());
+        rig.vcx.update(|window, cx| {
+            let input = filter.read(cx).input.clone();
+            input.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.insert("a".to_owned(), window, cx);
+            });
+        });
+        rig.vcx.executor().advance_clock(DEBOUNCE * 2);
+        rig.vcx.run_until_parked();
+        assert_eq!(str_view(&mut rig), [1, 0]);
+
+        // A late chunk of the cancelled scan: "aardvark" matches and sorts first, "zz" does not
+        // match.
+        let c1: Arc<[StringHit]> =
+            Arc::from(vec![str_hit(0x3000, "aardvark"), str_hit(0x4000, "zz")]);
+        let state = scan_state(scan, 40, vec![c0, c1], ScanPhase::Scanning);
+        publish_strings(&mut rig, cx, state);
+        rig.vcx.run_until_parked();
+        assert_eq!(str_view(&mut rig), [2, 1, 0], "aardvark, alpha, beta");
+        assert_eq!(str_rows(&mut rig), 3);
+        assert_eq!(str_status(&mut rig), "Scan cancelled. 4 strings found.");
     }
 
     #[gpui_kit::test]

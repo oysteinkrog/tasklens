@@ -358,8 +358,15 @@ fn sort_perm(chunks: &[Arc<[StringHit]>], sort: StringsSort) -> Arc<[u32]> {
 type ViewLists = (Arc<[u32]>, Arc<[u32]>);
 
 /// The view (`perm` filtered by `keep`) and its inverse (hit index to view position, `u32::MAX`
-/// when hidden), or `None` for all hits in address order.
+/// when hidden), or `None` for all hits in address order. Chunks only grow, so a permutation made
+/// before later chunks arrived covers the ids below its length; the newer ids follow it in address
+/// order until the new sort lands.
 fn compose(perm: Option<Arc<[u32]>>, keep: Option<Arc<[u32]>>, total: u32) -> Option<ViewLists> {
+    let perm = perm.map(|p| match (p.len() as u32).cmp(&total) {
+        Ordering::Less => p.iter().copied().chain(p.len() as u32..total).collect(),
+        Ordering::Equal => p,
+        Ordering::Greater => p.iter().copied().filter(|&i| i < total).collect(),
+    });
     let view: Arc<[u32]> = match (perm, keep) {
         (None, None) => return None,
         (Some(p), None) => p,
@@ -1093,9 +1100,12 @@ impl StringsTab {
         self.found = state.found;
         self.progress_pct = state.progress_pct.min(100);
         let chunks = state.chunks.clone();
-        self.table.update(cx, |t, cx| {
-            t.delegate_mut().set_chunks(chunks);
+        let (grew, sorted) = self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            let grew = !Arc::ptr_eq(&d.chunks, &chunks);
+            d.set_chunks(chunks);
             t.on_new_version(cx);
+            (grew, t.delegate.sort != StringsSort::default())
         });
         if self.phase.as_ref() != Some(&phase) {
             self.set_phase(phase.clone(), cx);
@@ -1105,11 +1115,16 @@ impl StringsTab {
             self.failed_toast = true;
             toast(window, cx, ToastKind::Warning, self.words.failed.clone());
         }
+        // Late chunks (after Cancel) need a new sort and a new filter run. The new sort also
+        // makes any sort still running on the old chunks stale.
+        if grew && sorted {
+            self.resort(cx);
+        }
         if !self.filter.read(cx).needle().is_empty() {
             let generation = self.filter.read(cx).generation();
             self.run_filter(generation, cx);
-        } else if self.perm.is_some() {
-            self.resort(cx);
+        } else if grew {
+            self.recompose(cx);
         }
     }
 
@@ -1138,7 +1153,8 @@ impl StringsTab {
         });
     }
 
-    /// Sorts on the background executor; address ascending needs no permutation.
+    /// Sorts on the background executor; address ascending needs no permutation. Only the latest
+    /// job may install its permutation.
     fn resort(&mut self, cx: &mut Context<Self>) {
         self.sort_gen += 1;
         let generation = self.sort_gen;
@@ -1539,6 +1555,18 @@ mod tests {
             w.status_text(&ScanPhase::StoppedExited, 7, 18_234),
             "Scan stopped: the process exited. 18\u{2009}234 strings found."
         );
+    }
+
+    #[test]
+    fn strings_compose_keeps_hits_newer_than_the_permutation() {
+        // A permutation of 3 hits after the chunks grew to 5: ids 3 and 4 follow it.
+        let perm: Arc<[u32]> = Arc::from(vec![2, 0, 1]);
+        let (view, inverse) = compose(Some(perm.clone()), None, 5).expect("a view");
+        assert_eq!(&*view, &[2, 0, 1, 3, 4]);
+        assert_eq!(&*inverse, &[1, 2, 0, 3, 4]);
+        let keep: Arc<[u32]> = Arc::from(vec![0, 3]);
+        let (view, _) = compose(Some(perm), Some(keep), 5).expect("a view");
+        assert_eq!(&*view, &[0, 3]);
     }
 
     #[test]
