@@ -1925,6 +1925,9 @@ mod end {
         "Copy rows as table",
     ];
 
+    /// Item 18 with no tray installed (wox.13, PERF-088).
+    const TRAY_ITEM: &str = "(Add tray icon graph: No system tray available)";
+
     /// The menu of one process row, with item 21 as `open_file` and item 24 as `parent`.
     fn process_shape(open_file: &str, parent: Option<&str>) -> Vec<String> {
         let mut out = vec![
@@ -1940,6 +1943,8 @@ mod end {
         ];
         out.extend(COPIES);
         out.extend([
+            "-",
+            TRAY_ITEM,
             "-",
             "Properties",
             open_file,
@@ -2010,6 +2015,8 @@ mod end {
         ];
         exited.extend(COPIES);
         exited.extend([
+            "-",
+            "(Add tray icon graph: Process exited)",
             "-",
             "(Properties: Process exited)",
             "(Open file location: Process exited)",
@@ -2293,7 +2300,6 @@ mod end {
             "File properties",
             "Minigraph",
             "Graph",
-            "tray",
             "Realtime",
             "Idle",
         ];
