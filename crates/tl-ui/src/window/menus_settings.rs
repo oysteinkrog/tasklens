@@ -16,11 +16,18 @@
 //! before "Default tab". tl-ui writes no file (ADR-011): both go through
 //! `AppEnv.set_autostart(enabled, minimized)` (R-171, R-236), and a key changes only when that
 //! call succeeds. On failure the Error toast "Could not change the autostart entry" shows.
+//!
+//! P3 rows (E21-033): "Record history", "History storage" and "Save history to disk" in
+//! Monitoring; the three tray checks, "Unlock privileged actions at launch" and "Open rescue
+//! window on critical memory pressure" in Window & startup. These rows only write their keys
+//! (plus the history toast). The features that react to the keys belong to E29 to E32.
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{App, Entity, FocusHandle, SharedString, Window, px};
 use tl_model::command::Tab;
-use tl_model::settings::{NetworkUnit, PROCESS_INTERVAL_MENU_MS, Settings, StartTab};
+use tl_model::settings::{
+    HISTORY_RETENTION_MENU_H, NetworkUnit, PROCESS_INTERVAL_MENU_MS, Settings, StartTab,
+};
 use tracing::warn;
 
 use super::confirm::ResetSettings;
@@ -44,6 +51,17 @@ pub(crate) const REFRESH_KEYS: [&str; 6] = [
     "shell-menu-settings-refresh-10000",
 ];
 
+/// The History storage items: label key per `HISTORY_RETENTION_MENU_H` entry.
+pub(crate) const HISTORY_STORAGE_KEYS: [&str; 7] = [
+    "shell-menu-settings-history-1h",
+    "shell-menu-settings-history-2h",
+    "shell-menu-settings-history-3h",
+    "shell-menu-settings-history-4h",
+    "shell-menu-settings-history-6h",
+    "shell-menu-settings-history-8h",
+    "shell-menu-settings-history-12h",
+];
+
 /// The locales shipped in this build after "System default": `general.language` value and the
 /// label key with the locale's own name. English only this round (R-132).
 pub(crate) const SHIPPED_LANGUAGES: [(&str, &str); 1] =
@@ -60,6 +78,8 @@ gpui_kit::actions!(
         ToggleStartAtLogin,
         /// Flips `startup.start_minimized`; rewrites the entry while Start at login is on.
         ToggleStartMinimized,
+        /// Flips `history.enabled` and shows the Info toast "History recording on" or "off".
+        ToggleRecordHistory,
     ]
 );
 
@@ -83,6 +103,16 @@ pub fn init(cx: &mut App) {
                 SettingValue::Bool(minimized),
             );
         }
+    });
+    cx.on_action(|_: &ToggleRecordHistory, cx| {
+        let on = !settings_now(cx).history.enabled;
+        TlSettings::set(cx, SettingKey::HistoryEnabled, SettingValue::Bool(on));
+        let key = if on {
+            "shell-toast-history-on"
+        } else {
+            "shell-toast-history-off"
+        };
+        info_toast(cx, key);
     });
     cx.on_action(|_: &TogglePublicIpAutoFetch, cx| {
         if settings_now(cx).network.auto_fetch_public_ip {
@@ -133,6 +163,28 @@ pub fn build(
                 s.units.network_auto_scale,
                 toggle(SettingKey::UnitsNetworkAutoScale),
             )
+            .check_item(
+                tr(cx, "shell-menu-settings-record-history"),
+                s.history.enabled,
+                Box::new(ToggleRecordHistory),
+            )
+            .submenu(
+                tr(cx, "shell-menu-settings-history-storage"),
+                window,
+                cx,
+                history_storage_submenu,
+            );
+        let persist = tr(cx, "shell-menu-settings-history-persist");
+        let menu = if s.history.enabled {
+            menu.check_item(
+                persist,
+                s.history.persist,
+                toggle(SettingKey::HistoryPersist),
+            )
+        } else {
+            menu.item_disabled(persist, Some(tr(cx, "shell-menu-settings-history-first")))
+        };
+        let menu = menu
             .header(tr(cx, "shell-menu-settings-motion"))
             .check_item(
                 tr(cx, "shell-menu-settings-animations"),
@@ -162,6 +214,21 @@ pub fn build(
             )
             .header(tr(cx, "shell-menu-settings-window-startup"))
             .check_item(
+                tr(cx, "shell-menu-settings-close-to-tray"),
+                s.tray.close_to_tray,
+                toggle(SettingKey::TrayCloseToTray),
+            )
+            .check_item(
+                tr(cx, "shell-menu-settings-minimize-to-tray"),
+                s.tray.minimize_to_tray,
+                toggle(SettingKey::TrayMinimizeToTray),
+            )
+            .check_item(
+                tr(cx, "shell-menu-settings-always-show-tray"),
+                s.tray.always_show,
+                toggle(SettingKey::TrayAlwaysShow),
+            )
+            .check_item(
                 tr(cx, "shell-menu-settings-start-at-login"),
                 s.startup.start_at_login,
                 Box::new(ToggleStartAtLogin),
@@ -184,9 +251,19 @@ pub fn build(
             default_tab_submenu,
         )
         .check_item(
+            tr(cx, "shell-menu-settings-unlock-at-launch"),
+            s.privilege.unlock_at_launch,
+            toggle(SettingKey::PrivilegeUnlockAtLaunch),
+        )
+        .check_item(
             tr(cx, "shell-menu-settings-public-ip"),
             s.network.auto_fetch_public_ip,
             Box::new(TogglePublicIpAutoFetch),
+        )
+        .check_item(
+            tr(cx, "shell-menu-settings-rescue-window"),
+            s.lowmem.enabled,
+            toggle(SettingKey::LowmemEnabled),
         )
         .header(tr(cx, "shell-menu-settings-language-group"))
         .submenu(
@@ -199,6 +276,22 @@ pub fn build(
         .item(tr(cx, "shell-menu-settings-all"), Box::new(OpenSettings))
         .item(tr(cx, "shell-menu-settings-reset"), Box::new(ResetSettings))
     })
+}
+
+/// Pushes the Info toast `key` in the active window. Deferred: the window is busy dispatching
+/// the menu action.
+fn info_toast(cx: &mut App, key: &str) {
+    let text = tr(cx, key);
+    let Some(handle) = cx.active_window() else {
+        return;
+    };
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| {
+            if let Some(queue) = ToastQueue::of_window(window, cx) {
+                queue.update(cx, |q, cx| q.push(ToastKind::Info, text, None, None, cx));
+            }
+        });
+    });
 }
 
 /// Calls `AppEnv.set_autostart(enabled, minimized)`. On failure (or with no `AppEnv`) pushes
@@ -287,6 +380,25 @@ fn network_unit_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
         current == NetworkUnit::Bytes,
         set_str(SettingKey::UnitsNetwork, "bytes"),
     )
+}
+
+/// "1 hour" to "12 hours". A stored value that is none of the seven marks nothing.
+fn history_storage_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+    let current = settings_now(cx).history.retention_h;
+    for (key, hours) in HISTORY_STORAGE_KEYS
+        .into_iter()
+        .zip(HISTORY_RETENTION_MENU_H)
+    {
+        menu = menu.radio_item(
+            tr(cx, key),
+            hours == current,
+            set(
+                SettingKey::HistoryRetentionH,
+                SettingValue::Int(hours.into()),
+            ),
+        );
+    }
+    menu
 }
 
 /// One item per built tab in tab order, with the tab strip's labels, then "Last used".

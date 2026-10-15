@@ -1,4 +1,4 @@
-//! Menu bar, File menu and View menu tests (E21-A1, E21-001, E21-003, E21-044, UI-SHL-030 to
+//! Menu bar, File menu and View menu tests (E21-A1, E21-001, E21-003, E21-044, E21-045, UI-SHL-030 to
 //! UI-SHL-034, UI-SHL-039, ADR-013).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
@@ -24,7 +24,7 @@ use tl_model::settings::{
 };
 use tl_model::table::TableMode;
 use tl_ui::actions::{
-    MenuId, OpenRunDialog, OpenSettings, Quit, SetViewMode, bind_keys_global,
+    MenuId, OpenHandleSearch, OpenRunDialog, OpenSettings, Quit, SetViewMode, bind_keys_global,
     register_global_handlers,
 };
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -86,6 +86,7 @@ struct Rig<'a> {
     table: FocusHandle,
     quits: Rc<Cell<u32>>,
     runs: Rc<Cell<u32>>,
+    handle_searches: Rc<Cell<u32>>,
     /// The View > Columns table actions, by name and table.
     tables: Rc<RefCell<Vec<(&'static str, TableId)>>>,
     collapses: Rc<Cell<u32>>,
@@ -114,6 +115,8 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
     let count = Rc::clone(&quits);
     let runs = Rc::new(Cell::new(0));
     let run_count = Rc::clone(&runs);
+    let handle_searches = Rc::new(Cell::new(0));
+    let handle_search_count = Rc::clone(&handle_searches);
     let tables = Rc::new(RefCell::new(Vec::new()));
     let (t1, t2, t3) = (tables.clone(), tables.clone(), tables.clone());
     let collapses = Rc::new(Cell::new(0));
@@ -150,6 +153,9 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
         menubar::init(cx);
         cx.on_action(move |_: &Quit, _| count.set(count.get() + 1));
         cx.on_action(move |_: &OpenRunDialog, _| run_count.set(run_count.get() + 1));
+        cx.on_action(move |_: &OpenHandleSearch, _| {
+            handle_search_count.set(handle_search_count.get() + 1)
+        });
         cx.on_action(move |a: &OpenColumnPicker, _| {
             t1.borrow_mut().push(("OpenColumnPicker", a.table))
         });
@@ -212,6 +218,7 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
         table,
         quits,
         runs,
+        handle_searches,
         tables,
         collapses,
         modes,
@@ -317,7 +324,7 @@ fn hint_for(r: &mut Rig<'_>, action: &dyn gpui_kit::Action) -> Option<String> {
 }
 
 #[gpui_kit::test]
-fn file_menu_p2_items(cx: &mut TestAppContext) {
+fn file_menu_p3_items(cx: &mut TestAppContext) {
     let mut r = rig(cx);
     // File, View and Settings, each followed by a separator one physical pixel wide, and nothing
     // for the absent menus.
@@ -342,17 +349,49 @@ fn file_menu_p2_items(cx: &mut TestAppContext) {
 
     click_file(r.cx);
     let entries = entries(r.cx);
-    assert_eq!(entries.len(), 3, "Run..., separator, Exit: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        4,
+        "Run..., Search File Handles..., separator, Exit: {entries:?}"
+    );
     assert_eq!(entries[0].role(), Some(Role::MenuItem));
     assert_eq!(entries[0].label(), Some("Run..."));
-    assert_eq!(entries[1].role(), None, "a separator");
-    assert_eq!(entries[1].label(), None);
-    assert!(entries[1].bounds().size.height < px(2.), "a one-pixel line");
-    assert_eq!(entries[2].role(), Some(Role::MenuItem));
-    assert_eq!(entries[2].label(), Some("Exit tasklens"));
+    assert_eq!(entries[1].role(), Some(Role::MenuItem));
+    assert_eq!(entries[1].label(), Some("Search File Handles..."));
+    assert_eq!(entries[2].role(), None, "a separator");
+    assert_eq!(entries[2].label(), None);
+    assert!(entries[2].bounds().size.height < px(2.), "a one-pixel line");
+    assert_eq!(entries[3].role(), Some(Role::MenuItem));
+    assert_eq!(entries[3].label(), Some("Exit tasklens"));
     // The hints come from the live bindings.
     assert_eq!(hint_for(&mut r, &OpenRunDialog).as_deref(), Some("Ctrl+N"));
     assert_eq!(hint_for(&mut r, &Quit).as_deref(), Some("Ctrl+Q"));
+    assert_eq!(hint_for(&mut r, &OpenHandleSearch), None, "no shortcut");
+}
+
+#[gpui_kit::test]
+fn file_menu_handle_search_dispatch(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    keys(r.cx, "f10 down");
+    assert_eq!(
+        entries(r.cx)[1].selected(),
+        Some(true),
+        "Search File Handles... highlighted"
+    );
+    keys(r.cx, "enter");
+    assert_eq!(r.handle_searches.get(), 1);
+    assert_eq!(r.runs.get(), 0);
+    assert_eq!(r.quits.get(), 0);
+    assert_eq!(open_menu(r.cx), None);
+    assert!(popup_bounds(r.cx).is_none());
+    assert!(table_focused(&mut r));
+
+    // A click on the item does the same.
+    click_file(r.cx);
+    let item = entries(r.cx)[1].bounds().center();
+    click(r.cx, item);
+    assert_eq!(r.handle_searches.get(), 2);
+    assert_eq!(open_menu(r.cx), None);
 }
 
 #[gpui_kit::test]
@@ -420,9 +459,9 @@ fn menu_esc_returns_focus(cx: &mut TestAppContext) {
 fn menubar_left_right_wrap(cx: &mut TestAppContext) {
     let r = rig(cx);
     // In File, Right on "Exit tasklens" opens View.
-    keys(r.cx, "f10 down");
-    assert_eq!(entries(r.cx)[2].label(), Some("Exit tasklens"));
-    assert_eq!(entries(r.cx)[2].selected(), Some(true));
+    keys(r.cx, "f10 down down");
+    assert_eq!(entries(r.cx)[3].label(), Some("Exit tasklens"));
+    assert_eq!(entries(r.cx)[3].selected(), Some(true));
     keys(r.cx, "right");
     assert_eq!(open_menu(r.cx), Some(MenuId::View));
     assert_eq!(entries(r.cx)[0].selected(), Some(true));
@@ -439,22 +478,23 @@ fn menubar_left_right_wrap(cx: &mut TestAppContext) {
 fn exit_dispatches_quit(cx: &mut TestAppContext) {
     let mut r = rig(cx);
     keys(r.cx, "f10");
-    keys(r.cx, "down");
+    keys(r.cx, "down down");
     assert_eq!(
-        entries(r.cx)[2].selected(),
+        entries(r.cx)[3].selected(),
         Some(true),
         "Down skips the separator"
     );
     keys(r.cx, "enter");
     assert_eq!(r.quits.get(), 1);
     assert_eq!(r.runs.get(), 0);
+    assert_eq!(r.handle_searches.get(), 0);
     assert_eq!(open_menu(r.cx), None);
     assert!(popup_bounds(r.cx).is_none());
     assert!(table_focused(&mut r));
 
     // A click on the item does the same.
     click_file(r.cx);
-    let item = entries(r.cx)[2].bounds().center();
+    let item = entries(r.cx)[3].bounds().center();
     click(r.cx, item);
     assert_eq!(r.quits.get(), 2);
     assert_eq!(open_menu(r.cx), None);
@@ -829,11 +869,14 @@ fn shapes(cx: &mut VisualTestContext) -> Vec<String> {
         .collect()
 }
 
-const SETTINGS_ROOT: [&str; 19] = [
+const SETTINGS_ROOT: [&str; 27] = [
     "header:Monitoring",
     "item:Refresh",
     "item:Network transfer unit",
     "item:Auto-scale network transfer rates",
+    "item:Record history",
+    "item:History storage",
+    "item:Save history to disk",
     "header:Motion & interaction",
     "item:Animations",
     "item:Smooth Graphs",
@@ -841,10 +884,15 @@ const SETTINGS_ROOT: [&str; 19] = [
     "item:Tab Switch 250 ms",
     "item:Close with Esc",
     "header:Window & startup",
+    "item:Close to tray",
+    "item:Minimize to tray",
+    "item:Always show tray icon",
     "item:Start at login",
     "item:Start minimized",
     "item:Default tab",
+    "item:Unlock privileged actions at launch",
     "item:Auto-fetch Public IP on launch",
+    "item:Open rescue window on critical memory pressure",
     "header:Language",
     "item:Language:",
     "separator",
@@ -915,9 +963,10 @@ fn settings_menu_network_and_checks(cx: &mut TestAppContext) {
     assert_eq!(settings_sub(r.cx), ["Bits per second", "Bytes per second"]);
     keys(r.cx, "down enter");
     assert_eq!(settings(r.cx).units.network, NetworkUnit::Bytes);
-    // Animations: Refresh, Network, Auto-scale, Animations.
+    // Animations: Network, Auto-scale, Record history, History storage, Animations
+    // ("Save history to disk" is disabled and skipped).
     assert!(settings(r.cx).motion.animations);
-    keys(r.cx, "alt-s down down down enter");
+    keys(r.cx, "alt-s down down down down down enter");
     assert!(!settings(r.cx).motion.animations);
 }
 
@@ -928,10 +977,11 @@ fn default_tab_lists_built_tabs(cx: &mut TestAppContext) {
         cx.global_mut::<ShellState>().built_tabs =
             [Tab::Processes, Tab::Performance].into_iter().collect();
     });
-    // Default tab is the tenth enabled item ("Start minimized" is disabled).
+    // Default tab is the 15th enabled item ("Save history to disk" and "Start minimized" are
+    // disabled).
     keys(
         r.cx,
-        "alt-s down down down down down down down down down right",
+        "alt-s down down down down down down down down down down down down down down right",
     );
     assert_eq!(
         settings_sub(r.cx),
@@ -1009,10 +1059,15 @@ fn settings_menu_p2_order(cx: &mut TestAppContext) {
     assert_eq!(
         group(r.cx, "Window & startup"),
         [
+            "Close to tray",
+            "Minimize to tray",
+            "Always show tray icon",
             "Start at login",
             "Start minimized",
             "Default tab",
-            "Auto-fetch Public IP on launch"
+            "Unlock privileged actions at launch",
+            "Auto-fetch Public IP on launch",
+            "Open rescue window on critical memory pressure"
         ]
     );
     let tail: Vec<String> = shapes(r.cx).into_iter().rev().take(3).collect();
@@ -1049,8 +1104,8 @@ fn settings_menu_tab_switch_slider(cx: &mut TestAppContext) {
     assert!(shapes(r.cx).contains(&"item:Tab Switch 300 ms".to_owned()));
     assert_eq!(open_menu(r.cx), Some(MenuId::Settings));
 
-    // Refresh is highlighted; six Downs reach Tab Switch, Right steps by 10.
-    keys(r.cx, "down down down down down down right");
+    // Refresh is highlighted; eight Downs reach Tab Switch, Right steps by 10.
+    keys(r.cx, "down down down down down down down down right");
     assert_eq!(settings(r.cx).motion.tab_switch_ms, 310);
     assert_eq!(r.persists.get(), before + 2);
 }
@@ -1066,6 +1121,7 @@ fn set_notice_accepted(cx: &mut VisualTestContext, accepted: bool) {
 #[gpui_kit::test]
 fn settings_menu_public_ip_toggle(cx: &mut TestAppContext) {
     let r = rig(cx);
+    tall_window(r.cx);
     set_notice_accepted(r.cx, true);
     assert!(!settings(r.cx).network.auto_fetch_public_ip);
     keys(r.cx, "alt-s");
@@ -1081,6 +1137,7 @@ fn settings_menu_public_ip_toggle(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn settings_menu_public_ip_asks_first(cx: &mut TestAppContext) {
     let r = rig(cx);
+    tall_window(r.cx);
     set_notice_accepted(r.cx, false);
     let windows = r.cx.update(|_, cx| cx.windows().len());
     keys(r.cx, "alt-s");
@@ -1681,8 +1738,11 @@ fn start_minimized_disabled(cx: &mut TestAppContext) {
         "disabled and indented by 16 at 100%"
     );
     assert_ne!(row.selected(), Some(true));
-    // Nine Downs from Refresh pass "Start at login" and skip the disabled row.
-    keys(r.cx, "down down down down down down down down down");
+    // Fourteen Downs from Refresh pass "Start at login" and skip the disabled rows.
+    keys(
+        r.cx,
+        "down down down down down down down down down down down down down down",
+    );
     assert_eq!(
         entries(r.cx)
             .into_iter()
@@ -1696,6 +1756,7 @@ fn start_minimized_disabled(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn start_at_login_success(cx: &mut TestAppContext) {
     let r = rig(cx);
+    tall_window(r.cx);
     let calls = fake_autostart(r.cx, false);
     keys(r.cx, "alt-s");
     click_label(r.cx, "Start at login");
@@ -1716,6 +1777,7 @@ fn start_at_login_success(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn start_at_login_failure_reverts(cx: &mut TestAppContext) {
     let mut r = rig_with_toasts(cx);
+    tall_window(r.cx);
     let calls = fake_autostart(r.cx, true);
     keys(r.cx, "alt-s");
     click_label(r.cx, "Start at login");
@@ -1734,6 +1796,7 @@ fn start_at_login_failure_reverts(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn start_minimized_rewrites_entry(cx: &mut TestAppContext) {
     let r = rig(cx);
+    tall_window(r.cx);
     let calls = fake_autostart(r.cx, false);
     set_start_at_login(r.cx, true);
     keys(r.cx, "alt-s");
@@ -1751,6 +1814,138 @@ fn start_minimized_rewrites_entry(cx: &mut TestAppContext) {
     draw(r.cx);
     assert!(!settings(r.cx).startup.start_minimized);
     assert_eq!(calls.lock().expect("calls").len(), 1, "no writer call");
+}
+
+// Settings menu P3 rows (E21-033).
+
+/// The Settings menu is taller than the 400 px rig window and scrolls; clicks need every row
+/// on screen.
+fn tall_window(cx: &mut VisualTestContext) {
+    cx.simulate_resize(size(px(1000.), px(1200.)));
+}
+
+/// The built Settings popup entry labelled `label`: its kind and tooltip.
+fn settings_entry(
+    cx: &mut VisualTestContext,
+    label: &str,
+) -> (tl_ui::components::menu::MenuEntryKind, Option<String>) {
+    let bar = bar(cx);
+    cx.update(|window, cx| {
+        let popup = bar.read(cx).popup().expect("menu open").clone();
+        popup
+            .read(cx)
+            .entries_for_test(window)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some(label))
+            .map(|e| (e.kind, e.tooltip.map(|t| t.to_string())))
+            .unwrap_or_else(|| panic!("{label} built"))
+    })
+}
+
+#[gpui_kit::test]
+fn save_history_disabled_without_recording(cx: &mut TestAppContext) {
+    use tl_ui::components::menu::MenuEntryKind;
+    let r = rig(cx);
+    assert!(!settings(r.cx).history.enabled);
+    keys(r.cx, "alt-s");
+    assert_eq!(
+        settings_entry(r.cx, "Save history to disk"),
+        (
+            MenuEntryKind::Disabled,
+            Some("Turn on Record history first".to_owned())
+        )
+    );
+    keys(r.cx, "escape");
+    r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.history.enabled = true));
+    keys(r.cx, "alt-s");
+    let (kind, tooltip) = settings_entry(r.cx, "Save history to disk");
+    assert_ne!(kind, MenuEntryKind::Disabled);
+    assert_eq!(tooltip, None);
+}
+
+#[gpui_kit::test]
+fn record_history_toast_and_engine_settings(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    tall_window(r.cx);
+    keys(r.cx, "alt-s");
+    click_label(r.cx, "Record history");
+    draw(r.cx);
+    assert!(settings(r.cx).history.enabled);
+    assert_eq!(
+        r.engine.settings().last().map(|s| s.history.enabled),
+        Some(true)
+    );
+    assert_eq!(toast_texts(&mut r), ["History recording on"]);
+}
+
+#[gpui_kit::test]
+fn history_storage_radio(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    // Refresh, Network, Auto-scale, Record history, History storage.
+    keys(r.cx, "alt-s down down down down right");
+    assert_eq!(
+        settings_sub(r.cx),
+        [
+            "1 hour", "2 hours", "3 hours", "4 hours", "6 hours", "8 hours", "12 hours"
+        ]
+    );
+    keys(r.cx, "down down down down down down enter");
+    assert_eq!(settings(r.cx).history.retention_h, 12);
+}
+
+#[gpui_kit::test]
+fn tray_and_privilege_checks_toggle(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    tall_window(r.cx);
+    type Read = fn(&Settings) -> bool;
+    let rows: [(&str, Read); 5] = [
+        ("Close to tray", |s| s.tray.close_to_tray),
+        ("Minimize to tray", |s| s.tray.minimize_to_tray),
+        ("Always show tray icon", |s| s.tray.always_show),
+        ("Unlock privileged actions at launch", |s| {
+            s.privilege.unlock_at_launch
+        }),
+        ("Open rescue window on critical memory pressure", |s| {
+            s.lowmem.enabled
+        }),
+    ];
+    for (label, read) in rows {
+        assert!(!read(&settings(r.cx)), "{label} starts off");
+        keys(r.cx, "alt-s");
+        click_label(r.cx, label);
+        assert!(read(&settings(r.cx)), "{label} turns on");
+    }
+}
+
+#[gpui_kit::test]
+fn settings_menu_p3_order(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    keys(r.cx, "alt-s");
+    assert_eq!(
+        group(r.cx, "Monitoring"),
+        [
+            "Refresh",
+            "Network transfer unit",
+            "Auto-scale network transfer rates",
+            "Record history",
+            "History storage",
+            "Save history to disk"
+        ]
+    );
+    assert_eq!(
+        group(r.cx, "Window & startup"),
+        [
+            "Close to tray",
+            "Minimize to tray",
+            "Always show tray icon",
+            "Start at login",
+            "Start minimized",
+            "Default tab",
+            "Unlock privileged actions at launch",
+            "Auto-fetch Public IP on launch",
+            "Open rescue window on critical memory pressure"
+        ]
+    );
 }
 
 // View > Theme (E21-012).

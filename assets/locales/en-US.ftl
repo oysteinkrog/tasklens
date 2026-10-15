@@ -2167,6 +2167,25 @@ shell-menu-settings-start-at-login = Start at login
 shell-menu-settings-start-minimized = Start minimized
 shell-toast-autostart-failed = Could not change the autostart entry
 shell-menu-settings-all = All settings…
+# Settings menu, P3 rows (tasklens-bj6.37, UI-SHL-040, APP-022, APP-047, APP-049).
+shell-menu-settings-record-history = Record history
+shell-menu-settings-history-storage = History storage
+shell-menu-settings-history-1h = 1 hour
+shell-menu-settings-history-2h = 2 hours
+shell-menu-settings-history-3h = 3 hours
+shell-menu-settings-history-4h = 4 hours
+shell-menu-settings-history-6h = 6 hours
+shell-menu-settings-history-8h = 8 hours
+shell-menu-settings-history-12h = 12 hours
+shell-menu-settings-history-persist = Save history to disk
+shell-menu-settings-history-first = Turn on Record history first
+shell-menu-settings-close-to-tray = Close to tray
+shell-menu-settings-minimize-to-tray = Minimize to tray
+shell-menu-settings-always-show-tray = Always show tray icon
+shell-menu-settings-unlock-at-launch = Unlock privileged actions at launch
+shell-menu-settings-rescue-window = Open rescue window on critical memory pressure
+shell-toast-history-on = History recording on
+shell-toast-history-off = History recording off
 # Process row menu and group header menu (tasklens-pdu.2, UI-PRC-013, UI-PRC-020)
 processes-menu-end-task = End Task
 processes-menu-end-app = End App
@@ -2548,3 +2567,6 @@ shell-settings-group-size = Size
 shell-settings-group-look = Look
 shell-settings-decorations = Use system title bar
 shell-toast-decorations-restart = Restart tasklens to apply the title bar change
+
+# File menu: Search File Handles... (E21-045)
+shell-menu-file-handle-search = Search File Handles...
