@@ -9,10 +9,10 @@
 //! even when the value is equal (crw.34); the card itself adds no render for it.
 
 use gpui_kit::{
-    App, AppContext as _, BoxShadow, Context, Entity, FocusHandle, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render,
-    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Subscription, WeakEntity, Window, div, point, px,
+    App, AppContext as _, BorrowAppContext as _, BoxShadow, Context, Entity, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Point, Render, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement,
+    Styled as _, Subscription, WeakEntity, Window, div, point, px,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -113,7 +113,6 @@ pub struct MinigraphCard {
     /// Process cards: the label as drawn, cut to fit, with the label and the width in px bits it
     /// was cut for.
     fitted: Option<(SharedString, u32, SharedString)>,
-    hub: Entity<SnapshotHub>,
     _hub_sub: Subscription,
     /// Where the menu items go when nothing in the window has focus (cards take no focus).
     menu_focus: FocusHandle,
@@ -175,7 +174,6 @@ impl MinigraphCard {
             gpui_drag: false,
             process_label,
             fitted: None,
-            hub: hub.clone(),
             _hub_sub,
             menu_focus: cx.focus_handle(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -418,13 +416,12 @@ impl MinigraphCard {
     /// Process, name and app cards: takes the label, value and state from the resolver and
     /// notifies only when one of them changed. The label changes only with the name.
     fn update_process(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
-        let theme = current(cx).clone();
         let Some(view) = resolve_process_source(
             &self.entry.source,
             self.entry.column,
             self.entry.color,
             snap,
-            &theme,
+            current(cx),
             cx,
         ) else {
             return;
