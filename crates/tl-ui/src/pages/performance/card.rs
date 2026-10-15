@@ -893,7 +893,7 @@ impl CardTextLayout {
 }
 
 /// The mini graph width of a card `card_w` wide: [`CARD_GRAPH_W`], or less so that the text
-/// column is at least `text_min` (the widest value) wide. Zero, no graph, when less than
+/// column is at least `text_min` (the card's widest value) wide. Zero, no graph, when less than
 /// [`CARD_GRAPH_MIN_W`] is left.
 pub fn card_graph_width(card_w: Pixels, text_min: Pixels, m: &UiMetrics) -> Pixels {
     let s = m.ui_scale;
@@ -1254,19 +1254,6 @@ const WATTS_TEMPLATES: &[&str] = &["999.9 W"];
 const RPM_TEMPLATES: &[&str] = &["9999 RPM"];
 const COUNT_TEMPLATES: &[&str] = &["99\u{2009}999"];
 
-/// Every value template. The text column is at least as wide as the widest.
-const VALUE_TEMPLATES: [&[&str]; 9] = [
-    PERCENT_TEMPLATES,
-    BYTES_TEMPLATES,
-    RATE_IEC_TEMPLATES,
-    RATE_BITS_TEMPLATES,
-    MHZ_TEMPLATES,
-    CELSIUS_TEMPLATES,
-    WATTS_TEMPLATES,
-    RPM_TEMPLATES,
-    COUNT_TEMPLATES,
-];
-
 /// The widest texts of `fmt` in `unit` (network rates only), as [`format_value`] prints them.
 fn value_templates(fmt: ValueFormat, unit: NetworkUnit) -> &'static [&'static str] {
     match fmt {
@@ -1560,11 +1547,7 @@ impl DeviceCard {
                         w.max(measure(CardFont::Value, t))
                     })
             });
-            let text_min = VALUE_TEMPLATES
-                .iter()
-                .flat_map(|ts| ts.iter())
-                .fold(value_w, |w, t| w.max(measure(CardFont::Value, t)));
-            let graph_w = card_graph_width(self.width, text_min, &m);
+            let graph_w = card_graph_width(self.width, value_w, &m);
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
