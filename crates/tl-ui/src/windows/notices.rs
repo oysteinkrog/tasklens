@@ -18,7 +18,6 @@
 //! thread. The result replaces that toast. The UI never reads the core file: it holds process
 //! memory.
 
-use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -26,8 +25,8 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    Action, AnyWindowHandle, App, AppContext as _, Context, Entity, Global, Pixels, SharedString,
-    Subscription, Task, WeakEntity, Window, px,
+    AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Context, Entity, Global, Pixels,
+    SharedString, Subscription, Task, WeakEntity, Window, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{
@@ -56,6 +55,7 @@ use crate::settings_global::TlSettings;
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::metrics::TextMetricsCache;
 use crate::theme::{UiMetrics, metrics};
+use crate::windows::actions::OpenDumpFolder;
 
 /// How long the hash may take before the "Computing SHA-256…" toast shows.
 pub const TOAST_DELAY: Duration = Duration::from_millis(500);
@@ -312,9 +312,6 @@ pub const DUMP_NAME_MAX: usize = 64;
 /// The toast keys of the dump flow sit in their own range.
 const DUMP_KEY_BASE: u64 = 0x8000_0000_0500_0000;
 
-/// Finished dumps whose "Open folder" button may still be clicked.
-const KEEP_DONE: usize = 16;
-
 /// The close button beside the toast text, before the UI scale.
 const TOAST_CLOSE_W: f32 = 24.0;
 
@@ -336,12 +333,6 @@ impl From<DumpToast> for ToastKey {
         ToastKey(DUMP_KEY_BASE | (key.0 & 0xFF_FFFF))
     }
 }
-
-/// "Open folder" on a dump's success toast: shows the core file of dump `.0` (its action id)
-/// in the file manager, selected.
-#[derive(Clone, PartialEq, Debug, Action)]
-#[action(namespace = tasklens, no_json)]
-pub struct OpenDumpFolder(pub u64);
 
 /// Creates a core dump of `key` (PROC-075). Asks first when VmRSS is over 2 GiB. `window` is
 /// the caller's window: the confirmation is modal to it and the toasts show in it.
@@ -421,11 +412,12 @@ pub fn shown_dump_path(path: &str, home: &str) -> String {
     home_tilde(path, home).unwrap_or_else(|| path.to_owned())
 }
 
-/// The running dumps and the finished ones whose "Open folder" may still be clicked.
+/// The running dumps and the last finished one. `OpenDumpFolder` has no payload, so "Open
+/// folder" shows the last dump that succeeded; every dump is in the same folder.
 #[derive(Default)]
 struct DumpFlows {
     live: Vec<Entity<DumpRequest>>,
-    done: VecDeque<(u64, DoneDump)>,
+    last_done: Option<DoneDump>,
     folder_action: bool,
 }
 
@@ -484,14 +476,11 @@ fn send_dump(key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
 
 /// "Open folder": FileManager1 `ShowItems` with the core file selected, then the Info toast
 /// "Opening file location". A failure shows the tracker's reason.
-fn open_dump_folder(action: &OpenDumpFolder, cx: &mut App) {
-    let Some(done) = cx.try_global::<DumpFlows>().and_then(|flows| {
-        flows
-            .done
-            .iter()
-            .find(|(id, _)| *id == action.0)
-            .map(|(_, done)| done.clone())
-    }) else {
+fn open_dump_folder(_: &OpenDumpFolder, cx: &mut App) {
+    let Some(done) = cx
+        .try_global::<DumpFlows>()
+        .and_then(|flows| flows.last_done.clone())
+    else {
         return;
     };
     let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
@@ -673,17 +662,13 @@ impl DumpRequest {
         );
         let button = ToastAction {
             label: tr(cx, DUMP_OPEN_FOLDER),
-            action: Box::new(OpenDumpFolder(self.id.0)),
+            action: Box::new(OpenDumpFolder),
         };
         let done = DoneDump {
             path: self.path.clone(),
             queue: self.queue.clone(),
         };
-        let flows = cx.default_global::<DumpFlows>();
-        if flows.done.len() == KEEP_DONE {
-            flows.done.pop_front();
-        }
-        flows.done.push_back((self.id.0, done));
+        cx.default_global::<DumpFlows>().last_done = Some(done);
         self.push(ToastKind::Success, text, Some(button), cx);
     }
 }

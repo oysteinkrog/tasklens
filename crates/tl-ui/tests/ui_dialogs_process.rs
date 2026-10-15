@@ -2226,6 +2226,7 @@ mod dump {
     use tl_ui::components::dialog::TlDialogView;
     use tl_ui::components::toast::ToastKey;
     use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui::hub::GlobalHub;
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::notices::{DUMP_POLL, DumpToast, set_test_home, start_dump};
@@ -2338,6 +2339,12 @@ mod dump {
             p.records = Arc::from(records);
         });
         cx.run_until_parked();
+        // No main window renders here, so mark the snapshot drawn: else the hub goes hidden
+        // after 1 s and the toast queue drops every push.
+        cx.update(|cx| {
+            let hub = cx.global::<GlobalHub>().0.clone();
+            hub.update(cx, |hub, cx| hub.note_render(cx));
+        });
         let spec = TlWindowSpec::new(
             TlWindowKind::Tool { resizable: true },
             "parent",
@@ -2582,9 +2589,10 @@ mod dump {
 
         // The toast key is DumpToast(action id).
         let key: ToastKey = DumpToast(request.id.0).into();
-        let selector = format!("TlToast-k{}", key.0);
+        // debug_bounds takes a static selector.
+        let selector: &'static str = format!("TlToast-k{}", key.0).leak();
         r.pcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(r.pcx.debug_bounds(&selector).is_some(), "{selector}");
+        assert!(r.pcx.debug_bounds(selector).is_some(), "{selector}");
 
         // After the result the size is no longer read.
         finish(&mut r, &request, ActionState::Succeeded);
@@ -2614,8 +2622,8 @@ mod dump {
 
         // "Open folder" shows the file in the file manager.
         let key: ToastKey = DumpToast(request.id.0).into();
-        let button = format!("TlButton-TlToast-k{}-action", key.0);
-        let at = r.pcx.debug_bounds(&button).expect("Open folder drawn");
+        let button: &'static str = format!("TlButton-TlToast-k{}-action", key.0).leak();
+        let at = r.pcx.debug_bounds(button).expect("Open folder drawn");
         r.pcx.simulate_click(at.center(), Modifiers::none());
         r.pcx.run_until_parked();
         let sent = actions(&r);
