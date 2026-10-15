@@ -70,7 +70,7 @@ const FRAME_PREFIX: usize = 4;
 /// ever blocks: a peer that sends part of a frame and stops cannot hold the helper past its idle
 /// limit or stall a scan (R-157).
 #[derive(Default)]
-pub struct FrameReader {
+struct FrameReader {
     /// Bytes of the current frame so far, prefix included.
     buf: Vec<u8>,
     /// Every fd that came with the current frame's bytes as `SCM_RIGHTS` (R-145 item 3).
@@ -108,7 +108,7 @@ impl FrameReader {
     /// ends between frames. Each read asks for no more than the frame still needs, so fds sent
     /// with the next frame stay in the socket. Received fds always have `O_CLOEXEC`. The frame
     /// is decoded with `tl_model::wire`. On error the frame's fds are closed.
-    pub fn read_ready(&mut self, sock: BorrowedFd<'_>) -> Result<Option<ReceivedFrame>, WireError> {
+    fn read_ready(&mut self, sock: BorrowedFd<'_>) -> Result<Option<ReceivedFrame>, WireError> {
         loop {
             let want = self.wanted()?;
             if want == 0 {
