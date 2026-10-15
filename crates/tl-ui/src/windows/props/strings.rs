@@ -1123,7 +1123,7 @@ impl StringsTab {
         if !self.filter.read(cx).needle().is_empty() {
             let generation = self.filter.read(cx).generation();
             self.run_filter(generation, cx);
-        } else if grew {
+        } else if grew && self.perm.is_some() {
             self.recompose(cx);
         }
     }
