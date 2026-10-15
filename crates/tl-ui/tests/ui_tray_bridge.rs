@@ -868,6 +868,7 @@ fn settings_tray_rows_toggle_keys(cx: &mut TestAppContext) {
             SettingKey::StartupStartAtLogin,
             SettingKey::StartupStartMinimized,
             SettingKey::NetworkAutoFetchPublicIp,
+            SettingKey::LowmemEnabled,
         ]
     );
     let tray = |f: &mut Full| {

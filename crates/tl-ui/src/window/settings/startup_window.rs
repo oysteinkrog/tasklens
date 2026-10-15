@@ -2,8 +2,8 @@
 //! APP-048, APP-009, R-058). Always On Top, Start at login, Start minimized and Auto-fetch Public
 //! IP dispatch the same actions as their menu items, so the KWin keep-above, the autostart entry
 //! and the public IP notice follow the switch. The Tray group (E31-010, APP-047: close to tray,
-//! minimize to tray, always show tray icon) sits between Window and Login. The Memory group (E32)
-//! goes after Network by chain edit.
+//! minimize to tray, always show tray icon) sits between Window and Login. The Memory group (E32-013,
+//! PROC-097, R-152: rescue window switch) is the last group, after Network.
 
 use gpui_kit::App;
 
@@ -27,6 +27,13 @@ pub fn page(cx: &mut App) -> PageBuilder {
     let tray = tr(cx, "shell-settings-group-tray");
     let login = tr(cx, "shell-settings-group-login");
     let network = tr(cx, "shell-settings-group-network");
+    let memory = tr(cx, "shell-settings-group-memory");
+    // R-152: the tooltip adds a note when the unit had to run with OOMScoreAdjust 0.
+    let lowmem_tooltip = if TlSettings::state(cx).lowmem.oom_score_adjust == Some(0) {
+        "shell-settings-lowmem-tooltip-normal-oom"
+    } else {
+        "shell-settings-lowmem-tooltip"
+    };
     let keep_above = keep_above_supported(cx);
     let start_at_login = TlSettings::settings(cx).startup.start_at_login;
     page.switch(
@@ -86,6 +93,13 @@ pub fn page(cx: &mut App) -> PageBuilder {
         SettingKey::NetworkAutoFetchPublicIp,
         tr(cx, "shell-menu-settings-public-ip"),
         || Box::new(TogglePublicIpAutoFetch),
+    )
+    .tooltip_next(Some(tr(cx, lowmem_tooltip)))
+    .switch(
+        memory,
+        SettingKey::LowmemEnabled,
+        tr(cx, "shell-menu-settings-rescue-window"),
+        None,
     );
     page
 }

@@ -1503,7 +1503,8 @@ fn startup_window_keys(cx: &mut TestAppContext) {
             SettingKey::TrayAlwaysShow,
             SettingKey::StartupStartAtLogin,
             SettingKey::StartupStartMinimized,
-            SettingKey::NetworkAutoFetchPublicIp
+            SettingKey::NetworkAutoFetchPublicIp,
+            SettingKey::LowmemEnabled
         ]
     );
 }

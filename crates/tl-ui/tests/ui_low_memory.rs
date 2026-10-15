@@ -27,11 +27,13 @@ use tl_model::settings::{Settings, UiState};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::action_tracker::GlobalActionTracker;
-use tl_ui::app::{AppEnv, OpenHooks, UiExit, UiExitSlot, UiInit, start_for_test};
+use tl_ui::app::{AppEnv, OpenHooks, TasklensUi, UiExit, UiExitSlot, UiInit, start_for_test};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
+use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
+use tl_ui::window::settings::{PageId, all_pages};
 use tl_ui::windows::low_memory::{LowMemoryWindow, MAX_ROWS, RowId, init_low_memory};
 use tl_ui::{OpenMode, StartOptions, UiLaunch};
 
@@ -1205,4 +1207,66 @@ fn lowmem_end_task_permission_denied_offers_retry(cx: &mut TestAppContext) {
     let last = last.expect("the tracker pushed a toast");
     assert_eq!(last.button.as_deref(), Some("Retry as administrator"));
     assert_eq!(toasts(&mut vcx).len(), 1);
+}
+
+// ---- E32-013: the lowmem switch on the Startup and window settings page ----
+
+#[gpui_kit::test]
+fn settings_lowmem_switch_writes_key(cx: &mut TestAppContext) {
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (_tx, rx) = async_channel::bounded(4);
+    let persists = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let count = persists.clone();
+    let init = UiInit {
+        settings: Settings::default(),
+        state: UiState::default(),
+        themes_json: None,
+        persist: Box::new(move |_, _| count.set(count.get() + 1)),
+        persist_themes: Box::new(|_| {}),
+        app_requests: rx,
+        startup_toasts: Vec::new(),
+        env: AppEnv::test(),
+    };
+    cx.update(|cx| {
+        TasklensUi::init(cx, client, init);
+        cx.set_reduce_motion(true);
+    });
+    cx.run_until_parked();
+
+    let page = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            all_pages(cx)
+                .into_iter()
+                .find(|p| p.id() == PageId::StartupWindow)
+                .expect("page listed")
+        })
+    };
+    let enabled = |cx: &mut TestAppContext| cx.update(|cx| TlSettings::settings(cx).lowmem.enabled);
+    let plain = "systemd-oomd may end processes before the rescue window opens.";
+
+    let p = page(cx);
+    assert_eq!(p.keys().last(), Some(&SettingKey::LowmemEnabled));
+    assert!(!enabled(cx), "off by default");
+    assert_eq!(
+        p.tooltip_of(SettingKey::LowmemEnabled).as_deref(),
+        Some(plain)
+    );
+
+    let before = persists.get();
+    cx.update(|cx| p.set_bool(SettingKey::LowmemEnabled, true, cx));
+    cx.run_until_parked();
+    assert!(enabled(cx));
+    assert_eq!(persists.get(), before + 1, "one persist call");
+
+    cx.update(|cx| p.set_bool(SettingKey::LowmemEnabled, false, cx));
+    cx.run_until_parked();
+    assert!(!enabled(cx));
+
+    cx.update(|cx| TlSettings::update(cx, |d| d.state.lowmem.oom_score_adjust = Some(0)));
+    let tip = page(cx).tooltip_of(SettingKey::LowmemEnabled);
+    assert_eq!(
+        tip.as_deref(),
+        Some(format!("{plain} The watcher runs with normal OOM priority.").as_str())
+    );
 }
