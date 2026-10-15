@@ -134,6 +134,8 @@ struct TabSlot {
 }
 
 impl TabSlot {
+    // Until a tab bead's `create_tab` arm lands, only `install_tab_view` builds slots.
+    #[cfg(any(test, feature = "test-hooks"))]
     fn new<T: Render + ServicePropsTabView>(view: Entity<T>) -> Self {
         Self {
             view: AnyView::from(view.clone()),

@@ -442,6 +442,9 @@ fn service_props_rerender_only_on_own_details(cx: &mut TestAppContext) {
             .detach();
     });
 
+    let renders = |cx: &mut TestAppContext| cx.read(|cx| win.read(cx).render_count());
+    let before = renders(cx);
+
     // A new version with the same details Arc.
     publish(
         cx,
@@ -451,6 +454,7 @@ fn service_props_rerender_only_on_own_details(cx: &mut TestAppContext) {
         ServiceBackend::Systemd,
     );
     assert_eq!(notified.get(), 0, "same details Arc, no notify");
+    assert_eq!(renders(cx), before, "same details Arc, no render");
 
     let mut changed = HashMap::new();
     changed.insert(unit("sshd.service"), details("sshd.service"));
@@ -462,6 +466,7 @@ fn service_props_rerender_only_on_own_details(cx: &mut TestAppContext) {
         ServiceBackend::Systemd,
     );
     assert_eq!(notified.get(), 1, "new details Arc, one notify");
+    assert!(renders(cx) > before, "new details Arc, renders again");
 }
 
 #[gpui_kit::test]
