@@ -209,6 +209,9 @@ async fn run_session(
             shared: shared.clone(),
         })
     });
+    if let Some(gate) = reducer.action_gate.as_ref() {
+        reducer.health.set_caps(gate.caps());
+    }
     reducer.record_sink = ep.hooks.record_sink.as_ref().map(|make| make(&ep.config));
     // E30-A2: history sink and worker. A test sink from the hooks replaces both. The low-memory
     // engine runs no history (R-152).

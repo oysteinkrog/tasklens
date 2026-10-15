@@ -183,6 +183,16 @@ impl HealthState {
         true
     }
 
+    /// Stores the engine capabilities. Returns true when they changed.
+    pub fn set_caps(&mut self, caps: EngineCaps) -> bool {
+        if self.current.caps == caps {
+            return false;
+        }
+        Arc::make_mut(&mut self.current).caps = caps;
+        self.dirty = true;
+        true
+    }
+
     /// True when the source is `Failed` or `Disabled`.
     pub fn is_down(&self, id: SourceId) -> bool {
         self.by_id
@@ -270,6 +280,18 @@ mod tests {
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
     const T: TimeNs = 100 * S;
+
+    #[test]
+    fn set_caps_reaches_the_snapshot() {
+        let mut h = HealthState::new();
+        assert!(h.set_caps(EngineCaps::GDB));
+        assert!(!h.set_caps(EngineCaps::GDB));
+        let snap = h.publish().expect("caps are a change");
+        assert!(snap.caps.contains(EngineCaps::GDB));
+        assert!(h.set_caps(EngineCaps::empty()));
+        let snap = h.publish().expect("caps are a change");
+        assert!(!snap.caps.contains(EngineCaps::GDB));
+    }
 
     #[test]
     fn stale_after_threshold_10hz() {

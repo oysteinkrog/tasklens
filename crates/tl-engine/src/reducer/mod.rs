@@ -113,6 +113,11 @@ pub trait ActionGate: Send + 'static {
     fn submit(&mut self, cx: &Cx, req: ActionRequest, view: &AdmissionView<'_>);
     /// The source to refresh after the action, if any.
     fn finished(&mut self, id: ActionId) -> Option<SourceId>;
+    /// The capabilities the gate's ops reported when it was built. The session copies them
+    /// into the health snapshot once at start. The default is none.
+    fn caps(&self) -> tl_model::health::EngineCaps {
+        tl_model::health::EngineCaps::empty()
+    }
 }
 
 /// What admission checks a process target against (ADR-006).

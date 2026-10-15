@@ -676,6 +676,8 @@ pub struct Gate {
     ctx: Arc<ActionCtx>,
     in_flight: FxHashMap<ActionId, InFlight>,
     busy_units: FxHashSet<UnitRef>,
+    /// Read from the ops once in `new` (R-141). Not re-checked per snapshot.
+    caps: tl_model::health::EngineCaps,
 }
 
 struct InFlight {
@@ -689,7 +691,12 @@ struct InFlight {
 
 impl Gate {
     pub fn new(ctx: Arc<ActionCtx>) -> Self {
+        let mut caps = tl_model::health::EngineCaps::empty();
+        if ctx.ops.dump_available() {
+            caps.insert(tl_model::health::EngineCaps::GDB);
+        }
         Self {
+            caps,
             ctx,
             in_flight: FxHashMap::default(),
             busy_units: FxHashSet::default(),
@@ -698,6 +705,10 @@ impl Gate {
 }
 
 impl ActionGate for Gate {
+    fn caps(&self) -> tl_model::health::EngineCaps {
+        self.caps
+    }
+
     fn submit(&mut self, cx: &Cx, req: ActionRequest, view: &AdmissionView<'_>) {
         let per_target = match admit(&req, view, self.in_flight.len(), &self.busy_units) {
             Admission::Reject(reason) => {
@@ -1442,12 +1453,23 @@ mod tests {
         async_channel::Receiver<ActionEvent>,
         mpsc::Receiver<EngineMsg>,
     ) {
+        ctx_with_ops(Arc::new(NoOps))
+    }
+
+    /// `ctx()` with `ops` in place of `NoOps`.
+    fn ctx_with_ops(
+        ops: Arc<dyn ActionOps>,
+    ) -> (
+        Arc<ActionCtx>,
+        async_channel::Receiver<ActionEvent>,
+        mpsc::Receiver<EngineMsg>,
+    ) {
         let (events_tx, events) = async_channel::bounded(256);
         let (msgs_tx, msgs) = mpsc::channel(256);
         let ctx = Arc::new(ActionCtx {
             events: events_tx,
             msgs: msgs_tx,
-            ops: Arc::new(NoOps),
+            ops,
             boot_id: BOOT,
             uid: 1000,
             config: Arc::new(EngineConfig::new(
@@ -1463,6 +1485,24 @@ mod tests {
             startup_paths: crate::actions::startup::StartupPaths::from_env(),
         });
         (ctx, events, msgs)
+    }
+
+    struct DumpOps(bool);
+    impl ActionOps for DumpOps {
+        fn dump_available(&self) -> bool {
+            self.0
+        }
+    }
+
+    #[test]
+    fn gate_caps_follow_dump_available() {
+        use tl_model::health::EngineCaps;
+        for available in [true, false] {
+            let (ctx, _events, _msgs) = ctx_with_ops(Arc::new(DumpOps(available)));
+            let caps = Gate::new(ctx).caps();
+            assert_eq!(caps.contains(EngineCaps::GDB), available);
+            assert!(!caps.contains(EngineCaps::FILE_MANAGER1));
+        }
     }
 
     /// A gate over `ctx()`.
