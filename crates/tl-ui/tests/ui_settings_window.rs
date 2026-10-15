@@ -21,7 +21,7 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::{NetworkUnit, Settings, StartTab, UiState};
 use tl_model::table::TableMode;
-use tl_ui::actions::OpenSettings;
+use tl_ui::actions::{OpenAdditionalSetup, OpenSettings};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::slider::TlSliderEvent;
@@ -1753,8 +1753,60 @@ fn settings_p2_page_list(cx: &mut TestAppContext) {
             PageId::Graphs,
             PageId::Services,
             PageId::StartupWindow,
+            PageId::Privileges,
             PageId::Advanced,
         ]
+    );
+}
+
+// Privileges page (E21-035).
+
+#[gpui_kit::test]
+fn privileges_page_position(cx: &mut TestAppContext) {
+    setup(cx);
+    let ids: Vec<PageId> = p2_pages(cx).iter().map(PageBuilder::id).collect();
+    let at = ids
+        .iter()
+        .position(|id| *id == PageId::Privileges)
+        .expect("Privileges listed");
+    assert_eq!(ids[at - 1], PageId::StartupWindow);
+    assert_eq!(ids[at + 1], PageId::Advanced);
+}
+
+#[gpui_kit::test]
+fn privileges_unlock_switch(cx: &mut TestAppContext) {
+    setup(cx);
+    let privileges = page(cx, PageId::Privileges);
+    assert!(!cx.update(|cx| TlSettings::settings(cx).privilege.unlock_at_launch));
+    cx.update(|cx| privileges.set_bool(SettingKey::PrivilegeUnlockAtLaunch, true, cx));
+    assert!(cx.update(|cx| TlSettings::settings(cx).privilege.unlock_at_launch));
+}
+
+#[gpui_kit::test]
+fn privileges_setup_button_dispatch(cx: &mut TestAppContext) {
+    setup(cx);
+    let opened = Rc::new(Cell::new(0));
+    let count = opened.clone();
+    cx.update(|cx| {
+        cx.on_action(move |a: &OpenAdditionalSetup, _| {
+            if a == &(OpenAdditionalSetup { focus_row: None }) {
+                count.set(count.get() + 1)
+            }
+        });
+    });
+    let (_, mut vcx) = open(cx, 1);
+    let privileges = page(cx, PageId::Privileges);
+    vcx.update(|window, cx| privileges.press("Additional setup…", window, cx));
+    vcx.run_until_parked();
+    assert_eq!(opened.get(), 1, "OpenAdditionalSetup dispatched once");
+}
+
+#[gpui_kit::test]
+fn privileges_page_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    assert_eq!(
+        page(cx, PageId::Privileges).keys(),
+        [SettingKey::PrivilegeUnlockAtLaunch]
     );
 }
 

@@ -21,6 +21,7 @@ mod general;
 mod graphs;
 mod motion;
 mod performance;
+mod privileges;
 mod processes;
 mod services;
 mod startup_window;
@@ -190,6 +191,7 @@ pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
         graphs::page(cx),
         services::page(cx),
         startup_window::page(cx),
+        privileges::page(cx),
         advanced::page(cx),
     ];
     #[cfg(any(test, feature = "test-hooks"))]

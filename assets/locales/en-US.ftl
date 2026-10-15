@@ -2346,6 +2346,8 @@ shell-settings-page-graphs = Graphs
 shell-settings-page-services = Services
 shell-settings-page-startup-window = Startup and window
 shell-settings-page-privileges = Privileges
+# Settings window, Privileges page (tasklens-bj6.39). The Help menu item reuses this key.
+shell-menu-help-setup = Additional setup…
 shell-settings-page-advanced = Advanced
 shell-settings-restart-note = Takes effect after restart
 # Settings window, General and Units pages (tasklens-bj6.22, UI-SHL-061, UI-SHL-064).
