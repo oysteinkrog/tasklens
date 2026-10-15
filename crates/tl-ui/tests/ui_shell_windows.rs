@@ -2222,9 +2222,12 @@ fn editor_drag_coalesced(cx: &mut TestAppContext) {
 // ---- Theme Editor preview, Random, Share and Import (E21-029) ----
 
 fn click_editor_button(vcx: &mut VisualTestContext, id: &str) {
-    let at = vcx
-        .debug_bounds(&format!("TlButton-ThemeEditor-{id}"))
-        .expect("button drawn");
+    let selector = match id {
+        "random" => "TlButton-ThemeEditor-random",
+        "share" => "TlButton-ThemeEditor-share",
+        _ => "TlButton-ThemeEditor-import",
+    };
+    let at = vcx.debug_bounds(selector).expect("button drawn");
     vcx.simulate_click(at.center(), gpui_kit::Modifiers::none());
     vcx.run_until_parked();
     draw(vcx);
