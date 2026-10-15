@@ -778,7 +778,8 @@ fn performance_page_keys(cx: &mut TestAppContext) {
             SettingKey::PerformanceShowNetworkOther,
             SettingKey::PerformanceShowDisconnectedFans,
             SettingKey::PerformanceDeviceOrder,
-            SettingKey::PerformanceDeviceOverrides
+            SettingKey::PerformanceDeviceOverrides,
+            SettingKey::Fans
         ]
     );
 }
