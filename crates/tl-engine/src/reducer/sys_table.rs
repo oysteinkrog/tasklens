@@ -874,7 +874,7 @@ mod tests {
     use smallvec::SmallVec;
     use tl_model::ids::GroupKey;
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-    use tl_model::snapshot::StartupKind;
+    use tl_model::snapshot::{StartupKind, StartupScope};
     use tl_model::table::{StartupRef, StartupSource};
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
@@ -1534,6 +1534,16 @@ mod tests {
             can_delete: true,
             can_run: true,
             overridden_by_user: false,
+            resolved_path: None,
+            file_exists: true,
+            source_word: "XDG autostart",
+            scope: StartupScope::User,
+            only_show_in: Default::default(),
+            not_show_in: Default::default(),
+            try_exec: None,
+            autostart_phase: None,
+            generated_unit: None,
+            overrides: None,
         }
     }
 

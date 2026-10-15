@@ -552,6 +552,34 @@ impl StartupKind {
             StartupKind::PlasmaLogout => "Plasma logout script",
         }
     }
+
+    /// The Source word of the Properties "Type / Source / Scope" line (UI-SYS-050).
+    pub const fn source_word(self) -> &'static str {
+        match self {
+            StartupKind::AutostartUser
+            | StartupKind::AutostartSystem
+            | StartupKind::AutostartSystemOverridden => "XDG autostart",
+            StartupKind::UserUnit => "systemd user unit",
+            StartupKind::PlasmaPreStartup => "Plasma pre-startup script",
+            StartupKind::PlasmaLogout => "Plasma logout script",
+        }
+    }
+}
+
+/// Whether a startup entry's file is the user's or the system's (SYS-026 Scope).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum StartupScope {
+    User,
+    System,
+}
+
+impl StartupScope {
+    pub const fn label(self) -> &'static str {
+        match self {
+            StartupScope::User => "user",
+            StartupScope::System => "system",
+        }
+    }
 }
 
 /// Startup impact (SYS-021). Ascending sort follows the declared order.
@@ -616,6 +644,26 @@ pub struct StartupEntry {
     pub can_delete: bool,
     pub can_run: bool,
     pub overridden_by_user: bool,
+    /// Absolute path of the command's program, found on `PATH` when not absolute. `None` when
+    /// it was not found; the UI shows "Not found".
+    pub resolved_path: Option<Arc<str>>,
+    /// The source file could be read at scan time.
+    pub file_exists: bool,
+    /// Source word (UI-SYS-050), `kind.source_word()`.
+    pub source_word: &'static str,
+    pub scope: StartupScope,
+    /// Desktop `OnlyShowIn`, empty when not set.
+    pub only_show_in: SmallVec<[Arc<str>; 2]>,
+    /// Desktop `NotShowIn`, empty when not set.
+    pub not_show_in: SmallVec<[Arc<str>; 2]>,
+    /// Desktop `TryExec`.
+    pub try_exec: Option<Arc<str>>,
+    /// Desktop `X-KDE-autostart-phase`.
+    pub autostart_phase: Option<Arc<str>>,
+    /// The systemd unit generated for a desktop entry; `None` for other kinds.
+    pub generated_unit: Option<Arc<str>>,
+    /// User desktop entry: the system path it shadows.
+    pub overrides: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -1953,6 +2001,19 @@ mod tests {
         for (kind, label) in kinds {
             assert_eq!(kind.label(), label);
         }
+        let sources = [
+            (StartupKind::AutostartUser, "XDG autostart"),
+            (StartupKind::AutostartSystem, "XDG autostart"),
+            (StartupKind::AutostartSystemOverridden, "XDG autostart"),
+            (StartupKind::UserUnit, "systemd user unit"),
+            (StartupKind::PlasmaPreStartup, "Plasma pre-startup script"),
+            (StartupKind::PlasmaLogout, "Plasma logout script"),
+        ];
+        for (kind, word) in sources {
+            assert_eq!(kind.source_word(), word);
+        }
+        assert_eq!(StartupScope::User.label(), "user");
+        assert_eq!(StartupScope::System.label(), "system");
         let statuses = [
             (StartupStatus::Enabled, "Enabled"),
             (StartupStatus::Disabled, "Disabled"),

@@ -2900,7 +2900,7 @@ fn startup_entry(
     name: &str,
     status: tl_model::snapshot::StartupStatus,
 ) -> tl_model::snapshot::StartupEntry {
-    use tl_model::snapshot::{Impact, StartupEntry, StartupKind};
+    use tl_model::snapshot::{Impact, StartupEntry, StartupKind, StartupScope};
     use tl_model::table::{StartupRef, StartupSource};
     StartupEntry {
         id: StartupRef {
@@ -2922,6 +2922,16 @@ fn startup_entry(
         can_delete: true,
         can_run: true,
         overridden_by_user: false,
+        resolved_path: None,
+        file_exists: true,
+        source_word: "XDG autostart",
+        scope: StartupScope::User,
+        only_show_in: Default::default(),
+        not_show_in: Default::default(),
+        try_exec: None,
+        autostart_phase: None,
+        generated_unit: None,
+        overrides: None,
     }
 }
 

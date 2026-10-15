@@ -38,7 +38,9 @@ use tl_collect::startup::{
     UnitFileListing, UnitTiming, classify, scan_startup,
 };
 use tl_model::health::SourceId;
-use tl_model::snapshot::{Impact, ImpactDetail, StartupEntry, StartupKind, StartupStatus};
+use tl_model::snapshot::{
+    Impact, ImpactDetail, StartupEntry, StartupKind, StartupScope, StartupStatus,
+};
 use tl_model::table::{StartupRef, StartupSource};
 use tl_model::validity::Validity;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
@@ -756,7 +758,9 @@ fn startup_ref(raw: &StartupRaw) -> StartupRef {
 }
 
 /// One model entry. The publisher is "User" for files under `$HOME` and blank otherwise;
-/// package lookup is not done here. Only an absolute `Icon=` is an icon path.
+/// package lookup is not done here. Only an absolute `Icon=` is an icon path. Scope is user
+/// for user autostart entries and Plasma scripts, system for system autostart entries, and
+/// for user units it follows whether the unit file is under `$HOME`.
 fn to_entry(
     id: StartupRef,
     raw: &StartupRaw,
@@ -764,6 +768,24 @@ fn to_entry(
     home: Option<&Path>,
 ) -> StartupEntry {
     let under_home = home.is_some_and(|home| Path::new(&*raw.source_path).starts_with(home));
+    let kind = match raw.kind {
+        StartupKindRaw::AutostartUser => StartupKind::AutostartUser,
+        StartupKindRaw::AutostartSystem => StartupKind::AutostartSystem,
+        StartupKindRaw::AutostartSystemOverridden => StartupKind::AutostartSystemOverridden,
+        StartupKindRaw::UserUnit => StartupKind::UserUnit,
+        StartupKindRaw::PlasmaPreStartup => StartupKind::PlasmaPreStartup,
+        StartupKindRaw::PlasmaLogout => StartupKind::PlasmaLogout,
+    };
+    let scope = match kind {
+        StartupKind::AutostartUser | StartupKind::PlasmaPreStartup | StartupKind::PlasmaLogout => {
+            StartupScope::User
+        }
+        StartupKind::AutostartSystem | StartupKind::AutostartSystemOverridden => {
+            StartupScope::System
+        }
+        StartupKind::UserUnit if under_home => StartupScope::User,
+        StartupKind::UserUnit => StartupScope::System,
+    };
     StartupEntry {
         id,
         name: Arc::clone(&raw.name),
@@ -783,14 +805,7 @@ fn to_entry(
         impact: facts.impact,
         impact_detail: facts.impact_detail,
         state_code: facts.state_code.clone(),
-        kind: match raw.kind {
-            StartupKindRaw::AutostartUser => StartupKind::AutostartUser,
-            StartupKindRaw::AutostartSystem => StartupKind::AutostartSystem,
-            StartupKindRaw::AutostartSystemOverridden => StartupKind::AutostartSystemOverridden,
-            StartupKindRaw::UserUnit => StartupKind::UserUnit,
-            StartupKindRaw::PlasmaPreStartup => StartupKind::PlasmaPreStartup,
-            StartupKindRaw::PlasmaLogout => StartupKind::PlasmaLogout,
-        },
+        kind,
         location: Arc::clone(&raw.location),
         command: Arc::clone(&raw.command),
         source_path: Arc::clone(&raw.source_path),
@@ -798,6 +813,16 @@ fn to_entry(
         can_delete: raw.can_delete,
         can_run: raw.can_run,
         overridden_by_user: raw.overridden_by_user,
+        resolved_path: raw.resolved_path.clone(),
+        file_exists: raw.file_exists,
+        source_word: kind.source_word(),
+        scope,
+        only_show_in: raw.only_show_in.clone(),
+        not_show_in: raw.not_show_in.clone(),
+        try_exec: raw.try_exec.clone(),
+        autostart_phase: raw.kde_autostart_phase.clone(),
+        generated_unit: raw.generated_unit.clone(),
+        overrides: raw.overrides.clone(),
     }
 }
 
@@ -1480,6 +1505,97 @@ mod tests {
             };
             assert_eq!(e.impact, want, "{:?}", e.id);
         }
+    }
+
+    /// A directory under `target/tmp`, removed on drop.
+    fn scratch() -> tempfile::TempDir {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        std::fs::create_dir_all(&base).expect("create target/tmp");
+        tempfile::Builder::new()
+            .prefix("startup-fields-")
+            .tempdir_in(&base)
+            .expect("temp dir")
+    }
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        std::fs::write(path, text).expect("write");
+    }
+
+    /// A user desktop entry with TryExec, OnlyShowIn, NotShowIn and an autostart phase over a
+    /// system copy, its program on `PATH`, and a listed user unit whose file is gone
+    /// (B8-E28-12).
+    #[test]
+    fn host_scan_fills_properties_fields() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch();
+        let root = dir.path();
+        let program = root.join("usr/bin/tray-tool");
+        write(&program, "#!/bin/sh\n");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let entry = "[Desktop Entry]\nType=Application\nName=Tray Tool\nExec=tray-tool --tray\n\
+                     TryExec=tray-tool\nOnlyShowIn=KDE;\nNotShowIn=GNOME;\n\
+                     X-KDE-autostart-phase=2\n";
+        let user_file = root.join("home/.config/autostart/tray-tool.desktop");
+        let system_file = root.join("etc/xdg/autostart/tray-tool.desktop");
+        write(&user_file, entry);
+        write(&system_file, entry);
+        let gone = root.join("home/.config/systemd/user/gone.service");
+        let input = ScanInput {
+            env: StartupEnv {
+                config_home: root.join("home/.config"),
+                config_dirs: vec![root.join("etc/xdg")],
+                current_desktop: vec!["KDE".to_owned()],
+                path_dirs: vec![root.join("usr/bin")],
+                locales: SmallVec::new(),
+            },
+            home: Some(root.join("home")),
+            units: vec![(
+                gone.to_str().expect("utf-8").to_owned(),
+                "enabled".to_owned(),
+            )],
+        };
+        let raws = host_scan(&input).expect("scans");
+        let entries = Cache::default().merge(raws, &Systemd::default(), input.home.as_deref());
+
+        let user = entries
+            .iter()
+            .find(|e| e.kind == StartupKind::AutostartUser)
+            .expect("the user row");
+        assert_eq!(user.resolved_path.as_deref(), program.to_str());
+        assert!(user.file_exists);
+        assert_eq!(user.source_word, "XDG autostart");
+        assert_eq!(user.scope, StartupScope::User);
+        let words =
+            |list: &SmallVec<[Arc<str>; 2]>| list.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(words(&user.only_show_in), ["KDE"]);
+        assert_eq!(words(&user.not_show_in), ["GNOME"]);
+        assert_eq!(user.try_exec.as_deref(), Some("tray-tool"));
+        assert_eq!(user.autostart_phase.as_deref(), Some("2"));
+        assert_eq!(
+            user.generated_unit.as_deref(),
+            Some(tl_collect::startup::autostart_unit_name("tray-tool.desktop").as_str())
+        );
+        assert_eq!(user.overrides.as_deref(), system_file.to_str());
+
+        let system = entries
+            .iter()
+            .find(|e| e.kind == StartupKind::AutostartSystemOverridden)
+            .expect("the shadowed system row");
+        assert_eq!(system.scope, StartupScope::System);
+        assert_eq!(system.overrides, None);
+
+        let unit = entries
+            .iter()
+            .find(|e| e.kind == StartupKind::UserUnit)
+            .expect("the gone.service row");
+        assert!(!unit.file_exists);
+        assert_eq!(unit.resolved_path, None);
+        assert_eq!(unit.source_word, "systemd user unit");
+        assert_eq!(unit.scope, StartupScope::User);
+        assert_eq!(unit.generated_unit, None);
+        assert!(unit.only_show_in.is_empty() && unit.try_exec.is_none());
     }
 
     const UNIT: &str = "app-org.kde.foo@autostart.service";

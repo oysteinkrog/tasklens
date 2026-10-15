@@ -6,8 +6,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::{App, TestAppContext, px};
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::snapshot::{
-    ComponentHeader, Impact, ImpactDetail, Snapshot, StartupEntry, StartupKind, StartupSnapshot,
-    StartupStatus,
+    ComponentHeader, Impact, ImpactDetail, Snapshot, StartupEntry, StartupKind, StartupScope,
+    StartupSnapshot, StartupStatus,
 };
 use tl_model::table::{StartupColumn, StartupRef, StartupSource, SysColumnId, SysNodeId, SysRow};
 use tl_model::time::BootId;
@@ -54,6 +54,16 @@ fn entry(name: &str, kind: StartupKind) -> StartupEntry {
         can_delete: true,
         can_run: true,
         overridden_by_user: false,
+        resolved_path: None,
+        file_exists: true,
+        source_word: "XDG autostart",
+        scope: StartupScope::User,
+        only_show_in: Default::default(),
+        not_show_in: Default::default(),
+        try_exec: None,
+        autostart_phase: None,
+        generated_unit: None,
+        overrides: None,
     }
 }
 
