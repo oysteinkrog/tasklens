@@ -1539,13 +1539,16 @@ impl DeviceCard {
                 advances.style_version = m.style_version;
             }
             let mut measure = |f: CardFont, s: &str| advances.width(s, f, &m, window);
-            // The widest text of the format, or the live text when it is wider still.
+            // The widest text of the format, or the live text when it is wider still. Rounded
+            // up to a whole pixel, as layout rounds up the text box.
             let value_w = value.as_ref().map_or(Pixels::ZERO, |v| {
-                v.templates
+                let w = v
+                    .templates
                     .iter()
                     .fold(measure(CardFont::Value, &v.text), |w, t| {
                         w.max(measure(CardFont::Value, t))
-                    })
+                    });
+                px(f32::from(w).ceil())
             });
             let graph_w = card_graph_width(self.width, value_w, &m);
             let layout = card_text_layout(
