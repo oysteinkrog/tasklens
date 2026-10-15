@@ -9,16 +9,21 @@ use gpui_kit::{
     TestAppContext, VisualTestContext, Window, WindowHandle, div,
 };
 use tl_model::client::EngineClient;
-use tl_model::command::{Command, RaplStatus, SetupState, SetupStatus};
+use tl_model::command::{
+    Command, RaplStatus, SetupPhase, SetupRun, SetupState, SetupStatus, SetupStep,
+};
+use tl_model::health::SourceId;
 use tl_model::settings::{Settings, UiState};
 use tl_ui::actions::OpenAdditionalSetup;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::badge::TlBadgeKind;
+use tl_ui::components::dialog::{DialogButton, TlDialogView};
+use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::i18n::tr;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-use tl_ui::window::setup::{CardView, SetupRow, SetupWindow, row_status};
+use tl_ui::window::setup::{CardView, SetupRow, SetupWindow, confirm_words, row_status};
 
 struct Parent;
 
@@ -253,4 +258,306 @@ fn setup_focus_flash_respects_reduced_motion(cx: &mut TestAppContext) {
     let mut pcx = parent(cx);
     dispatch(&mut pcx, Some(SetupRow::JournalAccess));
     assert_eq!(flashing(cx), None);
+}
+
+fn publish_run(engine: &FakeEngine, st: SetupStatus, run: Option<SetupRun>) {
+    engine.publish_with(|s| {
+        let mut health = (*s.health).clone();
+        health.version += 1;
+        health.setup = Arc::new(SetupState {
+            status: Some(st),
+            run,
+        });
+        s.health = Arc::new(health);
+    });
+}
+
+fn run(seq: u64, step: SetupStep, phase: SetupPhase) -> SetupRun {
+    SetupRun {
+        seq,
+        step,
+        phase,
+        output: Arc::from(""),
+    }
+}
+
+fn not_readable() -> SetupStatus {
+    status(RaplStatus::NotReadable, true, true)
+}
+
+fn tasklens_rule() -> SetupStatus {
+    status(
+        RaplStatus::Readable {
+            tasklens_rule: true,
+        },
+        true,
+        true,
+    )
+}
+
+fn run_setup_count(engine: &FakeEngine, step: SetupStep) -> usize {
+    engine
+        .commands()
+        .iter()
+        .filter(|c| matches!(c, Command::RunSetup { step: s } if *s == step))
+        .count()
+}
+
+fn reprobe_count(engine: &FakeEngine) -> usize {
+    engine
+        .commands()
+        .iter()
+        .filter(|c| matches!(c, Command::ReprobeSource(SourceId::Cpu)))
+        .count()
+}
+
+/// The setup window's own context, active.
+fn setup_vcx(cx: &mut TestAppContext) -> VisualTestContext {
+    let mut vcx = VisualTestContext::from_window(handle(cx).into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx
+}
+
+fn content(cx: &mut TestAppContext) -> Entity<SetupWindow> {
+    let frame = frame(cx);
+    cx.update(|cx| frame.read(cx).content().clone())
+}
+
+/// Opens the setup window with `st` published, and returns its context.
+fn open_with(
+    cx: &mut TestAppContext,
+    engine: &FakeEngine,
+    st: SetupStatus,
+    run: Option<SetupRun>,
+) -> VisualTestContext {
+    publish_run(engine, st, run);
+    cx.run_until_parked();
+    let mut pcx = parent(cx);
+    dispatch(&mut pcx, None);
+    setup_vcx(cx)
+}
+
+/// The dialog window that is not the setup window or the parent.
+fn dialog_view(cx: &mut TestAppContext) -> (Entity<TlDialogView>, VisualTestContext) {
+    let setup_id = handle(cx).window_id();
+    let h = cx
+        .update(|cx| {
+            cx.windows()
+                .into_iter()
+                .filter(|w| w.window_id() != setup_id)
+                .find_map(|w| {
+                    let root = w.downcast::<Root>()?;
+                    TlSecondaryWindow::<TlDialogView>::find(root, cx).map(|_| root)
+                })
+        })
+        .expect("dialog window");
+    let view = cx
+        .update(|cx| TlSecondaryWindow::<TlDialogView>::find(h, cx))
+        .map(|f| cx.read(|cx| f.read(cx).content().clone()))
+        .expect("dialog view");
+    let mut vcx = VisualTestContext::from_window(h.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+    (view, vcx)
+}
+
+fn press(cx: &mut TestAppContext, vcx: &mut VisualTestContext, enable: bool) {
+    let w = content(cx);
+    vcx.update(|window, cx| {
+        w.update(cx, |w, cx| {
+            if enable {
+                w.press_enable(window, cx)
+            } else {
+                w.press_revert(window, cx)
+            }
+        })
+    });
+    vcx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn setup_enable_confirm_text(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, not_readable(), None);
+    assert_eq!(cards(cx)[0].buttons, vec![("Enable".to_owned(), false)]);
+    press(cx, &mut vcx, true);
+    let words = cx.update(|cx| confirm_words(SetupStep::RaplEnable, cx));
+    assert_eq!(words.heading.as_ref(), "Enable CPU power draw?");
+    assert_eq!(
+        words.text.as_ref(),
+        "Lets every local user read CPU energy counters. This can leak information about other programs (CVE-2020-8694)."
+    );
+    assert_eq!(words.action.as_ref(), "Enable");
+    let (view, mut dvcx) = dialog_view(cx);
+    assert_eq!(
+        cx.update(|cx| view.read(cx).dialog().text().to_string()),
+        words.text.to_string()
+    );
+    assert_eq!(
+        cx.update(|cx| view.read(cx).dialog().cancel_text().to_string()),
+        "Cancel"
+    );
+    // R-104: a non-destructive dialog starts on its action button.
+    assert_eq!(
+        dvcx.update(|window, cx| view.read(cx).focused_button(window)),
+        Some(DialogButton::Action)
+    );
+    assert_eq!(run_setup_count(&engine, SetupStep::RaplEnable), 0);
+}
+
+#[gpui_kit::test]
+fn setup_enable_sends_run_setup(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, not_readable(), None);
+    press(cx, &mut vcx, true);
+    let (_, mut dvcx) = dialog_view(cx);
+    dvcx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(run_setup_count(&engine, SetupStep::RaplEnable), 1);
+    // A busy engine leaves the card idle.
+    engine.set_busy(true);
+    press(cx, &mut vcx, true);
+    let (_, mut dvcx) = dialog_view(cx);
+    dvcx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(run_setup_count(&engine, SetupStep::RaplEnable), 1);
+    assert_eq!(cards(cx)[0].failure, None);
+    assert_eq!(cards(cx)[0].buttons, vec![("Enable".to_owned(), false)]);
+}
+
+#[gpui_kit::test]
+fn setup_running_disables_buttons(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    open_with(
+        cx,
+        &engine,
+        not_readable(),
+        Some(run(1, SetupStep::RaplEnable, SetupPhase::Running)),
+    );
+    let card = cards(cx).remove(0);
+    assert_eq!(card.status.as_deref(), Some("Running…"));
+    assert_eq!(card.buttons, vec![("Enable".to_owned(), true)]);
+}
+
+#[gpui_kit::test]
+fn setup_success_reprobes_once(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    open_with(
+        cx,
+        &engine,
+        not_readable(),
+        Some(run(1, SetupStep::RaplEnable, SetupPhase::Running)),
+    );
+    for _ in 0..2 {
+        publish_run(
+            &engine,
+            not_readable(),
+            Some(run(1, SetupStep::RaplEnable, SetupPhase::Succeeded)),
+        );
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        cards(cx)[0].done.as_deref(),
+        Some("Done. No restart needed.")
+    );
+    assert_eq!(reprobe_count(&engine), 1);
+}
+
+#[gpui_kit::test]
+fn setup_failure_block_shows_output(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, not_readable(), None);
+    publish_run(
+        &engine,
+        not_readable(),
+        Some(run(
+            1,
+            SetupStep::RaplEnable,
+            SetupPhase::Failed(Arc::from("udevadm: not found\n")),
+        )),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        cards(cx)[0].failure.as_deref(),
+        Some("udevadm: not found\n")
+    );
+    let w = content(cx);
+    vcx.update(|_, cx| w.update(cx, |w, cx| w.retry(cx)));
+    assert_eq!(run_setup_count(&engine, SetupStep::RaplEnable), 1);
+    vcx.update(|window, cx| w.update(cx, |w, cx| w.copy_output(window, cx)));
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()))
+            .as_deref(),
+        Some("udevadm: not found\n")
+    );
+    let toasts: Vec<String> = vcx.update(|window, cx| {
+        ToastQueue::of_window(window, cx)
+            .expect("toast queue")
+            .read(cx)
+            .visible_texts()
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    });
+    assert!(
+        toasts.iter().any(|t| t == "Copied to clipboard"),
+        "{toasts:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn setup_cancelled_pkexec_keeps_status(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    open_with(
+        cx,
+        &engine,
+        not_readable(),
+        Some(run(1, SetupStep::RaplEnable, SetupPhase::Cancelled)),
+    );
+    let card = cards(cx).remove(0);
+    assert_eq!(card.failure, None);
+    assert_eq!(card.done, None);
+    assert_eq!(card.status.as_deref(), Some("Not enabled"));
+}
+
+#[gpui_kit::test]
+fn setup_existing_rule_no_buttons(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    open_with(
+        cx,
+        &engine,
+        status(
+            RaplStatus::Readable {
+                tasklens_rule: false,
+            },
+            true,
+            true,
+        ),
+        None,
+    );
+    assert!(cards(cx)[0].buttons.is_empty());
+}
+
+#[gpui_kit::test]
+fn setup_revert_confirm_and_send(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, tasklens_rule(), None);
+    assert_eq!(cards(cx)[0].buttons, vec![("Revert".to_owned(), false)]);
+    press(cx, &mut vcx, false);
+    let words = cx.update(|cx| confirm_words(SetupStep::RaplRevert, cx));
+    assert_eq!(words.heading.as_ref(), "Revert CPU power draw?");
+    assert_eq!(
+        words.text.as_ref(),
+        "Removes the tasklens udev rule. A reboot may be needed before the files return to mode 0400."
+    );
+    let (view, mut dvcx) = dialog_view(cx);
+    assert_eq!(
+        dvcx.update(|window, cx| view.read(cx).focused_button(window)),
+        Some(DialogButton::Cancel)
+    );
+    dvcx.simulate_keystrokes("tab");
+    dvcx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(run_setup_count(&engine, SetupStep::RaplRevert), 1);
 }
