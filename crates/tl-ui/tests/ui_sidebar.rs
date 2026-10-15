@@ -229,15 +229,17 @@ fn card_layout_and_click(cx: &mut TestAppContext) {
         .iter()
         .map(|s| cx.debug_bounds(s).expect("line").size.height)
         .collect();
-    assert_eq!(heights, [px(18.), px(16.), px(16.)]);
-    // Short lines: one row each.
-    for line in ["heading", "line1", "line2"] {
-        let row = cx
-            .debug_bounds(sel(format!("perf-card-row:net:enp38s0:{line}:0")))
-            .expect("row");
-        assert!(inside(row, text), "{line}: {row:?} in {text:?}");
+    // "↓ 1.2 Mbps ↑ 0.3 Mbps" does not fit one row: line 2 wraps, and the card keeps 80 px.
+    assert_eq!(heights, [px(18.), px(16.), px(32.)]);
+    for (line, rows) in [("heading", 1), ("line1", 1), ("line2", 2)] {
+        for i in 0..rows {
+            let row = cx
+                .debug_bounds(sel(format!("perf-card-row:net:enp38s0:{line}:{i}")))
+                .expect("row");
+            assert!(inside(row, text), "{line} {i}: {row:?} in {text:?}");
+        }
         assert!(
-            cx.debug_bounds(sel(format!("perf-card-row:net:enp38s0:{line}:1")))
+            cx.debug_bounds(sel(format!("perf-card-row:net:enp38s0:{line}:{rows}")))
                 .is_none()
         );
     }
@@ -1058,6 +1060,12 @@ mod sidebar {
     #[gpui_kit::test]
     fn card_value_in_heading_row(cx: &mut TestAppContext) {
         let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        // A live chart asks the window's driver for its next frame.
+        let _driver = r.vcx.update(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            driver
+        });
         let warming = prepared(&mut r, "cpu").value.expect("value");
         assert_eq!(
             (&*warming.text, warming.validity),
@@ -1094,6 +1102,11 @@ mod sidebar {
     #[gpui_kit::test]
     fn value_goes_stale_without_samples(cx: &mut TestAppContext) {
         let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let _driver = r.vcx.update(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            driver
+        });
         publish_cpu_series_at(&mut r, now_boot_ns() - 1_000_000_000);
         let value = prepared(&mut r, "cpu").value.expect("value");
         assert_eq!(value.validity, Validity::Valid);
