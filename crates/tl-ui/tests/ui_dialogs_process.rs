@@ -2414,6 +2414,23 @@ mod dump {
         r.pcx.run_until_parked();
     }
 
+    /// Clicks the element drawn with `selector` in the parent window.
+    fn click(r: &mut Rig, selector: String) {
+        r.pcx.update(|window, cx| window.draw(cx).clear(cx));
+        // debug_bounds takes a static selector.
+        let selector: &'static str = selector.leak();
+        let at = r
+            .pcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"));
+        r.pcx.simulate_click(at.center(), Modifiers::none());
+        r.pcx.run_until_parked();
+    }
+
+    fn toast_key(request: &ActionRequest) -> u64 {
+        ToastKey::from(DumpToast(request.id.0)).0
+    }
+
     /// The target result and the summary, both `state`.
     fn finish(r: &mut Rig, request: &ActionRequest, state: ActionState) {
         r.engine.emit(ActionEvent {
@@ -2604,9 +2621,43 @@ mod dump {
     }
 
     #[gpui_kit::test]
+    fn dump_progress_toast_stays_closed(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut r = rig(cx, tmp.path(), DumpMode::Mini, vec![record(5, "x", GIB)]);
+        start(&mut r, 5);
+        let (request, _, path) = dump(&r);
+        std::fs::create_dir_all(tmp.path().join("dumps")).expect("dumps dir");
+        let file = std::fs::File::create(&path).expect("core file");
+        file.set_len(GIB).expect("sparse size");
+        advance(&mut r, DUMP_POLL);
+        assert_eq!(toasts(&mut r), ["Writing core… 1.00 GiB"]);
+
+        // Closed while the dump runs: later size reads do not bring it back.
+        let key = toast_key(&request);
+        click(&mut r, format!("TlButton-TlToast-k{key}-close"));
+        assert!(toasts(&mut r).is_empty());
+        file.set_len(2 * GIB).expect("sparse size");
+        for _ in 0..4 {
+            advance(&mut r, DUMP_POLL);
+        }
+        assert!(toasts(&mut r).is_empty(), "still closed");
+
+        // The result still shows.
+        finish(&mut r, &request, ActionState::Succeeded);
+        let shown = toasts(&mut r);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].starts_with("Dump created: "), "{shown:?}");
+    }
+
+    #[gpui_kit::test]
     fn dump_success_toast_text_and_button(cx: &mut TestAppContext) {
         let state = PathBuf::from("/home/u/.local/state/tasklens");
-        let mut r = rig(cx, &state, DumpMode::Mini, vec![record(1, "x", GIB)]);
+        let mut r = rig(
+            cx,
+            &state,
+            DumpMode::Mini,
+            vec![record(1, "x", GIB), record(2, "y", GIB)],
+        );
         r.pcx.update(|_, cx| set_test_home(cx, "/home/u"));
         start(&mut r, 1);
         let (request, _, path) = dump(&r);
@@ -2620,22 +2671,38 @@ mod dump {
             )]
         );
 
-        // "Open folder" shows the file in the file manager.
-        let key: ToastKey = DumpToast(request.id.0).into();
-        let button: &'static str = format!("TlButton-TlToast-k{}-action", key.0).leak();
-        let at = r.pcx.debug_bounds(button).expect("Open folder drawn");
-        r.pcx.simulate_click(at.center(), Modifiers::none());
-        r.pcx.run_until_parked();
+        let created = format!("Dump created: ~/.local/state/tasklens/dumps/{file}");
+
+        // A click on the path copies the full path.
+        let key = toast_key(&request);
+        click(&mut r, format!("TlToast-k{key}-text"));
+        let copied = r
+            .pcx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(copied.as_deref(), Some(path.as_str()));
+        assert_eq!(toasts(&mut r), [created.as_str(), "Copied to clipboard"]);
+
+        // A second dump succeeds; "Open folder" on the first toast shows the first file.
+        start(&mut r, 2);
+        let second = actions(&r).pop().expect("second dump");
+        finish(&mut r, &second, ActionState::Succeeded);
+        assert_eq!(toasts(&mut r).len(), 3);
+        click(&mut r, format!("TlButton-TlToast-k{key}-action"));
         let sent = actions(&r);
-        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(sent.len(), 3, "{sent:?}");
         assert_eq!(
-            sent[1].kind,
+            sent[2].kind,
             ActionKind::ShowInFileManager {
                 path: path.as_str().into(),
                 properties: false,
             }
         );
-        assert_eq!(toasts(&mut r), ["Opening file location"]);
+        let shown = toasts(&mut r);
+        assert!(!shown.contains(&created), "{shown:?}");
+        assert_eq!(
+            shown.last().map(String::as_str),
+            Some("Opening file location")
+        );
     }
 
     #[gpui_kit::test]

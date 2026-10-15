@@ -94,9 +94,14 @@ gpui_kit::actions!(
         HandleSearchGoToProcess,
         HandleSearchCopyPaths,
         HandleSearchCopyRows,
-        OpenDumpFolder,
     ]
 );
+
+/// "Open folder" on the success toast of dump `.0` (its action id): shows that core file in
+/// the file manager (UI-PWN-035).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct OpenDumpFolder(pub u64);
 
 /// Selects Properties tab `0` (1..=7, Alt+1 to Alt+7).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, Action)]

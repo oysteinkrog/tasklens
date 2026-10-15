@@ -152,6 +152,7 @@ pwn-notices-dump-writing-size = Writing core… {$size}
 pwn-notices-dump-created = Dump created: {$path}
 pwn-notices-dump-open-folder = Open folder
 pwn-notices-dump-opening = Opening file location
+pwn-notices-dump-copied = Copied to clipboard
 pwn-notices-dump-failed = Could not create dump file.
 pwn-notices-dump-needs-admin = Creating a dump needs administrator rights
 

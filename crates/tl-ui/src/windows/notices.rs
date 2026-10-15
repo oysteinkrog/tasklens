@@ -15,9 +15,11 @@
 //! [`start_dump`] asks first when VmRSS is over 2 GiB, then sends `ActionKind::Dump` with a
 //! path the UI picks under `<state_dir>/dumps/`. While the action runs, the Info toast
 //! `DumpToast(action_id)` shows the file size, read with one `stat` every 500 ms off the UI
-//! thread. The result replaces that toast. The UI never reads the core file: it holds process
-//! memory.
+//! thread. Closing it stops the reads; the result still shows. The result replaces that toast.
+//! A click on the path in the success toast copies the full path. The UI never reads the core
+//! file: it holds process memory.
 
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -25,8 +27,8 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Context, Entity, Global, Pixels,
-    SharedString, Subscription, Task, WeakEntity, Window, px,
+    Action, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Context, Entity, Global,
+    Pixels, SharedString, Subscription, Task, WeakEntity, Window, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{
@@ -45,7 +47,7 @@ use crate::action_tracker::{
 };
 use crate::app::{AppEnv, EngineGlobal};
 use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::toast::{self, ToastAction, ToastKey, ToastKind, ToastQueue};
+use crate::components::toast::{self, ToastAction, ToastClosed, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
@@ -55,6 +57,7 @@ use crate::settings_global::TlSettings;
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::metrics::TextMetricsCache;
 use crate::theme::{UiMetrics, metrics};
+use crate::util::clipboard_write;
 use crate::windows::actions::OpenDumpFolder;
 
 /// How long the hash may take before the "Computing SHA-256…" toast shows.
@@ -309,6 +312,9 @@ pub const DUMP_POLL: Duration = Duration::from_millis(500);
 /// The longest `{name}` part of a dump file name, in bytes (R-224).
 pub const DUMP_NAME_MAX: usize = 64;
 
+/// Finished dumps whose "Open folder" button or path may still be clicked.
+const KEEP_DONE: usize = 16;
+
 /// The toast keys of the dump flow sit in their own range.
 const DUMP_KEY_BASE: u64 = 0x8000_0000_0500_0000;
 
@@ -320,6 +326,7 @@ const DUMP_WRITING_SIZE: &str = "pwn-notices-dump-writing-size";
 const DUMP_CREATED: &str = "pwn-notices-dump-created";
 const DUMP_OPEN_FOLDER: &str = "pwn-notices-dump-open-folder";
 const DUMP_OPENING: &str = "pwn-notices-dump-opening";
+const DUMP_COPIED: &str = "pwn-notices-dump-copied";
 const DUMP_FAILED: &str = "pwn-notices-dump-failed";
 const DUMP_NEEDS_ADMIN: &str = "pwn-notices-dump-needs-admin";
 
@@ -333,6 +340,12 @@ impl From<DumpToast> for ToastKey {
         ToastKey(DUMP_KEY_BASE | (key.0 & 0xFF_FFFF))
     }
 }
+
+/// A click on the path in the success toast of dump `.0` (its action id): copies the full path,
+/// then the toast "Copied to clipboard".
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct CopyDumpPath(pub u64);
 
 /// Creates a core dump of `key` (PROC-075). Asks first when VmRSS is over 2 GiB. `window` is
 /// the caller's window: the confirmation is modal to it and the toasts show in it.
@@ -412,13 +425,24 @@ pub fn shown_dump_path(path: &str, home: &str) -> String {
     home_tilde(path, home).unwrap_or_else(|| path.to_owned())
 }
 
-/// The running dumps and the last finished one. `OpenDumpFolder` has no payload, so "Open
-/// folder" shows the last dump that succeeded; every dump is in the same folder.
+/// The running dumps, and the last [`KEEP_DONE`] that succeeded by action id, for the buttons
+/// and paths of their toasts.
 #[derive(Default)]
 struct DumpFlows {
     live: Vec<Entity<DumpRequest>>,
-    last_done: Option<DoneDump>,
-    folder_action: bool,
+    done: VecDeque<(u64, DoneDump)>,
+    handlers: bool,
+}
+
+impl DumpFlows {
+    fn done(cx: &App, id: u64) -> Option<DoneDump> {
+        let flows = cx.try_global::<Self>()?;
+        flows
+            .done
+            .iter()
+            .find(|(done, _)| *done == id)
+            .map(|(_, done)| done.clone())
+    }
 }
 
 impl Global for DumpFlows {}
@@ -468,19 +492,17 @@ fn send_dump(key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
     let dump = cx.new(|cx| DumpRequest::new(id, path, queue.downgrade(), handle, &tracker, cx));
     let flows = cx.default_global::<DumpFlows>();
     flows.live.push(dump);
-    if !flows.folder_action {
-        flows.folder_action = true;
+    if !flows.handlers {
+        flows.handlers = true;
         App::on_action(cx, open_dump_folder);
+        App::on_action(cx, copy_dump_path);
     }
 }
 
-/// "Open folder": FileManager1 `ShowItems` with the core file selected, then the Info toast
-/// "Opening file location". A failure shows the tracker's reason.
-fn open_dump_folder(_: &OpenDumpFolder, cx: &mut App) {
-    let Some(done) = cx
-        .try_global::<DumpFlows>()
-        .and_then(|flows| flows.last_done.clone())
-    else {
+/// "Open folder": FileManager1 `ShowItems` with that toast's core file selected, then the Info
+/// toast "Opening file location". A failure shows the tracker's reason.
+fn open_dump_folder(action: &OpenDumpFolder, cx: &mut App) {
+    let Some(done) = DumpFlows::done(cx, action.0) else {
         return;
     };
     let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
@@ -509,6 +531,19 @@ fn open_dump_folder(_: &OpenDumpFolder, cx: &mut App) {
     }
 }
 
+/// A click on the path: copies the full path, then the Info toast "Copied to clipboard".
+fn copy_dump_path(action: &CopyDumpPath, cx: &mut App) {
+    let Some(done) = DumpFlows::done(cx, action.0) else {
+        return;
+    };
+    if clipboard_write(cx, done.path.to_string()).is_ok()
+        && let Some(queue) = done.queue.upgrade()
+    {
+        let text = tr(cx, DUMP_COPIED);
+        queue.update(cx, |q, cx| q.push(ToastKind::Info, text, None, None, cx));
+    }
+}
+
 /// One dump, from the request to its result toast. Its `DumpProgress` task reads the file
 /// size every 500 ms and ends with the action.
 pub struct DumpRequest {
@@ -518,9 +553,12 @@ pub struct DumpRequest {
     window: AnyWindowHandle,
     /// The last size read; `None` before the first read.
     size: Option<u64>,
+    /// The user closed the progress toast: it stays closed until the result.
+    closed: bool,
     done: bool,
     _progress: Option<Task<()>>,
     _tracker: Option<Subscription>,
+    _closed: Option<Subscription>,
 }
 
 impl DumpRequest {
@@ -547,6 +585,14 @@ impl DumpRequest {
                 }
             },
         );
+        let key: ToastKey = DumpToast(id.0).into();
+        let closed = queue.upgrade().map(|queue| {
+            cx.subscribe(&queue, move |this: &mut Self, _, ev: &ToastClosed, cx| {
+                if ev.0 == key {
+                    this.on_closed(cx);
+                }
+            })
+        });
         let file = path.clone();
         let progress = cx.spawn(async move |this, cx| {
             loop {
@@ -567,16 +613,27 @@ impl DumpRequest {
             queue,
             window,
             size: None,
+            closed: false,
             done: false,
             _progress: Some(progress),
             _tracker: Some(subscription),
+            _closed: closed,
         };
         this.show_progress(cx);
         this
     }
 
-    fn on_size(&mut self, size: Option<u64>, cx: &mut Context<Self>) {
+    /// The progress toast was closed: no more size reads and no new progress toast.
+    fn on_closed(&mut self, _: &mut Context<Self>) {
         if self.done {
+            return;
+        }
+        self.closed = true;
+        self._progress = None;
+    }
+
+    fn on_size(&mut self, size: Option<u64>, cx: &mut Context<Self>) {
+        if self.done || self.closed {
             return;
         }
         if size.is_some() {
@@ -621,6 +678,7 @@ impl DumpRequest {
         self.done = true;
         self._progress = None;
         self._tracker = None;
+        self._closed = None;
         match state {
             Some(ActionState::Succeeded) => self.show_success(cx),
             Some(
@@ -651,7 +709,8 @@ impl DumpRequest {
         });
     }
 
-    /// "Dump created: ~/…/name_1_20261003_101500.core" with "Open folder".
+    /// "Dump created: ~/…/name_1_20261003_101500.core" with "Open folder". A click on the text
+    /// copies the full path.
     fn show_success(&self, cx: &mut Context<Self>) {
         let shown = shown_dump_path(&self.path, &home_dir(cx));
         let shown = fit_path(self.window, &shown, cx);
@@ -662,14 +721,23 @@ impl DumpRequest {
         );
         let button = ToastAction {
             label: tr(cx, DUMP_OPEN_FOLDER),
-            action: Box::new(OpenDumpFolder),
+            action: Box::new(OpenDumpFolder(self.id.0)),
         };
         let done = DoneDump {
             path: self.path.clone(),
             queue: self.queue.clone(),
         };
-        cx.default_global::<DumpFlows>().last_done = Some(done);
+        let flows = cx.default_global::<DumpFlows>();
+        flows.done.push_back((self.id.0, done));
+        if flows.done.len() > KEEP_DONE {
+            flows.done.pop_front();
+        }
         self.push(ToastKind::Success, text, Some(button), cx);
+        let key = DumpToast(self.id.0).into();
+        let copy = CopyDumpPath(self.id.0);
+        if let Some(queue) = self.queue.upgrade() {
+            queue.update(cx, |q, cx| q.set_text_action(key, Box::new(copy), cx));
+        }
     }
 }
 

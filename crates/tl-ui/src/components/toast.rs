@@ -4,7 +4,9 @@
 //! The queue owns every rule: at most 4 visible toasts (Progress toasts do not count), a FIFO wait
 //! list of 16, the durations, hover and focus pause, replace in place by key, coalescing of
 //! repeats, Error priority and the hidden-window rule. Owners choose only the kind, the text, the
-//! key and an optional action button (R-113). Owners never push from `render`.
+//! key and an optional action button (R-113). Owners never push from `render`. An owner may also
+//! make a keyed toast's text clickable ([`ToastQueue::set_text_action`]) and learn when the user
+//! closes a keyed toast ([`ToastClosed`]).
 //!
 //! The queue draws the stack itself: it is a view, mounted above the window content by the
 //! `ToastLayer` Root plugin that [`init`] registers. Toasts sit in one column at the queue's top
@@ -22,6 +24,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,9 +33,9 @@ use gpui_kit::component::notification::{Notification, NotificationType};
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     Action, Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, BoxShadow, Context,
-    ElementId, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, StyledText, Task, TextRun, WeakEntity,
-    Window, div, font, point, prelude::FluentBuilder as _, px,
+    ElementId, Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, StyledText, Task,
+    TextRun, WeakEntity, Window, div, font, point, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use tracing::{debug, warn};
@@ -163,6 +166,11 @@ impl Clone for ToastAction {
     }
 }
 
+/// The user closed the keyed toast `.0` with its close or action button. A timer, a replace or
+/// [`ToastQueue::remove`] emits nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToastClosed(pub ToastKey);
+
 /// Which toast an entry is: an owner key or a queue-made number for an unkeyed push.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Slot {
@@ -184,6 +192,8 @@ struct ToastEntry {
     kind: ToastKind,
     text: SharedString,
     action: Option<ToastAction>,
+    /// Dispatched by a click on the text. Every push clears it.
+    text_action: Option<Rc<dyn Action>>,
     /// Pushes coalesced into this toast, 1 for the first.
     count: u32,
     /// The last push that landed on this toast, for coalescing.
@@ -228,6 +238,7 @@ impl ToastEntry {
             full: self.display_text(),
             count: self.count,
             action: self.action.clone(),
+            text_action: self.text_action.clone(),
             focus: self.focus.clone(),
             focused,
         }
@@ -249,6 +260,7 @@ struct ToastView {
     full: SharedString,
     count: u32,
     action: Option<ToastAction>,
+    text_action: Option<Rc<dyn Action>>,
     focus: Option<FocusHandle>,
     focused: bool,
 }
@@ -372,6 +384,7 @@ impl ToastQueue {
                 entry.kind = kind;
                 entry.text = text;
                 entry.action = action;
+                entry.text_action = None;
                 entry.count = 1;
                 entry.last_push = now;
                 return;
@@ -401,6 +414,7 @@ impl ToastQueue {
             kind,
             text,
             action,
+            text_action: None,
             count: 1,
             last_push: now,
             remaining: None,
@@ -421,6 +435,26 @@ impl ToastQueue {
             self.show(entry, now, cx);
         } else {
             self.wait(entry);
+        }
+    }
+
+    /// Makes the text of the toast with `key` dispatch `action` when clicked, until its next push.
+    /// Does nothing when no toast has `key`.
+    pub fn set_text_action(
+        &mut self,
+        key: ToastKey,
+        action: Box<dyn Action>,
+        cx: &mut Context<Self>,
+    ) {
+        let slot = Slot::Key(key.0);
+        let entry = self
+            .visible
+            .iter_mut()
+            .chain(self.waiting.iter_mut())
+            .find(|e| e.slot == slot);
+        if let Some(entry) = entry {
+            entry.text_action = Some(Rc::from(action));
+            cx.notify();
         }
     }
 
@@ -530,6 +564,7 @@ impl ToastQueue {
         entry.kind = kind;
         entry.text = text;
         entry.action = action;
+        entry.text_action = None;
         entry.count = 1;
         entry.last_push = now;
         let slot = entry.slot;
@@ -606,6 +641,9 @@ impl ToastQueue {
     /// The close button or the action button was pressed.
     fn dismiss(&mut self, slot: Slot, cx: &mut Context<Self>) {
         self.close(slot, cx);
+        if let Slot::Key(key) = slot {
+            cx.emit(ToastClosed(ToastKey(key)));
+        }
     }
 
     fn set_hovered(&mut self, slot: Slot, hovered: bool, cx: &mut Context<Self>) {
@@ -688,6 +726,8 @@ impl ToastQueue {
         });
     }
 }
+
+impl EventEmitter<ToastClosed> for ToastQueue {}
 
 impl Render for ToastQueue {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -836,6 +876,7 @@ pub(crate) fn static_card(
         full,
         count,
         action,
+        text_action: None,
         focus: None,
         focused: false,
     };
@@ -915,6 +956,18 @@ fn toast_card(
         )
     } else {
         text_box
+    };
+    let text_box = match view.text_action.clone().filter(|_| live) {
+        Some(action) => div()
+            .id(ElementId::Name(format!("{name}-text-click").into()))
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .cursor_pointer()
+            .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+            .child(text_box)
+            .into_any_element(),
+        None => text_box.into_any_element(),
     };
 
     let dismiss = |queue: Option<&WeakEntity<ToastQueue>>| {
