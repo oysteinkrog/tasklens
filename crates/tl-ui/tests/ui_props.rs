@@ -4004,6 +4004,18 @@ mod window {
         (handle, view, vcx)
     }
 
+    /// Key down and key up: a focused button activates on the pair.
+    fn press(vcx: &mut VisualTestContext, key: &str) {
+        let keystroke = gpui_kit::Keystroke::parse(key).expect("keystroke");
+        vcx.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        vcx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+        vcx.run_until_parked();
+    }
+
     fn button_label(vcx: &mut VisualTestContext, view: &Entity<PropsWindow>) -> Option<String> {
         vcx.update(|_, cx| view.read(cx).access_button().map(|b| b.label.to_string()))
     }
@@ -4020,10 +4032,11 @@ mod window {
             DetailTab::Strings,
             DetailTab::Security,
         ] {
+            // The engine reads a tab once it is demanded, so the payload comes after the switch.
+            vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(tab, window, cx)));
             publish_detail(cx, &engine, 4321, |d| {
                 d.tabs[tab.index()].validity = Validity::Restricted;
             });
-            vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(tab, window, cx)));
             draw(&mut vcx);
             assert!(vcx.debug_bounds("PropsAccessBlock").is_some(), "{tab:?}");
             let button = vcx.update(|_, cx| view.read(cx).access_button());
@@ -4059,8 +4072,7 @@ mod window {
         let focused = vcx.update(|window, cx| view.read(cx).access_focus().is_focused(window));
         assert!(focused, "the button is the body's first focus stop");
 
-        vcx.simulate_keystrokes("enter");
-        vcx.run_until_parked();
+        press(&mut vcx, "enter");
         assert_eq!(starts.get(), 1, "Enter dispatches StartHelperSession");
         assert!(
             !engine
@@ -4079,8 +4091,7 @@ mod window {
         assert!(b.loading);
         assert!(vcx.debug_bounds("TlButton-spinner").is_some());
 
-        vcx.simulate_keystrokes("space");
-        vcx.run_until_parked();
+        press(&mut vcx, "space");
         assert_eq!(starts.get(), 1, "a loading button is inert");
     }
 
@@ -4100,8 +4111,7 @@ mod window {
         );
         assert!(props_toasts(cx, handle).is_empty());
 
-        vcx.simulate_keystrokes("space");
-        vcx.run_until_parked();
+        press(&mut vcx, "space");
         assert_eq!(starts.get(), 1, "Space dispatches StartHelperSession");
         publish_helper(cx, &engine, HelperState::Starting, None);
         for _ in 0..2 {
@@ -4174,8 +4184,7 @@ mod window {
             Some("Needs administrator helper (not installed)")
         );
         assert!(vcx.debug_bounds("PropsAccessButton").is_some());
-        vcx.simulate_keystrokes("enter");
-        vcx.run_until_parked();
+        press(&mut vcx, "enter");
         assert_eq!(starts.get(), 0, "a disabled button dispatches nothing");
     }
 }
