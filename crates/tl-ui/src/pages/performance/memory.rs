@@ -914,14 +914,15 @@ pub struct SwapTableDelegate {
 }
 
 impl SwapTableDelegate {
-    fn new(words: SwapWords) -> Self {
+    fn new(words: SwapWords, ui_scale: f32) -> Self {
         let specs = swap_specs(&words);
-        let layout = ColumnLayout::defaults(
+        let mut layout = ColumnLayout::defaults(
             TableId::Processes,
             &specs,
             &SwapColumn::ALL,
             &SwapColumn::ALL,
         );
+        layout.rebuild(ui_scale);
         Self {
             rows: Arc::from([]),
             version: 0,
@@ -937,6 +938,16 @@ impl SwapTableDelegate {
             return false;
         }
         self.rows = rows;
+        self.version += 1;
+        true
+    }
+
+    /// Re-lays the columns at `ui_scale`. False when the scale is unchanged.
+    fn set_scale(&mut self, ui_scale: f32) -> bool {
+        if (self.layout.ui_scale() - ui_scale).abs() < f32::EPSILON {
+            return false;
+        }
+        self.layout.rebuild(ui_scale);
         self.version += 1;
         true
     }
@@ -1585,16 +1596,28 @@ impl MemoryPage {
     /// Creates the "Swap devices" table on the first render. The Name column then follows the
     /// body width of the previous frame.
     fn sync_swap_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let scale = metrics(cx).ui_scale;
         let table = match &self.swap_table {
             Some(table) => table.clone(),
             None => {
-                let mut delegate = SwapTableDelegate::new(self.words.swap_table.clone());
+                let mut delegate = SwapTableDelegate::new(self.words.swap_table.clone(), scale);
                 delegate.set_rows(Arc::clone(&self.swap_rows));
                 let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
                 self.swap_table = Some(table.clone());
                 table
             }
         };
+        let rescaled = table.update(cx, |t, cx| {
+            let changed = t.delegate_mut().set_scale(scale);
+            if changed {
+                t.on_new_version(cx);
+            }
+            changed
+        });
+        if rescaled {
+            // The Name column must be fitted again at the new scale.
+            self.swap_body = 0.;
+        }
         let body = ScrollbarHandle::viewport_bounds(&table.read(cx).scroll_handle())
             .size
             .width
@@ -1846,6 +1869,23 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn swap_columns_follow_ui_scale() {
+        let mut d = SwapTableDelegate::new(SwapWords::default(), 2.0);
+        assert_eq!(
+            d.layout.width(SwapColumn::Size),
+            px(SwapColumn::Size.width() * 2.0)
+        );
+        let v = d.version;
+        assert!(!d.set_scale(2.0));
+        assert!(d.set_scale(1.0));
+        assert!(d.version > v);
+        assert_eq!(
+            d.layout.width(SwapColumn::Size),
+            px(SwapColumn::Size.width())
+        );
+    }
 
     fn mem() -> MemoryTotals {
         MemoryTotals {
