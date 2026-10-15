@@ -682,6 +682,17 @@ impl ServicesDelegate {
         self.snap.units.get(row.record? as usize)
     }
 
+    /// Units of a reconnecting manager draw their toned labels in `text_secondary`.
+    fn mute_when_reconnecting(&self, unit: &UnitRecord, out: &mut CellOut) {
+        if let (Some(theme), ManagerState::Reconnecting) = (
+            &self.theme,
+            self.snap.managers[manager_index(unit.unit.manager)],
+        ) {
+            out.text_color = Some(theme.text_secondary);
+            out.selected_text_color = Some(theme.text_selected_secondary);
+        }
+    }
+
     fn status_cell(&self, unit: &UnitRecord, out: &mut CellOut) {
         let look = status_look(service_sys_status(unit.status));
         let overlay = self
@@ -699,6 +710,7 @@ impl ServicesDelegate {
             out.text_color = Some(tone_color(look.label, theme, false));
             out.selected_text_color = Some(tone_color(look.label, theme, true));
         }
+        self.mute_when_reconnecting(unit, out);
         if out.want_tooltip {
             out.tooltip = Some(format!("{} ({})", active_word(unit.status), unit.sub_state).into());
         }
@@ -860,7 +872,7 @@ impl TreeTableDelegate for ServicesDelegate {
                     == ManagerState::Reconnecting =>
             {
                 RowFlags {
-                    bits: RowFlags::STALE,
+                    bits: RowFlags::STALE | RowFlags::SECONDARY_NAME,
                     ..RowFlags::default()
                 }
             }
@@ -898,6 +910,7 @@ impl TreeTableDelegate for ServicesDelegate {
                     out.text_color = Some(tone_color(tone, theme, false));
                     out.selected_text_color = Some(tone_color(tone, theme, true));
                 }
+                self.mute_when_reconnecting(unit, out);
             }
             ServiceColumn::Pid => {
                 out.bits = u64::from(unit.main_pid);

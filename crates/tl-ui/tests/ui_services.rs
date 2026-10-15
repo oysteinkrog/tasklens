@@ -2329,6 +2329,13 @@ fn group_row_reconnecting_stale_units(cx: &mut TestAppContext) {
     assert_eq!(group.primary, "System services (214)");
     assert_eq!(group.secondary.as_deref(), Some("(reconnecting…)"));
     assert!(d.row_flags(1).has(RowFlags::STALE));
+    assert!(d.row_flags(1).has(RowFlags::SECONDARY_NAME));
+    let theme = cx.update(|cx| current(cx).clone());
+    for column in [ServiceColumn::Status, ServiceColumn::StartupType] {
+        let c = cell(&d, 1, column);
+        assert_eq!(c.text_color, Some(theme.text_secondary));
+        assert_eq!(c.selected_text_color, Some(theme.text_selected_secondary));
+    }
     assert_eq!(cell(&d, 1, ServiceColumn::Cpu).validity, Validity::Missing);
 }
 
