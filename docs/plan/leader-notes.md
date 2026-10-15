@@ -887,3 +887,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: gma.36 toast.rs text action and ToastClosed approved; dump privilege failures retry through the tracker; dump paths live until their toast closes.
 - 2026-10-15 leader decision: pdu.48 pick result handled by the shell WINDOWS handler (builds Processes first); Ctrl+click always confirms through the Picked dialog.
 - 2026-10-15 leader decision: new tasklens-gma.44 sets EngineCaps::GDB at engine start; gma.37 fills MenuCaps from health.caps (gdb and file_manager1) and waits for gma.44; exited tooltip wins over gdb missing.
+- 2026-10-15 leader decision: qfx.1 helper exits 3 (protocol error) when a partial frame is pending at the idle deadline; plain idle stays exit 0; closed by hand.
