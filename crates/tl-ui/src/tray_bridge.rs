@@ -2,13 +2,20 @@
 //!
 //! Once per second, while the tray is in use, [`TrayBridge`] builds a `TrayModel` from the latest
 //! snapshot and the `[[tray_graphs]]` of `state.toml` and sends it to the service (UI-PRF-050,
-//! UI-PRF-051, UI-SHL-113, ADR-008). Events coming back are E31-A2. Process, name and app
-//! graphs are E31 wox.16: until then their frame is in the warming-up state, with no series.
+//! UI-PRF-051, UI-SHL-113, ADR-008). Events coming back, and the add and remove actions, are
+//! E31-A2. Process, name and app graphs are E31 wox.16: until then their frame is in the
+//! warming-up state, with no series.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::{App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, WeakEntity};
+use gpui_kit::base::Root;
+use gpui_kit::gpui::private::schemars::JsonSchema;
+use gpui_kit::{
+    Action, App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, WeakEntity,
+    WindowHandle, gpui,
+};
+use serde::Deserialize;
 use tl_model::client::EngineClient;
 use tl_model::demand::{Demand, TrayDemand};
 use tl_model::health::{SourceId, SourceState};
@@ -17,22 +24,27 @@ use tl_model::settings::{NetworkUnit, TrayGraphState as TrayGraphEntry};
 use tl_model::snapshot::Snapshot;
 use tl_model::time::TimeNs;
 use tl_model::tray::{
-    TRAY_PAGE_SOURCES, TrayGraphFrame, TrayGraphId, TrayGraphState, TrayMenuState, TrayModel,
-    TrayUiEnd,
+    TRAY_PAGE_SOURCES, TrayEvent, TrayGraphFrame, TrayGraphId, TrayGraphState, TrayMenuState,
+    TrayModel, TrayUiEnd,
 };
 use tl_model::units;
 
+use crate::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
 use crate::app::EngineGlobal;
 use crate::chart::scale::{self, ScaleState};
 use crate::chart::view::find_tiered;
 use crate::chart::{ValueFormat, YScale, format_value};
+use crate::components::toast::ToastKind;
 use crate::demand::{DemandAggregator, GlobalDemand};
+use crate::i18n::tr;
 use crate::pages::minigraph::GraphColor;
 use crate::pages::minigraph::card::{chart_spec_for, device_for, resolve_colors};
 use crate::pages::minigraph::sources::MinigraphSource;
+use crate::pages::performance::actions::PerfAddTrayGraph;
 use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::TlSettings;
 use crate::theme::current;
+use crate::window::main::{ShellState, push_main_toast};
 
 /// Time between two models.
 pub const TRAY_TICK: Duration = Duration::from_millis(1000);
@@ -43,6 +55,24 @@ const WARMING_UP_TEXT: &str = "\u{2026}";
 const UNSUPPORTED_TEXT: &str = "n/a";
 /// Title of the main icon's tooltip.
 const MAIN_TITLE: &str = "tasklens";
+
+/// Adds a tray graph for `source` (a `[[minigraphs]]` source string) and `column`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct AddTrayGraph {
+    pub source: SharedString,
+    pub column: SharedString,
+}
+
+/// Removes the tray graph with this `source` and `column`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct RemoveTrayGraph {
+    pub source: SharedString,
+    pub column: SharedString,
+}
 
 /// GPUI Global read by menus ("No system tray available") and the close decision.
 pub struct TrayStatus {
@@ -93,8 +123,139 @@ pub fn install(cx: &mut App, end: TrayUiEnd) {
         available: true,
         running: true,
     });
+    let events = end.events.clone();
     let bridge = cx.new(|cx| TrayBridge::new(end, client, &entries, cx));
     cx.set_global(GlobalTrayBridge(bridge));
+    cx.on_action(
+        |a: &PerfAddTrayGraph, cx| match tray_source_of_card(&a.source) {
+            Some(source) => add_graph(cx, source.into(), "cpu".into()),
+            None => push_main_toast(
+                cx,
+                ToastKind::Error,
+                tr(cx, "tray-toast-add-failed"),
+                None,
+                None,
+            ),
+        },
+    );
+    cx.on_action(|a: &AddTrayGraph, cx| add_graph(cx, a.source.clone(), a.column.clone()));
+    cx.on_action(|a: &RemoveTrayGraph, cx| remove_matching(cx, &a.source, &a.column));
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Ok(event) = events.recv().await {
+            cx.update(|cx| handle_event(cx, event));
+        }
+        cx.update(|cx| cx.global_mut::<TrayStatus>().running = false);
+    })
+    .detach();
+}
+
+/// The `[[tray_graphs]] source` a Performance card key maps to (leader decision, wox.2). Overview,
+/// fan and battery cards have none.
+pub fn tray_source_of_card(key: &DeviceKey) -> Option<String> {
+    match key.kind() {
+        DeviceKind::Cpu => Some("cpu".to_owned()),
+        DeviceKind::Memory => Some("memory".to_owned()),
+        DeviceKind::Disk | DeviceKind::AggregateDisk => Some("disk".to_owned()),
+        DeviceKind::Net => Some("network".to_owned()),
+        DeviceKind::Gpu => Some(format!("gpu:{}", key.0)),
+        DeviceKind::AggregateGpu => Some("gpu".to_owned()),
+        DeviceKind::Overview | DeviceKind::Fan | DeviceKind::Battery => None,
+    }
+}
+
+fn toast(cx: &mut App, kind: ToastKind, key: &str) {
+    let text = tr(cx, key);
+    push_main_toast(cx, kind, text, None, None);
+}
+
+fn add_graph(cx: &mut App, source: SharedString, column: SharedString) {
+    let bridge = TrayBridge::global(cx);
+    let added = bridge.update(cx, |b, cx| b.add(source, column, cx));
+    toast(
+        cx,
+        if added {
+            ToastKind::Success
+        } else {
+            ToastKind::Warning
+        },
+        if added {
+            "tray-toast-added"
+        } else {
+            "tray-toast-exists"
+        },
+    );
+}
+
+fn remove_matching(cx: &mut App, source: &str, column: &str) {
+    let bridge = TrayBridge::global(cx);
+    let id = bridge.read(cx).find(source, column);
+    remove_by_id(cx, id);
+}
+
+fn remove_by_id(cx: &mut App, id: Option<TrayGraphId>) {
+    let Some(id) = id else {
+        toast(cx, ToastKind::Error, "tray-toast-remove-failed");
+        return;
+    };
+    TrayBridge::global(cx).update(cx, |b, cx| b.remove(id, cx));
+    toast(cx, ToastKind::Success, "tray-toast-removed");
+}
+
+/// The main window while it is open; `None` when it was removed to the tray.
+pub fn main_window_target(cx: &App) -> Option<WindowHandle<Root>> {
+    cx.try_global::<ShellState>()
+        .and_then(|s| s.main_window)
+        .filter(|h| cx.windows().iter().any(|w| w.window_id() == h.window_id()))
+}
+
+/// Sends a window action to the main window, or to the app when it is gone.
+fn dispatch_shell(cx: &mut App, action: Box<dyn Action>) {
+    if let Some(handle) = main_window_target(cx) {
+        let a = action.boxed_clone();
+        if handle
+            .update(cx, |_, window, cx| window.dispatch_action(a, cx))
+            .is_ok()
+        {
+            return;
+        }
+    }
+    cx.dispatch_action(&*action);
+}
+
+fn handle_event(cx: &mut App, event: TrayEvent) {
+    match event {
+        TrayEvent::WatcherOnline => cx.global_mut::<TrayStatus>().available = true,
+        TrayEvent::WatcherOffline => cx.global_mut::<TrayStatus>().available = false,
+        TrayEvent::RegisterFailed(id) => {
+            TrayBridge::global(cx).update(cx, |b, cx| b.remove(id, cx));
+            toast(cx, ToastKind::Error, "tray-toast-add-failed");
+        }
+        TrayEvent::ToggleMainWindow => dispatch_shell(cx, Box::new(ToggleMainWindow)),
+        TrayEvent::ShowMainWindow => dispatch_shell(cx, Box::new(ShowMainWindow)),
+        TrayEvent::ShowMiniWindow => dispatch_shell(cx, Box::new(ToggleMiniWindow)),
+        TrayEvent::Exit => dispatch_shell(cx, Box::new(Quit)),
+        TrayEvent::SetColor { id, color } => {
+            TrayBridge::global(cx).update(cx, |b, cx| b.set_color(id, &color, cx));
+        }
+        TrayEvent::SetRange { id, secs } => {
+            TrayBridge::global(cx).update(cx, |b, cx| b.set_range(id, secs, cx));
+        }
+        TrayEvent::Remove { id } => {
+            let known = TrayBridge::global(cx)
+                .read(cx)
+                .graphs
+                .iter()
+                .any(|g| g.id == id);
+            remove_by_id(cx, known.then_some(id));
+        }
+        TrayEvent::TogglePageSource { source } => {
+            let found = TrayBridge::global(cx).read(cx).find_source(source);
+            match found {
+                Some(id) => remove_by_id(cx, Some(id)),
+                None => add_graph(cx, source.into(), "cpu".into()),
+            }
+        }
+    }
 }
 
 impl TrayBridge {
@@ -145,6 +306,85 @@ impl TrayBridge {
     /// Drops one graph (E31-A2 calls it for a `Remove` event). The next tick applies it.
     pub fn remove_graph(&mut self, id: TrayGraphId) {
         self.graphs.retain(|g| g.id != id);
+    }
+
+    /// The id of the graph with this source and column.
+    fn find(&self, source: &str, column: &str) -> Option<TrayGraphId> {
+        self.graphs
+            .iter()
+            .find(|g| &*g.source == source && &*g.column == column)
+            .map(|g| g.id)
+    }
+
+    /// The id of the first graph with this source.
+    fn find_source(&self, source: &str) -> Option<TrayGraphId> {
+        self.graphs
+            .iter()
+            .find(|g| &*g.source == source)
+            .map(|g| g.id)
+    }
+
+    /// Writes `[[tray_graphs]]` in graph order with all four keys. The persist callback is the
+    /// 500 ms debounce (ADR-011).
+    fn save(&self, cx: &mut App) {
+        let entries: Vec<TrayGraphEntry> = self
+            .graphs
+            .iter()
+            .map(|g| TrayGraphEntry {
+                source: g.source.to_string(),
+                column: g.column.to_string(),
+                color: g.color.to_string(),
+                range_s: u16::try_from(g.range_s).unwrap_or(60),
+            })
+            .collect();
+        if cx.has_global::<TlSettings>() {
+            TlSettings::update(cx, |d| d.state.tray_graphs = entries);
+        }
+    }
+
+    /// Appends a graph unless the same source and column exist. True when it was added.
+    fn add(&mut self, source: SharedString, column: SharedString, cx: &mut App) -> bool {
+        if self.find(&source, &column).is_some() {
+            return false;
+        }
+        let id = self.next_id();
+        self.next_id += 1;
+        self.graphs.push(TrayGraph {
+            id,
+            source,
+            column,
+            color: GraphColor::Accent.as_str().into(),
+            range_s: 60,
+            scale: ScaleState::default(),
+        });
+        self.save(cx);
+        true
+    }
+
+    /// Removes a graph and writes `[[tray_graphs]]`.
+    fn remove(&mut self, id: TrayGraphId, cx: &mut App) {
+        self.remove_graph(id);
+        self.save(cx);
+    }
+
+    fn set_color(&mut self, id: TrayGraphId, color: &str, cx: &mut App) {
+        let Some(color) = GraphColor::from_str(color) else {
+            return;
+        };
+        if let Some(g) = self.graphs.iter_mut().find(|g| g.id == id) {
+            g.color = color.as_str().into();
+            self.save(cx);
+        }
+    }
+
+    fn set_range(&mut self, id: TrayGraphId, secs: u32, cx: &mut App) {
+        if !matches!(secs, 30 | 60 | 300 | 600) {
+            return;
+        }
+        if let Some(g) = self.graphs.iter_mut().find(|g| g.id == id) {
+            g.range_s = secs;
+            self.save(cx);
+        }
     }
 
     /// The graphs in `[[tray_graphs]]` order.

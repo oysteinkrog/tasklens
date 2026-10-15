@@ -13,13 +13,18 @@ use tl_model::settings::{
     AppearanceSettings, Settings, ThemeSettings, TrayGraphState as TrayGraphEntry, UiState,
 };
 use tl_model::snapshot::SeriesSet;
-use tl_model::tray::{TrayGraphState, TrayModel, TrayServiceEnd, tray_channels};
+use tl_model::tray::{
+    TrayEvent, TrayGraphId, TrayGraphState, TrayModel, TrayServiceEnd, tray_channels,
+};
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
 use tl_ui::hub::SnapshotHub;
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
-use tl_ui::tray_bridge::{self, TRAY_TICK, TrayBridge, TrayStatus};
+use tl_ui::tray_bridge::{
+    self, AddTrayGraph, RemoveTrayGraph, TRAY_TICK, TrayBridge, TrayStatus, main_window_target,
+    tray_source_of_card,
+};
 
 const NOW_NS: u64 = 10_000_000_000;
 const SAMPLE_NS: u64 = 9_000_000_000;
@@ -346,4 +351,358 @@ fn idle_tray_sends_nothing_and_releases_demand(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let last = r.engine.demands().pop().expect("demand sent");
     assert!(!last.tray.icons_shown && !last.tray.cpu);
+}
+
+// ---- E31-A2: events, actions, persistence, toasts ----
+
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui_kit::VisualTestContext;
+use tl_ui::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
+use tl_ui::app::{AppEnv, StartOptions, TasklensUi, UiInit};
+use tl_ui::components::toast::ToastQueue;
+use tl_ui::pages::performance::DeviceKey;
+use tl_ui::pages::performance::actions::PerfAddTrayGraph;
+use tl_ui::window::main::open_main_window;
+
+fn saved(cx: &mut TestAppContext) -> Vec<(String, String, String, u16)> {
+    cx.read(|cx| {
+        TlSettings::state(cx)
+            .tray_graphs
+            .iter()
+            .map(|g| {
+                (
+                    g.source.clone(),
+                    g.column.clone(),
+                    g.color.clone(),
+                    g.range_s,
+                )
+            })
+            .collect()
+    })
+}
+
+fn row(source: &str, column: &str, color: &str, range: u16) -> (String, String, String, u16) {
+    (source.into(), column.into(), color.into(), range)
+}
+
+/// The full UI with a main window, so toasts have a queue.
+struct Full {
+    vcx: VisualTestContext,
+    service: TrayServiceEnd,
+}
+
+fn full(cx: &mut TestAppContext, graphs: Vec<TrayGraphEntry>) -> Full {
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine;
+    let (_tx, rx) = async_channel::bounded(4);
+    let init = UiInit {
+        settings: Settings::default(),
+        state: UiState {
+            tray_graphs: graphs,
+            ..UiState::default()
+        },
+        themes_json: None,
+        persist: Box::new(|_, _| {}),
+        persist_themes: Box::new(|_| {}),
+        app_requests: rx,
+        startup_toasts: Vec::new(),
+        env: AppEnv::test(),
+    };
+    let (ui, service) = tray_channels();
+    cx.update(|cx| {
+        TasklensUi::init(cx, client, init);
+        cx.set_global(StartOptions::default());
+        cx.set_reduce_motion(true);
+        tray_bridge::install(cx, ui);
+    });
+    cx.run_until_parked();
+    let handle = cx.update(open_main_window).expect("the main window opens");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    Full { vcx, service }
+}
+
+impl Full {
+    fn event(&mut self, e: TrayEvent) {
+        self.service
+            .events
+            .try_send(e)
+            .expect("event channel has room");
+        self.vcx.run_until_parked();
+    }
+
+    fn act(&mut self, action: &dyn gpui_kit::Action) {
+        self.vcx.update(|_, cx| cx.dispatch_action(action));
+        self.vcx.run_until_parked();
+    }
+
+    fn toasts(&mut self) -> Vec<String> {
+        self.vcx.update(|window, cx| {
+            ToastQueue::of_window(window, cx)
+                .expect("toast queue")
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        })
+    }
+
+    fn saved(&mut self) -> Vec<(String, String, String, u16)> {
+        self.vcx.update(|_, cx| {
+            TlSettings::state(cx)
+                .tray_graphs
+                .iter()
+                .map(|g| {
+                    (
+                        g.source.clone(),
+                        g.column.clone(),
+                        g.color.clone(),
+                        g.range_s,
+                    )
+                })
+                .collect()
+        })
+    }
+}
+
+fn perf_add(key: &str) -> PerfAddTrayGraph {
+    PerfAddTrayGraph {
+        source: DeviceKey(Arc::from(key)),
+    }
+}
+
+#[gpui_kit::test]
+fn add_page_graph_persists_and_toasts(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.act(&perf_add("cpu"));
+    assert_eq!(f.saved(), vec![row("cpu", "cpu", "accent", 60)]);
+    assert_eq!(f.toasts(), vec!["Tray icon graph added".to_owned()]);
+}
+
+#[gpui_kit::test]
+fn add_existing_graph_warns(cx: &mut TestAppContext) {
+    let mut f = full(cx, vec![graph("cpu", "accent")]);
+    f.act(&perf_add("cpu"));
+    assert_eq!(f.saved(), vec![row("cpu", "cpu", "accent", 60)]);
+    assert_eq!(
+        f.toasts(),
+        vec!["Tray icon graph already exists".to_owned()]
+    );
+}
+
+#[gpui_kit::test]
+fn remove_graph_and_remove_missing(cx: &mut TestAppContext) {
+    let mut p = graph("process:0000000000000000:7:100", "accent");
+    p.column = "memory".to_owned();
+    let mut f = full(cx, vec![graph("cpu", "accent"), p]);
+    f.act(&RemoveTrayGraph {
+        source: "process:0000000000000000:7:100".into(),
+        column: "memory".into(),
+    });
+    assert_eq!(f.saved(), vec![row("cpu", "cpu", "accent", 60)]);
+    assert_eq!(f.toasts(), vec!["Tray icon graph removed".to_owned()]);
+    f.act(&RemoveTrayGraph {
+        source: "process:0000000000000000:7:100".into(),
+        column: "memory".into(),
+    });
+    assert_eq!(f.saved().len(), 1);
+    assert!(
+        f.toasts()
+            .contains(&"Unable to remove tray icon graph".to_owned())
+    );
+}
+
+#[gpui_kit::test]
+fn add_tray_graph_action_with_column(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.act(&AddTrayGraph {
+        source: "name:firefox".into(),
+        column: "memory".into(),
+    });
+    assert_eq!(f.saved(), vec![row("name:firefox", "memory", "accent", 60)]);
+}
+
+#[gpui_kit::test]
+fn register_failed_removes_and_errors(cx: &mut TestAppContext) {
+    let mut f = full(cx, vec![graph("cpu", "accent"), graph("memory", "accent")]);
+    f.event(TrayEvent::RegisterFailed(TrayGraphId(2)));
+    assert_eq!(f.saved(), vec![row("cpu", "cpu", "accent", 60)]);
+    assert_eq!(f.toasts(), vec!["Unable to add tray icon graph".to_owned()]);
+}
+
+#[gpui_kit::test]
+fn toggle_page_source_adds_and_removes(cx: &mut TestAppContext) {
+    let mut f = full(cx, vec![graph("cpu", "accent")]);
+    f.event(TrayEvent::TogglePageSource { source: "cpu" });
+    assert!(f.saved().is_empty());
+    assert!(f.toasts().contains(&"Tray icon graph removed".to_owned()));
+    f.event(TrayEvent::TogglePageSource { source: "cpu" });
+    assert_eq!(f.saved(), vec![row("cpu", "cpu", "accent", 60)]);
+    assert!(f.toasts().contains(&"Tray icon graph added".to_owned()));
+}
+
+#[gpui_kit::test]
+fn remove_event_removes_graph(cx: &mut TestAppContext) {
+    let mut f = full(cx, vec![graph("cpu", "accent")]);
+    f.event(TrayEvent::Remove { id: TrayGraphId(1) });
+    assert!(f.saved().is_empty());
+    assert_eq!(f.toasts(), vec!["Tray icon graph removed".to_owned()]);
+}
+
+#[gpui_kit::test]
+fn ids_stay_in_file_order_after_remove_and_add(cx: &mut TestAppContext) {
+    let mut f = full(cx, vec![graph("cpu", "accent"), graph("memory", "accent")]);
+    f.event(TrayEvent::Remove { id: TrayGraphId(1) });
+    f.act(&perf_add("net:eth0"));
+    assert_eq!(
+        f.saved(),
+        vec![
+            row("memory", "cpu", "accent", 60),
+            row("network", "cpu", "accent", 60)
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn card_keys_map_to_tray_sources(_cx: &mut TestAppContext) {
+    let map = |k: &str| tray_source_of_card(&DeviceKey(Arc::from(k)));
+    assert_eq!(map("cpu").as_deref(), Some("cpu"));
+    assert_eq!(map("memory").as_deref(), Some("memory"));
+    assert_eq!(map("disk:nvme0n1").as_deref(), Some("disk"));
+    assert_eq!(map("net:eth0").as_deref(), Some("network"));
+    assert_eq!(
+        map("gpu:pci:0000:2d:00.0").as_deref(),
+        Some("gpu:gpu:pci:0000:2d:00.0")
+    );
+    assert_eq!(
+        map("gpu:GPU-00000000-0000-0000-0000-000000000000").as_deref(),
+        Some("gpu:gpu:GPU-00000000-0000-0000-0000-000000000000")
+    );
+    assert_eq!(map("fan:chip:0"), None);
+    assert_eq!(map("bat:BAT0"), None);
+    assert_eq!(map(DeviceKey::OVERVIEW), None);
+}
+
+#[gpui_kit::test]
+fn card_without_tray_source_errors(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.act(&perf_add("fan:chip:0"));
+    assert!(f.saved().is_empty());
+    assert_eq!(f.toasts(), vec!["Unable to add tray icon graph".to_owned()]);
+}
+
+#[gpui_kit::test]
+fn card_actions_store_mapped_sources(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.act(&perf_add("gpu:pci:0000:2d:00.0"));
+    f.act(&perf_add("disk:nvme0n1"));
+    f.act(&perf_add("net:eth0"));
+    let sources: Vec<String> = f.saved().into_iter().map(|r| r.0).collect();
+    assert_eq!(sources, ["gpu:gpu:pci:0000:2d:00.0", "disk", "network"]);
+}
+
+#[gpui_kit::test]
+fn set_color_and_range_persist(cx: &mut TestAppContext) {
+    let r = rig(cx, vec![graph("cpu", "accent")], false);
+    r.service
+        .events
+        .try_send(TrayEvent::SetColor {
+            id: TrayGraphId(1),
+            color: "rose".into(),
+        })
+        .unwrap();
+    r.service
+        .events
+        .try_send(TrayEvent::SetRange {
+            id: TrayGraphId(1),
+            secs: 300,
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(saved(cx), vec![row("cpu", "cpu", "rose", 300)]);
+    let m = r.one(cx);
+    assert_eq!(m.graphs[0].line_rgb, [0xF4, 0x3F, 0x5E]);
+    r.service
+        .events
+        .try_send(TrayEvent::SetRange {
+            id: TrayGraphId(1),
+            secs: 45,
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(saved(cx), vec![row("cpu", "cpu", "rose", 300)]);
+}
+
+#[gpui_kit::test]
+fn watcher_events_set_status(cx: &mut TestAppContext) {
+    let r = rig(cx, Vec::new(), false);
+    let available = |cx: &mut TestAppContext| cx.read(|cx| cx.global::<TrayStatus>().available);
+    r.service
+        .events
+        .try_send(TrayEvent::WatcherOffline)
+        .unwrap();
+    cx.run_until_parked();
+    assert!(!available(cx));
+    r.service.events.try_send(TrayEvent::WatcherOnline).unwrap();
+    cx.run_until_parked();
+    assert!(available(cx));
+}
+
+#[gpui_kit::test]
+fn closed_channel_marks_not_running(cx: &mut TestAppContext) {
+    let r = rig(cx, Vec::new(), false);
+    assert!(cx.read(|cx| cx.global::<TrayStatus>().running));
+    drop(r.service);
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| cx.global::<TrayStatus>().running));
+}
+
+/// Counts each shell action that reaches the app.
+fn count_shell_actions(cx: &mut TestAppContext) -> [Rc<Cell<u32>>; 4] {
+    let counters: [Rc<Cell<u32>>; 4] = Default::default();
+    let [toggle, show, mini, quit] = counters.clone();
+    cx.update(|cx| {
+        cx.on_action(move |_: &ToggleMainWindow, _| toggle.set(toggle.get() + 1));
+        cx.on_action(move |_: &ShowMainWindow, _| show.set(show.get() + 1));
+        cx.on_action(move |_: &ToggleMiniWindow, _| mini.set(mini.get() + 1));
+        cx.on_action(move |_: &Quit, _| quit.set(quit.get() + 1));
+    });
+    counters
+}
+
+#[gpui_kit::test]
+fn window_events_dispatch_shell_actions(cx: &mut TestAppContext) {
+    // No main window: every action goes to the app.
+    let r = rig(cx, Vec::new(), false);
+    let [toggle, show, mini, quit] = count_shell_actions(cx);
+    assert!(cx.read(|cx| main_window_target(cx).is_none()));
+    for e in [
+        TrayEvent::ToggleMainWindow,
+        TrayEvent::ShowMainWindow,
+        TrayEvent::ShowMiniWindow,
+        TrayEvent::Exit,
+    ] {
+        r.service.events.try_send(e).unwrap();
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        [toggle.get(), show.get(), mini.get(), quit.get()],
+        [1, 1, 1, 1]
+    );
+}
+
+#[gpui_kit::test]
+fn shell_action_goes_to_open_main_window(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    assert!(f.vcx.update(|_, cx| main_window_target(cx).is_some()));
+    let mini = Rc::new(Cell::new(0));
+    let seen = Rc::clone(&mini);
+    f.vcx
+        .update(|_, cx| cx.on_action(move |_: &ToggleMiniWindow, _| seen.set(seen.get() + 1)));
+    f.event(TrayEvent::ShowMiniWindow);
+    assert_eq!(mini.get(), 1);
 }

@@ -56,6 +56,8 @@ pub fn card_menu(
 
 /// "Add tray icon graph": enabled, disabled with a tooltip, or left out (PERF-088).
 fn tray_item(menu: TlMenu, key: &DeviceKey, tray: Option<bool>, cx: &App) -> TlMenu {
+    // Overview, fan and battery cards have no tray source (wox.2).
+    let tray = tray.filter(|_| crate::tray_bridge::tray_source_of_card(key).is_some());
     match tray {
         Some(true) => menu.item(
             tr(cx, "perf-menu-add-tray"),
