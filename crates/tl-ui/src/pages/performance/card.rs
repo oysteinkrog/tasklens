@@ -1691,14 +1691,17 @@ impl RenderOnce for DeviceCard {
             text = HoverTooltip::attach(&state, text, DELAY_CONTROL, content.build(), window, cx);
         }
 
-        let graph = (graph_w > Pixels::ZERO).then(|| {
-            div()
-                .debug_selector(|| "perf-card-graph".into())
-                .flex_none()
-                .w(graph_w)
-                .h(px(CARD_GRAPH_H * s))
-                .child(self.chart.cached(StyleRefinement::default().size_full()))
-        });
+        // A card with no room for a graph keeps the chart mounted, 0 px wide, out of the row and
+        // unpainted. The chart's notify then still reaches the cached card, so the value updates.
+        let mut graph = div()
+            .debug_selector(|| "perf-card-graph".into())
+            .flex_none()
+            .w(graph_w)
+            .h(px(CARD_GRAPH_H * s))
+            .child(self.chart.cached(StyleRefinement::default().size_full()));
+        if graph_w == Pixels::ZERO {
+            graph = graph.absolute().invisible();
+        }
 
         let pressed = theme.row_selected.opacity(PRESSED_ALPHA);
         let hover = theme.row_hover;
@@ -1721,7 +1724,7 @@ impl RenderOnce for DeviceCard {
             .on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(PerfSelectDevice { key: key.clone() }), cx);
             })
-            .children(graph)
+            .child(graph)
             .child(text);
         if opacity < 1.0 {
             card = card.opacity(opacity);

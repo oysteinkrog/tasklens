@@ -1138,6 +1138,53 @@ mod sidebar {
         assert_values_inside(&mut r, "edit mode at nav_width 180, 1023.9 KiB/s");
     }
 
+    /// A card with no room for its graph keeps the chart mounted, so a new sample still draws
+    /// the cached card with the new value. At nav_width 180 and 200% UI scale the CPU card hides
+    /// its graph. The chart once left the tree there, and the value stopped at its last number.
+    #[gpui_kit::test]
+    fn hidden_graph_card_value_follows_new_samples(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        settings.motion.smooth_graphs = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.update(|window, cx| {
+            let appearance = AppearanceSettings {
+                ui_scale_pct: 200,
+                ..AppearanceSettings::default()
+            };
+            assert!(tl_ui::theme::metrics::recompute(&appearance, cx));
+            window.refresh();
+        });
+        r.host_w.set(180.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        publish_cpu_value_at(&mut r, now_boot_ns(), 30.);
+        draw(r.vcx);
+        let before = prepared(&mut r, "cpu");
+        assert_eq!(before.graph_w, px(0.), "no graph: {before:?}");
+        assert_eq!(&*before.value.expect("value").text, "30.0%");
+        let cpu_renders = |r: &mut Rig| {
+            card_counts(r)
+                .into_iter()
+                .find(|(key, ..)| key == "cpu")
+                .map(|(_, renders, _)| renders)
+                .expect("cpu card")
+        };
+        let renders = cpu_renders(&mut r);
+
+        publish_cpu_value_at(&mut r, now_boot_ns(), 55.);
+
+        assert_eq!(
+            cpu_renders(&mut r),
+            renders + 1,
+            "the new sample draws the card"
+        );
+        let after = prepared(&mut r, "cpu");
+        assert_eq!(after.graph_w, px(0.));
+        assert_eq!(&*after.value.expect("value").text, "55.0%");
+        assert_values_inside(&mut r, "nav_width 180 at 200%");
+    }
+
     /// A line that gains a row grows its card on the next draw, and the cards below move down.
     #[gpui_kit::test]
     fn height_change_relays_out_sidebar(cx: &mut TestAppContext) {
