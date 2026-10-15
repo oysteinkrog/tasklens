@@ -1262,3 +1262,377 @@ mod disk_buttons {
         });
     }
 }
+
+/// The "Disk is in use" window (E25-020, PERF-052, UI-PRF-030).
+mod disk_in_use {
+    use super::*;
+
+    use gpui_kit::Modifiers;
+    use gpui_kit::base::Root;
+    use tl_model::actions::{
+        ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, Signal,
+    };
+    use tl_model::command::{Command, DeviceCommand};
+    use tl_model::ids::{GroupKey, ProcessKey};
+    use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::snapshot::{Blocker, DiskDetails, EjectState};
+    use tl_model::time::BootId;
+    use tl_model::validity::FieldValidity;
+    use tl_ui::action_tracker::{ActionTracker, GlobalActionTracker};
+    use tl_ui::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui::components::toast::ToastKind;
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::pages::performance::actions::PerfEject;
+    use tl_ui::windows::disk_in_use::{
+        DiskInUseWindow, EjectToasts, RETRY_DELAY, find_disk_in_use,
+    };
+
+    const SDA: &str = "disk:sda";
+    const IDX: DeviceIdx = DeviceIdx(3);
+    const PIDS: [u32; 3] = [101, 102, 103];
+
+    fn pkey(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: 500,
+            boot_id: BootId(0),
+            pid,
+        }
+    }
+
+    fn record(pid: u32, name: &str, app: &str) -> ProcessRecord {
+        let text = |value: &str| Arc::<str>::from(value);
+        ProcessRecord {
+            key: pkey(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: text(name),
+                name: text(name),
+                exe: Some(text(&format!("/usr/bin/{name}"))),
+                cmdline: None,
+                user: text("me"),
+                cgroup: None,
+                app_id: Some(text(app)),
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: text(name),
+            }),
+            group: GroupKey(u64::from(pid)),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    /// Two apps and three processes: 101 and 103 in Files, 102 in Editor.
+    fn blockers() -> Arc<[Blocker]> {
+        let b = |pid: u32, name: &str, app: &str, path: &str| Blocker {
+            key: pkey(pid),
+            name: Arc::from(name),
+            app: Some(Arc::from(app)),
+            paths: Arc::from([Arc::<str>::from(path), Arc::<str>::from("/media/usb/b")]),
+        };
+        Arc::from([
+            b(101, "files", "org.files", "/media/usb/a"),
+            b(102, "editor", "org.editor", "/media/usb/c"),
+            b(103, "files-helper", "org.files", "/media/usb/d"),
+        ])
+    }
+
+    fn records() -> Arc<[ProcessRecord]> {
+        Arc::from([
+            record(101, "Files", "org.files"),
+            record(102, "Editor", "org.editor"),
+            record(103, "files-helper", "org.files"),
+        ])
+    }
+
+    /// The Disk page of sda with an action tracker installed.
+    fn setup(cx: &mut TestAppContext) -> Rig<'_> {
+        let mut r = open(cx);
+        select(&mut r, SDA);
+        let client: Arc<dyn EngineClient> = r.engine.clone();
+        r.vcx.update(|_, cx| {
+            let tracker = cx.new(|cx| ActionTracker::new(client, cx));
+            cx.set_global(GlobalActionTracker(tracker));
+        });
+        publish(&mut r, None);
+        r
+    }
+
+    fn publish(r: &mut Rig, eject: Option<(u64, EjectState)>) {
+        r.engine.publish_with(|s| {
+            let details = Arc::make_mut(&mut s.device_details);
+            details.header.version += 1;
+            details.disks = Arc::from([(
+                IDX,
+                DiskDetails {
+                    removable: true,
+                    eject,
+                    ..DiskDetails::default()
+                },
+            )]);
+            let p = Arc::make_mut(&mut s.processes);
+            p.header.version += 1;
+            p.records = records();
+        });
+        draw(r.vcx);
+    }
+
+    fn eject_seqs(r: &Rig) -> Vec<u64> {
+        r.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Device(DeviceCommand::Eject { seq, disk }) => {
+                    assert_eq!(&*disk, "sda");
+                    Some(seq)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sent(r: &Rig) -> Vec<ActionRequest> {
+        r.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(request) => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Dispatches `PerfEject` on the Disk page and returns the sequence it sent.
+    fn eject(r: &mut Rig) -> u64 {
+        let page = view_of(r, SDA).downcast::<DiskPage>().expect("a DiskPage");
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            focus.dispatch_action(&PerfEject { key: key(SDA) }, window, cx);
+        });
+        r.vcx.run_until_parked();
+        *eject_seqs(r).last().expect("an eject was sent")
+    }
+
+    fn blocked(others_may_hold: bool) -> EjectState {
+        EjectState::Blocked {
+            blockers: blockers(),
+            others_may_hold,
+        }
+    }
+
+    /// The open window, drawn.
+    fn window(r: &mut Rig) -> (VisualTestContext, Entity<DiskInUseWindow>) {
+        let (handle, view) = r
+            .vcx
+            .update(|_, cx| find_disk_in_use(IDX, cx))
+            .expect("the Disk is in use window is open");
+        let mut vcx = VisualTestContext::from_window(handle.into(), &r.vcx.cx);
+        redraw(&mut vcx);
+        (vcx, view)
+    }
+
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    /// Ejects and publishes `Blocked` for that sequence; returns the sequence and the window.
+    fn open_blocked(
+        r: &mut Rig,
+        others_may_hold: bool,
+    ) -> (u64, VisualTestContext, Entity<DiskInUseWindow>) {
+        let seq = eject(r);
+        publish(r, Some((seq, blocked(others_may_hold))));
+        let (vcx, view) = window(r);
+        (seq, vcx, view)
+    }
+
+    fn click(vcx: &mut VisualTestContext, selector: &'static str) {
+        let at = vcx.debug_bounds(selector).expect(selector).center();
+        vcx.simulate_click(at, Modifiers::none());
+        vcx.run_until_parked();
+    }
+
+    /// The open confirmation dialog, drawn.
+    fn dialog(r: &mut Rig) -> Option<(VisualTestContext, Entity<TlDialogView>)> {
+        let (any, frame) = r.vcx.update(|_, cx| {
+            cx.windows().into_iter().find_map(|w| {
+                let handle = w.downcast::<Root>()?;
+                let frame = TlSecondaryWindow::<TlDialogView>::find(handle, cx)?;
+                Some((w, frame))
+            })
+        })?;
+        let view = r.vcx.update(|_, cx| frame.read(cx).content().clone());
+        let mut vcx = VisualTestContext::from_window(any, &r.vcx.cx);
+        vcx.update(|window, _| window.activate_window());
+        redraw(&mut vcx);
+        Some((vcx, view))
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_layout(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (_, mut vcx, view) = open_blocked(&mut r, false);
+        vcx.update(|_, cx| {
+            let w = view.read(cx);
+            assert_eq!(w.groups().len(), 2);
+            assert_eq!(w.groups()[0].name.as_ref(), "Files");
+            assert_eq!(w.groups()[0].rows.len(), 2, "101 and 103 share an app");
+            assert_eq!(w.groups()[1].name.as_ref(), "Editor");
+            assert_eq!(w.row_label().as_ref(), "End Task");
+            assert_eq!(w.intro().as_ref(), "These programs are using Disk 1 (sda):");
+            assert!(!w.eacces_note());
+        });
+        assert!(vcx.debug_bounds("DiskInUseGroup-0").is_some());
+        assert!(vcx.debug_bounds("DiskInUseGroup-1").is_some());
+        assert!(vcx.debug_bounds("DiskInUseGroup-2").is_none());
+        for sel in ["DiskInUseEnd-0", "DiskInUseEnd-1", "DiskInUseEnd-2"] {
+            assert!(vcx.debug_bounds(sel).is_some(), "{sel}");
+        }
+        assert!(vcx.debug_bounds("DiskInUseRow-3").is_none());
+        assert!(vcx.debug_bounds("DiskInUseNote").is_none());
+        for sel in ["DiskInUseClose", "DiskInUseRetry", "DiskInUseEndAll"] {
+            assert!(vcx.debug_bounds(sel).is_some(), "{sel}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_shift_relabels(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (_, mut vcx, view) = open_blocked(&mut r, false);
+        vcx.simulate_modifiers_change(Modifiers::shift());
+        redraw(&mut vcx);
+        let label = vcx.update(|_, cx| view.read(cx).row_label().clone());
+        assert_eq!(label.as_ref(), "End Process");
+        vcx.simulate_modifiers_change(Modifiers::none());
+        redraw(&mut vcx);
+        let label = vcx.update(|_, cx| view.read(cx).row_label().clone());
+        assert_eq!(label.as_ref(), "End Task");
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_single_end_task_no_dialog(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (_, mut vcx, _) = open_blocked(&mut r, false);
+        click(&mut vcx, "DiskInUseEnd-0");
+        r.vcx.run_until_parked();
+        assert!(dialog(&mut r).is_none(), "no confirmation");
+        let sent = sent(&r);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].kind, ActionKind::Signal(Signal::Term));
+        assert_eq!(
+            sent[0].targets.as_slice(),
+            &[ActionTarget::Process(pkey(PIDS[0]))]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_end_all_confirms(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (_, mut vcx, _) = open_blocked(&mut r, false);
+        click(&mut vcx, "DiskInUseEndAll");
+        r.vcx.run_until_parked();
+        assert!(sent(&r).is_empty(), "nothing before the confirmation");
+        let (mut dvcx, view) = dialog(&mut r).expect("a confirmation");
+        let destructive = dvcx.update(|_, cx| view.read(cx).dialog().is_destructive());
+        if destructive {
+            assert_eq!(
+                dvcx.update(|window, cx| view.read(cx).focused_button(window)),
+                Some(DialogButton::Cancel)
+            );
+            dvcx.simulate_keystrokes("tab");
+        }
+        dvcx.simulate_keystrokes("enter");
+        dvcx.run_until_parked();
+        r.vcx.run_until_parked();
+        let sent = sent(&r);
+        assert_eq!(sent.len(), 1, "one request");
+        assert_eq!(sent[0].kind, ActionKind::Signal(Signal::Term));
+        let targets: Vec<_> = PIDS
+            .iter()
+            .map(|p| ActionTarget::Process(pkey(*p)))
+            .collect();
+        assert_eq!(sent[0].targets.to_vec(), targets);
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_auto_retry(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (seq, mut vcx, _) = open_blocked(&mut r, false);
+        click(&mut vcx, "DiskInUseEnd-1");
+        let id = sent(&r).first().expect("End Task sent").id;
+        r.engine.emit(ActionEvent {
+            id,
+            target: None,
+            state: ActionState::Succeeded,
+        });
+        r.vcx.run_until_parked();
+        assert_eq!(eject_seqs(&r), vec![seq], "no retry before 500 ms");
+        r.vcx
+            .executor()
+            .advance_clock(RETRY_DELAY - Duration::from_millis(1));
+        r.vcx.run_until_parked();
+        assert_eq!(eject_seqs(&r).len(), 1);
+        r.vcx.executor().advance_clock(Duration::from_millis(1));
+        r.vcx.run_until_parked();
+        let seqs = eject_seqs(&r);
+        assert_eq!(seqs.len(), 2, "one retry");
+        assert!(seqs[1] > seq);
+        r.vcx.executor().advance_clock(Duration::from_secs(2));
+        r.vcx.run_until_parked();
+        assert_eq!(eject_seqs(&r).len(), 2, "once per action");
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_done_closes_and_toasts(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (seq, _, _) = open_blocked(&mut r, false);
+        publish(&mut r, Some((seq, EjectState::Done)));
+        r.vcx.run_until_parked();
+        assert!(
+            r.vcx.update(|_, cx| find_disk_in_use(IDX, cx)).is_none(),
+            "the window closed"
+        );
+        let toasts = r.vcx.update(|_, cx| {
+            cx.try_global::<EjectToasts>()
+                .map(|t| t.0.clone())
+                .unwrap_or_default()
+        });
+        assert_eq!(
+            toasts,
+            vec![(ToastKind::Success, SharedString::from("Disk ejected"))]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_eacces_note(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (_, mut vcx, view) = open_blocked(&mut r, true);
+        assert!(vcx.update(|_, cx| view.read(cx).eacces_note()));
+        let note = vcx.debug_bounds("DiskInUseNote").expect("the note");
+        let footer = vcx.debug_bounds("DiskInUseFooter").expect("the footer");
+        let list = vcx.debug_bounds("DiskInUseList").expect("the list");
+        assert!(note.top() >= list.bottom(), "below the list");
+        assert!(note.bottom() <= footer.top(), "above the footer");
+    }
+}

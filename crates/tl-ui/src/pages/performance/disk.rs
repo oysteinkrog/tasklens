@@ -49,6 +49,7 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, TlSettings};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use crate::windows::disk_in_use::start_eject;
 
 /// Debug selectors of the chart boxes.
 pub const ACTIVE_ID: &str = "perf-disk-active";
@@ -999,6 +1000,16 @@ impl DiskPage {
         cx.notify();
     }
 
+    /// Sends the eject of this disk and follows it (PERF-052).
+    fn on_eject(&mut self, a: &PerfEject, _: &mut Window, cx: &mut Context<Self>) {
+        if a.key != self.key {
+            cx.propagate();
+            return;
+        }
+        let (key, hub, label) = (self.key.clone(), self.hub.clone(), self.header.0.clone());
+        start_eject(key, self.row.idx, hub, label, cx);
+    }
+
     /// `chart` in a full-width box of `height`.
     fn chart_box(id: &'static str, chart: &Entity<ChartView>, height: f32) -> gpui_kit::Div {
         div()
@@ -1145,13 +1156,17 @@ impl Render for DiskPage {
         self.details.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        div().size_full().track_focus(&self.focus).child(
-            DevicePageFrame {
-                page: self,
-                m: &m,
-                theme: &theme,
-            }
-            .render(window, cx),
-        )
+        div()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_eject))
+            .child(
+                DevicePageFrame {
+                    page: self,
+                    m: &m,
+                    theme: &theme,
+                }
+                .render(window, cx),
+            )
     }
 }
