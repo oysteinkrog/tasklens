@@ -662,7 +662,12 @@ impl Render for MinigraphCard {
         let m = *metrics(cx);
         let s = m.ui_scale;
         let label = if self.process_label.is_some() && !self.dragging {
-            let value_w = value_width(&self.value, &m, window, cx);
+            // A Restricted card draws the lock icon in place of the value text.
+            let value_w = if self.state == CardState::Restricted {
+                m.icon.xs
+            } else {
+                value_width(&self.value, &m, window, cx)
+            };
             // The card's width less its padding, the value and a gap between them.
             let max = px(MINI_CARD_W * s) - m.sp[3] * 2. - value_w - m.sp[2];
             self.fit_label(max, window, cx)
