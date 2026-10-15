@@ -11,7 +11,6 @@ use std::time::Duration;
 use gpui_kit::{App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, WeakEntity};
 use tl_model::client::EngineClient;
 use tl_model::demand::{Demand, TrayDemand};
-use tl_model::devices::DeviceKind;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::{NetworkUnit, TrayGraphState as TrayGraphEntry};
@@ -31,7 +30,7 @@ use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::pages::minigraph::GraphColor;
 use crate::pages::minigraph::card::{chart_spec_for, device_for, resolve_colors};
 use crate::pages::minigraph::sources::MinigraphSource;
-use crate::pages::performance::DeviceKey;
+use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::TlSettings;
 use crate::theme::current;
 
@@ -136,6 +135,16 @@ impl TrayBridge {
             active: false,
             demand_sent: None,
         }
+    }
+
+    /// The app's bridge, set by [`install`].
+    pub fn global(cx: &App) -> Entity<Self> {
+        cx.global::<GlobalTrayBridge>().0.clone()
+    }
+
+    /// Drops one graph (E31-A2 calls it for a `Remove` event). The next tick applies it.
+    pub fn remove_graph(&mut self, id: TrayGraphId) {
+        self.graphs.retain(|g| g.id != id);
     }
 
     /// The graphs in `[[tray_graphs]]` order.
