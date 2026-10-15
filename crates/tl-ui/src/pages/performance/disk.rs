@@ -539,9 +539,11 @@ pub fn update_disk_details_p2(
                 (ROW_TOTAL_WRITTEN, t.written_total, t.write_bps),
             ] {
                 // The totals share the diskstats read with the rates, so the rate's
-                // validity decides whether the byte count can be shown.
+                // validity decides whether the byte count can be shown. On the first
+                // sample and after a counter reset the rates are WarmingUp but the
+                // sampler still reads valid totals.
                 changed |= match rate.validity {
-                    Validity::Valid | Validity::Stale => {
+                    Validity::Valid | Validity::Stale | Validity::WarmingUp => {
                         let mut c = model.set_valid(label, n, |o| units::bytes(o, n));
                         if rate.validity == Validity::Stale {
                             c |= model.set_stale(label, age_ns(inp));

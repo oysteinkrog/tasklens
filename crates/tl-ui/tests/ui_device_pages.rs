@@ -1068,7 +1068,18 @@ mod disk_p2 {
     }
 
     #[gpui_kit::test]
-    fn disk_totals_missing_read_is_warming_up(cx: &mut TestAppContext) {
+    fn disk_totals_shown_while_rates_warm_up(cx: &mut TestAppContext) {
+        // First sample and counter reset: no rates yet, but the totals are valid.
+        let mut t = totals();
+        t.read_bps = Metric::with(Validity::WarmingUp);
+        t.write_bps = Metric::with(Validity::WarmingUp);
+        let m = model(cx, &t, &nvme_details());
+        assert_eq!(value(&m, "Total read").as_deref(), Some("812.41 GiB"));
+        assert_eq!(value(&m, "Total written").as_deref(), Some("400.00 GiB"));
+    }
+
+    #[gpui_kit::test]
+    fn disk_totals_missing_read_shows_fallback(cx: &mut TestAppContext) {
         let mut t = totals();
         t.read_bps = Metric::with(Validity::Missing);
         let m = model(cx, &t, &nvme_details());
