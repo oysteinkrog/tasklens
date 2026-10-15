@@ -1149,3 +1149,336 @@ fn digit_keys_select_metric(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("1");
     assert_eq!(metric(&page, vcx), HistoryMetric::Cpu);
 }
+
+/// Row menu, jump and Delete from history (tasklens-8fx.23). The real main window gives the
+/// toast queue and the Processes page; the History page sits in a second window, because
+/// nothing mounts it in the shell yet (8fx.3).
+mod row_actions {
+    use tl_model::command::Tab;
+    use tl_model::ids::GroupKey;
+    use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::snapshot::ProcessSnapshot;
+    use tl_model::validity::FieldValidity;
+    use tl_ui::actions::SelectTab;
+    use tl_ui::app::StartOptions;
+    use tl_ui::components::icons::TlIcon;
+    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu};
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::pages::processes::history::actions::{DeleteFromHistory, HistoryShowInLiveTable};
+    use tl_ui::table::actions::OpenProperties;
+    use tl_ui::table::tree_table::TreeTableEvent;
+    use tl_ui::window::main::{self as shell, main_window_view, open_main_window};
+
+    use super::*;
+
+    struct Rig<'a> {
+        engine: Arc<FakeEngine>,
+        page: Entity<HistoryPage>,
+        vcx: &'a mut VisualTestContext,
+        main: VisualTestContext,
+    }
+
+    fn proc_record(pid: u32) -> ProcessRecord {
+        let name: Arc<str> = Arc::from(format!("proc{pid}"));
+        ProcessRecord {
+            key: key(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: name.clone(),
+                name: name.clone(),
+                exe: None,
+                cmdline: None,
+                user: Arc::from("user"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: name,
+            }),
+            group: GroupKey(0),
+            state: ProcState::Running,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 1.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.,
+            io_write_bps: 0.,
+            net_rx_bps: 0.,
+            net_tx_bps: 0.,
+            gpu_util_pct: 0.,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    /// History mode on, pids 2, 3 and 4 in the history table, only pid 2 running.
+    fn rig(cx: &mut TestAppContext) -> Rig<'_> {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let mut state = UiState::default();
+        state.processes.history_mode = true;
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let appearance = AppearanceSettings::default();
+            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui::table::actions::bind_keys_table(cx);
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state,
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            cx.set_global(EngineGlobal(client.clone()));
+            let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            cx.set_global(GlobalHub(hub));
+            cx.set_global(GlobalDemand(demand));
+            tl_ui::components::toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            cx.set_global(StartOptions::default());
+            shell::init(cx);
+        });
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut main = VisualTestContext::from_window(handle.into(), cx);
+        main.update(|window, _| window.activate_window());
+        main.dispatch_action(SelectTab(Tab::Processes as usize));
+        main.run_until_parked();
+        engine.publish_with(|s| {
+            s.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    ..ComponentHeader::default()
+                },
+                records: Arc::from(vec![proc_record(2)]),
+                ..ProcessSnapshot::default()
+            });
+        });
+        main.run_until_parked();
+        let (page, vcx) = cx.add_window_view(HistoryPage::new);
+        vcx.run_until_parked();
+        publish_rows(
+            &engine,
+            vcx,
+            HistoryRange::At(600 * S),
+            vec![
+                prow(2, "live", 3.0),
+                prow(3, "gone", 2.0),
+                prow(4, "other", 1.0),
+            ],
+        );
+        let focus = vcx.read_entity(&page, |p, _| p.strip_focus().clone());
+        vcx.update(|window, cx| window.focus(&focus, cx));
+        draw(vcx);
+        Rig {
+            engine,
+            page,
+            vcx,
+            main,
+        }
+    }
+
+    impl Rig<'_> {
+        fn select(&mut self, pids: &[u32]) {
+            let keys = pids.iter().map(|&p| key(p)).collect();
+            self.page.update(self.vcx, |p, cx| p.set_selected(keys, cx));
+            self.vcx.run_until_parked();
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.main.update(|_, cx| {
+                let main = main_window_view(cx).expect("main window");
+                let queue = main.read(cx).toasts().clone();
+                queue
+                    .read(cx)
+                    .visible_texts()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
+        }
+
+        fn history_mode(&mut self) -> bool {
+            self.vcx
+                .update(|_, cx| TlSettings::state(cx).processes.history_mode)
+        }
+
+        fn deletes(&self) -> Vec<Vec<ProcessKey>> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::HistoryDelete { keys } => Some(keys.to_vec()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn menu(&mut self, targets: &[u32], col: Option<ColumnId>) -> Vec<MenuEntryInfo> {
+            let keys: Vec<ProcessKey> = targets.iter().map(|&p| key(p)).collect();
+            let table = self.vcx.read_entity(&self.page, |p, _| p.table().clone());
+            let menu = self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    table.update(cx, |t, cx| {
+                        t.delegate.context_menu(&keys, col, menu, window, cx)
+                    })
+                })
+            });
+            self.vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window))
+        }
+
+        /// Enter on the row of `pid`: the table's activate path, then `OpenProperties`.
+        fn enter(&mut self, pid: u32) {
+            let table = self.vcx.read_entity(&self.page, |p, _| p.table().clone());
+            table.update(self.vcx, |t, cx| t.delegate.on_activate(key(pid), cx));
+            self.vcx.dispatch_action(OpenProperties);
+            self.vcx.run_until_parked();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn history_menu_items(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let entries = r.menu(&[3], Some(ColumnId::Cpu));
+        let kinds: Vec<MenuEntryKind> = entries.iter().map(|e| e.kind).collect();
+        let labels: Vec<Option<String>> = entries
+            .iter()
+            .map(|e| e.label.as_ref().map(ToString::to_string))
+            .collect();
+        assert_eq!(entries.len(), 8, "{labels:?}");
+        assert_eq!(labels[0].as_deref(), Some("Copy"));
+        assert_eq!(labels[1].as_deref(), Some("Copy details"));
+        assert_eq!(labels[2].as_deref(), Some("Copy all metrics"));
+        assert_eq!(labels[3].as_deref(), Some("Copy rows as table"));
+        assert_eq!(kinds[4], MenuEntryKind::Separator);
+        assert_eq!(labels[5].as_deref(), Some("Show in live table"));
+        assert_eq!(kinds[5], MenuEntryKind::Disabled, "pid 3 is not running");
+        assert_eq!(kinds[6], MenuEntryKind::Separator);
+        assert_eq!(labels[7].as_deref(), Some("Delete from history"));
+        assert_eq!(entries[7].icon, Some(TlIcon::Trash));
+        assert!(entries[7].danger);
+        assert!(
+            entries[7]
+                .action
+                .as_ref()
+                .is_some_and(|a| a.partial_eq(&DeleteFromHistory))
+        );
+
+        let live = r.menu(&[2], Some(ColumnId::Cpu));
+        assert_eq!(live[5].kind, MenuEntryKind::Item);
+        assert!(
+            live[5]
+                .action
+                .as_ref()
+                .is_some_and(|a| a.partial_eq(&HistoryShowInLiveTable))
+        );
+        let keyboard = r.menu(&[2], None);
+        assert_eq!(keyboard.len(), 7, "the keyboard menu has no Copy item");
+    }
+
+    #[gpui_kit::test]
+    fn delete_from_history_removes_rows_series_and_chips(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.select(&[3]);
+        r.vcx.dispatch_action(DeleteFromHistory);
+        r.vcx.run_until_parked();
+        assert_eq!(r.deletes(), [vec![key(3)]]);
+        assert_eq!(r.toasts(), ["History entry deleted"]);
+        let selected = r
+            .vcx
+            .read_entity(&r.page, |p, _| p.state().selected.clone());
+        assert!(selected.is_empty(), "the chip is gone at once");
+        let in_table = with_table(&r.page, r.vcx, |t| t.selection.len());
+        assert_eq!(in_table, 0);
+        // The next view has no such row.
+        publish_rows(
+            &r.engine,
+            r.vcx,
+            HistoryRange::At(600 * S),
+            vec![prow(2, "live", 3.0), prow(4, "other", 1.0)],
+        );
+        let shown = with_table(&r.page, r.vcx, |t| {
+            (0..t.delegate.row_count())
+                .map(|ix| t.delegate.row_id(ix).pid)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(shown, [2, 4]);
+    }
+
+    #[gpui_kit::test]
+    fn delete_plural_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.select(&[2, 3, 4]);
+        r.vcx.dispatch_action(DeleteFromHistory);
+        r.vcx.run_until_parked();
+        let deletes = r.deletes();
+        assert_eq!(deletes.len(), 1);
+        let mut pids: Vec<u32> = deletes[0].iter().map(|k| k.pid).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, [2, 3, 4]);
+        assert_eq!(r.toasts(), ["3 history entries deleted"]);
+    }
+
+    #[gpui_kit::test]
+    fn enter_jumps_when_live(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        assert!(r.history_mode());
+        r.enter(2);
+        assert!(!r.history_mode(), "the jump leaves History mode");
+        assert!(!r.toasts().iter().any(|t| t == "Process not running"));
+    }
+
+    #[gpui_kit::test]
+    fn double_click_jumps_when_live(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let table = r.vcx.read_entity(&r.page, |p, _| p.table().clone());
+        table.update(r.vcx, |_, cx| {
+            cx.emit(TreeTableEvent::Activate { row_index: 0 });
+        });
+        r.vcx.run_until_parked();
+        // Row 0 is the highest CPU row, pid 2, which is running.
+        assert!(!r.history_mode());
+    }
+
+    #[gpui_kit::test]
+    fn enter_toasts_when_not_live(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.enter(3);
+        assert!(r.history_mode(), "the mode stays");
+        assert_eq!(r.toasts(), ["Process not running"]);
+    }
+
+    #[gpui_kit::test]
+    fn history_copy_details_has_no_command_line(cx: &mut TestAppContext) {
+        let r = rig(cx);
+        let table = r.vcx.read_entity(&r.page, |p, _| p.table().clone());
+        let (details, all, cell) = r.vcx.update(|_, cx| {
+            let keys = [key(2), key(3)];
+            let d = &table.read(cx).delegate;
+            (
+                d.copy_details_text(&keys, cx),
+                d.copy_all_metrics_text(&keys),
+                d.copy_cell_text(&keys, ColumnId::Name),
+            )
+        });
+        assert!(details.contains("Parent PID: \n"), "{details}");
+        assert!(details.contains("Name: live"), "{details}");
+        assert!(!details.contains("Command line"));
+        assert!(!all.contains("Command line"));
+        assert_eq!(cell, "live\ngone");
+    }
+}
