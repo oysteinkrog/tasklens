@@ -12,19 +12,20 @@
 //!
 //! Pointer interaction (E30-022): click or drag scrubs, the wheel zooms around the pointer,
 //! Shift+wheel or a middle-button drag pans, Shift+drag selects a range, a double-click returns
-//! to live. Listeners are registered in `paint` and update the page; the strip has no entity of
-//! its own, so a hover move notifies the page only when the hover x changed.
+//! to live. Listeners are registered in `paint` and update the page. A hover move notifies only
+//! the cached `StripView`, and only when the
+//! hover x changed. Bound grips are grabbed only on the axis row, so a plot click always scrubs.
 
 use core::fmt::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Bounds, ContentMask, CursorStyle, Element, ElementId, Entity, FillOptions, FocusHandle,
-    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Path, PathBuilder, PathStyle,
-    Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Style, Window, fill, point, px,
-    relative, size,
+    App, Bounds, ContentMask, Context, CursorStyle, Element, ElementId, Entity, EntityId,
+    FillOptions, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Path,
+    PathBuilder, PathStyle, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString,
+    Style, Window, fill, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use tl_model::history::{HistoryMetric, HistoryView};
@@ -322,6 +323,23 @@ impl ScrubberCache {
     }
 }
 
+/// The strip as its own cached view, so a hover move repaints it without rendering the page.
+pub struct StripView {
+    page: Entity<HistoryPage>,
+}
+
+impl StripView {
+    pub fn new(page: Entity<HistoryPage>) -> Self {
+        Self { page }
+    }
+}
+
+impl Render for StripView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        HistoryScrubber::new(self.page.clone())
+    }
+}
+
 /// The strip element. Reads the page's view and state and paints into its `ScrubberCache`.
 pub struct HistoryScrubber {
     page: Entity<HistoryPage>,
@@ -399,6 +417,12 @@ impl Element for HistoryScrubber {
             scale,
             hitbox: hitbox.clone(),
             focus,
+            strip: self
+                .page
+                .read(cx)
+                .strip_view
+                .as_ref()
+                .map(Entity::entity_id),
         };
         register_events(&self.page, &geo, window);
         let env = Env {
@@ -434,9 +458,17 @@ struct Geo {
     scale: f32,
     hitbox: Hitbox,
     focus: FocusHandle,
+    /// The strip view; hover changes notify it instead of the page.
+    strip: Option<EntityId>,
 }
 
 impl Geo {
+    /// True when `p` is level with the bound grips on the axis line.
+    fn on_grip_row(&self, p: Point<Pixels>) -> bool {
+        let dy = f32::from(p.y - self.plot.bottom()).abs();
+        dy <= BOUND_H / 2.0 * self.scale
+    }
+
     /// Pointer x relative to the plot's left edge, logical px.
     fn x(&self, p: Point<Pixels>) -> f32 {
         f32::from(p.x - self.plot.left())
@@ -474,6 +506,7 @@ fn on_mouse_down(
     }
     let width = geo.width();
     let x = geo.x(e.position);
+    let on_grip_row = geo.on_grip_row(e.position);
     match e.button {
         MouseButton::Left => {
             window.focus(&geo.focus, cx);
@@ -491,7 +524,7 @@ fn on_mouse_down(
                     (t as f64 - view.0 as f64) / (view.1 - view.0) as f64 * f64::from(width)
                 };
                 let grab = BOUND_GRAB * geo.scale;
-                let bound = p.state.range.and_then(|(a, b)| {
+                let bound = p.state.range.filter(|_| on_grip_row).and_then(|(a, b)| {
                     if (to_x(a) - f64::from(x)).abs() <= f64::from(grab) {
                         Some(b)
                     } else if (to_x(b) - f64::from(x)).abs() <= f64::from(grab) {
@@ -532,13 +565,27 @@ fn on_mouse_move(
     cx: &mut App,
 ) {
     let hovered = geo.hitbox.is_hovered(window);
+    let hover = hovered.then(|| e.position.x - geo.plot.left());
+    let hover_moved = page.update(cx, |p, _| {
+        if p.scrubber.drag.is_some() {
+            return None;
+        }
+        let changed = p.scrubber.hover_x != hover;
+        p.scrubber.hover_x = hover;
+        Some(changed)
+    });
+    match (hover_moved, geo.strip) {
+        // Only the strip repaints for a hover move, not the page.
+        (Some(true), Some(id)) => cx.notify(id),
+        (Some(true), None) => page.update(cx, |_, cx| cx.notify()),
+        (Some(false), _) => {}
+        (None, _) => {}
+    }
+    if hover_moved.is_some() {
+        return;
+    }
     page.update(cx, |p, cx| {
         let Some(drag) = p.scrubber.drag else {
-            let hover = hovered.then(|| e.position.x - geo.plot.left());
-            if p.scrubber.hover_x != hover {
-                p.scrubber.hover_x = hover;
-                cx.notify();
-            }
             return;
         };
         if e.pressed_button.is_none() {

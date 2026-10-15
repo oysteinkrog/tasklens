@@ -1594,3 +1594,39 @@ fn strip_focus_ring(cx: &mut TestAppContext) {
     settle(vcx);
     assert!(!vcx.read_entity(&page, |p, _| p.scrubber().focus_ring_painted));
 }
+
+#[gpui_kit::test]
+fn plot_click_on_a_bound_x_scrubs_and_clears_the_range(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton};
+    let (page, vcx) = keys_page(cx);
+    // View 400..1000 s: 500 s is at 1/6 of the plot.
+    page.update(vcx, |p, cx| p.set_range(Some((500 * S, 700 * S)), cx));
+    draw(vcx);
+    let plot = plot(&page, vcx);
+    let p = at(plot, 1.0 / 6.0);
+    vcx.simulate_mouse_move(p, None, Modifiers::none());
+    vcx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    vcx.simulate_mouse_up(p, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    let (scrub, range) = vcx.read_entity(&page, |p, _| (p.state().scrub, p.state().range));
+    assert_eq!((scrub, range), (Some(500 * S), None));
+}
+
+#[gpui_kit::test]
+fn hover_move_does_not_notify_the_page(cx: &mut TestAppContext) {
+    use gpui_kit::Modifiers;
+    use std::{cell::Cell, rc::Rc};
+    let (page, vcx) = keys_page(cx);
+    let plot = plot(&page, vcx);
+    vcx.simulate_mouse_move(at(plot, 0.3), None, Modifiers::none());
+    settle(vcx);
+    let notified = Rc::new(Cell::new(0u32));
+    let n = notified.clone();
+    let _sub = vcx.update(|_, cx| cx.observe(&page, move |_, _| n.set(n.get() + 1)));
+    vcx.simulate_mouse_move(at(plot, 0.6), None, Modifiers::none());
+    settle(vcx);
+    assert_eq!(notified.get(), 0);
+    let hover = vcx.read_entity(&page, |p, _| p.scrubber().hover_x);
+    assert!(hover.is_some());
+}

@@ -58,7 +58,7 @@ use crate::theme::{bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{FilterChanged, GlobalShellEvents, main_window_view, push_main_toast};
 
-use self::scrubber::{HistoryScrubber, ScrubberCache};
+use self::scrubber::{ScrubberCache, StripView};
 use self::table::{HistoryTableDelegate, is_live};
 
 const NS_PER_SEC: u64 = 1_000_000_000;
@@ -437,6 +437,8 @@ pub struct HistoryPage {
     section_versions: [u64; 3],
     /// The strip's built geometry and shaped labels, filled by `HistoryScrubber` in paint.
     scrubber: ScrubberCache,
+    /// The strip's own view, created on the first render that shows it.
+    strip_view: Option<Entity<StripView>>,
     /// Focus of the strip: the History key context is reached through it (E30-018).
     strip_focus: FocusHandle,
     /// Created in `new`, never in render.
@@ -548,6 +550,7 @@ impl HistoryPage {
             table,
             section_versions,
             scrubber: ScrubberCache::default(),
+            strip_view: None,
             strip_focus: cx.focus_handle().tab_stop(true),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1109,6 +1112,17 @@ impl Render for HistoryPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
+        let page = cx.entity();
+        let strip_view = self
+            .strip_view
+            .get_or_insert_with(|| {
+                cx.new(|cx| {
+                    // Every page change repaints the strip; only hover skips the page.
+                    cx.observe(&page, |_, _, cx| cx.notify()).detach();
+                    StripView::new(page)
+                })
+            })
+            .clone();
         let m = metrics(cx);
         let theme = current(cx);
         let scale = m.ui_scale;
@@ -1137,7 +1151,8 @@ impl Render for HistoryPage {
                 .text_color(theme.text_secondary)
                 .child(self.words.loading.clone())
         } else {
-            strip.child(HistoryScrubber::new(cx.entity()))
+            let view = strip_view.clone();
+            strip.child(view.cached(StyleRefinement::default().size_full()))
         };
         let minimap = div()
             .flex_none()
