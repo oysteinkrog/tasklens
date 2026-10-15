@@ -889,3 +889,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: new tasklens-gma.44 sets EngineCaps::GDB at engine start; gma.37 fills MenuCaps from health.caps (gdb and file_manager1) and waits for gma.44; exited tooltip wins over gdb missing.
 - 2026-10-15 leader decision: qfx.1 helper exits 3 (protocol error) when a partial frame is pending at the idle deadline; plain idle stays exit 0; closed by hand.
 - 2026-10-15 leader decision: qfx.28 adds WindowKey::SetupScript(&'static str) in registry.rs (chain edit) for one View script window per subcommand.
+- 2026-10-15 leader decision: new tasklens-qfx.37 helper_flow.rs sends helper session commands for shield actions from all windows; it toasts only for its own starts; qfx.31 tests wait for it.
