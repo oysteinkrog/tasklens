@@ -596,7 +596,8 @@ const DASH: [gpui_kit::Pixels; 2] = [px(5.0), px(5.0)];
 
 /// A chart stroke built directly as triangles. Each segment is a quad. Adjacent quads share a
 /// miter cross-section, or use a bevel when the default lyon miter limit of 4 would be exceeded.
-/// Butt caps and the 5/5 dash pattern match `PathBuilder::stroke` as used by charts.
+/// A sharp bevel whose inner point would reach past both segments folds, as in lyon. Butt caps
+/// and the 5/5 dash pattern match `PathBuilder::stroke` as used by charts.
 struct StrokeMesh {
     path: Option<Path<Pixels>>,
     spare: Option<Path<Pixels>>,
@@ -725,30 +726,29 @@ impl StrokeMesh {
         if self.half_width <= 0.0 || points.len() < 2 {
             return;
         }
-        let Some((mut direction, mut normal)) =
+        let Some((mut direction, mut normal, mut length)) =
             segment_frame(points[0], points[1], self.half_width)
         else {
             return;
         };
         let mut start = offset_pair(points[0], normal);
         for i in 0..points.len() - 1 {
-            let raw_start = start;
             let segment_direction = direction;
+            let segment_normal = normal;
             let p = points[i + 1];
             let last = i + 2 == points.len();
             let (mut end, next_start, bevel) = if let Some(&next) = points.get(i + 2) {
                 match segment_frame(p, next, self.half_width) {
-                    Some((next_direction, next_normal)) => {
+                    Some((next_direction, next_normal, next_length)) => {
                         let join = stroke_join(
                             p,
-                            direction,
-                            normal,
-                            next_direction,
-                            next_normal,
+                            (direction, normal, length),
+                            (next_direction, next_normal, next_length),
                             self.half_width,
                         );
                         direction = next_direction;
                         normal = next_normal;
+                        length = next_length;
                         join
                     }
                     None => {
@@ -760,11 +760,15 @@ impl StrokeMesh {
                 let pair = offset_pair(p, normal);
                 (pair, pair, None)
             };
+            // Like lyon, a cap clips the segment's own side lines, not the join vertices: a
+            // folded join puts both join vertices on the outer side.
             if i == 0 {
-                start = butt_cap(points[0], start, end, segment_direction, true);
+                let side = offset_pair(p, segment_normal);
+                start = butt_cap(points[0], start, side, segment_direction, true);
             }
             if last {
-                end = butt_cap(p, end, raw_start, segment_direction, false);
+                let side = offset_pair(points[i], segment_normal);
+                end = butt_cap(p, end, side, segment_direction, false);
             }
             self.quad(start, end);
             if let Some((a, b, c)) = bevel {
@@ -789,17 +793,18 @@ impl StrokeMesh {
     }
 }
 
+/// Unit direction, normal scaled to the half width, and length of the segment `a` to `b`.
 fn segment_frame(
     a: Point<Pixels>,
     b: Point<Pixels>,
     half_width: f32,
-) -> Option<((f32, f32), (f32, f32))> {
+) -> Option<((f32, f32), (f32, f32), f32)> {
     let (dx, dy) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
     let len = (dx * dx + dy * dy).sqrt();
     (len > f32::EPSILON).then(|| {
         let direction = (dx / len, dy / len);
         let normal = (-direction.1 * half_width, direction.0 * half_width);
-        (direction, normal)
+        (direction, normal, len)
     })
 }
 
@@ -870,10 +875,8 @@ type StrokeJoin = (
 
 fn stroke_join(
     p: Point<Pixels>,
-    direction: (f32, f32),
-    previous_normal: (f32, f32),
-    next_direction: (f32, f32),
-    next_normal: (f32, f32),
+    (direction, previous_normal, previous_length): ((f32, f32), (f32, f32), f32),
+    (next_direction, next_normal, next_length): ((f32, f32), (f32, f32), f32),
     half_width: f32,
 ) -> StrokeJoin {
     let tangent = (
@@ -894,29 +897,44 @@ fn stroke_join(
             (unit.0 / inv_len, unit.1 / inv_len)
         }
     };
+    let miter_sq = miter_normal.0 * miter_normal.0 + miter_normal.1 * miter_normal.1;
     let miter = (miter_normal.0 * half_width, miter_normal.1 * half_width);
     let miter_pair = offset_pair(p, miter);
     // Lyon defines the miter ratio against the full stroke width, so its default limit of 4
     // permits a normal up to 8 times the half width.
-    if miter_normal.0 * miter_normal.0 + miter_normal.1 * miter_normal.1 <= 4.0 * 4.0 * 4.0 {
+    if miter_sq <= 4.0 * 4.0 * 4.0 {
         return (miter_pair, miter_pair, None);
     }
 
     let previous = offset_pair(p, previous_normal);
     let next = offset_pair(p, next_normal);
     let cross = direction.0 * next_direction.1 - direction.1 * next_direction.0;
-    if cross >= 0.0 {
-        (
+    // `outer` points from `p` to the outer side. The inner miter point is `p - outer`.
+    let outer = if cross >= 0.0 {
+        (-miter.0, -miter.1)
+    } else {
+        miter
+    };
+    // Lyon's fold: on a sharp turn, when the inner point lies past the far end of both
+    // segments, it would draw a spike outside the stroke. Both quads then meet at the two
+    // outer side points instead, and the join adds no triangle.
+    let sharp = direction.0 * next_direction.0 + direction.1 * next_direction.1 < 0.0;
+    let past_next = -(outer.0 * next_direction.0 + outer.1 * next_direction.1) - next_length;
+    let past_previous = outer.0 * direction.0 + outer.1 * direction.1 - previous_length;
+    let fold = sharp && past_next.min(past_previous) > 0.0;
+    match (cross >= 0.0, fold) {
+        (true, true) => ((next.1, previous.1), (previous.1, next.1), None),
+        (false, true) => ((previous.0, next.0), (next.0, previous.0), None),
+        (true, false) => (
             (miter_pair.0, previous.1),
             (miter_pair.0, next.1),
             Some((previous.1, miter_pair.0, next.1)),
-        )
-    } else {
-        (
+        ),
+        (false, false) => (
             (previous.0, miter_pair.1),
             (next.0, miter_pair.1),
             Some((miter_pair.1, previous.0, next.0)),
-        )
+        ),
     }
 }
 

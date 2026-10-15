@@ -930,6 +930,34 @@ fn stroke_triangles_cover_a_straight_line() {
     assert_eq!(stroke.path.bounds.size.height.as_f32(), 1.0);
 }
 
+/// A sharp turn between two short segments folds its join, as lyon does: the inner bevel point
+/// would sit about 20 px below the apex, past both 5 px segments, and draw a false spike.
+#[test]
+fn sharp_short_join_folds_without_a_spike() {
+    let s = vec![
+        Sample::valid(0, 50.0),
+        Sample::valid(MS, 55.0),
+        Sample::valid(2 * MS, 50.0),
+    ];
+    // 0.1 px per ms: the points are (-0.2, 50), (-0.1, 45) and (0, 50).
+    let map = TimeMap {
+        anchor_ns: 2 * MS,
+        right_edge_ns: 2 * MS,
+        range_ns: 1_000 * MS,
+        plot_width: 100.0,
+    };
+    let v = view(s, MS);
+    let cache = run_build(&[(line(None, RED, false), Some(&v))], map, 2 * MS);
+
+    let stroke = &cache.strokes[0];
+    // Two quads and no join triangle.
+    assert_eq!(stroke.path.vertices.len(), 2 * 2 * 3);
+    let (top, bottom) = y_span(stroke);
+    assert!(top > 44.9, "top {top}");
+    assert!(bottom < 50.1, "bottom {bottom}");
+    assert!(stroke.path.bounds.size.height.as_f32() < 5.2);
+}
+
 #[test]
 fn dashed_stroke_has_five_pixel_segments() {
     let s = series(11, 100 * MS, 10 * SEC, |_| 50.0);
