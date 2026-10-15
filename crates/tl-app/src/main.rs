@@ -156,7 +156,7 @@ fn main() -> ExitCode {
         info!(target: "tasklens::ui", "rendering.gpu: set {name}={value}");
     }
 
-    // E32: the --low-memory arm goes here (before step 4)
+    // E32: --low-memory skips single instance (APP-011) and opens the rescue window.
     // E01: the bench path skips single instance, so a bench run can start while tasklens is open.
     #[cfg(feature = "bench")]
     if let Some(scene) = args.bench {
@@ -184,7 +184,9 @@ fn main() -> ExitCode {
     };
     let activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
     // `bus` keeps the bus name until the process exits, or until a relaunch closes it.
-    let (bus, app_requests) =
+    let (bus, app_requests) = if args.low_memory {
+        (None, None)
+    } else {
         match single_instance::acquire(args.app_id.as_deref(), &forward, activation_token) {
             Outcome::Forwarded => {
                 info!("another tasklens is running; forwarded");
@@ -196,7 +198,8 @@ fn main() -> ExitCode {
                 requests,
                 sender,
             } => (Some(conn), Some((sender, requests))),
-        };
+        }
+    };
     tl_ui::app::perf_step("single_instance");
 
     // Step 5: state and themes (settings were loaded before step 3).
@@ -219,8 +222,15 @@ fn main() -> ExitCode {
     // E01: --bench and --gallery arms go here (before step 7)
 
     // Step 7: start the engine. Do not wait for any collector.
-    let mut config = EngineConfig::new(EngineMode::Full, paths.state_dir.clone())
-        .with_history_dir(paths.history_dir());
+    let mut config = EngineConfig::new(
+        if args.low_memory {
+            EngineMode::LowMemory
+        } else {
+            EngineMode::Full
+        },
+        paths.state_dir.clone(),
+    )
+    .with_history_dir(paths.history_dir());
     if Path::new(HELPER_PATH).exists() {
         config = config.with_helper_path(HELPER_PATH.into());
     }
@@ -265,6 +275,13 @@ fn main() -> ExitCode {
         settings.lowmem.enabled,
         request_tx,
     );
+    // PROC-098 as amended by R-243: current pages only. A GPUI process is far above the default
+    // RLIMIT_MEMLOCK, so a failure is expected on some machines and is not fatal.
+    if args.low_memory
+        && let Err(e) = rustix::mm::mlockall(rustix::mm::MlockAllFlags::CURRENT)
+    {
+        warn!(target: "tasklens::engine", "mlockall failed: {e}");
+    }
     let exit = tl_ui::run(UiLaunch {
         client: Arc::new(engine.clone()),
         init: UiInit {
@@ -277,7 +294,11 @@ fn main() -> ExitCode {
             startup_toasts,
             env,
         },
-        open: OpenMode::Main,
+        open: if args.low_memory {
+            OpenMode::LowMemory
+        } else {
+            OpenMode::Main
+        },
         start: StartOptions {
             tab: args.tab.map(start_tab),
             select_pid: args.select_pid,
