@@ -1,21 +1,39 @@
 //! Services table rows, columns, expansion and persistence (UI-SYS-002, UI-SYS-013).
 
+use std::cell::RefCell;
 use std::hash::BuildHasher as _;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui_kit::{AnyView, AnyWindowHandle, Context, SharedString, Window, px};
+use gpui_kit::assets::IconName;
+use gpui_kit::{
+    AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, IntoElement,
+    ParentElement as _, Render, SharedString, Window, div, px,
+};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use tl_model::demand::Demand;
 use tl_model::health::ManagerState;
 use tl_model::settings::{SortState, UiState};
 use tl_model::snapshot::{
-    ComponentHeader, ComponentMask, ProcessSnapshot, ServiceBackend, ServicesSnapshot, Snapshot,
+    ComponentHeader, ComponentMask, ProcessSnapshot, ServiceBackend, ServiceStatus,
+    ServicesSnapshot, Snapshot, StartupType, UnitRecord,
 };
-use tl_model::table::{Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec};
+use tl_model::table::{
+    Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec, Total, UnitRef, UnitType,
+};
+use tl_model::units;
+use tl_model::units::LocalDateTime;
+use tl_model::validity::Validity;
 
 use crate::components::menu::TlMenu;
+use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::demand::GlobalDemand;
-use crate::pages::sys_table::SysDelegate;
+use crate::i18n::{Strings, tr, tr_en};
+use crate::pages::performance::details::Template;
+use crate::pages::sys_status::{DotStyle, LabelTone, SysStatus, status_look, tone_color};
+use crate::pages::sys_table::{ActionKindTag, SysDelegate};
 use crate::settings_global::TlSettings;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -24,6 +42,7 @@ use crate::table::columns::{
 use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
+use crate::theme::{TlTheme, current};
 
 /// Static metadata for one Services column.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -210,6 +229,340 @@ fn manager_index(manager: Manager) -> usize {
     }
 }
 
+/// The Lucide icon of a unit type (UI-SYS-015).
+pub fn unit_icon(kind: UnitType) -> IconName {
+    match kind {
+        UnitType::Service => IconName::Cog,
+        UnitType::Socket => IconName::Plug,
+        UnitType::Timer => IconName::Clock,
+        UnitType::Mount | UnitType::Automount => IconName::HardDrive,
+        UnitType::Path => IconName::FolderOpen,
+        UnitType::Target => IconName::CircleDot,
+        UnitType::Swap => IconName::MemoryStick,
+        UnitType::Slice | UnitType::Scope => IconName::Box,
+    }
+}
+
+/// The label tone of a Startup type word (UI-SYS-015).
+pub fn startup_type_tone(t: StartupType) -> LabelTone {
+    match t {
+        StartupType::Disabled | StartupType::NoUnitFile => LabelTone::Secondary,
+        StartupType::Masked => LabelTone::Warning,
+        StartupType::Enabled
+        | StartupType::EnabledRuntime
+        | StartupType::Static
+        | StartupType::Indirect
+        | StartupType::Generated
+        | StartupType::Transient
+        | StartupType::Alias
+        | StartupType::Linked => LabelTone::Primary,
+    }
+}
+
+/// The status word of a service status, one to one.
+pub fn service_sys_status(s: ServiceStatus) -> SysStatus {
+    super::copy::status_word(s)
+}
+
+/// The Status label of a unit with `tag` in flight. Actions without an overlay give `None`.
+pub fn overlay_label(words: &ServicesWords, tag: ActionKindTag) -> Option<Arc<str>> {
+    let ix = match tag {
+        ActionKindTag::Start => 0,
+        ActionKindTag::Stop => 1,
+        ActionKindTag::Restart => 2,
+        ActionKindTag::Reload => 3,
+        _ => return None,
+    };
+    Some(words.overlays[ix].clone())
+}
+
+/// Writes the label of a manager group row: "System services (214)", the bare name when the
+/// manager is unavailable, and " (reconnecting…)" after the count while it reconnects.
+pub fn group_label(
+    words: &ServicesWords,
+    manager: Manager,
+    n: u32,
+    state: ManagerState,
+    out: &mut String,
+) {
+    let m = manager_index(manager);
+    if state == ManagerState::Unavailable {
+        out.push_str(&words.group_plain[m]);
+        return;
+    }
+    let _ = words.group_count[m].write(out, &[&CountText(n)]);
+    if state == ManagerState::Reconnecting {
+        out.push(' ');
+        out.push_str(&words.reconnecting);
+    }
+}
+
+/// Writes the accessible name "<id>, <Status>, <Startup type>".
+pub fn unit_accessible_name(words: &ServicesWords, unit: &UnitRecord, out: &mut String) {
+    let _ = words.row_name.write(
+        out,
+        &[
+            &&*unit.unit.name,
+            &&**words.status(unit.status),
+            &&**words.startup(unit.startup),
+        ],
+    );
+}
+
+/// A count written with thin-space groups.
+struct CountText(u32);
+
+impl std::fmt::Display for CountText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = String::new();
+        units::count(&mut s, u64::from(self.0));
+        f.write_str(&s)
+    }
+}
+
+const SERVICE_STATUSES: [ServiceStatus; 8] = [
+    ServiceStatus::Running,
+    ServiceStatus::Active,
+    ServiceStatus::Starting,
+    ServiceStatus::Stopping,
+    ServiceStatus::Reloading,
+    ServiceStatus::Stopped,
+    ServiceStatus::Failed,
+    ServiceStatus::Maintenance,
+];
+
+const STARTUP_KEYS: [&str; 11] = [
+    "services-sys015-enabled",
+    "services-sys015-enabled-runtime",
+    "services-sys015-disabled",
+    "services-sys015-static",
+    "services-sys015-indirect",
+    "services-sys015-masked",
+    "services-sys015-generated",
+    "services-sys015-transient",
+    "services-sys015-alias",
+    "services-sys015-linked",
+    "services-sys015-no-unit-file",
+];
+
+const TYPE_KEYS: [&str; 10] = [
+    "services-sys015-service",
+    "services-sys015-socket",
+    "services-sys015-timer",
+    "services-sys015-mount",
+    "services-sys015-automount",
+    "services-sys015-path",
+    "services-sys015-target",
+    "services-sys015-swap",
+    "services-sys015-slice",
+    "services-sys015-scope",
+];
+
+fn startup_index(t: StartupType) -> usize {
+    match t {
+        StartupType::Enabled => 0,
+        StartupType::EnabledRuntime => 1,
+        StartupType::Disabled => 2,
+        StartupType::Static => 3,
+        StartupType::Indirect => 4,
+        StartupType::Masked => 5,
+        StartupType::Generated => 6,
+        StartupType::Transient => 7,
+        StartupType::Alias => 8,
+        StartupType::Linked => 9,
+        StartupType::NoUnitFile => 10,
+    }
+}
+
+fn type_index(t: UnitType) -> usize {
+    match t {
+        UnitType::Service => 0,
+        UnitType::Socket => 1,
+        UnitType::Timer => 2,
+        UnitType::Mount => 3,
+        UnitType::Automount => 4,
+        UnitType::Path => 5,
+        UnitType::Target => 6,
+        UnitType::Swap => 7,
+        UnitType::Slice => 8,
+        UnitType::Scope => 9,
+    }
+}
+
+/// The raw systemd ActiveState word of a status, for the Status tooltip.
+fn active_word(s: ServiceStatus) -> &'static str {
+    match s {
+        ServiceStatus::Running | ServiceStatus::Active => "active",
+        ServiceStatus::Starting => "activating",
+        ServiceStatus::Stopping => "deactivating",
+        ServiceStatus::Reloading => "reloading",
+        ServiceStatus::Stopped => "inactive",
+        ServiceStatus::Failed => "failed",
+        ServiceStatus::Maintenance => "maintenance",
+    }
+}
+
+/// The Services words, translated once per strings version (R-132).
+#[derive(Clone, Debug)]
+pub struct ServicesWords {
+    /// The strings version, `None` without strings.
+    version: Option<u64>,
+    /// Status labels in [`SERVICE_STATUSES`] order.
+    statuses: [Arc<str>; 8],
+    startups: [Arc<str>; 11],
+    types: [Arc<str>; 10],
+    /// System, User.
+    managers: [Arc<str>; 2],
+    /// Starting, Stopping, Restarting, Reloading.
+    overlays: [Arc<str>; 4],
+    /// "System services ({ $n })" and the user form.
+    group_count: [Template; 2],
+    /// "System services" and the user form.
+    group_plain: [SharedString; 2],
+    not_available: [SharedString; 2],
+    reconnecting: SharedString,
+    group_name: Template,
+    expanded: SharedString,
+    collapsed: SharedString,
+    manager_line: [SharedString; 2],
+    row_name: Template,
+}
+
+impl ServicesWords {
+    /// Every word in the current language, or en-US when no strings are installed.
+    pub fn new(cx: &App) -> Self {
+        match cx.try_global::<Strings>() {
+            Some(s) => Self::build(
+                Some(s.strings_version),
+                |key| tr(cx, key),
+                |key, args| Template::new(cx, key, args),
+            ),
+            None => Self::en(),
+        }
+    }
+
+    /// Every word in en-US.
+    pub fn en() -> Self {
+        Self::build(None, |key| tr_en(key, &[]), Template::en)
+    }
+
+    fn build(
+        version: Option<u64>,
+        text: impl Fn(&str) -> SharedString,
+        template: impl Fn(&str, &[&str]) -> Template,
+    ) -> Self {
+        let arc = |key: &str| -> Arc<str> { Arc::from(&*text(key)) };
+        Self {
+            version,
+            statuses: SERVICE_STATUSES.map(|s| arc(service_sys_status(s).key())),
+            startups: STARTUP_KEYS.map(arc),
+            types: TYPE_KEYS.map(arc),
+            managers: ["services-sys015-system", "services-sys015-user"].map(arc),
+            overlays: [
+                "services-sys018-starting",
+                "services-sys018-stopping",
+                "services-sys018-restarting",
+                "services-sys018-reloading",
+            ]
+            .map(arc),
+            group_count: [
+                template("services-sys014-system-services-n", &["n"]),
+                template("services-sys014-user-services-n", &["n"]),
+            ],
+            group_plain: [
+                text("services-sys014-system-services"),
+                text("services-sys014-user-services"),
+            ],
+            not_available: [
+                text("services-sys014-system-manager-not-available"),
+                text("services-sys014-user-manager-not-available"),
+            ],
+            reconnecting: text("services-sys014-reconnecting"),
+            group_name: template("services-sys014-group-name", &["group", "n", "state"]),
+            expanded: text("services-sys014-expanded"),
+            collapsed: text("services-sys014-collapsed"),
+            manager_line: [
+                text("services-sys015-manager-system"),
+                text("services-sys015-manager-user"),
+            ],
+            row_name: template("services-sys015-row-name", &["id", "status", "startup"]),
+        }
+    }
+
+    fn status(&self, s: ServiceStatus) -> &Arc<str> {
+        &self.statuses[s as usize]
+    }
+
+    fn startup(&self, t: StartupType) -> &Arc<str> {
+        &self.startups[startup_index(t)]
+    }
+}
+
+/// The hovered row's tooltip lines, shared between the delegate and [`ServicesRowTip`].
+#[derive(Default)]
+struct RowTipState {
+    /// (table version, row index) the lines were built for.
+    key: Option<(u64, usize)>,
+    lines: Vec<SharedString>,
+}
+
+/// The Name cell tooltip view: description, unit file path and manager.
+pub struct ServicesRowTip {
+    state: Rc<RefCell<RowTipState>>,
+    built: Option<((u64, usize), Entity<TlTooltip>)>,
+}
+
+impl Render for ServicesRowTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.borrow();
+        let fresh = match (&self.built, state.key) {
+            (Some((built, _)), Some(key)) => *built == key,
+            _ => false,
+        };
+        if !fresh && let Some(key) = state.key {
+            let tip = TlTooltip::lines(state.lines.clone());
+            self.built = Some((key, cx.new(|_| tip)));
+        }
+        div().children(self.built.as_ref().map(|(_, view)| view.clone()))
+    }
+}
+
+/// "YYYY-MM-DD HH:MM:SS" in the system time zone.
+fn local_time(unix_s: u64, out: &mut String) {
+    let Some(z) = i64::try_from(unix_s)
+        .ok()
+        .and_then(|secs| jiff::Timestamp::from_second(secs).ok())
+        .map(|t| t.to_zoned(jiff::tz::TimeZone::system()))
+    else {
+        return;
+    };
+    units::date_time(
+        out,
+        LocalDateTime {
+            year: i32::from(z.year()),
+            month: z.month() as u8,
+            day: z.day() as u8,
+            hour: z.hour() as u8,
+            minute: z.minute() as u8,
+            second: z.second() as u8,
+        },
+    );
+}
+
+/// Fills a metric cell from a `Total`: the bits, the validity and, when asked, the text.
+fn metric<T: Copy>(
+    out: &mut CellOut,
+    total: Total<T>,
+    bits: impl Fn(T) -> u64,
+    write: impl Fn(&mut String, T),
+) {
+    out.validity = total.validity;
+    out.bits = bits(total.value);
+    if out.want_text && matches!(total.validity, Validity::Valid | Validity::Stale) {
+        write(&mut out.text, total.value);
+    }
+}
+
 /// Services rows and table-owned interaction state.
 pub struct ServicesDelegate {
     snap: Arc<ServicesSnapshot>,
@@ -226,6 +579,15 @@ pub struct ServicesDelegate {
     version: u64,
     active: bool,
     window: Option<AnyWindowHandle>,
+    words: ServicesWords,
+    /// `None` until the first `refresh_look`: cells then set no colours.
+    theme: Option<Arc<TlTheme>>,
+    /// Units with an action in flight, for the Status overlay (UI-SYS-018).
+    pending: FxHashMap<UnitRef, ActionKindTag>,
+    /// The Name text of the two group rows, built once per snapshot.
+    group_labels: [SharedString; 2],
+    tip: Rc<RefCell<RowTipState>>,
+    tip_view: Option<AnyView>,
 }
 
 impl ServicesDelegate {
@@ -253,7 +615,128 @@ impl ServicesDelegate {
             version: 0,
             active: false,
             window: None,
+            words: ServicesWords::en(),
+            theme: None,
+            pending: FxHashMap::default(),
+            group_labels: [SharedString::default(), SharedString::default()],
+            tip: Rc::default(),
+            tip_view: None,
         }
+    }
+
+    /// Marks `unit` as having `tag` in flight, or clears the mark with `None`.
+    pub fn set_pending(&mut self, unit: UnitRef, tag: Option<ActionKindTag>) {
+        let changed = match tag {
+            Some(tag) => self.pending.insert(unit, tag) != Some(tag),
+            None => self.pending.remove(&unit).is_some(),
+        };
+        if changed {
+            self.version += 1;
+        }
+    }
+
+    /// Re-reads the words and theme when they changed. Returns true on a change.
+    pub fn refresh_look(&mut self, cx: &App) -> bool {
+        let mut changed = false;
+        let version = cx.try_global::<Strings>().map(|s| s.strings_version);
+        if version != self.words.version {
+            self.words = ServicesWords::new(cx);
+            self.build_group_labels();
+            changed = true;
+        }
+        let theme = current(cx);
+        if self.theme.as_ref().is_none_or(|t| !Arc::ptr_eq(t, theme)) {
+            self.theme = Some(theme.clone());
+            changed = true;
+        }
+        if changed {
+            self.version += 1;
+        }
+        changed
+    }
+
+    fn build_group_labels(&mut self) {
+        for manager in [Manager::System, Manager::User] {
+            let m = manager_index(manager);
+            let state = match self.snap.managers[m] {
+                ManagerState::Reconnecting => ManagerState::Connected,
+                other => other,
+            };
+            let mut text = String::new();
+            group_label(
+                &self.words,
+                manager,
+                self.snap.manager_counts[m],
+                state,
+                &mut text,
+            );
+            self.group_labels[m] = text.into();
+        }
+    }
+
+    fn unit(&self, ix: usize) -> Option<&UnitRecord> {
+        let row = self.rows.get(ix)?;
+        if !matches!(row.node, SysNodeId::Unit(_)) {
+            return None;
+        }
+        self.snap.units.get(row.record? as usize)
+    }
+
+    fn status_cell(&self, unit: &UnitRecord, out: &mut CellOut) {
+        let look = status_look(service_sys_status(unit.status));
+        let overlay = self
+            .pending
+            .get(&unit.unit)
+            .and_then(|tag| overlay_label(&self.words, *tag));
+        if let Some(label) = overlay {
+            out.arc = Some(label);
+            out.dot = Some(DotStyle::Filled(LabelTone::Info));
+            return;
+        }
+        out.arc = Some(self.words.status(unit.status).clone());
+        out.dot = Some(look.dot);
+        if let (Some(theme), true) = (&self.theme, look.label != LabelTone::Primary) {
+            out.text_color = Some(tone_color(look.label, theme, false));
+            out.selected_text_color = Some(tone_color(look.label, theme, true));
+        }
+        if out.want_tooltip {
+            out.tooltip = Some(format!("{} ({})", active_word(unit.status), unit.sub_state).into());
+        }
+    }
+
+    /// The accessible row name: "<id>, <Status>, <Startup type>" for a unit and
+    /// "System services, 214 units, expanded" for a group.
+    pub fn accessible_name(&self, ix: usize) -> Option<String> {
+        let mut out = String::new();
+        if let Some(unit) = self.unit(ix) {
+            unit_accessible_name(&self.words, unit, &mut out);
+            return Some(out);
+        }
+        let SysNodeId::ServiceGroup(manager) = self.rows.get(ix)?.node else {
+            return None;
+        };
+        let m = manager_index(manager);
+        let words = &self.words;
+        if self.snap.managers[m] == ManagerState::Unavailable {
+            out.push_str(&words.group_plain[m]);
+            out.push_str(", ");
+            out.push_str(&words.not_available[m]);
+            return Some(out);
+        }
+        let state = if self.expanded.contains(&SysNodeId::ServiceGroup(manager)) {
+            &words.expanded
+        } else {
+            &words.collapsed
+        };
+        let _ = words.group_name.write(
+            &mut out,
+            &[
+                &&*words.group_plain[m],
+                &CountText(self.snap.manager_counts[m]),
+                &&**state,
+            ],
+        );
+        Some(out)
     }
 
     pub fn default_layout(&self) -> ColumnLayout<SysColumnId> {
@@ -370,8 +853,19 @@ impl TreeTableDelegate for ServicesDelegate {
             _ => None,
         }
     }
-    fn row_flags(&self, _: usize) -> RowFlags {
-        RowFlags::default()
+    fn row_flags(&self, ix: usize) -> RowFlags {
+        match self.unit(ix) {
+            Some(unit)
+                if self.snap.managers[manager_index(unit.manager)]
+                    == ManagerState::Reconnecting =>
+            {
+                RowFlags {
+                    bits: RowFlags::STALE,
+                    ..RowFlags::default()
+                }
+            }
+            _ => RowFlags::default(),
+        }
     }
     fn table_version(&self) -> u64 {
         self.version
@@ -385,18 +879,102 @@ impl TreeTableDelegate for ServicesDelegate {
             .find(|spec| spec.id == id)
             .unwrap_or(&self.specs[0])
     }
-    fn cell(&self, _: usize, _: SysColumnId, _: &mut CellOut) {}
-    fn name_cell(&self, _: usize) -> NameCell {
-        NameCell {
+    fn cell(&self, ix: usize, col: SysColumnId, out: &mut CellOut) {
+        let (Some(unit), SysColumnId::Services(column)) = (self.unit(ix), col) else {
+            return;
+        };
+        let w = &self.words;
+        out.validity = Validity::Valid;
+        match column {
+            ServiceColumn::Name => out.arc = Some(unit.unit.name.clone()),
+            ServiceColumn::DisplayName | ServiceColumn::Description => {
+                out.arc = Some(unit.description.clone());
+            }
+            ServiceColumn::Status => self.status_cell(unit, out),
+            ServiceColumn::StartupType => {
+                out.arc = Some(w.startup(unit.startup).clone());
+                let tone = startup_type_tone(unit.startup);
+                if let (Some(theme), true) = (&self.theme, tone != LabelTone::Primary) {
+                    out.text_color = Some(tone_color(tone, theme, false));
+                    out.selected_text_color = Some(tone_color(tone, theme, true));
+                }
+            }
+            ServiceColumn::Pid => {
+                out.bits = u64::from(unit.main_pid);
+                if out.want_text && unit.main_pid != 0 {
+                    units::count(&mut out.text, u64::from(unit.main_pid));
+                }
+            }
+            ServiceColumn::User => out.arc = Some(unit.user.clone()),
+            ServiceColumn::Path => out.arc = Some(unit.path.clone()),
+            ServiceColumn::Manager => {
+                out.arc = Some(w.managers[manager_index(unit.manager)].clone())
+            }
+            ServiceColumn::UnitType => out.arc = Some(w.types[type_index(unit.kind)].clone()),
+            ServiceColumn::SubState => out.arc = Some(unit.sub_state.clone()),
+            ServiceColumn::LoadState => out.arc = Some(unit.load_state.clone()),
+            ServiceColumn::Cpu => metric(
+                out,
+                unit.cpu_pct,
+                |v| u64::from(v.to_bits()),
+                units::percent,
+            ),
+            ServiceColumn::Memory => metric(out, unit.memory_bytes, |v| v, units::bytes),
+            ServiceColumn::Disk => metric(out, unit.disk_bps, f64::to_bits, units::rate_mib_fixed),
+            ServiceColumn::Tasks => metric(out, unit.tasks, |v| v, units::count),
+            ServiceColumn::ActiveSince => {
+                if let Some(us) = unit.active_since_us {
+                    let secs = us / 1_000_000;
+                    out.bits = secs;
+                    if out.want_text {
+                        local_time(secs, &mut out.text);
+                    }
+                }
+            }
+            ServiceColumn::UnitFile => out.arc = unit.unit_file.clone(),
+            ServiceColumn::TriggeredBy => {
+                out.bits = FxBuildHasher.hash_one(&*unit.triggered_by);
+                if out.want_text {
+                    for (i, id) in unit.triggered_by.iter().enumerate() {
+                        if i > 0 {
+                            out.text.push_str(", ");
+                        }
+                        out.text.push_str(id);
+                    }
+                }
+            }
+        }
+    }
+    fn name_cell(&self, ix: usize) -> NameCell {
+        let mut cell = NameCell {
             icon: NameIcon::None,
             icon_size: IconSlot::Small,
             primary: SharedString::default(),
             count_run: None,
             secondary: None,
-            glyphs: smallvec::SmallVec::new(),
+            glyphs: SmallVec::new(),
             highlight_fffd: false,
             trailing: None,
+        };
+        if let Some(unit) = self.unit(ix) {
+            cell.icon = NameIcon::Lucide(unit_icon(unit.kind));
+            cell.primary = SharedString::from(unit.unit.name.clone());
+        } else if let Some(SysNodeId::ServiceGroup(manager)) = self.rows.get(ix).map(|r| &r.node) {
+            let m = manager_index(*manager);
+            cell.primary = self.group_labels[m].clone();
+            match self.snap.managers[m] {
+                ManagerState::Unavailable => {
+                    cell.glyphs
+                        .push((IconName::CircleAlert, SharedString::default()));
+                    cell.secondary = Some(self.words.not_available[m].clone());
+                }
+                ManagerState::Reconnecting => {
+                    cell.secondary = Some(self.words.reconnecting.clone())
+                }
+                ManagerState::Connected => {}
+            }
         }
+        cell
     }
     fn name_column(&self) -> Option<SysColumnId> {
         Some(service_id(ServiceColumn::Name))
@@ -479,8 +1057,40 @@ impl TreeTableDelegate for ServicesDelegate {
     fn on_activate(&mut self, _: u64, cx: &mut Context<TlTreeTable<Self>>) {
         cx.propagate();
     }
-    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
-        None
+    fn row_tooltip(&self, ix: usize) -> Option<AnyView> {
+        let view = self.tip_view.as_ref()?;
+        let unit = self.unit(ix)?;
+        let key = (self.version, ix);
+        let mut tip = self.tip.borrow_mut();
+        if tip.key != Some(key) {
+            tip.key = Some(key);
+            tip.lines.clear();
+            tip.lines.push(unit.description.clone().into());
+            if let Some(path) = &unit.unit_file {
+                tip.lines.push(path.clone().into());
+            }
+            tip.lines
+                .push(self.words.manager_line[manager_index(unit.manager)].clone());
+            tip.lines.retain(|line| !line.is_empty());
+        }
+        Some(view.clone())
+    }
+    fn cell_tip_delay(&self) -> Duration {
+        DELAY_ROW_NAME
+    }
+    fn before_rows(
+        &mut self,
+        _: std::ops::Range<usize>,
+        _: &mut Window,
+        cx: &mut Context<TlTreeTable<Self>>,
+    ) {
+        if self.tip_view.is_none() {
+            let state = Rc::clone(&self.tip);
+            self.tip_view = Some(cx.new(|_| ServicesRowTip { state, built: None }).into());
+        }
+        if self.refresh_look(cx) {
+            cx.notify();
+        }
     }
     fn empty_text(&self) -> Option<SharedString> {
         None
@@ -514,6 +1124,7 @@ impl SysDelegate for ServicesDelegate {
             .map(|(ix, row)| (row_key(&row.node), ix))
             .collect();
         self.backend = self.snap.backend;
+        self.build_group_labels();
         self.version += 1;
     }
     fn mask(&self) -> ComponentMask {

@@ -2109,3 +2109,250 @@ mod flows {
         assert_eq!(rig.toasts(), ["Switched to service process."]);
     }
 }
+
+// ---- Group and unit cells (UI-SYS-014, UI-SYS-015, UI-SYS-018) ----
+
+use gpui_kit::assets::IconName;
+use tl_model::snapshot::{ServiceStatus, StartupType, UnitRecord};
+use tl_model::table::Total;
+use tl_model::validity::Validity;
+use tl_ui::pages::services::delegate::unit_icon;
+use tl_ui::pages::sys_status::DotStyle;
+use tl_ui::pages::sys_table::ActionKindTag;
+use tl_ui::table::cells::CellOut;
+use tl_ui::table::tree_table::{NameIcon, RowFlags};
+use tl_ui::theme::current;
+
+use tl_ui::pages::sys_status::LabelTone;
+
+fn record(name: &str, kind: UnitType, status: ServiceStatus) -> UnitRecord {
+    UnitRecord {
+        unit: UnitRef {
+            manager: Manager::System,
+            name: Arc::from(name),
+        },
+        kind,
+        description: Arc::from("Secure Shell"),
+        status,
+        sub_state: Arc::from("running"),
+        load_state: Arc::from("loaded"),
+        startup: StartupType::Enabled,
+        main_pid: 0,
+        user: Arc::from("root"),
+        path: Arc::from("/usr/bin/sshd"),
+        unit_file: Some(Arc::from("/usr/lib/systemd/system/sshd.service")),
+        active_since_us: None,
+        triggered_by: Arc::from([]),
+        control_group: None,
+        can_reload: false,
+        has_cgroup_procs: false,
+        cgroup_pids: Arc::from([]),
+        cpu_pct: Total::default(),
+        memory_bytes: Total::default(),
+        disk_bps: Total::default(),
+        tasks: Total::default(),
+    }
+}
+
+/// Group (row 0), then one row per record, then the User group.
+fn delegate(
+    cx: &mut TestAppContext,
+    records: Vec<UnitRecord>,
+    managers: [ManagerState; 2],
+) -> ServicesDelegate {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        let mut d = ServicesDelegate::new(&UiState::default());
+        d.refresh_look(cx);
+        let mut rows = vec![SysRow {
+            node: SysNodeId::ServiceGroup(Manager::System),
+            depth: 0,
+            expanded: true,
+            has_children: true,
+            record: None,
+        }];
+        for (i, r) in records.iter().enumerate() {
+            rows.push(SysRow {
+                node: SysNodeId::Unit(r.unit.clone()),
+                depth: 1,
+                expanded: false,
+                has_children: false,
+                record: Some(i as u32),
+            });
+        }
+        rows.push(SysRow {
+            node: SysNodeId::ServiceGroup(Manager::User),
+            depth: 0,
+            expanded: true,
+            has_children: true,
+            record: None,
+        });
+        let mut snap = Snapshot::empty(BootId(1), 1);
+        snap.services = Arc::new(ServicesSnapshot {
+            rows: rows.into(),
+            units: records.into(),
+            managers,
+            manager_counts: [214, 3],
+            ..ServicesSnapshot::default()
+        });
+        d.install(&Arc::new(snap));
+        d
+    })
+}
+
+fn cell(d: &ServicesDelegate, ix: usize, c: ServiceColumn) -> CellOut {
+    let mut out = CellOut {
+        want_text: true,
+        want_tooltip: true,
+        ..CellOut::default()
+    };
+    d.cell(ix, service_id(c), &mut out);
+    out
+}
+
+const CONNECTED: [ManagerState; 2] = [ManagerState::Connected; 2];
+
+#[gpui_kit::test]
+fn unit_row_icon_per_kind(cx: &mut TestAppContext) {
+    let kinds = [
+        (UnitType::Service, IconName::Cog),
+        (UnitType::Socket, IconName::Plug),
+        (UnitType::Timer, IconName::Clock),
+        (UnitType::Mount, IconName::HardDrive),
+        (UnitType::Automount, IconName::HardDrive),
+        (UnitType::Path, IconName::FolderOpen),
+        (UnitType::Target, IconName::CircleDot),
+        (UnitType::Swap, IconName::MemoryStick),
+        (UnitType::Slice, IconName::Box),
+        (UnitType::Scope, IconName::Box),
+    ];
+    let records = kinds
+        .iter()
+        .map(|(k, _)| record(&format!("u.{k:?}"), *k, ServiceStatus::Running))
+        .collect();
+    let d = delegate(cx, records, CONNECTED);
+    for (i, (kind, icon)) in kinds.iter().enumerate() {
+        assert_eq!(unit_icon(*kind), *icon);
+        assert!(matches!(d.name_cell(i + 1).icon, NameIcon::Lucide(got) if got == *icon));
+    }
+}
+
+#[gpui_kit::test]
+fn unit_row_pid_blank_when_zero(cx: &mut TestAppContext) {
+    let mut running = record("sshd.service", UnitType::Service, ServiceStatus::Running);
+    running.main_pid = 812;
+    let d = delegate(
+        cx,
+        vec![
+            record("a.service", UnitType::Service, ServiceStatus::Stopped),
+            running,
+        ],
+        CONNECTED,
+    );
+    assert_eq!(cell(&d, 1, ServiceColumn::Pid).text, "");
+    assert_eq!(cell(&d, 2, ServiceColumn::Pid).text, "812");
+}
+
+#[gpui_kit::test]
+fn unit_row_masked_warning_color(cx: &mut TestAppContext) {
+    let mut masked = record("x.service", UnitType::Service, ServiceStatus::Stopped);
+    masked.startup = StartupType::Masked;
+    let d = delegate(cx, vec![masked], CONNECTED);
+    let out = cell(&d, 1, ServiceColumn::StartupType);
+    let theme = cx.update(|cx| current(cx).clone());
+    assert_eq!(out.arc.as_deref(), Some("Masked"));
+    assert_eq!(out.text_color, Some(theme.status.warning));
+}
+
+#[gpui_kit::test]
+fn unit_row_pending_overlay_label(cx: &mut TestAppContext) {
+    let stopped = record("a.service", UnitType::Service, ServiceStatus::Stopped);
+    let failed = record("b.service", UnitType::Service, ServiceStatus::Failed);
+    let mut d = delegate(cx, vec![stopped.clone(), failed], CONNECTED);
+    let theme = cx.update(|cx| current(cx).clone());
+    d.set_pending(stopped.unit.clone(), Some(ActionKindTag::Start));
+    let out = cell(&d, 1, ServiceColumn::Status);
+    assert_eq!(out.arc.as_deref(), Some("Starting…"));
+    assert_eq!(out.dot, Some(DotStyle::Filled(LabelTone::Info)));
+    d.set_pending(stopped.unit.clone(), None);
+    assert_eq!(
+        cell(&d, 1, ServiceColumn::Status).arc.as_deref(),
+        Some("Stopped")
+    );
+    let out = cell(&d, 2, ServiceColumn::Status);
+    assert_eq!(out.arc.as_deref(), Some("Failed"));
+    assert_eq!(out.selected_text_color, Some(theme.status.danger));
+}
+
+#[gpui_kit::test]
+fn group_row_unavailable_label(cx: &mut TestAppContext) {
+    let d = delegate(
+        cx,
+        vec![record(
+            "a.service",
+            UnitType::Service,
+            ServiceStatus::Running,
+        )],
+        [ManagerState::Connected, ManagerState::Unavailable],
+    );
+    let cell = d.name_cell(2);
+    assert_eq!(cell.primary, "User services");
+    assert_eq!(cell.glyphs.len(), 1);
+    assert_eq!(cell.glyphs[0].0, IconName::CircleAlert);
+    assert_eq!(
+        cell.secondary.as_deref(),
+        Some("User manager not available")
+    );
+    assert_eq!(d.row_expandable(2), None);
+    assert_eq!(d.name_cell(0).primary, "System services (214)");
+}
+
+#[gpui_kit::test]
+fn group_row_reconnecting_stale_units(cx: &mut TestAppContext) {
+    let mut bare = record("a.service", UnitType::Service, ServiceStatus::Running);
+    bare.cpu_pct = Total {
+        value: 0.0,
+        validity: Validity::Missing,
+    };
+    let d = delegate(
+        cx,
+        vec![bare],
+        [ManagerState::Reconnecting, ManagerState::Connected],
+    );
+    let group = d.name_cell(0);
+    assert_eq!(group.primary, "System services (214)");
+    assert_eq!(group.secondary.as_deref(), Some("(reconnecting…)"));
+    assert!(d.row_flags(1).has(RowFlags::STALE));
+    assert_eq!(cell(&d, 1, ServiceColumn::Cpu).validity, Validity::Missing);
+}
+
+#[gpui_kit::test]
+fn unit_row_tooltips_and_accessible_name(cx: &mut TestAppContext) {
+    let d = delegate(
+        cx,
+        vec![record(
+            "sshd.service",
+            UnitType::Service,
+            ServiceStatus::Running,
+        )],
+        CONNECTED,
+    );
+    assert_eq!(
+        cell(&d, 1, ServiceColumn::Status).tooltip.as_deref(),
+        Some("active (running)")
+    );
+    assert_eq!(
+        d.accessible_name(1).as_deref(),
+        Some("sshd.service, Running, Enabled")
+    );
+    assert_eq!(
+        d.accessible_name(0).as_deref(),
+        Some("System services, 214 units, expanded")
+    );
+}
