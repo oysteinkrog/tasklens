@@ -994,6 +994,9 @@ mod hardware_builders {
             form_factor: s("DIMM"),
             manufacturer: s("Kingston"),
             part_number: s("KF560C30-32"),
+            configured_speed_mts: ok(4800),
+            rank: ok(2),
+            configured_voltage_mv: ok(1100),
         }
     }
 

@@ -383,6 +383,7 @@ pub fn from_raw(raw: &InventoryRaw, root: &SysRoot) -> InventorySnapshot {
     snap.processor = processor_info(raw, root);
     snap.memory = memory_info(root);
     snap.modules = modules(&raw.modules);
+    snap.slots_total = slots_total(&raw.modules);
     snap.firmware = firmware_info(raw);
     snap.board = board_info(&raw.dmi);
     snap
@@ -873,6 +874,19 @@ fn modules(info: &ModulesInfo) -> Arc<[MemoryModule]> {
     modules.iter().map(module).collect()
 }
 
+/// `Unsupported` for `NotReported`, a missing total or a total of 0.
+fn slots_total(info: &ModulesInfo) -> InvField<u32> {
+    match info {
+        ModulesInfo::Modules { slots_total, .. } => nonzero(*slots_total),
+        ModulesInfo::NotReported => with(Validity::Unsupported),
+    }
+}
+
+/// Like `opt`, but a 0 also counts as not reported (DMI uses 0 for unknown).
+fn nonzero(value: Option<u32>) -> InvField<u32> {
+    opt(value.filter(|v| *v != 0))
+}
+
 fn module(m: &inventory::MemoryModule) -> MemoryModule {
     let slot = match (&m.bank_locator, &m.locator) {
         (Some(bank), Some(loc)) => Some(Arc::from(format!("{bank} ({loc})"))),
@@ -887,6 +901,9 @@ fn module(m: &inventory::MemoryModule) -> MemoryModule {
         form_factor: opt(m.form_factor.clone()),
         manufacturer: opt(m.manufacturer.clone()),
         part_number: opt(m.part_number.clone()),
+        configured_speed_mts: nonzero(m.configured_speed_mts),
+        rank: nonzero(m.rank),
+        configured_voltage_mv: nonzero(m.configured_voltage_mv),
     }
 }
 
@@ -1716,6 +1733,72 @@ mod tests {
         assert!(snap.modules.is_empty());
         assert_eq!(snap.firmware.secure_boot.validity, Validity::Unsupported);
         assert_eq!(snap.board.chassis_type.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn slots_total_from_modules_info() {
+        let root = SysRoot::at(Path::new("/nonexistent-tasklens-root"));
+        let mut r = raw("x86_64");
+        r.modules = ModulesInfo::Modules {
+            slots_total: Some(4),
+            modules: Vec::new(),
+        };
+        assert_eq!(from_raw(&r, &root).slots_total, valid(4));
+        r.modules = ModulesInfo::Modules {
+            slots_total: None,
+            modules: Vec::new(),
+        };
+        assert_eq!(
+            from_raw(&r, &root).slots_total.validity,
+            Validity::Unsupported
+        );
+        r.modules = ModulesInfo::NotReported;
+        assert_eq!(
+            from_raw(&r, &root).slots_total.validity,
+            Validity::Unsupported
+        );
+    }
+
+    fn bare_module() -> inventory::MemoryModule {
+        inventory::MemoryModule {
+            index: 0,
+            size_bytes: 0,
+            locator: None,
+            bank_locator: None,
+            speed_mts: None,
+            configured_speed_mts: None,
+            mem_type: None,
+            form_factor: None,
+            manufacturer: None,
+            part_number: None,
+            rank: None,
+            configured_voltage_mv: None,
+        }
+    }
+
+    #[test]
+    fn module_configured_fields() {
+        let full = inventory::MemoryModule {
+            configured_speed_mts: Some(4800),
+            rank: Some(2),
+            configured_voltage_mv: Some(1100),
+            ..bare_module()
+        };
+        let m = module(&full);
+        assert_eq!(m.configured_speed_mts, valid(4800));
+        assert_eq!(m.rank, valid(2));
+        assert_eq!(m.configured_voltage_mv, valid(1100));
+        let zero = inventory::MemoryModule {
+            configured_speed_mts: Some(0),
+            rank: Some(0),
+            configured_voltage_mv: Some(0),
+            ..bare_module()
+        };
+        for m in [module(&zero), module(&bare_module())] {
+            assert_eq!(m.configured_speed_mts.validity, Validity::Unsupported);
+            assert_eq!(m.rank.validity, Validity::Unsupported);
+            assert_eq!(m.configured_voltage_mv.validity, Validity::Unsupported);
+        }
     }
 
     #[test]

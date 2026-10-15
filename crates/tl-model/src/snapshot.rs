@@ -912,6 +912,10 @@ pub struct MemoryModule {
     pub form_factor: InvField<Arc<str>>,
     pub manufacturer: InvField<Arc<str>>,
     pub part_number: InvField<Arc<str>>,
+    /// Configured clock speed, in MT/s.
+    pub configured_speed_mts: InvField<u32>,
+    pub rank: InvField<u32>,
+    pub configured_voltage_mv: InvField<u32>,
 }
 
 /// One disk drive row (PERF-100).
@@ -1033,6 +1037,8 @@ pub struct InventorySnapshot {
     pub system: SystemInfo,
     pub memory: MemoryInfo,
     pub modules: Arc<[MemoryModule]>,
+    /// Memory slots on the board, occupied or not. `Unsupported` when the DMI data lacks it.
+    pub slots_total: InvField<u32>,
     pub disks: Arc<[DiskDrive]>,
     pub firmware: FirmwareInfo,
     pub board: BoardInfo,
@@ -2192,6 +2198,9 @@ mod tests {
             form_factor,
             manufacturer,
             part_number,
+            configured_speed_mts,
+            rank,
+            configured_voltage_mv,
         } = m;
         for v in [
             slot.validity,
@@ -2201,6 +2210,9 @@ mod tests {
             form_factor.validity,
             manufacturer.validity,
             part_number.validity,
+            configured_speed_mts.validity,
+            rank.validity,
+            configured_voltage_mv.validity,
         ] {
             assert_eq!(v, Validity::WarmingUp);
         }
