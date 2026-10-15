@@ -2942,7 +2942,10 @@ mod pick {
             let rows = shown
                 .iter()
                 .map(|&pid| {
-                    let ix = recs.iter().position(|r| r.key.pid == pid).unwrap();
+                    let ix = recs
+                        .iter()
+                        .position(|r| r.key.pid == pid)
+                        .expect("shown pid is a record");
                     row(NodeId::Process(key(pid)), 0, Some(ix as u32), None)
                 })
                 .collect();
@@ -3015,7 +3018,7 @@ mod pick {
         fn dialog(&mut self) -> (VisualTestContext, Entity<TlDialogView>) {
             let mut open = self.dialogs();
             assert_eq!(open.len(), 1, "one confirmation");
-            let (any, view) = open.pop().unwrap();
+            let (any, view) = open.pop().expect("a confirmation");
             let mut vcx = VisualTestContext::from_window(any, &self.vcx.cx);
             vcx.update(|window, _| window.activate_window());
             vcx.run_until_parked();
