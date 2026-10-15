@@ -3,7 +3,7 @@
 //! (tasklens-8fx.22), and queries on strip window, metric and selection changes
 //! (tasklens-8fx.38), and the timeline strip's cached geometry and gap bands (tasklens-8fx.24), and
 //! the filter text typed before the page existed (tasklens-8fx.39), and the top-3 hover card
-//! (tasklens-8fx.26), and the minimap (tasklens-8fx.27).
+//! (tasklens-8fx.26), and the minimap (tasklens-8fx.27), and the legend chips (tasklens-8fx.28).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -1050,6 +1050,14 @@ fn filter_typed_before_history_mode_applies(cx: &mut TestAppContext) {
 
 /// A page with the History keys bound, a view whose span is 100..1000 s and the strip focused.
 fn keys_page(cx: &mut TestAppContext) -> (Entity<HistoryPage>, &mut VisualTestContext) {
+    let (page, _, vcx) = keys_page_engine(cx);
+    (page, vcx)
+}
+
+/// [`keys_page`] that also returns the fake engine.
+fn keys_page_engine(
+    cx: &mut TestAppContext,
+) -> (Entity<HistoryPage>, Arc<FakeEngine>, &mut VisualTestContext) {
     let engine = init(cx);
     cx.update(bind_keys_history);
     let (page, vcx) = cx.add_window_view(HistoryPage::new);
@@ -1068,7 +1076,7 @@ fn keys_page(cx: &mut TestAppContext) -> (Entity<HistoryPage>, &mut VisualTestCo
     let focus = vcx.read_entity(&page, |p, _| p.strip_focus().clone());
     vcx.update(|window, cx| window.focus(&focus, cx));
     draw(vcx);
-    (page, vcx)
+    (page, engine, vcx)
 }
 
 fn scrub_of(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) -> Option<TimeNs> {
@@ -2323,4 +2331,106 @@ fn minimap_metric_change_asks_overview(cx: &mut TestAppContext) {
         overview(&sent[2].2),
         "the new metric's overview is asked at once"
     );
+}
+
+/// Clicks the centre of the element with debug selector `id`.
+fn click_selector(vcx: &mut VisualTestContext, id: &'static str) {
+    use gpui_kit::{Modifiers, MouseButton};
+    let b = vcx
+        .debug_bounds(id)
+        .unwrap_or_else(|| panic!("{id} is not drawn"));
+    let p = b.center();
+    vcx.simulate_mouse_move(p, None, Modifiers::none());
+    vcx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_up(p, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+}
+
+#[gpui_kit::test]
+fn legend_single_active_metric(cx: &mut TestAppContext) {
+    use tl_ui::pages::processes::history::legend::legend_model;
+    let (page, engine, vcx) = keys_page_engine(cx);
+    let metric = |vcx: &mut VisualTestContext| {
+        vcx.read_entity(&page, |p, _| legend_model(p.state(), None).metric)
+    };
+    assert_eq!(metric(vcx), HistoryMetric::Cpu);
+    for id in [
+        "history-chip-cpu",
+        "history-chip-memory",
+        "history-chip-disk",
+        "history-chip-network",
+        "history-chip-gpu",
+    ] {
+        assert!(vcx.debug_bounds(id).is_some(), "{id} is drawn");
+    }
+    click_selector(vcx, "history-chip-memory");
+    assert_eq!(metric(vcx), HistoryMetric::Memory);
+    advance(vcx, Duration::from_secs(1));
+    let sent = queries(&engine);
+    let last = sent.last().expect("a query was sent");
+    assert!(
+        matches!(
+            last.2,
+            HistoryWhat::Frame {
+                metric: HistoryMetric::Memory,
+                ..
+            }
+        ),
+        "{:?}",
+        last.2
+    );
+}
+
+#[gpui_kit::test]
+fn process_chip_added_on_select_removed_on_x(cx: &mut TestAppContext) {
+    use tl_ui::pages::processes::history::legend::legend_model;
+    let (page, engine, vcx) = keys_page_engine(cx);
+    publish_rows(
+        &engine,
+        vcx,
+        HistoryRange::At(700 * S),
+        vec![prow(4321, "firefox", 5.0)],
+    );
+    page.update(vcx, |p, cx| p.set_selected(vec![key(4321)], cx));
+    settle(vcx);
+    let label = vcx.read_entity(&page, |p, _| {
+        legend_model(p.state(), p.view().map(|v| &**v))
+            .chips
+            .first()
+            .map(|c| c.1.to_string())
+    });
+    assert_eq!(label.as_deref(), Some("firefox (4321)"));
+    click_selector(vcx, "history-chip-proc-0");
+    assert!(vcx.read_entity(&page, |p, _| p.state().selected.is_empty()));
+    assert_eq!(with_table(&page, vcx, |t| t.selection.len()), 0);
+    assert!(vcx.debug_bounds("history-chip-proc-0").is_none());
+}
+
+#[gpui_kit::test]
+fn chip_overflow_plus_n(cx: &mut TestAppContext) {
+    use tl_ui::pages::processes::history::legend::{LegendWords, legend_model};
+    let state = HistoryUiState {
+        selected: (1..=10).map(key).collect(),
+        ..HistoryUiState::default()
+    };
+    let legend = legend_model(&state, None);
+    assert_eq!(legend.chips.len(), 8);
+    assert_eq!(legend.more, 2);
+    let words = LegendWords::default();
+    let mut text = String::new();
+    words.more.write(&mut text, &[&legend.more]).unwrap();
+    assert_eq!(text, "+2");
+    let _ = cx;
+}
+
+#[test]
+fn series_colours_distinct_for_8() {
+    use tl_ui::pages::processes::history::scrubber::series_color;
+    let accent = gpui_kit::hsla(0.6, 0.7, 0.5, 1.0);
+    let colours: Vec<_> = (0..8).map(|k| series_color(accent, k)).collect();
+    for (i, a) in colours.iter().enumerate() {
+        for b in &colours[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
 }

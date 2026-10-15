@@ -19,6 +19,7 @@
 
 pub mod actions;
 pub mod hover;
+pub mod legend;
 pub mod minimap;
 pub mod scrubber;
 pub mod table;
@@ -41,11 +42,12 @@ use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime};
 
 use self::actions::{
-    DeleteFromHistory, HISTORY_CONTEXT, HistoryLive, HistoryMetricCpu, HistoryMetricDisk,
-    HistoryMetricGpu, HistoryMetricMemory, HistoryMetricNetwork, HistoryOldest, HistoryScrub,
-    HistorySetRange, HistoryShowInLiveTable, HistoryStepBack, HistoryStepBackMinute,
+    DeleteFromHistory, HISTORY_CONTEXT, HistoryClearProcess, HistoryLive, HistoryMetricCpu,
+    HistoryMetricDisk, HistoryMetricGpu, HistoryMetricMemory, HistoryMetricNetwork, HistoryOldest,
+    HistoryScrub, HistorySetRange, HistoryShowInLiveTable, HistoryStepBack, HistoryStepBackMinute,
     HistoryStepForward, HistoryStepForwardMinute, SCRUBBED,
 };
+use self::legend::{LegendWords, legend_model, render_legend};
 use crate::components::toast::ToastKind;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
@@ -426,6 +428,7 @@ pub struct HistoryPage {
     /// The last installed `Snapshot.history`.
     pub(crate) view: Option<Arc<HistoryView>>,
     words: HistoryWords,
+    legend_words: LegendWords,
     /// The shown header text, and a reused buffer for the next one.
     header: SharedString,
     scratch: String,
@@ -562,14 +565,19 @@ impl HistoryPage {
         let section_versions = cx
             .try_global::<TlSettings>()
             .map_or([0; 3], |tl| SECTIONS.map(|s| tl.version(s)));
-        let (words, strings_version) = match cx.try_global::<Strings>() {
-            Some(s) => (HistoryWords::new(cx), s.strings_version),
-            None => (HistoryWords::default(), 0),
+        let (words, legend_words, strings_version) = match cx.try_global::<Strings>() {
+            Some(s) => (
+                HistoryWords::new(cx),
+                LegendWords::new(cx),
+                s.strings_version,
+            ),
+            None => (HistoryWords::default(), LegendWords::default(), 0),
         };
         let mut page = Self {
             state: HistoryUiState::default(),
             view: None,
             words,
+            legend_words,
             header: SharedString::default(),
             scratch: String::with_capacity(96),
             strings_version,
@@ -616,6 +624,12 @@ impl HistoryPage {
 
     pub fn table(&self) -> &Entity<TlTreeTable<HistoryTableDelegate>> {
         &self.table
+    }
+
+    /// The last installed view, for the legend's chip names.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn view(&self) -> Option<&Arc<HistoryView>> {
+        self.view.as_ref()
     }
 
     /// The strip's cache, for its build counter and painted gap bands.
@@ -940,6 +954,7 @@ impl HistoryPage {
         }
         self.strings_version = version;
         self.words = HistoryWords::new(cx);
+        self.legend_words = LegendWords::new(cx);
         self.refresh_header();
         self.table.update(cx, |t, cx| {
             t.delegate.refresh_strings(cx);
@@ -1093,6 +1108,23 @@ impl HistoryPage {
         self.set_selected(selected, cx);
     }
 
+    /// Legend chip ×: drops one process from the selection and the table.
+    fn on_clear_process(
+        &mut self,
+        action: &HistoryClearProcess,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self
+            .state
+            .selected
+            .iter()
+            .copied()
+            .filter(|k| *k != action.key)
+            .collect();
+        self.set_selected(selected, cx);
+    }
+
     /// Show in live table: the first captured row that is running.
     fn on_show_live(
         &mut self,
@@ -1168,7 +1200,7 @@ enum CopyKind {
 }
 
 impl Render for HistoryPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let page = cx.entity();
@@ -1191,6 +1223,12 @@ impl Render for HistoryPage {
                 })
             })
             .clone();
+        let legend = render_legend(
+            &legend_model(&self.state, self.view.as_deref()),
+            &self.legend_words,
+            window,
+            cx,
+        );
         let m = metrics(cx);
         let theme = current(cx);
         let scale = m.ui_scale;
@@ -1203,7 +1241,8 @@ impl Render for HistoryPage {
             .px(margin)
             .text_size(m.text.base)
             .text_color(theme.text_primary)
-            .child(self.header.clone());
+            .child(div().flex_1().min_w_0().child(self.header.clone()))
+            .child(legend);
         // E30-026 adds the 28 px recording-off banner slot here.
         let mut strip = div()
             .flex_none()
@@ -1259,6 +1298,7 @@ impl Render for HistoryPage {
             .on_action(cx.listener(Self::on_copy_all_metrics))
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_show_live))
+            .on_action(cx.listener(Self::on_clear_process))
             .on_action(cx.listener(Self::on_open_properties))
             .on_action(cx.listener(|this, _: &HistoryMetricCpu, _, cx| {
                 this.on_metric(HistoryMetric::Cpu, cx)

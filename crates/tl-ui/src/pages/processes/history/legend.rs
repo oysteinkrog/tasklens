@@ -134,16 +134,24 @@ fn metric_action(metric: HistoryMetric) -> Box<dyn Action> {
 }
 
 /// One chip: dot, label and optional trailing ×, dispatching `action` on click.
-fn chip(
+struct Chip {
     id: SharedString,
     label: SharedString,
     dot: Option<Hsla>,
     on: bool,
     clearable: bool,
     action: Box<dyn Action>,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+}
+
+fn chip(c: Chip, window: &mut Window, cx: &mut App) -> AnyElement {
+    let Chip {
+        id,
+        label,
+        dot,
+        on,
+        clearable,
+        action,
+    } = c;
     let theme = current(cx).clone();
     let m = *metrics(cx);
     let focus: FocusHandle = window
@@ -215,28 +223,26 @@ pub fn render_legend(
         .gap(m.sp[2]);
     for (i, (metric, name, _)) in METRICS.iter().enumerate() {
         let on = *metric == legend.metric;
-        row = row.child(chip(
-            SharedString::from(format!("history-chip-{name}")),
-            words.metrics[i].clone(),
-            on.then(|| metric_line(&theme, *metric)),
+        let c = Chip {
+            id: SharedString::from(format!("history-chip-{name}")),
+            label: words.metrics[i].clone(),
+            dot: on.then(|| metric_line(&theme, *metric)),
             on,
-            false,
-            metric_action(*metric),
-            window,
-            cx,
-        ));
+            clearable: false,
+            action: metric_action(*metric),
+        };
+        row = row.child(chip(c, window, cx));
     }
     for (i, (key, label)) in legend.chips.iter().enumerate() {
-        row = row.child(chip(
-            SharedString::from(format!("history-chip-proc-{i}")),
-            label.clone(),
-            Some(series_color(theme.accent, i)),
-            false,
-            true,
-            Box::new(HistoryClearProcess { key: *key }),
-            window,
-            cx,
-        ));
+        let c = Chip {
+            id: SharedString::from(format!("history-chip-proc-{i}")),
+            label: label.clone(),
+            dot: Some(series_color(theme.accent, i)),
+            on: false,
+            clearable: true,
+            action: Box::new(HistoryClearProcess { key: *key }),
+        };
+        row = row.child(chip(c, window, cx));
     }
     if legend.more > 0 {
         let mut text = String::new();
