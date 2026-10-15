@@ -18,13 +18,16 @@ use std::net::Ipv6Addr;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{Icon, h_flex};
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, EntityId,
-    FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, canvas, div, fill,
-    point, px, size,
+    FocusHandle, Focusable, Global, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, canvas, div,
+    fill, point, px, size,
 };
 use smallvec::{SmallVec, smallvec};
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
@@ -36,19 +39,22 @@ use tl_model::time::now_boot_ns;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
-use super::actions::NoOp;
+use super::actions::{NoOp, PerfOpenNetworkSettings};
 use super::details::{Fallback, KeyValueModel};
 use super::page::{
     DetailsLinkClick, DetailsValuePrefix, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text,
     page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
+use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::actions::SetSetting;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
+use crate::components::link::TlLink;
 use crate::components::menu::{TlMenu, open_context_menu_at};
+use crate::components::toast::ToastQueue;
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
@@ -61,6 +67,40 @@ pub const THROUGHPUT_ID: &str = "perf-net-throughput";
 const KEY_THROUGHPUT: &str = "perf-net-heading-throughput";
 const KEY_DOWNLOAD: &str = "perf-net-legend-download";
 const KEY_UPLOAD: &str = "perf-net-legend-upload";
+const KEY_SETTINGS_LINK: &str = "perf-net-settings-link";
+const KEY_SETTINGS_FAILED: &str = "perf-net-settings-failed";
+
+/// Debug selector of the Network settings link.
+pub const SETTINGS_LINK_ID: &str = "perf-net-settings-link";
+/// KDE: the network module of System Settings (PERF-061).
+const KDE_SETTINGS_COMMAND: &str = "kcmshell6 kcm_networkmanagement";
+
+/// The desktops that have a network settings panel to open (PERF-061).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsDesktop {
+    Kde,
+    Gnome,
+}
+
+/// The desktop from `XDG_CURRENT_DESKTOP`, a colon list: an exact entry `KDE` or `GNOME`. KDE
+/// wins when both are present.
+pub fn settings_desktop(xdg: Option<&str>) -> Option<SettingsDesktop> {
+    let xdg = xdg?;
+    let has = |name| xdg.split(':').any(|e| e == name);
+    if has("KDE") {
+        Some(SettingsDesktop::Kde)
+    } else if has("GNOME") {
+        Some(SettingsDesktop::Gnome)
+    } else {
+        None
+    }
+}
+
+/// The desktop the Network settings link opens, read once from `XDG_CURRENT_DESKTOP` by the first
+/// Network page (there is no shell-wide desktop global); a test may set it first.
+pub struct NetSettingsDesktop(pub Option<SettingsDesktop>);
+
+impl Global for NetSettingsDesktop {}
 
 const NS_PER_S: u64 = 1_000_000_000;
 /// Alpha of the upload line against `net_line`.
@@ -76,6 +116,8 @@ pub struct Words {
     pub throughput: SharedString,
     pub download: SharedString,
     pub upload: SharedString,
+    pub settings_link: SharedString,
+    pub settings_failed: SharedString,
 }
 
 impl Words {
@@ -90,6 +132,8 @@ impl Words {
         self.throughput = t(KEY_THROUGHPUT);
         self.download = t(KEY_DOWNLOAD);
         self.upload = t(KEY_UPLOAD);
+        self.settings_link = t(KEY_SETTINGS_LINK);
+        self.settings_failed = t(KEY_SETTINGS_FAILED);
         true
     }
 }
@@ -906,6 +950,10 @@ pub struct NetPage {
     link_focus: Rc<[(usize, FocusHandle)]>,
     /// The Wi-Fi signal strength the Signal row's icon shows; `None` without Wi-Fi data.
     signal: Option<u8>,
+    /// The desktop whose network settings the link opens; `None` hides the link and the menu item.
+    settings_desktop: Option<SettingsDesktop>,
+    /// The Network settings link's focus handle, after `unit_focus` in `focus_order`.
+    settings_focus: FocusHandle,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -926,6 +974,11 @@ impl NetPage {
         let wifi = row.net_class == Some(NetClass::Wireless);
         let mut words = Words::default();
         words.refresh(cx);
+        if !cx.has_global::<NetSettingsDesktop>() {
+            let xdg = std::env::var("XDG_CURRENT_DESKTOP").ok();
+            cx.set_global(NetSettingsDesktop(settings_desktop(xdg.as_deref())));
+        }
+        let settings_desktop = cx.global::<NetSettingsDesktop>().0;
 
         let throughput = {
             let y = throughput_scale(settings.dynamic_scale, link_speed, settings.unit);
@@ -971,6 +1024,8 @@ impl NetPage {
             unit_focus: cx.focus_handle(),
             link_focus: Rc::from(Vec::new()),
             signal: None,
+            settings_desktop,
+            settings_focus: cx.focus_handle(),
             link_click: {
                 let page = cx.weak_entity();
                 Rc::new(move |n, bounds, window, cx| {
@@ -983,6 +1038,56 @@ impl NetPage {
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this
+    }
+
+    /// Opens the desktop's network settings through the action tracker (PERF-061). Only a failure
+    /// shows a toast.
+    fn on_open_network_settings(
+        &mut self,
+        _: &PerfOpenNetworkSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(what) = self.settings_launch() else {
+            return;
+        };
+        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+            return;
+        };
+        let Some(queue) = ToastQueue::of_window(window, cx) else {
+            return;
+        };
+        let request = ActionRequest {
+            id: ActionId(0),
+            kind: ActionKind::Launch(LaunchSpec {
+                what,
+                as_admin: false,
+                cwd: None,
+            }),
+            targets: SmallVec::new(),
+            privileged: false,
+        };
+        let texts = ToastTexts::new(SharedString::default(), self.words.settings_failed.clone());
+        tracker.update(cx, |t, cx| {
+            t.track_or_toast(request, queue.downgrade(), texts, cx);
+        });
+    }
+
+    /// What to launch for this desktop. GNOME opens the Wi-Fi panel for a wireless interface and
+    /// the Network panel otherwise.
+    fn settings_launch(&self) -> Option<LaunchWhat> {
+        Some(match self.settings_desktop? {
+            SettingsDesktop::Kde => LaunchWhat::Command(KDE_SETTINGS_COMMAND.into()),
+            SettingsDesktop::Gnome => {
+                let wifi = self.row.net_class == Some(NetClass::Wireless);
+                LaunchWhat::DbusActivate {
+                    bus_name: "org.gnome.Settings".into(),
+                    object_path: "/org/gnome/Settings".into(),
+                    action: "launch-panel".into(),
+                    parameter: Some(if wifi { "wifi" } else { "network" }.into()),
+                }
+            }
+        })
     }
 
     pub fn throughput(&self) -> &Entity<ChartView> {
@@ -1252,13 +1357,42 @@ impl DevicePage for NetPage {
         &self.details
     }
 
-    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
-        SmallVec::new()
+    /// The Network settings link row, on KDE and GNOME only.
+    fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
+        let mut out = SmallVec::new();
+        if self.settings_desktop.is_some() {
+            let (m, theme) = (*metrics(cx), current(cx).clone());
+            let link = TlLink::new(
+                SETTINGS_LINK_ID,
+                self.words.settings_link.clone(),
+                Box::new(PerfOpenNetworkSettings),
+            )
+            .focus_handle(self.settings_focus.clone());
+            out.push(
+                h_flex()
+                    .debug_selector(|| SETTINGS_LINK_ID.into())
+                    .gap(m.sp[3])
+                    .child(link)
+                    .child(
+                        Icon::new(IconName::ExternalLink)
+                            .size(m.icon.xs)
+                            .text_color(theme.status.info),
+                    )
+                    .into_any_element(),
+            );
+        }
+        out
     }
 
-    /// None in P1; E25-031 adds "Network settings" in P3.
+    /// "Network settings" on KDE and GNOME only.
     fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
-        menu
+        if self.settings_desktop.is_none() {
+            return menu;
+        }
+        menu.item(
+            self.words.settings_link.clone(),
+            Box::new(PerfOpenNetworkSettings),
+        )
     }
 
     /// E25-029 replaces this with the full Network copy text.
@@ -1268,9 +1402,14 @@ impl DevicePage for NetPage {
         self.details.copy_into(out);
     }
 
-    /// No header toggles; the Display unit link is the page's one block control.
+    /// No header toggles; the Display unit link and the Network settings link (when shown) are the
+    /// page's block controls.
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
-        smallvec![self.unit_focus.clone()]
+        let mut out = smallvec![self.unit_focus.clone()];
+        if self.settings_desktop.is_some() {
+            out.push(self.settings_focus.clone());
+        }
+        out
     }
 
     fn details_link_focus(&self) -> Option<Rc<[(usize, FocusHandle)]>> {
@@ -1339,14 +1478,18 @@ impl Render for NetPage {
         self.details.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        div().size_full().track_focus(&self.focus).child(
-            DevicePageFrame {
-                page: self,
-                m: &m,
-                theme: &theme,
-            }
-            .render(window, cx),
-        )
+        div()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_open_network_settings))
+            .child(
+                DevicePageFrame {
+                    page: self,
+                    m: &m,
+                    theme: &theme,
+                }
+                .render(window, cx),
+            )
     }
 }
 

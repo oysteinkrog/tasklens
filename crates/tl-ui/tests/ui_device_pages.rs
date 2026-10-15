@@ -2325,3 +2325,250 @@ fn no_serial_in_copy_text(cx: &mut TestAppContext) {
         assert!(!text.to_lowercase().contains("serial"), "{text}");
     });
 }
+
+mod net_settings {
+    use super::*;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point};
+    use tl_model::actions::{
+        ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, LaunchSpec, LaunchWhat,
+    };
+    use tl_model::command::Command;
+    use tl_ui::action_tracker::{ActionTracker, GlobalActionTracker};
+    use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
+    use tl_ui::components::toast::{self, ToastQueue};
+    use tl_ui::pages::performance::PAGE_PANEL_ID;
+    use tl_ui::pages::performance::actions::PerfOpenNetworkSettings;
+    use tl_ui::pages::performance::net::{
+        NetSettingsDesktop, SETTINGS_LINK_ID, SettingsDesktop, settings_desktop,
+    };
+
+    const NET: &str = "net:enp38s0";
+
+    /// The Performance tab inside a kit `Root` with a toast queue and an action tracker, the
+    /// Network settings desktop set to `desktop`.
+    fn open_root(
+        cx: &mut TestAppContext,
+        desktop: Option<SettingsDesktop>,
+    ) -> (
+        Arc<FakeEngine>,
+        VisualTestContext,
+        Entity<PerformancePage>,
+        Entity<ToastQueue>,
+    ) {
+        let engine = install(cx);
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            toast::init(cx);
+            cx.set_global(NetSettingsDesktop(desktop));
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
+        let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
+        let root_page = page.clone();
+        let window = cx.add_window(move |window, cx| Root::new(root_page, window, cx));
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(1280.), px(800.)));
+        let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
+        vcx.update(|_, cx| {
+            let tracker = cx.new(|cx| ActionTracker::new(client, cx));
+            cx.set_global(GlobalActionTracker(tracker));
+        });
+        draw(&mut vcx);
+        (engine, vcx, page, queue)
+    }
+
+    fn net_page(r: &mut Rig) -> Entity<NetPage> {
+        view_of(r, NET).downcast::<NetPage>().expect("a NetPage")
+    }
+
+    fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    fn menu_labels(r: &mut Rig) -> Vec<String> {
+        let at = r
+            .vcx
+            .debug_bounds(PAGE_PANEL_ID)
+            .expect("the page panel")
+            .center();
+        right_click(r.vcx, at);
+        let menu: Entity<TlMenuPopup> = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("a context menu is open");
+        r.vcx.update(|window, cx| {
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .filter(|e| e.kind != MenuEntryKind::Separator)
+                .map(|e| e.label.map(|l| l.to_string()).unwrap_or_default())
+                .collect()
+        })
+    }
+
+    fn launches(engine: &FakeEngine) -> Vec<ActionRequest> {
+        engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(request) => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn open_settings(r: &mut Rig) {
+        let page = net_page(r);
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            focus.dispatch_action(&PerfOpenNetworkSettings, window, cx);
+        });
+        r.vcx.run_until_parked();
+    }
+
+    #[test]
+    fn desktop_from_xdg_list() {
+        assert_eq!(settings_desktop(Some("KDE")), Some(SettingsDesktop::Kde));
+        assert_eq!(
+            settings_desktop(Some("ubuntu:GNOME")),
+            Some(SettingsDesktop::Gnome)
+        );
+        assert_eq!(
+            settings_desktop(Some("GNOME:KDE")),
+            Some(SettingsDesktop::Kde)
+        );
+        assert_eq!(settings_desktop(Some("sway")), None);
+        assert_eq!(settings_desktop(Some("kde")), None);
+        assert_eq!(settings_desktop(None), None);
+    }
+
+    #[gpui_kit::test]
+    fn network_settings_link_visibility(cx: &mut TestAppContext) {
+        let (engine, mut vcx, page, _queue) = open_root(cx, Some(SettingsDesktop::Kde));
+        let mut r = Rig {
+            page,
+            engine,
+            vcx: &mut vcx,
+        };
+        select(&mut r, NET);
+        assert!(r.vcx.debug_bounds(SETTINGS_LINK_ID).is_some(), "link row");
+        assert!(menu_labels(&mut r).contains(&"Network settings".to_owned()));
+        let net = net_page(&mut r);
+        assert_eq!(r.vcx.update(|_, cx| net.read(cx).focus_order().len()), 2);
+
+        let (engine, mut vcx, page, _queue) = open_root(cx, None);
+        let mut r = Rig {
+            page,
+            engine,
+            vcx: &mut vcx,
+        };
+        select(&mut r, NET);
+        assert!(
+            r.vcx.debug_bounds(SETTINGS_LINK_ID).is_none(),
+            "no link row"
+        );
+        assert!(!menu_labels(&mut r).contains(&"Network settings".to_owned()));
+        let net = net_page(&mut r);
+        assert_eq!(r.vcx.update(|_, cx| net.read(cx).focus_order().len()), 1);
+    }
+
+    #[gpui_kit::test]
+    fn network_settings_launch_kde(cx: &mut TestAppContext) {
+        let (engine, mut vcx, page, _queue) = open_root(cx, Some(SettingsDesktop::Kde));
+        let mut r = Rig {
+            page,
+            engine,
+            vcx: &mut vcx,
+        };
+        select(&mut r, NET);
+        open_settings(&mut r);
+        let sent = launches(&r.engine);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::Launch(LaunchSpec {
+                what: LaunchWhat::Command("kcmshell6 kcm_networkmanagement".into()),
+                as_admin: false,
+                cwd: None,
+            })
+        );
+        assert!(sent[0].targets.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn network_settings_launch_gnome(cx: &mut TestAppContext) {
+        let (engine, mut vcx, page, _queue) = open_root(cx, Some(SettingsDesktop::Gnome));
+        let mut r = Rig {
+            page,
+            engine,
+            vcx: &mut vcx,
+        };
+        select(&mut r, NET);
+        open_settings(&mut r);
+        let sent = launches(&r.engine);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::Launch(LaunchSpec {
+                what: LaunchWhat::DbusActivate {
+                    bus_name: "org.gnome.Settings".into(),
+                    object_path: "/org/gnome/Settings".into(),
+                    action: "launch-panel".into(),
+                    parameter: Some("network".into()),
+                },
+                as_admin: false,
+                cwd: None,
+            })
+        );
+    }
+
+    #[gpui_kit::test]
+    fn network_settings_failure_toast(cx: &mut TestAppContext) {
+        let (engine, mut vcx, page, _queue) = open_root(cx, Some(SettingsDesktop::Kde));
+        let mut r = Rig {
+            page,
+            engine,
+            vcx: &mut vcx,
+        };
+        select(&mut r, NET);
+        open_settings(&mut r);
+        let sent = launches(&r.engine);
+        r.engine.emit(ActionEvent {
+            id: sent[0].id,
+            target: None,
+            state: ActionState::Failed(ActionError::PermissionDenied),
+        });
+        draw(r.vcx);
+        let texts: Vec<String> = r.vcx.update(|window, cx| {
+            ToastQueue::of_window(window, cx)
+                .expect("toast queue")
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        });
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(
+            texts[0].starts_with("Could not open network settings."),
+            "{texts:?}"
+        );
+    }
+}
