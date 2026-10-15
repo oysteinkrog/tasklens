@@ -1150,3 +1150,357 @@ Start type: Enabled\nPID: \nUser: root\nBinary: ";
         assert_eq!(ids, [row_key(&sshd_node()), row_key(&cron_node())]);
     }
 }
+
+/// Services unit row menu (tasklens-hk6.17).
+mod menu_tests {
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use smallvec::SmallVec;
+    use tl_model::actions::{ActionKind, ActionTarget};
+    use tl_model::client::EngineClient;
+    use tl_model::ids::ProcessKey;
+    use tl_model::snapshot::{
+        ServiceBackend, ServiceStatus, ServicesSnapshot, StartupType, UnitRecord,
+    };
+    use tl_model::table::{Manager, SysColumnId, SysNodeId, Total, UnitRef, UnitType};
+    use tl_model::time::BootId;
+    use tl_model::validity::Validity;
+    use tl_ui::action_tracker::ActionTracker;
+    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenuPopup};
+    use tl_ui::pages::services::menu::{MenuChoice, ServiceMenuTargets, menu_choice, service_menu};
+    use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
+
+    use super::*;
+
+    const BUSY: &str = "A service action is already in progress.";
+
+    fn a(s: &str) -> Arc<str> {
+        Arc::from(s)
+    }
+
+    fn missing<T: Default>() -> Total<T> {
+        Total {
+            value: T::default(),
+            validity: Validity::Missing,
+        }
+    }
+
+    fn unit_ref(name: &str) -> UnitRef {
+        UnitRef {
+            manager: Manager::System,
+            name: a(name),
+        }
+    }
+
+    fn unit_record(name: &str, status: ServiceStatus, startup: StartupType) -> UnitRecord {
+        UnitRecord {
+            unit: unit_ref(name),
+            kind: UnitType::Service,
+            description: a("Unit"),
+            status,
+            sub_state: a("running"),
+            load_state: a("loaded"),
+            startup,
+            main_pid: 812,
+            user: a("root"),
+            path: a("/usr/bin/daemon"),
+            unit_file: Some(a("/usr/lib/systemd/system/daemon.service")),
+            active_since_us: None,
+            triggered_by: Arc::from([]),
+            control_group: None,
+            can_reload: false,
+            has_cgroup_procs: false,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: missing(),
+            memory_bytes: missing(),
+            disk_bps: missing(),
+            tasks: missing(),
+        }
+    }
+
+    fn snapshot(units: Vec<UnitRecord>) -> ServicesSnapshot {
+        ServicesSnapshot {
+            units: units.into(),
+            ..ServicesSnapshot::default()
+        }
+    }
+
+    fn node(name: &str) -> SysNodeId {
+        SysNodeId::Unit(unit_ref(name))
+    }
+
+    fn child(name: &str) -> SysNodeId {
+        SysNodeId::UnitProcess(
+            unit_ref(name),
+            ProcessKey {
+                start_ticks: 10,
+                boot_id: BootId(1),
+                pid: 812,
+            },
+        )
+    }
+
+    struct Rig {
+        vcx: VisualTestContext,
+        actions: Entity<SysActions>,
+        /// Kept alive: `SysActions::submit` needs the window's toast queue.
+        _queue: Entity<ToastQueue>,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        boot_settings(cx, &Default::default());
+        let window = cx.add_window(|window, cx| {
+            let host = cx.new(|_| Host);
+            Root::new(host, window, cx)
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
+        let client: Arc<dyn EngineClient> = FakeEngine::new();
+        let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, cx)));
+        let actions = vcx.update(|_, cx| cx.new(|cx| SysActions::new(&tracker, cx)));
+        Rig {
+            vcx,
+            actions,
+            _queue: queue,
+        }
+    }
+
+    impl Rig {
+        fn capture(
+            &mut self,
+            snap: &ServicesSnapshot,
+            selection: &[SysNodeId],
+            col: Option<SysColumnId>,
+        ) -> ServiceMenuTargets {
+            let actions = self.actions.clone();
+            self.vcx
+                .update(|_, cx| ServiceMenuTargets::capture(snap, selection, col, actions.read(cx)))
+        }
+
+        fn entries(&mut self, t: &ServiceMenuTargets) -> Vec<MenuEntryInfo> {
+            let t = t.clone();
+            let menu = self.vcx.update(|window, cx| {
+                let focus = cx.focus_handle();
+                TlMenu::build(window, cx, focus, move |menu, window, cx| {
+                    service_menu(menu, &t, ServiceBackend::Systemd, window, cx)
+                })
+            });
+            self.popup_entries(&menu)
+        }
+
+        fn popup_entries(&mut self, menu: &Entity<TlMenuPopup>) -> Vec<MenuEntryInfo> {
+            self.vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window))
+        }
+
+        fn stop_pending(&mut self, name: &str) {
+            let actions = self.actions.clone();
+            let target: SmallVec<[ActionTarget; 1]> =
+                [ActionTarget::Unit(unit_ref(name))].into_iter().collect();
+            let texts = ActionTexts {
+                pending_one: "Stopping service...".into(),
+                pending_many: "sys-sys007-starting-n-services",
+                done_one: "Service stopped".into(),
+                done_many: "sys-sys007-n-services-started",
+                partial_many: "sys-sys007-ok-of",
+                failed_prefix: "Failed to stop service".into(),
+                failed_suffix: true,
+                unknown: "Service action finished.".into(),
+                busy: BUSY.into(),
+                failed_button: None,
+            };
+            self.vcx.update(|window, cx| {
+                actions.update(cx, |a, cx| {
+                    a.submit(
+                        ActionKind::UnitStop,
+                        ActionKindTag::Stop,
+                        target,
+                        texts,
+                        window,
+                        cx,
+                    )
+                })
+            });
+            self.vcx.run_until_parked();
+        }
+    }
+
+    fn labels(entries: &[MenuEntryInfo]) -> Vec<String> {
+        entries
+            .iter()
+            .filter(|e| e.kind != MenuEntryKind::Separator)
+            .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
+            .collect()
+    }
+
+    fn find<'a>(entries: &'a [MenuEntryInfo], label: &str) -> Option<&'a MenuEntryInfo> {
+        entries
+            .iter()
+            .find(|e| e.label.as_ref().is_some_and(|l| l.as_ref() == label))
+    }
+
+    #[gpui_kit::test]
+    fn services_menu_order_and_labels(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let mut rec = unit_record("sshd.service", ServiceStatus::Running, StartupType::Enabled);
+        rec.can_reload = true;
+        let snap = snapshot(vec![rec]);
+        let col = Some(service_id(ServiceColumn::Name));
+        let t = r.capture(&snap, &[node("sshd.service")], col);
+        let entries = r.entries(&t);
+        assert_eq!(
+            labels(&entries),
+            [
+                "Start",
+                "Stop",
+                "Restart",
+                "Reload",
+                "Startup type",
+                "View logs",
+                "Properties",
+                "File properties",
+                "Open file location",
+                "Open unit file",
+                "Copy",
+                "Copy row",
+                "Copy rows as table",
+                "Jump to process",
+            ]
+        );
+        assert_eq!(
+            find(&entries, "Start").unwrap().kind,
+            MenuEntryKind::Disabled
+        );
+        assert_eq!(find(&entries, "Stop").unwrap().kind, MenuEntryKind::Item);
+        assert_eq!(
+            find(&entries, "Startup type").unwrap().kind,
+            MenuEntryKind::Submenu
+        );
+    }
+
+    #[gpui_kit::test]
+    fn menu_reload_hidden_without_canreload(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let rec = unit_record("cron.service", ServiceStatus::Stopped, StartupType::Enabled);
+        let snap = snapshot(vec![rec]);
+        let t = r.capture(&snap, &[node("cron.service")], None);
+        let entries = r.entries(&t);
+        assert!(find(&entries, "Reload").is_none());
+        assert!(find(&entries, "Reset failed state").is_none());
+        assert!(
+            find(&entries, "Copy").is_none(),
+            "no cell without a pointer"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn menu_pending_disables_with_tooltip(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let rec = unit_record("sshd.service", ServiceStatus::Running, StartupType::Enabled);
+        let snap = snapshot(vec![rec]);
+        r.stop_pending("sshd.service");
+        let t = r.capture(&snap, &[node("sshd.service")], None);
+        let entries = r.entries(&t);
+        for label in ["Start", "Stop", "Restart"] {
+            let e = find(&entries, label).unwrap();
+            assert_eq!(e.kind, MenuEntryKind::Disabled, "{label}");
+            assert_eq!(e.tooltip.as_deref(), Some(BUSY), "{label}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn startup_submenu_disabled_for_static(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let rec = unit_record("dbus.service", ServiceStatus::Running, StartupType::Static);
+        let snap = snapshot(vec![rec]);
+        let t = r.capture(&snap, &[node("dbus.service")], None);
+        let entries = r.entries(&t);
+        let e = find(&entries, "Startup type").unwrap();
+        assert_eq!(e.kind, MenuEntryKind::Disabled);
+        assert_eq!(
+            e.tooltip.as_deref(),
+            Some("This unit has no install section")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_submenu_no_check_on_mixed(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let snap = snapshot(vec![
+            unit_record("a.service", ServiceStatus::Running, StartupType::Enabled),
+            unit_record("b.service", ServiceStatus::Stopped, StartupType::Disabled),
+        ]);
+        let t = r.capture(&snap, &[node("a.service"), node("b.service")], None);
+        let entries = r.entries(&t);
+        let sub = find(&entries, "Startup type")
+            .unwrap()
+            .submenu
+            .clone()
+            .expect("submenu");
+        let items = r.popup_entries(&sub);
+        assert_eq!(labels(&items), ["Enabled", "Disabled", "Masked"]);
+        assert!(items.iter().all(|e| !e.checked));
+
+        // One target: its value is checked, and "Enabled (runtime)" counts as Enabled.
+        let snap = snapshot(vec![unit_record(
+            "a.service",
+            ServiceStatus::Running,
+            StartupType::EnabledRuntime,
+        )]);
+        let t = r.capture(&snap, &[node("a.service")], None);
+        let entries = r.entries(&t);
+        let sub = find(&entries, "Startup type")
+            .unwrap()
+            .submenu
+            .clone()
+            .expect("submenu");
+        let items = r.popup_entries(&sub);
+        let checked: Vec<_> = items.iter().filter(|e| e.checked).collect();
+        assert_eq!(checked.len(), 1);
+        assert_eq!(checked[0].label.as_deref(), Some("Enabled"));
+    }
+
+    #[gpui_kit::test]
+    fn menu_target_captured_at_open(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let old = snapshot(vec![
+            unit_record("a.service", ServiceStatus::Stopped, StartupType::Enabled),
+            unit_record("b.service", ServiceStatus::Running, StartupType::Enabled),
+        ]);
+        let t = r.capture(&old, &[node("a.service")], None);
+        // The rows re-sort after the menu opened.
+        let _resorted = snapshot(vec![
+            unit_record("b.service", ServiceStatus::Running, StartupType::Enabled),
+            unit_record("a.service", ServiceStatus::Stopped, StartupType::Enabled),
+        ]);
+        assert_eq!(t.units.as_slice(), [unit_ref("a.service")]);
+        assert_eq!(t.records[0].unit, unit_ref("a.service"));
+        let entries = r.entries(&t);
+        let start = find(&entries, "Start").unwrap();
+        assert_eq!(start.kind, MenuEntryKind::Item);
+        assert!(start.action.as_ref().unwrap().partial_eq(&ServiceStart));
+    }
+
+    #[gpui_kit::test]
+    fn menu_choice_mixed_and_child_only(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let snap = snapshot(vec![unit_record(
+            "a.service",
+            ServiceStatus::Running,
+            StartupType::Enabled,
+        )]);
+        let mixed = [node("a.service"), child("a.service")];
+        assert_eq!(menu_choice(&mixed), MenuChoice::Unit);
+        let t = r.capture(&snap, &mixed, None);
+        assert_eq!(t.units.as_slice(), [unit_ref("a.service")]);
+        assert_eq!(menu_choice(&[child("a.service")]), MenuChoice::Process);
+        assert_eq!(
+            menu_choice(&[SysNodeId::ServiceGroup(Manager::System)]),
+            MenuChoice::None
+        );
+        assert_eq!(menu_choice(&[]), MenuChoice::None);
+    }
+}
