@@ -708,13 +708,17 @@ impl HistoryPage {
         self.on_frame_input(true, cx);
     }
 
-    /// Sets the strip metric. While scrubbed or with a range set, asks for its frame.
+    /// Sets the strip metric. While scrubbed or with a range set, asks for its frame. While the
+    /// top-3 card is shown, asks for the hovered second's top list for the new metric.
     pub fn set_metric(&mut self, metric: HistoryMetric, cx: &mut Context<Self>) {
         if self.state.metric == metric {
             return;
         }
         self.state.metric = metric;
         self.on_frame_input(true, cx);
+        if let Some((t, _)) = self.top.hovered() {
+            self.top_hover(t, cx);
+        }
     }
 
     /// Sets the selected keys in selection order and selects them in the table. While scrubbed

@@ -1941,3 +1941,90 @@ fn top_answer_skips_rebuild(cx: &mut TestAppContext) {
     assert_eq!(notified.get(), 0, "the page is not notified");
     assert_eq!(card_rows(&page, vcx).len(), 1, "the card shows the answer");
 }
+
+/// Moves the pointer off the plot, below the strip, and paints.
+fn leave_plot(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) {
+    use gpui_kit::{point, px};
+    let plot = plot(page, vcx);
+    let p = point(plot.left() + px(10.), plot.bottom() + px(200.));
+    vcx.simulate_mouse_move(p, None, gpui_kit::Modifiers::none());
+    settle(vcx);
+}
+
+#[gpui_kit::test]
+fn top3_metric_change_asks_again(cx: &mut TestAppContext) {
+    let (engine, page, vcx) = hover_page(cx);
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    let sent = top_queries(&engine);
+    answer_top(&engine, vcx, sent[0], &[12.3]);
+    settle(vcx);
+
+    // The pointer stays; the metric changes.
+    page.update(vcx, |p, cx| p.set_metric(HistoryMetric::Memory, cx));
+    advance(vcx, Duration::from_millis(31));
+    assert_eq!(top_queries(&engine).len(), 1, "nothing before 32 ms");
+    advance(vcx, Duration::from_millis(1));
+    let sent = top_queries(&engine);
+    assert_eq!(sent.len(), 2);
+    assert_eq!((sent[1].1, sent[1].2), (700 * S, HistoryMetric::Memory));
+    answer_top(&engine, vcx, sent[1], &[1_310_000_000.0]);
+    settle(vcx);
+    assert_eq!(card_rows(&page, vcx)[0].1, "Memory: 1.22 / 16.00 GiB");
+}
+
+#[gpui_kit::test]
+fn top3_back_to_asked_second_drops_older_wants(cx: &mut TestAppContext) {
+    let (engine, page, vcx) = hover_page(cx);
+    // A (700 s) in flight, B (820 s) pending, then back to A.
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    let a = top_queries(&engine)[0];
+    hover_to(&page, vcx, 0.7);
+    advance(vcx, Duration::from_millis(32));
+    assert_eq!(
+        vcx.read_entity(&page, |p, _| p.top().pending()),
+        Some((820 * S, HistoryMetric::Cpu))
+    );
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    assert_eq!(vcx.read_entity(&page, |p, _| p.top().pending()), None);
+    answer_top(&engine, vcx, a, &[7.0]);
+    settle(vcx);
+    assert_eq!(top_queries(&engine).len(), 1, "B is not sent");
+    assert_eq!(card_rows(&page, vcx)[0].1, "CPU: 7.0%");
+
+    // B in flight, back to the answered A: B's late answer is not shown under A, A is asked
+    // again.
+    hover_to(&page, vcx, 0.7);
+    advance(vcx, Duration::from_millis(32));
+    let b = top_queries(&engine)[1];
+    assert_eq!(b.1, 820 * S);
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    assert_eq!(top_queries(&engine).len(), 2);
+    answer_top(&engine, vcx, b, &[3.0]);
+    settle(vcx);
+    let sent = top_queries(&engine);
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[2].1, 700 * S);
+    answer_top(&engine, vcx, sent[2], &[7.5]);
+    settle(vcx);
+    assert_eq!(card_rows(&page, vcx)[0].1, "CPU: 7.5%");
+}
+
+#[gpui_kit::test]
+fn top3_no_resend_after_leave(cx: &mut TestAppContext) {
+    let (engine, page, vcx) = hover_page(cx);
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    assert_eq!(top_queries(&engine).len(), 1);
+    leave_plot(&page, vcx);
+    assert_eq!(vcx.read_entity(&page, |p, _| p.top().hovered()), None);
+    // The unanswered query expires after 1,000 ms and is not sent again.
+    for _ in 0..4 {
+        advance(vcx, Duration::from_millis(1000));
+    }
+    assert_eq!(top_queries(&engine).len(), 1);
+    assert_eq!(vcx.read_entity(&page, |p, _| p.top().in_flight()), None);
+}

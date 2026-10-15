@@ -255,6 +255,11 @@ impl TopController {
         self.stale
     }
 
+    /// The second and metric under the pointer, `None` while the card is hidden.
+    pub fn hovered(&self) -> Option<(TimeNs, HistoryMetric)> {
+        self.hovered
+    }
+
     /// Sends at once when nothing is in flight, else replaces `pending`.
     fn want(&mut self, at: TopKey, client: &dyn EngineClient) {
         if self.in_flight.is_some() {
@@ -277,11 +282,11 @@ impl TopController {
         answered
     }
 
-    /// Gives up on the query in flight. The pending query, or else the late one, waits to be
-    /// sent again.
+    /// Gives up on the query in flight. The pending query, or else the late one while its second
+    /// is still hovered, waits to be sent again.
     fn expire(&mut self) {
         if self.in_flight.take().is_some() && self.pending.is_none() {
-            self.pending = self.last_sent.take();
+            self.pending = self.last_sent.take().filter(|&at| Some(at) == self.hovered);
         }
     }
 
@@ -345,16 +350,22 @@ impl HistoryPage {
             self.top.stale = false;
             self.top.stale_timer = None;
         } else {
-            self.top.stale_timer = Some(cx.spawn(
-                async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                    cx.background_executor().timer(STALE_AFTER).await;
-                    let _ = this.update(cx, |page, cx| page.top_go_stale(cx));
-                },
-            ));
+            self.arm_stale(cx);
         }
     }
 
-    /// The card hides: pointer left, drag start or wheel. A query in flight stays in flight.
+    /// The rows read "…" in 150 ms unless the hovered second is answered by then.
+    fn arm_stale(&mut self, cx: &mut Context<Self>) {
+        self.top.stale_timer = Some(cx.spawn(
+            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor().timer(STALE_AFTER).await;
+                let _ = this.update(cx, |page, cx| page.top_go_stale(cx));
+            },
+        ));
+    }
+
+    /// The card hides: pointer left, drag start or wheel. A query in flight stays in flight
+    /// until it is answered or expires, and is not sent again.
     pub(crate) fn top_clear(&mut self) {
         let top = &mut self.top;
         top.hovered = None;
@@ -362,10 +373,14 @@ impl HistoryPage {
         top.stale = false;
         top.debounce = None;
         top.stale_timer = None;
+        if top.in_flight.is_none() {
+            top.retry_timer = None;
+        }
     }
 
     /// A view came in: clears the TopAt query it answers and sends the pending one, then
-    /// repaints the strip.
+    /// repaints the strip. When the view no longer answers the hovered second and nothing asks
+    /// for it, for example a late answer for a second the pointer left, asks for it again.
     pub(crate) fn on_top_view(&mut self, view: &HistoryView, cx: &mut Context<Self>) {
         if self.top.on_view(view) {
             self.top_drive(cx, |top, client| top.retry(client));
@@ -373,11 +388,22 @@ impl HistoryPage {
         if answers(Some(view), self.top.hovered) {
             self.top.stale = false;
             self.top.stale_timer = None;
+        } else if let Some(at) = self.top.hovered
+            && self.top.in_flight.is_none()
+            && self.top.pending.is_none()
+            && self.top.debounce.is_none()
+        {
+            self.top_drive(cx, |top, client| top.want(at, client));
+            if !self.top.stale && self.top.stale_timer.is_none() {
+                self.arm_stale(cx);
+            }
         }
         self.notify_strip(cx);
     }
 
     /// The debounce ended: wants a query for the hovered second unless it is answered or asked.
+    /// Then a pending query for a second the pointer left is dropped, so its late answer does
+    /// not replace the hovered one.
     fn top_fire(&mut self, cx: &mut Context<Self>) {
         self.top.debounce = None;
         let Some(at) = self.top.hovered else {
@@ -385,6 +411,7 @@ impl HistoryPage {
         };
         let asked = self.top.in_flight.is_some() && self.top.last_sent == Some(at);
         if asked || answers(self.view.as_deref(), Some(at)) {
+            self.top.pending = None;
             return;
         }
         self.top_drive(cx, |top, client| top.want(at, client));
