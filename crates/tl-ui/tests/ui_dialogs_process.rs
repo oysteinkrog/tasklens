@@ -884,7 +884,7 @@ mod virustotal {
 
     type ParentFrame = TlSecondaryWindow<Body>;
 
-    struct Rig {
+    pub(super) struct Rig {
         engine: Arc<FakeEngine>,
         parent: Entity<ParentFrame>,
         pcx: VisualTestContext,
@@ -899,7 +899,7 @@ mod virustotal {
         }
     }
 
-    fn rig(cx: &mut TestAppContext, accepted: bool) -> Rig {
+    pub(super) fn rig(cx: &mut TestAppContext, accepted: bool) -> Rig {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         let (_tx, rx) = async_channel::bounded(4);
@@ -942,13 +942,13 @@ mod virustotal {
         }
     }
 
-    fn open(r: &mut Rig) {
+    pub(super) fn open(r: &mut Rig) {
         r.pcx
             .update(|window, cx| open_virustotal(key(), window, cx));
         r.pcx.run_until_parked();
     }
 
-    fn hash_requests(r: &Rig) -> usize {
+    pub(super) fn hash_requests(r: &Rig) -> usize {
         r.engine
             .commands()
             .iter()
@@ -968,7 +968,7 @@ mod virustotal {
             .collect()
     }
 
-    fn accepted(cx: &mut TestAppContext) -> bool {
+    pub(super) fn accepted(cx: &mut TestAppContext) -> bool {
         cx.update(|cx| TlSettings::state(cx).processes.virustotal_notice_accepted)
     }
 
@@ -988,7 +988,10 @@ mod virustotal {
     }
 
     /// The notice window, drawn.
-    fn notice(r: &Rig, cx: &mut TestAppContext) -> Option<(WindowHandle<Root>, VisualTestContext)> {
+    pub(super) fn notice(
+        r: &Rig,
+        cx: &mut TestAppContext,
+    ) -> Option<(WindowHandle<Root>, VisualTestContext)> {
         let parent_id = r.parent_id;
         let handle = cx
             .update(|cx| {
@@ -1276,7 +1279,7 @@ mod priority {
         }
     }
 
-    struct Rig {
+    pub(super) struct Rig {
         cx: TestAppContext,
         engine: Arc<FakeEngine>,
         handle: WindowHandle<Root>,
@@ -1287,7 +1290,7 @@ mod priority {
     }
 
     /// The dialog for `firefox (PID 4321)` with `initial`, from a parent window with toasts.
-    fn open(cx: &mut TestAppContext, initial: (SchedPolicy, i8, u8)) -> Rig {
+    pub(super) fn open(cx: &mut TestAppContext, initial: (SchedPolicy, i8, u8)) -> Rig {
         let engine = super::setup(cx);
         let parent = cx.add_window(|window, cx| {
             let host = cx.new(|_| Host);
@@ -1332,7 +1335,7 @@ mod priority {
             self.vcx.update(|window, cx| window.draw(cx).clear(cx));
         }
 
-        fn update(
+        pub(super) fn update(
             &mut self,
             f: impl FnOnce(&mut PriorityDialog, &mut Window, &mut Context<PriorityDialog>),
         ) {
@@ -1349,7 +1352,7 @@ mod priority {
         }
 
         /// Presses "Set priority". The window may close, so nothing draws after.
-        fn apply(&mut self) {
+        pub(super) fn apply(&mut self) {
             let dialog = self.dialog.clone();
             self.vcx
                 .update(|window, cx| dialog.update(cx, |d, cx| d.apply(window, cx)));
@@ -1359,7 +1362,7 @@ mod priority {
             }
         }
 
-        fn sent(&self) -> Vec<ActionRequest> {
+        pub(super) fn sent(&self) -> Vec<ActionRequest> {
             self.engine
                 .commands()
                 .into_iter()
@@ -1386,7 +1389,7 @@ mod priority {
         }
 
         /// The Realtime confirmation window, drawn, if it is open.
-        fn confirmation(&mut self) -> Option<(VisualTestContext, Entity<TlDialogView>)> {
+        pub(super) fn confirmation(&mut self) -> Option<(VisualTestContext, Entity<TlDialogView>)> {
             let skip = [self.parent_id, self.handle.window_id()];
             let any: AnyWindowHandle = self
                 .cx
@@ -1418,7 +1421,7 @@ mod priority {
         }
     }
 
-    const NORMAL: (SchedPolicy, i8, u8) = (SchedPolicy::Other, 0, 0);
+    pub(super) const NORMAL: (SchedPolicy, i8, u8) = (SchedPolicy::Other, 0, 0);
 
     #[gpui_kit::test]
     fn priority_dialog_enables_fields_by_policy(cx: &mut TestAppContext) {
@@ -1665,7 +1668,7 @@ mod signal {
         }
     }
 
-    struct Rig {
+    pub(super) struct Rig {
         cx: TestAppContext,
         engine: Arc<FakeEngine>,
         parent: WindowHandle<Root>,
@@ -1673,7 +1676,7 @@ mod signal {
         queue: Entity<ToastQueue>,
     }
 
-    fn rig(cx: &mut TestAppContext) -> Rig {
+    pub(super) fn rig(cx: &mut TestAppContext) -> Rig {
         let engine = super::setup(cx);
         let parent = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
         let mut pcx = VisualTestContext::from_window(parent.into(), cx);
@@ -1689,20 +1692,25 @@ mod signal {
     }
 
     impl Rig {
-        fn targets(n: u32) -> SmallVec<[ActionTarget; 1]> {
+        pub(super) fn targets(n: u32) -> SmallVec<[ActionTarget; 1]> {
             (0..n)
                 .map(|i| ActionTarget::Process(super::key_of(10_000 + i)))
                 .collect()
         }
 
-        fn send(&mut self, signo: i32, targets: SmallVec<[ActionTarget; 1]>, names: TargetNames) {
+        pub(super) fn send(
+            &mut self,
+            signo: i32,
+            targets: SmallVec<[ActionTarget; 1]>,
+            names: TargetNames,
+        ) {
             self.pcx
                 .update(|window, cx| signal::send_signal(signo, targets, names, window, cx));
             self.pcx.run_until_parked();
             self.cx.run_until_parked();
         }
 
-        fn sent(&self) -> Vec<ActionRequest> {
+        pub(super) fn sent(&self) -> Vec<ActionRequest> {
             self.engine
                 .commands()
                 .into_iter()
@@ -1733,7 +1741,7 @@ mod signal {
             })
         }
 
-        fn confirmation(&mut self) -> (VisualTestContext, Entity<TlDialogView>) {
+        pub(super) fn confirmation(&mut self) -> (VisualTestContext, Entity<TlDialogView>) {
             let parent = self.parent.window_id();
             let (any, frame): (AnyWindowHandle, _) = self
                 .cx
@@ -2232,7 +2240,7 @@ mod dump {
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::notices::{DUMP_POLL, DumpToast, set_test_home, start_dump};
 
-    const GIB: u64 = 1024 * 1024 * 1024;
+    pub(super) const GIB: u64 = 1024 * 1024 * 1024;
 
     struct Body;
 
@@ -2244,14 +2252,14 @@ mod dump {
 
     type ParentFrame = TlSecondaryWindow<Body>;
 
-    struct Rig {
+    pub(super) struct Rig {
         engine: Arc<FakeEngine>,
         parent: Entity<ParentFrame>,
         pcx: VisualTestContext,
         parent_id: gpui_kit::WindowId,
     }
 
-    fn key(pid: u32) -> ProcessKey {
+    pub(super) fn key(pid: u32) -> ProcessKey {
         ProcessKey {
             start_ticks: 4_242,
             boot_id: BootId(7),
@@ -2259,7 +2267,7 @@ mod dump {
         }
     }
 
-    fn record(pid: u32, name: &str, rss: u64) -> ProcessRecord {
+    pub(super) fn record(pid: u32, name: &str, rss: u64) -> ProcessRecord {
         let name: Arc<str> = Arc::from(name);
         ProcessRecord {
             key: key(pid),
@@ -2303,7 +2311,7 @@ mod dump {
     }
 
     /// A parent window with toasts, `records` in the snapshot, dumps under `state_dir`.
-    fn rig(
+    pub(super) fn rig(
         cx: &mut TestAppContext,
         state_dir: &Path,
         mode: DumpMode,
@@ -2368,13 +2376,13 @@ mod dump {
         }
     }
 
-    fn start(r: &mut Rig, pid: u32) {
+    pub(super) fn start(r: &mut Rig, pid: u32) {
         r.pcx.update(|window, cx| start_dump(key(pid), window, cx));
         r.pcx.run_until_parked();
     }
 
     /// Every action request sent, in order.
-    fn actions(r: &Rig) -> Vec<ActionRequest> {
+    pub(super) fn actions(r: &Rig) -> Vec<ActionRequest> {
         r.engine
             .commands()
             .into_iter()
@@ -2448,7 +2456,7 @@ mod dump {
     }
 
     /// The confirmation window, drawn.
-    fn confirmation(
+    pub(super) fn confirmation(
         r: &Rig,
         cx: &mut TestAppContext,
     ) -> Option<(VisualTestContext, Entity<TlDialogView>)> {
@@ -2881,5 +2889,573 @@ mod dump {
                 properties: false,
             }
         );
+    }
+}
+
+// ---- UI-PRC-014 texts for every process window trigger (tasklens-gma.38, UI-PWN-025) ----
+
+mod prc014 {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext, WindowHandle, WindowId};
+    use tl_model::actions::{ActionKind, ActionTarget, SchedPolicy};
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::details::{HandleHit, HandleKind, HandlePhase, HandleSearchState, SearchId};
+    use tl_model::ids::ProcessKey;
+    use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::ProcessSnapshot;
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::open_main_window_on;
+    use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
+    use tl_ui::windows::signal::{OtherUserTarget, TargetNames};
+
+    use super::{dump, priority, signal, virustotal};
+
+    /// What one confirmation must show.
+    struct Expect {
+        heading: &'static str,
+        text: &'static str,
+        button: &'static str,
+        danger: bool,
+        focus: DialogButton,
+    }
+
+    type Dialog = (VisualTestContext, Entity<TlDialogView>);
+
+    /// Window title "tasklens", the heading, text, button label, danger flag and initial focus.
+    fn check(dialog: &mut Dialog, kind: &ConfirmKind, e: &Expect) {
+        let (vcx, view) = dialog;
+        let expected = vcx.update(|_, cx| confirm_texts(kind, cx));
+        assert_eq!(expected.title.as_ref(), e.heading, "heading text");
+        assert_eq!(expected.description.as_ref(), e.text, "description text");
+        assert_eq!(expected.confirm_label.as_ref(), e.button, "button label");
+        assert_eq!(expected.confirm_danger, e.danger, "texts danger flag");
+        let (title, text, danger, focused) = vcx.update(|window, cx| {
+            let dialog = view.read(cx).dialog();
+            (
+                dialog.window_title().to_string(),
+                dialog.text().to_string(),
+                dialog.is_destructive(),
+                view.read(cx).focused_button(window),
+            )
+        });
+        assert_eq!(title, "tasklens", "{}: window title", e.heading);
+        assert!(
+            vcx.debug_bounds("TlDialogHeading").is_some(),
+            "{}: heading drawn",
+            e.heading
+        );
+        assert_eq!(text, e.text, "{}: text", e.heading);
+        assert_eq!(danger, e.danger, "{}: danger", e.heading);
+        assert_eq!(focused, Some(e.focus), "{}: initial focus", e.heading);
+    }
+
+    /// Presses `keys` in the dialog and lets everything settle.
+    fn press_in(dialog: &mut Dialog, cx: &mut TestAppContext, keys: &str) {
+        dialog.0.simulate_keystrokes(keys);
+        dialog.0.run_until_parked();
+        cx.run_until_parked();
+    }
+
+    /// The `Command::Action`s in `commands`.
+    fn action_count(engine: &FakeEngine) -> usize {
+        engine
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, Command::Action(_)))
+            .count()
+    }
+
+    // ---- Handle Search fixtures (copied from ui_handle_search.rs, trimmed) ----
+
+    struct HsRig {
+        engine: Arc<FakeEngine>,
+        win: VisualTestContext,
+        view: Entity<HandleSearchWindow>,
+    }
+
+    fn hs_setup(cx: &mut TestAppContext) -> HsRig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let _main = cx
+            .update(|cx| open_main_window_on(Tab::Processes, cx))
+            .expect("the main window opens");
+        cx.run_until_parked();
+        cx.update(open_handle_search);
+        cx.run_until_parked();
+        let (handle, view) = cx
+            .update(|cx| {
+                cx.windows().into_iter().find_map(|w| {
+                    let h = w.downcast::<Root>()?;
+                    HandleSearchWindow::find(h, cx).map(|v| (h, v))
+                })
+            })
+            .expect("the Handle Search window opens");
+        let mut win = VisualTestContext::from_window(handle.into(), cx);
+        win.update(|window, _| window.activate_window());
+        win.run_until_parked();
+        HsRig { engine, win, view }
+    }
+
+    fn hs_draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.run_until_parked();
+    }
+
+    fn hs_key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: 1_000 + u64::from(pid),
+            boot_id: BootId(1),
+            pid,
+        }
+    }
+
+    fn hs_hit(pid: u32, fd: i32, path: &str) -> HandleHit {
+        HandleHit {
+            key: hs_key(pid),
+            name: format!("proc{pid}").into(),
+            user: "me".into(),
+            kind: HandleKind::Fd,
+            fd: Some(fd),
+            path: path.into(),
+        }
+    }
+
+    /// An own, unprotected live process `pid`.
+    fn hs_record(pid: u32) -> ProcessRecord {
+        let a = |s: &str| Arc::<str>::from(s);
+        let name = format!("proc{pid}");
+        ProcessRecord {
+            key: hs_key(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: a(&name),
+                name: a(&name),
+                exe: Some(a(&format!("/usr/bin/{name}"))),
+                cmdline: None,
+                user: a("me"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a(&name),
+            }),
+            group: GroupKind::Background.key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    /// Publishes own unprotected processes `pids`, then a finished search with `hits`, and
+    /// draws the table.
+    fn hs_show(cx: &mut TestAppContext, rig: &mut HsRig, pids: &[u32], hits: Vec<HandleHit>) {
+        let mut records: Vec<ProcessRecord> = pids.iter().map(|&p| hs_record(p)).collect();
+        records.sort_by_key(|r| r.key);
+        rig.engine.publish_with(|s| {
+            s.processes = Arc::new(ProcessSnapshot {
+                records: records.into(),
+                ..ProcessSnapshot::default()
+            });
+        });
+        cx.run_until_parked();
+
+        let input = rig.win.read(|cx| rig.view.read(cx).pattern().clone());
+        rig.win
+            .update(|window, cx| input.update(cx, |s, cx| s.set_value("log", window, cx)));
+        rig.win.run_until_parked();
+        rig.win.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let id: SearchId = rig
+            .engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::HandleSearch { search, .. } => Some(search),
+                _ => None,
+            })
+            .next_back()
+            .expect("a search was sent");
+        let chunk: Arc<[HandleHit]> = hits.into();
+        let state = Arc::new(HandleSearchState {
+            search: id,
+            phase: HandlePhase::Done,
+            progress_pct: 100,
+            total_handles: 100,
+            chunks: Arc::from([chunk]),
+            searched: 2,
+            total: 2,
+            skipped: 0,
+        });
+        rig.engine.publish_with(|s| {
+            let d = Arc::make_mut(&mut s.details);
+            d.handle_search = Some(state);
+            d.header.version += 1;
+        });
+        cx.run_until_parked();
+        hs_draw(&mut rig.win);
+    }
+
+    /// Makes hit ids `ids` the selection.
+    fn hs_select(rig: &mut HsRig, ids: &[u32]) {
+        let table = rig.win.read(|cx| rig.view.read(cx).table().clone());
+        rig.win.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                for (n, id) in ids.iter().enumerate() {
+                    if n == 0 {
+                        t.selection.click(*id);
+                    } else {
+                        t.selection.ctrl_click(*id);
+                    }
+                }
+                cx.notify();
+            })
+        });
+        rig.win.run_until_parked();
+    }
+
+    fn hs_window_ids(rig: &mut HsRig) -> Vec<WindowId> {
+        rig.win
+            .update(|_, cx| cx.windows().iter().map(|w| w.window_id()).collect())
+    }
+
+    /// Focuses the table and presses `keys`. Returns the confirmation it opened.
+    fn hs_press(rig: &mut HsRig, keys: &str) -> Option<Dialog> {
+        let before = hs_window_ids(rig);
+        let table = rig.win.read(|cx| rig.view.read(cx).table().clone());
+        rig.win.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+        });
+        hs_draw(&mut rig.win);
+        rig.win.simulate_keystrokes(keys);
+        rig.win.run_until_parked();
+        let id = hs_window_ids(rig)
+            .into_iter()
+            .find(|w| !before.contains(w))?;
+        let handle = WindowHandle::<Root>::new(id);
+        let view = rig.win.update(|_, cx| {
+            TlSecondaryWindow::<TlDialogView>::find(handle, cx)
+                .map(|f| f.read(cx).content().clone())
+        })?;
+        let any = rig
+            .win
+            .update(|_, cx| cx.windows())
+            .into_iter()
+            .find(|w| w.window_id() == id)?;
+        let mut vcx = VisualTestContext::from_window(any, &rig.win.cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        Some((vcx, view))
+    }
+
+    // ---- the test ----
+
+    /// Security regression (UI-PWN-025, UI-PRC-014, R-104): every confirmation a process window
+    /// triggers shows its fixed texts and focus, Esc sends nothing, and Enter runs the focused
+    /// button. `cx_*` are one app context per trigger family.
+    #[gpui_kit::test]
+    fn pwn_triggers_use_prc014_texts(
+        cx_rt: &mut TestAppContext,
+        cx_sig: &mut TestAppContext,
+        cx_hs: &mut TestAppContext,
+        cx_dump: &mut TestAppContext,
+        cx_vt: &mut TestAppContext,
+    ) {
+        // Realtime from the Custom priority dialog (RR).
+        {
+            let kind = ConfirmKind::Realtime;
+            let e = Expect {
+                heading: "Set realtime priority?",
+                text: "Realtime priority can freeze the desktop if the process spins. Set it anyway?",
+                button: "Set realtime",
+                danger: true,
+                focus: DialogButton::Cancel,
+            };
+            let mut rig = priority::open(cx_rt, priority::NORMAL);
+            rig.update(|d, _, cx| {
+                d.set_policy(SchedPolicy::Rr, cx);
+                d.set_rt_prio(10, cx);
+            });
+            rig.apply();
+            let mut dialog = rig.confirmation().expect("realtime confirmation");
+            check(&mut dialog, &kind, &e);
+            press_in(&mut dialog, cx_rt, "escape");
+            assert!(rig.sent().is_empty(), "realtime: Esc sends nothing");
+            assert!(rig.confirmation().is_none(), "realtime: Esc closes it");
+            rig.apply();
+            let mut dialog = rig.confirmation().expect("realtime confirmation again");
+            press_in(&mut dialog, cx_rt, "enter");
+            assert!(
+                rig.sent().is_empty(),
+                "realtime: Enter on Cancel sends nothing"
+            );
+        }
+
+        // Signal cases: (signal, targets, names, kind, expected, Enter sends).
+        let mut sig = signal::rig(cx_sig);
+        let other = OtherUserTarget {
+            name: "sshd".into(),
+            pid: 10_000,
+            user: "root".into(),
+        };
+        let cases: Vec<(i32, u32, TargetNames, ConfirmKind, Expect)> = vec![
+            (
+                15,
+                1,
+                TargetNames::process("plasmashell", 10_000).with_protected("plasmashell"),
+                ConfirmKind::Protected {
+                    action: "Send signal".into(),
+                    name: "plasmashell".into(),
+                    tree_count: None,
+                },
+                Expect {
+                    heading: "End plasmashell?",
+                    text: "Ending plasmashell will end your desktop session. End it anyway?",
+                    button: "End anyway",
+                    danger: true,
+                    focus: DialogButton::Cancel,
+                },
+            ),
+            (
+                15,
+                1,
+                TargetNames::process("sshd", 10_000).with_other_user(other),
+                ConfirmKind::OtherUser {
+                    action: "Send signal".into(),
+                    name: "sshd".into(),
+                    pid: 10_000,
+                    user: "root".into(),
+                    destructive: true,
+                },
+                Expect {
+                    heading: "Act on another user's process?",
+                    text: "Send signal on sshd (PID 10000), owned by root. Continue?",
+                    button: "Send signal",
+                    danger: true,
+                    focus: DialogButton::Cancel,
+                },
+            ),
+            (
+                1,
+                4,
+                TargetNames::processes(4),
+                ConfirmKind::SignalMany {
+                    count: 4,
+                    signal_name: "HUP".into(),
+                    ends_process: true,
+                },
+                Expect {
+                    heading: "Send signal to 4 processes?",
+                    text: "Send SIGHUP to 4 selected processes?",
+                    button: "Send signal",
+                    danger: true,
+                    focus: DialogButton::Cancel,
+                },
+            ),
+            (
+                18,
+                4,
+                TargetNames::processes(4),
+                ConfirmKind::SignalMany {
+                    count: 4,
+                    signal_name: "CONT".into(),
+                    ends_process: false,
+                },
+                Expect {
+                    heading: "Send signal to 4 processes?",
+                    text: "Send SIGCONT to 4 selected processes?",
+                    button: "Send signal",
+                    danger: false,
+                    focus: DialogButton::Action,
+                },
+            ),
+        ];
+        for (signo, count, names, kind, e) in cases {
+            let before = sig.sent().len();
+            sig.send(signo, signal::Rig::targets(count), names.clone());
+            let mut dialog = sig.confirmation();
+            check(&mut dialog, &kind, &e);
+            press_in(&mut dialog, cx_sig, "escape");
+            assert_eq!(sig.sent().len(), before, "{}: Esc sends nothing", e.heading);
+
+            sig.send(signo, signal::Rig::targets(count), names);
+            let mut dialog = sig.confirmation();
+            press_in(&mut dialog, cx_sig, "enter");
+            let expected = before + usize::from(e.focus == DialogButton::Action);
+            assert_eq!(
+                sig.sent().len(),
+                expected,
+                "{}: Enter runs the focused button",
+                e.heading
+            );
+        }
+
+        // Handle Search End Task with 2 targets.
+        {
+            let kind = ConfirmKind::EndMany {
+                count: 2,
+                kill: false,
+            };
+            let e = Expect {
+                heading: "End 2 processes?",
+                text: "End 2 selected processes?",
+                button: "End tasks",
+                danger: true,
+                focus: DialogButton::Cancel,
+            };
+            let mut rig = hs_setup(cx_hs);
+            hs_show(
+                cx_hs,
+                &mut rig,
+                &[300, 301],
+                vec![
+                    hs_hit(300, 3, "/var/log/a.log"),
+                    hs_hit(301, 4, "/var/log/b.log"),
+                ],
+            );
+            hs_select(&mut rig, &[0, 1]);
+            let mut dialog = hs_press(&mut rig, "delete").expect("the End many confirmation");
+            check(&mut dialog, &kind, &e);
+            press_in(&mut dialog, cx_hs, "escape");
+            assert_eq!(
+                action_count(&rig.engine),
+                0,
+                "Handle Search: Esc sends nothing"
+            );
+
+            let mut dialog = hs_press(&mut rig, "delete").expect("the confirmation again");
+            press_in(&mut dialog, cx_hs, "enter");
+            assert_eq!(
+                action_count(&rig.engine),
+                0,
+                "Handle Search: Enter on Cancel sends nothing"
+            );
+        }
+
+        // Large dump (VmRSS 3.4 GiB).
+        {
+            let kind = ConfirmKind::LargeDump {
+                name: "big".into(),
+                size: "3.40 GiB".into(),
+            };
+            let e = Expect {
+                heading: "Create a large dump?",
+                text: "big uses 3.40 GiB. The process pauses while the core is written and the \
+                       file will be about that size. Continue?",
+                button: "Create dump",
+                danger: false,
+                focus: DialogButton::Action,
+            };
+            let mut r = dump::rig(
+                cx_dump,
+                Path::new("/s/tasklens"),
+                tl_model::actions::DumpMode::Mini,
+                vec![dump::record(200, "big", 34 * dump::GIB / 10)],
+            );
+            dump::start(&mut r, 200);
+            let mut dialog = dump::confirmation(&r, cx_dump).expect("the dump confirmation");
+            check(&mut dialog, &kind, &e);
+            press_in(&mut dialog, cx_dump, "escape");
+            assert!(dump::actions(&r).is_empty(), "dump: Esc sends nothing");
+
+            dump::start(&mut r, 200);
+            let mut dialog = dump::confirmation(&r, cx_dump).expect("the confirmation again");
+            press_in(&mut dialog, cx_dump, "enter");
+            let sent = dump::actions(&r);
+            assert_eq!(sent.len(), 1, "dump: Enter runs Create dump: {sent:?}");
+            assert!(matches!(sent[0].kind, ActionKind::Dump { .. }));
+            assert_eq!(
+                sent[0].targets.as_slice(),
+                &[ActionTarget::Process(dump::key(200))]
+            );
+        }
+
+        // VirusTotal first use.
+        {
+            let kind = ConfirmKind::VirusTotalFirstUse;
+            let e = Expect {
+                heading: "Open VirusTotal?",
+                text: "This opens virustotal.com with the file's hash. The file is not uploaded.",
+                button: "Open",
+                danger: false,
+                focus: DialogButton::Action,
+            };
+            let mut r = virustotal::rig(cx_vt, false);
+            virustotal::open(&mut r);
+            let mut dialog = vt_dialog(&r, cx_vt);
+            check(&mut dialog, &kind, &e);
+            press_in(&mut dialog, cx_vt, "escape");
+            assert_eq!(
+                virustotal::hash_requests(&r),
+                0,
+                "VirusTotal: Esc sends nothing"
+            );
+            assert!(
+                !virustotal::accepted(cx_vt),
+                "VirusTotal: Esc keeps the notice"
+            );
+
+            virustotal::open(&mut r);
+            let mut dialog = vt_dialog(&r, cx_vt);
+            press_in(&mut dialog, cx_vt, "enter");
+            assert!(virustotal::accepted(cx_vt), "VirusTotal: Enter accepts");
+        }
+    }
+
+    /// The VirusTotal notice's dialog view.
+    fn vt_dialog(r: &virustotal::Rig, cx: &mut TestAppContext) -> Dialog {
+        let (handle, vcx) = virustotal::notice(r, cx).expect("the notice window");
+        let frame = cx
+            .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+            .expect("a dialog frame");
+        let view = cx.read(|cx| frame.read(cx).content().clone());
+        (vcx, view)
     }
 }
