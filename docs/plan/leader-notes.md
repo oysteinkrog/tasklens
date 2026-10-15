@@ -875,3 +875,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: gma.30 inactive tab may run a count-only scan for the tab label; only the member list is limited to the active tab.
 - 2026-10-15 leader decision: new tasklens-o55.38 adds memory model fields (slots_total, configured_speed_mts, rank, configured_voltage_mv); o55.12 and o55.15 wait for it; o55.12 row 7 shows configured speed, Not reported when 0 or missing; o55.15 voltage mV/1000 2 decimals, "Slots used: N" without total when slots_total is missing.
 - 2026-10-15 owner decision: crw.57 keeps all three card lines (parity), fixes cut-off by wrap plus middle cut past 2 lines, value in the heading row, nav_width unchanged, graph left, card height min 80.
+- 2026-10-15 leader decision: 8fx.23 deleted series leave with the next HistoryView (no scrubber.rs edit); new TlMenu::danger_item plus TlIcon::Trash (Lucide trash.svg); HistoryPage handlers in history/mod.rs.
