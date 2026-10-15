@@ -118,6 +118,10 @@ enum Entry {
         indent: Pixels,
         /// The colour square before the label ([`TlMenu::swatch_radio_item`]).
         swatch: Option<Hsla>,
+        /// The icon before the label ([`TlMenu::danger_item`]).
+        icon: Option<TlIcon>,
+        /// The label and icon use `status.danger` ([`TlMenu::danger_item`]).
+        danger: bool,
     },
     Disabled {
         label: SharedString,
@@ -293,6 +297,8 @@ impl TlMenu {
             keep_open: false,
             indent: px(0.),
             swatch: None,
+            icon: None,
+            danger: false,
         });
         self
     }
@@ -359,6 +365,27 @@ impl TlMenu {
         menu
     }
 
+    /// An item with a 14 px `icon` before the label, label and icon in `status.danger`. The
+    /// row keeps the normal menu background and hover look (Delete from history, UI-PRC-037).
+    pub fn danger_item(
+        mut self,
+        label: impl Into<SharedString>,
+        icon: TlIcon,
+        action: Box<dyn Action>,
+    ) -> Self {
+        self = self.item(label, action);
+        if let Some(Entry::Item {
+            icon: icon_slot,
+            danger,
+            ..
+        }) = self.entries.last_mut()
+        {
+            *icon_slot = Some(icon);
+            *danger = true;
+        }
+        self
+    }
+
     /// The column stays reserved in a menu where nothing is checked yet.
     fn marked(mut self, label: SharedString, mark: Mark, action: Box<dyn Action>) -> Self {
         self.has_mark_column = true;
@@ -370,6 +397,8 @@ impl TlMenu {
             keep_open: false,
             indent: px(0.),
             swatch: None,
+            icon: None,
+            danger: false,
         });
         self
     }
@@ -550,6 +579,10 @@ pub struct MenuEntryInfo {
     pub painted: Option<(Hsla, Hsla)>,
     /// The colour square of a swatch row.
     pub swatch: Option<Hsla>,
+    /// The icon before the label ([`TlMenu::danger_item`]).
+    pub icon: Option<TlIcon>,
+    /// The label is drawn in `status.danger` ([`TlMenu::danger_item`]).
+    pub danger: bool,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -625,6 +658,10 @@ impl TlMenuPopup {
                     Entry::Item { swatch, .. } => *swatch,
                     _ => None,
                 };
+                let (icon, danger) = match e {
+                    Entry::Item { icon, danger, .. } => (*icon, *danger),
+                    _ => (None, false),
+                };
                 let painted = match e {
                     Entry::Painted { bg, fg, .. } => Some((*bg, *fg)),
                     _ => None,
@@ -693,6 +730,8 @@ impl TlMenuPopup {
                     indent,
                     painted,
                     swatch,
+                    icon,
+                    danger,
                 }
             })
             .collect()
@@ -1173,6 +1212,8 @@ impl TlMenuPopup {
                 tooltip,
                 indent,
                 swatch,
+                icon: item_icon,
+                danger,
                 ..
             } => {
                 let hint =
@@ -1209,6 +1250,14 @@ impl TlMenuPopup {
                                 .bg(color),
                         )
                     })
+                    .when_some(*item_icon, |d, name| {
+                        d.child(div().flex_none().mr(m.sp[2]).child(icon(
+                            name,
+                            m.icon.sm,
+                            t.status.danger,
+                        )))
+                    })
+                    .when(*danger, |d| d.text_color(t.status.danger))
                     .child(text)
                     .children(hint)
                     .on_click(

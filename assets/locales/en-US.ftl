@@ -1156,6 +1156,10 @@ history-tip-values-at = Values at the selected time
 history-tip-averages = Averages over the selected range (peak in cell tooltips)
 history-cell-peak = peak { $value }
 history-not-running = Process not running
+history-menu-show-live = Show in live table
+history-menu-delete = Delete from history
+history-toast-deleted = History entry deleted
+history-toast-deleted-n = { $count } history entries deleted
 history-previous-boot = (previous boot)
 
 ## Action tracker (E16-A3, ADR-015, R-196, R-197, R-240)

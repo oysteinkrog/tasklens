@@ -48,10 +48,11 @@ pub enum TlIcon {
     Pencil,
     FunnelX,
     Eject,
+    Trash,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -87,6 +88,7 @@ impl TlIcon {
         Self::Pencil,
         Self::FunnelX,
         Self::Eject,
+        Self::Trash,
     ];
 
     /// The kit name for this icon.
@@ -127,6 +129,7 @@ impl TlIcon {
             Self::Pencil => IconName::Pencil,
             Self::FunnelX => IconName::FunnelX,
             Self::Eject => IconName::Eject,
+            Self::Trash => IconName::Trash,
         }
     }
 }
@@ -203,7 +206,8 @@ impl IconNamed for AppIcon {
 // `RotateCcw` is the Set Affinity Reset button (E23-005). `Archive` is the Memory compression
 // pseudo row (UI-PRC-002). `Cog` and `FileCode` are Startup Apps Name icon fallbacks
 // (UI-SYS-041). `FunnelX` is the Services Remove filters button and the system tables' No matches
-// icon (UI-SYS-011, UI-SYS-005). `Eject` is the Disk page Eject button (UI-PRF-029).
+// icon (UI-SYS-011, UI-SYS-005). `Eject` is the Disk page Eject button (UI-PRF-029). `Trash` is the History
+// menu's Delete from history item (UI-PRC-037).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
@@ -211,7 +215,7 @@ gpui_kit::assets::icon_assets!(
         Square,
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
         Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive, Cog, FileCode,
-        FunnelX, Eject
+        FunnelX, Eject, Trash
     ]
 );
 
