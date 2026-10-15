@@ -3000,7 +3000,7 @@ fn cell_dot_paints_dot() {
 
 #[test]
 fn selected_text_color_kept_on_selected_row() {
-    let mut cx = cosmic_cx();
+    let cx = cosmic_cx();
     let (theme, m) = cx.update(|cx| (current(cx).clone(), *metrics(cx)));
     let danger = theme.status.danger;
     let ctx = |selected| CellCtx {
