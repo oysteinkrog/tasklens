@@ -3,7 +3,7 @@
 //! (tasklens-8fx.22), and queries on strip window, metric and selection changes
 //! (tasklens-8fx.38), and the timeline strip's cached geometry and gap bands (tasklens-8fx.24), and
 //! the filter text typed before the page existed (tasklens-8fx.39), and the top-3 hover card
-//! (tasklens-8fx.26).
+//! (tasklens-8fx.26), and the minimap (tasklens-8fx.27).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -2027,4 +2027,189 @@ fn top3_no_resend_after_leave(cx: &mut TestAppContext) {
     }
     assert_eq!(top_queries(&engine).len(), 1);
     assert_eq!(vcx.read_entity(&page, |p, _| p.top().in_flight()), None);
+}
+
+/// Minimap (tasklens-8fx.27): a page whose view spans `span`, with the strip window set to
+/// `view_range` and the window painted once.
+fn minimap_page(
+    cx: &mut TestAppContext,
+    span: (TimeNs, TimeNs),
+    view_range: (TimeNs, TimeNs),
+) -> (Arc<FakeEngine>, Entity<HistoryPage>, &mut VisualTestContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let v = HistoryView {
+        header: ComponentHeader {
+            version: 1,
+            ..ComponentHeader::default()
+        },
+        span: Some(span),
+        frame_t: Some(span.1),
+        store_state: HistoryStoreState::Ready,
+        ..HistoryView::default()
+    };
+    publish_view(&engine, vcx, v);
+    page.update(vcx, |p, cx| p.set_view_range(view_range, cx));
+    settle(vcx);
+    (engine, page, vcx)
+}
+
+fn map(
+    page: &Entity<HistoryPage>,
+    vcx: &mut VisualTestContext,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    vcx.read_entity(page, |p, _| p.minimap().map_bounds)
+}
+
+/// A press at `from`, a move to `to` with the button held, and a release there.
+fn drag(
+    vcx: &mut VisualTestContext,
+    from: gpui_kit::Point<gpui_kit::Pixels>,
+    to: gpui_kit::Point<gpui_kit::Pixels>,
+) {
+    use gpui_kit::{Modifiers, MouseButton};
+    vcx.simulate_mouse_move(from, None, Modifiers::none());
+    vcx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    vcx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    vcx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+}
+
+fn view_range(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) -> (TimeNs, TimeNs) {
+    vcx.read_entity(page, |p, _| p.state().view_range)
+}
+
+#[gpui_kit::test]
+fn minimap_box_tracks_strip_range(cx: &mut TestAppContext) {
+    // 6 h retained, the strip shows the last 10 minutes.
+    let span = (0, 6 * 3600 * S);
+    let (_engine, page, vcx) = minimap_page(cx, span, (span.1 - 600 * S, span.1));
+    let map = map(&page, vcx);
+    assert!(map.size.width > gpui_kit::px(0.));
+    let b = vcx
+        .read_entity(&page, |p, _| p.minimap().box_bounds)
+        .expect("a box");
+    let width = f32::from(b.size.width);
+    let want = f32::from(map.size.width) / 36.0;
+    assert!((width - want).abs() <= 1.0, "{width} {want}");
+    assert!(f32::from(b.right() - map.right()).abs() <= 1.0);
+}
+
+#[gpui_kit::test]
+fn minimap_drag_pans_strip(cx: &mut TestAppContext) {
+    let (_engine, page, vcx) = minimap_page(cx, (100 * S, 1000 * S), (400 * S, 600 * S));
+    let map = map(&page, vcx);
+    // The box centre, 500 s, is at 400 / 900 of the map.
+    let from = at(map, 400.0 / 900.0);
+    let to = at(map, 400.0 / 900.0 + 0.1);
+    drag(vcx, from, to);
+    let (a, b) = view_range(&page, vcx);
+    // 10% of a 900 s span is 90 s, within the time of one px.
+    let px_ns = 900.0 * S as f64 / f64::from(f32::from(map.size.width));
+    assert!((a as f64 - 490.0 * S as f64).abs() <= px_ns, "{a}");
+    assert_eq!(b - a, 200 * S);
+}
+
+#[gpui_kit::test]
+fn minimap_edge_zooms(cx: &mut TestAppContext) {
+    let (_engine, page, vcx) = minimap_page(cx, (100 * S, 1000 * S), (400 * S, 600 * S));
+    let map = map(&page, vcx);
+    // The left edge, 400 s, is at 300 / 900 of the map; drag it to 450 s.
+    drag(vcx, at(map, 300.0 / 900.0), at(map, 350.0 / 900.0));
+    let (a, b) = view_range(&page, vcx);
+    assert!(a > 400 * S, "{a}");
+    assert_eq!(b, 600 * S);
+    assert!(b - a < 200 * S);
+}
+
+#[gpui_kit::test]
+fn minimap_click_centres(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton};
+    let (_engine, page, vcx) = minimap_page(cx, (100 * S, 1000 * S), (400 * S, 600 * S));
+    let map = map(&page, vcx);
+    // 80% of the map is 820 s.
+    let p = at(map, 0.8);
+    vcx.simulate_mouse_move(p, None, Modifiers::none());
+    vcx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    vcx.simulate_mouse_up(p, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    assert_eq!(view_range(&page, vcx), (720 * S, 920 * S));
+}
+
+/// A view at `version` spanning 100..1000 s with `overview` as its overview.
+fn overview_view(version: u64, overview: Arc<[HistoryPoint]>) -> HistoryView {
+    HistoryView {
+        header: ComponentHeader {
+            version,
+            ..ComponentHeader::default()
+        },
+        span: Some((100 * S, 1000 * S)),
+        frame_t: Some(1000 * S),
+        store_state: HistoryStoreState::Ready,
+        overview,
+        ..HistoryView::default()
+    }
+}
+
+fn overview_points() -> Arc<[HistoryPoint]> {
+    (100..=1000u64)
+        .step_by(10)
+        .map(|t| HistoryPoint {
+            t_ns: t * S,
+            min: (t % 70) as f32,
+            max: if t == 500 { f32::NAN } else { (t % 70) as f32 },
+        })
+        .collect()
+}
+
+#[gpui_kit::test]
+fn minimap_path_cached(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let builds =
+        |vcx: &mut VisualTestContext| vcx.read_entity(&page, |p, _| p.minimap().build_count);
+    publish_view(&engine, vcx, overview_view(1, overview_points()));
+    settle(vcx);
+    assert_eq!(builds(vcx), 1);
+    // Only the strip window changes: the path is not rebuilt.
+    for r in [(300 * S, 900 * S), (200 * S, 500 * S)] {
+        page.update(vcx, |p, cx| p.set_view_range(r, cx));
+        settle(vcx);
+    }
+    assert_eq!(builds(vcx), 1);
+    // A view without an overview keeps the old one.
+    publish_view(&engine, vcx, overview_view(2, Arc::from(Vec::new())));
+    settle(vcx);
+    assert_eq!(builds(vcx), 1);
+    // A new overview rebuilds once.
+    publish_view(&engine, vcx, overview_view(3, overview_points()));
+    settle(vcx);
+    settle(vcx);
+    assert_eq!(builds(vcx), 2);
+}
+
+#[gpui_kit::test]
+fn minimap_metric_change_asks_overview(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    answer(&engine, 1, vcx);
+    advance(vcx, Duration::from_secs(1));
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 2);
+    assert!(!overview(&sent[1].2));
+    answer(&engine, sent[1].0, vcx);
+    page.update(vcx, |p, cx| p.set_metric(HistoryMetric::Memory, cx));
+    advance(vcx, Duration::from_secs(1));
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), 3);
+    assert!(
+        overview(&sent[2].2),
+        "the new metric's overview is asked at once"
+    );
 }

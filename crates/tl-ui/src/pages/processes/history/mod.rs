@@ -19,6 +19,7 @@
 
 pub mod actions;
 pub mod hover;
+pub mod minimap;
 pub mod scrubber;
 pub mod table;
 
@@ -59,6 +60,7 @@ use crate::theme::{bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{FilterChanged, GlobalShellEvents, main_window_view, push_main_toast};
 
+use self::minimap::{KeptOverview, MinimapCache, MinimapView};
 use self::scrubber::{ScrubberCache, StripView};
 use self::table::{HistoryTableDelegate, is_live};
 
@@ -330,6 +332,11 @@ impl QueryController {
         due
     }
 
+    /// Makes the next query ask for the overview.
+    pub fn reset_overview(&mut self) {
+        self.last_overview_ns = None;
+    }
+
     /// Sends at once when nothing is in flight, else replaces `pending`. A replaced query's
     /// overview request carries over, so it is not lost.
     pub fn want(&mut self, range: HistoryRange, mut what: HistoryWhat, client: &dyn EngineClient) {
@@ -442,6 +449,12 @@ pub struct HistoryPage {
     strip_view: Option<Entity<StripView>>,
     /// Focus of the strip: the History key context is reached through it (E30-018).
     strip_focus: FocusHandle,
+    /// The last overview the engine sent. Views that asked for none carry none, so it is kept.
+    overview: Option<KeptOverview>,
+    /// The minimap's built path and pointer state.
+    minimap: MinimapCache,
+    /// The minimap's own view, created on the first render that shows it.
+    minimap_view: Option<Entity<MinimapView>>,
     /// The top-3 hover card's TopAt queries and timers (E30-023).
     top: hover::TopController,
     /// The hover card's texts and shaped lines.
@@ -571,6 +584,9 @@ impl HistoryPage {
             scrubber: ScrubberCache::default(),
             strip_view: None,
             strip_focus: cx.focus_handle().tab_stop(true),
+            overview: None,
+            minimap: MinimapCache::default(),
+            minimap_view: None,
             top: hover::TopController::default(),
             card: hover::CardCache::default(),
             frame_version: 0,
@@ -606,6 +622,12 @@ impl HistoryPage {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn scrubber(&self) -> &ScrubberCache {
         &self.scrubber
+    }
+
+    /// The minimap's cache, for its build counter and painted box.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn minimap(&self) -> &MinimapCache {
+        &self.minimap
     }
 
     /// Sets the global filter text (PROC-046). The table matches it, lowercased, against name,
@@ -709,12 +731,15 @@ impl HistoryPage {
     }
 
     /// Sets the strip metric. While scrubbed or with a range set, asks for its frame. While the
-    /// top-3 card is shown, asks for the hovered second's top list for the new metric.
+    /// top-3 card is shown, asks for the hovered second's top list for the new metric. The next
+    /// Frame query asks for the new metric's overview.
     pub fn set_metric(&mut self, metric: HistoryMetric, cx: &mut Context<Self>) {
         if self.state.metric == metric {
             return;
         }
         self.state.metric = metric;
+        self.overview = None;
+        self.queries.reset_overview();
         self.on_frame_input(true, cx);
         if let Some((t, _)) = self.top.hovered() {
             self.top_hover(t, cx);
@@ -873,12 +898,20 @@ impl HistoryPage {
         true
     }
 
-    /// Stores `view`, sets the default strip window on the first span and rebuilds the header.
+    /// Stores `view`, sets the default strip window on the first span, keeps the view's overview
+    /// when it carries one and rebuilds the header.
     fn install(&mut self, view: Arc<HistoryView>) {
         if self.state.view_range == (0, 0)
             && let Some(span) = view.span
         {
             self.state.view_range = default_view_range(span);
+        }
+        if let Some(span) = view.span.filter(|_| !view.overview.is_empty()) {
+            self.overview = Some(KeptOverview {
+                metric: view.series.first().map_or(self.state.metric, |s| s.metric),
+                span,
+                points: Arc::clone(&view.overview),
+            });
         }
         self.view = Some(view);
         self.refresh_header();
@@ -1149,6 +1182,15 @@ impl Render for HistoryPage {
                 })
             })
             .clone();
+        let minimap_view = self
+            .minimap_view
+            .get_or_insert_with(|| {
+                cx.new(|cx| {
+                    cx.observe(&page, |_, _, cx| cx.notify()).detach();
+                    MinimapView::new(page.downgrade())
+                })
+            })
+            .clone();
         let m = metrics(cx);
         let theme = current(cx);
         let scale = m.ui_scale;
@@ -1180,11 +1222,14 @@ impl Render for HistoryPage {
             let view = strip_view.clone();
             strip.child(view.cached(StyleRefinement::default().size_full()))
         };
-        let minimap = div()
+        let mut minimap = div()
             .flex_none()
             .h(px(MINIMAP_H * scale))
             .mx(margin)
             .mt(m.sp[2]);
+        if !self.loading() {
+            minimap = minimap.child(minimap_view.cached(StyleRefinement::default().size_full()));
+        }
         // The history table fills this slot; it stays empty while the store loads.
         let mut table = div().flex_1().min_h_0().mt(m.sp[4]);
         if !self.loading() {
