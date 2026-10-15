@@ -5,8 +5,10 @@
 //! follows the `graphs.minigraph_*` settings, writes `[[minigraphs]]` on every change of the
 //! card set (tl-app debounces the write by 500 ms), handles `ResetMinigraphLayout`,
 //! `MinigraphHide` and `MinigraphRemove`, and sends the cards' demand as one surface while the
-//! Processes tab is shown (as the process table does, pdu.52). It re-renders only when the card
-//! set or the drag preview changes; each card is a cached view that re-renders on its own.
+//! Processes tab is shown (as the process table does, pdu.52). The cards' `graph_targets` also go
+//! out as an always-on part, so process, name and app cards keep sampling with the tab inactive
+//! or the window hidden (PERF-085, PROC-093). It re-renders only when the card set or the drag
+//! preview changes; each card is a cached view that re-renders on its own.
 //!
 //! Dragging a card (UI-PRF-043, PERF-082) previews the new order while the pointer is over a slot
 //! and moves the card there on drop, with no holes.
@@ -165,9 +167,13 @@ impl MinigraphPanel {
             }
         }
         this.rebuild_cards(cx);
+        this.send_graph_targets(cx);
         let source = cx.entity_id();
         cx.on_release(move |this, cx| {
-            this.demand.update(cx, |a, cx| a.remove(source, cx));
+            this.demand.update(cx, |a, cx| {
+                a.remove(source, cx);
+                a.set_graph_targets(source, Arc::from([]), cx);
+            });
         })
         .detach();
         this
@@ -453,7 +459,7 @@ impl MinigraphPanel {
     }
 
     /// Called by the Processes page on tab activation. Active sends the demand part; inactive
-    /// withdraws it.
+    /// withdraws it. The always-on graph targets stay.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.active == active {
             return;
@@ -505,9 +511,18 @@ impl MinigraphPanel {
         });
     }
 
+    /// Sends the cards' `graph_targets` as the always-on part, whether the tab is active or not.
+    fn send_graph_targets(&self, cx: &mut Context<Self>) {
+        let targets = self.demand_part(cx).graph_targets;
+        let source = cx.entity_id();
+        self.demand
+            .update(cx, |a, cx| a.set_graph_targets(source, targets, cx));
+    }
+
     /// The card set changed: rebuild the cards, resend demand, persist, redraw.
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.rebuild_cards(cx);
+        self.send_graph_targets(cx);
         self.send_demand(cx);
         self.persist(cx);
         cx.notify();

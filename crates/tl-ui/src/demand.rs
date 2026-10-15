@@ -3,6 +3,11 @@
 //! reports the main window hidden, parts from the main window are ignored (ADR-008 "Hidden
 //! detection", ADR-010).
 //!
+//! Graph targets (PERF-085, PROC-093): process, name and app minigraph cards keep sampling while
+//! they are off screen and while the window is hidden. Their surface sends them with
+//! [`DemandAggregator::set_graph_targets`] as a separate part that is never left out. Only its
+//! `graph_targets` count, so every bool still follows visibility.
+//!
 //! Save power on battery (wlf.32): while the system runs on battery and
 //! `motion.save_power_on_battery` is on, the merge leaves `cpu_fast` off, so CPU updates drop
 //! from 10 Hz to 1 Hz, and [`PowerSaving`] tells the charts to stop sliding. Both are applied
@@ -19,6 +24,7 @@ use tl_model::demand::{
     AFFINITY_TARGETS_MAX, CpuDemand, DETAIL_KEYS_MAX, DETAILS_MAX, Demand, GRAPH_TARGETS_MAX,
     UNIT_DETAILS_MAX,
 };
+use tl_model::ids::{ColumnId, GraphTarget};
 
 use crate::hub::{ComponentMask, HiddenChanged, SnapshotChanged, SnapshotHub};
 use crate::settings_global::TlSettings;
@@ -31,6 +37,8 @@ pub struct DemandAggregator {
     client: Arc<dyn EngineClient>,
     /// One contribution per surface. Window `None` means the surface is not in a window (tray).
     parts: FxHashMap<EntityId, (Option<AnyWindowHandle>, Demand)>,
+    /// Always-on graph targets, one list per surface. Kept while no part is visible.
+    graph_targets: FxHashMap<EntityId, Arc<[(GraphTarget, ColumnId)]>>,
     main_window: Option<AnyWindowHandle>,
     last_sent: Option<Demand>,
     flush_scheduled: bool,
@@ -91,6 +99,7 @@ impl DemandAggregator {
         Self {
             client,
             parts: FxHashMap::default(),
+            graph_targets: FxHashMap::default(),
             main_window: None,
             last_sent: None,
             flush_scheduled: false,
@@ -129,6 +138,24 @@ impl DemandAggregator {
         self.schedule_flush(cx);
     }
 
+    /// Replaces this surface's always-on graph targets and schedules a flush. An empty list
+    /// drops them. [`Self::remove`] leaves them in place.
+    pub fn set_graph_targets(
+        &mut self,
+        source: EntityId,
+        targets: Arc<[(GraphTarget, ColumnId)]>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if targets.is_empty() {
+            self.graph_targets.remove(&source).is_some()
+        } else {
+            self.graph_targets.insert(source, Arc::clone(&targets)) != Some(targets)
+        };
+        if changed {
+            self.schedule_flush(cx);
+        }
+    }
+
     /// Called once by `MainWindow::new`.
     pub fn set_main_window(&mut self, window: AnyWindowHandle) {
         self.main_window = Some(window);
@@ -147,7 +174,8 @@ impl DemandAggregator {
     }
 
     /// The merge of every part that counts now. While hidden, parts from the main window are
-    /// left out.
+    /// left out. The always-on graph targets follow the parts' own targets, capped at
+    /// `GRAPH_TARGETS_MAX`, visible or not.
     pub fn merged(&self) -> Demand {
         let mut parts: Vec<(EntityId, &Demand)> = self
             .parts
@@ -161,6 +189,14 @@ impl DemandAggregator {
         // parts gives an equal merge and nothing is resent.
         parts.sort_unstable_by_key(|(id, _)| *id);
         let mut merged = merge(parts.into_iter().map(|(_, part)| part));
+        if !self.graph_targets.is_empty() {
+            let mut always: Vec<_> = self.graph_targets.iter().collect();
+            always.sort_unstable_by_key(|(id, _)| **id);
+            merged.graph_targets = union(
+                std::iter::once(&merged.graph_targets).chain(always.into_iter().map(|(_, t)| t)),
+                GRAPH_TARGETS_MAX,
+            );
+        }
         if self.power_saving {
             merged.cpu_fast = false;
         }

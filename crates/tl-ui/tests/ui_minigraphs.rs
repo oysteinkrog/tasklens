@@ -893,6 +893,7 @@ mod panel {
     struct Rig {
         engine: Arc<FakeEngine>,
         panel: Entity<MinigraphPanel>,
+        demand: Entity<DemandAggregator>,
         vcx: VisualTestContext,
         saved: Arc<Mutex<Vec<UiState>>>,
     }
@@ -942,8 +943,9 @@ mod panel {
         cx.run_until_parked();
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        let panel_demand = demand.clone();
         let (host, vcx) = cx.add_window_view(move |_, cx| Host {
-            panel: cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx)),
+            panel: cx.new(|cx| MinigraphPanel::new(&hub, &panel_demand, cx)),
         });
         let mut vcx = vcx.clone();
         vcx.simulate_scale_factor_change(1.0);
@@ -953,6 +955,7 @@ mod panel {
         Rig {
             engine,
             panel,
+            demand,
             vcx,
             saved,
         }
@@ -1330,6 +1333,62 @@ mod panel {
         draw(&mut r.vcx);
         let sent = r.engine.demands().last().cloned().expect("demand sent");
         assert_eq!(&sent.graph_targets[..], want);
+    }
+
+    /// Process cards keep sampling off screen (PERF-085, PROC-093): with the tab inactive and
+    /// with the window hidden, the sent demand keeps the cards' targets and every bool is off.
+    #[gpui_kit::test]
+    fn process_cards_sample_while_hidden(cx: &mut TestAppContext) {
+        use tl_model::demand::Demand;
+
+        let mut r = rig_with(cx, process_state());
+        let panel = r.panel.clone();
+        let want = r
+            .vcx
+            .update(|_, cx| panel.read(cx).demand_part(cx).graph_targets);
+        assert_eq!(want.len(), 2);
+        let off_screen = Demand {
+            graph_targets: want.clone(),
+            ..Demand::default()
+        };
+
+        // Tab inactive: only the always-on targets go out.
+        r.vcx.executor().advance_clock(Duration::from_millis(200));
+        draw(&mut r.vcx);
+        let sent = r.engine.demands().last().cloned().expect("demand sent");
+        assert_eq!(sent, off_screen);
+
+        // Tab active in the main window: the cards' bools join the targets.
+        let demand = r.demand.clone();
+        r.vcx.update(|window, cx| {
+            let main = window.window_handle();
+            demand.update(cx, |a, _| a.set_main_window(main));
+            panel.update(cx, |p, cx| p.set_active(true, cx));
+        });
+        r.vcx.executor().advance_clock(Duration::from_millis(200));
+        draw(&mut r.vcx);
+        let sent = r.engine.demands().last().cloned().expect("demand sent");
+        assert!(sent.any_surface_visible && sent.memory);
+        assert_eq!(&sent.graph_targets[..], &want[..]);
+
+        // A change waits 1500 ms with no main window render: hidden, the targets stay.
+        r.engine
+            .publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
+        r.vcx.run_until_parked();
+        r.vcx.executor().advance_clock(Duration::from_millis(1500));
+        r.vcx.run_until_parked();
+        r.vcx.executor().advance_clock(Duration::from_millis(200));
+        r.vcx.run_until_parked();
+        let sent = r.engine.demands().last().cloned().expect("demand sent");
+        assert_eq!(sent, off_screen);
+
+        // The tab goes inactive while hidden: still only the targets.
+        r.vcx
+            .update(|_, cx| panel.update(cx, |p, cx| p.set_active(false, cx)));
+        r.vcx.executor().advance_clock(Duration::from_millis(200));
+        r.vcx.run_until_parked();
+        let sent = r.engine.demands().last().cloned().expect("demand sent");
+        assert_eq!(sent, off_screen);
     }
 
     /// Publishes the CPU series in both tiers: 10 Hz fast and 1 Hz with the tier bit.
