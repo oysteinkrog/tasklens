@@ -79,7 +79,26 @@ impl ScanInput {
 /// Runs on the blocking pool. Tests replace it with a scripted fake.
 pub type Scanner = Arc<dyn Fn(&ScanInput) -> Result<Vec<StartupRaw>, CollectError> + Send + Sync>;
 
-/// The real scanner: XDG autostart, user units and, on KDE, Plasma scripts.
+/// `$HOME` and `$XDG_CONFIG_HOME`. A file under either is a user file.
+#[derive(Clone, Copy, Default)]
+struct UserDirs<'a> {
+    home: Option<&'a Path>,
+    config_home: Option<&'a Path>,
+}
+
+impl<'a> UserDirs<'a> {
+    /// A relative `config_home` matches nothing.
+    fn new(home: Option<&'a Path>, config_home: &'a Path) -> Self {
+        Self {
+            home,
+            config_home: Some(config_home).filter(|p| p.is_absolute()),
+        }
+    }
+}
+
+/// The real scanner: XDG autostart, user units and, on KDE, Plasma scripts. A row keeps
+/// `file_exists` only when its program also exists: a resolved path that is a file after
+/// following symlinks. This runs here, on the blocking pool, because it reads the disk.
 fn host_scan(input: &ScanInput) -> Result<Vec<StartupRaw>, CollectError> {
     let units: Vec<UnitFileListing<'_>> = input
         .units
@@ -88,6 +107,12 @@ fn host_scan(input: &ScanInput) -> Result<Vec<StartupRaw>, CollectError> {
         .collect();
     let mut out = Vec::new();
     scan_startup(&input.env, &units, &mut out)?;
+    for raw in &mut out {
+        raw.file_exists &= raw
+            .resolved_path
+            .as_deref()
+            .is_some_and(|program| Path::new(program).is_file());
+    }
     Ok(out)
 }
 
@@ -150,6 +175,7 @@ async fn run<H: Host>(cx: Cx, io: WorkerIo, scanner: Scanner, host: H) -> Outcom
         }
         let mut input = host.input();
         let home = input.home.clone();
+        let config_home = input.env.config_home.clone();
         let mut systemd = Systemd::default();
         // Kept for the timing reads after the scan, then dropped with the scan.
         let mut manager = match host.manager(&cx).await {
@@ -204,7 +230,8 @@ async fn run<H: Host>(cx: Cx, io: WorkerIo, scanner: Scanner, host: H) -> Outcom
                     }
                 }
                 drop(manager);
-                let entries = cache.merge(raws, &systemd, home.as_deref());
+                let dirs = UserDirs::new(home.as_deref(), &config_home);
+                let entries = cache.merge(raws, &systemd, dirs);
                 let update = SourceUpdate::Startup(StartupUpdate {
                     entries,
                     validity: Validity::Valid,
@@ -722,7 +749,7 @@ impl Cache {
         &mut self,
         raws: Vec<StartupRaw>,
         systemd: &Systemd,
-        home: Option<&Path>,
+        dirs: UserDirs<'_>,
     ) -> Vec<StartupEntry> {
         let mut next = FxHashMap::default();
         let mut entries = Vec::with_capacity(raws.len());
@@ -731,7 +758,7 @@ impl Cache {
             let facts = systemd.facts(&raw);
             let entry = match self.rows.remove(&id) {
                 Some((old, old_facts, entry)) if old == raw && old_facts == facts => entry,
-                _ => to_entry(id.clone(), &raw, &facts, home),
+                _ => to_entry(id.clone(), &raw, &facts, dirs),
             };
             entries.push(entry.clone());
             next.entry(id).or_insert((raw, facts, entry));
@@ -760,14 +787,18 @@ fn startup_ref(raw: &StartupRaw) -> StartupRef {
 /// One model entry. The publisher is "User" for files under `$HOME` and blank otherwise;
 /// package lookup is not done here. Only an absolute `Icon=` is an icon path. Scope is user
 /// for user autostart entries and Plasma scripts, system for system autostart entries, and
-/// for user units it follows whether the unit file is under `$HOME`.
+/// for user units it follows whether the unit file is under `$HOME` or `$XDG_CONFIG_HOME`.
 fn to_entry(
     id: StartupRef,
     raw: &StartupRaw,
     facts: &UnitFacts,
-    home: Option<&Path>,
+    dirs: UserDirs<'_>,
 ) -> StartupEntry {
-    let under_home = home.is_some_and(|home| Path::new(&*raw.source_path).starts_with(home));
+    let source = Path::new(&*raw.source_path);
+    let under_home = dirs.home.is_some_and(|home| source.starts_with(home));
+    let under_config_home = dirs
+        .config_home
+        .is_some_and(|config_home| source.starts_with(config_home));
     let kind = match raw.kind {
         StartupKindRaw::AutostartUser => StartupKind::AutostartUser,
         StartupKindRaw::AutostartSystem => StartupKind::AutostartSystem,
@@ -783,7 +814,7 @@ fn to_entry(
         StartupKind::AutostartSystem | StartupKind::AutostartSystemOverridden => {
             StartupScope::System
         }
-        StartupKind::UserUnit if under_home => StartupScope::User,
+        StartupKind::UserUnit if under_home || under_config_home => StartupScope::User,
         StartupKind::UserUnit => StartupScope::System,
     };
     StartupEntry {
@@ -1425,7 +1456,7 @@ mod tests {
                 raw(StartupKindRaw::AutostartUser, "b.desktop"),
             ],
             &Systemd::default(),
-            None,
+            UserDirs::default(),
         );
         // A new scan builds new strings; only the changed row gets a new entry.
         let mut b = raw(StartupKindRaw::AutostartUser, "b.desktop");
@@ -1433,7 +1464,7 @@ mod tests {
         let second = cache.merge(
             vec![raw(StartupKindRaw::AutostartUser, "a.desktop"), b],
             &Systemd::default(),
-            None,
+            UserDirs::default(),
         );
         assert!(Arc::ptr_eq(&first[0].name, &second[0].name));
         assert!(!Arc::ptr_eq(&first[1].name, &second[1].name));
@@ -1465,8 +1496,11 @@ mod tests {
         };
         let raws = host_scan(&input).expect("fixture scans");
         assert!(!raws.is_empty());
-        let entries =
-            Cache::default().merge(raws.clone(), &Systemd::default(), input.home.as_deref());
+        let entries = Cache::default().merge(
+            raws.clone(),
+            &Systemd::default(),
+            UserDirs::new(input.home.as_deref(), &input.env.config_home),
+        );
         assert_eq!(entries.len(), raws.len());
 
         let user = entries
@@ -1523,8 +1557,9 @@ mod tests {
     }
 
     /// A user desktop entry with TryExec, OnlyShowIn, NotShowIn and an autostart phase over a
-    /// system copy, its program on `PATH`, and a listed user unit whose file is gone
-    /// (B8-E28-12).
+    /// system copy, its program on `PATH`; an entry whose absolute program is missing; a listed
+    /// user unit whose file is gone; units under an `$XDG_CONFIG_HOME` outside `$HOME` and
+    /// under a system directory (B8-E28-12).
     #[test]
     fn host_scan_fills_properties_fields() {
         use std::os::unix::fs::PermissionsExt;
@@ -1537,32 +1572,56 @@ mod tests {
         let entry = "[Desktop Entry]\nType=Application\nName=Tray Tool\nExec=tray-tool --tray\n\
                      TryExec=tray-tool\nOnlyShowIn=KDE;\nNotShowIn=GNOME;\n\
                      X-KDE-autostart-phase=2\n";
-        let user_file = root.join("home/.config/autostart/tray-tool.desktop");
+        let user_file = root.join("xdg-config/autostart/tray-tool.desktop");
         let system_file = root.join("etc/xdg/autostart/tray-tool.desktop");
         write(&user_file, entry);
         write(&system_file, entry);
-        let gone = root.join("home/.config/systemd/user/gone.service");
+        let missing = root.join("opt/missing/bin/missing-tool");
+        write(
+            &root.join("xdg-config/autostart/missing-tool.desktop"),
+            &format!(
+                "[Desktop Entry]\nType=Application\nName=Missing Tool\nExec={}\n",
+                missing.display()
+            ),
+        );
+        let gone = root.join("xdg-config/systemd/user/gone.service");
+        let unit = format!(
+            "[Service]\nExecStart={}\n[Install]\nWantedBy=default.target\n",
+            program.display()
+        );
+        let external = root.join("xdg-config/systemd/user/external.service");
+        let packaged = root.join("usr/lib/systemd/user/packaged.service");
+        write(&external, &unit);
+        write(&packaged, &unit);
         let input = ScanInput {
             env: StartupEnv {
-                config_home: root.join("home/.config"),
+                config_home: root.join("xdg-config"),
                 config_dirs: vec![root.join("etc/xdg")],
                 current_desktop: vec!["KDE".to_owned()],
                 path_dirs: vec![root.join("usr/bin")],
                 locales: SmallVec::new(),
             },
             home: Some(root.join("home")),
-            units: vec![(
-                gone.to_str().expect("utf-8").to_owned(),
-                "enabled".to_owned(),
-            )],
+            units: [&gone, &external, &packaged]
+                .iter()
+                .map(|p| (p.to_str().expect("utf-8").to_owned(), "enabled".to_owned()))
+                .collect(),
         };
         let raws = host_scan(&input).expect("scans");
-        let entries = Cache::default().merge(raws, &Systemd::default(), input.home.as_deref());
+        let entries = Cache::default().merge(
+            raws,
+            &Systemd::default(),
+            UserDirs::new(input.home.as_deref(), &input.env.config_home),
+        );
 
-        let user = entries
-            .iter()
-            .find(|e| e.kind == StartupKind::AutostartUser)
-            .expect("the user row");
+        let by_id = |id: &str| {
+            entries
+                .iter()
+                .find(|e| &*e.id.id == id && e.kind != StartupKind::AutostartSystemOverridden)
+                .unwrap_or_else(|| panic!("the {id} row"))
+        };
+        let user = by_id("tray-tool.desktop");
+        assert_eq!(user.kind, StartupKind::AutostartUser);
         assert_eq!(user.resolved_path.as_deref(), program.to_str());
         assert!(user.file_exists);
         assert_eq!(user.source_word, "XDG autostart");
@@ -1586,16 +1645,26 @@ mod tests {
         assert_eq!(system.scope, StartupScope::System);
         assert_eq!(system.overrides, None);
 
-        let unit = entries
-            .iter()
-            .find(|e| e.kind == StartupKind::UserUnit)
-            .expect("the gone.service row");
+        // The program path is absolute, so it resolves, but the file is not there.
+        let missing_row = by_id("missing-tool.desktop");
+        assert_eq!(missing_row.resolved_path.as_deref(), missing.to_str());
+        assert!(!missing_row.file_exists);
+
+        let unit = by_id("gone.service");
         assert!(!unit.file_exists);
         assert_eq!(unit.resolved_path, None);
         assert_eq!(unit.source_word, "systemd user unit");
         assert_eq!(unit.scope, StartupScope::User);
         assert_eq!(unit.generated_unit, None);
         assert!(unit.only_show_in.is_empty() && unit.try_exec.is_none());
+
+        // `$XDG_CONFIG_HOME` is outside `$HOME`; its units are still the user's.
+        let external_row = by_id("external.service");
+        assert!(external_row.file_exists);
+        assert_eq!(external_row.scope, StartupScope::User);
+        let packaged_row = by_id("packaged.service");
+        assert!(packaged_row.file_exists);
+        assert_eq!(packaged_row.scope, StartupScope::System);
     }
 
     const UNIT: &str = "app-org.kde.foo@autostart.service";
@@ -1743,7 +1812,11 @@ mod tests {
         systemd.loaded = listing.loaded;
         let facts = systemd.facts(&raws[0]);
         assert_eq!(facts.state_code.as_deref(), Some("active (running)"));
-        let entries = Cache::default().merge(raws, &systemd, input.home.as_deref());
+        let entries = Cache::default().merge(
+            raws,
+            &systemd,
+            UserDirs::new(input.home.as_deref(), &input.env.config_home),
+        );
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].kind, StartupKind::AutostartUser);
         assert_eq!(entries[0].impact, Impact::Low);
@@ -1785,7 +1858,11 @@ mod tests {
         systemd.loaded.insert("sync.service".into(), loaded);
         let t = systemd.timings.remove(UNIT).expect("timed");
         systemd.timings.insert("sync.service".into(), t);
-        let entries = Cache::default().merge(raws, &systemd, input.home.as_deref());
+        let entries = Cache::default().merge(
+            raws,
+            &systemd,
+            UserDirs::new(input.home.as_deref(), &input.env.config_home),
+        );
         let entry = entries
             .iter()
             .find(|e| e.kind == StartupKind::UserUnit)

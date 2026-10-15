@@ -647,7 +647,8 @@ pub struct StartupEntry {
     /// Absolute path of the command's program, found on `PATH` when not absolute. `None` when
     /// it was not found; the UI shows "Not found".
     pub resolved_path: Option<Arc<str>>,
-    /// The source file could be read at scan time.
+    /// At scan time the source file could be read and the program at `resolved_path` was a
+    /// file. `false` when either is missing.
     pub file_exists: bool,
     /// Source word (UI-SYS-050), `kind.source_word()`.
     pub source_word: &'static str,
