@@ -1544,14 +1544,15 @@ mod flows {
 
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use tl_model::actions::{
-        ActionError, ActionEvent, ActionId, ActionRequest, ActionState, ActionTarget,
+        ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
     };
     use tl_model::command::Tab;
+    use tl_model::ids::NodeId;
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::settings::Settings;
-    use tl_model::snapshot::{ProcessSnapshot, StartupType, UnitRecord};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, StartupType, UnitRecord};
     use tl_model::table::{Manager, UnitRef};
-    use tl_model::table::{NodeId, ProcessTableView, TableRow, Total};
+    use tl_model::table::{ProcessTableView, TableRow, Total};
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::action_tracker::{GlobalActionTracker, PushedToast};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -1794,10 +1795,12 @@ mod flows {
         assert_eq!(rig.pushed().last().expect("toast").kind, ToastKind::Warning);
     }
     fn unit_rec(name: &str, path: &str, unit_file: Option<&str>, pid: u32) -> UnitRecord {
-        let missing = || Total {
-            value: Default::default(),
-            validity: Validity::Missing,
-        };
+        fn missing<T: Default>() -> Total<T> {
+            Total {
+                value: T::default(),
+                validity: Validity::Missing,
+            }
+        }
         UnitRecord {
             unit: unit(name),
             kind: UnitType::Service,
@@ -1835,12 +1838,17 @@ mod flows {
 
         fn open(
             &mut self,
-            f: fn(&UnitRecord, &Entity<SysActions>, &mut Window, &mut App),
+            f: fn(&UnitRecord, &Entity<SysActions>, &mut Window, &mut gpui_kit::App),
             u: &UnitRecord,
         ) {
             let actions = self.actions.clone();
             self.main.update(|window, cx| f(u, &actions, window, cx));
             self.main.run_until_parked();
+        }
+
+        fn draw(&mut self) {
+            self.main.run_until_parked();
+            self.main.update(|window, cx| window.draw(cx).clear(cx));
         }
 
         fn active_tab(&mut self) -> Tab {
@@ -1988,11 +1996,12 @@ mod flows {
         let mut rig = rig(cx);
         let u = unit_rec("a.service", "/usr/bin/a", None, 0);
         let snap = (*rig.engine.latest()).clone();
+        let tab = rig.active_tab();
         rig.main
             .update(|window, cx| run_jump_to_process(&u, &snap, window, cx));
         rig.main.run_until_parked();
         assert_eq!(rig.toasts(), ["Service not running"]);
-        assert_eq!(rig.active_tab(), Tab::Services);
+        assert_eq!(rig.active_tab(), tab, "the tab does not change");
     }
 
     fn proc_record(pid: u32) -> ProcessRecord {
@@ -2048,12 +2057,14 @@ mod flows {
         let record = proc_record(812);
         let key = record.key;
         rig.engine.publish_with(|s| {
-            s.processes = Arc::new(ProcessSnapshot {
+            let mut processes = ProcessSnapshot {
                 records: vec![record].into(),
                 ..ProcessSnapshot::default()
-            });
+            };
+            processes.header.version = s.sequence;
+            s.processes = Arc::new(processes);
         });
-        rig.main.run_until_parked();
+        rig.draw();
         let u = unit_rec("a.service", "/usr/bin/a", None, 812);
         let snap = (*rig.engine.latest()).clone();
         let before = rig.queries();
@@ -2073,7 +2084,12 @@ mod flows {
             })
             .expect("query");
         rig.engine.publish_with(|s| {
+            let header = ComponentHeader {
+                version: s.sequence,
+                ..ComponentHeader::default()
+            };
             s.table = Arc::new(ProcessTableView {
+                header,
                 query_generation: generation,
                 rows: vec![TableRow {
                     node: NodeId::Process(key),
@@ -2089,7 +2105,7 @@ mod flows {
                 ..ProcessTableView::default()
             });
         });
-        rig.main.run_until_parked();
+        rig.draw();
         assert_eq!(rig.toasts(), ["Switched to service process."]);
     }
 }

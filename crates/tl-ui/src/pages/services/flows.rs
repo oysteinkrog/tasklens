@@ -183,12 +183,12 @@ pub fn run_unit_verb(
 /// the engine unmasks first as part of that request.
 pub fn startup_change_kind(current: StartupType, choice: StartupChoice) -> Option<ActionKind> {
     let same = matches!(
-        (current, choice),
+        (current, &choice),
         (
             StartupType::Enabled | StartupType::EnabledRuntime,
-            StartupChoice::Enabled
-        ) | (StartupType::Disabled, StartupChoice::Disabled)
-            | (StartupType::Masked, StartupChoice::Masked)
+            &StartupChoice::Enabled
+        ) | (StartupType::Disabled, &StartupChoice::Disabled)
+            | (StartupType::Masked, &StartupChoice::Masked)
     );
     if same {
         return None;
@@ -227,7 +227,7 @@ pub fn run_set_startup(
     let mut kind = None;
     let mut targets: SmallVec<[ActionTarget; 1]> = SmallVec::new();
     for (unit, current) in units {
-        if let Some(k) = startup_change_kind(*current, choice) {
+        if let Some(k) = startup_change_kind(*current, choice.clone()) {
             kind = Some(k);
             targets.push(ActionTarget::Unit(unit.clone()));
         }
