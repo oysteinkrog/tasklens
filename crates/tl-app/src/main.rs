@@ -223,11 +223,7 @@ fn main() -> ExitCode {
 
     // Step 7: start the engine. Do not wait for any collector.
     let mut config = EngineConfig::new(
-        if args.low_memory {
-            EngineMode::LowMemory
-        } else {
-            EngineMode::Full
-        },
+        engine_mode(args.low_memory, args.force_full_memory_mode),
         paths.state_dir.clone(),
     )
     .with_history_dir(paths.history_dir());
@@ -384,6 +380,16 @@ fn finish(
     std::process::exit(code)
 }
 
+/// The engine mode for the flags. `--force-full-memory-mode` only has an effect together with
+/// `--low-memory` (D-015): the rescue window stays, the engine runs in full mode.
+fn engine_mode(low_memory: bool, force_full: bool) -> EngineMode {
+    if low_memory && !force_full {
+        EngineMode::LowMemory
+    } else {
+        EngineMode::Full
+    }
+}
+
 /// True unless this process is itself the relaunch: one automatic relaunch (ADR-015).
 fn should_relaunch(relaunched: Option<OsString>) -> bool {
     relaunched.is_none_or(|v| v != "1")
@@ -512,6 +518,14 @@ fn start_tab(tab: TabArg) -> StartTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_mode_choice() {
+        assert_eq!(engine_mode(true, false), EngineMode::LowMemory);
+        assert_eq!(engine_mode(true, true), EngineMode::Full);
+        assert_eq!(engine_mode(false, false), EngineMode::Full);
+        assert_eq!(engine_mode(false, true), EngineMode::Full);
+    }
 
     #[test]
     fn exit_notice_kinds() {
