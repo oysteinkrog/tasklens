@@ -891,3 +891,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: qfx.28 adds WindowKey::SetupScript(&'static str) in registry.rs (chain edit) for one View script window per subcommand.
 - 2026-10-15 leader decision: new tasklens-qfx.37 helper_flow.rs sends helper session commands for shield actions from all windows; it toasts only for its own starts; qfx.31 tests wait for it.
 - 2026-10-15 leader decision: wox.9 split; page-source tray graphs now, process/name/app tray graphs in tasklens-wox.16 after xdh.13/xdh.14; xdh.13 exposes a public resolver.
+- 2026-10-15 leader decision: qfx.37 helper_flow is the only owner of helper-start failure toasts; one toast per seq in the latest requesting window (else main); Props and Handle Search drop their own cancel toasts.
