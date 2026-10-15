@@ -886,3 +886,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: gma.36 dump file names use the engine's [A-Za-z0-9._-] set (other chars to '_'), then R-224 cut and fallback; R-224 and UI-PWN-034 edited to match; engine check unchanged.
 - 2026-10-15 leader decision: gma.36 toast.rs text action and ToastClosed approved; dump privilege failures retry through the tracker; dump paths live until their toast closes.
 - 2026-10-15 leader decision: pdu.48 pick result handled by the shell WINDOWS handler (builds Processes first); Ctrl+click always confirms through the Picked dialog.
+- 2026-10-15 leader decision: new tasklens-gma.44 sets EngineCaps::GDB at engine start; gma.37 fills MenuCaps from health.caps (gdb and file_manager1) and waits for gma.44; exited tooltip wins over gdb missing.
