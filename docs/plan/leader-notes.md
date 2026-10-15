@@ -878,3 +878,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: 8fx.23 deleted series leave with the next HistoryView (no scrubber.rs edit); new TlMenu::danger_item plus TlIcon::Trash (Lucide trash.svg); HistoryPage handlers in history/mod.rs.
 - 2026-10-15 leader decision: crw.57 graph narrows (40 px minimum, hidden below) on narrow cards; value reserve must cover 1023.9 KiB/s.
 - 2026-10-15 leader decision: crw.57 value moves to its own line under the name when both do not fit on the heading row (any mode, any width).
+- 2026-10-15 leader decision: o55.15 TlButton::icon_rotation chain edit in button.rs; chevron 24 px (Sm); on_click toggle; modules block hidden while inventory WarmingUp, Not reported on Failed.
