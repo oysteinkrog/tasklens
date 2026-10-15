@@ -597,9 +597,7 @@ fn on_mouse_move(
             cx.notify();
             return None;
         }
-        let Some((view, span)) = view_and_span(p) else {
-            return None;
-        };
+        let (view, span) = view_and_span(p)?;
         let next = match drag {
             MinDrag::Box {
                 anchor_x,

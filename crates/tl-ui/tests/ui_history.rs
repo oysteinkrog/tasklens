@@ -2137,7 +2137,11 @@ fn minimap_click_centres(cx: &mut TestAppContext) {
     settle(vcx);
     vcx.simulate_mouse_up(p, MouseButton::Left, Modifiers::none());
     settle(vcx);
-    assert_eq!(view_range(&page, vcx), (720 * S, 920 * S));
+    let (a, b) = view_range(&page, vcx);
+    // Centred at 820 s within the time of one px, still 200 s wide.
+    let px_ns = 900.0 * S as f64 / f64::from(f32::from(map.size.width));
+    assert!((a as f64 - 720.0 * S as f64).abs() <= px_ns, "{a}");
+    assert_eq!(b - a, 200 * S);
 }
 
 /// A view at `version` spanning 100..1000 s with `overview` as its overview.
