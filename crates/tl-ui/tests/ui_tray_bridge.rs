@@ -701,8 +701,9 @@ fn shell_action_goes_to_open_main_window(cx: &mut TestAppContext) {
     assert!(f.vcx.update(|_, cx| main_window_target(cx).is_some()));
     let mini = Rc::new(Cell::new(0));
     let seen = Rc::clone(&mini);
-    f.vcx
-        .update(|_, cx| cx.on_action(move |_: &ToggleMiniWindow, _| seen.set(seen.get() + 1)));
+    f.vcx.update(|_, cx| {
+        cx.on_action(move |_: &ToggleMiniWindow, _| seen.set(seen.get() + 1));
+    });
     f.event(TrayEvent::ShowMiniWindow);
     assert_eq!(mini.get(), 1);
 }
