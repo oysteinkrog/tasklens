@@ -1,8 +1,16 @@
 //! tl-helper: the privileged helper that pkexec runs as root (ADR-006, R-003).
 //!
 //! The only accepted invocation is `tl-helper --session`. There is no `--once` mode and no other
-//! flag. The session loop arrives with E29-A1.
+//! flag. The helper reads framed requests on stdin and answers on stdout, both one end of the
+//! engine's socketpair (ADR-007). The first request must be `Hello` with this protocol version.
+//! The helper exits 0 at stdin EOF or after 300 s without a request, and dies with its parent
+//! through `PR_SET_PDEATHSIG` (PROC-076, APP-003).
+//!
+//! Exit status: 0 for EOF, idle or a gone engine; 1 when the helper cannot start; 2 for bad
+//! arguments; 3 for a protocol error. The helper logs nothing. Its only stderr output is the
+//! usage line and the line `tl-helper: protocol error`.
 
+mod dispatch;
 mod dropin;
 mod files;
 mod ops;
@@ -10,14 +18,34 @@ mod sockets;
 
 use std::io::{IoSliceMut, Read};
 use std::mem::MaybeUninit;
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags, Timespec};
+use rustix::fs::Mode;
+use rustix::io::Errno;
 use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags};
-use tl_model::helper_proto::{HelperError, HelperFrame, HelperRequest};
+use rustix::process::{Pid, Signal};
+use tl_model::helper_proto::{
+    HELPER_PROTO_VERSION, HelperError, HelperFrame, HelperReplyBody, HelperRequest,
+};
 use tl_model::wire::{self, MAX_HELPER_FRAME, WireError};
 
+use crate::dispatch::{Ctx, Next, Writer};
+
 const USAGE: &str = "usage: tl-helper --session";
+/// Time without a request after which the helper exits.
+const IDLE: Duration = Duration::from_secs(300);
+/// Test override of `IDLE`, in milliseconds. Read once at start.
+const IDLE_ENV: &str = "TL_HELPER_IDLE_MS";
+
+/// Exit status when the helper cannot start.
+const EXIT_START: u8 = 1;
+/// Exit status for bad arguments.
+const EXIT_USAGE: u8 = 2;
+/// Exit status for a protocol error.
+const EXIT_PROTOCOL: u8 = 3;
 
 /// Parses the arguments after the program name. `Ok` only for exactly `["--session"]`.
 fn parse_args(args: &[&str]) -> Result<(), ()> {
@@ -28,10 +56,6 @@ fn parse_args(args: &[&str]) -> Result<(), ()> {
 }
 
 /// One request frame and the fds that came with its bytes as `SCM_RIGHTS` (R-145 item 3).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the session loop arrives with E29-A1")
-)]
 struct ReceivedFrame {
     frame: HelperFrame,
     fds: Vec<OwnedFd>,
@@ -43,10 +67,6 @@ struct ReceivedFrame {
 /// fd that arrives with the frame's bytes. Each read asks for no more than the frame still needs,
 /// so fds sent with the next frame stay in the socket. Received fds always have `O_CLOEXEC`. On
 /// error every received fd is closed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the session loop arrives with E29-A1")
-)]
 fn read_request(sock: BorrowedFd<'_>) -> Result<ReceivedFrame, WireError> {
     let mut reader = FdReader {
         sock,
@@ -64,10 +84,6 @@ fn read_request(sock: BorrowedFd<'_>) -> Result<ReceivedFrame, WireError> {
 /// The fd a request may use. A `Dump` must carry exactly one fd; any other request must carry
 /// none. Otherwise `Err(NotAllowed)` (rule "unexpected fd"), and every received fd is closed
 /// when `fds` drops.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the session loop arrives with E29-A1")
-)]
 fn request_fd(received: ReceivedFrame) -> (HelperFrame, Result<Option<OwnedFd>, HelperError>) {
     let ReceivedFrame {
         frame,
@@ -112,14 +128,136 @@ impl Read for FdReader<'_> {
     }
 }
 
+/// Writes the one protocol error line to stderr and returns the exit status for it.
+fn protocol_error() -> u8 {
+    eprintln!("tl-helper: protocol error");
+    EXIT_PROTOCOL
+}
+
+/// The idle limit: `TL_HELPER_IDLE_MS` when it is set and parses, else 300 s.
+fn idle_limit() -> Duration {
+    std::env::var(IDLE_ENV)
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .map_or(IDLE, Duration::from_millis)
+}
+
+/// What waiting on fd 0 gave.
+enum Wait {
+    Frame(ReceivedFrame),
+    /// Idle limit reached or EOF: exit 0.
+    Done,
+    /// Exit with this status.
+    Exit(u8),
+}
+
+/// Waits until `deadline` for fd 0 to become readable, then reads one frame. Blocking poll, so
+/// an idle helper uses no CPU.
+fn wait_for_request(sock: BorrowedFd<'_>, deadline: Instant) -> Wait {
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Ok(left) = Timespec::try_from(left) else {
+            return Wait::Exit(EXIT_START);
+        };
+        let mut fds = [PollFd::new(&sock, PollFlags::IN)];
+        match rustix::event::poll(&mut fds, Some(&left)) {
+            Ok(0) => return Wait::Done,
+            Ok(_) => break,
+            Err(Errno::INTR) => {}
+            Err(_) => return Wait::Exit(EXIT_START),
+        }
+    }
+    match read_request(sock) {
+        Ok(received) => Wait::Frame(received),
+        Err(WireError::Eof) => Wait::Done,
+        // Oversize length, short read, postcard error or a socket error.
+        Err(_) => Wait::Exit(protocol_error()),
+    }
+}
+
+/// Answers the first frame. It must be `Hello` with `HELPER_PROTO_VERSION` and no fd. Returns
+/// `Next::Continue` when the session may go on.
+fn handshake(received: ReceivedFrame, out: &mut Writer<'_>) -> Next {
+    let (frame, fd) = request_fd(received);
+    let hello = matches!(
+        frame.request,
+        HelperRequest::Hello { proto } if proto == HELPER_PROTO_VERSION
+    );
+    let ok = hello && matches!(fd, Ok(None));
+    let body = if ok {
+        HelperReplyBody::Hello {
+            proto: HELPER_PROTO_VERSION,
+        }
+    } else {
+        // Rule "protocol version".
+        HelperReplyBody::Err(HelperError::NotAllowed)
+    };
+    match out.send_all(frame.seq, vec![body]) {
+        Err(_) => Next::Exit(0),
+        Ok(()) if ok => Next::Continue,
+        Ok(()) => Next::Exit(EXIT_PROTOCOL),
+    }
+}
+
+/// The session: start-up checks, the handshake, then one request at a time until EOF, the idle
+/// limit or an error.
+fn run_session() -> u8 {
+    // First action: die with the parent (APP-003).
+    if rustix::process::set_parent_process_death_signal(Some(Signal::KILL)).is_err() {
+        return EXIT_START;
+    }
+    // The parent was already gone before the line above ran.
+    if rustix::process::getppid() == Some(Pid::INIT) {
+        return 0;
+    }
+    rustix::process::umask(Mode::from_raw_mode(0o022));
+    // The engine sees EOF before its Hello reply.
+    let Some(boot) = ops::read_boot_id() else {
+        return EXIT_START;
+    };
+    let idle = idle_limit();
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut ctx = Ctx {
+        sock: stdin.as_fd(),
+        boot,
+        pending: None,
+        stdin_closed: false,
+    };
+    let mut out = Writer::new(stdout.as_fd());
+    let mut deadline = Instant::now() + idle;
+    let mut greeted = false;
+    loop {
+        let received = match ctx.pending.take() {
+            Some(received) => received,
+            None => match wait_for_request(ctx.sock, deadline) {
+                Wait::Frame(received) => received,
+                Wait::Done => return 0,
+                Wait::Exit(status) => return status,
+            },
+        };
+        let next = if greeted {
+            dispatch::handle(received, &mut ctx, &mut out)
+        } else {
+            greeted = true;
+            handshake(received, &mut out)
+        };
+        if let Next::Exit(status) = next {
+            return status;
+        }
+        deadline = Instant::now() + idle;
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     if parse_args(&args).is_err() {
         eprintln!("{USAGE}");
-        return ExitCode::from(2);
+        return ExitCode::from(EXIT_USAGE);
     }
-    ExitCode::SUCCESS
+    ExitCode::from(run_session())
 }
 
 #[cfg(test)]

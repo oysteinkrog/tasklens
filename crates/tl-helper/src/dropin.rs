@@ -64,7 +64,6 @@ const ON_FAILURE_SUFFIXES: [&str; 8] = [
 
 /// Answers `WriteServiceDropIn`. Empty `keys` removes the drop-in (`UnitRemoveRecovery`).
 /// Tests use `write_service_dropin_in` with a temp dir instead.
-#[expect(dead_code, reason = "dispatch arrives with E29-A1")]
 pub fn write_service_dropin(unit: &str, keys: &[(DropInKey, String)]) -> HelperReplyBody {
     /// The directory that holds system unit drop-ins.
     const SYSTEM_UNIT_DIR: &str = "/etc/systemd/system";

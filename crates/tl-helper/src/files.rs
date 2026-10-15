@@ -75,7 +75,6 @@ const MAPS_MAX: usize = 16 * 1024 * 1024;
 /// Answers `ReadProcessFiles { key, files }`. Returns the reply bodies in send order; `dispatch`
 /// sets `last` on the final one. Unknown bits in `files` are ignored. An empty set gets
 /// `Err(NotAllowed)` before any syscall.
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn read_process_files(key: ProcessKey, files: ProcFiles, boot: BootId) -> Vec<HelperReplyBody> {
     read_with_hook(key, files, boot, || {})
 }
@@ -359,7 +358,6 @@ fn read_ns(dir: &OwnedFd, left: usize) -> Result<Vec<u8>, Errno> {
 /// Answers `ScanStrings { key, opts }`. Sends every reply through `out`, with `last` true on the
 /// final one only, and returns the first error `out` gives. Calls `cancel` before each chunk;
 /// true ends the scan with an empty final `Strings`, and found strings not yet sent are dropped.
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn scan_strings(
     key: ProcessKey,
     opts: &StringScanOpts,
@@ -379,7 +377,6 @@ pub fn scan_strings(
 }
 
 /// True when `frame` is the `CancelScan` for the running `ScanStrings` frame `scan_seq` (R-157).
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn is_cancel_for(frame: &HelperFrame, scan_seq: u32) -> bool {
     matches!(frame.request, HelperRequest::CancelScan { seq } if seq == scan_seq)
 }

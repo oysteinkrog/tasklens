@@ -32,7 +32,6 @@ use tl_ops::OpsError;
 use tl_ops::{cgroup, dump, process};
 
 /// Reads the boot id once at helper start. `None` when the file is missing or does not parse.
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn read_boot_id() -> Option<BootId> {
     let text = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
     BootId::from_uuid_text(&text)
@@ -50,7 +49,6 @@ enum Op<'a> {
 
 /// Answers `Signal`, `SetNice`, `SetSched`, `SetAffinity` and `SetIoPriority`. Any other request
 /// gets `Err(NotAllowed)`.
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn run_process_op(req: &HelperRequest, boot: BootId) -> HelperReplyBody {
     let (target, op) = match req {
         HelperRequest::Signal { target, signal } => (*target, Op::Signal(*signal)),
@@ -191,7 +189,6 @@ enum GroupOp {
 /// `validate_cgroup` runs first and every write goes through the dirfd it returns. A freeze
 /// waits for `frozen 1` like the engine does; when it does not arrive within `FREEZE_WAIT` the
 /// reply is `Err(Os(EINPROGRESS))`, which the engine reports as "freeze still in progress".
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn run_cgroup_op(req: &HelperRequest) -> HelperReplyBody {
     let (cg, op) = match req {
         HelperRequest::FreezeGroup(cg) => (cg, GroupOp::Freeze),
@@ -336,7 +333,6 @@ fn check_not_inside(rel: &str, protected: &[String]) -> Result<(), HelperError> 
 ///
 /// The checks run in this order, and each one that fails returns before gdb runs:
 /// `open_verified`, the fd, gdb installed. A gdb failure gives `Err(Os(EIO))`.
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn run_dump(key: ProcessKey, mode: DumpMode, out_fd: OwnedFd, boot: BootId) -> HelperReplyBody {
     match dump_into(key, mode, out_fd, boot) {
         Ok(()) => HelperReplyBody::Ok,

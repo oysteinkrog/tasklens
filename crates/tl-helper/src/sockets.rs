@@ -22,7 +22,6 @@ use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
 
 /// Answers one `ResolveSocketInodes` request. Fails only when `/proc` itself cannot be opened.
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn resolve_socket_inodes(inodes: &[u64], boot: BootId) -> HelperReplyBody {
     if inodes.is_empty() {
         return HelperReplyBody::SocketOwners(Vec::new());
@@ -157,7 +156,6 @@ const IPPROTO_TCP: u8 = 6;
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Answers one `SockDestroy` request. Opens one netlink socket and closes it on return.
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
 pub fn sock_destroy(family: Family, proto: Proto, t: &FourTuple, cookie: u64) -> HelperReplyBody {
     // Rule "only tcp": the kernel can destroy UDP sockets too, but the helper never does.
     if proto != Proto::Tcp {
