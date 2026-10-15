@@ -3190,6 +3190,40 @@ mod pick {
     }
 
     #[gpui_kit::test]
+    fn pick_late_cancel_keeps_new_pick(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        // Esc cancels pick 1, then pick 2 starts before the engine answers pick 1.
+        r.vcx.simulate_keystrokes("escape");
+        r.draw();
+        assert!(!r.picking());
+        r.vcx.dispatch_action(StartWindowPick);
+        r.draw();
+        assert!(r.picking(), "pick 2 started");
+        let start = "Click a window to select its process. Hold CTRL while clicking to terminate \
+                     process. Esc cancels.";
+        assert_eq!(r.toasts(), [start]);
+
+        // The late Cancelled for pick 1 leaves pick 2, its toast and Esc alone.
+        r.result(1, PickOutcome::Cancelled);
+        assert!(r.picking(), "pick 2 still runs");
+        assert_eq!(r.toasts(), [start]);
+        r.vcx.simulate_keystrokes("escape");
+        r.draw();
+        assert!(!r.picking(), "Esc still cancels pick 2");
+        let cancels: Vec<u64> = r
+            .engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::KWin(KWinCommand::CancelPick { seq }) => Some(seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cancels, [1, 2]);
+        assert_eq!(r.toasts(), ["No window selected"]);
+    }
+
+    #[gpui_kit::test]
     fn pick_unknown_process_toast(cx: &mut TestAppContext) {
         let mut r = rig(cx);
         r.picked(99_999);

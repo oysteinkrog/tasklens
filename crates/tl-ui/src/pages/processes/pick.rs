@@ -93,6 +93,12 @@ pub fn on_pick_result(
     cx: &mut Context<MainWindow>,
 ) {
     debug!(target: "tasklens::ui", outcome = ?result.outcome, "window pick result");
+    // A result for an earlier pick, such as the engine's late Cancelled after Esc, must not end
+    // or answer the pick running now.
+    if result.seq != shell.pick_seq() {
+        debug!(target: "tasklens::ui", seq = result.seq, "stale window pick result ignored");
+        return;
+    }
     shell.end_window_pick(cx);
     let pid = match result.outcome {
         PickOutcome::NoWindow => return pick_toast(shell, NO_WINDOW_TEXT, cx),
