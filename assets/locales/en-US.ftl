@@ -191,6 +191,21 @@ pwn-handle-search-failed = Handle search failed
 pwn-handle-search-footer = Searched { $searched } of { $total } processes. { $skipped } need administrator rights.
 pwn-handle-search-toast-failed = Handle search failed
 pwn-handle-search-toast-auth-cancelled = Authentication cancelled
+pwn-handle-search-capped = Showing the first { $n } matches.
+pwn-handle-search-col-process = Process
+pwn-handle-search-col-pid = PID
+pwn-handle-search-col-user = User
+pwn-handle-search-col-type = Type
+pwn-handle-search-col-fd = FD
+pwn-handle-search-col-path = Path
+pwn-handle-search-menu-end-task = End Task
+pwn-handle-search-menu-end-process = End Process
+pwn-handle-search-menu-go-to = Go to process
+pwn-handle-search-menu-copy-path = Copy path
+pwn-handle-search-menu-open-location = Open file location
+pwn-handle-search-toast-copied = Copied to clipboard
+pwn-handle-search-toast-opening = Opening file location
+pwn-handle-search-toast-open-failed = Could not open file location.
 
 ## Performance (E24)
 
