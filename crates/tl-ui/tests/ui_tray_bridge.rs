@@ -732,6 +732,12 @@ impl Full {
         self.tick().expect("a tray model").show_main_icon
     }
 
+    /// Dispatches through the focused window, like a key press.
+    fn press(&mut self, action: impl gpui_kit::Action) {
+        self.vcx.dispatch_action(action);
+        self.vcx.run_until_parked();
+    }
+
     fn set_tray(&mut self, close: bool, minimize: bool) {
         self.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
@@ -754,7 +760,7 @@ fn window_open(cx: &TestAppContext) -> bool {
 fn close_to_tray_keeps_app(cx: &mut TestAppContext) {
     let mut f = full(cx, Vec::new());
     f.set_tray(true, false);
-    f.act(&CloseWindow);
+    f.press(CloseWindow);
     assert!(!window_open(cx));
     assert_eq!(exit_of(cx), None);
     assert!(f.icon_shown());
@@ -767,7 +773,7 @@ fn close_to_tray_keeps_app(cx: &mut TestAppContext) {
 fn close_quits_without_tray_setting(cx: &mut TestAppContext) {
     let mut f = full(cx, Vec::new());
     f.set_tray(false, false);
-    f.act(&CloseWindow);
+    f.press(CloseWindow);
     assert_eq!(exit_of(cx), Some(UiExit::Quit));
 }
 
@@ -776,7 +782,7 @@ fn close_to_tray_needs_available_tray(cx: &mut TestAppContext) {
     let mut f = full(cx, Vec::new());
     f.set_tray(true, false);
     f.event(TrayEvent::WatcherOffline);
-    f.act(&CloseWindow);
+    f.press(CloseWindow);
     assert_eq!(exit_of(cx), Some(UiExit::Quit));
 }
 
@@ -786,7 +792,7 @@ fn minimize_to_tray_removes_window(cx: &mut TestAppContext) {
     f.vcx
         .update(|_, cx| cx.set_global(TitleBarProbe::default()));
     f.set_tray(false, true);
-    f.act(&MinimizeWindow);
+    f.press(MinimizeWindow);
     assert!(!window_open(cx));
     assert_eq!(exit_of(cx), None);
     assert_eq!(cx.read(|cx| cx.global::<TitleBarProbe>().minimizes), 0);
@@ -799,7 +805,7 @@ fn minimize_stays_without_tray_setting(cx: &mut TestAppContext) {
     f.vcx
         .update(|_, cx| cx.set_global(TitleBarProbe::default()));
     f.set_tray(false, false);
-    f.act(&MinimizeWindow);
+    f.press(MinimizeWindow);
     assert!(window_open(cx));
     assert_eq!(cx.read(|cx| cx.global::<TitleBarProbe>().minimizes), 1);
 }
@@ -808,12 +814,12 @@ fn minimize_stays_without_tray_setting(cx: &mut TestAppContext) {
 fn reopen_clears_hidden_flag(cx: &mut TestAppContext) {
     let mut f = full(cx, Vec::new());
     f.set_tray(true, false);
-    f.act(&SelectTab(2));
+    f.press(SelectTab(2));
     let tab = f.vcx.update(|_, cx| {
         let main = main_window_view(cx).expect("main window");
         main.read(cx).active_tab()
     });
-    f.act(&CloseWindow);
+    f.press(CloseWindow);
     assert!(f.icon_shown());
     cx.update(|cx| cx.dispatch_action(&ShowMainWindow));
     cx.run_until_parked();
