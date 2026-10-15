@@ -2226,6 +2226,17 @@ services-sys019-disabled = Disabled
 services-sys019-masked = Masked
 services-sys019-no-install-section = This unit has no install section
 services-sys019-no-unit-file = This unit has no unit file
+services-sys030-title = { $id } Properties
+services-sys030-title-not-loaded = { $id } Properties (not loaded)
+services-sys030-tab-general = General
+services-sys030-tab-logon = Log On
+services-sys030-tab-recovery = Recovery
+services-sys030-tab-dependencies = Dependencies
+services-sys030-tab-logs = Logs
+services-sys030-ok = OK
+services-sys030-cancel = Cancel
+services-sys030-apply = Apply
+services-sys030-too-many-windows = Too many service properties windows are already open
 shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar
