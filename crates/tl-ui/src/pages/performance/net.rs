@@ -781,7 +781,7 @@ pub fn update_net_details_p2(model: &mut KeyValueModel, inp: &NetP2Inputs) -> bo
         ] {
             changed |= model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None);
         }
-        changed |= link_speed_row(model, inp.totals, None, 0);
+        changed |= link_speed_row(model, inp.totals, None, age_ns);
         changed |= set_row_tooltip(model, ROW_IPV6, None);
         if has_wifi {
             for label in WIFI_ROWS {
