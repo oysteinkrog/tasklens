@@ -23,6 +23,7 @@ pub mod logind;
 pub mod lowmem;
 pub mod memory;
 pub mod net;
+pub mod process_detail;
 pub mod processes;
 pub mod public_ip;
 pub mod sensors;
