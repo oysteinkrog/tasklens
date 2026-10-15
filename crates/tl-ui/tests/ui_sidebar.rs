@@ -2555,14 +2555,16 @@ mod sidebar {
             let menu = sidebar.update(cx, |s, cx| s.card_menu_for(&key("cpu"), focus, window, cx));
             entries(window, &menu, cx)
         });
-        // The trailing separator before the P3 tray item is dropped by `TlMenu::build`.
         assert_eq!(
             labels(&list),
             [
                 (MenuEntryKind::Item, "Select Pages"),
                 (MenuEntryKind::Item, "Hide This Page"),
+                (MenuEntryKind::Separator, ""),
+                (MenuEntryKind::Disabled, "Add tray icon graph"),
             ]
         );
+        assert_eq!(list[3].2.as_deref(), Some("No system tray available"));
         assert!(list[0].3.as_ref().unwrap().partial_eq(&PerfEnterEditMode));
         assert!(
             list[1]
@@ -2601,6 +2603,29 @@ mod sidebar {
         let no_tray = built(&mut r, "cpu", 9, false, false, Some(false));
         assert_eq!(no_tray[3].0, MenuEntryKind::Disabled);
         assert_eq!(no_tray[3].2.as_deref(), Some("No system tray available"));
+    }
+
+    #[gpui_kit::test]
+    fn card_menu_tray_item_states(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        // Production path: no tray bridge yet, so the item is disabled.
+        let sidebar = r.sidebar.clone();
+        let list = r.vcx.update(|window, cx| {
+            let focus = sidebar.read(cx).focus_handle(cx);
+            let menu = sidebar.update(cx, |s, cx| s.card_menu_for(&key("cpu"), focus, window, cx));
+            entries(window, &menu, cx)
+        });
+        let last = list.last().unwrap();
+        assert_eq!(last.0, MenuEntryKind::Disabled);
+        assert_eq!(last.1.as_deref(), Some("Add tray icon graph"));
+        assert_eq!(last.2.as_deref(), Some("No system tray available"));
+
+        let list = built(&mut r, "cpu", 9, false, false, Some(true));
+        let last = list.last().unwrap();
+        assert_eq!(last.0, MenuEntryKind::Item);
+        assert_eq!(last.1.as_deref(), Some("Add tray icon graph"));
+        let add = PerfAddTrayGraph { source: key("cpu") };
+        assert!(last.3.as_ref().unwrap().partial_eq(&add));
     }
 
     #[gpui_kit::test]

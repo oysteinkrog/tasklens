@@ -846,8 +846,16 @@ pub fn page_menu_ctx(summary_on: bool, cx: &App) -> PageMenuCtx<'static> {
         ranges_long_enabled: true,
         view_types: None,
         clicked_value: false,
-        tray_available: None,
+        tray_available: tray_available(cx),
     }
+}
+
+/// Whether the tray can take a graph: `None` leaves the item out, `Some(false)` disables it
+/// (PERF-088).
+pub fn tray_available(cx: &App) -> Option<bool> {
+    // TODO(E31-A2): Some(cx.try_global::<TrayStatus>().is_some_and(|s| s.available && s.running))
+    let _ = cx;
+    Some(false)
 }
 
 /// For each [`VIEW_KINDS`] kind, whether the sidebar shows a card of it.

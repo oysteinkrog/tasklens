@@ -879,6 +879,69 @@ perf-legend-kernel = <kernel>
         });
     }
 
+    #[gpui_kit::test]
+    fn page_menu_tray_item_position(cx: &mut TestAppContext) {
+        use tl_ui::components::menu::MenuEntryKind;
+        use tl_ui::i18n::init_strings;
+        use tl_ui::pages::performance::actions::PerfAddTrayGraph;
+        use tl_ui::pages::performance::menu::{PageMenuCtx, page_menu};
+
+        cx.update(|cx| {
+            setup(cx);
+            init_strings(cx, "en-US");
+        });
+        let (page, vcx) = cx.add_window_view(|_, cx| TestPage {
+            key: DeviceKey(Arc::from("cpu")),
+            model: "AMD Ryzen 7 7800X3D 8-Core Processor".into(),
+            toggles: 1,
+            details: KeyValueModel::new(&["perf-cpu-row-speed"]),
+            focus: cx.focus_handle(),
+            mini: Rc::default(),
+        });
+        let tail = |vcx: &mut VisualTestContext, tray: Option<bool>| {
+            vcx.update(|window, cx| {
+                let focus = page.read(cx).focus.clone();
+                let ctx = PageMenuCtx {
+                    range_s: 60,
+                    summary_on: false,
+                    ranges_long_enabled: true,
+                    view_types: Some(&[(DeviceKind::Cpu, true)]),
+                    clicked_value: false,
+                    tray_available: tray,
+                };
+                let menu = TlMenu::build(window, cx, focus, |menu, w, cx| {
+                    page.update(cx, |p, cx| page_menu(menu, p, &ctx, w, cx))
+                });
+                let list = menu.read(cx).entries_for_test(window);
+                let n = list.len();
+                list[n - 2..]
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.kind,
+                            e.label.as_ref().map(|l| l.to_string()).unwrap_or_default(),
+                            e.tooltip.as_ref().map(|t| t.to_string()),
+                            e.action.as_ref().map(|a| {
+                                a.partial_eq(&PerfAddTrayGraph {
+                                    source: DeviceKey(Arc::from("cpu")),
+                                })
+                            }),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let on = tail(vcx, Some(true));
+        assert_eq!(on[0].0, MenuEntryKind::Submenu);
+        assert_eq!(on[0].1, "View");
+        assert_eq!(on[1].0, MenuEntryKind::Item);
+        assert_eq!(on[1].1, "Add tray icon graph");
+        assert_eq!(on[1].3, Some(true));
+        let off = tail(vcx, Some(false));
+        assert_eq!(off[1].0, MenuEntryKind::Disabled);
+        assert_eq!(off[1].2.as_deref(), Some("No system tray available"));
+    }
+
     #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn performance_frames_do_no_tr_calls(cx: &mut TestAppContext) {
@@ -2373,6 +2436,7 @@ mod summary {
                 (MenuEntryKind::Item, "Kernel times"),
                 (MenuEntryKind::Separator, ""),
                 (MenuEntryKind::Submenu, "View"),
+                (MenuEntryKind::Disabled, "Add tray icon graph"),
             ]
         );
         assert!(!list[1].3, "summary mode is off");
@@ -2635,6 +2699,7 @@ mod summary {
                 (MenuEntryKind::Submenu, "Time range"),
                 (MenuEntryKind::Separator, ""),
                 (MenuEntryKind::Submenu, "View"),
+                (MenuEntryKind::Disabled, "Add tray icon graph"),
             ]
         );
     }

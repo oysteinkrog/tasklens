@@ -51,7 +51,12 @@ pub fn card_menu(
         );
     }
     menu = menu.separator();
-    match tray_available {
+    tray_item(menu, key, tray_available, cx)
+}
+
+/// "Add tray icon graph": enabled, disabled with a tooltip, or left out (PERF-088).
+fn tray_item(menu: TlMenu, key: &DeviceKey, tray: Option<bool>, cx: &App) -> TlMenu {
+    match tray {
         Some(true) => menu.item(
             tr(cx, "perf-menu-add-tray"),
             Box::new(PerfAddTrayGraph {
@@ -78,7 +83,7 @@ pub struct PageMenuCtx<'a> {
     pub view_types: Option<&'a [(DeviceKind, bool)]>,
     /// The right-click landed on a Details value: "Copy value" comes first (UI-PRF-020).
     pub clicked_value: bool,
-    /// `None` before P3 leaves the tray item out.
+    /// The tray item after "View": `None` leaves it out, `Some(false)` disables it.
     pub tray_available: Option<bool>,
 }
 
@@ -103,7 +108,7 @@ pub const VIEW_KINDS: [(DeviceKind, &str); 7] = [
 ];
 
 /// The page menu of `page`: "Copy value" on a Details value, the common items, then the page's
-/// own items, then "View >" and the later slots.
+/// own items, then "View >" and "Add tray icon graph".
 pub fn page_menu(
     menu: TlMenu,
     page: &dyn DevicePage,
@@ -119,10 +124,11 @@ pub fn page_menu(
     let menu = page_menu_common(menu, ctx, window, cx).separator();
     // `TlMenu` drops a doubled or trailing separator, so a page with no items leaves one.
     let menu = page.menu_items(menu, window, cx).separator();
-    match ctx.view_types {
+    let menu = match ctx.view_types {
         Some(types) => view_menu(menu, types, window, cx),
         None => menu,
-    }
+    };
+    tray_item(menu, page.key(), ctx.tray_available, cx)
 }
 
 /// "View >": one item per type that jumps to its first visible device; a type with no visible

@@ -54,7 +54,7 @@ use super::card::{
 use super::menu::card_menu;
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, fan_connected, initial_selection,
-    is_visible, sidebar_order, type_number, visible_rows,
+    is_visible, sidebar_order, tray_available, type_number, visible_rows,
 };
 use crate::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -1601,7 +1601,8 @@ impl DeviceSidebar {
         let hidden = !self.index.contains_key(&key);
         let edit_mode = self.edit_mode;
         TlMenu::build(window, cx, action_context, move |menu, _, cx| {
-            card_menu(menu, &key, count, hidden, edit_mode, None, cx)
+            let tray = tray_available(cx);
+            card_menu(menu, &key, count, hidden, edit_mode, tray, cx)
         })
     }
 
