@@ -5,6 +5,8 @@
 
 #![cfg(feature = "test-hooks")]
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::base::Root;
@@ -31,17 +33,21 @@ use tl_model::snapshot::ProcessSnapshot;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::action_tracker::{GlobalActionTracker, ToastTexts};
+use tl_ui::actions::OpenSettings;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::shield::TlShield;
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::tooltip::DELAY_CONTROL;
+use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::pages::processes::ProcessesPage;
+use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::text::fonts::UI_FAMILY;
 use tl_ui::text::style::t_sm;
 use tl_ui::theme::{current, metrics};
 use tl_ui::window::main::{HelperInstalled, MainWindow, main_window_view, open_main_window_on};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+use tl_ui::window::settings::{PageId, SettingsWindow, all_pages};
 use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
 use tl_ui::windows::props::{AccessButton, PropsWindow, open_process_properties};
 
@@ -59,6 +65,15 @@ const PID: u32 = 4321;
 /// App globals with `settings`, the helper installed, and the main window on Processes, active,
 /// past its first frame (so the launch steps have run).
 fn setup_with(cx: &mut TestAppContext, settings: Settings) -> (Arc<FakeEngine>, VisualTestContext) {
+    setup_counting(cx, settings, Rc::new(Cell::new(0)))
+}
+
+/// `setup_with`, and `persists` counts the persist callback calls.
+fn setup_counting(
+    cx: &mut TestAppContext,
+    settings: Settings,
+    persists: Rc<Cell<u32>>,
+) -> (Arc<FakeEngine>, VisualTestContext) {
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     let (_tx, rx) = async_channel::bounded(4);
@@ -66,7 +81,7 @@ fn setup_with(cx: &mut TestAppContext, settings: Settings) -> (Arc<FakeEngine>, 
         settings,
         state: UiState::default(),
         themes_json: None,
-        persist: Box::new(|_, _| {}),
+        persist: Box::new(move |_, _| persists.set(persists.get() + 1)),
         persist_themes: Box::new(|_| {}),
         app_requests: rx,
         startup_toasts: Vec::new(),
@@ -778,4 +793,95 @@ fn unlock_at_launch_starts_once(cx: &mut TestAppContext) {
     again.update(|window, cx| window.simulate_next_frame(cx));
     draw(&mut again);
     assert_eq!(starts_sent(&engine), 1, "exactly one StartHelperSession");
+}
+
+// ---- Settings Privileges page ----
+
+type SettingsFrame = TlSecondaryWindow<SettingsWindow>;
+
+/// Opens the Settings window from the main window and returns its frame and a context on it.
+fn open_settings(
+    cx: &mut TestAppContext,
+    main: &mut VisualTestContext,
+) -> (Entity<SettingsFrame>, VisualTestContext) {
+    main.update(|window, _| window.activate_window());
+    main.dispatch_action(OpenSettings);
+    main.run_until_parked();
+    let handle = cx
+        .update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::Settings)
+        })
+        .and_then(|h| h.downcast::<Root>())
+        .expect("settings window registered");
+    let frame = cx
+        .update(|cx| SettingsFrame::find(handle, cx))
+        .expect("settings frame");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    draw(&mut vcx);
+    (frame, vcx)
+}
+
+fn privileges_page(cx: &mut TestAppContext) -> tl_ui::window::settings::PageBuilder {
+    cx.update(all_pages)
+        .into_iter()
+        .find(|p| p.id() == PageId::Privileges)
+        .expect("Privileges page listed")
+}
+
+#[gpui_kit::test]
+fn privileges_unlock_at_launch_persists(cx: &mut TestAppContext) {
+    let persists = Rc::new(Cell::new(0));
+    setup_counting(cx, Settings::default(), persists.clone());
+    let page = privileges_page(cx);
+    assert!(!cx.update(|cx| TlSettings::settings(cx).privilege.unlock_at_launch));
+    let before = persists.get();
+    cx.update(|cx| page.set_bool(SettingKey::PrivilegeUnlockAtLaunch, true, cx));
+    cx.run_until_parked();
+    assert!(cx.update(|cx| TlSettings::settings(cx).privilege.unlock_at_launch));
+    assert_eq!(persists.get(), before + 1, "persisted once");
+}
+
+#[gpui_kit::test]
+fn privileges_additional_setup_opens_window(cx: &mut TestAppContext) {
+    let (_engine, mut main) = setup(cx);
+    let (_frame, mut vcx) = open_settings(cx, &mut main);
+    let page = privileges_page(cx);
+    vcx.update(|window, cx| page.press("Additional setup…", window, cx));
+    vcx.run_until_parked();
+    let open = cx.update(|cx| {
+        cx.global::<GlobalRegistry>()
+            .0
+            .read(cx)
+            .get(&WindowKey::AdditionalSetup)
+            .is_some()
+    });
+    assert!(open, "the Additional Setup window is registered");
+}
+
+#[gpui_kit::test]
+fn privileges_helper_status_line(cx: &mut TestAppContext) {
+    const NOT_INSTALLED: &str = "Administrator helper: Not installed";
+    const INSTALLED: &str = "Administrator helper: Installed";
+    let (engine, mut main) = setup(cx);
+    let (frame, mut vcx) = open_settings(cx, &mut main);
+    publish_helper(cx, &engine, HelperState::Missing, None);
+    let page = privileges_page(cx);
+    assert!(vcx.update(|window, cx| page.render_custom(NOT_INSTALLED, window, cx).is_some()));
+    assert!(vcx.update(|window, cx| page.render_custom(INSTALLED, window, cx).is_none()));
+
+    let content = vcx.read(|cx| frame.read(cx).content().clone());
+    let renders = vcx.read(|cx| content.read(cx).render_count());
+    publish_helper(cx, &engine, HelperState::Locked, None);
+    draw(&mut vcx);
+    assert!(
+        vcx.read(|cx| content.read(cx).render_count()) > renders,
+        "a HEALTH snapshot re-renders the window"
+    );
+    let page = privileges_page(cx);
+    assert!(vcx.update(|window, cx| page.render_custom(INSTALLED, window, cx).is_some()));
+    assert!(vcx.update(|window, cx| page.render_custom(NOT_INSTALLED, window, cx).is_none()));
 }

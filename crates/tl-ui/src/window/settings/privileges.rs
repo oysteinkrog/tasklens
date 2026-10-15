@@ -4,11 +4,15 @@
 //! before the button and the helper status line (E29, tasklens-qfx.29) after it, both by chain
 //! edit.
 
-use gpui_kit::App;
+use std::sync::Arc;
+
+use gpui_kit::{App, IntoElement as _};
+use tl_model::health::HelperState;
 
 use super::{PageBuilder, PageId};
 use crate::actions::OpenAdditionalSetup;
 use crate::components::button::TlButtonKind;
+use crate::hub::GlobalHub;
 use crate::i18n::tr;
 use crate::settings_global::SettingKey;
 
@@ -28,6 +32,18 @@ pub fn page(cx: &mut App) -> PageBuilder {
         Box::new(OpenAdditionalSetup { focus_row: None }),
         TlButtonKind::Secondary,
     );
-    // E29 (tasklens-qfx.29) adds the helper status line here.
+    // Helper status line (E29, tasklens-qfx.29). The window re-renders on `HEALTH`.
+    let installed = cx
+        .try_global::<GlobalHub>()
+        .map(|hub| Arc::clone(hub.0.read(cx).current()))
+        .is_some_and(|snap| snap.health.helper != HelperState::Missing);
+    let key = if installed {
+        "settings-privileges-helper-installed"
+    } else {
+        "settings-privileges-helper-not-installed"
+    };
+    page.custom(group, &[], tr(cx, key), |_, _| {
+        gpui_kit::Empty.into_any_element()
+    });
     page
 }

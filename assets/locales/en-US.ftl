@@ -2739,3 +2739,7 @@ setup-done = Done. No restart needed.
 setup-failed = Setup failed
 setup-button-copy-output = Copy output
 setup-button-retry = Retry
+
+# Settings > Privileges helper status (tasklens-qfx.29, UI-SHL-070).
+settings-privileges-helper-installed = Administrator helper: Installed
+settings-privileges-helper-not-installed = Administrator helper: Not installed

@@ -12,7 +12,8 @@
 //! persist; a slider previews on Change and persists on Release).
 //!
 //! The window re-renders on input, on `TlSettings` changes and on the device catalog
-//! (`ComponentMask::DEVICES`, for the Performance page lists), never on other snapshots. Slider
+//! (`ComponentMask::DEVICES`, for the Performance page lists) and on `HEALTH` (the Privileges
+//! helper status line), never on other snapshots. Slider
 //! states are created in `SettingsWindow::new`, never in render.
 
 mod advanced;
@@ -1357,7 +1358,10 @@ impl SettingsWindow {
             .map(|h| h.0.clone())
             .map(|hub| {
                 cx.subscribe(&hub, |_, _, ev: &SnapshotChanged, cx| {
-                    if ev.mask.intersects(ComponentMask::DEVICES) {
+                    if ev
+                        .mask
+                        .intersects(ComponentMask::DEVICES | ComponentMask::HEALTH)
+                    {
                         cx.notify();
                     }
                 })
