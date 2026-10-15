@@ -1074,6 +1074,50 @@ mod sidebar {
         assert_values_inside(&mut r, "edit mode");
     }
 
+    /// The widest IEC rate before the unit steps up, "1023.9 KiB/s", fits a network card at the
+    /// least nav_width (180). The text column once kept room only for "999.9 KiB/s".
+    #[gpui_kit::test]
+    fn widest_network_byte_rate_fits_at_nav_width_180(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        settings.units.network = NetworkUnit::Bytes;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
+        r.host_w.set(180.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        let newest = now_boot_ns();
+        r.engine.publish_with(|s| {
+            let version = s.series.header.version + 1;
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: Arc::from([Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(7),
+                        metric: MetricId::NET_RX,
+                    },
+                    version,
+                    period_ns: 100_000_000,
+                    samples: Arc::from([
+                        Sample::valid(newest - 100_000_000, 1024.),
+                        // 1023.9 × 1024 bytes per second.
+                        Sample::valid(newest, 1_048_473.6),
+                    ]),
+                })]),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+        draw(r.vcx);
+
+        let value = prepared(&mut r, "net:eth0").value.expect("value");
+        assert_eq!(&*value.text, "1023.9 KiB/s");
+        assert_values_inside(&mut r, "nav_width 180, 1023.9 KiB/s");
+    }
+
     /// A line that gains a row grows its card on the next draw, and the cards below move down.
     #[gpui_kit::test]
     fn height_change_relays_out_sidebar(cx: &mut TestAppContext) {

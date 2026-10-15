@@ -1196,9 +1196,9 @@ pub struct CardValue {
     /// The formatted value, or its UI-FND-026 glyph word. Restricted draws the lock icon.
     pub text: SharedString,
     pub validity: Validity,
-    /// The widest text of the value format. The heading row keeps room for it, so the rows do
-    /// not move as the value changes.
-    template: &'static str,
+    /// The widest texts of the value format in each unit it can step to. The heading row keeps
+    /// room for the widest, so the rows do not move as the value changes.
+    templates: &'static [&'static str],
 }
 
 impl CardValue {
@@ -1218,7 +1218,7 @@ impl CardValue {
         Some(Self {
             text,
             validity,
-            template: value_template(fmt),
+            templates: value_templates(fmt, unit),
         })
     }
 
@@ -1233,30 +1233,56 @@ impl CardValue {
     }
 }
 
-/// The widest text of each value format. The text column is at least as wide as the widest.
-const VALUE_TEMPLATES: [&str; 8] = [
-    "100.0%",
-    "999.99 GiB",
-    "999.9 KiB/s",
-    "9999 MHz",
-    "100 °C",
-    "999.9 W",
-    "9999 RPM",
-    "99999",
+// The widest text of each value format, one per unit it can step to, since which unit suffix
+// is widest depends on the font. A scaled value prints at most "1023.9" (IEC, base 1024) or
+// "999.9" (SI, base 1000) before it steps up a unit. Values past the largest unit, and formats
+// with no unit steps (MHz, °C, W, RPM, counts), can print wider; the card then measures the live
+// value too (`DeviceCard::prepare`).
+const PERCENT_TEMPLATES: &[&str] = &["100.0%"];
+const BYTES_TEMPLATES: &[&str] = &[
+    "1023 B",
+    "1023.99 KiB",
+    "1023.99 MiB",
+    "1023.99 GiB",
+    "1023.99 TiB",
+];
+const RATE_IEC_TEMPLATES: &[&str] = &["1023.9 KiB/s", "1023.9 MiB/s", "1023.9 GiB/s"];
+const RATE_BITS_TEMPLATES: &[&str] = &["999.9 Kbps", "999.9 Mbps", "999.9 Gbps"];
+const MHZ_TEMPLATES: &[&str] = &["9999 MHz"];
+const CELSIUS_TEMPLATES: &[&str] = &["100 °C"];
+const WATTS_TEMPLATES: &[&str] = &["999.9 W"];
+const RPM_TEMPLATES: &[&str] = &["9999 RPM"];
+const COUNT_TEMPLATES: &[&str] = &["99\u{2009}999"];
+
+/// Every value template. The text column is at least as wide as the widest.
+const VALUE_TEMPLATES: [&[&str]; 9] = [
+    PERCENT_TEMPLATES,
+    BYTES_TEMPLATES,
+    RATE_IEC_TEMPLATES,
+    RATE_BITS_TEMPLATES,
+    MHZ_TEMPLATES,
+    CELSIUS_TEMPLATES,
+    WATTS_TEMPLATES,
+    RPM_TEMPLATES,
+    COUNT_TEMPLATES,
 ];
 
-/// The widest text of `fmt`.
-fn value_template(fmt: ValueFormat) -> &'static str {
-    VALUE_TEMPLATES[match fmt {
-        ValueFormat::Percent | ValueFormat::PercentOf { .. } => 0,
-        ValueFormat::Bytes => 1,
-        ValueFormat::RateIec | ValueFormat::RateNetwork => 2,
-        ValueFormat::Mhz => 3,
-        ValueFormat::Celsius => 4,
-        ValueFormat::Watts => 5,
-        ValueFormat::Rpm => 6,
-        ValueFormat::Count => 7,
-    }]
+/// The widest texts of `fmt` in `unit` (network rates only), as [`format_value`] prints them.
+fn value_templates(fmt: ValueFormat, unit: NetworkUnit) -> &'static [&'static str] {
+    match fmt {
+        ValueFormat::Percent | ValueFormat::PercentOf { .. } => PERCENT_TEMPLATES,
+        ValueFormat::Bytes => BYTES_TEMPLATES,
+        ValueFormat::RateIec => RATE_IEC_TEMPLATES,
+        ValueFormat::RateNetwork => match unit {
+            NetworkUnit::Bits => RATE_BITS_TEMPLATES,
+            NetworkUnit::Bytes => RATE_IEC_TEMPLATES,
+        },
+        ValueFormat::Mhz => MHZ_TEMPLATES,
+        ValueFormat::Celsius => CELSIUS_TEMPLATES,
+        ValueFormat::Watts => WATTS_TEMPLATES,
+        ValueFormat::Rpm => RPM_TEMPLATES,
+        ValueFormat::Count => COUNT_TEMPLATES,
+    }
 }
 
 /// The boot time at which a chart of `series` turns Stale when no newer sample comes: just past
@@ -1526,12 +1552,18 @@ impl DeviceCard {
                 advances.style_version = m.style_version;
             }
             let mut measure = |f: CardFont, s: &str| advances.width(s, f, &m, window);
-            let value_w = value
-                .as_ref()
-                .map_or(Pixels::ZERO, |v| measure(CardFont::Value, v.template));
+            // The widest text of the format, or the live text when it is wider still.
+            let value_w = value.as_ref().map_or(Pixels::ZERO, |v| {
+                v.templates
+                    .iter()
+                    .fold(measure(CardFont::Value, &v.text), |w, t| {
+                        w.max(measure(CardFont::Value, t))
+                    })
+            });
             let text_min = VALUE_TEMPLATES
                 .iter()
-                .fold(Pixels::ZERO, |w, t| w.max(measure(CardFont::Value, t)));
+                .flat_map(|ts| ts.iter())
+                .fold(value_w, |w, t| w.max(measure(CardFont::Value, t)));
             let graph_w = card_graph_width(self.width, text_min, &m);
             let layout = card_text_layout(
                 &self.lines,
@@ -2521,6 +2553,39 @@ mod tests {
         );
         let l = lines(&input(DeviceKind::Cpu, &cpu, &s));
         assert!(same(&tip(&l), &l.line1));
+    }
+
+    /// The templates are what the formatter prints just below each unit step.
+    #[test]
+    fn value_templates_match_the_widest_formatted_values() {
+        let f = |fmt: ValueFormat, v: f32, unit: NetworkUnit| {
+            let mut out = String::new();
+            format_value(fmt, v, unit, &mut out);
+            out
+        };
+        let (kib, mib) = (1024.0_f32, 1024.0_f32 * 1024.0);
+        for (fmt, unit, v) in [
+            (ValueFormat::RateIec, NetworkUnit::Bits, 1023.9 * kib),
+            (ValueFormat::RateIec, NetworkUnit::Bits, 1023.9 * mib),
+            (ValueFormat::RateNetwork, NetworkUnit::Bytes, 1023.9 * kib),
+            (ValueFormat::RateNetwork, NetworkUnit::Bytes, 1023.9 * mib),
+            // Bits per second over 8: 999.9 Kbps and 999.9 Mbps.
+            (ValueFormat::RateNetwork, NetworkUnit::Bits, 999.9e3 / 8.0),
+            (ValueFormat::RateNetwork, NetworkUnit::Bits, 999.9e6 / 8.0),
+            (ValueFormat::Bytes, NetworkUnit::Bits, 1023.99 * kib),
+            (ValueFormat::Percent, NetworkUnit::Bits, 100.0),
+        ] {
+            let text = f(fmt, v, unit);
+            assert!(
+                value_templates(fmt, unit).contains(&text.as_str()),
+                "{fmt:?} {unit:?}: {text}"
+            );
+        }
+        // One step more and the unit steps up, to a shorter text.
+        assert_eq!(
+            f(ValueFormat::RateIec, 1023.96 * kib, NetworkUnit::Bits),
+            "1.0 MiB/s"
+        );
     }
 
     #[test]
