@@ -740,6 +740,11 @@ mod sidebar {
 
     /// CPU total samples of 20% and 30%, 100 ms apart, the newest at `newest`.
     fn publish_cpu_series_at(r: &mut Rig, newest: u64) {
+        publish_cpu_value_at(r, newest, 30.);
+    }
+
+    /// CPU total samples of 20% and `last`, 100 ms apart, the newest at `newest`.
+    fn publish_cpu_value_at(r: &mut Rig, newest: u64, last: f32) {
         r.engine.publish_with(|s| {
             let version = s.series.header.version + 1;
             s.series = Arc::new(SeriesSet {
@@ -756,7 +761,7 @@ mod sidebar {
                     period_ns: 100_000_000,
                     samples: Arc::from([
                         Sample::valid(newest - 100_000_000, 20.),
-                        Sample::valid(newest, 30.),
+                        Sample::valid(newest, last),
                     ]),
                 })]),
                 slow: Arc::from([]),
@@ -1022,6 +1027,53 @@ mod sidebar {
         assert!(line1.rows[1].text.ends_with("GB"), "{line1:?}");
     }
 
+    /// Every value row of every card lies inside its text column.
+    fn assert_values_inside(r: &mut Rig, what: &str) {
+        for key in keys(r) {
+            let col = text_column(r, &key);
+            let id = sel(format!("perf-card-row:{key}:value:0"));
+            if let Some(row) = r.vcx.debug_bounds(id) {
+                assert!(inside(row, col), "{what} {key} value: {row:?} in {col:?}");
+            }
+        }
+    }
+
+    /// At the least nav_width (180) and on the narrower edit-mode cards the graph gives way, so
+    /// the widest percent ("100.0%") and every other value fit the text column.
+    #[gpui_kit::test]
+    fn values_fit_narrow_cards(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
+        r.host_w.set(180.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
+        draw(r.vcx);
+
+        let value = prepared(&mut r, "cpu").value.expect("value");
+        assert_eq!(&*value.text, "100.0%");
+        let graph_w = prepared(&mut r, "cpu").graph_w;
+        assert!(
+            graph_w > px(0.) && graph_w < px(116.),
+            "the graph narrows: {graph_w:?}"
+        );
+        assert_values_inside(&mut r, "nav_width 180");
+
+        r.host_w.set(252.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        assert_eq!(
+            prepared(&mut r, "cpu").graph_w,
+            px(116.),
+            "full graph at 252"
+        );
+        enter_edit(&mut r);
+        draw(r.vcx);
+        assert_values_inside(&mut r, "edit mode");
+    }
+
     /// A line that gains a row grows its card on the next draw, and the cards below move down.
     #[gpui_kit::test]
     fn height_change_relays_out_sidebar(cx: &mut TestAppContext) {
@@ -1096,12 +1148,16 @@ mod sidebar {
         );
     }
 
-    /// The value turns Stale when the samples stop: a Valid value draws its card again 1.5 s
-    /// later without a new snapshot. The newest sample is 1 s old at the first draw; the stale
-    /// floor is 1.5 s for a 100 ms period.
+    /// The value turns Stale when the samples stop: a Valid value draws its card again at the
+    /// stale deadline without a new snapshot, not before and not after. The newest sample is 1 s
+    /// old at the first draw and the stale floor is 1.5 s for a 100 ms period, so the deadline
+    /// is 0.5 s away.
     #[gpui_kit::test]
     fn value_goes_stale_without_samples(cx: &mut TestAppContext) {
-        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        settings.motion.smooth_graphs = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
         let _driver = r.vcx.update(|window, cx| {
             let driver = cx.new(AnimationDriver::new);
             AnimationDriver::register(&driver, window, cx);
@@ -1110,18 +1166,39 @@ mod sidebar {
         publish_cpu_series_at(&mut r, now_boot_ns() - 1_000_000_000);
         let value = prepared(&mut r, "cpu").value.expect("value");
         assert_eq!(value.validity, Validity::Valid);
+        let cpu_renders = |r: &mut Rig| {
+            card_counts(r)
+                .into_iter()
+                .find(|(key, ..)| key == "cpu")
+                .map(|(_, renders, _)| renders)
+                .expect("cpu card")
+        };
+        let renders = cpu_renders(&mut r);
 
-        // The sample age follows the real boot clock; the check timer follows the test clock.
+        // The sample age follows the real boot clock; the timer follows the test clock.
+        let advance = |r: &mut Rig, ms: u64| {
+            r.vcx
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(ms));
+            draw(r.vcx);
+        };
+        advance(&mut r, 400);
+        assert_eq!(cpu_renders(&mut r), renders, "no draw before the deadline");
         std::thread::sleep(std::time::Duration::from_millis(700));
-        r.vcx
-            .executor()
-            .advance_clock(std::time::Duration::from_millis(1600));
-        draw(r.vcx);
+        advance(&mut r, 200);
+        assert_eq!(cpu_renders(&mut r), renders + 1, "one draw at the deadline");
         let value = prepared(&mut r, "cpu").value.expect("value");
         assert_eq!(value.validity, Validity::Stale);
         assert_eq!(&*value.text, "30.0%", "a Stale value keeps its number");
         let theme = r.vcx.update(|_, cx| current(cx).clone());
         assert_eq!(value.color(&theme), theme.text_secondary);
+
+        advance(&mut r, 5000);
+        assert_eq!(
+            cpu_renders(&mut r),
+            renders + 1,
+            "a Stale value sets no timer"
+        );
     }
 
     #[gpui_kit::test]

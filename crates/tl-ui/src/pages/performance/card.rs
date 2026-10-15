@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::fmt::Write as _;
 use std::rc::Rc;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -24,9 +24,11 @@ use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
+use tl_model::series::SeriesView;
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{DiskDetails, DiskDrive, Snapshot};
 use tl_model::system::{LinkState, Metric, SensorKind, SensorReading};
+use tl_model::time::now_boot_ns;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -49,8 +51,12 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Least card height, × ui_scale. A card grows when its wrapped text needs more.
 pub const CARD_H: f32 = 80.0;
-/// Mini graph width, × ui_scale.
+/// Mini graph width, × ui_scale. A card too narrow to hold it and the widest value makes the
+/// graph narrower ([`card_graph_width`]).
 pub const CARD_GRAPH_W: f32 = 116.0;
+/// Narrowest mini graph, × ui_scale. With less room the card draws no graph and the text
+/// column takes the whole card.
+const CARD_GRAPH_MIN_W: f32 = 40.0;
 /// Mini graph height, × ui_scale.
 pub const CARD_GRAPH_H: f32 = 56.0;
 
@@ -60,9 +66,9 @@ const HEADING_LINE_H: f32 = 18.0;
 const DETAIL_LINE_H: f32 = 16.0;
 /// Space above and below the text column, × ui_scale (sp2).
 const TEXT_PAD_Y: f32 = 4.0;
-/// A card whose value is Valid draws again after this long, so the value turns Stale when the
-/// samples stop (the 1.5 s stale floor of UI-PRF-001).
-const STALE_CHECK: Duration = Duration::from_millis(1500);
+/// The R-051 stale floor: a series is stale when its newest sample is older than
+/// max(3 periods, this), as `chart::is_stale`.
+const STALE_FLOOR_NS: u64 = 1_500_000_000;
 /// Opacity of a disconnected interface and of a hidden card in edit mode.
 const DIM_OPACITY: f32 = 0.6;
 /// Alpha of the pressed tint and of the focus ring.
@@ -886,11 +892,30 @@ impl CardTextLayout {
     }
 }
 
-/// The text column width of a card `card_w` wide: less the 1 px border on both sides, the sp5
-/// inset, the graph and the sp4 gap.
-pub fn card_text_width(card_w: Pixels, m: &UiMetrics) -> Pixels {
+/// The mini graph width of a card `card_w` wide: [`CARD_GRAPH_W`], or less so that the text
+/// column is at least `text_min` (the widest value) wide. Zero, no graph, when less than
+/// [`CARD_GRAPH_MIN_W`] is left.
+pub fn card_graph_width(card_w: Pixels, text_min: Pixels, m: &UiMetrics) -> Pixels {
     let s = m.ui_scale;
-    (card_w - px(2.0 * s) - m.sp[5] - px(CARD_GRAPH_W * s) - m.sp[4]).max(Pixels::ZERO)
+    let room = card_w - px(2.0 * s) - m.sp[5] - m.sp[4] - text_min;
+    let w = room.min(px(CARD_GRAPH_W * s));
+    if w < px(CARD_GRAPH_MIN_W * s) {
+        Pixels::ZERO
+    } else {
+        w
+    }
+}
+
+/// The text column width of a card `card_w` wide with a `graph_w` graph: less the 1 px border
+/// on both sides, the sp5 inset, and the graph with the sp4 gap after it.
+pub fn card_text_width(card_w: Pixels, graph_w: Pixels, m: &UiMetrics) -> Pixels {
+    let s = m.ui_scale;
+    let graph = if graph_w > Pixels::ZERO {
+        graph_w + m.sp[4]
+    } else {
+        Pixels::ZERO
+    };
+    (card_w - px(2.0 * s) - m.sp[5] - graph).max(Pixels::ZERO)
 }
 
 /// Lays out the card text in a column `text_w` wide (UI-PRF-011). Each line wraps at spaces to
@@ -1208,18 +1233,46 @@ impl CardValue {
     }
 }
 
-/// The widest text of each value format.
+/// The widest text of each value format. The text column is at least as wide as the widest.
+const VALUE_TEMPLATES: [&str; 8] = [
+    "100.0%",
+    "999.99 GiB",
+    "999.9 KiB/s",
+    "9999 MHz",
+    "100 °C",
+    "999.9 W",
+    "9999 RPM",
+    "99999",
+];
+
+/// The widest text of `fmt`.
 fn value_template(fmt: ValueFormat) -> &'static str {
-    match fmt {
-        ValueFormat::Percent | ValueFormat::PercentOf { .. } => "100.0%",
-        ValueFormat::Bytes => "999.99 GiB",
-        ValueFormat::RateIec | ValueFormat::RateNetwork => "999.9 KiB/s",
-        ValueFormat::Mhz => "9999 MHz",
-        ValueFormat::Celsius => "100 °C",
-        ValueFormat::Watts => "999.9 W",
-        ValueFormat::Rpm => "9999 RPM",
-        ValueFormat::Count => "99999",
+    VALUE_TEMPLATES[match fmt {
+        ValueFormat::Percent | ValueFormat::PercentOf { .. } => 0,
+        ValueFormat::Bytes => 1,
+        ValueFormat::RateIec | ValueFormat::RateNetwork => 2,
+        ValueFormat::Mhz => 3,
+        ValueFormat::Celsius => 4,
+        ValueFormat::Watts => 5,
+        ValueFormat::Rpm => 6,
+        ValueFormat::Count => 7,
+    }]
+}
+
+/// The boot time at which a chart of `series` turns Stale when no newer sample comes: just past
+/// the newest sample of any series plus max(3 periods, 1.5 s), as `ChartView::derived_state`.
+/// `None` without samples.
+fn stale_deadline_ns(series: &[Option<Arc<SeriesView>>]) -> Option<u64> {
+    let mut newest_ns = None;
+    let mut period_ns = u64::MAX;
+    for s in series.iter().flatten() {
+        period_ns = period_ns.min(s.period_ns);
+        if let Some(last) = s.samples.last() {
+            newest_ns = Some(newest_ns.unwrap_or(0).max(last.t_ns));
+        }
     }
+    let wait = period_ns.saturating_mul(3).max(STALE_FLOOR_NS);
+    Some(newest_ns?.saturating_add(wait).saturating_add(1))
 }
 
 /// What a card measured for one render.
@@ -1228,6 +1281,8 @@ pub struct CardPrepared {
     pub layout: CardTextLayout,
     pub value: Option<CardValue>,
     pub height: Pixels,
+    /// The mini graph width, zero when the card has no room for one ([`card_graph_width`]).
+    pub graph_w: Pixels,
 }
 
 /// The tooltip lines: the full text of each cut line, then the owner's tooltip (the Memory
@@ -1275,7 +1330,9 @@ pub struct CardView {
     /// notifies `sidebar` when it changed, so the cards below move on the next frame.
     height: Rc<Cell<Pixels>>,
     sidebar: EntityId,
-    /// Draws the card again once a Valid value may have gone Stale. Replaced by every render.
+    /// The boot time at which a Valid value turns Stale, when the card has one.
+    stale_at: Option<u64>,
+    /// Draws the card again at `stale_at`. Replaced only when `stale_at` changes.
     stale_check: Option<Task<()>>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -1306,6 +1363,7 @@ impl CardView {
             width,
             height,
             sidebar,
+            stale_at: None,
             stale_check: None,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -1361,10 +1419,11 @@ impl Render for CardView {
         };
         let prepared = card.prepare(window, cx);
         let height = prepared.height;
-        let live = prepared
+        let stale_at = prepared
             .value
             .as_ref()
-            .is_some_and(|v| v.validity == Validity::Valid);
+            .filter(|v| v.validity == Validity::Valid)
+            .and_then(|_| stale_deadline_ns(&self.chart.read(cx).series));
         #[cfg(any(test, feature = "test-hooks"))]
         {
             self.prepared = Some(prepared.clone());
@@ -1373,12 +1432,21 @@ impl Render for CardView {
             self.height.set(height);
             App::notify(cx, self.sidebar);
         }
-        self.stale_check = live.then(|| {
-            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                cx.background_executor().timer(STALE_CHECK).await;
-                let _ = this.update(cx, |_, cx| cx.notify());
-            })
-        });
+        // A new sample notifies through the chart, so the timer only fires when samples stop.
+        if stale_at != self.stale_at {
+            self.stale_at = stale_at;
+            self.stale_check = stale_at.map(|at| {
+                let wait = Duration::from_nanos(at.saturating_sub(now_boot_ns()));
+                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    cx.background_executor().timer(wait).await;
+                    let _ = this.update(cx, |this, cx| {
+                        // Render arms the timer again if the value is still Valid.
+                        this.stale_at = None;
+                        cx.notify();
+                    });
+                })
+            });
+        }
 
         #[cfg(any(test, feature = "test-hooks"))]
         {
@@ -1461,10 +1529,14 @@ impl DeviceCard {
             let value_w = value
                 .as_ref()
                 .map_or(Pixels::ZERO, |v| measure(CardFont::Value, v.template));
+            let text_min = VALUE_TEMPLATES
+                .iter()
+                .fold(Pixels::ZERO, |w, t| w.max(measure(CardFont::Value, t)));
+            let graph_w = card_graph_width(self.width, text_min, &m);
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
-                card_text_width(self.width, &m),
+                card_text_width(self.width, graph_w, &m),
                 m.sp[3],
                 m.icon.xs,
                 &mut measure,
@@ -1474,6 +1546,7 @@ impl DeviceCard {
                 layout,
                 value,
                 height,
+                graph_w,
             });
         }
         self.prepared.as_ref().expect("prepared above")
@@ -1494,6 +1567,7 @@ impl RenderOnce for DeviceCard {
             layout,
             value,
             height,
+            graph_w,
         } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
         let key = self.key;
@@ -1582,12 +1656,14 @@ impl RenderOnce for DeviceCard {
             text = HoverTooltip::attach(&state, text, DELAY_CONTROL, content.build(), window, cx);
         }
 
-        let graph = div()
-            .debug_selector(|| "perf-card-graph".into())
-            .flex_none()
-            .w(px(CARD_GRAPH_W * s))
-            .h(px(CARD_GRAPH_H * s))
-            .child(self.chart.cached(StyleRefinement::default().size_full()));
+        let graph = (graph_w > Pixels::ZERO).then(|| {
+            div()
+                .debug_selector(|| "perf-card-graph".into())
+                .flex_none()
+                .w(graph_w)
+                .h(px(CARD_GRAPH_H * s))
+                .child(self.chart.cached(StyleRefinement::default().size_full()))
+        });
 
         let pressed = theme.row_selected.opacity(PRESSED_ALPHA);
         let hover = theme.row_hover;
@@ -1610,7 +1686,7 @@ impl RenderOnce for DeviceCard {
             .on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(PerfSelectDevice { key: key.clone() }), cx);
             })
-            .child(graph)
+            .children(graph)
             .child(text);
         if opacity < 1.0 {
             card = card.opacity(opacity);
@@ -1744,8 +1820,6 @@ fn value_element(v: &CardValue, key: &DeviceKey, m: &UiMetrics, theme: &TlTheme)
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use tl_model::snapshot::{
         BatteryDetails, DeviceDetailsSnapshot, InventorySnapshot, NetDetails, PartitionRow,
         PartitionTable, SystemSnapshot,
@@ -2447,6 +2521,48 @@ mod tests {
         );
         let l = lines(&input(DeviceKind::Cpu, &cpu, &s));
         assert!(same(&tip(&l), &l.line1));
+    }
+
+    #[test]
+    fn card_graph_width_leaves_room_for_the_widest_value() {
+        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        let value = px(80.);
+        // 252 less sp4 on each side: the full graph, 98 px of text.
+        assert_eq!(card_graph_width(px(236.), value, &m), px(CARD_GRAPH_W));
+        assert_eq!(card_text_width(px(236.), px(CARD_GRAPH_W), &m), px(98.));
+        // nav_width 180: the graph gives way to the value.
+        let graph = card_graph_width(px(164.), value, &m);
+        assert_eq!(graph, px(62.));
+        assert_eq!(card_text_width(px(164.), graph, &m), value);
+        // Too narrow for the least graph: the text takes the card.
+        assert_eq!(card_graph_width(px(120.), value, &m), Pixels::ZERO);
+        assert_eq!(card_text_width(px(120.), Pixels::ZERO, &m), px(106.));
+    }
+
+    #[test]
+    fn stale_deadline_matches_chart_staleness() {
+        use tl_model::ids::{MetricId, SeriesId};
+        use tl_model::series::Sample;
+        let series = |period_ns: u64, newest: u64| {
+            Some(Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(0),
+                    metric: MetricId::CPU_TOTAL,
+                },
+                version: 1,
+                period_ns,
+                samples: Arc::from([Sample::valid(newest, 1.)]),
+            }))
+        };
+        assert_eq!(stale_deadline_ns(&[None]), None);
+        for (period, newest) in [(100_000_000, 7_000_000_000), (1_000_000_000, 9_000_000_000)] {
+            let at = stale_deadline_ns(&[series(period, newest), None]).expect("deadline");
+            assert!(!crate::chart::is_stale(newest, at - 1, period), "{period}");
+            assert!(crate::chart::is_stale(newest, at, period), "{period}");
+        }
+        // The newest sample of any series and the shortest period count.
+        let at = stale_deadline_ns(&[series(1_000_000_000, 5), series(100_000_000, 9)]);
+        assert_eq!(at, Some(9 + 1_500_000_000 + 1));
     }
 
     /// Monospace test measure: 1 px per character in every font, the ellipsis included.
