@@ -8,6 +8,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
@@ -793,6 +794,47 @@ fn unlock_at_launch_starts_once(cx: &mut TestAppContext) {
     again.update(|window, cx| window.simulate_next_frame(cx));
     draw(&mut again);
     assert_eq!(starts_sent(&engine), 1, "exactly one StartHelperSession");
+}
+
+/// Setup leaves the window active at the clock's start; moves the clock, then sends `mods`.
+fn shift_after(main: &mut VisualTestContext, ms: u64, mods: Modifiers) {
+    main.executor().advance_clock(Duration::from_millis(ms));
+    main.simulate_modifiers_change(mods);
+    draw(main);
+}
+
+#[gpui_kit::test]
+fn shift_within_500ms_starts_once(cx: &mut TestAppContext) {
+    let (engine, mut main) = setup(cx);
+    assert_eq!(starts_sent(&engine), 0);
+    shift_after(&mut main, 100, Modifiers::shift());
+    assert_eq!(starts_sent(&engine), 1);
+}
+
+#[gpui_kit::test]
+fn shift_after_500ms_ignored(cx: &mut TestAppContext) {
+    let (engine, mut main) = setup(cx);
+    shift_after(&mut main, 600, Modifiers::shift());
+    assert_eq!(starts_sent(&engine), 0);
+}
+
+#[gpui_kit::test]
+fn shift_twice_starts_once(cx: &mut TestAppContext) {
+    let (engine, mut main) = setup(cx);
+    shift_after(&mut main, 100, Modifiers::shift());
+    shift_after(&mut main, 100, Modifiers::none());
+    shift_after(&mut main, 100, Modifiers::shift());
+    assert_eq!(starts_sent(&engine), 1);
+}
+
+#[gpui_kit::test]
+fn shift_and_setting_start_once(cx: &mut TestAppContext) {
+    let mut settings = Settings::default();
+    settings.privilege.unlock_at_launch = true;
+    let (engine, mut main) = setup_with(cx, settings);
+    assert_eq!(starts_sent(&engine), 1);
+    shift_after(&mut main, 100, Modifiers::shift());
+    assert_eq!(starts_sent(&engine), 1);
 }
 
 // ---- Settings Privileges page ----

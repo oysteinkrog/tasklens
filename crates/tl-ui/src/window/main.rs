@@ -24,7 +24,8 @@
 //!
 //! The shield sits in toolbar slot 1 when the privileged helper is installed, and the helper
 //! session starts once after the first frame when asked for at launch (E20-026, UI-SHL-011,
-//! APP-003, APP-049).
+//! APP-003, APP-049). Shift set in the first modifiers event within 500 ms of first focus counts
+//! as held at launch (UI-SHL-110 step 6, R-124, U-43).
 //!
 //! `ToggleAlwaysOnTop` for the main window flips `window.always_on_top` and sends `KeepAbove`
 //! through the KWin bridge; a window that opens with the setting on gets it once the bridge is up
@@ -426,6 +427,15 @@ impl Global for HelperInstalled {}
 struct LaunchUnlockRequested;
 
 impl Global for LaunchUnlockRequested {}
+
+/// Set once a main window decided whether Shift was held at launch, so a reopened window is not a
+/// launch (E29-030, U-43).
+struct ShiftAtLaunchDecided;
+
+impl Global for ShiftAtLaunchDecided {}
+
+/// Shift counts as held at launch when it is set in a modifiers event this soon after first focus.
+const SHIFT_LAUNCH_WINDOW: Duration = Duration::from_millis(500);
 
 /// Set once the startup public IP fetch was considered, so a reopened window does not fetch
 /// again (E20-024).
@@ -1203,6 +1213,10 @@ pub struct MainWindow {
     health_ticking: bool,
     _health_tick: Option<Task<()>>,
     _subs: SmallVec<[Subscription; 8]>,
+    /// When the window first had focus; starts the Shift-at-launch window (E29-030).
+    first_focus_at: Option<Instant>,
+    /// Shift was set within [`SHIFT_LAUNCH_WINDOW`] of first focus (E29-030, U-43).
+    shift_at_launch: bool,
     /// `--select-pid` waiting for its process (E20-018).
     pending_pid: Option<PendingPid>,
     /// The page fade-in after a tab switch: start and duration (E20-021).
@@ -1260,6 +1274,17 @@ impl MainWindow {
         let fps = cx.new(FpsOverlay::new);
 
         let mut subs = SmallVec::new();
+        // First focus starts the Shift-at-launch window (E29-030, R-124, U-43).
+        subs.push(
+            cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+                if this.first_focus_at.is_none() && window.is_window_active() {
+                    this.first_focus_at = Some(cx.background_executor().now());
+                }
+            }),
+        );
+        let first_focus_at = window
+            .is_window_active()
+            .then(|| cx.background_executor().now());
         // `debug.show_fps` shows or hides the FPS overlay (E20-020).
         subs.push(cx.observe_global::<TlSettings>(|this: &mut Self, cx| {
             let version = TlSettings::get(cx).version(Section::Debug);
@@ -1405,6 +1430,8 @@ impl MainWindow {
             health_ticking: false,
             _health_tick: None,
             _subs: subs,
+            first_focus_at,
+            shift_at_launch: false,
             pending_pid: None,
             fade: None,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1771,6 +1798,7 @@ impl MainWindow {
         cx: &mut Context<Self>,
     ) {
         let m = ev.modifiers;
+        self.detect_shift_at_launch(m.shift, window, cx);
         let paused = cx.try_global::<ShellState>().is_some_and(|s| s.paused);
         let want = if paused {
             m.control
@@ -2018,6 +2046,34 @@ impl MainWindow {
         model
     }
 
+    /// Decides once per process whether Shift was held at launch: the first modifiers event after
+    /// first focus counts, and only within [`SHIFT_LAUNCH_WINDOW`] (E29-030, UI-SHL-110 step 6,
+    /// R-124, U-43). Wayland sends no modifier state before focus, X11 behaves the same way.
+    fn detect_shift_at_launch(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.has_global::<ShiftAtLaunchDecided>() {
+            return;
+        }
+        let Some(first) = self.first_focus_at else {
+            return;
+        };
+        cx.set_global(ShiftAtLaunchDecided);
+        let since = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(first);
+        let held = shift && since <= SHIFT_LAUNCH_WINDOW;
+        debug!(
+            target: "tasklens::ui",
+            shift,
+            ms_since_focus = since.as_millis() as u64,
+            "shift at launch decided"
+        );
+        if held {
+            self.shift_at_launch = true;
+            self.request_launch_unlock(window, cx);
+        }
+    }
+
     /// Starts the helper session at launch (APP-049): once per process, and only when the
     /// helper is installed. Step 11 calls it for `privilege.unlock_at_launch` or Shift held at
     /// launch; E29 calls it for Shift seen on Wayland (U-43).
@@ -2201,7 +2257,10 @@ impl MainWindow {
             }
         }
         // step 11: helper unlock at launch (E20-026)
-        if TlSettings::settings(cx).privilege.unlock_at_launch || options.shift_held {
+        if TlSettings::settings(cx).privilege.unlock_at_launch
+            || options.shift_held
+            || self.shift_at_launch
+        {
             self.request_launch_unlock(window, cx);
         }
         // step 11: public IP auto-fetch (E20-024), once per process
