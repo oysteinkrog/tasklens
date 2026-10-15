@@ -442,12 +442,13 @@ mod toasts {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
+    use tl_model::health::HelperState;
     use tl_model::ids::{NodeId, ProcessKey};
     use tl_model::process::ProcFlags;
     use tl_model::settings::{Settings, UiState};
     use tl_model::system::CpuSet;
     use tl_model::time::BootId;
-    use tl_ui::action_tracker::{GlobalActionTracker, PushedToast};
+    use tl_ui::action_tracker::{GlobalActionTracker, PushedToast, RetryActionAsAdmin};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::toast::{ToastKey, ToastKind};
     use tl_ui::i18n::init_strings;
@@ -886,6 +887,103 @@ mod toasts {
             ],
             "each request kept its own toast"
         );
+    }
+
+    /// tl-helper is installed, so a privilege failure may be retried.
+    fn publish_helper(engine: &FakeEngine, vcx: &mut VisualTestContext) {
+        engine.publish_with(|s| {
+            let health = Arc::make_mut(&mut s.health);
+            health.helper = HelperState::Locked;
+            health.version += 1;
+        });
+        vcx.run_until_parked();
+    }
+
+    /// One state per target, then the summary.
+    fn finish(
+        engine: &FakeEngine,
+        vcx: &mut VisualTestContext,
+        id: ActionId,
+        states: &[ActionState],
+    ) {
+        for (i, state) in states.iter().enumerate() {
+            emit(engine, vcx, id, Some(i as u16), state.clone());
+        }
+        emit(engine, vcx, id, None, ActionState::summarize(states));
+    }
+
+    fn last_button(vcx: &mut VisualTestContext) -> Option<String> {
+        let last = pushed(vcx).pop().expect("a toast");
+        last.button.map(|b| b.to_string())
+    }
+
+    fn five(bad: ActionState) -> [ActionState; 5] {
+        let ok = ActionState::Succeeded;
+        [ok.clone(), ok.clone(), bad, ok.clone(), ok]
+    }
+
+    #[gpui_kit::test]
+    fn retry_button_only_on_eperm(cx: &mut TestAppContext) {
+        let (engine, mut vcx) = open(cx);
+        publish_helper(&engine, &mut vcx);
+
+        let id = send(&mut vcx, ActionKind::Signal(Signal::Term), 5);
+        finish(&engine, &mut vcx, id, &five(EPERM));
+        let last = pushed(&mut vcx).pop().expect("a toast");
+        assert_eq!(last.text, "Ended 4 of 5 processes (1 permission denied)");
+        assert_eq!(last.button.as_deref(), Some("Retry as administrator"));
+
+        let gone = ActionState::Failed(ActionError::NoSuchProcess);
+        let id = send(&mut vcx, ActionKind::Signal(Signal::Term), 5);
+        finish(&engine, &mut vcx, id, &five(gone.clone()));
+        assert_eq!(last_button(&mut vcx).as_deref(), Some("Details"));
+
+        let id = send(&mut vcx, ActionKind::Signal(Signal::Term), 1);
+        finish(&engine, &mut vcx, id, &[gone]);
+        assert_eq!(last_button(&mut vcx), None);
+    }
+
+    #[gpui_kit::test]
+    fn retry_resends_failed_targets_privileged(cx: &mut TestAppContext) {
+        let (engine, mut vcx) = open(cx);
+        publish_helper(&engine, &mut vcx);
+        let id = send(&mut vcx, ActionKind::Signal(Signal::Term), 5);
+        finish(&engine, &mut vcx, id, &five(EPERM));
+        assert_eq!(actions_sent(&engine).len(), 1);
+
+        vcx.dispatch_action(RetryActionAsAdmin(id.0));
+        vcx.run_until_parked();
+        let sent = actions_sent(&engine);
+        assert_eq!(sent.len(), 2);
+        let retry = &sent[1];
+        assert!(retry.privileged);
+        assert_ne!(retry.id, id);
+        assert_eq!(retry.kind, ActionKind::Signal(Signal::Term));
+        assert_eq!(retry.targets.as_slice(), [ActionTarget::Process(key(102))]);
+
+        // 17 more finished requests push the first one out of the ring of 16.
+        for _ in 0..17 {
+            let next = send(&mut vcx, ActionKind::Signal(Signal::Term), 1);
+            finish(&engine, &mut vcx, next, &[EPERM]);
+        }
+        let before = actions_sent(&engine).len();
+        vcx.dispatch_action(RetryActionAsAdmin(id.0));
+        vcx.run_until_parked();
+        assert_eq!(actions_sent(&engine).len(), before, "too old to retry");
+    }
+
+    #[gpui_kit::test]
+    fn no_automatic_retry(cx: &mut TestAppContext) {
+        let (engine, mut vcx) = open(cx);
+        publish_helper(&engine, &mut vcx);
+        let one = send(&mut vcx, ActionKind::Signal(Signal::Term), 1);
+        finish(&engine, &mut vcx, one, &[EPERM]);
+        let many = send(&mut vcx, ActionKind::Signal(Signal::Term), 5);
+        finish(&engine, &mut vcx, many, &five(EPERM));
+        vcx.run_until_parked();
+        let sent = actions_sent(&engine);
+        assert_eq!(sent.len(), 2);
+        assert!(sent.iter().all(|r| !r.privileged));
     }
 
     #[gpui_kit::test]

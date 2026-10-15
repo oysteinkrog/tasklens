@@ -156,7 +156,9 @@ pub fn submit(
         warn!(target: "tasklens::ui", "no main window; the action was not sent");
         return None;
     };
-    let texts = texts.into_toast_texts(action_words(cx));
+    let mut texts = texts.into_toast_texts(action_words(cx));
+    // PROC-058, ADR-006: a permission-denied result offers "Retry as administrator".
+    texts.retry_as_admin = true;
     tracker.update(cx, |t, cx| t.track_or_toast(req, queue, texts, cx))
 }
 
