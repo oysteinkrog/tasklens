@@ -1542,7 +1542,7 @@ fn init_binds_services_keys(cx: &mut TestAppContext) {
 mod flows {
     use std::sync::Arc;
 
-    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use tl_model::actions::{
         ActionError, ActionEvent, ActionId, ActionRequest, ActionState, ActionTarget,
     };
@@ -1772,7 +1772,7 @@ mod flows {
         rig.run(UnitVerb::Stop, &names);
         assert_eq!(rig.toasts(), ["Stopping 5 services..."]);
         let id = only_id(&rig);
-        rig.finish(id, &[ActionState::Succeeded; 5]);
+        rig.finish(id, &vec![ActionState::Succeeded; 5]);
         assert_eq!(rig.toasts(), ["5 services stopped"]);
     }
 
