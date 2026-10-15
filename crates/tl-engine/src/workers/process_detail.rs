@@ -140,7 +140,7 @@ mod tests {
             fs::write(dir.join("smaps_rollup"), ROLLUP).expect("write smaps_rollup");
             keys.push(key(pid, START_TICKS));
         }
-        let cfg = EngineConfig::new(EngineMode::Headless, PathBuf::from("/nonexistent"))
+        let cfg = EngineConfig::new(EngineMode::Full, PathBuf::from("/nonexistent"))
             .with_sys_root(SysRoot::at(tmp.path()));
         (tmp, Arc::new(cfg), keys)
     }
