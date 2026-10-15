@@ -559,8 +559,13 @@ impl StartupDelegate {
     /// The Startup impact tooltip of row `ix`, one line per `\n`.
     pub fn impact_tooltip(&self, ix: usize) -> Option<SharedString> {
         let e = self.entry(ix)?;
-        // The model does not carry `fork_exec_only` yet (docs/ui/system-tabs.md, UI-SYS-042).
-        let lines = impact_tooltip_lines(e.impact, e.impact_detail.as_ref(), false, &self.words);
+        let fork_exec_only = e.impact_detail.is_some_and(|d| d.fork_exec_only);
+        let lines = impact_tooltip_lines(
+            e.impact,
+            e.impact_detail.as_ref(),
+            fork_exec_only,
+            &self.words,
+        );
         (!lines.is_empty()).then(|| lines.join("\n").into())
     }
 

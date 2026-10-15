@@ -616,6 +616,9 @@ pub struct ImpactDetail {
     pub started_after_login_ms: u64,
     /// CPUUsageNSec.
     pub cpu_nsec: Option<u64>,
+    /// True when the unit Type= is simple or exec, or unset. The tooltip then adds the fork/exec
+    /// note (UI-SYS-043).
+    pub fork_exec_only: bool,
 }
 
 /// One Startup Apps row (UI-SYS-042). `command` can hold secrets: never log it above debug

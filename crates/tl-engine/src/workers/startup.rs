@@ -611,6 +611,7 @@ impl Systemd {
                 activation_ms: d.activation_ms,
                 started_after_login_ms: d.start_offset_ms,
                 cpu_nsec: d.cpu_ns,
+                fork_exec_only: d.fork_exec_only,
             }),
         }
     }
@@ -1736,6 +1737,7 @@ mod tests {
             assert_eq!(detail.activation_ms, ms);
             assert_eq!(detail.started_after_login_ms, 3_000);
             assert_eq!(detail.cpu_nsec, Some(42_000));
+            assert!(detail.fork_exec_only);
         }
 
         // CPUUsageNSec u64::MAX is not available.
@@ -1743,6 +1745,23 @@ mod tests {
         t.cpu_ns = u64::MAX;
         let facts = systemd_with(t).facts(&foo_raw());
         assert_eq!(facts.impact_detail.expect("detail").cpu_nsec, None);
+    }
+
+    #[test]
+    fn impact_fork_exec_only_from_service_type() {
+        for (service_type, want) in [
+            (None, true),
+            (Some("simple"), true),
+            (Some("exec"), true),
+            (Some("forking"), false),
+            (Some("oneshot"), false),
+        ] {
+            let mut r = foo_raw();
+            r.service_type = service_type.map(Into::into);
+            let facts = systemd_with(timing(8_000_000, 400)).facts(&r);
+            let detail = facts.impact_detail.expect("detail");
+            assert_eq!(detail.fork_exec_only, want, "{service_type:?}");
+        }
     }
 
     #[test]

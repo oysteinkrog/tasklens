@@ -295,6 +295,7 @@ fn impact_tooltip_lines() {
         activation_ms: 412,
         started_after_login_ms: 3200,
         cpu_nsec: Some(1_000_000_000),
+        fork_exec_only: false,
     };
     let three = [
         "Activation time: 412 ms",
@@ -329,6 +330,7 @@ fn impact_tooltip_on_hovered_cell(cx: &mut TestAppContext) {
         activation_ms: 412,
         started_after_login_ms: 3200,
         cpu_nsec: Some(1_000_000_000),
+        fork_exec_only: false,
     });
     let (d, _) = delegate(cx, vec![e]);
     let out = cell(&d, 0, StartupColumn::Impact);
@@ -339,6 +341,26 @@ fn impact_tooltip_on_hovered_cell(cx: &mut TestAppContext) {
     let mut quiet = CellOut::default();
     d.cell(0, id(StartupColumn::Impact), &mut quiet);
     assert_eq!(quiet.tooltip, None, "no tooltip off the hovered row");
+}
+
+#[gpui_kit::test]
+fn impact_tooltip_fork_exec_line(cx: &mut TestAppContext) {
+    let mut e = entry("a", StartupKind::UserUnit);
+    e.impact = Impact::Medium;
+    e.impact_detail = Some(ImpactDetail {
+        activation_ms: 412,
+        started_after_login_ms: 3200,
+        cpu_nsec: Some(1_000_000_000),
+        fork_exec_only: true,
+    });
+    let (d, _) = delegate(cx, vec![e]);
+    let out = cell(&d, 0, StartupColumn::Impact);
+    assert_eq!(
+        out.tooltip.as_deref(),
+        Some(
+            "Activation time: 412 ms\nStarted 3.2 s after login\nCPU time: 0:00:01\nFor this unit type only the time to start the program is measured."
+        )
+    );
 }
 
 #[gpui_kit::test]
