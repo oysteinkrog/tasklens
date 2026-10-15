@@ -305,8 +305,9 @@ mod boxes {
         /// The CPU box size.
         cpu_w: f32,
         cpu_h: f32,
-        /// The Memory box width.
+        /// The Memory box size.
         mem_w: f32,
+        mem_h: f32,
     }
 
     impl Render for Host {
@@ -325,7 +326,7 @@ mod boxes {
                 .child(
                     div()
                         .w(px(self.mem_w))
-                        .h(px(300.))
+                        .h(px(self.mem_h))
                         .child(self.mem.clone().cached(cached())),
                 )
         }
@@ -431,6 +432,7 @@ mod boxes {
             cpu_w: cpu.0,
             cpu_h: cpu.1,
             mem_w: 800.,
+            mem_h: 300.,
         });
         vcx.simulate_scale_factor_change(1.0);
         let driver = vcx.update(|window, cx| {
@@ -684,46 +686,76 @@ mod boxes {
     }
 
     #[gpui_kit::test]
-    fn mem_box_narrow_keeps_sparklines_inside(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::mem_box::spark_id;
+    fn mem_box_rows_keep_all_parts_and_fill_body(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::mem_box::{
+            MEM_BODY_ID, meter_id, row_id, spark_id, value_id,
+        };
         let mut r = open(cx);
         r.system(|s| {
             s.memory.validity = Validity::Valid;
             s.memory.total = 64 * GIB;
             s.memory.used = 32 * GIB;
+            s.memory.available = 32 * GIB;
+            s.memory.cached = 16 * GIB;
+            s.memory.swap_total = 8 * GIB;
+            s.memory.swap_free = 6 * GIB;
+            s.memory.commit_limit = 40 * GIB;
+            s.memory.committed = 20 * GIB;
         });
-        let spark = |r: &mut Rig, i: usize| {
-            let id: &'static str = Box::leak(spark_id(i).into_boxed_str());
-            r.vcx.debug_bounds(id).expect("sparkline drawn")
-        };
-        assert_eq!(
-            f32::from(spark(&mut r, 0).size.width),
-            96.,
-            "800 px: full row"
-        );
+        // Room for the CPU box (300 px) and the tallest Memory box.
+        r.vcx.simulate_resize(size(px(800.), px(900.)));
         let host = r.host.clone();
-        // A 720 px page leaves a body of about 198 px.
-        for w in [240., 220.] {
+        let leak = |id: String| -> &'static str { Box::leak(id.into_boxed_str()) };
+        // (box width, box height, sparkline width): one-line rows at 800 px, the 1200 x 900
+        // default (384 x 516, a 358 px body) and a 720 px page (224 x 280, a 198 px body).
+        for (w, h, spark_w) in [(800., 300., 96.), (384., 516., 96.), (224., 280., 62.)] {
             r.vcx.update(|_, cx| {
-                host.update(cx, |h, cx| {
-                    h.mem_w = w;
+                host.update(cx, |hst, cx| {
+                    hst.mem_w = w;
+                    hst.mem_h = h;
                     cx.notify();
                 })
             });
             draw(r.vcx);
             let frame = r.vcx.debug_bounds(MEM_BOX_ID).expect("Memory box drawn");
+            let body = r.vcx.debug_bounds(MEM_BODY_ID).expect("body drawn");
             for i in 0..5 {
-                let b = spark(&mut r, i);
+                let value = r.vcx.debug_bounds(leak(value_id(i)));
+                let value = value.unwrap_or_else(|| panic!("{w} px: row {i} draws its value"));
                 assert!(
-                    b.right() <= frame.right(),
+                    f32::from(value.size.width) > 0. && value.right() <= frame.right(),
+                    "{w} px: value {i} is shown inside the box, got {value:?}"
+                );
+                let meter = r.vcx.debug_bounds(leak(meter_id(i)));
+                let meter = meter.unwrap_or_else(|| panic!("{w} px: row {i} draws its meter"));
+                assert!(
+                    f32::from(meter.size.width) >= 32.,
+                    "{w} px: meter {i} keeps its width, got {:?}",
+                    meter.size.width
+                );
+                let spark = r.vcx.debug_bounds(leak(spark_id(i)));
+                let spark = spark.unwrap_or_else(|| panic!("{w} px: row {i} draws its sparkline"));
+                assert!(
+                    spark.right() <= frame.right(),
                     "{w} px: sparkline {i} stays inside the box"
                 );
                 assert!(
-                    f32::from(b.size.width) >= 40.,
-                    "{w} px: sparkline {i} keeps its width, got {:?}",
-                    b.size.width
+                    (f32::from(spark.size.width) - spark_w).abs() < 1.,
+                    "{w} px: sparkline {i} is {spark_w} px, got {:?}",
+                    spark.size.width
                 );
             }
+            // The rows fill the body: no empty space above the first or below the last.
+            let first = r.vcx.debug_bounds(leak(row_id(0))).expect("row 0 drawn");
+            let last = r.vcx.debug_bounds(leak(row_id(4))).expect("row 4 drawn");
+            assert!(
+                (f32::from(first.top() - body.top())).abs() < 1.,
+                "{w} x {h}: first row at the body top, row {first:?}, body {body:?}"
+            );
+            assert!(
+                (f32::from(body.bottom() - last.bottom())).abs() < 1.,
+                "{w} x {h}: last row at the body bottom, row {last:?}, body {body:?}"
+            );
         }
     }
 

@@ -58,6 +58,24 @@ pub fn spark_id(i: usize) -> String {
     format!("{MEM_BOX_ID}-spark-{i}")
 }
 
+/// The debug selector of row `i`.
+pub fn row_id(i: usize) -> String {
+    format!("{MEM_BOX_ID}-row-{i}")
+}
+
+/// The debug selector of row `i`'s value text.
+pub fn value_id(i: usize) -> String {
+    format!("{MEM_BOX_ID}-value-{i}")
+}
+
+/// The debug selector of row `i`'s meter.
+pub fn meter_id(i: usize) -> String {
+    format!("{MEM_BOX_ID}-meter-{i}")
+}
+
+/// The debug selector of the box body.
+pub const MEM_BODY_ID: &str = "perf-overview-box-memory-body";
+
 const KEY_NO_SWAP: &str = "perf-overview-mem-no-swap";
 const SWAP: usize = 3;
 const COMMIT: usize = 4;
@@ -68,9 +86,14 @@ const ROW_PCT_W: f32 = 48.;
 /// The narrowest meter a wide row keeps, logical px before `ui_scale`.
 const ROW_MIN_METER_W: f32 = 32.;
 
-/// Whether a body `width` wide (0 before the first paint) has room for the full row: label,
+/// The narrowest text column of a narrow row, logical px before `ui_scale`: a 72 px meter (as wide
+/// as the one-line label column), the gap and the percent. The sparkline takes the rest, at most
+/// `SPARK_W`.
+const ROW_NARROW_TEXT_W: f32 = ROW_LABEL_W + ROW_PCT_W + 8.;
+
+/// Whether a body `width` wide (0 before the first paint) has room for the one-line row: label,
 /// value, a meter of at least `ROW_MIN_METER_W`, percent and the sparkline, with their 4 gaps.
-/// Narrower bodies get the narrow row: label, sparkline and one text column.
+/// Narrower bodies get the two-line row (`memory_row`).
 fn row_wide(width: Pixels, m: &UiMetrics) -> bool {
     let fixed = (ROW_LABEL_W + ROW_VALUE_W + ROW_MIN_METER_W + ROW_PCT_W + SPARK_W) * m.ui_scale;
     width == px(0.) || f32::from(width) >= fixed + 4. * f32::from(m.sp[4])
@@ -498,6 +521,8 @@ pub(super) fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyEl
 }
 
 /// One memory row: label, value, meter, percent and a sparkline that fills the row height.
+/// A `wide` row puts them on one line. A narrow row has two lines of text, the label and value
+/// over the meter and percent, with the sparkline beside them.
 fn memory_row(
     row: &MeterRow,
     percent: &SharedString,
@@ -509,53 +534,15 @@ fn memory_row(
 ) -> AnyElement {
     let s = m.ui_scale;
     let mut label = div()
-        .flex_none()
-        .w(px(ROW_LABEL_W * s))
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
         .text_color(theme.text_secondary)
         .child(row.label.clone());
     *label.text_style() = t_sm(m);
-    if !wide {
-        // One text column: the percent, or the value text when there is none ("No swap").
-        let text = if percent.is_empty() {
-            row.value.clone()
-        } else {
-            percent.clone()
-        };
-        let mut text_el = div()
-            .flex_none()
-            .w(px(ROW_PCT_W * s))
-            .flex()
-            .justify_end()
-            .whitespace_nowrap()
-            .text_color(theme.text_primary)
-            .child(text);
-        *text_el.text_style() = numeric_style(m, m.text.sm);
-        return div()
-            .flex()
-            .flex_row()
-            .flex_1()
-            .min_h(px(LABEL_ROW * s))
-            .items_center()
-            .gap(m.sp[4])
-            .child(label)
-            .child(
-                div()
-                    .debug_selector(move || spark_id(index))
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(chart.clone().cached(StyleRefinement::default().size_full())),
-            )
-            .child(text_el)
-            .into_any_element();
-    }
     let mut value = div()
+        .debug_selector(move || value_id(index))
         .flex_none()
-        .w(px(ROW_VALUE_W * s))
         .flex()
         .justify_end()
         .whitespace_nowrap()
@@ -571,29 +558,54 @@ fn memory_row(
         .text_color(theme.text_secondary)
         .child(percent.clone());
     *pct.text_style() = numeric_style(m, m.text.sm);
-    div()
+    let meter = div()
+        .debug_selector(move || meter_id(index))
+        .flex_1()
+        .min_w_0()
+        .child(Meter {
+            fraction: row.fraction,
+            color: row.color,
+        });
+    let spark = div()
+        .debug_selector(move || spark_id(index))
+        .relative()
+        .h_full()
+        .child(chart.clone().cached(StyleRefinement::default().size_full()));
+    let line = || div().flex().flex_row().items_center().gap(m.sp[4]);
+    let row_el = div()
+        .debug_selector(move || row_id(index))
         .flex()
         .flex_row()
         .flex_1()
-        .min_h(px(LABEL_ROW * s))
         .items_center()
-        .gap(m.sp[4])
-        .child(label)
-        .child(value)
-        .child(div().flex_1().min_w_0().child(Meter {
-            fraction: row.fraction,
-            color: row.color,
-        }))
+        .gap(m.sp[4]);
+    if !wide {
+        let text = div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .flex_1()
+            .min_w(px(ROW_NARROW_TEXT_W * s))
+            .child(
+                line()
+                    .h(px(LABEL_ROW * s))
+                    .child(label.flex_1().min_w_0())
+                    .child(value),
+            )
+            .child(line().h(px(LABEL_ROW * s)).child(meter).child(pct));
+        return row_el
+            .min_h(px(2. * LABEL_ROW * s))
+            .child(text)
+            .child(spark.flex_1().min_w_0().max_w(px(SPARK_W * s)))
+            .into_any_element();
+    }
+    row_el
+        .min_h(px(LABEL_ROW * s))
+        .child(label.flex_none().w(px(ROW_LABEL_W * s)))
+        .child(value.w(px(ROW_VALUE_W * s)))
+        .child(meter)
         .child(pct)
-        .child(
-            div()
-                .debug_selector(move || spark_id(index))
-                .relative()
-                .flex_none()
-                .w(px(SPARK_W * s))
-                .h_full()
-                .child(chart.clone().cached(StyleRefinement::default().size_full())),
-        )
+        .child(spark.flex_none().w(px(SPARK_W * s)))
         .into_any_element()
 }
 
@@ -606,6 +618,7 @@ impl Render for MemBox {
         let probe_m = m;
         let wide = row_wide(self.body.get().width, &m);
         let body = div()
+            .debug_selector(|| MEM_BODY_ID.into())
             .relative()
             .flex()
             .flex_col()
