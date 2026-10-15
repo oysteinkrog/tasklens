@@ -594,6 +594,8 @@ pub struct HistoryPage {
     card: hover::CardCache,
     /// Counts installed views other than TopAt answers. The strip rebuilds when it changes.
     frame_version: u64,
+    /// Ctrl-pause holds the shown view.
+    paused: bool,
     /// Created in `new`, never in render.
     _subs: SmallVec<[Subscription; 5]>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -634,24 +636,7 @@ impl HistoryPage {
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, |this, _, ev: &SnapshotChanged, cx| {
             if ev.mask.contains(ComponentMask::HISTORY) {
-                let history = Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().history);
-                // A TopAt answer changes only `top`: the card repaints, nothing else.
-                if this
-                    .view
-                    .as_ref()
-                    .is_some_and(|old| hover::top_only(old, &history))
-                {
-                    this.view = Some(Arc::clone(&history));
-                    this.on_top_view(&history, cx);
-                    return;
-                }
-                this.frame_version += 1;
-                this.install(Arc::clone(&history));
-                this.note_store_state(cx);
-                this.install_table(cx);
-                this.drive(cx, |q, c| q.on_view(&history, c));
-                this.on_top_view(&history, cx);
-                cx.notify();
+                this.on_hub_history(cx);
             }
         }));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
@@ -733,6 +718,7 @@ impl HistoryPage {
             top: hover::TopController::default(),
             card: hover::CardCache::default(),
             frame_version: 0,
+            paused: false,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -749,6 +735,45 @@ impl HistoryPage {
             this.note_store_state(cx);
         });
         page
+    }
+
+    /// Ctrl-pause (UI-PRC-017): while paused the table, strip and header keep what they show.
+    /// The query controller still sees every view, so the one-in-flight rule keeps working.
+    /// Release installs the hub's current view once.
+    pub fn set_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        if paused == self.paused {
+            return;
+        }
+        self.paused = paused;
+        if !paused {
+            self.on_hub_history(cx);
+        }
+    }
+
+    /// Takes the hub's current history view.
+    fn on_hub_history(&mut self, cx: &mut Context<Self>) {
+        let history = Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().history);
+        if self.paused {
+            self.drive(cx, |q, c| q.on_view(&history, c));
+            return;
+        }
+        // A TopAt answer changes only `top`: the card repaints, nothing else.
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|old| hover::top_only(old, &history))
+        {
+            self.view = Some(Arc::clone(&history));
+            self.on_top_view(&history, cx);
+            return;
+        }
+        self.frame_version += 1;
+        self.install(Arc::clone(&history));
+        self.note_store_state(cx);
+        self.install_table(cx);
+        self.drive(cx, |q, c| q.on_view(&history, c));
+        self.on_top_view(&history, cx);
+        cx.notify();
     }
 
     /// With recording off, tells the user once per session, with an Enable button. Entering

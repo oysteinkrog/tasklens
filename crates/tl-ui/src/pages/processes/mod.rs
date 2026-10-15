@@ -50,6 +50,7 @@ use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, pro
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
 use self::delegate::ProcessDelegate;
 use self::filter::FilterBinding;
+use self::history::HistoryPage;
 use self::jump::JumpTexts;
 use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
 use crate::components::toast::ToastKind;
@@ -118,7 +119,7 @@ pub struct ProcessesPage {
     client: Arc<dyn EngineClient>,
     /// Settings, metrics and strings observers, the table's copy events, Ctrl-pause and the
     /// table observer for the status chip.
-    _subs: SmallVec<[Subscription; 6]>,
+    _subs: SmallVec<[Subscription; 7]>,
     /// `TlSettings` versions of [`SECTIONS`] last applied.
     section_versions: [u64; 4],
     style_version: u64,
@@ -140,6 +141,15 @@ pub struct ProcessesPage {
     status_counts: StatusCounts,
     /// The status chip text, rebuilt only when `status_counts` or the strings change.
     status: String,
+    /// History mode (UI-PRC-030): the page shown in place of the live table. Created when
+    /// `history_mode` turns on, dropped when it turns off. The live table is kept.
+    history: Option<Entity<HistoryPage>>,
+    /// The history table's focus handle, while `history` is set.
+    history_focus: Option<FocusHandle>,
+    /// Whether the Processes tab is the shown one.
+    active: bool,
+    /// `TlSettings::state_version` last applied to the mode.
+    state_version: u64,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -179,7 +189,12 @@ impl ProcessesPage {
             this.on_snapshot(ev.mask, cx);
         });
         let mut subs = SmallVec::new();
-        subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_settings(cx)));
+        subs.push(
+            cx.observe_global_in::<TlSettings>(window, |this, window, cx| {
+                this.on_settings(cx);
+                this.sync_history(window, cx);
+            }),
+        );
         subs.push(cx.observe_global::<UiMetrics>(|this, cx| this.on_metrics(cx)));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
         // Ctrl+Shift+C is the table's own TSV copy (ADR-015); the page shows its toast.
@@ -204,6 +219,17 @@ impl ProcessesPage {
             .try_global::<GlobalDemand>()
             .map(|d| d.0.clone())
             .map(|demand| cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx)));
+        let history_mode = state.processes.history_mode;
+        let state_version = cx
+            .try_global::<TlSettings>()
+            .map_or(0, |t| t.state_version());
+        let mut history = None;
+        let mut history_focus = None;
+        if history_mode {
+            let page = cx.new(|cx| HistoryPage::new(window, cx));
+            history_focus = Some(page.read(cx).table().read(cx).focus_handle().clone());
+            history = Some(page);
+        }
         Self {
             table,
             _hub_sub: hub_sub,
@@ -221,7 +247,47 @@ impl ProcessesPage {
             minigraphs,
             status_counts: StatusCounts::default(),
             status: String::new(),
+            history,
+            history_focus,
+            active: false,
+            state_version,
         }
+    }
+
+    /// Mounts or drops the `HistoryPage` when `history_mode` changed. The live table entity is
+    /// never rebuilt. Focus follows only while this tab is shown.
+    fn sync_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tl) = cx.try_global::<TlSettings>() else {
+            return;
+        };
+        let version = tl.state_version();
+        if version == self.state_version {
+            return;
+        }
+        self.state_version = version;
+        let want = TlSettings::state(cx).processes.history_mode;
+        if want == self.history.is_some() {
+            return;
+        }
+        if want {
+            let page = cx.new(|cx| HistoryPage::new(window, cx));
+            let focus = page.read(cx).table().read(cx).focus_handle().clone();
+            if self.paused.is_some() {
+                page.update(cx, |p, cx| p.set_paused(true, cx));
+            }
+            if self.active {
+                window.focus(&focus, cx);
+            }
+            self.history = Some(page);
+            self.history_focus = Some(focus);
+        } else {
+            self.history = None;
+            self.history_focus = None;
+            if self.active {
+                window.focus(&self.focus, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// The status chip text (UI-PRC-018). Empty until the first view arrives.
@@ -274,6 +340,9 @@ impl ProcessesPage {
         if paused == self.paused.is_some() {
             return;
         }
+        if let Some(history) = &self.history {
+            history.update(cx, |h, cx| h.set_paused(paused, cx));
+        }
         if paused {
             let shown = Arc::clone(self.table.read(cx).delegate.snapshot());
             self.paused = Some(shown);
@@ -283,6 +352,12 @@ impl ProcessesPage {
             self.table.update(cx, |t, _| t.paused = false);
             self.on_snapshot(DRAWN, cx);
         }
+    }
+
+    /// The History mode page, while History mode is on.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn history_page(&self) -> Option<&Entity<HistoryPage>> {
+        self.history.as_ref()
     }
 
     pub fn table(&self) -> &Entity<TlTreeTable<ProcessDelegate>> {
@@ -1570,11 +1645,17 @@ impl Render for ProcessesPage {
                 div()
                     .relative()
                     .size_full()
-                    .child(
-                        self.table
+                    .child(match &self.history {
+                        Some(history) => history
                             .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    )
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element(),
+                        None => self
+                            .table
+                            .clone()
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element(),
+                    })
                     .children(self.minigraphs.clone().map(|panel| {
                         panel.cached(StyleRefinement::default().absolute().inset_0())
                     })),
@@ -1611,10 +1692,13 @@ impl ShellPage for ProcessesPage {
     }
 
     fn primary_focus(&self) -> FocusHandle {
-        self.focus.clone()
+        self.history_focus
+            .clone()
+            .unwrap_or_else(|| self.focus.clone())
     }
 
     fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.active = active;
         self.table
             .update(cx, |t, cx| t.delegate.set_active(active, cx));
         if let Some(panel) = &self.minigraphs {

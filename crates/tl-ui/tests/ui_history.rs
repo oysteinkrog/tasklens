@@ -2607,3 +2607,404 @@ fn series_colours_distinct_for_8() {
         }
     }
 }
+
+/// History mode inside the Processes tab (tasklens-8fx.3): the real main window with the fake
+/// engine, no second History window.
+mod mode {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use tl_model::command::Tab;
+    use tl_model::ids::GroupKey;
+    use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::snapshot::ProcessSnapshot;
+    use tl_model::validity::FieldValidity;
+    use tl_ui::actions::{SelectTab, ToggleHistoryMode};
+    use tl_ui::app::StartOptions;
+    use tl_ui::components::menu::TlMenu;
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::pages::processes::history::actions::DeleteFromHistory;
+    use tl_ui::window::main::{
+        self as shell, GlobalShellEvents, PauseChanged, main_window_view, open_main_window,
+    };
+
+    use super::*;
+
+    struct Mode {
+        engine: Arc<FakeEngine>,
+        persisted: Rc<Cell<u32>>,
+        main: VisualTestContext,
+    }
+
+    fn record(pid: u32) -> ProcessRecord {
+        let name: Arc<str> = Arc::from(format!("proc{pid}"));
+        ProcessRecord {
+            key: key(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: name.clone(),
+                name: name.clone(),
+                exe: None,
+                cmdline: None,
+                user: Arc::from("user"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: name,
+            }),
+            group: GroupKey(0),
+            state: ProcState::Running,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 1.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.,
+            io_write_bps: 0.,
+            net_rx_bps: 0.,
+            net_tx_bps: 0.,
+            gpu_util_pct: 0.,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn open(cx: &mut TestAppContext, history_mode: bool, recording: bool) -> Mode {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let persisted = Rc::new(Cell::new(0));
+        let count = Rc::clone(&persisted);
+        let mut state = UiState::default();
+        state.processes.history_mode = history_mode;
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let appearance = AppearanceSettings::default();
+            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui::table::actions::bind_keys_table(cx);
+            let mut settings = Settings::default();
+            settings.history.enabled = recording;
+            cx.set_global(BootSettings {
+                settings,
+                state,
+                persist: Some(Box::new(move |_, _| count.set(count.get() + 1))),
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            cx.set_global(EngineGlobal(client.clone()));
+            let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            cx.set_global(GlobalHub(hub));
+            cx.set_global(GlobalDemand(demand));
+            tl_ui::components::toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            cx.set_global(StartOptions::default());
+            shell::init(cx);
+        });
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut main = VisualTestContext::from_window(handle.into(), cx);
+        main.update(|window, _| window.activate_window());
+        main.dispatch_action(SelectTab(Tab::Processes as usize));
+        main.run_until_parked();
+        engine.publish_with(|s| {
+            s.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    ..ComponentHeader::default()
+                },
+                records: Arc::from(vec![record(2)]),
+                ..ProcessSnapshot::default()
+            });
+        });
+        main.run_until_parked();
+        Mode {
+            engine,
+            persisted,
+            main,
+        }
+    }
+
+    impl Mode {
+        fn processes(&mut self) -> Entity<ProcessesPage> {
+            self.main.update(|_, cx| {
+                main_window_view(cx)
+                    .expect("main window")
+                    .read(cx)
+                    .page_entity::<ProcessesPage>(Tab::Processes)
+                    .expect("the Processes page is built")
+            })
+        }
+
+        fn history(&mut self) -> Option<Entity<HistoryPage>> {
+            let page = self.processes();
+            self.main
+                .read_entity(&page, |p, _| p.history_page().cloned())
+        }
+
+        fn history_mode(&mut self) -> bool {
+            self.main
+                .update(|_, cx| TlSettings::state(cx).processes.history_mode)
+        }
+
+        fn toggle(&mut self) {
+            self.main.dispatch_action(ToggleHistoryMode);
+            self.main.run_until_parked();
+            draw(&mut self.main);
+        }
+
+        fn first_label(&mut self) -> String {
+            self.main.update(|_, cx| {
+                let main = main_window_view(cx).expect("main window");
+                let strip = main.read(cx).tabstrip_view().read(cx);
+                strip.drawn_labels()[0].to_string()
+            })
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.main.update(|_, cx| {
+                let main = main_window_view(cx).expect("main window");
+                let queue = main.read(cx).toasts().clone();
+                queue
+                    .read(cx)
+                    .visible_texts()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
+        }
+
+        fn set_paused(&mut self, paused: bool) {
+            self.main.update(|_, cx| {
+                let events = cx.global::<GlobalShellEvents>().0.clone();
+                events.update(cx, |_, cx| cx.emit(PauseChanged(paused)));
+            });
+            self.main.run_until_parked();
+        }
+
+        fn has_row(&mut self, page: &Entity<HistoryPage>, pid: u32) -> bool {
+            with_table(page, &mut self.main, |t| {
+                t.delegate.row_index(key(pid)).is_some()
+            })
+        }
+
+        /// Answers the Frame query in flight with the view of `answer`.
+        fn answer_last(&mut self) {
+            let (id, _, _) = queries(&self.engine).pop().expect("a query");
+            answer(&self.engine, id, &mut self.main);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn history_toggle_persists_and_relabels_tab(cx: &mut TestAppContext) {
+        let mut m = open(cx, false, true);
+        assert!(m.history().is_none());
+        assert!(queries(&m.engine).is_empty());
+        let before = m.persisted.get();
+        m.toggle();
+        assert!(m.history_mode());
+        assert!(m.history().is_some(), "the history page replaces the table");
+        assert!(m.persisted.get() > before, "the state is saved");
+        assert_eq!(m.first_label(), "History");
+        let sent = queries(&m.engine);
+        let (_, range, what) = sent.first().expect("the entry query");
+        assert_eq!(*range, HistoryRange::Live);
+        assert!(overview(what));
+    }
+
+    #[gpui_kit::test]
+    fn toggle_off_restores_live_table(cx: &mut TestAppContext) {
+        let mut m = open(cx, false, true);
+        let page = m.processes();
+        let table = m.main.read_entity(&page, |p, _| p.table().clone());
+        table.update(&mut m.main, |t, cx| {
+            t.selection.click(ProcRowId::Process(key(2)));
+            cx.notify();
+        });
+        let selected = |m: &mut Mode| -> Vec<_> {
+            m.main
+                .read_entity(&table, |t, _| t.selection.ids().collect())
+        };
+        let before = selected(&mut m);
+        assert_eq!(before.len(), 1);
+        let offset = m.main.update(|_, cx| {
+            page.read(cx)
+                .scroll_handle(cx)
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+        });
+        m.toggle();
+        let weak = m.history().expect("history page").downgrade();
+        m.toggle();
+        assert!(!m.history_mode());
+        assert!(m.history().is_none());
+        assert!(weak.upgrade().is_none(), "the history page is dropped");
+        assert_eq!(
+            m.main.read_entity(&page, |p, _| p.table().entity_id()),
+            table.entity_id()
+        );
+        assert_eq!(selected(&mut m), before);
+        let after = m.main.update(|_, cx| {
+            page.read(cx)
+                .scroll_handle(cx)
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+        });
+        assert_eq!(after, offset);
+        assert_eq!(m.first_label(), "Processes");
+    }
+
+    #[gpui_kit::test]
+    fn recording_off_keeps_process_table_demand(cx: &mut TestAppContext) {
+        let mut m = open(cx, false, false);
+        m.toggle();
+        let off = |m: &mut Mode| {
+            m.toasts()
+                .iter()
+                .filter(|t| t.as_str() == "History recording is off")
+                .count()
+        };
+        assert_eq!(off(&mut m), 1);
+        m.toggle();
+        m.toggle();
+        assert_eq!(off(&mut m), 1, "once per session");
+        m.main.executor().advance_clock(Duration::from_millis(200));
+        m.main.run_until_parked();
+        let last = m.engine.demands().pop().expect("a demand");
+        assert!(last.process_table);
+    }
+
+    #[gpui_kit::test]
+    fn history_mode_restored_at_start(cx: &mut TestAppContext) {
+        let mut m = open(cx, true, true);
+        assert!(m.history().is_some());
+        assert!(m.history_mode());
+        let sent = queries(&m.engine);
+        assert_eq!(sent[0].1, HistoryRange::Live);
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_pause_freezes_history_table(cx: &mut TestAppContext) {
+        let mut m = open(cx, true, true);
+        let page = m.history().expect("history page");
+        publish_rows(
+            &m.engine,
+            &mut m.main,
+            HistoryRange::At(600 * S),
+            vec![prow(2, "live", 3.0), prow(3, "gone", 2.0)],
+        );
+        assert!(m.has_row(&page, 3));
+        m.set_paused(true);
+        publish_rows(
+            &m.engine,
+            &mut m.main,
+            HistoryRange::At(600 * S),
+            vec![prow(2, "live", 3.0), prow(4, "other", 1.0)],
+        );
+        assert!(m.has_row(&page, 3), "the table keeps the paused rows");
+        assert!(!m.has_row(&page, 4));
+        m.set_paused(false);
+        assert!(!m.has_row(&page, 3), "the table follows the new view");
+        assert!(m.has_row(&page, 4));
+    }
+
+    #[gpui_kit::test]
+    fn scripted_session_command_order(cx: &mut TestAppContext) {
+        let mut m = open(cx, false, true);
+        m.toggle();
+        let page = m.history().expect("history page");
+        let (k1, k2) = (key(3), key(4));
+        publish_rows(
+            &m.engine,
+            &mut m.main,
+            HistoryRange::At(600 * S),
+            vec![prow(3, "a", 3.0), prow(4, "b", 2.0)],
+        );
+        m.answer_last();
+        page.update(&mut m.main, |p, cx| p.set_scrub(Some(500 * S), cx));
+        m.answer_last();
+        page.update(&mut m.main, |p, cx| {
+            p.set_range(Some((100 * S, 400 * S)), cx)
+        });
+        m.answer_last();
+        page.update(&mut m.main, |p, cx| p.set_metric(HistoryMetric::Memory, cx));
+        m.answer_last();
+        page.update(&mut m.main, |p, cx| p.set_selected(vec![k1, k2], cx));
+        m.answer_last();
+        // The answers carry no rows; the menu only captures rows the table shows.
+        publish_rows(
+            &m.engine,
+            &mut m.main,
+            HistoryRange::Span {
+                from: 100 * S,
+                to: 400 * S,
+            },
+            vec![prow(3, "a", 3.0), prow(4, "b", 2.0)],
+        );
+        let table = m.main.read_entity(&page, |p, _| p.table().clone());
+        let menu = m.main.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            TlMenu::build(window, cx, focus, |menu, window, cx| {
+                table.update(cx, |t, cx| {
+                    t.delegate
+                        .context_menu(&[k2], Some(ColumnId::Cpu), menu, window, cx)
+                })
+            })
+        });
+        let _menu = menu;
+        m.main.dispatch_action(DeleteFromHistory);
+        m.main.run_until_parked();
+        let log: Vec<Command> = m
+            .engine
+            .commands()
+            .into_iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Command::HistoryQuery { .. } | Command::HistoryDelete { .. }
+                )
+            })
+            .collect();
+        assert!(log.len() >= 6, "{log:?}");
+        let frame = |c: &Command| match c {
+            Command::HistoryQuery {
+                range,
+                what: HistoryWhat::Frame { metric, keys, .. },
+                ..
+            } => Some((*range, *metric, keys.to_vec())),
+            _ => None,
+        };
+        let (r0, ..) = frame(&log[0]).expect("Live Frame");
+        assert_eq!(r0, HistoryRange::Live);
+        let (r1, ..) = frame(&log[1]).expect("At Frame");
+        assert_eq!(r1, HistoryRange::At(500 * S));
+        let (r2, ..) = frame(&log[2]).expect("Span Frame");
+        assert!(matches!(r2, HistoryRange::Span { .. }));
+        let (r3, metric3, _) = frame(&log[3]).expect("Span Frame with Memory");
+        assert!(matches!(r3, HistoryRange::Span { .. }));
+        assert_eq!(metric3, HistoryMetric::Memory);
+        let (r4, _, keys4) = frame(&log[4]).expect("Span Frame with keys");
+        assert!(matches!(r4, HistoryRange::Span { .. }));
+        assert_eq!(keys4, [k1, k2]);
+        match &log[5] {
+            Command::HistoryDelete { keys } => assert_eq!(keys.to_vec(), [k2]),
+            other => panic!("expected HistoryDelete, got {other:?}"),
+        }
+    }
+}
