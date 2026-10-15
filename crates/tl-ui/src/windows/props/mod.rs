@@ -8,9 +8,7 @@
 //! when a tab label, the active tab or the exited state changes; the tab views are fed through
 //! their own setters and notify themselves.
 //!
-//! General, Threads and File descriptors have their views; the others come from later beads
-//! (E23-018 to E23-021). Until a tab has its view, its body is empty, or shows the access block
-//! when its payload is `Restricted`.
+//! Every tab has its view. A tab whose payload is `Restricted` shows the access block instead.
 
 pub mod environ;
 pub mod fds;
@@ -18,6 +16,7 @@ pub mod filter;
 pub mod general;
 pub mod maps;
 pub mod security;
+pub mod strings;
 pub mod threads;
 
 use std::rc::Rc;
@@ -25,6 +24,7 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Root;
+use gpui_kit::component::input::Escape;
 use gpui_kit::component::{Icon, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
@@ -49,6 +49,7 @@ use self::filter::{PropsFilter, filter_bar, on_clear};
 use self::general::GeneralTab;
 use self::maps::{MapsCountChanged, MapsTab};
 use self::security::SecurityTab;
+use self::strings::StringsTab;
 use self::threads::ThreadsTab;
 use crate::app::EngineGlobal;
 use crate::components::menu::{close_context_menu, context_menu_open};
@@ -64,8 +65,9 @@ use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::windows::actions::{
-    PROPS_WINDOW_CONTEXT, PropsCloseWindow, PropsEscape, PropsFocusFilter, PropsNextTab,
-    PropsPrevTab, PropsRefreshNow, PropsSelectTab, PropsVerifyPackage,
+    PROPS_WINDOW_CONTEXT, PropsCancelStringScan, PropsCloseWindow, PropsEscape, PropsFocusFilter,
+    PropsNextTab, PropsPrevTab, PropsRefreshNow, PropsSelectTab, PropsStartStringScan,
+    PropsVerifyPackage,
 };
 use crate::windows::frame::{EscStep, PwnWindow, esc_step, open_pwn, props_title};
 
@@ -358,6 +360,7 @@ pub struct PropsTabs {
     pub maps: Option<Entity<MapsTab>>,
     pub security: Option<Entity<SecurityTab>>,
     pub environ: Option<Entity<EnvironTab>>,
+    pub strings: Option<Entity<StringsTab>>,
 }
 
 /// The root view of a Process Properties window.
@@ -620,6 +623,19 @@ impl PropsWindow {
             }
             self.tabs.environ = Some(environ);
         }
+        if tab == DetailTab::Strings && self.tabs.strings.is_none() {
+            let filter = self.filter[strip_index(DetailTab::Strings)].clone();
+            let strings = cx.new(|cx| StringsTab::new(key, filter, window, cx));
+            let kernel_thread = self
+                .last_record
+                .as_ref()
+                .is_some_and(|r| r.flags.contains(ProcFlags::KERNEL_THREAD));
+            strings.update(cx, |t, cx| t.set_kernel_thread(kernel_thread, cx));
+            if self.exited {
+                strings.update(cx, |t, cx| t.set_exited(true, cx));
+            }
+            self.tabs.strings = Some(strings);
+        }
     }
 
     fn register_demand(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -692,6 +708,13 @@ impl PropsWindow {
                 }
                 None => self.focus.focus(window, cx),
             },
+            DetailTab::Strings => match &self.tabs.strings {
+                Some(t) => {
+                    let focus = t.read(cx).options_focus().clone();
+                    focus.focus(window, cx);
+                }
+                None => self.focus.focus(window, cx),
+            },
             _ => self.focus.focus(window, cx),
         }
     }
@@ -718,6 +741,7 @@ impl PropsWindow {
         let maps = self.tabs.maps.clone();
         let security = self.tabs.security.clone();
         let environ = self.tabs.environ.clone();
+        let strings = self.tabs.strings.clone();
         if mask.intersects(ComponentMask::SYSTEM) {
             self.mem_total = snap.system.memory.total;
             let online = snap.system.cpu_topology.online;
@@ -741,6 +765,10 @@ impl PropsWindow {
                     let mem_total = self.mem_total;
                     if let Some(g) = &general {
                         g.update(cx, |g, cx| g.set_record(Some(record), mem_total, cx));
+                    }
+                    if let Some(t) = &strings {
+                        let kernel_thread = record.flags.contains(ProcFlags::KERNEL_THREAD);
+                        t.update(cx, |t, cx| t.set_kernel_thread(kernel_thread, cx));
                     }
                     self.last_record = Some(record.clone());
                 }
@@ -778,6 +806,7 @@ impl PropsWindow {
             let maps_changed = changed(DetailTab::Maps);
             let security_changed = changed(DetailTab::Security);
             let environ_changed = changed(DetailTab::Environment);
+            let strings_changed = changed(DetailTab::Strings);
             let active_changed = changed(self.active);
             let validity_changed = self.last_detail.as_ref().is_none_or(|last| {
                 last.tab(self.active).validity != detail.tab(self.active).validity
@@ -788,6 +817,7 @@ impl PropsWindow {
                 || maps_changed
                 || security_changed
                 || environ_changed
+                || strings_changed
                 || active_changed
                 || validity_changed)
             {
@@ -800,6 +830,10 @@ impl PropsWindow {
             if environ_changed && let Some(t) = &environ {
                 let payload = detail.tab(DetailTab::Environment).payload.clone();
                 t.update(cx, |t, cx| t.set_payload(payload.as_ref(), cx));
+            }
+            if strings_changed && let Some(t) = &strings {
+                let payload = detail.tab(DetailTab::Strings).payload.clone();
+                t.update(cx, |t, cx| t.set_payload(payload.as_ref(), window, cx));
             }
             if security_changed && let Some(t) = &security {
                 let payload = detail.tab(DetailTab::Security).payload.clone();
@@ -848,6 +882,9 @@ impl PropsWindow {
             t.update(cx, |t, cx| t.set_exited(true, cx));
         }
         if let Some(t) = &self.tabs.environ {
+            t.update(cx, |t, cx| t.set_exited(true, cx));
+        }
+        if let Some(t) = &self.tabs.strings {
             t.update(cx, |t, cx| t.set_exited(true, cx));
         }
         self.remove_demand(cx);
@@ -938,17 +975,69 @@ impl PropsWindow {
             state.focus_handle(cx).contains_focused(window, cx)
                 && !state.text().to_string().is_empty()
         };
-        // The Strings scan (E23-021) adds its running state here.
         match esc_step(
             context_menu_open(window, cx),
-            false,
+            self.string_scan_running(cx),
             filter_focused_non_empty,
         ) {
             EscStep::ClosePopup => close_context_menu(window, cx),
-            EscStep::CancelScan => {}
+            EscStep::CancelScan => self.cancel_string_scan(cx),
             EscStep::ClearFilter => filter.update(cx, |f, cx| f.clear(window, cx)),
             EscStep::CloseWindow => window.remove_window(),
         }
+    }
+
+    /// The Strings tab is active and its scan runs: Esc cancels it first.
+    pub fn string_scan_running(&self, cx: &App) -> bool {
+        self.active == DetailTab::Strings
+            && self
+                .tabs
+                .strings
+                .as_ref()
+                .is_some_and(|t| t.read(cx).scan_running())
+    }
+
+    fn cancel_string_scan(&mut self, cx: &mut Context<Self>) {
+        if let Some(t) = &self.tabs.strings {
+            t.update(cx, |t, cx| t.cancel_scan(cx));
+        }
+    }
+
+    /// The Escape of a focused text field. A filter with text would clear itself first, so a
+    /// running scan is cancelled here, in the capture phase (UI-PWN-001 Esc order).
+    fn on_field_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if !context_menu_open(window, cx) && self.string_scan_running(cx) {
+            self.cancel_string_scan(cx);
+            cx.stop_propagation();
+        }
+    }
+
+    /// Scan: the button, or Enter in the options bar. A restricted tab shows no options.
+    fn on_start_string_scan(
+        &mut self,
+        _: &PropsStartStringScan,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let restricted = self
+            .last_detail
+            .as_ref()
+            .is_some_and(|d| d.tab(DetailTab::Strings).validity == Validity::Restricted);
+        if self.active != DetailTab::Strings || self.exited || restricted {
+            return;
+        }
+        if let Some(t) = &self.tabs.strings {
+            t.update(cx, |t, cx| t.start_scan(cx));
+        }
+    }
+
+    fn on_cancel_string_scan(
+        &mut self,
+        _: &PropsCancelStringScan,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_string_scan(cx);
     }
 
     fn banner(&self, cx: &App) -> AnyElement {
@@ -1032,6 +1121,14 @@ impl PropsWindow {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element();
         }
+        if self.active == DetailTab::Strings
+            && !restricted_now
+            && let Some(strings) = &self.tabs.strings
+        {
+            return AnyView::from(strings.clone())
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element();
+        }
         let restricted = self
             .last_detail
             .as_ref()
@@ -1107,6 +1204,9 @@ impl gpui_kit::Render for PropsWindow {
             .on_action(cx.listener(Self::on_verify_package))
             .on_action(cx.listener(Self::on_close))
             .on_action(cx.listener(Self::on_escape))
+            .on_action(cx.listener(Self::on_start_string_scan))
+            .on_action(cx.listener(Self::on_cancel_string_scan))
+            .capture_action(cx.listener(Self::on_field_escape))
             .on_action(on_clear(filter))
             .size_full()
             .flex()

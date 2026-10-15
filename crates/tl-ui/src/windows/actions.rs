@@ -25,6 +25,8 @@ pub use crate::pages::processes::actions::{CreateDump, OpenVirusTotal};
 pub const PROPS_WINDOW_CONTEXT: &str = "PropsWindow";
 /// Key context of the field grid inside a Properties tab.
 pub const KV_GRID_CONTEXT: &str = "KvGrid";
+/// Key context of the Strings tab options bar.
+pub const STRINGS_OPTIONS_CONTEXT: &str = "StringsOptions";
 /// Key context of the Set Affinity dialog.
 pub const AFFINITY_DIALOG_CONTEXT: &str = "AffinityDialog";
 /// Key context of the Custom priority dialog.
@@ -183,6 +185,8 @@ pub fn bind_keys_process_windows(cx: &mut App) {
     let props = Some(PROPS_WINDOW_CONTEXT);
     let grid_ctx = format!("{PROPS_WINDOW_CONTEXT} > {KV_GRID_CONTEXT}");
     let grid = Some(grid_ctx.as_str());
+    let strings_ctx = format!("{PROPS_WINDOW_CONTEXT} > {STRINGS_OPTIONS_CONTEXT}");
+    let strings = Some(strings_ctx.as_str());
     let affinity = Some(AFFINITY_DIALOG_CONTEXT);
     let priority = Some(PRIORITY_DIALOG_CONTEXT);
     let signal = Some(SIGNAL_DIALOG_CONTEXT);
@@ -218,6 +222,7 @@ pub fn bind_keys_process_windows(cx: &mut App) {
         KeyBinding::new("ctrl-c", PropsCopyValue, grid),
         KeyBinding::new("shift-f10", PropsFieldMenu, grid),
         KeyBinding::new("menu", PropsFieldMenu, grid),
+        KeyBinding::new("enter", PropsStartStringScan, strings),
         KeyBinding::new("left", AffinityMoveLeft, affinity),
         KeyBinding::new("right", AffinityMoveRight, affinity),
         KeyBinding::new("up", AffinityMoveUp, affinity),

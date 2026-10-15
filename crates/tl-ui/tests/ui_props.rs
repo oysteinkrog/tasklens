@@ -3526,6 +3526,354 @@ mod window {
             "Environment unavailable (insufficient privileges)"
         );
     }
+    // ---- Strings tab (E23-021, UI-PWN-017) ----
+
+    use tl_model::details::{ScanId, ScanPhase, StringEncoding, StringHit, StringScanState};
+    use tl_ui::table::TreeTableDelegate as _;
+    use tl_ui::windows::actions::{PropsCancelStringScan, PropsStartStringScan};
+    use tl_ui::windows::props::strings::{StringsTab, VALUE_CUT};
+
+    struct StrRig {
+        engine: Arc<FakeEngine>,
+        _main: VisualTestContext,
+        handle: AnyWindowHandle,
+        vcx: VisualTestContext,
+        tab: Entity<StringsTab>,
+    }
+
+    /// Opens Properties for 4321 (with `flags`) and selects the Strings tab with Alt+7.
+    fn strings_rig(cx: &mut TestAppContext, flags: ProcFlags) -> StrRig {
+        let (engine, main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, flags)]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("alt-7");
+        draw(&mut vcx);
+        let tab = cx
+            .read(|cx| view.read(cx).tabs().strings.clone())
+            .expect("strings tab");
+        StrRig {
+            engine,
+            _main: main,
+            handle,
+            vcx,
+            tab,
+        }
+    }
+
+    fn str_hit(address: u64, value: &str) -> StringHit {
+        StringHit {
+            address,
+            encoding: StringEncoding::Ascii,
+            length: value.chars().count() as u32,
+            value: Arc::from(value),
+        }
+    }
+
+    fn scan_state(
+        scan: ScanId,
+        pct: u8,
+        chunks: Vec<Arc<[StringHit]>>,
+        phase: ScanPhase,
+    ) -> StringScanState {
+        StringScanState {
+            scan,
+            progress_pct: pct,
+            found: chunks.iter().map(|c| c.len() as u32).sum(),
+            chunks: Arc::from(chunks),
+            phase,
+        }
+    }
+
+    fn publish_strings(rig: &mut StrRig, cx: &mut TestAppContext, state: StringScanState) {
+        let payload = Arc::new(TabPayload::Strings(Arc::new(state)));
+        publish_detail(cx, &rig.engine, 4321, move |d| {
+            let slot = &mut d.tabs[DetailTab::Strings.index()];
+            slot.payload = Some(payload);
+            slot.validity = Validity::Valid;
+        });
+        draw(&mut rig.vcx);
+    }
+
+    fn scans_sent(engine: &FakeEngine) -> Vec<ScanId> {
+        engine
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::StringScan { scan, .. } => Some(*scan),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn cancels_sent(engine: &FakeEngine) -> Vec<ScanId> {
+        engine
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::CancelStringScan(scan) => Some(*scan),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Presses Scan; returns the id it sent.
+    fn start_scan(rig: &mut StrRig) -> ScanId {
+        rig.vcx.dispatch_action(PropsStartStringScan);
+        draw(&mut rig.vcx);
+        *scans_sent(&rig.engine)
+            .last()
+            .expect("a StringScan command")
+    }
+
+    fn str_rows(rig: &mut StrRig) -> usize {
+        rig.vcx.read(|cx| {
+            let table = rig.tab.read(cx).table().clone();
+            table.read(cx).delegate.row_count()
+        })
+    }
+
+    fn str_status(rig: &mut StrRig) -> String {
+        rig.vcx
+            .read(|cx| rig.tab.read(cx).status_text(cx).to_string())
+    }
+
+    fn select_str_row(rig: &mut StrRig, id: u32) {
+        let table = rig.vcx.read(|cx| rig.tab.read(cx).table().clone());
+        rig.vcx.update(|window, cx| {
+            table.update(cx, |t, cx| {
+                t.selection.click(id);
+                cx.notify();
+            });
+            let focus = table.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+        });
+        draw(&mut rig.vcx);
+    }
+
+    #[gpui_kit::test]
+    fn strings_never_starts_by_itself(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        rig.vcx.executor().advance_clock(Duration::from_secs(10));
+        draw(&mut rig.vcx);
+        assert!(scans_sent(&rig.engine).is_empty(), "no StringScan in 10 s");
+        let body = rig.vcx.read(|cx| rig.tab.read(cx).body_text());
+        assert_eq!(
+            body.as_deref(),
+            Some("Press Scan to search this process's memory for text.")
+        );
+        assert!(rig.vcx.debug_bounds("StringsBody-text").is_some());
+        assert!(rig.vcx.debug_bounds("StringsOptions").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn strings_stale_scan_results_dropped(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        let first = start_scan(&mut rig);
+        rig.vcx.dispatch_action(PropsCancelStringScan);
+        draw(&mut rig.vcx);
+        let second = start_scan(&mut rig);
+        assert_ne!(first, second, "every scan has its own id");
+        assert_eq!(rig.vcx.read(|cx| rig.tab.read(cx).scan_id()), Some(second));
+        let before = str_status(&mut rig);
+        assert_eq!(before, "Scanning process memory... 0%  0 strings found");
+
+        let chunk: Arc<[StringHit]> = Arc::from(vec![str_hit(0x1000, "stale")]);
+        let state = scan_state(first, 42, vec![chunk], ScanPhase::Scanning);
+        publish_strings(&mut rig, cx, state);
+        assert_eq!(str_rows(&mut rig), 0, "rows unchanged");
+        assert_eq!(str_status(&mut rig), before, "status unchanged");
+        assert!(rig.vcx.read(|cx| rig.tab.read(cx).last_state().is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn strings_limit_banner_text(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        let scan = start_scan(&mut rig);
+        let chunk: Arc<[StringHit]> =
+            Arc::from(vec![str_hit(0x1000, "alpha"), str_hit(0x2000, "beta")]);
+        let state = scan_state(scan, 60, vec![chunk], ScanPhase::StoppedLimit);
+        publish_strings(&mut rig, cx, state);
+        let banner = rig.vcx.read(|cx| rig.tab.read(cx).limit_banner());
+        assert_eq!(
+            banner.as_deref(),
+            Some("String scan stopped: not enough memory.")
+        );
+        assert!(rig.vcx.debug_bounds("StringsLimitBanner").is_some());
+        assert_eq!(str_rows(&mut rig), 2, "results stay");
+        assert!(!rig.vcx.read(|cx| rig.tab.read(cx).scan_running()));
+    }
+
+    #[gpui_kit::test]
+    fn strings_kernel_thread_disabled(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::KERNEL_THREAD);
+        let (body, can_scan) = rig.vcx.read(|cx| {
+            let t = rig.tab.read(cx);
+            (t.body_text(), t.can_scan())
+        });
+        assert_eq!(
+            body.as_deref(),
+            Some("Strings unavailable for this process.")
+        );
+        assert!(!can_scan, "Scan is disabled");
+        assert!(rig.vcx.debug_bounds("StringsBody-text").is_some());
+        rig.vcx.dispatch_action(PropsStartStringScan);
+        rig.vcx.simulate_keystrokes("enter");
+        draw(&mut rig.vcx);
+        assert!(scans_sent(&rig.engine).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn strings_no_encoding_disables_scan(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        let tab = rig.tab.clone();
+        rig.vcx.update(|_, cx| {
+            tab.update(cx, |t, cx| {
+                let mut opts = t.opts();
+                opts.ascii = false;
+                opts.utf8 = false;
+                opts.utf16le = false;
+                t.set_opts(opts, cx);
+            })
+        });
+        draw(&mut rig.vcx);
+        let (can_scan, tip) = rig.vcx.read(|cx| {
+            let t = rig.tab.read(cx);
+            (t.can_scan(), t.scan_tooltip())
+        });
+        assert!(!can_scan);
+        assert_eq!(tip.as_deref(), Some("Choose at least one encoding"));
+        rig.vcx.dispatch_action(PropsStartStringScan);
+        draw(&mut rig.vcx);
+        assert!(scans_sent(&rig.engine).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn strings_chunks_not_copied(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        let scan = start_scan(&mut rig);
+        let c0: Arc<[StringHit]> = Arc::from(vec![str_hit(0x1000, "one"), str_hit(0x1010, "two")]);
+        let state = scan_state(scan, 10, vec![c0.clone()], ScanPhase::Scanning);
+        publish_strings(&mut rig, cx, state);
+        let first = rig
+            .vcx
+            .read(|cx| rig.tab.read(cx).last_state().cloned())
+            .expect("first payload");
+        let c1: Arc<[StringHit]> = Arc::from(vec![str_hit(0x2000, "three")]);
+        let state = scan_state(scan, 42, vec![c0.clone(), c1], ScanPhase::Scanning);
+        publish_strings(&mut rig, cx, state);
+        let second = rig
+            .vcx
+            .read(|cx| rig.tab.read(cx).last_state().cloned())
+            .expect("second payload");
+        assert!(Arc::ptr_eq(&first.chunks[0], &second.chunks[0]));
+        let shown = rig.vcx.read(|cx| {
+            let table = rig.tab.read(cx).table().clone();
+            table.read(cx).delegate.chunks()[0].clone()
+        });
+        assert!(
+            Arc::ptr_eq(&shown, &c0),
+            "the table reads the payload's chunk"
+        );
+        assert_eq!(str_rows(&mut rig), 3, "rows appear in batches");
+        assert_eq!(
+            str_status(&mut rig),
+            "Scanning process memory... 42%  3 strings found"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn strings_value_escapes_and_cut(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        let scan = start_scan(&mut rig);
+        let long = "v".repeat(600);
+        let chunk: Arc<[StringHit]> = Arc::from(vec![
+            str_hit(0x55d3_f1a0_c2f0, "a\tb\nc"),
+            str_hit(0x55d3_f1a0_c400, &long),
+        ]);
+        let state = scan_state(scan, 100, vec![chunk], ScanPhase::Finished);
+        publish_strings(&mut rig, cx, state);
+        assert_eq!(str_status(&mut rig), "Scan finished. 2 strings found.");
+        let (first, second) = rig.vcx.read(|cx| {
+            let table = rig.tab.read(cx).table().clone();
+            let d = &table.read(cx).delegate;
+            (d.value_text(0), d.value_text(1))
+        });
+        assert_eq!(first, "a\\tb\\nc");
+        assert_eq!(second.chars().count(), VALUE_CUT + 1);
+        assert!(second.ends_with('\u{2026}'));
+
+        // Copy value copies all 600 characters.
+        select_str_row(&mut rig, 1);
+        rig.vcx.dispatch_action(OpenContextMenu);
+        draw(&mut rig.vcx);
+        let labels = rig.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the row menu is open");
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| e.label.map(|l| l.to_string()).unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(labels, ["Copy value", "Copy address", "Copy row"]);
+        rig.vcx.simulate_keystrokes("down enter");
+        draw(&mut rig.vcx);
+        assert_eq!(clip(&mut rig.vcx), long);
+        assert_eq!(props_toasts(cx, rig.handle), ["Copied to clipboard"]);
+
+        // Ctrl+C copies the full value of the selected row.
+        select_str_row(&mut rig, 0);
+        rig.vcx.dispatch_action(CopyRow);
+        assert_eq!(clip(&mut rig.vcx), "a\tb\nc");
+    }
+
+    #[gpui_kit::test]
+    fn pwn_esc_order_scan_then_filter_then_close(cx: &mut TestAppContext) {
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        let scan = start_scan(&mut rig);
+        let filter = rig.vcx.read(|cx| rig.tab.read(cx).filter().clone());
+        rig.vcx.update(|window, cx| {
+            let input = filter.read(cx).input.clone();
+            input.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.insert("abc".to_owned(), window, cx);
+            });
+        });
+        draw(&mut rig.vcx);
+        let filter_text = |rig: &mut StrRig| {
+            rig.vcx
+                .read(|cx| filter.read(cx).input.read(cx).text().to_string())
+        };
+        let window_open = |cx: &mut TestAppContext, handle: AnyWindowHandle| {
+            cx.update(|cx| {
+                cx.windows()
+                    .iter()
+                    .any(|w| w.window_id() == handle.window_id())
+            })
+        };
+
+        // 1: the scan is cancelled.
+        rig.vcx.simulate_keystrokes("escape");
+        draw(&mut rig.vcx);
+        assert_eq!(cancels_sent(&rig.engine), [scan]);
+        assert_eq!(filter_text(&mut rig), "abc");
+        assert!(window_open(cx, rig.handle));
+
+        // 2: the filter is cleared.
+        rig.vcx.simulate_keystrokes("escape");
+        draw(&mut rig.vcx);
+        assert_eq!(filter_text(&mut rig), "");
+        assert_eq!(cancels_sent(&rig.engine), [scan], "no second cancel");
+        assert!(window_open(cx, rig.handle));
+
+        // 3: the window closes.
+        rig.vcx.simulate_keystrokes("escape");
+        rig.vcx.run_until_parked();
+        assert!(!window_open(cx, rig.handle));
+    }
 }
 
 // ---- Threads tab (E23-016, UI-PWN-010) ----

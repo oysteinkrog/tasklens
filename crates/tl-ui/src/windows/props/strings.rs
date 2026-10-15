@@ -65,7 +65,9 @@ use crate::table::tree_table::{
 };
 use crate::text::style::{numeric_style, t_base, t_sm};
 use crate::theme::{current, metrics};
-use crate::windows::actions::{PropsCancelStringScan, PropsStartStringScan, STRINGS_OPTIONS_CONTEXT};
+use crate::windows::actions::{
+    PropsCancelStringScan, PropsStartStringScan, STRINGS_OPTIONS_CONTEXT,
+};
 
 gpui_kit::actions!(
     tasklens_strings,
@@ -352,13 +354,12 @@ fn sort_perm(chunks: &[Arc<[StringHit]>], sort: StringsSort) -> Arc<[u32]> {
     ids.into()
 }
 
+/// A view and its inverse: the hit ids shown in order, and per hit id its view position.
+type ViewLists = (Arc<[u32]>, Arc<[u32]>);
+
 /// The view (`perm` filtered by `keep`) and its inverse (hit index to view position, `u32::MAX`
 /// when hidden), or `None` for all hits in address order.
-fn compose(
-    perm: Option<Arc<[u32]>>,
-    keep: Option<Arc<[u32]>>,
-    total: u32,
-) -> Option<(Arc<[u32]>, Arc<[u32]>)> {
+fn compose(perm: Option<Arc<[u32]>>, keep: Option<Arc<[u32]>>, total: u32) -> Option<ViewLists> {
     let view: Arc<[u32]> = match (perm, keep) {
         (None, None) => return None,
         (Some(p), None) => p,
@@ -566,7 +567,10 @@ impl TreeTableDelegate for StringsDelegate {
         &self.layout
     }
     fn column_spec(&self, id: StringsColumn) -> &ColumnSpec<StringsColumn> {
-        let i = StringsColumn::ALL.iter().position(|c| *c == id).unwrap_or(0);
+        let i = StringsColumn::ALL
+            .iter()
+            .position(|c| *c == id)
+            .unwrap_or(0);
         &self.specs[i]
     }
 
@@ -1123,9 +1127,7 @@ impl StringsTab {
         let Some(phase) = &self.phase else {
             return;
         };
-        let text = self
-            .words
-            .status_text(phase, self.progress_pct, self.found);
+        let text = self.words.status_text(phase, self.progress_pct, self.found);
         let pct = (*phase == ScanPhase::Scanning).then_some(self.progress_pct);
         self.status.update(cx, |s, cx| {
             if s.text != text || s.pct != pct {
@@ -1227,12 +1229,7 @@ impl StringsTab {
         .detach();
     }
 
-    fn apply_view(
-        &mut self,
-        generation: u64,
-        view: Option<(Arc<[u32]>, Arc<[u32]>)>,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_view(&mut self, generation: u64, view: Option<ViewLists>, cx: &mut Context<Self>) {
         if generation != self.view_gen {
             return;
         }
@@ -1281,7 +1278,11 @@ impl StringsTab {
         }
     }
 
-    fn menu_hit<R>(&self, cx: &App, f: impl FnOnce(&StringsDelegate, u32) -> Option<R>) -> Option<R> {
+    fn menu_hit<R>(
+        &self,
+        cx: &App,
+        f: impl FnOnce(&StringsDelegate, u32) -> Option<R>,
+    ) -> Option<R> {
         let d = &self.table.read(cx).delegate;
         d.menu_row.and_then(|i| f(d, i))
     }
@@ -1336,7 +1337,8 @@ impl StringsTab {
             .on_change(move |v, _, cx| {
                 let _ = weak.update(cx, |t, cx| {
                     let mut opts = t.opts;
-                    opts.min_len = u8::try_from(v).unwrap_or(*StringScanOpts::MIN_LEN_RANGE.start());
+                    opts.min_len =
+                        u8::try_from(v).unwrap_or(*StringScanOpts::MIN_LEN_RANGE.start());
                     t.set_opts(opts, cx);
                 });
             });
@@ -1393,12 +1395,18 @@ impl StringsTab {
             .border_color(theme.divider)
             .child(label.child(w.min_length.clone()))
             .child(stepper)
-            .child(check("StringsAscii", &w.encodings[0], self.opts.ascii, |o, v| {
-                o.ascii = v
-            }))
-            .child(check("StringsUtf8", &w.encodings[1], self.opts.utf8, |o, v| {
-                o.utf8 = v
-            }))
+            .child(check(
+                "StringsAscii",
+                &w.encodings[0],
+                self.opts.ascii,
+                |o, v| o.ascii = v,
+            ))
+            .child(check(
+                "StringsUtf8",
+                &w.encodings[1],
+                self.opts.utf8,
+                |o, v| o.utf8 = v,
+            ))
             .child(check(
                 "StringsUtf16le",
                 &w.encodings[2],
@@ -1477,7 +1485,9 @@ impl Render for StringsTab {
                     .child(label.child(text)),
             );
         }
-        let banner = self.limit_banner().map(|t| self.limit_banner_element(t, cx));
+        let banner = self
+            .limit_banner()
+            .map(|t| self.limit_banner_element(t, cx));
         root.child(self.status.clone())
             .children(banner)
             .child(div().flex_1().min_h_0().w_full().child(self.table.clone()))
@@ -1538,7 +1548,11 @@ mod tests {
         let shown = display_value(&long);
         assert_eq!(shown.chars().count(), VALUE_CUT + 1);
         assert!(shown.ends_with('\u{2026}'));
-        assert_eq!(display_value(&"y".repeat(512)), "y".repeat(512), "512 fits, no ellipsis");
+        assert_eq!(
+            display_value(&"y".repeat(512)),
+            "y".repeat(512),
+            "512 fits, no ellipsis"
+        );
     }
 
     #[test]

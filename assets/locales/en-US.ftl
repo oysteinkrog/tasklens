@@ -2015,6 +2015,34 @@ pwn-env-menu-copy-name = Copy name
 pwn-env-menu-copy-value = Copy value
 pwn-env-menu-copy-all = Copy all as NAME=value
 pwn-env-toast-copied = Copied to clipboard
+# Strings tab (UI-PWN-017, PROC-084).
+pwn-strings-col-address = Address
+pwn-strings-col-encoding = Encoding
+pwn-strings-col-length = Length
+pwn-strings-col-value = Value
+pwn-strings-enc-ascii = ASCII
+pwn-strings-enc-utf8 = UTF-8
+pwn-strings-enc-utf16le = UTF-16LE
+pwn-strings-min-length = Minimum length
+pwn-strings-include-file-backed = Include file-backed mappings
+pwn-strings-scan = Scan
+pwn-strings-cancel = Cancel
+pwn-strings-cancel-tooltip = Stop the scan (Esc)
+pwn-strings-no-encoding = Choose at least one encoding
+pwn-strings-idle = Press Scan to search this process's memory for text.
+pwn-strings-progress = Scanning process memory... { $pct }%  { $n } strings found
+pwn-strings-finished = Scan finished. { $n } strings found.
+pwn-strings-cancelled = Scan cancelled. { $n } strings found.
+pwn-strings-exited = Scan stopped: the process exited. { $n } strings found.
+pwn-strings-stopped = Scan stopped. { $n } strings found.
+pwn-strings-limit = String scan stopped: not enough memory.
+pwn-strings-failed = Failed to read process memory.
+pwn-strings-kernel-thread = Strings unavailable for this process.
+pwn-strings-sort-after-scan = Sorting is available after the scan
+pwn-strings-menu-copy-value = Copy value
+pwn-strings-menu-copy-address = Copy address
+pwn-strings-menu-copy-row = Copy row
+pwn-strings-toast-copied = Copied to clipboard
 pwn-general-cmdline-label = Command line
 # View menu and View > Columns (tasklens-bj6.4, UI-SHL-033, UI-SHL-034).
 shell-menu-view-columns = Columns

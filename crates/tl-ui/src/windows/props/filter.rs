@@ -251,6 +251,37 @@ impl PropsFilter {
             Some((generation, out.into()))
         })
     }
+
+    /// [`PropsFilter::run_filter`] for an owner that tests its rows itself, so it needs no
+    /// haystack copy: `keep(i)` says whether row `i` of `len` matches the current needle. Same
+    /// split: up to [`SYNC_MAX_ROWS`] rows at once, else in background chunks of [`CHUNK_ROWS`]
+    /// that stop once a newer generation exists.
+    pub fn run_filter_fn(
+        &mut self,
+        len: usize,
+        keep: impl Fn(usize) -> bool + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<(u64, Arc<[u32]>)>> {
+        let generation = self.generation;
+        if len <= SYNC_MAX_ROWS {
+            let out: Vec<u32> = (0..len).filter(|&i| keep(i)).map(|i| i as u32).collect();
+            return Task::ready(Some((generation, out.into())));
+        }
+        let latest = self.latest.clone();
+        cx.background_spawn(async move {
+            let mut out = Vec::new();
+            let mut start = 0;
+            while start < len {
+                if latest.load(Ordering::Relaxed) != generation {
+                    return None;
+                }
+                let end = (start + CHUNK_ROWS).min(len);
+                out.extend((start..end).filter(|&i| keep(i)).map(|i| i as u32));
+                start = end;
+            }
+            Some((generation, out.into()))
+        })
+    }
 }
 
 /// Appends the index of every row in `rows` that matches, offset by `start`.
