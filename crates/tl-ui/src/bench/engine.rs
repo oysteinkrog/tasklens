@@ -95,8 +95,6 @@ const DEV_AGG_NET: u16 = DEV_AGG_DISK + 1;
 const SWAP_TOTAL_BYTES: u64 = 8 << 30;
 const SWAP_USED_BYTES: u64 = SWAP_TOTAL_BYTES / 20;
 const CACHED_BYTES: u64 = MEM_TOTAL_BYTES / 5;
-/// perf-overview MemAvailable (half of the memory).
-const AVAILABLE_BYTES: u64 = MEM_TOTAL_BYTES / 2;
 /// perf-overview GPU memory size (16 GiB).
 const VRAM_TOTAL_BYTES: u64 = 16 << 30;
 /// perf-overview disks: each second a read burst and a write burst each start with this chance,
@@ -593,7 +591,7 @@ impl Publisher {
 
     fn tick_1hz(&mut self, t_ns: TimeNs, f: &CpuFrame) {
         let d = self.devices.sample_1hz(&mut self.rng);
-        let mem_used = (d.memory_pct as f64 / 100.0 * MEM_TOTAL_BYTES as f64) as u64;
+        let mem_used = mem_used_bytes(d.memory_pct);
         self.tracks[TR_MEMORY].push(Sample::valid(t_ns, mem_used as f32));
         self.tracks[TR_GPU].push(Sample::valid(t_ns, d.gpu_pct));
         for (i, &v) in d.disk_pct.iter().enumerate() {
@@ -741,7 +739,8 @@ impl OverviewSynth {
         for (i, s) in pre.devices[0].iter().enumerate() {
             let f = this.sample();
             let mbps = [pre.devices[6][i].value, pre.devices[7][i].value];
-            this.push(s.t_ns, &f, mbps);
+            let available = MEM_TOTAL_BYTES - mem_used_bytes(s.value);
+            this.push(s.t_ns, &f, available, mbps);
         }
         this
     }
@@ -766,12 +765,13 @@ impl OverviewSynth {
         }
     }
 
-    /// Appends one second at `t_ns`; `net_mbps` are the two interfaces' rates.
-    fn push(&mut self, t_ns: TimeNs, f: &OverviewFrame, net_mbps: [f32; 2]) {
+    /// Appends one second at `t_ns`; `available` is the memory not in use and `net_mbps` are the
+    /// two interfaces' rates.
+    fn push(&mut self, t_ns: TimeNs, f: &OverviewFrame, available: u64, net_mbps: [f32; 2]) {
         let mut push = |i: usize, v: f32| self.tracks[i].push(Sample::valid(t_ns, v));
         push(OX_SWAP, SWAP_USED_BYTES as f32);
         push(OX_CACHED, CACHED_BYTES as f32);
-        push(OX_AVAILABLE, AVAILABLE_BYTES as f32);
+        push(OX_AVAILABLE, available as f32);
         push(OX_GPU_MEM, f.vram_used as f32);
         let (mut read, mut write) = (0.0, 0.0);
         for (d, &(r, w)) in f.disk_bps.iter().enumerate() {
@@ -791,7 +791,7 @@ impl OverviewSynth {
     /// One second: the extra series and the memory, disk, network and GPU totals of `system`.
     fn tick_1hz(&mut self, t_ns: TimeNs, d: &DeviceFrame, system: &mut SystemSnapshot) {
         let f = self.sample();
-        self.push(t_ns, &f, d.net_mbps);
+        self.push(t_ns, &f, system.memory.available, d.net_mbps);
 
         let mem = &mut system.memory;
         mem.cached = CACHED_BYTES;
@@ -1107,12 +1107,7 @@ fn tracks(pre: &PrefilledSeries) -> Vec<Track> {
     // pre.devices is Memory, GPU 0, Disk 0 to Disk 3, enp38s0, tailscale0.
     let memory: Vec<Sample> = pre.devices[0]
         .iter()
-        .map(|s| {
-            Sample::valid(
-                s.t_ns,
-                (s.value as f64 / 100.0 * MEM_TOTAL_BYTES as f64) as f32,
-            )
-        })
+        .map(|s| Sample::valid(s.t_ns, mem_used_bytes(s.value) as f32))
         .collect();
     out.push(slow(DEV_MEMORY, MetricId::MEM_USED, &memory));
     out.push(slow(DEV_GPU, MetricId::GPU_UTIL, &pre.devices[1]));
@@ -1154,6 +1149,11 @@ fn cpu_totals(s: &StatsFrame) -> CpuTotals {
         load_avg: Metric::valid(s.load_avg),
         ..CpuTotals::default()
     }
+}
+
+/// Bytes in use at `pct` percent of the memory.
+fn mem_used_bytes(pct: f32) -> u64 {
+    (f64::from(pct) / 100.0 * MEM_TOTAL_BYTES as f64) as u64
 }
 
 fn memory_totals(used: u64) -> MemoryTotals {
@@ -1463,6 +1463,16 @@ mod tests {
                 .and_then(|v| v.samples.last().map(|s| s.value))
                 .expect("series")
         };
+        // The Available sparkline ends at the meter's value.
+        assert_eq!(
+            last(DEV_MEMORY, MetricId::MEM_AVAILABLE),
+            sys.memory.available as f32
+        );
+        assert_eq!(
+            sys.memory.available,
+            MEM_TOTAL_BYTES - sys.memory.used,
+            "available follows used"
+        );
         let read: f32 = (0..4)
             .map(|d| last(DEV_FIRST_DISK + d, MetricId::DISK_READ))
             .sum();
