@@ -33,7 +33,7 @@ use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::action_tracker::{GlobalActionTracker, ToastTexts};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::shield::TlShield;
-use tl_ui::components::toast::{ToastKind, ToastQueue};
+use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::pages::processes::ProcessesPage;
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -530,10 +530,10 @@ fn retry_as_administrator_sends_privileged(cx: &mut TestAppContext) {
     });
     assert_eq!(pushed.button.as_deref(), Some(RETRY));
 
-    // Security: no privileged request without the click, not after a long wait, not when the
-    // helper unlocks for another reason.
+    // Security: no privileged request without the click, not after a wait, not when the helper
+    // unlocks for another reason. 10 s keeps the toast up: a toast with a button stays 15 s.
     main.executor()
-        .advance_clock(std::time::Duration::from_secs(300));
+        .advance_clock(std::time::Duration::from_secs(10));
     main.run_until_parked();
     publish_helper(cx, &engine, HelperState::Unlocked, None);
     publish_helper(cx, &engine, HelperState::Locked, None);
@@ -753,7 +753,7 @@ fn search_all_starts_helper_and_resends(cx: &mut TestAppContext) {
     publish_helper(cx, &engine, HelperState::Unlocked, None);
     let sent = searches(&engine);
     assert_eq!(sent.len(), 2);
-    assert!(sent[1].1, "HandleSearch { privileged: true, .. }");
+    assert!(sent[1].1, "the second HandleSearch is privileged");
 }
 
 // ---- Unlock at launch ----
