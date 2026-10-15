@@ -1696,14 +1696,14 @@ mod window {
             vcx.read(|cx| view.read(cx).processes().read(cx).passes())
         };
 
-        // Not active: sweeps arrive and no member pass runs, in the tab or in the window. The
-        // row says 5 while two records belong to G, so a window scan for the label would show 2.
+        // Not active: sweeps arrive and the tab runs no member pass. The label still counts
+        // G's two records, not the row's filtered count of 5.
         sweep_two_apps(&engine, &mut main, 5);
         assert_eq!(passes(&mut vcx), 0);
         assert_eq!(
             vcx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses)),
-            "Processes [5]",
-            "the label keeps the row's count without a member pass"
+            "Processes [2]",
+            "the label counts the members without a member pass"
         );
 
         vcx.update(|window, cx| {
@@ -1730,6 +1730,23 @@ mod window {
         assert_eq!(view_pids(&mut vcx, &view), [101]);
     }
 
+    /// The default sort is PID ascending, even when a higher PID started earlier.
+    #[gpui_kit::test]
+    fn app_processes_sort_pid_ascending(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let g = app_group("Firefox", GroupRowKind::App, 3);
+        let records = [(300, 10), (100, 30), (200, 20)]
+            .map(|(pid, start_ticks)| {
+                let mut r = member(pid, g.key);
+                r.key.start_ticks = start_ticks;
+                r
+            })
+            .to_vec();
+        publish_table(&engine, &mut main, records, vec![g.clone()], Vec::new());
+        let (mut vcx, view) = open_processes_tab(cx, g.key);
+        assert_eq!(view_pids(&mut vcx, &view), [100, 200, 300]);
+    }
+
     #[gpui_kit::test]
     fn app_processes_enter_opens_props(cx: &mut TestAppContext) {
         let (engine, mut main) = setup(cx);
@@ -1753,9 +1770,8 @@ mod window {
         assert_eq!(props_count(cx), 1);
     }
 
-    /// While the tab is not active the label shows the row's member count. While it is active
-    /// the label counts the member list, even when the row's count (which follows the main
-    /// table's filter) says less.
+    /// The label counts the members, whether the tab is active or not, even when the row's
+    /// count (which follows the main table's filter) says less.
     #[gpui_kit::test]
     fn app_processes_count_label(cx: &mut TestAppContext) {
         let (engine, mut main) = setup(cx);
@@ -1774,6 +1790,15 @@ mod window {
         let label =
             |cx: &mut TestAppContext| cx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses));
         assert_eq!(label(cx), "Processes [34]");
+
+        let filtered = app_group("Firefox", GroupRowKind::App, 5);
+        sweep(&engine, &mut main, records.clone(), vec![filtered]);
+        assert_eq!(
+            label(cx),
+            "Processes [34]",
+            "not active: the label ignores the row's filtered count"
+        );
+        sweep(&engine, &mut main, records.clone(), vec![g.clone()]);
 
         let (mut vcx, view) = open_processes_tab(cx, g.key);
         assert_eq!(

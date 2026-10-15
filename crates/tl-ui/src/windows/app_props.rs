@@ -1291,7 +1291,8 @@ fn compare(a: &ProcessRecord, b: &ProcessRecord, col: AppProcColumn) -> Ordering
         AppProcColumn::User => a.meta.user.cmp(&b.meta.user),
         AppProcColumn::Cmdline => record_cmdline(a).cmp(record_cmdline(b)),
     };
-    by.then(a.key.cmp(&b.key))
+    // ProcessKey orders by start time first, so ties and the PID column use the PID.
+    by.then(a.key.pid.cmp(&b.key.pid)).then(a.key.cmp(&b.key))
 }
 
 fn app_proc_specs(words: &AppProcWords) -> Vec<ColumnSpec<AppProcColumn>> {
@@ -1684,7 +1685,7 @@ impl TreeTableDelegate for AppProcsDelegate {
 }
 
 /// Record indexes of the live processes that belong to the row `group`, unfiltered. Only the
-/// active Processes tab runs it, once per sweep.
+/// active Processes tab collects them, once per sweep.
 fn member_indexes(procs: &ProcessSnapshot, group: GroupKey) -> impl Iterator<Item = u32> + '_ {
     procs
         .records
@@ -1694,6 +1695,13 @@ fn member_indexes(procs: &ProcessSnapshot, group: GroupKey) -> impl Iterator<Ite
             !r.flags.contains(ProcFlags::EXITED) && is_row_member(r, procs.extras.get(*i), group)
         })
         .map(|(i, _)| i as u32)
+}
+
+/// How many live processes belong to the row `group`, unfiltered. The label count while the
+/// Processes tab is not active: it counts only, with no member list and no table work.
+fn count_members(procs: &ProcessSnapshot, group: GroupKey) -> u32 {
+    // A snapshot never holds more than u32::MAX records.
+    member_indexes(procs, group).count() as u32
 }
 
 /// The Processes child view. It lists the member processes of the window's row while it is the
@@ -2095,21 +2103,20 @@ impl AppPropsWindow {
         self.processes.update(cx, |tab, cx| {
             tab.set_active(active, snapshot.as_deref(), cx)
         });
-        let row = snapshot
-            .as_deref()
-            .and_then(|s| s.table.groups.iter().find(|row| row.key == self.group));
-        if let Some(row) = row {
-            self.member_count = row.members;
+        if let Some(snapshot) = snapshot {
+            self.sync_member_count(&snapshot, cx);
         }
-        self.sync_member_count(cx);
     }
 
-    /// While the Processes tab is active, the label counts its member list, so the two agree.
-    /// While it is not, the label keeps the table row's count and no member pass runs.
-    fn sync_member_count(&mut self, cx: &App) {
-        if let Some(count) = self.processes.read(cx).member_count() {
-            self.member_count = count;
-        }
+    /// The label is the unfiltered member count. While the Processes tab is active it is the
+    /// length of the tab's member list, so the two agree. While it is not, a count-only scan
+    /// gives it, with no member list and no table work. The table row's count is not used: it
+    /// follows the main table's filter.
+    fn sync_member_count(&mut self, snapshot: &Snapshot, cx: &App) {
+        self.member_count = match self.processes.read(cx).member_count() {
+            Some(count) => count,
+            None => count_members(&snapshot.processes, self.group),
+        };
     }
 
     fn register_demand(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2165,7 +2172,6 @@ impl AppPropsWindow {
                 .find(|row| row.key == self.group);
             match row {
                 Some(row) => {
-                    self.member_count = row.members;
                     self.general.update(cx, |g, cx| g.set_group(Some(row), cx));
                 }
                 None => {
@@ -2177,8 +2183,8 @@ impl AppPropsWindow {
         if mask.intersects(ComponentMask::PROCESSES) {
             self.processes
                 .update(cx, |tab, cx| tab.take_snapshot(snapshot, cx));
+            self.sync_member_count(snapshot, cx);
         }
-        self.sync_member_count(cx);
         if mask.intersects(ComponentMask::DETAILS) {
             let slot = snapshot
                 .details
