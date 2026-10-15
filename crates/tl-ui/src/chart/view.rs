@@ -56,6 +56,9 @@ pub struct ChartView {
     pub(crate) hover: hover::HoverState,
     /// The scale ceiling shows small in the plot's top-left corner (`set_compact_scale`).
     pub(crate) compact_scale: bool,
+    /// The chart keeps its resolved series and stops (`freeze`): no new snapshot is read, the
+    /// right edge stays at the newest valid sample and the chart is never Stale.
+    pub(crate) frozen: bool,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// `geometry::build` calls.
@@ -103,6 +106,7 @@ impl ChartView {
             tier_fallback: false,
             value_sum: false,
             compact_scale: false,
+            frozen: false,
             value_text: None,
             last_value_text: String::new(),
             hover: hover::HoverState::default(),
@@ -126,13 +130,17 @@ impl ChartView {
     }
 
     /// Notifies only when one of this chart's series changed, or when a device change may have
-    /// brought an absent series in (ADR-009: views notify only for what they draw).
+    /// brought an absent series in (ADR-009: views notify only for what they draw). A frozen
+    /// chart reads no snapshot.
     fn on_snapshot(
         &mut self,
         hub: Entity<SnapshotHub>,
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
+        if self.frozen {
+            return;
+        }
         let range_ns = self.spec.range_ns;
         let own_changed = ev.mask.contains(ComponentMask::SERIES) && {
             let changed = ChangedRuns::new(&ev.changed_series);
@@ -189,6 +197,7 @@ impl ChartView {
 
     /// Validity for this paint (UI-PRF-001). Owner-set Failed, Restricted and Unsupported win.
     /// Otherwise WarmingUp without samples, Stale when the newest sample is too old, else Live.
+    /// A frozen chart is never Stale.
     pub fn derived_state(&self, now_boot_ns: u64) -> ChartState {
         if matches!(
             self.state,
@@ -207,7 +216,7 @@ impl ChartView {
         let Some(newest_ns) = newest_ns else {
             return ChartState::WarmingUp;
         };
-        if geometry::is_stale(newest_ns, now_boot_ns, period_ns) {
+        if !self.frozen && geometry::is_stale(newest_ns, now_boot_ns, period_ns) {
             ChartState::Stale {
                 age_ns: geometry::stale_age_ns(newest_ns, now_boot_ns),
             }
@@ -332,14 +341,31 @@ impl ChartView {
     }
 
     /// Replaces the spec. When it changed, resolves it against the hub's current snapshot and
-    /// notifies.
+    /// notifies. A frozen chart keeps its series.
     pub fn set_spec(&mut self, spec: ChartSpec, cx: &mut Context<Self>) {
         if self.spec != spec {
             self.spec = spec;
-            let hub = self.hub.clone();
-            self.resolve(hub.read(cx).current());
+            if !self.frozen {
+                let hub = self.hub.clone();
+                self.resolve(hub.read(cx).current());
+            }
             cx.notify();
         }
+    }
+
+    /// Stops the chart at its last samples for good (PERF-086: an ended process card). It keeps
+    /// the series it has, reads no new snapshot, pins its right edge at the newest valid sample
+    /// and is never Stale, so it neither slides nor fades. The owner may then drop the series
+    /// from demand.
+    pub fn freeze(&mut self, cx: &mut Context<Self>) {
+        if !self.frozen {
+            self.frozen = true;
+            cx.notify();
+        }
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
     }
 
     pub fn set_labels(&mut self, labels: ChartLabels, cx: &mut Context<Self>) {

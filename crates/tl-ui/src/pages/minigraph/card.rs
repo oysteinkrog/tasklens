@@ -9,10 +9,11 @@
 //! even when the value is equal (crw.34); the card itself adds no render for it.
 
 use gpui_kit::{
-    App, AppContext as _, BorrowAppContext as _, BoxShadow, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Point, Render, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement,
-    Styled as _, Subscription, WeakEntity, Window, div, point, px,
+    App, AppContext as _, BorrowAppContext as _, BoxShadow, Context, Entity, EventEmitter,
+    FocusHandle, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Point, Render, SharedString, Stateful,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, WeakEntity,
+    Window, div, point, px,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -23,6 +24,7 @@ use tl_model::ids::{ColumnId, GraphTarget};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{ComponentMask, Snapshot, SystemSnapshot};
+use tl_model::validity::Validity;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::GraphColor;
@@ -36,8 +38,10 @@ use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
     YScale, format_value,
 };
+use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::tooltip::TlTooltip;
+use crate::components::validity::{GlyphContent, glyph_parts};
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
 use crate::pages::performance::DeviceKey;
@@ -77,14 +81,25 @@ pub fn past_threshold(press: Point<Pixels>, to: Point<Pixels>) -> bool {
     (to - press).magnitude() >= DRAG_THRESHOLD
 }
 
-/// A card's data state. Process cards use the others (E26-012).
+/// A card's data state. Process cards use the others (E26-012, PERF-086, UI-PRF-041).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardState {
     Live,
+    /// A name or app card that matches no process: `No match`, and the engine's samples are gaps
+    /// until a process matches again.
     NoMatch,
+    /// A process card whose process exited, or was saved in another boot. A latch: the chart is
+    /// frozen at its last samples, the target leaves demand, and the card never binds again.
     Ended,
+    /// A matching process belongs to another user and the column's field is not readable: the
+    /// lock glyph, and a gap in the graph.
     Restricted,
 }
+
+/// Emitted once when a process card latches `Ended`, so its owner resends demand without the
+/// card's graph target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardEnded;
 
 pub struct MinigraphCard {
     pub id: MinigraphId,
@@ -185,10 +200,33 @@ impl MinigraphCard {
             Some(view) => {
                 this.value = view.value;
                 this.state = view.state;
+                // A key from another boot names a process that cannot exist any more (R-100).
+                // Checked once, at load.
+                let other_boot = matches!(
+                    &this.entry.source,
+                    MinigraphSource::Process { key } if key.boot_id != snap.boot_id
+                );
+                if other_boot || this.gone(view.state) {
+                    this.latch_ended(cx);
+                }
             }
             None => this.update_value(&snap, true, cx),
         }
         this
+    }
+
+    /// A process card in `state` (from the resolver) has lost its process: the key is missing
+    /// from a `Valid` process list.
+    fn gone(&self, state: CardState) -> bool {
+        state == CardState::NoMatch && matches!(self.entry.source, MinigraphSource::Process { .. })
+    }
+
+    /// Ends the card for good: `Ended`, the chart frozen at its last samples. The label keeps
+    /// the last known name. The caller emits `CardEnded` and notifies.
+    fn latch_ended(&mut self, cx: &mut Context<Self>) {
+        self.state = CardState::Ended;
+        self.value = tr(cx, "minigraph-ended");
+        self.chart.update(cx, |c, cx| c.freeze(cx));
     }
 
     pub fn chart(&self) -> &Entity<ChartView> {
@@ -354,11 +392,11 @@ impl MinigraphCard {
         d
     }
 
-    /// The `graph_targets` entry of a process, name or app card; `None` for a system card and
-    /// for a column the engine does not sample.
+    /// The `graph_targets` entry of a process, name or app card; `None` for a system card, for
+    /// a column the engine does not sample and for an ended card.
     pub fn graph_target(&self) -> Option<(GraphTarget, ColumnId)> {
         let column = self.entry.column;
-        if !column.engine_sampled() {
+        if !column.engine_sampled() || self.state == CardState::Ended {
             return None;
         }
         Some((self.entry.source.graph_target()?, column.column_id()))
@@ -416,8 +454,13 @@ impl MinigraphCard {
     }
 
     /// Process, name and app cards: takes the label, value and state from the resolver and
-    /// notifies only when one of them changed. The label changes only with the name.
+    /// notifies only when one of them changed. The label changes only with the name. A process
+    /// card whose key left a `Valid` process list latches `Ended`; an ended card reads nothing
+    /// more, so a new process with the same pid never rebinds it.
     fn update_process(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        if self.state == CardState::Ended {
+            return;
+        }
         let Some(view) = resolve_process_source(
             &self.entry.source,
             self.entry.column,
@@ -428,6 +471,14 @@ impl MinigraphCard {
         ) else {
             return;
         };
+        if self.gone(view.state) {
+            self.latch_ended(cx);
+            cx.emit(CardEnded);
+            #[cfg(any(test, feature = "test-hooks"))]
+            self.notify_count.set(self.notify_count.get() + 1);
+            cx.notify();
+            return;
+        }
         let mut changed = false;
         if self.process_label.as_ref() != Some(&view.label_parts) {
             self.label = view.label;
@@ -573,6 +624,37 @@ impl MinigraphCard {
     }
 }
 
+impl MinigraphCard {
+    /// The value at the top right: the number in `text_primary`; `No match` and `Ended` in
+    /// `text_secondary`; the `TlValidityGlyph` lock when Restricted.
+    fn value_element(&self, m: &UiMetrics, t: &TlTheme) -> gpui_kit::Div {
+        let el = div()
+            .debug_selector(|| "MinigraphCard-value".into())
+            .flex_none()
+            .whitespace_nowrap();
+        match self.state {
+            CardState::Live => el.font_features(TNUM.clone()).child(self.value.clone()),
+            CardState::NoMatch | CardState::Ended => {
+                el.text_color(t.text_secondary).child(self.value.clone())
+            }
+            CardState::Restricted => {
+                match glyph_parts(Validity::Restricted, &self.value, false, t) {
+                    (GlyphContent::Lock, color) => el.child(
+                        div()
+                            .debug_selector(|| "TlValidityGlyph-lock".into())
+                            .flex()
+                            .items_center()
+                            .child(icon(TlIcon::Lock, m.icon.xs, color)),
+                    ),
+                    (GlyphContent::Text(text), color) => el.text_color(color).child(text),
+                }
+            }
+        }
+    }
+}
+
+impl EventEmitter<CardEnded> for MinigraphCard {}
+
 impl Render for MinigraphCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
@@ -629,14 +711,7 @@ impl Render for MinigraphCard {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(label),
             )
-            .child(
-                div()
-                    .debug_selector(|| "MinigraphCard-value".into())
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .font_features(TNUM.clone())
-                    .child(self.value.clone()),
-            );
+            .child(self.value_element(&m, t));
         let card = div()
             .id(("MinigraphCard", u64::from(self.id.0)))
             .debug_selector(|| "MinigraphCard".into())

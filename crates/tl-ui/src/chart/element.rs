@@ -10,6 +10,9 @@
 //! `now − period` when sliding and `now` otherwise, so the flat half-alpha tail from the newest
 //! sample to the right edge shows (UI-PRF-007). The geometry is rebuilt whenever that edge moved,
 //! because the tail is drawn up to it.
+//!
+//! Frozen (`ChartView::freeze`): the right edge stays at the newest valid sample, the chart is
+//! never stale and never asks for frames, so it stops where its data stopped (PERF-086).
 
 use std::sync::Arc;
 
@@ -254,6 +257,7 @@ fn paint_view(
         view.hover.clear();
     }
     let compact_scale = view.compact_scale;
+    let frozen = view.frozen;
     let ChartView {
         spec,
         labels,
@@ -281,11 +285,13 @@ fn paint_view(
     if period_ns == u64::MAX {
         period_ns = DEFAULT_PERIOD_NS;
     }
-    let sliding = spec.smooth && !env.reduce_motion && !env.power_saving;
-    let stale = newest_ns > 0 && geometry::is_stale(newest_ns, now, period_ns);
+    let sliding = !frozen && spec.smooth && !env.reduce_motion && !env.power_saving;
+    let stale = !frozen && newest_ns > 0 && geometry::is_stale(newest_ns, now, period_ns);
     // No data: the grid is placed against the clock, where the first samples will land.
     let right_edge = if newest_ns == 0 {
         now
+    } else if frozen {
+        newest_valid_ns(series).unwrap_or(newest_ns)
     } else if stale {
         if sliding {
             now.saturating_sub(period_ns)
@@ -355,7 +361,8 @@ fn paint_view(
                 plot_height: ph as f32,
                 y_min: y.y_min,
                 y_max: y.y_max,
-                now_boot_ns: now,
+                // Frozen: the clock stops at the right edge, so no stale tail is drawn.
+                now_boot_ns: if frozen { right_edge } else { now },
                 stack: spec.stack,
                 curved: env.curved,
             };
@@ -564,6 +571,16 @@ impl grid::QuadSink for QuadCount {
     fn quad(&mut self, _: gpui_kit::PaintQuad) {
         self.0 += 1;
     }
+}
+
+/// Time of the newest valid sample over every series, `None` when there is none.
+fn newest_valid_ns(series: &[Option<Arc<SeriesView>>]) -> Option<u64> {
+    series
+        .iter()
+        .flatten()
+        .filter_map(|s| s.samples.iter().rev().find(|s| s.is_valid()))
+        .map(|s| s.t_ns)
+        .max()
 }
 
 /// Min and max of the valid samples inside `[right_edge − range, right_edge]` over every series,

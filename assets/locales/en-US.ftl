@@ -2453,6 +2453,8 @@ minigraph-col-network = Network
 minigraph-col-gpu = GPU
 minigraph-col-vram = VRAM
 minigraph-col-gpu-shared = GPU shared
+minigraph-no-match = No match
+minigraph-ended = Ended
 # Settings window, Services page (tasklens-bj6.28, UI-SHL-068). The Graphs page uses the
 # shell-menu-graphs keys.
 shell-settings-services-unit-types = Unit types

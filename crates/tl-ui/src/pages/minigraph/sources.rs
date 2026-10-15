@@ -9,9 +9,11 @@ use gpui_kit::private::schemars::{JsonSchema, Schema, SchemaGenerator};
 use gpui_kit::{App, SharedString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tl_model::ids::{ColumnId, GraphTarget, ProcessKey, ProcessSeriesId};
+use tl_model::process::{GroupKind, ProcessRecord};
 use tl_model::settings::{MinigraphState, NetworkUnit};
 use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
+use tl_model::validity::{ProcessField, Validity};
 
 use super::GraphColor;
 use super::card::{CardState, resolve_colors};
@@ -379,8 +381,10 @@ pub struct ProcessSourceView {
     pub y: YScale,
     pub label: SharedString,
     pub label_parts: ProcessLabel,
-    /// The newest valid sample formatted for the column, `…` before the first one.
+    /// The newest valid sample formatted for the column, `…` before the first one, or
+    /// `No match` in the `NoMatch` state. A `Restricted` card draws the lock in its place.
     pub value: SharedString,
+    /// `Live`, `NoMatch` or `Restricted` ([`match_state`]). `Ended` is a latch the owner keeps.
     pub state: CardState,
 }
 
@@ -391,6 +395,9 @@ const WARMING_UP_TEXT: &str = "\u{2026}";
 /// state. `None` for a system source. Names come from `snap.processes`: a process card shows
 /// `Process <pid>` until the record is there, an app card shows its id until a member process
 /// is there.
+///
+/// The resolver keeps no state. A process source whose key is gone resolves to `NoMatch`; the
+/// owner turns that into its `Ended` latch and never goes back to `Live` (PERF-086).
 pub fn resolve_process_source(
     source: &MinigraphSource,
     column: GraphColumn,
@@ -424,20 +431,97 @@ pub fn resolve_process_source(
         NetworkUnit::default()
     };
     let (y, fmt) = column_scale(source, column);
-    let value = newest.map_or(SharedString::new_static(WARMING_UP_TEXT), |v| {
-        let mut s = String::new();
-        format_value(fmt, v, unit, &mut s);
-        s.into()
-    });
+    let state = match_state(source, column, snap);
+    let value = if state == CardState::NoMatch {
+        tr(cx, "minigraph-no-match")
+    } else {
+        newest.map_or(SharedString::new_static(WARMING_UP_TEXT), |v| {
+            let mut s = String::new();
+            format_value(fmt, v, unit, &mut s);
+            s.into()
+        })
+    };
     Some(ProcessSourceView {
         series,
         y,
         label: label_parts.text(cx),
         label_parts,
         value,
-        // E26-012 (tasklens-xdh.14) adds No match, Ended and Restricted.
-        state: CardState::Live,
+        state,
     })
+}
+
+/// The state of a process, name or app source in `snap` (PERF-086, UI-PRF-041):
+/// - `Restricted` when a matching record cannot read a field of the column (another user's
+///   process). The engine draws that as a plain gap, so the state comes from the records.
+/// - `NoMatch` when no record matches and the process list is `Valid`. Before the first sweep
+///   the list is empty, which is not "no match".
+/// - `Live` otherwise, and for a system source.
+///
+/// A process key is one binary search; a name or app is one pass over the records, matched as
+/// the engine matches its graph targets.
+pub fn match_state(source: &MinigraphSource, column: GraphColumn, snap: &Snapshot) -> CardState {
+    let procs = &snap.processes;
+    let fields = column_fields(column);
+    let mut matched = false;
+    let mut restricted = false;
+    let mut check = |r: &ProcessRecord| {
+        matched = true;
+        restricted |= fields
+            .iter()
+            .any(|&f| r.validity.get(f) == Validity::Restricted);
+    };
+    match source {
+        MinigraphSource::Process { key } => {
+            if let Some(r) = procs.get(*key) {
+                check(r);
+            }
+        }
+        MinigraphSource::Name(image) => procs
+            .records
+            .iter()
+            .filter(|r| *r.meta.name == **image)
+            .for_each(check),
+        MinigraphSource::App(id) => {
+            let group = GroupKind::App {
+                app_id: Arc::clone(id),
+            }
+            .key();
+            for (i, r) in procs.records.iter().enumerate() {
+                let unit = procs
+                    .extras
+                    .get(i)
+                    .and_then(|x| x.unit.as_ref())
+                    .is_some_and(|u| *u.name == **id);
+                if r.group == group || unit {
+                    check(r);
+                }
+            }
+        }
+        _ => return CardState::Live,
+    }
+    if restricted {
+        CardState::Restricted
+    } else if !matched && procs.header.validity == Validity::Valid {
+        CardState::NoMatch
+    } else {
+        CardState::Live
+    }
+}
+
+/// The record fields behind a graph column, as the engine reads them for its graph targets
+/// (a copy of `column_fields` in tl-engine `reducer/process_series.rs`, which is private).
+/// Columns the engine does not sample have none.
+fn column_fields(column: GraphColumn) -> &'static [ProcessField] {
+    match column {
+        GraphColumn::Cpu => &[ProcessField::Cpu],
+        GraphColumn::Memory => &[ProcessField::RssAnon],
+        GraphColumn::Disk => &[ProcessField::IoRead, ProcessField::IoWrite],
+        GraphColumn::Network => &[ProcessField::NetRx, ProcessField::NetTx],
+        GraphColumn::Gpu => &[ProcessField::GpuUtil],
+        GraphColumn::Vram => &[ProcessField::GpuMem],
+        GraphColumn::Rss | GraphColumn::RssShared | GraphColumn::GpuShared => &[],
+    }
 }
 
 /// The label parts of a process, name or app source; `None` for a system source.

@@ -187,11 +187,11 @@ mod card {
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{ComponentHeader, ProcessSeriesSet, ProcessSnapshot, SeriesSet};
     use tl_model::time::{BootId, now_boot_ns};
-    use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::chart::YScale;
+    use tl_model::validity::{FieldValidity, ProcessField, Validity};
+    use tl_ui::chart::{ChartState, YScale};
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::minigraph::GraphColor;
-    use tl_ui::pages::minigraph::card::{MinigraphCard, card_shadow};
+    use tl_ui::pages::minigraph::card::{CardState, MinigraphCard, card_shadow};
     use tl_ui::pages::minigraph::sources::{
         GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource,
     };
@@ -308,6 +308,8 @@ mod card {
             self.series_version += 1;
             let version = self.series_version;
             self.engine.publish_with(|s| {
+                // The boot of `pkey`, so a process card from this boot is not ended at load.
+                s.boot_id = BootId(7);
                 s.devices = Arc::new(catalog());
                 s.series = Arc::new(SeriesSet {
                     header: ComponentHeader {
@@ -346,7 +348,8 @@ mod card {
             (card, vcx)
         }
 
-        /// Publishes `records` (sorted here) as the process snapshot, in a new version.
+        /// Publishes `records` (sorted here) as a `Valid` process snapshot (a finished sweep),
+        /// in a new version.
         fn publish_processes(&mut self, cx: &mut TestAppContext, mut records: Vec<ProcessRecord>) {
             records.sort_by_key(|r| r.key);
             self.engine.publish_with(|s| {
@@ -354,6 +357,7 @@ mod card {
                 s.processes = Arc::new(ProcessSnapshot {
                     header: ComponentHeader {
                         version,
+                        validity: Validity::Valid,
                         ..ComponentHeader::default()
                     },
                     records: records.into(),
@@ -561,6 +565,249 @@ mod card {
         let (card, mut vcx) = r.card_entry(cx, rss, Vec::new());
         let d = vcx.update(|_, cx| card.read(cx).demand_part());
         assert!(d.graph_targets.is_empty());
+    }
+
+    const PERIOD: u64 = 1_000_000_000;
+
+    /// `valid` one-second samples of `value`, then `gaps` gap samples, the newest at `newest`.
+    fn gapped(valid: u64, gaps: u64, value: f32, newest: u64, version: u64) -> Arc<SeriesView> {
+        let n = valid + gaps;
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(0),
+                metric: MetricId(0),
+            },
+            version,
+            period_ns: PERIOD,
+            samples: (0..n)
+                .map(|k| {
+                    let t = newest - (n - 1 - k) * PERIOD;
+                    if k < valid {
+                        Sample::valid(t, value)
+                    } else {
+                        Sample::gap(t)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    }
+
+    fn state_of(card: &Entity<MinigraphCard>, vcx: &mut VisualTestContext) -> (CardState, String) {
+        vcx.update(|_, cx| {
+            let c = card.read(cx);
+            (c.state(), c.value().to_string())
+        })
+    }
+
+    /// A name card that matches nothing reads `No match` and its chart runs on past the last
+    /// valid sample with a gap; a match brings it back. A process card whose key leaves the
+    /// sweep reads `Ended`, keeps its last samples and stops (PERF-086, UI-PRF-041).
+    #[gpui_kit::test]
+    fn card_no_match_and_ended_states(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100);
+        let code = mini(MinigraphSource::Name(Arc::from("code")));
+        r.publish_processes(cx, vec![record(10, "code", None)]);
+        let (card, mut vcx) = r.card_entry(cx, code, Vec::new());
+        assert_eq!(state_of(&card, &mut vcx).0, CardState::Live);
+
+        // The process exits: the engine samples gaps for the name.
+        let name_id = ProcessSeriesId {
+            target: GraphTarget::Name(Arc::from("code")),
+            column: ColumnId::Cpu,
+        };
+        let newest = now_boot_ns();
+        r.publish_process_series(cx, vec![(name_id, gapped(30, 5, 20.0, newest, 1))]);
+        r.publish_processes(cx, vec![record(11, "other", None)]);
+        draw(&mut vcx);
+        assert_eq!(
+            state_of(&card, &mut vcx),
+            (CardState::NoMatch, "No match".to_owned())
+        );
+        let frozen = vcx.update(|_, cx| card.read(cx).chart().read(cx).is_frozen());
+        assert!(!frozen, "a no-match card keeps following its series");
+        #[cfg(feature = "test-hooks")]
+        {
+            let (edge, last_valid) = vcx.update(|_, cx| {
+                let chart = card.read(cx).chart().read(cx);
+                let last_valid = chart.resolved()[0]
+                    .as_ref()
+                    .and_then(|v| v.samples.iter().rev().find(|s| s.is_valid()))
+                    .map(|s| s.t_ns);
+                (chart.last_right_edge_ns.get(), last_valid)
+            });
+            assert_eq!(edge, newest, "the chart runs on to the newest gap sample");
+            assert_eq!(
+                last_valid,
+                Some(newest - 5 * PERIOD),
+                "the last 5 s are a gap"
+            );
+        }
+        // A process matches again: the graph resumes.
+        r.publish_processes(cx, vec![record(12, "code", None)]);
+        draw(&mut vcx);
+        assert_eq!(state_of(&card, &mut vcx).0, CardState::Live);
+
+        // A process card whose process exits.
+        r.publish_processes(cx, vec![record(4242, "firefox", None)]);
+        let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
+        let id = ProcessSeriesId {
+            target: GraphTarget::Process(pkey(4242)),
+            column: ColumnId::Cpu,
+        };
+        let last_valid = now_boot_ns();
+        r.publish_process_series(cx, vec![(id.clone(), gapped(30, 0, 40.0, last_valid, 1))]);
+        draw(&mut vcx);
+        assert_eq!(
+            state_of(&card, &mut vcx),
+            (CardState::Live, "40.0%".to_owned())
+        );
+        r.publish_processes(cx, Vec::new());
+        draw(&mut vcx);
+        assert_eq!(
+            state_of(&card, &mut vcx),
+            (CardState::Ended, "Ended".to_owned())
+        );
+        let (frozen, targets) = vcx.update(|_, cx| {
+            let c = card.read(cx);
+            (
+                c.chart().read(cx).is_frozen(),
+                c.demand_part().graph_targets.len(),
+            )
+        });
+        assert!(frozen, "the chart stops at its last samples");
+        assert_eq!(targets, 0, "an ended card drops its graph target");
+
+        // The engine still publishes gaps for the id: the frozen chart does not read them.
+        r.publish_process_series(
+            cx,
+            vec![(id, gapped(30, 3, 40.0, last_valid + 3 * PERIOD, 2))],
+        );
+        draw(&mut vcx);
+        let later = vcx.update(|_, cx| {
+            let chart = card.read(cx).chart().read(cx);
+            chart.derived_state(last_valid + 600 * PERIOD)
+        });
+        assert_eq!(later, ChartState::Live, "never Stale while frozen");
+        #[cfg(feature = "test-hooks")]
+        {
+            let (edge, newest_seen) = vcx.update(|_, cx| {
+                let chart = card.read(cx).chart().read(cx);
+                let newest_seen = chart.resolved()[0]
+                    .as_ref()
+                    .and_then(|v| v.samples.last())
+                    .map(|s| s.t_ns);
+                (chart.last_right_edge_ns.get(), newest_seen)
+            });
+            assert_eq!(
+                edge, last_valid,
+                "the right edge stays at the last valid sample"
+            );
+            assert_eq!(
+                newest_seen,
+                Some(last_valid),
+                "the pinned series is the old one"
+            );
+        }
+        let value = vcx.update(|_, cx| card.read(cx).chart().read(cx).value_now());
+        assert_eq!(value.map(|(v, _)| v), Some(40.0));
+    }
+
+    /// An ended process card never binds to a new process with the same pid (PERF-086).
+    #[gpui_kit::test]
+    fn card_ended_never_rebinds(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100);
+        r.publish_processes(cx, vec![record(4242, "firefox", None)]);
+        let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
+        assert_eq!(label_of(&card, &mut vcx), "firefox (4242) \u{b7} CPU");
+        r.publish_processes(cx, Vec::new());
+        draw(&mut vcx);
+        assert_eq!(state_of(&card, &mut vcx).0, CardState::Ended);
+        let notified = vcx.update(|_, cx| card.read(cx).notify_count.get());
+
+        // A new process reuses the pid with another start time.
+        let mut reused = record(4242, "bash", None);
+        reused.key.start_ticks += 1;
+        r.publish_processes(cx, vec![reused]);
+        draw(&mut vcx);
+        assert_eq!(
+            state_of(&card, &mut vcx),
+            (CardState::Ended, "Ended".to_owned())
+        );
+        assert_eq!(label_of(&card, &mut vcx), "firefox (4242) \u{b7} CPU");
+        let (target, again) = vcx.update(|_, cx| {
+            let c = card.read(cx);
+            (c.graph_target(), c.notify_count.get())
+        });
+        assert_eq!(target, None);
+        assert_eq!(again, notified, "an ended card reads no snapshot");
+
+        // Even the old key coming back does not revive it.
+        r.publish_processes(cx, vec![record(4242, "firefox", None)]);
+        draw(&mut vcx);
+        assert_eq!(state_of(&card, &mut vcx).0, CardState::Ended);
+    }
+
+    /// A saved process card from another boot starts `Ended`. A card from this boot whose
+    /// process is not in the list yet (before the first sweep) does not (R-100).
+    #[gpui_kit::test]
+    fn card_ended_on_boot_id_mismatch(cx: &mut TestAppContext) {
+        let r = rig(cx, 100);
+        let old = MinigraphSource::Process {
+            key: ProcessKey {
+                boot_id: BootId(8),
+                ..pkey(4242)
+            },
+        };
+        let (card, mut vcx) = r.card(cx, old, Vec::new());
+        assert_eq!(
+            state_of(&card, &mut vcx),
+            (CardState::Ended, "Ended".to_owned())
+        );
+        let (frozen, targets) = vcx.update(|_, cx| {
+            let c = card.read(cx);
+            (
+                c.chart().read(cx).is_frozen(),
+                c.demand_part().graph_targets.len(),
+            )
+        });
+        assert!(frozen);
+        assert_eq!(targets, 0);
+
+        let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
+        assert_eq!(
+            state_of(&card, &mut vcx),
+            (CardState::Live, "\u{2026}".to_owned())
+        );
+    }
+
+    /// Another user's process whose column field is not readable shows the lock glyph in place
+    /// of the value (UI-FND-026, UI-PRF-041).
+    #[gpui_kit::test]
+    fn card_restricted_glyph(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100);
+        let mut root = record(4242, "sshd", None);
+        root.uid = 0;
+        root.validity.set(ProcessField::Cpu, Validity::Restricted);
+        r.publish_processes(cx, vec![root, record(10, "code", None)]);
+        let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
+        assert_eq!(state_of(&card, &mut vcx).0, CardState::Restricted);
+        assert!(vcx.debug_bounds("TlValidityGlyph-lock").is_some());
+
+        // Another column of the same process reads a field that is readable.
+        let memory = mini_col(process(4242), GraphColumn::Memory);
+        let (card, mut vcx) = r.card_entry(cx, memory, Vec::new());
+        assert_eq!(state_of(&card, &mut vcx).0, CardState::Live);
+        assert!(vcx.debug_bounds("TlValidityGlyph-lock").is_none());
+
+        // A name card with one restricted member is Restricted.
+        let mut other = record(12, "code", None);
+        other.validity.set(ProcessField::Cpu, Validity::Restricted);
+        r.publish_processes(cx, vec![record(10, "code", None), other]);
+        let name = mini(MinigraphSource::Name(Arc::from("code")));
+        let (card, mut vcx) = r.card_entry(cx, name, Vec::new());
+        assert_eq!(state_of(&card, &mut vcx).0, CardState::Restricted);
+        assert!(vcx.debug_bounds("TlValidityGlyph-lock").is_some());
     }
 
     /// Embeds the card cached, as the panel does: the window's root re-renders on every draw.
@@ -939,7 +1186,11 @@ mod panel {
             });
             TlSettings::init(cx);
         });
-        engine.publish_with(|s| s.devices = Arc::new(catalog()));
+        engine.publish_with(|s| {
+            s.devices = Arc::new(catalog());
+            // The boot of `process_state`, so its process card is not ended at load.
+            s.boot_id = tl_model::time::BootId(7);
+        });
         cx.run_until_parked();
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
@@ -1347,6 +1598,34 @@ mod panel {
         draw(&mut r.vcx);
         let sent = r.engine.demands().last().cloned().expect("demand sent");
         assert_eq!(&sent.graph_targets[..], want);
+    }
+
+    /// A process card that ends leaves the panel's demand at once; the name card stays
+    /// (PERF-086).
+    #[gpui_kit::test]
+    fn ended_card_drops_demand_target(cx: &mut TestAppContext) {
+        use tl_model::ids::{ColumnId, GraphTarget};
+        use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+        use tl_model::validity::Validity;
+
+        let mut r = rig_with(cx, process_state());
+        r.engine.publish_with(|s| {
+            s.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                ..ProcessSnapshot::default()
+            });
+        });
+        draw(&mut r.vcx);
+        let want = [(GraphTarget::Name(Arc::from("code")), ColumnId::Memory)];
+        let (panel, demand) = (r.panel.clone(), r.demand.clone());
+        let d = r.vcx.update(|_, cx| panel.read(cx).demand_part(cx));
+        assert_eq!(&d.graph_targets[..], want);
+        let merged = r.vcx.update(|_, cx| demand.read(cx).merged());
+        assert_eq!(&merged.graph_targets[..], want);
     }
 
     /// Process cards keep sampling off screen (PERF-085, PROC-093): with the tab inactive and

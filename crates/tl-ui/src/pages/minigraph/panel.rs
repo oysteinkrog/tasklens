@@ -31,7 +31,9 @@ use super::actions::{
     MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor, MinigraphSetRange,
     ResetMinigraphLayout,
 };
-use super::card::{DraggedMinigraph, MINI_CARD_H, MINI_CARD_W, MinigraphCard, past_threshold};
+use super::card::{
+    CardEnded, DraggedMinigraph, MINI_CARD_H, MINI_CARD_W, MinigraphCard, past_threshold,
+};
 use super::sources::{
     COLS, GraphColumn, MAX_SLOTS, MinigraphEntry, MinigraphId, MinigraphSource, ROWS,
     default_entries, from_state, slot_cell, to_state,
@@ -541,7 +543,14 @@ impl MinigraphPanel {
                 Some(i) => old.swap_remove(i).1,
                 None => {
                     let (entry, hub) = (entry.clone(), self.hub.clone());
-                    cx.new(|cx| MinigraphCard::new(entry, &catalog, &order, &hub, cx))
+                    let card = cx.new(|cx| MinigraphCard::new(entry, &catalog, &order, &hub, cx));
+                    // An ended card drops its graph target (PERF-086).
+                    cx.subscribe(&card, |this, _, _: &CardEnded, cx| {
+                        this.send_graph_targets(cx);
+                        this.send_demand(cx);
+                    })
+                    .detach();
+                    card
                 }
             };
             card.update(cx, |c, _| c.entry.slot = entry.slot);
