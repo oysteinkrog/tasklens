@@ -883,3 +883,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: 8fx.26 TopAt hover queries use a latest-wins state (wanted, in_flight, shown); answers not matching wanted are dropped; no pending queue.
 - 2026-10-15 leader decision: new tasklens-o55.39 puts tempN in the sensor persistent key; bj6.41 and o55.32 store it without 'sensor:' as the fan temp source; fan row default name is 'Fan N'.
 - 2026-10-15 leader decision: 8fx.31 AC3 (scrub p99 on owner machine) split into a deferred MEASURE bead; 8fx.31 closes on the bench scene itself.
+- 2026-10-15 leader decision: gma.36 dump file names use the engine's [A-Za-z0-9._-] set (other chars to '_'), then R-224 cut and fallback; R-224 and UI-PWN-034 edited to match; engine check unchanged.
