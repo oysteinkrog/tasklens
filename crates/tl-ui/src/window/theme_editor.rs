@@ -1185,7 +1185,9 @@ impl ThemeEditor {
         };
         let def = ThemeStore::preview_def(token, cx);
         let parent = window.window_handle();
-        cx.defer(move |cx| open_share_window(&def, parent, cx));
+        cx.defer(move |cx| {
+            open_share_window(&def, parent, cx);
+        });
     }
 
     /// Import: loads the first theme of the clipboard into the preview (slots and name). The
