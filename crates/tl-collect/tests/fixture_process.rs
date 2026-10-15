@@ -4396,9 +4396,14 @@ mod hash_tests {
             read_security(&root, key, b"", &mut bufs, &mut sec).expect("security"),
             DetailRead::Ok
         );
-        assert!(
-            !sec.groups.is_empty() || sec.uid != [0; 4] || sec.gid != [0; 4] || sec.uid[0] == 0
+        let (uid, gid) = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
         );
+        assert_eq!(sec.uid[0], uid);
+        assert_eq!(sec.uid[1], rustix::process::geteuid().as_raw());
+        assert_eq!(sec.gid[0], gid);
+        assert_eq!(sec.cap_bnd & sec.cap_eff, sec.cap_eff);
 
         let mut env = EnvInfo::default();
         let mut buf = Vec::new();
@@ -4434,10 +4439,14 @@ mod hash_tests {
         }
         assert!(!hits.is_empty());
 
-        let mut walk = HandleWalk::start(&root, "/", false);
+        let mut walk = HandleWalk::start(&root, "/", true);
         let mut found = Vec::new();
-        let step = walk.step(&root, BootId(1), 64, &mut bufs, &mut found);
-        assert!(matches!(step, StepResult::More | StepResult::Done));
+        while walk.step(&root, BootId(1), 64, &mut bufs, &mut found) == StepResult::More {}
+        assert!(walk.progress().searched >= 1);
+        assert!(
+            found.iter().any(|h| h.key.pid == key.pid),
+            "no handle hit for the own pid"
+        );
 
         let mut cache = HashCache::new();
         hash_process_exe(&root, key, None, &mut cache, &mut buf).expect("hash exe");
