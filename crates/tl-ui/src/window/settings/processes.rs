@@ -2,15 +2,15 @@
 //! PROC-099): refresh, view, table display and Properties window options.
 //!
 //! Group order when every phase is built: Refresh, View, Tables (every table), Properties
-//! windows, Dumps (E21-036), History (E30).
+//! windows, Dumps (E21-036), History (E30-027).
 
 use gpui_kit::{App, SharedString};
-use tl_model::settings::PROCESS_INTERVAL_MENU_MS;
+use tl_model::settings::{HISTORY_RETENTION_MENU_H, PROCESS_INTERVAL_MENU_MS};
 
 use super::{PageBuilder, PageId};
 use crate::i18n::tr;
-use crate::settings_global::{SettingKey, SettingValue};
-use crate::window::menus_settings::REFRESH_KEYS;
+use crate::settings_global::{SettingKey, SettingValue, TlSettings};
+use crate::window::menus_settings::{HISTORY_STORAGE_KEYS, REFRESH_KEYS};
 
 pub fn page(cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(PageId::Processes);
@@ -115,6 +115,42 @@ pub fn page(cx: &mut App) -> PageBuilder {
                 ("shell-settings-dump-full", "full"),
             ],
         ),
+    );
+
+    let history = tr(cx, "shell-settings-group-history");
+    let recording = TlSettings::settings(cx).history.enabled;
+    let storage: Vec<(SharedString, SettingValue)> = HISTORY_STORAGE_KEYS
+        .into_iter()
+        .zip(HISTORY_RETENTION_MENU_H)
+        .map(|(key, h)| (tr(cx, key), SettingValue::Int(i64::from(h))))
+        .collect();
+    page.switch(
+        history.clone(),
+        SettingKey::HistoryEnabled,
+        tr(cx, "shell-menu-settings-record-history"),
+        None,
+    )
+    .dropdown(
+        history.clone(),
+        SettingKey::HistoryRetentionH,
+        tr(cx, "shell-menu-settings-history-storage"),
+        &storage,
+    )
+    .disable_next(!recording)
+    .tooltip_next((!recording).then(|| tr(cx, "shell-menu-settings-history-first")))
+    .switch(
+        history.clone(),
+        SettingKey::HistoryPersist,
+        tr(cx, "shell-menu-settings-history-persist"),
+        None,
+    )
+    .number(
+        history,
+        SettingKey::HistoryMaxDiskMb,
+        tr(cx, "shell-settings-history-disk-limit"),
+        64..=4096,
+        64,
+        tr(cx, "shell-settings-unit-mib"),
     );
     page
 }

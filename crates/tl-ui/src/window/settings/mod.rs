@@ -227,8 +227,19 @@ impl SliderStates {
     }
 }
 
+/// `v` clamped to `min..=max`, snapped to the nearest `step` counted from `min`.
+fn snap_number(v: f64, min: i64, max: i64, step: i64) -> i64 {
+    let (lo, hi, step) = (min as f64, max as f64, step.max(1) as f64);
+    let v = v.clamp(lo, hi);
+    let snapped = lo + ((v - lo) / step).round() * step;
+    snapped.clamp(lo, hi).round() as i64
+}
+
 type CustomRender = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 type BoolSetter = Rc<dyn Fn(bool, &mut App)>;
+/// A number input setter taking the typed value.
+#[cfg(any(test, feature = "test-hooks"))]
+type NumberSetter = Rc<dyn Fn(f64, &mut App)>;
 type BoolGetter = Rc<dyn Fn(&App) -> bool>;
 /// Runs with the value after a slider's Release write (the UI Scale toast).
 pub type SliderCommit = fn(i64, &mut App);
@@ -262,6 +273,9 @@ pub struct PageBuilder {
     /// The switch and checkbox setters, the same closures the kit calls.
     #[cfg(any(test, feature = "test-hooks"))]
     bool_setters: Vec<(SettingKey, BoolSetter)>,
+    /// The number input setters, the same closures the kit calls.
+    #[cfg(any(test, feature = "test-hooks"))]
+    numbers: Vec<(SettingKey, NumberSetter)>,
     /// The dropdown option labels and setters, the same closure the kit calls.
     #[cfg(any(test, feature = "test-hooks"))]
     dropdowns: Vec<(SettingKey, Vec<SharedString>, PickSetter)>,
@@ -316,6 +330,8 @@ impl PageBuilder {
             description: None,
             #[cfg(any(test, feature = "test-hooks"))]
             bool_setters: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            numbers: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             dropdowns: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -792,15 +808,19 @@ impl PageBuilder {
             step: step as f64,
         };
         let toast = self.take_toast(&restart);
+        let (min, max) = (*range.start(), *range.end());
+        let setter: NumberSetter = Rc::new(move |v: f64, cx| {
+            TlSettings::set(cx, key, SettingValue::Int(snap_number(v, min, max, step)));
+            if let Some(note) = &toast {
+                info_toast(note.clone(), cx);
+            }
+        });
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.numbers.push((key, setter.clone()));
         let field = SettingField::number_input(
             options,
             move |cx| read(cx, key).as_f64().unwrap_or_default(),
-            move |v: f64, cx| {
-                TlSettings::set(cx, key, SettingValue::Int(v.round() as i64));
-                if let Some(note) = &toast {
-                    info_toast(note.clone(), cx);
-                }
-            },
+            move |v: f64, cx| setter(v, cx),
         );
         let description = (!suffix.is_empty()).then_some(suffix);
         self.push(group, key, label, description, restart, field)
@@ -877,6 +897,15 @@ impl PageBuilder {
     pub fn set_bool(&self, key: SettingKey, on: bool, cx: &mut App) {
         if let Some((_, setter)) = self.bool_setters.iter().find(|(k, _)| *k == key) {
             setter(on, cx);
+        }
+    }
+
+    /// Runs the number input setter of `key` as typing `v` would. It snaps to the nearest step
+    /// from the minimum and clamps to the range.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_number(&self, key: SettingKey, v: f64, cx: &mut App) {
+        if let Some((_, setter)) = self.numbers.iter().find(|(k, _)| *k == key) {
+            setter(v, cx);
         }
     }
 

@@ -2310,6 +2310,10 @@ shell-settings-group-dumps = Dumps
 shell-settings-dump-type = Dump type
 shell-settings-dump-mini = Mini
 shell-settings-dump-full = Full
+# Settings window, History rows (tasklens-8fx.30, UI-SHL-065).
+shell-settings-group-history = History
+shell-settings-history-disk-limit = History disk limit
+shell-settings-unit-mib = MiB
 # Go to parent process and Open file location (tasklens-pdu.23, PROC-071, PROC-073)
 processes-toast-switched-to-parent = Switched to parent process
 processes-toast-parent-not-found = Parent process not found in current view

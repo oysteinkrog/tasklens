@@ -632,7 +632,11 @@ fn processes_page_keys(cx: &mut TestAppContext) {
             SettingKey::PropertiesHideUnnamedHandles,
             SettingKey::PropertiesSharedObjectsOnly,
             SettingKey::PropertiesEnvMask,
-            SettingKey::ProcessesDumpType
+            SettingKey::ProcessesDumpType,
+            SettingKey::HistoryEnabled,
+            SettingKey::HistoryRetentionH,
+            SettingKey::HistoryPersist,
+            SettingKey::HistoryMaxDiskMb
         ]
     );
 }

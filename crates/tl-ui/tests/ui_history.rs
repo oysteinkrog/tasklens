@@ -4,7 +4,8 @@
 //! (tasklens-8fx.38), and the timeline strip's cached geometry and gap bands (tasklens-8fx.24), and
 //! the filter text typed before the page existed (tasklens-8fx.39), and the top-3 hover card
 //! (tasklens-8fx.26), and the minimap (tasklens-8fx.27), and the legend chips (tasklens-8fx.28), and
-//! the Live button, recording-off banner and toast and load-problem toasts (tasklens-8fx.29).
+//! the Live button, recording-off banner and toast and load-problem toasts (tasklens-8fx.29), and
+//! the Settings window History rows (tasklens-8fx.30).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -24,7 +25,9 @@ use tl_model::history::{
     HistoryTotals, HistoryView,
 };
 use tl_model::ids::{ColumnId, ProcessKey};
-use tl_model::settings::{AppearanceSettings, Settings, SortState, ThemeSettings, UiState};
+use tl_model::settings::{
+    AppearanceSettings, HistorySettings, Settings, SortState, ThemeSettings, UiState,
+};
 use tl_model::snapshot::ComponentHeader;
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::Validity;
@@ -36,10 +39,11 @@ use tl_ui::pages::processes::history::{
     HistoryPage, HistoryUiState, HistoryWords, LIVE_DOT_ID, default_view_range, header_text,
     live_look,
 };
-use tl_ui::settings_global::TlSettings;
+use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::table::cells::CellOut;
 use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate};
 use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui::window::settings::{PageBuilder, PageId, all_pages};
 
 const S: TimeNs = 1_000_000_000;
 
@@ -3006,5 +3010,86 @@ mod mode {
             Command::HistoryDelete { keys } => assert_eq!(keys.to_vec(), [k2]),
             other => panic!("expected HistoryDelete, got {other:?}"),
         }
+    }
+}
+
+/// The real Settings Processes page, rebuilt from the live settings.
+fn processes_page(cx: &mut TestAppContext) -> PageBuilder {
+    cx.update(all_pages)
+        .into_iter()
+        .find(|p| p.id() == PageId::Processes)
+        .expect("Processes page listed")
+}
+
+fn history_settings(cx: &mut TestAppContext) -> HistorySettings {
+    cx.update(|cx| TlSettings::settings(cx).history.clone())
+}
+
+#[gpui_kit::test]
+fn settings_history_defaults(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    init_settings(cx, &engine, Settings::default());
+    let page = processes_page(cx);
+    assert_eq!(history_settings(cx), HistorySettings::default());
+    let labels: Vec<String> = page
+        .dropdown_labels(SettingKey::HistoryRetentionH)
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "1 hour", "2 hours", "3 hours", "4 hours", "6 hours", "8 hours", "12 hours"
+        ]
+    );
+    let h = history_settings(cx);
+    assert!(!h.enabled);
+    assert_eq!(h.retention_h, 6);
+    assert!(h.persist);
+    assert!(page.is_disabled(SettingKey::HistoryPersist));
+    assert_eq!(
+        page.tooltip_of(SettingKey::HistoryPersist).as_deref(),
+        Some("Turn on Record history first")
+    );
+    assert_eq!(
+        page.description_of(SettingKey::HistoryMaxDiskMb).as_deref(),
+        Some("MiB")
+    );
+    assert_eq!(h.max_disk_mb, 256);
+}
+
+#[gpui_kit::test]
+fn persist_disabled_until_recording(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    init_settings(cx, &engine, Settings::default());
+    let page = processes_page(cx);
+    cx.update(|cx| page.set_bool(SettingKey::HistoryEnabled, true, cx));
+    cx.run_until_parked();
+    let page = processes_page(cx);
+    assert!(!page.is_disabled(SettingKey::HistoryPersist));
+    assert_eq!(page.tooltip_of(SettingKey::HistoryPersist), None);
+}
+
+#[gpui_kit::test]
+fn retention_choice_sent_to_engine(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    init_settings(cx, &engine, Settings::default());
+    let page = processes_page(cx);
+    cx.update(|cx| page.pick(SettingKey::HistoryRetentionH, "12 hours", cx));
+    cx.run_until_parked();
+    assert_eq!(history_settings(cx).retention_h, 12);
+    let sent = engine.settings();
+    assert_eq!(sent.last().expect("settings sent").history.retention_h, 12);
+}
+
+#[gpui_kit::test]
+fn disk_limit_clamp_and_step(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    init_settings(cx, &engine, Settings::default());
+    let page = processes_page(cx);
+    for (typed, stored) in [(5000.0, 4096), (50.0, 64), (300.0, 320)] {
+        cx.update(|cx| page.set_number(SettingKey::HistoryMaxDiskMb, typed, cx));
+        cx.run_until_parked();
+        assert_eq!(history_settings(cx).max_disk_mb, stored, "typed {typed}");
     }
 }
