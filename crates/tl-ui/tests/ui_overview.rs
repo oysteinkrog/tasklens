@@ -1086,7 +1086,7 @@ mod bottom {
     }
 
     /// GPUs at 10..13, disks sda, sdb and sdc at 20, 21 and 22, aggregates, eth0 (wired) at 30,
-    /// docker0 (virtual) at 31 and lo at 32.
+    /// docker0 (virtual) at 31, lo at 32 and wlan0 (wireless) at 33.
     fn catalog() -> DeviceCatalog {
         let mut entries: Vec<_> = (0..3)
             .map(|n| entry(10 + n, gpu_id(n as u8), None))
@@ -1107,6 +1107,7 @@ mod bottom {
         entries.push(entry(30, net_id(2, "eth0"), Some(NetKind::Wired)));
         entries.push(entry(31, net_id(3, "docker0"), Some(NetKind::Virtual)));
         entries.push(entry(32, net_id(1, "lo"), Some(NetKind::Other)));
+        entries.push(entry(33, net_id(4, "wlan0"), Some(NetKind::Wireless)));
         DeviceCatalog {
             version: 1,
             entries: Arc::from(entries),
@@ -1169,12 +1170,22 @@ mod bottom {
     }
 
     fn net_totals(device: u16, rx_bps: f64, rx_total: u64) -> NetTotals {
+        net_totals_tx(device, rx_bps, rx_total, 0., 0)
+    }
+
+    fn net_totals_tx(
+        device: u16,
+        rx_bps: f64,
+        rx_total: u64,
+        tx_bps: f64,
+        tx_total: u64,
+    ) -> NetTotals {
         NetTotals {
             device: DeviceIdx(device),
             rx_bps: Metric::valid(rx_bps),
-            tx_bps: Metric::valid(0.),
+            tx_bps: Metric::valid(tx_bps),
             rx_total,
-            tx_total: 0,
+            tx_total,
             link_speed_mbps: Metric::default(),
             state: LinkState::Up,
         }
@@ -1890,7 +1901,7 @@ mod bottom {
         let texts = r
             .vcx
             .update(|_, cx| net.read(cx).texts().map(|t| t.to_string()));
-        assert_eq!(texts[2], "1.00 GiB since boot", "eth0 only");
+        assert_eq!(texts[4], "1.00 GiB", "eth0 only");
         let mut down = String::new();
         tl_ui::chart::format_value(
             tl_ui::chart::ValueFormat::RateNetwork,
@@ -1908,6 +1919,146 @@ mod bottom {
                 device: DeviceIdx(NET_AGG),
                 metric: MetricId::NET_RX
             }]
+        );
+    }
+
+    /// The aggregate download and upload series: 99999 outside the 60 s window, then 8000 and
+    /// 6000 B/s (download) and 7000 and 2000 B/s (upload).
+    fn publish_net_series(r: &mut Rig) {
+        r.version += 1;
+        let version = r.version;
+        let now = now_boot_ns();
+        let view = |metric, values: [f32; 3]| {
+            let at = [90, 30, 0];
+            Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(NET_AGG),
+                    metric,
+                },
+                version,
+                period_ns: 1_000_000_000,
+                samples: at
+                    .iter()
+                    .zip(values)
+                    .map(|(s, v)| Sample::valid(now - s * 1_000_000_000, v))
+                    .collect::<Vec<_>>()
+                    .into(),
+            })
+        };
+        let views = [
+            view(MetricId::NET_RX, [99999., 8000., 6000.]),
+            view(MetricId::NET_TX, [99999., 7000., 2000.]),
+        ];
+        r.publish(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: Arc::from(views),
+                slow: Arc::from([]),
+            });
+        });
+    }
+
+    fn two_adapters(r: &mut Rig) {
+        r.system(|s| {
+            s.nets = Arc::from([
+                (DeviceIdx(30), net_totals_tx(30, 1000., GIB, 100., GIB / 2)),
+                (DeviceIdx(33), net_totals_tx(33, 5000., 2 * GIB, 400., GIB)),
+            ]);
+        });
+        publish_net_series(r);
+    }
+
+    fn rate(unit: tl_model::settings::NetworkUnit, v: f32) -> String {
+        let mut out = String::new();
+        tl_ui::chart::format_value(tl_ui::chart::ValueFormat::RateNetwork, v, unit, &mut out);
+        out
+    }
+
+    #[gpui_kit::test]
+    fn net_box_two_adapters_sum_peak_total(cx: &mut TestAppContext) {
+        let mut r = open(cx, Vec::new(), Vec::new(), (200., 200.));
+        two_adapters(&mut r);
+        let (_, _, net) = r.boxes();
+        let unit = tl_model::settings::NetworkUnit::default();
+        let (texts, copy) = r.vcx.update(|_, cx| {
+            let n = net.read(cx);
+            let mut copy = String::new();
+            n.copy_text(&mut copy);
+            (n.texts().map(|t| t.to_string()), copy)
+        });
+        // The rates sum the live rates; the peaks come from the series over the last 60 s.
+        assert_eq!(texts[0], rate(unit, 6000.), "download rate");
+        assert_eq!(texts[1], rate(unit, 500.), "upload rate");
+        assert_eq!(
+            texts[2],
+            rate(unit, 8000.),
+            "download peak, 99999 is outside 60 s"
+        );
+        assert_eq!(texts[3], rate(unit, 7000.), "upload peak");
+        assert_eq!(texts[4], "3.00 GiB");
+        assert_eq!(texts[5], "1.50 GiB");
+        assert!(
+            copy.starts_with("Network\twlan0\n"),
+            "wlan0 is the busiest: {copy}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn net_box_formats_like_network_page(cx: &mut TestAppContext) {
+        use tl_model::settings::NetworkUnit;
+        let mut r = open(cx, Vec::new(), Vec::new(), (200., 200.));
+        two_adapters(&mut r);
+        let (_, _, net) = r.boxes();
+        for (unit, key) in [(NetworkUnit::Bytes, "bytes"), (NetworkUnit::Bits, "bits")] {
+            r.vcx.update(|_, cx| {
+                TlSettings::set(cx, SettingKey::UnitsNetwork, SettingValue::Str(key.into()))
+            });
+            draw(r.vcx);
+            let texts = r
+                .vcx
+                .update(|_, cx| net.read(cx).texts().map(|t| t.to_string()));
+            assert_eq!(texts[0], rate(unit, 6000.), "{key} rate");
+            assert_eq!(texts[2], rate(unit, 8000.), "{key} peak");
+            assert_eq!(texts[3], rate(unit, 7000.), "{key} upload peak");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn net_box_ignores_unrelated_series(cx: &mut TestAppContext) {
+        let mut r = open(cx, Vec::new(), Vec::new(), (200., 200.));
+        two_adapters(&mut r);
+        draw(r.vcx);
+        let (_, _, net) = r.boxes();
+        let count = |r: &mut Rig| r.vcx.update(|_, cx| net.read(cx).notify_count.get());
+        let before = count(&mut r);
+        r.version += 1;
+        let version = r.version;
+        let view = Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(100),
+                metric: MetricId::CPU_TOTAL,
+            },
+            version,
+            period_ns: 100_000_000,
+            samples: vec![Sample::valid(now_boot_ns(), 10.)].into(),
+        });
+        r.publish(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: Arc::from([view]),
+                slow: Arc::from([]),
+            });
+        });
+        assert_eq!(
+            count(&mut r),
+            before,
+            "a CPU-only series tick does not notify"
         );
     }
 
