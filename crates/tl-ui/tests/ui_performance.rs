@@ -879,6 +879,7 @@ perf-legend-kernel = <kernel>
         });
     }
 
+    #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn page_menu_tray_item_position(cx: &mut TestAppContext) {
         use tl_ui::components::menu::MenuEntryKind;
