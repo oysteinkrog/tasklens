@@ -1031,9 +1031,14 @@ mod sidebar {
     fn assert_values_inside(r: &mut Rig, what: &str) {
         for key in keys(r) {
             let col = text_column(r, &key);
-            let id = sel(format!("perf-card-row:{key}:value:0"));
-            if let Some(row) = r.vcx.debug_bounds(id) {
-                assert!(inside(row, col), "{what} {key} value: {row:?} in {col:?}");
+            for i in 0..2 {
+                let id = sel(format!("perf-card-row:{key}:value:{i}"));
+                if let Some(row) = r.vcx.debug_bounds(id) {
+                    assert!(
+                        inside(row, col),
+                        "{what} {key} value {i}: {row:?} in {col:?}"
+                    );
+                }
             }
         }
     }
@@ -1075,7 +1080,8 @@ mod sidebar {
     }
 
     /// The widest IEC rate before the unit steps up, "1023.9 KiB/s", fits a network card at the
-    /// least nav_width (180). The text column once kept room only for "999.9 KiB/s".
+    /// least nav_width (180). The text column once kept room only for "999.9 KiB/s". The edit-mode
+    /// card there has an 82 px text column even with no graph, so the value takes 2 rows.
     #[gpui_kit::test]
     fn widest_network_byte_rate_fits_at_nav_width_180(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
@@ -1116,6 +1122,20 @@ mod sidebar {
         let value = prepared(&mut r, "net:eth0").value.expect("value");
         assert_eq!(&*value.text, "1023.9 KiB/s");
         assert_values_inside(&mut r, "nav_width 180, 1023.9 KiB/s");
+
+        enter_edit(&mut r);
+        draw(r.vcx);
+        let col = text_column(&mut r, "net:eth0");
+        assert_eq!(
+            col.size.width,
+            px(82.),
+            "edit card: 180 - 2 × 8 - 52 - 2 × 8 - 2 - 12"
+        );
+        for i in 0..2 {
+            let id = sel(format!("perf-card-row:net:eth0:value:{i}"));
+            assert!(r.vcx.debug_bounds(id).is_some(), "edit value row {i}");
+        }
+        assert_values_inside(&mut r, "edit mode at nav_width 180, 1023.9 KiB/s");
     }
 
     /// A line that gains a row grows its card on the next draw, and the cards below move down.

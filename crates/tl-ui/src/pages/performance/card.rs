@@ -868,6 +868,9 @@ pub struct CardTextLayout {
     pub heading: CardLineLayout,
     /// The value fits after the last heading row. Otherwise it has a row of its own under it.
     pub value_inline: bool,
+    /// The value is wider than the text column even on its own row, as on an edit-mode card at
+    /// nav_width 180: it takes 2 rows, the number on the first and the unit on the second.
+    pub value_split: bool,
     pub line1: CardLineLayout,
     pub line2: CardLineLayout,
 }
@@ -877,6 +880,8 @@ impl CardTextLayout {
     pub fn text_height(&self) -> f32 {
         let value_row = if self.value_inline {
             0.0
+        } else if self.value_split {
+            2.0 * HEADING_LINE_H
         } else {
             HEADING_LINE_H
         };
@@ -921,8 +926,8 @@ pub fn card_text_width(card_w: Pixels, graph_w: Pixels, m: &UiMetrics) -> Pixels
 /// Lays out the card text in a column `text_w` wide (UI-PRF-011). Each line wraps at spaces to
 /// at most 2 rows, and what does not fit row 2 is cut in the middle ([`middle_ellipsis`]). A
 /// line whose first word does not fit is cut in the middle on one row. The value goes `gap`
-/// after the last heading row when `value_w` fits there, else on a row of its own; a value is
-/// never cut. `measure` returns the width of a string in a card font; `lock_w` is the width of
+/// after the last heading row when `value_w` fits there, else on a row of its own, and on 2 rows
+/// (number, then unit) when it is wider than `text_w`; a value is never cut. `measure` returns the width of a string in a card font; `lock_w` is the width of
 /// one lock icon.
 pub fn card_text_layout(
     lines: &CardLines,
@@ -944,6 +949,7 @@ pub fn card_text_layout(
         measure(CardFont::Heading, &row.text) + lock_w * row.locks.len() as f32
     });
     let value_inline = value_w == Pixels::ZERO || last_w + gap + value_w <= text_w;
+    let value_split = !value_inline && value_w > text_w;
     let line1 = wrap_line(
         &lines.line1,
         &lines.line1_locks,
@@ -963,6 +969,7 @@ pub fn card_text_layout(
     CardTextLayout {
         heading,
         value_inline,
+        value_split,
         line1,
         line2,
     }
@@ -1590,12 +1597,10 @@ impl RenderOnce for DeviceCard {
         let lines = self.lines;
         let key = self.key;
 
-        let mut value = value.map(|v| value_element(&v, &key, &m, &theme));
-        let inline = if layout.value_inline {
-            value.take()
-        } else {
-            None
-        };
+        let inline = value
+            .as_ref()
+            .filter(|_| layout.value_inline)
+            .map(|v| value_element(v, v.text.clone(), 0, &key, &m, &theme));
         let text_key = key.0.clone();
         let mut text = div()
             .debug_selector(move || format!("perf-card-text:{text_key}"))
@@ -1621,16 +1626,28 @@ impl RenderOnce for DeviceCard {
                 inline,
                 &m,
             ));
-        if let Some(value) = value {
-            text = text.child(
-                div()
-                    .debug_selector(|| "perf-card-value-row".into())
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .h(px(HEADING_LINE_H * s))
-                    .child(value),
-            );
+        if let Some(v) = value.as_ref().filter(|_| !layout.value_inline) {
+            // Split at the last space: the number on the first row, the unit on the second. A
+            // text with no space (a glyph word, the lock) stays on the first row.
+            let parts = match v.text.rsplit_once(' ').filter(|_| layout.value_split) {
+                Some((number, unit)) => [
+                    Some(SharedString::from(number.to_owned())),
+                    Some(SharedString::from(unit.to_owned())),
+                ],
+                None => [Some(v.text.clone()), None],
+            };
+            let rows = if layout.value_split { 2 } else { 1 };
+            for (i, part) in parts.into_iter().take(rows).enumerate() {
+                text = text.child(
+                    div()
+                        .debug_selector(|| "perf-card-value-row".into())
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .h(px(HEADING_LINE_H * s))
+                        .children(part.map(|t| value_element(v, t, i, &key, &m, &theme))),
+                );
+            }
         }
         text = text
             .child(line_rows(
@@ -1815,11 +1832,19 @@ fn line_rows(
     col.into_any_element()
 }
 
-/// The value: tabular `t_md` 400 in its validity colour, or the lock icon when Restricted.
-fn value_element(v: &CardValue, key: &DeviceKey, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+/// Value row `row` showing `text`, all or part of `v`: tabular `t_md` 400 in its validity
+/// colour, or the lock icon when Restricted.
+fn value_element(
+    v: &CardValue,
+    text: SharedString,
+    row: usize,
+    key: &DeviceKey,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
     let value_key = key.0.clone();
     let mut el = div()
-        .debug_selector(move || format!("perf-card-row:{value_key}:value:0"))
+        .debug_selector(move || format!("perf-card-row:{value_key}:value:{row}"))
         .flex()
         .flex_none()
         .items_center();
@@ -1832,7 +1857,7 @@ fn value_element(v: &CardValue, key: &DeviceKey, m: &UiMetrics, theme: &TlTheme)
     *el.text_style() = numeric_style(m, CardFont::Value.size(m));
     el.whitespace_nowrap()
         .text_color(v.color(theme))
-        .child(v.text.clone())
+        .child(text)
         .into_any_element()
 }
 
@@ -2727,6 +2752,21 @@ mod tests {
         assert_eq!(rows(&l.line2), ["dddd eeee", "ffff"]);
         assert_eq!(l.text_height(), 118.);
         assert_eq!(l.card_height(1.0), px(128.));
+    }
+
+    #[test]
+    fn card_text_layout_splits_a_value_wider_than_the_column() {
+        // "1023.9 KiB/s" is 12 wide; the column is 10.
+        let lines = card_text("eth0", "Ethernet", "R: 0 B/s");
+        let l = layout(&lines, 12., 10.);
+        assert!(!l.value_inline && l.value_split);
+        // 18 + 2 × 18 + 2 × 16.
+        assert_eq!(l.text_height(), 86.);
+        assert_eq!(l.card_height(1.0), px(96.));
+        // A value that fits its own row keeps one row.
+        let l = layout(&lines, 10., 10.);
+        assert!(!l.value_inline && !l.value_split);
+        assert_eq!(l.text_height(), 68.);
     }
 
     #[test]
