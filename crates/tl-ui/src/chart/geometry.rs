@@ -1142,8 +1142,9 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
             });
         }
 
-        // Flat continuation of a stale series to the right edge (UI-PRF-007).
-        if let Some(last_run) = runs.last() {
+        // Flat continuation of a stale series to the right edge (UI-PRF-007). Only when the
+        // series ends on a valid sample: newer gap samples are a gap, not a stale tail.
+        if let Some(last_run) = runs.last().filter(|r| r.end == samples.len()) {
             let newest = samples[last_run.end - 1];
             if is_stale(newest.t_ns, input.now_boot_ns, period) && map.right_edge_ns > newest.t_ns {
                 stale_pts.clear();
@@ -1174,9 +1175,10 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
     cache.y_max = input.y_max;
 }
 
-/// Dotted-gap spans of one series: between consecutive runs, and from the window's left edge to
-/// the first run when that run starts more than 2 periods in. The stale tail reaches the right
-/// edge, so a stale series adds no span on the right.
+/// Dotted-gap spans of one series: between consecutive runs, from the window's left edge to the
+/// first run when that run starts more than 2 periods in, and from the last run to the newest
+/// sample when gap samples follow it. The stale tail reaches the right edge, so a series that
+/// ends on a valid sample adds no span on the right.
 fn push_gaps(
     samples: &[Sample],
     runs: &[Run],
@@ -1196,6 +1198,12 @@ fn push_gaps(
         let a = samples[w[0].end - 1].t_ns;
         let b = samples[w[1].start].t_ns;
         gaps.push(map.x_local(a)..map.x_local(b));
+    }
+    if let (Some(last), Some(newest)) = (runs.last(), samples.last())
+        && last.end < samples.len()
+    {
+        let a = samples[last.end - 1].t_ns;
+        gaps.push(map.x_local(a)..map.x_local(newest.t_ns));
     }
 }
 
@@ -1294,8 +1302,9 @@ pub fn build_cell(
             });
         }
 
-        // Flat continuation of a stale series to the right edge (UI-PRF-007).
-        if let Some(last_run) = runs.last() {
+        // Flat continuation of a stale series to the right edge (UI-PRF-007). Only when the
+        // series ends on a valid sample: newer gap samples are a gap, not a stale tail.
+        if let Some(last_run) = runs.last().filter(|r| r.end == samples.len()) {
             let newest = samples[last_run.end - 1];
             if is_stale(newest.t_ns, input.now_boot_ns, period) && map.right_edge_ns > newest.t_ns {
                 stale_pts.clear();
