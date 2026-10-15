@@ -18,6 +18,7 @@
 //! `HistoryUiState::selected` in selection order.
 
 pub mod actions;
+pub mod hover;
 pub mod scrubber;
 pub mod table;
 
@@ -441,6 +442,12 @@ pub struct HistoryPage {
     strip_view: Option<Entity<StripView>>,
     /// Focus of the strip: the History key context is reached through it (E30-018).
     strip_focus: FocusHandle,
+    /// The top-3 hover card's TopAt queries and timers (E30-023).
+    top: hover::TopController,
+    /// The hover card's texts and shaped lines.
+    card: hover::CardCache,
+    /// Counts installed views other than TopAt answers. The strip rebuilds when it changes.
+    frame_version: u64,
     /// Created in `new`, never in render.
     _subs: SmallVec<[Subscription; 5]>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -482,9 +489,21 @@ impl HistoryPage {
         subs.push(cx.subscribe(&hub, |this, _, ev: &SnapshotChanged, cx| {
             if ev.mask.contains(ComponentMask::HISTORY) {
                 let history = Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().history);
+                // A TopAt answer changes only `top`: the card repaints, nothing else.
+                if this
+                    .view
+                    .as_ref()
+                    .is_some_and(|old| hover::top_only(old, &history))
+                {
+                    this.view = Some(Arc::clone(&history));
+                    this.on_top_view(&history, cx);
+                    return;
+                }
+                this.frame_version += 1;
                 this.install(Arc::clone(&history));
                 this.install_table(cx);
                 this.drive(cx, |q, c| q.on_view(&history, c));
+                this.on_top_view(&history, cx);
                 cx.notify();
             }
         }));
@@ -552,6 +571,9 @@ impl HistoryPage {
             scrubber: ScrubberCache::default(),
             strip_view: None,
             strip_focus: cx.focus_handle().tab_stop(true),
+            top: hover::TopController::default(),
+            card: hover::CardCache::default(),
+            frame_version: 0,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),

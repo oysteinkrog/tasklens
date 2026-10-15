@@ -32,6 +32,7 @@ use tl_model::history::{HistoryMetric, HistoryView};
 use tl_model::time::TimeNs;
 
 use super::actions::{HistoryLive, HistoryScrub, HistorySetRange};
+use super::hover;
 use super::{HistoryPage, HistoryUiState, MAX_SERIES};
 use crate::chart::GridStyle;
 use crate::chart::geometry::TimeMap;
@@ -393,7 +394,7 @@ impl Element for HistoryScrubber {
         (window.request_layout(style, [], cx), ())
     }
 
-    /// One hitbox over the whole strip.
+    /// One hitbox over the whole strip, and the hover card deferred above the page.
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -401,8 +402,9 @@ impl Element for HistoryScrubber {
         bounds: Bounds<Pixels>,
         _: &mut (),
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> Hitbox {
+        hover::defer_card(&self.page, bounds, window, cx);
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
@@ -443,6 +445,7 @@ impl Element for HistoryScrubber {
                 words,
                 strings_version,
                 scrubber,
+                frame_version,
                 ..
             } = page;
             let input = Input {
@@ -451,6 +454,7 @@ impl Element for HistoryScrubber {
                 state,
                 now_word: &words.now,
                 strings_version: *strings_version,
+                frame_version: *frame_version,
             };
             paint_strip(scrubber, &input, &env, bounds, window, cx);
         });
@@ -540,6 +544,7 @@ fn on_mouse_down(
                     }
                 });
                 p.scrubber.hover_x = None;
+                p.top_clear();
                 if let Some(fixed) = bound {
                     p.scrubber.drag = Some(Drag::Bound { fixed });
                 } else if e.modifiers.shift {
@@ -555,6 +560,7 @@ fn on_mouse_down(
         MouseButton::Middle => page.update(cx, |p, cx| {
             if view_and_span(p).is_some() {
                 p.scrubber.hover_x = None;
+                p.top_clear();
                 p.scrubber.drag = Some(Drag::Pan { last_x: x });
                 cx.notify();
             }
@@ -572,12 +578,22 @@ fn on_mouse_move(
 ) {
     let hovered = geo.hitbox.is_hovered(window);
     let hover = hovered.then(|| e.position.x - geo.plot.left());
-    let hover_moved = page.update(cx, |p, _| {
+    let hover_moved = page.update(cx, |p, cx| {
         if p.scrubber.drag.is_some() {
             return None;
         }
         let changed = p.scrubber.hover_x != hover;
         p.scrubber.hover_x = hover;
+        if changed {
+            // The hover card follows the hovered second (E30-023).
+            match hover.zip(view_and_span(p)) {
+                Some((hx, (view, span))) => {
+                    let t = snap_s(x_to_t(f32::from(hx), geo.width(), view), span);
+                    p.top_hover(t, cx);
+                }
+                None => p.top_clear(),
+            }
+        }
         Some(changed)
     });
     match (hover_moved, geo.strip) {
@@ -651,6 +667,7 @@ fn on_scroll(
             zoom(view, x_to_t(x, width, view), notches, span)
         };
         p.scrubber.hover_x = None;
+        p.top_clear();
         p.set_view_range(next, cx);
         cx.notify();
     });
@@ -704,6 +721,8 @@ struct Input<'a> {
     state: &'a HistoryUiState,
     now_word: &'a SharedString,
     strings_version: u64,
+    /// The page's count of installed views; a TopAt answer does not change it.
+    frame_version: u64,
 }
 
 impl Input<'_> {
@@ -771,7 +790,7 @@ fn paint_strip(
     }
 
     let key = GeometryKey {
-        version: input.view.map_or(0, |v| v.header.version),
+        version: input.frame_version,
         query_id: input.view.map_or(0, |v| v.query_id),
         physical_width: pw,
         physical_height: ph,

@@ -2,7 +2,8 @@
 //! query controller with one Frame query in flight (tasklens-8fx.20), and the History table
 //! (tasklens-8fx.22), and queries on strip window, metric and selection changes
 //! (tasklens-8fx.38), and the timeline strip's cached geometry and gap bands (tasklens-8fx.24), and
-//! the filter text typed before the page existed (tasklens-8fx.39).
+//! the filter text typed before the page existed (tasklens-8fx.39), and the top-3 hover card
+//! (tasklens-8fx.26).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -18,7 +19,7 @@ use tl_model::command::{Command, HistoryWhat};
 use tl_model::details::DetailsSnapshot;
 use tl_model::history::{
     HistoryMetric, HistoryPeaks, HistoryPoint, HistoryProcessRow, HistoryRange, HistorySeries,
-    HistoryStackBucket, HistoryStoreState, HistoryTotals, HistoryView,
+    HistoryStackBucket, HistoryStoreState, HistoryTop, HistoryTopRow, HistoryTotals, HistoryView,
 };
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::{AppearanceSettings, Settings, SortState, ThemeSettings, UiState};
@@ -1671,4 +1672,274 @@ fn page_dropped_when_its_host_lets_go(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     // The strip view holds the page weakly, so nothing keeps the page alive.
     assert!(weak.upgrade().is_none());
+}
+
+/// Hover card (tasklens-8fx.26): a page whose view spans 100..1000 s, so the strip shows
+/// 400..1000 s.
+fn hover_page(
+    cx: &mut TestAppContext,
+) -> (Arc<FakeEngine>, Entity<HistoryPage>, &mut VisualTestContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let v = HistoryView {
+        header: ComponentHeader {
+            version: 1,
+            ..ComponentHeader::default()
+        },
+        span: Some((100 * S, 1000 * S)),
+        frame_t: Some(1000 * S),
+        store_state: HistoryStoreState::Ready,
+        ..HistoryView::default()
+    };
+    publish_view(&engine, vcx, v);
+    draw(vcx);
+    (engine, page, vcx)
+}
+
+/// The `(id, t, metric)` of every TopAt query sent.
+fn top_queries(engine: &FakeEngine) -> Vec<(u64, TimeNs, HistoryMetric)> {
+    queries(engine)
+        .into_iter()
+        .filter_map(|(id, range, what)| match what {
+            HistoryWhat::TopAt { t, metric, n } => {
+                assert_eq!((range, n), (HistoryRange::At(t), 3));
+                Some((id, t, metric))
+            }
+            HistoryWhat::Frame { .. } => None,
+        })
+        .collect()
+}
+
+/// Answers TopAt query `id` as the engine does: the current view again with `top` set.
+fn answer_top(
+    engine: &FakeEngine,
+    vcx: &mut VisualTestContext,
+    (id, t, metric): (u64, TimeNs, HistoryMetric),
+    values: &[f32],
+) {
+    engine.publish_with(|s| {
+        let mut v = (*s.history).clone();
+        v.header.version += 1;
+        v.top = Some(Arc::new(HistoryTop {
+            query_id: id,
+            t_ns: t,
+            metric,
+            cpu_total_pct: 25.0,
+            mem_total_bytes: 16 << 30,
+            rows: values
+                .iter()
+                .enumerate()
+                .map(|(i, &value)| HistoryTopRow {
+                    key: key(10 + i as u32),
+                    name: Arc::from(format!("p{i}").as_str()),
+                    app_id: None,
+                    value,
+                })
+                .collect(),
+        }));
+        s.history = Arc::new(v);
+    });
+    vcx.run_until_parked();
+}
+
+/// Moves the pointer onto the plot at `frac` of its width and paints.
+fn hover_to(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext, frac: f32) {
+    let p = at(plot(page, vcx), frac);
+    vcx.simulate_mouse_move(p, None, gpui_kit::Modifiers::none());
+    settle(vcx);
+}
+
+/// Value text, rank and name of each card row.
+fn card_rows(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) -> Vec<(String, String)> {
+    vcx.read_entity(page, |p, _| {
+        let t = p.card().texts();
+        t.rows
+            .iter()
+            .map(|r| (format!("{} {}", r.rank, r.name), r.value.clone()))
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn top3_card_formats_per_metric(cx: &mut TestAppContext) {
+    use tl_model::units::NetUnit;
+    use tl_ui::pages::processes::history::hover::{TopWords, value_text};
+
+    let (engine, page, vcx) = hover_page(cx);
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    let sent = top_queries(&engine);
+    assert_eq!(sent.len(), 1);
+    // View 400..1000 s: the middle is 700 s.
+    assert_eq!((sent[0].1, sent[0].2), (700 * S, HistoryMetric::Cpu));
+    answer_top(&engine, vcx, sent[0], &[12.3, 6.1, 2.0]);
+    settle(vcx);
+    assert_eq!(
+        card_rows(&page, vcx),
+        [
+            ("1 p0 (10)".to_owned(), "CPU: 12.3%".to_owned()),
+            ("2 p1 (11)".to_owned(), "CPU: 6.1%".to_owned()),
+            ("3 p2 (12)".to_owned(), "CPU: 2.0%".to_owned()),
+        ]
+    );
+    vcx.read_entity(&page, |p, _| {
+        let t = p.card().texts();
+        assert_eq!(t.total, "CPU total 25.0%");
+        assert_eq!(t.time.len(), 8, "HH:MM:SS: {}", t.time);
+        // 700 s is 5 min before the newest second, 1000 s.
+        assert_eq!(t.offset, "  (-5m 0s)");
+        assert!(p.card().painted.is_some());
+    });
+
+    let w = TopWords::default();
+    let text = |metric, value: f32, net| {
+        let mut out = String::new();
+        value_text(&w, &mut out, metric, value, 67_320_000_000, net);
+        out
+    };
+    let bits = (NetUnit::Bits, false);
+    assert_eq!(
+        text(HistoryMetric::Memory, 1_310_000_000.0, bits),
+        "Memory: 1.22 / 62.70 GiB"
+    );
+    assert_eq!(
+        text(HistoryMetric::Network, 1_500_000.0, bits),
+        "Network: 12.0 Mbps"
+    );
+    assert_eq!(
+        text(HistoryMetric::Network, 1_500_000.0, (NetUnit::Bits, true)),
+        "Network: 12.0 Mbps"
+    );
+    assert_eq!(
+        text(HistoryMetric::Disk, 4.2 * 1_048_576.0, bits),
+        "Disk: 4.2 MiB/s"
+    );
+    assert_eq!(text(HistoryMetric::Gpu, 41.0, bits), "GPU: 41.0%");
+}
+
+#[gpui_kit::test]
+fn top3_query_debounced_and_coalesced(cx: &mut TestAppContext) {
+    let (engine, page, vcx) = hover_page(cx);
+    // 10 moves 10 ms apart, each to a new second.
+    for i in 0..10 {
+        if i > 0 {
+            advance(vcx, Duration::from_millis(10));
+        }
+        hover_to(&page, vcx, 0.1 + 0.05 * i as f32);
+    }
+    advance(vcx, Duration::from_millis(31));
+    assert!(top_queries(&engine).is_empty(), "nothing before 32 ms");
+    advance(vcx, Duration::from_millis(1));
+    let sent = top_queries(&engine);
+    assert_eq!(sent.len(), 1, "exactly one query 32 ms after the last move");
+    // The last move is at 55%: 730 s.
+    assert_eq!(sent[0].1, 730 * S);
+    assert!(sent[0].0 >= 1 << 48, "TopAt ids never meet Frame ids");
+
+    // While it is in flight, newer seconds wait, and the newest replaces the older.
+    hover_to(&page, vcx, 0.8);
+    advance(vcx, Duration::from_millis(32));
+    hover_to(&page, vcx, 0.9);
+    advance(vcx, Duration::from_millis(32));
+    assert_eq!(top_queries(&engine).len(), 1);
+    let pending = vcx.read_entity(&page, |p, _| p.top().pending());
+    assert_eq!(pending, Some((940 * S, HistoryMetric::Cpu)));
+    answer_top(&engine, vcx, sent[0], &[1.0]);
+    let sent = top_queries(&engine);
+    assert_eq!(sent.len(), 2, "the pending query goes out after the answer");
+    assert_eq!(sent[1].1, 940 * S);
+    assert_eq!(
+        vcx.read_entity(&page, |p, _| p.top().in_flight()),
+        Some(sent[1].0)
+    );
+}
+
+#[gpui_kit::test]
+fn top3_card_flips_at_right_edge(cx: &mut TestAppContext) {
+    use gpui_kit::{Bounds, point, px, size};
+    use tl_ui::pages::processes::history::hover::card_origin;
+
+    let strip = Bounds::new(point(px(20.), px(50.)), size(px(1000.), px(120.)));
+    assert_eq!(card_origin(px(500.), strip, 1.0), point(px(512.), px(58.)));
+    assert_eq!(card_origin(px(920.), strip, 1.0), point(px(648.), px(58.)));
+
+    let (engine, page, vcx) = hover_page(cx);
+    let plot = plot(&page, vcx);
+    let scale = vcx.update(|_, cx| cx.global::<tl_ui::theme::UiMetrics>().ui_scale);
+    let card_at = |vcx: &mut VisualTestContext, hx: gpui_kit::Pixels| {
+        vcx.simulate_mouse_move(
+            point(plot.left() + hx, plot.top() + px(10.)),
+            None,
+            gpui_kit::Modifiers::none(),
+        );
+        settle(vcx);
+        advance(vcx, Duration::from_millis(32));
+        if let Some(q) = top_queries(&engine).last().copied() {
+            answer_top(&engine, vcx, q, &[5.0, 4.0]);
+        }
+        settle(vcx);
+        vcx.read_entity(&page, |p, _| p.card().painted.expect("the card is shown"))
+    };
+    // The hairline 100 px from the right edge: the card sits left of it.
+    let hx = plot.size.width - px(100.);
+    let card = card_at(vcx, hx);
+    let expect = plot.left() + hx - px(272. * scale);
+    assert!((f32::from(card.origin.x - expect)).abs() < 0.5, "{card:?}");
+    assert!((f32::from(card.origin.y - plot.top()) - 8. * scale).abs() < 0.5);
+    assert!((f32::from(card.size.width) - 260. * scale).abs() < 0.5);
+    // Far from the edge: 12 px right of the hairline.
+    let card = card_at(vcx, px(100.));
+    let expect = plot.left() + px(100. + 12. * scale);
+    assert!((f32::from(card.origin.x - expect)).abs() < 0.5, "{card:?}");
+}
+
+#[gpui_kit::test]
+fn top3_stale_rows_after_150ms(cx: &mut TestAppContext) {
+    let (engine, page, vcx) = hover_page(cx);
+    hover_to(&page, vcx, 0.3);
+    advance(vcx, Duration::from_millis(32));
+    let sent = top_queries(&engine);
+    answer_top(&engine, vcx, sent[0], &[12.3, 6.1, 2.0]);
+    settle(vcx);
+    let answered = card_rows(&page, vcx);
+    assert_eq!(answered[0].1, "CPU: 12.3%");
+
+    // A new second with no answer: the previous card stays for 149 ms.
+    hover_to(&page, vcx, 0.6);
+    advance(vcx, Duration::from_millis(149));
+    settle(vcx);
+    assert_eq!(card_rows(&page, vcx), answered);
+    assert!(!vcx.read_entity(&page, |p, _| p.top().stale()));
+
+    advance(vcx, Duration::from_millis(1));
+    settle(vcx);
+    let ellipsis = (" …".to_owned(), String::new());
+    assert_eq!(card_rows(&page, vcx), vec![ellipsis; 3]);
+    vcx.read_entity(&page, |p, _| {
+        assert!(p.top().stale());
+        assert_eq!(p.card().texts().total, "CPU total …");
+        assert!(p.card().painted.is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn top_answer_skips_rebuild(cx: &mut TestAppContext) {
+    let (engine, page, vcx) = hover_page(cx);
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    settle(vcx);
+    let before = (
+        builds(&page, vcx),
+        vcx.read_entity(&page, |p, _| p.render_count.get()),
+    );
+    let sent = top_queries(&engine);
+    answer_top(&engine, vcx, sent[0], &[3.0]);
+    settle(vcx);
+    let after = (
+        builds(&page, vcx),
+        vcx.read_entity(&page, |p, _| p.render_count.get()),
+    );
+    assert_eq!(after, before, "no strip rebuild and no page render");
+    assert_eq!(card_rows(&page, vcx).len(), 1, "the card shows the answer");
 }

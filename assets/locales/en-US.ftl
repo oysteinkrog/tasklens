@@ -1367,6 +1367,14 @@ shell-menu-file-run = Run...
 # History timeline scrubber (E30-021)
 history-scrubber-now = now
 
+# History top-3 hover card (E30-023)
+history-top-cpu-total = CPU total { $value }
+history-top-cpu = CPU: { $value }
+history-top-memory = Memory: { $used } / { $total }
+history-top-disk = Disk: { $value }
+history-top-network = Network: { $value }
+history-top-gpu = GPU: { $value }
+
 # Information rows: Operating System, Processor, System, BIOS/Firmware, Motherboard (E28-031)
 information-os-name = OS name
 information-os-version = Version
