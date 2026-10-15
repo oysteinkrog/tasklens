@@ -13,7 +13,8 @@ use std::cell::Cell;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use gpui_kit::component::{ScrollbarHandle, v_flex};
+use gpui_kit::base::ScrollbarHandle;
+use gpui_kit::component::v_flex;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyView, AnyWindowHandle, App, AppContext as _,
     AsyncApp, Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight, Hsla,
