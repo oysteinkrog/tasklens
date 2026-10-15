@@ -129,6 +129,9 @@ type CopiedHandler = Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
 type SectionHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 type MenuHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
 type LinkHandler = Rc<dyn Fn(usize, Bounds<Pixels>, &mut Window, &mut App)>;
+/// Builds the element drawn before the text of a plain value, by flat row index, with its width.
+/// `None` draws no prefix for that row.
+pub type ValuePrefix = Rc<dyn Fn(usize, &mut Window, &mut App) -> Option<(Pixels, AnyElement)>>;
 type RowHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// Binds Ctrl+C inside the grid, so a text selection is copied before the page's Copy binding
@@ -611,6 +614,7 @@ pub struct TlKeyValueGrid {
     on_value_mouse_down: Option<RowHandler>,
     link_tab_stop: bool,
     link_focus: Rc<[(usize, FocusHandle)]>,
+    value_prefix: Option<ValuePrefix>,
     cursor: Option<usize>,
     filtered_empty: bool,
     loading: bool,
@@ -640,6 +644,7 @@ impl TlKeyValueGrid {
             on_value_mouse_down: None,
             link_tab_stop: true,
             link_focus: Rc::from(Vec::new()),
+            value_prefix: None,
             cursor: None,
             filtered_empty: false,
             loading: false,
@@ -782,6 +787,16 @@ impl TlKeyValueGrid {
     /// [`TlKeyValueGrid::copy_texts`], so the owner can name that link in its focus order.
     pub fn link_focus(mut self, handles: Rc<[(usize, FocusHandle)]>) -> Self {
         self.link_focus = handles;
+        self
+    }
+
+    /// An element drawn before the text of a plain (non-link) value, built per flat row index.
+    /// It takes its width from the value's room, so the text is cut earlier.
+    pub fn value_prefix(
+        mut self,
+        prefix: impl Fn(usize, &mut Window, &mut App) -> Option<(Pixels, AnyElement)> + 'static,
+    ) -> Self {
+        self.value_prefix = Some(Rc::new(prefix));
         self
     }
 
@@ -934,6 +949,15 @@ impl TlKeyValueGrid {
             } else {
                 debug_assert_clean(&look.text);
                 let mut shown = look.text.clone();
+                let mut available = available;
+                if let Some((width, element)) = self
+                    .value_prefix
+                    .clone()
+                    .and_then(|build| build(n, window, cx))
+                {
+                    available = available.map(|a| (a - width).max(px(0.)));
+                    cell = cell.child(element);
+                }
                 if let Some(available) = available {
                     let (width, cut) =
                         measure(&look.text, row.value.path, available, m, window, cx);
@@ -2071,6 +2095,32 @@ mod tests {
         cx.update(|window, cx| window.focus_next(cx));
         let focused = cx.update(|window, _| focus.is_focused(window));
         assert!(focused, "Tab reaches the link through the owner's handle");
+    }
+
+    #[gpui_kit::test]
+    fn value_prefix_draws_before_text(cx: &mut TestAppContext) {
+        let (cx, _, _) = host(cx, || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline)
+                .sections(&[section(vec![
+                    row("PID:", TlValue::new("1")),
+                    row("Signal:", TlValue::new("-52 dBm")),
+                ])])
+                .value_prefix(|n, _, _| {
+                    (n == 1).then(|| {
+                        let icon = div()
+                            .debug_selector(|| "TlKv-prefix".into())
+                            .w(px(16.))
+                            .h(px(16.))
+                            .into_any_element();
+                        (px(16.), icon)
+                    })
+                })
+        });
+        let prefix = bounds(cx, "TlKv-prefix").expect("prefix drawn");
+        let value = bounds(cx, "TlKv-value-1").expect("value drawn");
+        assert!(prefix.left() >= value.left(), "inside the value cell");
+        assert!(prefix.size.width == px(16.));
+        assert!(bounds(cx, "TlKv-value-0").is_some());
     }
 
     /// The link clicks an owner handler saw: row index and value bounds.

@@ -13,21 +13,25 @@
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
+use std::fmt::{self, Write as _};
+use std::net::Ipv6Addr;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, EntityId,
     FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, div, point, px,
+    Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, canvas, div, fill,
+    point, px, size,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
+use tl_model::devices::{DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
-use tl_model::snapshot::Snapshot;
-use tl_model::system::{Metric, NetTotals};
+use tl_model::snapshot::{InvField, NetDetails, Snapshot, WifiInfo};
+use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
@@ -35,7 +39,8 @@ use tl_model::validity::Validity;
 use super::actions::NoOp;
 use super::details::{Fallback, KeyValueModel};
 use super::page::{
-    DetailsLinkClick, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text, page_words,
+    DetailsLinkClick, DetailsValuePrefix, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text,
+    page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
 use crate::actions::SetSetting;
@@ -278,7 +283,8 @@ const TAIL_ROWS: [&str; 8] = [
     ROW_PUBLIC_IP,
 ];
 
-/// The rows this page fills in P1; E25-020 and E25-021 fill the rest.
+/// The rows [`update_net_details_p1`] fills. [`update_net_details_p2`] shows the rest except
+/// Public IP, which E25-021 fills.
 const P1_ROWS: [&str; 5] = [
     ROW_DOWNLOAD,
     ROW_UPLOAD,
@@ -297,7 +303,8 @@ pub const KEY_UNIT_BITS: &str = "perf-net-unit-bits";
 pub const KEY_UNIT_BYTES: &str = "perf-net-unit-bytes";
 
 /// The Network Details model: the PERF-056 rows in order, the Wi-Fi rows only when `wifi`. All
-/// but the P1 rows stay hidden until E25-020 and E25-021.
+/// but the P1 rows stay hidden until [`update_net_details_p2`] shows them; Public IP stays
+/// hidden until E25-021.
 pub fn net_details_model(wifi: bool) -> KeyValueModel {
     let mut labels: SmallVec<[&'static str; 22]> = SmallVec::new();
     labels.extend_from_slice(&HEAD_ROWS);
@@ -311,7 +318,20 @@ pub fn net_details_model(wifi: bool) -> KeyValueModel {
         (KEY_UNIT_BITS_AUTO, &[]),
         (KEY_UNIT_BYTES_AUTO, &[]),
         (KEY_UNIT_TOOLTIP, &[]),
+        (KEY_UNKNOWN_ADAPTER, &[]),
+        (KEY_LINK_SPEED, &["mbps"]),
+        (KEY_LINK_SPEED_WIFI, &["rx", "tx"]),
+        (KEY_SIGNAL, &["dbm", "pct"]),
+        (KEY_SIGNAL_PCT, &["pct"]),
+        (KEY_FREQUENCY, &["mhz", "ch"]),
+        (KEY_LINK_LOCAL, &["addrs"]),
     ]);
+    for (_, key) in TYPE_KEYS {
+        model = model.with_texts(&[(key, &[])]);
+    }
+    for (_, key) in STATE_KEYS {
+        model = model.with_texts(&[(key, &[])]);
+    }
     for label in labels {
         if !P1_ROWS.contains(&label) {
             model.hide(label);
@@ -319,6 +339,38 @@ pub fn net_details_model(wifi: bool) -> KeyValueModel {
     }
     model
 }
+
+const KEY_UNKNOWN_ADAPTER: &str = "perf-unknown-adapter";
+const KEY_LINK_SPEED: &str = "perf-net-link-speed-value";
+const KEY_LINK_SPEED_WIFI: &str = "perf-net-link-speed-wifi";
+const KEY_SIGNAL: &str = "perf-net-signal-value";
+const KEY_SIGNAL_PCT: &str = "perf-net-signal-pct";
+const KEY_FREQUENCY: &str = "perf-net-frequency-value";
+const KEY_LINK_LOCAL: &str = "perf-net-link-local";
+
+/// The PERF-054 connection type words by the engine's `type_label`.
+const TYPE_KEYS: [(&str, &str); 9] = [
+    ("Ethernet", "perf-net-type-ethernet"),
+    ("Wi-Fi", "perf-net-type-wifi"),
+    ("Virtual", "perf-net-type-virtual"),
+    ("USB network", "perf-net-type-usb"),
+    ("Bridge", "perf-net-type-bridge"),
+    ("Cellular", "perf-net-type-cellular"),
+    ("Tunnel", "perf-net-type-tunnel"),
+    ("VPN", "perf-net-type-vpn"),
+    ("Other", "perf-net-type-other"),
+];
+
+/// The PERF-054 connection status words by link state.
+const STATE_KEYS: [(LinkState, &str); 7] = [
+    (LinkState::Up, "perf-net-state-connected"),
+    (LinkState::Down, "perf-net-state-disconnected"),
+    (LinkState::Testing, "perf-net-state-testing"),
+    (LinkState::Dormant, "perf-net-state-dormant"),
+    (LinkState::NotPresent, "perf-net-state-not-present"),
+    (LinkState::LowerLayerDown, "perf-net-state-lower-layer-down"),
+    (LinkState::Unknown, "perf-net-state-unknown"),
+];
 
 /// The key of the Display unit value for `unit` and `auto_scale`: `Mbps`, `MiB/s`,
 /// `bits/s, auto` or `bytes/s, auto`.
@@ -424,6 +476,354 @@ fn sync_display_unit(model: &mut KeyValueModel, unit: NetworkUnit, auto_scale: b
     changed
 }
 
+/// What the P2 rows are read from.
+#[derive(Clone, Copy, Default)]
+pub struct NetP2Inputs<'a> {
+    /// The interface's record in `Snapshot.device_details`; `None` before the first read.
+    pub details: Option<&'a NetDetails>,
+    /// The interface's record in `Snapshot.system` (1 Hz): state and link speed.
+    pub totals: Option<&'a NetTotals>,
+    /// The interface name from the device catalog (`enp38s0`).
+    pub iface: Option<&'a str>,
+}
+
+/// Hides or shows `label`. True when that changed.
+fn set_hidden(model: &mut KeyValueModel, label: &'static str, hidden: bool) -> bool {
+    let was = model
+        .rows
+        .iter()
+        .find(|r| r.label == label)
+        .map(|r| r.hidden);
+    if was == Some(hidden) {
+        return false;
+    }
+    if hidden {
+        model.hide(label);
+    } else {
+        model.show(label);
+    }
+    true
+}
+
+/// The row's tooltip. True when it changed.
+fn set_row_tooltip(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    tip: Option<SharedString>,
+) -> bool {
+    let same = model
+        .rows
+        .iter()
+        .find(|r| r.label == label)
+        .is_some_and(|r| r.tooltip == tip);
+    if same {
+        return false;
+    }
+    model.set_tooltip(label, tip);
+    true
+}
+
+/// A text row from an inventory string: Valid and non-empty shows the text, Unsupported and an
+/// empty value read "Not reported", anything else "Unavailable".
+fn field_row(model: &mut KeyValueModel, label: &'static str, f: &InvField<Arc<str>>) -> bool {
+    match f.validity {
+        Validity::Valid | Validity::Stale if !f.value.is_empty() => model.set_text(label, &f.value),
+        Validity::Valid | Validity::Stale | Validity::Unsupported => {
+            model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None)
+        }
+        Validity::Missing => {
+            model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None)
+        }
+        v => model.set_fallback(label, v, Fallback::Unavailable, None),
+    }
+}
+
+/// "Not reported" for a value the source does not give.
+fn not_reported(model: &mut KeyValueModel, label: &'static str) -> bool {
+    model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None)
+}
+
+/// The Connection type word key: the engine's PERF-054 label, else the class word of `kind`.
+fn type_key(label: &str, kind: NetKind) -> &'static str {
+    if let Some((_, key)) = TYPE_KEYS.iter().find(|(l, _)| *l == label) {
+        return key;
+    }
+    match kind {
+        NetKind::Wired => TYPE_KEYS[0].1,
+        NetKind::Wireless => TYPE_KEYS[1].1,
+        NetKind::VpnTunnel => TYPE_KEYS[7].1,
+        NetKind::Virtual => TYPE_KEYS[2].1,
+        NetKind::Other => TYPE_KEYS[8].1,
+    }
+}
+
+/// True for an address in `fe80::/10`. `cidr` is `addr/prefix`.
+fn is_link_local_v6(cidr: &str) -> bool {
+    let addr = cidr.split('/').next().unwrap_or(cidr);
+    addr.parse::<Ipv6Addr>()
+        .is_ok_and(|a| a.segments()[0] & 0xffc0 == 0xfe80)
+}
+
+/// The Link speed row: Wi-Fi with both bit rates shows them, otherwise the sysfs speed.
+fn link_speed_row(
+    model: &mut KeyValueModel,
+    t: Option<&NetTotals>,
+    wifi: Option<&WifiInfo>,
+) -> bool {
+    if let Some(WifiInfo {
+        rx_mbps: Some(rx),
+        tx_mbps: Some(tx),
+        ..
+    }) = wifi
+    {
+        let (rx, tx) = (rx.round() as u32, tx.round() as u32);
+        let template = model.text(KEY_LINK_SPEED_WIFI);
+        let bits = u64::from(rx) | u64::from(tx) << 32;
+        return model.set_valid(ROW_LINK_SPEED, bits, |o| {
+            let _ = template.write(o, &[&rx, &tx]);
+        });
+    }
+    match t {
+        None => model.set_fallback(
+            ROW_LINK_SPEED,
+            Validity::WarmingUp,
+            Fallback::Unavailable,
+            None,
+        ),
+        Some(t) => match t.link_speed_mbps {
+            m if m.validity == Validity::Valid && m.value > 0 => {
+                let (mbps, template) = (m.value, model.text(KEY_LINK_SPEED));
+                model.set_valid(ROW_LINK_SPEED, u64::from(mbps), |o| {
+                    let _ = template.write(o, &[&mbps]);
+                })
+            }
+            _ => not_reported(model, ROW_LINK_SPEED),
+        },
+    }
+}
+
+/// The IPv4 and IPv6 rows. IPv6 shows the global addresses and puts the link-local ones in the
+/// tooltip.
+fn address_rows(model: &mut KeyValueModel, addresses: &[Arc<str>]) -> bool {
+    let join = |it: Vec<&str>| it.join(", ");
+    let v4: Vec<&str> = addresses
+        .iter()
+        .map(|a| &**a)
+        .filter(|a| !a.contains(':'))
+        .collect();
+    let (local, global): (Vec<&str>, Vec<&str>) = addresses
+        .iter()
+        .map(|a| &**a)
+        .filter(|a| a.contains(':'))
+        .partition(|a| is_link_local_v6(a));
+    let mut changed = false;
+    changed |= if v4.is_empty() {
+        not_reported(model, ROW_IPV4)
+    } else {
+        model.set_text(ROW_IPV4, &join(v4))
+    };
+    let tip = (!local.is_empty()).then(|| {
+        let mut out = String::new();
+        let _ = model.text(KEY_LINK_LOCAL).write(&mut out, &[&join(local)]);
+        SharedString::from(out)
+    });
+    let (shown, tip) = if global.is_empty() {
+        // Only link-local addresses: they are the value, so there is no tooltip.
+        (local, None)
+    } else {
+        (global, tip)
+    };
+    changed |= if shown.is_empty() {
+        not_reported(model, ROW_IPV6)
+    } else {
+        model.set_text(ROW_IPV6, &join(shown))
+    };
+    changed | set_row_tooltip(model, ROW_IPV6, tip)
+}
+
+/// The six Wi-Fi rows. `None` reads "Unavailable" when NetworkManager and nl80211 both failed.
+fn wifi_rows(model: &mut KeyValueModel, wifi: Option<&WifiInfo>) -> bool {
+    let mut changed = false;
+    let Some(w) = wifi else {
+        for label in WIFI_ROWS {
+            changed |= model.set_fallback(label, Validity::Failed, Fallback::Unavailable, None);
+        }
+        return changed;
+    };
+    changed |= if w.ssid.is_empty() {
+        not_reported(model, ROW_SSID)
+    } else {
+        model.set_text(ROW_SSID, &w.ssid)
+    };
+    let mut text = String::new();
+    let pct = w.signal_pct;
+    let (key, args): (&str, [&dyn fmt::Display; 2]) = match w.signal_dbm.as_ref() {
+        Some(dbm) => (KEY_SIGNAL, [dbm, &pct]),
+        None => (KEY_SIGNAL_PCT, [&pct, &pct]),
+    };
+    let _ = model.text(key).write(&mut text, &args);
+    changed |= model.set_text(ROW_SIGNAL, &text);
+    for (label, rate) in [(ROW_RX_BITRATE, w.rx_mbps), (ROW_TX_BITRATE, w.tx_mbps)] {
+        changed |= match rate {
+            Some(r) => {
+                let template = model.text(KEY_LINK_SPEED);
+                let mbps = r.round() as u32;
+                model.set_valid(label, u64::from(mbps), |o| {
+                    let _ = template.write(o, &[&mbps]);
+                })
+            }
+            None => not_reported(model, label),
+        };
+    }
+    changed |= match w.channel {
+        Some(ch) if w.freq_mhz > 0 => {
+            let (mhz, template) = (w.freq_mhz, model.text(KEY_FREQUENCY));
+            model.set_valid(ROW_FREQUENCY, u64::from(mhz) | u64::from(ch) << 32, |o| {
+                let _ = template.write(o, &[&mhz, &ch]);
+            })
+        }
+        _ => not_reported(model, ROW_FREQUENCY),
+    };
+    changed |= if w.security.is_empty() {
+        not_reported(model, ROW_SECURITY)
+    } else {
+        model.set_text(ROW_SECURITY, &w.security)
+    };
+    changed
+}
+
+/// Fills the static and Wi-Fi rows (UI-PRF-031, PERF-054, 056, 058, 059): Adapter name,
+/// Interface name, Connection type and status, the Wi-Fi rows when the model has them, Link
+/// speed, the addresses, MAC address, Interface index and Driver. Each value formats again only
+/// when it changed. Public IP stays hidden. True when any row changed.
+pub fn update_net_details_p2(model: &mut KeyValueModel, inp: &NetP2Inputs) -> bool {
+    let has_wifi = model.rows.iter().any(|r| r.label == ROW_SSID);
+    let mut changed = false;
+    let mut shown: SmallVec<[&'static str; 22]> = SmallVec::new();
+    shown.extend_from_slice(&HEAD_ROWS[4..]);
+    if has_wifi {
+        shown.extend_from_slice(&WIFI_ROWS);
+    }
+    shown.extend(
+        TAIL_ROWS
+            .iter()
+            .copied()
+            .filter(|l| *l != ROW_DISPLAY_UNIT && *l != ROW_PUBLIC_IP),
+    );
+    for label in &shown {
+        changed |= set_hidden(model, label, false);
+    }
+
+    changed |= match inp.iface {
+        Some(name) => model.set_text(ROW_INTERFACE, name),
+        None => model.set_fallback(
+            ROW_INTERFACE,
+            Validity::WarmingUp,
+            Fallback::Unavailable,
+            None,
+        ),
+    };
+    changed |= match inp.totals {
+        Some(t) => {
+            let key = STATE_KEYS
+                .iter()
+                .find(|(s, _)| *s == t.state)
+                .map_or(STATE_KEYS[6].1, |(_, k)| k);
+            let word = model.text(key);
+            model.set_text(ROW_STATUS, word.text())
+        }
+        None => model.set_fallback(ROW_STATUS, Validity::WarmingUp, Fallback::Unavailable, None),
+    };
+
+    let Some(d) = inp.details else {
+        for label in [
+            ROW_ADAPTER,
+            ROW_TYPE,
+            ROW_IPV4,
+            ROW_IPV6,
+            ROW_MAC,
+            ROW_IFINDEX,
+            ROW_DRIVER,
+        ] {
+            changed |= model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None);
+        }
+        changed |= link_speed_row(model, inp.totals, None);
+        changed |= set_row_tooltip(model, ROW_IPV6, None);
+        if has_wifi {
+            for label in WIFI_ROWS {
+                changed |=
+                    model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None);
+            }
+        }
+        return changed;
+    };
+    changed |= if matches!(d.adapter_name.validity, Validity::Valid | Validity::Stale)
+        && !d.adapter_name.value.is_empty()
+    {
+        model.set_text(ROW_ADAPTER, &d.adapter_name.value)
+    } else {
+        let word = model.text(KEY_UNKNOWN_ADAPTER);
+        model.set_text(ROW_ADAPTER, word.text())
+    };
+    let word = model.text(type_key(&d.type_label, d.kind));
+    changed |= model.set_text(ROW_TYPE, word.text());
+    if has_wifi {
+        changed |= wifi_rows(model, d.wifi.as_ref());
+    }
+    changed |= link_speed_row(model, inp.totals, d.wifi.as_ref());
+    changed |= address_rows(model, &d.addresses);
+    changed |= field_row(model, ROW_MAC, &d.mac);
+    let index = d.ifindex;
+    changed |= model.set_valid(ROW_IFINDEX, u64::from(index), |o| {
+        let _ = write!(o, "{index}");
+    });
+    changed |= field_row(model, ROW_DRIVER, &d.driver);
+    changed
+}
+
+/// The four signal bar colours for `pct` (UI-PRF-031): bar `i` is `accent` when the strength is
+/// at least 25, 50, 75 and 100 for bars 1 to 4, else `divider`.
+pub fn signal_bar_colors(pct: u8, theme: &TlTheme) -> [Hsla; 4] {
+    std::array::from_fn(|i| {
+        if u32::from(pct) >= 25 * (i as u32 + 1) {
+            theme.accent
+        } else {
+            theme.divider
+        }
+    })
+}
+
+/// Side of the signal icon in logical pixels.
+const SIGNAL_ICON: f32 = 16.;
+/// Width of one bar and the gap between bars.
+const SIGNAL_BAR_W: f32 = 3.;
+const SIGNAL_BAR_GAP: f32 = 1.;
+
+/// The 16 px signal icon: four bottom aligned bars 4, 8, 12 and 16 px high, drawn as quads.
+/// Decorative: the row's text carries the value.
+fn signal_icon(pct: u8, theme: &TlTheme, scale: f32) -> AnyElement {
+    let colors = signal_bar_colors(pct, theme);
+    let side = px(SIGNAL_ICON * scale);
+    canvas(
+        |_, _, _| (),
+        move |bounds, (), window, _| {
+            for (i, color) in colors.iter().enumerate() {
+                let h = px(4. * (i as f32 + 1.) * scale);
+                let x = bounds.left() + px(i as f32 * (SIGNAL_BAR_W + SIGNAL_BAR_GAP) * scale);
+                let bar = Bounds::new(
+                    point(x, bounds.bottom() - h),
+                    size(px(SIGNAL_BAR_W * scale), h),
+                );
+                window.paint_quad(fill(bar, *color));
+            }
+        },
+    )
+    .w(side)
+    .h(side)
+    .flex_none()
+    .into_any_element()
+}
+
 /// The record of `device` in the snapshot.
 fn net_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&NetTotals> {
     snap.system
@@ -465,6 +865,8 @@ pub struct NetPage {
     unit_focus: FocusHandle,
     /// `unit_focus` by the Display unit row's flat index, for the grid.
     link_focus: Rc<[(usize, FocusHandle)]>,
+    /// The Wi-Fi signal strength the Signal row's icon shows; `None` without Wi-Fi data.
+    signal: Option<u8>,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -529,6 +931,7 @@ impl NetPage {
             focus: cx.focus_handle(),
             unit_focus: cx.focus_handle(),
             link_focus: Rc::from(Vec::new()),
+            signal: None,
             link_click: {
                 let page = cx.weak_entity();
                 Rc::new(move |n, bounds, window, cx| {
@@ -603,9 +1006,12 @@ impl NetPage {
                 self.link_speed_bps = speed;
                 self.rebuild_spec(cx);
             }
-            if self.sync_details(snap) {
-                cx.notify();
-            }
+        }
+        if mask.intersects(
+            ComponentMask::SYSTEM | ComponentMask::DEVICE_DETAILS | ComponentMask::DEVICES,
+        ) && self.sync_details(snap)
+        {
+            cx.notify();
         }
         if mask.contains(ComponentMask::HEALTH) {
             let state = health_state(snap);
@@ -661,7 +1067,7 @@ impl NetPage {
         open_context_menu_at(at, window, cx, menu);
     }
 
-    /// Brings the P1 Details rows up to date. True when one changed.
+    /// Brings the Details rows up to date. True when one changed.
     fn sync_details(&mut self, snap: &Snapshot) -> bool {
         let inputs = NetDetailInputs {
             now_boot_ns: now_boot_ns(),
@@ -670,7 +1076,29 @@ impl NetPage {
             unit: self.settings.unit,
             auto_scale: self.settings.auto_scale,
         };
-        let changed = update_net_details_p1(&mut self.details, &inputs);
+        let details = snap
+            .device_details
+            .nets
+            .iter()
+            .find(|(i, _)| *i == self.row.idx)
+            .map(|(_, d)| d);
+        let iface = snap
+            .devices
+            .entries
+            .iter()
+            .find(|e| e.idx == self.row.idx)
+            .and_then(|e| match &e.identity {
+                DeviceIdentity::Net { name, .. } => Some(&**name),
+                _ => None,
+            });
+        let p2 = NetP2Inputs {
+            details,
+            totals: inputs.totals,
+            iface,
+        };
+        let changed = update_net_details_p1(&mut self.details, &inputs)
+            | update_net_details_p2(&mut self.details, &p2);
+        self.signal = details.and_then(|d| d.wifi.as_ref()).map(|w| w.signal_pct);
         self.sync_link_focus();
         changed
     }
@@ -809,6 +1237,31 @@ impl DevicePage for NetPage {
 
     fn details_link_click(&self) -> Option<DetailsLinkClick> {
         Some(self.link_click.clone())
+    }
+
+    /// The 4 bar signal icon before the Signal value.
+    fn details_value_prefix(&self) -> Option<DetailsValuePrefix> {
+        let pct = self.signal?;
+        let at = self
+            .details
+            .rows
+            .iter()
+            .filter(|r| !r.hidden)
+            .position(|r| r.label == ROW_SIGNAL)?;
+        Some(Rc::new(move |n, _, cx| {
+            if n != at {
+                return None;
+            }
+            let (theme, m) = (current(cx).clone(), *metrics(cx));
+            let gap = m.sp[2];
+            let width = px(SIGNAL_ICON * m.ui_scale) + gap;
+            let icon = div()
+                .flex_none()
+                .mr(gap)
+                .child(signal_icon(pct, &theme, m.ui_scale))
+                .into_any_element();
+            Some((width, icon))
+        }))
     }
 
     fn set_active(&mut self, active: bool, cx: &mut App) {

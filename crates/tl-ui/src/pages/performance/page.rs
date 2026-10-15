@@ -184,12 +184,20 @@ pub trait DevicePage: 'static {
     fn details_link_focus(&self) -> Option<Rc<[(usize, FocusHandle)]>> {
         None
     }
+    /// Builds the element drawn before a Details value, by flat row index
+    /// (`TlKeyValueGrid::value_prefix`). `None` by default.
+    fn details_value_prefix(&self) -> Option<DetailsValuePrefix> {
+        None
+    }
     /// Called with true when the page becomes the shown page and false when it stops being
     /// shown (R-229; E25-010 wires the calls).
     fn set_active(&mut self, active: bool, cx: &mut App) {
         let _ = (active, cx);
     }
 }
+
+/// A Details value prefix builder: flat row index, the element and its width.
+pub type DetailsValuePrefix = crate::components::kv_grid::ValuePrefix;
 
 /// A Details link click handler: flat row index and the link's bounds.
 pub type DetailsLinkClick = Rc<dyn Fn(usize, Bounds<Pixels>, &mut Window, &mut App)>;
@@ -417,6 +425,9 @@ impl DevicePageFrame<'_> {
                 let mut grid = render_details(page.details(), m, cx);
                 if let Some(focus) = page.details_link_focus() {
                     grid = grid.link_focus(focus);
+                }
+                if let Some(prefix) = page.details_value_prefix() {
+                    grid = grid.value_prefix(move |n, w, cx| prefix(n, w, cx));
                 }
                 match page.details_link_click() {
                     Some(click) => grid.on_link_click(move |n, b, w, cx| click(n, b, w, cx)),

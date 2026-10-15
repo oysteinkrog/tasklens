@@ -1657,3 +1657,252 @@ mod disk_in_use {
         assert!(note.bottom() <= footer.top(), "above the footer");
     }
 }
+
+mod net_p2 {
+    use super::*;
+    use tl_model::snapshot::{NetDetails, WifiInfo};
+    use tl_model::system::{LinkState, Metric, NetTotals};
+    use tl_ui::pages::performance::details::KeyValueModel;
+    use tl_ui::pages::performance::net::{
+        NetP2Inputs, net_details_model, signal_bar_colors, update_net_details_p2,
+    };
+    use tl_ui::theme::current;
+
+    fn text(s: &str) -> InvField<Arc<str>> {
+        InvField {
+            value: Arc::from(s),
+            validity: Validity::Valid,
+        }
+    }
+
+    fn totals(state: LinkState, speed: Metric<u32>) -> NetTotals {
+        NetTotals {
+            device: DeviceIdx(1),
+            rx_bps: Metric::valid(0.0),
+            tx_bps: Metric::valid(0.0),
+            rx_total: 0,
+            tx_total: 0,
+            link_speed_mbps: speed,
+            state,
+        }
+    }
+
+    fn ethernet() -> NetDetails {
+        NetDetails {
+            type_label: Arc::from("Ethernet"),
+            connection: None,
+            adapter_name: text("Intel I350 Gigabit Network Connection"),
+            driver: text("igb"),
+            mac: text("aa:bb:cc:dd:ee:ff"),
+            ifindex: 2,
+            link_speed_mbps: InvField {
+                value: 1000,
+                validity: Validity::Valid,
+            },
+            state: LinkState::Up,
+            addresses: Arc::from([Arc::<str>::from("192.168.1.10/24")]),
+            kind: NetKind::Wired,
+            wifi: None,
+        }
+    }
+
+    fn wifi() -> WifiInfo {
+        WifiInfo {
+            ssid: Arc::from("Home"),
+            signal_dbm: Some(-52),
+            signal_pct: 78,
+            rx_mbps: Some(866.0),
+            tx_mbps: Some(866.0),
+            freq_mhz: 5180,
+            channel: Some(36),
+            security: Arc::from("WPA2"),
+        }
+    }
+
+    fn model(
+        cx: &mut TestAppContext,
+        wifi: bool,
+        d: Option<&NetDetails>,
+        t: &NetTotals,
+    ) -> KeyValueModel {
+        let mut model = net_details_model(wifi);
+        let inp = NetP2Inputs {
+            details: d,
+            totals: Some(t),
+            iface: Some("enp38s0"),
+        };
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            model.refresh_strings(cx);
+            model.refresh_labels(cx);
+        });
+        update_net_details_p2(&mut model, &inp);
+        model
+    }
+
+    fn rows(model: &KeyValueModel) -> Vec<(String, String)> {
+        model
+            .to_kv_rows()
+            .map(|r| (r.label.to_string(), r.value.text.to_string()))
+            .collect()
+    }
+
+    fn value(model: &KeyValueModel, label: &str) -> String {
+        rows(model)
+            .into_iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("row {label}"))
+    }
+
+    const HEAD: [&str; 8] = [
+        "Download speed",
+        "Upload speed",
+        "Total downloaded",
+        "Total uploaded",
+        "Adapter name",
+        "Interface name",
+        "Connection type",
+        "Connection status",
+    ];
+    const WIFI_LABELS: [&str; 6] = [
+        "SSID",
+        "Signal",
+        "RX bitrate",
+        "TX bitrate",
+        "Frequency",
+        "Security",
+    ];
+    const TAIL: [&str; 7] = [
+        "Link speed",
+        "IPv4 address",
+        "IPv6 address",
+        "MAC address",
+        "Interface index",
+        "Driver",
+        "Display unit",
+    ];
+
+    #[gpui_kit::test]
+    fn net_details_order_ethernet(cx: &mut TestAppContext) {
+        let t = totals(LinkState::Up, Metric::valid(1000));
+        let d = ethernet();
+        let m = model(cx, false, Some(&d), &t);
+        let r = rows(&m);
+        let labels: Vec<&str> = r.iter().map(|(l, _)| l.as_str()).collect();
+        let want: Vec<&str> = HEAD.iter().chain(TAIL.iter()).copied().collect();
+        assert_eq!(labels, want);
+        assert_eq!(labels.len(), 15, "Public IP is hidden until E25-021");
+        assert_eq!(
+            value(&m, "Adapter name"),
+            "Intel I350 Gigabit Network Connection"
+        );
+        assert_eq!(value(&m, "Interface name"), "enp38s0");
+        assert_eq!(value(&m, "Connection type"), "Ethernet");
+        assert_eq!(value(&m, "Connection status"), "Connected");
+        assert_eq!(value(&m, "Link speed"), "1000 Mbps");
+        assert_eq!(value(&m, "IPv4 address"), "192.168.1.10/24");
+        assert_eq!(value(&m, "MAC address"), "aa:bb:cc:dd:ee:ff");
+        assert_eq!(value(&m, "Interface index"), "2");
+        assert_eq!(value(&m, "Driver"), "igb");
+    }
+
+    #[gpui_kit::test]
+    fn net_details_order_wifi(cx: &mut TestAppContext) {
+        let t = totals(LinkState::Up, Metric::valid(866));
+        let mut d = ethernet();
+        d.type_label = Arc::from("Wi-Fi");
+        d.kind = NetKind::Wireless;
+        d.wifi = Some(wifi());
+        let m = model(cx, true, Some(&d), &t);
+        let r = rows(&m);
+        let labels: Vec<&str> = r.iter().map(|(l, _)| l.as_str()).collect();
+        let want: Vec<&str> = HEAD
+            .iter()
+            .chain(WIFI_LABELS.iter())
+            .chain(TAIL.iter())
+            .copied()
+            .collect();
+        assert_eq!(labels, want);
+        assert_eq!(labels.len(), 21);
+        assert_eq!(value(&m, "SSID"), "Home");
+        assert_eq!(value(&m, "Signal"), "-52 dBm (78%)");
+        assert_eq!(value(&m, "RX bitrate"), "866 Mbps");
+        assert_eq!(value(&m, "Frequency"), "5180 MHz, channel 36");
+        assert_eq!(value(&m, "Security"), "WPA2");
+        assert_eq!(value(&m, "Link speed"), "RX 866 Mbps · TX 866 Mbps");
+    }
+
+    #[gpui_kit::test]
+    fn net_wifi_unavailable_without_data(cx: &mut TestAppContext) {
+        let t = totals(LinkState::Up, Metric::valid(866));
+        let d = ethernet();
+        let m = model(cx, true, Some(&d), &t);
+        for label in WIFI_LABELS {
+            assert_eq!(value(&m, label), "Unavailable", "{label}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn signal_icon_bars(cx: &mut TestAppContext) {
+        let r = open(cx);
+        let theme = r.vcx.update(|_, cx| current(cx).clone());
+        let (a, d) = (theme.accent, theme.divider);
+        assert_ne!(a, d);
+        assert_eq!(signal_bar_colors(78, &theme), [a, a, a, d]);
+        assert_eq!(signal_bar_colors(24, &theme), [d, d, d, d]);
+        assert_eq!(signal_bar_colors(25, &theme), [a, d, d, d]);
+        assert_eq!(signal_bar_colors(100, &theme), [a, a, a, a]);
+    }
+
+    #[gpui_kit::test]
+    fn net_link_speed_not_reported(cx: &mut TestAppContext) {
+        let t = totals(LinkState::Up, Metric::with(Validity::Unsupported));
+        let d = ethernet();
+        let m = model(cx, false, Some(&d), &t);
+        assert_eq!(value(&m, "Link speed"), "Not reported");
+    }
+
+    #[gpui_kit::test]
+    fn net_ipv6_link_local_tooltip(cx: &mut TestAppContext) {
+        let t = totals(LinkState::Up, Metric::valid(1000));
+        let mut d = ethernet();
+        d.addresses = Arc::from([
+            Arc::<str>::from("192.168.1.10/24"),
+            Arc::from("2001:db8::1/64"),
+            Arc::from("fe80::1/64"),
+        ]);
+        let m = model(cx, false, Some(&d), &t);
+        assert_eq!(value(&m, "IPv6 address"), "2001:db8::1/64");
+        let tip = m
+            .to_kv_rows()
+            .find(|r| r.label.as_ref() == "IPv6 address")
+            .and_then(|r| r.value.tooltip.clone());
+        assert_eq!(tip.as_deref(), Some("Link-local: fe80::1/64"));
+    }
+
+    #[gpui_kit::test]
+    fn net_tunnel_unknown_state(cx: &mut TestAppContext) {
+        let t = totals(LinkState::Unknown, Metric::with(Validity::Unsupported));
+        let mut d = ethernet();
+        d.type_label = Arc::from("Tunnel");
+        d.kind = NetKind::VpnTunnel;
+        let m = {
+            let mut model = net_details_model(false);
+            let inp = NetP2Inputs {
+                details: Some(&d),
+                totals: Some(&t),
+                iface: Some("tailscale0"),
+            };
+            cx.update(|cx| {
+                init_strings(cx, "en-US");
+                model.refresh_strings(cx);
+            });
+            update_net_details_p2(&mut model, &inp);
+            model
+        };
+        assert_eq!(value(&m, "Interface name"), "tailscale0");
+        assert_eq!(value(&m, "Connection type"), "Tunnel");
+        assert_eq!(value(&m, "Connection status"), "Unknown");
+    }
+}
