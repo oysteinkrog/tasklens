@@ -885,3 +885,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: 8fx.31 AC3 (scrub p99 on owner machine) split into a deferred MEASURE bead; 8fx.31 closes on the bench scene itself.
 - 2026-10-15 leader decision: gma.36 dump file names use the engine's [A-Za-z0-9._-] set (other chars to '_'), then R-224 cut and fallback; R-224 and UI-PWN-034 edited to match; engine check unchanged.
 - 2026-10-15 leader decision: gma.36 toast.rs text action and ToastClosed approved; dump privilege failures retry through the tracker; dump paths live until their toast closes.
+- 2026-10-15 leader decision: pdu.48 pick result handled by the shell WINDOWS handler (builds Processes first); Ctrl+click always confirms through the Picked dialog.
