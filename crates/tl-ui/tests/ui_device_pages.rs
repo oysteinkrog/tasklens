@@ -16,7 +16,9 @@ use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
-use tl_model::snapshot::{InvField, MemoryDetails, ZramDetail, ZswapInfo};
+use tl_model::snapshot::{
+    InvField, MemoryDetails, SwapDevice, SwapKindModel, ZramDetail, ZswapInfo,
+};
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -38,8 +40,8 @@ use tl_ui::pages::performance::memory::{
     ROW_COMPRESSED, ROW_HUGE_PAGES, ROW_IN_USE, ROW_SAVINGS, ROW_SLAB_RECLAIMABLE,
     ROW_SLAB_UNRECLAIMABLE, ROW_SWAP_AVAILABLE, ROW_SWAP_USED, ROW_ZRAM_ALGORITHM,
     ROW_ZRAM_COMPRESSED, ROW_ZRAM_DEVICE, ROW_ZRAM_MEM_USED, ROW_ZRAM_RATIO, ROW_ZRAM_SIZE,
-    ROW_ZRAM_STORED, ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, ZRAM_GRID_ID, ZSWAP_GRID_ID,
-    update_compressed_block,
+    ROW_ZRAM_STORED, ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, SWAP_TABLE_ID, SwapColumn, ZRAM_GRID_ID,
+    ZSWAP_GRID_ID, update_compressed_block,
 };
 use tl_ui::pages::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
@@ -48,6 +50,7 @@ use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage, build_page};
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow, PerformancePage};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui::theme::metrics;
 
 const GPU: &str = "gpu:pci:0000:2d:00.0";
 const DISKS: [&str; 4] = ["disk:sda", "disk:sdb", "disk:sdc", "disk:sdd"];
@@ -726,4 +729,139 @@ fn zram_ratio_key_has_no_collisions() {
         },
     );
     assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "12.0 : 1");
+}
+
+fn swap_device(name: &str, kind: SwapKindModel, priority: i32) -> SwapDevice {
+    SwapDevice {
+        name: Arc::from(name),
+        kind,
+        size_bytes: 8 * GIB,
+        used_bytes: GIB,
+        priority,
+    }
+}
+
+/// Publishes `swaps` with `validity` as the memory details and draws.
+fn publish_swaps(r: &mut Rig, swaps: Vec<SwapDevice>, validity: Validity) {
+    r.engine.publish_with(|s| {
+        let details = Arc::make_mut(&mut s.device_details);
+        details.header.version += 1;
+        details.memory = Arc::new(MemoryDetails {
+            swaps: InvField {
+                value: Arc::from(swaps),
+                validity,
+            },
+            ..MemoryDetails::default()
+        });
+    });
+    draw(r.vcx);
+    draw(r.vcx);
+}
+
+fn swap_blocks(r: &mut Rig, memory: &Entity<MemoryPage>) -> usize {
+    let memory = memory.clone();
+    r.vcx
+        .update(|window, cx| memory.update(cx, |page, cx| page.blocks(window, cx).len()))
+}
+
+/// Two swap entries give one block with five columns at their widths, the heading, and a zram
+/// entry whose Type cell reads `zram`.
+#[gpui_kit::test]
+fn swap_table_columns(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, "memory");
+    let memory = view_of(&mut r, "memory")
+        .downcast::<MemoryPage>()
+        .expect("a MemoryPage");
+    publish_swaps(
+        &mut r,
+        vec![
+            swap_device("/dev/nvme0n1p3", SwapKindModel::Partition, -2),
+            swap_device("/dev/zram0", SwapKindModel::Zram, 100),
+        ],
+        Validity::Valid,
+    );
+    assert_eq!(swap_blocks(&mut r, &memory), 1);
+    r.vcx.update(|_, cx| {
+        let page = memory.read(cx);
+        assert_eq!(page.words().block_swap.as_ref(), "Swap devices");
+        let table = page.swap_table().expect("table created").clone();
+        table.update(cx, |t, _| {
+            let layout = t.columns();
+            assert_eq!(&**layout.visible_columns(), &SwapColumn::ALL[..]);
+            for (col, w) in [
+                (SwapColumn::Type, 80.),
+                (SwapColumn::Size, 90.),
+                (SwapColumn::Used, 90.),
+                (SwapColumn::Priority, 70.),
+            ] {
+                assert_eq!(layout.width(col).as_f32(), w * layout.ui_scale(), "{col:?}");
+            }
+            let tsv = t.rows_as_tsv(&[0, 1]);
+            let lines: Vec<&str> = tsv.lines().collect();
+            assert_eq!(lines.len(), 3, "header and two rows: {tsv}");
+            assert_eq!(lines[0], "Name\tType\tSize\tUsed\tPriority");
+            assert_eq!(lines[1].split('\t').nth(1), Some("partition"));
+            assert_eq!(lines[1].split('\t').nth(4), Some("-2"));
+            assert_eq!(lines[2].split('\t').nth(1), Some("zram"));
+        });
+    });
+}
+
+/// No block for an empty list, and none when the list failed to read.
+#[gpui_kit::test]
+fn swap_table_hidden_when_empty(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, "memory");
+    let memory = view_of(&mut r, "memory")
+        .downcast::<MemoryPage>()
+        .expect("a MemoryPage");
+    publish_swaps(&mut r, Vec::new(), Validity::Valid);
+    assert_eq!(swap_blocks(&mut r, &memory), 0, "empty list");
+    publish_swaps(
+        &mut r,
+        vec![swap_device("/swapfile", SwapKindModel::File, -2)],
+        Validity::Failed,
+    );
+    assert_eq!(swap_blocks(&mut r, &memory), 0, "failed list");
+}
+
+/// Twelve entries show 8 rows of height, and the table becomes a Tab stop.
+#[gpui_kit::test]
+fn swap_table_caps_at_8_rows(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, "memory");
+    let memory = view_of(&mut r, "memory")
+        .downcast::<MemoryPage>()
+        .expect("a MemoryPage");
+    let swaps = |n: usize| {
+        (0..n)
+            .map(|i| swap_device(&format!("/dev/swap{i}"), SwapKindModel::Partition, i as i32))
+            .collect::<Vec<_>>()
+    };
+    let tab_stop_and_rows = |r: &mut Rig| {
+        let memory = memory.clone();
+        r.vcx.update(|_, cx| {
+            let table = memory.read(cx).swap_table().expect("table").clone();
+            table.update(cx, |t, _| {
+                let d = t.delegate_mut();
+                (
+                    d.scrolls(),
+                    tl_ui::table::tree_table::TreeTableDelegate::row_count(d),
+                )
+            })
+        })
+    };
+    publish_swaps(&mut r, swaps(2), Validity::Valid);
+    assert_eq!(tab_stop_and_rows(&mut r), (false, 2));
+    publish_swaps(&mut r, swaps(12), Validity::Valid);
+    assert_eq!(tab_stop_and_rows(&mut r), (true, 12));
+    let m = r.vcx.update(|_, cx| *metrics(cx));
+    let bounds = r.vcx.debug_bounds(SWAP_TABLE_ID).expect("table box drawn");
+    let want = 28. * m.ui_scale + 8. * m.row_height.as_f32();
+    assert!(
+        (bounds.size.height.as_f32() - want).abs() < 0.5,
+        "{} vs {want}",
+        bounds.size.height.as_f32()
+    );
 }

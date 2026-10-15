@@ -169,6 +169,11 @@ pub trait TreeTableDelegate: 'static + Sized {
         false
     }
 
+    /// False: the table is no Tab stop. A static table that never scrolls sets this.
+    fn tab_stop(&self) -> bool {
+        true
+    }
+
     /// The column that shows the Name cell. The default is the column type's pinned first
     /// column (Name on the process tables, none on the system tables). On `None` the table uses
     /// the first visible column.
@@ -2452,7 +2457,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .key_context(TABLE_CONTEXT)
             .track_focus(&self.focus)
             .tab_index(0)
-            .tab_stop(true)
+            .tab_stop(self.delegate.tab_stop())
             // CopyRow, CopyCell, CollapseAll and the header Actions have no handler here, so they
             // bubble to the owner page (open item 16).
             .on_action(cx.listener(Self::on_move_focus))

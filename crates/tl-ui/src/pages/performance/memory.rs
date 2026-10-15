@@ -13,10 +13,10 @@ use std::cell::Cell;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use gpui_kit::component::v_flex;
+use gpui_kit::component::{ScrollbarHandle, v_flex};
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
-    Context, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight, Hsla,
+    Animation, AnimationExt as _, AnyElement, AnyView, AnyWindowHandle, App, AppContext as _,
+    AsyncApp, Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
@@ -24,7 +24,7 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::{MemoryDetails, Snapshot};
+use tl_model::snapshot::{MemoryDetails, Snapshot, SwapDevice, SwapKindModel};
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
@@ -46,6 +46,14 @@ use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, TlSettings, animations_on};
+use crate::table::cells::CellOut;
+use crate::table::columns::{
+    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
+};
+use crate::table::tree_table::{
+    HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, SCROLLBAR_W,
+    TableSort, TlTreeTable, TreeTableDelegate,
+};
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -73,6 +81,24 @@ const KEY_RANGE_MEMORY: &str = "perf-mem-range-memory";
 const KEY_RANGE_SWAP: &str = "perf-mem-range-swap";
 const KEY_BLOCK_COMPRESSED: &str = "perf-mem-block-compressed";
 const KEY_ZSWAP: &str = "perf-mem-zswap";
+const KEY_BLOCK_SWAP: &str = "perf-mem-block-swap";
+const KEY_SWAP_COLS: [&str; 5] = [
+    "perf-swap-col-name",
+    "perf-swap-col-type",
+    "perf-swap-col-size",
+    "perf-swap-col-used",
+    "perf-swap-col-priority",
+];
+const KEY_SWAP_TYPES: [&str; 3] = [
+    "perf-swap-type-partition",
+    "perf-swap-type-file",
+    "perf-swap-type-zram",
+];
+
+/// Debug selector of the "Swap devices" table box.
+pub const SWAP_TABLE_ID: &str = "perf-mem-swap-table";
+/// The table shows at most this many rows; more rows scroll.
+pub const SWAP_TABLE_MAX_ROWS: usize = 8;
 
 const NS_PER_S: u64 = 1_000_000_000;
 /// Alpha of the dirty-bytes line against `mem_line`.
@@ -95,6 +121,17 @@ pub struct Words {
     pub range_swap: SharedString,
     pub block_compressed: SharedString,
     pub zswap: SharedString,
+    pub block_swap: SharedString,
+    pub swap_table: SwapWords,
+}
+
+/// The words of the "Swap devices" table.
+#[derive(Clone, Debug, Default)]
+pub struct SwapWords {
+    /// Header labels in `SwapColumn::ALL` order.
+    pub columns: [SharedString; 5],
+    /// Partition, file and zram.
+    pub types: [SharedString; 3],
 }
 
 impl Words {
@@ -118,6 +155,11 @@ impl Words {
         self.range_swap = t(KEY_RANGE_SWAP);
         self.block_compressed = t(KEY_BLOCK_COMPRESSED);
         self.zswap = t(KEY_ZSWAP);
+        self.block_swap = t(KEY_BLOCK_SWAP);
+        self.swap_table = SwapWords {
+            columns: KEY_SWAP_COLS.map(t),
+            types: KEY_SWAP_TYPES.map(t),
+        };
         true
     }
 }
@@ -759,6 +801,327 @@ pub fn update_compressed_block(block: &mut CompressedBlock, inp: &CompressedInpu
     changed
 }
 
+// ---- Swap devices table ----
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SwapColumn {
+    Name,
+    Type,
+    Size,
+    Used,
+    Priority,
+}
+
+impl SwapColumn {
+    pub const ALL: [Self; 5] = [
+        Self::Name,
+        Self::Type,
+        Self::Size,
+        Self::Used,
+        Self::Priority,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|c| *c == self).unwrap_or(0)
+    }
+
+    /// Logical px at 100%. Name is the flex column; this is its width before the first fit.
+    fn width(self) -> f32 {
+        match self {
+            Self::Name => 240.,
+            Self::Type => 80.,
+            Self::Size | Self::Used => 90.,
+            Self::Priority => 70.,
+        }
+    }
+}
+
+impl TableColumn for SwapColumn {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Name => "swap-name",
+            Self::Type => "swap-type",
+            Self::Size => "swap-size",
+            Self::Used => "swap-used",
+            Self::Priority => "swap-priority",
+        }
+    }
+    fn parse(_: TableId, _: &str) -> Option<Self> {
+        None
+    }
+    fn pinned_first(self) -> bool {
+        false
+    }
+    fn min_width(self) -> Option<f32> {
+        match self {
+            Self::Name => Some(120.),
+            _ => None,
+        }
+    }
+}
+
+/// The table has no sort; this state only names the first column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SwapSort;
+
+impl TableSort<SwapColumn> for SwapSort {
+    fn column(&self) -> SwapColumn {
+        SwapColumn::Name
+    }
+    fn ascending(&self) -> bool {
+        true
+    }
+}
+
+fn swap_specs(words: &SwapWords) -> Vec<ColumnSpec<SwapColumn>> {
+    SwapColumn::ALL
+        .iter()
+        .map(|&id| {
+            let label = words.columns[id.index()].clone();
+            ColumnSpec {
+                id,
+                label: label.clone(),
+                full_name: label.clone(),
+                group: label,
+                align: match id {
+                    SwapColumn::Name | SwapColumn::Type => ColumnAlign::Left,
+                    _ => ColumnAlign::Right,
+                },
+                kind: match id {
+                    SwapColumn::Name => ColumnKind::Path,
+                    SwapColumn::Type => ColumnKind::Text,
+                    _ => ColumnKind::Numeric,
+                },
+                sortable: false,
+                template: None,
+                default_width: px(id.width()),
+                tooltip: None,
+                availability: Availability::Available,
+                hideable: false,
+            }
+        })
+        .collect()
+}
+
+/// The flat, static table of `/proc/swaps` entries (E25-014).
+pub struct SwapTableDelegate {
+    rows: Arc<[SwapDevice]>,
+    version: u64,
+    specs: Vec<ColumnSpec<SwapColumn>>,
+    layout: ColumnLayout<SwapColumn>,
+    words: SwapWords,
+}
+
+impl SwapTableDelegate {
+    fn new(words: SwapWords) -> Self {
+        let specs = swap_specs(&words);
+        let layout = ColumnLayout::defaults(
+            TableId::Processes,
+            &specs,
+            &SwapColumn::ALL,
+            &SwapColumn::ALL,
+        );
+        Self {
+            rows: Arc::from([]),
+            version: 0,
+            specs,
+            layout,
+            words,
+        }
+    }
+
+    /// Takes new rows. False, with the version unchanged, when they equal the current ones.
+    fn set_rows(&mut self, rows: Arc<[SwapDevice]>) -> bool {
+        if Arc::ptr_eq(&self.rows, &rows) || self.rows == rows {
+            return false;
+        }
+        self.rows = rows;
+        self.version += 1;
+        true
+    }
+
+    fn set_words(&mut self, words: SwapWords) {
+        self.specs = swap_specs(&words);
+        self.words = words;
+        self.version += 1;
+    }
+
+    /// Gives the Name column the width the other columns leave in a body `body_px` wide
+    /// (logical px at the layout's scale, scrollbar excluded), never below its minimum. True
+    /// when the width changed.
+    fn fit_flex_column(&mut self, body_px: f32) -> bool {
+        let scale = self.layout.ui_scale().max(0.1);
+        let flex = SwapColumn::Name;
+        let others: f32 = SwapColumn::ALL
+            .iter()
+            .filter(|&&c| c != flex)
+            .map(|c| self.layout.widths.get(c).map_or(0.0, |w| w.as_f32()))
+            .sum();
+        let target = (body_px / scale - SCROLLBAR_W - others).max(flex.min_width().unwrap_or(0.));
+        let current = self.layout.widths.get(&flex).map_or(0.0, |w| w.as_f32());
+        if (target - current).abs() < 0.5 {
+            return false;
+        }
+        self.layout.widths.insert(flex, px(target));
+        self.layout.rebuild(scale);
+        self.version += 1;
+        true
+    }
+
+    /// The table scrolls, so it is a Tab stop (UI-PRC-016).
+    pub fn scrolls(&self) -> bool {
+        self.rows.len() > SWAP_TABLE_MAX_ROWS
+    }
+
+    fn type_word(&self, kind: SwapKindModel) -> &str {
+        match kind {
+            SwapKindModel::Partition => &self.words.types[0],
+            SwapKindModel::File => &self.words.types[1],
+            SwapKindModel::Zram => &self.words.types[2],
+            SwapKindModel::Other => "-",
+        }
+    }
+}
+
+impl TreeTableDelegate for SwapTableDelegate {
+    type RowId = u32;
+    type Column = SwapColumn;
+    type Sort = SwapSort;
+
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+    fn row_id(&self, ix: usize) -> u32 {
+        ix as u32
+    }
+    fn row_index(&self, id: u32) -> Option<usize> {
+        ((id as usize) < self.rows.len()).then_some(id as usize)
+    }
+    fn row_kind(&self, _: usize) -> RowKind {
+        RowKind::Plain
+    }
+    fn row_depth(&self, _: usize) -> u8 {
+        0
+    }
+    fn row_expandable(&self, _: usize) -> Option<bool> {
+        None
+    }
+    fn row_flags(&self, _: usize) -> RowFlags {
+        RowFlags::default()
+    }
+    fn table_version(&self) -> u64 {
+        self.version
+    }
+    fn columns(&self) -> &ColumnLayout<SwapColumn> {
+        &self.layout
+    }
+    fn column_spec(&self, id: SwapColumn) -> &ColumnSpec<SwapColumn> {
+        &self.specs[id.index()]
+    }
+    fn cell(&self, ix: usize, col: SwapColumn, out: &mut CellOut) {
+        let Some(row) = self.rows.get(ix) else {
+            return;
+        };
+        out.validity = Validity::Valid;
+        if !out.want_text {
+            return;
+        }
+        match col {
+            SwapColumn::Name => out.text.push_str(&row.name),
+            SwapColumn::Type => out.text.push_str(self.type_word(row.kind)),
+            SwapColumn::Size => units::bytes(&mut out.text, row.size_bytes),
+            SwapColumn::Used => units::bytes(&mut out.text, row.used_bytes),
+            SwapColumn::Priority => {
+                let _ = write!(out.text, "{}", row.priority);
+            }
+        }
+    }
+    fn name_cell(&self, ix: usize) -> NameCell {
+        NameCell {
+            icon: NameIcon::None,
+            icon_size: IconSlot::Small,
+            primary: self.rows.get(ix).map_or_else(SharedString::default, |r| {
+                SharedString::from(r.name.clone())
+            }),
+            count_run: None,
+            secondary: None,
+            glyphs: SmallVec::new(),
+            highlight_fffd: true,
+            trailing: None,
+        }
+    }
+    fn name_column(&self) -> Option<SwapColumn> {
+        Some(SwapColumn::Name)
+    }
+    fn header_total(&self, _: SwapColumn, _: &mut CellOut) -> bool {
+        false
+    }
+    fn sort(&self) -> SwapSort {
+        SwapSort
+    }
+    fn selectable(&self, _: usize) -> bool {
+        false
+    }
+    fn context_menu(
+        &mut self,
+        _: &[u32],
+        _: Option<SwapColumn>,
+        menu: TlMenu,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> TlMenu {
+        menu
+    }
+    fn on_toggle_expand(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_sort(&mut self, _: SwapColumn, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_columns_changed(
+        &mut self,
+        layout: &ColumnLayout<SwapColumn>,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) {
+        self.layout = layout.clone();
+    }
+    fn on_visible_range(&mut self, _: &[u32], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_activate(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
+        None
+    }
+    fn empty_text(&self) -> Option<SharedString> {
+        None
+    }
+    fn header_lines(&self) -> HeaderLines {
+        HeaderLines::One
+    }
+    fn columns_fixed(&self) -> bool {
+        true
+    }
+    fn tab_stop(&self) -> bool {
+        self.scrolls()
+    }
+}
+
+/// A flat table box: the one-line header plus `rows` rows, at most [`SWAP_TABLE_MAX_ROWS`]
+/// (more rows scroll). The partitions and SMART tables use it too.
+pub(super) fn flat_static_table<D: TreeTableDelegate>(
+    table: &Entity<TlTreeTable<D>>,
+    rows: usize,
+    m: &UiMetrics,
+) -> Div {
+    div()
+        .flex_none()
+        .w_full()
+        .h(px(HEADER_H_ONE * m.ui_scale) + m.row_height * rows.min(SWAP_TABLE_MAX_ROWS) as f32)
+        .child(table.clone())
+}
+
+/// The swap list of a snapshot: the value when it is `Valid` or `Stale`, else none.
+fn swap_rows_of(details: &MemoryDetails) -> Arc<[SwapDevice]> {
+    match details.swaps.validity {
+        Validity::Valid | Validity::Stale => Arc::clone(&details.swaps.value),
+        _ => Arc::from([]),
+    }
+}
+
 /// The Swap chart's height animation (UI-PRF-026).
 #[derive(Clone, Copy, Debug)]
 struct SwapAnim {
@@ -784,6 +1147,12 @@ pub struct MemoryPage {
     details: KeyValueModel,
     /// The "Compressed memory" block under the Details grid.
     compressed: CompressedBlock,
+    /// The `/proc/swaps` entries of the "Swap devices" block.
+    swap_rows: Arc<[SwapDevice]>,
+    /// Created in the first render, which has the `Window` the table needs.
+    swap_table: Option<Entity<TlTreeTable<SwapTableDelegate>>>,
+    /// The table body width the Name column was last fitted to.
+    swap_body: f32,
     /// `performance.memory_composition`.
     show_composition: bool,
     /// `performance.memory_swap_graph`.
@@ -873,6 +1242,9 @@ impl MemoryPage {
             composition,
             details: memory_details_model(),
             compressed: CompressedBlock::new(),
+            swap_rows: swap_rows_of(&snap.device_details.memory),
+            swap_table: None,
+            swap_body: 0.,
             show_composition: settings.composition,
             show_swap: settings.swap,
             swap_total: totals.swap,
@@ -920,6 +1292,24 @@ impl MemoryPage {
         if self.compressed.refresh_strings(cx) || changed {
             cx.notify();
         }
+        let rows = swap_rows_of(&snap.device_details.memory);
+        if !Arc::ptr_eq(&self.swap_rows, &rows) && *self.swap_rows != *rows {
+            self.swap_rows = rows;
+            cx.notify();
+        }
+        if let Some(table) = &self.swap_table {
+            let rows = Arc::clone(&self.swap_rows);
+            table.update(cx, |t, cx| {
+                if t.delegate_mut().set_rows(rows) {
+                    t.on_new_version(cx);
+                }
+            });
+        }
+    }
+
+    /// The "Swap devices" table, once the page has rendered.
+    pub fn swap_table(&self) -> Option<&Entity<TlTreeTable<SwapTableDelegate>>> {
+        self.swap_table.as_ref()
     }
 
     /// The "Compressed memory" block's models.
@@ -1155,6 +1545,13 @@ impl MemoryPage {
         self.commit.update(cx, |v, cx| v.set_labels(commit, cx));
         self.swap.update(cx, |v, cx| v.set_labels(swap, cx));
         self.header.0 = page_words(cx).memory.clone();
+        if let Some(table) = &self.swap_table {
+            let words = self.words.swap_table.clone();
+            table.update(cx, |t, cx| {
+                t.delegate_mut().set_words(words);
+                t.on_new_version(cx);
+            });
+        }
         cx.notify();
     }
 
@@ -1182,6 +1579,33 @@ impl MemoryPage {
             p.memory_swap_graph = !p.memory_swap_graph;
         });
         self.sync_settings(cx);
+    }
+
+    /// Creates the "Swap devices" table on the first render. The Name column then follows the
+    /// body width of the previous frame.
+    fn sync_swap_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let table = match &self.swap_table {
+            Some(table) => table.clone(),
+            None => {
+                let mut delegate = SwapTableDelegate::new(self.words.swap_table.clone());
+                delegate.set_rows(Arc::clone(&self.swap_rows));
+                let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
+                self.swap_table = Some(table.clone());
+                table
+            }
+        };
+        let body = ScrollbarHandle::viewport_bounds(&table.read(cx).scroll_handle())
+            .size
+            .width
+            .as_f32();
+        if body > 0. && body != self.swap_body {
+            self.swap_body = body;
+            table.update(cx, |t, cx| {
+                if t.delegate_mut().fit_flex_column(body) {
+                    t.on_new_version(cx);
+                }
+            });
+        }
     }
 
     /// `chart` in a full-width box of `height`.
@@ -1278,9 +1702,7 @@ impl DevicePage for MemoryPage {
     }
 
     fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
-        if self.compressed.is_hidden() {
-            return SmallVec::new();
-        }
+        let mut blocks: SmallVec<[AnyElement; 3]> = SmallVec::new();
         let (m, theme) = (metrics(cx), current(cx));
         let heading = |text: SharedString, style| {
             let mut el = div().text_color(theme.text_primary).child(text);
@@ -1289,6 +1711,25 @@ impl DevicePage for MemoryPage {
         };
         let md = label_style(m, m.text.md, FontWeight::MEDIUM);
         let sm = label_style(m, m.text.sm, FontWeight::MEDIUM);
+        if let Some(table) = self
+            .swap_table
+            .as_ref()
+            .filter(|_| !self.swap_rows.is_empty())
+        {
+            blocks.push(
+                v_flex()
+                    .gap(m.sp[4])
+                    .child(heading(self.words.block_swap.clone(), md.clone()))
+                    .child(
+                        flat_static_table(table, self.swap_rows.len(), m)
+                            .debug_selector(|| SWAP_TABLE_ID.into()),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if self.compressed.is_hidden() {
+            return blocks;
+        }
         let mut block = v_flex()
             .gap(m.sp[4])
             .child(heading(self.words.block_compressed.clone(), md));
@@ -1318,7 +1759,9 @@ impl DevicePage for MemoryPage {
                 ZSWAP_GRID_ID.to_owned(),
                 &self.compressed.zswap,
             ));
-        smallvec![block.into_any_element()]
+        // The compressed block comes first, then the swap table.
+        blocks.insert(0, block.into_any_element());
+        blocks
     }
 
     fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
@@ -1380,6 +1823,7 @@ impl Render for MemoryPage {
         self.compressed.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
+        self.sync_swap_table(window, cx);
         div()
             .size_full()
             .track_focus(&self.focus)
