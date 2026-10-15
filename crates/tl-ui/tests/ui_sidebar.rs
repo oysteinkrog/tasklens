@@ -1312,6 +1312,56 @@ mod sidebar {
         );
     }
 
+    /// An edit card is not a cached card view, so the sidebar draws it again at the stale
+    /// deadline when the samples stop, as `value_goes_stale_without_samples` does for a normal
+    /// card. Same timing: the deadline is 0.5 s after the first draw.
+    #[gpui_kit::test]
+    fn edit_card_value_goes_stale_without_samples(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        settings.motion.smooth_graphs = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        let _driver = r.vcx.update(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            driver
+        });
+        enter_edit(&mut r);
+        publish_cpu_series_at(&mut r, now_boot_ns() - 1_000_000_000);
+        draw(r.vcx);
+        let sidebar = r.sidebar.clone();
+        let armed = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| sidebar.read(cx).edit_stale_at_for_test())
+        };
+        let renders = |r: &mut Rig| r.vcx.update(|_, cx| sidebar.read(cx).render_count.get());
+        assert!(
+            armed(&mut r).is_some(),
+            "a Valid edit card value arms the timer"
+        );
+        let before = renders(&mut r);
+
+        let advance = |r: &mut Rig, ms: u64| {
+            r.vcx
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(ms));
+            draw(r.vcx);
+        };
+        advance(&mut r, 400);
+        assert_eq!(renders(&mut r), before, "no draw before the deadline");
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        advance(&mut r, 200);
+        assert_eq!(renders(&mut r), before + 1, "one draw at the deadline");
+        assert_eq!(
+            armed(&mut r),
+            None,
+            "the value is Stale, so no timer is armed"
+        );
+
+        advance(&mut r, 5000);
+        assert_eq!(renders(&mut r), before + 1, "a Stale value sets no timer");
+    }
+
     #[gpui_kit::test]
     fn demand_follows_visible_kinds(cx: &mut TestAppContext) {
         let devices = vec![

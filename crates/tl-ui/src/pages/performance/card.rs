@@ -1305,6 +1305,58 @@ pub struct CardPrepared {
     pub graph_w: Pixels,
 }
 
+impl CardPrepared {
+    /// The boot time at which this card's value turns Stale when no newer sample comes. `None`
+    /// unless the value is Valid.
+    pub fn stale_at(&self, chart: &ChartView) -> Option<u64> {
+        self.value
+            .as_ref()
+            .filter(|v| v.validity == Validity::Valid)
+            .and_then(|_| stale_deadline_ns(&chart.series))
+    }
+}
+
+/// Draws its owner again at the stale deadline of a card value, so a Valid value turns Stale
+/// when the samples stop. A new sample notifies through the chart, so the timer only fires when
+/// samples stop. No per-frame polling.
+#[derive(Default)]
+pub struct StaleTimer {
+    at: Option<u64>,
+    task: Option<Task<()>>,
+}
+
+impl StaleTimer {
+    /// The armed deadline, if any.
+    pub fn at(&self) -> Option<u64> {
+        self.at
+    }
+
+    /// Arms the timer for the deadline `at`, or drops it for `None`. A running timer for the
+    /// same deadline is kept. `field` finds this timer in the owner when it fires.
+    pub fn arm<V: 'static>(
+        &mut self,
+        at: Option<u64>,
+        field: fn(&mut V) -> &mut StaleTimer,
+        cx: &mut Context<V>,
+    ) {
+        if at == self.at {
+            return;
+        }
+        self.at = at;
+        self.task = at.map(|at| {
+            let wait = Duration::from_nanos(at.saturating_sub(now_boot_ns()));
+            cx.spawn(async move |this: WeakEntity<V>, cx: &mut AsyncApp| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |this, cx| {
+                    // Render arms the timer again if a value is still Valid.
+                    field(this).at = None;
+                    cx.notify();
+                });
+            })
+        });
+    }
+}
+
 /// The tooltip lines: the full text of each cut line, then the owner's tooltip (the Memory
 /// commit note, a network adapter and connection). An owner tooltip that only repeats line 1
 /// shows only when line 1 is cut. Empty when there is nothing to show.
@@ -1350,10 +1402,8 @@ pub struct CardView {
     /// notifies `sidebar` when it changed, so the cards below move on the next frame.
     height: Rc<Cell<Pixels>>,
     sidebar: EntityId,
-    /// The boot time at which a Valid value turns Stale, when the card has one.
-    stale_at: Option<u64>,
-    /// Draws the card again at `stale_at`. Replaced only when `stale_at` changes.
-    stale_check: Option<Task<()>>,
+    /// Draws the card again when its Valid value turns Stale.
+    stale: StaleTimer,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     /// Whole-card paint callbacks. A cached paint replay does not increment this counter.
@@ -1383,8 +1433,7 @@ impl CardView {
             width,
             height,
             sidebar,
-            stale_at: None,
-            stale_check: None,
+            stale: StaleTimer::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1439,11 +1488,7 @@ impl Render for CardView {
         };
         let prepared = card.prepare(window, cx);
         let height = prepared.height;
-        let stale_at = prepared
-            .value
-            .as_ref()
-            .filter(|v| v.validity == Validity::Valid)
-            .and_then(|_| stale_deadline_ns(&self.chart.read(cx).series));
+        let stale_at = prepared.stale_at(self.chart.read(cx));
         #[cfg(any(test, feature = "test-hooks"))]
         {
             self.prepared = Some(prepared.clone());
@@ -1452,21 +1497,8 @@ impl Render for CardView {
             self.height.set(height);
             App::notify(cx, self.sidebar);
         }
-        // A new sample notifies through the chart, so the timer only fires when samples stop.
-        if stale_at != self.stale_at {
-            self.stale_at = stale_at;
-            self.stale_check = stale_at.map(|at| {
-                let wait = Duration::from_nanos(at.saturating_sub(now_boot_ns()));
-                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                    cx.background_executor().timer(wait).await;
-                    let _ = this.update(cx, |this, cx| {
-                        // Render arms the timer again if the value is still Valid.
-                        this.stale_at = None;
-                        cx.notify();
-                    });
-                })
-            });
-        }
+        self.stale
+            .arm(stale_at, |this: &mut Self| &mut this.stale, cx);
 
         #[cfg(any(test, feature = "test-hooks"))]
         {

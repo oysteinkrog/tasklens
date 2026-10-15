@@ -48,7 +48,7 @@ use super::actions::{
     PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice, PerfSetPageVisible,
 };
 use super::card::{
-    CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, DeviceCard,
+    CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, DeviceCard, StaleTimer,
     card_chart_grid, card_chart_labels, card_words, update_card_lines,
 };
 use super::menu::card_menu;
@@ -528,6 +528,9 @@ pub struct DeviceSidebar {
     /// Keeps the edit surface mounted while its leave animation runs.
     edit_leaving: bool,
     edit_generation: u64,
+    /// Edit cards are not cached [`CardView`]s, so the sidebar draws them again when the first
+    /// Valid value among them turns Stale.
+    edit_stale: StaleTimer,
     pub(crate) hub: Entity<SnapshotHub>,
     pub(crate) demand: Entity<DemandAggregator>,
     id: EntityId,
@@ -593,6 +596,7 @@ impl DeviceSidebar {
             edit_cards: Vec::new(),
             edit_leaving: false,
             edit_generation: 0,
+            edit_stale: StaleTimer::default(),
             hub,
             demand,
             id,
@@ -715,6 +719,12 @@ impl DeviceSidebar {
                 )
             })
             .collect()
+    }
+
+    /// The stale deadline the edit cards armed, if any.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn edit_stale_at_for_test(&self) -> Option<u64> {
+        self.edit_stale.at()
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -1755,6 +1765,8 @@ impl Render for DeviceSidebar {
             .collect();
 
         let edit_present = self.edit_mode || self.edit_leaving;
+        // The earliest stale deadline of a Valid edit card value.
+        let mut edit_stale_at: Option<u64> = None;
         let content: AnyElement = if edit_present {
             let entering = self.edit_mode;
             let animate_edit = animations_on(cx);
@@ -1901,6 +1913,25 @@ impl Render for DeviceSidebar {
                             window,
                             cx,
                         );
+                        let mut device_card = DeviceCard {
+                            key,
+                            chart: card.chart.clone(),
+                            lines: card.lines.clone(),
+                            selected: self.selected.as_ref() == Some(&card.row.key),
+                            focused: self.focus.is_focused(window),
+                            edit_mode: true,
+                            hidden_in_edit: !checked && !dragging,
+                            width: edit_card_w,
+                            prepared: None,
+                        };
+                        let stale_at = device_card
+                            .prepare(window, cx)
+                            .stale_at(card.chart.read(cx));
+                        edit_stale_at = match (edit_stale_at, stale_at) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (a, b) => a.or(b),
+                        };
+                        let key = device_card.key.clone();
                         let target_key = key.clone();
                         let mut row = div()
                             .debug_selector({
@@ -1923,17 +1954,7 @@ impl Render for DeviceSidebar {
                                 div()
                                     .flex_none()
                                     .on_mouse_down(MouseButton::Right, on_right)
-                                    .child(DeviceCard {
-                                        key,
-                                        chart: card.chart.clone(),
-                                        lines: card.lines.clone(),
-                                        selected: self.selected.as_ref() == Some(&card.row.key),
-                                        focused: self.focus.is_focused(window),
-                                        edit_mode: true,
-                                        hidden_in_edit: !checked && !dragging,
-                                        width: edit_card_w,
-                                        prepared: None,
-                                    }),
+                                    .child(device_card),
                             )
                             .child(div().flex_none().w(px(28. * m.ui_scale)).child(switch));
                         if indicator_before || indicator_after {
@@ -2078,6 +2099,8 @@ impl Render for DeviceSidebar {
                 .children(normal_cards)
                 .into_any_element()
         };
+        self.edit_stale
+            .arm(edit_stale_at, |this: &mut Self| &mut this.edit_stale, cx);
 
         // The cards have a fixed width: measure the sidebar each paint and redraw when it moved.
         let measured = Rc::clone(&self.card_width);
