@@ -33,26 +33,33 @@ use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, HistoryWhat, Tab};
 use tl_model::history::{HistoryMetric, HistoryRange, HistoryStoreState, HistoryView};
-use tl_model::ids::ProcessKey;
+use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::{Settings, UiState};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime};
 
 use self::actions::{
-    HISTORY_CONTEXT, HistoryLive, HistoryMetricCpu, HistoryMetricDisk, HistoryMetricGpu,
-    HistoryMetricMemory, HistoryMetricNetwork, HistoryOldest, HistoryStepBack,
-    HistoryStepBackMinute, HistoryStepForward, HistoryStepForwardMinute, SCRUBBED,
+    DeleteFromHistory, HISTORY_CONTEXT, HistoryLive, HistoryMetricCpu, HistoryMetricDisk,
+    HistoryMetricGpu, HistoryMetricMemory, HistoryMetricNetwork, HistoryOldest,
+    HistoryShowInLiveTable, HistoryStepBack, HistoryStepBackMinute, HistoryStepForward,
+    HistoryStepForwardMinute, SCRUBBED,
 };
+use crate::components::toast::ToastKind;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
-use crate::i18n::{Strings, tr, tr_en};
+use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::performance::details::Template;
+use crate::pages::processes::ProcessesPage;
+use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
+use crate::pages::processes::jump::JumpTexts;
 use crate::settings_global::{Section, TlSettings};
-use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
+use crate::table::actions::{CopyCell, OpenProperties};
+use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{bump_style_version, current, metrics};
-use crate::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
+use crate::util::clipboard_write;
+use crate::window::main::{FilterChanged, GlobalShellEvents, main_window_view, push_main_toast};
 
 use self::scrubber::{HistoryScrubber, ScrubberCache};
-use self::table::HistoryTableDelegate;
+use self::table::{HistoryTableDelegate, is_live};
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 
@@ -482,6 +489,21 @@ impl HistoryPage {
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
         subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_settings(cx)));
         subs.push(cx.observe(&table, |this, _, cx| this.sync_selection(cx)));
+        subs.push(cx.subscribe_in(
+            &table,
+            window,
+            |this, _, ev: &TreeTableEvent, window, cx| match ev {
+                TreeTableEvent::Activate { row_index } => {
+                    let key = this.table.read(cx).delegate.row_id(*row_index);
+                    this.jump(key, window, cx);
+                }
+                TreeTableEvent::CopiedRows { .. } => {
+                    let text = tr(cx, "processes-toast-copied");
+                    push_main_toast(cx, ToastKind::Success, text, None, None);
+                }
+                TreeTableEvent::CopyFailed => {}
+            },
+        ));
         if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
             subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
                 if ev.tab == Tab::Processes {
@@ -917,6 +939,133 @@ impl HistoryPage {
         self.apply_selected(selected, cx);
     }
 
+    /// The rows a menu action acts on: the ones the open menu captured, else the selected rows
+    /// in view order.
+    fn targets(&mut self, cx: &mut Context<Self>) -> (Vec<ProcessKey>, Option<ColumnId>) {
+        let captured = self.table.update(cx, |t, _| t.delegate.take_captured());
+        if let Some((keys, col)) = captured {
+            return (keys.into_vec(), col);
+        }
+        let d = &self.table.read(cx).delegate;
+        let mut keys = self.state.selected.clone();
+        keys.sort_by_key(|k| d.row_index(*k).unwrap_or(usize::MAX));
+        (keys, None)
+    }
+
+    /// Copy, Copy details and Copy all metrics (PROC-070): the target rows onto the clipboard,
+    /// then a Success toast. History rows hold no command line, so none is ever copied.
+    fn copy(&mut self, what: CopyKind, cx: &mut Context<Self>) {
+        let (keys, _) = self.targets(cx);
+        let d = &self.table.read(cx).delegate;
+        let text = match what {
+            CopyKind::Cell(col) => d.copy_cell_text(&keys, col),
+            CopyKind::Details => d.copy_details_text(&keys, cx),
+            CopyKind::AllMetrics => d.copy_all_metrics_text(&keys),
+        };
+        if text.is_empty() {
+            return;
+        }
+        // `clipboard_write` cannot fail yet (R-199), so there is no failure toast.
+        if clipboard_write(cx, text).is_err() {
+            return;
+        }
+        let many = keys.len() > 1;
+        let key = match (what, many) {
+            (CopyKind::Cell(_), false) => "processes-toast-copied",
+            (CopyKind::Cell(_), true) => "processes-toast-values-copied",
+            (CopyKind::Details, _) => "processes-toast-details-copied",
+            (CopyKind::AllMetrics, false) => "processes-toast-metrics-copied",
+            (CopyKind::AllMetrics, true) => "processes-toast-many-metrics-copied",
+        };
+        let text = tr(cx, key);
+        push_main_toast(cx, ToastKind::Success, text, None, None);
+    }
+
+    fn on_copy_cell(&mut self, a: &CopyCell, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy(CopyKind::Cell(a.col), cx);
+    }
+
+    fn on_copy_details(&mut self, _: &CopyDetails, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy(CopyKind::Details, cx);
+    }
+
+    fn on_copy_all_metrics(&mut self, _: &CopyAllMetrics, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy(CopyKind::AllMetrics, cx);
+    }
+
+    /// Delete from history (UI-PRC-037): no confirmation. One `HistoryDelete` carries every
+    /// target key; the rows leave with the next `HistoryView`. The keys leave the selection at
+    /// once, so their chips go now and the strip drops their series with the next view.
+    fn on_delete(&mut self, _: &DeleteFromHistory, _: &mut Window, cx: &mut Context<Self>) {
+        let (keys, _) = self.targets(cx);
+        if keys.is_empty() {
+            return;
+        }
+        let command = Command::HistoryDelete {
+            keys: keys.iter().copied().collect(),
+        };
+        if let Err(err) = self.client.send(command) {
+            tracing::warn!(target: "tasklens::history", ?err, "history delete not sent");
+            return;
+        }
+        let text = match keys.len() {
+            1 => tr(cx, "history-toast-deleted"),
+            n => tr_args(cx, "history-toast-deleted-n", &[("count", n.into())]),
+        };
+        push_main_toast(cx, ToastKind::Success, text, None, None);
+        let selected = self
+            .state
+            .selected
+            .iter()
+            .copied()
+            .filter(|k| !keys.contains(k))
+            .collect();
+        self.set_selected(selected, cx);
+    }
+
+    /// Show in live table: the first captured row that is running.
+    fn on_show_live(
+        &mut self,
+        _: &HistoryShowInLiveTable,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (keys, _) = self.targets(cx);
+        if let Some(key) = keys.into_iter().find(|&k| is_live(k, cx)) {
+            self.jump(key, window, cx);
+        }
+    }
+
+    /// Enter on a row: the row the table remembered.
+    fn on_open_properties(
+        &mut self,
+        _: &OpenProperties,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self.table.update(cx, |t, _| t.delegate.take_activated());
+        if let Some(key) = key {
+            self.jump(key, window, cx);
+        }
+    }
+
+    /// Double-click and Enter: a running process is selected in the live table, which leaves
+    /// History mode (UI-PRC-022); any other row shows "Process not running".
+    fn jump(&mut self, key: ProcessKey, window: &mut Window, cx: &mut Context<Self>) {
+        if is_live(key, cx) {
+            let page = main_window_view(cx)
+                .and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
+            if let Some(page) = page {
+                page.update(cx, |p, cx| {
+                    p.select_by_key(key, JumpTexts::default(), window, cx)
+                });
+                return;
+            }
+        }
+        let text = tr(cx, "history-not-running");
+        push_main_toast(cx, ToastKind::Warning, text, None, None);
+    }
+
     fn loading(&self) -> bool {
         self.view
             .as_ref()
@@ -939,6 +1088,13 @@ pub fn step_scrub(scrub: Option<TimeNs>, span: (TimeNs, TimeNs), delta_s: i64) -
     } else {
         Some(base.saturating_sub(delta).clamp(span.0, span.1))
     }
+}
+
+#[derive(Clone, Copy)]
+enum CopyKind {
+    Cell(ColumnId),
+    Details,
+    AllMetrics,
 }
 
 impl Render for HistoryPage {
@@ -1002,6 +1158,12 @@ impl Render for HistoryPage {
             .on_action(cx.listener(Self::on_step_forward_minute))
             .on_action(cx.listener(Self::on_oldest))
             .on_action(cx.listener(Self::on_live))
+            .on_action(cx.listener(Self::on_copy_cell))
+            .on_action(cx.listener(Self::on_copy_details))
+            .on_action(cx.listener(Self::on_copy_all_metrics))
+            .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_show_live))
+            .on_action(cx.listener(Self::on_open_properties))
             .on_action(cx.listener(|this, _: &HistoryMetricCpu, _, cx| {
                 this.on_metric(HistoryMetric::Cpu, cx)
             }))

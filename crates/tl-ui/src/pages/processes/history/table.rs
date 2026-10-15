@@ -22,18 +22,25 @@ use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use tl_model::history::{HistoryPeaks, HistoryProcessRow, HistoryRange, HistoryView};
 use tl_model::ids::{ColumnId, ProcessKey};
+use tl_model::process::ProcFlags;
 use tl_model::settings::{NetworkUnit, Settings, SortState, UiState};
 use tl_model::snapshot::ProcessSnapshot;
 use tl_model::table::SortSpec;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
+use super::actions::{DeleteFromHistory, HistoryShowInLiveTable};
+use crate::components::icons::TlIcon;
 use crate::components::menu::TlMenu;
+use crate::components::validity::copy_text;
+use crate::hub::GlobalHub;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
+use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
 use crate::pages::processes::cells::process_column;
 use crate::pages::processes::delegate::ValidityTips;
 use crate::settings_global::TlSettings;
+use crate::table::actions::{CopyCell, CopyRowsAsTable};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, next_sort,
@@ -108,6 +115,20 @@ impl HistoryTableWords {
         }
     }
 }
+
+/// True when `key` is in the current live process list and has not exited.
+pub fn is_live(key: ProcessKey, cx: &App) -> bool {
+    cx.try_global::<GlobalHub>().is_some_and(|hub| {
+        hub.0
+            .read(cx)
+            .current()
+            .processes
+            .get(key)
+            .is_some_and(|r| !r.flags.contains(ProcFlags::EXITED))
+    })
+}
+
+const MIB: f64 = 1024.0 * 1024.0;
 
 /// One metric value before formatting.
 #[derive(Clone, Copy)]
@@ -199,7 +220,16 @@ pub struct HistoryTableDelegate {
     peak_tips: RefCell<PeakTips>,
     /// Scratch for the lowercase field text the filter compares against.
     lower: String,
+    /// The rows and cell column the open row menu was built for. The menu actions read it
+    /// through [`Self::take_captured`], so a view that changes under the open menu does not
+    /// change what it acts on.
+    captured: Option<CapturedRows>,
+    /// The row Enter or a double-click activated, for the page's `OpenProperties` handler.
+    activated: Option<ProcessKey>,
 }
+
+/// The rows (in view order) and the clicked column a row menu was built for.
+pub type CapturedRows = (SmallVec<[ProcessKey; 8]>, Option<ColumnId>);
 
 impl HistoryTableDelegate {
     /// Translates the words and labels once, reads the sort from `[sort.history]` (an unknown
@@ -240,6 +270,8 @@ impl HistoryTableDelegate {
             icons_for: 0,
             peak_tips: RefCell::default(),
             lower: String::new(),
+            captured: None,
+            activated: None,
         }
     }
 
@@ -315,6 +347,110 @@ impl HistoryTableDelegate {
     }
 
     /// The Name header tooltip for the view's range.
+    /// Takes the rows the open row menu was built for.
+    pub fn take_captured(&mut self) -> Option<CapturedRows> {
+        self.captured.take()
+    }
+
+    /// Takes the row Enter or a double-click activated.
+    pub fn take_activated(&mut self) -> Option<ProcessKey> {
+        self.activated.take()
+    }
+
+    /// The text a copy puts on the clipboard for the cell at (`ix`, `col`): the displayed text,
+    /// or the validity word for a cell with no value.
+    fn copy_value(&self, ix: usize, col: ColumnId, out: &mut CellOut) -> String {
+        out.reset();
+        out.want_text = true;
+        self.cell(ix, col, out);
+        let text = match out.arc.take() {
+            Some(arc) => arc.to_string(),
+            None => std::mem::take(&mut out.text),
+        };
+        copy_text(out.validity, &text.into()).to_string()
+    }
+
+    /// Copy: the displayed text of column `col` of each of `keys`, one per line, in the order
+    /// given. A key that is no longer shown is skipped.
+    pub fn copy_cell_text(&self, keys: &[ProcessKey], col: ColumnId) -> String {
+        let mut out = CellOut::default();
+        keys.iter()
+            .filter_map(|k| self.index.get(k))
+            .map(|&ix| self.copy_value(ix as usize, col, &mut out))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Copy details (PROC-070 fields history has): `Name`, `PID`, `Parent PID` (history keeps
+    /// none, so it is empty), `CPU`, `Memory`, `Disk`, `Network` and `GPU`, one block per row
+    /// separated by a blank line. Never a command line (R-169 OI-6).
+    pub fn copy_details_text(&self, keys: &[ProcessKey], cx: &App) -> String {
+        let mut out = CellOut::default();
+        let ppid = text(cx, process_column(ColumnId::Ppid).label);
+        let mut blocks = Vec::new();
+        for ix in keys.iter().filter_map(|k| self.index.get(k)) {
+            let ix = *ix as usize;
+            let r = self.row(ix);
+            let mut block = String::new();
+            for col in [ColumnId::Name, ColumnId::Pid] {
+                let value = self.copy_value(ix, col, &mut out);
+                let _ = writeln!(block, "{}: {value}", self.column_spec(col).label);
+            }
+            let _ = writeln!(block, "{ppid}: ");
+            let cpu = if r.present {
+                format!("{:.2}%", r.cpu_pct)
+            } else {
+                self.copy_value(ix, ColumnId::Cpu, &mut out)
+            };
+            let memory = if r.present {
+                format!("{} MiB", (r.mem_anon_bytes as f64 / MIB).round() as u64)
+            } else {
+                self.copy_value(ix, ColumnId::Memory, &mut out)
+            };
+            let _ = writeln!(block, "{}: {cpu}", self.column_spec(ColumnId::Cpu).label);
+            let _ = write!(
+                block,
+                "{}: {memory}",
+                self.column_spec(ColumnId::Memory).label
+            );
+            for col in [ColumnId::Disk, ColumnId::Network, ColumnId::Gpu] {
+                let value = self.copy_value(ix, col, &mut out);
+                let _ = write!(block, "\n{}: {value}", self.column_spec(col).label);
+            }
+            blocks.push(block);
+        }
+        blocks.join("\n\n")
+    }
+
+    /// Copy all metrics: per row one `Label: value` line for every visible column with a Valid
+    /// value and non-empty text, rows separated by a blank line. Never a command line.
+    pub fn copy_all_metrics_text(&self, keys: &[ProcessKey]) -> String {
+        let mut out = CellOut::default();
+        let visible = self.layout.visible_columns().clone();
+        let mut blocks = Vec::new();
+        for ix in keys.iter().filter_map(|k| self.index.get(k)) {
+            let ix = *ix as usize;
+            let mut lines = Vec::new();
+            for &col in visible.iter() {
+                out.reset();
+                out.want_text = true;
+                self.cell(ix, col, &mut out);
+                if out.validity != Validity::Valid {
+                    continue;
+                }
+                let value = match out.arc.take() {
+                    Some(arc) => arc.to_string(),
+                    None => std::mem::take(&mut out.text),
+                };
+                if !value.is_empty() {
+                    lines.push(format!("{}: {value}", self.column_spec(col).label));
+                }
+            }
+            blocks.push(lines.join("\n"));
+        }
+        blocks.join("\n\n")
+    }
+
     fn name_tooltip(&mut self) {
         let w = &self.words;
         let tip = match self.view.range {
@@ -664,15 +800,53 @@ impl TreeTableDelegate for HistoryTableDelegate {
         true
     }
 
+    /// The History row menu (UI-PRC-031): the four copies, Show in live table (disabled when no
+    /// selected row is running) and Delete from history. Copy needs the clicked column, so the
+    /// keyboard menu leaves it out.
     fn context_menu(
         &mut self,
-        _: &[ProcessKey],
-        _: Option<ColumnId>,
+        ids: &[ProcessKey],
+        clicked_col: Option<ColumnId>,
         menu: TlMenu,
         _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
-        menu
+        let keys: SmallVec<[ProcessKey; 8]> = ids
+            .iter()
+            .copied()
+            .filter(|k| self.index.contains_key(k))
+            .collect();
+        if keys.is_empty() {
+            return menu;
+        }
+        let any_live = keys.iter().any(|&k| is_live(k, cx));
+        self.captured = Some((keys, clicked_col));
+        let mut menu = menu;
+        if let Some(col) = clicked_col {
+            menu = menu.item(tr(cx, "processes-menu-copy"), Box::new(CopyCell { col }));
+        }
+        menu = menu
+            .item(tr(cx, "processes-menu-copy-details"), Box::new(CopyDetails))
+            .item(
+                tr(cx, "processes-menu-copy-all-metrics"),
+                Box::new(CopyAllMetrics),
+            )
+            .item(
+                tr(cx, "processes-menu-copy-rows-as-table"),
+                Box::new(CopyRowsAsTable),
+            )
+            .separator();
+        let show = tr(cx, "history-menu-show-live");
+        menu = if any_live {
+            menu.item(show, Box::new(HistoryShowInLiveTable))
+        } else {
+            menu.item_disabled(show, None)
+        };
+        menu.separator().danger_item(
+            tr(cx, "history-menu-delete"),
+            TlIcon::Trash,
+            Box::new(DeleteFromHistory),
+        )
     }
 
     fn on_toggle_expand(&mut self, _: ProcessKey, _: &mut Context<TlTreeTable<Self>>) {}
@@ -701,7 +875,11 @@ impl TreeTableDelegate for HistoryTableDelegate {
 
     fn on_visible_range(&mut self, _: &[ProcessKey], _: &mut Context<TlTreeTable<Self>>) {}
 
-    fn on_activate(&mut self, _: ProcessKey, _: &mut Context<TlTreeTable<Self>>) {}
+    /// Enter: remembers the row and lets `OpenProperties` go on to the page, which jumps to it.
+    fn on_activate(&mut self, id: ProcessKey, cx: &mut Context<TlTreeTable<Self>>) {
+        self.activated = Some(id);
+        cx.propagate();
+    }
 
     fn row_tooltip(&self, _: usize) -> Option<AnyView> {
         None
