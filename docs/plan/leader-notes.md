@@ -870,3 +870,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: 9o0.10 option B, the startup delete confirmation has no busy state; UI-SYS-047 States updated by that bead.
 - 2026-10-15 leader decision: tasklens-y6k.29 adds all remaining B8-E28-12 StartupEntry fields in one model change; 9o0.11 and 9o0.12 wait for it.
 - 2026-10-15 leader decision: crw.47 narrow layout keeps sparkline over meter, never hides all engine charts (busiest engine stays), sections sized by content, '+n more' as a body row like Disk.
+- 2026-10-15 leader decision: crw.53 follows the owner's dense mockup (CPU chart share 0.40, cores in 2 columns about 215 px), GHz defaults from the prep accepted; D-022 and UI-PRF-017 get the new widths; crw.54 and crw.55 run after crw.53 (shared parts.rs).
