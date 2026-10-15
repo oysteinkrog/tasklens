@@ -256,7 +256,7 @@ impl ServicePropertiesWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let tracker = GlobalActionTracker.0.clone();
+        let tracker = cx.global::<GlobalActionTracker>().0.clone();
         let actions = cx.new(|cx| SysActions::new(&tracker, cx));
         let mut subs = vec![cx.subscribe_in(
             &tracker,
