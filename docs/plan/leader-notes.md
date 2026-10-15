@@ -872,3 +872,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: crw.47 narrow layout keeps sparkline over meter, never hides all engine charts (busiest engine stays), sections sized by content, '+n more' as a body row like Disk.
 - 2026-10-15 leader decision: crw.53 follows the owner's dense mockup (CPU chart share 0.40, cores in 2 columns about 215 px), GHz defaults from the prep accepted; D-022 and UI-PRF-017 get the new widths; crw.54 and crw.55 run after crw.53 (shared parts.rs).
 - 2026-10-15 leader decision: crw.54 drops the Memory chart for five mockup rows; tasklens-hjn.35 adds MEM_AVAILABLE first; crw.55 after crw.54 (shared parts.rs).
+- 2026-10-15 leader decision: gma.30 inactive tab may run a count-only scan for the tab label; only the member list is limited to the active tab.
