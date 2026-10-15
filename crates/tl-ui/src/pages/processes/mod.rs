@@ -15,6 +15,7 @@ pub mod history;
 pub mod jump;
 pub mod menu;
 pub mod name_cell;
+pub mod pick;
 pub mod status;
 pub mod table;
 pub mod toasts;

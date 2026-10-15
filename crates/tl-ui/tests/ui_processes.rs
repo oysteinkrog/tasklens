@@ -1336,7 +1336,7 @@ mod shell {
         }
     }
 
-    fn other(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+    pub(super) fn other(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
         let page = cx.new(|cx| OtherPage {
             focus: cx.focus_handle().tab_stop(true),
         });
@@ -2836,5 +2836,385 @@ mod keys {
                 );
             }
         });
+    }
+}
+
+/// The window-pick result (tasklens-pdu.48, PROC-055, UI-SHL-014, R-239). The window opens on
+/// the Performance stand-in, so the shell builds the Processes page when a pick needs it.
+mod pick {
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{AnyWindowHandle, Entity, Modifiers, TestAppContext, VisualTestContext};
+    use tl_model::actions::{ActionKind, ActionTarget, Signal};
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, KWinCommand, Tab};
+    use tl_model::ids::NodeId;
+    use tl_model::process::{ProcFlags, ProcessRecord};
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::{ComponentHeader, PickOutcome, PickResult, Snapshot, WindowsSnapshot};
+    use tl_model::validity::Validity;
+    use tl_ui::actions::StartWindowPick;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
+    use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{MainWindow, main_window_view, open_main_window_on, set_test_page};
+
+    use super::delegate::{key, record, row, snapshot};
+
+    const PID: u32 = 4242;
+    const FILLER: u32 = 100;
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        main: Entity<MainWindow>,
+        version: u64,
+        windows_version: u64,
+    }
+
+    fn records() -> Vec<ProcessRecord> {
+        vec![
+            record(FILLER, "filler", ProcFlags::empty()),
+            record(PID, "firefox", ProcFlags::empty()),
+        ]
+    }
+
+    /// The real app with its action tracker, on the Performance stand-in, with a KWin bridge,
+    /// the records of [`records`] and a pick started.
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+            set_test_page(cx, Tab::Performance, super::shell::other);
+        });
+        let handle = cx
+            .update(|cx| open_main_window_on(Tab::Performance, cx))
+            .expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        let mut r = Rig {
+            engine,
+            vcx,
+            main,
+            version: 1,
+            windows_version: 0,
+        };
+        r.publish(&[], 0, None);
+        r.vcx.dispatch_action(StartWindowPick);
+        r.draw();
+        assert!(r.picking(), "the pick started");
+        assert!(r.page().is_none(), "Processes not built yet");
+        r
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        /// A snapshot with [`records`], a view with `shown` (pids) as rows for `generation`,
+        /// and a valid windows component holding `pick`.
+        fn publish(&mut self, shown: &[u32], generation: u64, pick: Option<PickResult>) {
+            let recs = records();
+            let rows = shown
+                .iter()
+                .map(|&pid| {
+                    let ix = recs.iter().position(|r| r.key.pid == pid).unwrap();
+                    row(NodeId::Process(key(pid)), 0, Some(ix as u32), None)
+                })
+                .collect();
+            self.version += 1;
+            self.windows_version += 1;
+            let mut s = Snapshot::clone(&snapshot(self.version, rows, Vec::new(), recs));
+            s.sequence = self.engine.latest().sequence + 1;
+            Arc::make_mut(&mut s.table).query_generation = generation;
+            Arc::make_mut(&mut s.processes).header.version = self.version;
+            s.windows = Arc::new(WindowsSnapshot {
+                header: ComponentHeader {
+                    version: self.windows_version,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                windows: Arc::from([]),
+                pick,
+            });
+            self.engine.publish(s);
+            self.draw();
+        }
+
+        fn result(&mut self, seq: u64, outcome: PickOutcome) {
+            self.publish(&[], 0, Some(PickResult { seq, outcome }));
+        }
+
+        fn picked(&mut self, pid: u32) {
+            self.result(1, PickOutcome::Picked { pid });
+        }
+
+        fn picking(&mut self) -> bool {
+            let main = self.main.clone();
+            self.vcx.update(|_, cx| main.read(cx).is_picking())
+        }
+
+        fn page(&mut self) -> Option<Entity<ProcessesPage>> {
+            let main = self.main.clone();
+            self.vcx
+                .update(|_, cx| main.read(cx).page_entity::<ProcessesPage>(Tab::Processes))
+        }
+
+        fn active_tab(&mut self) -> Tab {
+            let main = self.main.clone();
+            self.vcx.update(|_, cx| main.read(cx).active_tab())
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            let main = self.main.clone();
+            self.vcx.update(|_, cx| {
+                let texts = main.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(ToString::to_string).collect()
+            })
+        }
+
+        /// The open confirmation windows.
+        fn dialogs(&mut self) -> Vec<(AnyWindowHandle, Entity<TlDialogView>)> {
+            self.vcx.update(|_, cx| {
+                cx.windows()
+                    .into_iter()
+                    .filter_map(|w| {
+                        let handle = w.downcast::<Root>()?;
+                        let frame = TlSecondaryWindow::<TlDialogView>::find(handle, cx)?;
+                        Some((w, frame.read(cx).content().clone()))
+                    })
+                    .collect()
+            })
+        }
+
+        /// The one open confirmation, drawn.
+        fn dialog(&mut self) -> (VisualTestContext, Entity<TlDialogView>) {
+            let mut open = self.dialogs();
+            assert_eq!(open.len(), 1, "one confirmation");
+            let (any, view) = open.pop().unwrap();
+            let mut vcx = VisualTestContext::from_window(any, &self.vcx.cx);
+            vcx.update(|window, _| window.activate_window());
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            (vcx, view)
+        }
+
+        /// Clicks the open confirmation's button `selector`.
+        fn choose(&mut self, selector: &'static str) {
+            let (mut vcx, _) = self.dialog();
+            let at = vcx.debug_bounds(selector).expect("dialog button").center();
+            vcx.simulate_click(at, Modifiers::none());
+            vcx.run_until_parked();
+            self.draw();
+        }
+
+        /// The action requests sent: kind and target PIDs.
+        fn actions(&self) -> Vec<(ActionKind, Vec<u32>)> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Action(r) => Some(r),
+                    _ => None,
+                })
+                .map(|r| {
+                    let pids = r
+                        .targets
+                        .iter()
+                        .filter_map(|t| match t {
+                            ActionTarget::Process(k) => Some(k.pid),
+                            _ => None,
+                        })
+                        .collect();
+                    (r.kind, pids)
+                })
+                .collect()
+        }
+
+        /// Answers the page's last query with a view that shows the filler and the target.
+        fn answer(&mut self) {
+            let generation = super::sent(&self.engine)
+                .pop()
+                .expect("a query was sent")
+                .generation;
+            self.publish(&[FILLER, PID], generation, None);
+        }
+
+        fn selected(&mut self) -> Vec<ProcRowId> {
+            let page = self.page().expect("Processes built");
+            self.vcx
+                .update(|_, cx| page.read(cx).table().read(cx).selection.ids().collect())
+        }
+
+        fn target_visible(&mut self) -> bool {
+            let page = self.page().expect("Processes built");
+            self.vcx
+                .update(|_, cx| page.read(cx).table().read(cx).visible_range().contains(&1))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn pick_result_opens_picked_dialog_when_inactive(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.vcx.deactivate_window();
+        r.picked(PID);
+        assert!(!r.picking(), "end_window_pick ran");
+        assert!(r.toasts().is_empty(), "the start toast went");
+        let (mut vcx, view) = r.dialog();
+        let heading = vcx.update(|_, cx| {
+            let kind = ConfirmKind::Picked {
+                name: "firefox".into(),
+                pid: PID,
+            };
+            confirm_texts(&kind, cx).title.to_string()
+        });
+        assert_eq!(heading, "Picked firefox (PID 4242)");
+        assert!(vcx.debug_bounds("TlDialogHeading").is_some());
+        let (text, focused) = vcx.update(|window, cx| {
+            let v = view.read(cx);
+            (v.dialog().text().to_string(), v.focused_button(window))
+        });
+        assert_eq!(text, "What do you want to do with this process?");
+        assert_eq!(focused, Some(DialogButton::Action), "Select is the default");
+        assert!(vcx.debug_bounds("TlDialogSecond").is_some(), "Terminate");
+        assert!(r.actions().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn pick_select_jumps_to_row(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.vcx.deactivate_window();
+        r.picked(PID);
+        r.choose("TlDialogAction");
+        assert!(r.dialogs().is_empty());
+        assert_eq!(r.active_tab(), Tab::Processes);
+        r.answer();
+        assert_eq!(r.selected(), [ProcRowId::Process(key(PID))]);
+        assert!(r.target_visible());
+        assert!(r.actions().is_empty(), "Select sends no action");
+    }
+
+    #[gpui_kit::test]
+    fn pick_terminate_sends_end_task(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.vcx.deactivate_window();
+        r.picked(PID);
+        r.choose("TlDialogSecond");
+        assert!(
+            r.dialogs().is_empty(),
+            "an own process needs no second confirmation"
+        );
+        assert_eq!(r.actions(), [(ActionKind::Signal(Signal::Term), vec![PID])]);
+    }
+
+    #[gpui_kit::test]
+    fn pick_ctrl_active_ends_task(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.vcx.simulate_modifiers_change(Modifiers::control());
+        r.draw();
+        r.picked(PID);
+        assert!(!r.picking());
+        // Leader decision Q2: Ctrl+click asks with the Picked dialog too (PROC-055).
+        assert!(r.actions().is_empty(), "nothing before the confirmation");
+        r.choose("TlDialogSecond");
+        assert_eq!(r.actions(), [(ActionKind::Signal(Signal::Term), vec![PID])]);
+    }
+
+    #[gpui_kit::test]
+    fn pick_plain_active_selects(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.picked(PID);
+        assert!(!r.picking());
+        assert!(r.dialogs().is_empty(), "no dialog");
+        assert_eq!(r.active_tab(), Tab::Processes);
+        r.answer();
+        assert_eq!(r.selected(), [ProcRowId::Process(key(PID))]);
+        assert!(r.target_visible());
+        assert!(r.actions().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn pick_no_window_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.result(1, PickOutcome::NoWindow);
+        assert!(!r.picking());
+        assert_eq!(r.toasts(), ["No window found"]);
+        assert_eq!(r.active_tab(), Tab::Performance, "no tab switch");
+        assert!(r.dialogs().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn pick_cancelled_toast_once(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        // Esc cancels first and shows the toast; the engine's Cancelled reply replaces it.
+        r.vcx.simulate_keystrokes("escape");
+        r.draw();
+        let cancels = r
+            .engine
+            .commands()
+            .into_iter()
+            .filter(|c| matches!(c, Command::KWin(KWinCommand::CancelPick { seq: 1 })))
+            .count();
+        assert_eq!(cancels, 1);
+        assert_eq!(r.toasts(), ["No window selected"]);
+        r.result(1, PickOutcome::Cancelled);
+        assert_eq!(r.toasts(), ["No window selected"]);
+        assert!(!r.picking());
+    }
+
+    #[gpui_kit::test]
+    fn pick_unknown_process_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.picked(99_999);
+        assert!(!r.picking());
+        assert_eq!(r.toasts(), ["Unknown process"]);
+        assert!(r.dialogs().is_empty());
+        assert_eq!(r.active_tab(), Tab::Performance);
+    }
+
+    #[gpui_kit::test]
+    fn pick_same_seq_ignored(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.vcx.deactivate_window();
+        r.picked(PID);
+        let (mut vcx, _) = r.dialog();
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        r.draw();
+        assert!(r.dialogs().is_empty(), "Esc cancels the dialog");
+
+        // A later snapshot still carries seq 1.
+        r.picked(PID);
+        assert!(r.dialogs().is_empty(), "handled once");
+        r.result(1, PickOutcome::NoWindow);
+        assert!(
+            r.toasts().is_empty(),
+            "same seq, new outcome: still ignored"
+        );
+        assert!(r.actions().is_empty());
     }
 }

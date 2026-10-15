@@ -1091,6 +1091,9 @@ processes-toast-process-exited = Process exited
 processes-jump-switched-tab = Switched to Processes tab
 processes-jump-not-found = Process not found in current view
 processes-jump-show = Show
+# Window-pick result (tasklens-pdu.48, PROC-055). "No window selected" is shell-toast-pick-none.
+prc-055-no-window-found = No window found
+prc-055-unknown-process = Unknown process
 
 ## Include children checkbox (E20-010)
 

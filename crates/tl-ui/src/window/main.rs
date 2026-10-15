@@ -91,6 +91,7 @@ use crate::pages::performance::details::Template;
 use crate::pages::performance::{PerformancePage, SummaryToggled};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
+use crate::pages::processes::pick::{self, PickWatch};
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::pages::startup::StartupPage;
 use crate::settings_global::{Section, TlSettings, animations_on};
@@ -141,7 +142,7 @@ fn single_char(text: &str) -> Option<char> {
 /// (E20-027).
 pub const PICK_TOAST: ToastKey = ToastKey(0x7069_636b_0000_0001);
 const PICK_START_TEXT: &str = "shell-toast-pick-start";
-const PICK_NONE_TEXT: &str = "shell-toast-pick-none";
+pub(crate) const PICK_NONE_TEXT: &str = "shell-toast-pick-none";
 const PICK_FAILED_TEXT: &str = "shell-toast-pick-failed";
 
 /// The UI scale toast's key. Fixed, so repeated presses replace one toast (UI-SHL-130).
@@ -1154,6 +1155,8 @@ pub struct MainWindow {
     picking: bool,
     /// The `seq` of the last `KWin(Pick)` sent; its `CancelPick` and its `PickResult` carry it.
     pick_seq: u64,
+    /// The last pick result handled (E22-045).
+    pick_watch: PickWatch,
     status_buf: String,
     /// `(state_version, processes version)` the toolbar model was built from.
     settings_versions: (u64, u64),
@@ -1319,6 +1322,11 @@ impl MainWindow {
                     }
                     // The picker follows the KWin bridge; picking ends when the bridge goes.
                     if ev.mask.contains(ComponentMask::WINDOWS) {
+                        // A new pick result, read from the live snapshot (E22-045, PROC-055).
+                        let windows = Arc::clone(&hub.read(cx).current().windows);
+                        if let Some(result) = this.pick_watch.take(&windows) {
+                            pick::on_pick_result(this, result, window, cx);
+                        }
                         if this.picking && !keep_above_supported(cx) {
                             this.end_window_pick(cx);
                         }
@@ -1339,6 +1347,12 @@ impl MainWindow {
             })
             .is_err()
         });
+        // A pick result already in the hub belongs to an earlier main window; picks from this
+        // one continue its sequence.
+        let pick_watch = cx
+            .try_global::<GlobalHub>()
+            .map(|hub| PickWatch::new(&hub.0.read(cx).current().windows))
+            .unwrap_or_default();
 
         let mut this = Self {
             root_focus,
@@ -1353,7 +1367,8 @@ impl MainWindow {
             pages: Default::default(),
             active: start,
             picking: false,
-            pick_seq: 0,
+            pick_seq: pick_watch.last_seq(),
+            pick_watch,
             status_buf: String::new(),
             settings_versions: settings_versions(cx),
             style_version: metrics(cx).style_version,
