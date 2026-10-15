@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{AnyWindowHandle, TestAppContext, VisualTestContext};
+use gpui_kit::base::Root;
+use gpui_kit::{AnyWindowHandle, Entity, TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
 use tl_model::health::{HelperStartOutcome, HelperState};
@@ -23,6 +24,8 @@ use tl_ui::helper_flow::GlobalHelperFlow;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+use tl_ui::windows::actions::HandleSearchAll;
+use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
 use tl_ui::windows::props::open_process_properties;
 
 const CANCELLED: &str = "Authentication cancelled";
@@ -173,6 +176,33 @@ fn open_props(cx: &mut TestAppContext, engine: &FakeEngine, pid: u32) -> VisualT
     vcx
 }
 
+/// Opens the Handle Search window, activates it and types a pattern.
+fn open_search(cx: &mut TestAppContext) -> (VisualTestContext, Entity<HandleSearchWindow>) {
+    cx.update(open_handle_search);
+    cx.run_until_parked();
+    let (handle, view) = cx
+        .update(|cx| {
+            cx.windows().into_iter().find_map(|w| {
+                let h = w.downcast::<Root>()?;
+                HandleSearchWindow::find(h, cx).map(|v| (h, v))
+            })
+        })
+        .expect("the Handle Search window opens");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    let input = vcx.read(|cx| view.read(cx).pattern().clone());
+    vcx.update(|window, cx| input.update(cx, |s, cx| s.set_value("log", window, cx)));
+    vcx.run_until_parked();
+    (vcx, view)
+}
+
+/// Clicks "Search all" while the helper is locked: Handle Search dispatches a start.
+fn search_all(vcx: &mut VisualTestContext, view: &Entity<HandleSearchWindow>) {
+    vcx.update(|window, cx| window.dispatch_action(Box::new(HandleSearchAll), cx));
+    vcx.run_until_parked();
+    assert!(vcx.read(|cx| view.read(cx).is_pending_all()));
+}
+
 fn window_toasts(vcx: &mut VisualTestContext) -> Vec<String> {
     vcx.update(|window, cx| {
         let queue = ToastQueue::of_window(window, cx).expect("toast queue");
@@ -313,4 +343,113 @@ fn outcome_without_a_sent_start_does_not_toast(cx: &mut TestAppContext) {
         Some((1, HelperStartOutcome::Cancelled)),
     );
     assert!(main_toasts(cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn overlapping_starts_toast_each_cancel_once(cx: &mut TestAppContext) {
+    let (engine, mut main) = setup(cx);
+    publish_helper(cx, &engine, HelperState::Locked, None);
+    main.dispatch_action(StartHelperSession);
+    main.run_until_parked();
+    let (mut search, view) = open_search(cx);
+    search_all(&mut search, &view);
+    assert_eq!(starts_sent(&engine), 2);
+    assert_eq!(pending(cx), [true, false]);
+
+    // The first cancel answers the main window's start, but Handle Search toasts it.
+    publish_helper(
+        cx,
+        &engine,
+        HelperState::Locked,
+        Some((1, HelperStartOutcome::Cancelled)),
+    );
+    assert_eq!(window_toasts(&mut search), [CANCELLED]);
+    assert!(main_toasts(cx).is_empty(), "one toast for the first cancel");
+
+    // The second cancel answers Handle Search's start, which toasts no more.
+    publish_helper(
+        cx,
+        &engine,
+        HelperState::Locked,
+        Some((2, HelperStartOutcome::Cancelled)),
+    );
+    assert_eq!(
+        main_toasts(cx),
+        [CANCELLED],
+        "one toast for the second cancel"
+    );
+    assert_eq!(window_toasts(&mut search), [CANCELLED]);
+    assert!(pending(cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn overlapping_cancels_in_one_snapshot_toast_twice(cx: &mut TestAppContext) {
+    let (engine, mut main) = setup(cx);
+    publish_helper(cx, &engine, HelperState::Locked, None);
+    main.dispatch_action(StartHelperSession);
+    main.run_until_parked();
+    let (mut search, view) = open_search(cx);
+    search_all(&mut search, &view);
+
+    // Both cancels reach the UI in one snapshot.
+    publish_helper(
+        cx,
+        &engine,
+        HelperState::Locked,
+        Some((2, HelperStartOutcome::Cancelled)),
+    );
+    assert_eq!(window_toasts(&mut search), [CANCELLED]);
+    assert_eq!(main_toasts(cx), [CANCELLED]);
+}
+
+#[gpui_kit::test]
+fn window_start_first_then_main_start_toasts_each_cancel_once(cx: &mut TestAppContext) {
+    let (engine, mut main) = setup(cx);
+    publish_helper(cx, &engine, HelperState::Locked, None);
+    let (mut search, view) = open_search(cx);
+    search_all(&mut search, &view);
+    main.update(|window, _| window.activate_window());
+    main.dispatch_action(StartHelperSession);
+    main.run_until_parked();
+    assert_eq!(pending(cx), [false, true]);
+
+    publish_helper(
+        cx,
+        &engine,
+        HelperState::Locked,
+        Some((1, HelperStartOutcome::Cancelled)),
+    );
+    assert_eq!(window_toasts(&mut search), [CANCELLED]);
+    assert!(main_toasts(cx).is_empty());
+
+    publish_helper(
+        cx,
+        &engine,
+        HelperState::Locked,
+        Some((2, HelperStartOutcome::Cancelled)),
+    );
+    assert_eq!(main_toasts(cx), [CANCELLED]);
+    assert_eq!(window_toasts(&mut search), [CANCELLED]);
+}
+
+#[gpui_kit::test]
+fn closed_window_cancel_toasts_in_main(cx: &mut TestAppContext) {
+    let (engine, _main) = setup(cx);
+    publish_helper(cx, &engine, HelperState::Locked, None);
+    let (mut search, view) = open_search(cx);
+    search_all(&mut search, &view);
+    search.update(|window, _| window.remove_window());
+    search.run_until_parked();
+
+    publish_helper(
+        cx,
+        &engine,
+        HelperState::Locked,
+        Some((1, HelperStartOutcome::Cancelled)),
+    );
+    assert_eq!(
+        main_toasts(cx),
+        [CANCELLED],
+        "no window is left to toast it"
+    );
 }
