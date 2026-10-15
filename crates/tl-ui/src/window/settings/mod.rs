@@ -238,7 +238,6 @@ fn snap_number(v: f64, min: i64, max: i64, step: i64) -> i64 {
 type CustomRender = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 type BoolSetter = Rc<dyn Fn(bool, &mut App)>;
 /// A number input setter taking the typed value.
-#[cfg(any(test, feature = "test-hooks"))]
 type NumberSetter = Rc<dyn Fn(f64, &mut App)>;
 type BoolGetter = Rc<dyn Fn(&App) -> bool>;
 /// Runs with the value after a slider's Release write (the UI Scale toast).
