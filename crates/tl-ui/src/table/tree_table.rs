@@ -759,8 +759,8 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     selected: false,
                     width: f.total_width - x,
                 };
-                let label = self.delegate.name_cell(ix).primary;
-                let cell = paint_group_header_cell(label, self.delegate.row_expandable(ix), &ctx);
+                let name = self.delegate.name_cell(ix);
+                let cell = paint_group_header_cell(name, self.delegate.row_expandable(ix), &ctx);
                 row = row.child(cell.absolute().top_0().left(x));
             }
             return row.into_any_element();

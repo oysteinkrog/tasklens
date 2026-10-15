@@ -45,6 +45,7 @@ use tl_model::validity::Validity;
 
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::{glyph, glyph_allows_heat, glyph_start};
+use crate::pages::sys_status::{DotStyle, LabelTone, StatusLook, cell_colors};
 use crate::table::columns::ColumnKind;
 use crate::table::tree_table::{
     CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NAME_PAD, NameCell, NameIcon, RowFlags,
@@ -72,6 +73,10 @@ pub struct CellOut {
     pub background: Option<Hsla>,
     /// Page override (an exited process row's secondary text).
     pub text_color: Option<Hsla>,
+    /// Text colour kept on a selected row, in place of `text_selected_secondary`.
+    pub selected_text_color: Option<Hsla>,
+    /// A status dot drawn before the value, in the colours of a status cell. Not drawn on glyphs.
+    pub dot: Option<DotStyle>,
     /// Page override (dim zero values, PROC-041): the text draws at [`DIM_OPACITY`].
     pub dim: bool,
     /// Drawn before a numeric value in its own colour (the process table's "Σ ", UI-PRC-002).
@@ -106,6 +111,8 @@ impl CellOut {
         self.want_text = false;
         self.background = None;
         self.text_color = None;
+        self.selected_text_color = None;
+        self.dot = None;
         self.dim = false;
         self.prefix = None;
         self.suffix = None;
@@ -242,6 +249,25 @@ pub fn value_cell(
                 .text_color(color)
         }
     };
+    if let Some(dot) = out.dot {
+        let stale = out.validity == Validity::Stale;
+        let look = StatusLook {
+            dot,
+            label: LabelTone::Primary,
+        };
+        if let Some(color) = cell_colors(look, ctx.selected, stale, ctx.theme).dot {
+            let d = div()
+                .debug_selector(|| "TlCell-dot".into())
+                .flex_none()
+                .size(px(8.0 * ctx.m.ui_scale))
+                .rounded_full()
+                .mr(ctx.m.sp[3]);
+            cell = cell.child(match dot {
+                DotStyle::Ring(_) => d.border(px(1.5 * ctx.m.ui_scale)).border_color(color),
+                _ => d.bg(color),
+            });
+        }
+    }
     if let Some((prefix, color)) = &out.prefix {
         let color = if ctx.selected {
             ctx.theme.text_selected_secondary
@@ -324,15 +350,18 @@ pub fn cell_background(out: &CellOut, ctx: &CellCtx) -> Option<Hsla> {
 pub const DIM_OPACITY: f32 = 0.3;
 
 /// The page text colour for a cell: `out.text_color`, which becomes `text_selected_secondary`
-/// on a selected row, at [`DIM_OPACITY`] when `out.dim` is set (from the row's primary colour
+/// on a selected row unless `out.selected_text_color` is set, at [`DIM_OPACITY`] when `out.dim` is set (from the row's primary colour
 /// when there is no `text_color`). Glyphs and a prefix keep their own colours.
 pub fn cell_text_color(out: &CellOut, ctx: &CellCtx) -> Option<Hsla> {
-    let color = out.text_color.map(|color| {
-        if ctx.selected {
-            ctx.theme.text_selected_secondary
-        } else {
-            color
-        }
+    let selected_color = out.selected_text_color.filter(|_| ctx.selected);
+    let color = selected_color.or_else(|| {
+        out.text_color.map(|color| {
+            if ctx.selected {
+                ctx.theme.text_selected_secondary
+            } else {
+                color
+            }
+        })
     });
     if out.dim {
         return Some(color.unwrap_or_else(|| ctx.primary()).opacity(DIM_OPACITY));
@@ -1071,7 +1100,7 @@ pub fn paint_name_cell(
 /// The Name cell of a group header row (R-105, UI-PRC-002): the chevron at x 8 in
 /// `text_primary` and the label at x 30 in `t_md` 14 weight 600. `ctx.width` is the width the
 /// label may use, normally the rest of the row.
-pub fn paint_group_header_cell(label: SharedString, expanded: Option<bool>, ctx: &CellCtx) -> Div {
+pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &CellCtx) -> Div {
     let m = ctx.m;
     let s = m.ui_scale;
     let mut root = div()
@@ -1105,20 +1134,48 @@ pub fn paint_group_header_cell(label: SharedString, expanded: Option<bool>, ctx:
     }
     let mut text = div();
     *text.text_style() = label_style(m, m.text.md, FontWeight::SEMIBOLD);
-    root.child(
-        text.debug_selector(|| "TlGroupHeaderCell-label".into())
-            .absolute()
-            .top_0()
-            .left(px(GROUP_LABEL_X * s))
-            .right(m.sp[4])
-            .h_full()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .text_ellipsis()
-            .text_color(ctx.theme.text_primary)
-            .child(label),
-    )
+    let mut row = div()
+        .absolute()
+        .top_0()
+        .left(px(GROUP_LABEL_X * s))
+        .right(m.sp[4])
+        .h_full()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .child(
+            text.debug_selector(|| "TlGroupHeaderCell-label".into())
+                .min_w_0()
+                .flex_shrink(1.)
+                .text_ellipsis()
+                .text_color(ctx.theme.text_primary)
+                .child(cell.primary),
+        );
+    for (name, _tip) in cell.glyphs {
+        row = row.child(
+            svg()
+                .debug_selector(|| "TlGroupHeaderCell-glyph".into())
+                .path(name.path())
+                .size(m.icon.sm)
+                .flex_none()
+                .ml(m.sp[3])
+                .text_color(ctx.theme.status.warning),
+        );
+    }
+    if let Some(secondary) = cell.secondary {
+        row = row.child(
+            div()
+                .debug_selector(|| "TlGroupHeaderCell-secondary".into())
+                .ml(m.sp[3])
+                .min_w_0()
+                .flex_shrink(1.)
+                .text_ellipsis()
+                .text_color(ctx.theme.text_secondary)
+                .font_weight(FontWeight::NORMAL)
+                .child(secondary),
+        );
+    }
+    root.child(row)
 }
 
 #[cfg(test)]
@@ -1141,6 +1198,8 @@ mod tests {
             want_text: true,
             background: Some(gpui_kit::red()),
             text_color: Some(gpui_kit::red()),
+            selected_text_color: Some(gpui_kit::red()),
+            dot: Some(DotStyle::Filled(LabelTone::Danger)),
             dim: true,
             prefix: Some(("Σ ".into(), gpui_kit::red())),
             suffix: Some(CellSuffix {
@@ -1156,6 +1215,7 @@ mod tests {
         assert_eq!(out.bits, 0);
         assert_eq!(out.validity, Validity::WarmingUp);
         assert!(out.arc.is_none() && out.background.is_none() && out.text_color.is_none());
+        assert!(out.selected_text_color.is_none() && out.dot.is_none());
         assert!(out.tooltip.is_none() && !out.want_text && !out.want_tooltip);
         assert!(!out.dim && out.prefix.is_none() && out.suffix.is_none());
         assert!(out.text.is_empty());

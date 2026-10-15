@@ -185,5 +185,15 @@ pub fn render_name_cell(
 /// The Name cell of a group header row (D-011): chevron at x 8, label such as "Apps (11)" at
 /// x 30 in `t_md` 14 weight 600. The row draws the `header` band and the top `divider` line.
 pub fn render_group_header(label: SharedString, expanded: bool, ctx: &CellCtx) -> AnyElement {
-    paint_group_header_cell(label, Some(expanded), ctx).into_any_element()
+    let cell = NameCell {
+        icon: NameIcon::None,
+        icon_size: IconSlot::Small,
+        primary: label,
+        count_run: None,
+        secondary: None,
+        glyphs: SmallVec::new(),
+        highlight_fffd: false,
+        trailing: None,
+    };
+    paint_group_header_cell(cell, Some(expanded), ctx).into_any_element()
 }
