@@ -19,6 +19,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{Action, App, Entity, FocusHandle, SharedString, Window, gpui};
@@ -38,13 +39,17 @@ use crate::components::menu::{MenuSuffixAction, TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::hub::GlobalHub;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::pages::minigraph::actions::ResetMinigraphLayout;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::{CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
 use crate::table::columns::TableId;
+use crate::theme::share_code::{ShareCodeError, import_text};
 use crate::theme::store::{self, ActivateSource, ActivateTheme, ThemeError, ThemeStore};
+use crate::theme::{ThemeDef, ThemeEvent};
 use crate::window::confirm::confirm_delete_theme;
+use crate::window::share_theme::ShareTheme;
+use crate::window::theme_editor::EditTheme;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
@@ -60,12 +65,21 @@ pub struct DeleteTheme {
     pub name: SharedString,
 }
 
+gpui_kit::actions!(
+    tasklens,
+    [
+        /// View > Theme > Import theme: adds the themes in the clipboard text (E21-031).
+        ImportTheme
+    ]
+);
+
 /// Registers the `ActivateTheme` handler and the follow-system observer. `TasklensUi::init`
 /// calls it after `TlSettings::init`.
 pub fn init(cx: &mut App) {
     cx.on_action(|a: &ActivateTheme, cx| activate_theme(&a.name, cx));
     cx.on_action(|a: &CopyTheme, cx| copy_theme(&a.name, cx));
     cx.on_action(|a: &DeleteTheme, cx| delete_theme(&a.name, cx));
+    cx.on_action(|_: &ImportTheme, cx| import_theme(cx));
     let following = Rc::new(Cell::new(follow_system(cx)));
     cx.observe_global::<TlSettings>(move |cx| {
         let now = follow_system(cx);
@@ -91,6 +105,74 @@ fn copy_theme(name: &str, cx: &mut App) {
         }
         Err(e) => tracing::warn!(target: "tasklens::ui", ?e, name, "theme not copied"),
         Ok(event) => tracing::warn!(target: "tasklens::ui", ?event, "unexpected copy event"),
+    }
+}
+
+/// The themes in the clipboard text, named so none clashes with an existing theme (user or
+/// built-in) or an earlier one of the batch: a taken name gets " 2", " 3" and so on. The text is
+/// untrusted and is never logged. Has no side effects.
+pub(crate) fn import_from_clipboard(cx: &App) -> Result<Vec<ThemeDef>, ShareCodeError> {
+    let text = cx
+        .read_from_clipboard()
+        .and_then(|c| c.text())
+        .ok_or(ShareCodeError::NotAThemeCode)?;
+    let store = cx.global::<ThemeStore>();
+    import_defs(&text, |n| store.resolve(n).is_some())
+}
+
+fn import_defs(text: &str, taken: impl Fn(&str) -> bool) -> Result<Vec<ThemeDef>, ShareCodeError> {
+    let mut defs = import_text(text)?;
+    if defs.is_empty() {
+        return Err(ShareCodeError::NotAThemeCode);
+    }
+    let mut used: Vec<Arc<str>> = Vec::new();
+    for def in &mut defs {
+        let clash = |n: &str| taken(n) || used.iter().any(|u| &**u == n);
+        if clash(&def.name) {
+            let base = def.name.clone();
+            def.name = (2..)
+                .map(|n| format!("{base} {n}"))
+                .find(|n| !clash(n))
+                .expect("a free suffix exists")
+                .into();
+        }
+        used.push(def.name.clone());
+    }
+    Ok(defs)
+}
+
+fn import_theme(cx: &mut App) {
+    if cx.global::<ThemeStore>().preview.is_some() {
+        toast(ToastKind::Info, "shell-toast-theme-editor-busy", cx);
+        return;
+    }
+    let defs = match import_from_clipboard(cx) {
+        Ok(defs) => defs,
+        Err(e) => {
+            tracing::debug!(target: "tasklens::ui", ?e, "clipboard theme not imported");
+            toast(ToastKind::Info, "shell-toast-theme-no-code", cx);
+            return;
+        }
+    };
+    let first = defs[0].name.clone();
+    match ThemeStore::import_themes(defs, cx) {
+        Ok(ThemeEvent::Imported { count }) => {
+            if let Err(e) = store::activate(&first, ActivateSource::User, cx) {
+                tracing::warn!(target: "tasklens::ui", ?e, "imported theme not activated");
+            }
+            TlSettings::update(cx, |d| d.settings.theme.active = first.to_string());
+            if count == 1 {
+                toast(ToastKind::Success, "shell-toast-theme-imported", cx);
+            } else {
+                let text = tr_args(
+                    cx,
+                    "shell-toast-themes-imported",
+                    &[("count", count.into())],
+                );
+                toast_text(ToastKind::Success, text, cx);
+            }
+        }
+        Ok(_) | Err(_) => toast(ToastKind::Info, "shell-toast-theme-no-code", cx),
     }
 }
 
@@ -149,6 +231,11 @@ fn activate_theme(name: &str, cx: &mut App) {
 /// menu action.
 fn toast(kind: ToastKind, key: &str, cx: &mut App) {
     let text = tr(cx, key);
+    toast_text(kind, text, cx);
+}
+
+/// Like `toast`, with ready text.
+fn toast_text(kind: ToastKind, text: SharedString, cx: &mut App) {
     let Some(handle) = cx.active_window() else {
         return;
     };
@@ -574,10 +661,23 @@ fn theme_submenu(mut menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu 
             }),
         )
         .item(
+            tr(cx, "shell-menu-theme-edit"),
+            Box::new(EditTheme {
+                name: active.clone(),
+            }),
+        )
+        .item(
+            tr(cx, "shell-menu-theme-share"),
+            Box::new(ShareTheme {
+                name: active.clone(),
+            }),
+        )
+        .item(
             tr(cx, "shell-menu-theme-delete"),
             Box::new(DeleteTheme { name: active }),
         )
         .separator()
+        .item(tr(cx, "shell-menu-theme-import"), Box::new(ImportTheme))
         .check_item(
             tr(cx, "shell-menu-theme-sync"),
             follow,
@@ -616,4 +716,26 @@ fn preferred_submenu(mut menu: TlMenu, key: SettingKey, cx: &mut App) -> TlMenu 
         );
     }
     menu
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn import_fuzz_no_panic(s in any::<String>()) {
+            for taken in [false, true] {
+                for text in [s.clone(), format!("TL1.{s}")] {
+                    let _ = import_defs(&text, |_| taken);
+                }
+                let ts1 = format!("TS1.{s}");
+                prop_assert!(import_defs(&ts1, |_| taken).is_err());
+            }
+        }
+    }
 }

@@ -2060,6 +2060,12 @@ shell-confirm-delete-button = Delete
 shell-toast-theme-copied = Theme copied
 shell-toast-theme-deleted = Theme deleted
 shell-toast-theme-builtin-delete = Built-in themes cannot be deleted
+shell-menu-theme-edit = Edit colors
+shell-menu-theme-share = Share theme
+shell-menu-theme-import = Import theme
+shell-toast-theme-imported = Theme imported
+shell-toast-themes-imported = Imported { $count } themes
+shell-toast-theme-no-code = Clipboard does not contain a theme code
 # Theme Editor window (tasklens-bj6.30, UI-SHL-081, APP-035). Theme names are data, not translated.
 shell-theme-editor-title = tasklens Theme Editor
 shell-theme-editor-name = Name:

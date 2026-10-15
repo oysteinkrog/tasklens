@@ -12,10 +12,10 @@ use gpui_kit::base::Root;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
-    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, Role, Styled, TestAppContext,
-    VisualTestContext, Window, WindowHandle, div, px, size,
+    AnyWindowHandle, AppContext as _, Bounds, ClipboardItem, Context, ElementId, Entity,
+    FocusHandle, InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Role, Styled,
+    TestAppContext, VisualTestContext, Window, WindowHandle, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
@@ -43,7 +43,7 @@ use tl_ui::theme::user_store::{PersistTheme, ThemePersist};
 use tl_ui::window::confirm::ResetSettings;
 use tl_ui::window::main::ShellState;
 use tl_ui::window::menubar::{self, MenuBar, menu_bar_for};
-use tl_ui::window::menus_view::{CopyTheme, DeleteTheme};
+use tl_ui::window::menus_view::{CopyTheme, DeleteTheme, ImportTheme};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
 use tl_ui::window::{menus_settings, menus_view};
 
@@ -1913,8 +1913,11 @@ fn theme_rows_painted(cx: &mut TestAppContext) {
         [
             "",
             "Create copy",
+            "Edit colors",
+            "Share theme",
             "Delete theme",
             "",
+            "Import theme",
             "Sync theme with system",
             "Preferred Light Theme",
             "Preferred Dark Theme"
@@ -1975,6 +1978,114 @@ fn copy_icon_copies_row_theme(cx: &mut TestAppContext) {
     assert_eq!(active_theme(r.cx), format!("{source} copy"));
     assert_eq!(open_menu(r.cx), Some(MenuId::View), "the menu stays open");
     assert_eq!(toast_texts(&mut r), ["Theme copied"]);
+}
+
+fn import_clipboard(r: &mut Rig<'_>, text: String) {
+    r.cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
+    r.cx.dispatch_action(ImportTheme);
+    draw(r.cx);
+}
+
+fn builtin_def(cx: &mut VisualTestContext, name: &str) -> tl_ui::theme::ThemeDef {
+    cx.update(|_, cx| {
+        cx.global::<tl_ui::theme::ThemeStore>()
+            .builtin
+            .iter()
+            .find(|d| d.name.as_ref() == name)
+            .expect("built-in theme")
+            .clone()
+    })
+}
+
+fn user_defs(cx: &mut VisualTestContext) -> Vec<tl_ui::theme::ThemeDef> {
+    cx.update(|_, cx| cx.global::<tl_ui::theme::ThemeStore>().user.clone())
+}
+
+#[gpui_kit::test]
+fn theme_menu_p3_items(cx: &mut TestAppContext) {
+    let r = rig_with_toasts(cx);
+    let n = builtin_names(r.cx).len();
+    open_theme(r.cx);
+    let tail: Vec<String> = theme_entries(r.cx)
+        .iter()
+        .skip(n)
+        .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            "",
+            "Create copy",
+            "Edit colors",
+            "Share theme",
+            "Delete theme",
+            "",
+            "Import theme",
+            "Sync theme with system",
+            "Preferred Light Theme",
+            "Preferred Dark Theme"
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn import_tl1_roundtrip(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    add_custom_theme(r.cx, "Mine", "Default Dark");
+    let def = user_defs(r.cx).remove(0);
+    import_clipboard(&mut r, tl_ui::theme::share_code::encode_tl1(&def));
+    assert_eq!(user_theme_names(r.cx), ["Mine", "Mine 2"]);
+    let defs = user_defs(r.cx);
+    assert_eq!(defs[1].slots, defs[0].slots);
+    assert_eq!(defs[1].accent, defs[0].accent);
+    assert_eq!(active_theme(r.cx), "Mine 2");
+    assert_eq!(theme(r.cx).active, "Mine 2");
+    assert_eq!(toast_texts(&mut r), ["Theme imported"]);
+    assert_eq!(r.theme_persists.borrow().len(), 1);
+}
+
+#[gpui_kit::test]
+fn import_raw_json_multiple(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    let mut a = builtin_def(r.cx, "Default Dark");
+    a.name = "A".into();
+    let mut b = builtin_def(r.cx, "Default Light");
+    b.name = "B".into();
+    import_clipboard(
+        &mut r,
+        tl_ui::theme::user_store::serialize_user_themes(&[a, b]),
+    );
+    assert_eq!(user_theme_names(r.cx), ["A", "B"]);
+    assert_eq!(active_theme(r.cx), "A");
+    assert_eq!(toast_texts(&mut r), ["Imported 2 themes"]);
+}
+
+#[gpui_kit::test]
+fn import_missing_slot_fill(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    import_clipboard(
+        &mut r,
+        r##"{"themes":[{"name":"Half","WINDOW_BG":"#101010"}]}"##.to_owned(),
+    );
+    let dark = builtin_def(r.cx, "Default Dark");
+    let defs = user_defs(r.cx);
+    assert_eq!(defs[0].name.as_ref(), "Half");
+    let i = tl_ui::theme::ThemeSlot::Titlebar as usize;
+    assert_eq!(defs[0].slots[i], dark.slots[i]);
+}
+
+#[gpui_kit::test]
+fn import_garbage_toast(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    let active = active_theme(r.cx);
+    import_clipboard(&mut r, "hello".to_owned());
+    assert_eq!(
+        toast_texts(&mut r),
+        ["Clipboard does not contain a theme code"]
+    );
+    assert!(user_theme_names(r.cx).is_empty());
+    assert_eq!(active_theme(r.cx), active);
+    assert!(r.theme_persists.borrow().is_empty());
 }
 
 #[gpui_kit::test]
