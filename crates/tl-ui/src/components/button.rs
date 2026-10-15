@@ -26,8 +26,8 @@ use gpui_kit::assets::IconNamed as _;
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::{
     Action, AnyElement, App, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
-    StatefulInteractiveElement, Styled, Window, accesskit::Toggled, div,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Radians, RenderOnce,
+    SharedString, StatefulInteractiveElement, Styled, Window, accesskit::Toggled, div,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 
@@ -167,6 +167,7 @@ pub struct TlButton {
     icon_size: Option<Pixels>,
     icon_muted: bool,
     icon_hover: bool,
+    icon_rotation: Option<Radians>,
     action: Option<Rc<dyn Action>>,
     on_click: Option<ClickHandler>,
     tooltip: Option<SharedString>,
@@ -190,6 +191,7 @@ impl TlButton {
             icon_size: None,
             icon_muted: false,
             icon_hover: false,
+            icon_rotation: None,
             action: None,
             on_click: None,
             tooltip: None,
@@ -237,6 +239,13 @@ impl TlButton {
     /// Information section copy button does. Default `false`.
     pub fn icon_hover(mut self, on: bool) -> Self {
         self.icon_hover = on;
+        self
+    }
+
+    /// Turns the leading icon by `angle`, such as a chevron that opens a section. Ignored while
+    /// [`TlButton::icon_hover`] is drawing the icon. Default none.
+    pub fn icon_rotation(mut self, angle: Radians) -> Self {
+        self.icon_rotation = Some(angle);
         self
     }
 
@@ -386,11 +395,18 @@ impl RenderOnce for TlButton {
             .when(self.loading, |c| c.invisible())
             .when_some(self.icon, |c, name| {
                 let id = self.id.clone();
+                let rotation = self.icon_rotation;
                 c.child(
                     div()
                         .debug_selector(move || format!("TlButton-{id}-icon"))
                         .flex_none()
-                        .child(icon_element(name, icon_size, icon_fg, icon_hover_fg)),
+                        .child(icon_element(
+                            name,
+                            icon_size,
+                            icon_fg,
+                            icon_hover_fg,
+                            rotation,
+                        )),
                 )
             });
         if let Some(label) = self.label.clone().filter(|_| !self.kind.icon_only()) {
@@ -404,7 +420,7 @@ impl RenderOnce for TlButton {
                 div()
                     .debug_selector(move || format!("TlButton-{id}-trailing-icon"))
                     .flex_none()
-                    .child(icon_element(name, icon_size, icon_fg, icon_hover_fg)),
+                    .child(icon_element(name, icon_size, icon_fg, icon_hover_fg, None)),
             );
         }
 
@@ -513,7 +529,13 @@ impl RenderOnce for TlButton {
 }
 
 /// The icon in `color`, or in `hover` while the pointer is over the button.
-fn icon_element(name: TlIcon, size: Pixels, color: Hsla, hover: Option<Hsla>) -> AnyElement {
+fn icon_element(
+    name: TlIcon,
+    size: Pixels,
+    color: Hsla,
+    hover: Option<Hsla>,
+    rotation: Option<Radians>,
+) -> AnyElement {
     match hover {
         // The kit `Icon` fixes its colour, so a hover colour needs the bare svg.
         Some(hover) => svg()
@@ -523,7 +545,9 @@ fn icon_element(name: TlIcon, size: Pixels, color: Hsla, hover: Option<Hsla>) ->
             .text_color(color)
             .group_hover(HOVER_GROUP, move |s| s.text_color(hover))
             .into_any_element(),
-        None => icon(name, size, color).into_any_element(),
+        None => icon(name, size, color)
+            .when_some(rotation, |i, angle| i.rotate(angle))
+            .into_any_element(),
     }
 }
 
@@ -893,6 +917,18 @@ mod tests {
             Some("Run"),
             "a labelled button: the label"
         );
+    }
+
+    #[gpui_kit::test]
+    fn icon_rotation_is_kept_on_the_leading_icon(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            setup(cx);
+            let plain = TlButton::new("chev", TlButtonKind::Ghost).icon(TlIcon::ChevronRight);
+            assert_eq!(plain.icon_rotation, None, "off by default");
+            let angle = gpui_kit::radians(std::f32::consts::FRAC_PI_2);
+            let turned = plain.icon_rotation(angle);
+            assert_eq!(turned.icon_rotation, Some(angle));
+        });
     }
 
     #[gpui_kit::test]

@@ -19,13 +19,15 @@ use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyView, AnyWindowHandle, App, AppContext as _,
     AsyncApp, Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px,
+    StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px, radians,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::{InventorySnapshot, MemoryDetails, Snapshot, SwapDevice, SwapKindModel};
+use tl_model::snapshot::{
+    InvField, InventorySnapshot, MemoryDetails, MemoryModule, Snapshot, SwapDevice, SwapKindModel,
+};
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
@@ -40,8 +42,10 @@ use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::icons::TlIcon;
 use crate::components::menu::TlMenu;
-use crate::components::motion::{M_BASE, ease_out_cubic};
+use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
@@ -123,6 +127,7 @@ pub struct Words {
     pub block_compressed: SharedString,
     pub zswap: SharedString,
     pub block_swap: SharedString,
+    pub block_modules: SharedString,
     pub swap_table: SwapWords,
 }
 
@@ -157,6 +162,7 @@ impl Words {
         self.block_compressed = t(KEY_BLOCK_COMPRESSED);
         self.zswap = t(KEY_ZSWAP);
         self.block_swap = t(KEY_BLOCK_SWAP);
+        self.block_modules = t(KEY_BLOCK_MODULES);
         self.swap_table = SwapWords {
             columns: KEY_SWAP_COLS.map(t),
             types: KEY_SWAP_TYPES.map(t),
@@ -920,6 +926,335 @@ pub fn update_compressed_block(block: &mut CompressedBlock, inp: &CompressedInpu
     changed
 }
 
+// ---- "Memory modules" block (UI-PRF-028 block 3, PERF-046) ----
+
+pub const ROW_MOD_SLOT: &str = "perf-mem-mod-slot";
+pub const ROW_MOD_CAPACITY: &str = "perf-mem-mod-capacity";
+pub const ROW_MOD_SPEED: &str = "perf-mem-mod-speed";
+pub const ROW_MOD_CONFIGURED: &str = "perf-mem-mod-configured";
+pub const ROW_MOD_TYPE: &str = "perf-mem-mod-type";
+pub const ROW_MOD_FORM_FACTOR: &str = "perf-mem-mod-form-factor";
+pub const ROW_MOD_MANUFACTURER: &str = "perf-mem-mod-manufacturer";
+pub const ROW_MOD_PART: &str = "perf-mem-mod-part";
+pub const ROW_MOD_RANK: &str = "perf-mem-mod-rank";
+pub const ROW_MOD_VOLTAGE: &str = "perf-mem-mod-voltage";
+pub const ROW_MOD_DETAILS: &str = "perf-mem-mod-details";
+
+/// Debug selector of the chevron button of module `n`, with `-{n}` appended.
+pub const MODULE_CHEVRON_ID: &str = "perf-mem-module-chevron";
+/// Element id and debug selector of the grid of module `n`, with `-{n}` appended in the
+/// selector. A parent id of its own, for the reason given at [`ZRAM_GRID_ID`].
+pub const MODULE_GRID_ID: &str = "perf-mem-module-grid";
+/// Debug selector of the "Module details: Not reported" grid.
+pub const MODULES_NOT_REPORTED_ID: &str = "perf-mem-modules-not-reported";
+
+const KEY_BLOCK_MODULES: &str = "perf-mem-block-modules";
+/// "Slots used: {$used} of {$total}".
+const KEY_SLOTS_LINE: &str = "perf-mem-slots-line";
+/// "Slots used: {$used}".
+const KEY_SLOTS_LINE_USED: &str = "perf-mem-slots-line-used";
+/// "Memory module {$n}".
+const KEY_MODULE_TITLE: &str = "perf-mem-module-title";
+/// "{$v} V".
+const KEY_VOLTAGE_VALUE: &str = "perf-mem-voltage-value";
+
+/// Blocks start collapsed when there are more modules than this.
+pub const MODULES_EXPANDED_MAX: usize = 4;
+
+const MODULE_ROWS: [&str; 10] = [
+    ROW_MOD_SLOT,
+    ROW_MOD_CAPACITY,
+    ROW_MOD_SPEED,
+    ROW_MOD_CONFIGURED,
+    ROW_MOD_TYPE,
+    ROW_MOD_FORM_FACTOR,
+    ROW_MOD_MANUFACTURER,
+    ROW_MOD_PART,
+    ROW_MOD_RANK,
+    ROW_MOD_VOLTAGE,
+];
+
+/// The chevron's turn animation after a toggle.
+#[derive(Clone, Copy, Debug)]
+struct ChevronAnim {
+    module: usize,
+    /// True while the module opens, false while it closes.
+    opening: bool,
+    /// Bumped on each toggle, so a new toggle restarts the animation.
+    generation: u32,
+}
+
+/// One collapsible grid per populated DIMM under the swap table. No serial is read or shown
+/// (D-007).
+pub struct ModulesBlock {
+    /// "Slots used: 2 of 4", or "Slots used: 2" without the slot total. Empty when not shown.
+    pub slots_line: SharedString,
+    /// "Memory module N" with its grid, in SMBIOS order.
+    pub modules: Vec<(SharedString, KeyValueModel)>,
+    pub expanded: Vec<bool>,
+    /// The inventory has no module keys: one grid row "Module details: Not reported" shows
+    /// instead of the list.
+    pub not_reported: bool,
+    /// The inventory is still warming up: the block does not show.
+    hidden: bool,
+    /// Holds the "Module details" row and the line and title texts.
+    words: KeyValueModel,
+    used: usize,
+    slots_total: Option<u32>,
+    anim: Option<ChevronAnim>,
+}
+
+impl Default for ModulesBlock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn module_model() -> KeyValueModel {
+    let mut model = KeyValueModel::new(&MODULE_ROWS)
+        .with_texts(&[(KEY_SPEED_VALUE, &["mts"]), (KEY_VOLTAGE_VALUE, &["v"])]);
+    model.hide(ROW_MOD_CONFIGURED);
+    model
+}
+
+impl ModulesBlock {
+    /// An empty block, which is hidden.
+    pub fn new() -> Self {
+        Self {
+            slots_line: SharedString::default(),
+            modules: Vec::new(),
+            expanded: Vec::new(),
+            not_reported: false,
+            hidden: true,
+            words: KeyValueModel::new(&[ROW_MOD_DETAILS]).with_texts(&[
+                (KEY_SLOTS_LINE, &["used", "total"]),
+                (KEY_SLOTS_LINE_USED, &["used"]),
+                (KEY_MODULE_TITLE, &["n"]),
+            ]),
+            used: 0,
+            slots_total: None,
+            anim: None,
+        }
+    }
+
+    /// The block does not show while the inventory is warming up.
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// The "Module details: Not reported" grid.
+    pub fn details_model(&self) -> &KeyValueModel {
+        &self.words
+    }
+
+    /// Opens or closes module `i`. False when there is no such module.
+    pub fn toggle(&mut self, i: usize) -> bool {
+        let Some(open) = self.expanded.get_mut(i) else {
+            return false;
+        };
+        *open = !*open;
+        let generation = self.anim.map_or(0, |a| a.generation.wrapping_add(1));
+        self.anim = Some(ChevronAnim {
+            module: i,
+            opening: *open,
+            generation,
+        });
+        true
+    }
+
+    /// Writes the title and grid of every module, for the page's copy text.
+    pub fn copy_into(&self, out: &mut String) {
+        for (title, model) in &self.modules {
+            out.push_str(title);
+            out.push('\n');
+            model.copy_into(out);
+        }
+    }
+
+    /// Translates the words of every grid when the strings changed. True when they did.
+    pub fn refresh_strings(&mut self, cx: &App) -> bool {
+        let changed = self.words.refresh_strings(cx);
+        let mut grids = false;
+        for (_, model) in &mut self.modules {
+            grids |= model.refresh_strings(cx);
+        }
+        if changed {
+            self.write_words();
+        }
+        changed || grids
+    }
+
+    /// Writes the slots line and the module titles from the current texts.
+    fn write_words(&mut self) {
+        let mut line = String::new();
+        if self.not_reported || self.hidden {
+            // No line.
+        } else if let Some(total) = self.slots_total {
+            let used = self.used;
+            self.words
+                .text(KEY_SLOTS_LINE)
+                .write_each(&mut line, |i, o| {
+                    let _ = match i {
+                        0 => write!(o, "{used}"),
+                        _ => write!(o, "{total}"),
+                    };
+                });
+        } else {
+            let used = self.used;
+            self.words
+                .text(KEY_SLOTS_LINE_USED)
+                .write_each(&mut line, |_, o| {
+                    let _ = write!(o, "{used}");
+                });
+        }
+        self.slots_line = SharedString::from(line);
+        let template = self.words.text(KEY_MODULE_TITLE);
+        for (n, (title, _)) in self.modules.iter_mut().enumerate() {
+            let mut text = String::new();
+            template.write_each(&mut text, |_, o| {
+                let _ = write!(o, "{}", n + 1);
+            });
+            *title = SharedString::from(text);
+        }
+    }
+}
+
+fn inv_shown(v: Validity) -> bool {
+    matches!(v, Validity::Valid | Validity::Stale)
+}
+
+fn not_reported(model: &mut KeyValueModel, label: &'static str) -> bool {
+    model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None)
+}
+
+fn module_text(model: &mut KeyValueModel, label: &'static str, f: &InvField<Arc<str>>) -> bool {
+    if inv_shown(f.validity) && !f.value.is_empty() {
+        model.set_text(label, &f.value)
+    } else {
+        not_reported(model, label)
+    }
+}
+
+/// A speed row with the "{$mts} MT/s" text. 0 reads Not reported.
+fn module_speed(model: &mut KeyValueModel, label: &'static str, f: &InvField<u32>) -> bool {
+    if !(inv_shown(f.validity) && f.value > 0) {
+        return not_reported(model, label);
+    }
+    let mts = f.value;
+    let template = model.text(KEY_SPEED_VALUE);
+    model.set_valid(label, u64::from(mts), |o| {
+        template.write_each(o, |_, o| {
+            let _ = write!(o, "{mts}");
+        });
+    })
+}
+
+/// Fills one module's grid. True when any row changed.
+fn update_module_model(model: &mut KeyValueModel, m: &MemoryModule) -> bool {
+    let mut changed = module_text(model, ROW_MOD_SLOT, &m.slot);
+    let cap = &m.capacity_bytes;
+    if inv_shown(cap.validity) && cap.value > 0 {
+        let bytes = cap.value;
+        changed |= model.set_valid(ROW_MOD_CAPACITY, bytes, |o| units::bytes(o, bytes));
+    } else {
+        changed |= not_reported(model, ROW_MOD_CAPACITY);
+    }
+    changed |= module_speed(model, ROW_MOD_SPEED, &m.speed_mts);
+
+    // Configured speed shows only when it differs from the rated speed.
+    let (speed, configured) = (&m.speed_mts, &m.configured_speed_mts);
+    let differs = inv_shown(configured.validity)
+        && configured.value > 0
+        && !(inv_shown(speed.validity) && speed.value == configured.value);
+    changed |= set_hidden(model, ROW_MOD_CONFIGURED, !differs);
+    if differs {
+        changed |= module_speed(model, ROW_MOD_CONFIGURED, configured);
+    }
+
+    changed |= module_text(model, ROW_MOD_TYPE, &m.kind);
+    changed |= module_text(model, ROW_MOD_FORM_FACTOR, &m.form_factor);
+    changed |= module_text(model, ROW_MOD_MANUFACTURER, &m.manufacturer);
+    changed |= module_text(model, ROW_MOD_PART, &m.part_number);
+
+    let rank = &m.rank;
+    if inv_shown(rank.validity) && rank.value > 0 {
+        let n = rank.value;
+        changed |= model.set_valid(ROW_MOD_RANK, u64::from(n), |o| {
+            let _ = write!(o, "{n}");
+        });
+    } else {
+        changed |= not_reported(model, ROW_MOD_RANK);
+    }
+
+    // The inventory holds millivolts; the grid shows volts with two decimals.
+    let mv = &m.configured_voltage_mv;
+    if inv_shown(mv.validity) && mv.value > 0 {
+        let mv = mv.value;
+        let template = model.text(KEY_VOLTAGE_VALUE);
+        changed |= model.set_valid(ROW_MOD_VOLTAGE, u64::from(mv), |o| {
+            template.write_each(o, |_, o| {
+                let _ = write!(o, "{:.2}", f64::from(mv) / 1000.);
+            });
+        });
+    } else {
+        changed |= not_reported(model, ROW_MOD_VOLTAGE);
+    }
+    changed
+}
+
+/// Brings the block up to date with the module inventory (PERF-046). Empty slots are not in the
+/// inventory. The block starts collapsed from more than [`MODULES_EXPANDED_MAX`] modules, and a
+/// later update keeps what the user opened. True when anything shown changed.
+pub fn update_modules_block(block: &mut ModulesBlock, inv: &InventorySnapshot) -> bool {
+    let validity = inv.header.validity;
+    if validity == Validity::WarmingUp {
+        let changed = !block.hidden;
+        block.hidden = true;
+        return changed;
+    }
+    let mut changed = block.hidden;
+    block.hidden = false;
+
+    let slots = &inv.slots_total;
+    let slots_total = inv_shown(slots.validity).then_some(slots.value);
+    let missing = validity == Validity::Failed || (inv.modules.is_empty() && slots_total.is_none());
+    if missing {
+        changed |= !block.not_reported;
+        block.not_reported = true;
+        changed |= !block.modules.is_empty();
+        block.modules.clear();
+        block.expanded.clear();
+        block.used = 0;
+        block.slots_total = None;
+        changed |= not_reported(&mut block.words, ROW_MOD_DETAILS);
+        block.write_words();
+        return changed;
+    }
+    changed |= block.not_reported;
+    block.not_reported = false;
+
+    if block.modules.len() != inv.modules.len() {
+        block.modules = inv
+            .modules
+            .iter()
+            .map(|_| (SharedString::default(), module_model()))
+            .collect();
+        block.expanded = vec![inv.modules.len() <= MODULES_EXPANDED_MAX; inv.modules.len()];
+        block.anim = None;
+        changed = true;
+    }
+    for ((_, model), m) in block.modules.iter_mut().zip(inv.modules.iter()) {
+        changed |= update_module_model(model, m);
+    }
+    if block.used != inv.modules.len() || block.slots_total != slots_total || changed {
+        block.used = inv.modules.len();
+        block.slots_total = slots_total;
+        block.write_words();
+        changed = true;
+    }
+    changed
+}
+
 // ---- Swap devices table ----
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -1277,6 +1612,12 @@ pub struct MemoryPage {
     details: KeyValueModel,
     /// The "Compressed memory" block under the Details grid.
     compressed: CompressedBlock,
+    /// The "Memory modules" block under the swap table.
+    modules: ModulesBlock,
+    /// One focus handle per module chevron, in module order.
+    module_focus: Vec<FocusHandle>,
+    /// This page, for the chevron click closures.
+    this: WeakEntity<Self>,
     /// The `/proc/swaps` entries of the "Swap devices" block.
     swap_rows: Arc<[SwapDevice]>,
     /// Created in the first render, which has the `Window` the table needs.
@@ -1372,6 +1713,9 @@ impl MemoryPage {
             composition,
             details: memory_details_model(),
             compressed: CompressedBlock::new(),
+            modules: ModulesBlock::new(),
+            module_focus: Vec::new(),
+            this: cx.weak_entity(),
             swap_rows: swap_rows_of(&snap.device_details.memory),
             swap_table: None,
             swap_body: 0.,
@@ -1414,6 +1758,14 @@ impl MemoryPage {
         if update_memory_details_modules(&mut self.details, &snap.inventory, total) {
             cx.notify();
         }
+        if update_modules_block(&mut self.modules, &snap.inventory) {
+            let n = self.modules.modules.len();
+            self.module_focus.truncate(n);
+            while self.module_focus.len() < n {
+                self.module_focus.push(cx.focus_handle());
+            }
+            cx.notify();
+        }
     }
 
     /// Brings the Details rows up to date; notifies only when one changed.
@@ -1453,6 +1805,18 @@ impl MemoryPage {
     /// The "Swap devices" table, once the page has rendered.
     pub fn swap_table(&self) -> Option<&Entity<TlTreeTable<SwapTableDelegate>>> {
         self.swap_table.as_ref()
+    }
+
+    /// The "Memory modules" block's models.
+    pub fn modules(&self) -> &ModulesBlock {
+        &self.modules
+    }
+
+    /// Opens or closes module `i`; the chevron turns over `m_fast`.
+    pub fn toggle_module(&mut self, i: usize, cx: &mut Context<Self>) {
+        if self.modules.toggle(i) {
+            cx.notify();
+        }
     }
 
     /// The "Compressed memory" block's models.
@@ -1782,6 +2146,105 @@ impl MemoryPage {
     }
 }
 
+impl MemoryPage {
+    /// The "Memory modules" block: heading, slots line, then a header row and grid per module.
+    /// `None` while the inventory is warming up.
+    fn modules_element(
+        &self,
+        heading: &dyn Fn(SharedString, gpui_kit::TextStyleRefinement) -> Div,
+        md: &gpui_kit::TextStyleRefinement,
+        sm: &gpui_kit::TextStyleRefinement,
+        m: UiMetrics,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let block = &self.modules;
+        if block.is_hidden() {
+            return None;
+        }
+        let theme = current(cx);
+        let mut out = v_flex()
+            .gap(m.sp[4])
+            .child(heading(self.words.block_modules.clone(), md.clone()));
+        if block.not_reported {
+            return Some(
+                out.child(
+                    div()
+                        .id(MODULES_NOT_REPORTED_ID)
+                        .debug_selector(|| MODULES_NOT_REPORTED_ID.into())
+                        .child(render_details(block.details_model(), &m, cx)),
+                )
+                .into_any_element(),
+            );
+        }
+        if !block.slots_line.is_empty() {
+            let mut line = div()
+                .text_color(theme.text_secondary)
+                .child(block.slots_line.clone());
+            *line.text_style() = label_style(&m, m.text.sm, FontWeight::NORMAL);
+            out = out.child(line);
+        }
+        let animate = animations_on(cx);
+        for (n, (title, model)) in block.modules.iter().enumerate() {
+            let open = block.expanded[n];
+            let weak = self.this.clone();
+            let mut chevron = TlButton::new((MODULE_CHEVRON_ID, n), TlButtonKind::Ghost)
+                .size(TlButtonSize::Sm)
+                .icon(TlIcon::ChevronRight)
+                .icon_size(m.icon.sm)
+                .accessible_name(title.clone())
+                .on_click(move |_, _, cx| {
+                    weak.update(cx, |page, cx| page.toggle_module(n, cx)).ok();
+                });
+            if let Some(focus) = self.module_focus.get(n) {
+                chevron = chevron.focus_handle(focus.clone());
+            }
+            let turn = |t: f32| radians(std::f32::consts::FRAC_PI_2 * t);
+            let chevron = match block.anim.filter(|a| a.module == n && animate) {
+                Some(ChevronAnim {
+                    opening,
+                    generation,
+                    ..
+                }) => chevron
+                    .with_animation(
+                        (
+                            "perf-mem-module-chevron-anim",
+                            generation as usize * 1024 + n,
+                        ),
+                        Animation::new(M_FAST).with_easing(ease_out_cubic),
+                        move |b, t| b.icon_rotation(turn(if opening { t } else { 1. - t })),
+                    )
+                    .into_any_element(),
+                None => chevron
+                    .icon_rotation(turn(if open { 1. } else { 0. }))
+                    .into_any_element(),
+            };
+            let mut header = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(m.sp[3])
+                .h(px(28. * m.ui_scale))
+                .child(
+                    div()
+                        .debug_selector(move || format!("{MODULE_CHEVRON_ID}-{n}"))
+                        .flex_none()
+                        .child(chevron),
+                );
+            header = header.child(heading(title.clone(), sm.clone()));
+            out = out.child(header);
+            if open {
+                out = out.child(
+                    div()
+                        .id((MODULE_GRID_ID, n))
+                        .debug_selector(move || format!("{MODULE_GRID_ID}-{n}"))
+                        .child(render_details(model, &m, cx)),
+                );
+            }
+        }
+        Some(out.into_any_element())
+    }
+}
+
 impl DevicePage for MemoryPage {
     fn key(&self) -> &DeviceKey {
         &self.key
@@ -1890,6 +2353,9 @@ impl DevicePage for MemoryPage {
                     .into_any_element(),
             );
         }
+        if let Some(block) = self.modules_element(&heading, &md, &sm, *m, cx) {
+            blocks.push(block);
+        }
         if self.compressed.is_hidden() {
             return blocks;
         }
@@ -1949,7 +2415,7 @@ impl DevicePage for MemoryPage {
     }
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
-        SmallVec::new()
+        self.module_focus.iter().cloned().collect()
     }
 
     fn set_active(&mut self, active: bool, cx: &mut App) {
@@ -1984,6 +2450,7 @@ impl Render for MemoryPage {
         }
         self.details.refresh_strings(cx);
         self.compressed.refresh_strings(cx);
+        self.modules.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
         self.sync_swap_table(window, cx);

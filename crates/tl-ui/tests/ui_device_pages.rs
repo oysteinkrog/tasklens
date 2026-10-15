@@ -2119,3 +2119,209 @@ fn memory_page_demands_inventory(cx: &mut TestAppContext) {
     select(&mut r, "memory");
     assert!(last_demand(&r).inventory);
 }
+
+// ---- "Memory modules" block (E25-015) ----
+
+use tl_ui::pages::performance::memory::{
+    ModulesBlock, ROW_MOD_CAPACITY, ROW_MOD_CONFIGURED, ROW_MOD_DETAILS, ROW_MOD_FORM_FACTOR,
+    ROW_MOD_MANUFACTURER, ROW_MOD_PART, ROW_MOD_RANK, ROW_MOD_SLOT, ROW_MOD_SPEED, ROW_MOD_TYPE,
+    ROW_MOD_VOLTAGE, update_modules_block,
+};
+
+fn full_dimm(speed: u32, configured: u32) -> MemoryModule {
+    MemoryModule {
+        slot: inv_ok(Arc::from("P0 CHANNEL A (DIMM 0)")),
+        capacity_bytes: inv_ok(16 * GIB),
+        speed_mts: inv_ok(speed),
+        configured_speed_mts: inv_ok(configured),
+        kind: inv_ok(Arc::from("DDR4")),
+        form_factor: inv_ok(Arc::from("DIMM")),
+        manufacturer: inv_ok(Arc::from("Kingston")),
+        part_number: inv_ok(Arc::from("KF3200C16D4/16GX")),
+        rank: inv_ok(2),
+        configured_voltage_mv: inv_ok(1200),
+    }
+}
+
+fn module_block(modules: Vec<MemoryModule>, slots: InvField<u32>) -> ModulesBlock {
+    let mut block = ModulesBlock::new();
+    update_modules_block(&mut block, &inventory(modules, slots));
+    block
+}
+
+fn publish_modules(r: &mut Rig, modules: Vec<MemoryModule>, slots: InvField<u32>) {
+    r.engine.publish_with(|s| {
+        let inv = Arc::make_mut(&mut s.inventory);
+        inv.header.version += 1;
+        inv.header.validity = Validity::Valid;
+        inv.modules = Arc::from(modules);
+        inv.slots_total = slots;
+    });
+    draw(r.vcx);
+    draw(r.vcx);
+}
+
+fn memory_page(r: &mut Rig) -> Entity<MemoryPage> {
+    select(r, "memory");
+    view_of(r, "memory")
+        .downcast::<MemoryPage>()
+        .expect("a MemoryPage")
+}
+
+fn module_blocks(r: &mut Rig, memory: &Entity<MemoryPage>) -> usize {
+    let memory = memory.clone();
+    r.vcx
+        .update(|window, cx| memory.update(cx, |page, cx| page.blocks(window, cx).len()))
+}
+
+#[gpui_kit::test]
+fn modules_block_layout(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let memory = memory_page(&mut r);
+    publish_modules(
+        &mut r,
+        vec![full_dimm(3200, 3200), full_dimm(3200, 3200)],
+        inv_ok(4),
+    );
+    assert_eq!(module_blocks(&mut r, &memory), 1, "the modules block");
+    r.vcx.update(|_, cx| {
+        let block = memory.read(cx).modules();
+        assert_eq!(block.slots_line.as_ref(), "Slots used: 2 of 4");
+        assert_eq!(block.expanded, [true, true]);
+        assert_eq!(block.modules[0].0.as_ref(), "Memory module 1");
+        assert_eq!(block.modules[1].0.as_ref(), "Memory module 2");
+        let grid = &block.modules[0].1;
+        for (label, want) in [
+            (ROW_MOD_SLOT, "P0 CHANNEL A (DIMM 0)"),
+            (ROW_MOD_CAPACITY, "16.00 GiB"),
+            (ROW_MOD_SPEED, "3200 MT/s"),
+            (ROW_MOD_TYPE, "DDR4"),
+            (ROW_MOD_FORM_FACTOR, "DIMM"),
+            (ROW_MOD_MANUFACTURER, "Kingston"),
+            (ROW_MOD_PART, "KF3200C16D4/16GX"),
+            (ROW_MOD_RANK, "2"),
+            (ROW_MOD_VOLTAGE, "1.20 V"),
+        ] {
+            assert_eq!(value_of(grid, label), want, "{label}");
+        }
+    });
+    for id in [
+        "perf-mem-module-chevron-0",
+        "perf-mem-module-chevron-1",
+        "perf-mem-module-grid-0",
+        "perf-mem-module-grid-1",
+    ] {
+        assert!(r.vcx.debug_bounds(id).is_some(), "{id} is drawn");
+    }
+}
+
+#[gpui_kit::test]
+fn modules_collapsed_when_more_than_4(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let memory = memory_page(&mut r);
+    publish_modules(&mut r, vec![full_dimm(3200, 3200); 6], inv_ok(8));
+    r.vcx.update(|_, cx| {
+        let block = memory.read(cx).modules();
+        assert_eq!(block.slots_line.as_ref(), "Slots used: 6 of 8");
+        assert_eq!(block.expanded, [false; 6]);
+    });
+    assert!(r.vcx.debug_bounds("perf-mem-module-grid-0").is_none());
+
+    let at = r
+        .vcx
+        .debug_bounds("perf-mem-module-chevron-0")
+        .expect("the first chevron")
+        .center();
+    r.vcx.simulate_click(at, gpui_kit::Modifiers::none());
+    draw(r.vcx);
+    r.vcx.update(|_, cx| {
+        let block = memory.read(cx).modules();
+        assert_eq!(block.expanded, [true, false, false, false, false, false]);
+    });
+    assert!(r.vcx.debug_bounds("perf-mem-module-grid-0").is_some());
+    assert!(r.vcx.debug_bounds("perf-mem-module-grid-1").is_none());
+}
+
+#[test]
+fn module_configured_speed_only_when_differs() {
+    let block = module_block(vec![full_dimm(3200, 2933)], inv_ok(2));
+    let grid = &block.modules[0].1;
+    assert_eq!(value_of(grid, ROW_MOD_SPEED), "3200 MT/s");
+    assert_eq!(value_of(grid, ROW_MOD_CONFIGURED), "2933 MT/s");
+    let hidden = |g: &tl_ui::pages::performance::details::KeyValueModel| {
+        g.rows
+            .iter()
+            .find(|r| r.label == ROW_MOD_CONFIGURED)
+            .expect("row")
+            .hidden
+    };
+    assert!(!hidden(grid));
+
+    let block = module_block(vec![full_dimm(3200, 3200)], inv_ok(2));
+    assert!(hidden(&block.modules[0].1), "equal speeds hide the row");
+
+    // A change back and forth shows and hides the row again.
+    let mut block = block;
+    update_modules_block(
+        &mut block,
+        &inventory(vec![full_dimm(3200, 2933)], inv_ok(2)),
+    );
+    assert!(!hidden(&block.modules[0].1));
+}
+
+#[test]
+fn module_voltage_and_missing_fields() {
+    let mut dimm = full_dimm(3200, 3200);
+    dimm.configured_voltage_mv = inv_ok(1100);
+    dimm.rank = InvField::default();
+    let block = module_block(vec![dimm], InvField::default());
+    assert_eq!(block.slots_line.as_ref(), "Slots used: 1", "no slot total");
+    let grid = &block.modules[0].1;
+    assert_eq!(value_of(grid, ROW_MOD_VOLTAGE), "1.10 V");
+    assert_eq!(value_of(grid, ROW_MOD_RANK), "Not reported");
+
+    let mut dimm = full_dimm(3200, 3200);
+    dimm.configured_voltage_mv = inv_ok(0);
+    let block = module_block(vec![dimm], inv_ok(2));
+    assert_eq!(
+        value_of(&block.modules[0].1, ROW_MOD_VOLTAGE),
+        "Not reported"
+    );
+}
+
+#[test]
+fn modules_not_reported() {
+    let block = module_block(Vec::new(), InvField::default());
+    assert!(block.not_reported);
+    assert!(block.modules.is_empty());
+    assert!(block.slots_line.is_empty());
+    assert_eq!(
+        value_of(block.details_model(), ROW_MOD_DETAILS),
+        "Not reported"
+    );
+
+    // Failed inventory reads the same; warming up hides the block.
+    let mut block = ModulesBlock::new();
+    let mut inv = inventory(vec![full_dimm(3200, 3200)], inv_ok(2));
+    inv.header.validity = Validity::Failed;
+    update_modules_block(&mut block, &inv);
+    assert!(block.not_reported && !block.is_hidden());
+    inv.header.validity = Validity::WarmingUp;
+    update_modules_block(&mut block, &inv);
+    assert!(block.is_hidden());
+}
+
+#[gpui_kit::test]
+fn no_serial_in_copy_text(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let memory = memory_page(&mut r);
+    publish_modules(&mut r, vec![full_dimm(3200, 3200)], inv_ok(2));
+    r.vcx.update(|_, cx| {
+        let page = memory.read(cx);
+        let mut text = String::new();
+        page.copy_text(&mut text);
+        page.modules().copy_into(&mut text);
+        assert!(text.contains("Memory module 1"), "{text}");
+        assert!(!text.to_lowercase().contains("serial"), "{text}");
+    });
+}
