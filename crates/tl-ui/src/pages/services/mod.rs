@@ -4,3 +4,4 @@ pub mod actions;
 pub mod copy;
 pub mod delegate;
 pub mod filter_strip;
+pub mod menu;
