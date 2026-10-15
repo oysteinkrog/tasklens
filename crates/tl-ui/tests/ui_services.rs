@@ -1537,3 +1537,252 @@ fn init_binds_services_keys(cx: &mut TestAppContext) {
         "ctrl-3",
     );
 }
+
+/// Services Start, Stop, Restart, Reload and Reset failed flows (tasklens-hk6.15).
+mod flows {
+    use std::sync::Arc;
+
+    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use tl_model::actions::{
+        ActionError, ActionEvent, ActionId, ActionRequest, ActionState, ActionTarget,
+    };
+    use tl_model::command::Tab;
+    use tl_model::settings::Settings;
+    use tl_model::table::{Manager, UnitRef};
+    use tl_ui::action_tracker::{GlobalActionTracker, PushedToast};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::toast::{ToastKey, ToastKind};
+    use tl_ui::pages::services::flows::{UnitVerb, run_unit_verb, unit_action_texts};
+    use tl_ui::pages::sys_table::{ActionKindTag, SysActions};
+    use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
+
+    use super::*;
+
+    fn unit(name: &str) -> UnitRef {
+        UnitRef {
+            manager: Manager::System,
+            name: Arc::from(name),
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        main: VisualTestContext,
+        actions: Entity<SysActions>,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let handle = cx
+            .update(|cx| open_main_window_on(Tab::Services, cx))
+            .expect("the main window opens");
+        let mut main = VisualTestContext::from_window(handle.into(), cx);
+        main.update(|window, _| window.activate_window());
+        main.run_until_parked();
+        let actions = main.update(|_, cx| {
+            let tracker = cx.global::<GlobalActionTracker>().0.clone();
+            cx.new(|cx| SysActions::new(&tracker, cx))
+        });
+        Rig {
+            engine,
+            main,
+            actions,
+        }
+    }
+
+    impl Rig {
+        fn run(&mut self, v: UnitVerb, names: &[&str]) {
+            let units: Vec<UnitRef> = names.iter().map(|n| unit(n)).collect();
+            let actions = self.actions.clone();
+            self.main
+                .update(|window, cx| run_unit_verb(v, &units, &actions, window, cx));
+            self.main.run_until_parked();
+        }
+
+        fn sent(&self) -> Vec<ActionRequest> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Action(r) => Some(r),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn emit(&mut self, id: ActionId, target: Option<u16>, state: ActionState) {
+            self.engine.emit(ActionEvent { id, target, state });
+            self.main.run_until_parked();
+        }
+
+        /// `Started`, one state per target, then the summary of those states.
+        fn finish(&mut self, id: ActionId, states: &[ActionState]) {
+            self.emit(id, None, ActionState::Started);
+            for (i, state) in states.iter().enumerate() {
+                self.emit(id, Some(i as u16), state.clone());
+            }
+            self.emit(id, None, ActionState::summarize(states));
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.main.update(|_, cx| {
+                let view = main_window_view(cx).expect("main window");
+                let texts = view.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(|t| t.to_string()).collect()
+            })
+        }
+
+        fn pending_tag(&mut self, name: &str) -> Option<ActionKindTag> {
+            let target = ActionTarget::Unit(unit(name));
+            self.actions
+                .read_with(&self.main, |a, _| a.pending_tag(&target))
+        }
+
+        fn pushed(&mut self) -> Vec<PushedToast> {
+            self.actions
+                .read_with(&self.main, |a, _| a.pushed().to_vec())
+        }
+    }
+
+    fn only_id(rig: &Rig) -> ActionId {
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 1, "one request is sent");
+        sent[0].id
+    }
+
+    #[gpui_kit::test]
+    fn start_flow_toasts_and_overlay(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.run(UnitVerb::Start, &["a.service"]);
+        assert_eq!(rig.toasts(), ["Starting service..."]);
+        assert_eq!(rig.pending_tag("a.service"), Some(ActionKindTag::Start));
+        let id = only_id(&rig);
+        rig.finish(id, &[ActionState::Succeeded]);
+        assert_eq!(rig.toasts(), ["Service started"]);
+        assert_eq!(rig.pending_tag("a.service"), None);
+        let pushed = rig.pushed();
+        assert!(pushed.iter().all(|p| p.key == Some(ToastKey(id.0))));
+        assert_eq!(pushed.last().expect("toast").kind, ToastKind::Success);
+    }
+
+    #[gpui_kit::test]
+    fn failed_start_shows_view_logs(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.run(UnitVerb::Start, &["a.service"]);
+        let id = only_id(&rig);
+        let failed = ActionState::Failed(ActionError::UnitJob {
+            result: "failed".into(),
+            error_name: None,
+        });
+        rig.finish(id, &[failed]);
+        assert_eq!(rig.toasts(), ["Failed to start service: failed"]);
+        let last = rig.pushed().last().cloned().expect("toast");
+        assert_eq!(last.kind, ToastKind::Error);
+        assert_eq!(last.button.as_deref(), Some("View logs"));
+        let action = rig.main.update(|_, cx| {
+            let (_, make) = unit_action_texts(UnitVerb::Start, cx)
+                .failed_button
+                .expect("button");
+            make(&ActionTarget::Unit(unit("a.service")))
+        });
+        rig.main
+            .update(|window, cx| window.dispatch_action(action, cx));
+        rig.main.run_until_parked();
+        let handle = rig.main.update(|_, cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry
+                .read(cx)
+                .get(&WindowKey::Service(unit("a.service")))
+        });
+        let handle = handle
+            .and_then(|h| h.downcast::<gpui_kit::base::Root>())
+            .expect("Service Properties opened");
+        let view = rig
+            .main
+            .update(|_, cx| ServicePropertiesWindow::find(handle, cx))
+            .expect("view");
+        assert_eq!(
+            view.read_with(&rig.main, |v, _| v.active()),
+            ServicePropsTab::Logs
+        );
+    }
+
+    #[gpui_kit::test]
+    fn busy_rejection_toast(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.run(UnitVerb::Start, &["a.service"]);
+        rig.run(UnitVerb::Start, &["a.service"]);
+        assert_eq!(
+            rig.toasts().last().map(String::as_str),
+            Some("A service action is already in progress.")
+        );
+        assert_eq!(rig.sent().len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn reset_failed_no_overlay(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.run(UnitVerb::ResetFailed, &["a.service"]);
+        // The delegate draws no overlay for this tag (hk6.11).
+        assert_eq!(
+            rig.pending_tag("a.service"),
+            Some(ActionKindTag::ResetFailed)
+        );
+        let id = only_id(&rig);
+        rig.finish(id, &[ActionState::Succeeded]);
+        assert_eq!(rig.toasts(), ["Failed state cleared"]);
+        rig.main.update(|_, cx| {
+            assert!(
+                unit_action_texts(UnitVerb::ResetFailed, cx)
+                    .failed_button
+                    .is_none()
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn stop_five_units_summary_toast(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let names = [
+            "a.service",
+            "b.service",
+            "c.service",
+            "d.service",
+            "e.service",
+        ];
+        rig.run(UnitVerb::Stop, &names);
+        assert_eq!(rig.toasts(), ["Stopping 5 services..."]);
+        let id = only_id(&rig);
+        rig.finish(id, &[ActionState::Succeeded; 5]);
+        assert_eq!(rig.toasts(), ["5 services stopped"]);
+    }
+
+    #[gpui_kit::test]
+    fn outcome_unknown_warning(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.run(UnitVerb::Restart, &["a.service"]);
+        let id = only_id(&rig);
+        rig.finish(id, &[ActionState::OutcomeUnknown("timeout".into())]);
+        assert_eq!(rig.toasts(), ["Service action finished."]);
+        assert_eq!(rig.pushed().last().expect("toast").kind, ToastKind::Warning);
+    }
+}
