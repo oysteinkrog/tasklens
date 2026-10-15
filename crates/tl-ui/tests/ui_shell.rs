@@ -3411,7 +3411,13 @@ mod main_window {
         let graph = open_child(cx, WindowKey::DetachedGraph(0));
         vcx.dispatch_action(CloseWindow);
         cx.run_until_parked();
-        cx.update(|cx| cx.dispatch_action(&ShowMainWindow));
+        cx.update(|cx| {
+            graph
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(gpui_kit::Action::boxed_clone(&ShowMainWindow), cx)
+                })
+                .ok()
+        });
         cx.run_until_parked();
         assert!(!main_is_gone(cx));
         close_graph(cx, graph);
