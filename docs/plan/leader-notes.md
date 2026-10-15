@@ -881,3 +881,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: o55.15 TlButton::icon_rotation chain edit in button.rs; chevron 24 px (Sm); on_click toggle; modules block hidden while inventory WarmingUp, Not reported on Failed.
 - 2026-10-15 owner decision: if crw.57 attempt 6 fails review, close it and file each open finding as its own Sonnet bead.
 - 2026-10-15 leader decision: 8fx.26 TopAt hover queries use a latest-wins state (wanted, in_flight, shown); answers not matching wanted are dropped; no pending queue.
+- 2026-10-15 leader decision: new tasklens-o55.39 puts tempN in the sensor persistent key; bj6.41 and o55.32 store it without 'sensor:' as the fan temp source; fan row default name is 'Fan N'.
