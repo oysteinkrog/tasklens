@@ -507,9 +507,12 @@ mod card {
         use super::*;
 
         /// Moves the pointer to `(x, y)` in the window and draws. The chart shows the readout
-        /// only in an active window.
+        /// only in an active window. The window is activated and drawn first: the activation
+        /// lands on the next draw and resets the pointer to the origin, which would undo a move
+        /// made before it.
         fn move_to(vcx: &mut VisualTestContext, x: f32, y: f32) {
             vcx.update(|window, _| window.activate_window());
+            draw(vcx);
             vcx.simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
             draw(vcx);
         }
