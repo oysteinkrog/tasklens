@@ -419,7 +419,10 @@ fn secondary_menu(
             menu.item_disabled(label, tip)
         };
         if item.setup_after {
-            menu = menu.item(words.setup_power.clone(), Box::new(OpenAdditionalSetup));
+            menu = menu.item(
+                words.setup_power.clone(),
+                Box::new(OpenAdditionalSetup { focus_row: None }),
+            );
         }
     }
     menu

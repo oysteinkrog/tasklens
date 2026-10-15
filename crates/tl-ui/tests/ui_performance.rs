@@ -22,7 +22,7 @@ fn read(model: &KeyValueModel) -> (String, Option<String>, bool, bool) {
     let setup = row
         .action
         .as_ref()
-        .is_some_and(|a| a.partial_eq(&OpenAdditionalSetup));
+        .is_some_and(|a| a.partial_eq(&OpenAdditionalSetup { focus_row: None }));
     (
         row.value.to_string(),
         row.tooltip.as_ref().map(|t| t.to_string()),

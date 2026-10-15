@@ -699,7 +699,8 @@ impl KeyValueModel {
             Some(text) => Some(SharedString::from(text)),
         };
         row.link = link;
-        row.action = link.then(|| Box::new(OpenAdditionalSetup) as Box<dyn Action>);
+        row.action =
+            link.then(|| Box::new(OpenAdditionalSetup { focus_row: None }) as Box<dyn Action>);
         true
     }
 

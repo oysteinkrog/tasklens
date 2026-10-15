@@ -8,6 +8,7 @@
 //! Declared by their owners, not here (GPUI fails on a duplicate name in one namespace):
 //! - `StartHelperSession`, `EndHelperSession`: `components/shield.rs` (E16-010), re-exported
 //!   below.
+//! - `OpenAdditionalSetup { focus_row }`: `window/setup.rs` (E29-A3), re-exported below.
 //! - `ToggleAlwaysOnTop { window: WindowKey }`, `CloseSecondaryWindow`:
 //!   `components/window_frame.rs` (E16-008).
 //! - `OpenProperties` and the other table Actions: `table/actions.rs` (E18).
@@ -20,6 +21,7 @@ use tl_model::table::TableMode;
 pub use crate::components::shield::{EndHelperSession, StartHelperSession};
 use crate::components::{checkbox, window_frame};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
+pub use crate::window::setup::OpenAdditionalSetup;
 
 gpui_kit::actions!(
     tasklens,
@@ -53,8 +55,6 @@ gpui_kit::actions!(
         ShowSystemInformation,
         ShowMainWindow,
         ToggleMainWindow,
-        // Unit form until E29 adds `focus_row` (UI-PRF-052); the Additional Setup window handles it.
-        OpenAdditionalSetup,
     ]
 );
 

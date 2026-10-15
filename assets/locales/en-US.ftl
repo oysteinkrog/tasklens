@@ -1435,7 +1435,8 @@ processes-status-count = { $total } Processes
 processes-status-filtered = { $shown } / { $total } Processes
 processes-status-selected = { $count } processes selected
 processes-status-restricted = { $count } restricted
-processes-status-restricted-tooltip = Some values for other users' processes need administrator rights.
+processes-status-restricted-tooltip = Some values for other users' processes need administrator rights. Click to enable.
+processes-status-administrator-mode = Administrator mode
 information-toast-copied = Copied to clipboard
 
 # File menu: Run... (E21-044)
@@ -2697,3 +2698,25 @@ shell-toast-decorations-restart = Restart tasklens to apply the title bar change
 
 # File menu: Search File Handles... (E21-045)
 shell-menu-file-handle-search = Search File Handles...
+
+# Additional Setup window (E29-A3, UI-SHL-094, UI-PRF-052)
+setup-title = tasklens Additional Setup
+setup-row-cpu-title = CPU power draw
+setup-row-cpu-description = Reads the CPU energy counters (RAPL) for the Power draw row and graph.
+setup-row-journal-title = Journal access
+setup-row-journal-description = Lets tasklens read service logs. Run this command, then log out and back in:
+setup-row-journal-command = sudo usermod -aG systemd-journal $USER
+setup-row-helper-title = Administrator helper
+setup-row-helper-description = Needed for actions on other users' processes and for protected reads.
+setup-row-fan-title = Fan sensors
+setup-row-fan-description = Reads fan speeds through lm-sensors.
+setup-row-network-title = Per-process network
+setup-row-network-description = tasklens attributes TCP traffic per process through sock_diag without setup. Exact numbers for all traffic need the network helper, which arrives in a later version.
+setup-status-enabled = Enabled
+setup-status-enabled-existing = Enabled (existing rule)
+setup-status-not-enabled = Not enabled
+setup-status-not-needed = Not needed
+setup-status-installed = Installed
+setup-status-not-installed = Not installed
+setup-tooltip-existing-rule = Readable through /etc/udev/rules.d/99-powercap.rules. tasklens leaves that file alone.
+setup-tooltip-helper-missing = /usr/lib/tasklens/tl-helper was not found

@@ -363,6 +363,7 @@ impl TasklensUi {
         crate::window::share_theme::init(cx);
         crate::window::theme_editor::init(cx);
         crate::window::collector_health::init(cx);
+        crate::window::setup::init(cx);
         crate::window::shortcuts::init(cx);
         crate::window::about::init(cx);
         crate::windows::run::init(cx);
