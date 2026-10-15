@@ -1630,3 +1630,45 @@ fn hover_move_does_not_notify_the_page(cx: &mut TestAppContext) {
     let hover = vcx.read_entity(&page, |p, _| p.scrubber().hover_x);
     assert!(hover.is_some());
 }
+
+#[gpui_kit::test]
+fn page_dropped_when_its_host_lets_go(cx: &mut TestAppContext) {
+    use gpui_kit::{Context, IntoElement, ParentElement as _, Render, Styled as _, Window, div};
+    struct Host(Option<Entity<HistoryPage>>);
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().children(self.0.clone())
+        }
+    }
+    let engine = init(cx);
+    let (host, vcx) =
+        cx.add_window_view(|window, cx| Host(Some(cx.new(|cx| HistoryPage::new(window, cx)))));
+    vcx.run_until_parked();
+    let v = HistoryView {
+        header: ComponentHeader {
+            version: 1,
+            ..ComponentHeader::default()
+        },
+        span: Some((100 * S, 1000 * S)),
+        frame_t: Some(1000 * S),
+        store_state: HistoryStoreState::Ready,
+        ..HistoryView::default()
+    };
+    publish_view(&engine, vcx, v);
+    draw(vcx);
+    let page = vcx.read_entity(&host, |h, _| h.0.clone().expect("page"));
+    assert!(
+        vcx.read_entity(&page, |p, _| p.scrubber().plot_bounds.size.width
+            > gpui_kit::px(0.))
+    );
+    let weak = page.downgrade();
+    drop(page);
+    host.update(vcx, |h, cx| {
+        h.0 = None;
+        cx.notify();
+    });
+    draw(vcx);
+    vcx.run_until_parked();
+    // The strip view holds the page weakly, so nothing keeps the page alive.
+    assert!(weak.upgrade().is_none());
+}

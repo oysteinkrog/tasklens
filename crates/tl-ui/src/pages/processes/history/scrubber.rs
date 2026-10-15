@@ -21,11 +21,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Bounds, ContentMask, Context, CursorStyle, Element, ElementId, Entity, EntityId,
+    App, Bounds, ContentMask, Context, CursorStyle, Element, ElementId, Empty, Entity, EntityId,
     FillOptions, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Path,
     PathBuilder, PathStyle, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString,
-    Style, Window, fill, point, px, relative, size,
+    Style, WeakEntity, Window, fill, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use tl_model::history::{HistoryMetric, HistoryView};
@@ -324,19 +324,25 @@ impl ScrubberCache {
 }
 
 /// The strip as its own cached view, so a hover move repaints it without rendering the page.
+///
+/// The page owns this view, so the view holds the page weakly. A strong handle would make a
+/// cycle and keep the page alive after its window closes.
 pub struct StripView {
-    page: Entity<HistoryPage>,
+    page: WeakEntity<HistoryPage>,
 }
 
 impl StripView {
-    pub fn new(page: Entity<HistoryPage>) -> Self {
+    pub fn new(page: WeakEntity<HistoryPage>) -> Self {
         Self { page }
     }
 }
 
 impl Render for StripView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        HistoryScrubber::new(self.page.clone())
+        match self.page.upgrade() {
+            Some(page) => HistoryScrubber::new(page).into_any_element(),
+            None => Empty.into_any_element(),
+        }
     }
 }
 

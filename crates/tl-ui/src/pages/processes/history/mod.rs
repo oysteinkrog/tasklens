@@ -1119,7 +1119,7 @@ impl Render for HistoryPage {
                 cx.new(|cx| {
                     // Every page change repaints the strip; only hover skips the page.
                     cx.observe(&page, |_, _, cx| cx.notify()).detach();
-                    StripView::new(page)
+                    StripView::new(page.downgrade())
                 })
             })
             .clone();
