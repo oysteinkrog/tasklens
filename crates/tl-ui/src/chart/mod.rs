@@ -32,7 +32,7 @@ use std::ops::Range;
 
 use gpui_kit::{Hsla, Path, Pixels, SharedString, px};
 use smallvec::SmallVec;
-use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::ids::{DeviceIdx, MetricId, ProcessSeriesId, SeriesId};
 
 /// 60 s, the default chart range (R-016).
 pub const DEFAULT_RANGE_NS: u64 = 60_000_000_000;
@@ -83,6 +83,9 @@ impl ChartSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChartSeries {
     pub id: SeriesId,
+    /// A per-process series (minigraph process, name and app cards, R-154). When set, the view
+    /// reads `Snapshot.process_series` by this id and ignores `id`.
+    pub process: Option<ProcessSeriesId>,
     pub fill: Option<Hsla>,
     pub line: Hsla,
     pub line_width: Pixels,
@@ -96,6 +99,7 @@ impl Default for ChartSeries {
                 device: DeviceIdx(0),
                 metric: MetricId::CPU_TOTAL,
             },
+            process: None,
             fill: None,
             line: Hsla::default(),
             line_width: px(1.0),

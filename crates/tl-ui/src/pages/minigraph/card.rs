@@ -1,5 +1,6 @@
 //! `MinigraphCard`: one 180 × 90 card over the Processes tab for a system source (E26-005,
-//! PERF-080, PERF-024, UI-PRF-041, UI-PRF-008, R-085).
+//! PERF-080, PERF-024, UI-PRF-041, UI-PRF-008, R-085) or a process, name or app source
+//! (E26-011, PERF-085, PERF-087, R-154).
 //!
 //! The chart fills the card; the label (top left) and the value (top right) sit over its top
 //! row. The card follows the hub for its value only and notifies only when the value text, the
@@ -18,13 +19,18 @@ use smallvec::{SmallVec, smallvec};
 use std::hash::Hasher as _;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, DeviceKind};
+use tl_model::ids::{ColumnId, GraphTarget};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{ComponentMask, Snapshot, SystemSnapshot};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::GraphColor;
 use super::menu::{CardMenuCtx, card_menu};
-use super::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
+use super::sources::{
+    MinigraphEntry, MinigraphId, MinigraphSource, ProcessLabel, ProcessSourceView,
+    resolve_process_source,
+};
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
@@ -36,7 +42,10 @@ use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
 use crate::pages::performance::DeviceKey;
 use crate::settings_global::TlSettings;
+use crate::text::ellipsis::ELLIPSIS;
+use crate::text::metrics::TextMetricsCache;
 use crate::text::style::TNUM;
+use crate::theme::metrics::UiMetrics;
 use crate::theme::palette::accent_color;
 use crate::theme::{TlTheme, current, metrics};
 
@@ -99,6 +108,11 @@ pub struct MinigraphCard {
     press: Option<Point<Pixels>>,
     /// GPUI runs a drag of this card. It starts at 2 px, before the 4 px threshold.
     gpui_drag: bool,
+    /// Process, name and app cards: the label in parts, for the name cut.
+    process_label: Option<ProcessLabel>,
+    /// Process cards: the label as drawn, cut to fit, with the label and the width in px bits it
+    /// was cut for.
+    fitted: Option<(SharedString, u32, SharedString)>,
     hub: Entity<SnapshotHub>,
     _hub_sub: Subscription,
     /// Where the menu items go when nothing in the window has focus (cards take no focus).
@@ -123,20 +137,26 @@ impl MinigraphCard {
         let device = device_for(&entry.source, catalog, sidebar_gpu_order);
         let theme = current(cx).clone();
         let smooth = cx.has_global::<TlSettings>() && TlSettings::settings(cx).motion.smooth_graphs;
-        let spec = {
-            let hub = hub.read(cx);
-            chart_spec_for(
+        let snap = std::sync::Arc::clone(hub.read(cx).current());
+        let process =
+            resolve_process_source(&entry.source, entry.column, entry.color, &snap, &theme, cx);
+        let spec = match &process {
+            Some(view) => process_chart_spec(view, entry.range_s, smooth),
+            None => chart_spec_for(
                 &entry.source,
                 device.unwrap_or(DeviceIdx(u16::MAX)),
-                &hub.current().system,
+                &snap.system,
                 entry.color,
                 entry.range_s,
                 smooth,
                 &theme,
-            )
+            ),
         };
         let chart = cx.new(|cx| ChartView::new(spec, chart_labels(), hub, cx));
-        let label = label_for(&entry.source, cx);
+        let (label, process_label) = match &process {
+            Some(view) => (view.label.clone(), Some(view.label_parts.clone())),
+            None => (label_for(&entry.source, cx), None),
+        };
         let _hub_sub = cx.subscribe(hub, Self::on_snapshot);
         let mut this = Self {
             id: entry.id,
@@ -153,6 +173,8 @@ impl MinigraphCard {
             dragging: false,
             press: None,
             gpui_drag: false,
+            process_label,
+            fitted: None,
             hub: hub.clone(),
             _hub_sub,
             menu_focus: cx.focus_handle(),
@@ -161,8 +183,13 @@ impl MinigraphCard {
             #[cfg(any(test, feature = "test-hooks"))]
             notify_count: std::cell::Cell::new(0),
         };
-        let snap = std::sync::Arc::clone(this.hub.read(cx).current());
-        this.update_value(&snap, true, cx);
+        match process {
+            Some(view) => {
+                this.value = view.value;
+                this.state = view.state;
+            }
+            None => this.update_value(&snap, true, cx),
+        }
         this
     }
 
@@ -170,8 +197,18 @@ impl MinigraphCard {
         &self.chart
     }
 
+    /// The whole label.
     pub fn label(&self) -> &SharedString {
         &self.label
+    }
+
+    /// The label as last drawn: a process, name or app label cut in the middle of its name part
+    /// to fit beside the value (UI-PRF-041).
+    pub fn shown_label(&self) -> &SharedString {
+        match &self.fitted {
+            Some((_, _, shown)) => shown,
+            None => &self.label,
+        }
     }
 
     pub fn value(&self) -> &SharedString {
@@ -290,7 +327,9 @@ impl MinigraphCard {
         self.chart.read(cx).series_ids().collect()
     }
 
-    /// The `Demand` bits this card needs; the panel sums the cards' parts (E26-004).
+    /// The `Demand` bits this card needs; the panel sums the cards' parts (E26-004). A process,
+    /// name or app card lists its identity and column in `graph_targets` (PERF-085, R-154),
+    /// unless the engine does not sample that column.
     pub fn demand_part(&self) -> Demand {
         let mut d = Demand {
             any_surface_visible: true,
@@ -306,9 +345,23 @@ impl MinigraphCard {
             }
             MinigraphSource::Process { .. }
             | MinigraphSource::Name(_)
-            | MinigraphSource::App(_) => {}
+            | MinigraphSource::App(_) => {
+                if let Some(target) = self.graph_target() {
+                    d.graph_targets = std::sync::Arc::from([target]);
+                }
+            }
         }
         d
+    }
+
+    /// The `graph_targets` entry of a process, name or app card; `None` for a system card and
+    /// for a column the engine does not sample.
+    pub fn graph_target(&self) -> Option<(GraphTarget, ColumnId)> {
+        let column = self.entry.column;
+        if !column.engine_sampled() {
+            return None;
+        }
+        Some((self.entry.source.graph_target()?, column.column_id()))
     }
 
     /// The series the value reads: the chart's plus the disk read and write rates.
@@ -337,6 +390,16 @@ impl MinigraphCard {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
+        if self.process_label.is_some() {
+            if ev
+                .mask
+                .intersects(ComponentMask::PROCESSES | ComponentMask::PROCESS_SERIES)
+            {
+                let snap = std::sync::Arc::clone(hub.read(cx).current());
+                self.update_process(&snap, cx);
+            }
+            return;
+        }
         let series = ev.mask.contains(ComponentMask::SERIES) && {
             let changed = ChangedRuns::new(&ev.changed_series);
             self.value_series().iter().any(|id| changed.contains(*id))
@@ -350,6 +413,80 @@ impl MinigraphCard {
             let snap = std::sync::Arc::clone(hub.read(cx).current());
             self.update_value(&snap, false, cx);
         }
+    }
+
+    /// Process, name and app cards: takes the label, value and state from the resolver and
+    /// notifies only when one of them changed. The label changes only with the name.
+    fn update_process(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        let theme = current(cx).clone();
+        let Some(view) = resolve_process_source(
+            &self.entry.source,
+            self.entry.column,
+            self.entry.color,
+            snap,
+            &theme,
+            cx,
+        ) else {
+            return;
+        };
+        let mut changed = false;
+        if self.process_label.as_ref() != Some(&view.label_parts) {
+            self.label = view.label;
+            self.process_label = Some(view.label_parts);
+            changed = true;
+        }
+        if self.value != view.value || self.state != view.state {
+            self.value = view.value;
+            self.state = view.state;
+            changed = true;
+        }
+        if changed {
+            #[cfg(any(test, feature = "test-hooks"))]
+            self.notify_count.set(self.notify_count.get() + 1);
+            cx.notify();
+        }
+    }
+
+    /// The label cut in the middle of its name part to fit `max` beside the value, keeping
+    /// ` · <col>` (UI-PRF-041). Cut again only when the label or `max` changed.
+    fn fit_label(&mut self, max: Pixels, window: &Window, cx: &mut App) -> SharedString {
+        let Some(parts) = self.process_label.clone() else {
+            return self.label.clone();
+        };
+        let bits = f32::from(max).to_bits();
+        if let Some((label, at, shown)) = &self.fitted
+            && *label == self.label
+            && *at == bits
+        {
+            return shown.clone();
+        }
+        let m = *metrics(cx);
+        let (size, version) = (m.text.sm, m.style_version);
+        // The label without its name: what stays whatever the cut.
+        let rest = parts.with_name("", cx);
+        if !cx.has_global::<TextMetricsCache>() {
+            cx.set_global(TextMetricsCache::default());
+        }
+        let label = self.label.clone();
+        let cut = cx.update_global::<TextMetricsCache, _>(|cache, cx| {
+            cache.clear_if_stale(version);
+            let mut width_of = |s: &str| {
+                s.chars().fold(px(0.), |sum, ch| {
+                    sum + cache.char_advance(ch, size, window, cx)
+                })
+            };
+            if width_of(&label) <= max {
+                return None;
+            }
+            let budget = (max - width_of(&rest)).max(px(0.));
+            Some(cut_middle(&parts.name, budget, &mut width_of))
+        });
+        let shown = match cut {
+            Some(name) if name != parts.name => parts.with_name(&name, cx),
+            _ => label.clone(),
+        };
+        self.fitted = Some((label, bits, shown.clone()));
+        shown
     }
 
     /// Re-formats the value when its inputs changed and notifies only then.
@@ -438,12 +575,20 @@ impl MinigraphCard {
 }
 
 impl Render for MinigraphCard {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
-        let m = metrics(cx);
-        let t = current(cx);
+        let m = *metrics(cx);
         let s = m.ui_scale;
+        let label = if self.process_label.is_some() && !self.dragging {
+            let value_w = value_width(&self.value, &m, window, cx);
+            // The card's width less its padding, the value and a gap between them.
+            let max = px(MINI_CARD_W * s) - m.sp[3] * 2. - value_w - m.sp[2];
+            self.fit_label(max, window, cx)
+        } else {
+            self.label.clone()
+        };
+        let t = current(cx);
         if self.dragging {
             // The home slot while the card follows the pointer: 1 px accent dashed outline.
             return div()
@@ -480,12 +625,16 @@ impl Render for MinigraphCard {
                     .id("MinigraphCard-label")
                     .debug_selector(|| "MinigraphCard-label".into())
                     .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .whitespace_nowrap()
+                    .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.label.clone()),
+                    .child(label),
             )
             .child(
                 div()
                     .debug_selector(|| "MinigraphCard-value".into())
+                    .flex_none()
+                    .whitespace_nowrap()
                     .font_features(TNUM.clone())
                     .child(self.value.clone()),
             );
@@ -637,9 +786,10 @@ impl Render for MinigraphDragGhost {
     }
 }
 
-/// (fill, line) of the card's first series. `Accent` uses the source's palette pair (VRAM and
-/// GPU temp use the GPU pair); a named colour is that accent for the line and at alpha 0.85 for
-/// the fill (R-263).
+/// (fill, line) of the card's first series. `Accent` uses the source's palette pair on a system
+/// card (VRAM and GPU temp use the GPU pair) and `TlTheme.accent` on a process, name or app
+/// card (UI-PRF-041); a named colour is that accent for the line and at alpha 0.85 for the fill
+/// (R-263), and `TlTheme.accent` is drawn the same way.
 pub fn resolve_colors(
     source: &MinigraphSource,
     color: GraphColor,
@@ -649,6 +799,9 @@ pub fn resolve_colors(
         && let Some(named) = accent_color(color.as_str())
     {
         return (Some(named.opacity(NAMED_FILL_ALPHA)), named);
+    }
+    if !source.is_system() {
+        return (Some(theme.accent.opacity(NAMED_FILL_ALPHA)), theme.accent);
     }
     let g = &theme.graph;
     let (fill, line) = match source {
@@ -751,6 +904,40 @@ pub fn chart_spec_for(
     }
 }
 
+/// The chart of a process, name or app card: its one engine-sampled series on the column's
+/// scale (UI-PRF-041).
+pub fn process_chart_spec(view: &ProcessSourceView, range_s: u16, smooth: bool) -> ChartSpec {
+    ChartSpec {
+        series: smallvec![view.series.clone()],
+        y: view.y,
+        range_ns: range_ns(range_s),
+        grid: GridStyle {
+            lines: true,
+            baseline: true,
+            outline: true,
+            rounded: true,
+        },
+        smooth,
+        hover: true,
+        stack: false,
+        background: ChartBg::List,
+    }
+}
+
+/// Width of the value text in the label font at `text.sm`.
+fn value_width(value: &str, m: &UiMetrics, window: &Window, cx: &mut App) -> Pixels {
+    if !cx.has_global::<TextMetricsCache>() {
+        cx.set_global(TextMetricsCache::default());
+    }
+    let (size, version) = (m.text.sm, m.style_version);
+    cx.update_global::<TextMetricsCache, _>(|cache, cx| {
+        cache.clear_if_stale(version);
+        value.chars().fold(px(0.), |sum, ch| {
+            sum + cache.char_advance(ch, size, window, cx)
+        })
+    })
+}
+
 /// The card draws the label and value itself.
 fn chart_labels() -> ChartLabels {
     ChartLabels {
@@ -776,7 +963,7 @@ fn label_for(source: &MinigraphSource, cx: &App) -> SharedString {
         MinigraphSource::Gpu(_) => "minigraph-label-gpu",
         MinigraphSource::Vram(_) => "minigraph-label-vram",
         MinigraphSource::GpuTemp(_) => "minigraph-label-gpu-temp",
-        // Process cards are E26-011.
+        // Process, name and app labels come from `resolve_process_source`.
         MinigraphSource::Process { .. } | MinigraphSource::Name(_) | MinigraphSource::App(_) => {
             return SharedString::default();
         }
@@ -817,6 +1004,45 @@ pub fn device_for(
     }
 }
 
+/// `text` cut in the middle to fit `max`: graphemes from the start and the end are kept in
+/// turn while they fit beside the ellipsis, so both ends of a process name stay readable.
+/// `text` whole when it fits.
+pub fn cut_middle(
+    text: &str,
+    max: Pixels,
+    measure: &mut impl FnMut(&str) -> Pixels,
+) -> SharedString {
+    if measure(text) <= max {
+        return SharedString::new(text);
+    }
+    let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+    let mut buf = [0u8; 4];
+    let mut budget = max - measure(ELLIPSIS.encode_utf8(&mut buf));
+    // Graphemes `..head` and `tail..` are kept.
+    let (mut head, mut tail) = (0, graphemes.len());
+    let mut front = true;
+    while head < tail {
+        let w = measure(graphemes[if front { head } else { tail - 1 }].1);
+        if w > budget {
+            break;
+        }
+        budget -= w;
+        if front {
+            head += 1;
+        } else {
+            tail -= 1;
+        }
+        front = !front;
+    }
+    let at = |i: usize| graphemes.get(i).map_or(text.len(), |(byte, _)| *byte);
+    let (head, tail) = (at(head), at(tail));
+    let mut out = String::with_capacity(head + ELLIPSIS.len_utf8() + text.len() - tail);
+    out.push_str(&text[..head]);
+    out.push(ELLIPSIS);
+    out.push_str(&text[tail..]);
+    out.into()
+}
+
 /// The newest valid sample of `id`.
 fn newest(snap: &Snapshot, id: SeriesId) -> Option<f32> {
     snap.series
@@ -831,6 +1057,20 @@ fn newest(snap: &Snapshot, id: SeriesId) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_middle_keeps_both_ends() {
+        let mut mono = |s: &str| px(s.chars().count() as f32);
+        assert_eq!(cut_middle("firefox", px(7.), &mut mono).as_ref(), "firefox");
+        assert_eq!(
+            cut_middle("abcdefghij", px(5.), &mut mono).as_ref(),
+            "ab\u{2026}ij"
+        );
+        assert_eq!(
+            cut_middle("abcdefghij", px(0.), &mut mono).as_ref(),
+            "\u{2026}"
+        );
+    }
 
     #[test]
     fn card_color_named_overrides() {

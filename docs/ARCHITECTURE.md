@@ -1629,7 +1629,7 @@ pub struct ChartSpec {
     pub grid: GridStyle,
     pub smooth: bool,            // setting motion.smooth_graphs ("Smooth graphs")
 }
-pub struct ChartSeries { pub id: SeriesId, pub fill: Option<Hsla>, pub line: Hsla, pub line_width: Pixels }
+pub struct ChartSeries { pub id: SeriesId, pub process: Option<ProcessSeriesId>, pub fill: Option<Hsla>, pub line: Hsla, pub line_width: Pixels } // process: per-process series, read from Snapshot.process_series (R-154)
 pub enum YScale { Fixed { min: f32, max: f32 }, AutoRate { floor: f32 } }
 
 pub struct ChartGeometryKey {

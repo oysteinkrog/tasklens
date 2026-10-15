@@ -2429,6 +2429,21 @@ minigraph-menu-remove = Remove graph
 minigraph-menu-range = Time range
 minigraph-menu-color = Graph color
 minigraph-menu-reset = Reset minigraph layout
+# Process, name and app minigraph cards (tasklens-xdh.13, PERF-085, PERF-087).
+minigraph-label-process = {$name} ({$pid}) · {$col}
+minigraph-label-name = {$name} by name · {$col}
+minigraph-label-app = {$app} by app · {$col}
+minigraph-label-unnamed = {$name} · {$col}
+minigraph-process-unnamed = Process {$pid}
+minigraph-col-cpu = CPU
+minigraph-col-memory = Memory
+minigraph-col-rss = RSS
+minigraph-col-rss-shared = RSS shared
+minigraph-col-disk = Disk
+minigraph-col-network = Network
+minigraph-col-gpu = GPU
+minigraph-col-vram = VRAM
+minigraph-col-gpu-shared = GPU shared
 # Settings window, Services page (tasklens-bj6.28, UI-SHL-068). The Graphs page uses the
 # shell-menu-graphs keys.
 shell-settings-services-unit-types = Unit types
@@ -2641,6 +2656,9 @@ shell-settings-group-window = Window
 shell-settings-group-tray = Tray
 shell-settings-group-login = Login
 shell-settings-group-network = Network
+shell-settings-group-memory = Memory
+shell-settings-lowmem-tooltip = systemd-oomd may end processes before the rescue window opens.
+shell-settings-lowmem-tooltip-normal-oom = systemd-oomd may end processes before the rescue window opens. The watcher runs with normal OOM priority.
 shell-settings-device-default = Default
 # Settings window, Advanced page (tasklens-bj6.2, UI-SHL-071).
 shell-settings-public-ip-notice = Do not ask again for public IP fetches

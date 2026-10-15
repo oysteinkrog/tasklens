@@ -6,14 +6,20 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use gpui_kit::private::schemars::{JsonSchema, Schema, SchemaGenerator};
+use gpui_kit::{App, SharedString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use tl_model::ids::ProcessKey;
-use tl_model::settings::MinigraphState;
+use tl_model::ids::{ColumnId, GraphTarget, ProcessKey, ProcessSeriesId};
+use tl_model::settings::{MinigraphState, NetworkUnit};
+use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
 
 use super::GraphColor;
+use super::card::{CardState, resolve_colors};
+use crate::chart::{ChartSeries, ValueFormat, YScale, format_value};
+use crate::i18n::{tr, tr_args};
 use crate::pages::performance::DeviceKey;
-use crate::settings_global::SettingKey;
+use crate::settings_global::{SettingKey, TlSettings};
+use crate::theme::TlTheme;
 
 /// A card's identity, assigned at load and stable while the app runs. Never stored.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema)]
@@ -149,6 +155,17 @@ impl MinigraphSource {
         }
     }
 
+    /// What the engine samples for a process, name or app card (R-154); `None` for a system
+    /// source.
+    pub fn graph_target(&self) -> Option<GraphTarget> {
+        match self {
+            Self::Process { key } => Some(GraphTarget::Process(*key)),
+            Self::Name(image) => Some(GraphTarget::Name(Arc::clone(image))),
+            Self::App(id) => Some(GraphTarget::App(Arc::clone(id))),
+            _ => None,
+        }
+    }
+
     /// The `graphs.minigraph_*` setting that shows a system card.
     pub fn settings_key(&self) -> Option<SettingKey> {
         match self {
@@ -263,6 +280,242 @@ impl GraphColumn {
             Self::Vram => "VRAM",
             Self::GpuShared => "GPU shared",
         }
+    }
+
+    /// The string key of [`GraphColumn::label`] (PERF-087).
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Cpu => "minigraph-col-cpu",
+            Self::Memory => "minigraph-col-memory",
+            Self::Rss => "minigraph-col-rss",
+            Self::RssShared => "minigraph-col-rss-shared",
+            Self::Disk => "minigraph-col-disk",
+            Self::Network => "minigraph-col-network",
+            Self::Gpu => "minigraph-col-gpu",
+            Self::Vram => "minigraph-col-vram",
+            Self::GpuShared => "minigraph-col-gpu-shared",
+        }
+    }
+
+    /// The process table column behind this graph column.
+    pub fn column_id(self) -> ColumnId {
+        match self {
+            Self::Cpu => ColumnId::Cpu,
+            Self::Memory => ColumnId::Memory,
+            Self::Rss => ColumnId::WsTotal,
+            Self::RssShared => ColumnId::WsShared,
+            Self::Disk => ColumnId::Disk,
+            Self::Network => ColumnId::Network,
+            Self::Gpu => ColumnId::Gpu,
+            Self::Vram => ColumnId::GpuMemDedicated,
+            Self::GpuShared => ColumnId::GpuMemShared,
+        }
+    }
+
+    /// The engine samples this column for graph targets (R-154 allows six). RSS, RSS shared
+    /// and GPU shared cards get no series and show the warming-up value.
+    pub fn engine_sampled(self) -> bool {
+        !matches!(self, Self::Rss | Self::RssShared | Self::GpuShared)
+    }
+}
+
+/// The label of a process, name or app card in parts, so the card can cut the name part alone
+/// and keep ` · <col>` (PERF-087, UI-PRF-041).
+#[derive(Clone, PartialEq, Debug)]
+pub struct ProcessLabel {
+    /// `minigraph-label-process`, `-name`, `-app` or `-unnamed`.
+    key: &'static str,
+    /// The name part: the process name, the image name, the app's display name, or
+    /// `Process <pid>` before the snapshot has the process.
+    pub name: SharedString,
+    /// The pid of a named process card.
+    pid: Option<u32>,
+    pub column: GraphColumn,
+}
+
+impl ProcessLabel {
+    /// The whole label.
+    pub fn text(&self, cx: &App) -> SharedString {
+        self.with_name(&self.name, cx)
+    }
+
+    /// The label with `name` as its name part, for a name cut to fit.
+    pub fn with_name(&self, name: &str, cx: &App) -> SharedString {
+        let col = tr(cx, self.column.label_key());
+        let name_arg = if self.key == "minigraph-label-app" {
+            "app"
+        } else {
+            "name"
+        };
+        match self.pid {
+            Some(pid) => tr_args(
+                cx,
+                self.key,
+                &[
+                    (name_arg, name.to_owned().into()),
+                    ("pid", pid.to_string().into()),
+                    ("col", col.to_string().into()),
+                ],
+            ),
+            None => tr_args(
+                cx,
+                self.key,
+                &[
+                    (name_arg, name.to_owned().into()),
+                    ("col", col.to_string().into()),
+                ],
+            ),
+        }
+    }
+}
+
+/// What a process, name or app card or tray graph shows (PERF-085, UI-PRF-041). The minigraph
+/// card and the tray bridge both build it with [`resolve_process_source`].
+#[derive(Clone, PartialEq, Debug)]
+pub struct ProcessSourceView {
+    /// The engine-sampled series of the source and column, coloured.
+    pub series: ChartSeries,
+    /// The y scale of the column.
+    pub y: YScale,
+    pub label: SharedString,
+    pub label_parts: ProcessLabel,
+    /// The newest valid sample formatted for the column, `…` before the first one.
+    pub value: SharedString,
+    pub state: CardState,
+}
+
+/// The value of a card with no valid sample yet (WarmingUp).
+const WARMING_UP_TEXT: &str = "\u{2026}";
+
+/// Resolves a process, name or app source against `snap`: its series, label, value text and
+/// state. `None` for a system source. Names come from `snap.processes`: a process card shows
+/// `Process <pid>` until the record is there, an app card shows its id until a member process
+/// is there.
+pub fn resolve_process_source(
+    source: &MinigraphSource,
+    column: GraphColumn,
+    color: GraphColor,
+    snap: &Snapshot,
+    theme: &TlTheme,
+    cx: &App,
+) -> Option<ProcessSourceView> {
+    let target = source.graph_target()?;
+    let id = ProcessSeriesId {
+        target,
+        column: column.column_id(),
+    };
+    let (fill, line) = resolve_colors(source, color, theme);
+    let newest = column
+        .engine_sampled()
+        .then(|| snap.process_series.get(&id))
+        .flatten()
+        .and_then(|v| v.samples.iter().rev().find(|s| s.is_valid()))
+        .map(|s| s.value);
+    let series = ChartSeries {
+        process: Some(id),
+        fill,
+        line,
+        ..ChartSeries::default()
+    };
+    let label_parts = process_label(source, column, snap, cx)?;
+    let unit = if cx.has_global::<TlSettings>() {
+        TlSettings::settings(cx).units.network
+    } else {
+        NetworkUnit::default()
+    };
+    let (y, fmt) = column_scale(source, column);
+    let value = newest.map_or(SharedString::new_static(WARMING_UP_TEXT), |v| {
+        let mut s = String::new();
+        format_value(fmt, v, unit, &mut s);
+        s.into()
+    });
+    Some(ProcessSourceView {
+        series,
+        y,
+        label: label_parts.text(cx),
+        label_parts,
+        value,
+        // E26-012 (tasklens-xdh.14) adds No match, Ended and Restricted.
+        state: CardState::Live,
+    })
+}
+
+/// The label parts of a process, name or app source; `None` for a system source.
+pub fn process_label(
+    source: &MinigraphSource,
+    column: GraphColumn,
+    snap: &Snapshot,
+    cx: &App,
+) -> Option<ProcessLabel> {
+    let (key, name, pid) = match source {
+        MinigraphSource::Process { key } => match snap.processes.get(*key) {
+            Some(r) => (
+                "minigraph-label-process",
+                SharedString::from(Arc::clone(&r.meta.name)),
+                Some(key.pid),
+            ),
+            None => (
+                "minigraph-label-unnamed",
+                tr_args(
+                    cx,
+                    "minigraph-process-unnamed",
+                    &[("pid", key.pid.to_string().into())],
+                ),
+                None,
+            ),
+        },
+        MinigraphSource::Name(image) => (
+            "minigraph-label-name",
+            SharedString::from(Arc::clone(image)),
+            None,
+        ),
+        MinigraphSource::App(id) => (
+            "minigraph-label-app",
+            app_display_name(snap, id).unwrap_or_else(|| SharedString::from(Arc::clone(id))),
+            None,
+        ),
+        _ => return None,
+    };
+    Some(ProcessLabel {
+        key,
+        name,
+        pid,
+        column,
+    })
+}
+
+/// The display name of app `id`, as the process table names its app row: the name of the
+/// earliest started member process. `None` when no process of the app is in the snapshot.
+fn app_display_name(snap: &Snapshot, id: &str) -> Option<SharedString> {
+    snap.processes
+        .records
+        .iter()
+        .filter(|r| r.meta.app_id.as_deref() == Some(id))
+        .min_by_key(|r| r.key.start_ticks)
+        .map(|r| SharedString::from(Arc::clone(&r.meta.name)))
+}
+
+/// The y scale and value format of a process card's column (UI-PRF-041 "by column"). A CPU
+/// card of one process is 0..100 %; a name or app sum may pass 100 %, so it sticks up.
+pub fn column_scale(source: &MinigraphSource, column: GraphColumn) -> (YScale, ValueFormat) {
+    let percent = YScale::Fixed {
+        min: 0.0,
+        max: 100.0,
+    };
+    let sticky = YScale::StickyUp { hw_max: None };
+    match column {
+        GraphColumn::Cpu if matches!(source, MinigraphSource::Process { .. }) => {
+            (percent, ValueFormat::Percent)
+        }
+        GraphColumn::Cpu => (sticky, ValueFormat::Percent),
+        GraphColumn::Memory
+        | GraphColumn::Rss
+        | GraphColumn::RssShared
+        | GraphColumn::Vram
+        | GraphColumn::GpuShared => (sticky, ValueFormat::Bytes),
+        GraphColumn::Disk => (YScale::AutoRate { iec: true }, ValueFormat::RateIec),
+        GraphColumn::Network => (YScale::AutoRate { iec: false }, ValueFormat::RateNetwork),
+        GraphColumn::Gpu => (percent, ValueFormat::Percent),
     }
 }
 

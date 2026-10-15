@@ -179,11 +179,15 @@ mod card {
     };
     use tl_model::client::EngineClient;
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
-    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::ids::{
+        ColumnId, DeviceIdx, GraphTarget, GroupKey, MetricId, ProcessKey, ProcessSeriesId, SeriesId,
+    };
+    use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
-    use tl_model::snapshot::{ComponentHeader, SeriesSet};
-    use tl_model::time::now_boot_ns;
+    use tl_model::snapshot::{ComponentHeader, ProcessSeriesSet, ProcessSnapshot, SeriesSet};
+    use tl_model::time::{BootId, now_boot_ns};
+    use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::chart::YScale;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::minigraph::GraphColor;
@@ -237,10 +241,14 @@ mod card {
     }
 
     fn mini(source: MinigraphSource) -> MinigraphEntry {
+        mini_col(source, GraphColumn::Cpu)
+    }
+
+    fn mini_col(source: MinigraphSource, column: GraphColumn) -> MinigraphEntry {
         MinigraphEntry {
             id: MinigraphId(1),
             source,
-            column: GraphColumn::Cpu,
+            column,
             range_s: 60,
             color: GraphColor::Accent,
             slot: 0,
@@ -319,15 +327,240 @@ mod card {
             source: MinigraphSource,
             order: Vec<DeviceKey>,
         ) -> (Entity<MinigraphCard>, VisualTestContext) {
+            self.card_entry(cx, mini(source), order)
+        }
+
+        fn card_entry(
+            &self,
+            cx: &mut TestAppContext,
+            entry: MinigraphEntry,
+            order: Vec<DeviceKey>,
+        ) -> (Entity<MinigraphCard>, VisualTestContext) {
             let hub = self.hub.clone();
             let (host, vcx) = cx.add_window_view(move |_, cx| Host {
-                card: cx.new(|cx| MinigraphCard::new(mini(source), &catalog(), &order, &hub, cx)),
+                card: cx.new(|cx| MinigraphCard::new(entry, &catalog(), &order, &hub, cx)),
             });
             let mut vcx = vcx.clone();
             let card = vcx.read_entity(&host, |h, _| h.card.clone());
             draw(&mut vcx);
             (card, vcx)
         }
+
+        /// Publishes `records` (sorted here) as the process snapshot, in a new version.
+        fn publish_processes(&mut self, cx: &mut TestAppContext, mut records: Vec<ProcessRecord>) {
+            records.sort_by_key(|r| r.key);
+            self.engine.publish_with(|s| {
+                let version = s.processes.header.version + 1;
+                s.processes = Arc::new(ProcessSnapshot {
+                    header: ComponentHeader {
+                        version,
+                        ..ComponentHeader::default()
+                    },
+                    records: records.into(),
+                    ..ProcessSnapshot::default()
+                });
+            });
+            cx.run_until_parked();
+        }
+
+        /// Publishes `views` as the process series set, in a new version.
+        fn publish_process_series(
+            &mut self,
+            cx: &mut TestAppContext,
+            mut views: Vec<(ProcessSeriesId, Arc<SeriesView>)>,
+        ) {
+            views.sort_by(|a, b| a.0.cmp(&b.0));
+            self.engine.publish_with(|s| {
+                let version = s.process_series.header.version + 1;
+                s.process_series = Arc::new(ProcessSeriesSet {
+                    header: ComponentHeader {
+                        version,
+                        ..ComponentHeader::default()
+                    },
+                    series: views.into(),
+                    slow: Arc::from([]),
+                });
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    fn pkey(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: u64::from(pid) * 10,
+            boot_id: BootId(7),
+            pid,
+        }
+    }
+
+    fn record(pid: u32, name: &str, app_id: Option<&str>) -> ProcessRecord {
+        let name: Arc<str> = Arc::from(name);
+        ProcessRecord {
+            key: pkey(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: Arc::clone(&name),
+                name: Arc::clone(&name),
+                exe: None,
+                cmdline: None,
+                user: Arc::from("user"),
+                cgroup: None,
+                app_id: app_id.map(Arc::from),
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: Arc::clone(&name),
+            }),
+            group: GroupKey(0),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn process(pid: u32) -> MinigraphSource {
+        MinigraphSource::Process { key: pkey(pid) }
+    }
+
+    fn label_of(card: &Entity<MinigraphCard>, vcx: &mut VisualTestContext) -> String {
+        vcx.update(|_, cx| card.read(cx).label().to_string())
+    }
+
+    /// The three process label forms and `Process <pid>` before the name is known (PERF-085,
+    /// PERF-087, UI-PRF-041).
+    #[gpui_kit::test]
+    fn card_labels_process(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100);
+        // Before the snapshot has pid 4242.
+        let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
+        assert_eq!(label_of(&card, &mut vcx), "Process 4242 \u{b7} CPU");
+
+        r.publish_processes(
+            cx,
+            vec![
+                record(4242, "firefox", None),
+                record(900, "Dolphin", Some("org.kde.dolphin")),
+                record(950, "dolphin-helper", Some("org.kde.dolphin")),
+            ],
+        );
+        draw(&mut vcx);
+        assert_eq!(label_of(&card, &mut vcx), "firefox (4242) \u{b7} CPU");
+
+        let name = mini_col(
+            MinigraphSource::Name(Arc::from("code")),
+            GraphColumn::Memory,
+        );
+        let (card, mut vcx) = r.card_entry(cx, name, Vec::new());
+        assert_eq!(label_of(&card, &mut vcx), "code by name \u{b7} Memory");
+
+        let app = mini_col(
+            MinigraphSource::App(Arc::from("org.kde.dolphin")),
+            GraphColumn::Memory,
+        );
+        let (card, mut vcx) = r.card_entry(cx, app, Vec::new());
+        assert_eq!(label_of(&card, &mut vcx), "Dolphin by app \u{b7} Memory");
+        let y = vcx.update(|_, cx| card.read(cx).chart().read(cx).spec.y.scale_bits());
+        assert_eq!(y, YScale::StickyUp { hw_max: None }.scale_bits());
+    }
+
+    /// A 40-character name in a 180 px card is cut in the middle and keeps ` · CPU`.
+    #[gpui_kit::test]
+    fn card_label_middle_ellipsis_keeps_column(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100);
+        let name = "averyveryverylongprocessnamethatgoeson40";
+        assert_eq!(name.chars().count(), 40);
+        r.publish_processes(cx, vec![record(4242, name, None)]);
+        let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
+        let (whole, shown) = vcx.update(|_, cx| {
+            let c = card.read(cx);
+            (c.label().to_string(), c.shown_label().to_string())
+        });
+        assert_eq!(whole, format!("{name} (4242) \u{b7} CPU"));
+        assert!(shown.ends_with(" (4242) \u{b7} CPU"), "{shown}");
+        let name_part = shown.trim_end_matches(" (4242) \u{b7} CPU");
+        assert!(name_part.contains('\u{2026}'), "{shown}");
+        assert!(!name_part.starts_with('\u{2026}') && !name_part.ends_with('\u{2026}'));
+        assert!(name.starts_with(name_part.split('\u{2026}').next().unwrap_or_default()));
+        assert!(name.ends_with(name_part.split('\u{2026}').next_back().unwrap_or_default()));
+    }
+
+    /// The card's chart draws the engine-sampled series of its identity and column; the value
+    /// is its newest sample (PERF-085, R-154).
+    #[gpui_kit::test]
+    fn card_process_series_binding(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100);
+        let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
+        assert_eq!(
+            vcx.update(|_, cx| card.read(cx).value().to_string()),
+            "\u{2026}"
+        );
+        let id = ProcessSeriesId {
+            target: GraphTarget::Process(pkey(4242)),
+            column: ColumnId::Cpu,
+        };
+        let other = ProcessSeriesId {
+            target: GraphTarget::Name(Arc::from("code")),
+            column: ColumnId::Cpu,
+        };
+        let dummy = SeriesId {
+            device: DeviceIdx(0),
+            metric: MetricId(0),
+        };
+        r.publish_process_series(
+            cx,
+            vec![
+                (id.clone(), series(dummy.device, dummy.metric, 12.5, 1)),
+                (other, series(dummy.device, dummy.metric, 70.0, 1)),
+            ],
+        );
+        draw(&mut vcx);
+        let (value, now, process) = vcx.update(|_, cx| {
+            let c = card.read(cx);
+            let chart = c.chart().read(cx);
+            (
+                c.value().to_string(),
+                chart.value_now().map(|(v, _)| v),
+                chart.spec.series[0].process.clone(),
+            )
+        });
+        assert_eq!(value, "12.5%");
+        assert_eq!(now, Some(12.5));
+        assert_eq!(process, Some(id));
+    }
+
+    /// A process card's demand part lists its identity and column; RSS has no engine series.
+    #[gpui_kit::test]
+    fn card_process_demand_part(cx: &mut TestAppContext) {
+        let r = rig(cx, 100);
+        let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
+        let d = vcx.update(|_, cx| card.read(cx).demand_part());
+        assert!(d.any_surface_visible);
+        assert_eq!(
+            &d.graph_targets[..],
+            [(GraphTarget::Process(pkey(4242)), ColumnId::Cpu)]
+        );
+        let rss = mini_col(MinigraphSource::Name(Arc::from("code")), GraphColumn::Rss);
+        let (card, mut vcx) = r.card_entry(cx, rss, Vec::new());
+        let d = vcx.update(|_, cx| card.read(cx).demand_part());
+        assert!(d.graph_targets.is_empty());
     }
 
     /// Embeds the card cached, as the panel does: the window's root re-renders on every draw.
@@ -605,7 +838,9 @@ mod panel {
     use tl_model::demand::CpuDemand;
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::DeviceIdx;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::settings::{
+        AppearanceSettings, MinigraphState, Settings, ThemeSettings, UiState,
+    };
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
     use tl_ui::components::toast::ToastKind;
@@ -1016,6 +1251,85 @@ mod panel {
             .map(|e| e.1.clone().unwrap_or_default())
             .collect();
         assert_eq!(checked, ["1 minute"]);
+    }
+
+    /// A state with a process card in slot 0 and a name card in slot 1; the panel adds the
+    /// system cards after them.
+    fn process_state() -> UiState {
+        UiState {
+            minigraphs: vec![
+                MinigraphState {
+                    source: "process:0000000000000007:4242:42420".to_owned(),
+                    column: "cpu".to_owned(),
+                    slot: 0,
+                    ..MinigraphState::default()
+                },
+                MinigraphState {
+                    source: "name:code".to_owned(),
+                    column: "memory".to_owned(),
+                    slot: 1,
+                    ..MinigraphState::default()
+                },
+            ],
+            ..UiState::default()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn card_menu_order_process(cx: &mut TestAppContext) {
+        let mut r = rig_with(cx, process_state());
+        let (menu, _) = right_click(&mut r, 0);
+        // Detach (E26-015) and the tray item (E31) are not built yet, so one separator stays.
+        assert_eq!(
+            menu,
+            [
+                item("Remove graph"),
+                (
+                    MenuEntryKind::Submenu,
+                    Some("Time range".to_owned()),
+                    None,
+                    false
+                ),
+                (
+                    MenuEntryKind::Submenu,
+                    Some("Graph color".to_owned()),
+                    None,
+                    false
+                ),
+                (MenuEntryKind::Separator, None, None, false),
+                item("Reset minigraph layout"),
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn process_cards_add_demand_identities(cx: &mut TestAppContext) {
+        use tl_model::ids::{ColumnId, GraphTarget, ProcessKey};
+        use tl_model::time::BootId;
+
+        let mut r = rig_with(cx, process_state());
+        let want = [
+            (
+                GraphTarget::Process(ProcessKey {
+                    start_ticks: 42420,
+                    boot_id: BootId(7),
+                    pid: 4242,
+                }),
+                ColumnId::Cpu,
+            ),
+            (GraphTarget::Name(Arc::from("code")), ColumnId::Memory),
+        ];
+        let panel = r.panel.clone();
+        let d = r.vcx.update(|_, cx| panel.read(cx).demand_part(cx));
+        assert_eq!(&d.graph_targets[..], want);
+        assert!(d.memory, "the system cards keep their bits");
+
+        r.vcx
+            .update(|_, cx| panel.update(cx, |p, cx| p.set_active(true, cx)));
+        r.vcx.executor().advance_clock(Duration::from_millis(200));
+        draw(&mut r.vcx);
+        let sent = r.engine.demands().last().cloned().expect("demand sent");
+        assert_eq!(&sent.graph_targets[..], want);
     }
 
     /// Publishes the CPU series in both tiers: 10 Hz fast and 1 Hz with the tier bit.

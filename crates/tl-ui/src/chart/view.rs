@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use gpui_kit::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window};
 use smallvec::SmallVec;
-use tl_model::ids::SeriesId;
+use tl_model::ids::{ProcessSeriesId, SeriesId};
 use tl_model::series::SeriesView;
-use tl_model::snapshot::{ComponentMask, SeriesSet, Snapshot};
+use tl_model::snapshot::{ComponentMask, ProcessSeriesSet, SeriesSet, Snapshot};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
@@ -139,27 +139,48 @@ impl ChartView {
             self.spec
                 .series
                 .iter()
+                .filter(|s| s.process.is_none())
                 .any(|s| changed.tier_changed(s.id, range_ns))
         };
         let device_appeared = ev.mask.contains(ComponentMask::DEVICES)
             && (self.series.len() != self.spec.series.len()
                 || self.series.iter().any(Option::is_none));
+        // `changed_series` does not list process series, so a new process series set
+        // re-resolves and notifies only when one of this chart's views is a new `Arc`.
+        let process_changed = ev.mask.contains(ComponentMask::PROCESS_SERIES)
+            && self.spec.series.iter().any(|s| s.process.is_some());
         if own_changed || device_appeared {
             self.resolve(hub.read(cx).current());
             cx.notify();
+        } else if process_changed {
+            let before = self.series.clone();
+            self.resolve(hub.read(cx).current());
+            let same = before.len() == self.series.len()
+                && before.iter().zip(&self.series).all(|(a, b)| match (a, b) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                });
+            if !same {
+                cx.notify();
+            }
         }
     }
 
     /// Looks up every spec series in `snap` by binary search and keeps an `Arc` clone of each,
-    /// `None` when absent. Ranges over 60 s read the 1 Hz tier (`find_tiered`). Reuses the
-    /// inline buffer, so it does not allocate for up to 2 series.
+    /// `None` when absent. Ranges over 60 s read the 1 Hz tier (`find_tiered`). A series with
+    /// `process` set reads `snap.process_series` the same way (`find_process_tiered`). Reuses
+    /// the inline buffer, so it does not allocate for up to 2 series.
     pub fn resolve(&mut self, snap: &Snapshot) {
         let set = &*snap.series;
         let range_ns = self.spec.range_ns;
         let mut fallback = false;
         self.series.clear();
         self.series.extend(self.spec.series.iter().map(|s| {
-            let (view, fell_back) = find_tiered(set, s.id, range_ns);
+            let (view, fell_back) = match &s.process {
+                Some(id) => find_process_tiered(&snap.process_series, id, range_ns),
+                None => find_tiered(set, s.id, range_ns),
+            };
             fallback |= fell_back;
             view.cloned()
         }));
@@ -446,6 +467,25 @@ pub(crate) fn find_tiered(
         Some(v) => (Some(v), false),
         None => {
             let fast = find_series(set, id);
+            (fast, fast.is_some())
+        }
+    }
+}
+
+/// The process series `id` for a chart of `range_ns`: over 60 s the 1 Hz view, falling back to
+/// the fast view when the set has no 1 Hz view (the bool is then true), else the fast view.
+pub(crate) fn find_process_tiered<'a>(
+    set: &'a ProcessSeriesSet,
+    id: &ProcessSeriesId,
+    range_ns: u64,
+) -> (Option<&'a Arc<SeriesView>>, bool) {
+    if range_ns <= TIER_1HZ_MIN_RANGE_NS {
+        return (set.get(id), false);
+    }
+    match set.get_slow(id) {
+        Some(v) => (Some(v), false),
+        None => {
+            let fast = set.get(id);
             (fast, fast.is_some())
         }
     }
