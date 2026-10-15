@@ -1669,9 +1669,15 @@ mod window {
             vcx.read(|cx| view.read(cx).processes().read(cx).passes())
         };
 
-        // Not active: sweeps arrive and no member pass runs.
-        publish_two_apps(&engine, &mut main, 2);
+        // Not active: sweeps arrive and no member pass runs, in the tab or in the window. The
+        // row says 5 while two records belong to G, so a window scan for the label would show 2.
+        publish_two_apps(&engine, &mut main, 5);
         assert_eq!(passes(&mut vcx), 0);
+        assert_eq!(
+            vcx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses)),
+            "Processes [5]",
+            "the label keeps the row's count without a member pass"
+        );
 
         vcx.update(|window, cx| {
             view.update(cx, |v, cx| {
@@ -1681,6 +1687,14 @@ mod window {
         draw(&mut vcx);
         assert_eq!(passes(&mut vcx), 1);
         assert_eq!(view_pids(&mut vcx, &view), [101, 103]);
+
+        // Active: one pass per sweep, and the label counts that pass.
+        publish_two_apps(&engine, &mut main, 5);
+        assert_eq!(passes(&mut vcx), 2);
+        assert_eq!(
+            vcx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses)),
+            "Processes [2]"
+        );
 
         // An exited member leaves the list at the next sweep.
         let mut exited = member(103, g.key);
@@ -1712,27 +1726,39 @@ mod window {
         assert_eq!(props_count(cx), 1);
     }
 
-    /// The label counts the real member processes, not the table row's own count (which follows
-    /// the main table's filter). The row here says 5; 34 records belong to the group.
+    /// While the tab is not active the label shows the row's member count. While it is active
+    /// the label counts the member list, even when the row's count (which follows the main
+    /// table's filter) says less.
     #[gpui_kit::test]
     fn app_processes_count_label(cx: &mut TestAppContext) {
         let (engine, mut main) = setup(cx);
-        let g = app_group("Firefox", GroupRowKind::App, 5);
+        let g = app_group("Firefox", GroupRowKind::App, 34);
         let mut records: Vec<ProcessRecord> = (1000..1034).map(|pid| member(pid, g.key)).collect();
         records.push(member(2000, app_group("Chrome", GroupRowKind::App, 1).key));
-        publish_table(&engine, &mut main, records, vec![g.clone()], Vec::new());
+        publish_table(
+            &engine,
+            &mut main,
+            records.clone(),
+            vec![g.clone()],
+            Vec::new(),
+        );
         let handle = open_app(cx, g.key).expect("app window opened");
         let view = app_props(cx, handle);
-        assert_eq!(
-            cx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses)),
-            "Processes [34]"
-        );
+        let label =
+            |cx: &mut TestAppContext| cx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses));
+        assert_eq!(label(cx), "Processes [34]");
+
         let (mut vcx, view) = open_processes_tab(cx, g.key);
         assert_eq!(
             view_pids(&mut vcx, &view).len(),
             34,
             "the list has as many rows"
         );
+        assert_eq!(label(cx), "Processes [34]");
+
+        let filtered = app_group("Firefox", GroupRowKind::App, 5);
+        publish_table(&engine, &mut main, records, vec![filtered], Vec::new());
+        assert_eq!(label(cx), "Processes [34]", "the label follows the list");
     }
 
     /// The command line column takes the width the other columns leave, so the columns fill

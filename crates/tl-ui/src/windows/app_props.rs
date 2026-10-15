@@ -1683,8 +1683,8 @@ impl TreeTableDelegate for AppProcsDelegate {
     }
 }
 
-/// Record indexes of the live processes that belong to the row `group`, unfiltered. The tab list
-/// and the tab count both use it, so they agree.
+/// Record indexes of the live processes that belong to the row `group`, unfiltered. Only the
+/// active Processes tab runs it, once per sweep.
 fn member_indexes(procs: &ProcessSnapshot, group: GroupKey) -> impl Iterator<Item = u32> + '_ {
     procs
         .records
@@ -1706,6 +1706,8 @@ pub struct AppProcessesTab {
     exited: bool,
     /// How many member passes ran, for the tests.
     passes: u32,
+    /// Member count of the last pass.
+    member_count: u32,
     /// Window width the flex column was last fitted to.
     flex_body: f32,
     /// Bumped by every member pass. A filter result for an older pass is dropped.
@@ -1754,6 +1756,7 @@ impl AppProcessesTab {
             active: false,
             exited: false,
             passes: 0,
+            member_count: 0,
             flex_body: 0.0,
             members_epoch: 0,
             words,
@@ -1772,6 +1775,11 @@ impl AppProcessesTab {
 
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// Member count of the last pass, or `None` while the tab is not active.
+    pub fn member_count(&self) -> Option<u32> {
+        self.active.then_some(self.member_count)
     }
 
     /// The tab became the active one or stopped being it. Becoming active collects the members
@@ -1806,6 +1814,7 @@ impl AppProcessesTab {
         let procs = snapshot.processes.clone();
         let group = self.group;
         let members: Arc<[u32]> = member_indexes(&procs, group).collect();
+        self.member_count = members.len() as u32;
         self.table.update(cx, |t, cx| {
             t.delegate_mut().set_members(procs, members);
             t.on_new_version(cx);
@@ -1996,10 +2005,7 @@ impl AppPropsWindow {
             filters,
             exited: false,
             name: SharedString::from(&row.name),
-            member_count: hub.as_ref().map_or(row.members, |hub| {
-                let snapshot = hub.read(cx).current().clone();
-                member_indexes(&snapshot.processes, group).count() as u32
-            }),
+            member_count: row.members,
             words,
             focus: cx.focus_handle(),
             demand: None,
@@ -2080,8 +2086,8 @@ impl AppPropsWindow {
     }
 
     /// Tells the Processes tab whether it is active; becoming active collects its members from
-    /// the current snapshot.
-    fn sync_processes_tab(&self, cx: &mut Context<Self>) {
+    /// the current snapshot. Then takes the label count from the right source.
+    fn sync_processes_tab(&mut self, cx: &mut Context<Self>) {
         let active = self.active == DetailTab::AppProcesses;
         let snapshot = cx
             .try_global::<GlobalHub>()
@@ -2089,6 +2095,21 @@ impl AppPropsWindow {
         self.processes.update(cx, |tab, cx| {
             tab.set_active(active, snapshot.as_deref(), cx)
         });
+        let row = snapshot
+            .as_deref()
+            .and_then(|s| s.table.groups.iter().find(|row| row.key == self.group));
+        if let Some(row) = row {
+            self.member_count = row.members;
+        }
+        self.sync_member_count(cx);
+    }
+
+    /// While the Processes tab is active, the label counts its member list, so the two agree.
+    /// While it is not, the label keeps the table row's count and no member pass runs.
+    fn sync_member_count(&mut self, cx: &App) {
+        if let Some(count) = self.processes.read(cx).member_count() {
+            self.member_count = count;
+        }
     }
 
     fn register_demand(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2136,9 +2157,6 @@ impl AppPropsWindow {
         if self.exited {
             return;
         }
-        if mask.intersects(ComponentMask::TABLE | ComponentMask::PROCESSES) {
-            self.member_count = member_indexes(&snapshot.processes, self.group).count() as u32;
-        }
         if mask.intersects(ComponentMask::TABLE) {
             let row = snapshot
                 .table
@@ -2147,6 +2165,7 @@ impl AppPropsWindow {
                 .find(|row| row.key == self.group);
             match row {
                 Some(row) => {
+                    self.member_count = row.members;
                     self.general.update(cx, |g, cx| g.set_group(Some(row), cx));
                 }
                 None => {
@@ -2159,6 +2178,7 @@ impl AppPropsWindow {
             self.processes
                 .update(cx, |tab, cx| tab.take_snapshot(snapshot, cx));
         }
+        self.sync_member_count(cx);
         if mask.intersects(ComponentMask::DETAILS) {
             let slot = snapshot
                 .details
