@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, AsyncApp, AvailableSpace, Bounds, BoxShadow, ContentMask,
-    Context, Element, ElementId, Entity, FontWeight, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, Pixels, Point, Size, Style, Styled as _, StyledImage as _, Task,
-    WeakEntity, Window, fill, img, point, px, size, svg,
+    AnyElement, App, AsyncApp, AvailableSpace, Bounds, BoxShadow, ContentMask, Context, Element,
+    ElementId, Entity, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    Pixels, Point, Size, Style, Styled as _, StyledImage as _, Task, WeakEntity, Window, fill, img,
+    point, px, size, svg,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;

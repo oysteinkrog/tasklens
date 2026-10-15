@@ -1925,21 +1925,19 @@ fn top3_stale_rows_after_150ms(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn top_answer_skips_rebuild(cx: &mut TestAppContext) {
+    use std::{cell::Cell, rc::Rc};
     let (engine, page, vcx) = hover_page(cx);
     hover_to(&page, vcx, 0.5);
     advance(vcx, Duration::from_millis(32));
     settle(vcx);
-    let before = (
-        builds(&page, vcx),
-        vcx.read_entity(&page, |p, _| p.render_count.get()),
-    );
+    let before = builds(&page, vcx);
+    let notified = Rc::new(Cell::new(0u32));
+    let n = notified.clone();
+    let _sub = vcx.update(|_, cx| cx.observe(&page, move |_, _| n.set(n.get() + 1)));
     let sent = top_queries(&engine);
     answer_top(&engine, vcx, sent[0], &[3.0]);
     settle(vcx);
-    let after = (
-        builds(&page, vcx),
-        vcx.read_entity(&page, |p, _| p.render_count.get()),
-    );
-    assert_eq!(after, before, "no strip rebuild and no page render");
+    assert_eq!(builds(&page, vcx), before, "no strip rebuild");
+    assert_eq!(notified.get(), 0, "the page is not notified");
     assert_eq!(card_rows(&page, vcx).len(), 1, "the card shows the answer");
 }
