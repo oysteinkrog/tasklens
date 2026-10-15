@@ -11,10 +11,11 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::ScrollbarHandle;
 use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
-    Action, AnyView, App, AppContext as _, Context, Div, Entity, InteractiveElement as _,
-    IntoElement, KeyContext, Modifiers, MouseButton, MouseMoveEvent, ParentElement, Pixels, Render,
-    Role, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Styled, Subscription,
-    TestAppContext, TestDispatcher, TouchPhase, VisualTestContext, Window, div, point, px,
+    Action, AnyView, App, AppContext as _, Background, Context, Div, Entity, Hsla,
+    InteractiveElement as _, IntoElement, KeyContext, Modifiers, MouseButton, MouseMoveEvent,
+    ParentElement, Pixels, Render, Role, ScrollDelta, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Styled, Subscription, TestAppContext, TestDispatcher, TouchPhase,
+    VisualTestContext, Window, div, point, px,
 };
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
@@ -24,14 +25,15 @@ use tl_model::validity::Validity;
 use tl_ui::components::menu::{TlMenu, context_menu_layer};
 use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::components::validity::{GlyphContent, GlyphCtx, glyph_parts, tooltip_text};
+use tl_ui::pages::sys_status::{DotStyle, LabelTone, STALE_DOT_ALPHA};
 use tl_ui::table::actions::{
     CollapseAll, CollapseOrParent, CopyRow, CopyRowsAsTable, ExpandOrChild, MoveFocus,
     MoveFocusEdge, MoveFocusPage, OpenContextMenu, OpenProperties, SelectAll, TABLE_CONTEXT,
     ToggleExpand, ToggleSelectFocus,
 };
 use tl_ui::table::cells::{
-    CellCtx, CellOut, attach_cell_tooltip, cell_background, cell_text_color, glyph_cell,
-    guide_quads, numeric_cell, text_cell, with_overrides,
+    CellCtx, CellOut, DIM_OPACITY, attach_cell_tooltip, cell_background, cell_text_color,
+    glyph_cell, guide_quads, numeric_cell, text_cell, with_overrides,
 };
 use tl_ui::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
@@ -338,6 +340,8 @@ struct TRow {
     name: &'static str,
     /// `None`: no chevron. Flipped by `on_toggle_expand`.
     expandable: Option<bool>,
+    secondary: Option<&'static str>,
+    glyph: Option<IconName>,
 }
 
 fn plain(id: u32) -> TRow {
@@ -349,6 +353,8 @@ fn plain(id: u32) -> TRow {
         icon: None,
         name: "row",
         expandable: None,
+        secondary: None,
+        glyph: None,
     }
 }
 
@@ -411,6 +417,10 @@ struct TDelegate {
     tips_built: RefCell<Vec<SharedString>>,
     /// The row whose Name text `name_weight` gives 500.
     medium_row: Option<usize>,
+    /// Status dots: (row id, column, style).
+    dots: Vec<(u32, ColumnId, DotStyle)>,
+    /// `selected_text_color` overrides: (row id, column, colour).
+    selected_colors: Vec<(u32, ColumnId, Hsla)>,
 }
 
 impl TDelegate {
@@ -444,6 +454,8 @@ impl TDelegate {
             tip_rows: RefCell::new(Vec::new()),
             tips_built: RefCell::new(Vec::new()),
             medium_row: None,
+            dots: Vec::new(),
+            selected_colors: Vec::new(),
         }
     }
 
@@ -509,6 +521,17 @@ impl TreeTableDelegate for TDelegate {
             self.tip_rows.borrow_mut().push(ix);
         }
         let id = self.rows[ix].id;
+        if let Some(d) = self.dots.iter().find(|d| d.0 == id && d.1 == col) {
+            out.dot = Some(d.2);
+        }
+        if let Some(c) = self
+            .selected_colors
+            .iter()
+            .find(|c| c.0 == id && c.1 == col)
+        {
+            out.text_color = Some(c.2);
+            out.selected_text_color = Some(c.2);
+        }
         if let Some(k) = self.cells.iter().position(|c| c.0 == id && c.1 == col) {
             let (_, _, text, validity) = self.cells[k];
             out.bits = k as u64;
@@ -546,8 +569,12 @@ impl TreeTableDelegate for TDelegate {
             icon_size: row.icon.unwrap_or(IconSlot::Small),
             primary: SharedString::new_static(row.name),
             count_run: None,
-            secondary: None,
-            glyphs: SmallVec::new(),
+            secondary: row.secondary.map(SharedString::new_static),
+            glyphs: row
+                .glyph
+                .into_iter()
+                .map(|g| (g, SharedString::new_static("glyph")))
+                .collect(),
             highlight_fffd: true,
             trailing: None,
         }
@@ -2919,4 +2946,114 @@ fn want_tooltip_only_on_hovered_row() {
         vcx.debug_bounds("TlTooltip").is_some(),
         "the Stale cell shows its age tooltip"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// rsf.29: status dot, selected text colour and group row glyphs.
+// ---------------------------------------------------------------------------------------------
+
+/// Painted quads filled with `color`.
+fn quads_filled(cx: &mut VisualTestContext, color: Hsla) -> usize {
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        window
+            .painted_quads()
+            .iter()
+            .filter(|q| q.background == Background::from(color))
+            .count()
+    })
+}
+
+#[test]
+fn cell_dot_paints_dot() {
+    let dotted = |validity: Option<Validity>| {
+        let mut cx = cosmic_cx();
+        let mut d = TDelegate::new(vec![plain(1), plain(2)]);
+        d.dots
+            .push((1, ColumnId::Cpu, DotStyle::Filled(LabelTone::Danger)));
+        if let Some(v) = validity {
+            d.cells.push((1, ColumnId::Cpu, "3.0%", v));
+        }
+        let (_, vcx) = open_table(&mut cx, d, 600., 200.);
+        let (theme, m) = vcx.update(|_, cx| (current(cx).clone(), *metrics(cx)));
+        let dot = vcx.debug_bounds("TlCell-dot");
+        let fills = (
+            quads_filled(vcx, theme.status.danger),
+            quads_filled(vcx, theme.status.danger.opacity(STALE_DOT_ALPHA)),
+        );
+        (dot, fills, m)
+    };
+
+    let (dot, fills, m) = dotted(None);
+    let dot = dot.expect("the dot is drawn");
+    assert_eq!(dot.size.width, px(8. * m.ui_scale));
+    assert_eq!(fills, (1, 0), "one danger quad");
+
+    let (dot, fills, _) = dotted(Some(Validity::Stale));
+    assert!(dot.is_some());
+    assert_eq!(fills, (0, 1), "a stale dot is at STALE_DOT_ALPHA");
+
+    let mut cx = cosmic_cx();
+    let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![plain(1)]), 600., 200.);
+    assert!(vcx.debug_bounds("TlCell-dot").is_none(), "no dots set");
+}
+
+#[test]
+fn selected_text_color_kept_on_selected_row() {
+    let mut cx = cosmic_cx();
+    let (theme, m) = cx.update(|cx| (current(cx).clone(), *metrics(cx)));
+    let danger = theme.status.danger;
+    let ctx = |selected| CellCtx {
+        m: &m,
+        theme: &theme,
+        selected,
+        width: px(80.),
+    };
+    let out = CellOut {
+        text_color: Some(danger),
+        selected_text_color: Some(danger),
+        ..CellOut::default()
+    };
+    assert_eq!(cell_text_color(&out, &ctx(true)), Some(danger));
+    assert_eq!(cell_text_color(&out, &ctx(false)), Some(danger));
+
+    let without = CellOut {
+        text_color: Some(danger),
+        ..CellOut::default()
+    };
+    assert_eq!(
+        cell_text_color(&without, &ctx(true)),
+        Some(theme.text_selected_secondary)
+    );
+
+    let dim = CellOut { dim: true, ..out };
+    assert_eq!(
+        cell_text_color(&dim, &ctx(true)),
+        Some(danger.opacity(DIM_OPACITY))
+    );
+}
+
+#[test]
+fn group_row_draws_glyph_and_secondary() {
+    let mut cx = cosmic_cx();
+    let rows = vec![TRow {
+        glyph: Some(IconName::CircleAlert),
+        secondary: Some("User manager not available"),
+        ..group(10)
+    }];
+    let (_, vcx) = open_table(&mut cx, TDelegate::new(rows), 600., 200.);
+    let m = vcx.update(|_, cx| *metrics(cx));
+    let label = vcx.debug_bounds("TlGroupHeaderCell-label").expect("label");
+    let glyph = vcx.debug_bounds("TlGroupHeaderCell-glyph").expect("glyph");
+    let secondary = vcx
+        .debug_bounds("TlGroupHeaderCell-secondary")
+        .expect("secondary");
+    assert_eq!(glyph.size.width, m.icon.sm);
+    assert!(glyph.origin.x >= label.origin.x + label.size.width);
+    assert!(secondary.origin.x >= glyph.origin.x + glyph.size.width);
+
+    let mut cx = cosmic_cx();
+    let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![group(10)]), 600., 200.);
+    assert!(vcx.debug_bounds("TlGroupHeaderCell-glyph").is_none());
+    assert!(vcx.debug_bounds("TlGroupHeaderCell-secondary").is_none());
 }
