@@ -643,7 +643,7 @@ mod card {
                 "the last 5 s are a gap"
             );
             // The painted geometry: the line ends at the last valid sample, no stale tail fills
-            // the 5 s after it, and one dotted gap span covers them.
+            // the 5 s after it, and a dotted gap span covers them.
             let (paths, live, line_end, gaps) = vcx.update(|_, cx| {
                 let chart = card.read(cx).chart().read(cx);
                 let (fills, strokes) = chart.cached_fill_stroke_counts();
@@ -656,18 +656,16 @@ mod card {
             });
             assert_eq!(paths, live, "no stale tail over the gap");
             let line_end = line_end.expect("the valid samples draw a line");
-            assert_eq!(
-                gaps.len(),
-                1,
-                "one dotted gap after the last sample: {gaps:?}"
-            );
+            // The rightmost span is the trailing gap. The data starts late in the window, so a
+            // left-edge span may come before it.
+            let tail = gaps.last().expect("a dotted gap after the last sample");
             assert!(
-                (gaps[0].start - line_end).abs() < 0.01,
+                (tail.start - line_end).abs() < 0.01,
                 "the gap starts where the line ends: {gaps:?}, line end {line_end}"
             );
             assert!(
-                gaps[0].end > gaps[0].start + 1.0,
-                "the gap runs on to the newest sample: {gaps:?}"
+                tail.end.abs() < 0.01,
+                "the gap runs on to the newest sample at the anchor: {gaps:?}"
             );
         }
         // A process matches again: the graph resumes.
