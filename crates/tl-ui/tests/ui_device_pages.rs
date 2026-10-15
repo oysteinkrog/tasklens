@@ -17,7 +17,8 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{
-    InvField, MemoryDetails, SwapDevice, SwapKindModel, ZramDetail, ZswapInfo,
+    InvField, InventorySnapshot, MemoryDetails, MemoryModule, SwapDevice, SwapKindModel,
+    ZramDetail, ZswapInfo,
 };
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::validity::Validity;
@@ -37,11 +38,12 @@ use tl_ui::pages::performance::gpu::{
 };
 use tl_ui::pages::performance::memory::{
     CompressedBlock, CompressedInputs, MemoryPage, ROW_AVAILABLE, ROW_CACHED, ROW_COMMITTED,
-    ROW_COMPRESSED, ROW_HUGE_PAGES, ROW_IN_USE, ROW_SAVINGS, ROW_SLAB_RECLAIMABLE,
-    ROW_SLAB_UNRECLAIMABLE, ROW_SWAP_AVAILABLE, ROW_SWAP_USED, ROW_ZRAM_ALGORITHM,
-    ROW_ZRAM_COMPRESSED, ROW_ZRAM_DEVICE, ROW_ZRAM_MEM_USED, ROW_ZRAM_RATIO, ROW_ZRAM_SIZE,
-    ROW_ZRAM_STORED, ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, SWAP_TABLE_ID, SwapColumn, ZRAM_GRID_ID,
-    ZSWAP_GRID_ID, update_compressed_block,
+    ROW_COMPRESSED, ROW_FORM_FACTOR, ROW_HUGE_PAGES, ROW_IN_USE, ROW_RESERVED as MEM_ROW_RESERVED,
+    ROW_SAVINGS, ROW_SLAB_RECLAIMABLE, ROW_SLAB_UNRECLAIMABLE, ROW_SLOTS, ROW_SPEED,
+    ROW_SWAP_AVAILABLE, ROW_SWAP_USED, ROW_TYPE, ROW_ZRAM_ALGORITHM, ROW_ZRAM_COMPRESSED,
+    ROW_ZRAM_DEVICE, ROW_ZRAM_MEM_USED, ROW_ZRAM_RATIO, ROW_ZRAM_SIZE, ROW_ZRAM_STORED,
+    ROW_ZSWAP_ENABLED, ROW_ZSWAP_POOL, SWAP_TABLE_ID, SwapColumn, ZRAM_GRID_ID, ZSWAP_GRID_ID,
+    update_compressed_block, update_memory_details_modules,
 };
 use tl_ui::pages::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
@@ -2029,4 +2031,91 @@ mod net_p2 {
             .and_then(|r| r.value.tooltip.clone());
         assert_eq!(tip.as_deref(), Some("Last updated 30s ago"));
     }
+}
+
+fn inv_ok<T>(value: T) -> InvField<T> {
+    InvField {
+        value,
+        validity: Validity::Valid,
+    }
+}
+
+fn dimm(configured: InvField<u32>) -> MemoryModule {
+    MemoryModule {
+        capacity_bytes: inv_ok(16 * GIB),
+        speed_mts: inv_ok(3200),
+        configured_speed_mts: configured,
+        kind: inv_ok(Arc::from("DDR4")),
+        form_factor: inv_ok(Arc::from("DIMM")),
+        ..MemoryModule::default()
+    }
+}
+
+fn inventory(modules: Vec<MemoryModule>, slots: InvField<u32>) -> InventorySnapshot {
+    let mut inv = InventorySnapshot::default();
+    inv.header.validity = Validity::Valid;
+    inv.modules = Arc::from(modules);
+    inv.slots_total = slots;
+    inv
+}
+
+#[test]
+fn memory_module_rows() {
+    let mut model = tl_ui::pages::performance::memory::memory_details_model();
+    let inv = inventory(vec![dimm(inv_ok(3200)), dimm(inv_ok(3200))], inv_ok(4));
+    // 32 GiB minus 716.80 MiB.
+    let mem_total = 32 * GIB - 751_619_277;
+    assert!(update_memory_details_modules(&mut model, &inv, mem_total));
+    assert_eq!(value_of(&model, ROW_SPEED), "3200 MT/s");
+    assert_eq!(value_of(&model, ROW_SLOTS), "2 of 4");
+    assert_eq!(value_of(&model, ROW_FORM_FACTOR), "DIMM");
+    assert_eq!(value_of(&model, ROW_TYPE), "DDR4");
+    assert_eq!(value_of(&model, MEM_ROW_RESERVED), "716.80 MiB");
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.label == MEM_ROW_RESERVED)
+        .expect("row");
+    assert!(!row.hidden);
+    assert_eq!(
+        row.tooltip.as_deref(),
+        Some("Sum of module sizes minus MemTotal")
+    );
+    assert!(!update_memory_details_modules(&mut model, &inv, mem_total));
+}
+
+#[test]
+fn memory_module_rows_not_reported() {
+    let mut model = tl_ui::pages::performance::memory::memory_details_model();
+    let inv = inventory(Vec::new(), InvField::default());
+    update_memory_details_modules(&mut model, &inv, 32 * GIB);
+    for label in [ROW_SPEED, ROW_SLOTS, ROW_FORM_FACTOR, ROW_TYPE] {
+        assert_eq!(value_of(&model, label), "Not reported", "{label}");
+    }
+    let hidden = |m: &tl_ui::pages::performance::details::KeyValueModel| {
+        m.rows
+            .iter()
+            .find(|r| r.label == MEM_ROW_RESERVED)
+            .expect("row")
+            .hidden
+    };
+    assert!(hidden(&model));
+
+    // A missing configured speed reads Not reported even when the rated speed is set.
+    let mut model = tl_ui::pages::performance::memory::memory_details_model();
+    let unsupported = InvField {
+        value: 0,
+        validity: Validity::Unsupported,
+    };
+    let inv = inventory(vec![dimm(unsupported)], inv_ok(2));
+    update_memory_details_modules(&mut model, &inv, 32 * GIB);
+    assert_eq!(value_of(&model, ROW_SPEED), "Not reported");
+    assert_eq!(value_of(&model, ROW_SLOTS), "1 of 2");
+}
+
+#[gpui_kit::test]
+fn memory_page_demands_inventory(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, "memory");
+    assert!(last_demand(&r).inventory);
 }

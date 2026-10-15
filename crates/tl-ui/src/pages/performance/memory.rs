@@ -25,7 +25,7 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::{MemoryDetails, Snapshot, SwapDevice, SwapKindModel};
+use tl_model::snapshot::{InventorySnapshot, MemoryDetails, Snapshot, SwapDevice, SwapKindModel};
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
@@ -401,13 +401,25 @@ const LIVE_ROWS: [&str; 11] = [
 /// "{$count} × {$size}".
 const KEY_HUGE_PAGES_VALUE: &str = "perf-mem-huge-pages-value";
 
+/// "{$mts} MT/s".
+const KEY_SPEED_VALUE: &str = "perf-mem-speed-value";
+/// "{$used} of {$total}".
+const KEY_SLOTS_VALUE: &str = "perf-mem-slots-value";
+/// "Sum of module sizes minus MemTotal".
+const KEY_RESERVED_TIP: &str = "perf-mem-hw-reserved-tooltip";
+
 /// Compressed and Savings show from this many compressed bytes.
 pub const COMPRESSED_MIN: u64 = 1 << 20;
 
-/// The Memory Details model: 16 rows in order, rows 7 to 11 hidden until E25-011.
+/// The Memory Details model: 16 rows in order, rows 7 to 11 hidden until the first
+/// [`update_memory_details_modules`].
 pub fn memory_details_model() -> KeyValueModel {
-    let mut model = KeyValueModel::new(&MEMORY_DETAIL_ROWS)
-        .with_texts(&[(KEY_HUGE_PAGES_VALUE, &["count", "size"])]);
+    let mut model = KeyValueModel::new(&MEMORY_DETAIL_ROWS).with_texts(&[
+        (KEY_HUGE_PAGES_VALUE, &["count", "size"]),
+        (KEY_SPEED_VALUE, &["mts"]),
+        (KEY_SLOTS_VALUE, &["used", "total"]),
+        (KEY_RESERVED_TIP, &[]),
+    ]);
     for label in [
         ROW_SPEED,
         ROW_SLOTS,
@@ -565,6 +577,112 @@ pub fn update_memory_details(model: &mut KeyValueModel, inp: &MemoryDetailInputs
             });
         });
         changed |= stale && model.set_stale(ROW_HUGE_PAGES, age_ns);
+    }
+    changed
+}
+
+/// Fills rows 7 to 11 from the SMBIOS module inventory (PERF-043, PERF-046). Speed is the
+/// configured speed of the first populated module. Rows 7 to 10 read Not reported when the
+/// inventory has no module keys. Hardware reserved is the sum of the module sizes minus
+/// `mem_total`, clamped at 0, and hidden without modules or a total. True when any row changed.
+pub fn update_memory_details_modules(
+    model: &mut KeyValueModel,
+    inv: &InventorySnapshot,
+    mem_total: u64,
+) -> bool {
+    let shown = |v: Validity| matches!(v, Validity::Valid | Validity::Stale);
+    let rows = [ROW_SPEED, ROW_SLOTS, ROW_FORM_FACTOR, ROW_TYPE];
+    let mut changed = false;
+    for label in rows {
+        changed |= set_hidden(model, label, false);
+    }
+    let fallback = match inv.header.validity {
+        v @ (Validity::WarmingUp | Validity::Failed) => Some(v),
+        _ if inv.modules.is_empty() => Some(Validity::Unsupported),
+        _ => None,
+    };
+    if let Some(v) = fallback {
+        for label in rows {
+            changed |= model.set_fallback(label, v, Fallback::NotReported, None);
+        }
+        changed |= set_hidden(model, ROW_RESERVED, true);
+        return changed;
+    }
+    let first = &inv.modules[0];
+
+    let speed = &first.configured_speed_mts;
+    if shown(speed.validity) && speed.value > 0 {
+        let mts = speed.value;
+        let template = model.text(KEY_SPEED_VALUE);
+        changed |= model.set_valid(ROW_SPEED, u64::from(mts), |o| {
+            template.write_each(o, |_, o| {
+                let _ = write!(o, "{mts}");
+            });
+        });
+    } else {
+        changed |= model.set_fallback(
+            ROW_SPEED,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        );
+    }
+
+    let slots = &inv.slots_total;
+    if shown(slots.validity) {
+        let (used, total) = (inv.modules.len() as u64, u64::from(slots.value));
+        let template = model.text(KEY_SLOTS_VALUE);
+        changed |= model.set_valid(ROW_SLOTS, used << 32 | total, |o| {
+            template.write_each(o, |i, o| match i {
+                0 => {
+                    let _ = write!(o, "{used}");
+                }
+                _ => {
+                    let _ = write!(o, "{total}");
+                }
+            });
+        });
+    } else {
+        changed |= model.set_fallback(
+            ROW_SLOTS,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        );
+    }
+
+    for (label, field) in [
+        (ROW_FORM_FACTOR, &first.form_factor),
+        (ROW_TYPE, &first.kind),
+    ] {
+        if shown(field.validity) {
+            changed |= model.set_text(label, &field.value);
+        } else {
+            changed |=
+                model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None);
+        }
+    }
+
+    let hide = mem_total == 0;
+    changed |= set_hidden(model, ROW_RESERVED, hide);
+    if !hide {
+        let sum = inv
+            .modules
+            .iter()
+            .filter(|m| shown(m.capacity_bytes.validity))
+            .fold(0u64, |a, m| a.saturating_add(m.capacity_bytes.value));
+        let reserved = sum.saturating_sub(mem_total);
+        changed |= model.set_valid(ROW_RESERVED, reserved, |o| units::bytes(o, reserved));
+        let tip = model.text(KEY_RESERVED_TIP).text().clone();
+        let has = model
+            .rows
+            .iter()
+            .find(|r| r.label == ROW_RESERVED)
+            .is_some_and(|r| r.tooltip.as_ref() == Some(&tip));
+        if !has {
+            model.set_tooltip(ROW_RESERVED, Some(tip));
+            changed = true;
+        }
     }
     changed
 }
@@ -1282,7 +1400,20 @@ impl MemoryPage {
         this.set_chart_state(state, cx);
         this.sync_bar(cx);
         this.sync_details(&snap, cx);
+        this.sync_modules(&snap, cx);
         this
+    }
+
+    /// Brings Details rows 7 to 11 up to date from the inventory; notifies only on change.
+    fn sync_modules(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        let mem = &snap.system.memory;
+        let total = match mem.validity {
+            Validity::Valid | Validity::Stale => mem.total,
+            _ => 0,
+        };
+        if update_memory_details_modules(&mut self.details, &snap.inventory, total) {
+            cx.notify();
+        }
     }
 
     /// Brings the Details rows up to date; notifies only when one changed.
@@ -1386,11 +1517,13 @@ impl MemoryPage {
         self.active
     }
 
-    /// This page's demand part while it is active: memory only.
+    /// This page's demand part while it is active: memory, and the inventory for Details rows 7
+    /// to 11.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             memory: true,
+            inventory: true,
             ..Demand::default()
         }
     }
@@ -1421,6 +1554,12 @@ impl MemoryPage {
             ComponentMask::SYSTEM | ComponentMask::HEALTH | ComponentMask::DEVICE_DETAILS,
         ) {
             self.sync_details(&snap, cx);
+        }
+        if ev
+            .mask
+            .intersects(ComponentMask::SYSTEM | ComponentMask::INVENTORY)
+        {
+            self.sync_modules(&snap, cx);
         }
         if ev.mask.contains(ComponentMask::SYSTEM) {
             self.composition = Composition::of(&snap.system.memory);
