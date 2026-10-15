@@ -1245,6 +1245,13 @@ mod panel {
                     false
                 ),
                 (MenuEntryKind::Separator, None, None, false),
+                (
+                    MenuEntryKind::Disabled,
+                    Some("Add tray icon graph".to_owned()),
+                    Some("No system tray available".to_owned()),
+                    false
+                ),
+                (MenuEntryKind::Separator, None, None, false),
                 item("Reset minigraph layout"),
             ]
         );
@@ -1282,7 +1289,7 @@ mod panel {
     fn card_menu_order_process(cx: &mut TestAppContext) {
         let mut r = rig_with(cx, process_state());
         let (menu, _) = right_click(&mut r, 0);
-        // Detach (E26-015) and the tray item (E31) are not built yet, so one separator stays.
+        // Detach (E26-015) is not built yet. The rig has no tray, so item 7 is disabled.
         assert_eq!(
             menu,
             [
@@ -1297,6 +1304,13 @@ mod panel {
                     MenuEntryKind::Submenu,
                     Some("Graph color".to_owned()),
                     None,
+                    false
+                ),
+                (MenuEntryKind::Separator, None, None, false),
+                (
+                    MenuEntryKind::Disabled,
+                    Some("Add tray icon graph".to_owned()),
+                    Some("No system tray available".to_owned()),
                     false
                 ),
                 (MenuEntryKind::Separator, None, None, false),

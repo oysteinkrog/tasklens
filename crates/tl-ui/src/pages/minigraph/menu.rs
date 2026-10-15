@@ -7,14 +7,20 @@ use super::GraphColor;
 use super::actions::{
     MinigraphHide, MinigraphRemove, MinigraphSetColor, MinigraphSetRange, ResetMinigraphLayout,
 };
-use super::sources::MinigraphId;
+use super::sources::{GraphColumn, MinigraphId};
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
+use crate::tray_bridge::AddTrayGraph;
+use crate::window::main::tray_available;
 
 /// What the card menu needs of its card.
 pub struct CardMenuCtx {
     pub id: MinigraphId,
     pub is_process: bool,
+    /// The card's `[[minigraphs]] source` string, sent to the tray bridge.
+    pub source: SharedString,
+    /// The card's column; a system card always sends "cpu".
+    pub column: GraphColumn,
     /// The card's range in seconds; its radio is checked.
     pub range_s: u16,
     pub color: GraphColor,
@@ -93,7 +99,28 @@ pub fn card_menu(menu: TlMenu, ctx: &CardMenuCtx, window: &mut Window, cx: &mut 
     }
     // 5
     menu = menu.separator();
-    // 6: Detach or Attach to main window, E26-015 adds it while `detach`. 7: E31-012.
+    // 6: Detach or Attach to main window, E26-015 adds it while `detach`.
+    // 7: Add tray icon graph; the bridge toasts when the graph already exists.
+    menu = if tray_available(cx) {
+        let column: SharedString = if ctx.is_process {
+            ctx.column.as_str()
+        } else {
+            "cpu"
+        }
+        .into();
+        menu.item(
+            tr(cx, "perf-menu-add-tray"),
+            Box::new(AddTrayGraph {
+                source: ctx.source.clone(),
+                column,
+            }),
+        )
+    } else {
+        menu.item_disabled(
+            tr(cx, "perf-menu-add-tray"),
+            Some(tr(cx, "perf-tip-no-tray")),
+        )
+    };
     // 8
     menu = menu.separator();
     // 9

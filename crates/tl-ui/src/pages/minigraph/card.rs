@@ -304,6 +304,8 @@ impl MinigraphCard {
         let ctx = CardMenuCtx {
             id: self.id,
             is_process: !self.entry.source.is_system(),
+            source: self.entry.source.to_state_string().into(),
+            column: self.entry.column,
             range_s: self.entry.range_s,
             color: self.entry.color,
             detached: self.entry.detached,

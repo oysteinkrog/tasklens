@@ -1105,3 +1105,104 @@ mod row_menu_tray {
         assert_eq!(entry.tooltip.as_deref(), Some("No system tray available"));
     }
 }
+
+// ---- Minigraph card menu item 7 (tasklens-wox.14, UI-PRF-042, PERF-088) ----
+
+mod minigraph_menu_tray {
+    use super::*;
+    use gpui_kit::VisualTestContext;
+    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu};
+    use tl_ui::pages::minigraph::GraphColor;
+    use tl_ui::pages::minigraph::menu::{CardMenuCtx, card_menu};
+    use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphId};
+
+    const SOURCE: &str = "process:0000000000000007:4321:4242";
+
+    fn ctx(source: &str, is_process: bool, column: GraphColumn) -> CardMenuCtx {
+        CardMenuCtx {
+            id: MinigraphId(0),
+            is_process,
+            source: source.to_owned().into(),
+            column,
+            range_s: 60,
+            color: GraphColor::Accent,
+            detached: false,
+            long_ranges: true,
+            colors: true,
+            detach: false,
+        }
+    }
+
+    fn entries(vcx: &mut VisualTestContext, ctx: CardMenuCtx) -> Vec<MenuEntryInfo> {
+        let menu = vcx.update(|window, cx| {
+            let focus = cx.focus_handle();
+            TlMenu::build(window, cx, focus, move |menu, window, cx| {
+                card_menu(menu, &ctx, window, cx)
+            })
+        });
+        vcx.update(|window, cx| menu.read(cx).entries_for_test(window))
+    }
+
+    fn tray_entry(entries: Vec<MenuEntryInfo>) -> MenuEntryInfo {
+        entries
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Add tray icon graph"))
+            .expect("item 7")
+    }
+
+    #[gpui_kit::test]
+    fn minigraph_menu_tray_item_position(cx: &mut TestAppContext) {
+        let mut f = full(cx, Vec::new());
+        let list = entries(&mut f.vcx, ctx("cpu", false, GraphColumn::Cpu));
+        let shape: Vec<_> = list.iter().map(|e| (e.kind, e.label.as_deref())).collect();
+        assert_eq!(
+            shape,
+            [
+                (MenuEntryKind::Item, Some("Hide graph")),
+                (MenuEntryKind::Submenu, Some("Time range")),
+                (MenuEntryKind::Submenu, Some("Graph color")),
+                (MenuEntryKind::Separator, None),
+                (MenuEntryKind::Item, Some("Add tray icon graph")),
+                (MenuEntryKind::Separator, None),
+                (MenuEntryKind::Item, Some("Reset minigraph layout")),
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn minigraph_menu_tray_item_dispatch_system_and_process(cx: &mut TestAppContext) {
+        let mut f = full(cx, Vec::new());
+        let entry = tray_entry(entries(&mut f.vcx, ctx("cpu", false, GraphColumn::Cpu)));
+        let action = entry.action.as_deref().expect("action");
+        assert!(action.partial_eq(&AddTrayGraph {
+            source: "cpu".into(),
+            column: "cpu".into(),
+        }));
+        f.act(action);
+        assert_eq!(f.saved(), vec![row("cpu", "cpu", "accent", 60)]);
+        assert_eq!(f.toasts(), ["Tray icon graph added"]);
+        f.act(action);
+        assert!(
+            f.toasts()
+                .iter()
+                .any(|t| t == "Tray icon graph already exists")
+        );
+
+        let entry = tray_entry(entries(&mut f.vcx, ctx(SOURCE, true, GraphColumn::Memory)));
+        let action = entry.action.as_deref().expect("action");
+        assert!(action.partial_eq(&AddTrayGraph {
+            source: SOURCE.into(),
+            column: "memory".into(),
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn minigraph_menu_tray_item_disabled_without_tray(cx: &mut TestAppContext) {
+        let mut f = full(cx, Vec::new());
+        f.vcx
+            .update(|_, cx| cx.global_mut::<TrayStatus>().available = false);
+        let entry = tray_entry(entries(&mut f.vcx, ctx("cpu", false, GraphColumn::Cpu)));
+        assert_eq!(entry.kind, MenuEntryKind::Disabled);
+        assert_eq!(entry.tooltip.as_deref(), Some("No system tray available"));
+    }
+}
