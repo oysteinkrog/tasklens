@@ -458,6 +458,16 @@ impl ToastQueue {
         }
     }
 
+    /// Whether a toast with `key` is shown or waiting. False once it closed, timed out or was
+    /// dropped.
+    pub fn has(&self, key: ToastKey) -> bool {
+        let slot = Slot::Key(key.0);
+        self.visible
+            .iter()
+            .chain(self.waiting.iter())
+            .any(|e| e.slot == slot)
+    }
+
     /// Closes the toast with `key`, or drops it from the wait list.
     pub fn remove(&mut self, key: ToastKey, cx: &mut Context<Self>) {
         debug!(?key, "toast remove");

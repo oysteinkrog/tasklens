@@ -16,10 +16,10 @@
 //! path the UI picks under `<state_dir>/dumps/`. While the action runs, the Info toast
 //! `DumpToast(action_id)` shows the file size, read with one `stat` every 500 ms off the UI
 //! thread. Closing it stops the reads; the result still shows. The result replaces that toast.
-//! A click on the path in the success toast copies the full path. The UI never reads the core
-//! file: it holds process memory.
+//! A click on the path in the success toast copies the full path. A privilege failure offers the
+//! tracker's "Retry as administrator"; the retry shows its progress and result in the same toast.
+//! The UI never reads the core file: it holds process memory.
 
-use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -43,7 +43,8 @@ use tl_model::units;
 use tracing::warn;
 
 use crate::action_tracker::{
-    ActionTracker, ActionTrackerEvent, GlobalActionTracker, ToastTexts, action_words,
+    ActionTracker, ActionTrackerEvent, GlobalActionTracker, RetryActionAsAdmin, ToastTexts,
+    action_words,
 };
 use crate::app::{AppEnv, EngineGlobal};
 use crate::components::dialog::{DialogResult, TlDialog};
@@ -312,9 +313,6 @@ pub const DUMP_POLL: Duration = Duration::from_millis(500);
 /// The longest `{name}` part of a dump file name, in bytes (R-224).
 pub const DUMP_NAME_MAX: usize = 64;
 
-/// Finished dumps whose "Open folder" button or path may still be clicked.
-const KEEP_DONE: usize = 16;
-
 /// The toast keys of the dump flow sit in their own range.
 const DUMP_KEY_BASE: u64 = 0x8000_0000_0500_0000;
 
@@ -330,8 +328,8 @@ const DUMP_COPIED: &str = "pwn-notices-dump-copied";
 const DUMP_FAILED: &str = "pwn-notices-dump-failed";
 const DUMP_NEEDS_ADMIN: &str = "pwn-notices-dump-needs-admin";
 
-/// The toast key of one dump, by its action id: the progress toast and the result that
-/// replaces it.
+/// The toast key of one dump, by the id of its first request: the progress toast and the result
+/// that replaces it, also after "Retry as administrator".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DumpToast(pub u64);
 
@@ -341,8 +339,8 @@ impl From<DumpToast> for ToastKey {
     }
 }
 
-/// A click on the path in the success toast of dump `.0` (its action id): copies the full path,
-/// then the toast "Copied to clipboard".
+/// A click on the path in the success toast `DumpToast(.0)`: copies the full path, then the
+/// toast "Copied to clipboard".
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = tasklens, no_json)]
 pub struct CopyDumpPath(pub u64);
@@ -425,32 +423,60 @@ pub fn shown_dump_path(path: &str, home: &str) -> String {
     home_tilde(path, home).unwrap_or_else(|| path.to_owned())
 }
 
-/// The running dumps, and the last [`KEEP_DONE`] that succeeded by action id, for the buttons
-/// and paths of their toasts.
+/// The running dumps, the dumps whose success toast is still up (for its "Open folder" button
+/// and path) and those whose "Retry as administrator" toast is still up. An entry goes only once
+/// its toast has closed, timed out or been dropped.
 #[derive(Default)]
 struct DumpFlows {
     live: Vec<Entity<DumpRequest>>,
-    done: VecDeque<(u64, DoneDump)>,
-    handlers: bool,
+    done: Vec<DoneDump>,
+    retry: Vec<RetryDump>,
+    /// The action handlers and the tracker subscription are set up with the first dump.
+    tracker_sub: Option<Subscription>,
 }
 
 impl DumpFlows {
-    fn done(cx: &App, id: u64) -> Option<DoneDump> {
+    fn done(cx: &App, toast: u64) -> Option<DoneDump> {
         let flows = cx.try_global::<Self>()?;
-        flows
-            .done
-            .iter()
-            .find(|(done, _)| *done == id)
-            .map(|(_, done)| done.clone())
+        flows.done.iter().find(|d| d.toast.0 == toast).cloned()
+    }
+
+    /// Forgets the finished dumps whose toast is gone.
+    fn prune(cx: &mut App) {
+        if !cx.has_global::<Self>() {
+            return;
+        }
+        cx.update_global::<Self, _>(|flows, cx| {
+            flows.done.retain(|d| toast_up(&d.queue, d.toast, cx));
+            flows.retry.retain(|r| toast_up(&r.queue, r.toast, cx));
+        });
     }
 }
 
 impl Global for DumpFlows {}
 
+/// Whether toast `toast` still shows or waits in `queue`.
+fn toast_up(queue: &WeakEntity<ToastQueue>, toast: DumpToast, cx: &App) -> bool {
+    queue
+        .upgrade()
+        .is_some_and(|queue| queue.read(cx).has(toast.into()))
+}
+
 #[derive(Clone)]
 struct DoneDump {
+    toast: DumpToast,
     path: Arc<str>,
     queue: WeakEntity<ToastQueue>,
+}
+
+/// A dump refused for privileges whose toast offers "Retry as administrator".
+struct RetryDump {
+    /// The refused request.
+    id: ActionId,
+    toast: DumpToast,
+    path: Arc<str>,
+    queue: WeakEntity<ToastQueue>,
+    window: AnyWindowHandle,
 }
 
 fn send_dump(key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
@@ -479,24 +505,46 @@ fn send_dump(key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
         targets: smallvec![ActionTarget::Process(key)],
         privileged: false,
     };
+    let toast = DumpToast(id.0);
     let mut texts = ToastTexts::new(SharedString::default(), SharedString::default());
     texts.owner_toasts = true;
-    texts.toast_key = Some(DumpToast(id.0).into());
+    texts.retry_as_admin = true;
+    texts.toast_key = Some(toast.into());
     let sent = tracker.update(cx, |t, cx| {
         t.track_or_toast(request, queue.downgrade(), texts, cx)
     });
     if sent.is_none() {
         return;
     }
-    let handle = window.window_handle();
-    let dump = cx.new(|cx| DumpRequest::new(id, path, queue.downgrade(), handle, &tracker, cx));
-    let flows = cx.default_global::<DumpFlows>();
-    flows.live.push(dump);
-    if !flows.handlers {
-        flows.handlers = true;
+    if cx.default_global::<DumpFlows>().tracker_sub.is_none() {
         App::on_action(cx, open_dump_folder);
         App::on_action(cx, copy_dump_path);
+        let retried = cx.subscribe(&tracker, |tracker, ev: &ActionTrackerEvent, cx| {
+            if let ActionTrackerEvent::Retried { from, to } = *ev {
+                on_retried(from, to, &tracker, cx);
+            }
+        });
+        cx.global_mut::<DumpFlows>().tracker_sub = Some(retried);
     }
+    let handle = window.window_handle();
+    let queue = queue.downgrade();
+    let dump = cx.new(|cx| DumpRequest::new(id, toast, path, queue, handle, &tracker, cx));
+    cx.global_mut::<DumpFlows>().live.push(dump);
+}
+
+/// "Retry as administrator" on a dump's toast sent request `to`: its progress and result show
+/// in the same toast.
+fn on_retried(from: ActionId, to: ActionId, tracker: &Entity<ActionTracker>, cx: &mut App) {
+    if !cx.has_global::<DumpFlows>() {
+        return;
+    }
+    let flows = cx.global_mut::<DumpFlows>();
+    let Some(ix) = flows.retry.iter().position(|r| r.id == from) else {
+        return;
+    };
+    let r = flows.retry.swap_remove(ix);
+    let dump = cx.new(|cx| DumpRequest::new(to, r.toast, r.path, r.queue, r.window, tracker, cx));
+    cx.global_mut::<DumpFlows>().live.push(dump);
 }
 
 /// "Open folder": FileManager1 `ShowItems` with that toast's core file selected, then the Info
@@ -544,10 +592,11 @@ fn copy_dump_path(action: &CopyDumpPath, cx: &mut App) {
     }
 }
 
-/// One dump, from the request to its result toast. Its `DumpProgress` task reads the file
+/// One dump request, from the send to its result toast. Its `DumpProgress` task reads the file
 /// size every 500 ms and ends with the action.
 pub struct DumpRequest {
     id: ActionId,
+    toast: DumpToast,
     path: Arc<str>,
     queue: WeakEntity<ToastQueue>,
     window: AnyWindowHandle,
@@ -564,6 +613,7 @@ pub struct DumpRequest {
 impl DumpRequest {
     fn new(
         id: ActionId,
+        toast: DumpToast,
         path: Arc<str>,
         queue: WeakEntity<ToastQueue>,
         window: AnyWindowHandle,
@@ -585,7 +635,7 @@ impl DumpRequest {
                 }
             },
         );
-        let key: ToastKey = DumpToast(id.0).into();
+        let key: ToastKey = toast.into();
         let closed = queue.upgrade().map(|queue| {
             cx.subscribe(&queue, move |this: &mut Self, _, ev: &ToastClosed, cx| {
                 if ev.0 == key {
@@ -609,6 +659,7 @@ impl DumpRequest {
         });
         let this = Self {
             id,
+            toast,
             path,
             queue,
             window,
@@ -663,7 +714,7 @@ impl DumpRequest {
         action: Option<ToastAction>,
         cx: &mut Context<Self>,
     ) {
-        let key = DumpToast(self.id.0).into();
+        let key = self.toast.into();
         if let Some(queue) = self.queue.upgrade() {
             queue.update(cx, |q, cx| q.push(kind, text, Some(key), action, cx));
         }
@@ -684,10 +735,7 @@ impl DumpRequest {
             Some(
                 ActionState::Failed(ActionError::PermissionDenied)
                 | ActionState::Rejected(RejectReason::NotOwner),
-            ) => {
-                let text = tr(cx, DUMP_NEEDS_ADMIN);
-                self.push(ToastKind::Warning, text, None, cx);
-            }
+            ) => self.show_needs_admin(cx),
             other => {
                 let words = action_words(cx);
                 let reason = match &other {
@@ -721,23 +769,44 @@ impl DumpRequest {
         );
         let button = ToastAction {
             label: tr(cx, DUMP_OPEN_FOLDER),
-            action: Box::new(OpenDumpFolder(self.id.0)),
+            action: Box::new(OpenDumpFolder(self.toast.0)),
         };
-        let done = DoneDump {
+        DumpFlows::prune(cx);
+        cx.default_global::<DumpFlows>().done.push(DoneDump {
+            toast: self.toast,
             path: self.path.clone(),
             queue: self.queue.clone(),
-        };
-        let flows = cx.default_global::<DumpFlows>();
-        flows.done.push_back((self.id.0, done));
-        if flows.done.len() > KEEP_DONE {
-            flows.done.pop_front();
-        }
+        });
         self.push(ToastKind::Success, text, Some(button), cx);
-        let key = DumpToast(self.id.0).into();
-        let copy = CopyDumpPath(self.id.0);
+        let key = self.toast.into();
+        let copy = CopyDumpPath(self.toast.0);
         if let Some(queue) = self.queue.upgrade() {
             queue.update(cx, |q, cx| q.set_text_action(key, Box::new(copy), cx));
         }
+    }
+
+    /// "Creating a dump needs administrator rights", with the tracker's "Retry as administrator"
+    /// when it holds a retry for this request (tl-helper installed, not yet privileged).
+    fn show_needs_admin(&self, cx: &mut Context<Self>) {
+        let text = tr(cx, DUMP_NEEDS_ADMIN);
+        let retry = cx
+            .try_global::<GlobalActionTracker>()
+            .is_some_and(|t| t.0.read(cx).can_retry(self.id));
+        let button = retry.then(|| ToastAction {
+            label: action_words(cx).retry_admin.clone(),
+            action: Box::new(RetryActionAsAdmin(self.id.0)),
+        });
+        if retry {
+            DumpFlows::prune(cx);
+            cx.default_global::<DumpFlows>().retry.push(RetryDump {
+                id: self.id,
+                toast: self.toast,
+                path: self.path.clone(),
+                queue: self.queue.clone(),
+                window: self.window,
+            });
+        }
+        self.push(ToastKind::Warning, text, button, cx);
     }
 }
 

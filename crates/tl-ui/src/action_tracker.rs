@@ -17,7 +17,9 @@
 //!
 //! An owner that shows its own toasts sets `ToastTexts::owner_toasts` (the system tables'
 //! `SysActions`, UI-SYS-007): the tracker then sends, sweeps and emits events as usual, also
-//! `TargetFinished` per target, but pushes no toast, and `results` gives the final states.
+//! `TargetFinished` per target, but pushes no toast, and `results` gives the final states. With
+//! `retry_as_admin` such an owner asks [`ActionTracker::can_retry`] and adds the "Retry as
+//! administrator" button itself; the retry is announced with `Retried`.
 //!
 //! A request with a deadline that has had no summary `deadline + 5 s` after it was sent becomes
 //! "Outcome unknown" (ADR-005). Nothing is ever retried automatically; "Retry as administrator"
@@ -229,6 +231,12 @@ pub enum ActionTrackerEvent {
         ok: u16,
         total: u16,
         failed: u16,
+    },
+    /// "Retry as administrator" re-sent the failed targets of `from` as request `to`, with the
+    /// same texts.
+    Retried {
+        from: ActionId,
+        to: ActionId,
     },
 }
 
@@ -493,10 +501,17 @@ impl ActionTracker {
             .filter(|s| matches!(s, ActionState::Succeeded))
             .count() as u16;
         let failed = total - ok;
+        let eperm: SmallVec<[u16; 4]> = (0..total)
+            .filter(|&i| is_eperm(states[usize::from(i)]))
+            .collect();
+        let retry = !eperm.is_empty() && retry_allowed(&entry, helper);
         if entry.texts.owner_toasts {
             let finals = states.iter().enumerate();
             let finals = finals.map(|(i, s)| (i as u16, (*s).clone())).collect();
             drop(states);
+            if retry {
+                self.keep_retry(id, retry_record(entry, &eperm));
+            }
             self.keep_finished(id, finals);
             cx.emit(ActionTrackerEvent::Finished {
                 id,
@@ -513,13 +528,9 @@ impl ActionTracker {
             failed,
         });
 
-        let eperm: SmallVec<[u16; 4]> = (0..total)
-            .filter(|&i| is_eperm(states[usize::from(i)]))
-            .collect();
         if !eperm.is_empty() && helper == HelperState::Missing {
             self.note_restricted(eperm.len() as u32, cx);
         }
-        let retry = !eperm.is_empty() && retry_allowed(&entry, helper);
         let queue = entry.queue.clone();
         let key = entry.key();
 
@@ -591,21 +602,7 @@ impl ActionTracker {
 
         drop(states);
         if retry {
-            let mut request = entry.request;
-            request.id = ActionId(0);
-            request.privileged = true;
-            request.targets = eperm
-                .iter()
-                .filter_map(|&i| request.targets.get(usize::from(i)).cloned())
-                .collect();
-            self.keep_retry(
-                id,
-                RetryRecord {
-                    request,
-                    queue,
-                    texts: entry.texts,
-                },
-            );
+            self.keep_retry(id, retry_record(entry, &eperm));
         }
     }
 
@@ -704,7 +701,15 @@ impl ActionTracker {
         let Some((_, record)) = self.retries.remove(ix) else {
             return;
         };
-        self.track_or_toast(record.request, record.queue, record.texts, cx);
+        if let Some(to) = self.track_or_toast(record.request, record.queue, record.texts, cx) {
+            cx.emit(ActionTrackerEvent::Retried { from: id, to });
+        }
+    }
+
+    /// Whether finished request `id` has a "Retry as administrator" waiting. An owner that
+    /// shows its own toasts adds the button, `RetryActionAsAdmin(id)`, only then.
+    pub fn can_retry(&self, id: ActionId) -> bool {
+        self.retries.iter().any(|(r, _)| *r == id)
     }
 
     fn show_details(&mut self, id: ActionId, cx: &mut Context<Self>) {
@@ -828,6 +833,22 @@ fn is_eperm(state: &ActionState) -> bool {
 /// request that already ran privileged.
 fn retry_allowed(entry: &PendingAction, helper: HelperState) -> bool {
     entry.texts.retry_as_admin && helper != HelperState::Missing && !entry.request.privileged
+}
+
+/// The retry of `entry`: its `eperm` targets, privileged, with a new id.
+fn retry_record(entry: PendingAction, eperm: &[u16]) -> RetryRecord {
+    let mut request = entry.request;
+    request.id = ActionId(0);
+    request.privileged = true;
+    request.targets = eperm
+        .iter()
+        .filter_map(|&i| request.targets.get(usize::from(i)).cloned())
+        .collect();
+    RetryRecord {
+        request,
+        queue: entry.queue,
+        texts: entry.texts,
+    }
 }
 
 fn retry_button(id: ActionId, words: &ActionWords) -> ToastAction {

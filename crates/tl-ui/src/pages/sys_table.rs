@@ -678,7 +678,7 @@ impl SysActions {
     fn on_tracker(&mut self, ev: ActionTrackerEvent, cx: &mut Context<Self>) {
         match ev {
             // The pending toast stays as it is.
-            ActionTrackerEvent::Started(_) => {}
+            ActionTrackerEvent::Started(_) | ActionTrackerEvent::Retried { .. } => {}
             ActionTrackerEvent::TargetFinished { id, index } => {
                 if !self.requests.contains_key(&id) {
                     return;

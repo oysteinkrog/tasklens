@@ -2217,6 +2217,7 @@ mod dump {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Command;
+    use tl_model::health::HelperState;
     use tl_model::ids::{GroupKey, ProcessKey};
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::settings::{Settings, UiState};
@@ -2737,6 +2738,148 @@ mod dump {
         assert_eq!(
             toasts(&mut r),
             ["Creating a dump needs administrator rights"]
+        );
+    }
+
+    /// tl-helper is installed, so a privilege failure may be retried.
+    fn publish_helper(r: &mut Rig, helper: HelperState) {
+        r.engine.publish_with(|s| {
+            let health = Arc::make_mut(&mut s.health);
+            health.helper = helper;
+            health.version += 1;
+        });
+        r.pcx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn dump_privilege_failure_offers_retry(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let mut r = rig(cx, &state, DumpMode::Mini, vec![record(3, "x", GIB)]);
+        publish_helper(&mut r, HelperState::Locked);
+        start(&mut r, 3);
+        let (request, _, path) = dump(&r);
+        let tkey = toast_key(&request);
+        finish(
+            &mut r,
+            &request,
+            ActionState::Failed(ActionError::PermissionDenied),
+        );
+        assert_eq!(
+            toasts(&mut r),
+            ["Creating a dump needs administrator rights"]
+        );
+
+        // The button is the tracker's RetryActionAsAdmin: the dump goes again, privileged.
+        click(&mut r, format!("TlButton-TlToast-k{tkey}-action"));
+        let sent = actions(&r);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        let retry = &sent[1];
+        assert!(retry.privileged);
+        assert_ne!(retry.id, request.id);
+        assert_eq!(retry.targets.as_slice(), &[ActionTarget::Process(key(3))]);
+        assert_eq!(
+            retry.kind,
+            ActionKind::Dump {
+                mode: DumpMode::Mini,
+                path: path.as_str().into(),
+            }
+        );
+
+        // The retry shows its progress and result in the same toast.
+        assert_eq!(toasts(&mut r), ["Writing core…"]);
+        r.pcx.update(|window, cx| window.draw(cx).clear(cx));
+        let selector: &'static str = format!("TlToast-k{tkey}").leak();
+        assert!(r.pcx.debug_bounds(selector).is_some(), "{selector}");
+        finish(&mut r, retry, ActionState::Succeeded);
+        let shown = toasts(&mut r);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].starts_with("Dump created: "), "{shown:?}");
+
+        // A privileged dump that is refused again offers no second retry.
+        start(&mut r, 3);
+        let third = actions(&r).pop().expect("third dump");
+        finish(
+            &mut r,
+            &third,
+            ActionState::Failed(ActionError::PermissionDenied),
+        );
+        let third_key = toast_key(&third);
+        click(&mut r, format!("TlButton-TlToast-k{third_key}-action"));
+        let fourth = actions(&r).pop().expect("fourth dump");
+        assert!(fourth.privileged);
+        finish(
+            &mut r,
+            &fourth,
+            ActionState::Failed(ActionError::PermissionDenied),
+        );
+        r.pcx.update(|window, cx| window.draw(cx).clear(cx));
+        let button: &'static str = format!("TlButton-TlToast-k{third_key}-action").leak();
+        assert!(
+            r.pcx.debug_bounds(button).is_none(),
+            "no retry after a privileged try"
+        );
+        assert!(toasts(&mut r).contains(&"Creating a dump needs administrator rights".to_owned()));
+    }
+
+    #[gpui_kit::test]
+    fn dump_privilege_failure_without_helper_has_no_retry(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let mut r = rig(cx, &state, DumpMode::Mini, vec![record(3, "x", GIB)]);
+        start(&mut r, 3);
+        let (request, _, _) = dump(&r);
+        finish(
+            &mut r,
+            &request,
+            ActionState::Failed(ActionError::PermissionDenied),
+        );
+        assert_eq!(
+            toasts(&mut r),
+            ["Creating a dump needs administrator rights"]
+        );
+        let button: &'static str =
+            format!("TlButton-TlToast-k{}-action", toast_key(&request)).leak();
+        assert!(
+            r.pcx.debug_bounds(button).is_none(),
+            "no retry without tl-helper"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn dump_paths_live_while_toasts_show(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let records = (1..=17)
+            .map(|pid| record(pid, &format!("p{pid}"), GIB))
+            .collect();
+        let mut r = rig(cx, &state, DumpMode::Mini, records);
+        let mut first = None;
+        for pid in 1..=17 {
+            start(&mut r, pid);
+            let request = actions(&r).pop().expect("a dump");
+            finish(&mut r, &request, ActionState::Succeeded);
+            first.get_or_insert(request);
+        }
+        let first = first.expect("17 dumps");
+        let ActionKind::Dump { path, .. } = &first.kind else {
+            panic!("not Dump: {:?}", first.kind);
+        };
+        let path = path.to_string();
+        assert!(path.contains("/p1_1_"), "{path}");
+        let key = toast_key(&first);
+
+        // Every toast is still shown or waiting; the first one's path and button still work.
+        click(&mut r, format!("TlToast-k{key}-text"));
+        let copied = r
+            .pcx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(copied.as_deref(), Some(path.as_str()));
+        click(&mut r, format!("TlButton-TlToast-k{key}-action"));
+        let sent = actions(&r).pop().expect("Open folder");
+        assert_eq!(
+            sent.kind,
+            ActionKind::ShowInFileManager {
+                path: path.as_str().into(),
+                properties: false,
+            }
         );
     }
 }
