@@ -188,7 +188,8 @@ impl Signal {
     }
 }
 
-/// `rt_prio` is 1..=99 for `Fifo` and `Rr`, else 0.
+/// `rt_prio` is 1..=99 for `Fifo` and `Rr`, else 0. `Deadline` (`SCHED_DEADLINE`) is display
+/// only: tasklens never sets it, and every action that asks for it is refused.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum SchedPolicy {
     Other,
@@ -196,6 +197,7 @@ pub enum SchedPolicy {
     Idle,
     Fifo,
     Rr,
+    Deadline,
 }
 
 /// Levels are 0..=7. `None` is `IOPRIO_CLASS_NONE`, shown as "Default (follows nice)".

@@ -154,6 +154,7 @@ pub enum SchedPolicyWire {
     Idle,
     Fifo,
     Rr,
+    Deadline,
 }
 
 impl From<SchedPolicyWire> for SchedPolicy {
@@ -164,6 +165,7 @@ impl From<SchedPolicyWire> for SchedPolicy {
             SchedPolicyWire::Idle => Self::Idle,
             SchedPolicyWire::Fifo => Self::Fifo,
             SchedPolicyWire::Rr => Self::Rr,
+            SchedPolicyWire::Deadline => Self::Deadline,
         }
     }
 }
@@ -176,6 +178,7 @@ impl From<SchedPolicy> for SchedPolicyWire {
             SchedPolicy::Idle => Self::Idle,
             SchedPolicy::Fifo => Self::Fifo,
             SchedPolicy::Rr => Self::Rr,
+            SchedPolicy::Deadline => Self::Deadline,
         }
     }
 }

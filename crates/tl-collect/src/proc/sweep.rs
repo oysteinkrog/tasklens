@@ -1374,13 +1374,14 @@ fn build_meta(
     }
 }
 
-/// `SchedPolicy` from stat field 41. `SCHED_DEADLINE` (6) and unknown values show as Other.
+/// `SchedPolicy` from stat field 41. Unknown values show as Other.
 fn sched_policy(policy: u32) -> SchedPolicy {
     match policy {
         1 => SchedPolicy::Fifo,
         2 => SchedPolicy::Rr,
         3 => SchedPolicy::Batch,
         5 => SchedPolicy::Idle,
+        6 => SchedPolicy::Deadline,
         _ => SchedPolicy::Other,
     }
 }

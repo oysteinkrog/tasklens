@@ -62,9 +62,9 @@ pub enum PidOp {
     IoPriority(IoPriority),
 }
 
-/// The checks before any syscall: nice -20..=19, a non-empty CPU set, `rt_prio` 1..=99 for
-/// `Fifo` and `Rr` and 0 for the other policies, I/O levels 0..=7, and no `IoPriority::Realtime`
-/// on this unprivileged path.
+/// The checks before any syscall: nice -20..=19, a non-empty CPU set, no `Deadline`, `rt_prio`
+/// 1..=99 for `Fifo` and `Rr` and 0 for the other policies, I/O levels 0..=7, and no
+/// `IoPriority::Realtime` on this unprivileged path.
 fn valid(op: PidOp) -> bool {
     match op {
         PidOp::Nice(n) => (-20..=19).contains(&n),
@@ -73,6 +73,10 @@ fn valid(op: PidOp) -> bool {
             policy: SchedPolicy::Fifo | SchedPolicy::Rr,
             rt_prio,
         } => (1..=99).contains(&rt_prio),
+        PidOp::Sched {
+            policy: SchedPolicy::Deadline,
+            ..
+        } => false,
         PidOp::Sched { rt_prio, .. } => rt_prio == 0,
         PidOp::IoPriority(IoPriority::Realtime(_)) => false,
         PidOp::IoPriority(IoPriority::BestEffort(level)) => level <= 7,
@@ -705,6 +709,7 @@ mod tests {
             (SchedPolicy::Fifo, 0),
             (SchedPolicy::Rr, 0),
             (SchedPolicy::Rr, u8::MAX),
+            (SchedPolicy::Deadline, 0),
         ] {
             let (state, log) = run_pid(ActionKind::SetSched { policy, rt_prio }, Ok(()));
             assert_eq!(

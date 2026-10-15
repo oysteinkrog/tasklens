@@ -4346,10 +4346,13 @@ mod threads {
     #[gpui_kit::test]
     fn threads_priority_words(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
-        feed(&view, cx, Some(threads(sample())));
+        let mut rows = sample();
+        rows.push(row(4340, "dl-worker", SchedPolicy::Deadline, 0, 0.0));
+        feed(&view, cx, Some(threads(rows)));
         assert_eq!(cell(&view, cx, 4321, ThreadColumn::Priority), "Variable");
         assert_eq!(cell(&view, cx, 4325, ThreadColumn::Priority), "Realtime 50");
         assert_eq!(cell(&view, cx, 4330, ThreadColumn::Priority), "Variable");
+        assert_eq!(cell(&view, cx, 4340, ThreadColumn::Priority), "Deadline");
         assert_eq!(cell(&view, cx, 4325, ThreadColumn::BasePriority), "50");
         assert_eq!(
             cell(&view, cx, 4321, ThreadColumn::CtxSwitches),

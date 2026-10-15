@@ -877,7 +877,7 @@ fn write_priority(out: &mut String, w: &CellWords, policy: SchedPolicy, rt: u8, 
             return;
         }
         SchedPolicy::Idle => &w.priority_idle,
-        SchedPolicy::Other | SchedPolicy::Batch => match nice {
+        SchedPolicy::Other | SchedPolicy::Batch | SchedPolicy::Deadline => match nice {
             ..=-11 => &w.priority_high,
             -10..=-1 => &w.priority_above_normal,
             0 => &w.priority_normal,

@@ -2313,6 +2313,27 @@ fn sweep_frozen_app_members() {
     assert_eq!(unit.stats.frozen, Some(true));
 }
 
+sweep_clock!(deadline_clock);
+
+#[test]
+fn sweep_policy_deadline() {
+    let (tmp, root) = merged_root();
+    // Stat fields 38 to 42: exit_signal, processor, rt_priority, policy (6 is SCHED_DEADLINE),
+    // delayacct_blkio_ticks.
+    let path = tmp.path().join("proc/4201/stat");
+    let stat = fs::read_to_string(&path).expect("read stat");
+    assert_eq!(stat.matches(" 17 3 0 0 0 ").count(), 1);
+    fs::write(&path, stat.replace(" 17 3 0 0 0 ", " 17 3 0 6 0 ")).expect("write stat");
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(deadline_clock::now);
+    let out = sweep_n(&mut s, deadline_clock::set, 1);
+
+    assert_eq!(
+        out.extras[index_of(&out, 4201)].policy,
+        tl_model::actions::SchedPolicy::Deadline
+    );
+}
+
 /// A `MakeWriter` that keeps every formatted line.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);

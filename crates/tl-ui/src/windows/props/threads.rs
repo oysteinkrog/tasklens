@@ -223,6 +223,7 @@ pub struct ThreadWords {
     /// Running, Sleeping, Disk sleep, Stopped, Zombie, Idle, Unknown.
     pub states: [SharedString; 7],
     pub variable: SharedString,
+    pub deadline: SharedString,
     /// "Realtime {$prio}".
     pub realtime: Template,
     pub all_cpus: SharedString,
@@ -252,6 +253,7 @@ impl ThreadWords {
             no_match: t(NO_MATCH_THREADS),
             states: KEY_STATES.map(t),
             variable: t("pwn-threads-prio-variable"),
+            deadline: t("pwn-threads-prio-deadline"),
             realtime: Template::new(cx, "pwn-threads-prio-realtime", &["prio"]),
             all_cpus: t("pwn-threads-affinity-all"),
             restricted: t("pwn-threads-restricted"),
@@ -284,6 +286,7 @@ pub fn policy_name(policy: SchedPolicy) -> &'static str {
         SchedPolicy::Idle => "SCHED_IDLE",
         SchedPolicy::Fifo => "SCHED_FIFO",
         SchedPolicy::Rr => "SCHED_RR",
+        SchedPolicy::Deadline => "SCHED_DEADLINE",
     }
 }
 
@@ -291,10 +294,13 @@ fn is_realtime(policy: SchedPolicy) -> bool {
     matches!(policy, SchedPolicy::Fifo | SchedPolicy::Rr)
 }
 
-/// `Variable` for the time-sharing policies, `Realtime 50` for FIFO and RR.
+/// `Variable` for the time-sharing policies, `Realtime 50` for FIFO and RR, `Deadline` for
+/// SCHED_DEADLINE.
 pub fn fmt_priority(out: &mut String, words: &ThreadWords, policy: SchedPolicy, rt_prio: u8) {
     if is_realtime(policy) {
         let _ = words.realtime.write(out, &[&rt_prio]);
+    } else if policy == SchedPolicy::Deadline {
+        out.push_str(&words.deadline);
     } else {
         out.push_str(&words.variable);
     }
@@ -1221,6 +1227,7 @@ fn common_priority_class(rows: &[ThreadRow]) -> Option<ThreadPriorityClass> {
     let class = |row: &ThreadRow| match row.policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => Some(ThreadPriorityClass::Realtime),
         SchedPolicy::Idle => Some(ThreadPriorityClass::Idle),
+        SchedPolicy::Deadline => None,
         SchedPolicy::Other | SchedPolicy::Batch => [-10, -5, 0, 5, 19]
             .contains(&row.nice)
             .then_some(ThreadPriorityClass::Nice(row.nice)),

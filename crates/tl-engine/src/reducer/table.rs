@@ -428,7 +428,7 @@ fn priority_rank(r: &ProcessRecord, x: &ProcessExtras) -> i128 {
     match x.policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => -200 - i128::from(x.rt_prio),
         SchedPolicy::Idle => 100,
-        SchedPolicy::Other | SchedPolicy::Batch => i128::from(r.nice),
+        SchedPolicy::Other | SchedPolicy::Batch | SchedPolicy::Deadline => i128::from(r.nice),
     }
 }
 

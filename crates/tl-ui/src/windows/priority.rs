@@ -140,7 +140,8 @@ pub fn plan(initial: SchedPolicy, policy: SchedPolicy, nice: i8, rt_prio: u8) ->
             then_nice: Some(nice),
             confirm: false,
         },
-        SchedPolicy::Idle => PriorityPlan {
+        // The dialog never offers Deadline and the engine refuses it.
+        SchedPolicy::Idle | SchedPolicy::Deadline => PriorityPlan {
             first: sched(0),
             then_nice: None,
             confirm: false,
@@ -1004,5 +1005,18 @@ mod tests {
         // Realtime always confirms, also when the policy does not change.
         assert!(plan(Fifo, Fifo, 0, 50).confirm);
         assert_eq!(policy_of(policy_value(Idle)), Some(Idle));
+        // The dialog never offers Deadline. A plan for it is a bare SetSched the engine refuses.
+        assert_eq!(
+            plan(Other, Deadline, 3, 10),
+            PriorityPlan {
+                first: ActionKind::SetSched {
+                    policy: Deadline,
+                    rt_prio: 0
+                },
+                then_nice: None,
+                confirm: false,
+            }
+        );
+        assert_eq!(policy_of(policy_value(Deadline)), Some(Other));
     }
 }

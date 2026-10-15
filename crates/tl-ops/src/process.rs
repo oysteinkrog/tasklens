@@ -346,6 +346,7 @@ pub(crate) fn sched_attr_for(
                 ..base
             })
         }
+        SchedPolicy::Deadline => Err(OpsError::InvalidInput("SCHED_DEADLINE cannot be set")),
         SchedPolicy::Other | SchedPolicy::Batch | SchedPolicy::Idle => {
             if rt_prio != 0 {
                 return Err(OpsError::InvalidInput("rt priority must be 0"));
@@ -1203,6 +1204,10 @@ mod tests {
         assert_eq!(sched_attr_for(SchedPolicy::Rr, 100, 0).err(), out_of_range);
         let must_be_zero = Some(OpsError::InvalidInput("rt priority must be 0"));
         assert_eq!(sched_attr_for(SchedPolicy::Batch, 5, 0).err(), must_be_zero);
+        assert_eq!(
+            sched_attr_for(SchedPolicy::Deadline, 0, 0).err(),
+            Some(OpsError::InvalidInput("SCHED_DEADLINE cannot be set"))
+        );
         // A key that does not verify: if the check ran after open_verified, the error would differ.
         let key = ProcessKey {
             start_ticks: 0,

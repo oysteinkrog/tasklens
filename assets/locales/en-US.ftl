@@ -68,6 +68,7 @@ pwn-threads-state-zombie = Zombie
 pwn-threads-state-idle = Idle
 pwn-threads-state-unknown = Unknown
 pwn-threads-prio-variable = Variable
+pwn-threads-prio-deadline = Deadline
 pwn-threads-prio-realtime = Realtime { $prio }
 pwn-threads-affinity-all = All
 pwn-threads-restricted = Needs administrator access.

@@ -393,6 +393,7 @@ fn action_serde_types_roundtrip() {
         SchedPolicy::Idle,
         SchedPolicy::Fifo,
         SchedPolicy::Rr,
+        SchedPolicy::Deadline,
     ] {
         roundtrip(&policy, max);
     }

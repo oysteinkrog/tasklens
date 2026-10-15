@@ -117,6 +117,8 @@ fn check_values(op: Op<'_>) -> Result<(), HelperError> {
         Op::Sched(SchedPolicy::Other | SchedPolicy::Batch | SchedPolicy::Idle, rt_prio) => {
             rt_prio == 0
         }
+        // Rule "policy not settable".
+        Op::Sched(SchedPolicy::Deadline, _) => false,
         // Rule "ioprio level out of range".
         Op::IoPriority(IoPriority::Realtime(level) | IoPriority::BestEffort(level)) => level <= 7,
         Op::IoPriority(IoPriority::None | IoPriority::Idle) => true,
@@ -612,6 +614,11 @@ mod tests {
                 target,
                 policy: SchedPolicy::Other,
                 rt_prio: 5,
+            },
+            HelperRequest::SetSched {
+                target,
+                policy: SchedPolicy::Deadline,
+                rt_prio: 0,
             },
             HelperRequest::SetIoPriority {
                 key,

@@ -795,6 +795,7 @@ pub fn fmt_priority(
         SchedPolicy::Idle => "SCHED_IDLE",
         SchedPolicy::Fifo => "SCHED_FIFO",
         SchedPolicy::Rr => "SCHED_RR",
+        SchedPolicy::Deadline => "SCHED_DEADLINE",
     };
     let _ = match policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => {
@@ -3494,6 +3495,10 @@ mod tests {
         assert_eq!(
             run(|s| fmt_priority(s, &w(), SchedPolicy::Batch, -5, 0, 115)),
             "Nice -5, SCHED_BATCH, kernel prio 115"
+        );
+        assert_eq!(
+            run(|s| fmt_priority(s, &w(), SchedPolicy::Deadline, 0, 0, -1)),
+            "Nice 0, SCHED_DEADLINE, kernel prio -1"
         );
     }
 

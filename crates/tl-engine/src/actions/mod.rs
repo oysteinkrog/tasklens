@@ -33,7 +33,7 @@ use rustix::io::Errno;
 use smallvec::SmallVec;
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
-    LaunchSpec, MAX_ACTION_TARGETS, MAX_ACTIONS_IN_FLIGHT, RejectReason, Signal,
+    LaunchSpec, MAX_ACTION_TARGETS, MAX_ACTIONS_IN_FLIGHT, RejectReason, SchedPolicy, Signal,
 };
 use tl_model::health::{HelperState, SourceId};
 use tl_model::helper_proto::{HelperReply, HelperRequest};
@@ -94,6 +94,14 @@ pub fn admit(
         };
     }
     if req.targets.is_empty() {
+        return Admission::Reject(RejectReason::Unsupported);
+    }
+    // SCHED_DEADLINE is display only. Refused here for both the direct and the helper path.
+    if let ActionKind::SetSched {
+        policy: SchedPolicy::Deadline,
+        ..
+    } = req.kind
+    {
         return Admission::Reject(RejectReason::Unsupported);
     }
     let per_target = req
@@ -1375,6 +1383,33 @@ mod tests {
             f.admit(&open(vec![]), 16),
             Admission::Reject(RejectReason::Busy)
         );
+    }
+
+    #[test]
+    fn admission_rejects_deadline() {
+        let mut f = Fixture::new();
+        f.live.insert(key(500), ProcFlags::empty());
+        let deadline = ActionKind::SetSched {
+            policy: SchedPolicy::Deadline,
+            rt_prio: 0,
+        };
+        for privileged in [false, true] {
+            let mut req = request(deadline.clone(), vec![ActionTarget::Process(key(500))]);
+            req.privileged = privileged;
+            assert_eq!(
+                f.admit(&req, 0),
+                Admission::Reject(RejectReason::Unsupported)
+            );
+        }
+        // Other policies on the same target still run.
+        let other = request(
+            ActionKind::SetSched {
+                policy: SchedPolicy::Other,
+                rt_prio: 0,
+            },
+            vec![ActionTarget::Process(key(500))],
+        );
+        assert_eq!(f.per_target(&other), vec![None]);
     }
 
     #[test]
