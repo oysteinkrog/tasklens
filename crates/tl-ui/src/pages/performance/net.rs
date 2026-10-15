@@ -768,6 +768,7 @@ pub fn update_net_details_p2(model: &mut KeyValueModel, inp: &NetP2Inputs) -> bo
         None => model.set_fallback(ROW_STATUS, Validity::WarmingUp, Fallback::Unavailable, None),
     };
 
+    let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
     let Some(d) = inp.details else {
         for label in [
             ROW_ADAPTER,
@@ -790,16 +791,19 @@ pub fn update_net_details_p2(model: &mut KeyValueModel, inp: &NetP2Inputs) -> bo
         }
         return changed;
     };
-    changed |= if matches!(d.adapter_name.validity, Validity::Valid | Validity::Stale)
-        && !d.adapter_name.value.is_empty()
-    {
-        model.set_text(ROW_ADAPTER, &d.adapter_name.value)
-    } else {
-        let word = model.text(KEY_UNKNOWN_ADAPTER);
-        model.set_text(ROW_ADAPTER, word.text())
-    };
-    let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
     let details_age_ns = inp.now_boot_ns.saturating_sub(inp.details_observed_end_ns);
+    let adapter = &d.adapter_name;
+    changed |= match adapter.validity {
+        Validity::Valid if !adapter.value.is_empty() => model.set_text(ROW_ADAPTER, &adapter.value),
+        Validity::Stale if !adapter.value.is_empty() => {
+            model.set_text(ROW_ADAPTER, &adapter.value)
+                | model.set_stale(ROW_ADAPTER, details_age_ns)
+        }
+        _ => {
+            let word = model.text(KEY_UNKNOWN_ADAPTER);
+            model.set_text(ROW_ADAPTER, word.text())
+        }
+    };
     let word = model.text(type_key(&d.type_label, d.kind));
     changed |= model.set_text(ROW_TYPE, word.text());
     if has_wifi {

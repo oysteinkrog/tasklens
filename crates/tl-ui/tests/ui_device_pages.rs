@@ -1957,13 +1957,14 @@ mod net_p2 {
         assert_eq!(value(&m, "Connection status"), "Unknown");
     }
 
-    /// A stale MAC address and Driver report the age of the device details read, not the
-    /// age of the 1 Hz system sample.
+    /// A stale Adapter name, MAC address and Driver keep their value and report the age of
+    /// the device details read, not the age of the 1 Hz system sample.
     #[gpui_kit::test]
     fn net_stale_inventory_uses_details_age(cx: &mut TestAppContext) {
         const S: u64 = 1_000_000_000;
         let t = totals(LinkState::Up, Metric::valid(1000));
         let mut d = ethernet();
+        d.adapter_name.validity = Validity::Stale;
         d.mac.validity = Validity::Stale;
         d.driver.validity = Validity::Stale;
         let mut model = net_details_model(false);
@@ -1980,12 +1981,52 @@ mod net_p2 {
             model.refresh_strings(cx);
         });
         update_net_details_p2(&mut model, &inp);
-        for label in ["MAC address", "Driver"] {
-            let tip = model
+        assert_eq!(
+            value(&model, "Adapter name"),
+            "Intel I350 Gigabit Network Connection"
+        );
+        for label in ["Adapter name", "MAC address", "Driver"] {
+            let row = model
                 .to_kv_rows()
                 .find(|r| r.label.as_ref() == label)
-                .and_then(|r| r.value.tooltip.clone());
+                .unwrap();
+            assert_eq!(row.value.validity, Validity::Stale, "{label}");
+            let tip = row.value.tooltip.clone();
             assert_eq!(tip.as_deref(), Some("Last updated 1m 30s ago"), "{label}");
         }
+    }
+
+    /// Before the first device details read, a stale Link speed still reports the age of the
+    /// system sample.
+    #[gpui_kit::test]
+    fn net_stale_link_speed_without_details(cx: &mut TestAppContext) {
+        const S: u64 = 1_000_000_000;
+        let t = totals(
+            LinkState::Up,
+            Metric {
+                value: 1000,
+                validity: Validity::Stale,
+            },
+        );
+        let mut model = net_details_model(false);
+        let inp = NetP2Inputs {
+            now_boot_ns: 100 * S,
+            observed_end_ns: 70 * S,
+            details_observed_end_ns: 0,
+            details: None,
+            totals: Some(&t),
+            iface: Some("enp38s0"),
+        };
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            model.refresh_strings(cx);
+        });
+        update_net_details_p2(&mut model, &inp);
+        assert_eq!(value(&model, "Link speed"), "1000 Mbps");
+        let tip = model
+            .to_kv_rows()
+            .find(|r| r.label.as_ref() == "Link speed")
+            .and_then(|r| r.value.tooltip.clone());
+        assert_eq!(tip.as_deref(), Some("Last updated 30s ago"));
     }
 }
