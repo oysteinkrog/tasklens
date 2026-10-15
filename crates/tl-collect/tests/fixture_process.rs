@@ -3916,7 +3916,7 @@ mod environ {
 
     #[test]
     fn environ_vars_parsed() {
-        let root = SysRoot::at(common::fixture_dir("process-edge"));
+        let root = SysRoot::at(&common::fixture_dir("process-edge"));
         let (r, out) = read(&root);
         assert_eq!(r, EnvRead::Ok);
         let vars: Vec<(&str, &str)> = out.vars.iter().map(|(n, v)| (&**n, &**v)).collect();
