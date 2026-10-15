@@ -30,6 +30,7 @@ use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
+use super::actions::{PerfEject, PerfShowSmart};
 use super::details::{Fallback, KeyValueModel};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
 use super::{
@@ -40,6 +41,8 @@ use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::icons::TlIcon;
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
@@ -56,6 +59,16 @@ const KEY_TRANSFER: &str = "perf-disk-heading-transfer";
 const KEY_READ: &str = "perf-disk-legend-read";
 const KEY_WRITE: &str = "perf-disk-legend-write";
 const KEY_THROUGHPUT: &str = "perf-disk-range-throughput";
+const KEY_BTN_SMART: &str = "perf-disk-btn-smart";
+const KEY_BTN_EJECT: &str = "perf-disk-btn-eject";
+const KEY_MENU_SMART: &str = "perf-disk-menu-smart";
+const KEY_MENU_EJECT: &str = "perf-disk-menu-eject";
+const KEY_TIP_EJECT: &str = "perf-disk-tip-eject";
+
+/// Debug selector of the `Show SMART data` button.
+pub const SMART_BUTTON_ID: &str = "perf-disk-smart";
+/// Debug selector of the `Eject` button.
+pub const EJECT_BUTTON_ID: &str = "perf-disk-eject";
 
 const NS_PER_S: u64 = 1_000_000_000;
 
@@ -69,6 +82,11 @@ pub struct Words {
     pub read: SharedString,
     pub write: SharedString,
     pub throughput: SharedString,
+    pub btn_smart: SharedString,
+    pub btn_eject: SharedString,
+    pub menu_smart: SharedString,
+    pub menu_eject: SharedString,
+    pub tip_eject: SharedString,
 }
 
 impl Words {
@@ -85,6 +103,11 @@ impl Words {
         self.read = t(KEY_READ);
         self.write = t(KEY_WRITE);
         self.throughput = t(KEY_THROUGHPUT);
+        self.btn_smart = t(KEY_BTN_SMART);
+        self.btn_eject = t(KEY_BTN_EJECT);
+        self.menu_smart = t(KEY_MENU_SMART);
+        self.menu_eject = t(KEY_MENU_EJECT);
+        self.tip_eject = t(KEY_TIP_EJECT);
         true
     }
 }
@@ -703,10 +726,12 @@ pub struct DiskPage {
     /// The rows from `update_disk_details_p1` and `update_disk_details_p2`.
     details: KeyValueModel,
     // E25-016: partitions: Option<PartitionsBlock> (added by o55.17 as a chain edit, R-262)
-    /// E25-017 renders the SMART button from it.
+    /// The `Show SMART data` button and menu item are present.
     smart_available: bool,
-    /// E25-017 renders the Eject button from it.
+    /// The `Eject` button and menu item are present (ejectable or removable drive).
     ejectable: bool,
+    smart_focus: FocusHandle,
+    eject_focus: FocusHandle,
     header: (SharedString, SharedString),
     settings: PageSettings,
     settings_versions: [u64; 3],
@@ -777,6 +802,8 @@ impl DiskPage {
             details: disk_details_model(),
             smart_available: false,
             ejectable: false,
+            smart_focus: cx.focus_handle(),
+            eject_focus: cx.focus_handle(),
             header: (SharedString::default(), SharedString::default()),
             settings,
             settings_versions: section_versions(cx),
@@ -861,7 +888,7 @@ impl DiskPage {
             .map(|(_, d)| d);
         if details {
             let smart = d.is_some_and(|d| d.smart != SmartKind::None);
-            let eject = d.is_some_and(|d| d.ejectable);
+            let eject = d.is_some_and(|d| d.ejectable || d.removable);
             if (smart, eject) != (self.smart_available, self.ejectable) {
                 (self.smart_available, self.ejectable) = (smart, eject);
                 changed = true;
@@ -984,9 +1011,39 @@ impl DevicePage for DiskPage {
         self.header.clone()
     }
 
-    /// E25-017 adds the SMART and Eject buttons.
     fn toggles(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 2]> {
-        SmallVec::new()
+        let mut out = SmallVec::new();
+        // Dispatched on the page, so it works wherever focus is.
+        if self.smart_available {
+            let (page_focus, key) = (self.focus.clone(), self.key.clone());
+            out.push(
+                TlButton::new(SMART_BUTTON_ID, TlButtonKind::Secondary)
+                    .size(TlButtonSize::Sm)
+                    .label(self.words.btn_smart.clone())
+                    .tooltip(self.words.btn_smart.clone())
+                    .focus_handle(self.smart_focus.clone())
+                    .on_click(move |_, window, cx| {
+                        page_focus.dispatch_action(&PerfShowSmart { key: key.clone() }, window, cx);
+                    })
+                    .into_any_element(),
+            );
+        }
+        if self.ejectable {
+            let (page_focus, key) = (self.focus.clone(), self.key.clone());
+            out.push(
+                TlButton::new(EJECT_BUTTON_ID, TlButtonKind::Secondary)
+                    .size(TlButtonSize::Sm)
+                    .icon(TlIcon::Eject)
+                    .label(self.words.btn_eject.clone())
+                    .tooltip(self.words.tip_eject.clone())
+                    .focus_handle(self.eject_focus.clone())
+                    .on_click(move |_, window, cx| {
+                        page_focus.dispatch_action(&PerfEject { key: key.clone() }, window, cx);
+                    })
+                    .into_any_element(),
+            );
+        }
+        out
     }
 
     fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
@@ -1009,8 +1066,18 @@ impl DevicePage for DiskPage {
         SmallVec::new()
     }
 
-    /// No page items in P1.
-    fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
+    fn menu_items(&self, mut menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
+        if self.smart_available {
+            let key = self.key.clone();
+            menu = menu.item(
+                self.words.menu_smart.clone(),
+                Box::new(PerfShowSmart { key }),
+            );
+        }
+        if self.ejectable {
+            let key = self.key.clone();
+            menu = menu.item(self.words.menu_eject.clone(), Box::new(PerfEject { key }));
+        }
         menu
     }
 
@@ -1026,9 +1093,15 @@ impl DevicePage for DiskPage {
         self.details.copy_into(out);
     }
 
-    /// E25-017 adds the header buttons.
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
-        SmallVec::new()
+        let mut out = SmallVec::new();
+        if self.smart_available {
+            out.push(self.smart_focus.clone());
+        }
+        if self.ejectable {
+            out.push(self.eject_focus.clone());
+        }
+        out
     }
 
     fn set_active(&mut self, active: bool, cx: &mut App) {

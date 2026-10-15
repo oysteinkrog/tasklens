@@ -1087,3 +1087,171 @@ mod disk_p2 {
         assert_eq!(value(&m, "Total written").as_deref(), Some("400.00 GiB"));
     }
 }
+
+/// The Disk header buttons and page-menu items (E25-017).
+mod disk_buttons {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point};
+    use tl_model::snapshot::{DiskDetails, SmartKind};
+    use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
+    use tl_ui::pages::performance::PAGE_PANEL_ID;
+    use tl_ui::pages::performance::actions::PerfShowSmart;
+
+    const SDA: &str = "disk:sda";
+
+    fn publish(r: &mut Rig, smart: SmartKind, removable: bool, ejectable: bool) {
+        r.engine.publish_with(|s| {
+            let details = Arc::make_mut(&mut s.device_details);
+            details.header.version += 1;
+            details.disks = Arc::from([(
+                DeviceIdx(3),
+                DiskDetails {
+                    smart,
+                    removable,
+                    ejectable,
+                    ..DiskDetails::default()
+                },
+            )]);
+        });
+        draw(r.vcx);
+    }
+
+    fn disk_page(r: &mut Rig) -> Entity<DiskPage> {
+        view_of(r, SDA).downcast::<DiskPage>().expect("a DiskPage")
+    }
+
+    fn open_disk(cx: &mut TestAppContext) -> Rig<'_> {
+        let mut r = open(cx);
+        select(&mut r, SDA);
+        r
+    }
+
+    #[gpui_kit::test]
+    fn disk_buttons_visibility(cx: &mut TestAppContext) {
+        let mut r = open_disk(cx);
+        publish(&mut r, SmartKind::Nvme, false, false);
+        let page = disk_page(&mut r);
+        r.vcx.update(|window, cx| {
+            let toggles = page.update(cx, |p, cx| p.toggles(window, cx));
+            assert_eq!(toggles.len(), 1, "only the SMART button");
+            assert!(!page.read(cx).ejectable());
+        });
+        assert!(r.vcx.debug_bounds("perf-page-toggle-0").is_some());
+        assert!(r.vcx.debug_bounds("perf-page-toggle-1").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn disk_eject_button_live(cx: &mut TestAppContext) {
+        let mut r = open_disk(cx);
+        publish(&mut r, SmartKind::Nvme, false, false);
+        let before = disk_page(&mut r);
+        assert!(r.vcx.debug_bounds("perf-page-toggle-1").is_none());
+        publish(&mut r, SmartKind::Nvme, true, false);
+        let after = disk_page(&mut r);
+        assert_eq!(before.entity_id(), after.entity_id(), "page not re-created");
+        assert!(
+            r.vcx.debug_bounds("perf-page-toggle-1").is_some(),
+            "Eject appears"
+        );
+        publish(&mut r, SmartKind::Nvme, false, false);
+        assert!(
+            r.vcx.debug_bounds("perf-page-toggle-1").is_none(),
+            "Eject goes"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn disk_smart_button_dispatch(cx: &mut TestAppContext) {
+        let mut r = open_disk(cx);
+        publish(&mut r, SmartKind::Nvme, false, false);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        r.vcx.update(|_, cx| {
+            cx.on_action(move |a: &PerfShowSmart, _| sink.borrow_mut().push(a.clone()));
+        });
+        let at = r
+            .vcx
+            .debug_bounds("perf-page-toggle-0")
+            .expect("the SMART button")
+            .center();
+        r.vcx.simulate_click(at, Modifiers::none());
+        r.vcx.run_until_parked();
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].key, key(SDA));
+    }
+
+    fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    fn menu_labels(r: &mut Rig) -> Vec<(MenuEntryKind, String)> {
+        let at = r
+            .vcx
+            .debug_bounds(PAGE_PANEL_ID)
+            .expect("the page panel")
+            .center();
+        right_click(r.vcx, at);
+        let menu: Entity<TlMenuPopup> = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("a context menu is open");
+        r.vcx.update(|window, cx| {
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| (e.kind, e.label.map(|l| l.to_string()).unwrap_or_default()))
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn disk_menu_items(cx: &mut TestAppContext) {
+        let mut r = open_disk(cx);
+        publish(&mut r, SmartKind::Nvme, true, false);
+        let list = menu_labels(&mut r);
+        let names: Vec<&str> = list.iter().map(|e| e.1.as_str()).collect();
+        let smart = names.iter().position(|n| *n == "Show SMART data…");
+        let eject = names.iter().position(|n| *n == "Eject");
+        let (smart, eject) = (smart.expect("SMART item"), eject.expect("Eject item"));
+        assert_eq!(eject, smart + 1, "{names:?}");
+        let first_sep = list
+            .iter()
+            .position(|e| e.0 == MenuEntryKind::Separator)
+            .expect("a separator");
+        assert!(smart > first_sep, "after the common items: {names:?}");
+        assert_eq!(list[eject + 1].0, MenuEntryKind::Separator, "{names:?}");
+        assert_eq!(names[eject + 2], "View");
+    }
+
+    #[gpui_kit::test]
+    fn disk_focus_order(cx: &mut TestAppContext) {
+        let mut r = open_disk(cx);
+        publish(&mut r, SmartKind::Nvme, true, false);
+        let page = disk_page(&mut r);
+        r.vcx.update(|_, cx| {
+            let order = page.read(cx).focus_order();
+            assert_eq!(order.len(), 2, "SMART then Eject");
+            assert_ne!(order[0], order[1]);
+        });
+        publish(&mut r, SmartKind::None, true, false);
+        r.vcx
+            .update(|_, cx| assert_eq!(page.read(cx).focus_order().len(), 1));
+    }
+}

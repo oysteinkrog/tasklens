@@ -426,6 +426,11 @@ perf-disk-kind-virtual = Virtual
 perf-disk-yes = Yes
 perf-disk-no = No
 perf-disk-rpm-value = {$rpm} RPM
+perf-disk-btn-smart = Show SMART data
+perf-disk-btn-eject = Eject
+perf-disk-menu-smart = Show SMART data…
+perf-disk-menu-eject = Eject
+perf-disk-tip-eject = Eject this disk
 perf-summary-title-suffix = {" "}· Graph Summary
 perf-summary-range-percentage = Percentage
 

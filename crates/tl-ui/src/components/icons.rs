@@ -47,10 +47,11 @@ pub enum TlIcon {
     List,
     Pencil,
     FunnelX,
+    Eject,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -85,6 +86,7 @@ impl TlIcon {
         Self::List,
         Self::Pencil,
         Self::FunnelX,
+        Self::Eject,
     ];
 
     /// The kit name for this icon.
@@ -124,6 +126,7 @@ impl TlIcon {
             Self::List => IconName::List,
             Self::Pencil => IconName::Pencil,
             Self::FunnelX => IconName::FunnelX,
+            Self::Eject => IconName::Eject,
         }
     }
 }
