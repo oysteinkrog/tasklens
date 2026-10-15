@@ -2036,7 +2036,7 @@ mod end {
             "-",
         ];
         app.extend(COPIES);
-        app.extend(["-", "Properties"]);
+        app.extend(["-", TRAY_ITEM, "-", "Properties"]);
         assert_eq!(menu(&mut rig, &[7]), app, "an app row");
         let mut unit = app.clone();
         unit.extend(["-", "Go to service"]);
