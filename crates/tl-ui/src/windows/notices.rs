@@ -97,7 +97,7 @@ pub fn open_virustotal(key: ProcessKey, window: &mut Window, cx: &mut App) {
         return;
     }
     let dialog = TlDialog::confirm(tr(cx, TEXT), tr(cx, OPEN))
-        .title(tr(cx, TITLE))
+        .heading(tr(cx, TITLE))
         .cancel_label(tr(cx, CANCEL));
     let opened = dialog.open(window, cx, move |result, window, cx| {
         if let DialogResult::Confirmed { .. } = result {
