@@ -319,6 +319,10 @@ impl ServicesDelegate {
         self.backend
     }
 
+    pub fn services(&self) -> &Arc<ServicesSnapshot> {
+        &self.snap
+    }
+
     pub fn processes(&self) -> &Arc<ProcessSnapshot> {
         &self.processes
     }

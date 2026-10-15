@@ -74,6 +74,7 @@ fn delegate_table_with_engine(
             startup_toasts: Vec::new(),
         });
         TlSettings::init(cx);
+        toast::init(cx);
         cx.set_global(EngineGlobal(client.clone()));
         let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
@@ -779,4 +780,373 @@ fn unit_types_count_suffix(cx: &mut TestAppContext) {
         })
         .expect("Unit types button");
     assert_eq!(unit_types.label(), Some("Unit types (6)"));
+}
+
+/// Services copy block and copy source (tasklens-hk6.14).
+mod copy {
+    use std::sync::Arc;
+
+    use super::*;
+    use gpui_kit::{ClipboardItem, TestAppContext, VisualTestContext};
+    use tl_model::actions::SchedPolicy;
+    use tl_model::ids::ProcessKey;
+    use tl_model::process::{
+        GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord,
+    };
+    use tl_model::snapshot::{
+        ProcessSnapshot, ServiceStatus, ServicesSnapshot, Snapshot, StartupType, UnitRecord,
+    };
+    use tl_model::system::CpuSet;
+    use tl_model::table::{Manager, ServiceColumn, SysNodeId, SysRow, Total, UnitRef, UnitType};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::pages::services::copy::{
+        alias_column, block_service, column_alias, services_copy_texts,
+    };
+    use tl_ui::pages::services::delegate::{ServicesDelegate, row_key};
+    use tl_ui::pages::sys_copy::{SysCopySource as _, copy_row};
+
+    const GOLDEN: &str = "Name: sshd.service\n\
+Display name: OpenSSH Daemon\n\
+Status: Running\n\
+Start type: Enabled\n\
+PID: 812\n\
+User: root\n\
+Binary: /usr/bin/sshd";
+
+    fn a(s: &str) -> Arc<str> {
+        Arc::from(s)
+    }
+
+    fn missing<T: Default>() -> Total<T> {
+        Total {
+            value: T::default(),
+            validity: Validity::Missing,
+        }
+    }
+
+    fn unit_ref(name: &str) -> UnitRef {
+        UnitRef {
+            manager: Manager::System,
+            name: a(name),
+        }
+    }
+
+    fn unit_record(name: &str, description: &str, pid: u32, path: &str) -> UnitRecord {
+        UnitRecord {
+            unit: unit_ref(name),
+            kind: UnitType::Service,
+            description: a(description),
+            status: ServiceStatus::Running,
+            sub_state: a("running"),
+            load_state: a("loaded"),
+            startup: StartupType::Enabled,
+            main_pid: pid,
+            user: a("root"),
+            path: a(path),
+            unit_file: None,
+            active_since_us: None,
+            triggered_by: Arc::from([]),
+            control_group: None,
+            can_reload: false,
+            has_cgroup_procs: false,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: missing(),
+            memory_bytes: missing(),
+            disk_bps: missing(),
+            tasks: missing(),
+        }
+    }
+
+    fn process_key() -> ProcessKey {
+        ProcessKey {
+            start_ticks: 10,
+            boot_id: BootId(1),
+            pid: 812,
+        }
+    }
+
+    fn process_record() -> ProcessRecord {
+        ProcessRecord {
+            key: process_key(),
+            ppid: 1,
+            uid: 0,
+            meta: Arc::new(ProcessMeta {
+                comm: a("sshd"),
+                name: a("sshd"),
+                exe: Some(a("/usr/bin/sshd")),
+                cmdline: Some(a("/usr/bin/sshd -D")),
+                user: a("root"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a("sshd"),
+            }),
+            group: GroupKind::App { app_id: a("sshd") }.key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn process_extras() -> ProcessExtras {
+        ProcessExtras {
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            start_boot_ns: 0,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: CpuSet::empty(),
+            handles: None,
+            exe_name: a("sshd"),
+            exe_path: a("/usr/bin/sshd"),
+            exe_deleted: false,
+            unit: Some(unit_ref("sshd.service")),
+            state_letter: b'S',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+        }
+    }
+
+    fn sys_row(node: SysNodeId, depth: u8, record: Option<u32>) -> SysRow {
+        SysRow {
+            node,
+            depth,
+            expanded: true,
+            has_children: record.is_none(),
+            record,
+        }
+    }
+
+    fn install(delegate: &mut ServicesDelegate) {
+        let sshd = unit_ref("sshd.service");
+        let cron = unit_ref("cron.service");
+        let rows: Arc<[SysRow]> = Arc::from([
+            sys_row(SysNodeId::ServiceGroup(Manager::System), 0, None),
+            sys_row(SysNodeId::Unit(sshd.clone()), 1, Some(0)),
+            sys_row(SysNodeId::UnitProcess(sshd, process_key()), 2, Some(0)),
+            sys_row(SysNodeId::Unit(cron), 1, Some(1)),
+        ]);
+        let mut snapshot = Snapshot::empty(BootId(1), 1);
+        snapshot.services = Arc::new(ServicesSnapshot {
+            rows,
+            units: Arc::from([
+                unit_record("sshd.service", "OpenSSH Daemon", 812, "/usr/bin/sshd"),
+                unit_record("cron.service", "Regular Jobs", 0, ""),
+            ]),
+            managers: [ManagerState::Connected, ManagerState::Unavailable],
+            ..ServicesSnapshot::default()
+        });
+        snapshot.processes = Arc::new(ProcessSnapshot {
+            records: Arc::from([process_record()]),
+            extras: Arc::from([process_extras()]),
+            ..ProcessSnapshot::default()
+        });
+        delegate.install(&Arc::new(snapshot));
+    }
+
+    struct Rig {
+        table: Entity<TlTreeTable<ServicesDelegate>>,
+        vcx: VisualTestContext,
+        queue: Entity<ToastQueue>,
+    }
+
+    impl Rig {
+        fn select(&mut self, nodes: &[SysNodeId]) {
+            let ids: Vec<u64> = nodes.iter().map(row_key).collect();
+            self.table.update(&mut self.vcx, |table, _| {
+                table.selection.clear();
+                for id in ids {
+                    table.selection.ctrl_click(id);
+                }
+            });
+        }
+
+        fn copy(&mut self) {
+            let table = self.table.clone();
+            self.vcx.update(|window, cx| {
+                table.update(cx, |table, cx| copy_row(&*table, window, cx));
+            });
+            self.vcx.run_until_parked();
+        }
+
+        fn clipboard(&mut self) -> Option<String> {
+            self.vcx
+                .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.queue.read_with(&self.vcx, |q, _| {
+                q.visible_texts().iter().map(|t| t.to_string()).collect()
+            })
+        }
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let (table, _engine) = delegate_table_with_engine(cx, UiState::default());
+        cx.update(|cx| {
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let window = cx.windows().into_iter().next().expect("window");
+        let mut vcx = VisualTestContext::from_window(window, cx);
+        vcx.update(|window, _| window.activate_window());
+        let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
+        table.update(&mut vcx, |table, _| install(&mut table.delegate));
+        vcx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("before".into())));
+        vcx.run_until_parked();
+        Rig { table, vcx, queue }
+    }
+
+    fn sshd_node() -> SysNodeId {
+        SysNodeId::Unit(unit_ref("sshd.service"))
+    }
+
+    fn cron_node() -> SysNodeId {
+        SysNodeId::Unit(unit_ref("cron.service"))
+    }
+
+    #[test]
+    fn service_copy_block_golden() {
+        let mut out = String::new();
+        block_service(
+            &unit_record("sshd.service", "OpenSSH Daemon", 812, "/usr/bin/sshd"),
+            &mut out,
+        );
+        assert_eq!(out, GOLDEN);
+    }
+
+    #[test]
+    fn service_copy_empty_values() {
+        let mut out = String::new();
+        block_service(
+            &unit_record("cron.service", "Regular Jobs", 0, ""),
+            &mut out,
+        );
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[4], "PID: ");
+        assert_eq!(lines[6], "Binary: ");
+        assert!(!out.ends_with('\n'));
+    }
+
+    #[test]
+    fn services_copy_texts_are_the_spec_texts() {
+        let texts = services_copy_texts();
+        assert_eq!(texts.row_ok, "Service details copied.");
+        assert_eq!(texts.row_failed, "Could not copy service details.");
+        assert_eq!(texts.nothing_selected, "Select a service row first.");
+    }
+
+    #[test]
+    fn services_copy_column_alias_round_trip() {
+        let all = [
+            ServiceColumn::Name,
+            ServiceColumn::DisplayName,
+            ServiceColumn::Status,
+            ServiceColumn::StartupType,
+            ServiceColumn::Pid,
+            ServiceColumn::User,
+            ServiceColumn::Path,
+            ServiceColumn::Manager,
+            ServiceColumn::UnitType,
+            ServiceColumn::SubState,
+            ServiceColumn::LoadState,
+            ServiceColumn::Cpu,
+            ServiceColumn::Memory,
+            ServiceColumn::Disk,
+            ServiceColumn::Tasks,
+            ServiceColumn::ActiveSince,
+            ServiceColumn::UnitFile,
+            ServiceColumn::TriggeredBy,
+            ServiceColumn::Description,
+        ];
+        for column in all {
+            assert_eq!(alias_column(column_alias(column)), column);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn copy_row_services_block_format(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.select(&[
+            SysNodeId::ServiceGroup(Manager::System),
+            cron_node(),
+            sshd_node(),
+        ]);
+        r.copy();
+        let cron = "Name: cron.service\nDisplay name: Regular Jobs\nStatus: Running\n\
+Start type: Enabled\nPID: \nUser: root\nBinary: ";
+        assert_eq!(r.clipboard(), Some(format!("{GOLDEN}\n\n{cron}")));
+        assert_eq!(r.toasts(), ["Service details copied."]);
+
+        r.select(&[]);
+        r.vcx
+            .update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("before".into())));
+        r.copy();
+        assert_eq!(r.clipboard().as_deref(), Some("before"));
+        assert!(
+            r.toasts()
+                .iter()
+                .any(|t| t == "Select a service row first.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn copy_child_row_uses_process_block(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.select(&[SysNodeId::UnitProcess(
+            unit_ref("sshd.service"),
+            process_key(),
+        )]);
+        r.copy();
+        let text = r.clipboard().expect("clipboard");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "Name: sshd");
+        assert_eq!(lines[1], "PID: 812");
+        assert!(!text.contains("Display name"));
+        assert_eq!(r.toasts(), ["Service details copied."]);
+    }
+
+    #[gpui_kit::test]
+    fn copy_rows_follow_view_order(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.select(&[cron_node(), sshd_node()]);
+        let ids = r
+            .table
+            .read_with(&r.vcx, |table, _| table.copy_rows().to_vec());
+        assert_eq!(ids, [row_key(&sshd_node()), row_key(&cron_node())]);
+    }
 }
