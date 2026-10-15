@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AnyWindowHandle, Context, Entity, Focusable as _, IntoElement, KeyDownEvent, KeyUpEvent,
-    Keystroke, ParentElement as _, Render, Styled as _, TestAppContext, VisualContext as _,
-    VisualTestContext, Window, WindowHandle, div,
+    AnyWindowHandle, AppContext as _, Context, Entity, Focusable as _, IntoElement, KeyDownEvent,
+    KeyUpEvent, Keystroke, ParentElement as _, Render, Styled as _, TestAppContext,
+    VisualContext as _, VisualTestContext, Window, WindowHandle, div,
 };
 use tl_model::client::EngineClient;
 use tl_model::health::{SourceHealth, SourceId, SourceState};
@@ -17,7 +17,10 @@ use tl_model::settings::{Settings, UiState};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_ui::actions::{OpenCollectorHealth, OpenShortcuts};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, has_modal_child};
+use tl_ui::components::toast::ToastQueue;
+use tl_ui::components::window_frame::{
+    CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, has_modal_child,
+};
 use tl_ui::i18n::{set_test_catalogue, tr_calls};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::share_code::{decode_tl1, encode_tl1};
@@ -29,6 +32,7 @@ use tl_ui::window::share_theme::{ShareTheme, ShareThemeView};
 use tl_ui::window::shortcuts::{
     Heading, LISTED_CONTEXTS, ShortcutsWindow, build_rows, first_context,
 };
+use tl_ui::window::theme_editor::{EditTheme, ThemeEditor, ThemeEditorDone};
 
 struct Parent;
 
@@ -55,13 +59,18 @@ fn setup(cx: &mut TestAppContext) {
 
 /// `setup`, returning the fake engine.
 fn setup_engine(cx: &mut TestAppContext) -> Arc<FakeEngine> {
+    setup_themes(cx, &[mine()])
+}
+
+/// `setup` with `themes` in themes.json.
+fn setup_themes(cx: &mut TestAppContext, themes: &[ThemeDef]) -> Arc<FakeEngine> {
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     let (_tx, rx) = async_channel::bounded(4);
     let init = UiInit {
         settings: Settings::default(),
         state: UiState::default(),
-        themes_json: Some(serialize_user_themes(&[mine()]).into()),
+        themes_json: Some(serialize_user_themes(themes).into()),
         persist: Box::new(|_, _| {}),
         persist_themes: Box::new(|_| {}),
         app_requests: rx,
@@ -1847,4 +1856,233 @@ mod public_ip {
         assert_eq!(windows(cx), before, "no window opens");
         assert_eq!(r.fetches.get(), 1, "the fetch runs at once");
     }
+}
+
+// ---- Theme Editor (E21-027, UI-SHL-081) ----
+
+type EditorFrame = TlSecondaryWindow<ThemeEditor>;
+
+struct EditorRig {
+    parent: VisualTestContext,
+    toasts: Entity<ToastQueue>,
+}
+
+/// Sets up the themes and a parent window with a Root and a toast queue, as the main window has.
+fn editor_rig(cx: &mut TestAppContext, themes: &[ThemeDef]) -> EditorRig {
+    setup_themes(cx, themes);
+    cx.update(tl_ui::components::toast::init);
+    let parent = cx.add_window(|window, cx| Root::new(cx.new(|_| Parent), window, cx));
+    let mut parent = VisualTestContext::from_window(parent.into(), cx);
+    let toasts =
+        parent.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, gpui_kit::px(40.))));
+    parent.update(|window, _| window.activate_window());
+    draw(&mut parent);
+    EditorRig { parent, toasts }
+}
+
+fn edit(r: &mut EditorRig, name: &str) {
+    r.parent.dispatch_action(EditTheme {
+        name: name.to_owned().into(),
+    });
+    r.parent.run_until_parked();
+}
+
+fn editor_handle(cx: &mut TestAppContext) -> Option<WindowHandle<Root>> {
+    cx.update(|cx| {
+        cx.global::<GlobalRegistry>()
+            .0
+            .read(cx)
+            .get(&WindowKey::ThemeEditor)
+    })
+    .and_then(|h| h.downcast::<Root>())
+}
+
+fn editor_vcx(cx: &mut TestAppContext) -> (Entity<EditorFrame>, VisualTestContext) {
+    let handle = editor_handle(cx).expect("editor registered");
+    let frame = cx
+        .update(|cx| EditorFrame::find(handle, cx))
+        .expect("editor frame");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    (frame, vcx)
+}
+
+fn window_open(cx: &mut TestAppContext, id: gpui_kit::WindowId) -> bool {
+    cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
+}
+
+fn toast_texts(r: &mut EditorRig) -> Vec<String> {
+    let q = r.toasts.clone();
+    r.parent.read(|cx| {
+        q.read(cx)
+            .visible_texts()
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn editor_builtin_refused(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Default Dark");
+    draw(&mut r.parent);
+    assert_eq!(
+        toast_texts(&mut r),
+        ["Built-in themes cannot be edited. Copy it first."]
+    );
+    assert!(editor_handle(cx).is_none(), "no editor window");
+    assert!(
+        cx.update(|cx| ThemeStore::preview_name(cx)).is_none(),
+        "no preview"
+    );
+}
+
+#[gpui_kit::test]
+fn editor_cancel_restores(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    let before = cx.update(|cx| current(cx).clone());
+    edit(&mut r, "Mine");
+    assert!(
+        cx.update(|cx| ThemeStore::preview_name(cx)).is_some(),
+        "preview live"
+    );
+    let (frame, mut vcx) = editor_vcx(cx);
+    let id = vcx.window_handle().window_id();
+    // The preview token is private to the editor, so the edit is a rename.
+    vcx.simulate_keystrokes("ctrl-a");
+    vcx.simulate_input("Renamed");
+    vcx.run_until_parked();
+    cx.update(|cx| {
+        assert!(
+            !Arc::ptr_eq(&before, current(cx)),
+            "the preview replaced current()"
+        );
+    });
+    vcx.dispatch_action(CloseSecondaryWindow);
+    vcx.run_until_parked();
+    drop(frame);
+    assert!(!window_open(cx, id), "window closed");
+    let after = cx.update(|cx| current(cx).clone());
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "current() is the theme active before"
+    );
+    assert!(cx.update(|cx| ThemeStore::preview_name(cx)).is_none());
+}
+
+#[gpui_kit::test]
+fn editor_done_duplicate_name(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (frame, mut vcx) = editor_vcx(cx);
+    vcx.simulate_keystrokes("ctrl-a");
+    vcx.simulate_input("default dark");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    let f = frame.clone();
+    assert!(
+        !vcx.read(|cx| f.read(cx).content().read(cx).done_enabled()),
+        "Done disabled"
+    );
+    assert!(
+        vcx.debug_bounds("ThemeEditor-name-error").is_some(),
+        "error text drawn"
+    );
+    vcx.dispatch_action(ThemeEditorDone);
+    vcx.run_until_parked();
+    let id = vcx.window_handle().window_id();
+    assert!(window_open(cx, id), "Done does nothing");
+    assert_eq!(cx.update(|cx| cx.global::<ThemeStore>().user.len()), 1);
+    assert_eq!(
+        cx.update(|cx| cx.global::<ThemeStore>().user[0].name.to_string()),
+        "Mine"
+    );
+}
+
+#[gpui_kit::test]
+fn editor_done_saves(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (frame, mut vcx) = editor_vcx(cx);
+    let id = vcx.window_handle().window_id();
+    vcx.simulate_keystrokes("ctrl-a");
+    vcx.simulate_input("Mine 2");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    vcx.dispatch_action(ThemeEditorDone);
+    vcx.run_until_parked();
+    drop(frame);
+    assert!(!window_open(cx, id), "window closed");
+    let (names, active, setting) = cx.update(|cx| {
+        let store = cx.global::<ThemeStore>();
+        (
+            store
+                .user
+                .iter()
+                .map(|d| d.name.to_string())
+                .collect::<Vec<_>>(),
+            store.active.name.to_string(),
+            tl_ui::settings_global::TlSettings::settings(cx)
+                .theme
+                .active
+                .clone(),
+        )
+    });
+    assert_eq!(names, ["Mine 2"]);
+    assert_eq!(active, "Mine 2");
+    assert_eq!(setting, "Mine 2");
+    draw(&mut r.parent);
+    assert_eq!(toast_texts(&mut r), ["Theme saved"]);
+}
+
+#[gpui_kit::test]
+fn editor_second_theme_replaces_first(cx: &mut TestAppContext) {
+    let mut other = mine();
+    other.name = "Other".into();
+    let mut r = editor_rig(cx, &[mine(), other]);
+    edit(&mut r, "Mine");
+    let first = editor_handle(cx).expect("first editor").window_id();
+    edit(&mut r, "Other");
+    let second = editor_handle(cx).expect("second editor").window_id();
+    assert_ne!(first, second, "a new window opened");
+    assert!(!window_open(cx, first), "the first editor closed");
+    assert_eq!(
+        cx.update(|cx| ThemeStore::preview_name(cx)).as_deref(),
+        Some("Other")
+    );
+    let editors = cx.update(|cx| {
+        cx.windows()
+            .iter()
+            .filter(|w| {
+                w.downcast::<Root>()
+                    .is_some_and(|h| EditorFrame::find(h, cx).is_some())
+            })
+            .count()
+    });
+    assert_eq!(editors, 1, "one editor window");
+}
+
+#[gpui_kit::test]
+fn editor_slot_list_keys(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (frame, mut vcx) = editor_vcx(cx);
+    let at = vcx.debug_bounds("ThemeEditor-slot-0").expect("row 0 drawn");
+    vcx.simulate_click(at.center(), gpui_kit::Modifiers::none());
+    draw(&mut vcx);
+    let f = frame.clone();
+    assert_eq!(
+        vcx.read(|cx| f.read(cx).content().read(cx).selected_slot()),
+        tl_ui::theme::ThemeSlot::WindowBg
+    );
+    vcx.simulate_keystrokes("down");
+    vcx.run_until_parked();
+    let f = frame.clone();
+    assert_eq!(
+        vcx.read(|cx| f.read(cx).content().read(cx).selected_slot()),
+        tl_ui::theme::ThemeSlot::Titlebar
+    );
 }

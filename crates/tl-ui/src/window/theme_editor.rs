@@ -13,10 +13,10 @@ use gpui_kit::base::Root;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{
-    Action, AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
-    Hsla, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, MouseButton, ParentElement,
-    Render, Rgba, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
-    WindowHandle, div, gpui, prelude::FluentBuilder as _, px, size,
+    Action, AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Hsla,
+    InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, MouseButton, ParentElement, Render,
+    Rgba, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, WindowHandle,
+    div, gpui, prelude::FluentBuilder as _, px, size,
 };
 use serde::Deserialize;
 use tracing::warn;
