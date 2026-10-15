@@ -1,5 +1,5 @@
-//! `ReadProcessFiles` as root: the fixed set of `/proc/<pid>` files of any user's process (ADR-006,
-//! R-004, R-098, R-157).
+//! `ReadProcessFiles` and `ScanStrings` as root: the fixed set of `/proc/<pid>` files and the
+//! memory strings of any user's process (ADR-006, R-004, R-098, R-144, R-157).
 //!
 //! There is no path argument. The helper verifies the process with `open_verified`, keeps that
 //! pidfd open for the whole call, opens `/proc/<pid>` once as a dirfd and reads every entry
@@ -7,13 +7,19 @@
 //! exited during the call gets `Err(NoSuchProcess)` and none of the data, so data from another
 //! process is never sent.
 //!
-//! Reply shape: each requested file, in ascending bit order, gives one or more
+//! `ReadProcessFiles` reply shape: each requested file, in ascending bit order, gives one or more
 //! `File { file, data }` bodies (split at 60 KiB) or exactly one `Err(Os(errno))` body. The data
 //! of the whole reply stays under 4 MiB minus 4 KiB of headroom; the file that would pass it and
 //! every later one get `Err(Os(EFBIG))`.
 //!
-//! The helper does not log (R-281). File contents, paths and environments never leave this module
-//! except in the reply (ADR-015).
+//! `ScanStrings` runs tl-collect's `StringScanner` over `/proc/<pid>/mem` and streams `Strings`
+//! batches of at most 2,000 strings or 48 KiB, so each fits one 64 KiB frame (R-157). The final
+//! reply is the last batch, `Err(TooLarge)` at the scan limits, `Err(NoSuchProcess)` when the
+//! process exits, or `Err(Os(errno))` when no region can be read. Kernel threads get
+//! `Err(NotAllowed)`.
+//!
+//! The helper does not log (R-281). File contents, paths, environments and found strings never
+//! leave this module except in the reply (ADR-015).
 
 use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
@@ -21,7 +27,13 @@ use std::os::fd::{AsFd, OwnedFd};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Dir, Mode, OFlags};
 use rustix::io::Errno;
-use tl_model::helper_proto::{HelperError, HelperReplyBody, ProcFiles};
+use tl_collect::proc::strings::{
+    self, Encoding, MemSource, ProcMem, ScanEnd, ScanOpts, StringScanner,
+};
+use tl_collect::proc::{detail, pid_stat};
+use tl_collect::{CollectError, SysRoot};
+use tl_model::details::{StringEncoding, StringScanOpts};
+use tl_model::helper_proto::{HelperError, HelperFrame, HelperReplyBody, HelperRequest, ProcFiles};
 use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
 use tl_ops::{OpsError, process};
@@ -47,6 +59,18 @@ const NS_NAMES: [&str; 10] = [
     "user",
     "uts",
 ];
+/// Strings per `Strings` batch, at most.
+const BATCH_STRINGS: usize = 2_000;
+/// Counted bytes that end a `Strings` batch. A batch is sent once it reaches this, so it holds
+/// at most this plus one entry: 48 KiB plus 4,113 bytes, well under one 64 KiB frame.
+const BATCH_BYTES: usize = 48 * 1024;
+/// Postcard bytes of one batch entry besides its text, at most: the address varint (10), the
+/// encoding (1) and the text length varint (3).
+const ENTRY_OVERHEAD: usize = 14;
+/// The most `stat` bytes read.
+const STAT_MAX: usize = 4096;
+/// The most `maps` bytes read, as tl-collect's detail reader.
+const MAPS_MAX: usize = 16 * 1024 * 1024;
 
 /// Answers `ReadProcessFiles { key, files }`. Returns the reply bodies in send order; `dispatch`
 /// sets `last` on the final one. Unknown bits in `files` are ignored. An empty set gets
@@ -332,6 +356,206 @@ fn read_ns(dir: &OwnedFd, left: usize) -> Result<Vec<u8>, Errno> {
     encode(&list, left)
 }
 
+/// Answers `ScanStrings { key, opts }`. Sends every reply through `out`, with `last` true on the
+/// final one only, and returns the first error `out` gives. Calls `cancel` before each chunk;
+/// true ends the scan with an empty final `Strings`, and found strings not yet sent are dropped.
+#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
+pub fn scan_strings(
+    key: ProcessKey,
+    opts: &StringScanOpts,
+    boot: BootId,
+    out: &mut dyn FnMut(HelperReplyBody, bool) -> std::io::Result<()>,
+    cancel: &mut dyn FnMut() -> bool,
+) -> std::io::Result<()> {
+    scan_with_limits(
+        key,
+        opts,
+        boot,
+        out,
+        cancel,
+        strings::MAX_STRINGS,
+        strings::MAX_TEXT_BYTES,
+    )
+}
+
+/// True when `frame` is the `CancelScan` for the running `ScanStrings` frame `scan_seq` (R-157).
+#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
+pub fn is_cancel_for(frame: &HelperFrame, scan_seq: u32) -> bool {
+    matches!(frame.request, HelperRequest::CancelScan { seq } if seq == scan_seq)
+}
+
+/// `scan_strings` with the stop limits as arguments, so tests can lower them.
+fn scan_with_limits(
+    key: ProcessKey,
+    opts: &StringScanOpts,
+    boot: BootId,
+    out: &mut dyn FnMut(HelperReplyBody, bool) -> std::io::Result<()>,
+    cancel: &mut dyn FnMut() -> bool,
+    max_strings: u32,
+    max_text: u64,
+) -> std::io::Result<()> {
+    let (pidfd, scanner, mut mem) = match prepare_scan(key, opts, boot) {
+        Ok(scan) => scan,
+        Err(error) => return out(HelperReplyBody::Err(error), true),
+    };
+    let mut scanner = scanner.with_limits(max_strings, max_text);
+
+    let mut buf = Vec::with_capacity(strings::CHUNK);
+    let mut hits = Vec::new();
+    let mut batch: Vec<(u64, StringEncoding, String)> = Vec::new();
+    let mut batch_bytes = 0;
+    loop {
+        if cancel() {
+            return out(HelperReplyBody::Strings(Vec::new()), true);
+        }
+        if has_exited(&pidfd) {
+            return out(HelperReplyBody::Err(HelperError::NoSuchProcess), true);
+        }
+        let end = scanner.step(&mut mem, &mut buf, &mut hits);
+        for hit in hits.drain(..) {
+            batch_bytes += hit.value.len() + ENTRY_OVERHEAD;
+            batch.push((
+                hit.address,
+                string_encoding(hit.encoding),
+                hit.value.into_string(),
+            ));
+            if batch.len() >= BATCH_STRINGS || batch_bytes >= BATCH_BYTES {
+                batch_bytes = 0;
+                out(HelperReplyBody::Strings(std::mem::take(&mut batch)), false)?;
+            }
+        }
+        let Some(end) = end else {
+            continue;
+        };
+        if has_exited(&pidfd) {
+            return out(HelperReplyBody::Err(HelperError::NoSuchProcess), true);
+        }
+        return match end {
+            ScanEnd::Finished => out(HelperReplyBody::Strings(batch), true),
+            // `step` never returns it; the cancel path above is the only one.
+            ScanEnd::Cancelled => out(HelperReplyBody::Strings(Vec::new()), true),
+            ScanEnd::Stopped => {
+                if !batch.is_empty() {
+                    out(HelperReplyBody::Strings(batch), false)?;
+                }
+                out(HelperReplyBody::Err(HelperError::TooLarge), true)
+            }
+            ScanEnd::Failed => {
+                let errno = mem.last_errno.unwrap_or(Errno::IO);
+                out(HelperReplyBody::Err(os_err(errno)), true)
+            }
+        };
+    }
+}
+
+/// Verifies `key`, checks the kernel thread rule, reads the regions and opens `mem`. Returns the
+/// pidfd that stays open for the scan, the scanner and the memory source.
+fn prepare_scan(
+    key: ProcessKey,
+    opts: &StringScanOpts,
+    boot: BootId,
+) -> Result<(OwnedFd, StringScanner, ScanMem), HelperError> {
+    let pidfd = match process::open_verified(key, boot) {
+        Ok(fd) => fd,
+        Err(OpsError::IdentityChanged) => return Err(HelperError::IdentityChanged),
+        Err(OpsError::NoSuchProcess) => return Err(HelperError::NoSuchProcess),
+        Err(e) => return Err(os_err(ops_errno(&e))),
+    };
+    let fail = |errno: Errno| {
+        if has_exited(&pidfd) {
+            HelperError::NoSuchProcess
+        } else {
+            os_err(errno)
+        }
+    };
+    let dir = open_proc_dir(key.pid).map_err(fail)?;
+    // As in `read_with_hook`: alive after the dirfd was open, so the dirfd is this process's.
+    if has_exited(&pidfd) {
+        return Err(HelperError::NoSuchProcess);
+    }
+
+    let stat = open_at(&dir, "stat", OFlags::empty())
+        .and_then(|fd| read_capped(fd, STAT_MAX))
+        .map_err(fail)?;
+    let mut parsed = pid_stat::PidStat::default();
+    pid_stat::parse_pid_stat(&stat, &mut parsed).map_err(|_| os_err(Errno::IO))?;
+    // Rule "kernel thread".
+    if parsed.flags & pid_stat::PF_KTHREAD != 0 {
+        return Err(HelperError::NotAllowed);
+    }
+
+    let maps = open_at(&dir, "maps", OFlags::empty())
+        .and_then(|fd| read_capped(fd, MAPS_MAX))
+        .map_err(fail)?;
+    let mut infos = Vec::new();
+    detail::parse_maps(&maps, &mut infos).map_err(|_| os_err(Errno::IO))?;
+    let mut regions = Vec::new();
+    strings::select_regions(&infos, opts.include_file_backed, &mut regions);
+
+    // `ProcMem::open` reopens `/proc/<pid>` by path and checks the start time. The pidfd check
+    // after it proves the pid was not reused in between.
+    let mem = ProcMem::open(&SysRoot::host(), key).map_err(|e| match e {
+        CollectError::ProcessGone { .. } | CollectError::NotFound => HelperError::NoSuchProcess,
+        CollectError::PermissionDenied => HelperError::PermissionDenied,
+        CollectError::Os(errno) => os_err(errno),
+        _ => os_err(Errno::IO),
+    })?;
+    if has_exited(&pidfd) {
+        return Err(HelperError::NoSuchProcess);
+    }
+
+    let scan_opts = ScanOpts {
+        min_len: opts.min_len,
+        ascii: opts.ascii,
+        utf8: opts.utf8,
+        utf16le: opts.utf16le,
+        include_file_backed: opts.include_file_backed,
+    };
+    let scanner = StringScanner::new(scan_opts, regions);
+    Ok((
+        pidfd,
+        scanner,
+        ScanMem {
+            mem,
+            last_errno: None,
+        },
+    ))
+}
+
+/// `ProcMem` that keeps the errno of its last failed read, for the final `Err(Os(errno))` of a
+/// scan that could read no region. The scanner itself turns read errors into holes.
+struct ScanMem {
+    mem: ProcMem,
+    last_errno: Option<Errno>,
+}
+
+impl MemSource for ScanMem {
+    fn read(&mut self, addr: u64, buf: &mut [u8]) -> Result<usize, CollectError> {
+        let result = self.mem.read(addr, buf);
+        if let Err(e) = &result {
+            self.last_errno = Some(match e {
+                CollectError::Os(errno) => *errno,
+                CollectError::PermissionDenied => Errno::ACCESS,
+                CollectError::NotFound | CollectError::ProcessGone { .. } => Errno::SRCH,
+                _ => Errno::IO,
+            });
+        }
+        result
+    }
+}
+
+fn string_encoding(encoding: Encoding) -> StringEncoding {
+    match encoding {
+        Encoding::Ascii => StringEncoding::Ascii,
+        Encoding::Utf8 => StringEncoding::Utf8,
+        Encoding::Utf16Le => StringEncoding::Utf16Le,
+    }
+}
+
+fn os_err(errno: Errno) -> HelperError {
+    HelperError::Os(errno.raw_os_error())
+}
+
 #[cfg(test)]
 thread_local! {
     /// Opens and readlinks on this thread, so a test can prove none happened.
@@ -350,13 +574,22 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use tl_model::helper_proto::HelperReply;
+    use tl_model::actions::Signal;
+    use tl_model::helper_proto::{HelperReply, HelperTarget};
 
     use super::*;
 
     const BOOT: BootId = BootId(0x5eed_0000_0000_0007);
     /// Threads in the mapping child: each adds two mappings (stack and guard page).
     const MAPPING_THREADS: usize = 3000;
+    /// Set in the strings child's environment. The markers themselves never go in argv or env.
+    const STRINGS_CHILD_ENV: &str = "TL_HELPER_STRINGS_CHILD";
+    const ASCII_MARKER: &str = "tasklens-marker-1234";
+    const UTF16_MARKER: &str = "wine-marker";
+    /// Extra ASCII markers `tl-mark-NN-xyz` in the strings child.
+    const MARKERS: usize = 50;
+    /// Heap strings of 4,000 `q` in the strings child, so the scan sends several batches.
+    const LONG_STRINGS: usize = 100;
 
     /// A child that is killed and reaped on drop, even when an assertion fails.
     struct ChildGuard(Child);
@@ -385,23 +618,34 @@ mod tests {
 
         /// This test binary with many threads, after it printed `ready`.
         fn mapping() -> Self {
+            Self::entry(
+                "files::tests::mapping_child_entry",
+                "TL_HELPER_FILES_THREADS",
+                &MAPPING_THREADS.to_string(),
+            )
+        }
+
+        /// This test binary holding the scan markers in heap memory, after it printed `ready`.
+        fn strings() -> Self {
+            Self::entry("files::tests::strings_child_entry", STRINGS_CHILD_ENV, "1")
+        }
+
+        /// This test binary running only the test `entry` with `env=value`, after it printed
+        /// `ready`.
+        fn entry(entry: &str, env: &str, value: &str) -> Self {
             let mut child = Command::new(std::env::current_exe().expect("current_exe"))
-                .args([
-                    "--exact",
-                    "files::tests::mapping_child_entry",
-                    "--nocapture",
-                ])
-                .env("TL_HELPER_FILES_THREADS", MAPPING_THREADS.to_string())
+                .args(["--exact", entry, "--nocapture"])
+                .env(env, value)
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()
-                .expect("spawn mapping child");
+                .expect("spawn child");
             let stderr = child.stderr.take().expect("child stderr");
             let guard = ChildGuard(child);
             let ready = std::io::BufReader::new(stderr)
                 .lines()
                 .any(|line| line.is_ok_and(|l| l.trim() == "ready"));
-            assert!(ready, "mapping child never printed ready");
+            assert!(ready, "{entry} never printed ready");
             guard
         }
 
@@ -695,6 +939,256 @@ mod tests {
                 })
                 .expect("spawn thread");
         }
+        eprintln!("ready");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    type Replies = Vec<(HelperReplyBody, bool)>;
+
+    /// Runs a scan with the given limits and `cancel`, collecting every reply.
+    fn scan_limited(
+        key: ProcessKey,
+        opts: &StringScanOpts,
+        cancel: &mut dyn FnMut() -> bool,
+        max_strings: u32,
+        max_text: u64,
+    ) -> Replies {
+        let mut replies = Vec::new();
+        let mut out = |body: HelperReplyBody, last: bool| {
+            replies.push((body, last));
+            Ok(())
+        };
+        scan_with_limits(key, opts, BOOT, &mut out, cancel, max_strings, max_text)
+            .expect("out never fails");
+        replies
+    }
+
+    /// Runs `scan_strings` with no cancel, collecting every reply.
+    fn scan(key: ProcessKey, opts: &StringScanOpts) -> Replies {
+        let mut replies = Vec::new();
+        let mut out = |body: HelperReplyBody, last: bool| {
+            replies.push((body, last));
+            Ok(())
+        };
+        scan_strings(key, opts, BOOT, &mut out, &mut || false).expect("out never fails");
+        replies
+    }
+
+    /// Checks that only the final reply has `last` set.
+    fn assert_one_last(replies: &Replies) {
+        let (final_reply, rest) = replies.split_last().expect("at least one reply");
+        assert!(final_reply.1, "the final reply has last false");
+        assert!(
+            rest.iter().all(|(_, last)| !last),
+            "last set before the end"
+        );
+    }
+
+    fn found(replies: &Replies) -> Vec<(u64, StringEncoding, String)> {
+        replies
+            .iter()
+            .filter_map(|(body, _)| match body {
+                HelperReplyBody::Strings(batch) => Some(batch.iter().cloned()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn scan_finds_ascii_and_utf16() {
+        let child = ChildGuard::strings();
+        let replies = scan(child.key(), &StringScanOpts::default());
+        assert_one_last(&replies);
+        assert!(matches!(
+            replies.last(),
+            Some((HelperReplyBody::Strings(_), true))
+        ));
+        let found = found(&replies);
+        assert!(
+            found
+                .iter()
+                .any(|(_, enc, v)| *enc == StringEncoding::Ascii && v == ASCII_MARKER),
+            "ASCII marker not found"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|(_, enc, v)| *enc == StringEncoding::Utf16Le && v == UTF16_MARKER),
+            "UTF-16LE marker not found"
+        );
+    }
+
+    #[test]
+    fn scan_min_len_filters() {
+        let child = ChildGuard::strings();
+        let opts = StringScanOpts {
+            min_len: 30,
+            ..StringScanOpts::default()
+        };
+        let replies = scan(child.key(), &opts);
+        assert_one_last(&replies);
+        let found = found(&replies);
+        assert!(!found.is_empty(), "the 4,000 byte strings are still found");
+        assert!(
+            found
+                .iter()
+                .all(|(_, _, v)| !v.contains(ASCII_MARKER) && !v.contains(UTF16_MARKER)),
+            "a marker shorter than 30 chars was reported"
+        );
+    }
+
+    #[test]
+    fn scan_cancel_stops() {
+        let child = ChildGuard::strings();
+        let mut calls = 0;
+        let mut cancel = || {
+            calls += 1;
+            calls >= 2
+        };
+        let replies = scan_limited(
+            child.key(),
+            &StringScanOpts::default(),
+            &mut cancel,
+            strings::MAX_STRINGS,
+            strings::MAX_TEXT_BYTES,
+        );
+        assert_eq!(calls, 2, "the scan read more chunks after the cancel");
+        assert_one_last(&replies);
+        assert_eq!(
+            replies.last(),
+            Some(&(HelperReplyBody::Strings(Vec::new()), true))
+        );
+    }
+
+    #[test]
+    fn scan_stale_key_rejected() {
+        let child = ChildGuard::strings();
+        for key in [
+            ProcessKey {
+                start_ticks: child.key().start_ticks + 1,
+                ..child.key()
+            },
+            ProcessKey {
+                boot_id: BootId(BOOT.0 + 1),
+                ..child.key()
+            },
+        ] {
+            OPENS.with(|n| n.set(0));
+            let replies = scan(key, &StringScanOpts::default());
+            assert_eq!(
+                replies,
+                vec![(HelperReplyBody::Err(HelperError::IdentityChanged), true)]
+            );
+            assert_eq!(OPENS.with(|n| n.get()), 0, "a file was opened");
+        }
+    }
+
+    #[test]
+    fn scan_batches_fit_frame() {
+        let child = ChildGuard::strings();
+        let replies = scan(child.key(), &StringScanOpts::default());
+        let batches = replies
+            .iter()
+            .filter(|(body, _)| matches!(body, HelperReplyBody::Strings(b) if !b.is_empty()))
+            .count();
+        assert!(batches > 1, "the scan fit one batch; add long strings");
+        for (body, last) in replies {
+            let reply = HelperReply {
+                seq: u32::MAX,
+                last,
+                body,
+            };
+            let size = postcard::to_allocvec(&reply).expect("encode").len();
+            assert!(size <= 65_536, "reply of {size} bytes");
+        }
+    }
+
+    #[test]
+    fn scan_limit_too_large() {
+        let child = ChildGuard::strings();
+        let replies = scan_limited(
+            child.key(),
+            &StringScanOpts::default(),
+            &mut || false,
+            10,
+            u64::MAX,
+        );
+        assert_one_last(&replies);
+        assert_eq!(
+            replies.last(),
+            Some(&(HelperReplyBody::Err(HelperError::TooLarge), true))
+        );
+        assert!(found(&replies).len() <= 10);
+    }
+
+    #[test]
+    fn scan_kernel_thread_not_allowed() {
+        // Pid 2 is kthreadd outside containers.
+        if std::fs::read("/proc/2/comm").ok().as_deref() != Some(b"kthreadd\n".as_slice()) {
+            return;
+        }
+        let replies = scan(key_of(2), &StringScanOpts::default());
+        assert_eq!(
+            replies,
+            vec![(HelperReplyBody::Err(HelperError::NotAllowed), true)]
+        );
+    }
+
+    #[test]
+    fn cancel_scan_matches_seq() {
+        let frame = |request| HelperFrame { seq: 9, request };
+        let target = HelperTarget::Process(ProcessKey {
+            start_ticks: 1,
+            boot_id: BOOT,
+            pid: 1,
+        });
+        assert!(is_cancel_for(
+            &frame(HelperRequest::CancelScan { seq: 7 }),
+            7
+        ));
+        assert!(!is_cancel_for(
+            &frame(HelperRequest::CancelScan { seq: 8 }),
+            7
+        ));
+        assert!(!is_cancel_for(
+            &frame(HelperRequest::Signal {
+                target,
+                signal: Signal::Term,
+            }),
+            7
+        ));
+    }
+
+    /// The body of the strings child. Does nothing in a normal test run.
+    #[test]
+    fn strings_child_entry() {
+        if std::env::var_os(STRINGS_CHILD_ENV).is_none() {
+            return;
+        }
+        let mut kept: Vec<Vec<u8>> = Vec::new();
+        // Each string sits at offset 8 of its own zeroed heap buffer, so zeros end it on both
+        // sides.
+        let mut place = |bytes: &[u8]| {
+            let mut buf = vec![0u8; bytes.len() + 16];
+            buf[8..8 + bytes.len()].copy_from_slice(bytes);
+            kept.push(buf);
+        };
+        place(ASCII_MARKER.as_bytes());
+        let wide: Vec<u8> = UTF16_MARKER
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        place(&wide);
+        for n in 0..MARKERS {
+            place(format!("tl-mark-{n:02}-xyz").as_bytes());
+        }
+        for _ in 0..LONG_STRINGS {
+            place(&[b'q'; 4000]);
+        }
+        std::hint::black_box(&kept);
         eprintln!("ready");
         loop {
             std::thread::park();

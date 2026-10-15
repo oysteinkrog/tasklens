@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 tl-model = { workspace = true }
 tl-ops = { workspace = true }
+tl-collect = { workspace = true }
 # The workspace row enables the features later beads need: process, fs, net, thread, event, pipe.
 rustix = { workspace = true }
 postcard = { workspace = true }
