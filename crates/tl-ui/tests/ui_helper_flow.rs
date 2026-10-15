@@ -245,18 +245,21 @@ fn own_cancel_toasts_once(cx: &mut TestAppContext) {
 fn own_failure_toasts_start_failed(cx: &mut TestAppContext) {
     let (engine, mut main) = setup(cx);
     publish_helper(cx, &engine, HelperState::Locked, None);
-    for (seq, outcome) in [
-        (1, HelperStartOutcome::NotAuthorized),
+    // The queue merges an equal text into the visible toast, so the second shows "(×2)".
+    let expected = [FAILED.to_string(), format!("{FAILED} (\u{d7}2)")];
+    for (seq, outcome, expected) in [
+        (1, HelperStartOutcome::NotAuthorized, &expected[0]),
         (
             2,
             HelperStartOutcome::Failed("no answer from the helper".into()),
+            &expected[1],
         ),
     ] {
         main.dispatch_action(StartHelperSession);
         main.run_until_parked();
         publish_helper(cx, &engine, HelperState::Locked, Some((seq, outcome)));
+        assert_eq!(main_toasts(cx), [expected.as_str()], "seq {seq}");
     }
-    assert_eq!(main_toasts(cx), [FAILED, FAILED]);
 }
 
 #[gpui_kit::test]
