@@ -10,26 +10,33 @@
 //! hairline as quads, and paints the label lines shaped at the last build. A frame where only the
 //! hover hairline or the handle moved builds no path and shapes no text.
 //!
-//! E30-022 adds pointer and keyboard interaction; it sets [`ScrubberCache::hover_x`].
+//! Pointer interaction (E30-022): click or drag scrubs, the wheel zooms around the pointer,
+//! Shift+wheel or a middle-button drag pans, Shift+drag selects a range, a double-click returns
+//! to live. Listeners are registered in `paint` and update the page; the strip has no entity of
+//! its own, so a hover move notifies the page only when the hover x changed.
 
 use core::fmt::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Bounds, ContentMask, Element, ElementId, Entity, FillOptions, GlobalElementId, Hitbox,
-    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, Path, PathBuilder, PathStyle,
-    Pixels, Point, SharedString, Style, Window, fill, point, px, relative, size,
+    App, Bounds, ContentMask, CursorStyle, Element, ElementId, Entity, FillOptions, FocusHandle,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Path, PathBuilder, PathStyle,
+    Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Style, Window, fill, point, px,
+    relative, size,
 };
 use smallvec::SmallVec;
 use tl_model::history::{HistoryMetric, HistoryView};
 use tl_model::time::TimeNs;
 
+use super::actions::{HistoryLive, HistoryScrub, HistorySetRange};
 use super::{HistoryPage, HistoryUiState, MAX_SERIES};
 use crate::chart::GridStyle;
 use crate::chart::geometry::TimeMap;
 use crate::chart::grid::{self, GridPaint};
 use crate::chart::labels::{CachedLine, LineStyle, paint_line};
+use crate::components::focus::TlFocusRing;
 use crate::theme::{GraphPalette, TlTheme, UiMetrics};
 
 const NS_PER_SEC: u64 = 1_000_000_000;
@@ -41,6 +48,18 @@ const LABEL_TOP: f32 = 104.0;
 const LABEL_H: f32 = 14.0;
 /// Scrub grip: a 10 × 10 diamond centred on the axis line.
 const GRIP: f32 = 10.0;
+/// The scrub grip while it is dragged.
+const GRIP_DRAG: f32 = 12.0;
+/// A press this close (logical px at 100% scale) to a range bound grabs the bound.
+const BOUND_GRAB: f32 = 4.0;
+/// Wheel zoom factor per notch.
+const ZOOM_STEP: f64 = 1.25;
+/// The shortest zoomed window.
+const MIN_VIEW_NS: u64 = 60 * NS_PER_SEC;
+/// Shift+wheel pans this share of the view per notch.
+const PAN_NOTCH: f64 = 0.10;
+/// A pixel scroll delta counts as one notch per this many px.
+const PIXELS_PER_NOTCH: f32 = 20.0;
 /// Range bound grips: 6 wide, 10 high, centred on the axis line.
 const BOUND_W: f32 = 6.0;
 const BOUND_H: f32 = 10.0;
@@ -100,6 +119,61 @@ pub fn drop_overlapping(labels: &[(f32, f32)]) -> SmallVec<[usize; 16]> {
     kept
 }
 
+/// The time at strip-local `x` of a plot `width` wide showing `view`. `x` is clamped to the plot.
+pub fn x_to_t(x: f32, width: f32, view: (TimeNs, TimeNs)) -> TimeNs {
+    let frac = if width > 0.0 {
+        f64::from((x / width).clamp(0.0, 1.0))
+    } else {
+        0.0
+    };
+    view.0 + (frac * view.1.saturating_sub(view.0) as f64).round() as TimeNs
+}
+
+/// `t` rounded to a whole second and clamped into `span`.
+pub fn snap_s(t: TimeNs, span: (TimeNs, TimeNs)) -> TimeNs {
+    let s = (t.saturating_add(NS_PER_SEC / 2) / NS_PER_SEC).saturating_mul(NS_PER_SEC);
+    s.clamp(span.0, span.1.max(span.0))
+}
+
+/// Moves a window of `width` to start at `start`, kept inside `span`.
+fn place(start: i128, width: TimeNs, span: (TimeNs, TimeNs)) -> (TimeNs, TimeNs) {
+    let last_start = i128::from(span.1) - i128::from(width);
+    let start = start.min(last_start).max(i128::from(span.0)) as TimeNs;
+    (start, start + width)
+}
+
+/// Zooms `view` by `notches` (positive zooms in, 1.25 per notch) around `cursor`, which keeps its
+/// place in the view. The span of the result is clamped to 60 s (or all of `span` when shorter)
+/// up to all of `span`, and the result stays inside `span`.
+pub fn zoom(
+    view: (TimeNs, TimeNs),
+    cursor: TimeNs,
+    notches: f32,
+    span: (TimeNs, TimeNs),
+) -> (TimeNs, TimeNs) {
+    let old = view.1.saturating_sub(view.0);
+    let full = span.1.saturating_sub(span.0);
+    if old == 0 || full == 0 {
+        return view;
+    }
+    let min = MIN_VIEW_NS.min(full) as f64;
+    let width = (old as f64 / ZOOM_STEP.powf(f64::from(notches)))
+        .clamp(min, full as f64)
+        .round() as TimeNs;
+    let frac = ((i128::from(cursor) - i128::from(view.0)) as f64 / old as f64).clamp(0.0, 1.0);
+    let start = i128::from(cursor) - (frac * width as f64).round() as i128;
+    place(start, width, span)
+}
+
+/// Shifts `view` by `delta_ns` (positive is newer), keeping its width and staying inside `span`.
+pub fn pan(view: (TimeNs, TimeNs), delta_ns: i64, span: (TimeNs, TimeNs)) -> (TimeNs, TimeNs) {
+    let width = view
+        .1
+        .saturating_sub(view.0)
+        .min(span.1.saturating_sub(span.0));
+    place(i128::from(view.0) + i128::from(delta_ns), width, span)
+}
+
 /// Fill and line colour of `metric` (UI-PRC-035).
 fn metric_colors(g: &GraphPalette, metric: HistoryMetric) -> (Hsla, Hsla) {
     match metric {
@@ -156,6 +230,19 @@ struct PlacedLabel {
     slot: usize,
 }
 
+/// The pointer gesture in progress on the strip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Drag {
+    /// The scrub handle follows the pointer.
+    Scrub,
+    /// Shift+drag from `anchor`.
+    Range { anchor: TimeNs },
+    /// One range bound follows the pointer; the other stays at `fixed`.
+    Bound { fixed: TimeNs },
+    /// Middle-button drag; `last_x` is the previous pointer x in logical px.
+    Pan { last_x: f32 },
+}
+
 /// The strip's built geometry, shaped labels and hover state, kept on the page between frames.
 #[derive(Default)]
 pub struct ScrubberCache {
@@ -171,18 +258,29 @@ pub struct ScrubberCache {
     markers: SmallVec<[(Point<f32>, Hsla); 9]>,
     /// The scrub grip, centred on the origin.
     diamond: Option<Path<Pixels>>,
+    /// The scrub grip while dragged.
+    diamond_drag: Option<Path<Pixels>>,
     labels: SmallVec<[PlacedLabel; 16]>,
     pool: Vec<LabelSlot>,
     stamp: u64,
     text: String,
-    /// Pointer x relative to the strip's left edge while hovered (set by E30-022).
+    /// Pointer x relative to the strip's left edge while hovered. `None` while dragging and
+    /// after a wheel event until the pointer moves.
     pub hover_x: Option<Pixels>,
+    /// The gesture in progress.
+    pub drag: Option<Drag>,
     /// Geometry builds over every paint.
     #[cfg(any(test, feature = "test-hooks"))]
     pub build_count: u32,
     /// Gap bands painted by the last paint, window x in logical px.
     #[cfg(any(test, feature = "test-hooks"))]
     pub painted_gaps: SmallVec<[Range<Pixels>; 4]>,
+    /// The plot of the last paint, window logical px.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub plot_bounds: Bounds<Pixels>,
+    /// True when the last paint drew the focus ring.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub focus_ring_painted: bool,
 }
 
 impl ScrubberCache {
@@ -290,10 +388,19 @@ impl Element for HistoryScrubber {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut Hitbox,
+        hitbox: &mut Hitbox,
         window: &mut Window,
         cx: &mut App,
     ) {
+        let scale = cx.global::<UiMetrics>().ui_scale;
+        let focus = self.page.read(cx).strip_focus.clone();
+        let geo = Geo {
+            plot: Bounds::new(bounds.origin, size(bounds.size.width, px(PLOT_H * scale))),
+            scale,
+            hitbox: hitbox.clone(),
+            focus,
+        };
+        register_events(&self.page, &geo, window);
         let env = Env {
             sf: window.scale_factor(),
             metrics: *cx.global::<UiMetrics>(),
@@ -309,6 +416,7 @@ impl Element for HistoryScrubber {
                 ..
             } = page;
             let input = Input {
+                focused: geo.focus.is_focused(window),
                 view: view.as_deref(),
                 state,
                 now_word: &words.now,
@@ -317,6 +425,215 @@ impl Element for HistoryScrubber {
             paint_strip(scrubber, &input, &env, bounds, window, cx);
         });
     }
+}
+
+/// What the pointer listeners need, captured at paint time.
+#[derive(Clone)]
+struct Geo {
+    plot: Bounds<Pixels>,
+    scale: f32,
+    hitbox: Hitbox,
+    focus: FocusHandle,
+}
+
+impl Geo {
+    /// Pointer x relative to the plot's left edge, logical px.
+    fn x(&self, p: Point<Pixels>) -> f32 {
+        f32::from(p.x - self.plot.left())
+    }
+
+    fn width(&self) -> f32 {
+        f32::from(self.plot.size.width)
+    }
+}
+
+/// The page's view window and retained span, when both can be used.
+fn view_and_span(page: &HistoryPage) -> Option<((TimeNs, TimeNs), (TimeNs, TimeNs))> {
+    let span = page.view.as_ref().and_then(|v| v.span)?;
+    let view = page.state.view_range;
+    (view.1 > view.0).then_some((view, span))
+}
+
+/// Dispatches `HistorySetRange` for two ends in any order when they differ.
+fn dispatch_range(a: TimeNs, b: TimeNs, window: &mut Window, cx: &mut App) {
+    let (from, to) = (a.min(b), a.max(b));
+    if from < to {
+        window.dispatch_action(Box::new(HistorySetRange { from, to }), cx);
+    }
+}
+
+fn on_mouse_down(
+    page: &Entity<HistoryPage>,
+    geo: &Geo,
+    e: &MouseDownEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !geo.hitbox.is_hovered(window) {
+        return;
+    }
+    let width = geo.width();
+    let x = geo.x(e.position);
+    match e.button {
+        MouseButton::Left => {
+            window.focus(&geo.focus, cx);
+            if e.click_count >= 2 {
+                page.update(cx, |p, _| p.scrubber.drag = None);
+                window.dispatch_action(Box::new(HistoryLive), cx);
+                return;
+            }
+            page.update(cx, |p, cx| {
+                let Some((view, span)) = view_and_span(p) else {
+                    return;
+                };
+                let t = snap_s(x_to_t(x, width, view), span);
+                let to_x = |t: TimeNs| {
+                    (t as f64 - view.0 as f64) / (view.1 - view.0) as f64 * f64::from(width)
+                };
+                let grab = BOUND_GRAB * geo.scale;
+                let bound = p.state.range.and_then(|(a, b)| {
+                    if (to_x(a) - f64::from(x)).abs() <= f64::from(grab) {
+                        Some(b)
+                    } else if (to_x(b) - f64::from(x)).abs() <= f64::from(grab) {
+                        Some(a)
+                    } else {
+                        None
+                    }
+                });
+                p.scrubber.hover_x = None;
+                if let Some(fixed) = bound {
+                    p.scrubber.drag = Some(Drag::Bound { fixed });
+                } else if e.modifiers.shift {
+                    p.scrubber.drag = Some(Drag::Range { anchor: t });
+                } else {
+                    p.scrubber.drag = Some(Drag::Scrub);
+                    p.set_range(None, cx);
+                    window.dispatch_action(Box::new(HistoryScrub { t }), cx);
+                }
+                cx.notify();
+            });
+        }
+        MouseButton::Middle => page.update(cx, |p, cx| {
+            if view_and_span(p).is_some() {
+                p.scrubber.hover_x = None;
+                p.scrubber.drag = Some(Drag::Pan { last_x: x });
+                cx.notify();
+            }
+        }),
+        _ => {}
+    }
+}
+
+fn on_mouse_move(
+    page: &Entity<HistoryPage>,
+    geo: &Geo,
+    e: &MouseMoveEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let hovered = geo.hitbox.is_hovered(window);
+    page.update(cx, |p, cx| {
+        let Some(drag) = p.scrubber.drag else {
+            let hover = hovered.then(|| e.position.x - geo.plot.left());
+            if p.scrubber.hover_x != hover {
+                p.scrubber.hover_x = hover;
+                cx.notify();
+            }
+            return;
+        };
+        if e.pressed_button.is_none() {
+            // The button was released outside the window.
+            p.scrubber.drag = None;
+            cx.notify();
+            return;
+        }
+        let Some((view, span)) = view_and_span(p) else {
+            return;
+        };
+        let width = geo.width();
+        let x = geo.x(e.position);
+        let t = snap_s(x_to_t(x, width, view), span);
+        match drag {
+            Drag::Scrub => window.dispatch_action(Box::new(HistoryScrub { t }), cx),
+            Drag::Range { anchor: fixed } | Drag::Bound { fixed } => {
+                dispatch_range(fixed, t, window, cx);
+            }
+            Drag::Pan { last_x } if width > 0.0 => {
+                let delta = -f64::from((x - last_x) / width) * (view.1 - view.0) as f64;
+                p.scrubber.drag = Some(Drag::Pan { last_x: x });
+                p.set_view_range(pan(view, delta as i64, span), cx);
+            }
+            Drag::Pan { .. } => {}
+        }
+        cx.notify();
+    });
+}
+
+fn on_scroll(
+    page: &Entity<HistoryPage>,
+    geo: &Geo,
+    e: &ScrollWheelEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !geo.hitbox.is_hovered(window) {
+        return;
+    }
+    let notches = match e.delta {
+        ScrollDelta::Lines(l) => l.y,
+        ScrollDelta::Pixels(p) => f32::from(p.y) / PIXELS_PER_NOTCH,
+    };
+    if notches == 0.0 {
+        return;
+    }
+    let (x, width) = (geo.x(e.position), geo.width());
+    page.update(cx, |p, cx| {
+        let Some((view, span)) = view_and_span(p) else {
+            return;
+        };
+        let next = if e.modifiers.shift {
+            let delta = -f64::from(notches) * PAN_NOTCH * (view.1 - view.0) as f64;
+            pan(view, delta as i64, span)
+        } else {
+            zoom(view, x_to_t(x, width, view), notches, span)
+        };
+        p.scrubber.hover_x = None;
+        p.set_view_range(next, cx);
+        cx.notify();
+    });
+    cx.stop_propagation();
+}
+
+/// Registers the strip's pointer listeners for this frame.
+fn register_events(page: &Entity<HistoryPage>, geo: &Geo, window: &mut Window) {
+    let (p, g) = (page.clone(), geo.clone());
+    window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+        if phase.bubble() {
+            on_mouse_down(&p, &g, e, window, cx);
+        }
+    });
+    let (p, g) = (page.clone(), geo.clone());
+    window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+        if phase.bubble() {
+            on_mouse_move(&p, &g, e, window, cx);
+        }
+    });
+    let p = page.clone();
+    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+        if phase.bubble() {
+            p.update(cx, |p, cx| {
+                if p.scrubber.drag.take().is_some() {
+                    cx.notify();
+                }
+            });
+        }
+    });
+    let (p, g) = (page.clone(), geo.clone());
+    window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+        if phase.bubble() {
+            on_scroll(&p, &g, e, window, cx);
+        }
+    });
 }
 
 /// Per-paint values read from the window and the app.
@@ -328,6 +645,8 @@ struct Env {
 
 /// What the page hands the strip.
 struct Input<'a> {
+    /// The strip holds keyboard focus.
+    focused: bool,
     view: Option<&'a HistoryView>,
     state: &'a HistoryUiState,
     now_word: &'a SharedString,
@@ -393,6 +712,10 @@ fn paint_strip(
         plot_width: pw as f32,
     };
     let has_frames = input.has_frames();
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        cache.plot_bounds = plot;
+    }
 
     let key = GeometryKey {
         version: input.view.map_or(0, |v| v.header.version),
@@ -520,7 +843,12 @@ fn paint_strip(
                     Bounds::new(point(x, plot.top()), size(hairline, plot.size.height)),
                     theme.accent,
                 ));
-                if let Some(d) = &cache.diamond {
+                let grip = if cache.drag == Some(Drag::Scrub) {
+                    &cache.diamond_drag
+                } else {
+                    &cache.diamond
+                };
+                if let Some(d) = grip {
                     window.paint_path(placed(d, point(x, axis_y), 1.0 / sf), theme.accent);
                 }
             }
@@ -546,6 +874,33 @@ fn paint_strip(
             ));
         }
     }
+
+    match cache.drag {
+        Some(Drag::Scrub | Drag::Bound { .. }) => {
+            window.set_window_cursor_style(CursorStyle::ResizeLeftRight);
+        }
+        Some(Drag::Pan { .. }) => window.set_window_cursor_style(CursorStyle::ClosedHand),
+        _ => {}
+    }
+
+    // Focus ring: 1 px `accent` inside the strip.
+    let ring = TlFocusRing::show(input.focused, window);
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        cache.focus_ring_painted = ring;
+    }
+    if ring {
+        let w = px(1.0);
+        let (bw, bh) = (bounds.size.width, bounds.size.height);
+        for edge in [
+            Bounds::new(bounds.origin, size(bw, w)),
+            Bounds::new(point(bounds.left(), bounds.bottom() - w), size(bw, w)),
+            Bounds::new(bounds.origin, size(w, bh)),
+            Bounds::new(point(bounds.right() - w, bounds.top()), size(w, bh)),
+        ] {
+            window.paint_quad(fill(edge, theme.accent));
+        }
+    }
 }
 
 /// Rebuilds every path, marker, gap band and label of the strip into `cache`.
@@ -567,6 +922,7 @@ fn build(
     cache.markers.clear();
     cache.labels.clear();
     cache.diamond = diamond(GRIP * scale * sf / 2.0);
+    cache.diamond_drag = diamond(GRIP_DRAG * scale * sf / 2.0);
     let line_w = px(sf);
 
     if let Some(view) = input.view.filter(|_| input.has_frames()) {
@@ -885,6 +1241,58 @@ mod tests {
         for_each_run(6, |i| ts[i], |i| valid[i], &[(3, 4)], |r| runs.push(r));
         // 3 and 4 touch the gap ends but the gap (3, 4) lies between them.
         assert_eq!(runs, [0..2, 3..4, 4..6]);
+    }
+
+    fn secs(a: u64, b: u64) -> (TimeNs, TimeNs) {
+        (a * S, b * S)
+    }
+
+    #[test]
+    fn scrubber_zoom_clamps_and_keeps_cursor_time() {
+        let span = secs(0, 3600);
+        let view = secs(1000, 1600);
+        let cursor = 1300 * S;
+        let z = zoom(view, cursor, 1.0, span);
+        assert_eq!(z.1 - z.0, 480 * S);
+        assert_eq!(z, secs(1060, 1540));
+        // The cursor keeps its place in the view.
+        assert_eq!(x_to_t(0.5, 1.0, z), cursor);
+        // Zooming out.
+        let out = zoom(view, cursor, -1.0, span);
+        assert_eq!(out.1 - out.0, 750 * S);
+        // 70 s, 3 notches: clamped to 60 s.
+        let z = zoom(secs(1000, 1070), 1035 * S, 3.0, span);
+        assert_eq!(z.1 - z.0, 60 * S);
+        // Out clamps to the span and stays inside it.
+        assert_eq!(zoom(view, cursor, -20.0, span), span);
+        // A span shorter than 60 s shows whole.
+        let short = secs(10, 40);
+        assert_eq!(zoom(secs(10, 40), 20 * S, 5.0, short), short);
+        // Zooming at the right edge keeps the window inside the span.
+        let z = zoom(secs(3000, 3600), 3600 * S, 1.0, span);
+        assert_eq!(z, secs(3120, 3600));
+    }
+
+    #[test]
+    fn pan_clamped_to_span() {
+        let span = secs(100, 1000);
+        let view = secs(400, 1000);
+        assert_eq!(pan(view, 30 * S as i64, span), view);
+        assert_eq!(pan(view, -30 * S as i64, span), secs(370, 970));
+        assert_eq!(pan(view, -1000 * S as i64, span), secs(100, 700));
+        assert_eq!(pan(secs(100, 700), 50 * S as i64, span), secs(150, 750));
+    }
+
+    #[test]
+    fn x_to_t_maps() {
+        let view = secs(400, 1000);
+        assert_eq!(x_to_t(0.0, 200.0, view), 400 * S);
+        assert_eq!(x_to_t(50.0, 200.0, view), 550 * S);
+        assert_eq!(x_to_t(200.0, 200.0, view), 1000 * S);
+        assert_eq!(x_to_t(-5.0, 200.0, view), 400 * S);
+        assert_eq!(x_to_t(250.0, 200.0, view), 1000 * S);
+        assert_eq!(snap_s(550 * S + S / 2 - 1, secs(100, 1000)), 550 * S);
+        assert_eq!(snap_s(2000 * S, secs(100, 1000)), 1000 * S);
     }
 
     #[test]

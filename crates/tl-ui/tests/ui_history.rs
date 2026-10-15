@@ -1499,3 +1499,98 @@ mod row_actions {
         assert_eq!(cell, "live\ngone");
     }
 }
+
+/// The plot of the last paint.
+fn plot(
+    page: &Entity<HistoryPage>,
+    vcx: &mut VisualTestContext,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    vcx.read_entity(page, |p, _| p.scrubber().plot_bounds)
+}
+
+/// A point at `frac` of the plot width, on the plot's vertical middle.
+fn at(plot: gpui_kit::Bounds<gpui_kit::Pixels>, frac: f32) -> gpui_kit::Point<gpui_kit::Pixels> {
+    gpui_kit::point(
+        plot.left() + plot.size.width * frac,
+        plot.top() + plot.size.height / 2.0,
+    )
+}
+
+fn settle(vcx: &mut VisualTestContext) {
+    vcx.run_until_parked();
+    draw(vcx);
+}
+
+#[gpui_kit::test]
+fn click_scrubs_snapped(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton};
+    let (page, vcx) = keys_page(cx);
+    let plot = plot(&page, vcx);
+    let p = at(plot, 0.25);
+    vcx.simulate_mouse_move(p, None, Modifiers::none());
+    vcx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    vcx.simulate_mouse_up(p, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    // View 400..1000 s: 25% is 550 s.
+    assert_eq!(scrub_of(&page, vcx), Some(550 * S));
+}
+
+#[gpui_kit::test]
+fn shift_drag_sets_range(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton};
+    let (page, vcx) = keys_page(cx);
+    let plot = plot(&page, vcx);
+    let (a, b) = (at(plot, 0.2), at(plot, 0.4));
+    let shift = Modifiers::shift();
+    vcx.simulate_mouse_move(a, None, shift);
+    vcx.simulate_mouse_down(a, MouseButton::Left, shift);
+    settle(vcx);
+    vcx.simulate_mouse_move(b, MouseButton::Left, shift);
+    settle(vcx);
+    vcx.simulate_mouse_up(b, MouseButton::Left, shift);
+    settle(vcx);
+    let range = vcx.read_entity(&page, |p, _| p.state().range);
+    assert_eq!(range, Some((520 * S, 640 * S)));
+    let header = vcx.read_entity(&page, |p, _| p.header().to_string());
+    assert!(header.starts_with("History Range:"), "{header}");
+}
+
+#[gpui_kit::test]
+fn double_click_returns_live(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton, MouseDownEvent};
+    let (page, vcx) = keys_page(cx);
+    page.update(vcx, |p, cx| {
+        p.set_scrub(Some(500 * S), cx);
+        p.set_range(Some((450 * S, 550 * S)), cx);
+    });
+    draw(vcx);
+    let plot = plot(&page, vcx);
+    let p = at(plot, 0.5);
+    vcx.simulate_mouse_move(p, None, Modifiers::none());
+    vcx.simulate_event(MouseDownEvent {
+        position: p,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    settle(vcx);
+    let (scrub, range) = vcx.read_entity(&page, |p, _| (p.state().scrub, p.state().range));
+    assert_eq!((scrub, range), (None, None));
+}
+
+#[gpui_kit::test]
+fn strip_focus_ring(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton};
+    let (page, vcx) = keys_page(cx);
+    vcx.simulate_keystrokes("left");
+    settle(vcx);
+    assert!(vcx.read_entity(&page, |p, _| p.scrubber().focus_ring_painted));
+    // A click focuses without the keyboard, so the ring is not shown.
+    let p = at(plot(&page, vcx), 0.5);
+    vcx.simulate_mouse_move(p, None, Modifiers::none());
+    vcx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+    settle(vcx);
+    assert!(!vcx.read_entity(&page, |p, _| p.scrubber().focus_ring_painted));
+}

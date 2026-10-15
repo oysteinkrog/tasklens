@@ -40,9 +40,9 @@ use tl_model::units::{self, LocalDateTime};
 
 use self::actions::{
     DeleteFromHistory, HISTORY_CONTEXT, HistoryLive, HistoryMetricCpu, HistoryMetricDisk,
-    HistoryMetricGpu, HistoryMetricMemory, HistoryMetricNetwork, HistoryOldest,
-    HistoryShowInLiveTable, HistoryStepBack, HistoryStepBackMinute, HistoryStepForward,
-    HistoryStepForwardMinute, SCRUBBED,
+    HistoryMetricGpu, HistoryMetricMemory, HistoryMetricNetwork, HistoryOldest, HistoryScrub,
+    HistorySetRange, HistoryShowInLiveTable, HistoryStepBack, HistoryStepBackMinute,
+    HistoryStepForward, HistoryStepForwardMinute, SCRUBBED,
 };
 use crate::components::toast::ToastKind;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
@@ -548,7 +548,7 @@ impl HistoryPage {
             table,
             section_versions,
             scrubber: ScrubberCache::default(),
-            strip_focus: cx.focus_handle(),
+            strip_focus: cx.focus_handle().tab_stop(true),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -651,6 +651,14 @@ impl HistoryPage {
         self.state.scrub = None;
         self.state.range = None;
         self.on_query_state(cx);
+    }
+
+    fn on_scrub(&mut self, a: &HistoryScrub, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_scrub(Some(a.t), cx);
+    }
+
+    fn on_set_range(&mut self, a: &HistorySetRange, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_range(Some((a.from, a.to)), cx);
     }
 
     fn on_metric(&mut self, metric: HistoryMetric, cx: &mut Context<Self>) {
@@ -1158,6 +1166,8 @@ impl Render for HistoryPage {
             .on_action(cx.listener(Self::on_step_forward_minute))
             .on_action(cx.listener(Self::on_oldest))
             .on_action(cx.listener(Self::on_live))
+            .on_action(cx.listener(Self::on_scrub))
+            .on_action(cx.listener(Self::on_set_range))
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_details))
             .on_action(cx.listener(Self::on_copy_all_metrics))
