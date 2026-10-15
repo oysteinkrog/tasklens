@@ -8,16 +8,21 @@
 //! and waits for a filled process table with CPU and Memory totals. The Startup test activates
 //! the Startup page state and waits for the view built for its query. The Startup page test opens
 //! the main window on the Startup tab and waits for the page's table and status text.
+//! The Services test (tasklens-hk6.12) expands a unit on a lone Services table and waits for
+//! the process sweep its demand turns on.
 //!
 //! GPUI's test scheduler fails a test when another thread wakes one of its tasks, so the UI gets
 //! the engine through `Pumped`, whose wake channel the test thread feeds.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{AppContext as _, Context, TestAppContext, VisualTestContext, Window};
+use gpui_kit::base::Root;
+use gpui_kit::{AppContext as _, Context, Entity, TestAppContext, VisualTestContext, Window};
 use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
 use tl_engine::EngineHandle;
@@ -26,12 +31,16 @@ use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, Tab};
 use tl_model::demand::Demand;
-use tl_model::health::SourceId;
+use tl_model::health::{ManagerState, SourceId};
+use tl_model::ids::ProcessKey;
 use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::settings::EngineSettings;
 use tl_model::settings::{Settings, UiState};
-use tl_model::snapshot::Snapshot;
-use tl_model::table::{StartupColumn, SysColumnId, SysSortSpec, SysTable};
+use tl_model::snapshot::{ServicesSnapshot, Snapshot};
+use tl_model::table::{
+    Manager, ServiceColumn, StartupColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec, SysTable,
+    UnitRef,
+};
 use tl_model::units;
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -39,9 +48,11 @@ use tl_ui::demand::GlobalDemand;
 use tl_ui::hub::GlobalHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::processes::ProcessesPage;
+use tl_ui::pages::services::delegate::{ServicesDelegate, row_key};
 use tl_ui::pages::startup::StartupPage;
-use tl_ui::pages::sys_table::{SysBody, SysPageState, SysQuery};
-use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
+use tl_ui::pages::sys_table::{SysBody, SysDelegate as _, SysPageState, SysQuery};
+use tl_ui::table::cells::CellOut;
+use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _};
 use tl_ui::window::main::{
     MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
 };
@@ -459,5 +470,156 @@ fn startup_page_fills_from_real_engine(cx: &mut TestAppContext) {
         status.starts_with(&format!("{total} Total | ")),
         "the status text shows the engine's counts"
     );
+    assert!(report.drained, "engine drained on shutdown");
+}
+
+/// `base` with a services list of one expanded sshd.service unit and one child row per key.
+fn with_unit(base: &Snapshot, unit: &UnitRef, children: &[ProcessKey]) -> Arc<Snapshot> {
+    let mut rows = vec![
+        SysRow {
+            node: SysNodeId::ServiceGroup(Manager::System),
+            depth: 0,
+            expanded: true,
+            has_children: true,
+            record: None,
+        },
+        SysRow {
+            node: SysNodeId::Unit(unit.clone()),
+            depth: 1,
+            expanded: true,
+            has_children: true,
+            record: None,
+        },
+    ];
+    rows.extend(children.iter().map(|key| SysRow {
+        node: SysNodeId::UnitProcess(unit.clone(), *key),
+        depth: 2,
+        expanded: false,
+        has_children: false,
+        record: None,
+    }));
+    let mut snap = base.clone();
+    snap.services = Arc::new(ServicesSnapshot {
+        rows: rows.into(),
+        managers: [ManagerState::Connected; 2],
+        ..ServicesSnapshot::default()
+    });
+    Arc::new(snap)
+}
+
+/// Services child rows against the real engine (tasklens-hk6.12, leader comment 161). No
+/// Processes page exists: expanding a unit on the active Services table turns on the process
+/// sweep, a child row shows the engine's record, and collapsing the unit withdraws the demand.
+#[gpui_kit::test]
+fn services_child_demand_runs_process_sweep(cx: &mut TestAppContext) {
+    let (dir, root) = fixture_root();
+    let mut cpu_ticks = CpuTicks::new(&root);
+    let engine = start_engine(dir.path(), &root);
+    let pumped = Arc::new(Pumped::new(engine.clone()));
+    init_ui(cx, pumped.clone());
+    let slot = Rc::new(RefCell::new(None));
+    let keep = Rc::clone(&slot);
+    let handle = cx.add_window(move |window, cx| {
+        let delegate = ServicesDelegate::new(&UiState::default());
+        let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
+        *keep.borrow_mut() = Some(table.clone());
+        Root::new(table, window, cx)
+    });
+    let table: Entity<TlTreeTable<ServicesDelegate>> =
+        slot.borrow().clone().expect("the services table");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+
+    let unit = UnitRef {
+        manager: Manager::System,
+        name: Arc::from("sshd.service"),
+    };
+    let install = |vcx: &mut VisualTestContext, snap: Arc<Snapshot>| {
+        vcx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                t.delegate.install(&snap);
+                t.on_new_version(cx);
+            });
+        });
+    };
+    let toggle = |vcx: &mut VisualTestContext| {
+        let id = row_key(&SysNodeId::Unit(unit.clone()));
+        vcx.update(|_, cx| {
+            table.update(cx, |t, cx| t.delegate_mut().on_toggle_expand(id, cx));
+        });
+    };
+    let merged = |vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged())
+    };
+    install(&mut vcx, with_unit(&engine.latest(), &unit, &[]));
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| t.delegate_mut().set_active(true, cx));
+    });
+    let before = merged(&mut vcx);
+    toggle(&mut vcx);
+
+    let begin = Instant::now();
+    while begin.elapsed() < DEADLINE {
+        if !engine.latest().processes.records.is_empty() && merged(&mut vcx).process_table {
+            break;
+        }
+        step(&mut vcx, &mut cpu_ticks, &pumped);
+    }
+    let expanded = merged(&mut vcx);
+    let latest = engine.latest();
+    let child = latest.processes.records.first().map(|r| r.key);
+
+    // A child row for an engine record shows its PID and is reported as a detail key.
+    let mut pid_text = String::new();
+    let mut detail_keys = Vec::new();
+    if let Some(key) = child {
+        install(&mut vcx, with_unit(&latest, &unit, &[key]));
+        step(&mut vcx, &mut cpu_ticks, &pumped);
+        pid_text = vcx.update(|_, cx| {
+            let mut out = CellOut {
+                want_text: true,
+                ..CellOut::default()
+            };
+            let d = &table.read(cx).delegate;
+            d.cell(2, SysColumnId::Services(ServiceColumn::Pid), &mut out);
+            out.text
+        });
+        detail_keys = merged(&mut vcx).detail_keys.to_vec();
+    }
+
+    toggle(&mut vcx);
+    step(&mut vcx, &mut cpu_ticks, &pumped);
+    let collapsed = merged(&mut vcx);
+    let report = engine.shutdown(Duration::from_millis(1500));
+
+    eprintln!(
+        "records {}, child {child:?}, pid text {pid_text:?}, detail keys {detail_keys:?}",
+        latest.processes.records.len()
+    );
+    assert!(
+        before.any_surface_visible && before.services && !before.process_table,
+        "no sweep before a unit is expanded"
+    );
+    assert!(
+        expanded.process_table,
+        "an expanded unit asks for the sweep"
+    );
+    let key = child.expect("the sweep published process records");
+    assert_eq!(
+        pid_text,
+        key.pid.to_string(),
+        "the child row shows the engine's PID"
+    );
+    assert_eq!(detail_keys, [key], "the visible child is a detail key");
+    assert!(
+        collapsed.any_surface_visible && collapsed.services,
+        "the page stays visible"
+    );
+    assert!(
+        !collapsed.process_table,
+        "collapsing the last unit withdraws the sweep"
+    );
+    assert!(collapsed.detail_keys.is_empty());
     assert!(report.drained, "engine drained on shutdown");
 }

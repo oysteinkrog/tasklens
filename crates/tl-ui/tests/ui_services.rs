@@ -2400,3 +2400,304 @@ fn unit_row_tooltips_and_accessible_name(cx: &mut TestAppContext) {
         Some("System services, 214 units, expanded")
     );
 }
+
+// ---- Child process rows and process demand (UI-SYS-016) ----
+
+use smallvec::SmallVec;
+use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+use tl_model::snapshot::ProcessSnapshot;
+use tl_model::units;
+use tl_model::validity::FieldValidity;
+use tl_ui::pages::services::delegate::{ChildCell, child_column, child_demand};
+
+fn child_key(pid: u32) -> ProcessKey {
+    ProcessKey {
+        start_ticks: u64::from(pid),
+        boot_id: BootId(1),
+        pid,
+    }
+}
+
+fn child_process(pid: u32, flags: ProcFlags) -> ProcessRecord {
+    let text = |value: &str| Arc::<str>::from(value);
+    ProcessRecord {
+        key: child_key(pid),
+        ppid: 1,
+        uid: 0,
+        meta: Arc::new(ProcessMeta {
+            comm: text("sshd"),
+            name: text("sshd"),
+            exe: Some(text("/usr/bin/sshd")),
+            cmdline: None,
+            user: text("root"),
+            cgroup: None,
+            app_id: None,
+            icon: None,
+            description: Some(text("OpenSSH daemon")),
+            desktop_path: None,
+            search_lower: text("sshd"),
+        }),
+        group: GroupKind::System.key(),
+        state: ProcState::Sleeping,
+        flags,
+        nice: 0,
+        threads: 3,
+        cpu_pct: 0.5,
+        rss_anon_bytes: 5_452_595,
+        rss_bytes: 9_000_000,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.,
+        io_write_bps: 0.,
+        net_rx_bps: 0.,
+        net_tx_bps: 0.,
+        gpu_util_pct: 0.,
+        gpu_mem_bytes: 0,
+        euid: None,
+        net_shared: false,
+        cancelled_write_bps: 0.,
+        validity: FieldValidity::all(Validity::Valid),
+    }
+}
+
+/// System group (row 0), the expanded sshd.service unit (row 1), one child row per key from
+/// row 2, then the User group. `records` is the process snapshot.
+fn install_children(
+    d: &mut ServicesDelegate,
+    children: &[ProcessKey],
+    records: Vec<ProcessRecord>,
+) {
+    let unit = record("sshd.service", UnitType::Service, ServiceStatus::Running);
+    let mut rows = vec![
+        SysRow {
+            node: SysNodeId::ServiceGroup(Manager::System),
+            depth: 0,
+            expanded: true,
+            has_children: true,
+            record: None,
+        },
+        SysRow {
+            node: SysNodeId::Unit(unit.unit.clone()),
+            depth: 1,
+            expanded: true,
+            has_children: true,
+            record: Some(0),
+        },
+    ];
+    for key in children {
+        rows.push(SysRow {
+            node: SysNodeId::UnitProcess(unit.unit.clone(), *key),
+            depth: 2,
+            expanded: false,
+            has_children: false,
+            // Stale on purpose: the delegate finds the record by key.
+            record: Some(7),
+        });
+    }
+    rows.push(SysRow {
+        node: SysNodeId::ServiceGroup(Manager::User),
+        depth: 0,
+        expanded: true,
+        has_children: true,
+        record: None,
+    });
+    let mut records = records;
+    records.sort_by_key(|r| r.key);
+    let mut snap = Snapshot::empty(BootId(1), 1);
+    snap.services = Arc::new(ServicesSnapshot {
+        rows: rows.into(),
+        units: vec![unit].into(),
+        managers: CONNECTED,
+        ..ServicesSnapshot::default()
+    });
+    snap.processes = Arc::new(ProcessSnapshot {
+        records: records.into(),
+        ..ProcessSnapshot::default()
+    });
+    d.install(&Arc::new(snap));
+}
+
+fn child_delegate(
+    cx: &mut TestAppContext,
+    children: &[ProcessKey],
+    records: Vec<ProcessRecord>,
+) -> ServicesDelegate {
+    let mut d = delegate(cx, Vec::new(), CONNECTED);
+    install_children(&mut d, children, records);
+    d
+}
+
+/// The text a cell shows: its `arc`, else its formatted text.
+fn shown(out: &CellOut) -> String {
+    out.arc
+        .as_deref()
+        .map_or_else(|| out.text.clone(), str::to_owned)
+}
+
+#[gpui_kit::test]
+fn child_rows_column_mapping(cx: &mut TestAppContext) {
+    let process = child_process(812, ProcFlags::empty());
+    let d = child_delegate(cx, &[child_key(812)], vec![process.clone()]);
+    assert_eq!(d.row_kind(2), RowKind::Process);
+    assert_eq!(d.row_depth(2), 2);
+
+    for column in [ServiceColumn::Status, ServiceColumn::StartupType] {
+        let out = cell(&d, 2, column);
+        assert_eq!(shown(&out), "", "{column:?}");
+        assert_eq!(out.dot, None, "{column:?}");
+    }
+    assert_eq!(shown(&cell(&d, 2, ServiceColumn::Pid)), "812");
+    let mut memory = String::new();
+    units::bytes(&mut memory, process.rss_anon_bytes);
+    assert_eq!(memory, "5.20 MiB");
+    assert_eq!(shown(&cell(&d, 2, ServiceColumn::Memory)), memory);
+    assert_eq!(
+        shown(&cell(&d, 2, ServiceColumn::DisplayName)),
+        "OpenSSH daemon"
+    );
+    assert_eq!(shown(&cell(&d, 2, ServiceColumn::User)), "root");
+    assert_eq!(shown(&cell(&d, 2, ServiceColumn::Path)), "/usr/bin/sshd");
+    assert_eq!(shown(&cell(&d, 2, ServiceColumn::Tasks)), "3");
+    for column in [
+        ServiceColumn::Manager,
+        ServiceColumn::UnitType,
+        ServiceColumn::SubState,
+        ServiceColumn::LoadState,
+        ServiceColumn::ActiveSince,
+        ServiceColumn::UnitFile,
+        ServiceColumn::TriggeredBy,
+        ServiceColumn::Description,
+    ] {
+        assert_eq!(shown(&cell(&d, 2, column)), "", "{column:?}");
+    }
+    assert_eq!(d.name_cell(2).primary, "sshd");
+    assert!(!d.row_flags(2).has(RowFlags::EXITED));
+
+    let mapping = [
+        (ServiceColumn::Name, ChildCell::Name),
+        (ServiceColumn::DisplayName, ChildCell::Description),
+        (ServiceColumn::Status, ChildCell::Empty),
+        (ServiceColumn::StartupType, ChildCell::Empty),
+        (ServiceColumn::Pid, ChildCell::Pid),
+        (ServiceColumn::User, ChildCell::User),
+        (ServiceColumn::Path, ChildCell::ExePath),
+        (ServiceColumn::Manager, ChildCell::Empty),
+        (ServiceColumn::UnitType, ChildCell::Empty),
+        (ServiceColumn::SubState, ChildCell::Empty),
+        (ServiceColumn::LoadState, ChildCell::Empty),
+        (ServiceColumn::Cpu, ChildCell::Cpu),
+        (ServiceColumn::Memory, ChildCell::Memory),
+        (ServiceColumn::Disk, ChildCell::Disk),
+        (ServiceColumn::Tasks, ChildCell::Threads),
+        (ServiceColumn::ActiveSince, ChildCell::Empty),
+        (ServiceColumn::UnitFile, ChildCell::Empty),
+        (ServiceColumn::TriggeredBy, ChildCell::Empty),
+        (ServiceColumn::Description, ChildCell::Empty),
+    ];
+    assert_eq!(mapping.len(), services_columns().len());
+    for (column, want) in mapping {
+        assert_eq!(child_column(column), want, "{column:?}");
+    }
+}
+
+#[gpui_kit::test]
+fn child_row_exited_style(cx: &mut TestAppContext) {
+    let gone = child_key(900);
+    let d = child_delegate(
+        cx,
+        &[child_key(812), gone],
+        vec![child_process(812, ProcFlags::EXITED)],
+    );
+    let theme = cx.update(|cx| current(cx).clone());
+    assert!(d.row_flags(2).has(RowFlags::EXITED));
+    assert!(d.name_cell(2).primary == "sshd");
+    for column in [
+        ServiceColumn::Pid,
+        ServiceColumn::Memory,
+        ServiceColumn::User,
+    ] {
+        assert_eq!(
+            cell(&d, 2, column).text_color,
+            Some(theme.text_secondary),
+            "{column:?}"
+        );
+    }
+
+    // A key no longer in the process snapshot draws as exited until the services update.
+    assert!(d.row_flags(3).has(RowFlags::EXITED));
+    let pid = cell(&d, 3, ServiceColumn::Pid);
+    assert_eq!(shown(&pid), "900");
+    assert_eq!(pid.text_color, Some(theme.text_secondary));
+    assert_eq!(shown(&cell(&d, 3, ServiceColumn::Memory)), "");
+}
+
+/// A delegate table with an engine, the unit and three children installed, the page active
+/// and the unit expanded with the three child rows visible.
+fn expanded_with_children(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<TlTreeTable<ServicesDelegate>>,
+    Arc<FakeEngine>,
+    Vec<ProcessKey>,
+) {
+    let (table, engine) = delegate_table_with_engine(cx, UiState::default());
+    let keys = vec![child_key(812), child_key(813), child_key(814)];
+    let records = keys
+        .iter()
+        .map(|k| child_process(k.pid, ProcFlags::empty()))
+        .collect();
+    cx.update(|cx| {
+        table.update(cx, |table, cx| {
+            install_children(table.delegate_mut(), &keys, records);
+            table.on_new_version(cx);
+            let d = table.delegate_mut();
+            d.set_active(true, cx);
+            let part = d.demand_part();
+            assert!(!part.process_table);
+            assert!(part.detail_keys.is_empty());
+            d.on_toggle_expand(d.row_id(1), cx);
+            let ids: Vec<u64> = (0..d.row_count()).map(|ix| d.row_id(ix)).collect();
+            d.on_visible_range(&ids, cx);
+        });
+    });
+    cx.executor().advance_clock(DEMAND_COALESCE * 2);
+    cx.run_until_parked();
+    (table, engine, keys)
+}
+
+#[gpui_kit::test]
+fn expanding_unit_enables_process_demand(cx: &mut TestAppContext) {
+    let (table, engine, keys) = expanded_with_children(cx);
+    let part = cx.update(|cx| table.read(cx).delegate.demand_part());
+    assert!(part.any_surface_visible && part.services);
+    assert!(part.process_table);
+    assert_eq!(&*part.detail_keys, &keys[..]);
+    let sent = engine.demands().last().cloned().expect("a demand was sent");
+    assert!(sent.process_table);
+    assert_eq!(&*sent.detail_keys, &keys[..]);
+
+    let many: Vec<ProcessKey> = (0..600).map(child_key).collect();
+    assert_eq!(child_demand(1, &many).1.len(), 512);
+}
+
+#[gpui_kit::test]
+fn collapsing_last_unit_clears_process_demand(cx: &mut TestAppContext) {
+    let (table, engine, keys) = expanded_with_children(cx);
+    cx.update(|cx| {
+        table.update(cx, |table, cx| {
+            let d = table.delegate_mut();
+            d.on_toggle_expand(d.row_id(1), cx);
+        });
+    });
+    cx.executor().advance_clock(DEMAND_COALESCE * 2);
+    cx.run_until_parked();
+    let part = cx.update(|cx| table.read(cx).delegate.demand_part());
+    assert!(part.any_surface_visible && part.services);
+    assert!(!part.process_table);
+    assert!(part.detail_keys.is_empty());
+    let sent = engine.demands().last().cloned().expect("a demand was sent");
+    assert!(!sent.process_table);
+    assert!(sent.detail_keys.is_empty());
+    assert_eq!(child_demand(0, &keys), (false, SmallVec::new()));
+}

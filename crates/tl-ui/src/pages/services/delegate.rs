@@ -1,6 +1,11 @@
 //! Services table rows, columns, expansion and persistence (UI-SYS-002, UI-SYS-013).
+//!
+//! Child process rows (UI-SYS-016) paint through the process table's `ProcessRowCells`, with the
+//! Services columns mapped by [`child_column`]. Each child finds its record by `ProcessKey` in
+//! the installed snapshot, so a key that left the process snapshot draws as exited.
 
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::hash::BuildHasher as _;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -13,16 +18,20 @@ use gpui_kit::{
 };
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tl_model::demand::Demand;
+use tl_model::demand::{ColumnSet, Demand};
 use tl_model::health::ManagerState;
-use tl_model::settings::{SortState, UiState};
+use tl_model::ids::{ColumnId, NodeId, ProcessKey};
+use tl_model::process::{ProcFlags, ProcState, ProcessRecord};
+use tl_model::settings::{Settings, SortState, UiState};
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ProcessSnapshot, ServiceBackend, ServiceStatus,
     ServicesSnapshot, Snapshot, StartupType, UnitRecord,
 };
 use tl_model::table::{
-    Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec, Total, UnitRef, UnitType,
+    Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec, TableRow, Total, UnitRef,
+    UnitType,
 };
+use tl_model::time::{BootId, now_boot_ns};
 use tl_model::units;
 use tl_model::units::LocalDateTime;
 use tl_model::validity::Validity;
@@ -32,15 +41,20 @@ use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::demand::GlobalDemand;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
+use crate::pages::processes::cells::{CellCtx, CellWords, GroupMembers, PaintState, RowRef};
+use crate::pages::processes::delegate::{ProcessRowCells, ValidityTips, live_tip};
+use crate::pages::processes::name_cell::{self, NameCellData, NameWords, StateGlyph};
+use crate::pages::processes::tooltip::{RowTipState as ProcTipState, RowTipWords, RowTooltip};
 use crate::pages::sys_status::{DotStyle, LabelTone, SysStatus, status_look, tone_color};
 use crate::pages::sys_table::{ActionKindTag, SysDelegate};
-use crate::settings_global::TlSettings;
+use crate::settings_global::{Section, TlSettings};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
 use crate::table::tree_table::{
-    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
+    DEMAND_MAX_IDS, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
+    TreeTableDelegate,
 };
 use crate::theme::{TlTheme, current};
 
@@ -181,6 +195,87 @@ pub fn cgroup_stats_wanted(layout: &ColumnLayout<SysColumnId>) -> bool {
     .into_iter()
     .any(|column| layout.visible.contains(&service_id(column)))
 }
+
+/// What a child process row shows in one Services column (UI-SYS-016).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChildCell {
+    Name,
+    Description,
+    Pid,
+    User,
+    ExePath,
+    Cpu,
+    Memory,
+    Disk,
+    Threads,
+    Empty,
+}
+
+/// Services column -> what the child row shows.
+pub fn child_column(col: ServiceColumn) -> ChildCell {
+    match col {
+        ServiceColumn::Name => ChildCell::Name,
+        ServiceColumn::DisplayName => ChildCell::Description,
+        ServiceColumn::Pid => ChildCell::Pid,
+        ServiceColumn::User => ChildCell::User,
+        ServiceColumn::Path => ChildCell::ExePath,
+        ServiceColumn::Cpu => ChildCell::Cpu,
+        ServiceColumn::Memory => ChildCell::Memory,
+        ServiceColumn::Disk => ChildCell::Disk,
+        ServiceColumn::Tasks => ChildCell::Threads,
+        ServiceColumn::Status
+        | ServiceColumn::StartupType
+        | ServiceColumn::Manager
+        | ServiceColumn::UnitType
+        | ServiceColumn::SubState
+        | ServiceColumn::LoadState
+        | ServiceColumn::ActiveSince
+        | ServiceColumn::UnitFile
+        | ServiceColumn::TriggeredBy
+        | ServiceColumn::Description => ChildCell::Empty,
+    }
+}
+
+/// The process table column a child cell paints, `None` for an empty cell.
+fn child_process_column(cell: ChildCell) -> Option<ColumnId> {
+    Some(match cell {
+        ChildCell::Name => ColumnId::Name,
+        ChildCell::Description => ColumnId::Description,
+        ChildCell::Pid => ColumnId::Pid,
+        ChildCell::User => ColumnId::User,
+        ChildCell::ExePath => ColumnId::ImagePath,
+        ChildCell::Cpu => ColumnId::Cpu,
+        ChildCell::Memory => ColumnId::Memory,
+        ChildCell::Disk => ColumnId::Disk,
+        ChildCell::Threads => ColumnId::Threads,
+        ChildCell::Empty => return None,
+    })
+}
+
+/// Demand contribution of the Services page: the process sweep and the visible child keys
+/// (at most `DEMAND_MAX_IDS`) while at least one unit row is expanded, else nothing.
+pub fn child_demand(
+    expanded_units: usize,
+    visible_child_keys: &[ProcessKey],
+) -> (bool, SmallVec<[ProcessKey; 64]>) {
+    if expanded_units == 0 {
+        return (false, SmallVec::new());
+    }
+    (
+        true,
+        visible_child_keys
+            .iter()
+            .take(DEMAND_MAX_IDS)
+            .copied()
+            .collect(),
+    )
+}
+
+/// `sysconf(_SC_CLK_TCK)`, as in the process table.
+const CLK_TCK: u32 = 100;
+
+/// Settings sections the child cells read.
+const CHILD_SECTIONS: [Section; 3] = [Section::Units, Section::Appearance, Section::Tables];
 
 /// Stable table key for a Services node. `TreeTableDelegate::RowId` must be `Copy`.
 pub fn row_key(node: &SysNodeId) -> u64 {
@@ -566,7 +661,8 @@ fn metric<T: Copy>(
 /// Services rows and table-owned interaction state.
 pub struct ServicesDelegate {
     snap: Arc<ServicesSnapshot>,
-    processes: Arc<ProcessSnapshot>,
+    /// The whole installed snapshot. Child rows read their process records here.
+    snapshot: Arc<Snapshot>,
     rows: Arc<[SysRow]>,
     row_index: FxHashMap<u64, usize>,
     expanded: FxHashSet<SysNodeId>,
@@ -588,6 +684,21 @@ pub struct ServicesDelegate {
     group_labels: [SharedString; 2],
     tip: Rc<RefCell<RowTipState>>,
     tip_view: Option<AnyView>,
+    /// Units, appearance and tables settings for the child cells.
+    settings: Settings,
+    /// The `CHILD_SECTIONS` versions `settings` was read at.
+    settings_seen: Option<[u64; 3]>,
+    cell_words: CellWords,
+    name_words: NameWords,
+    tips: ValidityTips,
+    /// Never refreshed: child rows are records, which do not read it.
+    members: GroupMembers,
+    /// The child process keys of the last visible range, at most `DEMAND_MAX_IDS`.
+    visible_child_keys: Arc<[ProcessKey]>,
+    /// The hovered child row's tooltip lines, shared with `proc_tip_view`.
+    proc_tip: Rc<RefCell<ProcTipState>>,
+    proc_tip_view: Option<AnyView>,
+    proc_tip_words: RowTipWords,
 }
 
 impl ServicesDelegate {
@@ -602,7 +713,7 @@ impl ServicesDelegate {
         }
         Self {
             snap: Arc::default(),
-            processes: Arc::default(),
+            snapshot: Arc::new(Snapshot::empty(BootId(0), 0)),
             rows: Arc::from([]),
             row_index: FxHashMap::default(),
             expanded,
@@ -621,6 +732,16 @@ impl ServicesDelegate {
             group_labels: [SharedString::default(), SharedString::default()],
             tip: Rc::default(),
             tip_view: None,
+            settings: Settings::default(),
+            settings_seen: None,
+            cell_words: CellWords::from_fn(|key| Arc::from(tr_en(key, &[]).as_ref())),
+            name_words: NameWords::from_fn(|key| tr_en(key, &[])),
+            tips: ValidityTips::default(),
+            members: GroupMembers::default(),
+            visible_child_keys: Arc::from([]),
+            proc_tip: Rc::default(),
+            proc_tip_view: None,
+            proc_tip_words: RowTipWords::from_fn(|key| tr_en(key, &[])),
         }
     }
 
@@ -642,7 +763,19 @@ impl ServicesDelegate {
         if version != self.words.version {
             self.words = ServicesWords::new(cx);
             self.build_group_labels();
+            self.cell_words = CellWords::new(cx);
+            self.name_words = NameWords::new(cx);
+            self.proc_tip_words = RowTipWords::new(cx);
+            self.proc_tip.borrow_mut().clear();
             changed = true;
+        }
+        if let Some(settings) = cx.try_global::<TlSettings>() {
+            let seen = CHILD_SECTIONS.map(|section| settings.version(section));
+            if self.settings_seen != Some(seen) {
+                self.settings_seen = Some(seen);
+                self.settings = TlSettings::settings(cx).clone();
+                changed = true;
+            }
         }
         let theme = current(cx);
         if self.theme.as_ref().is_none_or(|t| !Arc::ptr_eq(t, theme)) {
@@ -680,6 +813,112 @@ impl ServicesDelegate {
             return None;
         }
         self.snap.units.get(row.record? as usize)
+    }
+
+    /// The process key of child row `ix` and the index of its record in the installed process
+    /// snapshot, `None` when the process left it. Services rows rebuild only on services
+    /// updates, so `SysRow.record` can point into an older process snapshot and is not read.
+    fn child(&self, ix: usize) -> Option<(ProcessKey, Option<usize>)> {
+        let SysNodeId::UnitProcess(_, key) = self.rows.get(ix)?.node else {
+            return None;
+        };
+        let records = &self.snapshot.processes.records;
+        Some((key, records.binary_search_by_key(&key, |r| r.key).ok()))
+    }
+
+    fn child_record(&self, i: usize) -> (&ProcessRecord, TableRow) {
+        let r = &self.snapshot.processes.records[i];
+        let row = TableRow {
+            node: NodeId::Process(r.key),
+            depth: 2,
+            expanded: false,
+            has_children: false,
+            record: Some(i as u32),
+            group: None,
+            descendants: 0,
+            subtree: None,
+        };
+        (r, row)
+    }
+
+    fn cell_ctx(&self) -> CellCtx<'_> {
+        let s = &*self.snapshot;
+        let system = &s.system;
+        CellCtx {
+            view: &s.table,
+            records: &s.processes.records,
+            extras: &s.processes.extras,
+            settings: &self.settings,
+            words: &self.cell_words,
+            members: &self.members,
+            ncpu: system.cpu_topology.online.count().min(u32::from(u16::MAX)) as u16,
+            online: &system.cpu_topology.online,
+            mem_total: system.memory.total,
+            vram_total: system.gpus.iter().map(|(_, g)| g.mem_total.value).sum(),
+            boot_time_s: system.boot_time_s,
+            clk_tck: CLK_TCK,
+        }
+    }
+
+    /// One cell of child row `ix` through the process table's cells (E22). A process that left
+    /// the snapshot shows only its PID, in `text_secondary`, until the row goes.
+    fn child_cell(
+        &self,
+        key: ProcessKey,
+        record: Option<usize>,
+        column: ServiceColumn,
+        out: &mut CellOut,
+    ) {
+        out.validity = Validity::Valid;
+        let (Some(col), Some(theme)) = (child_process_column(child_column(column)), &self.theme)
+        else {
+            return;
+        };
+        let Some(i) = record else {
+            if col == ColumnId::Pid {
+                out.bits = u64::from(key.pid);
+                if out.want_text {
+                    let _ = write!(out.text, "{}", key.pid);
+                }
+            }
+            out.text_color = Some(theme.text_secondary);
+            return;
+        };
+        let (r, row) = self.child_record(i);
+        let exited = r.flags.contains(ProcFlags::EXITED);
+        let a = &self.settings.appearance;
+        let state = PaintState {
+            selected: false,
+            exited,
+            heat_on: a.heat_coloring,
+            heat_intensity_pct: a.heat_intensity_pct,
+            dim_zero: self.settings.tables.dim_zero_values,
+            subtree: false,
+        };
+        ProcessRowCells::fill(
+            RowRef::Record(r, &row, RowKind::Process),
+            col,
+            &self.cell_ctx(),
+            state,
+            theme,
+            &self.tips,
+            out,
+        );
+        if out.want_tooltip && matches!(out.validity, Validity::Stale | Validity::Failed) {
+            out.tooltip = live_tip(out.validity, &self.snapshot, now_boot_ns());
+        }
+        if exited {
+            // UI-PRC-011: all text of an exited row is secondary.
+            out.text_color = Some(theme.text_secondary);
+        }
+    }
+
+    /// Unit rows expanded now.
+    fn expanded_units(&self) -> usize {
+        self.expanded
+            .iter()
+            .filter(|node| matches!(node, SysNodeId::Unit(_)))
+            .count()
     }
 
     /// Units of a reconnecting manager draw every cell's text in `text_secondary`, including
@@ -778,11 +1017,27 @@ impl ServicesDelegate {
         }
     }
 
+    /// The services list, unit cgroup stats for the shown metric columns and, while a unit is
+    /// expanded, the process sweep with the visible child keys (UI-SYS-016).
     pub fn demand_part(&self) -> Demand {
+        let (process_table, keys) = child_demand(self.expanded_units(), &self.visible_child_keys);
+        let mut process_columns = ColumnSet::EMPTY;
+        if process_table {
+            for col in self.layout.visible_columns().iter() {
+                if let SysColumnId::Services(column) = col
+                    && let Some(id) = child_process_column(child_column(*column))
+                {
+                    process_columns.insert(id);
+                }
+            }
+        }
         Demand {
             any_surface_visible: true,
             services: true,
             service_cgroup_stats: cgroup_stats_wanted(&self.layout),
+            process_table,
+            process_columns,
+            detail_keys: keys.as_slice().into(),
             ..Demand::default()
         }
     }
@@ -819,7 +1074,7 @@ impl ServicesDelegate {
     }
 
     pub fn processes(&self) -> &Arc<ProcessSnapshot> {
-        &self.processes
+        &self.snapshot.processes
     }
 
     fn requested_expanded(&self) -> Arc<[SysNodeId]> {
@@ -866,6 +1121,32 @@ impl TreeTableDelegate for ServicesDelegate {
         }
     }
     fn row_flags(&self, ix: usize) -> RowFlags {
+        if let Some((_, record)) = self.child(ix) {
+            let Some(i) = record else {
+                return RowFlags {
+                    bits: RowFlags::EXITED,
+                    ..RowFlags::default()
+                };
+            };
+            let r = &self.snapshot.processes.records[i];
+            let mut bits = 0;
+            if r.flags.contains(ProcFlags::NEW) {
+                bits |= RowFlags::NEW;
+            }
+            if r.flags.contains(ProcFlags::EXITED) {
+                bits |= RowFlags::EXITED;
+            }
+            if r.state == ProcState::Stopped {
+                bits |= RowFlags::SUSPENDED;
+            }
+            if r.validity.0.contains(&Validity::Restricted) {
+                bits |= RowFlags::RESTRICTED;
+            }
+            return RowFlags {
+                bits,
+                ..RowFlags::default()
+            };
+        }
         match self.unit(ix) {
             Some(unit)
                 if self.snap.managers[manager_index(unit.unit.manager)]
@@ -892,6 +1173,10 @@ impl TreeTableDelegate for ServicesDelegate {
             .unwrap_or(&self.specs[0])
     }
     fn cell(&self, ix: usize, col: SysColumnId, out: &mut CellOut) {
+        if let (Some((key, record)), SysColumnId::Services(column)) = (self.child(ix), col) {
+            self.child_cell(key, record, column, out);
+            return;
+        }
         let (Some(unit), SysColumnId::Services(column)) = (self.unit(ix), col) else {
             return;
         };
@@ -969,6 +1254,32 @@ impl TreeTableDelegate for ServicesDelegate {
             highlight_fffd: false,
             trailing: None,
         };
+        if let Some((_, record)) = self.child(ix) {
+            let mut d = NameCellData {
+                kind: RowKind::Process,
+                depth: 2,
+                expandable: None,
+                icon: NameIcon::None,
+                primary: SharedString::default(),
+                count_run: None,
+                state_glyph: None,
+                exited: true,
+            };
+            if let Some(i) = record {
+                let r = &self.snapshot.processes.records[i];
+                d.icon = r
+                    .meta
+                    .icon
+                    .as_ref()
+                    .map_or(NameIcon::None, |i| NameIcon::File(Arc::clone(i)));
+                d.primary = SharedString::from(&r.meta.name);
+                d.exited = r.flags.contains(ProcFlags::EXITED);
+                if r.state == ProcState::Stopped {
+                    d.state_glyph = Some(StateGlyph::Suspended);
+                }
+            }
+            return name_cell::name_cell(d, &self.name_words);
+        }
         if let Some(unit) = self.unit(ix) {
             cell.icon = NameIcon::Lucide(unit_icon(unit.kind));
             cell.primary = SharedString::from(unit.unit.name.clone());
@@ -1035,6 +1346,7 @@ impl TreeTableDelegate for ServicesDelegate {
             });
         }
         self.expanded_request = Some(self.requested_expanded());
+        self.send_demand(cx);
         cx.notify();
     }
     fn on_sort(&mut self, column: SysColumnId, cx: &mut Context<TlTreeTable<Self>>) {
@@ -1066,11 +1378,39 @@ impl TreeTableDelegate for ServicesDelegate {
         }
         self.send_demand(cx);
     }
-    fn on_visible_range(&mut self, _: &[u64], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_visible_range(&mut self, ids: &[u64], cx: &mut Context<TlTreeTable<Self>>) {
+        let keys: Arc<[ProcessKey]> = ids
+            .iter()
+            .filter_map(|id| match self.rows.get(self.row_index(*id)?)?.node {
+                SysNodeId::UnitProcess(_, key) => Some(key),
+                _ => None,
+            })
+            .take(DEMAND_MAX_IDS)
+            .collect();
+        if keys != self.visible_child_keys {
+            self.visible_child_keys = keys;
+            self.send_demand(cx);
+        }
+    }
     fn on_activate(&mut self, _: u64, cx: &mut Context<TlTreeTable<Self>>) {
         cx.propagate();
     }
     fn row_tooltip(&self, ix: usize) -> Option<AnyView> {
+        if let Some((_, record)) = self.child(ix) {
+            let view = self.proc_tip_view.as_ref()?;
+            let (r, row) = self.child_record(record?);
+            let key = (self.snapshot.sequence, self.version, ix);
+            return self
+                .proc_tip
+                .borrow_mut()
+                .update(
+                    key,
+                    RowRef::Record(r, &row, RowKind::Process),
+                    &self.snapshot,
+                    &self.proc_tip_words,
+                )
+                .then(|| view.clone());
+        }
         let view = self.tip_view.as_ref()?;
         let unit = self.unit(ix)?;
         let key = (self.version, ix);
@@ -1101,6 +1441,10 @@ impl TreeTableDelegate for ServicesDelegate {
             let state = Rc::clone(&self.tip);
             self.tip_view = Some(cx.new(|_| ServicesRowTip { state, built: None }).into());
         }
+        if self.proc_tip_view.is_none() {
+            let state = Rc::clone(&self.proc_tip);
+            self.proc_tip_view = Some(cx.new(|_| RowTooltip::new(state)).into());
+        }
         if self.refresh_look(cx) {
             cx.notify();
         }
@@ -1128,7 +1472,7 @@ impl SysDelegate for ServicesDelegate {
     }
     fn install(&mut self, snap: &Arc<Snapshot>) {
         self.snap = Arc::clone(&snap.services);
-        self.processes = Arc::clone(&snap.processes);
+        self.snapshot = Arc::clone(snap);
         self.rows = Arc::clone(&self.snap.rows);
         self.row_index = self
             .rows
