@@ -424,6 +424,9 @@ pub struct UiLaunch {
     pub init: UiInit,
     pub open: OpenMode,
     pub start: StartOptions,
+    /// UI end of the tray channels. `Some` only when tl-app started the tray thread. Not used in
+    /// `LowMemory` mode.
+    pub tray: Option<tl_model::tray::TrayUiEnd>,
 }
 
 /// Which window opens first.
@@ -564,6 +567,7 @@ fn start(cx: &mut App, launch: UiLaunch, exit: Rc<Cell<Option<UiExit>>>) {
         init,
         open,
         start,
+        tray,
     } = launch;
     cx.set_global(start);
     cx.set_global(UiExitSlot(None));
@@ -574,6 +578,9 @@ fn start(cx: &mut App, launch: UiLaunch, exit: Rc<Cell<Option<UiExit>>>) {
         crate::windows::low_memory::init_low_memory(cx, client, init);
     } else {
         TasklensUi::init(cx, client, init);
+        if let Some(end) = tray {
+            crate::tray_bridge::install(cx, end);
+        }
     }
     open_first(cx, open);
     perf_step("window_open");

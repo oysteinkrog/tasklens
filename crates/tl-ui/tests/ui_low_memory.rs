@@ -652,6 +652,7 @@ fn start_run(cx: &mut TestAppContext, open: OpenMode) -> Option<UiExit> {
         init: ui_init(),
         open,
         start: StartOptions::default(),
+        tray: None,
     };
     let exit = cx.update(|cx| start_for_test(cx, launch));
     cx.run_until_parked();

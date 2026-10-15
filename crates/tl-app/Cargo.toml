@@ -14,6 +14,7 @@ tl-model  = { workspace = true }
 tl-engine = { workspace = true }
 tl-ui     = { workspace = true }
 tl-ops    = { workspace = true }   # write_atomic (R-130)
+tl-tray   = { workspace = true }   # tray thread (E31-008)
 zbus      = { workspace = true }
 toml      = { workspace = true }
 serde     = { workspace = true }

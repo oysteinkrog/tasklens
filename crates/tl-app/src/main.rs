@@ -278,6 +278,8 @@ fn main() -> ExitCode {
     {
         warn!(target: "tasklens::engine", "mlockall failed: {e}");
     }
+    // No tray in the low-memory rescue window (R-243).
+    let tray = if args.low_memory { None } else { start_tray() };
     let exit = tl_ui::run(UiLaunch {
         client: Arc::new(engine.clone()),
         init: UiInit {
@@ -302,6 +304,7 @@ fn main() -> ExitCode {
             shift_held: false,
             pending_crash_report: None,
         },
+        tray,
     });
 
     // U-2: `Application::run` returns on Linux after `cx.quit()`, so this is the only path.
@@ -378,6 +381,27 @@ fn finish(
     // The non-blocking writer loses lines unless its guard is dropped before `exit`.
     drop(log);
     std::process::exit(code)
+}
+
+/// The main tray icon pixels, pre-rendered from `assets/icons/tasklens.svg` (R-161 item 4).
+fn main_tray_icon() -> tl_tray::MainIcon {
+    tl_tray::MainIcon {
+        argb_22: include_bytes!("../../../assets/icons/tray-22.argb").to_vec(),
+        argb_44: include_bytes!("../../../assets/icons/tray-44.argb").to_vec(),
+    }
+}
+
+/// Starts the tray thread. Returns the UI end for `UiLaunch`, or `None` when the thread did not
+/// start, so no tray entry point is enabled.
+fn start_tray() -> Option<tl_model::tray::TrayUiEnd> {
+    let (tray_ui, tray_service) = tl_model::tray::tray_channels();
+    match tl_tray::spawn(tray_service, main_tray_icon()) {
+        Ok(_join) => Some(tray_ui),
+        Err(e) => {
+            warn!(target: "tasklens::tray", error = %e, "tray thread did not start");
+            None
+        }
+    }
 }
 
 /// The engine mode for the flags. `--force-full-memory-mode` only has an effect together with
@@ -518,6 +542,13 @@ fn start_tab(tab: TabArg) -> StartTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_tray_icon_sizes() {
+        let icon = main_tray_icon();
+        assert_eq!(icon.argb_22.len(), 1_936);
+        assert_eq!(icon.argb_44.len(), 7_744);
+    }
 
     #[test]
     fn engine_mode_choice() {

@@ -639,6 +639,7 @@ fn start_options_global_installed(cx: &mut TestAppContext) {
             select_pid: Some(42),
             ..StartOptions::default()
         },
+        tray: None,
     };
     let exit = cx.update(|cx| start_for_test(cx, launch));
     cx.update(|cx| assert_eq!(cx.global::<StartOptions>().select_pid, Some(42)));

@@ -41,6 +41,7 @@ pub fn run() -> i32 {
         },
         open: OpenMode::Gallery,
         start: StartOptions::default(),
+        tray: None,
     });
     info!(target: "tasklens::ui", ?exit, "gallery closed");
     0
