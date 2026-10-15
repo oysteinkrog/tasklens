@@ -1,9 +1,9 @@
 //! The top-3 hover card of the History strip (UI-PRC-034, PROC-090, R-063).
 //!
 //! Hovering the plot shows the time and the 3 processes that used the most of the active metric
-//! at that second. [`TopController`] waits 32 ms after the hovered second changes, then sends one
-//! `TopAt` query. At most one is in flight; a newer one waits in `pending` and replaces an older
-//! one there, as [`super::QueryController`] does for Frame queries.
+//! at that second. [`TopController`] keeps the latest wanted second: 32 ms after it last changed,
+//! and with no query in flight, it sends one `TopAt` query for it. Only an answer for the wanted
+//! second replaces the card; a late answer for a second the pointer left is dropped.
 //!
 //! The engine answers a `TopAt` query with the last view cloned and `top` set, so the page stores
 //! it and repaints only the strip (see [`top_only`]). The strip's prepaint calls [`defer_card`],
@@ -25,7 +25,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, HistoryWhat};
-use tl_model::history::{HistoryMetric, HistoryRange, HistoryView};
+use tl_model::history::{HistoryMetric, HistoryRange, HistoryTop, HistoryView};
 use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, NetUnit};
@@ -205,102 +205,108 @@ pub fn top_only(old: &HistoryView, new: &HistoryView) -> bool {
 /// The hovered second and metric a TopAt query asks for.
 type TopKey = (TimeNs, HistoryMetric);
 
-/// Keeps at most one TopAt query in flight, and the debounce and stale timers of the card.
+/// The TopAt state of the card, latest wins: `wanted` is what the hairline shows, `in_flight`
+/// the one query out and `shown` the answer on the card. Only `wanted` is ever sent, and only an
+/// answer for `wanted` replaces the card.
 pub struct TopController {
     next_id: u64,
-    /// Id of the TopAt query sent and not yet answered.
-    in_flight: Option<u64>,
-    sent_at: Option<Instant>,
-    /// What the query in flight asks for.
-    last_sent: Option<TopKey>,
-    /// Latest wanted query while one is in flight, or one `send` refused with `Busy`.
-    pending: Option<TopKey>,
     /// The second and metric under the pointer. `None` while the card is hidden.
-    hovered: Option<TopKey>,
-    /// True once the hovered second went 150 ms without an answer.
+    wanted: Option<TopKey>,
+    /// Id and key of the TopAt query sent and not yet answered.
+    in_flight: Option<(u64, TopKey)>,
+    sent_at: Option<Instant>,
+    /// The answer on the card.
+    shown: Option<Arc<HistoryTop>>,
+    /// True when the last `send` was refused with `Busy`.
+    busy: bool,
+    /// True once `wanted` went 150 ms without an answer.
     stale: bool,
+    /// Runs for 32 ms after `wanted` changed.
     debounce: Option<Task<()>>,
     stale_timer: Option<Task<()>>,
-    /// Timeout and `Busy` retry.
-    retry_timer: Option<Task<()>>,
+    /// Expiry of the query in flight, and the `Busy` retry.
+    timer: Option<Task<()>>,
 }
 
 impl Default for TopController {
     fn default() -> Self {
         Self {
             next_id: TOP_ID_BASE,
+            wanted: None,
             in_flight: None,
             sent_at: None,
-            last_sent: None,
-            pending: None,
-            hovered: None,
+            shown: None,
+            busy: false,
             stale: false,
             debounce: None,
             stale_timer: None,
-            retry_timer: None,
+            timer: None,
         }
     }
 }
 
 impl TopController {
+    /// Id of the TopAt query in flight.
     pub fn in_flight(&self) -> Option<u64> {
-        self.in_flight
+        self.in_flight.map(|(id, _)| id)
     }
 
-    pub fn pending(&self) -> Option<(TimeNs, HistoryMetric)> {
-        self.pending
+    /// The second and metric under the pointer, `None` while the card is hidden.
+    pub fn wanted(&self) -> Option<(TimeNs, HistoryMetric)> {
+        self.wanted
+    }
+
+    /// The second and metric of the answer on the card.
+    pub fn shown(&self) -> Option<(TimeNs, HistoryMetric)> {
+        self.shown.as_deref().map(|top| (top.t_ns, top.metric))
     }
 
     pub fn stale(&self) -> bool {
         self.stale
     }
 
-    /// The second and metric under the pointer, `None` while the card is hidden.
-    pub fn hovered(&self) -> Option<(TimeNs, HistoryMetric)> {
-        self.hovered
-    }
-
-    /// Sends at once when nothing is in flight, else replaces `pending`.
-    fn want(&mut self, at: TopKey, client: &dyn EngineClient) {
-        if self.in_flight.is_some() {
-            self.pending = Some(at);
-        } else {
-            self.send(at, client);
-        }
-    }
-
-    /// Clears `in_flight` when `view` carries its answer. True when it did.
+    /// Takes the answer `view.top` carries. Frees the slot when it answers the query in flight,
+    /// and shows it when it is for `wanted`. Any other answer is dropped and the card keeps the
+    /// previous one. True when the card changed.
     fn on_view(&mut self, view: &HistoryView) -> bool {
-        let answered = view
-            .top
-            .as_ref()
-            .is_some_and(|top| self.in_flight == Some(top.query_id));
-        if answered {
+        let Some(top) = view.top.as_ref() else {
+            return false;
+        };
+        if self.in_flight.is_some_and(|(id, _)| id == top.query_id) {
             self.in_flight = None;
-            self.last_sent = None;
+            self.sent_at = None;
         }
-        answered
+        let is_wanted = self.wanted == Some((top.t_ns, top.metric));
+        if !is_wanted || self.shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, top)) {
+            return false;
+        }
+        self.shown = Some(Arc::clone(top));
+        self.stale = false;
+        self.stale_timer = None;
+        true
     }
 
-    /// Gives up on the query in flight. The pending query, or else the late one while its second
-    /// is still hovered, waits to be sent again.
-    fn expire(&mut self) {
-        if self.in_flight.take().is_some() && self.pending.is_none() {
-            self.pending = self.last_sent.take().filter(|&at| Some(at) == self.hovered);
-        }
-    }
-
-    /// Sends `pending` when nothing is in flight.
-    fn retry(&mut self, client: &dyn EngineClient) {
-        if self.in_flight.is_none()
-            && let Some(at) = self.pending.take()
+    /// Frees the slot when the query in flight went unanswered for 1,000 ms.
+    fn expire(&mut self, now: Instant) {
+        if self
+            .sent_at
+            .is_some_and(|sent| now.saturating_duration_since(sent) >= QUERY_TIMEOUT)
         {
-            self.send(at, client);
+            self.in_flight = None;
+            self.sent_at = None;
         }
     }
 
-    /// `Busy` keeps the query pending. `EngineStopped` drops it.
-    fn send(&mut self, at: TopKey, client: &dyn EngineClient) {
+    /// Sends `wanted` when the slot is free, the debounce has passed and the card does not show
+    /// it yet. `Busy` tries again later, `EngineStopped` gives up.
+    fn send_wanted(&mut self, client: &dyn EngineClient, now: Instant) {
+        self.busy = false;
+        let Some(at) = self.wanted else {
+            return;
+        };
+        if self.in_flight.is_some() || self.debounce.is_some() || self.shown() == Some(at) {
+            return;
+        }
         let id = self.next_id;
         let (t, metric) = at;
         let cmd = Command::HistoryQuery {
@@ -315,154 +321,99 @@ impl TopController {
         match client.send(cmd) {
             Ok(()) => {
                 self.next_id += 1;
-                self.in_flight = Some(id);
-                self.pending = None;
-                self.last_sent = Some(at);
+                self.in_flight = Some((id, at));
+                self.sent_at = Some(now);
             }
-            Err(CommandError::Busy) => self.pending = Some(at),
+            Err(CommandError::Busy) => self.busy = true,
             Err(CommandError::EngineStopped) => {}
         }
     }
 }
 
-/// True when `view` holds the answer for `at`.
-fn answers(view: Option<&HistoryView>, at: Option<TopKey>) -> bool {
-    let top = view.and_then(|v| v.top.as_deref());
-    matches!((top, at), (Some(top), Some(at)) if (top.t_ns, top.metric) == at)
-}
-
 impl HistoryPage {
-    /// The pointer is over the plot at second `t`. A new second restarts the 32 ms debounce and
-    /// the 150 ms stale timer.
+    /// The pointer is over the plot at second `t`. A new second or metric restarts the 32 ms
+    /// debounce and, unless the card shows it, the 150 ms stale timer.
     pub(crate) fn top_hover(&mut self, t: TimeNs, cx: &mut Context<Self>) {
         let at = (t, self.state.metric);
-        if self.top.hovered == Some(at) {
+        if self.top.wanted == Some(at) {
             return;
         }
-        self.top.hovered = Some(at);
+        self.top.wanted = Some(at);
         self.top.debounce = Some(cx.spawn(
             async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 cx.background_executor().timer(DEBOUNCE).await;
-                let _ = this.update(cx, |page, cx| page.top_fire(cx));
+                let _ = this.update(cx, |page, cx| {
+                    page.top.debounce = None;
+                    page.top_drive(cx);
+                });
             },
         ));
-        if answers(self.view.as_deref(), Some(at)) {
+        if self.top.shown() == Some(at) {
             self.top.stale = false;
             self.top.stale_timer = None;
         } else {
-            self.arm_stale(cx);
+            self.top.stale_timer = Some(cx.spawn(
+                async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    cx.background_executor().timer(STALE_AFTER).await;
+                    let _ = this.update(cx, |page, cx| page.top_go_stale(cx));
+                },
+            ));
         }
     }
 
-    /// The rows read "…" in 150 ms unless the hovered second is answered by then.
-    fn arm_stale(&mut self, cx: &mut Context<Self>) {
-        self.top.stale_timer = Some(cx.spawn(
-            async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                cx.background_executor().timer(STALE_AFTER).await;
-                let _ = this.update(cx, |page, cx| page.top_go_stale(cx));
-            },
-        ));
-    }
-
-    /// The card hides: pointer left, drag start or wheel. A query in flight stays in flight
-    /// until it is answered or expires, and is not sent again.
+    /// The card hides: pointer left, drag start or wheel. Nothing is wanted, so nothing is sent
+    /// and a late answer is dropped. A query in flight keeps only its 1,000 ms expiry.
     pub(crate) fn top_clear(&mut self) {
         let top = &mut self.top;
-        top.hovered = None;
-        top.pending = None;
+        top.wanted = None;
+        top.shown = None;
+        top.busy = false;
         top.stale = false;
         top.debounce = None;
         top.stale_timer = None;
         if top.in_flight.is_none() {
-            top.retry_timer = None;
+            top.timer = None;
         }
     }
 
-    /// A view came in: clears the TopAt query it answers and sends the pending one, then
-    /// repaints the strip. When the view no longer answers the hovered second and nothing asks
-    /// for it, for example a late answer for a second the pointer left, asks for it again.
+    /// A view came in: takes the TopAt answer it carries, sends `wanted` when the slot came free
+    /// and repaints the strip when the card changed.
     pub(crate) fn on_top_view(&mut self, view: &HistoryView, cx: &mut Context<Self>) {
-        if self.top.on_view(view) {
-            self.top_drive(cx, |top, client| top.retry(client));
+        let had_flight = self.top.in_flight.is_some();
+        let changed = self.top.on_view(view);
+        if had_flight && self.top.in_flight.is_none() {
+            self.top_drive(cx);
         }
-        if answers(Some(view), self.top.hovered) {
-            self.top.stale = false;
-            self.top.stale_timer = None;
-        } else if let Some(at) = self.top.hovered
-            && self.top.in_flight.is_none()
-            && self.top.pending.is_none()
-            && self.top.debounce.is_none()
-        {
-            self.top_drive(cx, |top, client| top.want(at, client));
-            if !self.top.stale && self.top.stale_timer.is_none() {
-                self.arm_stale(cx);
-            }
+        if changed {
+            self.notify_strip(cx);
         }
-        self.notify_strip(cx);
-    }
-
-    /// The debounce ended: wants a query for the hovered second unless it is answered or asked.
-    /// Then a pending query for a second the pointer left is dropped, so its late answer does
-    /// not replace the hovered one.
-    fn top_fire(&mut self, cx: &mut Context<Self>) {
-        self.top.debounce = None;
-        let Some(at) = self.top.hovered else {
-            return;
-        };
-        let asked = self.top.in_flight.is_some() && self.top.last_sent == Some(at);
-        if asked || answers(self.view.as_deref(), Some(at)) {
-            self.top.pending = None;
-            return;
-        }
-        self.top_drive(cx, |top, client| top.want(at, client));
     }
 
     fn top_go_stale(&mut self, cx: &mut Context<Self>) {
         self.top.stale_timer = None;
-        if self.top.hovered.is_some() && !answers(self.view.as_deref(), self.top.hovered) {
+        if self.top.wanted.is_some() && self.top.wanted != self.top.shown() {
             self.top.stale = true;
             self.notify_strip(cx);
         }
     }
 
-    /// Runs `f` on the controller, notes when a query went out and re-arms the retry timer.
-    fn top_drive(
-        &mut self,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut TopController, &dyn EngineClient),
-    ) {
-        let next_id = self.top.next_id;
-        f(&mut self.top, &*self.client);
-        if self.top.next_id != next_id {
-            self.top.sent_at = Some(cx.background_executor().now());
-        }
+    /// Expires an old query, sends `wanted` when it may go, then arms the timer for the expiry
+    /// of the query in flight or the `Busy` retry.
+    fn top_drive(&mut self, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
-        let wait = match (self.top.in_flight, self.top.sent_at) {
-            (Some(_), Some(sent)) => {
-                Some(QUERY_TIMEOUT.saturating_sub(now.saturating_duration_since(sent)))
-            }
-            _ if self.top.pending.is_some() => Some(DEBOUNCE),
-            _ => None,
+        self.top.expire(now);
+        self.top.send_wanted(&*self.client, now);
+        let wait = match self.top.sent_at {
+            Some(sent) => Some(QUERY_TIMEOUT.saturating_sub(now.saturating_duration_since(sent))),
+            None if self.top.busy => Some(DEBOUNCE),
+            None => None,
         };
-        self.top.retry_timer = wait.map(|wait| {
+        self.top.timer = wait.map(|wait| {
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 cx.background_executor().timer(wait).await;
-                let _ = this.update(cx, |page, cx| page.top_tick(cx));
+                let _ = this.update(cx, |page, cx| page.top_drive(cx));
             })
         });
-    }
-
-    /// Expires a TopAt query unanswered for 1,000 ms, then sends the pending one.
-    fn top_tick(&mut self, cx: &mut Context<Self>) {
-        let now = cx.background_executor().now();
-        if self
-            .top
-            .sent_at
-            .is_some_and(|sent| now.saturating_duration_since(sent) >= QUERY_TIMEOUT)
-        {
-            self.top.expire();
-        }
-        self.top_drive(cx, |top, client| top.retry(client));
     }
 
     /// Repaints the strip view only, or the page while the strip view does not exist yet.
@@ -571,6 +522,7 @@ impl CardCache {
     fn sync(
         &mut self,
         view: &HistoryView,
+        top: Option<&Arc<HistoryTop>>,
         stale_t: Option<TimeNs>,
         units_version: u64,
         net: (NetUnit, bool),
@@ -592,7 +544,7 @@ impl CardCache {
             self.words = Some((strings_version, words));
         }
         let key = CardKey {
-            top: view.top.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize),
+            top: top.map_or(0, |t| Arc::as_ptr(t) as usize),
             stale_t,
             now: view.span.map_or(0, |s| s.1),
             realtime_offset_ns: view.realtime_offset_ns,
@@ -601,7 +553,7 @@ impl CardCache {
         };
         if self.key != Some(key) {
             self.key = Some(key);
-            self.build(view, stale_t, net, cx);
+            self.build(view, top.map(|t| &**t), stale_t, net, cx);
             #[cfg(any(test, feature = "test-hooks"))]
             {
                 self.builds += 1;
@@ -638,10 +590,11 @@ impl CardCache {
         }
     }
 
-    /// The texts for `view.top`, or for the hovered second `stale_t` with "…" rows.
+    /// The texts for the answer `top`, or for the hovered second `stale_t` with "…" rows.
     fn build(
         &mut self,
         view: &HistoryView,
+        top: Option<&HistoryTop>,
         stale_t: Option<TimeNs>,
         net: (NetUnit, bool),
         cx: &App,
@@ -650,7 +603,6 @@ impl CardCache {
             Some((_, w)) => w,
             None => return,
         };
-        let top = view.top.as_deref();
         let Some(t) = stale_t.or(top.map(|top| top.t_ns)) else {
             return;
         };
@@ -851,11 +803,22 @@ pub(super) fn defer_card(
             return None;
         }
         let view = view.as_deref().filter(|v| v.span.is_some())?;
-        let stale_t = top.hovered.filter(|_| top.stale).map(|(t, _)| t);
-        if stale_t.is_none() && view.top.is_none() {
+        let stale_t = top.wanted.filter(|_| top.stale).map(|(t, _)| t);
+        if stale_t.is_none() && top.shown.is_none() {
             return None;
         }
-        card.sync(view, stale_t, units_version, net, &m, &theme, window, cx);
+        let shown = top.shown.as_ref();
+        card.sync(
+            view,
+            shown,
+            stale_t,
+            units_version,
+            net,
+            &m,
+            &theme,
+            window,
+            cx,
+        );
         let origin = card_origin(strip.left() + hx, strip, m.ui_scale);
         Some((origin, card.size(&m), card.icon_elements(&m, &theme)))
     });

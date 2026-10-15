@@ -1837,17 +1837,17 @@ fn top3_query_debounced_and_coalesced(cx: &mut TestAppContext) {
     assert_eq!(sent[0].1, 730 * S);
     assert!(sent[0].0 >= 1 << 48, "TopAt ids never meet Frame ids");
 
-    // While it is in flight, newer seconds wait, and the newest replaces the older.
+    // While it is in flight, newer seconds wait, and only the newest is wanted.
     hover_to(&page, vcx, 0.8);
     advance(vcx, Duration::from_millis(32));
     hover_to(&page, vcx, 0.9);
     advance(vcx, Duration::from_millis(32));
     assert_eq!(top_queries(&engine).len(), 1);
-    let pending = vcx.read_entity(&page, |p, _| p.top().pending());
-    assert_eq!(pending, Some((940 * S, HistoryMetric::Cpu)));
+    let wanted = vcx.read_entity(&page, |p, _| p.top().wanted());
+    assert_eq!(wanted, Some((940 * S, HistoryMetric::Cpu)));
     answer_top(&engine, vcx, sent[0], &[1.0]);
     let sent = top_queries(&engine);
-    assert_eq!(sent.len(), 2, "the pending query goes out after the answer");
+    assert_eq!(sent.len(), 2, "the wanted query goes out after the answer");
     assert_eq!(sent[1].1, 940 * S);
     assert_eq!(
         vcx.read_entity(&page, |p, _| p.top().in_flight()),
@@ -1976,41 +1976,96 @@ fn top3_metric_change_asks_again(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn top3_back_to_asked_second_drops_older_wants(cx: &mut TestAppContext) {
     let (engine, page, vcx) = hover_page(cx);
-    // A (700 s) in flight, B (820 s) pending, then back to A.
+    // A (700 s) in flight, B (820 s) wanted past its debounce, then back to A.
     hover_to(&page, vcx, 0.5);
     advance(vcx, Duration::from_millis(32));
     let a = top_queries(&engine)[0];
     hover_to(&page, vcx, 0.7);
     advance(vcx, Duration::from_millis(32));
     assert_eq!(
-        vcx.read_entity(&page, |p, _| p.top().pending()),
+        vcx.read_entity(&page, |p, _| p.top().wanted()),
         Some((820 * S, HistoryMetric::Cpu))
     );
     hover_to(&page, vcx, 0.5);
     advance(vcx, Duration::from_millis(32));
-    assert_eq!(vcx.read_entity(&page, |p, _| p.top().pending()), None);
+    assert_eq!(
+        vcx.read_entity(&page, |p, _| p.top().wanted()),
+        Some((700 * S, HistoryMetric::Cpu))
+    );
     answer_top(&engine, vcx, a, &[7.0]);
     settle(vcx);
+    advance(vcx, Duration::from_millis(100));
     assert_eq!(top_queries(&engine).len(), 1, "B is not sent");
     assert_eq!(card_rows(&page, vcx)[0].1, "CPU: 7.0%");
+}
 
-    // B in flight, back to the answered A: B's late answer is not shown under A, A is asked
-    // again.
+#[gpui_kit::test]
+fn top3_late_answer_keeps_card(cx: &mut TestAppContext) {
+    let (engine, page, vcx) = hover_page(cx);
+    // A (700 s) answered.
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    let a = top_queries(&engine)[0];
+    answer_top(&engine, vcx, a, &[7.0, 2.0]);
+    settle(vcx);
+    let shown = card_rows(&page, vcx);
+    assert_eq!(shown[0].1, "CPU: 7.0%");
+
+    // B (820 s) goes out, the pointer goes back to A, then B answers late.
     hover_to(&page, vcx, 0.7);
     advance(vcx, Duration::from_millis(32));
     let b = top_queries(&engine)[1];
     assert_eq!(b.1, 820 * S);
     hover_to(&page, vcx, 0.5);
     advance(vcx, Duration::from_millis(32));
+    answer_top(&engine, vcx, b, &[3.0, 1.0, 0.5]);
+    settle(vcx);
+    advance(vcx, Duration::from_millis(200));
+    settle(vcx);
+
+    // The card still shows A: no B row, no "…", and A is not asked again.
+    assert_eq!(card_rows(&page, vcx), shown);
+    vcx.read_entity(&page, |p, _| {
+        assert_eq!(p.top().shown(), Some((700 * S, HistoryMetric::Cpu)));
+        assert!(!p.top().stale());
+        assert!(p.card().painted.is_some());
+    });
     assert_eq!(top_queries(&engine).len(), 2);
-    answer_top(&engine, vcx, b, &[3.0]);
+}
+
+#[gpui_kit::test]
+fn top3_obsolete_want_never_sent(cx: &mut TestAppContext) {
+    let (engine, page, vcx) = hover_page(cx);
+    // A (700 s) in flight, B (820 s) wanted, back to A within the debounce, A answers before
+    // the debounce ends.
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(32));
+    let a = top_queries(&engine)[0];
+    hover_to(&page, vcx, 0.7);
+    advance(vcx, Duration::from_millis(10));
+    hover_to(&page, vcx, 0.5);
+    advance(vcx, Duration::from_millis(10));
+    answer_top(&engine, vcx, a, &[7.0]);
     settle(vcx);
+    assert_eq!(card_rows(&page, vcx)[0].1, "CPU: 7.0%");
+    advance(vcx, Duration::from_millis(2000));
+    assert_eq!(top_queries(&engine).len(), 1, "B is never sent");
+
+    // The same with B's debounce over before the pointer goes back to A.
+    hover_to(&page, vcx, 0.3);
+    advance(vcx, Duration::from_millis(32));
+    let c = top_queries(&engine)[1];
+    assert_eq!(c.1, 580 * S);
+    hover_to(&page, vcx, 0.7);
+    advance(vcx, Duration::from_millis(40));
+    hover_to(&page, vcx, 0.3);
+    advance(vcx, Duration::from_millis(5));
+    answer_top(&engine, vcx, c, &[4.0]);
+    settle(vcx);
+    advance(vcx, Duration::from_millis(2000));
     let sent = top_queries(&engine);
-    assert_eq!(sent.len(), 3);
-    assert_eq!(sent[2].1, 700 * S);
-    answer_top(&engine, vcx, sent[2], &[7.5]);
-    settle(vcx);
-    assert_eq!(card_rows(&page, vcx)[0].1, "CPU: 7.5%");
+    assert_eq!(sent.len(), 2, "B is never sent: {sent:?}");
+    assert_eq!(card_rows(&page, vcx)[0].1, "CPU: 4.0%");
 }
 
 #[gpui_kit::test]
@@ -2019,14 +2074,23 @@ fn top3_no_resend_after_leave(cx: &mut TestAppContext) {
     hover_to(&page, vcx, 0.5);
     advance(vcx, Duration::from_millis(32));
     assert_eq!(top_queries(&engine).len(), 1);
+    let a = top_queries(&engine)[0];
     leave_plot(&page, vcx);
-    assert_eq!(vcx.read_entity(&page, |p, _| p.top().hovered()), None);
+    assert_eq!(vcx.read_entity(&page, |p, _| p.top().wanted()), None);
     // The unanswered query expires after 1,000 ms and is not sent again.
     for _ in 0..4 {
         advance(vcx, Duration::from_millis(1000));
     }
     assert_eq!(top_queries(&engine).len(), 1);
     assert_eq!(vcx.read_entity(&page, |p, _| p.top().in_flight()), None);
+    // Its late answer is dropped: the card stays hidden.
+    answer_top(&engine, vcx, a, &[7.0]);
+    settle(vcx);
+    vcx.read_entity(&page, |p, _| {
+        assert_eq!(p.top().shown(), None);
+        assert!(p.card().painted.is_none());
+    });
+    assert_eq!(top_queries(&engine).len(), 1);
 }
 
 /// Minimap (tasklens-8fx.27): a page whose view spans `span`, with the strip window set to

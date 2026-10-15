@@ -741,7 +741,7 @@ impl HistoryPage {
         self.overview = None;
         self.queries.reset_overview();
         self.on_frame_input(true, cx);
-        if let Some((t, _)) = self.top.hovered() {
+        if let Some((t, _)) = self.top.wanted() {
             self.top_hover(t, cx);
         }
     }
