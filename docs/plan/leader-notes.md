@@ -894,3 +894,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: qfx.37 helper_flow is the only owner of helper-start failure toasts; one toast per seq in the latest requesting window (else main); Props and Handle Search drop their own cancel toasts.
 - 2026-10-15 leader decision: wox.2 keeps PerfAddTrayGraph(DeviceKey) and maps card keys to tray sources in tray_bridge.rs; no tray item on overview/fan/battery cards; wox.14 uses AddTrayGraph with a source string.
 - 2026-10-15 leader decision: xdh.13 adds ChartSeries.process (ProcessSeriesId) so ChartView draws process series; panel demand unions graph_targets; hidden sampling split to tasklens-xdh.24.
+- 2026-10-15 leader decision: wox.10 passes the tray UI end through UiLaunch.tray; no tray in low-memory or gallery mode; tl-tray added to workspace dependencies.
