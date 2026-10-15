@@ -3093,3 +3093,158 @@ fn disk_limit_clamp_and_step(cx: &mut TestAppContext) {
         assert_eq!(history_settings(cx).max_disk_mb, stored, "typed {typed}");
     }
 }
+
+/// The `history-scrub` bench synth (tasklens-8fx.31): two synths from seed 42 give the same
+/// answers, and the answers have the scene's shape.
+#[cfg(feature = "bench")]
+#[test]
+fn history_scrub_synth_deterministic() {
+    use tl_model::history::HISTORY_MAX_POINTS;
+    use tl_ui::bench::history_scrub::{
+        NEAR_VIEW_NS, PROCESSES, SPAN_END_NS, SPAN_START_NS, ScrubSynth,
+    };
+    use tl_ui::bench::synth::SEED;
+    use tl_ui::pages::processes::history::hover::top_only;
+
+    let t = SPAN_START_NS + 3_600 * S;
+    let near = (t - NEAR_VIEW_NS, t);
+    let whole = (SPAN_START_NS, SPAN_END_NS);
+    let frame = |view, keys: &[ProcessKey]| HistoryWhat::Frame {
+        metric: HistoryMetric::Cpu,
+        view,
+        keys: Arc::from(keys),
+        overview: true,
+    };
+    let answers = |synth: &mut ScrubSynth| -> Vec<HistoryView> {
+        let live = synth.answer(1, HistoryRange::Live, frame((0, 0), &[]));
+        let key = live.rows[5].key;
+        let at = synth.answer(2, HistoryRange::At(t), frame(near, &[key]));
+        let top = synth.answer(
+            1 << 48,
+            HistoryRange::At(t),
+            HistoryWhat::TopAt {
+                t: t - 30 * S,
+                metric: HistoryMetric::Cpu,
+                n: 3,
+            },
+        );
+        let wide = synth.answer(3, HistoryRange::At(t + S), frame(whole, &[]));
+        vec![live, at, top, wide]
+    };
+    let a = answers(&mut ScrubSynth::new(SEED));
+    let b = answers(&mut ScrubSynth::new(SEED));
+    assert_eq!(format!("{a:?}"), format!("{b:?}"));
+
+    let [live, at, top, wide] = &a[..] else {
+        panic!("four answers");
+    };
+    assert_eq!(live.span, Some((SPAN_START_NS, SPAN_END_NS)));
+    assert_eq!(live.frame_t, Some(SPAN_END_NS));
+    assert_eq!(at.frame_t, Some(t));
+    assert_eq!(at.rows.len(), PROCESSES);
+    assert_eq!(at.process_count, PROCESSES as u32);
+    // The system total and the one selected key; 601 one-second buckets for [t - 10 min, t].
+    assert_eq!(at.series.len(), 2);
+    assert_eq!(at.series[0].points.len(), 601);
+    assert_eq!(at.series[1].points.len(), 601);
+    assert_eq!(at.stack.len(), 601);
+    assert!(!at.overview.is_empty() && at.overview.len() <= HISTORY_MAX_POINTS);
+    // 6 h: 22 s buckets.
+    let n = wide.series[0].points.len();
+    assert!((900..=HISTORY_MAX_POINTS).contains(&n), "{n}");
+    assert_eq!(wide.stack.len(), n);
+
+    // The TopAt answer is the last view with the new list.
+    assert!(top_only(at, top));
+    let list = top.top.as_ref().expect("top list");
+    assert_eq!(list.t_ns, t - 30 * S);
+    assert_eq!(list.rows.len(), 3);
+    assert!(list.rows.windows(2).all(|w| w[0].value >= w[1].value));
+    assert!(Arc::ptr_eq(list, wide.top.as_ref().expect("kept list")));
+    let versions: Vec<u64> = a.iter().map(|v| v.header.version).collect();
+    assert_eq!(versions, [1, 2, 3, 4]);
+
+    // 200 of the 2,000 processes change from one second to the next.
+    let changed = at
+        .rows
+        .iter()
+        .zip(wide.rows.iter())
+        .filter(|(x, y)| x.cpu_pct != y.cpu_pct)
+        .count();
+    assert!(changed <= 200, "{changed}");
+    assert!(changed >= 190, "{changed}");
+}
+
+/// The `history-scrub` scene runs headless for 2 s of simulated time, with one frame every
+/// 100 ms, and writes its JSON (tasklens-8fx.31).
+#[cfg(feature = "bench")]
+#[gpui_kit::test]
+fn history_scrub_scene_runs_headless_5_frames(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use tl_ui::bench::stats::BenchReport;
+    use tl_ui::bench::{BenchClocks, BenchError, BenchOptions, BenchScene, run};
+
+    static FAKE_CPU: AtomicU64 = AtomicU64::new(0);
+    fn fake_cpu() -> u64 {
+        FAKE_CPU.fetch_add(1_000, Ordering::Relaxed)
+    }
+
+    std::fs::create_dir_all("/var/tmp/claude").expect("scratch dir");
+    let dir = tempfile::tempdir_in("/var/tmp/claude").expect("temp dir");
+    let json = dir.path().join("history-scrub.json");
+    cx.executor().allow_parking();
+    let outcome: Rc<RefCell<Option<Result<BenchReport, BenchError>>>> = Rc::default();
+    let slot = Rc::clone(&outcome);
+    let duration_s = 2;
+    cx.update(|cx| {
+        let opts = BenchOptions {
+            duration_s,
+            warmup_s: 0,
+            json: Some(json.clone()),
+        };
+        let clocks = BenchClocks {
+            thread_cpu_ns: fake_cpu,
+            process_cpu_ns: fake_cpu,
+        };
+        let task = run(cx, BenchScene::HistoryScrub, opts, clocks, None);
+        cx.spawn(async move |_| *slot.borrow_mut() = Some(task.await))
+            .detach();
+    });
+    let window = cx
+        .update(|cx| cx.windows().last().copied())
+        .expect("scene window");
+    let mut vcx = VisualTestContext::from_window(window, cx);
+    for _ in 0..=duration_s * 10 {
+        if outcome.borrow().is_some() {
+            break;
+        }
+        // The history views come from a real thread: give it time to answer.
+        std::thread::sleep(Duration::from_millis(20));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+        vcx.executor().advance_clock(Duration::from_millis(100));
+    }
+    vcx.run_until_parked();
+    let report = outcome
+        .borrow_mut()
+        .take()
+        .expect("the scene finished")
+        .expect("the scene ran");
+    assert_eq!(report.scene, "history-scrub");
+    assert!(report.frames >= 5, "{} frames", report.frames);
+
+    let text = std::fs::read_to_string(&json).expect("the JSON was written");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(v["scene"], "history-scrub");
+    for key in ["p50", "p95", "p99"] {
+        assert!(v["scrub_frame_ms"][key].is_number(), "{key}");
+    }
+    assert!(v["scrub_frames"].as_u64().is_some_and(|n| n > 0));
+    assert!(v["frame_cpu_ms"]["p99"].is_number());
+}

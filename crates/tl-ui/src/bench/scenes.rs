@@ -83,10 +83,12 @@ pub enum BenchScene {
     Bridge,
     Static,
     Soak,
+    /// The History mode scrub scene (PROC-092, E30-028), in [`super::history_scrub`].
+    HistoryScrub,
 }
 
 impl BenchScene {
-    pub const ALL: [BenchScene; 8] = [
+    pub const ALL: [BenchScene; 9] = [
         Self::PerfCpu,
         Self::PerfOverview,
         Self::PerfOverviewStatic,
@@ -95,10 +97,11 @@ impl BenchScene {
         Self::Bridge,
         Self::Static,
         Self::Soak,
+        Self::HistoryScrub,
     ];
 
     /// "perf-cpu", "perf-overview", "perf-overview-static", "perf-overview-procs", "table-2000",
-    /// "bridge", "static" or "soak".
+    /// "bridge", "static", "soak" or "history-scrub".
     pub fn from_arg(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|scene| scene.as_str() == s)
     }
@@ -113,6 +116,7 @@ impl BenchScene {
             Self::Bridge => "bridge",
             Self::Static => "static",
             Self::Soak => "soak",
+            Self::HistoryScrub => "history-scrub",
         }
     }
 
@@ -498,6 +502,9 @@ pub fn run(
     clocks: BenchClocks,
     real: Option<Arc<dyn EngineClient>>,
 ) -> Task<Result<BenchReport, BenchError>> {
+    if scene == BenchScene::HistoryScrub {
+        return super::history_scrub::run(cx, opts, clocks);
+    }
     let feed = match (scene, real) {
         (BenchScene::Table2000, _) => BenchFeed::Table,
         (BenchScene::Soak, _) => BenchFeed::Soak,

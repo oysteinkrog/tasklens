@@ -2,6 +2,7 @@
 //! Built only with `--features bench`.
 
 pub mod engine;
+pub mod history_scrub;
 pub mod scenes;
 pub mod stats;
 pub mod synth;
