@@ -1076,6 +1076,12 @@ history-duration = { $min } min { $sec } sec
 history-duration-sec = { $sec } sec
 history-duration-hour = { $hours } h { $min } min
 history-loading = Loading history…
+history-chip-cpu = CPU
+history-chip-memory = Memory
+history-chip-disk = Disk
+history-chip-network = Network
+history-chip-gpu = GPU
+history-chip-more = +{ $count }
 
 # Keyboard Shortcuts window (E21-016)
 shortcuts-title = tasklens Keyboard Shortcuts
