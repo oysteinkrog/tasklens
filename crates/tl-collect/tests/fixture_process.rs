@@ -4228,3 +4228,219 @@ mod general_static {
         assert!(matches!(read_bytes(&bytes), Err(CollectError::NotElf)));
     }
 }
+
+// ---- hash.rs (E05-A3) ----
+
+mod hash_tests {
+    use std::io::Write;
+    use std::os::fd::AsFd;
+
+    use tl_collect::SysRoot;
+    use tl_collect::hash::{
+        HashCache, HashError, Hashes, hash_cached, hash_fd, hash_process_exe, hash_reads,
+    };
+    use tl_collect::proc::detail::{
+        DetailRead, EnvInfo, EnvRead, LinkRead, SecurityInfo, read_cwd, read_elf, read_environ,
+        read_fds, read_maps, read_root, read_security,
+    };
+    use tl_collect::proc::handles::{HandleWalk, StepResult};
+    use tl_collect::proc::meta::ReadBufs;
+    use tl_collect::proc::pid_stat::read_start_ticks;
+    use tl_collect::proc::strings::{ScanOpts, StringScanner, VecMem};
+    use tl_model::ids::ProcessKey;
+    use tl_model::time::BootId;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn hash_bytes(content: &[u8]) -> Hashes {
+        let mut file = tempfile::tempfile().expect("tempfile");
+        file.write_all(content).expect("write");
+        hash_fd(file.as_fd(), &mut Vec::new()).expect("hash")
+    }
+
+    fn own_key() -> ProcessKey {
+        let pid = std::process::id();
+        let dir = rustix::fs::open(
+            format!("/proc/{pid}"),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .expect("open own proc dir");
+        let start_ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).expect("own start ticks");
+        ProcessKey {
+            start_ticks,
+            boot_id: BootId(1),
+            pid,
+        }
+    }
+
+    #[test]
+    fn hash_known_vectors() {
+        let abc = hash_bytes(b"abc");
+        assert_eq!(
+            hex(&abc.sha256),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(hex(&abc.md5), "900150983cd24fb0d6963f7d28e17f72");
+        let empty = hash_bytes(b"");
+        assert_eq!(
+            hex(&empty.sha256),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(hex(&empty.md5), "d41d8cd98f00b204e9800998ecf8427e");
+    }
+
+    #[test]
+    fn hash_cache_hit() {
+        let root = SysRoot::host();
+        let key = own_key();
+        let mut cache = HashCache::new();
+        let mut buf = Vec::new();
+        let before = hash_reads();
+        let first = hash_process_exe(&root, key, None, &mut cache, &mut buf).expect("first");
+        assert_eq!(hash_reads(), before + 1);
+        let second = hash_process_exe(&root, key, None, &mut cache, &mut buf).expect("second");
+        assert_eq!(
+            hash_reads(),
+            before + 1,
+            "second call must not read the file"
+        );
+        assert_eq!(first, second);
+        assert_eq!(cache.len(), 1);
+    }
+
+    /// Security regression: a reused pid never hashes another process's image.
+    #[test]
+    fn hash_identity_mismatch() {
+        let root = SysRoot::host();
+        let real = own_key();
+        let wrong = ProcessKey {
+            start_ticks: real.start_ticks + 1,
+            ..real
+        };
+        let mut cache = HashCache::new();
+        let mut buf = Vec::new();
+        let before = hash_reads();
+        assert_eq!(
+            hash_process_exe(&root, wrong, None, &mut cache, &mut buf),
+            Err(HashError::ExeUnavailable)
+        );
+        // Also when argv0 names a readable file.
+        assert_eq!(
+            hash_process_exe(&root, wrong, Some("/proc/self/exe"), &mut cache, &mut buf),
+            Err(HashError::ExeUnavailable)
+        );
+        assert_eq!(hash_reads(), before);
+        assert!(cache.is_empty());
+        assert_eq!(
+            HashError::ExeUnavailable.message(),
+            "Executable path unavailable"
+        );
+    }
+
+    #[test]
+    fn hash_cache_cap_256() {
+        let mut cache = HashCache::new();
+        let mut buf = Vec::new();
+        let mut files = Vec::new();
+        for i in 0..257u32 {
+            let mut file = tempfile::tempfile().expect("tempfile");
+            file.write_all(&i.to_le_bytes()).expect("write");
+            hash_cached(file.as_fd(), &mut cache, &mut buf).expect("hash");
+            files.push(file);
+        }
+        assert_eq!(cache.len(), 256);
+        assert!(!cache.contains(files[0].as_fd()));
+        assert!(cache.contains(files[1].as_fd()));
+        assert!(cache.contains(files[256].as_fd()));
+    }
+
+    #[test]
+    fn detail_readers_on_self() {
+        let root = SysRoot::host();
+        let key = own_key();
+        let mut bufs = ReadBufs::default();
+
+        let mut threads = Vec::new();
+        let r = tl_collect::proc::detail::ThreadReader::new().read(
+            &root,
+            key,
+            rustix::param::clock_ticks_per_second(),
+            1,
+            &mut bufs,
+            &mut threads,
+        );
+        assert_eq!(r.expect("threads"), DetailRead::Ok);
+        assert!(!threads.is_empty());
+
+        let mut fds = Vec::new();
+        assert_eq!(
+            read_fds(&root, key, &mut bufs, &mut fds).expect("fds"),
+            DetailRead::Ok
+        );
+        assert!(!fds.is_empty());
+
+        let (mut regions, mut nodes) = (Vec::new(), Vec::new());
+        assert_eq!(
+            read_maps(&root, key, true, &mut bufs, &mut regions, &mut nodes).expect("maps"),
+            DetailRead::Ok
+        );
+        assert!(!regions.is_empty());
+
+        let mut sec = SecurityInfo::default();
+        assert_eq!(
+            read_security(&root, key, b"", &mut bufs, &mut sec).expect("security"),
+            DetailRead::Ok
+        );
+        assert!(
+            !sec.groups.is_empty() || sec.uid != [0; 4] || sec.gid != [0; 4] || sec.uid[0] == 0
+        );
+
+        let mut env = EnvInfo::default();
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_environ(&root, key, &mut buf, &mut env).expect("environ"),
+            EnvRead::Ok
+        );
+        assert!(!env.vars.is_empty());
+
+        let pid_dir = std::fs::File::open(format!("/proc/{}", key.pid)).expect("open pid dir");
+        match read_cwd(pid_dir.as_fd(), &mut buf) {
+            LinkRead::Path(p) => assert!(!p.is_empty()),
+            other => panic!("cwd gave {other:?}"),
+        }
+        match read_root(pid_dir.as_fd(), &mut buf) {
+            LinkRead::Path(p) => assert!(!p.is_empty()),
+            other => panic!("root gave {other:?}"),
+        }
+
+        let exe = std::fs::File::open("/proc/self/exe").expect("open exe");
+        let elf = read_elf(exe.as_fd(), &mut buf).expect("elf");
+        assert_ne!(elf.machine, 0);
+
+        let data: Vec<u8> = b"hello world string\0".repeat(8);
+        let end = 0x1000 + data.len() as u64;
+        let mut scanner = StringScanner::new(ScanOpts::default(), vec![(0x1000, end)]);
+        let mut mem = VecMem(0x1000, data);
+        let mut hits = Vec::new();
+        for _ in 0..16 {
+            if scanner.step(&mut mem, &mut buf, &mut hits).is_some() {
+                break;
+            }
+        }
+        assert!(!hits.is_empty());
+
+        let mut walk = HandleWalk::start(&root, "/", false);
+        let mut found = Vec::new();
+        let step = walk.step(&root, BootId(1), 64, &mut bufs, &mut found);
+        assert!(matches!(step, StepResult::More | StepResult::Done));
+
+        let mut cache = HashCache::new();
+        hash_process_exe(&root, key, None, &mut cache, &mut buf).expect("hash exe");
+        assert!(!cache.is_empty());
+    }
+}

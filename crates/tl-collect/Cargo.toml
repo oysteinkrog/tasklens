@@ -13,6 +13,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 smallvec = { workspace = true }
 rustc-hash = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
 netlink-packet-core = { workspace = true }
 netlink-packet-sock-diag = { workspace = true }
 netlink-sys = { workspace = true }

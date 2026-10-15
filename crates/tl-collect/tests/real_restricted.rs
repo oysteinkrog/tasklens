@@ -491,3 +491,62 @@ fn cwd_pid1_restricted() {
         LinkRead::Restricted
     );
 }
+
+fn pid1_key() -> tl_model::ids::ProcessKey {
+    use tl_collect::proc::pid_stat::read_start_ticks;
+    use tl_model::time::BootId;
+
+    let dir = open_dir("/proc/1");
+    let start_ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).expect("pid 1 stat");
+    tl_model::ids::ProcessKey {
+        start_ticks,
+        boot_id: BootId(1),
+        pid: 1,
+    }
+}
+
+/// PROC-074: the exe of another user's process is denied, so an absolute argv0 stands in.
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn hash_pid1_argv_fallback() {
+    use tl_collect::SysRoot;
+    use tl_collect::hash::{HashCache, hash_process_exe};
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let argv0 = "/usr/lib/systemd/systemd";
+    if !std::path::Path::new(argv0).exists() {
+        eprintln!("skipped: {argv0} not found");
+        return;
+    }
+    let got = hash_process_exe(
+        &SysRoot::host(),
+        pid1_key(),
+        Some(argv0),
+        &mut HashCache::new(),
+        &mut Vec::new(),
+    );
+    assert!(got.is_ok(), "PID 1 with argv0 gave {got:?}");
+}
+
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn hash_pid1_no_argv_unavailable() {
+    use tl_collect::SysRoot;
+    use tl_collect::hash::{HashCache, HashError, hash_process_exe};
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let got = hash_process_exe(
+        &SysRoot::host(),
+        pid1_key(),
+        None,
+        &mut HashCache::new(),
+        &mut Vec::new(),
+    );
+    assert_eq!(got, Err(HashError::ExeUnavailable));
+}
