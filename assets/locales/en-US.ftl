@@ -422,6 +422,7 @@ perf-overview-box-network = Network
 perf-overview-box-processes = Top processes
 perf-overview-gpu-vram = VRAM
 perf-overview-gpu-enc-dec = Video Encode/Decode
+perf-overview-gpu-more-engines = +{$n} more engines
 perf-overview-more = +{$n} more
 perf-overview-since-boot = {$size} since boot
 

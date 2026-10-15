@@ -744,16 +744,19 @@ pub fn box_chart<T: 'static>(
     })
 }
 
-/// The sparkline column at the right of a spark row, logical px before `ui_scale`.
+/// The sparkline column at the right of a full spark row, logical px before `ui_scale`.
 pub const SPARK_W: f32 = 96.;
 
-/// The narrowest meter a spark row keeps next to its sparkline, logical px before `ui_scale`.
+/// The narrowest meter a full spark row keeps next to its sparkline, logical px before `ui_scale`.
 const SPARK_MIN_METER_W: f32 = 32.;
 
-/// Whether a spark row `width` wide (0 before the first paint) has room for its sparkline:
-/// label, a meter of at least `SPARK_MIN_METER_W`, value and the `SPARK_W` column, with their
-/// three gaps. Narrower rows drop the sparkline column, so the value never overlaps it.
-pub fn spark_fits(width: Pixels, m: &UiMetrics) -> bool {
+/// The percent column of a narrow spark row ("100.0%"), logical px before `ui_scale`.
+const SPARK_VALUE_W: f32 = 48.;
+
+/// Whether a spark row `width` wide (0 before the first paint) has room for its meter: label, a
+/// meter of at least `SPARK_MIN_METER_W`, value and the `SPARK_W` column, with their three gaps.
+/// Narrower rows drop the meter and keep the sparkline (crw.47).
+pub fn meter_fits(width: Pixels, m: &UiMetrics) -> bool {
     let fixed = (ROW_LABEL_W + SPARK_MIN_METER_W + ROW_VALUE_W + SPARK_W) * m.ui_scale;
     width == px(0.) || f32::from(width) >= fixed + 3. * f32::from(m.sp[4])
 }
@@ -786,30 +789,71 @@ pub fn spark_chart<T: 'static>(
 
 /// A meter row with a sparkline column at the right: label, meter, value, then `chart` in a
 /// `SPARK_W` column. `None` leaves the column empty, so the meters of rows with and without a
-/// sparkline line up. Without `spark` (see [`spark_fits`]) the row is a plain meter row with no
-/// column. The chart is a cached child view: the row builds no chart geometry.
+/// sparkline line up. Without `meter` (see [`meter_fits`]) a row with a chart is label, sparkline
+/// and percent, the sparkline taking the meter's place, and a row without a chart is a plain
+/// meter row. The chart is a cached child view: the row builds no chart geometry.
 pub fn spark_row(
     row: &MeterRow,
     chart: Option<&Entity<ChartView>>,
-    spark: bool,
+    meter: bool,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
-    if !spark {
-        return div()
+    let s = m.ui_scale;
+    let cached =
+        |chart: &Entity<ChartView>| chart.clone().cached(StyleRefinement::default().size_full());
+    if !meter {
+        let Some(chart) = chart else {
+            return div()
+                .flex_none()
+                .w_full()
+                .child(meter_row(row, m, theme))
+                .into_any_element();
+        };
+        let mut label = div()
             .flex_none()
-            .w_full()
-            .child(meter_row(row, m, theme))
+            .w(px(ROW_LABEL_W * s))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(theme.text_secondary)
+            .child(row.label.clone());
+        *label.text_style() = t_sm(m);
+        let mut value = div()
+            .flex_none()
+            .w(px(SPARK_VALUE_W * s))
+            .flex()
+            .justify_end()
+            .whitespace_nowrap()
+            .text_color(theme.text_primary)
+            .child(row.value.clone());
+        *value.text_style() = numeric_style(m, m.text.sm);
+        return div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(m.sp[4])
+            .h(px(LABEL_ROW * s))
+            .child(label)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(LABEL_ROW * s))
+                    .child(cached(chart)),
+            )
+            .child(value)
             .into_any_element();
     }
-    let s = m.ui_scale;
     let mut spark = div()
         .relative()
         .flex_none()
         .w(px(SPARK_W * s))
         .h(px(LABEL_ROW * s));
     if let Some(chart) = chart {
-        spark = spark.child(chart.clone().cached(StyleRefinement::default().size_full()));
+        spark = spark.child(cached(chart));
     }
     div()
         .flex()

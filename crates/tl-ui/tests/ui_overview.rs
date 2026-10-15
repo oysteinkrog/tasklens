@@ -698,7 +698,9 @@ mod bottom {
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::DeviceKey;
     use tl_ui::pages::performance::overview::disk_box::DiskBox;
-    use tl_ui::pages::performance::overview::gpu_box::{GPU_BOX_ID, GpuBox, rows_id};
+    use tl_ui::pages::performance::overview::gpu_box::{
+        GPU_BOX_ID, GpuBox, engine_row_id, rows_id,
+    };
     use tl_ui::pages::performance::overview::net_box::NetBox;
     use tl_ui::pages::performance::overview::parts::time_axis_id;
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -1007,9 +1009,14 @@ mod bottom {
         s
     }
 
+    /// The height of `n` body rows: 18 px each, 4 px apart.
+    fn rows_h(n: usize) -> f32 {
+        n as f32 * 18. + (n - 1) as f32 * 4.
+    }
+
     #[gpui_kit::test]
     fn gpu_box_caps_at_two_with_more(cx: &mut TestAppContext) {
-        let r = open(cx, devices("gpu", &[10, 11, 12]), Vec::new(), (450., 200.));
+        let mut r = open(cx, devices("gpu", &[10, 11, 12]), Vec::new(), (450., 200.));
         let (gpu, _, _) = r.boxes();
         let (sections, more, text, shown) = r.vcx.update(|_, cx| {
             let g = gpu.read(cx);
@@ -1023,11 +1030,17 @@ mod bottom {
         assert_eq!((sections, more), (2, 1));
         assert_eq!(text, "+1 more");
         // 450 - 60 = 390 px body. Without totals each section has 3 engine rows and VRAM:
-        // 48 + 4 × 22 = 136, the second adds a 22 px heading, plus 12 px between sections: 306.
-        // "+n more" is in the title line and takes no body height.
+        // 48 + 4 × 22 = 136. The second adds a 22 px heading and the 22 px "+1 more" row, plus
+        // 12 px between sections: 328.
         assert_eq!(shown, 2, "450 px fits both sections");
         let title = r.vcx.update(|_, cx| gpu.read(cx).shown_more_text());
         assert_eq!(title.as_ref(), "+1 more");
+        let rows = r.bounds(rows_id(1));
+        assert_eq!(
+            f32::from(rows.size.height),
+            rows_h(5),
+            "3 engines, VRAM and the \"+1 more\" body row"
+        );
         let mut copy = String::new();
         r.vcx.update(|_, cx| gpu.read(cx).copy_text(&mut copy));
         assert!(copy.ends_with("+1 more\n"), "{copy}");
@@ -1048,12 +1061,12 @@ mod bottom {
         assert_eq!(shown(&mut r), 2, "back to both");
     }
 
-    /// Two GPUs at the 220 px row minimum: the first section (3 engines, VRAM, temperature and
-    /// power) needs 48 + 5 × 22 = 158 px of the 160 px body. "+1 more" goes to the title line,
-    /// so the rows end above the time axis.
+    /// Two GPUs with 3 engines, VRAM and the temperature and power row: each section is
+    /// 48 + 5 × 22 = 158 px, the second adds a 22 px heading, with 12 px between: 350 px, the
+    /// body of a 410 px box. Sections take their content height, so neither clips.
     #[gpui_kit::test]
-    fn gpu_box_more_fits_min_height(cx: &mut TestAppContext) {
-        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (220., 200.));
+    fn gpu_box_two_full_sections_at_410(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (410., 200.));
         r.system(|s| {
             let mut t11 = gpu_engines(false);
             t11.device = DeviceIdx(11);
@@ -1061,52 +1074,145 @@ mod bottom {
         });
         draw(r.vcx);
         let (gpu, _, _) = r.boxes();
-        let (shown, more, rows) = r.vcx.update(|_, cx| {
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                (g.shown(), g.collapsed())
+            })
+        };
+        assert_eq!(state(&mut r), (2, false), "410 px: two full sections");
+        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        for i in 0..2 {
+            let rows = r.bounds(rows_id(i));
+            assert_eq!(f32::from(rows.size.height), rows_h(5), "section {i}");
+            assert!(
+                rows.bottom() <= axis.top(),
+                "section {i} rows end at {:?}, the time axis starts at {:?}",
+                rows.bottom(),
+                axis.top()
+            );
+        }
+        let first = r.bounds(rows_id(0));
+        let second = r.bounds(engine_row_id(1, "gpu"));
+        assert!(first.bottom() < second.top(), "{first:?} above {second:?}");
+
+        r.heights(409., 200.);
+        assert_eq!(
+            state(&mut r),
+            (1, false),
+            "409 px: one full section and \"+1 more\""
+        );
+        let rows = r.bounds(rows_id(0));
+        assert_eq!(f32::from(rows.size.height), rows_h(6));
+    }
+
+    /// Two GPUs at the 220 px row minimum (160 px body): the first section in full with the
+    /// "+1 more" row needs 48 + 6 × 22 = 180 px, so it shows only its busiest engine and
+    /// "+2 more engines": 48 + 5 × 22 = 158 px, above the time axis.
+    #[gpui_kit::test]
+    fn gpu_box_min_height_shows_busiest_engine(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (220., 200.));
+        r.system(|s| {
+            let mut t10 = gpu_engines(false);
+            t10.dec_pct = Metric::valid(50.);
+            let mut t11 = gpu_engines(false);
+            t11.device = DeviceIdx(11);
+            s.gpus = Arc::from([(DeviceIdx(10), t10), (DeviceIdx(11), t11)]);
+        });
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let (shown, collapsed, more, engines_more) = r.vcx.update(|_, cx| {
             let g = gpu.read(cx);
             (
                 g.shown(),
+                g.collapsed(),
                 g.shown_more_text().to_string(),
-                g.sections()[0].engines.len(),
+                g.sections()[0].engines_more.to_string(),
             )
         });
-        assert_eq!((shown, more.as_str(), rows), (1, "+1 more", 3));
-        let section = r.bounds(rows_id(0));
-        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
-        assert!(
-            section.bottom() <= axis.top(),
-            "rows end at {:?}, the time axis starts at {:?}",
-            section.bottom(),
-            axis.top()
+        assert_eq!((shown, collapsed), (1, true));
+        assert_eq!(
+            (more.as_str(), engines_more.as_str()),
+            ("+1 more", "+2 more engines")
         );
         assert!(
-            f32::from(section.size.height) >= 5. * 18. + 4. * 4.,
-            "all five rows drawn: {section:?}"
+            r.vcx.debug_bounds(leak(engine_row_id(0, "dec"))).is_some(),
+            "busiest row"
+        );
+        for key in ["gpu", "enc"] {
+            assert!(
+                r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_none(),
+                "{key}"
+            );
+        }
+        let rows = r.bounds(rows_id(0));
+        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        assert!(
+            rows.bottom() <= axis.top(),
+            "rows end at {:?}, the time axis starts at {:?}",
+            rows.bottom(),
+            axis.top()
+        );
+        assert_eq!(
+            f32::from(rows.size.height),
+            rows_h(5),
+            "busiest engine, \"+2 more engines\", VRAM, temperature and power, \"+1 more\""
         );
     }
 
-    /// At the supported 720 px page width a GPU box is 224 px wide with a 198 px body: too
-    /// narrow for label 72, meter 32, value 80 and the 96 px sparkline with their gaps (304 px),
-    /// so the rows drop the sparkline column and stay inside the body.
+    /// One GPU at the 220 px row minimum: 3 engines, VRAM and the temperature and power row need
+    /// 158 of the 160 px body, so every engine row shows.
     #[gpui_kit::test]
-    fn gpu_box_narrow_drops_sparklines(cx: &mut TestAppContext) {
+    fn gpu_box_one_gpu_min_height_all_engines(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (220., 200.));
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let collapsed = r.vcx.update(|_, cx| gpu.read(cx).collapsed());
+        assert!(!collapsed);
+        for key in ["gpu", "enc", "dec"] {
+            assert!(
+                r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_some(),
+                "{key}"
+            );
+        }
+        let rows = r.bounds(rows_id(0));
+        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        assert!(rows.bottom() <= axis.top(), "{rows:?} above {axis:?}");
+    }
+
+    /// At the supported 720 px page width a GPU box is 224 px wide with a 198 px body: too
+    /// narrow for label 72, meter 32, value 80 and the 96 px sparkline with their gaps (304 px).
+    /// The engine rows drop the meter and keep the sparkline, and stay inside the body.
+    #[gpui_kit::test]
+    fn gpu_box_narrow_keeps_sparklines(cx: &mut TestAppContext) {
         let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (300., 200.));
         r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
         draw(r.vcx);
         let (gpu, _, _) = r.boxes();
-        let spark = |r: &mut Rig| r.vcx.update(|_, cx| gpu.read(cx).spark());
-        assert!(spark(&mut r), "500 px: sparklines");
+        let meters = |r: &mut Rig| r.vcx.update(|_, cx| gpu.read(cx).meters());
+        assert!(meters(&mut r), "500 px: meters");
         r.gpu_width(224.);
-        assert!(!spark(&mut r), "224 px: no sparklines");
-        let rows = r.bounds(rows_id(0));
+        assert!(!meters(&mut r), "224 px: no meters");
+        let collapsed = r.vcx.update(|_, cx| gpu.read(cx).collapsed());
+        assert!(!collapsed, "every engine row stays");
         let frame = r.bounds(GPU_BOX_ID.to_owned());
-        assert!(
-            rows.right() <= frame.right() - px(12.),
-            "rows {rows:?} inside the body of {frame:?}"
-        );
+        for key in ["gpu", "enc", "dec"] {
+            let row = r.bounds(engine_row_id(0, key));
+            assert!(
+                row.right() <= frame.right() - px(12.),
+                "{key} row {row:?} inside the body of {frame:?}"
+            );
+            assert_eq!(f32::from(row.size.height), 18., "{key}");
+        }
         r.gpu_width(330.);
-        assert!(spark(&mut r), "330 px (304 px body): sparklines");
+        assert!(meters(&mut r), "330 px (304 px body): meters");
         r.gpu_width(329.);
-        assert!(!spark(&mut r), "329 px: no sparklines");
+        assert!(!meters(&mut r), "329 px: no meters");
+    }
+
+    fn leak(id: String) -> &'static str {
+        Box::leak(id.into_boxed_str())
     }
 
     #[gpui_kit::test]

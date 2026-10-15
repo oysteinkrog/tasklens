@@ -1,14 +1,15 @@
 //! The Overview page's GPU box (UI-PRF-017, D-022, UI-PRF-029): one section per shown GPU, at most
 //! two, each a utilization chart, one row per engine (label, meter, percent and a sparkline), a
-//! VRAM meter row and a temperature and power row. "+n more" sits in the title line, so it never
-//! takes body height.
+//! VRAM meter row and a temperature and power row, then a "+n more" row for the GPUs left over.
 //!
 //! The page hands in the GPUs of the sidebar's visible cards. The box formats its text only when
 //! the inputs' hash changes and notifies only then. Engine rows and their sparkline charts are
-//! built only when the shown engine list changes (crw.47). The second section shows only when
-//! both fit the box height with charts of at least 48 px (TMOG), and the sparkline column only
-//! when the box is wide enough for it (`spark_fits`); a resize re-renders the box only when one of
-//! those changes. Pointer movement never notifies.
+//! built only when the shown engine list changes (crw.47). Each section is as high as its content
+//! with a chart of at least 48 px (TMOG), and the spare height goes to the charts. The second
+//! section shows only when both fit. When one section's rows do not fit, it shows only the
+//! busiest engine and a "+n more engines" row. Narrow rows drop the meter and keep the sparkline
+//! (`meter_fits`). A resize re-renders the box only when one of those changes. Pointer movement
+//! never notifies.
 
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
@@ -17,7 +18,7 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    AnyElement, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
     Subscription, Window, div, px, size,
 };
@@ -36,7 +37,7 @@ use super::cpu_box::value_text;
 use super::mem_box::MeterRow;
 use super::parts::{
     ChartSettings, MIN_CHART_H, SPARK_GRID, box_chart, box_frame, chart_section_versions,
-    class_probe, spark_chart, spark_fits, spark_row,
+    class_probe, meter_fits, spark_chart, spark_row,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -59,6 +60,7 @@ const KEY_VRAM: &str = "perf-overview-gpu-vram";
 /// The one row of a shared encode/decode engine.
 const KEY_ENC_DEC: &str = "perf-overview-gpu-enc-dec";
 const KEY_MORE: &str = "perf-overview-more";
+const KEY_MORE_ENGINES: &str = "perf-overview-gpu-more-engines";
 const KEY_RANGE: &str = "perf-gpu-row-utilization";
 
 /// The joint between the temperature and the power.
@@ -74,6 +76,8 @@ pub struct GpuSection {
     pub value: SharedString,
     /// One row per shown engine, in the vendor's order.
     pub engines: SmallVec<[EngineRow; 4]>,
+    /// "+n more engines" for every engine but the busiest, shown when the rows do not fit.
+    pub engines_more: SharedString,
     pub vram: MeterRow,
     /// Temperature and power, each only when known.
     pub line: SharedString,
@@ -225,41 +229,99 @@ fn spacing(m: &UiMetrics) -> (f32, f32, f32) {
     )
 }
 
-/// The body rows under a section's chart: the engines, VRAM and, when known, temperature and
-/// power.
-fn body_rows(s: &GpuSection) -> usize {
-    s.engines.len() + 1 + usize::from(!s.line.is_empty())
+/// A section's body rows under its chart: the engine rows, and the rest (VRAM and, when known,
+/// the temperature and power row).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SectionRows {
+    engines: usize,
+    rest: usize,
 }
 
-/// How many sections fit a body of `body` (0 before the first paint shows them all). `rows` has
-/// each section's body rows. The first section is a chart and its rows (its heading is the box
-/// title row); later ones add a heading row. "+n more" is in the title line and costs nothing.
-fn sections_fit(body: Size<Pixels>, rows: &[usize], m: &UiMetrics) -> usize {
+fn section_rows(s: &GpuSection) -> SectionRows {
+    SectionRows {
+        engines: s.engines.len(),
+        rest: 1 + usize::from(!s.line.is_empty()),
+    }
+}
+
+/// What a body shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Fit {
+    /// How many sections.
+    sections: usize,
+    /// The first section shows only its busiest engine and a "+n more engines" row.
+    collapsed: bool,
+    /// The engine rows draw their meters (see `meter_fits`).
+    meters: bool,
+}
+
+impl Fit {
+    /// The layout class for `class_probe`.
+    fn class(self) -> u32 {
+        self.sections as u32 | u32::from(self.collapsed) << 2 | u32::from(self.meters) << 3
+    }
+}
+
+/// The engine rows a section draws: all of them, or the busiest and "+n more engines" when
+/// `collapsed` and there are more than two.
+fn engine_lines(engines: usize, collapsed: bool) -> usize {
+    if collapsed { engines.min(2) } else { engines }
+}
+
+/// The content height of a section, in px: its heading row (`heading`), a `MIN_CHART_H` chart
+/// and `lines` body rows.
+fn section_h(lines: usize, heading: bool, m: &UiMetrics) -> f32 {
+    let (row, gap, _) = spacing(m);
+    let head = if heading { row + gap } else { 0. };
+    head + MIN_CHART_H * m.ui_scale + lines as f32 * (gap + row)
+}
+
+/// What fits a body of `body` (everything before the first paint). `rows` has each section's
+/// body rows and `total` counts every GPU; those without a section get a "+n more" row under the
+/// last section. Both sections show only when both fit in full. Otherwise one section shows, and
+/// when its rows do not fit, only its busiest engine and "+n more engines".
+fn fit(body: Size<Pixels>, rows: &[SectionRows], total: usize, m: &UiMetrics) -> Fit {
+    let meters = meter_fits(body.width, m);
     let count = rows.len();
-    if body.height == px(0.) || count < 2 {
-        return count;
+    if body.height == px(0.) || count == 0 {
+        return Fit {
+            sections: count,
+            collapsed: false,
+            meters,
+        };
     }
-    let (row, gap, section_gap) = spacing(m);
-    let chart = MIN_CHART_H * m.ui_scale;
-    let section = |n: usize| chart + n as f32 * (gap + row);
-    let first = section(rows[0]);
-    let next = row + gap + section(rows[1]);
-    if f32::from(body.height) >= first + section_gap + next {
-        2
-    } else {
-        1
+    let (_, _, section_gap) = spacing(m);
+    let more = |shown: usize| usize::from(total > shown);
+    let h = f32::from(body.height);
+    let lines = |r: SectionRows, collapsed: bool| engine_lines(r.engines, collapsed) + r.rest;
+    if count >= 2 {
+        let two = section_h(lines(rows[0], false), false, m)
+            + section_gap
+            + section_h(lines(rows[1], false) + more(2), true, m);
+        if h >= two {
+            return Fit {
+                sections: 2,
+                collapsed: false,
+                meters,
+            };
+        }
     }
-}
-
-/// The layout class of a body: how many sections fit (bits 0 and 1) and whether the rows have
-/// room for their sparklines (bit 2).
-fn layout_class(body: Size<Pixels>, rows: &[usize], m: &UiMetrics) -> u32 {
-    sections_fit(body, rows, m) as u32 | u32::from(spark_fits(body.width, m)) << 2
+    let full = section_h(lines(rows[0], false) + more(1), false, m);
+    Fit {
+        sections: 1,
+        collapsed: h < full && rows[0].engines > 2,
+        meters,
+    }
 }
 
 /// The debug selector of section `i`'s body rows.
 pub fn rows_id(i: usize) -> String {
     format!("{GPU_BOX_ID}-rows-{i}")
+}
+
+/// The debug selector of section `i`'s engine row `key`.
+pub fn engine_row_id(i: usize, key: &str) -> String {
+    format!("{GPU_BOX_ID}-engine-{i}-{key}")
 }
 
 /// The GPU box.
@@ -274,11 +336,11 @@ pub struct GpuBox {
     text_bits: u64,
     /// `performance.hidden_gpu_engines`.
     hidden: Vec<String>,
-    /// The body size of the last paint, how many sections the last render showed and whether it
-    /// drew the sparkline column.
+    /// The body size of the last paint and what the last render showed.
     body: Rc<Cell<Size<Pixels>>>,
     shown: usize,
-    spark: bool,
+    collapsed: bool,
+    meters: bool,
     settings: ChartSettings,
     settings_versions: [u64; 3],
     style_version: u64,
@@ -309,7 +371,8 @@ impl GpuBox {
                 .clone(),
             body: Rc::new(Cell::new(size(px(0.), px(0.)))),
             shown: 0,
-            spark: true,
+            collapsed: false,
+            meters: true,
             settings: ChartSettings::read(cx),
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
@@ -367,12 +430,18 @@ impl GpuBox {
         self.shown
     }
 
-    /// Whether the last render drew the sparkline column.
-    pub fn spark(&self) -> bool {
-        self.spark
+    /// Whether the last render showed only the first section's busiest engine and "+n more
+    /// engines".
+    pub fn collapsed(&self) -> bool {
+        self.collapsed
     }
 
-    /// The title line's "+n more" text of the last render, empty when every GPU is shown.
+    /// Whether the last render drew the engine rows' meters.
+    pub fn meters(&self) -> bool {
+        self.meters
+    }
+
+    /// The "+n more" row of the last render, empty when every GPU is shown.
     pub fn shown_more_text(&self) -> SharedString {
         if self.shown < self.sections.len() {
             self.more_text_fit.clone()
@@ -444,6 +513,7 @@ impl GpuBox {
                         chart: box_chart(spec, labels, &hub, cx),
                         value: SharedString::default(),
                         engines: SmallVec::new(),
+                        engines_more: SharedString::default(),
                         vram: MeterRow {
                             label: tr(cx, KEY_VRAM),
                             value: SharedString::default(),
@@ -519,6 +589,7 @@ impl GpuBox {
                 };
                 rows.push(row);
             }
+            self.sections[i].engines_more = more_engines(rows.len(), cx);
             self.sections[i].engines = rows;
         }
         changed
@@ -649,6 +720,7 @@ impl GpuBox {
             for e in &mut s.engines {
                 e.meter.label = tr(cx, e.name);
             }
+            s.engines_more = more_engines(s.engines.len(), cx);
             let labels = chart_labels(range.clone());
             s.chart.update(cx, |v, cx| v.set_labels(labels, cx));
         }
@@ -667,6 +739,12 @@ impl GpuBox {
             }
         }
     }
+}
+
+/// "+n more engines" for a section with `engines` engine rows: all but the busiest.
+fn more_engines(engines: usize, cx: &App) -> SharedString {
+    let n = engines.saturating_sub(1);
+    tr_args(cx, KEY_MORE_ENGINES, &[("n", FluentValue::from(n))])
 }
 
 /// One section's value ("12%"), engine percents and fills, VRAM ("3.20 GiB / 16.00 GiB" and its
@@ -736,6 +814,32 @@ fn chart_element(s: &GpuSection) -> AnyElement {
         .into_any_element()
 }
 
+/// A secondary text row: "+n more engines" or "+n more".
+fn text_row(text: &SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let mut line = div()
+        .flex_none()
+        .h(px(LABEL_ROW * m.ui_scale))
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_ellipsis()
+        .text_color(theme.text_secondary)
+        .child(text.clone());
+    *line.text_style() = t_xs(m);
+    line.into_any_element()
+}
+
+/// The index of the engine with the highest current value; the first on a tie or with none.
+fn busiest(engines: &[EngineRow]) -> usize {
+    let mut best = 0;
+    for (i, e) in engines.iter().enumerate() {
+        let v = e.meter.fraction.unwrap_or(-1.);
+        if v > engines[best].meter.fraction.unwrap_or(-1.) {
+            best = i;
+        }
+    }
+    best
+}
+
 impl Render for GpuBox {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
@@ -744,11 +848,15 @@ impl Render for GpuBox {
         let theme = current(cx).clone();
         let s = m.ui_scale;
         let row_h = px(LABEL_ROW * s);
-        let rows: SmallVec<[usize; MAX_GPUS]> = self.sections.iter().map(body_rows).collect();
+        let rows: SmallVec<[SectionRows; MAX_GPUS]> =
+            self.sections.iter().map(section_rows).collect();
+        let total = self.sections.len() + self.more;
         let body_size = self.body.get();
-        self.shown = sections_fit(body_size, &rows, &m);
-        self.spark = spark_fits(body_size.width, &m);
-        let spark = self.spark;
+        let shown = fit(body_size, &rows, total, &m);
+        self.shown = shown.sections;
+        self.collapsed = shown.collapsed;
+        self.meters = shown.meters;
+        let more = self.shown_more_text();
 
         let mut body = div()
             .relative()
@@ -757,12 +865,18 @@ impl Render for GpuBox {
             .size_full()
             .overflow_hidden()
             .gap(m.sp[5]);
-        for (i, section) in self.sections.iter().take(self.shown).enumerate() {
+        for (i, section) in self.sections.iter().take(shown.sections).enumerate() {
+            let collapsed = shown.collapsed && i == 0;
+            let last = i + 1 == shown.sections;
+            let lines = engine_lines(rows[i].engines, collapsed)
+                + rows[i].rest
+                + usize::from(last && !more.is_empty());
             let mut col = div()
                 .flex()
                 .flex_col()
-                .flex_1()
-                .min_h(px(MIN_CHART_H * s))
+                .flex_grow(1.)
+                .flex_shrink_0()
+                .flex_basis(px(section_h(lines, i > 0, &m)))
                 .w_full()
                 .gap(m.sp[2]);
             if i > 0 {
@@ -790,31 +904,41 @@ impl Render for GpuBox {
                         .child(value),
                 );
             }
+            let engine = |e: &EngineRow| {
+                let key = e.key;
+                div()
+                    .debug_selector(move || engine_row_id(i, key))
+                    .flex_none()
+                    .w_full()
+                    .child(spark_row(
+                        &e.meter,
+                        Some(&e.chart),
+                        shown.meters,
+                        &m,
+                        &theme,
+                    ))
+            };
             let mut section_rows = div()
                 .debug_selector(move || rows_id(i))
                 .flex()
                 .flex_col()
                 .flex_none()
                 .w_full()
-                .gap(m.sp[2])
-                .children(
-                    section
-                        .engines
-                        .iter()
-                        .map(|e| spark_row(&e.meter, Some(&e.chart), spark, &m, &theme)),
-                )
-                .child(spark_row(&section.vram, None, spark, &m, &theme));
+                .gap(m.sp[2]);
+            if collapsed && section.engines.len() > 2 {
+                section_rows = section_rows
+                    .child(engine(&section.engines[busiest(&section.engines)]))
+                    .child(text_row(&section.engines_more, &m, &theme));
+            } else {
+                section_rows = section_rows.children(section.engines.iter().map(engine));
+            }
+            section_rows =
+                section_rows.child(spark_row(&section.vram, None, shown.meters, &m, &theme));
             if !section.line.is_empty() {
-                let mut line = div()
-                    .flex_none()
-                    .h(row_h)
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_color(theme.text_secondary)
-                    .child(section.line.clone());
-                *line.text_style() = t_xs(&m);
-                section_rows = section_rows.child(line);
+                section_rows = section_rows.child(text_row(&section.line, &m, &theme));
+            }
+            if last && !more.is_empty() {
+                section_rows = section_rows.child(text_row(&more, &m, &theme));
             }
             col = col
                 .child(
@@ -827,12 +951,11 @@ impl Render for GpuBox {
                 .child(section_rows);
             body = body.child(col);
         }
-        let class = layout_class(body_size, &rows, &m);
         let probe_m = m;
         body = body.child(class_probe(
             Rc::clone(&self.body),
-            class,
-            move |b| layout_class(b, &rows, &probe_m),
+            shown.class(),
+            move |b| fit(b, &rows, total, &probe_m).class(),
             cx.entity_id(),
         ));
 
@@ -843,7 +966,7 @@ impl Render for GpuBox {
             first.map(|s| s.key.clone()),
             pick(|s| &s.heading),
             pick(|s| &s.value),
-            self.shown_more_text(),
+            SharedString::default(),
             body.into_any_element(),
             &m,
             &theme,
