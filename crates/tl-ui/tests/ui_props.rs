@@ -4089,7 +4089,20 @@ mod window {
             .expect("button");
         assert_eq!(b.label.as_ref(), "Waiting for authentication\u{2026}");
         assert!(b.loading);
-        assert!(vcx.debug_bounds("TlButton-spinner").is_some());
+        // The label stays visible: the button is not in TlButton's loading mode, which hides
+        // its content, and the spinner sits beside it.
+        assert!(vcx.debug_bounds("TlButton-spinner").is_none());
+        assert!(vcx.debug_bounds("TlButton-label").is_some());
+        let button = vcx
+            .debug_bounds("TlButton-PropsAccessButton")
+            .expect("button bounds");
+        let spinner = vcx
+            .debug_bounds("PropsAccessButton-spinner")
+            .expect("spinner bounds");
+        assert!(
+            spinner.left() >= button.right(),
+            "the spinner is beside the label"
+        );
 
         press(&mut vcx, "space");
         assert_eq!(starts.get(), 1, "a loading button is inert");

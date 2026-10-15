@@ -27,7 +27,7 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Root;
 use gpui_kit::component::input::Escape;
-use gpui_kit::component::{Icon, v_flex};
+use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
     FocusHandle, Focusable as _, Global, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -57,6 +57,7 @@ use self::threads::ThreadsTab;
 use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::menu::{close_context_menu, context_menu_open};
+use crate::components::progress::TlSpinner;
 use crate::components::shield::StartHelperSession;
 use crate::components::tabs::{TlTabSpec, TlTabs};
 use crate::components::toast::{ToastKind, ToastQueue};
@@ -360,19 +361,29 @@ impl RenderOnce for AccessBlock {
             let view = self
                 .view
                 .unwrap_or_else(|| access_button_view(kind, HelperState::Locked, false, &words));
-            div()
+            // `TlButton::loading` hides the label, and "Waiting for authentication…" must stay
+            // readable. While loading the button is inert and the spinner sits beside it.
+            h_flex()
                 .debug_selector(|| "PropsAccessButton".into())
                 .mt(m.sp[5] - m.sp[4])
+                .gap(m.sp[3])
                 .child(
                     TlButton::new("PropsAccessButton", TlButtonKind::Secondary)
                         .size(TlButtonSize::Sm)
                         .label(view.label)
                         .action(Box::new(StartHelperSession))
-                        .disabled(view.disabled)
-                        .loading(view.loading)
+                        .disabled(view.disabled || view.loading)
                         .when_some(view.tooltip, |b, tip| b.tooltip(tip))
                         .when_some(self.focus, |b, focus| b.focus_handle(focus)),
                 )
+                .when(view.loading, |row| {
+                    row.child(
+                        div()
+                            .debug_selector(|| "PropsAccessButton-spinner".into())
+                            .flex_none()
+                            .child(TlSpinner::new(m.icon.sm)),
+                    )
+                })
         });
         v_flex()
             .debug_selector(|| "PropsAccessBlock".into())
