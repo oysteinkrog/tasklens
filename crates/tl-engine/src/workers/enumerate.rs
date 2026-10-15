@@ -178,11 +178,12 @@ pub fn fan_key(chip: &HwmonChip, f: &FanInput) -> Arc<str> {
     format!("fan:{}:{path}:{}", chip.name, f.n).into()
 }
 
-/// `sensor:<hwmon name>:<device path>:<label>` for temperatures. PERF-005 names no key for
-/// temperatures; this one only fills the mandatory field with a stable value.
+/// `sensor:<hwmon name>:<device path>:temp<n>` for temperatures, `n` from `temp<n>_input`.
+/// The label stays out of the key. Without the `sensor:` prefix this is the stored form of a
+/// fan's temperature source (table (a), PERF-077).
 pub fn sensor_key(chip: &HwmonChip, t: &TempInput) -> Arc<str> {
     let path = chip.device_path.as_deref().unwrap_or("");
-    format!("sensor:{}:{path}:{}", chip.name, temp_label(t)).into()
+    format!("sensor:{}:{path}:temp{}", chip.name, t.n).into()
 }
 
 /// The disk key for one block device, read from `<udev_root>/udev/data/b<major>:<minor>`.
@@ -389,6 +390,63 @@ mod tests {
         assert_eq!(
             &*net_key(&iface("eth0"), Some("a8:a1:59:12:34:56")),
             "net:a8:a1:59:12:34:56"
+        );
+    }
+
+    fn chip(name: &str, device_path: Option<&str>) -> HwmonChip {
+        HwmonChip {
+            dir: "/sys/class/hwmon/hwmon0".into(),
+            index: 0,
+            name: name.into(),
+            device_path: device_path.map(Into::into),
+            temps: Vec::new(),
+            fans: Vec::new(),
+            pwms: Vec::new(),
+        }
+    }
+
+    fn temp_input(n: u16, label: Option<&str>) -> TempInput {
+        TempInput {
+            n,
+            label: label.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn sensor_key_carries_index_not_label() {
+        let c = chip("k10temp", Some("devices/pci0000:00/0000:00:18.3"));
+        let key = sensor_key(&c, &temp_input(1, Some("Tctl")));
+        assert_eq!(
+            &*key,
+            "sensor:k10temp:devices/pci0000:00/0000:00:18.3:temp1"
+        );
+    }
+
+    #[test]
+    fn sensor_key_unlabelled_ends_in_index() {
+        let c = chip("nct6797", Some("devices/platform/nct6775.656"));
+        assert!(sensor_key(&c, &temp_input(3, None)).ends_with(":temp3"));
+    }
+
+    #[test]
+    fn sensor_key_colon_path_one_key_per_sensor() {
+        let path = "devices/pci0000:00/0000:00:18.3";
+        let mut c = chip("k10temp", Some(path));
+        c.temps = vec![
+            temp_input(1, Some("Tctl")),
+            temp_input(2, Some("Tccd1")),
+            temp_input(3, None),
+        ];
+        let list = sensor_list(0, std::slice::from_ref(&c));
+        let keys: Vec<&str> = list.entries.iter().map(|e| &*e.persistent_key).collect();
+        let mut unique = keys.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 3);
+        // Table (a) form: the key without "sensor:".
+        assert_eq!(
+            keys[0].strip_prefix("sensor:"),
+            Some("k10temp:devices/pci0000:00/0000:00:18.3:temp1")
         );
     }
 }

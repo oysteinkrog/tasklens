@@ -186,7 +186,9 @@ fn sid(device: DeviceIdx, metric: MetricId) -> SeriesId {
 }
 
 /// Name and persistent key for a device first seen in a sample, before any `DeviceList` named
-/// it. The next list from the worker replaces both.
+/// it. The next list from the worker replaces both. The sensor key here has no device path
+/// and no `temp<n>` index (the identity holds only chip and label), so it cannot match the
+/// worker's `sensor:<chip>:<path>:temp<n>` form. Nothing stores it.
 fn fallback_name_key(id: &DeviceIdentity) -> (String, String) {
     match id {
         DeviceIdentity::CpuPackage => ("CPU".into(), "cpu".into()),
