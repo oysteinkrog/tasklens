@@ -28,7 +28,7 @@ use gpui_kit::{
 };
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, Signal};
 use tl_model::command::{Command, Tab};
 use tl_model::details::{HandleHit, HandleKind, HandlePhase, HandleSearchState, SearchId};
 use tl_model::health::{HelperStartOutcome, HelperState};
@@ -1326,6 +1326,13 @@ impl HandleSearchWindow {
         if captured.items.is_empty() {
             return;
         }
+        if captured.truncated {
+            // More than MAX_TARGETS processes: send nothing and name the limit, as the engine
+            // would for an oversized request.
+            let (kind, text) = action_words(cx).reject(RejectReason::TooManyTargets);
+            toast(window, cx, kind, text);
+            return;
+        }
         let words = toast_words(cx);
         if let Some(text) = captured
             .items
@@ -1392,15 +1399,22 @@ impl HandleSearchWindow {
         self.end(true, window, cx);
     }
 
-    /// Go to process (PROC-071): the focus row's process on the Processes tab.
+    /// The row an item for one row acts on: the focus row when it is selected, else the first
+    /// selected row in view order. A Ctrl-click that deselects a row leaves the focus on it, so
+    /// the focus alone can name a row that is not selected.
+    fn acting_row(&self, cx: &App) -> Option<u32> {
+        let t = self.table.read(cx);
+        t.selection
+            .focus()
+            .filter(|id| t.selection.contains(id))
+            .or_else(|| t.delegate.in_view_order(t.selection.ids()).first().copied())
+    }
+
+    /// Go to process (PROC-071): the acting row's process on the Processes tab.
     fn on_go_to(&mut self, _: &HandleSearchGoToProcess, _: &mut Window, cx: &mut Context<Self>) {
-        let key = {
-            let t = self.table.read(cx);
-            t.selection
-                .focus()
-                .and_then(|id| t.delegate.hit(id))
-                .map(|h| h.key)
-        };
+        let key = self
+            .acting_row(cx)
+            .and_then(|id| self.table.read(cx).delegate.hit(id).map(|h| h.key));
         if let Some(key) = key {
             go_to_process(key, cx);
         }
@@ -1438,7 +1452,8 @@ impl HandleSearchWindow {
         toast(window, cx, ToastKind::Success, self.words.copied.clone());
     }
 
-    /// Open file location (PROC-073) for the focus row's path.
+    /// Open file location (PROC-073) for the path of the one selected row, the same rule that
+    /// enables the menu item.
     fn on_open_location(
         &mut self,
         _: &HandleSearchOpenLocation,
@@ -1447,11 +1462,15 @@ impl HandleSearchWindow {
     ) {
         let path = {
             let t = self.table.read(cx);
-            t.selection
-                .focus()
-                .and_then(|id| t.delegate.hit(id))
-                .filter(|h| h.path.starts_with('/'))
-                .map(|h| h.path.clone())
+            let mut ids = t.selection.ids();
+            match (ids.next(), ids.next()) {
+                (Some(id), None) => t
+                    .delegate
+                    .hit(id)
+                    .filter(|h| h.path.starts_with('/'))
+                    .map(|h| h.path.clone()),
+                _ => None,
+            }
         };
         let Some(path) = path else {
             return;

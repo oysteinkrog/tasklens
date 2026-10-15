@@ -38,7 +38,7 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::windows::actions::{HandleSearchEndProcess, HandleSearchEndTask};
 use tl_ui::windows::handle_search::{
-    HANDLE_HIT_CAP, HandleSearchWindow, SearchStatus, open_handle_search,
+    HANDLE_HIT_CAP, HandleSearchOpenLocation, HandleSearchWindow, SearchStatus, open_handle_search,
 };
 
 struct Rig {
@@ -799,4 +799,63 @@ fn handle_hit_cap_status(cx: &mut TestAppContext) {
         "Showing the first 100\u{2009}000 matches."
     );
     draw(&mut rig.win);
+}
+
+/// Security regression: more than 256 distinct processes send nothing and name the limit,
+/// rather than ending only the first 256.
+#[gpui_kit::test]
+fn handle_end_over_target_limit_sends_nothing(cx: &mut TestAppContext) {
+    let mut rig = setup(cx);
+    let hits: Vec<HandleHit> = (0..257)
+        .map(|n| hit_of(300 + n, 3, "/var/log/a.log"))
+        .collect();
+    show_hits(cx, &mut rig, hits);
+    let ids: Vec<u32> = (0..257).collect();
+    select(&mut rig, &ids);
+    let before = window_ids(&mut rig);
+    rig.win
+        .update(|window, cx| window.dispatch_action(HandleSearchEndProcess.boxed_clone(), cx));
+    rig.win.run_until_parked();
+    assert!(actions_sent(&rig.engine).is_empty(), "nothing is sent");
+    assert_eq!(window_ids(&mut rig), before, "no confirmation opens");
+    assert!(
+        own_toasts(&mut rig)
+            .iter()
+            .any(|t| t == "Too many processes selected. The limit is 256."),
+        "the limit is reported in the Handle Search window"
+    );
+}
+
+/// The item acts on the selected row even when a Ctrl-click left the focus on a deselected one.
+#[gpui_kit::test]
+fn handle_open_location_uses_selected_row(cx: &mut TestAppContext) {
+    let mut rig = setup(cx);
+    show_hits(
+        cx,
+        &mut rig,
+        vec![
+            hit_of(300, 3, "/var/log/a.log"),
+            hit_of(301, 4, "/srv/b.log"),
+        ],
+    );
+    // Select A and B, then Ctrl-click B again: only A stays selected, the focus is on B.
+    select(&mut rig, &[0, 1, 1]);
+    let (focus, selected) = rig.win.read(|cx| {
+        let t = rig.view.read(cx).table().read(cx);
+        (t.selection.focus(), t.selection.ids().collect::<Vec<_>>())
+    });
+    assert_eq!((focus, selected), (Some(1), vec![0]));
+    rig.win
+        .update(|window, cx| window.dispatch_action(HandleSearchOpenLocation.boxed_clone(), cx));
+    rig.win.run_until_parked();
+    let sent = actions_sent(&rig.engine);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].kind,
+        ActionKind::ShowInFileManager {
+            path: "/var/log/a.log".into(),
+            properties: false,
+        }
+    );
+    assert!(sent[0].targets.is_empty());
 }
