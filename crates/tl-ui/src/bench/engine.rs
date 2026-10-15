@@ -95,6 +95,8 @@ const DEV_AGG_NET: u16 = DEV_AGG_DISK + 1;
 const SWAP_TOTAL_BYTES: u64 = 8 << 30;
 const SWAP_USED_BYTES: u64 = SWAP_TOTAL_BYTES / 20;
 const CACHED_BYTES: u64 = MEM_TOTAL_BYTES / 5;
+/// perf-overview MemAvailable (half of the memory).
+const AVAILABLE_BYTES: u64 = MEM_TOTAL_BYTES / 2;
 /// perf-overview GPU memory size (16 GiB).
 const VRAM_TOTAL_BYTES: u64 = 16 << 30;
 /// perf-overview disks: each second a read burst and a write burst each start with this chance,
@@ -109,9 +111,10 @@ const WIRED_LINK_MBPS: u32 = 1_000;
 /// perf-overview track indexes, sorted by `SeriesId` like the tracks above.
 const OX_SWAP: usize = 0;
 const OX_CACHED: usize = 1;
-const OX_GPU_MEM: usize = 2;
+const OX_AVAILABLE: usize = 2;
+const OX_GPU_MEM: usize = 3;
 /// Disk `d` has its read rate at `OX_FIRST_DISK + 2d` and its write rate right after.
-const OX_FIRST_DISK: usize = 3;
+const OX_FIRST_DISK: usize = 4;
 const OX_AGG_DISK: usize = OX_FIRST_DISK + 8;
 const OX_AGG_NET: usize = OX_AGG_DISK + 2;
 const OX_TRACKS: usize = OX_AGG_NET + 2;
@@ -121,7 +124,7 @@ pub enum BenchFeed {
     /// Every series synthetic (perf-cpu, static).
     Synthetic,
     /// perf-overview: the `Synthetic` series plus memory, disk, network and GPU totals, the
-    /// DISK_READ, DISK_WRITE, MEM_CACHED, SWAP_USED and GPU_MEM series, and the disk and
+    /// DISK_READ, DISK_WRITE, MEM_CACHED, MEM_AVAILABLE, SWAP_USED and GPU_MEM series, and the disk and
     /// network aggregates with their summed rates.
     Overview,
     /// perf-overview-procs: the `Overview` feed, and once per second the records of a
@@ -768,6 +771,7 @@ impl OverviewSynth {
         let mut push = |i: usize, v: f32| self.tracks[i].push(Sample::valid(t_ns, v));
         push(OX_SWAP, SWAP_USED_BYTES as f32);
         push(OX_CACHED, CACHED_BYTES as f32);
+        push(OX_AVAILABLE, AVAILABLE_BYTES as f32);
         push(OX_GPU_MEM, f.vram_used as f32);
         let (mut read, mut write) = (0.0, 0.0);
         for (d, &(r, w)) in f.disk_bps.iter().enumerate() {
@@ -880,6 +884,7 @@ fn overview_tracks() -> Vec<Track> {
     let mut out = Vec::with_capacity(OX_TRACKS);
     out.push(slow(DEV_MEMORY, MetricId::SWAP_USED));
     out.push(slow(DEV_MEMORY, MetricId::MEM_CACHED));
+    out.push(slow(DEV_MEMORY, MetricId::MEM_AVAILABLE));
     out.push(slow(DEV_GPU, MetricId::GPU_MEM));
     for d in 0..4 {
         out.push(slow(DEV_FIRST_DISK + d, MetricId::DISK_READ));

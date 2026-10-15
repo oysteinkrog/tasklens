@@ -72,10 +72,12 @@ impl MetricId {
     pub const GPU_ENGINE_OTHER: Self = Self(57);
     pub const FAN_PWM: Self = Self(58);
     pub const BATTERY_POWER: Self = Self(61);
+    /// MemAvailable in bytes (tasklens-hjn.35).
+    pub const MEM_AVAILABLE: Self = Self(15);
 
-    /// Every constant with its name: the 24 base ones in order, then the 15 appended ones in
-    /// order (39 entries). Used by the frozen-id test.
-    pub const ALL: [(&'static str, MetricId); 39] = [
+    /// Every constant with its name: the 24 base ones in order, then the 16 appended ones in
+    /// order (40 entries). Used by the frozen-id test.
+    pub const ALL: [(&'static str, MetricId); 40] = [
         ("CPU_TOTAL", Self::CPU_TOTAL),
         ("CPU_KERNEL", Self::CPU_KERNEL),
         ("CPU_FREQ", Self::CPU_FREQ),
@@ -115,6 +117,7 @@ impl MetricId {
         ("GPU_ENGINE_OTHER", Self::GPU_ENGINE_OTHER),
         ("FAN_PWM", Self::FAN_PWM),
         ("BATTERY_POWER", Self::BATTERY_POWER),
+        ("MEM_AVAILABLE", Self::MEM_AVAILABLE),
     ];
 
     /// Bit 15 marks the 1 Hz slow-tier view of a metric (R-170 item 2).
@@ -789,7 +792,7 @@ mod tests {
 
     #[test]
     fn metric_all_matches_constants() {
-        let expected: [(&str, u16); 39] = [
+        let expected: [(&str, u16); 40] = [
             ("CPU_TOTAL", 1),
             ("CPU_KERNEL", 2),
             ("CPU_FREQ", 3),
@@ -829,17 +832,18 @@ mod tests {
             ("GPU_ENGINE_OTHER", 57),
             ("FAN_PWM", 58),
             ("BATTERY_POWER", 61),
+            ("MEM_AVAILABLE", 15),
         ];
-        assert_eq!(MetricId::ALL.len(), 39);
+        assert_eq!(MetricId::ALL.len(), 40);
         for ((name, id), (want_name, want_num)) in MetricId::ALL.iter().zip(expected) {
             assert_eq!(*name, want_name);
             assert_eq!(id.0, want_num, "{name}");
             assert!(id.0 < MetricId::TIER_1HZ, "{name}");
         }
         let numbers: HashSet<u16> = MetricId::ALL.iter().map(|(_, id)| id.0).collect();
-        assert_eq!(numbers.len(), 39, "a metric number is used twice");
+        assert_eq!(numbers.len(), 40, "a metric number is used twice");
         let names: HashSet<&str> = MetricId::ALL.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names.len(), 39, "a metric name is used twice");
+        assert_eq!(names.len(), 40, "a metric name is used twice");
     }
 
     #[test]

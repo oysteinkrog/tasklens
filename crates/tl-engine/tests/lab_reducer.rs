@@ -2210,6 +2210,33 @@ fn restart_marks_gap_for_source_only() {
     assert!(mem.iter().all(|&s| !has_gap(s)));
 }
 
+/// tasklens-hjn.35: MemAvailable of 6 GiB gives a MEM_AVAILABLE sample of 6 GiB.
+#[test]
+fn memory_available_series() {
+    let mut rig = Rig::new();
+    rig.run(vec![src(SourceUpdate::Memory(MemorySample {
+        t_ns: SEC,
+        totals: MemoryTotals {
+            validity: Validity::Valid,
+            total: 8 << 30,
+            available: 6 << 30,
+            used: 2 << 30,
+            ..MemoryTotals::default()
+        },
+        zram: Vec::new(),
+        validity: Validity::Valid,
+    }))])
+    .expect("no invariant violation");
+    let id = SeriesId {
+        device: rig.idx(&DeviceIdentity::Memory),
+        metric: MetricId::MEM_AVAILABLE,
+    };
+    let snap = rig.latest();
+    let s = &snap.series.get(id).expect("MEM_AVAILABLE exists").samples;
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].value, (6u64 << 30) as f32);
+}
+
 /// R-289: the first Running of a session adds no gap, even after Off.
 #[test]
 fn first_running_no_extra_gap() {

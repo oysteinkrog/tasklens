@@ -234,6 +234,7 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
             MetricId::MEM_COMMIT,
             MetricId::SWAP_USED,
             MetricId::MEM_CACHED,
+            MetricId::MEM_AVAILABLE,
         ],
         DeviceKind::Gpu => &GPU_METRICS,
         DeviceKind::Disk => &DISK_METRICS,
@@ -1033,6 +1034,14 @@ impl Reducer {
         self.push(idx, MetricId::MEM_COMMIT, t, m.committed as f32, ok, period);
         self.push(idx, MetricId::SWAP_USED, t, swap_used as f32, ok, period);
         self.push(idx, MetricId::MEM_CACHED, t, m.cached as f32, ok, period);
+        self.push(
+            idx,
+            MetricId::MEM_AVAILABLE,
+            t,
+            m.available as f32,
+            ok,
+            period,
+        );
         if readable(m.validity) && m.committed > self.apply_state.peak_committed {
             self.apply_state.peak_committed = m.committed;
             Arc::make_mut(&mut self.components.inventory)
