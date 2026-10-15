@@ -1498,6 +1498,9 @@ fn startup_window_keys(cx: &mut TestAppContext) {
         [
             SettingKey::WindowCloseWithEsc,
             SettingKey::WindowAlwaysOnTop,
+            SettingKey::TrayCloseToTray,
+            SettingKey::TrayMinimizeToTray,
+            SettingKey::TrayAlwaysShow,
             SettingKey::StartupStartAtLogin,
             SettingKey::StartupStartMinimized,
             SettingKey::NetworkAutoFetchPublicIp

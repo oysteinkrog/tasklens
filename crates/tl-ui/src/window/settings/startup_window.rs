@@ -1,8 +1,9 @@
 //! Settings window, Startup and window page, P2 rows (E21-026, UI-SHL-069, UI-SHL-040, APP-023,
 //! APP-048, APP-009, R-058). Always On Top, Start at login, Start minimized and Auto-fetch Public
 //! IP dispatch the same actions as their menu items, so the KWin keep-above, the autostart entry
-//! and the public IP notice follow the switch. The Tray group (E31) goes between Window and
-//! Login, the Memory group (E32) after Network, both by chain edit.
+//! and the public IP notice follow the switch. The Tray group (E31-010, APP-047: close to tray,
+//! minimize to tray, always show tray icon) sits between Window and Login. The Memory group (E32)
+//! goes after Network by chain edit.
 
 use gpui_kit::App;
 
@@ -23,6 +24,7 @@ const START_MINIMIZED_INDENT: f32 = 16.;
 pub fn page(cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(PageId::StartupWindow);
     let window = tr(cx, "shell-settings-group-window");
+    let tray = tr(cx, "shell-settings-group-tray");
     let login = tr(cx, "shell-settings-group-login");
     let network = tr(cx, "shell-settings-group-network");
     let keep_above = keep_above_supported(cx);
@@ -45,6 +47,24 @@ pub fn page(cx: &mut App) -> PageBuilder {
                 caption: WINDOW_TITLE.into(),
             })
         },
+    )
+    .switch(
+        tray.clone(),
+        SettingKey::TrayCloseToTray,
+        tr(cx, "shell-menu-settings-close-to-tray"),
+        None,
+    )
+    .switch(
+        tray.clone(),
+        SettingKey::TrayMinimizeToTray,
+        tr(cx, "shell-menu-settings-minimize-to-tray"),
+        None,
+    )
+    .switch(
+        tray,
+        SettingKey::TrayAlwaysShow,
+        tr(cx, "shell-menu-settings-always-show-tray"),
+        None,
     )
     .action_switch(
         login.clone(),

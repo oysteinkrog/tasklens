@@ -19,7 +19,7 @@ use tl_model::tray::{
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
 use tl_ui::hub::SnapshotHub;
-use tl_ui::settings_global::TlSettings;
+use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::tray_bridge::{
     self, AddTrayGraph, RemoveTrayGraph, TRAY_TICK, TrayBridge, TrayStatus, main_window_target,
@@ -365,6 +365,7 @@ use tl_ui::components::toast::ToastQueue;
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::actions::PerfAddTrayGraph;
 use tl_ui::window::main::open_main_window;
+use tl_ui::window::settings::{PageId, all_pages};
 
 fn saved(cx: &mut TestAppContext) -> Vec<(String, String, String, u16)> {
     cx.read(|cx| {
@@ -391,12 +392,14 @@ fn row(source: &str, column: &str, color: &str, range: u16) -> (String, String, 
 struct Full {
     vcx: VisualTestContext,
     service: TrayServiceEnd,
+    persists: Rc<Cell<u32>>,
 }
 
 fn full(cx: &mut TestAppContext, graphs: Vec<TrayGraphEntry>) -> Full {
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine;
     let (_tx, rx) = async_channel::bounded(4);
+    let persists = Rc::new(Cell::new(0));
     let init = UiInit {
         settings: Settings::default(),
         state: UiState {
@@ -404,7 +407,10 @@ fn full(cx: &mut TestAppContext, graphs: Vec<TrayGraphEntry>) -> Full {
             ..UiState::default()
         },
         themes_json: None,
-        persist: Box::new(|_, _| {}),
+        persist: Box::new({
+            let persists = persists.clone();
+            move |_, _| persists.set(persists.get() + 1)
+        }),
         persist_themes: Box::new(|_| {}),
         app_requests: rx,
         startup_toasts: Vec::new(),
@@ -422,7 +428,11 @@ fn full(cx: &mut TestAppContext, graphs: Vec<TrayGraphEntry>) -> Full {
     let mut vcx = VisualTestContext::from_window(handle.into(), cx);
     vcx.run_until_parked();
     vcx.update(|window, cx| window.draw(cx).clear(cx));
-    Full { vcx, service }
+    Full {
+        vcx,
+        service,
+        persists,
+    }
 }
 
 impl Full {
@@ -833,4 +843,62 @@ fn reopen_clears_hidden_flag(cx: &mut TestAppContext) {
     assert_eq!(reopened, tab);
     assert_ne!(tab, Tab::Performance);
     assert!(!f.tick().is_some_and(|m| m.show_main_icon));
+}
+
+// ---- E31-010: Tray rows on the Startup and window settings page ----
+
+#[gpui_kit::test]
+fn settings_tray_rows_toggle_keys(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    let page = f.vcx.update(|_, cx| {
+        all_pages(cx)
+            .into_iter()
+            .find(|p| p.id() == PageId::StartupWindow)
+            .expect("page listed")
+    });
+    // Table order is the render order, so it is the Tab order.
+    assert_eq!(
+        page.keys(),
+        [
+            SettingKey::WindowCloseWithEsc,
+            SettingKey::WindowAlwaysOnTop,
+            SettingKey::TrayCloseToTray,
+            SettingKey::TrayMinimizeToTray,
+            SettingKey::TrayAlwaysShow,
+            SettingKey::StartupStartAtLogin,
+            SettingKey::StartupStartMinimized,
+            SettingKey::NetworkAutoFetchPublicIp,
+        ]
+    );
+    let tray = |f: &mut Full| {
+        f.vcx.update(|_, cx| {
+            let t = TlSettings::settings(cx).tray.clone();
+            (t.close_to_tray, t.minimize_to_tray, t.always_show)
+        })
+    };
+    assert_eq!(tray(&mut f), (false, false, false));
+    // Visible window and no graphs: no main icon yet.
+    assert!(!f.tick().is_some_and(|m| m.show_main_icon));
+
+    let mut seen = f.persists.get();
+    for (i, key) in [
+        SettingKey::TrayCloseToTray,
+        SettingKey::TrayMinimizeToTray,
+        SettingKey::TrayAlwaysShow,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f.vcx.update(|_, cx| page.set_bool(key, true, cx));
+        f.vcx.run_until_parked();
+        let now = tray(&mut f);
+        assert_eq!(
+            [now.0, now.1, now.2],
+            [true, i >= 1, i >= 2],
+            "after {key:?}"
+        );
+        assert!(f.persists.get() > seen, "{key:?} persisted");
+        seen = f.persists.get();
+    }
+    assert!(f.tick().expect("a tray model").show_main_icon);
 }
