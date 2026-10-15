@@ -1,10 +1,14 @@
-//! The Overview page's Disk box (UI-PRF-017, D-022, UI-PRF-031): the read and write chart of all
-//! disks, then one row per shown disk with its rates and busy meter.
+//! The Overview page's Disk box (UI-PRF-017, D-022, UI-PRF-031, crw.55): one section per shown
+//! whole disk, at most 8, then "+n more". A section is a header (name, model and active percent)
+//! and, when expanded, a Read row and a Write row, each a sparkline of the disk's series and the
+//! current rate.
 //!
-//! The page hands in the disks of the sidebar's visible cards. The box formats its text only
-//! when the inputs' hash changes and notifies only then. It shows as many rows as fit the box
-//! height under a chart of at least 48 px (TMOG), at most 8, then "+n more"; a resize re-renders
-//! the box only when that count changes. Pointer movement never notifies.
+//! The page hands in the disks of the sidebar's visible cards; partitions never get a section.
+//! The box formats its text only when the inputs' hash changes and notifies only then. A disk's
+//! sparkline charts are built only when it gets a section, never for a text or catalog change.
+//! When the sections do not fit the box height they collapse to their headers, the busiest disks
+//! expanded first (`fit`); a resize re-renders the box only when that changes. Pointer movement
+//! never notifies.
 
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
@@ -13,57 +17,46 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
+    AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
+    Subscription, Window, div, px, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
-use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity};
+use tl_model::devices::DeviceCatalog;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
-use tl_model::snapshot::Snapshot;
+use tl_model::snapshot::{InvField, Snapshot};
 use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::mem_box::ROW_LABEL_W;
 use super::parts::{
-    ChartSettings, MIN_CHART_H, Meter, box_chart, box_frame, chart_section_versions, class_probe,
-    opens_device,
+    ChartSettings, SPARK_GRID, box_frame, chart_section_versions, class_probe, opens_device,
+    spark_chart,
 };
 use crate::chart::labels::LABEL_ROW;
-use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
-    YScale, format_value,
-};
+use crate::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, ValueFormat, YScale, format_value};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::TlSettings;
-use crate::text::style::{numeric_style, t_sm, t_xs};
+use crate::text::style::{label_style, numeric_style, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The box's debug selector.
 pub const DISK_BOX_ID: &str = "perf-overview-box-disk";
 
-/// Disks with a row; the rest are counted in the "+n more" line.
+/// Disks with a section; the rest are counted in the "+n more" line.
 pub const MAX_DISK_ROWS: usize = 8;
 
 const KEY_TITLE: &str = "perf-overview-box-disks";
 const KEY_MORE: &str = "perf-overview-more";
 const KEY_READ: &str = "perf-disk-legend-read";
 const KEY_WRITE: &str = "perf-disk-legend-write";
-const KEY_RANGE: &str = "perf-disk-range-throughput";
 
-/// The rate columns, logical px before `ui_scale`.
+/// The rate and active percent column, logical px before `ui_scale`.
 const RATE_W: f32 = 76.;
-/// The busy meter column, logical px before `ui_scale`.
-const BUSY_W: f32 = 48.;
-
-/// The aggregate disk device's idx in `catalog`, `DeviceIdx(u16::MAX)` when it has none.
-fn aggregate(catalog: &DeviceCatalog) -> DeviceIdx {
-    catalog
-        .find(&DeviceIdentity::Aggregate(AggregateKind::Disks))
-        .map_or(DeviceIdx(u16::MAX), |e| e.idx)
-}
 
 /// Disk inputs whose catalog entry is a whole disk. Unknown inputs are retained because the
 /// page may update its card list before the matching catalog snapshot reaches this entity.
@@ -80,78 +73,109 @@ fn whole_disks<'a>(
     })
 }
 
-/// One disk's row.
-#[derive(Clone, Debug, PartialEq)]
+/// One disk's section.
+#[derive(Clone)]
 pub struct DiskRow {
     pub key: DeviceKey,
     pub idx: DeviceIdx,
     pub name: SharedString,
+    /// The drive model, empty when not known.
+    pub model: SharedString,
+    /// Active time ("40%").
+    pub active: SharedString,
     pub read: SharedString,
     pub write: SharedString,
-    /// Active time as a fraction, `None` when not known.
+    /// Active time as a fraction, `None` when not known. Ranks the sections for expanding.
     pub busy: Option<f32>,
+    /// The sparklines of the disk's `DISK_READ` and `DISK_WRITE` series.
+    pub read_chart: Entity<ChartView>,
+    pub write_chart: Entity<ChartView>,
 }
 
-/// The IO chart: read filled, write dashed, auto-scaled IEC rates.
-fn chart_spec(device: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
-    let g = &theme.graph;
-    let id = |metric| SeriesId { device, metric };
+/// A Read or Write sparkline: filled, auto-scaled IEC rates.
+fn io_spec(device: DeviceIdx, metric: MetricId, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
     ChartSpec {
-        series: smallvec![
-            ChartSeries {
-                id: id(MetricId::DISK_READ),
-                fill: Some(g.disk_fill),
-                line: g.disk_line,
-                ..ChartSeries::default()
-            },
-            ChartSeries {
-                id: id(MetricId::DISK_WRITE),
-                fill: None,
-                line: g.disk_line,
-                dashed: true,
-                ..ChartSeries::default()
-            },
-        ],
+        series: smallvec![ChartSeries {
+            id: SeriesId { device, metric },
+            fill: Some(theme.graph.disk_fill),
+            line: theme.graph.disk_line,
+            ..ChartSeries::default()
+        }],
         y: YScale::AutoRate { iec: true },
         range_ns: s.range_ns,
-        grid: GridStyle {
-            lines: true,
-            baseline: false,
-            outline: true,
-            rounded: s.rounded,
-        },
+        grid: SPARK_GRID,
         smooth: s.smooth,
         background: ChartBg::List,
         ..ChartSpec::default()
     }
 }
 
-/// No heading and no value: the rows carry the numbers.
-fn chart_labels(range_word: SharedString) -> ChartLabels {
-    ChartLabels {
-        heading: None,
-        value_fmt: ValueFormat::RateIec,
-        value_align: ValueAlign::Hidden,
-        range_word,
-        legend: SmallVec::new(),
-        show_axis_max: false,
+/// The trimmed text of `f` when it is Valid or Stale and not blank.
+fn valid_text(f: &InvField<Arc<str>>) -> Option<&str> {
+    let ok = matches!(f.validity, Validity::Valid | Validity::Stale) && !f.value.trim().is_empty();
+    ok.then(|| f.value.trim())
+}
+
+/// The model of disk `idx`: the device details' model, else the inventory drive's, as on the
+/// sidebar card.
+fn model_of(snap: &Snapshot, idx: DeviceIdx) -> Option<&str> {
+    snap.device_details
+        .disks
+        .iter()
+        .find(|(i, _)| *i == idx)
+        .and_then(|(_, d)| valid_text(&d.model))
+        .or_else(|| {
+            snap.inventory
+                .disks
+                .iter()
+                .find(|d| d.device == Some(idx))
+                .and_then(|d| valid_text(&d.model))
+        })
+}
+
+/// What fits the box body: the number of sections shown and how many of them are expanded.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Fit {
+    shown: usize,
+    expanded: usize,
+}
+
+impl Fit {
+    fn class(self) -> u32 {
+        self.shown as u32 | (self.expanded as u32) << 8
     }
 }
 
-/// How many rows fit a body of `body` under the chart and the column header, at most `rows`;
-/// one row goes to "+n more" when not all of `total` fit. All `rows` before the first paint.
-fn rows_fit(body: Size<Pixels>, rows: usize, total: usize, m: &UiMetrics) -> usize {
+/// What fits a body of `body` (everything before the first paint) for `rows` sections out of
+/// `total` disks. Every line (header, Read, Write, "+n more") is 18 px with 4 px between lines.
+/// When the headers and the "+n more" line do not fit, only the headers that fit show, with one
+/// line left for "+n more". Otherwise the spare lines expand sections, two lines each.
+fn fit(body: Size<Pixels>, rows: usize, total: usize, m: &UiMetrics) -> Fit {
     if body.height == px(0.) {
-        return rows;
+        return Fit {
+            shown: rows,
+            expanded: rows,
+        };
     }
-    let row = LABEL_ROW * m.ui_scale;
-    let space = f32::from(body.height) - MIN_CHART_H * m.ui_scale - f32::from(m.sp[5]) - row;
-    let fit = (space.max(0.) / row).floor() as usize;
-    if fit >= total {
-        rows.min(total)
-    } else {
-        fit.saturating_sub(1).min(rows)
+    let gap = f32::from(m.sp[2]);
+    let line = LABEL_ROW * m.ui_scale + gap;
+    let lines = ((f32::from(body.height) + gap) / line).floor().max(0.) as usize;
+    let more = usize::from(total > rows);
+    if rows + more > lines {
+        return Fit {
+            shown: lines.saturating_sub(1).min(rows),
+            expanded: 0,
+        };
     }
+    Fit {
+        shown: rows,
+        expanded: rows.min((lines - rows - more) / 2),
+    }
+}
+
+/// The debug selector of a disk's Read ("read") or Write ("write") row.
+pub fn io_row_id(key: &DeviceKey, which: &str) -> String {
+    format!("{DISK_BOX_ID}-{which}:{}", key.0)
 }
 
 /// The Disk box.
@@ -162,19 +186,18 @@ pub struct DiskBox {
     rows: SmallVec<[DiskRow; 8]>,
     /// Disks past `MAX_DISK_ROWS`.
     more: usize,
-    /// "+n more" by the number of rows shown, empty when every disk has a row.
+    /// "+n more" by the number of sections shown, empty when every disk has a section.
     more_texts: SmallVec<[SharedString; 9]>,
-    io_chart: Entity<ChartView>,
-    /// The aggregate device the chart is on.
-    aggregate: DeviceIdx,
     catalog_version: u64,
     title: SharedString,
     read_word: SharedString,
     write_word: SharedString,
     text_bits: u64,
-    /// The body size of the last paint, and how many rows the last render showed.
+    /// The body size of the last paint, how many sections the last render showed and which of
+    /// them it expanded (bit `i` for section `i`).
     body: Rc<Cell<Size<Pixels>>>,
     shown: usize,
+    expanded: u8,
     settings: ChartSettings,
     settings_versions: [u64; 3],
     style_version: u64,
@@ -192,21 +215,13 @@ impl DiskBox {
         disks: &[(DeviceKey, DeviceIdx, SharedString)],
         cx: &mut Context<Self>,
     ) -> Self {
-        let theme = current(cx).clone();
-        let settings = ChartSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
-        let aggregate = aggregate(&snap.devices);
-        let spec = chart_spec(aggregate, &settings, &theme);
-        let labels = chart_labels(tr(cx, KEY_RANGE));
-        let io_chart = box_chart(spec, labels, hub, cx);
         let mut this = Self {
             hub: hub.clone(),
             disks: disks.iter().cloned().collect(),
             rows: SmallVec::new(),
             more: 0,
             more_texts: SmallVec::new(),
-            io_chart,
-            aggregate,
             catalog_version: snap.devices.version,
             title: tr(cx, KEY_TITLE),
             read_word: tr(cx, KEY_READ),
@@ -214,7 +229,8 @@ impl DiskBox {
             text_bits: 0,
             body: Rc::new(Cell::new(size(px(0.), px(0.)))),
             shown: 0,
-            settings,
+            expanded: 0,
+            settings: ChartSettings::read(cx),
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
             strings_version: cx.global::<Strings>().strings_version,
@@ -259,13 +275,14 @@ impl DiskBox {
         self.more
     }
 
-    pub fn io_chart(&self) -> &Entity<ChartView> {
-        &self.io_chart
-    }
-
-    /// How many rows the last render showed.
+    /// How many sections the last render showed.
     pub fn shown(&self) -> usize {
         self.shown
+    }
+
+    /// Whether the last render showed section `i` with its Read and Write rows.
+    pub fn expanded(&self, i: usize) -> bool {
+        i < MAX_DISK_ROWS && self.expanded & (1 << i) != 0
     }
 
     /// The "+n more" text the last render showed, empty for none.
@@ -297,28 +314,51 @@ impl DiskBox {
         }
     }
 
+    /// The sections of the whole disks. A disk that had a section keeps its charts; only a new
+    /// one builds them.
     fn build_rows(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        let theme = current(cx).clone();
+        let hub = self.hub.clone();
         let disks: SmallVec<[_; 8]> = whole_disks(&self.disks, &snap.devices).cloned().collect();
-        self.rows.clear();
-        self.rows.extend(
-            disks
-                .iter()
-                .take(MAX_DISK_ROWS)
-                .map(|(key, idx, name)| DiskRow {
-                    key: key.clone(),
-                    idx: *idx,
-                    name: name.clone(),
-                    read: SharedString::default(),
-                    write: SharedString::default(),
-                    busy: None,
-                }),
-        );
+        let mut old = std::mem::take(&mut self.rows);
+        for (key, idx, name) in disks.iter().take(MAX_DISK_ROWS) {
+            let row = match old.iter().position(|r| r.key == *key) {
+                Some(i) => {
+                    let mut r = old.remove(i);
+                    if r.idx != *idx {
+                        r.idx = *idx;
+                        self.set_specs(&r, &theme, cx);
+                    }
+                    r.name = name.clone();
+                    r
+                }
+                None => {
+                    let chart = |metric, cx: &mut Context<Self>| {
+                        let spec = io_spec(*idx, metric, &self.settings, &theme);
+                        spark_chart(spec, ValueFormat::RateIec, &hub, cx)
+                    };
+                    DiskRow {
+                        key: key.clone(),
+                        idx: *idx,
+                        name: name.clone(),
+                        model: SharedString::default(),
+                        active: SharedString::default(),
+                        read: SharedString::default(),
+                        write: SharedString::default(),
+                        busy: None,
+                        read_chart: chart(MetricId::DISK_READ, cx),
+                        write_chart: chart(MetricId::DISK_WRITE, cx),
+                    }
+                }
+            };
+            self.rows.push(row);
+        }
         self.more = disks.len().saturating_sub(MAX_DISK_ROWS);
         self.sync_more_texts(cx);
         self.sync_text(snap, true);
     }
 
-    /// "+n more" for each number of rows shown.
+    /// "+n more" for each number of sections shown.
     fn sync_more_texts(&mut self, cx: &mut Context<Self>) {
         let total = self.rows.len() + self.more;
         self.more_texts.clear();
@@ -338,19 +378,19 @@ impl DiskBox {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        let devices = ev.mask.contains(ComponentMask::DEVICES);
-        if !(devices || ev.mask.contains(ComponentMask::SYSTEM)) {
+        if !ev.mask.intersects(
+            ComponentMask::DEVICES
+                | ComponentMask::SYSTEM
+                | ComponentMask::DEVICE_DETAILS
+                | ComponentMask::INVENTORY,
+        ) {
             return;
         }
         let snap = Arc::clone(hub.read(cx).current());
         let mut rebuilt = false;
-        if devices && snap.devices.version != self.catalog_version {
+        if ev.mask.contains(ComponentMask::DEVICES) && snap.devices.version != self.catalog_version
+        {
             self.catalog_version = snap.devices.version;
-            let aggregate = aggregate(&snap.devices);
-            if aggregate != self.aggregate {
-                self.aggregate = aggregate;
-                self.rebuild_spec(cx);
-            }
             self.build_rows(&snap, cx);
             rebuilt = true;
         }
@@ -361,8 +401,8 @@ impl DiskBox {
         }
     }
 
-    /// Every row's rates and busy meter when their inputs changed, or always with `force`. True
-    /// when the text was formatted again.
+    /// Every section's model, active percent and rates when their inputs changed, or always
+    /// with `force`. True when the text was formatted again.
     fn sync_text(&mut self, snap: &Snapshot, force: bool) -> bool {
         let totals = |idx: DeviceIdx| {
             snap.system
@@ -374,6 +414,7 @@ impl DiskBox {
         let mut h = FxHasher::default();
         for r in &self.rows {
             r.idx.0.hash(&mut h);
+            model_of(snap, r.idx).hash(&mut h);
             let Some(t) = totals(r.idx) else {
                 h.write_u8(0);
                 continue;
@@ -392,8 +433,11 @@ impl DiskBox {
         self.text_bits = bits;
         let unit = NetworkUnit::default();
         for r in &mut self.rows {
+            r.model = model_of(snap, r.idx)
+                .map_or_else(SharedString::default, |m| SharedString::from(m.to_owned()));
             let Some(t) = totals(r.idx) else {
                 let missing = value_text(Validity::Missing, |_| {});
+                r.active = missing.clone();
                 r.read = missing.clone();
                 r.write = missing;
                 r.busy = None;
@@ -406,6 +450,9 @@ impl DiskBox {
             };
             r.read = rate(&t.read_bps);
             r.write = rate(&t.write_bps);
+            r.active = value_text(t.active_pct.validity, |out| {
+                format_value(ValueFormat::Percent, t.active_pct.value, unit, out);
+            });
             r.busy = matches!(t.active_pct.validity, Validity::Valid | Validity::Stale)
                 .then(|| t.active_pct.value / 100.);
         }
@@ -424,7 +471,7 @@ impl DiskBox {
             return;
         }
         self.settings = new;
-        self.rebuild_spec(cx);
+        self.rebuild_specs(cx);
     }
 
     /// A new theme or UI scale: new chart colours, and the rows draw in the new style.
@@ -434,11 +481,11 @@ impl DiskBox {
             return;
         }
         self.style_version = version;
-        self.rebuild_spec(cx);
+        self.rebuild_specs(cx);
         cx.notify();
     }
 
-    /// A new language: new title, column words and "+n more".
+    /// A new language: new title, row words and "+n more".
     fn sync_strings(&mut self, cx: &mut Context<Self>) {
         let version = cx.global::<Strings>().strings_version;
         if version == self.strings_version {
@@ -448,78 +495,98 @@ impl DiskBox {
         self.title = tr(cx, KEY_TITLE);
         self.read_word = tr(cx, KEY_READ);
         self.write_word = tr(cx, KEY_WRITE);
-        let labels = chart_labels(tr(cx, KEY_RANGE));
-        self.io_chart.update(cx, |v, cx| v.set_labels(labels, cx));
         self.sync_more_texts(cx);
         cx.notify();
     }
 
-    fn rebuild_spec(&mut self, cx: &mut Context<Self>) {
+    /// Both sparklines of `r` on its current device.
+    fn set_specs(&self, r: &DiskRow, theme: &TlTheme, cx: &mut Context<Self>) {
+        let read = io_spec(r.idx, MetricId::DISK_READ, &self.settings, theme);
+        r.read_chart.update(cx, |v, cx| v.set_spec(read, cx));
+        let write = io_spec(r.idx, MetricId::DISK_WRITE, &self.settings, theme);
+        r.write_chart.update(cx, |v, cx| v.set_spec(write, cx));
+    }
+
+    fn rebuild_specs(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
-        let spec = chart_spec(self.aggregate, &self.settings, &theme);
-        self.io_chart.update(cx, |v, cx| v.set_spec(spec, cx));
+        for r in &self.rows {
+            self.set_specs(r, &theme, cx);
+        }
     }
 }
 
-/// The debug selector prefix of a disk row, followed by its device key.
+/// The debug selector prefix of a disk section's header, followed by its device key.
 pub const DISK_ROW_ID_PREFIX: &str = "perf-overview-disk-row:";
 
-/// A row: name, read, write, busy. With `None` for the meter it is the column header. A click
-/// on a row with a `target` opens that disk (crw.44).
-fn row_element(
-    target: Option<&DeviceKey>,
-    name: &SharedString,
-    read: &SharedString,
-    write: &SharedString,
-    busy: Option<Option<f32>>,
-    m: &UiMetrics,
-    theme: &TlTheme,
-) -> AnyElement {
-    let s = m.ui_scale;
-    let header = busy.is_none();
-    let (color, style) = if header {
-        (theme.text_secondary, t_xs(m))
-    } else {
-        (theme.text_primary, numeric_style(m, m.text.sm))
-    };
-    let rate = |text: &SharedString| {
-        let mut d = div()
-            .flex_none()
-            .w(px(RATE_W * s))
-            .flex()
-            .justify_end()
-            .whitespace_nowrap()
-            .text_color(color)
-            .child(text.clone());
-        *d.text_style() = style.clone();
-        d
-    };
-    let mut label = div()
+/// A right-aligned number column: a rate or the active percent.
+fn rate_cell(text: &SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let mut d = div()
+        .flex_none()
+        .w(px(RATE_W * m.ui_scale))
+        .flex()
+        .justify_end()
+        .whitespace_nowrap()
+        .text_color(theme.text_primary)
+        .child(text.clone());
+    *d.text_style() = numeric_style(m, m.text.sm);
+    d.into_any_element()
+}
+
+/// A section header: name, model and active percent. A click opens that disk (crw.44).
+fn header(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let mut name = div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.text_primary)
+        .child(r.name.clone());
+    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let mut model = div()
         .flex_1()
         .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
         .text_color(theme.text_secondary)
-        .child(name.clone());
-    *label.text_style() = if header { t_xs(m) } else { t_sm(m) };
-    let busy_el = div().flex_none().w(px(BUSY_W * s));
-    let busy_el = match busy.flatten() {
-        Some(f) => busy_el.child(Meter {
-            fraction: Some(f),
-            color: theme.graph.disk_line,
-        }),
-        None if !header => busy_el.child(Meter {
-            fraction: None,
-            color: theme.graph.disk_line,
-        }),
-        None => busy_el,
-    };
-    let mut row = div();
-    if let Some(key) = target.map(|k| k.0.clone()) {
-        row = row.debug_selector(move || format!("{DISK_ROW_ID_PREFIX}{key}"));
-    }
-    let row = row
+        .child(r.model.clone());
+    *model.text_style() = t_sm(m);
+    let key = r.key.0.clone();
+    let row = div()
+        .debug_selector(move || format!("{DISK_ROW_ID_PREFIX}{key}"))
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(m.sp[4])
+        .h(px(LABEL_ROW * m.ui_scale))
+        .child(name)
+        .child(model)
+        .child(rate_cell(&r.active, m, theme));
+    opens_device(row, Some(r.key.clone())).into_any_element()
+}
+
+/// A Read or Write row: the word, the cached sparkline and the current rate.
+fn io_row(
+    id: String,
+    word: &SharedString,
+    chart: &Entity<ChartView>,
+    rate: &SharedString,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    let s = m.ui_scale;
+    let mut label = div()
+        .flex_none()
+        .w(px(ROW_LABEL_W * s))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.text_secondary)
+        .child(word.clone());
+    *label.text_style() = t_sm(m);
+    div()
+        .debug_selector(move || id)
         .flex()
         .flex_row()
         .flex_none()
@@ -527,10 +594,25 @@ fn row_element(
         .gap(m.sp[4])
         .h(px(LABEL_ROW * s))
         .child(label)
-        .child(rate(read))
-        .child(rate(write))
-        .child(busy_el);
-    opens_device(row, target.cloned()).into_any_element()
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .h(px(LABEL_ROW * s))
+                .child(chart.clone().cached(StyleRefinement::default().size_full())),
+        )
+        .child(rate_cell(rate, m, theme))
+        .into_any_element()
+}
+
+/// The bit mask of the `n` busiest of the first `shown` rows (unknown lowest, ties to the
+/// earlier row).
+fn busiest(rows: &[DiskRow], shown: usize, n: usize) -> u8 {
+    let mut order: SmallVec<[usize; MAX_DISK_ROWS]> = (0..shown.min(rows.len())).collect();
+    let busy = |i: usize| rows[i].busy.unwrap_or(-1.);
+    order.sort_by(|&a, &b| busy(b).total_cmp(&busy(a)));
+    order.iter().take(n).fold(0, |mask, &i| mask | 1 << i)
 }
 
 impl Render for DiskBox {
@@ -539,69 +621,59 @@ impl Render for DiskBox {
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        let s = m.ui_scale;
         let rows = self.rows.len();
         let total = rows + self.more;
-        self.shown = rows_fit(self.body.get(), rows, total, &m);
+        let shown = fit(self.body.get(), rows, total, &m);
+        self.shown = shown.shown;
+        self.expanded = busiest(&self.rows, shown.shown, shown.expanded);
 
-        let chart = div()
+        let mut body = div()
             .relative()
-            .flex_1()
-            .min_h(px(MIN_CHART_H * s))
-            .w_full()
-            .child(
-                self.io_chart
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            );
-        let mut list = div().flex().flex_col().flex_none().w_full();
-        if rows > 0 {
-            list = list.child(row_element(
-                None,
-                &SharedString::default(),
-                &self.read_word,
-                &self.write_word,
-                None,
-                &m,
-                &theme,
-            ));
-        }
-        for r in self.rows.iter().take(self.shown) {
-            list = list.child(row_element(
-                Some(&r.key),
-                &r.name,
-                &r.read,
-                &r.write,
-                Some(r.busy),
-                &m,
-                &theme,
-            ));
+            .flex()
+            .flex_col()
+            .size_full()
+            .overflow_hidden()
+            .gap(m.sp[2]);
+        for (i, r) in self.rows.iter().take(shown.shown).enumerate() {
+            body = body.child(header(r, &m, &theme));
+            if self.expanded(i) {
+                body = body
+                    .child(io_row(
+                        io_row_id(&r.key, "read"),
+                        &self.read_word,
+                        &r.read_chart,
+                        &r.read,
+                        &m,
+                        &theme,
+                    ))
+                    .child(io_row(
+                        io_row_id(&r.key, "write"),
+                        &self.write_word,
+                        &r.write_chart,
+                        &r.write,
+                        &m,
+                        &theme,
+                    ));
+            }
         }
         let more = self.shown_more_text();
         if !more.is_empty() {
             let mut line = div()
                 .flex_none()
-                .h(px(LABEL_ROW * s))
+                .h(px(LABEL_ROW * m.ui_scale))
+                .whitespace_nowrap()
                 .text_color(theme.text_secondary)
                 .child(more);
             *line.text_style() = t_xs(&m);
-            list = list.child(line);
+            body = body.child(line);
         }
         let probe_m = m;
-        let body = div()
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .gap(m.sp[5])
-            .child(chart)
-            .child(list)
-            .child(class_probe(
-                Rc::clone(&self.body),
-                self.shown as u32,
-                move |b| rows_fit(b, rows, total, &probe_m) as u32,
-                cx.entity_id(),
-            ));
+        body = body.child(class_probe(
+            Rc::clone(&self.body),
+            shown.class(),
+            move |b| fit(b, rows, total, &probe_m).class(),
+            cx.entity_id(),
+        ));
         box_frame(
             DISK_BOX_ID,
             self.rows.first().map(|r| r.key.clone()),
@@ -619,7 +691,7 @@ impl Render for DiskBox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tl_model::devices::DeviceEntry;
+    use tl_model::devices::{DeviceEntry, DeviceIdentity};
 
     fn disk(
         idx: u16,
@@ -711,5 +783,56 @@ mod tests {
             .map(|(_, _, name)| name.as_ref())
             .collect();
         assert_eq!(names, ["sda"]);
+    }
+
+    fn m() -> UiMetrics {
+        crate::theme::metrics::compute(&tl_model::settings::AppearanceSettings::default(), 0)
+    }
+
+    fn body(h: f32) -> Size<Pixels> {
+        size(px(300.), px(h))
+    }
+
+    #[test]
+    fn fit_expands_what_the_lines_allow() {
+        let m = m();
+        // 3 disks need 9 lines: 9 · 18 + 8 · 4 = 194 px.
+        assert_eq!(
+            fit(body(194.), 3, 3, &m),
+            Fit {
+                shown: 3,
+                expanded: 3
+            }
+        );
+        // The 220 px row minimum leaves a 160 px body: 7 lines, 2 sections expanded.
+        assert_eq!(
+            fit(body(160.), 3, 3, &m),
+            Fit {
+                shown: 3,
+                expanded: 2
+            }
+        );
+        assert_eq!(
+            fit(body(0.), 3, 3, &m),
+            Fit {
+                shown: 3,
+                expanded: 3
+            }
+        );
+        // 8 sections and "+2 more" in 6 lines: 5 headers and the "+n more" line.
+        assert_eq!(
+            fit(body(128.), 8, 10, &m),
+            Fit {
+                shown: 5,
+                expanded: 0
+            }
+        );
+        assert_eq!(
+            fit(body(10.), 3, 3, &m),
+            Fit {
+                shown: 0,
+                expanded: 0
+            }
+        );
     }
 }

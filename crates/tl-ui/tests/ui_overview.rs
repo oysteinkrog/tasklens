@@ -903,8 +903,11 @@ mod bottom {
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
-    use tl_model::snapshot::{ComponentHeader, SeriesSet, Snapshot, SystemSnapshot};
+    use tl_model::snapshot::{
+        ComponentHeader, DeviceDetailsSnapshot, DiskDetails, SeriesSet, Snapshot, SystemSnapshot,
+    };
     use tl_model::system::{DiskTotals, GpuTotals, LinkState, Metric, NetTotals};
+    use tl_model::table::Total;
     use tl_model::time::now_boot_ns;
     use tl_model::units;
     use tl_model::validity::Validity;
@@ -913,7 +916,9 @@ mod bottom {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::DeviceKey;
-    use tl_ui::pages::performance::overview::disk_box::DiskBox;
+    use tl_ui::pages::performance::overview::disk_box::{
+        DISK_ROW_ID_PREFIX, DiskBox, DiskRow, io_row_id,
+    };
     use tl_ui::pages::performance::overview::gpu_box::{
         GPU_BOX_ID, GpuBox, engine_row_id, rows_id,
     };
@@ -1004,14 +1009,15 @@ mod bottom {
         }
     }
 
-    /// GPUs at 10..13, disks sda and sdb at 20 and 21, aggregates, eth0 (wired) at 30, docker0
-    /// (virtual) at 31 and lo at 32.
+    /// GPUs at 10..13, disks sda, sdb and sdc at 20, 21 and 22, aggregates, eth0 (wired) at 30,
+    /// docker0 (virtual) at 31 and lo at 32.
     fn catalog() -> DeviceCatalog {
         let mut entries: Vec<_> = (0..3)
             .map(|n| entry(10 + n, gpu_id(n as u8), None))
             .collect();
         entries.push(entry(20, disk_id(0, "sda"), None));
         entries.push(entry(21, disk_id(16, "sdb"), None));
+        entries.push(entry(22, disk_id(32, "sdc"), None));
         entries.push(entry(
             DISK_AGG,
             DeviceIdentity::Aggregate(AggregateKind::Disks),
@@ -1607,9 +1613,169 @@ mod bottom {
         assert_eq!(rows[0].read.as_ref(), rate_iec(MIB));
         assert_eq!(rows[0].write.as_ref(), rate_iec(0.));
         assert_eq!(rows[0].busy, Some(0.4));
+        assert_eq!(rows[0].active.as_ref(), percent(40.));
         assert_eq!(rows[1].name.as_ref(), "disk 1");
     }
 
+    fn percent(v: f32) -> String {
+        let mut s = String::new();
+        tl_ui::chart::format_value(
+            tl_ui::chart::ValueFormat::Percent,
+            v,
+            tl_model::settings::NetworkUnit::default(),
+            &mut s,
+        );
+        s
+    }
+
+    /// Disk totals at 1 MiB/s read with active time `pct`, for each of `idx`.
+    fn active_disks(idx: &[u16], pct: &[f32]) -> Arc<[(DeviceIdx, DiskTotals)]> {
+        idx.iter()
+            .zip(pct)
+            .map(|(d, p)| {
+                (
+                    DeviceIdx(*d),
+                    DiskTotals {
+                        active_pct: Metric::valid(*p),
+                        ..disk_totals(*d, MIB)
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    /// How many sections the last render showed, and which of the rows it expanded.
+    fn disk_state(r: &mut Rig) -> (usize, Vec<bool>) {
+        let (_, disk, _) = r.boxes();
+        r.vcx.update(|_, cx| {
+            let d = disk.read(cx);
+            (
+                d.shown(),
+                (0..d.rows().len()).map(|i| d.expanded(i)).collect(),
+            )
+        })
+    }
+
+    /// crw.55: three whole disks get three sections, each a header with name, model and active
+    /// percent, and Read and Write sparklines on the disk's own series.
+    #[gpui_kit::test]
+    fn disk_box_three_disks_three_sections(cx: &mut TestAppContext) {
+        let mut r = open(cx, Vec::new(), devices("disk", &[20, 21, 22]), (200., 300.));
+        r.system(|s| s.disks = active_disks(&[20, 21, 22], &[40., 40., 40.]));
+        r.publish(|s| {
+            let mut details = DeviceDetailsSnapshot::default();
+            details.header.version = 1;
+            details.disks = Arc::from([(
+                DeviceIdx(20),
+                DiskDetails {
+                    model: Total {
+                        value: Arc::from("Samsung SSD 980"),
+                        validity: Validity::Valid,
+                    },
+                    ..DiskDetails::default()
+                },
+            )]);
+            s.device_details = Arc::new(details);
+        });
+        draw(r.vcx);
+        assert_eq!(disk_state(&mut r), (3, vec![true, true, true]));
+        let (_, disk, _) = r.boxes();
+        let rows = r.vcx.update(|_, cx| disk.read(cx).rows().to_vec());
+        assert_eq!(rows[0].name.as_ref(), "disk 0");
+        assert_eq!(rows[0].model.as_ref(), "Samsung SSD 980");
+        assert_eq!(rows[1].model.as_ref(), "", "no model: the name only");
+        assert_eq!(rows[0].active.as_ref(), percent(40.));
+        let id = |metric| SeriesId {
+            device: DeviceIdx(20),
+            metric,
+        };
+        let (read_ids, write_ids): (Vec<SeriesId>, Vec<SeriesId>) = r.vcx.update(|_, cx| {
+            (
+                rows[0].read_chart.read(cx).series_ids().collect(),
+                rows[0].write_chart.read(cx).series_ids().collect(),
+            )
+        });
+        assert_eq!(read_ids, [id(MetricId::DISK_READ)]);
+        assert_eq!(write_ids, [id(MetricId::DISK_WRITE)]);
+        for row in &rows {
+            r.bounds(format!("{DISK_ROW_ID_PREFIX}{}", row.key.0));
+            r.bounds(io_row_id(&row.key, "read"));
+            r.bounds(io_row_id(&row.key, "write"));
+        }
+
+        // A catalog bump keeps every chart.
+        let charts = |rows: &[DiskRow]| -> Vec<_> {
+            rows.iter()
+                .flat_map(|r| [r.read_chart.entity_id(), r.write_chart.entity_id()])
+                .collect()
+        };
+        r.publish(|s| {
+            let mut c = catalog();
+            c.version = 2;
+            s.devices = Arc::new(c);
+        });
+        let after = r.vcx.update(|_, cx| disk.read(cx).rows().to_vec());
+        assert_eq!(charts(&after), charts(&rows), "no new charts");
+    }
+
+    /// crw.55: a partition in the disk inputs never gets a section.
+    #[gpui_kit::test]
+    fn disk_box_partitions_never_appear(cx: &mut TestAppContext) {
+        let mut disks = devices("disk", &[20, 21, 22, 23]);
+        disks[3].0 = DeviceKey(Arc::from("disk:sda1"));
+        let mut r = open(cx, Vec::new(), disks, (200., 300.));
+        let mut c = catalog();
+        let mut entries = c.entries.to_vec();
+        entries.push(DeviceEntry {
+            parent: Some(DeviceIdx(20)),
+            ..entry(23, disk_id(1, "sda1"), None)
+        });
+        c.entries = Arc::from(entries);
+        c.version = 2;
+        r.publish(|s| s.devices = Arc::new(c));
+        draw(r.vcx);
+        let (_, disk, _) = r.boxes();
+        let idx: Vec<u16> = r
+            .vcx
+            .update(|_, cx| disk.read(cx).rows().iter().map(|r| r.idx.0).collect());
+        assert_eq!(idx, [20, 21, 22]);
+        assert_eq!(disk_state(&mut r).0, 3);
+        assert!(
+            r.vcx
+                .debug_bounds(leak(format!("{DISK_ROW_ID_PREFIX}disk:sda1")))
+                .is_none()
+        );
+    }
+
+    /// crw.55: at the 220 px row minimum (body 160, 7 lines) 2 of 3 sections expand, the
+    /// busiest first; at 300 px all 3.
+    #[gpui_kit::test]
+    fn disk_box_collapse_follows_activity(cx: &mut TestAppContext) {
+        let idx = [20, 21, 22];
+        let mut r = open(cx, Vec::new(), devices("disk", &idx), (200., 220.));
+        r.system(|s| s.disks = active_disks(&idx, &[10., 80., 40.]));
+        draw(r.vcx);
+        assert_eq!(disk_state(&mut r), (3, vec![false, true, true]));
+        let key = |n: usize| DeviceKey(Arc::from(format!("disk{n}")));
+        assert!(
+            r.vcx
+                .debug_bounds(leak(io_row_id(&key(0), "read")))
+                .is_none()
+        );
+        r.bounds(format!("{DISK_ROW_ID_PREFIX}disk0"));
+        r.bounds(io_row_id(&key(1), "write"));
+
+        r.system(|s| s.disks = active_disks(&idx, &[90., 5., 40.]));
+        draw(r.vcx);
+        assert_eq!(disk_state(&mut r), (3, vec![true, false, true]));
+
+        r.heights(200., 300.);
+        assert_eq!(disk_state(&mut r), (3, vec![true, true, true]));
+    }
+
+    /// crw.55: past 8 disks a "+n more" line; when the headers do not fit, only those that fit
+    /// show, none expanded.
     #[gpui_kit::test]
     fn disk_box_rows_fit_height(cx: &mut TestAppContext) {
         let idx: Vec<u16> = (0..10).map(|i| 200 + i).collect();
@@ -1622,74 +1788,16 @@ mod bottom {
                     d.rows().len(),
                     d.more(),
                     d.shown(),
+                    (0..8).filter(|&i| d.expanded(i)).count(),
                     d.shown_more_text().to_string(),
                 )
             })
         };
-        assert_eq!(
-            state(&mut r),
-            (8, 2, 8, "+2 more".into()),
-            "600 px: all 8 rows"
-        );
-        // 200 px: 200 - 2·12 padding - 2 border - 24 title = 150 body; minus the 48 px chart,
-        // 12 px gap, 18 px header and 18 px time axis leaves 54 px: 3 rows, one goes to
-        // "+n more".
+        // 600 px: a 540 px body, 24 lines: 8 headers, "+2 more" and 7 expanded sections.
+        assert_eq!(state(&mut r), (8, 2, 8, 7, "+2 more".into()));
+        // 200 px: a 140 px body, 6 lines: 5 headers and "+5 more".
         r.heights(200., 200.);
-        assert_eq!(state(&mut r), (8, 2, 2, "+8 more".into()));
-    }
-
-    #[gpui_kit::test]
-    fn disk_box_io_chart_on_aggregate(cx: &mut TestAppContext) {
-        let mut r = open(cx, Vec::new(), devices("disk", &[20]), (200., 300.));
-        let (_, disk, _) = r.boxes();
-        let ids: Vec<SeriesId> = r
-            .vcx
-            .update(|_, cx| disk.read(cx).io_chart().read(cx).series_ids().collect());
-        let id = |metric| SeriesId {
-            device: DeviceIdx(DISK_AGG),
-            metric,
-        };
-        assert_eq!(ids, [id(MetricId::DISK_READ), id(MetricId::DISK_WRITE)]);
-
-        // With data, the auto scale's ceiling shows as the compact scale label.
-        let newest = now_boot_ns();
-        let views: Vec<_> = [MetricId::DISK_READ, MetricId::DISK_WRITE]
-            .into_iter()
-            .map(|metric| {
-                Arc::new(SeriesView {
-                    id: id(metric),
-                    version: 1,
-                    period_ns: 1_000_000_000,
-                    samples: (0..5u64)
-                        .map(|k| Sample::valid(newest - (4 - k) * 1_000_000_000, 3. * MIB as f32))
-                        .collect::<Vec<_>>()
-                        .into(),
-                })
-            })
-            .collect();
-        r.publish(|s| {
-            s.series = Arc::new(SeriesSet {
-                header: ComponentHeader {
-                    version: 1,
-                    ..ComponentHeader::default()
-                },
-                series: views.into(),
-                slow: Arc::from([]),
-            });
-        });
-        draw(r.vcx);
-        let text = r.vcx.update(|_, cx| {
-            let chart = disk.read(cx).io_chart().read(cx);
-            chart
-                .label_cache()
-                .text(tl_ui::chart::labels::LabelKind::AxisMax)
-                .map(str::to_owned)
-        });
-        assert_eq!(
-            text.as_deref(),
-            Some("4 MiB/s"),
-            "the power-of-two ceiling over 3 MiB/s"
-        );
+        assert_eq!(state(&mut r), (8, 2, 5, 0, "+5 more".into()));
     }
 
     #[gpui_kit::test]
@@ -1747,7 +1855,8 @@ mod bottom {
                     builds(&g.sections()[0].chart),
                     d.render_count.get(),
                     d.notify_count.get(),
-                    builds(d.io_chart()),
+                    builds(&d.rows()[0].read_chart),
+                    builds(&d.rows()[0].write_chart),
                     n.render_count.get(),
                     n.notify_count.get(),
                     builds(n.down_chart()),
@@ -1758,7 +1867,7 @@ mod bottom {
             })
         };
         let before = counts(&mut r);
-        assert_eq!(before.len(), 13, "three engine sparklines");
+        assert_eq!(before.len(), 14, "three engine sparklines");
         r.version += 1;
         let version = r.version;
         let newest = now_boot_ns();
@@ -2072,7 +2181,10 @@ mod page {
                 ];
                 let mut charts: Vec<&Entity<ChartView>> = vec![c.total_chart(), m.chart()];
                 charts.extend(g.sections().iter().map(|s| &s.chart));
-                charts.extend([d.io_chart(), n.down_chart(), n.up_chart()]);
+                if let Some(row) = d.rows().first() {
+                    charts.extend([&row.read_chart, &row.write_chart]);
+                }
+                charts.extend([n.down_chart(), n.up_chart()]);
                 for chart in charts {
                     let v = chart.read(cx);
                     out.push(v.render_count.get());
@@ -2633,7 +2745,7 @@ mod wired {
         r.vcx.update(|_, cx| demand.read(cx).merged())
     }
 
-    fn overview_render_counts(r: &mut Rig) -> ([u32; 5], [u32; 6]) {
+    fn overview_render_counts(r: &mut Rig) -> ([u32; 5], [u32; 7]) {
         let page = overview(r).expect("an OverviewPage");
         r.vcx.update(|_, cx| {
             let page = page.read(cx);
@@ -2654,7 +2766,8 @@ mod wired {
                     cpu.total_chart().read(cx).render_count.get(),
                     memory.chart().read(cx).render_count.get(),
                     gpu.sections()[0].chart.read(cx).render_count.get(),
-                    disk.io_chart().read(cx).render_count.get(),
+                    disk.rows()[0].read_chart.read(cx).render_count.get(),
+                    disk.rows()[0].write_chart.read(cx).render_count.get(),
                     net.down_chart().read(cx).render_count.get(),
                     net.up_chart().read(cx).render_count.get(),
                 ],
@@ -2859,9 +2972,9 @@ mod wired {
 
         let after = overview_render_counts(&mut r);
         let box_delta = std::array::from_fn::<_, 5, _>(|i| after.0[i] - before.0[i]);
-        let chart_delta = std::array::from_fn::<_, 6, _>(|i| after.1[i] - before.1[i]);
+        let chart_delta = std::array::from_fn::<_, 7, _>(|i| after.1[i] - before.1[i]);
         assert_eq!(box_delta, [1, 0, 0, 0, 0], "box render deltas");
-        assert_eq!(chart_delta, [1, 0, 0, 0, 0, 0], "chart render deltas");
+        assert_eq!(chart_delta, [1, 0, 0, 0, 0, 0, 0], "chart render deltas");
     }
 
     /// wlf.37: the Performance exception does not remove page caching from another tab.
@@ -2938,13 +3051,15 @@ mod wired {
             let cpu = page.cpu_box().read(cx).total_chart().clone();
             let memory = page.mem_box().read(cx).chart().clone();
             let gpu = page.gpu_box().read(cx).sections()[0].chart.clone();
-            let disk = page.disk_box().read(cx).io_chart().clone();
+            let disk = &page.disk_box().read(cx).rows()[0];
+            let (disk_read, disk_write) = (disk.read_chart.clone(), disk.write_chart.clone());
             let net = page.net_box().read(cx);
             [
                 cpu,
                 memory,
                 gpu,
-                disk,
+                disk_read,
+                disk_write,
                 net.down_chart().clone(),
                 net.up_chart().clone(),
             ]
