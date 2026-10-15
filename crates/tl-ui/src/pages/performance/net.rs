@@ -624,7 +624,9 @@ fn address_rows(model: &mut KeyValueModel, addresses: &[Arc<str>]) -> bool {
     };
     let tip = (!local.is_empty()).then(|| {
         let mut out = String::new();
-        let _ = model.text(KEY_LINK_LOCAL).write(&mut out, &[&join(local)]);
+        let _ = model
+            .text(KEY_LINK_LOCAL)
+            .write(&mut out, &[&join(local.clone())]);
         SharedString::from(out)
     });
     let (shown, tip) = if global.is_empty() {
