@@ -2063,6 +2063,7 @@ processes-menu-copy-all-metrics = Copy all metrics
 processes-menu-copy-rows-as-table = Copy rows as table
 processes-menu-properties = Properties
 processes-menu-open-file-location = Open file location
+processes-menu-open-virustotal = Open in VirusTotal
 processes-menu-executable-deleted = Executable deleted
 processes-menu-go-to-parent = Go to parent process
 processes-menu-process-exited = Process exited

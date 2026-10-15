@@ -985,12 +985,14 @@ mod end {
     use std::sync::Arc;
 
     use gpui_kit::component::kbd::Kbd;
-    use gpui_kit::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle, WindowId};
+    use gpui_kit::{
+        Action, Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle, WindowId,
+    };
     use gpui_kit::{Keystroke, point, px};
     use tl_model::actions::ActionError;
     use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
-    use tl_model::command::Tab;
+    use tl_model::command::{Command, Tab};
     use tl_model::ids::ColumnId;
     use tl_model::ids::PseudoKind;
     use tl_model::ids::{GroupKey, NodeId, ProcessKey};
@@ -1014,8 +1016,8 @@ mod end {
     use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
         CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree, EndTask, GoToParent,
-        OpenFileLocation, PriorityClass, ProcessesShowHidden, ResumeProcess, SetPriority,
-        SuspendProcess,
+        OpenFileLocation, OpenVirusTotal, PriorityClass, ProcessesShowHidden, ResumeProcess,
+        SetPriority, SuspendProcess,
     };
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
@@ -1830,12 +1832,13 @@ mod end {
             "End Process Tree",
             "-",
             "Suspend Process",
+            "Send Signal >",
             "Set Priority >",
             "Set Affinity…",
             "-",
         ];
         out.extend(COPIES);
-        out.extend(["-", open_file]);
+        out.extend(["-", "Properties", open_file, "Open in VirusTotal"]);
         if let Some(parent) = parent {
             out.extend(["-", parent]);
         }
@@ -1852,10 +1855,13 @@ mod end {
         };
         let process = process_shape("Open file location", Some("Go to parent process"));
         assert_eq!(menu(&mut rig, &[1]), process, "one running own process");
+        let mut kernel = process.clone();
+        let signal = kernel.iter().position(|l| l == "Send Signal >").unwrap();
+        kernel[signal] = "(Send Signal: Kernel threads cannot be signalled.)".to_owned();
         assert_eq!(
             menu(&mut rig, &[5]),
-            process,
-            "a kernel thread as a process"
+            kernel,
+            "a kernel thread as a process, Send Signal disabled"
         );
         assert_eq!(
             menu(&mut rig, &[6]),
@@ -1875,11 +1881,13 @@ mod end {
             "End Selected Processes [Ends the process immediately (SIGKILL)]",
             "-",
             "Suspend Selected Tasks",
+            "Send Signal >",
             "Set Priority >",
             "Set Affinity…",
             "-",
         ];
         multi.extend(COPIES);
+        multi.extend(["-", "Properties"]);
         assert_eq!(menu(&mut rig, &[1, 2, 3]), multi, "3 selected rows");
 
         let mut exited = vec![
@@ -1888,6 +1896,7 @@ mod end {
             "(End Process Tree: Process exited)",
             "-",
             "(Suspend Process: Process exited)",
+            "(Send Signal: Process exited)",
             "(Set Priority: Process exited)",
             "(Set Affinity…: Process exited)",
             "-",
@@ -1895,7 +1904,9 @@ mod end {
         exited.extend(COPIES);
         exited.extend([
             "-",
+            "(Properties: Process exited)",
             "(Open file location: Process exited)",
+            "(Open in VirusTotal: Process exited)",
             "-",
             "(Go to parent process: Process exited)",
         ]);
@@ -1904,11 +1915,13 @@ mod end {
         let mut app = vec![
             "End App",
             "-",
+            "Send Signal >",
             "Set Priority > [Applies to the app's current processes]",
             "Set Affinity…",
             "-",
         ];
         app.extend(COPIES);
+        app.extend(["-", "Properties"]);
         assert_eq!(menu(&mut rig, &[7]), app, "an app row");
         assert_eq!(menu(&mut rig, &[8]), app, "a unit row");
 
@@ -2054,12 +2067,9 @@ mod end {
             "Freeze",
             "Thaw",
             "Show Window",
-            "Send Signal",
             "I/O",
             "Restart",
-            "Properties",
             "File properties",
-            "VirusTotal",
             "dump",
             "Minigraph",
             "Graph",
@@ -2096,7 +2106,12 @@ mod end {
         rig.publish(records, &[300, 301, 302, 303], vec![app_group(1)]);
         let priority = |rig: &mut Rig, rows: &[usize]| {
             let menu = build_menu(rig, rows, ColumnId::Name);
-            submenu_shapes(rig, &menu)
+            let sub = entries(rig, &menu)
+                .into_iter()
+                .find(|e| e.label.as_deref() == Some("Set Priority"))
+                .and_then(|e| e.submenu)
+                .expect("Set Priority submenu");
+            shape(rig, &sub)
         };
         let classes = |checked: Option<&str>| -> Vec<String> {
             let note = "# With autogroup on, nice only orders processes within the same session.";
@@ -2320,6 +2335,37 @@ mod end {
             toasts.last().map(String::as_str),
             Some(message(&err).as_ref())
         );
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_virustotal_calls_notice_flow(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300]), &[300], Vec::new());
+        rig.select_pids(&[300]);
+        let mut notice = rig.dispatch(OpenVirusTotal).expect("the notice opens");
+        assert_eq!(
+            notice.text(),
+            "This opens virustotal.com with the file's hash. The file is not uploaded."
+        );
+        let hashes = |rig: &Rig| {
+            rig.engine
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, Command::ComputeHashes(k) if *k == key(300)))
+                .count()
+        };
+        assert_eq!(
+            hashes(&rig),
+            0,
+            "no ComputeHashes before the notice is answered"
+        );
+        let at = notice
+            .vcx
+            .debug_bounds("TlDialogAction")
+            .expect("Open button drawn");
+        notice.vcx.simulate_click(at.center(), Modifiers::none());
+        notice.vcx.run_until_parked();
+        assert_eq!(hashes(&rig), 1, "ComputeHashes with the captured key");
     }
 
     #[gpui_kit::test]

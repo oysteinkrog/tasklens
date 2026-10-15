@@ -13,7 +13,8 @@ use tl_model::ids::NodeId;
 
 use super::actions::{
     CapturedTargets, CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree, EndTask, GoToParent,
-    OpenFileLocation, PriorityClass, ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
+    OpenFileLocation, OpenVirusTotal, PriorityClass, ResumeProcess, SetPriority, SuspendProcess,
+    ToggleGroupRow,
 };
 use super::{SuspendLabel, suspend_or_resume};
 use crate::components::menu::TlMenu;
@@ -112,6 +113,7 @@ pub fn row_menu(
     menu = menu.separator();
     menu = add_properties(menu, shape, cx);
     menu = add_open_file_location(menu, targets, shape, cx);
+    menu = add_open_virustotal(menu, shape, cx);
     menu = menu.separator();
     add_go_to_parent(menu, targets, shape, cx)
 }
@@ -356,6 +358,20 @@ fn add_open_file_location(
         return menu.item_disabled(label, Some(tr(cx, "processes-menu-executable-deleted")));
     }
     exitable(menu, shape, label, Box::new(OpenFileLocation), cx)
+}
+
+/// Item 22: Open in VirusTotal, on one process row (PROC-074).
+fn add_open_virustotal(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
+    if !shape.process {
+        return menu;
+    }
+    exitable(
+        menu,
+        shape,
+        tr(cx, "processes-menu-open-virustotal"),
+        Box::new(OpenVirusTotal),
+        cx,
+    )
 }
 
 /// Item 24: Go to parent process, on one process row whose parent PID is not 0.

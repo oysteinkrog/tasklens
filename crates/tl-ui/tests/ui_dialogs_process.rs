@@ -1884,6 +1884,53 @@ mod signal {
     }
 
     #[gpui_kit::test]
+    fn row_menu_virustotal_item_rules(cx: &mut TestAppContext) {
+        super::setup(cx);
+        let handle = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        let mut labels = |targets: Vec<CapturedTarget>| {
+            let menu = vcx.update(|window, cx| {
+                let focus = cx.focus_handle();
+                let targets = CapturedTargets::new(targets, None);
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                })
+            });
+            vcx.update(|window, cx| menu.read(cx).entries_for_test(window))
+        };
+        let find = |entries: &[_], label: &str| -> Option<usize> {
+            entries
+                .iter()
+                .position(|e: &tl_ui::components::menu::MenuEntryInfo| {
+                    e.label.as_deref().is_some_and(|l| l.contains(label))
+                })
+        };
+
+        let entries = labels(vec![captured(4321, RowKind::Process, ProcFlags::empty())]);
+        let file = find(&entries, "Open file location").expect("Open file location");
+        let vt = find(&entries, "Open in VirusTotal").expect("VirusTotal item");
+        assert_eq!(vt, file + 1, "item 22 follows item 21");
+        assert_eq!(entries[vt].kind, MenuEntryKind::Item);
+
+        let entries = labels(vec![captured(4321, RowKind::Process, ProcFlags::EXITED)]);
+        let vt = find(&entries, "Open in VirusTotal").expect("disabled item");
+        assert_eq!(entries[vt].kind, MenuEntryKind::Disabled);
+        assert_eq!(entries[vt].tooltip.as_deref(), Some("Process exited"));
+
+        let mut app = captured(4321, RowKind::App, ProcFlags::empty());
+        app.pid = None;
+        let pseudo = captured(5, RowKind::Pseudo, ProcFlags::empty());
+        let two = vec![
+            captured(1, RowKind::Process, ProcFlags::empty()),
+            captured(2, RowKind::Process, ProcFlags::empty()),
+        ];
+        for targets in [vec![app], vec![pseudo], two] {
+            let entries = labels(targets);
+            assert!(find(&entries, "Open in VirusTotal").is_none());
+        }
+    }
+
+    #[gpui_kit::test]
     fn row_menu_signal_app_row_targets_primaries(cx: &mut TestAppContext) {
         super::setup(cx);
         let group = GroupKind::App {

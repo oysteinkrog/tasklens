@@ -42,8 +42,8 @@ use tracing::warn;
 
 use self::actions::{
     CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree,
-    EndTask, GoToParent, MAX_TARGETS, OpenFileLocation, ResumeProcess, SetPriority, SuspendProcess,
-    ToggleGroupRow,
+    EndTask, GoToParent, MAX_TARGETS, OpenFileLocation, OpenVirusTotal, ResumeProcess, SetPriority,
+    SuspendProcess, ToggleGroupRow,
 };
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
@@ -828,6 +828,24 @@ impl ProcessesPage {
         submit(self, req, texts, cx);
     }
 
+    /// Open in VirusTotal (PROC-074, UI-PWN-036): the notice and hashing flow for the one
+    /// captured process row.
+    fn on_open_virustotal(
+        &mut self,
+        _: &OpenVirusTotal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.take_targets(cx);
+        let [t] = &targets.items[..] else {
+            return;
+        };
+        let NodeId::Process(key) = t.node else {
+            return;
+        };
+        crate::windows::notices::open_virustotal(key, window, cx);
+    }
+
     /// Copy, Copy details and Copy all metrics (PROC-070, ADR-015): the captured targets in
     /// view order, exited rows too, onto the clipboard, then a Success toast (UI-PRC-015).
     /// Command lines leave only through Copy all metrics and Copy on the Command line cell.
@@ -1529,6 +1547,7 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_signal_open_realtime))
             .on_action(cx.listener(Self::on_go_to_parent))
             .on_action(cx.listener(Self::on_open_file_location))
+            .on_action(cx.listener(Self::on_open_virustotal))
             .child(
                 div()
                     .relative()
