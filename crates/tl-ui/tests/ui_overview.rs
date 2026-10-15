@@ -287,7 +287,6 @@ mod boxes {
     use tl_model::validity::Validity;
     use tl_ui::anim::AnimationDriver;
     use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::chart::ChartView;
     use tl_ui::chart::labels::LabelKind;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
@@ -645,19 +644,32 @@ mod boxes {
             s.memory.cached = 16 * GIB;
             s.memory.swap_total = 0;
             s.memory.swap_free = 0;
+            s.memory.commit_limit = 40 * GIB;
+            s.memory.committed = 98 * GIB;
         });
         let mem = r.mem();
-        let (rows, value) = r.vcx.update(|_, cx| {
+        let (rows, pcts, value) = r.vcx.update(|_, cx| {
             let m = mem.read(cx);
-            (m.rows().clone(), m.text().1.to_string())
+            (
+                m.rows().clone(),
+                m.percents().clone(),
+                m.text().1.to_string(),
+            )
         });
         assert_eq!(value, "50.0%");
-        assert_eq!(rows[0].label.as_ref(), "Used");
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_ref()).collect();
+        assert_eq!(labels, ["In use", "Cached", "Available", "Swap", "Commit"]);
         assert_eq!(rows[0].fraction, Some(0.5));
         assert_eq!(rows[0].value.as_ref(), "32.00 GiB");
-        assert_eq!(rows[2].fraction, Some(0.25));
+        assert_eq!(pcts[0].as_ref(), "50.0%");
+        assert_eq!(rows[1].fraction, Some(0.25));
+        assert_eq!(rows[2].fraction, Some(0.5));
         assert_eq!(rows[3].value.as_ref(), "No swap");
         assert_eq!(rows[3].fraction, None);
+        assert_eq!(pcts[3].as_ref(), "");
+        // Commit passes 100%: the meter stops at full, the percent shows the real ratio.
+        assert_eq!(rows[4].fraction, Some(1.0));
+        assert_eq!(pcts[4].as_ref(), "245.0%");
 
         r.system(|s| {
             s.memory.swap_total = 8 * GIB;
@@ -688,7 +700,7 @@ mod boxes {
 
         let mem = r.mem();
         r.vcx.update(|_, cx| {
-            let chart = mem.read(cx).chart().read(cx);
+            let chart = mem.read(cx).sparks()[0].read(cx);
             let used = chart.resolved()[0].as_ref().expect("MEM_USED resolved");
             assert_eq!(used.samples.len(), 8, "fixture history reached the chart");
             assert_ne!(
@@ -709,7 +721,7 @@ mod boxes {
         });
         draw(r.vcx);
         let mem = r.mem();
-        let chart = r.vcx.update(|_, cx| mem.read(cx).chart().clone());
+        let chart = r.vcx.update(|_, cx| mem.read(cx).sparks()[0].clone());
         let builds = |r: &mut Rig| r.vcx.update(|_, cx| chart.read(cx).build_count.get());
         let (before, built) = (r.counts(), builds(&mut r));
         r.publish_cores([10., 20., 30., 40.]);
@@ -721,40 +733,25 @@ mod boxes {
     }
 
     #[gpui_kit::test]
-    fn scale_label_shapes_on_ceiling_change(cx: &mut TestAppContext) {
-        let mut r = open(cx);
-        r.system(|s| {
-            s.memory.validity = Validity::Valid;
-            s.memory.total = 16 * GIB;
-            s.memory.used = 4 * GIB;
-        });
+    fn scale_label_shapes_once(cx: &mut TestAppContext) {
+        // The CPU chart keeps its scale label; the Memory sparklines draw none (crw.54).
+        let r = open(cx);
         draw(r.vcx);
         let (cpu, mem) = (r.cpu(), r.mem());
         let cpu_chart = r.vcx.update(|_, cx| cpu.read(cx).total_chart().clone());
-        let mem_chart = r.vcx.update(|_, cx| mem.read(cx).chart().clone());
-        let label = |r: &mut Rig, chart: &Entity<ChartView>| {
-            r.vcx.update(|_, cx| {
-                let c = chart.read(cx).label_cache();
-                assert!(
-                    c.painted(LabelKind::AxisMax).is_some(),
-                    "scale label painted"
-                );
-                (c.text(LabelKind::AxisMax).map(str::to_owned), c.shape_count)
-            })
-        };
-        assert_eq!(label(&mut r, &cpu_chart).0.as_deref(), Some("100.0%"));
-        let (text, shapes) = label(&mut r, &mem_chart);
-        assert_eq!(text.as_deref(), Some("16.00 GiB"));
-        // Memory changes below the total keep the label shaped.
-        r.system(|s| s.memory.used = 5 * GIB);
-        draw(r.vcx);
-        assert_eq!(label(&mut r, &mem_chart).1, shapes);
-        // A new total is a new ceiling.
-        r.system(|s| s.memory.total = 32 * GIB);
-        draw(r.vcx);
-        let (text, after) = label(&mut r, &mem_chart);
-        assert_eq!(text.as_deref(), Some("32.00 GiB"));
-        assert_eq!(after, shapes + 1);
+        let sparks = r.vcx.update(|_, cx| mem.read(cx).sparks().clone());
+        r.vcx.update(|_, cx| {
+            let c = cpu_chart.read(cx).label_cache();
+            assert!(
+                c.painted(LabelKind::AxisMax).is_some(),
+                "scale label painted"
+            );
+            assert_eq!(c.text(LabelKind::AxisMax), Some("100.0%"));
+            for spark in &sparks {
+                let c = spark.read(cx).label_cache();
+                assert!(c.painted(LabelKind::AxisMax).is_none(), "no scale label");
+            }
+        });
     }
 
     #[gpui_kit::test]
@@ -2179,7 +2176,7 @@ mod page {
                     n.render_count.get(),
                     n.notify_count.get(),
                 ];
-                let mut charts: Vec<&Entity<ChartView>> = vec![c.total_chart(), m.chart()];
+                let mut charts: Vec<&Entity<ChartView>> = vec![c.total_chart(), &m.sparks()[0]];
                 charts.extend(g.sections().iter().map(|s| &s.chart));
                 if let Some(row) = d.rows().first() {
                     charts.extend([&row.read_chart, &row.write_chart]);
@@ -2764,7 +2761,7 @@ mod wired {
                 ],
                 [
                     cpu.total_chart().read(cx).render_count.get(),
-                    memory.chart().read(cx).render_count.get(),
+                    memory.sparks()[0].read(cx).render_count.get(),
                     gpu.sections()[0].chart.read(cx).render_count.get(),
                     disk.rows()[0].read_chart.read(cx).render_count.get(),
                     disk.rows()[0].write_chart.read(cx).render_count.get(),
@@ -3049,7 +3046,7 @@ mod wired {
         let charts = r.vcx.update(|_, cx| {
             let page = overview.read(cx);
             let cpu = page.cpu_box().read(cx).total_chart().clone();
-            let memory = page.mem_box().read(cx).chart().clone();
+            let memory = page.mem_box().read(cx).sparks()[0].clone();
             let gpu = page.gpu_box().read(cx).sections()[0].chart.clone();
             let disk = &page.disk_box().read(cx).rows()[0];
             let (disk_read, disk_write) = (disk.read_chart.clone(), disk.write_chart.clone());
