@@ -33,7 +33,7 @@ use tl_model::health::HelperState;
 use tl_model::table::TableMode;
 use tl_model::validity::Validity;
 
-use super::main::WINDOW_TITLE;
+use super::main::{WINDOW_TITLE, hide_main_to_tray, tray_available};
 use super::registry::WindowKey;
 use super::toolbar::{DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel, toolbar_toggle};
 use crate::actions::{CancelWindowPick, CloseWindow, MinimizeWindow, StartWindowPick, ZoomWindow};
@@ -266,7 +266,10 @@ pub fn keep_above_supported(cx: &App) -> bool {
 
 /// The Minimize caption button's behaviour. E20-A1's `MinimizeWindow` handler calls it.
 pub fn minimize_main(window: &mut Window, cx: &mut App) {
-    // minimize rule (E31-009): the minimize-to-tray check goes here, before minimize_window
+    if tray_available(cx) && TlSettings::settings(cx).tray.minimize_to_tray {
+        hide_main_to_tray(window, cx);
+        return;
+    }
     if probe_installed(cx) {
         #[cfg(any(test, feature = "test-hooks"))]
         {

@@ -707,3 +707,124 @@ fn shell_action_goes_to_open_main_window(cx: &mut TestAppContext) {
     f.event(TrayEvent::ShowMiniWindow);
     assert_eq!(mini.get(), 1);
 }
+
+// ---- E31-009: close to tray and minimize to tray ----
+
+use tl_model::command::Tab;
+use tl_ui::actions::{CloseWindow, MinimizeWindow, SelectTab};
+use tl_ui::app::{UiExit, UiExitSlot};
+use tl_ui::window::main::main_window_view;
+use tl_ui::window::titlebar::TitleBarProbe;
+
+impl Full {
+    /// Runs one tray tick and returns the last model it sent.
+    fn tick(&mut self) -> Option<TrayModel> {
+        self.vcx.executor().advance_clock(TRAY_TICK);
+        self.vcx.run_until_parked();
+        let mut last = None;
+        while let Ok(m) = self.service.models.try_recv() {
+            last = Some(m);
+        }
+        last
+    }
+
+    fn icon_shown(&mut self) -> bool {
+        self.tick().expect("a tray model").show_main_icon
+    }
+
+    fn set_tray(&mut self, close: bool, minimize: bool) {
+        self.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.tray.close_to_tray = close;
+                d.settings.tray.minimize_to_tray = minimize;
+            })
+        });
+    }
+}
+
+fn exit_of(cx: &TestAppContext) -> Option<UiExit> {
+    cx.read(|cx| cx.try_global::<UiExitSlot>().and_then(|s| s.0.clone()))
+}
+
+fn window_open(cx: &TestAppContext) -> bool {
+    cx.read(|cx| main_window_target(cx).is_some())
+}
+
+#[gpui_kit::test]
+fn close_to_tray_keeps_app(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.set_tray(true, false);
+    f.act(&CloseWindow);
+    assert!(!window_open(cx));
+    assert_eq!(exit_of(cx), None);
+    assert!(f.icon_shown());
+    cx.update(|cx| cx.dispatch_action(&Quit));
+    cx.run_until_parked();
+    assert_eq!(exit_of(cx), Some(UiExit::Quit));
+}
+
+#[gpui_kit::test]
+fn close_quits_without_tray_setting(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.set_tray(false, false);
+    f.act(&CloseWindow);
+    assert_eq!(exit_of(cx), Some(UiExit::Quit));
+}
+
+#[gpui_kit::test]
+fn close_to_tray_needs_available_tray(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.set_tray(true, false);
+    f.event(TrayEvent::WatcherOffline);
+    f.act(&CloseWindow);
+    assert_eq!(exit_of(cx), Some(UiExit::Quit));
+}
+
+#[gpui_kit::test]
+fn minimize_to_tray_removes_window(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.vcx
+        .update(|_, cx| cx.set_global(TitleBarProbe::default()));
+    f.set_tray(false, true);
+    f.act(&MinimizeWindow);
+    assert!(!window_open(cx));
+    assert_eq!(exit_of(cx), None);
+    assert_eq!(cx.read(|cx| cx.global::<TitleBarProbe>().minimizes), 0);
+    assert!(f.icon_shown());
+}
+
+#[gpui_kit::test]
+fn minimize_stays_without_tray_setting(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.vcx
+        .update(|_, cx| cx.set_global(TitleBarProbe::default()));
+    f.set_tray(false, false);
+    f.act(&MinimizeWindow);
+    assert!(window_open(cx));
+    assert_eq!(cx.read(|cx| cx.global::<TitleBarProbe>().minimizes), 1);
+}
+
+#[gpui_kit::test]
+fn reopen_clears_hidden_flag(cx: &mut TestAppContext) {
+    let mut f = full(cx, Vec::new());
+    f.set_tray(true, false);
+    f.act(&SelectTab(2));
+    let tab = f.vcx.update(|_, cx| {
+        let main = main_window_view(cx).expect("main window");
+        main.read(cx).active_tab()
+    });
+    f.act(&CloseWindow);
+    assert!(f.icon_shown());
+    cx.update(|cx| cx.dispatch_action(&ShowMainWindow));
+    cx.run_until_parked();
+    assert!(window_open(cx));
+    let reopened = cx.read(|cx| {
+        main_window_view(cx)
+            .expect("reopened")
+            .read(cx)
+            .active_tab()
+    });
+    assert_eq!(reopened, tab);
+    assert_ne!(tab, Tab::Performance);
+    assert!(!f.tick().is_some_and(|m| m.show_main_icon));
+}

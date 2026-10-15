@@ -99,6 +99,7 @@ use crate::table::actions::TABLE_CONTEXT;
 use crate::text::style::numeric_style;
 use crate::theme::store::apply_metrics;
 use crate::theme::{ThemeStore, UiMetrics, bump_style_version, current, metrics};
+use crate::tray_bridge::{TrayBridge, TrayStatus};
 
 pub use super::tabstrip::TAB_STRIP_H;
 pub use super::titlebar::TITLEBAR_H;
@@ -169,6 +170,8 @@ pub enum CloseOutcome {
     Quit,
     /// Remove the window; the app and the engine keep running.
     RemoveWindow,
+    /// Row 1 or minimize to tray: remove the window and show the main tray icon.
+    HideToTray,
 }
 
 /// Implemented by every page entity (E22, E24, E27, E28). Inherent methods of the same name may
@@ -759,9 +762,9 @@ fn toggle_main_window(cx: &mut App) {
                     return;
                 };
                 match view.read(cx).close_decision(cx) {
-                    CloseOutcome::RemoveWindow => view.update(cx, |this, cx| {
-                        this.apply_close(CloseOutcome::RemoveWindow, window, cx)
-                    }),
+                    outcome @ (CloseOutcome::RemoveWindow | CloseOutcome::HideToTray) => {
+                        view.update(cx, |this, cx| this.apply_close(outcome, window, cx))
+                    }
                     CloseOutcome::Quit => minimize_main(window, cx),
                 }
             })
@@ -874,7 +877,26 @@ pub fn reopen_main_window(cx: &mut App) {
     };
     let _ = handle.update(cx, |_, window, _| window.activate_window());
     cx.default_global::<DetachedWatch>().0 = None;
-    // after reopen (E31-009 chain edit): tell the tray bridge the main window is visible
+    set_tray_main_hidden(false, cx);
+}
+
+/// Tells the tray bridge whether the main window is removed to the tray. No-op without a tray.
+fn set_tray_main_hidden(hidden: bool, cx: &mut App) {
+    if cx.has_global::<TrayStatus>() {
+        TrayBridge::global(cx).update(cx, |bridge, cx| bridge.set_main_window_hidden(hidden, cx));
+    }
+}
+
+/// Removes the main window to the tray like close row 1. Deferred, because callers such as the
+/// minimize handler run inside a `MainWindow` update.
+pub(crate) fn hide_main_to_tray(window: &mut Window, cx: &mut App) {
+    window.defer(cx, |window, cx| {
+        if let Some(view) = main_window_view(cx) {
+            view.update(cx, |this, cx| {
+                this.apply_close(CloseOutcome::HideToTray, window, cx)
+            });
+        }
+    });
 }
 
 /// `UiState.window` for `bounds`: logical px rounded to integers. Maximized and fullscreen save
@@ -946,10 +968,10 @@ pub fn restored_bounds(state: &WindowState) -> WindowBounds {
     }
 }
 
-/// The tray is running and available (E31-009 replaces the body).
-fn tray_available(cx: &App) -> bool {
-    let _ = cx;
-    false
+/// The tray is running and available.
+pub(crate) fn tray_available(cx: &App) -> bool {
+    cx.try_global::<TrayStatus>()
+        .is_some_and(|s| s.running && s.available)
 }
 
 /// Whether any detached graph window is open. False when no registry is installed.
@@ -1780,7 +1802,10 @@ impl MainWindow {
 
     /// The close decision (UI-SHL-113). Rows are checked in order; first match wins.
     fn close_decision(&self, cx: &App) -> CloseOutcome {
-        // close decision: row 1, close to tray (E31-009 chain edit)
+        // close decision: row 1, close to tray (E31-009)
+        if tray_available(cx) && TlSettings::settings(cx).tray.close_to_tray {
+            return CloseOutcome::HideToTray;
+        }
         // close decision: row 2, keep detached graphs (E20-028)
         if TlSettings::settings(cx).graphs.keep_detached_on_close && detached_graph_open(cx) {
             return CloseOutcome::RemoveWindow;
@@ -1794,7 +1819,7 @@ impl MainWindow {
         self.save_size_now(window, cx);
         match outcome {
             CloseOutcome::Quit => request_exit(cx, UiExit::Quit),
-            CloseOutcome::RemoveWindow => {
+            CloseOutcome::RemoveWindow | CloseOutcome::HideToTray => {
                 let keep_detached = TlSettings::settings(cx).graphs.keep_detached_on_close;
                 if let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
                     registry.update(cx, |registry, cx| {
@@ -1808,6 +1833,9 @@ impl MainWindow {
                 state.main_view = None;
                 if keep_detached && detached_graph_open(cx) {
                     watch_detached(cx);
+                }
+                if outcome == CloseOutcome::HideToTray {
+                    set_tray_main_hidden(true, cx);
                 }
                 window.remove_window();
             }
