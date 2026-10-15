@@ -2419,18 +2419,21 @@ mod status {
     use std::rc::Rc;
     use std::sync::Arc;
 
+    use gpui_kit::Modifiers;
     use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
     use tl_model::client::EngineClient as _;
     use tl_model::command::Tab;
+    use tl_model::health::HelperState;
     use tl_model::ids::{NodeId, PseudoKind};
     use tl_model::process::{GroupRowKind, ProcFlags};
     use tl_model::settings::UiState;
     use tl_model::snapshot::Snapshot;
     use tl_model::table::TableRow;
+    use tl_ui::actions::{EndHelperSession, StartHelperSession};
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
-    use tl_ui::window::status::StatusChanged;
+    use tl_ui::window::status::{StatusActionKind, StatusChanged};
 
     use super::delegate::{group, key, record, row, snapshot};
     use super::shell::open_with;
@@ -2509,6 +2512,7 @@ mod status {
                 .update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation());
             let mut s = Snapshot::clone(&snapshot(self.version, rows, groups, records));
             s.sequence = self.engine.latest().sequence + 1;
+            s.health = Arc::clone(&self.engine.latest().health);
             let t = Arc::make_mut(&mut s.table);
             t.query_generation = generation;
             t.total = total;
@@ -2555,6 +2559,102 @@ mod status {
                 out
             })
         }
+
+        /// Publishes a new helper state.
+        fn helper(&mut self, state: HelperState) {
+            self.engine.publish_with(|s| {
+                let health = Arc::make_mut(&mut s.health);
+                health.helper = state;
+                health.version += 1;
+            });
+            self.draw();
+        }
+
+        /// The (kind, label, tooltip) of each chip part.
+        fn actions(&mut self) -> Vec<(StatusActionKind, String, String)> {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| {
+                page.read(cx)
+                    .status_actions()
+                    .iter()
+                    .map(|a| (a.kind, a.label.to_string(), a.tooltip.to_string()))
+                    .collect()
+            })
+        }
+
+        fn click(&mut self, selector: &'static str) {
+            self.draw();
+            let at = self
+                .vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} drawn"))
+                .center();
+            self.vcx.simulate_click(at, Modifiers::none());
+        }
+
+        fn drawn(&mut self, selector: &'static str) -> bool {
+            self.draw();
+            self.vcx.debug_bounds(selector).is_some()
+        }
+    }
+
+    /// Counts dispatches of the two helper session actions: (start, end).
+    fn count_sessions(r: &mut Rig) -> (Rc<Cell<u32>>, Rc<Cell<u32>>) {
+        let start = Rc::new(Cell::new(0));
+        let end = Rc::new(Cell::new(0));
+        let (s, e) = (start.clone(), end.clone());
+        r.vcx.update(|_, cx| {
+            cx.on_action(move |_: &StartHelperSession, _| s.set(s.get() + 1));
+            cx.on_action(move |_: &EndHelperSession, _| e.set(e.get() + 1));
+        });
+        (start, end)
+    }
+
+    #[gpui_kit::test]
+    fn restricted_segment_starts_helper(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let (start, _) = count_sessions(&mut r);
+        r.helper(HelperState::Locked);
+        r.publish(&[1, 2, 3, 4], 0, 296, 296, 42);
+        assert_eq!(r.text(), "296 Processes");
+        assert_eq!(
+            r.actions(),
+            vec![(
+                StatusActionKind::Link,
+                "42 restricted".to_owned(),
+                "Some values for other users' processes need administrator rights. Click to enable."
+                    .to_owned()
+            )]
+        );
+        r.click("StatusChip-action-0");
+        assert_eq!(start.get(), 1);
+
+        r.publish(&[1, 2, 3, 4], 0, 296, 296, 0);
+        assert!(r.actions().is_empty());
+        assert!(!r.drawn("StatusChip-action-0"));
+    }
+
+    #[gpui_kit::test]
+    fn admin_badge_ends_helper(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let (start, end) = count_sessions(&mut r);
+        r.helper(HelperState::Unlocked);
+        r.publish(&[1, 2, 3, 4], 0, 296, 296, 42);
+        let kinds: Vec<_> = r.actions().into_iter().map(|a| (a.0, a.1)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (StatusActionKind::Link, "42 restricted".to_owned()),
+                (StatusActionKind::Badge, "Administrator mode".to_owned()),
+            ]
+        );
+        r.click("StatusChip-action-1");
+        assert_eq!(end.get(), 1);
+        assert_eq!(start.get(), 0);
+
+        r.helper(HelperState::Locked);
+        assert_eq!(r.actions().len(), 1);
+        assert!(!r.drawn("StatusChip-action-1"));
     }
 
     #[gpui_kit::test]

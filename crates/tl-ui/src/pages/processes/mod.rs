@@ -66,12 +66,12 @@ use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::registry::{CapClass, GlobalRegistry, WindowKey};
-use crate::window::status::StatusChanged;
+use crate::window::status::{StatusAction, StatusChanged};
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
 use crate::windows::signal::{
     OtherUserTarget, SignalRefusal, TargetNames, open_rt_signal, send_signal,
 };
-use status::{StatusCounts, write_status};
+use status::{StatusCounts, write_actions, write_status};
 
 /// Key context of the page div. The table inside it has `Table`.
 pub const PAGE_CONTEXT: &str = "ProcessTable";
@@ -142,6 +142,8 @@ pub struct ProcessesPage {
     status_counts: StatusCounts,
     /// The status chip text, rebuilt only when `status_counts` or the strings change.
     status: String,
+    /// The clickable chip parts: the restricted link and the Administrator mode badge.
+    status_actions: SmallVec<[StatusAction; 2]>,
     /// History mode (UI-PRC-030): the page shown in place of the live table. Created when
     /// `history_mode` turns on, dropped when it turns off. The live table is kept.
     history: Option<Entity<HistoryPage>>,
@@ -248,6 +250,7 @@ impl ProcessesPage {
             minigraphs,
             status_counts: StatusCounts::default(),
             status: String::new(),
+            status_actions: SmallVec::new(),
             history,
             history_focus,
             active: false,
@@ -296,6 +299,11 @@ impl ProcessesPage {
         out.push_str(&self.status);
     }
 
+    /// The clickable chip parts (E20-008).
+    pub fn status_actions(&self) -> SmallVec<[StatusAction; 2]> {
+        self.status_actions.clone()
+    }
+
     /// Rebuilds the chip text when a count, the filter state or the selection size changed, or
     /// always with `force` (new strings), and emits `StatusChanged` when the text changed. Counts
     /// come from a view built for the current query; until it arrives the previous counts stay.
@@ -310,11 +318,16 @@ impl ProcessesPage {
         let Some(view) = d.query().shown() else {
             return;
         };
+        let helper = cx.global::<GlobalHub>().0.read(cx).current().health.helper;
         let counts = if view.query_generation == d.query().generation() {
-            StatusCounts::of(view, !d.query().filter().is_empty(), selected)
+            StatusCounts {
+                helper,
+                ..StatusCounts::of(view, !d.query().filter().is_empty(), selected)
+            }
         } else {
             StatusCounts {
                 selected: u32::try_from(selected).unwrap_or(u32::MAX),
+                helper,
                 ..self.status_counts
             }
         };
@@ -324,8 +337,11 @@ impl ProcessesPage {
         self.status_counts = counts;
         let mut text = String::with_capacity(self.status.len());
         write_status(&mut text, counts, cx);
-        if text != self.status {
+        let mut actions = SmallVec::new();
+        write_actions(&mut actions, counts, cx);
+        if text != self.status || actions != self.status_actions {
             self.status = text;
+            self.status_actions = actions;
             cx.emit(StatusChanged);
         }
     }
@@ -379,6 +395,9 @@ impl ProcessesPage {
     /// notified only when the view was built for the current query. While paused only an unsent
     /// query is retried.
     fn on_snapshot(&mut self, mask: ComponentMask, cx: &mut Context<Self>) {
+        if mask.intersects(ComponentMask::HEALTH) {
+            self.refresh_status(false, cx);
+        }
         let paused = self.paused.is_some();
         let hub = cx.global::<GlobalHub>().0.clone();
         let snapshot = Arc::clone(hub.read(cx).current());
@@ -1703,6 +1722,10 @@ fn should_attempt_properties(
 impl ShellPage for ProcessesPage {
     fn status_text(&self, out: &mut String) {
         ProcessesPage::status_text(self, out);
+    }
+
+    fn status_actions(&self) -> SmallVec<[StatusAction; 2]> {
+        ProcessesPage::status_actions(self)
     }
 
     fn primary_focus(&self) -> FocusHandle {
