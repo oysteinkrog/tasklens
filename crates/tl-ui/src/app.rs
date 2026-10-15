@@ -347,6 +347,7 @@ impl TasklensUi {
         crate::pages::connections::actions::bind_keys_connections(cx);
         crate::pages::services::actions::bind_keys_services(cx);
         crate::pages::processes::bind_keys_processes(cx);
+        crate::pages::processes::history::actions::bind_keys_history(cx);
         actions::register_global_handlers(cx);
         crate::window::menubar::init(cx);
         crate::window::menus_view::init(cx);

@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use gpui_kit::{
+    Action, AppContext as _, Entity, KeyContext, Keystroke, TestAppContext, VisualTestContext,
+};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, HistoryWhat};
 use tl_model::details::DetailsSnapshot;
@@ -25,6 +27,7 @@ use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
+use tl_ui::pages::processes::history::actions::{HistoryLive, bind_keys_history};
 use tl_ui::pages::processes::history::table::HistoryTableDelegate;
 use tl_ui::pages::processes::history::{
     HistoryPage, HistoryUiState, HistoryWords, default_view_range, header_text,
@@ -1042,4 +1045,107 @@ fn filter_typed_before_history_mode_applies(cx: &mut TestAppContext) {
     vcx.update(|window, cx| filter.update(cx, |f, cx| f.clear(window, cx)));
     vcx.run_until_parked();
     assert_eq!(shown(vcx), [3, 2], "clearing shows every row");
+}
+
+/// A page with the History keys bound, a view whose span is 100..1000 s and the strip focused.
+fn keys_page(cx: &mut TestAppContext) -> (Entity<HistoryPage>, &mut VisualTestContext) {
+    let engine = init(cx);
+    cx.update(bind_keys_history);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let v = HistoryView {
+        header: ComponentHeader {
+            version: 1,
+            ..ComponentHeader::default()
+        },
+        span: Some((100 * S, 1000 * S)),
+        frame_t: Some(1000 * S),
+        store_state: HistoryStoreState::Ready,
+        ..HistoryView::default()
+    };
+    publish_view(&engine, vcx, v);
+    let focus = vcx.read_entity(&page, |p, _| p.strip_focus().clone());
+    vcx.update(|window, cx| window.focus(&focus, cx));
+    draw(vcx);
+    (page, vcx)
+}
+
+fn scrub_of(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) -> Option<TimeNs> {
+    vcx.read_entity(page, |p, _| p.state().scrub)
+}
+
+#[gpui_kit::test]
+fn scrubber_keys_step_1s_1min(cx: &mut TestAppContext) {
+    let (page, vcx) = keys_page(cx);
+    vcx.simulate_keystrokes("left");
+    assert_eq!(scrub_of(&page, vcx), Some(999 * S));
+    vcx.simulate_keystrokes("shift-right");
+    assert_eq!(scrub_of(&page, vcx), None);
+    vcx.simulate_keystrokes("shift-left");
+    assert_eq!(scrub_of(&page, vcx), Some(940 * S));
+    vcx.simulate_keystrokes("right");
+    assert_eq!(scrub_of(&page, vcx), Some(941 * S));
+    page.update(vcx, |p, cx| p.set_scrub(Some(100 * S), cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("left");
+    assert_eq!(scrub_of(&page, vcx), Some(100 * S));
+}
+
+#[gpui_kit::test]
+fn home_end_oldest_and_live(cx: &mut TestAppContext) {
+    let (page, vcx) = keys_page(cx);
+    vcx.simulate_keystrokes("home");
+    assert_eq!(scrub_of(&page, vcx), Some(100 * S));
+    vcx.simulate_keystrokes("end");
+    assert_eq!(scrub_of(&page, vcx), None);
+    page.update(vcx, |p, cx| {
+        p.set_scrub(Some(500 * S), cx);
+        p.set_range(Some((200 * S, 300 * S)), cx);
+    });
+    draw(vcx);
+    vcx.simulate_keystrokes("end");
+    let (scrub, range) = vcx.read_entity(&page, |p, _| (p.state().scrub, p.state().range));
+    assert_eq!((scrub, range), (None, None));
+}
+
+#[gpui_kit::test]
+fn esc_returns_live_before_global(cx: &mut TestAppContext) {
+    let (page, vcx) = keys_page(cx);
+    vcx.update(|_, cx| tl_ui::actions::bind_keys_global(cx));
+    page.update(vcx, |p, cx| p.set_scrub(Some(500 * S), cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(scrub_of(&page, vcx), None);
+    // The keymap ranks the History rule above the global one only while scrubbed.
+    let resolve = |vcx: &mut VisualTestContext, contexts: &[&str]| -> Option<Box<dyn Action>> {
+        vcx.update(|_, cx| {
+            let input = [Keystroke::parse("escape").unwrap()];
+            let stack: Vec<KeyContext> = contexts
+                .iter()
+                .map(|c| KeyContext::parse(c).expect("key context"))
+                .collect();
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let (bindings, _) = keymap.bindings_for_input(&input, &stack);
+            bindings.first().map(|b| b.action().boxed_clone())
+        })
+    };
+    let scrubbed = resolve(vcx, &["Global", "History scrubbed"]).expect("a binding");
+    assert!(scrubbed.partial_eq(&HistoryLive));
+    let live = resolve(vcx, &["Global", "History"]).expect("a binding");
+    assert!(live.partial_eq(&tl_ui::actions::EscapeChain));
+}
+
+#[gpui_kit::test]
+fn digit_keys_select_metric(cx: &mut TestAppContext) {
+    let (page, vcx) = keys_page(cx);
+    let metric = |page: &Entity<HistoryPage>, vcx: &mut VisualTestContext| {
+        vcx.read_entity(page, |p, _| p.state().metric)
+    };
+    vcx.simulate_keystrokes("3");
+    assert_eq!(metric(&page, vcx), HistoryMetric::Disk);
+    vcx.simulate_keystrokes("5");
+    assert_eq!(metric(&page, vcx), HistoryMetric::Gpu);
+    vcx.simulate_keystrokes("1");
+    assert_eq!(metric(&page, vcx), HistoryMetric::Cpu);
 }

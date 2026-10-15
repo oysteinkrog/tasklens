@@ -17,6 +17,7 @@
 //! made, then each `FilterChanged`) and the settings it follows, and copies its selection into
 //! `HistoryUiState::selected` in selection order.
 
+pub mod actions;
 pub mod scrubber;
 pub mod table;
 
@@ -24,8 +25,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    App, AppContext as _, AsyncApp, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyContext, ParentElement as _, Render, SharedString, StyleRefinement,
+    Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
@@ -36,6 +38,11 @@ use tl_model::settings::{Settings, UiState};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime};
 
+use self::actions::{
+    HISTORY_CONTEXT, HistoryLive, HistoryMetricCpu, HistoryMetricDisk, HistoryMetricGpu,
+    HistoryMetricMemory, HistoryMetricNetwork, HistoryOldest, HistoryStepBack,
+    HistoryStepBackMinute, HistoryStepForward, HistoryStepForwardMinute, SCRUBBED,
+};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
@@ -423,6 +430,8 @@ pub struct HistoryPage {
     section_versions: [u64; 3],
     /// The strip's built geometry and shaped labels, filled by `HistoryScrubber` in paint.
     scrubber: ScrubberCache,
+    /// Focus of the strip: the History key context is reached through it (E30-018).
+    strip_focus: FocusHandle,
     /// Created in `new`, never in render.
     _subs: SmallVec<[Subscription; 5]>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -517,6 +526,7 @@ impl HistoryPage {
             table,
             section_versions,
             scrubber: ScrubberCache::default(),
+            strip_focus: cx.focus_handle(),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -529,6 +539,11 @@ impl HistoryPage {
 
     pub fn state(&self) -> &HistoryUiState {
         &self.state
+    }
+
+    /// The strip's focus handle.
+    pub fn strip_focus(&self) -> &FocusHandle {
+        &self.strip_focus
     }
 
     /// The header line text as shown.
@@ -564,6 +579,60 @@ impl HistoryPage {
         }
         self.state.scrub = scrub;
         self.on_query_state(cx);
+    }
+
+    /// Steps the scrub point by `delta_s` seconds. Needs a span.
+    fn step(&mut self, delta_s: i64, cx: &mut Context<Self>) {
+        let Some(span) = self.view.as_ref().and_then(|v| v.span) else {
+            return;
+        };
+        self.set_scrub(step_scrub(self.state.scrub, span, delta_s), cx);
+    }
+
+    fn on_step_back(&mut self, _: &HistoryStepBack, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(-1, cx);
+    }
+
+    fn on_step_forward(&mut self, _: &HistoryStepForward, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(1, cx);
+    }
+
+    fn on_step_back_minute(
+        &mut self,
+        _: &HistoryStepBackMinute,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step(-60, cx);
+    }
+
+    fn on_step_forward_minute(
+        &mut self,
+        _: &HistoryStepForwardMinute,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step(60, cx);
+    }
+
+    fn on_oldest(&mut self, _: &HistoryOldest, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(span) = self.view.as_ref().and_then(|v| v.span) {
+            self.set_scrub(Some(span.0), cx);
+        }
+    }
+
+    /// Clears the scrub point and the range together, so one query goes out and not two.
+    fn on_live(&mut self, _: &HistoryLive, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_live() {
+            return;
+        }
+        self.state.scrub = None;
+        self.state.range = None;
+        self.on_query_state(cx);
+    }
+
+    fn on_metric(&mut self, metric: HistoryMetric, cx: &mut Context<Self>) {
+        self.set_metric(metric, cx);
     }
 
     /// Sets the selected range (`None` clears it) and asks for its frame.
@@ -855,6 +924,23 @@ impl HistoryPage {
     }
 }
 
+/// The scrub point after a step of `delta_s` seconds from `scrub` (live counts as the newest
+/// second). `None` is live: a forward step that reaches the newest second returns to live.
+/// Backward steps stop at the oldest second.
+pub fn step_scrub(scrub: Option<TimeNs>, span: (TimeNs, TimeNs), delta_s: i64) -> Option<TimeNs> {
+    let base = scrub.unwrap_or(span.1);
+    let delta = delta_s.unsigned_abs().saturating_mul(1_000_000_000);
+    if delta_s >= 0 {
+        let target = base.saturating_add(delta);
+        if target >= span.1 {
+            return None;
+        }
+        Some(target.max(span.0))
+    } else {
+        Some(base.saturating_sub(delta).clamp(span.0, span.1))
+    }
+}
+
 impl Render for HistoryPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
@@ -880,6 +966,7 @@ impl Render for HistoryPage {
             .flex()
             .items_center()
             .justify_center();
+        strip = strip.track_focus(&self.strip_focus);
         strip = if self.loading() {
             strip
                 .text_size(m.text.base)
@@ -902,7 +989,34 @@ impl Render for HistoryPage {
                     .cached(StyleRefinement::default().size_full()),
             );
         }
+        let mut key_context = KeyContext::default();
+        key_context.add(HISTORY_CONTEXT);
+        if self.state.scrub.is_some() {
+            key_context.add(SCRUBBED);
+        }
         div()
+            .key_context(key_context)
+            .on_action(cx.listener(Self::on_step_back))
+            .on_action(cx.listener(Self::on_step_forward))
+            .on_action(cx.listener(Self::on_step_back_minute))
+            .on_action(cx.listener(Self::on_step_forward_minute))
+            .on_action(cx.listener(Self::on_oldest))
+            .on_action(cx.listener(Self::on_live))
+            .on_action(cx.listener(|this, _: &HistoryMetricCpu, _, cx| {
+                this.on_metric(HistoryMetric::Cpu, cx)
+            }))
+            .on_action(cx.listener(|this, _: &HistoryMetricMemory, _, cx| {
+                this.on_metric(HistoryMetric::Memory, cx)
+            }))
+            .on_action(cx.listener(|this, _: &HistoryMetricDisk, _, cx| {
+                this.on_metric(HistoryMetric::Disk, cx)
+            }))
+            .on_action(cx.listener(|this, _: &HistoryMetricNetwork, _, cx| {
+                this.on_metric(HistoryMetric::Network, cx)
+            }))
+            .on_action(cx.listener(|this, _: &HistoryMetricGpu, _, cx| {
+                this.on_metric(HistoryMetric::Gpu, cx)
+            }))
             .size_full()
             .flex()
             .flex_col()
