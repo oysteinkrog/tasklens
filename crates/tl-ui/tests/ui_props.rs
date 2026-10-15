@@ -1107,7 +1107,9 @@ mod window {
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
-    use tl_ui::windows::app_props::{APP_EXITED_BANNER, AppPropsWindow, open_app_properties};
+    use tl_ui::windows::app_props::{
+        APP_EXITED_BANNER, AppProcsGoTo, AppPropsWindow, open_app_properties,
+    };
     use tl_ui::windows::props::{
         ACCESS_ENV, ACCESS_FDS, ACCESS_MAPS, ACCESS_SECURITY, ACCESS_STRINGS, PropsWindow,
         open_process_properties, props_words,
@@ -1588,6 +1590,166 @@ mod window {
             cx.update(|cx| cx.active_window().map(|w| w.window_id())),
             Some(app_handle.window_id()),
             "opening twice activates the existing window"
+        );
+    }
+
+    fn member(pid: u32, group: GroupKey) -> ProcessRecord {
+        let mut r = rec(pid, ProcFlags::empty());
+        r.group = group;
+        r
+    }
+
+    /// Two app rows (G, H) with three processes: 101 and 103 in G, 102 in H.
+    fn publish_two_apps(
+        engine: &FakeEngine,
+        main: &mut VisualTestContext,
+        g_members: u32,
+    ) -> (GroupRow, GroupRow) {
+        let g = app_group("Firefox", GroupRowKind::App, g_members);
+        let h = app_group("Chrome", GroupRowKind::App, 1);
+        publish_table(
+            engine,
+            main,
+            vec![member(101, g.key), member(102, h.key), member(103, g.key)],
+            vec![g.clone(), h.clone()],
+            Vec::new(),
+        );
+        (g, h)
+    }
+
+    fn open_processes_tab(
+        cx: &mut TestAppContext,
+        group: GroupKey,
+    ) -> (VisualTestContext, Entity<AppPropsWindow>) {
+        let handle = open_app(cx, group).expect("app window opened");
+        let view = app_props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.select_tab(DetailTab::AppProcesses, window, cx)
+            })
+        });
+        draw(&mut vcx);
+        (vcx, view)
+    }
+
+    fn view_pids(vcx: &mut VisualTestContext, view: &Entity<AppPropsWindow>) -> Vec<u32> {
+        vcx.read(|cx| {
+            let tab = view.read(cx).processes().read(cx);
+            tab.table()
+                .read(cx)
+                .delegate
+                .view_keys()
+                .map(|k| k.pid)
+                .collect()
+        })
+    }
+
+    fn focus_row(vcx: &mut VisualTestContext, view: &Entity<AppPropsWindow>, pid: u32) {
+        let table = vcx.read(|cx| view.read(cx).processes().read(cx).table().clone());
+        let focus = vcx.read(|cx| table.read(cx).focus_handle().clone());
+        vcx.update(|window, cx| {
+            table.update(cx, |t, cx| {
+                t.selection.click(key(pid));
+                cx.notify();
+            });
+            focus.focus(window, cx);
+        });
+        draw(vcx);
+    }
+
+    #[gpui_kit::test]
+    fn app_processes_members_only(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let (g, _) = publish_two_apps(&engine, &mut main, 2);
+        let handle = open_app(cx, g.key).expect("app window opened");
+        let view = app_props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        let passes = |vcx: &mut VisualTestContext| {
+            vcx.read(|cx| view.read(cx).processes().read(cx).passes())
+        };
+
+        // Not active: sweeps arrive and no member pass runs.
+        publish_two_apps(&engine, &mut main, 2);
+        assert_eq!(passes(&mut vcx), 0);
+
+        vcx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.select_tab(DetailTab::AppProcesses, window, cx)
+            })
+        });
+        draw(&mut vcx);
+        assert_eq!(passes(&mut vcx), 1);
+        assert_eq!(view_pids(&mut vcx, &view), [101, 103]);
+
+        // An exited member leaves the list at the next sweep.
+        let mut exited = member(103, g.key);
+        exited.flags = ProcFlags::EXITED;
+        publish_records(cx, &engine, vec![member(101, g.key), exited]);
+        assert_eq!(view_pids(&mut vcx, &view), [101]);
+    }
+
+    #[gpui_kit::test]
+    fn app_processes_enter_opens_props(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let (g, _) = publish_two_apps(&engine, &mut main, 2);
+        let (mut vcx, view) = open_processes_tab(cx, g.key);
+        focus_row(&mut vcx, &view, 103);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+
+        assert!(
+            cx.update(|cx| {
+                cx.global::<GlobalRegistry>()
+                    .0
+                    .read(cx)
+                    .get(&WindowKey::Properties(key(103)))
+                    .is_some()
+            }),
+            "Enter opens Process Properties for the focused row"
+        );
+        assert_eq!(props_count(cx), 1);
+    }
+
+    #[gpui_kit::test]
+    fn app_processes_count_label(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let (g, _) = publish_two_apps(&engine, &mut main, 34);
+        let handle = open_app(cx, g.key).expect("app window opened");
+        let view = app_props(cx, handle);
+        assert_eq!(
+            cx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses)),
+            "Processes [34]"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn app_processes_go_to_process(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let (g, _) = publish_two_apps(&engine, &mut main, 2);
+        let page = processes_page(&mut main);
+        let generation = |main: &mut VisualTestContext| {
+            main.update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation())
+        };
+        let before = generation(&mut main);
+        let (mut vcx, view) = open_processes_tab(cx, g.key);
+        focus_row(&mut vcx, &view, 103);
+        let table = vcx.read(|cx| view.read(cx).processes().read(cx).table().clone());
+        vcx.update(|_, cx| table.update(cx, |t, _| t.delegate_mut().capture_for_test(&[key(103)])));
+
+        vcx.dispatch_action(AppProcsGoTo);
+        vcx.run_until_parked();
+
+        assert!(
+            generation(&mut main) > before,
+            "the jump asks the Processes page for the row's key"
+        );
+        let main_id = main.update(|window, _| window.window_handle().window_id());
+        assert_eq!(
+            cx.update(|cx| cx.active_window().map(|w| w.window_id())),
+            Some(main_id),
+            "the main window is activated"
         );
     }
 
