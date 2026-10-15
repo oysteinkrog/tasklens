@@ -1712,22 +1712,53 @@ mod window {
         assert_eq!(props_count(cx), 1);
     }
 
+    /// The label counts the real member processes, not the table row's own count (which follows
+    /// the main table's filter). The row here says 5; 34 records belong to the group.
     #[gpui_kit::test]
     fn app_processes_count_label(cx: &mut TestAppContext) {
         let (engine, mut main) = setup(cx);
-        let (g, _) = publish_two_apps(&engine, &mut main, 34);
+        let g = app_group("Firefox", GroupRowKind::App, 5);
+        let mut records: Vec<ProcessRecord> = (1000..1034).map(|pid| member(pid, g.key)).collect();
+        records.push(member(2000, app_group("Chrome", GroupRowKind::App, 1).key));
+        publish_table(&engine, &mut main, records, vec![g.clone()], Vec::new());
         let handle = open_app(cx, g.key).expect("app window opened");
         let view = app_props(cx, handle);
         assert_eq!(
             cx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses)),
             "Processes [34]"
         );
+        let (mut vcx, view) = open_processes_tab(cx, g.key);
+        assert_eq!(
+            view_pids(&mut vcx, &view).len(),
+            34,
+            "the list has as many rows"
+        );
+    }
+
+    /// The command line column takes the width the other columns leave, so the columns fill
+    /// the window.
+    #[gpui_kit::test]
+    fn app_processes_cmdline_column_is_flex(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let (g, _) = publish_two_apps(&engine, &mut main, 2);
+        let (mut vcx, view) = open_processes_tab(cx, g.key);
+        vcx.simulate_resize(size(px(1400.), px(700.)));
+        draw(&mut vcx);
+        let (total, window_w) = vcx.update(|window, cx| {
+            let tab = view.read(cx).processes().read(cx);
+            let total = tab.table().read(cx).columns().total_width().as_f32();
+            (total, window.viewport_size().width.as_f32())
+        });
+        assert!(
+            (total - window_w).abs() < 1.0,
+            "columns span the window: {total} vs {window_w}"
+        );
     }
 
     #[gpui_kit::test]
     fn app_processes_go_to_process(cx: &mut TestAppContext) {
         let (engine, mut main) = setup(cx);
-        let (g, _) = publish_two_apps(&engine, &mut main, 2);
+        let (g, h) = publish_two_apps(&engine, &mut main, 2);
         let page = processes_page(&mut main);
         let generation = |main: &mut VisualTestContext| {
             main.update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation())
@@ -1744,6 +1775,42 @@ mod window {
         assert!(
             generation(&mut main) > before,
             "the jump asks the Processes page for the row's key"
+        );
+        // The engine answers the jump's query with the process rows. A newer version, so the
+        // page installs the view.
+        let answered = generation(&mut main);
+        let records = vec![member(101, g.key), member(102, h.key), member(103, g.key)];
+        let rows = vec![
+            table_row(NodeId::Group(g.key), None, Some(0)),
+            table_row(NodeId::Process(key(101)), Some(0), None),
+            table_row(NodeId::Process(key(103)), Some(2), None),
+        ];
+        let groups = vec![g.clone(), h.clone()];
+        engine.publish_with(|snapshot| {
+            let mut procs = ProcessSnapshot::clone(&snapshot.processes);
+            procs.header.version += 1;
+            procs.records = records.into();
+            snapshot.processes = Arc::new(procs);
+            snapshot.table = Arc::new(ProcessTableView {
+                header: ComponentHeader {
+                    version: snapshot.table.header.version + 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                query_generation: answered,
+                rows: rows.into(),
+                groups: groups.into(),
+                ..ProcessTableView::default()
+            });
+        });
+        main.run_until_parked();
+        draw(&mut main);
+        let selected: Vec<ProcRowId> =
+            main.update(|_, cx| page.read(cx).table().read(cx).selection.ids().collect());
+        assert_eq!(
+            selected,
+            vec![ProcRowId::Process(key(103))],
+            "the jump selects the focused process, not another"
         );
         let main_id = main.update(|window, _| window.window_handle().window_id());
         assert_eq!(

@@ -1417,6 +1417,29 @@ impl AppProcsDelegate {
         self.rebuild_view();
     }
 
+    /// Gives the command line column the width the other columns leave in a body `body_px` wide
+    /// (logical px at the layout's scale), never below its minimum. Returns true when the width
+    /// changed.
+    fn fit_flex_column(&mut self, body_px: f32) -> bool {
+        let scale = self.layout.ui_scale().max(0.1);
+        let flex = AppProcColumn::Cmdline;
+        let others: f32 = AppProcColumn::ALL
+            .iter()
+            .filter(|&&c| c != flex)
+            .map(|c| self.layout.widths.get(c).map_or(0.0, |w| w.as_f32()))
+            .sum();
+        let min = flex.meta().2;
+        let target = (body_px / scale - others).max(min);
+        let current = self.layout.widths.get(&flex).map_or(0.0, |w| w.as_f32());
+        if (target - current).abs() < 0.5 {
+            return false;
+        }
+        self.layout.widths.insert(flex, px(target));
+        self.layout.rebuild(scale);
+        self.version += 1;
+        true
+    }
+
     fn set_words(&mut self, words: Rc<AppProcWords>) {
         self.specs = app_proc_specs(&words);
         self.words = words;
@@ -1660,6 +1683,19 @@ impl TreeTableDelegate for AppProcsDelegate {
     }
 }
 
+/// Record indexes of the live processes that belong to the row `group`, unfiltered. The tab list
+/// and the tab count both use it, so they agree.
+fn member_indexes(procs: &ProcessSnapshot, group: GroupKey) -> impl Iterator<Item = u32> + '_ {
+    procs
+        .records
+        .iter()
+        .enumerate()
+        .filter(move |(i, r)| {
+            !r.flags.contains(ProcFlags::EXITED) && is_row_member(r, procs.extras.get(*i), group)
+        })
+        .map(|(i, _)| i as u32)
+}
+
 /// The Processes child view. It lists the member processes of the window's row while it is the
 /// active tab, and does no work while it is not.
 pub struct AppProcessesTab {
@@ -1670,6 +1706,10 @@ pub struct AppProcessesTab {
     exited: bool,
     /// How many member passes ran, for the tests.
     passes: u32,
+    /// Window width the flex column was last fitted to.
+    flex_body: f32,
+    /// Bumped by every member pass. A filter result for an older pass is dropped.
+    members_epoch: u64,
     words: Rc<AppProcWords>,
     _subs: SmallVec<[Subscription; 3]>,
 }
@@ -1714,6 +1754,8 @@ impl AppProcessesTab {
             active: false,
             exited: false,
             passes: 0,
+            flex_body: 0.0,
+            members_epoch: 0,
             words,
             _subs: subs,
         }
@@ -1760,18 +1802,10 @@ impl AppProcessesTab {
             return;
         }
         self.passes += 1;
+        self.members_epoch += 1;
         let procs = snapshot.processes.clone();
         let group = self.group;
-        let members: Arc<[u32]> = procs
-            .records
-            .iter()
-            .enumerate()
-            .filter(|(i, r)| {
-                !r.flags.contains(ProcFlags::EXITED)
-                    && is_row_member(r, procs.extras.get(*i), group)
-            })
-            .map(|(i, _)| i as u32)
-            .collect();
+        let members: Arc<[u32]> = member_indexes(&procs, group).collect();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().set_members(procs, members);
             t.on_new_version(cx);
@@ -1803,20 +1837,34 @@ impl AppProcessesTab {
             return;
         }
         if self.filter.read(cx).needle().is_empty() {
-            self.apply_filter(generation, None, cx);
+            self.apply_filter(generation, self.members_epoch, None, cx);
             return;
         }
+        let epoch = self.members_epoch;
         let rows = self.haystacks(cx);
         let task = self.filter.update(cx, |f, cx| f.run_filter(rows, cx));
         cx.spawn(async move |this, cx| {
             if let Some((generation, keep)) = task.await {
-                let _ = this.update(cx, |this, cx| this.apply_filter(generation, Some(keep), cx));
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_filter(generation, epoch, Some(keep), cx)
+                });
             }
         })
         .detach();
     }
 
-    fn apply_filter(&mut self, generation: u64, keep: Option<Arc<[u32]>>, cx: &mut Context<Self>) {
+    /// `epoch` is the member pass the `keep` positions were computed for. Positions of an older
+    /// pass index other members, so they are dropped.
+    fn apply_filter(
+        &mut self,
+        generation: u64,
+        epoch: u64,
+        keep: Option<Arc<[u32]>>,
+        cx: &mut Context<Self>,
+    ) {
+        if epoch != self.members_epoch {
+            return;
+        }
         if !self.filter.update(cx, |f, _| f.accept(generation)) {
             return;
         }
@@ -1882,7 +1930,17 @@ fn go_to_process(key: ProcessKey, cx: &mut App) {
 }
 
 impl Render for AppProcessesTab {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The command line column is the flex column: it takes the width the others leave.
+        let body = window.viewport_size().width.as_f32();
+        if self.flex_body != body {
+            self.flex_body = body;
+            self.table.update(cx, |t, cx| {
+                if t.delegate_mut().fit_flex_column(body) {
+                    t.on_new_version(cx);
+                }
+            });
+        }
         div()
             .debug_selector(|| "AppPropsProcesses".into())
             .size_full()
@@ -1938,7 +1996,10 @@ impl AppPropsWindow {
             filters,
             exited: false,
             name: SharedString::from(&row.name),
-            member_count: row.members,
+            member_count: hub.as_ref().map_or(row.members, |hub| {
+                let snapshot = hub.read(cx).current().clone();
+                member_indexes(&snapshot.processes, group).count() as u32
+            }),
             words,
             focus: cx.focus_handle(),
             demand: None,
@@ -2075,6 +2136,9 @@ impl AppPropsWindow {
         if self.exited {
             return;
         }
+        if mask.intersects(ComponentMask::TABLE | ComponentMask::PROCESSES) {
+            self.member_count = member_indexes(&snapshot.processes, self.group).count() as u32;
+        }
         if mask.intersects(ComponentMask::TABLE) {
             let row = snapshot
                 .table
@@ -2083,7 +2147,6 @@ impl AppPropsWindow {
                 .find(|row| row.key == self.group);
             match row {
                 Some(row) => {
-                    self.member_count = row.members;
                     self.general.update(cx, |g, cx| g.set_group(Some(row), cx));
                 }
                 None => {
