@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::Focusable as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -806,6 +807,14 @@ fn fans_group(words: &Rc<FanWords>, window: &mut Window, cx: &mut App) -> AnyEle
             .child(row.name.clone());
         *name.text_style() = t_base(&m);
         let key = row.key.clone();
+        let caption = |text: &SharedString| {
+            let mut c = div()
+                .flex_none()
+                .text_color(t.text_secondary)
+                .child(text.clone());
+            *c.text_style() = t_sm(&m);
+            c
+        };
         list = list.child(
             div()
                 .id(ElementId::Name(format!("fan-row-el-{}", row.key).into()))
@@ -817,12 +826,14 @@ fn fans_group(words: &Rc<FanWords>, window: &mut Window, cx: &mut App) -> AnyEle
                 .items_center()
                 .gap(m.sp[2])
                 .child(name)
+                .child(caption(&words.label))
                 .child(
                     TlTextInput::new(format!("fan-label-{}", row.key), &input)
                         .placeholder(row.name.clone())
                         .aria_label(words.label.clone())
                         .width(gpui_kit::px(160. * m.ui_scale)),
                 )
+                .child(caption(&words.temp))
                 .child(
                     TlSelect::new(format!("fan-temp-{}", row.key), &select).on_change(
                         move |value, _, cx| {
@@ -841,7 +852,9 @@ mod tests {
     use super::*;
     use tl_model::devices::{DeviceCatalog, DeviceEntry};
     use tl_model::ids::DeviceIdx;
-    use tl_model::system::{Metric, SensorReading, SystemSnapshot};
+    use tl_model::snapshot::SystemSnapshot;
+    use tl_model::system::{Metric, SensorReading};
+    use tl_model::time::BootId;
 
     fn sensor(idx: u16, chip: &str, label: &str, key: &str) -> DeviceEntry {
         DeviceEntry {
@@ -875,7 +888,7 @@ mod tests {
 
     #[test]
     fn sensor_options_show_reading_or_glyph() {
-        let mut snap = Snapshot::default();
+        let mut snap = Snapshot::empty(BootId(0), 0);
         snap.devices = Arc::new(DeviceCatalog {
             version: 1,
             entries: Arc::from(vec![
@@ -888,11 +901,13 @@ mod tests {
                 sensor(1, "nvme", "Composite", "sensor:nvme::temp1"),
             ]),
         });
-        let mut system = SystemSnapshot::default();
-        system.sensors = Arc::from(vec![
-            reading(0, Metric::valid(45.2)),
-            reading(1, Metric::with(Validity::Failed)),
-        ]);
+        let system = SystemSnapshot {
+            sensors: Arc::from(vec![
+                reading(0, Metric::valid(45.2)),
+                reading(1, Metric::with(Validity::Failed)),
+            ]),
+            ..SystemSnapshot::default()
+        };
         snap.system = Arc::new(system);
         let options = sensor_options_of(&snap);
         assert_eq!(&*options[0].value, "k10temp:/devices/pci0000:00/x:temp1");

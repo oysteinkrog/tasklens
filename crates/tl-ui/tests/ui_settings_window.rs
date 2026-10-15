@@ -973,10 +973,6 @@ struct DeviceProbe {
 }
 
 impl DeviceProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self::with_label(DEVICE_LIST, cx)
-    }
-
     /// A probe that draws the custom item labelled `label`.
     fn with_label(label: &'static str, cx: &mut Context<Self>) -> Self {
         let page = all_pages(cx)
@@ -1934,6 +1930,11 @@ fn fans(
     cx.update(|cx| TlSettings::settings(cx).fans.clone())
 }
 
+fn bounds_of(vcx: &mut VisualTestContext, selector: String) -> Option<gpui_kit::Bounds<Pixels>> {
+    let selector: &'static str = Box::leak(selector.into_boxed_str());
+    vcx.debug_bounds(selector)
+}
+
 fn pick_sensor(vcx: &mut VisualTestContext, item: f32) {
     click_selector(vcx, format!("TlSelect-fan-temp-{FAN_KEY}"));
     let list = vcx
@@ -1959,15 +1960,9 @@ fn fans_group_rows(cx: &mut TestAppContext) {
     let (engine, _) = setup(cx);
     publish_fan(&engine, true, cx);
     let (mut vcx, _) = probe_for(FANS_GROUP, cx);
-    assert!(vcx.debug_bounds(&format!("FanRow-{FAN_KEY}")).is_some());
-    assert!(
-        vcx.debug_bounds(&format!("TlTextInput-fan-label-{FAN_KEY}"))
-            .is_some()
-    );
-    assert!(
-        vcx.debug_bounds(&format!("TlSelect-fan-temp-{FAN_KEY}"))
-            .is_some()
-    );
+    assert!(bounds_of(&mut vcx, format!("FanRow-{FAN_KEY}")).is_some());
+    assert!(bounds_of(&mut vcx, format!("TlTextInput-fan-label-{FAN_KEY}")).is_some());
+    assert!(bounds_of(&mut vcx, format!("TlSelect-fan-temp-{FAN_KEY}")).is_some());
     // The dropdown lists "None" and the one sensor.
     click_selector(&mut vcx, format!("TlSelect-fan-temp-{FAN_KEY}"));
     let list = vcx
@@ -1990,7 +1985,7 @@ fn fans_group_rows(cx: &mut TestAppContext) {
 fn fans_group_hidden_without_fans(cx: &mut TestAppContext) {
     let (engine, _) = setup(cx);
     publish_fan(&engine, false, cx);
-    let (vcx, _) = probe_for(FANS_GROUP, cx);
+    let (mut vcx, _) = probe_for(FANS_GROUP, cx);
     assert!(
         vcx.debug_bounds("FansGroup")
             .is_some_and(|b| b.size.height == px(0.))
