@@ -102,6 +102,20 @@ pub fn page(cx: &mut App) -> PageBuilder {
     ] {
         page.switch(properties.clone(), key, tr(cx, label), None);
     }
+
+    let dumps = tr(cx, "shell-settings-group-dumps");
+    page.dropdown(
+        dumps,
+        SettingKey::ProcessesDumpType,
+        tr(cx, "shell-settings-dump-type"),
+        &options(
+            cx,
+            &[
+                ("shell-settings-dump-mini", "mini"),
+                ("shell-settings-dump-full", "full"),
+            ],
+        ),
+    );
     page
 }
 

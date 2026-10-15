@@ -2045,6 +2045,7 @@ shell-menu-graphs-gpu = GPU Graph
 shell-menu-graphs-vram = VRAM Graph
 shell-menu-graphs-gpu-temp = GPU Temperature Graph
 shell-menu-graphs-reset = Reset Minigraph Layout
+shell-menu-graphs-keep-detached = Keep detached graphs open when closing main window
 # View > Theme (tasklens-bj6.15, UI-SHL-038, UI-SHL-080). Theme names are data, not translated.
 shell-menu-theme-sync = Sync theme with system
 shell-menu-theme-light = Preferred Light Theme
@@ -2259,6 +2260,10 @@ shell-settings-dim-zero-values = Dim zero values
 shell-settings-hide-unnamed-handles = Hide unnamed handles
 shell-settings-shared-objects-only = Shared libraries only
 shell-settings-env-mask = Mask secret environment values
+shell-settings-group-dumps = Dumps
+shell-settings-dump-type = Dump type
+shell-settings-dump-mini = Mini
+shell-settings-dump-full = Full
 # Go to parent process and Open file location (tasklens-pdu.23, PROC-071, PROC-073)
 processes-toast-switched-to-parent = Switched to parent process
 processes-toast-parent-not-found = Parent process not found in current view
@@ -2561,6 +2566,7 @@ shell-settings-perf-net-wireless = Wireless
 shell-settings-perf-net-vpn = VPN and tunnel
 shell-settings-perf-net-virtual = Virtual
 shell-settings-perf-net-other = Other
+shell-settings-perf-disconnected-fans = Show disconnected fans
 # Settings window, Appearance page (tasklens-bj6.23, UI-SHL-062).
 shell-settings-group-theme = Theme
 shell-settings-group-size = Size

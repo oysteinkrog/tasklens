@@ -1,6 +1,6 @@
 //! Settings window, Graphs page, P2 rows (E21-025, UI-SHL-067, APP-021, R-089): the seven
-//! minigraph switches and "Reset Minigraph Layout". The P3 row "Keep detached graphs open when
-//! closing main window" is E21-036.
+//! minigraph switches, "Keep detached graphs open when closing main window" (E21-036) and
+//! "Reset Minigraph Layout".
 
 use gpui_kit::App;
 
@@ -34,6 +34,12 @@ pub fn page(cx: &mut App) -> PageBuilder {
     ] {
         page.switch(group, key, tr(cx, label), None);
     }
+    page.switch(
+        group,
+        SettingKey::GraphsKeepDetachedOnClose,
+        tr(cx, "shell-menu-graphs-keep-detached"),
+        None,
+    );
     page.button(
         group,
         tr(cx, "shell-menu-graphs-reset"),

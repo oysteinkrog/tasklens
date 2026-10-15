@@ -2,7 +2,7 @@
 //! R-054): graphs, CPU, memory, GPU options, the hidden GPU engine checklist and the device
 //! visibility switches.
 //!
-//! "Show disconnected fans" is E21-036 and the Fans group E21-037. The engine checklist lists
+//! The Fans group is E21-037. The engine checklist lists
 //! every present GPU of the device catalog; the Settings window re-renders on
 //! `ComponentMask::DEVICES`, so it follows hotplug.
 //!
@@ -195,6 +195,12 @@ pub fn page(cx: &mut App) -> PageBuilder {
     ] {
         page.switch(network.clone(), key, tr(cx, label), None);
     }
+    page.switch(
+        devices,
+        SettingKey::PerformanceShowDisconnectedFans,
+        tr(cx, "shell-settings-perf-disconnected-fans"),
+        None,
+    );
 
     let words = Rc::new(ListWords {
         default: tr(cx, "shell-settings-device-default"),
