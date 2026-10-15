@@ -461,10 +461,18 @@ mod details {
         r.engine.publish_with(move |s| s.system = Arc::new(sys));
         draw(r.vcx);
         let page = r.page.clone();
+        let p1 = [
+            "Active time",
+            "Average response time",
+            "Read speed",
+            "Write speed",
+            "Capacity",
+        ];
         let values: Vec<String> = r
             .vcx
             .update(|_, cx| rows(page.read(cx).details()))
             .into_iter()
+            .filter(|(l, _)| p1.contains(&l.as_str()))
             .map(|(_, v)| v)
             .collect();
         assert_eq!(

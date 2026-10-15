@@ -415,6 +415,17 @@ perf-disk-row-wwn = WWN
 perf-disk-row-serial = Serial
 perf-disk-row-rotation = Rotation rate
 perf-disk-row-temperature = Temperature
+perf-disk-kind-nvme = NVMe
+perf-disk-kind-ssd = SSD
+perf-disk-kind-hdd = HDD
+perf-disk-kind-emmc = eMMC
+perf-disk-kind-sd = SD
+perf-disk-kind-usb = USB
+perf-disk-kind-optical = Optical
+perf-disk-kind-virtual = Virtual
+perf-disk-yes = Yes
+perf-disk-no = No
+perf-disk-rpm-value = {$rpm} RPM
 perf-summary-title-suffix = {" "}· Graph Summary
 perf-summary-range-percentage = Percentage
 

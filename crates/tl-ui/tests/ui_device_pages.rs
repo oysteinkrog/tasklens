@@ -865,3 +865,195 @@ fn swap_table_caps_at_8_rows(cx: &mut TestAppContext) {
         bounds.size.height.as_f32()
     );
 }
+
+/// The 14 Disk Details rows after the P1 rows (E25-015).
+mod disk_p2 {
+    use super::*;
+    use tl_model::snapshot::DiskDetails;
+    use tl_model::system::{DiskTotals, Metric};
+    use tl_ui::pages::performance::details::KeyValueModel;
+    use tl_ui::pages::performance::disk::{
+        DISK_DETAIL_ROWS, DiskDetailInputs, disk_details_model, update_disk_details_p1,
+        update_disk_details_p2,
+    };
+
+    const GIB: u64 = 1 << 30;
+
+    fn totals() -> DiskTotals {
+        DiskTotals {
+            device: DeviceIdx(1),
+            active_pct: Metric::valid(12.0),
+            read_bps: Metric::valid(4.0 * 1048576.0),
+            write_bps: Metric::valid(1.5 * 1048576.0),
+            response_ms: Metric::valid(0.42),
+            read_total: 812 * GIB + 410 * (GIB / 1000),
+            written_total: 400 * GIB,
+            capacity: 1_000_204_886_016,
+            temp_c: Metric::valid(41.0),
+        }
+    }
+
+    fn nvme_details() -> DiskDetails {
+        let text = |s: &str| InvField {
+            value: Arc::<str>::from(s),
+            validity: Validity::Valid,
+        };
+        let size = |n: u64| InvField {
+            value: n,
+            validity: Validity::Valid,
+        };
+        let flag = |b: bool| InvField {
+            value: b,
+            validity: Validity::Valid,
+        };
+        DiskDetails {
+            kind: Arc::from("NVMe"),
+            model: text("WD_BLACK SN850X 1000GB"),
+            interface: text("NVMe"),
+            wwn: text("eui.0000000000000001"),
+            serial: text("S6XXNX0T"),
+            rotation_rpm: Some(7200),
+            formatted_bytes: size(920 * GIB),
+            used_bytes: size(400 * GIB),
+            free_bytes: size(520 * GIB),
+            system_disk: flag(true),
+            swap: flag(false),
+            ..DiskDetails::default()
+        }
+    }
+
+    fn model(cx: &mut TestAppContext, t: &DiskTotals, d: &DiskDetails) -> KeyValueModel {
+        let mut model = disk_details_model();
+        let inp = DiskDetailInputs {
+            now_boot_ns: 0,
+            observed_end_ns: 0,
+            totals: Some(t),
+            error: None,
+        };
+        update_disk_details_p1(&mut model, &inp);
+        update_disk_details_p2(&mut model, &inp, Some(d));
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            model.refresh_strings(cx);
+            model.refresh_labels(cx);
+        });
+        model
+    }
+
+    fn rows(model: &KeyValueModel) -> Vec<(String, String)> {
+        model
+            .to_kv_rows()
+            .map(|r| (r.label.to_string(), r.value.text.to_string()))
+            .collect()
+    }
+
+    fn value(model: &KeyValueModel, label: &str) -> Option<String> {
+        rows(model)
+            .into_iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| v)
+    }
+
+    #[gpui_kit::test]
+    fn disk_details_order(cx: &mut TestAppContext) {
+        let m = model(cx, &totals(), &nvme_details());
+        let r = rows(&m);
+        let labels: Vec<&str> = r.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels.len(), 19);
+        assert_eq!(
+            labels,
+            [
+                "Active time",
+                "Average response time",
+                "Read speed",
+                "Write speed",
+                "Total read",
+                "Total written",
+                "Capacity",
+                "Formatted",
+                "Used space",
+                "Free space",
+                "System disk",
+                "Swap",
+                "Hardware name",
+                "Type",
+                "Interface",
+                "WWN",
+                "Serial",
+                "Rotation rate",
+                "Temperature",
+            ]
+        );
+        assert_eq!(DISK_DETAIL_ROWS.len(), 19);
+        assert_eq!(value(&m, "Total read").as_deref(), Some("812.41 GiB"));
+        assert_eq!(value(&m, "Formatted").as_deref(), Some("920.00 GiB"));
+        assert_eq!(
+            value(&m, "Hardware name").as_deref(),
+            Some("WD_BLACK SN850X 1000GB")
+        );
+        assert_eq!(value(&m, "Type").as_deref(), Some("NVMe"));
+        assert_eq!(value(&m, "Rotation rate").as_deref(), Some("7200 RPM"));
+        assert_eq!(value(&m, "Temperature").as_deref(), Some("41 °C"));
+    }
+
+    #[gpui_kit::test]
+    fn disk_hidden_rows(cx: &mut TestAppContext) {
+        let mut d = nvme_details();
+        d.wwn.validity = Validity::Unsupported;
+        d.serial.validity = Validity::Unsupported;
+        d.rotation_rpm = None;
+        let m = model(cx, &totals(), &d);
+        let r = rows(&m);
+        let labels: Vec<&str> = r.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels.len(), 16);
+        let want: Vec<&str> = [
+            "Active time",
+            "Average response time",
+            "Read speed",
+            "Write speed",
+            "Total read",
+            "Total written",
+            "Capacity",
+            "Formatted",
+            "Used space",
+            "Free space",
+            "System disk",
+            "Swap",
+            "Hardware name",
+            "Type",
+            "Interface",
+            "Temperature",
+        ]
+        .to_vec();
+        assert_eq!(labels, want);
+    }
+
+    #[gpui_kit::test]
+    fn disk_system_disk_yes(cx: &mut TestAppContext) {
+        let m = model(cx, &totals(), &nvme_details());
+        assert_eq!(value(&m, "System disk").as_deref(), Some("Yes"));
+        assert_eq!(value(&m, "Swap").as_deref(), Some("No"));
+    }
+
+    #[gpui_kit::test]
+    fn disk_no_mount_not_reported(cx: &mut TestAppContext) {
+        let mut d = nvme_details();
+        d.formatted_bytes.validity = Validity::Unsupported;
+        d.used_bytes.validity = Validity::Unsupported;
+        d.free_bytes.validity = Validity::Unsupported;
+        let m = model(cx, &totals(), &d);
+        for label in ["Formatted", "Used space", "Free space"] {
+            assert_eq!(value(&m, label).as_deref(), Some("Not reported"), "{label}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn disk_temperature_not_reported(cx: &mut TestAppContext) {
+        let mut t = totals();
+        t.temp_c = Metric::with(Validity::Unsupported);
+        let mut d = nvme_details();
+        d.smart_temp_c = None;
+        let m = model(cx, &t, &d);
+        assert_eq!(value(&m, "Temperature").as_deref(), Some("Not reported"));
+    }
+}

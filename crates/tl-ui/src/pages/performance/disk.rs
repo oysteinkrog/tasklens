@@ -11,6 +11,7 @@
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use gpui_kit::component::v_flex;
@@ -23,7 +24,7 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::{SmartKind, Snapshot};
+use tl_model::snapshot::{DiskDetails, InvField, SmartKind, Snapshot};
 use tl_model::system::{DiskTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
@@ -262,9 +263,43 @@ pub const DISK_DETAIL_ROWS: [&str; 19] = [
 /// The P1 rows this page fills, in grid order.
 const P1_ROWS: [&str; 5] = [ROW_ACTIVE, ROW_RESPONSE, ROW_READ, ROW_WRITE, ROW_CAPACITY];
 
-/// The Disk Details model: 19 rows in order, all but the P1 rows hidden until E25-015.
+const KEY_YES: &str = "perf-disk-yes";
+const KEY_NO: &str = "perf-disk-no";
+const KEY_RPM: &str = "perf-disk-rpm-value";
+
+/// The Type words, by the kind name the engine gives (the E04-021 `DiskKind` names).
+const KIND_KEYS: [(&str, &str); 8] = [
+    ("NVMe", "perf-disk-kind-nvme"),
+    ("SSD", "perf-disk-kind-ssd"),
+    ("HDD", "perf-disk-kind-hdd"),
+    ("eMMC", "perf-disk-kind-emmc"),
+    ("SD", "perf-disk-kind-sd"),
+    ("USB", "perf-disk-kind-usb"),
+    ("Optical", "perf-disk-kind-optical"),
+    ("Virtual", "perf-disk-kind-virtual"),
+];
+
+/// The word key of an engine kind name; `None` for a name this page does not know.
+fn kind_key(kind: &str) -> Option<&'static str> {
+    KIND_KEYS.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
+}
+
+/// The Disk Details model: 19 rows in order, all but the P1 rows hidden until
+/// [`update_disk_details_p2`] shows them.
 pub fn disk_details_model() -> KeyValueModel {
-    let mut model = KeyValueModel::new(&DISK_DETAIL_ROWS);
+    let mut model = KeyValueModel::new(&DISK_DETAIL_ROWS).with_texts(&[
+        (KEY_YES, &[]),
+        (KEY_NO, &[]),
+        (KEY_RPM, &["rpm"]),
+        (KIND_KEYS[0].1, &[]),
+        (KIND_KEYS[1].1, &[]),
+        (KIND_KEYS[2].1, &[]),
+        (KIND_KEYS[3].1, &[]),
+        (KIND_KEYS[4].1, &[]),
+        (KIND_KEYS[5].1, &[]),
+        (KIND_KEYS[6].1, &[]),
+        (KIND_KEYS[7].1, &[]),
+    ]);
     for label in DISK_DETAIL_ROWS {
         if !P1_ROWS.contains(&label) {
             model.hide(label);
@@ -368,6 +403,251 @@ pub fn update_disk_details_p1(model: &mut KeyValueModel, inp: &DiskDetailInputs)
     changed
 }
 
+/// Hides or shows `label`. True when that changed.
+fn set_hidden(model: &mut KeyValueModel, label: &'static str, hidden: bool) -> bool {
+    let was = model
+        .rows
+        .iter()
+        .find(|r| r.label == label)
+        .map(|r| r.hidden);
+    if was == Some(hidden) {
+        return false;
+    }
+    if hidden {
+        model.hide(label);
+    } else {
+        model.show(label);
+    }
+    true
+}
+
+/// The Stale age of a row, from the system component's end time.
+fn age_ns(inp: &DiskDetailInputs) -> u64 {
+    inp.now_boot_ns.saturating_sub(inp.observed_end_ns)
+}
+
+/// The fallback for a field with no value. Unsupported reads "Not reported": the collector
+/// gives it for a disk with no mounted filesystem.
+fn field_fallback(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    validity: Validity,
+    inp: &DiskDetailInputs,
+) -> bool {
+    match validity {
+        Validity::Unsupported => model.set_fallback(label, validity, Fallback::NotReported, None),
+        Validity::Missing => {
+            model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None)
+        }
+        Validity::Failed => model.set_fallback(label, validity, Fallback::Unavailable, inp.error),
+        v => model.set_fallback(label, v, Fallback::Unavailable, None),
+    }
+}
+
+/// A byte count row: Valid and Stale show the size, the rest their fallback.
+fn bytes_row(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    f: InvField<u64>,
+    inp: &DiskDetailInputs,
+) -> bool {
+    let mut changed = set_hidden(model, label, false);
+    changed |= match f.validity {
+        Validity::Valid | Validity::Stale => {
+            let n = f.value;
+            let mut c = model.set_valid(label, n, |o| units::bytes(o, n));
+            if f.validity == Validity::Stale {
+                c |= model.set_stale(label, age_ns(inp));
+            }
+            c
+        }
+        v => field_fallback(model, label, v, inp),
+    };
+    changed
+}
+
+/// A Yes or No row.
+fn yes_no_row(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    f: InvField<bool>,
+    inp: &DiskDetailInputs,
+) -> bool {
+    let mut changed = set_hidden(model, label, false);
+    changed |= match f.validity {
+        Validity::Valid | Validity::Stale => {
+            let word = model.text(if f.value { KEY_YES } else { KEY_NO });
+            let mut c = model.set_text(label, word.text());
+            if f.validity == Validity::Stale {
+                c |= model.set_stale(label, age_ns(inp));
+            }
+            c
+        }
+        v => field_fallback(model, label, v, inp),
+    };
+    changed
+}
+
+/// A text row from a string field: Valid and non-empty shows the text. With `hide_empty` a
+/// missing value hides the row, otherwise it shows its fallback.
+fn text_row(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    f: &InvField<Arc<str>>,
+    hide_empty: bool,
+    inp: &DiskDetailInputs,
+) -> bool {
+    let has = matches!(f.validity, Validity::Valid | Validity::Stale) && !f.value.is_empty();
+    if hide_empty && !has {
+        return set_hidden(model, label, true);
+    }
+    let mut changed = set_hidden(model, label, false);
+    changed |= if has {
+        let mut c = model.set_text(label, &f.value);
+        if f.validity == Validity::Stale {
+            c |= model.set_stale(label, age_ns(inp));
+        }
+        c
+    } else {
+        // A Valid but empty value reads as not reported.
+        let v = if f.validity == Validity::Valid {
+            Validity::Unsupported
+        } else {
+            f.validity
+        };
+        field_fallback(model, label, v, inp)
+    };
+    changed
+}
+
+/// Fills the 14 rows after the P1 rows (UI-PRF-030, PERF-049, PERF-053): the two totals,
+/// Formatted, Used and Free space, System disk, Swap, Hardware name, Type, Interface, WWN,
+/// Serial, Rotation rate and Temperature. WWN, Serial and Rotation rate are hidden when the
+/// disk has none. Each value formats again only when it changed. True when any row changed.
+pub fn update_disk_details_p2(
+    model: &mut KeyValueModel,
+    inp: &DiskDetailInputs,
+    details: Option<&DiskDetails>,
+) -> bool {
+    let mut changed = false;
+    match inp.totals {
+        Some(t) => {
+            changed |= set_hidden(model, ROW_TOTAL_READ, false);
+            changed |= set_hidden(model, ROW_TOTAL_WRITTEN, false);
+            for (label, n, rate) in [
+                (ROW_TOTAL_READ, t.read_total, t.read_bps),
+                (ROW_TOTAL_WRITTEN, t.written_total, t.write_bps),
+            ] {
+                changed |= model.set_valid(label, n, |o| units::bytes(o, n));
+                if rate.validity == Validity::Stale {
+                    changed |= model.set_stale(label, age_ns(inp));
+                }
+            }
+        }
+        None => {
+            for label in [ROW_TOTAL_READ, ROW_TOTAL_WRITTEN] {
+                changed |= set_hidden(model, label, false);
+                changed |=
+                    model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None);
+            }
+        }
+    }
+    let Some(d) = details else {
+        for label in [
+            ROW_FORMATTED,
+            ROW_USED,
+            ROW_FREE,
+            ROW_SYSTEM,
+            ROW_SWAP,
+            ROW_HARDWARE,
+            ROW_TYPE,
+            ROW_INTERFACE,
+        ] {
+            changed |= set_hidden(model, label, false);
+            changed |= model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None);
+        }
+        for label in [ROW_WWN, ROW_SERIAL, ROW_ROTATION] {
+            changed |= set_hidden(model, label, true);
+        }
+        changed |= temperature_row(model, inp, None);
+        return changed;
+    };
+    changed |= bytes_row(model, ROW_FORMATTED, d.formatted_bytes, inp);
+    changed |= bytes_row(model, ROW_USED, d.used_bytes, inp);
+    changed |= bytes_row(model, ROW_FREE, d.free_bytes, inp);
+    changed |= yes_no_row(model, ROW_SYSTEM, d.system_disk, inp);
+    changed |= yes_no_row(model, ROW_SWAP, d.swap, inp);
+    changed |= text_row(model, ROW_HARDWARE, &d.model, false, inp);
+    changed |= set_hidden(model, ROW_TYPE, false);
+    changed |= match kind_key(&d.kind) {
+        Some(key) => {
+            let word = model.text(key);
+            model.set_text(ROW_TYPE, word.text())
+        }
+        None => model.set_fallback(ROW_TYPE, Validity::Unsupported, Fallback::NotReported, None),
+    };
+    changed |= text_row(model, ROW_INTERFACE, &d.interface, false, inp);
+    changed |= text_row(model, ROW_WWN, &d.wwn, true, inp);
+    changed |= text_row(model, ROW_SERIAL, &d.serial, true, inp);
+    match d.rotation_rpm {
+        Some(rpm) => {
+            changed |= set_hidden(model, ROW_ROTATION, false);
+            let template = model.text(KEY_RPM);
+            changed |= model.set_valid(ROW_ROTATION, u64::from(rpm), |o| {
+                template.write_each(o, |_, o| {
+                    let _ = write!(o, "{rpm}");
+                });
+            });
+        }
+        None => changed |= set_hidden(model, ROW_ROTATION, true),
+    }
+    changed |= temperature_row(model, inp, Some(d));
+    changed
+}
+
+/// The Temperature row: the newest disk temperature, or the SMART one when the drive has no
+/// hwmon sensor (PERF-053). "Not reported" with neither.
+fn temperature_row(
+    model: &mut KeyValueModel,
+    inp: &DiskDetailInputs,
+    details: Option<&DiskDetails>,
+) -> bool {
+    let mut changed = set_hidden(model, ROW_TEMPERATURE, false);
+    let Some(t) = inp.totals else {
+        return changed
+            | model.set_fallback(
+                ROW_TEMPERATURE,
+                Validity::WarmingUp,
+                Fallback::Unavailable,
+                None,
+            );
+    };
+    let mut temp = t.temp_c;
+    if temp.validity == Validity::Unsupported
+        && let Some(c) = details.and_then(|d| d.smart_temp_c)
+    {
+        temp = Metric::valid(c);
+    }
+    changed |= if temp.validity == Validity::Unsupported {
+        model.set_fallback(
+            ROW_TEMPERATURE,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        )
+    } else {
+        metric_row(
+            model,
+            ROW_TEMPERATURE,
+            temp,
+            inp,
+            |v| u64::from(v.to_bits()),
+            units::celsius,
+        )
+    };
+    changed
+}
+
 /// The record of `device` in the snapshot.
 fn disk_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&DiskTotals> {
     snap.system
@@ -410,7 +690,7 @@ pub struct DiskPage {
     row: DeviceRow,
     active: Entity<ChartView>,
     transfer: Entity<ChartView>,
-    /// The P1 rows from `update_disk_details_p1`; E25-015 fills the rest.
+    /// The rows from `update_disk_details_p1` and `update_disk_details_p2`.
     details: KeyValueModel,
     // E25-016: partitions: Option<PartitionsBlock> (added by o55.17 as a chain edit, R-262)
     /// E25-017 renders the SMART button from it.
@@ -563,13 +843,13 @@ impl DiskPage {
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
         let mut changed = false;
         let details = mask.contains(ComponentMask::DEVICE_DETAILS);
+        let d = snap
+            .device_details
+            .disks
+            .iter()
+            .find(|(i, _)| *i == self.row.idx)
+            .map(|(_, d)| d);
         if details {
-            let d = snap
-                .device_details
-                .disks
-                .iter()
-                .find(|(i, _)| *i == self.row.idx)
-                .map(|(_, d)| d);
             let smart = d.is_some_and(|d| d.smart != SmartKind::None);
             let eject = d.is_some_and(|d| d.ejectable);
             if (smart, eject) != (self.smart_available, self.ejectable) {
@@ -584,7 +864,9 @@ impl DiskPage {
                 chart.update(cx, |v, cx| v.set_state(state, cx));
             }
         }
-        if mask.intersects(ComponentMask::SYSTEM | ComponentMask::HEALTH) {
+        if mask.intersects(
+            ComponentMask::SYSTEM | ComponentMask::HEALTH | ComponentMask::DEVICE_DETAILS,
+        ) {
             let inputs = DiskDetailInputs {
                 now_boot_ns: now_boot_ns(),
                 observed_end_ns: snap.system.header.observed_end,
@@ -592,6 +874,7 @@ impl DiskPage {
                 error: snap.health.get(SourceId::Disk).last_error.as_deref(),
             };
             changed |= update_disk_details_p1(&mut self.details, &inputs);
+            changed |= update_disk_details_p2(&mut self.details, &inputs, d);
         }
         // The model comes from the disk details or the inventory.
         if details || mask.intersects(ComponentMask::DEVICES.union(ComponentMask::INVENTORY)) {
