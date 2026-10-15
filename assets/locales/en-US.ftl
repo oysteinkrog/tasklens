@@ -2092,6 +2092,9 @@ shell-theme-editor-import = Import
 shell-theme-editor-cancel = Cancel
 shell-theme-editor-done = Done
 shell-theme-editor-name-error = Choose a name that no other theme uses
+shell-theme-editor-hex-hint = Enter a 6-digit hex color
+shell-theme-editor-readout-rgb = R { $r } G { $g } B { $b }
+shell-theme-editor-readout-hsv = H { $h } S { $s } V { $v }
 shell-toast-theme-saved = Theme saved
 shell-toast-theme-copy-first = Built-in themes cannot be edited. Copy it first.
 # Graph Color submenu (tasklens-bj6.35, UI-SHL-085, APP-039).

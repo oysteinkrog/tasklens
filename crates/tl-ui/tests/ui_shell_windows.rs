@@ -2086,3 +2086,135 @@ fn editor_slot_list_keys(cx: &mut TestAppContext) {
         tl_ui::theme::ThemeSlot::Titlebar
     );
 }
+
+// ---- Theme Editor picker (E21-028, UI-SHL-081) ----
+
+fn editor_content(frame: &Entity<EditorFrame>, vcx: &mut VisualTestContext) -> Entity<ThemeEditor> {
+    let f = frame.clone();
+    vcx.read(|cx| f.read(cx).content().clone())
+}
+
+/// Opens "Mine" and selects "Title bar" (#27292B).
+fn editor_on_titlebar(
+    cx: &mut TestAppContext,
+) -> (EditorRig, Entity<EditorFrame>, VisualTestContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (frame, mut vcx) = editor_vcx(cx);
+    let at = vcx.debug_bounds("ThemeEditor-slot-1").expect("row 1 drawn");
+    vcx.simulate_click(at.center(), gpui_kit::Modifiers::none());
+    draw(&mut vcx);
+    (r, frame, vcx)
+}
+
+fn style_version(cx: &mut TestAppContext) -> u64 {
+    cx.update(|cx| tl_ui::theme::metrics(cx).style_version)
+}
+
+fn type_hex(vcx: &mut VisualTestContext, text: &str) {
+    let at = vcx.debug_bounds("ThemeEditor-hex").expect("hex drawn");
+    vcx.simulate_click(at.center(), gpui_kit::Modifiers::none());
+    vcx.simulate_keystrokes("ctrl-a");
+    vcx.simulate_input(text);
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    draw(vcx);
+}
+
+#[gpui_kit::test]
+fn editor_readouts_for_slot(cx: &mut TestAppContext) {
+    let (_r, frame, mut vcx) = editor_on_titlebar(cx);
+    let ed = editor_content(&frame, &mut vcx);
+    vcx.read(|cx| {
+        let e = ed.read(cx);
+        assert_eq!(e.selected_slot(), tl_ui::theme::ThemeSlot::Titlebar);
+        assert_eq!(e.readouts(), ("R 39 G 41 B 43", "H 210 S 009 V 017"));
+    });
+    let hex = vcx.read(|cx| ed.read(cx).hex_text(cx));
+    assert_eq!(hex, "#27292B");
+}
+
+#[gpui_kit::test]
+fn editor_hex_invalid(cx: &mut TestAppContext) {
+    let (_r, frame, mut vcx) = editor_on_titlebar(cx);
+    let ed = editor_content(&frame, &mut vcx);
+    let before = cx.update(|cx| current(cx).titlebar);
+    let n = style_version(cx);
+    type_hex(&mut vcx, "12345");
+    assert_eq!(cx.update(|cx| current(cx).titlebar), before);
+    assert_eq!(style_version(cx), n);
+    assert!(vcx.read(|cx| ed.read(cx).hex_error()));
+    assert!(vcx.debug_bounds("ThemeEditor-hex-error").is_some());
+}
+
+#[gpui_kit::test]
+fn editor_hex_without_hash_applies(cx: &mut TestAppContext) {
+    let (_r, _frame, mut vcx) = editor_on_titlebar(cx);
+    type_hex(&mut vcx, "1E1F22");
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| current(cx).titlebar),
+        builtin::parse_hex("#1E1F22").expect("hex")
+    );
+}
+
+#[gpui_kit::test]
+fn editor_plane_keys(cx: &mut TestAppContext) {
+    let (_r, frame, mut vcx) = editor_on_titlebar(cx);
+    let ed = editor_content(&frame, &mut vcx);
+    let plane = vcx.read(|cx| ed.read(cx).plane().cloned().expect("plane"));
+    let s0 = vcx.read(|cx| plane.read(cx).s());
+    let n = style_version(cx);
+    let handle = vcx.read(|cx| plane.focus_handle(cx));
+    vcx.update(|window, cx| handle.focus(window, cx));
+    vcx.simulate_keystrokes("right");
+    vcx.run_until_parked();
+    let s1 = vcx.read(|cx| plane.read(cx).s());
+    assert!((s1 - s0 - 0.01).abs() < 1e-4, "{s0} -> {s1}");
+    assert_eq!(style_version(cx), n + 1);
+}
+
+#[gpui_kit::test]
+fn editor_hue_shift_step(cx: &mut TestAppContext) {
+    let (_r, frame, mut vcx) = editor_on_titlebar(cx);
+    let ed = editor_content(&frame, &mut vcx);
+    let strip = vcx.read(|cx| ed.read(cx).hue_strip().cloned().expect("strip"));
+    assert!((vcx.read(|cx| strip.read(cx).hue()) - 210.0).abs() < 0.5);
+    let handle = vcx.read(|cx| strip.focus_handle(cx));
+    vcx.update(|window, cx| handle.focus(window, cx));
+    vcx.simulate_keystrokes("shift-up");
+    vcx.run_until_parked();
+    assert!((vcx.read(|cx| strip.read(cx).hue()) - 200.0).abs() < 0.5);
+}
+
+#[gpui_kit::test]
+fn editor_drag_coalesced(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    let _driver = r.parent.update(|window, cx| {
+        let driver = cx.new(tl_ui::anim::AnimationDriver::new);
+        tl_ui::anim::AnimationDriver::register(&driver, window, cx);
+        tl_ui::theme::store::set_anim_window(window.window_handle(), cx);
+        driver
+    });
+    edit(&mut r, "Mine");
+    let (_frame, mut vcx) = editor_vcx(cx);
+    let at = vcx.debug_bounds("ThemeEditor-plane").expect("plane drawn");
+    vcx.simulate_mouse_down(
+        at.center(),
+        gpui_kit::MouseButton::Left,
+        gpui_kit::Modifiers::none(),
+    );
+    let n = style_version(cx);
+    for i in 0..30 {
+        let x = at.left() + at.size.width * (i as f32 / 30.0);
+        vcx.simulate_mouse_move(
+            gpui_kit::point(x, at.center().y),
+            Some(gpui_kit::MouseButton::Left),
+            gpui_kit::Modifiers::none(),
+        );
+    }
+    assert_eq!(style_version(cx), n, "nothing applies before the frame");
+    r.parent.run_until_parked();
+    r.parent.update(|window, cx| window.simulate_next_frame(cx));
+    assert_eq!(style_version(cx), n + 1);
+}
