@@ -682,7 +682,8 @@ impl ServicesDelegate {
         self.snap.units.get(row.record? as usize)
     }
 
-    /// Units of a reconnecting manager draw their toned labels in `text_secondary`.
+    /// Units of a reconnecting manager draw every cell's text in `text_secondary`, including
+    /// toned labels and the pending overlay.
     fn mute_when_reconnecting(&self, unit: &UnitRecord, out: &mut CellOut) {
         if let (Some(theme), ManagerState::Reconnecting) = (
             &self.theme,
@@ -702,15 +703,14 @@ impl ServicesDelegate {
         if let Some(label) = overlay {
             out.arc = Some(label);
             out.dot = Some(DotStyle::Filled(LabelTone::Info));
-            return;
+        } else {
+            out.arc = Some(self.words.status(unit.status).clone());
+            out.dot = Some(look.dot);
+            if let (Some(theme), true) = (&self.theme, look.label != LabelTone::Primary) {
+                out.text_color = Some(tone_color(look.label, theme, false));
+                out.selected_text_color = Some(tone_color(look.label, theme, true));
+            }
         }
-        out.arc = Some(self.words.status(unit.status).clone());
-        out.dot = Some(look.dot);
-        if let (Some(theme), true) = (&self.theme, look.label != LabelTone::Primary) {
-            out.text_color = Some(tone_color(look.label, theme, false));
-            out.selected_text_color = Some(tone_color(look.label, theme, true));
-        }
-        self.mute_when_reconnecting(unit, out);
         if out.want_tooltip {
             out.tooltip = Some(format!("{} ({})", active_word(unit.status), unit.sub_state).into());
         }
@@ -910,7 +910,6 @@ impl TreeTableDelegate for ServicesDelegate {
                     out.text_color = Some(tone_color(tone, theme, false));
                     out.selected_text_color = Some(tone_color(tone, theme, true));
                 }
-                self.mute_when_reconnecting(unit, out);
             }
             ServiceColumn::Pid => {
                 out.bits = u64::from(unit.main_pid);
@@ -957,6 +956,7 @@ impl TreeTableDelegate for ServicesDelegate {
                 }
             }
         }
+        self.mute_when_reconnecting(unit, out);
     }
     fn name_cell(&self, ix: usize) -> NameCell {
         let mut cell = NameCell {

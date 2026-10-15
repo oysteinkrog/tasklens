@@ -2280,6 +2280,8 @@ fn unit_row_pending_overlay_label(cx: &mut TestAppContext) {
     let out = cell(&d, 1, ServiceColumn::Status);
     assert_eq!(out.arc.as_deref(), Some("Starting…"));
     assert_eq!(out.dot, Some(DotStyle::Filled(LabelTone::Info)));
+    assert_eq!(out.text_color, None);
+    assert_eq!(out.tooltip.as_deref(), Some("inactive (running)"));
     d.set_pending(stopped.unit.clone(), None);
     assert_eq!(
         cell(&d, 1, ServiceColumn::Status).arc.as_deref(),
@@ -2320,9 +2322,11 @@ fn group_row_reconnecting_stale_units(cx: &mut TestAppContext) {
         value: 0.0,
         validity: Validity::Missing,
     };
-    let d = delegate(
+    bare.main_pid = 812;
+    bare.startup = StartupType::Masked;
+    let mut d = delegate(
         cx,
-        vec![bare],
+        vec![bare.clone()],
         [ManagerState::Reconnecting, ManagerState::Connected],
     );
     let group = d.name_cell(0);
@@ -2331,12 +2335,45 @@ fn group_row_reconnecting_stale_units(cx: &mut TestAppContext) {
     assert!(d.row_flags(1).has(RowFlags::STALE));
     assert!(d.row_flags(1).has(RowFlags::SECONDARY_NAME));
     let theme = cx.update(|cx| current(cx).clone());
-    for column in [ServiceColumn::Status, ServiceColumn::StartupType] {
+    let columns = [
+        ServiceColumn::Name,
+        ServiceColumn::DisplayName,
+        ServiceColumn::Status,
+        ServiceColumn::StartupType,
+        ServiceColumn::Pid,
+        ServiceColumn::User,
+        ServiceColumn::Path,
+        ServiceColumn::Manager,
+        ServiceColumn::UnitType,
+        ServiceColumn::SubState,
+        ServiceColumn::LoadState,
+        ServiceColumn::Cpu,
+        ServiceColumn::Memory,
+        ServiceColumn::Disk,
+        ServiceColumn::Tasks,
+        ServiceColumn::ActiveSince,
+        ServiceColumn::UnitFile,
+        ServiceColumn::TriggeredBy,
+        ServiceColumn::Description,
+    ];
+    for column in columns {
         let c = cell(&d, 1, column);
-        assert_eq!(c.text_color, Some(theme.text_secondary));
-        assert_eq!(c.selected_text_color, Some(theme.text_selected_secondary));
+        assert_eq!(c.text_color, Some(theme.text_secondary), "{column:?}");
+        assert_eq!(
+            c.selected_text_color,
+            Some(theme.text_selected_secondary),
+            "{column:?}"
+        );
     }
     assert_eq!(cell(&d, 1, ServiceColumn::Cpu).validity, Validity::Missing);
+
+    d.set_pending(bare.unit.clone(), Some(ActionKindTag::Stop));
+    let out = cell(&d, 1, ServiceColumn::Status);
+    assert_eq!(out.arc.as_deref(), Some("Stopping…"));
+    assert_eq!(out.dot, Some(DotStyle::Filled(LabelTone::Info)));
+    assert_eq!(out.text_color, Some(theme.text_secondary));
+    assert_eq!(out.selected_text_color, Some(theme.text_selected_secondary));
+    assert_eq!(out.tooltip.as_deref(), Some("active (running)"));
 }
 
 #[gpui_kit::test]
