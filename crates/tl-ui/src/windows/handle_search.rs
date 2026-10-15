@@ -4,7 +4,8 @@
 //! its row menu (UI-PWN-031): End Task, End Process, Go to process, Copy path and Open file
 //! location.
 //!
-//! Security: "Search all" only dispatches `StartHelperSession`; the engine elevates. End Task
+//! Security: "Search all" only dispatches `StartHelperSession` and marks this window as the
+//! start's requester, so the helper flow toasts a failed start here; the engine elevates. End Task
 //! and End Process follow the Processes page rules (PROC-059 to PROC-061, R-036, D-009): one own
 //! unprotected process is sent at once, two or more processes, a protected process or another
 //! user's process ask first, and tasklens itself, PID 1 and kernel threads are refused. The
@@ -122,7 +123,6 @@ pub struct HandleSearchWords {
     pub none: SharedString,
     pub failed: SharedString,
     pub toast_failed: SharedString,
-    pub toast_auth_cancelled: SharedString,
     /// Header labels in [`HitColumn::ALL`] order.
     pub headers: [SharedString; 6],
     pub end_task: SharedString,
@@ -158,7 +158,6 @@ impl HandleSearchWords {
             none: tr(cx, "pwn-handle-search-none"),
             failed: tr(cx, "pwn-handle-search-failed"),
             toast_failed: tr(cx, "pwn-handle-search-toast-failed"),
-            toast_auth_cancelled: tr(cx, "pwn-handle-search-toast-auth-cancelled"),
             headers: HitColumn::ALL.map(|c| tr(cx, c.meta().0)),
             end_task: tr(cx, "pwn-handle-search-menu-end-task"),
             end_process: tr(cx, "pwn-handle-search-menu-end-process"),
@@ -1170,6 +1169,7 @@ impl HandleSearchWindow {
             self.start(true, cx);
         } else {
             self.pending_all = true;
+            crate::helper_flow::note_start(window.window_handle(), cx);
             window.dispatch_action(Box::new(StartHelperSession), cx);
             cx.notify();
         }
@@ -1183,7 +1183,7 @@ impl HandleSearchWindow {
         cx: &mut Context<Self>,
     ) {
         if mask.intersects(ComponentMask::HEALTH) {
-            self.take_health(snap, window, cx);
+            self.take_health(snap, cx);
         }
         if mask.intersects(ComponentMask::PROCESSES) {
             self.procs = snap.processes.clone();
@@ -1205,7 +1205,8 @@ impl HandleSearchWindow {
         });
     }
 
-    fn take_health(&mut self, snap: &Snapshot, window: &mut Window, cx: &mut Context<Self>) {
+    /// A cancel ends "Search all"; the helper flow toasts it.
+    fn take_health(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
         let health = &snap.health;
         if let Some((seq, outcome)) = &health.helper_start
             && self.start_seq != Some(*seq)
@@ -1213,8 +1214,6 @@ impl HandleSearchWindow {
             self.start_seq = Some(*seq);
             if self.pending_all && *outcome == HelperStartOutcome::Cancelled {
                 self.pending_all = false;
-                let text = self.words.toast_auth_cancelled.clone();
-                toast(window, cx, ToastKind::Info, text);
                 cx.notify();
             }
         }

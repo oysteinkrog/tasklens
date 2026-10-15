@@ -1,68 +1,45 @@
 //! Helper session flow (UI-FND-028, R-148): sends the helper session commands for the shield
-//! Actions and toasts a failed start in the main window.
+//! Actions and toasts each failed start once.
 //!
 //! Every window only dispatches `StartHelperSession` and `EndHelperSession`. This module catches
 //! both with `App::on_action`, so a dispatch from any window reaches the engine as
 //! `Command::StartHelperSession` or `Command::EndHelperSession`. It sends a command only for a
 //! dispatched Action, so the helper never starts without a user action.
 //!
-//! The engine publishes a failed start once, as a new `HealthSnapshot.helper_start` seq. A good
-//! start, a start while the session is already up and the helper's idle exit publish no seq. The
-//! engine answers starts in the order it gets them, so this module keeps the starts it sent,
-//! oldest first, and matches each new seq to the oldest one.
-//!
-//! A Process Properties or Handle Search window that dispatched a start toasts the first cancel
-//! seq after it, whichever start that seq answers. This module keeps a claim for each such
-//! window and counts the toasts those windows give. It toasts in the main window only when the
-//! failed starts a snapshot answers need more toasts than the windows give, so each cancel gets
-//! one toast. A cancel shows "Authentication cancelled", any other failure of this module's own
-//! start "Could not start the privileged helper". A window's start that fails without a cancel
-//! gets no toast.
+//! This module is the only code that toasts a failed helper start. Each start records the window
+//! that asked for it: the window that called [`note_start`] during the dispatch (Process
+//! Properties, Handle Search), else the active window. The engine publishes a failed start once,
+//! as a new `HealthSnapshot.helper_start` seq; a good start and the helper's idle exit publish
+//! none. Each new seq gives one toast in the window of the last recorded start, or in the main
+//! window when that window is closed or no start is recorded, and then clears the record. A
+//! cancel shows "Authentication cancelled", any other failure "Could not start the privileged
+//! helper".
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 
-use gpui_kit::base::Root;
+use gpui_kit::Subscription;
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, Global, SharedString};
-use gpui_kit::{Subscription, WindowHandle};
 use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::health::{HelperStartOutcome, HelperState};
 use tracing::debug;
 
 use crate::components::shield::{EndHelperSession, StartHelperSession};
-use crate::components::toast::ToastKind;
+use crate::components::toast::{ToastKind, ToastQueue};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::window::main::push_main_toast;
-use crate::windows::handle_search::HandleSearchWindow;
-use crate::windows::props::PropsWindow;
 
 const AUTH_CANCELLED_TEXT: &str = "fnd-shield-auth-cancelled";
 const START_FAILED_TEXT: &str = "fnd-shield-start-failed";
 
-/// Unanswered starts kept at most. An older entry is dropped first.
-const MAX_PENDING: usize = 8;
-
-/// A window that toasts the next cancel seq because it dispatched a start.
-#[derive(Clone, Copy)]
-struct Claim {
-    window: AnyWindowHandle,
-    /// Process Properties drops its claim on any new seq. Handle Search keeps it until a cancel.
-    props: bool,
-}
-
-/// The shield's command sender and start outcome tracker.
+/// The shield's command sender and start outcome toaster.
 pub struct HelperFlow {
     client: Arc<dyn EngineClient>,
-    /// One entry per start sent and not answered yet, oldest first: `true` for this module's
-    /// own start, `false` for a window's start.
-    pending: VecDeque<bool>,
-    /// Windows that toast the next cancel seq.
-    claims: Vec<Claim>,
-    /// Toasts a window gave for a cancel of another start. Each one stands for the later failure
-    /// of a window start still waiting, so that failure gets no second toast.
-    credit: usize,
+    /// The window [`note_start`] named for the start being dispatched now.
+    noted: Option<AnyWindowHandle>,
+    /// The window of the last start sent, until a start outcome or an active session.
+    requester: Option<AnyWindowHandle>,
     /// The last `helper_start` seq seen, 0 before the first.
     seen_seq: u64,
     _health: Subscription,
@@ -84,14 +61,8 @@ pub fn install(cx: &mut App) {
 
     let weak = flow.downgrade();
     App::on_action(cx, move |_: &StartHelperSession, cx| {
-        // The dispatching window is being updated while this runs, so its root cannot be read
-        // until the dispatch ends.
         let active = cx.active_window();
-        let weak = weak.clone();
-        cx.defer(move |cx| {
-            let owner = start_owner(active, cx);
-            let _ = weak.update(cx, |flow, _| flow.start(owner));
-        });
+        let _ = weak.update(cx, |flow, _| flow.start(active));
     });
     let weak = flow.downgrade();
     App::on_action(cx, move |_: &EndHelperSession, cx| {
@@ -99,40 +70,13 @@ pub fn install(cx: &mut App) {
     });
 }
 
-/// Who handles a start dispatched while `window` was active.
-#[derive(Clone, Copy)]
-enum Owner {
-    /// This module toasts its failure.
-    Module,
-    /// A window toasts its own cancel, and `Some` claims the next cancel seq.
-    Window(Option<Claim>),
-}
-
-/// The owner of a start dispatched while `window` was active. A window claims the next cancel
-/// only when it marked its start: Handle Search when "Search all" waits for the helper, Process
-/// Properties when it shows the helper as `Locked` and the process has not exited.
-fn start_owner(window: Option<AnyWindowHandle>, cx: &App) -> Owner {
-    let Some(window) = window else {
-        return Owner::Module;
-    };
-    if let Some(props) = PropsWindow::find(window, cx) {
-        let props = props.read(cx);
-        let marked = props.helper() == HelperState::Locked && !props.exited();
-        return Owner::Window(marked.then_some(Claim {
-            window,
-            props: true,
-        }));
+/// Names `window` as the requester of the `StartHelperSession` it dispatches now. A window calls
+/// it before the Action reaches this module: before `dispatch_action`, or in a capture-phase
+/// handler. Does nothing when the flow is not installed.
+pub fn note_start(window: AnyWindowHandle, cx: &mut App) {
+    if let Some(flow) = cx.try_global::<GlobalHelperFlow>().map(|g| g.0.clone()) {
+        flow.update(cx, |flow, _| flow.noted = Some(window));
     }
-    if let Some(search) =
-        HandleSearchWindow::find(WindowHandle::<Root>::new(window.window_id()), cx)
-    {
-        let marked = search.read(cx).is_pending_all();
-        return Owner::Window(marked.then_some(Claim {
-            window,
-            props: false,
-        }));
-    }
-    Owner::Module
 }
 
 impl HelperFlow {
@@ -152,30 +96,21 @@ impl HelperFlow {
         });
         Self {
             client,
-            pending: VecDeque::new(),
-            claims: Vec::new(),
-            credit: 0,
+            noted: None,
+            requester: None,
             seen_seq,
             _health,
         }
     }
 
-    /// Sends `StartHelperSession` and records it with its owner.
-    fn start(&mut self, owner: Owner) {
+    /// Sends `StartHelperSession` and records its requester: the noted window, else `active`.
+    fn start(&mut self, active: Option<AnyWindowHandle>) {
+        let window = self.noted.take().or(active);
         if let Err(e) = self.client.send(Command::StartHelperSession) {
             debug!(target: "tasklens::ui", ?e, "start_helper_session not sent");
             return;
         }
-        if self.pending.len() == MAX_PENDING {
-            self.pending.pop_front();
-        }
-        self.pending.push_back(matches!(owner, Owner::Module));
-        if let Owner::Window(Some(claim)) = owner {
-            let id = claim.window.window_id();
-            if !self.claims.iter().any(|c| c.window.window_id() == id) {
-                self.claims.push(claim);
-            }
-        }
+        self.requester = window;
     }
 
     fn end(&mut self) {
@@ -184,10 +119,8 @@ impl HelperFlow {
         }
     }
 
-    /// Matches a new `helper_start` seq to the oldest unanswered starts and toasts once when the
-    /// windows do not toast every failure it answers. `Unlocked` answers every start still
-    /// waiting and ends every claim. `Missing` answers every start but keeps the claims, as the
-    /// windows keep waiting.
+    /// Toasts each new `helper_start` seq once, in the requester's window, and clears the
+    /// requester. An active session or a missing helper also clears it.
     fn take_health(&mut self, hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) {
         let health = &hub.read(cx).current().health;
         let helper = health.helper;
@@ -195,68 +128,39 @@ impl HelperFlow {
         if let Some((seq, outcome)) = start
             && seq != self.seen_seq
         {
-            // Each failed start adds 1. A lower seq is a new engine session counting from 1.
-            let answered = if seq > self.seen_seq {
-                seq - self.seen_seq
-            } else {
-                1
-            };
             self.seen_seq = seq;
-            let cancelled = outcome == HelperStartOutcome::Cancelled;
-            // Failed starts that need a toast: every own start, and a window's start on a cancel.
-            let mut needed = 0;
-            for _ in 0..answered {
-                match self.pending.pop_front() {
-                    Some(own) => needed += usize::from(own || cancelled),
-                    None => break,
+            let (kind, key) = match outcome {
+                HelperStartOutcome::Cancelled => (ToastKind::Info, AUTH_CANCELLED_TEXT),
+                HelperStartOutcome::NotAuthorized | HelperStartOutcome::Failed(_) => {
+                    (ToastKind::Error, START_FAILED_TEXT)
                 }
-            }
-            let given = if cancelled {
-                let open = cx.windows();
-                let given = self
-                    .claims
-                    .iter()
-                    .filter(|c| open.iter().any(|w| w.window_id() == c.window.window_id()))
-                    .count();
-                self.claims.clear();
-                given
-            } else {
-                self.claims.retain(|c| !c.props);
-                0
             };
-            let covered = self.credit + given;
-            let waiting = self.pending.iter().filter(|own| !**own).count();
-            self.credit = covered.saturating_sub(needed).min(waiting);
-            if needed > covered {
-                let (kind, key) = match outcome {
-                    HelperStartOutcome::Cancelled => (ToastKind::Info, AUTH_CANCELLED_TEXT),
-                    HelperStartOutcome::NotAuthorized | HelperStartOutcome::Failed(_) => {
-                        (ToastKind::Error, START_FAILED_TEXT)
-                    }
-                };
-                let text = flow_text(cx, key);
-                push_main_toast(cx, kind, text, None, None);
-            }
+            let text = flow_text(cx, key);
+            toast_in(self.requester.take(), kind, text, cx);
         }
-        match helper {
-            HelperState::Unlocked => {
-                self.pending.clear();
-                self.claims.clear();
-                self.credit = 0;
-            }
-            HelperState::Missing => {
-                self.pending.clear();
-                self.credit = 0;
-            }
-            HelperState::Locked | HelperState::Starting => {}
+        if matches!(helper, HelperState::Unlocked | HelperState::Missing) {
+            self.requester = None;
         }
     }
 
-    /// Starts sent and not answered yet, oldest first: `true` when this module toasts the
-    /// failure.
+    /// The window of the last start sent and not answered yet.
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn pending(&self) -> Vec<bool> {
-        self.pending.iter().copied().collect()
+    pub fn requester(&self) -> Option<AnyWindowHandle> {
+        self.requester
+    }
+}
+
+/// Pushes the toast into `window`'s stack when it is open and has one, else into the main
+/// window's.
+fn toast_in(window: Option<AnyWindowHandle>, kind: ToastKind, text: SharedString, cx: &mut App) {
+    let queue = window.and_then(|w| {
+        w.update(cx, |_, window, cx| ToastQueue::of_window(window, cx))
+            .ok()
+            .flatten()
+    });
+    match queue {
+        Some(queue) => queue.update(cx, |q, cx| q.push(kind, text, None, None, cx)),
+        None => push_main_toast(cx, kind, text, None, None),
     }
 }
 

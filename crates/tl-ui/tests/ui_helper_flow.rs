@@ -1,6 +1,6 @@
 //! The helper session flow (tasklens-qfx.37, UI-FND-028, R-148): shield Actions become engine
-//! commands, and a failed start toasts once in the main window unless the window that started
-//! it toasts its own cancel. Run with `--features test-hooks`.
+//! commands, and each failed start toasts once, in the window that asked for the last start or
+//! else in the main window. Run with `--features test-hooks`.
 
 #![cfg(feature = "test-hooks")]
 
@@ -83,8 +83,8 @@ fn starts_sent(engine: &FakeEngine) -> usize {
     sent(engine, |c| matches!(c, Command::StartHelperSession))
 }
 
-fn pending(cx: &mut TestAppContext) -> Vec<bool> {
-    cx.update(|cx| cx.global::<GlobalHelperFlow>().0.read(cx).pending())
+fn requester(cx: &mut TestAppContext) -> Option<AnyWindowHandle> {
+    cx.update(|cx| cx.global::<GlobalHelperFlow>().0.read(cx).requester())
 }
 
 fn main_toasts(cx: &mut TestAppContext) -> Vec<String> {
@@ -225,10 +225,11 @@ fn main_window_start_sends_one_command(cx: &mut TestAppContext) {
     main.run_until_parked();
 
     assert_eq!(starts_sent(&engine), 1);
+    let main_id = main.update(|window, _| window.window_handle().window_id());
     assert_eq!(
-        pending(cx),
-        [true],
-        "the main window's start is the module's own"
+        requester(cx).map(|w| w.window_id()),
+        Some(main_id),
+        "the main window asked for the start"
     );
 }
 
@@ -259,7 +260,7 @@ fn own_cancel_toasts_once(cx: &mut TestAppContext) {
         Some((1, HelperStartOutcome::Cancelled)),
     );
     assert_eq!(main_toasts(cx), [CANCELLED]);
-    assert!(pending(cx).is_empty());
+    assert!(requester(cx).is_none(), "the outcome clears the record");
 
     // The same seq again, in a later health change, toasts nothing.
     publish_helper(
@@ -293,31 +294,6 @@ fn own_failure_toasts_start_failed(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn props_start_does_not_toast_from_module(cx: &mut TestAppContext) {
-    let (engine, _main) = setup(cx);
-    publish_helper(cx, &engine, HelperState::Locked, None);
-    let mut props = open_props(cx, &engine, 4321);
-
-    props.dispatch_action(StartHelperSession);
-    props.run_until_parked();
-    assert_eq!(starts_sent(&engine), 1, "the module sends Props' start");
-    assert_eq!(pending(cx), [false], "Props toasts its own cancel");
-
-    publish_helper(
-        cx,
-        &engine,
-        HelperState::Locked,
-        Some((1, HelperStartOutcome::Cancelled)),
-    );
-    assert!(main_toasts(cx).is_empty(), "no toast from this module");
-    assert_eq!(
-        window_toasts(&mut props),
-        [CANCELLED],
-        "one toast, Props' own"
-    );
-}
-
-#[gpui_kit::test]
 fn idle_exit_does_not_toast(cx: &mut TestAppContext) {
     let (engine, mut main) = setup(cx);
     publish_helper(cx, &engine, HelperState::Locked, None);
@@ -325,7 +301,7 @@ fn idle_exit_does_not_toast(cx: &mut TestAppContext) {
     main.run_until_parked();
     publish_helper(cx, &engine, HelperState::Starting, None);
     publish_helper(cx, &engine, HelperState::Unlocked, None);
-    assert!(pending(cx).is_empty(), "a good start answers the start");
+    assert!(requester(cx).is_none(), "a good start clears the record");
 
     // The helper's 300 s idle exit: back to Locked with no new seq.
     publish_helper(cx, &engine, HelperState::Locked, None);
@@ -334,19 +310,33 @@ fn idle_exit_does_not_toast(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn outcome_without_a_sent_start_does_not_toast(cx: &mut TestAppContext) {
+fn props_cancel_toasts_in_props_only(cx: &mut TestAppContext) {
     let (engine, _main) = setup(cx);
+    publish_helper(cx, &engine, HelperState::Locked, None);
+    let mut props = open_props(cx, &engine, 4321);
+
+    props.dispatch_action(StartHelperSession);
+    props.run_until_parked();
+    assert_eq!(starts_sent(&engine), 1, "the module sends Props' start");
+    let props_id = props.update(|window, _| window.window_handle().window_id());
+    assert_eq!(requester(cx).map(|w| w.window_id()), Some(props_id));
+
     publish_helper(
         cx,
         &engine,
         HelperState::Locked,
         Some((1, HelperStartOutcome::Cancelled)),
     );
-    assert!(main_toasts(cx).is_empty());
+    assert_eq!(
+        window_toasts(&mut props),
+        [CANCELLED],
+        "one toast, in Props"
+    );
+    assert!(main_toasts(cx).is_empty(), "no toast in the main window");
 }
 
 #[gpui_kit::test]
-fn overlapping_starts_toast_each_cancel_once(cx: &mut TestAppContext) {
+fn main_start_then_search_all_toasts_once_in_search(cx: &mut TestAppContext) {
     let (engine, mut main) = setup(cx);
     publish_helper(cx, &engine, HelperState::Locked, None);
     main.dispatch_action(StartHelperSession);
@@ -354,64 +344,6 @@ fn overlapping_starts_toast_each_cancel_once(cx: &mut TestAppContext) {
     let (mut search, view) = open_search(cx);
     search_all(&mut search, &view);
     assert_eq!(starts_sent(&engine), 2);
-    assert_eq!(pending(cx), [true, false]);
-
-    // The first cancel answers the main window's start, but Handle Search toasts it.
-    publish_helper(
-        cx,
-        &engine,
-        HelperState::Locked,
-        Some((1, HelperStartOutcome::Cancelled)),
-    );
-    assert_eq!(window_toasts(&mut search), [CANCELLED]);
-    assert!(main_toasts(cx).is_empty(), "one toast for the first cancel");
-
-    // The second cancel answers Handle Search's start, which toasts no more.
-    publish_helper(
-        cx,
-        &engine,
-        HelperState::Locked,
-        Some((2, HelperStartOutcome::Cancelled)),
-    );
-    assert_eq!(
-        main_toasts(cx),
-        [CANCELLED],
-        "one toast for the second cancel"
-    );
-    assert_eq!(window_toasts(&mut search), [CANCELLED]);
-    assert!(pending(cx).is_empty());
-}
-
-#[gpui_kit::test]
-fn overlapping_cancels_in_one_snapshot_toast_twice(cx: &mut TestAppContext) {
-    let (engine, mut main) = setup(cx);
-    publish_helper(cx, &engine, HelperState::Locked, None);
-    main.dispatch_action(StartHelperSession);
-    main.run_until_parked();
-    let (mut search, view) = open_search(cx);
-    search_all(&mut search, &view);
-
-    // Both cancels reach the UI in one snapshot.
-    publish_helper(
-        cx,
-        &engine,
-        HelperState::Locked,
-        Some((2, HelperStartOutcome::Cancelled)),
-    );
-    assert_eq!(window_toasts(&mut search), [CANCELLED]);
-    assert_eq!(main_toasts(cx), [CANCELLED]);
-}
-
-#[gpui_kit::test]
-fn window_start_first_then_main_start_toasts_each_cancel_once(cx: &mut TestAppContext) {
-    let (engine, mut main) = setup(cx);
-    publish_helper(cx, &engine, HelperState::Locked, None);
-    let (mut search, view) = open_search(cx);
-    search_all(&mut search, &view);
-    main.update(|window, _| window.activate_window());
-    main.dispatch_action(StartHelperSession);
-    main.run_until_parked();
-    assert_eq!(pending(cx), [false, true]);
 
     publish_helper(
         cx,
@@ -420,16 +352,11 @@ fn window_start_first_then_main_start_toasts_each_cancel_once(cx: &mut TestAppCo
         Some((1, HelperStartOutcome::Cancelled)),
     );
     assert_eq!(window_toasts(&mut search), [CANCELLED]);
-    assert!(main_toasts(cx).is_empty());
-
-    publish_helper(
-        cx,
-        &engine,
-        HelperState::Locked,
-        Some((2, HelperStartOutcome::Cancelled)),
+    assert!(
+        main_toasts(cx).is_empty(),
+        "exactly one toast for one cancel"
     );
-    assert_eq!(main_toasts(cx), [CANCELLED]);
-    assert_eq!(window_toasts(&mut search), [CANCELLED]);
+    assert!(!search.read(|cx| view.read(cx).is_pending_all()));
 }
 
 #[gpui_kit::test]
@@ -450,6 +377,27 @@ fn closed_window_cancel_toasts_in_main(cx: &mut TestAppContext) {
     assert_eq!(
         main_toasts(cx),
         [CANCELLED],
-        "no window is left to toast it"
+        "the requesting window is gone"
     );
+}
+
+#[gpui_kit::test]
+fn cleared_search_still_toasts_once(cx: &mut TestAppContext) {
+    let (engine, _main) = setup(cx);
+    publish_helper(cx, &engine, HelperState::Locked, None);
+    let (mut search, view) = open_search(cx);
+    search_all(&mut search, &view);
+    search.update(|window, cx| view.update(cx, |v, cx| v.clear(window, cx)));
+    search.run_until_parked();
+    assert!(!search.read(|cx| view.read(cx).is_pending_all()));
+
+    publish_helper(
+        cx,
+        &engine,
+        HelperState::Locked,
+        Some((1, HelperStartOutcome::Cancelled)),
+    );
+    let toasts = window_toasts(&mut search).len() + main_toasts(cx).len();
+    assert_eq!(toasts, 1, "exactly one toast");
+    assert_eq!(window_toasts(&mut search), [CANCELLED]);
 }

@@ -9,8 +9,10 @@
 //! their own setters and notify themselves.
 //!
 //! Every tab has its view. A tab whose payload is `Restricted` shows the access block instead.
-//! Its Grant access or Enable button dispatches `StartHelperSession`, the shield's Action. When
-//! the helper session becomes active the window sends one `DetailRefresh` for its active tab.
+//! Its Grant access or Enable button dispatches `StartHelperSession`, the shield's Action, and
+//! marks this window as the start's requester, so the helper flow toasts a failed start here.
+//! When the helper session becomes active the window sends one `DetailRefresh` for its active
+//! tab.
 
 pub mod environ;
 pub mod fds;
@@ -37,7 +39,7 @@ use gpui_kit::{
 use tl_model::command::Command;
 use tl_model::demand::{Demand, DetailDemand};
 use tl_model::details::{DetailTab, DetailTarget, TabSlot, TargetDetail};
-use tl_model::health::{HelperStartOutcome, HelperState};
+use tl_model::health::HelperState;
 use tl_model::ids::ProcessKey;
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::{ComponentMask, Snapshot};
@@ -131,7 +133,6 @@ const KEY_ACCESS_GRANT: &str = "pwn-props-access-grant";
 const KEY_ACCESS_ENABLE: &str = "pwn-props-access-enable";
 const KEY_ACCESS_WAITING: &str = "pwn-props-access-waiting";
 const KEY_ACCESS_NO_HELPER: &str = "pwn-props-access-no-helper";
-const KEY_AUTH_CANCELLED: &str = "pwn-props-toast-auth-cancelled";
 const KEY_ACCESS: [(&str, &str); 5] = [
     (ACCESS_FDS, "pwn-props-access-fds"),
     (ACCESS_MAPS, "pwn-props-access-maps"),
@@ -160,7 +161,6 @@ pub struct PropsWords {
     pub access_waiting: SharedString,
     /// Tooltip of the disabled access button when the helper is not installed.
     pub access_no_helper: SharedString,
-    pub auth_cancelled: SharedString,
 }
 
 impl PropsWords {
@@ -183,7 +183,6 @@ impl PropsWords {
             access_enable: t(KEY_ACCESS_ENABLE),
             access_waiting: t(KEY_ACCESS_WAITING),
             access_no_helper: t(KEY_ACCESS_NO_HELPER),
-            auth_cancelled: t(KEY_AUTH_CANCELLED),
         }
     }
 
@@ -528,10 +527,9 @@ pub struct PropsWindow {
     focus: FocusHandle,
     /// The helper session state from `Snapshot.health`.
     helper: HelperState,
-    /// The last `helper_start` seq seen, so an outcome toasts at most once.
+    /// The last `helper_start` seq seen, so each outcome ends `grant_pending` once.
     start_seq: Option<u64>,
-    /// The access button of this window started the helper and no outcome has come yet. Only
-    /// then does a cancel toast here; the shield's own starts toast in the main window.
+    /// The access button of this window started the helper and no outcome has come yet.
     grant_pending: bool,
     /// Focus handle of the access button, the body's first focus stop while it shows.
     access_focus: FocusHandle,
@@ -657,6 +655,11 @@ impl PropsWindow {
     /// The helper session state this window last read.
     pub fn helper(&self) -> HelperState {
         self.helper
+    }
+
+    /// The access button started the helper and no start outcome or active session came yet.
+    pub fn grant_pending(&self) -> bool {
+        self.grant_pending
     }
 
     /// The access button the body shows now, or `None` when it shows none.
@@ -964,7 +967,7 @@ impl PropsWindow {
         cx: &mut Context<Self>,
     ) {
         if mask.intersects(ComponentMask::HEALTH) {
-            self.take_health(snap, window, cx);
+            self.take_health(snap, cx);
         }
         if self.exited {
             return;
@@ -1093,23 +1096,17 @@ impl PropsWindow {
         }
     }
 
-    /// Reads the helper session state (UI-PWN-018). A cancel of this window's own start toasts
-    /// once per `helper_start` seq. When the session becomes active and the active tab or
-    /// General is `Restricted`, one `DetailRefresh` for the active tab re-reads it through the
-    /// helper.
-    fn take_health(&mut self, snap: &Snapshot, window: &mut Window, cx: &mut Context<Self>) {
+    /// Reads the helper session state (UI-PWN-018). A new `helper_start` seq ends
+    /// `grant_pending`; the helper flow toasts the failure. When the session becomes active and
+    /// the active tab or General is `Restricted`, one `DetailRefresh` for the active tab re-reads
+    /// it through the helper.
+    fn take_health(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
         let health = &snap.health;
-        if let Some((seq, outcome)) = &health.helper_start
+        if let Some((seq, _)) = &health.helper_start
             && self.start_seq != Some(*seq)
         {
             self.start_seq = Some(*seq);
-            if std::mem::take(&mut self.grant_pending) && *outcome == HelperStartOutcome::Cancelled
-            {
-                let text = self.words.auth_cancelled.clone();
-                if let Some(queue) = ToastQueue::of_window(window, cx) {
-                    queue.update(cx, |q, cx| q.push(ToastKind::Info, text, None, None, cx));
-                }
-            }
+            self.grant_pending = false;
         }
         let helper = health.helper;
         if helper == self.helper {
@@ -1137,8 +1134,15 @@ impl PropsWindow {
         cx.notify();
     }
 
-    /// The access button started the helper: a cancel of this start toasts here.
-    fn on_start_helper(&mut self, _: &StartHelperSession, _: &mut Window, _: &mut Context<Self>) {
+    /// The access button started the helper: the helper flow toasts a failure of this start in
+    /// this window.
+    fn on_start_helper(
+        &mut self,
+        _: &StartHelperSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::helper_flow::note_start(window.window_handle(), cx);
         if !self.exited && self.helper == HelperState::Locked {
             self.grant_pending = true;
         }
