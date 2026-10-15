@@ -2,7 +2,8 @@
 //! R-054): graphs, CPU, memory, GPU options, the hidden GPU engine checklist and the device
 //! visibility switches.
 //!
-//! The Fans group is E21-037. The engine checklist lists
+//! The Fans group (E21-037) is the last group: one row per present fan, with a label input and a
+//! temperature sensor dropdown, writing `fans."<fan key>"`. The engine checklist lists
 //! every present GPU of the device catalog; the Settings window re-renders on
 //! `ComponentMask::DEVICES`, so it follows hotplug.
 //!
@@ -19,18 +20,25 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, div,
 };
-use tl_model::devices::DeviceKind;
-use tl_model::settings::{DeviceVisibility, GRAPH_RANGES_S};
+use tl_model::devices::{DeviceIdentity, DeviceKind};
+use tl_model::settings::{DeviceVisibility, FanOverride, GRAPH_RANGES_S};
 use tl_model::snapshot::Snapshot;
+use tl_model::system::SensorKind;
+use tl_model::units;
+use tl_model::validity::Validity;
 
 use super::{CheckSection, PageBuilder, PageId};
 use crate::components::button::{TlButton, TlButtonKind};
+use crate::components::input::TlTextInput;
+use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::components::validity::copy_text;
 use crate::hub::GlobalHub;
 use crate::i18n::tr;
 use crate::pages::performance::card::{CardWords, card_words};
@@ -218,6 +226,18 @@ pub fn page(cx: &mut App) -> PageBuilder {
         ],
         tr(cx, "shell-settings-device-order"),
         move |window, cx| device_list(&words, window, cx),
+    );
+
+    let fan_words = Rc::new(FanWords {
+        label: tr(cx, "shell-settings-fan-label"),
+        temp: tr(cx, "shell-settings-fan-temp"),
+        none: tr(cx, "shell-settings-fan-temp-none"),
+    });
+    page.custom(
+        tr(cx, "shell-settings-perf-group-fans"),
+        &[SettingKey::Fans],
+        tr(cx, "shell-settings-perf-group-fans"),
+        move |window, cx| fans_group(&fan_words, window, cx),
     );
     page
 }
@@ -571,4 +591,313 @@ fn options(cx: &App, pairs: &[(&str, &'static str)]) -> Vec<(SharedString, Setti
         .iter()
         .map(|(key, value)| (tr(cx, key), SettingValue::Str((*value).into())))
         .collect()
+}
+
+// The Fans group (E21-037).
+
+/// The fixed words of the Fans group, translated when the page is built.
+struct FanWords {
+    label: SharedString,
+    temp: SharedString,
+    none: SharedString,
+}
+
+/// One row of the Fans group.
+pub struct FanRowData {
+    /// The `fans` key, which is also the sidebar device key.
+    pub key: Arc<str>,
+    /// The default name, "Fan N", as on the sidebar card.
+    pub name: SharedString,
+}
+
+/// One present fan per row, in sidebar order. Empty without a hub or without a fan.
+pub fn fan_rows(cx: &mut App) -> Vec<FanRowData> {
+    device_list_rows(cx)
+        .into_iter()
+        .filter(|row| DeviceKey(row.key.clone()).kind() == PerfKind::Fan)
+        .map(|row| FanRowData {
+            key: row.key,
+            name: row.kind,
+        })
+        .collect()
+}
+
+/// One option of the sensor dropdown.
+pub struct SensorOption {
+    /// The stored `temp` value: the sensor key without its `sensor:` prefix.
+    pub value: Arc<str>,
+    /// "<label> (<chip>) 45 °C", or the glyph word in place of the reading.
+    pub text: SharedString,
+}
+
+/// Every present hwmon temperature sensor in catalog order. Empty without a hub.
+pub fn sensor_options(cx: &mut App) -> Vec<SensorOption> {
+    let Some(snap) = cx
+        .try_global::<GlobalHub>()
+        .map(|hub| Arc::clone(hub.0.read(cx).current()))
+    else {
+        return Vec::new();
+    };
+    sensor_options_of(&snap)
+}
+
+fn sensor_options_of(snap: &Snapshot) -> Vec<SensorOption> {
+    snap.devices
+        .entries
+        .iter()
+        .filter(|e| e.present)
+        .filter_map(|e| {
+            let DeviceIdentity::Sensor { chip, label } = &e.identity else {
+                return None;
+            };
+            let reading = snap
+                .system
+                .sensors
+                .iter()
+                .find(|(idx, r)| *idx == e.idx && r.kind == SensorKind::Temperature)
+                .map(|(_, r)| r.value);
+            let (validity, c) =
+                reading.map_or((Validity::WarmingUp, 0.), |m| (m.validity, m.value));
+            let mut text = String::new();
+            units::celsius(&mut text, c);
+            let reading = copy_text(validity, &SharedString::from(text));
+            let value = e
+                .persistent_key
+                .strip_prefix("sensor:")
+                .unwrap_or(&e.persistent_key);
+            Some(SensorOption {
+                value: Arc::from(value),
+                text: format!("{label} ({chip}) {reading}").into(),
+            })
+        })
+        .collect()
+}
+
+/// Writes `fans[key].label`, the trimmed text, or removes the field when it is empty. The entry
+/// goes when neither field is left.
+pub fn set_fan_label(key: &str, text: &str, cx: &mut App) {
+    let text = text.trim();
+    update_fan(key, cx, |f| {
+        f.label = (!text.is_empty()).then(|| text.to_owned());
+    });
+}
+
+/// Writes `fans[key].temp`, or removes the field for `None`. The entry goes when neither field is
+/// left.
+pub fn set_fan_temp(key: &str, temp: Option<&str>, cx: &mut App) {
+    update_fan(key, cx, |f| f.temp = temp.map(str::to_owned));
+}
+
+fn update_fan(key: &str, cx: &mut App, edit: impl FnOnce(&mut FanOverride)) {
+    TlSettings::update(cx, |d| {
+        let mut fan = d.settings.fans.get(key).cloned().unwrap_or_default();
+        edit(&mut fan);
+        if fan.label.is_none() && fan.temp.is_none() {
+            d.settings.fans.remove(key);
+        } else {
+            d.settings.fans.insert(key.to_owned(), fan);
+        }
+    });
+}
+
+/// The widgets of one fan row, kept across renders.
+struct FanRowState {
+    label: gpui_kit::Entity<InputState>,
+    temp: gpui_kit::Entity<TlSelectState>,
+    _subs: Vec<gpui_kit::Subscription>,
+}
+
+/// The dropdown items: "None", every sensor, and the stored sensor when it is no longer present.
+fn temp_items(
+    options: &[SensorOption],
+    stored: Option<&str>,
+    words: &FanWords,
+) -> Vec<TlSelectItem> {
+    let mut items = vec![TlSelectItem::new("", words.none.clone())];
+    items.extend(
+        options
+            .iter()
+            .map(|o| TlSelectItem::new(o.value.to_string(), o.text.clone())),
+    );
+    if let Some(stored) = stored.filter(|s| !options.iter().any(|o| &*o.value == *s)) {
+        items.push(TlSelectItem::new(stored.to_owned(), stored.to_owned()));
+    }
+    items
+}
+
+/// The fan rows: the fan's default name, a Label input, then a Temperature sensor dropdown.
+/// Nothing when the catalog has no fan.
+fn fans_group(words: &Rc<FanWords>, window: &mut Window, cx: &mut App) -> AnyElement {
+    let rows = fan_rows(cx);
+    let t = current(cx).clone();
+    let m = *metrics(cx);
+    let mut list = div()
+        .debug_selector(|| "FansGroup".into())
+        .flex()
+        .flex_col()
+        .gap(m.sp[2])
+        .w_full();
+    if rows.is_empty() {
+        return list.into_any_element();
+    }
+    let options = sensor_options(cx);
+    let fans = TlSettings::settings(cx).fans.clone();
+    for row in rows {
+        let stored = fans.get(&*row.key);
+        let stored_label = stored.and_then(|f| f.label.clone()).unwrap_or_default();
+        let stored_temp = stored.and_then(|f| f.temp.clone());
+        let state = window.use_keyed_state(
+            ElementId::Name(format!("fan-row-{}", row.key).into()),
+            cx,
+            {
+                let key = row.key.clone();
+                let (label, temp) = (stored_label.clone(), stored_temp.clone());
+                let items = temp_items(&options, stored_temp.as_deref(), words);
+                move |window, cx| {
+                    let input = cx.new(|cx| InputState::new(window, cx));
+                    input.update(cx, |s, cx| s.set_value(label, window, cx));
+                    let select = cx.new(|cx| {
+                        TlSelectState::new(items, Some(temp.as_deref().unwrap_or("")), cx)
+                    });
+                    // Enter or blur applies the text. A change from code does not.
+                    let sub =
+                        cx.subscribe_in(&input, window, move |_, input, ev: &InputEvent, _, cx| {
+                            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                                let text = input.read(cx).value().to_string();
+                                set_fan_label(&key, &text, cx);
+                            }
+                        });
+                    FanRowState {
+                        label: input,
+                        temp: select,
+                        _subs: vec![sub],
+                    }
+                }
+            },
+        );
+        let (input, select) = {
+            let st = state.read(cx);
+            (st.label.clone(), st.temp.clone())
+        };
+        // Follow the stored values and the sensor list, which change with the catalog.
+        let items = temp_items(&options, stored_temp.as_deref(), words);
+        select.update(cx, |s, cx| {
+            let same = s.items().len() == items.len()
+                && s.items()
+                    .iter()
+                    .zip(&items)
+                    .all(|(a, b)| a.value == b.value && a.label == b.label);
+            if !same {
+                s.set_items(items, cx);
+            }
+            s.set_selected_value(stored_temp.as_deref().unwrap_or(""), cx);
+        });
+        if !input.read(cx).focus_handle(cx).is_focused(window)
+            && input.read(cx).value() != stored_label.as_str()
+        {
+            input.update(cx, |s, cx| s.set_value(stored_label.clone(), window, cx));
+        }
+
+        let mut name = div()
+            .flex_none()
+            .w(gpui_kit::px(96. * m.ui_scale))
+            .whitespace_nowrap()
+            .text_color(t.text_primary)
+            .child(row.name.clone());
+        *name.text_style() = t_base(&m);
+        let key = row.key.clone();
+        list = list.child(
+            div()
+                .id(ElementId::Name(format!("fan-row-el-{}", row.key).into()))
+                .debug_selector({
+                    let key = row.key.clone();
+                    move || format!("FanRow-{key}")
+                })
+                .flex()
+                .items_center()
+                .gap(m.sp[2])
+                .child(name)
+                .child(
+                    TlTextInput::new(format!("fan-label-{}", row.key), &input)
+                        .placeholder(row.name.clone())
+                        .aria_label(words.label.clone())
+                        .width(gpui_kit::px(160. * m.ui_scale)),
+                )
+                .child(
+                    TlSelect::new(format!("fan-temp-{}", row.key), &select).on_change(
+                        move |value, _, cx| {
+                            let temp = (!value.is_empty()).then(|| value.to_string());
+                            set_fan_temp(&key, temp.as_deref(), cx);
+                        },
+                    ),
+                ),
+        );
+    }
+    list.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tl_model::devices::{DeviceCatalog, DeviceEntry};
+    use tl_model::ids::DeviceIdx;
+    use tl_model::system::{Metric, SensorReading, SystemSnapshot};
+
+    fn sensor(idx: u16, chip: &str, label: &str, key: &str) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity: DeviceIdentity::Sensor {
+                chip: Arc::from(chip),
+                label: Arc::from(label),
+            },
+            generation: 0,
+            display_name: Arc::from(label),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(key),
+            net_kind: None,
+        }
+    }
+
+    fn reading(idx: u16, value: Metric<f32>) -> (DeviceIdx, SensorReading) {
+        (
+            DeviceIdx(idx),
+            SensorReading {
+                device: DeviceIdx(idx),
+                kind: SensorKind::Temperature,
+                value,
+                pwm_pct: Metric::with(Validity::Unsupported),
+                fan_control: None,
+                fan_connected: false,
+            },
+        )
+    }
+
+    #[test]
+    fn sensor_options_show_reading_or_glyph() {
+        let mut snap = Snapshot::default();
+        snap.devices = Arc::new(DeviceCatalog {
+            version: 1,
+            entries: Arc::from(vec![
+                sensor(
+                    0,
+                    "k10temp",
+                    "Tctl",
+                    "sensor:k10temp:/devices/pci0000:00/x:temp1",
+                ),
+                sensor(1, "nvme", "Composite", "sensor:nvme::temp1"),
+            ]),
+        });
+        let mut system = SystemSnapshot::default();
+        system.sensors = Arc::from(vec![
+            reading(0, Metric::valid(45.2)),
+            reading(1, Metric::with(Validity::Failed)),
+        ]);
+        snap.system = Arc::new(system);
+        let options = sensor_options_of(&snap);
+        assert_eq!(&*options[0].value, "k10temp:/devices/pci0000:00/x:temp1");
+        assert_eq!(options[0].text, "Tctl (k10temp) 45 °C");
+        assert_eq!(&*options[1].value, "nvme::temp1");
+        assert_eq!(options[1].text, "Composite (nvme) !");
+    }
 }

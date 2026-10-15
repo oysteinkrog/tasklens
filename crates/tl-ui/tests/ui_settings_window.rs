@@ -968,11 +968,17 @@ const DEVICE_LIST: &str = "Device order and visibility";
 /// device changes as the Settings window does.
 struct DeviceProbe {
     page: PageBuilder,
+    label: &'static str,
     _subs: Vec<gpui_kit::Subscription>,
 }
 
 impl DeviceProbe {
     fn new(cx: &mut Context<Self>) -> Self {
+        Self::with_label(DEVICE_LIST, cx)
+    }
+
+    /// A probe that draws the custom item labelled `label`.
+    fn with_label(label: &'static str, cx: &mut Context<Self>) -> Self {
         let page = all_pages(cx)
             .into_iter()
             .find(|p| p.id() == PageId::Performance)
@@ -984,7 +990,11 @@ impl DeviceProbe {
                 cx.notify()
             }),
         ];
-        Self { page, _subs: subs }
+        Self {
+            page,
+            label,
+            _subs: subs,
+        }
     }
 }
 
@@ -992,7 +1002,7 @@ impl Render for DeviceProbe {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
-            .children(self.page.render_custom(DEVICE_LIST, window, cx))
+            .children(self.page.render_custom(self.label, window, cx))
     }
 }
 
@@ -1052,8 +1062,15 @@ fn publish_devices(engine: &FakeEngine, disks: &[&str], cx: &mut TestAppContext)
 
 /// Opens the probe window with a toast queue, and draws it.
 fn device_probe(cx: &mut TestAppContext) -> (VisualTestContext, Entity<ToastQueue>) {
+    probe_for(DEVICE_LIST, cx)
+}
+
+fn probe_for(
+    label: &'static str,
+    cx: &mut TestAppContext,
+) -> (VisualTestContext, Entity<ToastQueue>) {
     let window = cx.add_window(|window, cx| {
-        let probe = cx.new(DeviceProbe::new);
+        let probe = cx.new(|cx| DeviceProbe::with_label(label, cx));
         Root::new(probe, window, cx)
     });
     let mut vcx = VisualTestContext::from_window(window.into(), cx);
@@ -1861,4 +1878,169 @@ fn appearance_ui_scale_release_toast(cx: &mut TestAppContext) {
         125
     );
     assert_eq!(window_toasts(&mut vcx), ["UI scale changed to 125%"]);
+}
+
+// Performance page: Fans group (E21-037).
+
+const FANS_GROUP: &str = "Fans";
+const FAN_KEY: &str = "fan:nct6775:1";
+
+fn entry(idx: u16, identity: DeviceIdentity, key: &str) -> DeviceEntry {
+    DeviceEntry {
+        idx: DeviceIdx(idx),
+        identity,
+        generation: 0,
+        display_name: Arc::from(key),
+        present: true,
+        parent: None,
+        persistent_key: Arc::from(key),
+        net_kind: None,
+    }
+}
+
+/// Publishes a catalog with one fan (`nct6775` fan 1) and the temperature sensor Tctl (k10temp).
+fn publish_fan(engine: &FakeEngine, with_fan: bool, cx: &mut TestAppContext) {
+    let mut entries = vec![entry(0, DeviceIdentity::CpuPackage, "")];
+    if with_fan {
+        entries.push(entry(
+            1,
+            DeviceIdentity::Fan {
+                chip: Arc::from("nct6775"),
+                index: 1,
+            },
+            "fan:nct6775:/devices/platform/nct6775.656:1",
+        ));
+    }
+    entries.push(entry(
+        2,
+        DeviceIdentity::Sensor {
+            chip: Arc::from("k10temp"),
+            label: Arc::from("Tctl"),
+        },
+        "sensor:k10temp:/devices/pci0000:00/0000:00:18.3:temp1",
+    ));
+    engine.publish_with(|s| {
+        s.devices = Arc::new(DeviceCatalog {
+            version: s.devices.version + 1,
+            entries: Arc::from(entries),
+        });
+    });
+    cx.run_until_parked();
+}
+
+fn fans(
+    cx: &mut TestAppContext,
+) -> std::collections::BTreeMap<String, tl_model::settings::FanOverride> {
+    cx.update(|cx| TlSettings::settings(cx).fans.clone())
+}
+
+fn pick_sensor(vcx: &mut VisualTestContext, item: f32) {
+    click_selector(vcx, format!("TlSelect-fan-temp-{FAN_KEY}"));
+    let list = vcx
+        .debug_bounds("TlSelect-list")
+        .expect("sensor list drawn");
+    // The popup lists "None" and one sensor, so each item is half the list.
+    let at = gpui_kit::point(
+        list.center().x,
+        list.top() + list.size.height * (item / 2. + 0.25),
+    );
+    click_at(vcx, at);
+}
+
+fn type_label(vcx: &mut VisualTestContext, text: &str) {
+    click_selector(vcx, format!("TlTextInput-fan-label-{FAN_KEY}"));
+    vcx.simulate_input(text);
+    vcx.simulate_keystrokes("enter");
+    draw_probe(vcx);
+}
+
+#[gpui_kit::test]
+fn fans_group_rows(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_fan(&engine, true, cx);
+    let (mut vcx, _) = probe_for(FANS_GROUP, cx);
+    assert!(vcx.debug_bounds(&format!("FanRow-{FAN_KEY}")).is_some());
+    assert!(
+        vcx.debug_bounds(&format!("TlTextInput-fan-label-{FAN_KEY}"))
+            .is_some()
+    );
+    assert!(
+        vcx.debug_bounds(&format!("TlSelect-fan-temp-{FAN_KEY}"))
+            .is_some()
+    );
+    // The dropdown lists "None" and the one sensor.
+    click_selector(&mut vcx, format!("TlSelect-fan-temp-{FAN_KEY}"));
+    let list = vcx
+        .debug_bounds("TlSelect-list")
+        .expect("sensor list drawn");
+    assert!(list.size.height > px(0.));
+    assert!(fans(cx).is_empty(), "drawing writes nothing");
+    // The page lists the one key.
+    assert_eq!(
+        page(cx, PageId::Performance)
+            .keys()
+            .iter()
+            .filter(|k| **k == SettingKey::Fans)
+            .count(),
+        1
+    );
+}
+
+#[gpui_kit::test]
+fn fans_group_hidden_without_fans(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_fan(&engine, false, cx);
+    let (vcx, _) = probe_for(FANS_GROUP, cx);
+    assert!(
+        vcx.debug_bounds("FansGroup")
+            .is_some_and(|b| b.size.height == px(0.))
+    );
+}
+
+#[gpui_kit::test]
+fn fans_write_entry(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_fan(&engine, true, cx);
+    let (mut vcx, _) = probe_for(FANS_GROUP, cx);
+    type_label(&mut vcx, "CPU fan");
+    assert_eq!(
+        fans(cx)[FAN_KEY].label.as_deref(),
+        Some("CPU fan"),
+        "label only: no temp is written"
+    );
+    assert_eq!(fans(cx)[FAN_KEY].temp, None);
+    pick_sensor(&mut vcx, 1.);
+    let entry = fans(cx)[FAN_KEY].clone();
+    assert_eq!(entry.label.as_deref(), Some("CPU fan"));
+    assert_eq!(
+        entry.temp.as_deref(),
+        Some("k10temp:/devices/pci0000:00/0000:00:18.3:temp1")
+    );
+}
+
+#[gpui_kit::test]
+fn fans_remove_entry(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_fan(&engine, true, cx);
+    cx.update(|cx| {
+        tl_ui::settings_global::TlSettings::update(cx, |d| {
+            d.settings.fans.insert(
+                FAN_KEY.into(),
+                tl_model::settings::FanOverride {
+                    label: Some("CPU fan".into()),
+                    temp: Some("k10temp:/devices/pci0000:00/0000:00:18.3:temp1".into()),
+                },
+            );
+        })
+    });
+    let (mut vcx, _) = probe_for(FANS_GROUP, cx);
+    // "None" first: the label stays, so does the entry.
+    pick_sensor(&mut vcx, 0.);
+    assert_eq!(fans(cx)[FAN_KEY].temp, None);
+    assert_eq!(fans(cx)[FAN_KEY].label.as_deref(), Some("CPU fan"));
+    // Clearing the label leaves nothing: the entry goes.
+    click_selector(&mut vcx, format!("TlTextInput-fan-label-{FAN_KEY}"));
+    vcx.simulate_keystrokes("ctrl-a backspace enter");
+    draw_probe(&mut vcx);
+    assert!(fans(cx).is_empty());
 }

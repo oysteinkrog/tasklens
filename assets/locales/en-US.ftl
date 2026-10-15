@@ -2567,6 +2567,11 @@ shell-settings-perf-net-vpn = VPN and tunnel
 shell-settings-perf-net-virtual = Virtual
 shell-settings-perf-net-other = Other
 shell-settings-perf-disconnected-fans = Show disconnected fans
+# Settings window, Performance page, Fans group (tasklens-bj6.41, UI-SHL-066).
+shell-settings-perf-group-fans = Fans
+shell-settings-fan-label = Label
+shell-settings-fan-temp = Temperature sensor
+shell-settings-fan-temp-none = None
 # Settings window, Appearance page (tasklens-bj6.23, UI-SHL-062).
 shell-settings-group-theme = Theme
 shell-settings-group-size = Size
