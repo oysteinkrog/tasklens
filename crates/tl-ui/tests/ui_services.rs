@@ -1504,3 +1504,36 @@ mod menu_tests {
         assert_eq!(menu_choice(&[]), MenuChoice::None);
     }
 }
+
+#[gpui_kit::test]
+fn init_binds_services_keys(cx: &mut TestAppContext) {
+    use tl_model::settings::Settings;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (_tx, rx) = async_channel::bounded(4);
+    let init = UiInit {
+        settings: Settings::default(),
+        state: UiState::default(),
+        themes_json: None,
+        persist: Box::new(|_, _| {}),
+        persist_themes: Box::new(|_| {}),
+        app_requests: rx,
+        startup_toasts: Vec::new(),
+        env: AppEnv::test(),
+    };
+    cx.update(|cx| TasklensUi::init(cx, client, init));
+    cx.run_until_parked();
+
+    let handle = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.run_until_parked();
+    assert_window_binding(&mut vcx, &ServiceStart, "Table ServiceTable", "ctrl-s");
+    assert_window_binding(
+        &mut vcx,
+        &ServicePropsSelectTab { index: 2 },
+        "ServiceProps",
+        "ctrl-3",
+    );
+}
