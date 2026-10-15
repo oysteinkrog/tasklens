@@ -421,7 +421,11 @@ fn scan_with_limits(
             ));
             if batch.len() >= BATCH_STRINGS || batch_bytes >= BATCH_BYTES {
                 batch_bytes = 0;
-                out(HelperReplyBody::Strings(std::mem::take(&mut batch)), false)?;
+                // `out` takes the body by value, so each sent batch is one exact-size Vec.
+                // `append` moves the entries and leaves `batch` empty with its capacity kept.
+                let mut sent = Vec::with_capacity(batch.len());
+                sent.append(&mut batch);
+                out(HelperReplyBody::Strings(sent), false)?;
             }
         }
         let Some(end) = end else {
