@@ -361,6 +361,7 @@ impl TasklensUi {
         // open hooks
         crate::window::main::init(cx);
         crate::window::share_theme::init(cx);
+        crate::window::theme_editor::init(cx);
         crate::window::collector_health::init(cx);
         crate::window::shortcuts::init(cx);
         crate::window::about::init(cx);
