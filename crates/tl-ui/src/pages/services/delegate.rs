@@ -856,7 +856,7 @@ impl TreeTableDelegate for ServicesDelegate {
     fn row_flags(&self, ix: usize) -> RowFlags {
         match self.unit(ix) {
             Some(unit)
-                if self.snap.managers[manager_index(unit.manager)]
+                if self.snap.managers[manager_index(unit.unit.manager)]
                     == ManagerState::Reconnecting =>
             {
                 RowFlags {
@@ -908,7 +908,7 @@ impl TreeTableDelegate for ServicesDelegate {
             ServiceColumn::User => out.arc = Some(unit.user.clone()),
             ServiceColumn::Path => out.arc = Some(unit.path.clone()),
             ServiceColumn::Manager => {
-                out.arc = Some(w.managers[manager_index(unit.manager)].clone())
+                out.arc = Some(w.managers[manager_index(unit.unit.manager)].clone())
             }
             ServiceColumn::UnitType => out.arc = Some(w.types[type_index(unit.kind)].clone()),
             ServiceColumn::SubState => out.arc = Some(unit.sub_state.clone()),
@@ -1070,7 +1070,7 @@ impl TreeTableDelegate for ServicesDelegate {
                 tip.lines.push(path.clone().into());
             }
             tip.lines
-                .push(self.words.manager_line[manager_index(unit.manager)].clone());
+                .push(self.words.manager_line[manager_index(unit.unit.manager)].clone());
             tip.lines.retain(|line| !line.is_empty());
         }
         Some(view.clone())
