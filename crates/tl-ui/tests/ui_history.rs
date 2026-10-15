@@ -1391,6 +1391,23 @@ mod row_actions {
     }
 
     #[gpui_kit::test]
+    fn history_menu_close_drops_captured_rows(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.menu(&[3], Some(ColumnId::Cpu));
+        let table = r.vcx.read_entity(&r.page, |p, _| p.table().clone());
+        table.update(r.vcx, |t, cx| t.delegate.on_menu_closed(cx));
+        // The selection changes after the menu is dismissed.
+        r.select(&[2]);
+        r.vcx.dispatch_action(DeleteFromHistory);
+        r.vcx.run_until_parked();
+        assert_eq!(
+            r.deletes(),
+            [vec![key(2)]],
+            "the selected row, not the stale capture"
+        );
+    }
+
+    #[gpui_kit::test]
     fn delete_from_history_removes_rows_series_and_chips(cx: &mut TestAppContext) {
         let mut r = rig(cx);
         r.select(&[3]);

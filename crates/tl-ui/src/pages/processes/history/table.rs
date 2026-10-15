@@ -849,6 +849,12 @@ impl TreeTableDelegate for HistoryTableDelegate {
         )
     }
 
+    /// Drops the rows captured when the menu opened, so a dismissed menu cannot feed a later
+    /// keyboard command.
+    fn on_menu_closed(&mut self, _: &mut Context<TlTreeTable<Self>>) {
+        self.captured = None;
+    }
+
     fn on_toggle_expand(&mut self, _: ProcessKey, _: &mut Context<TlTreeTable<Self>>) {}
 
     /// Sorts the rows here and persists `[sort.history]`. Numeric columns start descending,
