@@ -1,10 +1,11 @@
-//! The Overview boxes' drawing parts (UI-PRF-017, D-022): a meter bar, a per-core bar grid, the
+//! The Overview boxes' drawing parts (UI-PRF-017, D-022): a meter bar, a per-core row grid, the
 //! box frame and the sparkline rows.
 //!
 //! [`Meter`] and [`CoreBars`] follow the custom `Element` pattern of `memory_bar.rs`
 //! (UI-PRF-027): quads plus cached shaped text, no child elements. `TlProgress` is not allowed in
 //! charts or cards (ADR-009). [`CoreBars`] re-formats and re-shapes a percent label only when its
-//! 1% bucket changes (U-47).
+//! 1% bucket changes (U-47), and a GHz label only when its 0.1 GHz bucket changes. The core
+//! sparklines are cached chart views in [`core_sparks`], a flex grid over the painted cells.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -34,16 +35,26 @@ use super::mem_box::{MeterRow, ROW_LABEL_W, ROW_VALUE_W, meter_row};
 /// The meter bar height, logical px before `ui_scale`.
 pub const METER_H: f32 = 6.;
 
-/// The narrowest core cell, logical px before `ui_scale`.
-const CELL_MIN_W: f32 = 140.;
+/// The narrowest core cell, logical px before `ui_scale` (crw.53). A 438 px side part (CPU box
+/// at 1200 × 900) holds 2 cells of 215 px.
+const CELL_MIN_W: f32 = 180.;
 /// The gap between core cells, logical px before `ui_scale`.
 const CELL_GAP: f32 = 8.;
 /// The core name column ("C12"), logical px before `ui_scale`.
 const NAME_W: f32 = 28.;
+/// The sparkline in a core cell, logical px before `ui_scale`.
+pub const CORE_SPARK_W: f32 = 48.;
 /// The percent column ("100%"), logical px before `ui_scale`.
 const PCT_W: f32 = 36.;
-/// The gap between the bar and the percent, logical px before `ui_scale`.
-const PCT_GAP: f32 = 4.;
+/// The GHz column ("3.9 GHz"), logical px before `ui_scale`.
+const GHZ_W: f32 = 44.;
+/// The gap between the parts of a core cell, logical px before `ui_scale`.
+const PART_GAP: f32 = 4.;
+/// The narrowest meter a core cell keeps. A narrower cell gives the meter's room to the
+/// sparkline. Logical px before `ui_scale`.
+const CORE_METER_MIN_W: f32 = 16.;
+/// The space above and below a core sparkline in its row, logical px before `ui_scale`.
+const CORE_SPARK_INSET: f32 = 2.;
 /// The lowest row a squeezed core grid gets, logical px before `ui_scale`.
 const MIN_ROW_H: f32 = 12.;
 /// Rows lower than this hide the core labels, logical px before `ui_scale`.
@@ -56,6 +67,16 @@ pub const TIME_AXIS_END: &str = "Now";
 
 /// `buckets` entry for a core with no valid sample.
 const NO_BUCKET: u16 = u16::MAX;
+
+/// The 0.1 GHz bucket of a clock in MHz: 3949 MHz is 39 ("3.9 GHz"), 3950 MHz is 40.
+pub fn ghz_bucket(mhz: f32) -> u16 {
+    (mhz.max(0.) / 100.).round().min(f32::from(NO_BUCKET - 1)) as u16
+}
+
+/// "3.9 GHz" for a 0.1 GHz bucket.
+fn ghz_text(bucket: u16) -> SharedString {
+    format!("{}.{} GHz", bucket / 10, bucket % 10).into()
+}
 
 #[cfg(any(test, feature = "test-hooks"))]
 thread_local! {
@@ -180,18 +201,25 @@ impl Element for Meter {
     }
 }
 
-/// The per-core bars' data: one name, value and percent label per logical CPU.
+/// The per-core rows' data: one name, value, percent label and GHz label per logical CPU.
 #[derive(Default, Debug)]
 pub struct CoreBarsModel {
     /// Percent per logical CPU id; `None` is no valid sample.
     pub values: Vec<Option<f32>>,
+    /// Clock in MHz per logical CPU id; `None` is no valid sample.
+    pub freqs: Vec<Option<f32>>,
     /// The 1% bucket of each value, or `NO_BUCKET`.
     buckets: Vec<u16>,
+    /// The 0.1 GHz bucket of each clock, or `NO_BUCKET`.
+    ghz_buckets: Vec<u16>,
     names: Vec<SharedString>,
     /// "12%", or "…" for no valid sample.
     pct_text: Vec<SharedString>,
+    /// "3.9 GHz", or "…" for no valid sample.
+    ghz_text: Vec<SharedString>,
     name_lines: Vec<CachedLine>,
     pct_lines: Vec<CachedLine>,
+    ghz_lines: Vec<CachedLine>,
     /// Paints of the element.
     #[cfg(any(test, feature = "test-hooks"))]
     pub paint_count: Cell<u32>,
@@ -201,19 +229,27 @@ pub struct CoreBarsModel {
 }
 
 impl CoreBarsModel {
-    /// Sets the CPU names ("C0", "C1", …). Every value goes back to no valid sample.
+    /// Sets the CPU names ("C0", "C1", …). Every value and clock goes back to no valid sample.
     pub fn set_cpus(&mut self, names: impl Iterator<Item = SharedString>) {
         self.names.clear();
         self.names.extend(names);
         let n = self.names.len();
+        let warming = SharedString::new_static(WARMING);
         self.values.clear();
         self.values.resize(n, None);
+        self.freqs.clear();
+        self.freqs.resize(n, None);
         self.buckets.clear();
         self.buckets.resize(n, NO_BUCKET);
+        self.ghz_buckets.clear();
+        self.ghz_buckets.resize(n, NO_BUCKET);
         self.pct_text.clear();
-        self.pct_text.resize(n, SharedString::new_static(WARMING));
+        self.pct_text.resize(n, warming.clone());
+        self.ghz_text.clear();
+        self.ghz_text.resize(n, warming);
         self.name_lines.resize_with(n, CachedLine::default);
         self.pct_lines.resize_with(n, CachedLine::default);
+        self.ghz_lines.resize_with(n, CachedLine::default);
     }
 
     /// Takes one value per CPU; missing values count as no valid sample. True when a 1% bucket
@@ -240,18 +276,52 @@ impl CoreBarsModel {
         changed
     }
 
-    /// "C0\t12%" per CPU, one per line.
+    /// Takes one clock in MHz per CPU; missing clocks count as no valid sample. True when a
+    /// 0.1 GHz bucket ([`ghz_bucket`]) or a None/Some state changed. Re-formats only those
+    /// labels ("3.9 GHz").
+    pub fn set_freqs(&mut self, mhz: impl Iterator<Item = Option<f32>>) -> bool {
+        let mut mhz = mhz;
+        let mut changed = false;
+        for i in 0..self.names.len() {
+            let f = mhz.next().flatten();
+            self.freqs[i] = f;
+            let b = f.map_or(NO_BUCKET, ghz_bucket);
+            if b == self.ghz_buckets[i] {
+                continue;
+            }
+            self.ghz_buckets[i] = b;
+            self.ghz_text[i] = if b == NO_BUCKET {
+                SharedString::new_static(WARMING)
+            } else {
+                ghz_text(b)
+            };
+            changed = true;
+        }
+        changed
+    }
+
+    /// The GHz label of each CPU: "3.9 GHz", or "…" for no valid sample.
+    pub fn ghz_labels(&self) -> &[SharedString] {
+        &self.ghz_text
+    }
+
+    /// "C0\t12%" per CPU, one per line, with "\t3.9 GHz" when the clock is known.
     pub fn copy_text(&self, out: &mut String) {
-        for (name, pct) in self.names.iter().zip(&self.pct_text) {
-            out.push_str(name);
+        for i in 0..self.names.len() {
+            out.push_str(&self.names[i]);
             out.push('\t');
-            out.push_str(pct);
+            out.push_str(&self.pct_text[i]);
+            if self.ghz_buckets[i] != NO_BUCKET {
+                out.push('\t');
+                out.push_str(&self.ghz_text[i]);
+            }
             out.push('\n');
         }
     }
 }
 
-/// A grid of per-core bars, as large as its parent. Each cell is a name, a meter and a percent.
+/// A grid of per-core rows, as large as its parent. Each cell is a name, room for the sparkline
+/// ([`core_sparks`] draws it), a meter, a percent and a GHz label.
 pub struct CoreBars {
     pub model: Rc<RefCell<CoreBarsModel>>,
 }
@@ -263,12 +333,33 @@ pub struct CoreBarsLayout {
     pub rows: usize,
     pub cell_w: Pixels,
     pub row_h: Pixels,
-    /// False when the rows are too low for the name and percent.
+    /// True when the rows are lower than 18 px and share the height equally.
+    pub squeezed: bool,
+    /// False when the rows are too low for the name, sparkline, percent and GHz.
     pub labels: bool,
+    /// False when a cell is too narrow for its meter; the sparkline then takes its room.
+    pub meter: bool,
 }
 
-/// The grid for `n` cores in `w × h`: as many 140 px cells per row as fit, 18 px rows, squeezed
-/// down to 12 px when the rows do not fit. Labels hide below 14 px.
+impl CoreBarsLayout {
+    /// The layout class for `class_probe`: what the sparkline grid depends on. Cell width and row
+    /// height inside one class follow the flex layout.
+    pub fn class(&self) -> u32 {
+        (self.cols.min(0x3ff) as u32)
+            | ((self.rows.min(0xfff) as u32) << 10)
+            | (u32::from(self.squeezed) << 22)
+            | (u32::from(self.labels) << 23)
+            | (u32::from(self.meter) << 24)
+    }
+}
+
+/// The width a core cell needs before its meter, logical px before `ui_scale`: name, sparkline,
+/// percent and GHz with their 4 gaps.
+const CORE_FIXED_W: f32 = NAME_W + CORE_SPARK_W + PCT_W + GHZ_W + 4. * PART_GAP;
+
+/// The grid for `n` cores in `w × h`: as many 180 px cells per row as fit, 18 px rows, squeezed
+/// down to 12 px when the rows do not fit. Labels and sparklines hide below 14 px. A cell
+/// narrower than 188 px has no meter.
 pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsLayout {
     let n = n.max(1);
     let gap = CELL_GAP * scale;
@@ -279,16 +370,126 @@ pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsL
     let cell_w = ((w - gap * (cols - 1) as f32) / cols as f32).max(0.);
     let mut row_h = LABEL_ROW * scale;
     let h = f32::from(h);
-    if rows as f32 * row_h > h {
+    let squeezed = rows as f32 * row_h > h;
+    if squeezed {
         row_h = (MIN_ROW_H * scale).max(h / rows as f32);
     }
+    let labels = row_h >= LABELS_MIN_ROW_H * scale;
     CoreBarsLayout {
         cols,
         rows,
         cell_w: px(cell_w),
         row_h: px(row_h),
-        labels: row_h >= LABELS_MIN_ROW_H * scale,
+        squeezed,
+        labels,
+        meter: labels && cell_w >= (CORE_FIXED_W + CORE_METER_MIN_W) * scale,
     }
+}
+
+/// The x offsets of a core cell's parts from the cell's left edge.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct CoreCell {
+    pub spark_x: Pixels,
+    pub spark_w: Pixels,
+    pub meter_x: Pixels,
+    /// 0 when the cell has no meter.
+    pub meter_w: Pixels,
+    /// The right edge of the percent label; the GHz label ends at the cell's right edge.
+    pub pct_right: Pixels,
+}
+
+/// The parts of a cell of `l`. Without labels the meter is the whole cell.
+pub fn core_cell(l: &CoreBarsLayout, scale: f32) -> CoreCell {
+    let cell = l.cell_w;
+    if !l.labels {
+        return CoreCell {
+            spark_x: px(0.),
+            spark_w: px(0.),
+            meter_x: px(0.),
+            meter_w: cell,
+            pct_right: cell,
+        };
+    }
+    let gap = px(PART_GAP * scale);
+    let spark_x = px(NAME_W * scale) + gap;
+    let tail = px((PCT_W + GHZ_W) * scale) + gap * 2.;
+    let pct_right = cell - px(GHZ_W * scale) - gap;
+    if l.meter {
+        let spark_w = px(CORE_SPARK_W * scale);
+        let meter_x = spark_x + spark_w + gap;
+        CoreCell {
+            spark_x,
+            spark_w,
+            meter_x,
+            meter_w: (cell - meter_x - tail).max(px(0.)),
+            pct_right,
+        }
+    } else {
+        CoreCell {
+            spark_x,
+            spark_w: (cell - spark_x - tail).max(px(0.)),
+            meter_x: cell - tail,
+            meter_w: px(0.),
+            pct_right,
+        }
+    }
+}
+
+/// The debug selector of core `i`'s sparkline.
+pub fn core_spark_id(i: usize) -> String {
+    format!("perf-overview-core-spark-{i}")
+}
+
+/// The sparklines over a [`CoreBars`] grid laid out as `l`, one cached chart per core in
+/// `charts`. A flex grid of the same columns, rows and gaps, so each sparkline sits in its painted
+/// cell at any size inside `l`'s class. Empty when the rows are too low for labels.
+pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetrics) -> Div {
+    let s = m.ui_scale;
+    let mut grid = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col();
+    if !l.labels || charts.is_empty() {
+        return grid;
+    }
+    let gap = px(PART_GAP * s);
+    let left = px(NAME_W * s) + gap;
+    let inset = px(CORE_SPARK_INSET * s);
+    let tail = px((PCT_W + GHZ_W) * s) + gap * 2.;
+    for r in 0..l.rows {
+        let mut row = div().flex().flex_row().w_full().gap(px(CELL_GAP * s));
+        row = if l.squeezed {
+            row.flex_1().min_h(px(MIN_ROW_H * s))
+        } else {
+            row.flex_none().h(px(LABEL_ROW * s))
+        };
+        for c in 0..l.cols {
+            let i = r * l.cols + c;
+            let mut cell = div().relative().flex_1().min_w_0().h_full();
+            if let Some(chart) = charts.get(i) {
+                let spark = div()
+                    .debug_selector(move || core_spark_id(i))
+                    .absolute()
+                    .top(inset)
+                    .bottom(inset)
+                    .left(left);
+                let spark = if l.meter {
+                    spark.w(px(CORE_SPARK_W * s))
+                } else {
+                    spark.right(tail)
+                };
+                cell = cell.child(
+                    spark.child(chart.clone().cached(StyleRefinement::default().size_full())),
+                );
+            }
+            row = row.child(cell);
+        }
+        grid = grid.child(row);
+    }
+    grid
 }
 
 impl IntoElement for CoreBars {
@@ -360,20 +561,16 @@ impl Element for CoreBars {
             return;
         }
         let l = core_bars_layout(n, bounds.size.width, bounds.size.height, s);
+        let parts = core_cell(&l, s);
         let gap = px(CELL_GAP * s);
         let bar_h = px(METER_H * s);
-        let (name_w, pct_w) = if l.labels {
-            (px(NAME_W * s), px((PCT_W + PCT_GAP) * s))
-        } else {
-            (px(0.), px(0.))
-        };
         let name_style = LineStyle {
             size: m.text.xs,
             weight: FontWeight::NORMAL,
             color: theme.text_secondary,
             tnum: false,
         };
-        let pct_style = LineStyle {
+        let num_style = LineStyle {
             tnum: true,
             ..name_style
         };
@@ -381,32 +578,36 @@ impl Element for CoreBars {
             let (col, row) = (i % l.cols, i / l.cols);
             let x = bounds.left() + (l.cell_w + gap) * col as f32;
             let y = bounds.top() + l.row_h * row as f32;
-            let bar_w = (l.cell_w - name_w - pct_w).max(px(0.));
-            let bar = Bounds::new(
-                point(x + name_w, y + (l.row_h - bar_h) / 2.),
-                size(bar_w, bar_h),
-            );
-            let fraction = model.values[i].map(|v| v / 100.);
-            paint_meter(
-                window,
-                bar,
-                fraction,
-                theme.graph.cpu_line,
-                theme.divider,
-                m.radius_small,
-                sf,
-            );
+            if parts.meter_w > px(0.) {
+                let bar = Bounds::new(
+                    point(x + parts.meter_x, y + (l.row_h - bar_h) / 2.),
+                    size(parts.meter_w, bar_h),
+                );
+                let fraction = model.values[i].map(|v| v / 100.);
+                paint_meter(
+                    window,
+                    bar,
+                    fraction,
+                    theme.graph.cpu_line,
+                    theme.divider,
+                    m.radius_small,
+                    sf,
+                );
+            }
             if !l.labels {
                 continue;
             }
             let name = &mut model.name_lines[i];
-            let shaped = name.sync(window, &model.names[i], name_style);
+            let mut shaped = u32::from(name.sync(window, &model.names[i], name_style));
             labels::paint_line(window, cx, name, point(x, y), l.row_h);
             let pct = &mut model.pct_lines[i];
-            let shaped =
-                u32::from(shaped) + u32::from(pct.sync(window, &model.pct_text[i], pct_style));
-            let pct_x = x + l.cell_w - pct.width();
+            shaped += u32::from(pct.sync(window, &model.pct_text[i], num_style));
+            let pct_x = x + parts.pct_right - pct.width();
             labels::paint_line(window, cx, pct, point(pct_x, y), l.row_h);
+            let ghz = &mut model.ghz_lines[i];
+            shaped += u32::from(ghz.sync(window, &model.ghz_text[i], num_style));
+            let ghz_x = x + l.cell_w - ghz.width();
+            labels::paint_line(window, cx, ghz, point(ghz_x, y), l.row_h);
             #[cfg(any(test, feature = "test-hooks"))]
             model.shape_count.set(model.shape_count.get() + shaped);
             #[cfg(not(any(test, feature = "test-hooks")))]
@@ -577,6 +778,9 @@ pub const SPLIT_W: f32 = 560.;
 /// The chart's share of a wide box's body.
 const CHART_SHARE: f32 = 0.55;
 
+/// The CPU box chart's share of a wide body (crw.53), so 2 columns of core rows fit beside it.
+pub const CPU_CHART_SHARE: f32 = 0.40;
+
 /// A canvas over its parent (which must be `relative`) that keeps the parent's width in `width`
 /// and notifies `view` after the frame when the width crosses `threshold` the other way from
 /// `wide`, the side the last render used. Resizes inside one side never notify.
@@ -636,7 +840,18 @@ pub fn is_wide(width: Pixels, scale: f32) -> bool {
 /// The body of a box: `chart` on the left (55%) and `side` on the right, or `chart` above
 /// `side` when not `wide`.
 pub fn split_body(chart: AnyElement, side: AnyElement, wide: bool, m: &UiMetrics) -> Div {
-    split_body_with_side_height(chart, side, wide, None, m)
+    split_body_with_side_height(chart, side, wide, None, CHART_SHARE, m)
+}
+
+/// [`split_body`] with the chart taking `share` of a wide body.
+pub fn split_body_share(
+    chart: AnyElement,
+    side: AnyElement,
+    wide: bool,
+    share: f32,
+    m: &UiMetrics,
+) -> Div {
+    split_body_with_side_height(chart, side, wide, None, share, m)
 }
 
 /// The body of a box whose stacked side has a fixed height. Wide boxes still use the same 55%
@@ -648,7 +863,7 @@ pub fn split_body_fixed_side(
     side_height: Pixels,
     m: &UiMetrics,
 ) -> Div {
-    split_body_with_side_height(chart, side, wide, Some(side_height), m)
+    split_body_with_side_height(chart, side, wide, Some(side_height), CHART_SHARE, m)
 }
 
 fn split_body_with_side_height(
@@ -656,6 +871,7 @@ fn split_body_with_side_height(
     side: AnyElement,
     wide: bool,
     side_height: Option<Pixels>,
+    share: f32,
     m: &UiMetrics,
 ) -> Div {
     if wide {
@@ -664,13 +880,7 @@ fn split_body_with_side_height(
             .flex_row()
             .size_full()
             .gap(m.sp[5])
-            .child(
-                div()
-                    .flex_none()
-                    .w(relative(CHART_SHARE))
-                    .h_full()
-                    .child(chart),
-            )
+            .child(div().flex_none().w(relative(share)).h_full().child(chart))
             .child(div().flex_1().min_w_0().h_full().child(side))
     } else {
         let side = div().w_full().child(side);

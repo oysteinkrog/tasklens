@@ -1,9 +1,10 @@
-//! The Overview page's CPU box (UI-PRF-017, D-022, UI-PRF-023): the total chart and one bar per
-//! logical CPU.
+//! The Overview page's CPU box (UI-PRF-017, D-022, UI-PRF-023): the total chart and one row per
+//! logical CPU (crw.53): name, sparkline, meter, percent and GHz.
 //!
 //! The box is its own view. It formats its text only when the inputs' hash changes and notifies
-//! only when the text or a core's 1% bucket changed, so an idle tick renders nothing. The chart is
-//! a cached child view that re-renders for its own series. Pointer movement never notifies.
+//! only when the text, a core's 1% bucket or a core's 0.1 GHz bucket changed, so an idle tick
+//! renders nothing. The total chart and the core sparklines are cached child views that re-render
+//! for their own series. Pointer movement never notifies.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::hash::{Hash as _, Hasher as _};
@@ -13,7 +14,7 @@ use std::sync::Arc;
 use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, Context, Entity, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Window, div, px,
+    Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -25,8 +26,9 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::super::cpu::logical_devices;
 use super::parts::{
-    ChartSettings, CoreBars, CoreBarsModel, SPLIT_W, box_chart, box_frame, chart_section_versions,
-    is_wide, split_body, width_probe,
+    CPU_CHART_SHARE, ChartSettings, CoreBars, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W,
+    box_chart, box_frame, chart_section_versions, class_probe, core_bars_layout, core_sparks,
+    is_wide, spark_chart, split_body_share, width_probe,
 };
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
@@ -90,6 +92,30 @@ fn total_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
     }
 }
 
+/// A core sparkline: `CPU_TOTAL` of logical CPU `device`, filled, 0..100.
+fn core_spec(device: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+    ChartSpec {
+        series: smallvec![ChartSeries {
+            id: SeriesId {
+                device,
+                metric: MetricId::CPU_TOTAL,
+            },
+            fill: Some(theme.graph.cpu_fill),
+            line: theme.graph.cpu_line,
+            ..ChartSeries::default()
+        }],
+        y: YScale::Fixed {
+            min: 0.0,
+            max: 100.0,
+        },
+        range_ns: s.range_ns,
+        grid: SPARK_GRID,
+        smooth: s.smooth,
+        background: ChartBg::List,
+        ..ChartSpec::default()
+    }
+}
+
 /// No heading and no value: the box title row carries the numbers.
 fn total_labels(range_word: SharedString) -> ChartLabels {
     ChartLabels {
@@ -128,13 +154,21 @@ pub(super) fn value_text(validity: Validity, format: impl FnOnce(&mut String)) -
 
 /// The CPU box.
 pub struct CpuBox {
+    hub: Entity<SnapshotHub>,
     cpu: DeviceIdx,
     total: Entity<ChartView>,
     bars: Rc<RefCell<CoreBarsModel>>,
+    /// One sparkline per entry of `logical`.
+    sparks: Vec<Entity<ChartView>>,
     /// Logical CPU id to device; `DeviceIdx(u16::MAX)` for an id with no catalog entry.
     logical: Vec<DeviceIdx>,
     /// `CPU_TOTAL` of each entry of `logical`.
     logical_ids: Vec<SeriesId>,
+    /// `CPU_FREQ` of each entry of `logical`.
+    freq_ids: Vec<SeriesId>,
+    /// The core grid's size at the last paint, and the layout the last render used.
+    grid_size: Rc<Cell<Size<Pixels>>>,
+    grid: CoreBarsLayout,
     catalog_version: u64,
     title: SharedString,
     value: SharedString,
@@ -164,12 +198,18 @@ impl CpuBox {
         let labels = total_labels(tr(cx, KEY_RANGE));
         let total = box_chart(spec, labels, hub, cx);
         let snap = Arc::clone(hub.read(cx).current());
+        let grid_size = size(px(0.), px(0.));
         let mut this = Self {
+            hub: hub.clone(),
             cpu,
             total,
             bars: Rc::default(),
+            sparks: Vec::new(),
             logical: Vec::new(),
             logical_ids: Vec::new(),
+            freq_ids: Vec::new(),
+            grid_size: Rc::new(Cell::new(grid_size)),
+            grid: core_bars_layout(0, grid_size.width, grid_size.height, 1.),
             catalog_version: u64::MAX,
             title: tr(cx, KEY_TITLE),
             value: SharedString::default(),
@@ -205,6 +245,16 @@ impl CpuBox {
         self.bars.borrow()
     }
 
+    /// One sparkline per logical CPU.
+    pub fn core_sparks(&self) -> &[Entity<ChartView>] {
+        &self.sparks
+    }
+
+    /// The core grid layout of the last render.
+    pub fn core_layout(&self) -> CoreBarsLayout {
+        self.grid
+    }
+
     /// The title, value and line text.
     pub fn text(&self) -> (&SharedString, &SharedString, &SharedString) {
         (&self.title, &self.value, &self.line)
@@ -215,7 +265,8 @@ impl CpuBox {
         self.wide
     }
 
-    /// "CPU\t12%", the line when there is one, then "C0\t10%" per logical CPU.
+    /// "CPU\t12%", the line when there is one, then "C0\t10%" per logical CPU, with "\t3.9 GHz"
+    /// when its clock is known.
     pub fn copy_text(&self, out: &mut String) {
         out.push_str(&self.title);
         out.push('\t');
@@ -247,7 +298,12 @@ impl CpuBox {
         }
         if series && !changed {
             let runs = ChangedRuns::new(&ev.changed_series);
-            if self.logical_ids.iter().any(|id| runs.contains(*id)) {
+            if self
+                .logical_ids
+                .iter()
+                .chain(&self.freq_ids)
+                .any(|id| runs.contains(*id))
+            {
                 changed |= self.sync_bars(&snap);
             }
         }
@@ -261,23 +317,49 @@ impl CpuBox {
         }
     }
 
-    /// Rebuilds the logical CPU list and the bar names when the catalog changed. True when it
-    /// did.
+    /// Rebuilds the logical CPU list, the row names and the sparklines when the catalog changed.
+    /// True when it did.
     fn sync_devices(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
         if snap.devices.version == self.catalog_version {
             return false;
         }
         self.catalog_version = snap.devices.version;
+        let old = std::mem::take(&mut self.logical);
         logical_devices(&snap.devices, &mut self.logical);
+        let id = |device, metric| SeriesId { device, metric };
         self.logical_ids.clear();
-        self.logical_ids
-            .extend(self.logical.iter().map(|&device| SeriesId {
-                device,
-                metric: MetricId::CPU_TOTAL,
-            }));
+        self.logical_ids.extend(
+            self.logical
+                .iter()
+                .map(|&device| id(device, MetricId::CPU_TOTAL)),
+        );
+        self.freq_ids.clear();
+        self.freq_ids.extend(
+            self.logical
+                .iter()
+                .map(|&device| id(device, MetricId::CPU_FREQ)),
+        );
+        self.sync_sparks(&old, cx);
         self.sync_names(cx);
         self.sync_bars(snap);
         true
+    }
+
+    /// One sparkline per logical CPU. Keeps the charts of CPUs whose device did not change.
+    fn sync_sparks(&mut self, old: &[DeviceIdx], cx: &mut Context<Self>) {
+        let theme = current(cx).clone();
+        self.sparks.truncate(self.logical.len());
+        for (i, &device) in self.logical.iter().enumerate() {
+            let spec = core_spec(device, &self.settings, &theme);
+            if let Some(chart) = self.sparks.get(i) {
+                if old.get(i) != Some(&device) {
+                    chart.update(cx, |v, cx| v.set_spec(spec, cx));
+                }
+            } else {
+                let chart = spark_chart(spec, ValueFormat::Percent, &self.hub, cx);
+                self.sparks.push(chart);
+            }
+        }
     }
 
     /// "C0", "C1", … for the logical CPUs.
@@ -289,13 +371,13 @@ impl CpuBox {
         bars.set_cpus(names.into_iter());
     }
 
-    /// The newest valid `CPU_TOTAL` of each logical CPU to the bars. True when a bar's bucket
-    /// changed.
+    /// The newest valid `CPU_TOTAL` and `CPU_FREQ` of each logical CPU to the rows. True when a
+    /// row's 1% or 0.1 GHz bucket changed.
     fn sync_bars(&mut self, snap: &Snapshot) -> bool {
-        let ids = &self.logical_ids;
-        self.bars
-            .borrow_mut()
-            .set_values(ids.iter().map(|id| newest(snap, *id)))
+        let mut bars = self.bars.borrow_mut();
+        let pct = bars.set_values(self.logical_ids.iter().map(|id| newest(snap, *id)));
+        let ghz = bars.set_freqs(self.freq_ids.iter().map(|id| newest(snap, *id)));
+        pct || ghz
     }
 
     /// The value (utilization) and line (clock, temperature) when their inputs changed, or
@@ -369,9 +451,15 @@ impl CpuBox {
         self.title = tr(cx, KEY_TITLE);
         let labels = total_labels(tr(cx, KEY_RANGE));
         self.total.update(cx, |v, cx| v.set_labels(labels, cx));
-        let values = self.bars.borrow().values.clone();
+        let (values, freqs) = {
+            let bars = self.bars.borrow();
+            (bars.values.clone(), bars.freqs.clone())
+        };
         self.sync_names(cx);
-        self.bars.borrow_mut().set_values(values.into_iter());
+        let mut bars = self.bars.borrow_mut();
+        bars.set_values(values.into_iter());
+        bars.set_freqs(freqs.into_iter());
+        drop(bars);
         cx.notify();
     }
 
@@ -379,6 +467,10 @@ impl CpuBox {
         let theme = current(cx).clone();
         let spec = total_spec(self.cpu, &self.settings, &theme);
         self.total.update(cx, |v, cx| v.set_spec(spec, cx));
+        for (chart, &device) in self.sparks.iter().zip(&self.logical) {
+            let spec = core_spec(device, &self.settings, &theme);
+            chart.update(cx, |v, cx| v.set_spec(spec, cx));
+        }
     }
 }
 
@@ -398,11 +490,25 @@ impl Render for CpuBox {
                     .cached(StyleRefinement::default().size_full()),
             )
             .into_any_element();
-        let bars = CoreBars {
-            model: Rc::clone(&self.bars),
-        }
-        .into_any_element();
-        let body = split_body(chart, bars, self.wide, &m).into_any_element();
+        let n = self.logical.len();
+        let s = m.ui_scale;
+        let grid_size = self.grid_size.get();
+        self.grid = core_bars_layout(n, grid_size.width, grid_size.height, s);
+        let rows = div()
+            .relative()
+            .size_full()
+            .child(CoreBars {
+                model: Rc::clone(&self.bars),
+            })
+            .child(core_sparks(&self.sparks, &self.grid, &m))
+            .child(class_probe(
+                Rc::clone(&self.grid_size),
+                self.grid.class(),
+                move |size| core_bars_layout(n, size.width, size.height, s).class(),
+                cx.entity_id(),
+            ))
+            .into_any_element();
+        let body = split_body_share(chart, rows, self.wide, CPU_CHART_SHARE, &m).into_any_element();
         box_frame(
             CPU_BOX_ID,
             Some(DeviceKey(DeviceKey::CPU.into())),

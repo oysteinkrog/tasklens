@@ -3,7 +3,9 @@
 #![cfg(feature = "test-hooks")]
 
 use gpui_kit::px;
-use tl_ui::pages::performance::overview::parts::{CoreBarsModel, core_bars_layout, meter_fill_w};
+use tl_ui::pages::performance::overview::parts::{
+    CoreBarsModel, CoreCell, core_bars_layout, core_cell, ghz_bucket, meter_fill_w,
+};
 
 #[test]
 fn meter_fill_width_rounds_to_physical_px() {
@@ -22,19 +24,79 @@ fn meter_fill_width_rounds_to_physical_px() {
 #[test]
 fn core_bars_layout_32_cores() {
     let l = core_bars_layout(32, px(776.), px(400.), 1.);
-    assert_eq!((l.cols, l.rows), (5, 7));
+    assert_eq!((l.cols, l.rows), (4, 8));
     assert_eq!(l.row_h, px(18.));
-    assert!(l.labels);
+    assert!(l.labels && l.meter && !l.squeezed);
     // Too low for 18 px rows: squeezed, labels kept at 14 px and hidden below.
-    let l = core_bars_layout(32, px(776.), px(7. * 15.), 1.);
+    let l = core_bars_layout(32, px(776.), px(8. * 15.), 1.);
     assert_eq!(l.row_h, px(15.));
-    assert!(l.labels);
+    assert!(l.squeezed && l.labels);
     let l = core_bars_layout(32, px(776.), px(50.), 1.);
     assert_eq!(l.row_h, px(12.));
-    assert!(!l.labels);
+    assert!(!l.labels && !l.meter);
     // Narrower than one cell: one column.
     let l = core_bars_layout(4, px(100.), px(400.), 1.);
     assert_eq!((l.cols, l.rows), (1, 4));
+}
+
+/// crw.53: the CPU box at 1200 × 900 is 776 × 516. Its body is 750 × 456 and the side part
+/// beside the 40% chart is 750 × 0.6 − 12 = 438 px wide: 2 columns of 215 px, 16 rows of 18 px.
+#[test]
+fn core_rows_fit_32_threads_at_1200x900() {
+    let l = core_bars_layout(32, px(438.), px(456.), 1.);
+    assert_eq!((l.cols, l.rows), (2, 16));
+    assert_eq!(l.cell_w, px(215.));
+    assert_eq!(l.row_h, px(18.));
+    assert!(!l.squeezed && l.labels && l.meter);
+    assert_eq!(
+        core_cell(&l, 1.),
+        CoreCell {
+            spark_x: px(32.),
+            spark_w: px(48.),
+            meter_x: px(84.),
+            meter_w: px(43.),
+            pct_right: px(167.),
+        }
+    );
+}
+
+#[test]
+fn core_columns_follow_width() {
+    let cols = |w: f32| core_bars_layout(32, px(w), px(900.), 1.).cols;
+    assert_eq!(cols(170.), 1);
+    assert_eq!(cols(368.), 2);
+    assert_eq!(cols(564.), 3);
+    assert_eq!(cols(752.), 4);
+    // UI scale widens every cell.
+    assert_eq!(core_bars_layout(32, px(752.), px(900.), 2.).cols, 2);
+    // A cell under 188 px gives the meter's room to the sparkline.
+    let l = core_bars_layout(32, px(376.), px(900.), 1.);
+    assert_eq!((l.cols, l.cell_w), (2, px(184.)));
+    assert!(l.labels && !l.meter);
+    let c = core_cell(&l, 1.);
+    assert_eq!((c.spark_w, c.meter_w), (px(64.), px(0.)));
+}
+
+#[test]
+fn core_ghz_bucket_change_only() {
+    assert_eq!(ghz_bucket(3949.), 39);
+    assert_eq!(ghz_bucket(3950.), 40);
+    assert_eq!(ghz_bucket(-5.), 0);
+    let mut model = CoreBarsModel::default();
+    model.set_cpus((0..2).map(|i| format!("C{i}").into()));
+    assert_eq!(model.ghz_labels()[0].as_ref(), "…");
+    assert!(model.set_freqs([Some(3900.), Some(4630.)].into_iter()));
+    assert_eq!(model.ghz_labels()[0].as_ref(), "3.9 GHz");
+    assert_eq!(model.ghz_labels()[1].as_ref(), "4.6 GHz");
+    assert!(!model.set_freqs([Some(3920.), Some(4610.)].into_iter()));
+    assert_eq!(model.freqs[0], Some(3920.));
+    assert!(model.set_freqs([Some(3960.), Some(4610.)].into_iter()));
+    assert_eq!(model.ghz_labels()[0].as_ref(), "4.0 GHz");
+    assert!(model.set_freqs([Some(3960.), None].into_iter()));
+    assert_eq!(model.ghz_labels()[1].as_ref(), "…");
+    let mut text = String::new();
+    model.copy_text(&mut text);
+    assert_eq!(text, "C0\t…\t4.0 GHz\nC1\t…\n");
 }
 
 #[test]
@@ -167,7 +229,10 @@ mod drawn {
             (m.paint_count.get(), m.shape_count.get())
         };
         assert!(paints >= 1, "painted");
-        assert_eq!(shaped, 8, "4 names and 4 percents shaped once");
+        assert_eq!(
+            shaped, 12,
+            "4 names, 4 percents and 4 GHz labels shaped once"
+        );
 
         assert!(
             model
@@ -176,13 +241,27 @@ mod drawn {
         );
         vcx.update(|_, cx| host.update(cx, |_, cx| cx.notify()));
         draw(vcx);
+        let (paints, shaped) = {
+            let m = model.borrow();
+            assert!(m.paint_count.get() > paints, "painted again");
+            assert_eq!(
+                m.shape_count.get(),
+                shaped + 1,
+                "only C1's percent re-shaped"
+            );
+            (m.paint_count.get(), m.shape_count.get())
+        };
+
+        assert!(
+            model
+                .borrow_mut()
+                .set_freqs([None, None, Some(3900.), None].into_iter())
+        );
+        vcx.update(|_, cx| host.update(cx, |_, cx| cx.notify()));
+        draw(vcx);
         let m = model.borrow();
         assert!(m.paint_count.get() > paints, "painted again");
-        assert_eq!(
-            m.shape_count.get(),
-            shaped + 1,
-            "only C1's percent re-shaped"
-        );
+        assert_eq!(m.shape_count.get(), shaped + 1, "only C2's GHz re-shaped");
     }
 }
 
@@ -212,8 +291,9 @@ mod boxes {
     use tl_ui::chart::labels::LabelKind;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
-    use tl_ui::pages::performance::overview::cpu_box::CpuBox;
+    use tl_ui::pages::performance::overview::cpu_box::{CPU_BOX_ID, CpuBox};
     use tl_ui::pages::performance::overview::mem_box::MemBox;
+    use tl_ui::pages::performance::overview::parts::core_spark_id;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -223,8 +303,9 @@ mod boxes {
     struct Host {
         cpu: Entity<CpuBox>,
         mem: Entity<MemBox>,
-        /// The CPU box width.
+        /// The CPU box size.
         cpu_w: f32,
+        cpu_h: f32,
     }
 
     impl Render for Host {
@@ -237,7 +318,7 @@ mod boxes {
                 .child(
                     div()
                         .w(px(self.cpu_w))
-                        .h(px(300.))
+                        .h(px(self.cpu_h))
                         .child(self.cpu.clone().cached(cached())),
                 )
                 .child(
@@ -264,11 +345,16 @@ mod boxes {
 
     /// CPU package 0, logical CPU `id` at `100 + id`, memory 1.
     fn catalog() -> DeviceCatalog {
+        catalog_with(CPUS)
+    }
+
+    /// [`catalog`] with `cpus` logical CPUs.
+    fn catalog_with(cpus: u16) -> DeviceCatalog {
         let mut entries = vec![
             entry(0, DeviceIdentity::CpuPackage),
             entry(1, DeviceIdentity::Memory),
         ];
-        entries.extend((0..CPUS).map(|id| entry(100 + id, DeviceIdentity::CpuLogical { id })));
+        entries.extend((0..cpus).map(|id| entry(100 + id, DeviceIdentity::CpuLogical { id })));
         DeviceCatalog {
             version: 1,
             entries: Arc::from(entries),
@@ -305,8 +391,18 @@ mod boxes {
     }
 
     fn open_with_memory(cx: &mut TestAppContext, memory: DeviceIdx) -> Rig<'_> {
+        open_sized(cx, memory, CPUS, (800., 300.))
+    }
+
+    /// `cpus` logical CPUs and a CPU box of `cpu` (width, height).
+    fn open_sized(
+        cx: &mut TestAppContext,
+        memory: DeviceIdx,
+        cpus: u16,
+        cpu: (f32, f32),
+    ) -> Rig<'_> {
         let engine = FakeEngine::new();
-        engine.publish_with(|s| s.devices = Arc::new(catalog()));
+        engine.publish_with(|s| s.devices = Arc::new(catalog_with(cpus)));
         let client: Arc<dyn EngineClient> = engine.clone();
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -331,7 +427,8 @@ mod boxes {
         let (host, vcx) = cx.add_window_view(move |_, cx| Host {
             cpu: cx.new(|cx| CpuBox::new(&hub, DeviceIdx(0), cx)),
             mem: cx.new(|cx| MemBox::new(&hub, memory, cx)),
-            cpu_w: 800.,
+            cpu_w: cpu.0,
+            cpu_h: cpu.1,
         });
         vcx.simulate_scale_factor_change(1.0);
         let driver = vcx.update(|window, cx| {
@@ -339,7 +436,7 @@ mod boxes {
             AnimationDriver::register(&driver, window, cx);
             driver
         });
-        vcx.simulate_resize(size(px(800.), px(600.)));
+        vcx.simulate_resize(size(px(cpu.0.max(800.)), px(cpu.1 + 300.)));
         draw(vcx);
         Rig {
             engine,
@@ -368,17 +465,25 @@ mod boxes {
 
         /// `CPU_TOTAL` of each logical CPU as the series set.
         fn publish_cores(&mut self, values: [f32; CPUS as usize]) {
+            self.publish_core_series(&values, &[]);
+        }
+
+        /// `CPU_TOTAL` of logical CPU `i` from `pct[i]` and its `CPU_FREQ` from `mhz[i]`, as
+        /// the series set.
+        fn publish_core_series(&mut self, pct: &[f32], mhz: &[f32]) {
             self.version += 1;
             let version = self.version;
-            let mut views: Vec<_> = (0..CPUS)
-                .map(|id| {
-                    series(
-                        100 + id,
-                        MetricId::CPU_TOTAL,
-                        values[usize::from(id)],
-                        version,
-                    )
-                })
+            let total = pct
+                .iter()
+                .enumerate()
+                .map(|(id, &v)| (id, MetricId::CPU_TOTAL, v));
+            let freq = mhz
+                .iter()
+                .enumerate()
+                .map(|(id, &v)| (id, MetricId::CPU_FREQ, v));
+            let mut views: Vec<_> = total
+                .chain(freq)
+                .map(|(id, metric, v)| series(100 + id as u16, metric, v, version))
                 .collect();
             views.sort_by_key(|v| v.id);
             self.publish(|s| {
@@ -669,6 +774,117 @@ mod boxes {
             draw(r.vcx);
             assert_eq!(wide(&mut r), side, "{w} px");
         }
+    }
+
+    /// crw.53: the GHz column follows each core's `CPU_FREQ` series, and the box notifies only
+    /// when a 0.1 GHz bucket changes.
+    #[gpui_kit::test]
+    fn cpu_box_ghz_follows_freq_series(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        let pct = [10., 20., 30., 40.];
+        r.publish_core_series(&pct, &[3900., 4000., 4630., 800.]);
+        let cpu = r.cpu();
+        let ghz = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let c = cpu.read(cx);
+                let bars = c.bars();
+                bars.ghz_labels()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(ghz(&mut r), ["3.9 GHz", "4.0 GHz", "4.6 GHz", "0.8 GHz"]);
+        let before = r.counts();
+
+        // Inside every 0.1 GHz bucket: no notify.
+        r.publish_core_series(&pct, &[3920., 3980., 4610., 820.]);
+        assert_eq!(r.counts()[1], before[1], "same buckets, no notify");
+
+        // One clock crosses a bucket: one notify.
+        r.publish_core_series(&pct, &[3920., 3980., 4610., 1200.]);
+        assert_eq!(r.counts()[1], before[1] + 1, "one notify");
+        assert_eq!(ghz(&mut r)[3], "1.2 GHz");
+
+        let mut text = String::new();
+        r.vcx.update(|_, cx| cpu.read(cx).copy_text(&mut text));
+        assert!(text.contains("C3\t40%\t1.2 GHz\n"), "{text}");
+
+        // No clock samples: the warming glyph.
+        r.publish_core_series(&pct, &[]);
+        assert_eq!(ghz(&mut r), ["…"; 4]);
+    }
+
+    /// crw.53 AC: on a 32-thread fixture every core row shows in the CPU box at 1200 × 900
+    /// (776 × 516), in 2 columns of 18 px rows beside the 40% chart, each with its sparkline.
+    /// The column count follows the box width.
+    #[gpui_kit::test]
+    fn cpu_box_fits_32_threads_at_1200x900(cx: &mut TestAppContext) {
+        const N: u16 = 32;
+        let mut r = open_sized(cx, DeviceIdx(1), N, (776., 516.));
+        let pct: Vec<f32> = (0..N).map(|i| f32::from(i) * 3.).collect();
+        let mhz: Vec<f32> = (0..N).map(|i| 3000. + f32::from(i) * 25.).collect();
+        r.publish_core_series(&pct, &mhz);
+        draw(r.vcx);
+        let cpu = r.cpu();
+        let (layout, sparks) = r.vcx.update(|_, cx| {
+            let c = cpu.read(cx);
+            (c.core_layout(), c.core_sparks().to_vec())
+        });
+        assert!(r.vcx.update(|_, cx| cpu.read(cx).side_by_side()));
+        assert_eq!((layout.cols, layout.rows), (2, 16));
+        assert_eq!(layout.row_h, px(18.));
+        assert!(!layout.squeezed && layout.labels && layout.meter);
+        assert_eq!(sparks.len(), usize::from(N));
+
+        let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box drawn");
+        for i in 0..usize::from(N) {
+            let id: &'static str = Box::leak(core_spark_id(i).into_boxed_str());
+            let b = r
+                .vcx
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("core {i} sparkline drawn"));
+            assert_eq!(b.size, size(px(48.), px(14.)), "core {i} sparkline size");
+            assert!(
+                b.left() >= frame.left()
+                    && b.right() <= frame.right()
+                    && b.bottom() <= frame.bottom(),
+                "core {i} inside the box: {b:?} in {frame:?}"
+            );
+            let (row, col) = (i / 2, i % 2);
+            if col == 1 {
+                let left = r
+                    .vcx
+                    .debug_bounds(Box::leak(core_spark_id(i - 1).into_boxed_str()));
+                let left = left.expect("left neighbour");
+                assert_eq!(b.top(), left.top(), "core {i} beside core {}", i - 1);
+                assert!(b.left() > left.right(), "core {i} in the right column");
+            } else if row > 0 {
+                let above = r
+                    .vcx
+                    .debug_bounds(Box::leak(core_spark_id(i - 2).into_boxed_str()));
+                let above = above.expect("row above");
+                assert_eq!(b.top() - above.top(), px(18.), "core {i} one row lower");
+            }
+        }
+        // The sparklines are bound to their core's series.
+        r.vcx.update(|_, cx| {
+            let chart = sparks[31].read(cx);
+            assert!(chart.resolved()[0].is_some(), "C31 CPU_TOTAL resolved");
+        });
+
+        // The column count follows the width: 1000 px gives a 572 px side part, 3 columns.
+        r.vcx.simulate_resize(size(px(1200.), px(816.)));
+        let host = r.host.clone();
+        r.vcx.update(|_, cx| {
+            host.update(cx, |h, cx| {
+                h.cpu_w = 1000.;
+                cx.notify();
+            })
+        });
+        draw(r.vcx);
+        let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
+        assert_eq!((layout.cols, layout.rows), (3, 11));
     }
 }
 

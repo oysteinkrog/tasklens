@@ -24,9 +24,11 @@ the tasklens theme, laid out from data (UI-PRF-017). The leader recorded these d
 - **Chart motion.** The Overview charts step at the sample rate; smooth sliding is off for them only (crw.46). Revisit after wlf.31.
 - **Top processes box** (owner decision 2026-10-07, crw.45). An opt-in box with the 10 busiest processes by CPU, off by default. `performance.overview_top_processes` turns it on until the layout editor exists. While it is placed the page sets `Demand.process_top`, which starts the process sweep without the history window.
 - **Later.** Saving the layout and the layout editor come in later beads.
-- **Fixed values.** `STACK_W` 720 px; row minimums 280 and 220 px; row weights 3:2; core bar cell
-  140 px; at most 2 GPUs and 8 disk rows; the per-core percent is an integer and its text is
-  re-shaped only when its 1% bucket changes (this settles U-47 for Overview).
+- **Fixed values.** `STACK_W` 720 px; row minimums 280 and 220 px; row weights 3:2; core row
+  cell at least 180 px (215 px at 1200 × 900) with a 48 px sparkline, and the CPU chart takes 40%
+  of a wide CPU box (crw.53, leader decision 2026-10-15); at most 2 GPUs and 8 disk rows; the
+  per-core percent is an integer and its text is re-shaped only when its 1% bucket changes (this
+  settles U-47 for Overview), and the per-core GHz text only when its 0.1 GHz bucket changes.
 
 ## 2026-10-04
 
