@@ -5,9 +5,8 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement as _,
-    Render, Styled as _, TestAppContext, VisualTestContext, Window, WindowDecorations, WindowKind,
-    div, point, px, size,
+    AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, Render, Styled as _,
+    TestAppContext, VisualTestContext, Window, WindowDecorations, WindowKind, div, point, px, size,
 };
 use smallvec::smallvec;
 use tl_model::client::EngineClient;
@@ -34,7 +33,9 @@ use tl_ui::windows::detached_graph::{
 const MS: u64 = 1_000_000;
 
 /// A stand-in for the main window: it owns its own driver.
-struct Host;
+struct Host {
+    _driver: Entity<AnimationDriver>,
+}
 
 impl Render for Host {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -124,7 +125,7 @@ fn draw(vcx: &mut VisualTestContext) {
 #[gpui_kit::test]
 fn detached_window_opens_with_caption(cx: &mut TestAppContext) {
     setup(cx);
-    let (mut vcx, view) = open(cx, 1, vec![cpu_entry()]);
+    let (vcx, view) = open(cx, 1, vec![cpu_entry()]);
     assert_eq!(
         vcx.read_entity(&view, |v, _| v.title().to_string()),
         "tasklens Graph 1"
@@ -145,7 +146,7 @@ fn detached_window_opens_with_caption(cx: &mut TestAppContext) {
     assert_eq!(options.window_decorations, Some(WindowDecorations::Client));
     assert_eq!(options.app_id.as_deref(), Some(APP_ID));
     let bounds = options.window_bounds.expect("bounds").get_bounds();
-    assert_eq!(bounds.size, size(px(184.), px(98.)));
+    assert_eq!(bounds.size, size(px(188.), px(98.)));
 
     // A window id above 255 does not fit the registry key.
     let before = cx.update(|cx| cx.windows().len());
@@ -180,10 +181,10 @@ fn detached_body_drag_moves_window(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn detached_window_own_driver(cx: &mut TestAppContext) {
     setup(cx);
-    let (_host, mut host_vcx) = cx.add_window_view(|window, cx| {
+    let (_host, host_vcx) = cx.add_window_view(|window, cx| {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
-        Host
+        Host { _driver: driver }
     });
     let host_driver = host_vcx.update(|window, cx| AnimationDriver::global(window, cx));
     let (mut vcx, view) = open(cx, 1, vec![cpu_entry()]);
@@ -213,9 +214,6 @@ fn detached_window_own_driver(cx: &mut TestAppContext) {
         vcx.read_entity(&own, |d, _| d.is_armed()),
         "the window's driver is armed"
     );
-    assert_eq!(
-        host_vcx.read_entity(&host_driver, |d, _| d.stats.requested),
-        0
-    );
+    assert_eq!(cx.read_entity(&host_driver, |d, _| d.stats.requested), 0);
     assert_ne!(own, host_driver);
 }

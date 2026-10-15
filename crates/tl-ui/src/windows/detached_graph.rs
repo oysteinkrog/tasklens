@@ -158,7 +158,8 @@ pub fn open_detached(
         let options = detached_window_options(window_size, cx);
         let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
             let this = cx.new(|cx| DetachedGraphWindow::new(window_id, cards, window, cx));
-            window.focus(&this.read(cx).focus);
+            let focus = this.read(cx).focus.clone();
+            window.focus(&focus, cx);
             this
         })?;
         opened = Some(handle);
@@ -166,7 +167,7 @@ pub fn open_detached(
     };
     match cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
         Some(registry) => {
-            let outcome = registry.update(cx, |r, cx| r.open_or_focus(key, cx, open));
+            let outcome = registry.update(cx, |r, cx| r.open_or_focus(key.clone(), cx, open));
             match outcome {
                 OpenOutcome::Opened => {}
                 OpenOutcome::Focused => opened = registry.read(cx).get(&key),

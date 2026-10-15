@@ -2431,6 +2431,7 @@ minigraph-label-gpu-temp = GPU temp
 minigraph-tip-total = Total
 minigraph-tip-kernel = Kernel
 minigraph-toast-full = No space for more minigraphs
+minigraph-toast-detach-failed = Could not open the graph window
 minigraph-toast-reset = Minigraph layout reset
 minigraph-menu-hide = Hide graph
 minigraph-menu-remove = Remove graph

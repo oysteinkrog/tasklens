@@ -695,7 +695,7 @@ fn flag_mut<'a>(graphs: &'a mut GraphsSettings, source: &MinigraphSource) -> Opt
 }
 
 /// The GPU keys of `performance.device_order`, for a card with no GPU key (R-085).
-fn gpu_order(cx: &App) -> Vec<DeviceKey> {
+pub(crate) fn gpu_order(cx: &App) -> Vec<DeviceKey> {
     if !cx.has_global::<TlSettings>() {
         return Vec::new();
     }
