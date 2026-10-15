@@ -10,8 +10,8 @@
 use gpui_kit::{
     App, AppContext as _, BoxShadow, Context, Entity, FocusHandle, Hsla, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render,
-    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription,
-    Window, div, point, px,
+    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+    Subscription, WeakEntity, Window, div, point, px,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -51,6 +51,22 @@ const NAMED_FILL_ALPHA: f32 = 0.85;
 const HOVER_BORDER_ALPHA: f32 = 0.5;
 /// The value of a card whose series is absent or has no valid sample yet (WarmingUp).
 const WARMING_UP_TEXT: &str = "\u{2026}";
+/// Pointer travel in px before a press on a card becomes a drag (UI-PRF-043). GPUI starts its
+/// own drag at 2 px, so the ghost and the panel check this themselves.
+pub const DRAG_THRESHOLD: f64 = 4.;
+/// Opacity of the card that follows the pointer (UI-PRF-043).
+const GHOST_OPACITY: f32 = 0.85;
+
+/// The payload of a card drag (UI-PRF-043). The panel takes the drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DraggedMinigraph {
+    pub id: MinigraphId,
+}
+
+/// `to` is at least `DRAG_THRESHOLD` from `press`.
+pub fn past_threshold(press: Point<Pixels>, to: Point<Pixels>) -> bool {
+    (to - press).magnitude() >= DRAG_THRESHOLD
+}
 
 /// A card's data state. Process cards use the others (E26-012).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,9 +93,10 @@ pub struct MinigraphCard {
     hover: bool,
     /// The pointer is on the CPU card's label row, which blocks the card under it.
     row_hover: bool,
-    /// The drag look is E26-008.
-    #[allow(dead_code, reason = "read from E26-008 on")]
+    /// The card is being dragged: it draws only the dashed outline of its slot.
     dragging: bool,
+    /// Where the left button went down on the card, for the 4 px drag threshold.
+    press: Option<Point<Pixels>>,
     hub: Entity<SnapshotHub>,
     _hub_sub: Subscription,
     /// Where the menu items go when nothing in the window has focus (cards take no focus).
@@ -132,6 +149,7 @@ impl MinigraphCard {
             hover: false,
             row_hover: false,
             dragging: false,
+            press: None,
             hub: hub.clone(),
             _hub_sub,
             menu_focus: cx.focus_handle(),
@@ -159,6 +177,44 @@ impl MinigraphCard {
 
     pub fn state(&self) -> CardState {
         self.state
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// Where the last left press on the card was, until the drag ends.
+    pub fn press(&self) -> Option<Point<Pixels>> {
+        self.press
+    }
+
+    pub fn set_dragging(&mut self, dragging: bool, cx: &mut Context<Self>) {
+        if self.dragging != dragging {
+            self.dragging = dragging;
+            cx.notify();
+        }
+    }
+
+    /// Clears the press and the drag look.
+    pub fn end_drag(&mut self, cx: &mut Context<Self>) {
+        self.press = None;
+        self.set_dragging(false, cx);
+    }
+
+    /// The left press and the drag on `el` (the card, or the CPU label row that blocks it).
+    fn draggable(
+        &self,
+        el: Stateful<gpui_kit::Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<gpui_kit::Div> {
+        let card = cx.weak_entity();
+        el.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, ev: &MouseDownEvent, _, _| this.press = Some(ev.position)),
+        )
+        .on_drag(DraggedMinigraph { id: self.id }, move |_, _, _, cx| {
+            MinigraphDragGhost::new(&card, cx)
+        })
     }
 
     /// The CPU card's tooltip lines; `None` for every other source.
@@ -376,6 +432,18 @@ impl Render for MinigraphCard {
         let m = metrics(cx);
         let t = current(cx);
         let s = m.ui_scale;
+        if self.dragging {
+            // The home slot while the card follows the pointer: 1 px accent dashed outline.
+            return div()
+                .id(("MinigraphCard", u64::from(self.id.0)))
+                .debug_selector(|| "MinigraphCard-home".into())
+                .w(px(MINI_CARD_W * s))
+                .h(px(MINI_CARD_H * s))
+                .border_1()
+                .border_dashed()
+                .border_color(t.accent)
+                .rounded(m.radius_card);
+        }
         let border = if self.hover || self.row_hover {
             t.accent.opacity(HOVER_BORDER_ALPHA)
         } else {
@@ -395,9 +463,12 @@ impl Render for MinigraphCard {
             .text_size(m.text.sm)
             .text_color(t.text_primary)
             .child(
+                // A press on the label text starts no drag (UI-PRF-043).
                 div()
+                    .id("MinigraphCard-label")
                     .debug_selector(|| "MinigraphCard-label".into())
                     .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(self.label.clone()),
             )
             .child(
@@ -406,7 +477,7 @@ impl Render for MinigraphCard {
                     .font_features(TNUM.clone())
                     .child(self.value.clone()),
             );
-        let mut card = div()
+        let card = div()
             .id(("MinigraphCard", u64::from(self.id.0)))
             .debug_selector(|| "MinigraphCard".into())
             .relative()
@@ -416,7 +487,9 @@ impl Render for MinigraphCard {
             .border_1()
             .border_color(border)
             .rounded(m.radius_card)
-            .overflow_hidden()
+            .overflow_hidden();
+        let mut card = self
+            .draggable(card, cx)
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
@@ -442,9 +515,10 @@ impl Render for MinigraphCard {
         }
         // The CPU tooltip belongs to the label row only; below it the chart's hover readout
         // takes over. The row blocks the mouse, so the chart under it shows no readout; it then
-        // keeps the card's hover border and right-click itself.
-        if let Some(lines) = &self.tip {
-            text_row = text_row
+        // keeps the card's hover border, right-click and drag itself.
+        if let Some(lines) = self.tip.clone() {
+            text_row = self
+                .draggable(text_row, cx)
                 .occlude()
                 .tooltip(TlTooltip::lines(lines.to_vec()).build())
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -475,6 +549,70 @@ pub fn card_shadow(theme: &TlTheme, ui_scale: f32) -> Option<BoxShadow> {
         spread_radius: px(0.),
         inset: false,
     })
+}
+
+/// The card that follows the pointer during a drag (UI-PRF-043): the label and value on the card
+/// background at opacity 0.85 with the card shadow. GPUI shows it from 2 px; it draws nothing
+/// until the pointer is `DRAG_THRESHOLD` from the press.
+pub struct MinigraphDragGhost {
+    label: SharedString,
+    value: SharedString,
+    press: Option<Point<Pixels>>,
+}
+
+impl MinigraphDragGhost {
+    fn new(card: &WeakEntity<MinigraphCard>, cx: &mut App) -> Entity<Self> {
+        let (label, value, press) = card.upgrade().map_or_else(Default::default, |c| {
+            let c = c.read(cx);
+            (c.label.clone(), c.value.clone(), c.press)
+        });
+        cx.new(|_| Self {
+            label,
+            value,
+            press,
+        })
+    }
+}
+
+impl Render for MinigraphDragGhost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mouse = window.mouse_position();
+        if self.press.is_some_and(|p| !past_threshold(p, mouse)) {
+            return div();
+        }
+        let m = metrics(cx);
+        let t = current(cx);
+        let s = m.ui_scale;
+        let mut ghost = div()
+            .debug_selector(|| "MinigraphDragGhost".into())
+            .w(px(MINI_CARD_W * s))
+            .h(px(MINI_CARD_H * s))
+            .opacity(GHOST_OPACITY)
+            .bg(t.list_bg)
+            .border_1()
+            .border_color(t.accent.opacity(HOVER_BORDER_ALPHA))
+            .rounded(m.radius_card)
+            .child(
+                div()
+                    .h(px(TEXT_ROW_H * s))
+                    .px(m.sp[3])
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_size(m.text.sm)
+                    .text_color(t.text_primary)
+                    .child(
+                        div()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child(self.label.clone()),
+                    )
+                    .child(div().font_features(TNUM.clone()).child(self.value.clone())),
+            );
+        if let Some(shadow) = card_shadow(t, s) {
+            ghost.style().box_shadow = Some(vec![shadow]);
+        }
+        ghost
+    }
 }
 
 /// (fill, line) of the card's first series. `Accent` uses the source's palette pair (VRAM and

@@ -594,9 +594,9 @@ mod panel {
     use std::time::Duration;
 
     use gpui_kit::{
-        App, AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton,
-        ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext,
-        VisualTestContext, Window, div, px, size,
+        App, AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton,
+        ParentElement as _, Pixels, Point, Render, StyleRefinement, Styled as _, TestAppContext,
+        VisualTestContext, Window, div, point, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::demand::CpuDemand;
@@ -1087,6 +1087,267 @@ mod panel {
             .cloned()
             .expect("persisted");
         assert_eq!(saved.minigraphs, state);
+    }
+
+    /// GPU and VRAM off: CPU 0, Memory 1, Disk 2, Network 3.
+    fn four_cards(cx: &mut TestAppContext) -> Rig {
+        let mut r = rig(cx);
+        r.set(SettingKey::GraphsMinigraphGpu, false);
+        r.set(SettingKey::GraphsMinigraphVram, false);
+        assert_eq!(
+            r.attached(),
+            [
+                (MinigraphSource::Cpu, 0),
+                (MinigraphSource::Memory, 1),
+                (MinigraphSource::Disk, 2),
+                (MinigraphSource::Network, 3),
+            ]
+        );
+        r
+    }
+
+    fn slot_bounds(r: &mut Rig, slot: u16) -> Bounds<Pixels> {
+        let selector: &'static str = Box::leak(format!("MinigraphSlot-{slot}").into_boxed_str());
+        r.vcx.debug_bounds(selector).expect("slot drawn")
+    }
+
+    /// The centre of slot 9 (row 2, column 1), which holds no card: 16 + 188 px from the right,
+    /// 16 + 2 × 98 px from the bottom of the 1000 × 600 host.
+    fn slot_9_center() -> Point<Pixels> {
+        point(px(1000. - 204. - 90.), px(600. - 212. - 45.))
+    }
+
+    /// Presses the CPU card in the middle of its chart (below the label row).
+    fn press_cpu(r: &mut Rig) -> Point<Pixels> {
+        let at = slot_bounds(r, 0).center();
+        r.vcx
+            .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        draw(&mut r.vcx);
+        at
+    }
+
+    /// Moves the pressed pointer from `from` to `to` in 4 steps, drawing after each.
+    fn drag_to(r: &mut Rig, from: Point<Pixels>, to: Point<Pixels>) {
+        for i in 1..=4 {
+            let t = i as f32 / 4.;
+            let p = point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            r.vcx
+                .simulate_mouse_move(p, MouseButton::Left, Modifiers::none());
+            draw(&mut r.vcx);
+        }
+    }
+
+    fn release(r: &mut Rig, at: Point<Pixels>) {
+        r.vcx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        draw(&mut r.vcx);
+    }
+
+    /// The slot each card is drawn at, by source, in slot order.
+    fn preview(r: &mut Rig) -> Vec<(MinigraphSource, u16)> {
+        let panel = r.panel.clone();
+        r.vcx.update(|_, cx| {
+            let p = panel.read(cx);
+            let mut v: Vec<_> = p
+                .preview_slots(cx)
+                .into_iter()
+                .map(|(id, slot)| {
+                    let e = p.entries().iter().find(|e| e.id == id).expect("entry");
+                    (e.source.clone(), slot)
+                })
+                .collect();
+            v.sort_by_key(|(_, slot)| *slot);
+            v
+        })
+    }
+
+    fn cpu_dragging(r: &mut Rig) -> bool {
+        let panel = r.panel.clone();
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        r.vcx.update(|_, cx| {
+            let p = panel.read(cx);
+            let card = p.cards().iter().find(|(id, _)| *id == cpu).expect("CPU");
+            card.1.read(cx).is_dragging()
+        })
+    }
+
+    fn reordered() -> Vec<(MinigraphSource, u16)> {
+        vec![
+            (MinigraphSource::Memory, 0),
+            (MinigraphSource::Disk, 1),
+            (MinigraphSource::Cpu, 2),
+            (MinigraphSource::Network, 3),
+        ]
+    }
+
+    #[gpui_kit::test]
+    fn drag_shifts_cards(cx: &mut TestAppContext) {
+        let mut r = four_cards(cx);
+        let before = r.attached();
+        let target = slot_bounds(&mut r, 2).center();
+        let from = press_cpu(&mut r);
+        drag_to(&mut r, from, target);
+        assert!(cpu_dragging(&mut r), "the CPU card shows its home outline");
+        // Memory and Disk shift right by one slot; the stored layout stays until the drop.
+        assert_eq!(preview(&mut r), reordered());
+        assert_eq!(r.attached(), before);
+        assert!(r.vcx.debug_bounds("MinigraphCard-home").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn drop_reorders_and_persists(cx: &mut TestAppContext) {
+        let mut r = four_cards(cx);
+        let target = slot_bounds(&mut r, 2).center();
+        let from = press_cpu(&mut r);
+        drag_to(&mut r, from, target);
+        release(&mut r, target);
+        assert_eq!(r.attached(), reordered());
+        assert!(!cpu_dragging(&mut r));
+        assert_eq!(preview(&mut r), reordered());
+        r.vcx.executor().advance_clock(Duration::from_millis(600));
+        draw(&mut r.vcx);
+        let saved = r
+            .saved
+            .lock()
+            .expect("lock")
+            .last()
+            .cloned()
+            .expect("persisted");
+        let slot = |source: &str| {
+            saved
+                .minigraphs
+                .iter()
+                .find(|m| m.source == source)
+                .map(|m| m.slot)
+        };
+        assert_eq!(
+            [slot("memory"), slot("disk"), slot("cpu"), slot("network")],
+            [Some(0), Some(1), Some(2), Some(3)]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn drag_no_holes(cx: &mut TestAppContext) {
+        let mut r = four_cards(cx);
+        let from = press_cpu(&mut r);
+        drag_to(&mut r, from, slot_9_center());
+        let over = r.vcx.update(|_, cx| {
+            r.panel.read(cx).slot_at(
+                slot_9_center(),
+                Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(600.))),
+            )
+        });
+        assert_eq!(over, Some(9));
+        release(&mut r, slot_9_center());
+        assert_eq!(
+            r.attached(),
+            [
+                (MinigraphSource::Memory, 0),
+                (MinigraphSource::Disk, 1),
+                (MinigraphSource::Network, 2),
+                (MinigraphSource::Cpu, 3),
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn drag_threshold_4px(cx: &mut TestAppContext) {
+        let mut r = four_cards(cx);
+        r.vcx.executor().advance_clock(Duration::from_millis(600));
+        draw(&mut r.vcx);
+        let saves = r.saved.lock().expect("lock").len();
+        let before = r.attached();
+        let from = press_cpu(&mut r);
+        let to = point(from.x - px(3.), from.y);
+        drag_to(&mut r, from, to);
+        let dragging = r.vcx.update(|_, cx| r.panel.read(cx).dragging());
+        assert_eq!(dragging, None, "3 px starts no drag");
+        assert!(!cpu_dragging(&mut r));
+        assert!(r.vcx.debug_bounds("MinigraphDragGhost").is_none());
+        release(&mut r, to);
+        assert_eq!(r.attached(), before);
+        assert_eq!(preview(&mut r), before);
+        r.vcx.executor().advance_clock(Duration::from_millis(600));
+        draw(&mut r.vcx);
+        assert_eq!(
+            r.saved.lock().expect("lock").len(),
+            saves,
+            "nothing persisted"
+        );
+
+        // 4 px does start one.
+        let from = press_cpu(&mut r);
+        drag_to(&mut r, from, point(from.x - px(4.), from.y));
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        let dragging = r.vcx.update(|_, cx| r.panel.read(cx).dragging());
+        assert_eq!(dragging, Some(cpu));
+    }
+
+    #[gpui_kit::test]
+    fn drop_outside_grid_restores(cx: &mut TestAppContext) {
+        let mut r = four_cards(cx);
+        let before = r.attached();
+        // The 8 px gap between Memory (slot 1) and Disk (slot 2), then the host's top left.
+        let gap = point(
+            slot_bounds(&mut r, 1).left() - px(4.),
+            slot_bounds(&mut r, 1).center().y,
+        );
+        for drop_at in [gap, point(px(2.), px(2.))] {
+            let target = slot_bounds(&mut r, 2).center();
+            let from = press_cpu(&mut r);
+            drag_to(&mut r, from, target);
+            assert_eq!(preview(&mut r), reordered());
+            drag_to(&mut r, target, drop_at);
+            assert_eq!(preview(&mut r), before, "off a slot shows the old order");
+            release(&mut r, drop_at);
+            assert_eq!(r.attached(), before);
+            let dragging = r.vcx.update(|_, cx| r.panel.read(cx).dragging());
+            assert_eq!(dragging, None);
+            assert!(!cpu_dragging(&mut r));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn drag_preview_instant_under_reduce_motion(cx: &mut TestAppContext) {
+        let frames = |r: &mut Rig| -> usize {
+            (0..3)
+                .map(|_| {
+                    r.vcx.run_until_parked();
+                    r.vcx.update(|window, cx| {
+                        let queued = window.simulate_next_frame(cx);
+                        window.draw(cx).clear(cx);
+                        queued
+                    })
+                })
+                .sum()
+        };
+        // With animations on, the shift requests frames.
+        let mut r = four_cards(cx);
+        let target = slot_bounds(&mut r, 2).center();
+        let from = press_cpu(&mut r);
+        drag_to(&mut r, from, target);
+        assert!(frames(&mut r) > 0, "the shift animates");
+        release(&mut r, target);
+
+        r.set(SettingKey::MotionAnimations, false);
+        frames(&mut r);
+        let target = slot_bounds(&mut r, 3).center();
+        let from = slot_bounds(&mut r, 0).center();
+        r.vcx
+            .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        draw(&mut r.vcx);
+        drag_to(&mut r, from, target);
+        // Memory (now slot 0) over slot 3.
+        assert_eq!(
+            preview(&mut r),
+            [
+                (MinigraphSource::Disk, 0),
+                (MinigraphSource::Cpu, 1),
+                (MinigraphSource::Network, 2),
+                (MinigraphSource::Memory, 3),
+            ]
+        );
+        assert_eq!(frames(&mut r), 0, "no animation frames");
     }
 }
 

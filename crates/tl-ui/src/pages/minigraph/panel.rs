@@ -6,31 +6,38 @@
 //! card set (tl-app debounces the write by 500 ms), handles `ResetMinigraphLayout`,
 //! `MinigraphHide` and `MinigraphRemove`, and sends the cards' demand as one surface while the
 //! Processes tab is shown (as the process table does, pdu.52). It re-renders only when the card
-//! set changes; each card is a cached view that re-renders on its own.
+//! set or the drag preview changes; each card is a cached view that re-renders on its own.
+//!
+//! Dragging a card (UI-PRF-043, PERF-082) previews the new order while the pointer is over a slot
+//! and moves the card there on drop, with no holes.
 
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, Global, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StyleRefinement, Styled as _, Subscription, WeakEntity, Window,
-    div, px,
+    Animation, AnimationExt as _, App, AppContext as _, Bounds, Context, DragMoveEvent, ElementId,
+    Entity, Global, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
+    ParentElement as _, Pixels, Point, Render, StyleRefinement, Styled as _, Subscription,
+    WeakEntity, Window, div, px,
 };
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::settings::GraphsSettings;
 
 use super::GraphColor;
-use super::actions::{MinigraphHide, MinigraphRemove, MinigraphSetRange, ResetMinigraphLayout};
-use super::card::{MINI_CARD_H, MINI_CARD_W, MinigraphCard};
-use super::sources::{
-    GraphColumn, MAX_SLOTS, MinigraphEntry, MinigraphId, MinigraphSource, default_entries,
-    from_state, slot_cell, to_state,
+use super::actions::{
+    MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetRange, ResetMinigraphLayout,
 };
+use super::card::{DraggedMinigraph, MINI_CARD_H, MINI_CARD_W, MinigraphCard, past_threshold};
+use super::sources::{
+    COLS, GraphColumn, MAX_SLOTS, MinigraphEntry, MinigraphId, MinigraphSource, ROWS,
+    default_entries, from_state, slot_cell, to_state,
+};
+use crate::components::motion::{M_FAST, ease_out_cubic};
 use crate::components::toast::ToastKind;
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::pages::performance::{DeviceKey, DeviceKind};
-use crate::settings_global::{SettingValue, TlSettings};
+use crate::settings_global::{SettingValue, TlSettings, animations_on};
 use crate::theme::metrics;
 use crate::window::main::push_main_toast;
 
@@ -56,6 +63,19 @@ const SYSTEM: [(MinigraphSource, GraphColumn); 7] = [
     (MinigraphSource::GpuTemp(None), GraphColumn::Gpu),
 ];
 
+/// A card drag past the 4 px threshold (UI-PRF-043).
+struct DragPreview {
+    id: MinigraphId,
+    /// The slot under the pointer; `None` in a gap or off the grid, which shows the old order.
+    over: Option<u16>,
+    /// `over` before its last change; the shift animates from that order.
+    from: Option<u16>,
+    /// Counts the changes of `over`, so each shift starts a new animation.
+    epoch: usize,
+    /// The panel bounds from the last drag move.
+    bounds: Bounds<Pixels>,
+}
+
 /// The app's panel, set by `MinigraphPanel::new` (ADR-009: one panel per app). The shell menu
 /// and the row menu reach the panel through it without the Processes page.
 pub struct GlobalMinigraphPanel(pub WeakEntity<MinigraphPanel>);
@@ -74,6 +94,9 @@ pub struct MinigraphPanel {
     active: bool,
     /// The `graphs` section the panel last followed.
     graphs: GraphsSettings,
+    drag: Option<DragPreview>,
+    /// `ui_scale` of the last render, for `slot_at`.
+    scale: f32,
     _settings_sub: Option<Subscription>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
@@ -121,6 +144,8 @@ impl MinigraphPanel {
             demand: demand.clone(),
             active: false,
             graphs: graphs.clone(),
+            drag: None,
+            scale: 1.,
             _settings_sub,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -161,6 +186,136 @@ impl MinigraphPanel {
     /// The attached cards, sorted by slot.
     pub fn cards(&self) -> &[(MinigraphId, Entity<MinigraphCard>)] {
         &self.cards
+    }
+
+    /// The card being dragged past the 4 px threshold.
+    pub fn dragging(&self) -> Option<MinigraphId> {
+        self.drag.as_ref().map(|d| d.id)
+    }
+
+    /// The slot each attached card is drawn at: the drag preview order while a dragged card is
+    /// over a slot, else the stored slots.
+    pub fn preview_slots(&self, cx: &App) -> Vec<(MinigraphId, u16)> {
+        let over = self.drag.as_ref().map(|d| (d.id, d.over));
+        let slots = self.arranged(over, cx);
+        self.cards.iter().map(|(id, _)| *id).zip(slots).collect()
+    }
+
+    /// The slot under `p`, from the 4 × 3 slot rects laid out from the bottom right of `bounds`.
+    /// A gap or a point off the grid gives `None`; an empty slot counts.
+    pub fn slot_at(&self, p: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<u16> {
+        let s = self.scale;
+        let x = f32::from(bounds.right() - p.x) / s - MARGIN;
+        let y = f32::from(bounds.bottom() - p.y) / s - MARGIN;
+        let cell = |d: f32, size: f32, count: u16| {
+            if d <= 0. {
+                return None;
+            }
+            let i = (d / (size + GAP)).floor();
+            let inside = d - i * (size + GAP);
+            (i < f32::from(count) && inside > 0. && inside <= size).then_some(i as u16)
+        };
+        let col = cell(x, MINI_CARD_W, COLS)?;
+        let row = cell(y, MINI_CARD_H, ROWS)?;
+        Some(row * COLS + col)
+    }
+
+    /// `MinigraphMoveToSlot`: the card takes `slot` and the others shift to fill. The attached
+    /// cards then sit at slots 0 to n - 1 in that order (no holes), so a slot past the last card
+    /// is the next free slot.
+    pub fn move_to_slot(&mut self, id: MinigraphId, slot: u16, cx: &mut Context<Self>) {
+        let mut order: Vec<(u16, MinigraphId)> = self.attached().map(|e| (e.slot, e.id)).collect();
+        order.sort_unstable();
+        let mut order: Vec<MinigraphId> = order.into_iter().map(|(_, id)| id).collect();
+        let Some(from) = order.iter().position(|o| *o == id) else {
+            return;
+        };
+        move_within(&mut order, from, slot);
+        let mut moved = false;
+        for (id, slot) in order.into_iter().zip(0u16..) {
+            if let Some(e) = self.entries.iter_mut().find(|e| e.id == id && !e.detached) {
+                moved |= e.slot != slot;
+                e.slot = slot;
+            }
+        }
+        if moved {
+            self.changed(cx);
+        }
+    }
+
+    /// The slot of each card in `cards` order, with `dragged` moved to its slot under the
+    /// pointer. With no slot under the pointer the stored slots stay.
+    fn arranged(&self, dragged: Option<(MinigraphId, Option<u16>)>, cx: &App) -> Vec<u16> {
+        let from = dragged
+            .and_then(|(id, over)| Some((self.cards.iter().position(|(c, _)| *c == id)?, over?)));
+        let Some((from, over)) = from else {
+            return self
+                .cards
+                .iter()
+                .map(|(_, c)| c.read(cx).entry.slot)
+                .collect();
+        };
+        let mut order: Vec<usize> = (0..self.cards.len()).collect();
+        move_within(&mut order, from, over);
+        let mut slots = vec![0; order.len()];
+        for (i, slot) in order.into_iter().zip(0u16..) {
+            slots[i] = slot;
+        }
+        slots
+    }
+
+    /// A drag move of a card: starts the preview past 4 px and follows the slot under the
+    /// pointer. Re-renders only when that slot changes.
+    fn on_drag_move(&mut self, ev: &DragMoveEvent<DraggedMinigraph>, cx: &mut Context<Self>) {
+        let id = ev.drag(cx).id;
+        let pos = ev.event.position;
+        if self.drag.is_none() {
+            let Some((_, card)) = self.cards.iter().find(|(c, _)| *c == id) else {
+                return;
+            };
+            if !card
+                .read(cx)
+                .press()
+                .is_some_and(|p| past_threshold(p, pos))
+            {
+                return;
+            }
+            card.update(cx, |c, cx| c.set_dragging(true, cx));
+            self.drag = Some(DragPreview {
+                id,
+                over: None,
+                from: None,
+                epoch: 0,
+                bounds: ev.bounds,
+            });
+        }
+        let over = self.slot_at(pos, ev.bounds);
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        drag.bounds = ev.bounds;
+        if drag.over != over {
+            drag.from = drag.over;
+            drag.over = over;
+            drag.epoch = drag.epoch.wrapping_add(1);
+            cx.notify();
+        }
+    }
+
+    /// A left release. After a drag, a release at `at` over a slot moves the card there;
+    /// anywhere else the cards go back to their slots.
+    fn end_drag(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let drag = self.drag.take();
+        for (_, card) in &self.cards {
+            card.update(cx, |c, cx| c.end_drag(cx));
+        }
+        let Some(drag) = drag else {
+            return;
+        };
+        if let Some(slot) = self.slot_at(at, drag.bounds) {
+            self.move_to_slot(drag.id, slot, cx);
+        }
+        cx.notify();
     }
 
     /// Adds a system card at the next free slot. `Err` when 12 cards are attached; the caller
@@ -435,9 +590,20 @@ fn register_actions(cx: &mut Context<MinigraphPanel>) {
     app.on_action(move |a: &MinigraphRemove, cx| {
         let _ = panel.update(cx, |p, cx| p.remove(a.id, cx));
     });
+    let panel = weak.clone();
+    app.on_action(move |a: &MinigraphMoveToSlot, cx| {
+        let _ = panel.update(cx, |p, cx| p.move_to_slot(a.id, a.slot, cx));
+    });
     app.on_action(move |a: &MinigraphSetRange, cx| {
         let _ = weak.update(cx, |p, cx| p.set_range(a.id, a.secs, cx));
     });
+}
+
+/// Moves `v[from]` to index `to`, or to the end when `to` is past it.
+fn move_within<T>(v: &mut Vec<T>, from: usize, to: u16) {
+    let item = v.remove(from);
+    let to = usize::from(to).min(v.len());
+    v.insert(to, item);
 }
 
 /// Same system kind; a GPU key does not count.
@@ -486,7 +652,8 @@ impl Render for MinigraphPanel {
         self.render_count.set(self.render_count.get() + 1);
         // The host mounts the panel cached with an `absolute().inset_0()` style over the
         // Processes table; a cached view lays out as its own root, so the root fills that box.
-        // No handlers on the panel itself, so it is no hitbox: only the cards take the pointer.
+        // The drag and drop handlers make the root a normal hitbox: it does not block the
+        // table, and only the cards take clicks.
         let mut root = div()
             .id("MinigraphPanel")
             .debug_selector(|| "MinigraphPanel".into())
@@ -497,31 +664,80 @@ impl Render for MinigraphPanel {
             .on_action(cx.listener(|this, a: &MinigraphRemove, _, cx| this.remove(a.id, cx)))
             .on_action(
                 cx.listener(|this, a: &MinigraphSetRange, _, cx| this.set_range(a.id, a.secs, cx)),
+            )
+            .on_action(cx.listener(|this, a: &MinigraphMoveToSlot, _, cx| {
+                this.move_to_slot(a.id, a.slot, cx)
+            }))
+            .on_drag_move(
+                cx.listener(|this, ev: &DragMoveEvent<DraggedMinigraph>, _, cx| {
+                    this.on_drag_move(ev, cx)
+                }),
+            )
+            .on_drop(cx.listener(|this, _: &DraggedMinigraph, window, cx| {
+                this.end_drag(window.mouse_position(), cx)
+            }))
+            // GPUI drops the drag on a release off the panel and fires no drop. A card's blocking
+            // label row also hides the panel from the pointer, so the slot still decides.
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseUpEvent, _, cx| this.end_drag(ev.position, cx)),
             );
+        let s = metrics(cx).ui_scale;
+        self.scale = s;
         if self.cards.is_empty() {
             return root;
         }
-        let s = metrics(cx).ui_scale;
         let (w, h) = (MINI_CARD_W * s, MINI_CARD_H * s);
-        for (id, card) in &self.cards {
-            let slot = card.read(cx).entry.slot;
+        let offset = |slot: u16| {
             let (row, col) = slot_cell(slot);
-            let right = (MARGIN + f32::from(col) * (MINI_CARD_W + GAP)) * s;
-            let bottom = (MARGIN + f32::from(row) * (MINI_CARD_H + GAP)) * s;
-            root = root.child(
-                div()
-                    .id(("MinigraphSlot", u64::from(id.0)))
-                    .debug_selector(move || format!("MinigraphSlot-{slot}"))
-                    .absolute()
-                    .right(px(right))
-                    .bottom(px(bottom))
-                    .w(px(w))
-                    .h(px(h))
-                    .child(
-                        card.clone()
-                            .cached(StyleRefinement::default().w(px(w)).h(px(h))),
-                    ),
-            );
+            (
+                (MARGIN + f32::from(col) * (MINI_CARD_W + GAP)) * s,
+                (MARGIN + f32::from(row) * (MINI_CARD_H + GAP)) * s,
+            )
+        };
+        let drag = self.drag.as_ref().map(|d| (d.id, d.over, d.from, d.epoch));
+        let now = self.arranged(drag.map(|(id, over, _, _)| (id, over)), cx);
+        // The order before the last change of the slot under the pointer, to slide from.
+        let before = match drag {
+            Some((id, _, from, _)) if animations_on(cx) => {
+                Some(self.arranged(Some((id, from)), cx))
+            }
+            _ => None,
+        };
+        for (i, (id, card)) in self.cards.iter().enumerate() {
+            let slot = now[i];
+            let (right, bottom) = offset(slot);
+            let el = div()
+                .id(("MinigraphSlot", u64::from(id.0)))
+                .debug_selector(move || format!("MinigraphSlot-{slot}"))
+                .absolute()
+                .right(px(right))
+                .bottom(px(bottom))
+                .w(px(w))
+                .h(px(h))
+                .child(
+                    card.clone()
+                        .cached(StyleRefinement::default().w(px(w)).h(px(h))),
+                );
+            let old = before.as_ref().map(|b| b[i]).filter(|old| *old != slot);
+            match (old, drag) {
+                (Some(old), Some((_, _, _, epoch))) => {
+                    let (r0, b0) = offset(old);
+                    let id = ElementId::NamedInteger(
+                        format!("MinigraphShift-{}", id.0).into(),
+                        epoch as u64,
+                    );
+                    root = root.child(el.with_animation(
+                        id,
+                        Animation::new(M_FAST).with_easing(ease_out_cubic),
+                        move |el, t| {
+                            el.right(px(r0 + (right - r0) * t))
+                                .bottom(px(b0 + (bottom - b0) * t))
+                        },
+                    ));
+                }
+                _ => root = root.child(el),
+            }
         }
         root
     }
