@@ -17,7 +17,7 @@ pub struct CardMenuCtx {
     pub range_s: u16,
     pub color: GraphColor,
     pub detached: bool,
-    /// The 5 and 10 minute ranges; false before E26-009.
+    /// The 5 and 10 minute ranges (E26-009, P2).
     pub long_ranges: bool,
     /// The Graph color submenu; false before E26-010.
     pub colors: bool,

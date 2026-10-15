@@ -674,6 +674,10 @@ mod panel {
     }
 
     fn rig(cx: &mut TestAppContext) -> Rig {
+        rig_with(cx, UiState::default())
+    }
+
+    fn rig_with(cx: &mut TestAppContext, state: UiState) -> Rig {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         let saved: Arc<Mutex<Vec<UiState>>> = Arc::default();
@@ -687,7 +691,7 @@ mod panel {
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             cx.set_global(BootSettings {
                 settings: Settings::default(),
-                state: UiState::default(),
+                state,
                 persist: Some(Box::new(move |_, state| {
                     sink.lock().expect("lock").push(state.clone());
                 })),
@@ -1004,11 +1008,126 @@ mod panel {
         assert_eq!(checked, ["1 minute"]);
     }
 
+    /// Publishes the CPU series in both tiers: 10 Hz fast and 1 Hz with the tier bit.
+    fn publish_both_tiers(engine: &FakeEngine) {
+        use tl_model::ids::{MetricId, SeriesId};
+        use tl_model::series::{Sample, SeriesView};
+        use tl_model::snapshot::SeriesSet;
+
+        let view = |id: SeriesId, period_ns: u64| {
+            Arc::new(SeriesView {
+                id,
+                version: 1,
+                period_ns,
+                samples: Arc::from([Sample::valid(period_ns, 10.0)]),
+            })
+        };
+        engine.publish_with(|s| {
+            let mut set = SeriesSet::default();
+            set.header.version = 1;
+            let ids = [MetricId::CPU_TOTAL, MetricId::CPU_KERNEL].map(|metric| SeriesId {
+                device: DeviceIdx(0),
+                metric,
+            });
+            set.series = ids.iter().map(|&id| view(id, 100_000_000)).collect();
+            set.slow = ids
+                .iter()
+                .map(|&id| {
+                    view(
+                        SeriesId {
+                            metric: id.metric.with_tier_1hz(),
+                            ..id
+                        },
+                        1_000_000_000,
+                    )
+                })
+                .collect();
+            s.series = Arc::new(set);
+        });
+    }
+
+    /// The CPU card's chart: (range_ns, resolved ids carry the tier bit, periods, fallback,
+    /// spec ids carry the tier bit).
+    fn cpu_chart(r: &mut Rig) -> (u64, Vec<bool>, Vec<u64>, bool, bool) {
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        let panel = r.panel.clone();
+        r.vcx.update(|_, cx| {
+            let card = panel
+                .read(cx)
+                .cards()
+                .iter()
+                .find(|(id, _)| *id == cpu)
+                .map(|(_, c)| c.clone())
+                .expect("CPU card");
+            let spec_tier = card
+                .read(cx)
+                .series_ids(cx)
+                .iter()
+                .any(|s| s.metric.is_tier_1hz());
+            let chart = card.read(cx).chart().read(cx);
+            let views: Vec<_> = chart.resolved().iter().flatten().cloned().collect();
+            (
+                chart.spec.range_ns,
+                views.iter().map(|v| v.id.metric.is_tier_1hz()).collect(),
+                views.iter().map(|v| v.period_ns).collect(),
+                chart.tier_fallback,
+                spec_tier,
+            )
+        })
+    }
+
     #[gpui_kit::test]
-    fn card_menu_long_ranges_disabled_before_p2(cx: &mut TestAppContext) {
+    fn card_long_range_uses_1hz_tier(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        publish_both_tiers(&r.engine);
+        draw(&mut r.vcx);
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+
+        r.vcx
+            .dispatch_action(MinigraphSetRange { id: cpu, secs: 600 });
+        draw(&mut r.vcx);
+        let (range_ns, tier, periods, fallback, spec_tier) = cpu_chart(&mut r);
+        assert_eq!(range_ns, 600_000_000_000);
+        assert!(!tier.is_empty() && tier.iter().all(|t| *t), "tier ids");
+        assert!(periods.iter().all(|p| *p == 1_000_000_000));
+        assert!(!fallback);
+        assert!(!spec_tier, "the card spec never carries the tier bit");
+
+        r.vcx
+            .dispatch_action(MinigraphSetRange { id: cpu, secs: 60 });
+        draw(&mut r.vcx);
+        let (range_ns, tier, periods, _, spec_tier) = cpu_chart(&mut r);
+        assert_eq!(range_ns, 60_000_000_000);
+        assert!(!tier.is_empty() && tier.iter().all(|t| !*t), "fast ids");
+        assert!(periods.iter().all(|p| *p == 100_000_000));
+        assert!(!spec_tier);
+    }
+
+    #[gpui_kit::test]
+    fn card_long_range_from_state(cx: &mut TestAppContext) {
+        use tl_model::settings::MinigraphState;
+
+        let state = UiState {
+            minigraphs: vec![MinigraphState {
+                source: "cpu".into(),
+                range_s: 300,
+                ..Default::default()
+            }],
+            ..UiState::default()
+        };
+        let mut r = rig_with(cx, state);
+        publish_both_tiers(&r.engine);
+        draw(&mut r.vcx);
+        let (range_ns, tier, periods, _, _) = cpu_chart(&mut r);
+        assert_eq!(range_ns, 300_000_000_000);
+        assert!(!tier.is_empty() && tier.iter().all(|t| *t), "tier ids");
+        assert!(periods.iter().all(|p| *p == 1_000_000_000));
+    }
+
+    #[gpui_kit::test]
+    fn card_long_ranges_enabled(cx: &mut TestAppContext) {
         let mut r = rig(cx);
         let (_, range) = right_click(&mut r, 0);
-        let later = Some("Available in a later version".to_owned());
         assert_eq!(
             range,
             [
@@ -1020,15 +1139,15 @@ mod panel {
                 ),
                 (MenuEntryKind::Item, Some("1 minute".to_owned()), None, true),
                 (
-                    MenuEntryKind::Disabled,
+                    MenuEntryKind::Item,
                     Some("5 minutes".to_owned()),
-                    later.clone(),
+                    None,
                     false
                 ),
                 (
-                    MenuEntryKind::Disabled,
+                    MenuEntryKind::Item,
                     Some("10 minutes".to_owned()),
-                    later,
+                    None,
                     false
                 ),
             ]

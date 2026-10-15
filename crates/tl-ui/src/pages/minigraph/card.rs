@@ -272,7 +272,7 @@ impl MinigraphCard {
             range_s: self.entry.range_s,
             color: self.entry.color,
             detached: self.entry.detached,
-            long_ranges: false,
+            long_ranges: true,
             colors: false,
             detach: false,
         };
