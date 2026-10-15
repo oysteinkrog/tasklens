@@ -29,7 +29,7 @@ use crate::text::style::{numeric_style, t_md, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current};
 
 use super::layout::BoxKind;
-use super::mem_box::{MeterRow, meter_row};
+use super::mem_box::{MeterRow, ROW_LABEL_W, ROW_VALUE_W, meter_row};
 
 /// The meter bar height, logical px before `ui_scale`.
 pub const METER_H: f32 = 6.;
@@ -747,6 +747,17 @@ pub fn box_chart<T: 'static>(
 /// The sparkline column at the right of a spark row, logical px before `ui_scale`.
 pub const SPARK_W: f32 = 96.;
 
+/// The narrowest meter a spark row keeps next to its sparkline, logical px before `ui_scale`.
+const SPARK_MIN_METER_W: f32 = 32.;
+
+/// Whether a spark row `width` wide (0 before the first paint) has room for its sparkline:
+/// label, a meter of at least `SPARK_MIN_METER_W`, value and the `SPARK_W` column, with their
+/// three gaps. Narrower rows drop the sparkline column, so the value never overlaps it.
+pub fn spark_fits(width: Pixels, m: &UiMetrics) -> bool {
+    let fixed = (ROW_LABEL_W + SPARK_MIN_METER_W + ROW_VALUE_W + SPARK_W) * m.ui_scale;
+    width == px(0.) || f32::from(width) >= fixed + 3. * f32::from(m.sp[4])
+}
+
 /// The grid of a sparkline: grid lines, no outline and no rounding.
 pub const SPARK_GRID: GridStyle = GridStyle {
     lines: true,
@@ -775,13 +786,22 @@ pub fn spark_chart<T: 'static>(
 
 /// A meter row with a sparkline column at the right: label, meter, value, then `chart` in a
 /// `SPARK_W` column. `None` leaves the column empty, so the meters of rows with and without a
-/// sparkline line up. The chart is a cached child view: the row builds no chart geometry.
+/// sparkline line up. Without `spark` (see [`spark_fits`]) the row is a plain meter row with no
+/// column. The chart is a cached child view: the row builds no chart geometry.
 pub fn spark_row(
     row: &MeterRow,
     chart: Option<&Entity<ChartView>>,
+    spark: bool,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
+    if !spark {
+        return div()
+            .flex_none()
+            .w_full()
+            .child(meter_row(row, m, theme))
+            .into_any_element();
+    }
     let s = m.ui_scale;
     let mut spark = div()
         .relative()

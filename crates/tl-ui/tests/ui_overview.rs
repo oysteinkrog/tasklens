@@ -698,8 +698,9 @@ mod bottom {
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::DeviceKey;
     use tl_ui::pages::performance::overview::disk_box::DiskBox;
-    use tl_ui::pages::performance::overview::gpu_box::GpuBox;
+    use tl_ui::pages::performance::overview::gpu_box::{GPU_BOX_ID, GpuBox, rows_id};
     use tl_ui::pages::performance::overview::net_box::NetBox;
+    use tl_ui::pages::performance::overview::parts::time_axis_id;
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -714,9 +715,10 @@ mod bottom {
         gpu: Entity<GpuBox>,
         disk: Entity<DiskBox>,
         net: Entity<NetBox>,
-        /// GPU and Disk box heights.
+        /// GPU and Disk box heights, and the GPU box width.
         gpu_h: f32,
         disk_h: f32,
+        gpu_w: f32,
     }
 
     impl Render for Host {
@@ -728,7 +730,7 @@ mod bottom {
                 .size_full()
                 .child(
                     div()
-                        .w(px(500.))
+                        .w(px(self.gpu_w))
                         .h(px(self.gpu_h))
                         .child(self.gpu.clone().cached(cached())),
                 )
@@ -921,6 +923,7 @@ mod bottom {
             net: cx.new(|cx| NetBox::new(&hub, cx)),
             gpu_h: heights.0,
             disk_h: heights.1,
+            gpu_w: 500.,
         });
         vcx.simulate_scale_factor_change(1.0);
         let driver = vcx.update(|window, cx| {
@@ -980,6 +983,22 @@ mod bottom {
             });
             draw(self.vcx);
         }
+
+        fn gpu_width(&mut self, w: f32) {
+            let host = self.host.clone();
+            self.vcx.update(|_, cx| {
+                host.update(cx, |h, cx| {
+                    h.gpu_w = w;
+                    cx.notify();
+                })
+            });
+            draw(self.vcx);
+        }
+
+        fn bounds(&mut self, id: String) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+            let id: &'static str = Box::leak(id.into_boxed_str());
+            self.vcx.debug_bounds(id).expect(id)
+        }
     }
 
     fn rate_iec(bps: f64) -> String {
@@ -1004,9 +1023,11 @@ mod bottom {
         assert_eq!((sections, more), (2, 1));
         assert_eq!(text, "+1 more");
         // 450 - 60 = 390 px body. Without totals each section has 3 engine rows and VRAM:
-        // 48 + 4 × 22 = 136, the second adds a 22 px heading, plus 12 px between sections and
-        // 12 + 18 for "+n more": 336.
+        // 48 + 4 × 22 = 136, the second adds a 22 px heading, plus 12 px between sections: 306.
+        // "+n more" is in the title line and takes no body height.
         assert_eq!(shown, 2, "450 px fits both sections");
+        let title = r.vcx.update(|_, cx| gpu.read(cx).shown_more_text());
+        assert_eq!(title.as_ref(), "+1 more");
         let mut copy = String::new();
         r.vcx.update(|_, cx| gpu.read(cx).copy_text(&mut copy));
         assert!(copy.ends_with("+1 more\n"), "{copy}");
@@ -1025,6 +1046,67 @@ mod bottom {
         assert_eq!(shown(&mut r), 1, "150 px: one section");
         r.heights(450., 200.);
         assert_eq!(shown(&mut r), 2, "back to both");
+    }
+
+    /// Two GPUs at the 220 px row minimum: the first section (3 engines, VRAM, temperature and
+    /// power) needs 48 + 5 × 22 = 158 px of the 160 px body. "+1 more" goes to the title line,
+    /// so the rows end above the time axis.
+    #[gpui_kit::test]
+    fn gpu_box_more_fits_min_height(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (220., 200.));
+        r.system(|s| {
+            let mut t11 = gpu_engines(false);
+            t11.device = DeviceIdx(11);
+            s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false)), (DeviceIdx(11), t11)]);
+        });
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let (shown, more, rows) = r.vcx.update(|_, cx| {
+            let g = gpu.read(cx);
+            (
+                g.shown(),
+                g.shown_more_text().to_string(),
+                g.sections()[0].engines.len(),
+            )
+        });
+        assert_eq!((shown, more.as_str(), rows), (1, "+1 more", 3));
+        let section = r.bounds(rows_id(0));
+        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        assert!(
+            section.bottom() <= axis.top(),
+            "rows end at {:?}, the time axis starts at {:?}",
+            section.bottom(),
+            axis.top()
+        );
+        assert!(
+            f32::from(section.size.height) >= 5. * 18. + 4. * 4.,
+            "all five rows drawn: {section:?}"
+        );
+    }
+
+    /// At the supported 720 px page width a GPU box is 224 px wide with a 198 px body: too
+    /// narrow for label 72, meter 32, value 80 and the 96 px sparkline with their gaps (304 px),
+    /// so the rows drop the sparkline column and stay inside the body.
+    #[gpui_kit::test]
+    fn gpu_box_narrow_drops_sparklines(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (300., 200.));
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let spark = |r: &mut Rig| r.vcx.update(|_, cx| gpu.read(cx).spark());
+        assert!(spark(&mut r), "500 px: sparklines");
+        r.gpu_width(224.);
+        assert!(!spark(&mut r), "224 px: no sparklines");
+        let rows = r.bounds(rows_id(0));
+        let frame = r.bounds(GPU_BOX_ID.to_owned());
+        assert!(
+            rows.right() <= frame.right() - px(12.),
+            "rows {rows:?} inside the body of {frame:?}"
+        );
+        r.gpu_width(330.);
+        assert!(spark(&mut r), "330 px (304 px body): sparklines");
+        r.gpu_width(329.);
+        assert!(!spark(&mut r), "329 px: no sparklines");
     }
 
     #[gpui_kit::test]

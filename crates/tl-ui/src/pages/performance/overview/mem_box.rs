@@ -55,9 +55,9 @@ const KEY_ROWS: [&str; 4] = [
 const KEY_NO_SWAP: &str = "perf-overview-mem-no-swap";
 
 /// The meter label column, logical px before `ui_scale`.
-const ROW_LABEL_W: f32 = 72.;
+pub(super) const ROW_LABEL_W: f32 = 72.;
 /// The meter value column, logical px before `ui_scale`.
-const ROW_VALUE_W: f32 = 80.;
+pub(super) const ROW_VALUE_W: f32 = 80.;
 
 /// One meter row: its label, its value text, its fill and the fill colour.
 #[derive(Clone, Debug, PartialEq)]
