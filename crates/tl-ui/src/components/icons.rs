@@ -203,7 +203,7 @@ impl IconNamed for AppIcon {
 // `RotateCcw` is the Set Affinity Reset button (E23-005). `Archive` is the Memory compression
 // pseudo row (UI-PRC-002). `Cog` and `FileCode` are Startup Apps Name icon fallbacks
 // (UI-SYS-041). `FunnelX` is the Services Remove filters button and the system tables' No matches
-// icon (UI-SYS-011, UI-SYS-005).
+// icon (UI-SYS-011, UI-SYS-005). `Eject` is the Disk page Eject button (UI-PRF-029).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
@@ -211,7 +211,7 @@ gpui_kit::assets::icon_assets!(
         Square,
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
         Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive, Cog, FileCode,
-        FunnelX
+        FunnelX, Eject
     ]
 );
 
