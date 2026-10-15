@@ -611,8 +611,9 @@ mod panel {
     use tl_ui::components::toast::ToastKind;
     use tl_ui::demand::DemandAggregator;
     use tl_ui::hub::SnapshotHub;
+    use tl_ui::pages::minigraph::GraphColor;
     use tl_ui::pages::minigraph::actions::{
-        MinigraphHide, MinigraphSetRange, ResetMinigraphLayout,
+        MinigraphHide, MinigraphSetColor, MinigraphSetRange, ResetMinigraphLayout,
     };
     use tl_ui::pages::minigraph::panel::{MinigraphPanel, PanelFull, toast_full};
     use tl_ui::pages::minigraph::sources::{
@@ -999,6 +1000,12 @@ mod panel {
                     None,
                     false
                 ),
+                (
+                    MenuEntryKind::Submenu,
+                    Some("Graph color".to_owned()),
+                    None,
+                    false
+                ),
                 (MenuEntryKind::Separator, None, None, false),
                 item("Reset minigraph layout"),
             ]
@@ -1127,6 +1134,123 @@ mod panel {
         assert!(periods.iter().all(|p| *p == 1_000_000_000));
     }
 
+    /// The CPU chart's first series line colour.
+    fn cpu_line(r: &mut Rig) -> gpui_kit::Hsla {
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        let panel = r.panel.clone();
+        r.vcx.update(|_, cx| {
+            let card = panel
+                .read(cx)
+                .cards()
+                .iter()
+                .find(|(id, _)| *id == cpu)
+                .map(|(_, c)| c.clone())
+                .expect("CPU card");
+            card.read(cx).chart().read(cx).spec.series[0].line
+        })
+    }
+
+    const COLOR_LABELS: [&str; 18] = [
+        "Accent (theme default)",
+        "Coral",
+        "Orange",
+        "Amber",
+        "Yellow",
+        "Lime",
+        "Green",
+        "Mint",
+        "Teal",
+        "Cyan",
+        "Blue",
+        "Indigo",
+        "Violet",
+        "Lavender",
+        "Fuchsia",
+        "Pink",
+        "Rose",
+        "Slate",
+    ];
+
+    #[gpui_kit::test]
+    fn card_color_menu_items(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let card = r.vcx.debug_bounds("MinigraphSlot-0").expect("card drawn");
+        r.vcx
+            .simulate_mouse_down(card.center(), MouseButton::Right, Modifiers::none());
+        draw(&mut r.vcx);
+        let rows = r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the card menu is open");
+            let colors = menu
+                .read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .find(|e| {
+                    e.label
+                        .as_ref()
+                        .is_some_and(|l| l.as_ref() == "Graph color")
+                })
+                .and_then(|e| e.submenu)
+                .expect("the Graph color submenu");
+            colors.read(cx).entries_for_test(window)
+        });
+        let names: Vec<String> = rows
+            .iter()
+            .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
+            .collect();
+        assert_eq!(names, COLOR_LABELS);
+        let checked: Vec<&str> = rows
+            .iter()
+            .zip(COLOR_LABELS)
+            .filter(|(e, _)| e.checked)
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(checked, ["Accent (theme default)"]);
+        assert!(rows.iter().all(|e| e.swatch.is_some()));
+    }
+
+    #[gpui_kit::test]
+    fn card_set_color_persists(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        r.vcx.dispatch_action(MinigraphSetColor {
+            id: cpu,
+            color: GraphColor::Mint,
+        });
+        draw(&mut r.vcx);
+        assert_eq!(cpu_line(&mut r), gpui_kit::rgb(0x3EB489).into());
+        let state = r
+            .vcx
+            .update(|_, cx| TlSettings::state(cx).minigraphs.clone());
+        let entry = state.iter().find(|m| m.source == "cpu").expect("cpu entry");
+        assert_eq!(entry.color, "mint");
+        let saved = r
+            .saved
+            .lock()
+            .expect("lock")
+            .last()
+            .cloned()
+            .expect("persisted");
+        assert_eq!(saved.minigraphs, state);
+    }
+
+    #[gpui_kit::test]
+    fn card_color_from_state(cx: &mut TestAppContext) {
+        use tl_model::settings::MinigraphState;
+
+        let state = UiState {
+            minigraphs: vec![MinigraphState {
+                source: "cpu".into(),
+                range_s: 60,
+                color: "teal".into(),
+                ..Default::default()
+            }],
+            ..UiState::default()
+        };
+        let mut r = rig_with(cx, state);
+        draw(&mut r.vcx);
+        assert_eq!(cpu_line(&mut r), gpui_kit::rgb(0x14A098).into());
+    }
+
     #[gpui_kit::test]
     fn card_long_ranges_enabled(cx: &mut TestAppContext) {
         let mut r = rig(cx);
@@ -1175,7 +1299,12 @@ mod panel {
         let labels: Vec<_> = menu.iter().filter_map(|e| e.1.clone()).collect();
         assert_eq!(
             labels,
-            ["Remove graph", "Time range", "Reset minigraph layout"]
+            [
+                "Remove graph",
+                "Time range",
+                "Graph color",
+                "Reset minigraph layout"
+            ]
         );
     }
 

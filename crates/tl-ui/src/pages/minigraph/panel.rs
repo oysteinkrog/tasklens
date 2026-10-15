@@ -26,7 +26,8 @@ use tl_model::settings::GraphsSettings;
 
 use super::GraphColor;
 use super::actions::{
-    MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetRange, ResetMinigraphLayout,
+    MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor, MinigraphSetRange,
+    ResetMinigraphLayout,
 };
 use super::card::{DraggedMinigraph, MINI_CARD_H, MINI_CARD_W, MinigraphCard, past_threshold};
 use super::sources::{
@@ -396,6 +397,21 @@ impl MinigraphPanel {
         self.persist(cx);
     }
 
+    /// `MinigraphSetColor` (PERF-081): the card's line colour and its `[[minigraphs]]` entry.
+    pub fn set_color(&mut self, id: MinigraphId, color: GraphColor, cx: &mut Context<Self>) {
+        let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+        if entry.color == color {
+            return;
+        }
+        entry.color = color;
+        if let Some((_, card)) = self.cards.iter().find(|(c, _)| *c == id) {
+            card.update(cx, |c, cx| c.set_color(color, cx));
+        }
+        self.persist(cx);
+    }
+
     /// `ResetMinigraphLayout` (UI-PRF-044): the six default cards at slots 0 to 5 with the
     /// default range and colour, GPU temp at slot 6 when its setting is on. Detached cards are
     /// attached again (E26-015 closes their windows) and process cards are removed. The six
@@ -612,6 +628,10 @@ fn register_actions(cx: &mut Context<MinigraphPanel>) {
     app.on_action(move |a: &MinigraphMoveToSlot, cx| {
         let _ = panel.update(cx, |p, cx| p.move_to_slot(a.id, a.slot, cx));
     });
+    let panel = weak.clone();
+    app.on_action(move |a: &MinigraphSetColor, cx| {
+        let _ = panel.update(cx, |p, cx| p.set_color(a.id, a.color, cx));
+    });
     app.on_action(move |a: &MinigraphSetRange, cx| {
         let _ = weak.update(cx, |p, cx| p.set_range(a.id, a.secs, cx));
     });
@@ -682,6 +702,9 @@ impl Render for MinigraphPanel {
             .on_action(cx.listener(|this, a: &MinigraphRemove, _, cx| this.remove(a.id, cx)))
             .on_action(
                 cx.listener(|this, a: &MinigraphSetRange, _, cx| this.set_range(a.id, a.secs, cx)),
+            )
+            .on_action(
+                cx.listener(|this, a: &MinigraphSetColor, _, cx| this.set_color(a.id, a.color, cx)),
             )
             .on_action(cx.listener(|this, a: &MinigraphMoveToSlot, _, cx| {
                 this.move_to_slot(a.id, a.slot, cx)

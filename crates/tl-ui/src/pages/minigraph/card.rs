@@ -273,7 +273,7 @@ impl MinigraphCard {
             color: self.entry.color,
             detached: self.entry.detached,
             long_ranges: true,
-            colors: false,
+            colors: true,
             detach: false,
         };
         let context = window

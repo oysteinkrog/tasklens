@@ -4,7 +4,9 @@
 use gpui_kit::{App, SharedString, Window};
 
 use super::GraphColor;
-use super::actions::{MinigraphHide, MinigraphRemove, MinigraphSetRange, ResetMinigraphLayout};
+use super::actions::{
+    MinigraphHide, MinigraphRemove, MinigraphSetColor, MinigraphSetRange, ResetMinigraphLayout,
+};
 use super::sources::MinigraphId;
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
@@ -72,7 +74,23 @@ pub fn card_menu(menu: TlMenu, ctx: &CardMenuCtx, window: &mut Window, cx: &mut 
             menu
         },
     );
-    // 4: Graph color, E26-010 adds it while `colors`.
+    // 4: Graph color, the shell's shared builder (E21-032).
+    if ctx.colors {
+        let color = ctx.color;
+        menu = menu.submenu(
+            tr(cx, "minigraph-menu-color"),
+            window,
+            cx,
+            move |menu, _, cx| {
+                crate::window::menubar::graph_color_menu(
+                    menu,
+                    color,
+                    move |c| Box::new(MinigraphSetColor { id, color: c }),
+                    cx,
+                )
+            },
+        );
+    }
     // 5
     menu = menu.separator();
     // 6: Detach or Attach to main window, E26-015 adds it while `detach`. 7: E31-012.

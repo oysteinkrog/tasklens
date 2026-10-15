@@ -292,7 +292,7 @@ impl MenuWords {
 pub fn graph_color_menu(
     mut menu: TlMenu,
     current: GraphColor,
-    action: fn(GraphColor) -> Box<dyn gpui_kit::Action>,
+    action: impl Fn(GraphColor) -> Box<dyn gpui_kit::Action>,
     cx: &App,
 ) -> TlMenu {
     let theme = crate::theme::current(cx).clone();

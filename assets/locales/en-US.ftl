@@ -2422,6 +2422,7 @@ minigraph-toast-reset = Minigraph layout reset
 minigraph-menu-hide = Hide graph
 minigraph-menu-remove = Remove graph
 minigraph-menu-range = Time range
+minigraph-menu-color = Graph color
 minigraph-menu-reset = Reset minigraph layout
 # Settings window, Services page (tasklens-bj6.28, UI-SHL-068). The Graphs page uses the
 # shell-menu-graphs keys.
