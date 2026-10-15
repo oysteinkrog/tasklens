@@ -1969,6 +1969,7 @@ mod panel {
                 "Remove graph",
                 "Time range",
                 "Graph color",
+                "Add tray icon graph",
                 "Reset minigraph layout"
             ]
         );
