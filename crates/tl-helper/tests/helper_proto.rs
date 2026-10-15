@@ -94,7 +94,8 @@ fn send_with_fd(sock: &UnixStream, seq: u32, request: HelperRequest, fd: Borrowe
         .expect("encode frame");
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = SendAncillaryBuffer::new(&mut space);
-    assert!(control.push(SendAncillaryMessage::ScmRights(&[fd])));
+    let fds = [fd];
+    assert!(control.push(SendAncillaryMessage::ScmRights(&fds)));
     let sent = rustix::net::sendmsg(
         sock.as_fd(),
         &[IoSlice::new(&bytes)],

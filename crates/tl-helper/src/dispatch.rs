@@ -72,7 +72,7 @@ impl<'a> Writer<'a> {
     pub fn send_all(&mut self, seq: u32, bodies: Vec<HelperReplyBody>) -> io::Result<()> {
         self.buf.clear();
         if bodies.is_empty() {
-            encode_or_too_large(seq, HelperReplyBody::Ok, &mut self.buf);
+            encode_final(seq, HelperReplyBody::Ok, &mut self.buf);
             return write_all(self.fd, &self.buf);
         }
         let count = bodies.len();
@@ -90,7 +90,7 @@ impl<'a> Writer<'a> {
             };
             if !fits {
                 self.buf.clear();
-                encode_or_too_large(
+                encode_final(
                     seq,
                     HelperReplyBody::Err(HelperError::TooLarge),
                     &mut self.buf,
@@ -110,7 +110,7 @@ impl<'a> Writer<'a> {
         let ended = match wire::encode_frame(&reply, MAX_HELPER_FRAME, &mut self.buf) {
             Ok(()) => last,
             Err(_) => {
-                encode_or_too_large(
+                encode_final(
                     seq,
                     HelperReplyBody::Err(HelperError::TooLarge),
                     &mut self.buf,
@@ -123,23 +123,15 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// Encodes `body` as the final reply of `seq`. The bodies passed here are a few bytes, so the
-/// fallback never runs; it keeps `Err(TooLarge)` as the answer if it did.
-fn encode_or_too_large(seq: u32, body: HelperReplyBody, buf: &mut Vec<u8>) {
+/// Encodes `body` as the final reply of `seq`. Only `Ok` and `Err` bodies come here; they are a
+/// few bytes and always fit one frame.
+fn encode_final(seq: u32, body: HelperReplyBody, buf: &mut Vec<u8>) {
     let reply = HelperReply {
         seq,
         last: true,
         body,
     };
-    if wire::encode_frame(&reply, MAX_HELPER_FRAME, buf).is_err() {
-        let too_large = HelperReply {
-            seq,
-            last: true,
-            body: HelperReplyBody::Err(HelperError::TooLarge),
-        };
-        // A fixed 8-byte message always encodes.
-        let _ = wire::encode_frame(&too_large, MAX_HELPER_FRAME, buf);
-    }
+    let _ = wire::encode_frame(&reply, MAX_HELPER_FRAME, buf);
 }
 
 /// Writes all of `bytes` to `fd`, retrying on `EINTR`. An error means the engine is gone.
