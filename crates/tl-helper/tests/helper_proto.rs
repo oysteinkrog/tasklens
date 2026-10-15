@@ -268,6 +268,89 @@ fn idle_exit() {
     );
 }
 
+/// Security regression: part of a frame does not hold the helper past its idle limit. The frame
+/// is still short at the deadline, so the helper exits 3.
+#[test]
+fn partial_frame_cannot_hold_idle_exit() {
+    let mut h = spawn(Some(200));
+    hello(&mut h.sock, 0);
+    let answered = Instant::now();
+    h.sock.write_all(&[1]).expect("write one prefix byte");
+    let status = h
+        .child
+        .wait_exit(Duration::from_secs(5))
+        .expect("exit with a partial frame");
+    let elapsed = answered.elapsed();
+    assert_eq!(status.code(), Some(3));
+    assert!(
+        (Duration::from_millis(200)..=Duration::from_millis(400)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    assert_eq!(read_stderr(&mut h.child), "tl-helper: protocol error\n");
+}
+
+/// Security regression: part of a frame during a scan does not stall the scan's cancel check.
+/// The scan ends, and the kept bytes finish the next request once the rest arrives. The helper
+/// scans itself, the one process it may read as the test user under Yama ptrace scope 1.
+#[test]
+fn partial_frame_does_not_stall_scan() {
+    let mut h = spawn(None);
+    hello(&mut h.sock, 0);
+    let pid = h.child.pid();
+    let key = ProcessKey {
+        start_ticks: tl_ops::process::read_start_ticks(pid).expect("start ticks"),
+        boot_id: boot_id(),
+        pid,
+    };
+    let mut next = Vec::new();
+    wire::encode_frame(
+        &HelperFrame {
+            seq: 2,
+            request: HelperRequest::Hello {
+                proto: HELPER_PROTO_VERSION,
+            },
+        },
+        MAX_HELPER_FRAME,
+        &mut next,
+    )
+    .expect("encode frame");
+    let mut bytes = Vec::new();
+    wire::encode_frame(
+        &HelperFrame {
+            seq: 1,
+            request: HelperRequest::ScanStrings {
+                key,
+                opts: StringScanOpts::default(),
+            },
+        },
+        MAX_HELPER_FRAME,
+        &mut bytes,
+    )
+    .expect("encode frame");
+    bytes.extend_from_slice(&next[..1]);
+    h.sock.write_all(&bytes).expect("write scan and one byte");
+
+    let replies = recv(&mut h.sock);
+    assert!(
+        replies
+            .iter()
+            .all(|r| r.seq == 1 && matches!(r.body, HelperReplyBody::Strings(_))),
+        "{:?}",
+        replies.iter().map(|r| (r.seq, r.last)).collect::<Vec<_>>()
+    );
+
+    h.sock.write_all(&next[1..]).expect("write the rest");
+    // Rule "hello twice".
+    assert_eq!(
+        recv(&mut h.sock),
+        [HelperReply {
+            seq: 2,
+            last: true,
+            body: HelperReplyBody::Err(HelperError::NotAllowed),
+        }]
+    );
+}
+
 /// The helper dies with its parent (`PR_SET_PDEATHSIG`). A non-interactive shell starts a
 /// background job with stdin on /dev/null, so the script passes the socket through fd 3.
 #[test]

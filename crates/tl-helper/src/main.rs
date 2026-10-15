@@ -16,7 +16,7 @@ mod files;
 mod ops;
 mod sockets;
 
-use std::io::{IoSliceMut, Read};
+use std::io::IoSliceMut;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::process::ExitCode;
@@ -63,22 +63,101 @@ struct ReceivedFrame {
     truncated: bool,
 }
 
-/// Reads one request frame from the socket `sock` (fd 0) with `tl_model::wire`, collecting every
-/// fd that arrives with the frame's bytes. Each read asks for no more than the frame still needs,
-/// so fds sent with the next frame stay in the socket. Received fds always have `O_CLOEXEC`. On
-/// error every received fd is closed.
-fn read_request(sock: BorrowedFd<'_>) -> Result<ReceivedFrame, WireError> {
-    let mut reader = FdReader {
-        sock,
-        fds: Vec::new(),
-        truncated: false,
-    };
-    let frame = wire::read_frame(&mut reader, MAX_HELPER_FRAME)?;
-    Ok(ReceivedFrame {
-        frame,
-        fds: reader.fds,
-        truncated: reader.truncated,
-    })
+/// Bytes of the length prefix before each frame payload (ADR-007).
+const FRAME_PREFIX: usize = 4;
+
+/// The request frame being read from fd 0. It keeps a partial frame across calls, so no read
+/// ever blocks: a peer that sends part of a frame and stops cannot hold the helper past its idle
+/// limit or stall a scan (R-157).
+#[derive(Default)]
+pub struct FrameReader {
+    /// Bytes of the current frame so far, prefix included.
+    buf: Vec<u8>,
+    /// Every fd that came with the current frame's bytes as `SCM_RIGHTS` (R-145 item 3).
+    fds: Vec<OwnedFd>,
+    /// The kernel dropped fds that did not fit the ancillary buffer (`MSG_CTRUNC`).
+    truncated: bool,
+}
+
+impl FrameReader {
+    /// True when part of a frame has arrived.
+    fn started(&self) -> bool {
+        !self.buf.is_empty()
+    }
+
+    /// Bytes the current frame still needs. An oversize length fails here, before any payload
+    /// byte is read.
+    fn wanted(&self) -> Result<usize, WireError> {
+        if self.buf.len() < FRAME_PREFIX {
+            return Ok(FRAME_PREFIX - self.buf.len());
+        }
+        let mut prefix = [0u8; FRAME_PREFIX];
+        prefix.copy_from_slice(&self.buf[..FRAME_PREFIX]);
+        let len = u32::from_le_bytes(prefix) as usize;
+        if len > MAX_HELPER_FRAME {
+            return Err(WireError::TooLarge {
+                len,
+                max: MAX_HELPER_FRAME,
+            });
+        }
+        Ok(FRAME_PREFIX + len - self.buf.len())
+    }
+
+    /// Reads what the socket `sock` (fd 0) holds now, without blocking. Returns the frame once
+    /// all its bytes are in, `Ok(None)` while it is still incomplete, and `Eof` when the stream
+    /// ends between frames. Each read asks for no more than the frame still needs, so fds sent
+    /// with the next frame stay in the socket. Received fds always have `O_CLOEXEC`. The frame
+    /// is decoded with `tl_model::wire`. On error the frame's fds are closed.
+    pub fn read_ready(&mut self, sock: BorrowedFd<'_>) -> Result<Option<ReceivedFrame>, WireError> {
+        loop {
+            let want = self.wanted()?;
+            if want == 0 {
+                let frame = wire::read_frame(&mut self.buf.as_slice(), MAX_HELPER_FRAME);
+                self.buf.clear();
+                let fds = std::mem::take(&mut self.fds);
+                let truncated = std::mem::replace(&mut self.truncated, false);
+                return frame.map(|frame| {
+                    Some(ReceivedFrame {
+                        frame,
+                        fds,
+                        truncated,
+                    })
+                });
+            }
+            let start = self.buf.len();
+            self.buf.resize(start + want, 0);
+            let got = self.recv(sock, start);
+            self.buf.truncate(start + got.as_ref().map_or(0, |n| *n));
+            match got {
+                Ok(0) if start == 0 => return Err(WireError::Eof),
+                Ok(0) => return Err(WireError::Truncated),
+                Ok(_) | Err(Errno::INTR) => {}
+                Err(Errno::AGAIN) => return Ok(None),
+                Err(e) => return Err(WireError::Io(e.into())),
+            }
+        }
+    }
+
+    /// One `recvmsg` without blocking into `buf[start..]`, with room for one fd.
+    fn recv(&mut self, sock: BorrowedFd<'_>, start: usize) -> Result<usize, Errno> {
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = RecvAncillaryBuffer::new(&mut space);
+        let msg = rustix::net::recvmsg(
+            sock,
+            &mut [IoSliceMut::new(&mut self.buf[start..])],
+            &mut control,
+            RecvFlags::DONTWAIT | RecvFlags::CMSG_CLOEXEC,
+        )?;
+        if msg.flags.contains(ReturnFlags::CTRUNC) {
+            self.truncated = true;
+        }
+        for message in control.drain() {
+            if let RecvAncillaryMessage::ScmRights(fds) = message {
+                self.fds.extend(fds);
+            }
+        }
+        Ok(msg.bytes)
+    }
 }
 
 /// The fd a request may use. A `Dump` must carry exactly one fd; any other request must carry
@@ -97,35 +176,6 @@ fn request_fd(received: ReceivedFrame) -> (HelperFrame, Result<Option<OwnedFd>, 
         _ => Err(HelperError::NotAllowed),
     };
     (frame, fd)
-}
-
-/// A `Read` over `recvmsg` with room for one fd per call.
-struct FdReader<'a> {
-    sock: BorrowedFd<'a>,
-    fds: Vec<OwnedFd>,
-    truncated: bool,
-}
-
-impl Read for FdReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
-        let mut control = RecvAncillaryBuffer::new(&mut space);
-        let msg = rustix::net::recvmsg(
-            self.sock,
-            &mut [IoSliceMut::new(buf)],
-            &mut control,
-            RecvFlags::CMSG_CLOEXEC,
-        )?;
-        if msg.flags.contains(ReturnFlags::CTRUNC) {
-            self.truncated = true;
-        }
-        for message in control.drain() {
-            if let RecvAncillaryMessage::ScmRights(fds) = message {
-                self.fds.extend(fds);
-            }
-        }
-        Ok(msg.bytes)
-    }
 }
 
 /// Writes the one protocol error line to stderr and returns the exit status for it.
@@ -151,27 +201,29 @@ enum Wait {
     Exit(u8),
 }
 
-/// Waits until `deadline` for fd 0 to become readable, then reads one frame. Blocking poll, so
-/// an idle helper uses no CPU.
-fn wait_for_request(sock: BorrowedFd<'_>, deadline: Instant) -> Wait {
+/// Reads one frame from fd 0, waiting until `deadline` for its bytes. Blocking poll, so an
+/// idle helper uses no CPU. The deadline covers the whole frame: a frame still incomplete then
+/// is a short read.
+fn wait_for_request(ctx: &mut Ctx<'_>, deadline: Instant) -> Wait {
     loop {
+        match ctx.reader.read_ready(ctx.sock) {
+            Ok(Some(received)) => return Wait::Frame(received),
+            Ok(None) => {}
+            Err(WireError::Eof) => return Wait::Done,
+            // Oversize length, short read, postcard error or a socket error.
+            Err(_) => return Wait::Exit(protocol_error()),
+        }
         let left = deadline.saturating_duration_since(Instant::now());
         let Ok(left) = Timespec::try_from(left) else {
             return Wait::Exit(EXIT_START);
         };
-        let mut fds = [PollFd::new(&sock, PollFlags::IN)];
+        let mut fds = [PollFd::new(&ctx.sock, PollFlags::IN)];
         match rustix::event::poll(&mut fds, Some(&left)) {
+            Ok(0) if ctx.reader.started() => return Wait::Exit(protocol_error()),
             Ok(0) => return Wait::Done,
-            Ok(_) => break,
-            Err(Errno::INTR) => {}
+            Ok(_) | Err(Errno::INTR) => {}
             Err(_) => return Wait::Exit(EXIT_START),
         }
-    }
-    match read_request(sock) {
-        Ok(received) => Wait::Frame(received),
-        Err(WireError::Eof) => Wait::Done,
-        // Oversize length, short read, postcard error or a socket error.
-        Err(_) => Wait::Exit(protocol_error()),
     }
 }
 
@@ -222,6 +274,7 @@ fn run_session() -> u8 {
     let mut ctx = Ctx {
         sock: stdin.as_fd(),
         boot,
+        reader: FrameReader::default(),
         pending: None,
         stdin_closed: false,
     };
@@ -231,7 +284,7 @@ fn run_session() -> u8 {
     loop {
         let received = match ctx.pending.take() {
             Some(received) => received,
-            None => match wait_for_request(ctx.sock, deadline) {
+            None => match wait_for_request(&mut ctx, deadline) {
                 Wait::Frame(received) => received,
                 Wait::Done => return 0,
                 Wait::Exit(status) => return status,
@@ -344,6 +397,85 @@ mod tests {
             rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
         )
         .expect("pipe")
+    }
+
+    /// Reads one frame that is already in the socket.
+    fn read_request(sock: BorrowedFd<'_>) -> Result<ReceivedFrame, WireError> {
+        FrameReader::default()
+            .read_ready(sock)
+            .map(|frame| frame.expect("the whole frame is in the socket"))
+    }
+
+    fn write_bytes(sock: &OwnedFd, bytes: &[u8]) {
+        assert_eq!(rustix::io::write(sock, bytes).expect("write"), bytes.len());
+    }
+
+    fn hello_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let frame = HelperFrame {
+            seq: 3,
+            request: HelperRequest::Hello {
+                proto: HELPER_PROTO_VERSION,
+            },
+        };
+        wire::encode_frame(&frame, MAX_HELPER_FRAME, &mut bytes).expect("encode frame");
+        bytes
+    }
+
+    /// Security regression: a partial frame never blocks a read. The reader keeps the bytes and
+    /// finishes the frame when the rest arrives.
+    #[test]
+    fn partial_frame_does_not_block() {
+        let (engine, helper) = socketpair();
+        let bytes = hello_bytes();
+        let mut reader = FrameReader::default();
+        assert!(matches!(reader.read_ready(helper.as_fd()), Ok(None)));
+        assert!(!reader.started());
+
+        write_bytes(&engine, &bytes[..1]);
+        assert!(matches!(reader.read_ready(helper.as_fd()), Ok(None)));
+        write_bytes(&engine, &bytes[1..FRAME_PREFIX + 1]);
+        assert!(matches!(reader.read_ready(helper.as_fd()), Ok(None)));
+        assert!(reader.started());
+
+        write_bytes(&engine, &bytes[FRAME_PREFIX + 1..]);
+        let received = reader
+            .read_ready(helper.as_fd())
+            .expect("read frame")
+            .expect("whole frame");
+        assert_eq!(received.frame.seq, 3);
+        assert!(!reader.started());
+
+        drop(engine);
+        assert!(matches!(
+            reader.read_ready(helper.as_fd()),
+            Err(WireError::Eof)
+        ));
+    }
+
+    #[test]
+    fn eof_inside_frame_is_truncated() {
+        let (engine, helper) = socketpair();
+        write_bytes(&engine, &hello_bytes()[..2]);
+        drop(engine);
+        let mut reader = FrameReader::default();
+        assert!(matches!(
+            reader.read_ready(helper.as_fd()),
+            Err(WireError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn oversize_prefix_refused_before_payload() {
+        let (engine, helper) = socketpair();
+        write_bytes(&engine, &65_537u32.to_le_bytes());
+        write_bytes(&engine, &[0u8; 8]);
+        let mut reader = FrameReader::default();
+        assert!(matches!(
+            reader.read_ready(helper.as_fd()),
+            Err(WireError::TooLarge { len: 65_537, .. })
+        ));
+        assert_eq!(reader.buf.len(), FRAME_PREFIX);
     }
 
     #[test]

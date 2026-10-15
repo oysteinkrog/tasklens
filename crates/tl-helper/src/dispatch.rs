@@ -13,7 +13,6 @@
 use std::io;
 use std::os::fd::BorrowedFd;
 
-use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use tl_model::details::StringScanOpts;
 use tl_model::helper_proto::{
@@ -23,10 +22,7 @@ use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
 use tl_model::wire::{self, MAX_HELPER_FRAME, MAX_HELPER_REPLY_TOTAL, WireError};
 
-use crate::{ReceivedFrame, dropin, files, ops, sockets};
-
-/// Bytes of the length prefix before each frame payload (ADR-007).
-const FRAME_PREFIX: usize = 4;
+use crate::{FRAME_PREFIX, FrameReader, ReceivedFrame, dropin, files, ops, sockets};
 /// Pairs per `SocketOwners` body. One pair is at most 35 postcard bytes, so a body stays under
 /// one 64 KiB frame.
 const OWNERS_PER_BODY: usize = 1_800;
@@ -43,6 +39,8 @@ pub enum Next {
 pub struct Ctx<'a> {
     /// fd 0, the socket the requests come on.
     pub sock: BorrowedFd<'a>,
+    /// The request frame being read from `sock`, kept across reads so none blocks.
+    pub reader: FrameReader,
     /// Read once at start.
     pub boot: BootId,
     /// A frame read during a scan, handled next by the loop.
@@ -219,8 +217,8 @@ fn split_owners(body: HelperReplyBody) -> Vec<HelperReplyBody> {
     }
 }
 
-/// Runs `ScanStrings` and streams its replies. Between chunks it looks at fd 0 without
-/// blocking: a frame that arrived is kept in `ctx.pending` for the loop, and the scan stops when
+/// Runs `ScanStrings` and streams its replies. Between chunks it reads what fd 0 holds without
+/// blocking, so a partial frame never stalls the scan: a whole frame that arrived is kept in `ctx.pending` for the loop, and the scan stops when
 /// that frame is the `CancelScan` for this `seq` or when the engine closed its end. The loop
 /// then answers the kept `CancelScan` with `Ok`, after the scan's final reply (R-157).
 fn scan(
@@ -251,15 +249,14 @@ fn scan(
         if ctx.stdin_closed || protocol_error {
             return true;
         }
-        if !readable_now(ctx.sock) {
-            return false;
-        }
-        match crate::read_request(ctx.sock) {
-            Ok(received) => {
+        match ctx.reader.read_ready(ctx.sock) {
+            Ok(Some(received)) => {
                 let stop = files::is_cancel_for(&received.frame, seq);
                 ctx.pending = Some(received);
                 stop
             }
+            // Nothing, or part of a frame: the reader keeps the bytes for the next look.
+            Ok(None) => false,
             Err(WireError::Eof) => {
                 ctx.stdin_closed = true;
                 true
@@ -279,14 +276,4 @@ fn scan(
     } else {
         Next::Continue
     }
-}
-
-/// True when fd 0 has data or end of stream right now. Never blocks.
-fn readable_now(sock: BorrowedFd<'_>) -> bool {
-    let zero = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let mut fds = [PollFd::new(&sock, PollFlags::IN)];
-    matches!(rustix::event::poll(&mut fds, Some(&zero)), Ok(n) if n > 0)
 }
