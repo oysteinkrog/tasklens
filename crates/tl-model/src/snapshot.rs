@@ -483,6 +483,8 @@ pub struct ServicesSnapshot {
     pub counts: ServiceCounts,
     /// Index 0 is System, 1 is User.
     pub managers: [ManagerState; 2],
+    /// Units per manager after all filters, collapsed groups included. Index 0 is System, 1 is User.
+    pub manager_counts: [u32; 2],
     /// Units in `Demand.unit_details`, at most 10.
     pub details: Arc<HashMap<UnitRef, Arc<UnitDetails>>>,
     pub backend: ServiceBackend,
@@ -497,6 +499,7 @@ impl Default for ServicesSnapshot {
             units: Arc::from([]),
             counts: ServiceCounts::default(),
             managers: [ManagerState::default(); 2],
+            manager_counts: [0; 2],
             details: Arc::default(),
             backend: ServiceBackend::Systemd,
         }
@@ -1871,6 +1874,7 @@ mod tests {
         assert_eq!(snap.query_generation, 0);
         assert_eq!(snap.counts, ServiceCounts::default());
         assert_eq!(snap.managers, [ManagerState::Unavailable; 2]);
+        assert_eq!(snap.manager_counts, [0; 2]);
     }
 
     #[test]

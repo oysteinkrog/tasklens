@@ -193,10 +193,11 @@ fn decimal(mut n: u32, buf: &mut [u8; 10]) -> &str {
 /// `build` keeps only the rows; the reducer calls this to store both.
 ///
 /// Counts cover unit rows after all filters, including units of collapsed groups (UI-SYS-022).
+/// The third value is the unit count per manager under the same rule (`manager_counts`).
 pub fn build_services(
     input: &SysTableInput<'_>,
     query: &SysTableQuery,
-) -> (SysTableOutput, ServiceCounts) {
+) -> (SysTableOutput, ServiceCounts, [u32; 2]) {
     let default_filter;
     let filter = match &query.services {
         Some(f) => f,
@@ -226,6 +227,7 @@ pub fn build_services(
     let units = &input.services.units;
     let mut rows = Vec::with_capacity(units.len() + 2);
     let mut counts = ServiceCounts::default();
+    let mut manager_counts = [0u32; 2];
     let mut members: Vec<u32> = Vec::new();
     let mut children: Vec<(ProcessKey, u32)> = Vec::new();
 
@@ -257,6 +259,7 @@ pub fn build_services(
                 members.push(i as u32);
             }
         }
+        manager_counts[slot] = members.len() as u32;
         // UI-SYS-014: a group the filters empty is hidden.
         if members.is_empty() {
             continue;
@@ -293,7 +296,7 @@ pub fn build_services(
         }
     }
 
-    (finish(rows, query), counts)
+    (finish(rows, query), counts, manager_counts)
 }
 
 /// Index of `manager` in `ServicesSnapshot.managers`: 0 System, 1 User.
@@ -1030,7 +1033,23 @@ mod tests {
             processes,
             settings: &settings,
         };
-        build_services(&input, q)
+        let (out, counts, _) = build_services(&input, q);
+        (out, counts)
+    }
+
+    fn manager_counts(services: &ServicesSnapshot, q: &SysTableQuery) -> [u32; 2] {
+        let startup = StartupSnapshot::default();
+        let connections = ConnectionsSnapshot::default();
+        let processes = ProcessSnapshot::default();
+        let settings = EngineSettings::default();
+        let input = SysTableInput {
+            services,
+            startup: &startup,
+            connections: &connections,
+            processes: &processes,
+            settings: &settings,
+        };
+        build_services(&input, q).2
     }
 
     fn run(services: &ServicesSnapshot, q: &SysTableQuery) -> (SysTableOutput, ServiceCounts) {
@@ -1098,6 +1117,51 @@ mod tests {
         assert_eq!(unit_names(&out), ["d.service", "e.service"]);
         assert_eq!(counts.total, 5);
         assert_eq!(counts.running, 5);
+    }
+
+    #[test]
+    fn services_manager_counts_collapsed_group() {
+        let s = snapshot(vec![
+            sys("a.service"),
+            sys("b.service"),
+            sys("c.service"),
+            usr("d.service"),
+            usr("e.service"),
+        ]);
+        let q = SysTableQuery {
+            expanded: Arc::from([SysNodeId::ServiceGroup(Manager::System)]),
+            ..query(SysTable::Services, 1)
+        };
+        assert_eq!(manager_counts(&s, &q), [3, 2]);
+        let (_, counts) = run(&s, &q);
+        assert_eq!(counts.total, 5);
+    }
+
+    #[test]
+    fn services_manager_counts_filtered() {
+        let mut s = snapshot(vec![
+            sys("sshd.service"),
+            sys("cups.service"),
+            usr("ssh-agent.service"),
+            usr("pipewire.service"),
+        ]);
+        let text = SysTableQuery {
+            filter: Arc::from("ssh"),
+            ..open_query()
+        };
+        assert_eq!(manager_counts(&s, &text), [1, 1]);
+
+        let no_system = SysTableQuery {
+            services: Some(ServiceFilter {
+                system: false,
+                ..ServiceFilter::default()
+            }),
+            ..open_query()
+        };
+        assert_eq!(manager_counts(&s, &no_system), [0, 2]);
+
+        s.managers[1] = ManagerState::Unavailable;
+        assert_eq!(manager_counts(&s, &open_query()), [2, 0]);
     }
 
     #[test]

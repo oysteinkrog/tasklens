@@ -1656,6 +1656,7 @@ impl Reducer {
             units: units.into(),
             counts: old.counts,
             managers,
+            manager_counts: old.manager_counts,
             details: Arc::new(details),
             backend: u.backend,
         });
@@ -1856,11 +1857,12 @@ impl Reducer {
         };
         match table {
             SysTable::Services => {
-                let (out, counts) = sys_table::build_services(&input, &query);
+                let (out, counts, manager_counts) = sys_table::build_services(&input, &query);
                 let next = Arc::make_mut(&mut self.components.services);
                 next.rows = out.rows;
                 next.query_generation = out.query_generation;
                 next.counts = counts;
+                next.manager_counts = manager_counts;
                 self.mark(ComponentMask::SERVICES);
             }
             SysTable::Startup => {
