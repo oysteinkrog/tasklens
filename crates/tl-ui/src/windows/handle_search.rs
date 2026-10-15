@@ -347,7 +347,7 @@ impl HandleSearchWindow {
     }
 
     fn pattern_text(&self, cx: &App) -> String {
-        self.pattern.read(cx).text().trim().to_owned()
+        self.pattern.read(cx).text().to_string().trim().to_owned()
     }
 
     /// Search is enabled: a pattern and no search running. While searching the button is Stop.
