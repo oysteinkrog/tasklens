@@ -969,6 +969,29 @@ fn dashed_stroke_phase_continues_across_runs() {
     assert!((fill_area(stroke) - 7.0).abs() < 0.001);
 }
 
+/// A one-point run goes through the dash pattern: it draws nothing in an off phase.
+#[test]
+fn dashed_single_point_run_respects_off_phase() {
+    let mut s = vec![
+        Sample::valid(0, 50.0),
+        Sample::valid(60 * MS, 50.0),
+        Sample::valid(100 * MS, 50.0),
+        Sample::gap(130 * MS),
+    ];
+    s[2].flags |= SampleFlags::GAP_BEFORE;
+    let map = TimeMap {
+        anchor_ns: 0,
+        right_edge_ns: 130 * MS,
+        range_ns: 1_000 * MS,
+        plot_width: 100.0,
+    };
+    let v = view(s, 100 * MS);
+    let cache = run_build(&[(line(None, RED, true), Some(&v))], map, 130 * MS);
+
+    // The first run draws 5 px, then 1 px of the off phase. The 1 px stub stays in the off phase.
+    assert!((fill_area(&cache.strokes[0]) - 5.0).abs() < 0.001);
+}
+
 /// A run of one point has no width: no fill set, but the stroke still draws its 1 px dash.
 #[test]
 fn single_point_run_has_no_fill() {

@@ -656,9 +656,10 @@ impl StrokeMesh {
         let Some((&first, rest)) = points.split_first() else {
             return;
         };
-        if rest.is_empty() {
-            self.stroke_line(&[first, point(first.x + px(1.0), first.y)]);
-        } else if self.dashed {
+        // A single point becomes a 1px stub so dashing treats it like any other run.
+        let stub = [first, point(first.x + px(1.0), first.y)];
+        let points = if rest.is_empty() { &stub[..] } else { points };
+        if self.dashed {
             self.stroke_dashed(points);
         } else {
             self.stroke_line(points);
