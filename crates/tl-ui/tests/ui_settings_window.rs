@@ -13,7 +13,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels,
     Render, Styled as _, TestAppContext, VisualTestContext, Window, WindowHandle, div, px, size,
 };
-use tl_model::actions::ActionKind;
+use tl_model::actions::{ActionKind, DumpMode};
 use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::command::Tab;
@@ -536,6 +536,40 @@ fn processes_refresh_dropdown(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn dump_type_dropdown(cx: &mut TestAppContext) {
+    setup(cx);
+    let processes = page(cx, PageId::Processes);
+    assert_eq!(
+        processes.dropdown_labels(SettingKey::ProcessesDumpType),
+        ["Mini", "Full"]
+    );
+    cx.update(|cx| processes.pick(SettingKey::ProcessesDumpType, "Full", cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).processes.dump_type),
+        DumpMode::Full
+    );
+}
+
+#[gpui_kit::test]
+fn show_disconnected_fans_switch(cx: &mut TestAppContext) {
+    setup(cx);
+    let performance = page(cx, PageId::Performance);
+    assert!(!cx.update(|cx| TlSettings::settings(cx).performance.show_disconnected_fans));
+    cx.update(|cx| performance.set_bool(SettingKey::PerformanceShowDisconnectedFans, true, cx));
+    assert!(cx.update(|cx| TlSettings::settings(cx).performance.show_disconnected_fans));
+}
+
+#[gpui_kit::test]
+fn keep_detached_switch(cx: &mut TestAppContext) {
+    setup(cx);
+    let graphs = page(cx, PageId::Graphs);
+    assert!(!cx.update(|cx| TlSettings::settings(cx).graphs.keep_detached_on_close));
+    cx.update(|cx| graphs.set_bool(SettingKey::GraphsKeepDetachedOnClose, true, cx));
+    assert!(cx.update(|cx| TlSettings::settings(cx).graphs.keep_detached_on_close));
+}
+
+#[gpui_kit::test]
 fn processes_hide_system_engine_settings(cx: &mut TestAppContext) {
     let (engine, _) = setup(cx);
     cx.update(|cx| {
@@ -597,7 +631,8 @@ fn processes_page_keys(cx: &mut TestAppContext) {
             SettingKey::TablesDimZeroValues,
             SettingKey::PropertiesHideUnnamedHandles,
             SettingKey::PropertiesSharedObjectsOnly,
-            SettingKey::PropertiesEnvMask
+            SettingKey::PropertiesEnvMask,
+            SettingKey::ProcessesDumpType
         ]
     );
 }
@@ -741,6 +776,7 @@ fn performance_page_keys(cx: &mut TestAppContext) {
             SettingKey::PerformanceShowNetworkVpn,
             SettingKey::PerformanceShowNetworkVirtual,
             SettingKey::PerformanceShowNetworkOther,
+            SettingKey::PerformanceShowDisconnectedFans,
             SettingKey::PerformanceDeviceOrder,
             SettingKey::PerformanceDeviceOverrides
         ]
@@ -904,7 +940,8 @@ fn graphs_services_keys(cx: &mut TestAppContext) {
             SettingKey::GraphsMinigraphNetwork,
             SettingKey::GraphsMinigraphGpu,
             SettingKey::GraphsMinigraphVram,
-            SettingKey::GraphsMinigraphGpuTemperature
+            SettingKey::GraphsMinigraphGpuTemperature,
+            SettingKey::GraphsKeepDetachedOnClose
         ]
     );
     assert_eq!(
