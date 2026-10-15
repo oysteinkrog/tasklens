@@ -27,15 +27,19 @@ pub mod table;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::base::Button as BaseButton;
 use gpui_kit::{
-    App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyContext, ParentElement as _, Render, SharedString, StyleRefinement,
-    Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    Action as _, AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Global,
+    Hsla, InteractiveElement as _, IntoElement, KeyContext, MouseButton, ParentElement as _,
+    Render, SharedString, StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, HistoryWhat, Tab};
-use tl_model::history::{HistoryMetric, HistoryRange, HistoryStoreState, HistoryView};
+use tl_model::history::{
+    HistoryLoadProblem, HistoryMetric, HistoryRange, HistoryStoreState, HistoryView,
+};
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::{Settings, UiState};
 use tl_model::time::TimeNs;
@@ -48,17 +52,21 @@ use self::actions::{
     HistoryStepForward, HistoryStepForwardMinute, SCRUBBED,
 };
 use self::legend::{LegendWords, legend_model, render_legend};
-use crate::components::toast::ToastKind;
+use crate::actions::SetSetting;
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::icons::TlIcon;
+use crate::components::toast::{ToastAction, ToastKind};
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
 use crate::pages::processes::jump::JumpTexts;
-use crate::settings_global::{Section, TlSettings};
+use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
 use crate::table::actions::{CopyCell, OpenProperties};
 use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
-use crate::theme::{bump_style_version, current, metrics};
+use crate::theme::{TlTheme, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{FilterChanged, GlobalShellEvents, main_window_view, push_main_toast};
 
@@ -75,6 +83,12 @@ pub const DEFAULT_VIEW_NS: u64 = 600 * NS_PER_SEC;
 const HEADER_H: f32 = 32.0;
 const STRIP_H: f32 = 120.0;
 const MINIMAP_H: f32 = 24.0;
+const BANNER_H: f32 = 28.0;
+const LIVE_BTN_H: f32 = 24.0;
+/// The Live button's "not live" dot, × ui_scale.
+const LIVE_DOT: f32 = 6.0;
+/// Fill alpha of the recording-off banner (UI-PRC-036).
+const BANNER_ALPHA: f32 = 0.15;
 
 /// The live query period (UI-PRC-030).
 const LIVE_TICK: Duration = Duration::from_secs(1);
@@ -146,6 +160,14 @@ pub struct HistoryWords {
     pub loading: SharedString,
     /// The strip's right-edge time label.
     pub now: SharedString,
+    /// The Live button label and its two tooltips.
+    pub live_button: SharedString,
+    pub live_tip_on: SharedString,
+    pub live_tip_off: SharedString,
+    /// The recording-off banner text, the Enable button and the close tooltip.
+    pub off_banner: SharedString,
+    pub enable: SharedString,
+    pub close: SharedString,
 }
 
 const KEY_COLLECTING: &str = "history-header-collecting";
@@ -159,6 +181,13 @@ const KEY_DURATION_SEC: &str = "history-duration-sec";
 const KEY_DURATION_HOUR: &str = "history-duration-hour";
 const KEY_LOADING: &str = "history-loading";
 const KEY_NOW: &str = "history-scrubber-now";
+const KEY_LIVE_BUTTON: &str = "history-live";
+const KEY_LIVE_TIP_ON: &str = "history-live-tip-on";
+const KEY_LIVE_TIP_OFF: &str = "history-live-tip-off";
+const KEY_OFF_BANNER: &str = "history-off-banner";
+const KEY_OFF_TOAST: &str = "history-off-toast";
+const KEY_ENABLE: &str = "history-enable";
+const KEY_CLOSE: &str = "fnd-action-close";
 
 impl Default for HistoryWords {
     fn default() -> Self {
@@ -174,6 +203,12 @@ impl Default for HistoryWords {
             duration_hour: Template::en(KEY_DURATION_HOUR, &["hours", "min"]),
             loading: tr_en(KEY_LOADING, &[]),
             now: tr_en(KEY_NOW, &[]),
+            live_button: tr_en(KEY_LIVE_BUTTON, &[]),
+            live_tip_on: tr_en(KEY_LIVE_TIP_ON, &[]),
+            live_tip_off: tr_en(KEY_LIVE_TIP_OFF, &[]),
+            off_banner: tr_en(KEY_OFF_BANNER, &[]),
+            enable: tr_en(KEY_ENABLE, &[]),
+            close: tr_en(KEY_CLOSE, &[]),
         }
     }
 }
@@ -193,6 +228,12 @@ impl HistoryWords {
             duration_hour: Template::new(cx, KEY_DURATION_HOUR, &["hours", "min"]),
             loading: tr(cx, KEY_LOADING),
             now: tr(cx, KEY_NOW),
+            live_button: tr(cx, KEY_LIVE_BUTTON),
+            live_tip_on: tr(cx, KEY_LIVE_TIP_ON),
+            live_tip_off: tr(cx, KEY_LIVE_TIP_OFF),
+            off_banner: tr(cx, KEY_OFF_BANNER),
+            enable: tr(cx, KEY_ENABLE),
+            close: tr(cx, KEY_CLOSE),
         }
     }
 }
@@ -422,6 +463,93 @@ fn history_mode(cx: &App) -> bool {
         .is_none_or(|_| TlSettings::state(cx).processes.history_mode)
 }
 
+/// What the user was told or dismissed in this session. `HistoryPage` is dropped when History
+/// mode turns off, so the flags live here and each new page reads them (UI-PRC-036, PROC-087).
+#[derive(Default)]
+struct HistorySession {
+    banner_hidden: bool,
+    off_toast_shown: bool,
+    /// One flag per [`HistoryLoadProblem`], in [`problem_index`] order.
+    problems_shown: [bool; 6],
+}
+
+impl Global for HistorySession {}
+
+/// True while `history.enabled` is off. Without settings (tests) recording counts as on.
+fn recording_off(cx: &App) -> bool {
+    cx.try_global::<TlSettings>()
+        .is_some_and(|_| !TlSettings::settings(cx).history.enabled)
+}
+
+/// Turns recording on through the settings, which makes the engine switch to the store.
+fn enable_recording(cx: &mut App) {
+    TlSettings::update(cx, |d| d.settings.history.enabled = true);
+}
+
+fn problem_index(p: HistoryLoadProblem) -> usize {
+    match p {
+        HistoryLoadProblem::OpenFailed => 0,
+        HistoryLoadProblem::EmptyOrTruncated => 1,
+        HistoryLoadProblem::VersionMismatch => 2,
+        HistoryLoadProblem::NoInRange => 3,
+        HistoryLoadProblem::Stale => 4,
+        HistoryLoadProblem::TimedOut => 5,
+    }
+}
+
+/// The PROC-087 text key of `p`.
+fn problem_key(p: HistoryLoadProblem) -> &'static str {
+    match p {
+        HistoryLoadProblem::OpenFailed => "history-load-open-failed",
+        HistoryLoadProblem::EmptyOrTruncated => "history-load-empty",
+        HistoryLoadProblem::VersionMismatch => "history-load-version",
+        HistoryLoadProblem::NoInRange => "history-load-no-range",
+        HistoryLoadProblem::Stale => "history-load-stale",
+        HistoryLoadProblem::TimedOut => "history-load-timeout",
+    }
+}
+
+/// Pushes a toast after the current update, because the main window may be mid-update.
+fn defer_toast(kind: ToastKind, text: SharedString, action: Option<ToastAction>, cx: &mut App) {
+    cx.defer(move |cx| push_main_toast(cx, kind, text, None, action));
+}
+
+/// The colours of the Live button in one state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveLook {
+    pub bg: Hsla,
+    pub fg: Hsla,
+    pub border: Option<Hsla>,
+    /// `None` keeps the colour on hover.
+    pub hover: Option<Hsla>,
+    /// The leading dot, only while scrubbed or a range is set.
+    pub dot: Option<Hsla>,
+}
+
+/// Primary and fixed while `live`; the Secondary look with a green dot otherwise.
+pub fn live_look(live: bool, theme: &TlTheme) -> LiveLook {
+    if live {
+        LiveLook {
+            bg: theme.accent,
+            fg: gpui_kit::rgb(0xFFFFFF).into(),
+            border: None,
+            hover: None,
+            dot: None,
+        }
+    } else {
+        LiveLook {
+            bg: theme.toolbar,
+            fg: theme.text_primary,
+            border: Some(theme.divider),
+            hover: Some(theme.tab_hover),
+            dot: Some(theme.status.success),
+        }
+    }
+}
+
+/// Element id of the Live button's dot, present only while not live.
+pub const LIVE_DOT_ID: &str = "history-live-dot";
+
 /// The History mode page. Built when History mode turns on.
 pub struct HistoryPage {
     pub(crate) state: HistoryUiState,
@@ -446,6 +574,8 @@ pub struct HistoryPage {
     table: Entity<TlTreeTable<HistoryTableDelegate>>,
     /// `TlSettings` versions of [`SECTIONS`] last applied.
     section_versions: [u64; 3],
+    /// The `history` section version last seen, so a `history.enabled` change repaints.
+    history_version: u64,
     /// The strip's built geometry and shaped labels, filled by `HistoryScrubber` in paint.
     scrubber: ScrubberCache,
     /// The strip's own view, created on the first render that shows it.
@@ -517,6 +647,7 @@ impl HistoryPage {
                 }
                 this.frame_version += 1;
                 this.install(Arc::clone(&history));
+                this.note_store_state(cx);
                 this.install_table(cx);
                 this.drive(cx, |q, c| q.on_view(&history, c));
                 this.on_top_view(&history, cx);
@@ -565,6 +696,9 @@ impl HistoryPage {
         let section_versions = cx
             .try_global::<TlSettings>()
             .map_or([0; 3], |tl| SECTIONS.map(|s| tl.version(s)));
+        let history_version = cx
+            .try_global::<TlSettings>()
+            .map_or(0, |tl| tl.version(Section::History));
         let (words, legend_words, strings_version) = match cx.try_global::<Strings>() {
             Some(s) => (
                 HistoryWords::new(cx),
@@ -589,6 +723,7 @@ impl HistoryPage {
             retry_timer: None,
             table,
             section_versions,
+            history_version,
             scrubber: ScrubberCache::default(),
             strip_view: None,
             strip_focus: cx.focus_handle().tab_stop(true),
@@ -603,9 +738,66 @@ impl HistoryPage {
             render_count: std::cell::Cell::new(0),
         };
         page.install(history);
+        let session = cx.default_global::<HistorySession>();
+        page.state.banner_hidden = session.banner_hidden;
+        page.state.off_toast_shown = session.off_toast_shown;
         page.request(cx);
         page.update_live_timer(cx);
+        // Deferred: the main window may be mid-update when History mode turns on.
+        cx.defer_in(window, |this, _, cx| {
+            this.note_recording_off(cx);
+            this.note_store_state(cx);
+        });
         page
+    }
+
+    /// With recording off, tells the user once per session, with an Enable button. Entering
+    /// History mode again shows no second toast.
+    pub fn note_recording_off(&mut self, cx: &mut Context<Self>) {
+        if cx.default_global::<HistorySession>().off_toast_shown || !recording_off(cx) {
+            return;
+        }
+        cx.default_global::<HistorySession>().off_toast_shown = true;
+        self.state.off_toast_shown = true;
+        let action = ToastAction {
+            label: tr(cx, KEY_ENABLE),
+            action: SetSetting {
+                key: SettingKey::HistoryEnabled,
+                value: SettingValue::Bool(true),
+            }
+            .boxed_clone(),
+        };
+        defer_toast(ToastKind::Info, tr(cx, KEY_OFF_TOAST), Some(action), cx);
+    }
+
+    /// A Warning toast for a store load problem, once per problem per session.
+    fn note_store_state(&mut self, cx: &mut Context<Self>) {
+        let Some(HistoryStoreState::Problem(p)) = self.view.as_ref().map(|v| v.store_state) else {
+            return;
+        };
+        let session = cx.default_global::<HistorySession>();
+        let shown = &mut session.problems_shown[problem_index(p)];
+        if std::mem::replace(shown, true) {
+            return;
+        }
+        defer_toast(ToastKind::Warning, tr(cx, problem_key(p)), None, cx);
+    }
+
+    /// Hides the recording-off banner for the rest of the session.
+    fn hide_banner(&mut self, cx: &mut Context<Self>) {
+        cx.default_global::<HistorySession>().banner_hidden = true;
+        self.state.banner_hidden = true;
+        cx.notify();
+    }
+
+    /// The Live button's tooltip as it is now.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn live_tooltip(&self) -> &SharedString {
+        if self.is_live() {
+            &self.words.live_tip_on
+        } else {
+            &self.words.live_tip_off
+        }
     }
 
     pub fn state(&self) -> &HistoryUiState {
@@ -982,7 +1174,12 @@ impl HistoryPage {
         let Some(tl) = cx.try_global::<TlSettings>() else {
             return;
         };
+        let history_version = tl.version(Section::History);
         let versions = SECTIONS.map(|s| tl.version(s));
+        if history_version != self.history_version {
+            self.history_version = history_version;
+            cx.notify();
+        }
         if versions == self.section_versions {
             return;
         }
@@ -1199,6 +1396,104 @@ enum CopyKind {
     AllMetrics,
 }
 
+impl HistoryPage {
+    /// "Live": Primary while live, else Secondary with a green dot. Click returns to live.
+    fn render_live_button(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = current(cx).clone();
+        let m = *metrics(cx);
+        let live = self.is_live();
+        let look = live_look(live, &theme);
+        let label = self.words.live_button.clone();
+        let tip = if live {
+            self.words.live_tip_on.clone()
+        } else {
+            self.words.live_tip_off.clone()
+        };
+        let state = HoverTooltip::state("history-live-tip", window, cx);
+        let button = BaseButton::new("history-live")
+            .key_context("TlButton")
+            .debug_selector(|| "history-live".to_string())
+            .accessibility_label(label.clone())
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(m.sp[2])
+            .mr(m.sp[4])
+            .h(px(LIVE_BTN_H * m.ui_scale))
+            .px(m.sp[4])
+            .rounded(m.radius_small)
+            .bg(look.bg)
+            .when_some(look.border, |b, c| b.border_1().border_color(c))
+            .text_size(m.text.sm)
+            .text_color(look.fg)
+            .when_some(look.hover, |b, c| b.hover(move |s| s.bg(c)))
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(HistoryLive), cx))
+            .when_some(look.dot, |b, color| {
+                b.child(
+                    div()
+                        .debug_selector(|| LIVE_DOT_ID.to_string())
+                        .flex_none()
+                        .size(px(LIVE_DOT * m.ui_scale))
+                        .rounded_full()
+                        .bg(color),
+                )
+            })
+            .child(div().whitespace_nowrap().child(label));
+        HoverTooltip::attach(
+            &state,
+            button,
+            DELAY_CONTROL,
+            TlTooltip::text(tip).build(),
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// The one-line recording-off banner: text, Enable and a close ×.
+    fn render_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = current(cx).clone();
+        let m = *metrics(cx);
+        let page = cx.entity().downgrade();
+        div()
+            .debug_selector(|| "history-off-banner".to_string())
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .h(px(BANNER_H * m.ui_scale))
+            .mx(m.sp[5])
+            .px(m.sp[5])
+            .gap(m.sp[3])
+            .bg(theme.status.info.alpha(BANNER_ALPHA))
+            .text_size(m.text.sm)
+            .text_color(theme.text_primary)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.words.off_banner.clone()),
+            )
+            .child(
+                TlButton::new("history-off-enable", TlButtonKind::Secondary)
+                    .size(TlButtonSize::Sm)
+                    .label(self.words.enable.clone())
+                    .on_click(|_, _, cx| enable_recording(cx)),
+            )
+            .child(
+                TlButton::new("history-off-close", TlButtonKind::Icon)
+                    .size(TlButtonSize::Sm)
+                    .icon(TlIcon::X)
+                    .tooltip(self.words.close.clone())
+                    .on_click(move |_, _, cx| {
+                        page.update(cx, |p, cx| p.hide_banner(cx)).ok();
+                    }),
+            )
+    }
+}
+
 impl Render for HistoryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
@@ -1229,6 +1524,9 @@ impl Render for HistoryPage {
             window,
             cx,
         );
+        let live_button = self.render_live_button(window, cx);
+        let banner = (recording_off(cx) && !self.state.banner_hidden)
+            .then(|| self.render_banner(cx).into_any_element());
         let m = metrics(cx);
         let theme = current(cx);
         let scale = m.ui_scale;
@@ -1242,8 +1540,8 @@ impl Render for HistoryPage {
             .text_size(m.text.base)
             .text_color(theme.text_primary)
             .child(div().flex_1().min_w_0().child(self.header.clone()))
+            .child(live_button)
             .child(legend);
-        // E30-026 adds the 28 px recording-off banner slot here.
         let mut strip = div()
             .flex_none()
             .h(px(STRIP_H * scale))
@@ -1319,6 +1617,7 @@ impl Render for HistoryPage {
             .flex()
             .flex_col()
             .child(header)
+            .children(banner)
             .child(strip)
             .child(minimap)
             .child(table)

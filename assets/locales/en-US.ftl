@@ -1082,6 +1082,18 @@ history-chip-disk = Disk
 history-chip-network = Network
 history-chip-gpu = GPU
 history-chip-more = +{ $count }
+history-live = Live
+history-live-tip-on = Showing live data
+history-live-tip-off = Return to live (double-click the timeline or press End)
+history-off-banner = History recording is off. Showing the last 10 minutes kept in memory.
+history-off-toast = History recording is off
+history-enable = Enable
+history-load-open-failed = Could not open process history store.
+history-load-empty = Process history store is empty or truncated.
+history-load-version = Process history store version/layout mismatch; starting fresh.
+history-load-no-range = No in-range process history in store.
+history-load-stale = Process history store is stale.
+history-load-timeout = Process history load timed out; starting fresh.
 
 # Keyboard Shortcuts window (E21-016)
 shortcuts-title = tasklens Keyboard Shortcuts

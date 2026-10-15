@@ -3,7 +3,8 @@
 //! (tasklens-8fx.22), and queries on strip window, metric and selection changes
 //! (tasklens-8fx.38), and the timeline strip's cached geometry and gap bands (tasklens-8fx.24), and
 //! the filter text typed before the page existed (tasklens-8fx.39), and the top-3 hover card
-//! (tasklens-8fx.26), and the minimap (tasklens-8fx.27), and the legend chips (tasklens-8fx.28).
+//! (tasklens-8fx.26), and the minimap (tasklens-8fx.27), and the legend chips (tasklens-8fx.28), and
+//! the Live button, recording-off banner and toast and load-problem toasts (tasklens-8fx.29).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -18,8 +19,9 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, HistoryWhat};
 use tl_model::details::DetailsSnapshot;
 use tl_model::history::{
-    HistoryMetric, HistoryPeaks, HistoryPoint, HistoryProcessRow, HistoryRange, HistorySeries,
-    HistoryStackBucket, HistoryStoreState, HistoryTop, HistoryTopRow, HistoryTotals, HistoryView,
+    HistoryLoadProblem, HistoryMetric, HistoryPeaks, HistoryPoint, HistoryProcessRow, HistoryRange,
+    HistorySeries, HistorySource, HistoryStackBucket, HistoryStoreState, HistoryTop, HistoryTopRow,
+    HistoryTotals, HistoryView,
 };
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::{AppearanceSettings, Settings, SortState, ThemeSettings, UiState};
@@ -31,7 +33,8 @@ use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::pages::processes::history::actions::{HistoryLive, bind_keys_history};
 use tl_ui::pages::processes::history::table::HistoryTableDelegate;
 use tl_ui::pages::processes::history::{
-    HistoryPage, HistoryUiState, HistoryWords, default_view_range, header_text,
+    HistoryPage, HistoryUiState, HistoryWords, LIVE_DOT_ID, default_view_range, header_text,
+    live_look,
 };
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::cells::CellOut;
@@ -1232,6 +1235,11 @@ mod row_actions {
 
     /// History mode on, pids 2, 3 and 4 in the history table, only pid 2 running.
     fn rig(cx: &mut TestAppContext) -> Rig<'_> {
+        rig_with(cx, true)
+    }
+
+    /// [`rig`] with `history.enabled` set to `recording`.
+    fn rig_with(cx: &mut TestAppContext, recording: bool) -> Rig<'_> {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         let mut state = UiState::default();
@@ -1243,8 +1251,10 @@ mod row_actions {
             tl_ui::theme::metrics::init_metrics(&appearance, cx);
             tl_ui::i18n::init_strings(cx, "en-US");
             tl_ui::table::actions::bind_keys_table(cx);
+            let mut settings = Settings::default();
+            settings.history.enabled = recording;
             cx.set_global(BootSettings {
-                settings: Settings::default(),
+                settings,
                 state,
                 persist: None,
                 startup_toasts: Vec::new(),
@@ -1506,6 +1516,169 @@ mod row_actions {
         assert!(!details.contains("Command line"));
         assert!(!all.contains("Command line"));
         assert_eq!(cell, "live\ngone");
+    }
+
+    fn banner_drawn(r: &mut Rig<'_>) -> bool {
+        draw(r.vcx);
+        r.vcx.debug_bounds("history-off-banner").is_some()
+    }
+
+    fn recording(r: &mut Rig<'_>) -> bool {
+        r.vcx
+            .update(|_, cx| TlSettings::settings(cx).history.enabled)
+    }
+
+    #[gpui_kit::test]
+    fn recording_off_banner_and_toast_once(cx: &mut TestAppContext) {
+        let mut r = rig_with(cx, false);
+        assert_eq!(r.toasts(), ["History recording is off"]);
+        assert!(banner_drawn(&mut r));
+        let Rig { main, .. } = r;
+        // History mode entered again in the same session: a second page, no second toast.
+        let (_page, vcx) = cx.add_window_view(HistoryPage::new);
+        vcx.run_until_parked();
+        draw(vcx);
+        let mut main = main;
+        let texts: Vec<String> = main.update(|_, cx| {
+            let queue = main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .toasts()
+                .clone();
+            queue
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        });
+        assert_eq!(texts, ["History recording is off"]);
+    }
+
+    #[gpui_kit::test]
+    fn banner_dismiss_session(cx: &mut TestAppContext) {
+        let mut r = rig_with(cx, false);
+        assert!(banner_drawn(&mut r));
+        click_selector(r.vcx, "TlButton-history-off-close");
+        assert!(!banner_drawn(&mut r));
+        let Rig { .. } = r;
+        let (_page, vcx) = cx.add_window_view(HistoryPage::new);
+        vcx.run_until_parked();
+        draw(vcx);
+        assert!(vcx.debug_bounds("history-off-banner").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn enable_sets_setting(cx: &mut TestAppContext) {
+        let mut r = rig_with(cx, false);
+        assert!(!recording(&mut r));
+        assert!(banner_drawn(&mut r));
+        click_selector(r.vcx, "TlButton-history-off-enable");
+        assert!(recording(&mut r));
+        assert!(!banner_drawn(&mut r));
+    }
+
+    #[gpui_kit::test]
+    fn toast_enable_button_sets_setting(cx: &mut TestAppContext) {
+        let mut r = rig_with(cx, false);
+        r.vcx
+            .update(|_, cx| tl_ui::actions::register_global_handlers(cx));
+        r.vcx.dispatch_action(tl_ui::actions::SetSetting {
+            key: tl_ui::settings_global::SettingKey::HistoryEnabled,
+            value: tl_ui::settings_global::SettingValue::Bool(true),
+        });
+        assert!(recording(&mut r));
+    }
+
+    #[gpui_kit::test]
+    fn load_problem_toast_once_each(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        for version in [100, 101] {
+            let (engine, vcx) = (r.engine.clone(), &mut *r.vcx);
+            publish_view(
+                &engine,
+                vcx,
+                HistoryView {
+                    header: ComponentHeader {
+                        version,
+                        ..ComponentHeader::default()
+                    },
+                    store_state: HistoryStoreState::Problem(HistoryLoadProblem::Stale),
+                    ..view(700 * S)
+                },
+            );
+        }
+        assert_eq!(r.toasts(), ["Process history store is stale."]);
+        // Another problem still shows its own toast.
+        let (engine, vcx) = (r.engine.clone(), &mut *r.vcx);
+        publish_view(
+            &engine,
+            vcx,
+            HistoryView {
+                header: ComponentHeader {
+                    version: 102,
+                    ..ComponentHeader::default()
+                },
+                store_state: HistoryStoreState::Problem(HistoryLoadProblem::OpenFailed),
+                ..view(700 * S)
+            },
+        );
+        let toasts = r.toasts();
+        assert!(toasts.contains(&"Could not open process history store.".to_string()));
+        assert_eq!(toasts.len(), 2, "{toasts:?}");
+    }
+}
+
+#[gpui_kit::test]
+fn live_button_state_follows_scrub(cx: &mut TestAppContext) {
+    let (page, vcx) = keys_page(cx);
+    let theme = vcx.update(|_, cx| tl_ui::theme::current(cx).clone());
+    let live = live_look(true, &theme);
+    assert_eq!(live.bg, theme.accent);
+    assert!(live.dot.is_none() && live.hover.is_none());
+    assert!(vcx.debug_bounds("history-live").is_some());
+    assert!(vcx.debug_bounds(LIVE_DOT_ID).is_none());
+    assert_eq!(
+        vcx.read_entity(&page, |p, _| p.live_tooltip().to_string()),
+        "Showing live data"
+    );
+    page.update(vcx, |p, cx| p.set_scrub(Some(400 * S), cx));
+    vcx.run_until_parked();
+    draw(vcx);
+    let off = live_look(false, &theme);
+    assert_eq!(off.dot, Some(theme.status.success));
+    assert!(vcx.debug_bounds(LIVE_DOT_ID).is_some());
+    assert_eq!(
+        vcx.read_entity(&page, |p, _| p.live_tooltip().to_string()),
+        "Return to live (double-click the timeline or press End)"
+    );
+    click_selector(vcx, "history-live");
+    assert_eq!(scrub_of(&page, vcx), None);
+    draw(vcx);
+    assert!(vcx.debug_bounds(LIVE_DOT_ID).is_none());
+}
+
+#[gpui_kit::test]
+fn rolling_window_labels_capped_10min(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    publish_view(
+        &engine,
+        vcx,
+        HistoryView {
+            source: HistorySource::RollingWindow,
+            span: Some((100 * S, 700 * S)),
+            ..strip_view(1, Vec::new())
+        },
+    );
+    draw(vcx);
+    let labels = vcx.read_entity(&page, |p, _| p.scrubber().label_texts());
+    assert!(labels.iter().any(|l| l == "-10:00"), "{labels:?}");
+    for l in labels.iter().filter(|l| l.starts_with('-')) {
+        let (m, sec) = l[1..].split_once(':').expect("-M:SS");
+        let secs = m.parse::<u32>().unwrap() * 60 + sec.parse::<u32>().unwrap();
+        assert!(secs <= 600, "{l} is beyond -10:00 in {labels:?}");
     }
 }
 
