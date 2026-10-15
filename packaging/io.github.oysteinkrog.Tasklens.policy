@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>tasklens</vendor>
+  <icon_name>io.github.oysteinkrog.Tasklens</icon_name>
+  <action id="io.github.oysteinkrog.tasklens.helper">
+    <description>Run tasklens administrator actions</description>
+    <message>Authentication is required to let tasklens act on other users' processes, system services and network connections.</message>
+    <defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/tasklens/tl-helper</annotate>
+  </action>
+  <action id="io.github.oysteinkrog.tasklens.setup">
+    <description>Change tasklens system setup</description>
+    <message>Authentication is required to change system settings for tasklens.</message>
+    <defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/tasklens/tasklens-setup</annotate>
+  </action>
+  <action id="io.github.oysteinkrog.tasklens.netmon">
+    <description>Run the tasklens network monitor</description>
+    <message>Authentication is required to run the tasklens network monitor.</message>
+    <defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/tasklens/tl-netmon</annotate>
+  </action>
+</policyconfig>

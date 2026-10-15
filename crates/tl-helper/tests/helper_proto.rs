@@ -620,3 +620,78 @@ fn check_replies(
         assert_eq!(&replies[0].body, expected, "{label}");
     }
 }
+
+fn policy_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packaging/io.github.oysteinkrog.Tasklens.policy")
+}
+
+/// The polkit policy has exactly three actions, each tied to one fixed binary, none defaulting
+/// to `yes`, with the owner-confirmed texts (D-019).
+#[test]
+fn policy_file_has_three_actions() {
+    let path = policy_path();
+    let text = std::fs::read_to_string(&path).expect("read the policy file");
+
+    match Command::new("xmllint")
+        .arg("--noout")
+        .arg("--nonet")
+        .arg(&path)
+        .output()
+    {
+        Ok(out) => assert!(
+            out.status.success(),
+            "xmllint failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(_) => eprintln!("xmllint not installed, well-formedness check skipped"),
+    }
+
+    assert_eq!(text.matches("<action id=\"").count(), 3);
+    assert_eq!(text.matches(" id=\"").count(), 3, "no other id anywhere");
+    assert!(!text.contains(">yes<"));
+
+    let expected = [
+        (
+            "io.github.oysteinkrog.tasklens.helper",
+            "tl-helper",
+            "Run tasklens administrator actions",
+            "Authentication is required to let tasklens act on other users' processes, system services and network connections.",
+        ),
+        (
+            "io.github.oysteinkrog.tasklens.setup",
+            "tasklens-setup",
+            "Change tasklens system setup",
+            "Authentication is required to change system settings for tasklens.",
+        ),
+        (
+            "io.github.oysteinkrog.tasklens.netmon",
+            "tl-netmon",
+            "Run the tasklens network monitor",
+            "Authentication is required to run the tasklens network monitor.",
+        ),
+    ];
+    let pieces: Vec<&str> = text.split("<action id=\"").skip(1).collect();
+    assert_eq!(pieces.len(), expected.len());
+    for (piece, (id, bin, description, message)) in pieces.iter().zip(expected) {
+        assert!(piece.starts_with(&format!("{id}\"")), "{id}");
+        assert!(
+            piece.contains("<allow_active>auth_admin_keep</allow_active>"),
+            "{id}: allow_active"
+        );
+        assert!(
+            piece.contains(&format!(
+                "<annotate key=\"org.freedesktop.policykit.exec.path\">/usr/lib/tasklens/{bin}</annotate>"
+            )),
+            "{id}: exec path"
+        );
+        assert!(
+            piece.contains(&format!("<description>{description}</description>")),
+            "{id}"
+        );
+        assert!(
+            piece.contains(&format!("<message>{message}</message>")),
+            "{id}"
+        );
+    }
+}
