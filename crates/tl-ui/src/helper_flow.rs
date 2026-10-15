@@ -17,7 +17,7 @@
 //! failed starts a snapshot answers need more toasts than the windows give, so each cancel gets
 //! one toast. A cancel shows "Authentication cancelled", any other failure of this module's own
 //! start "Could not start the privileged helper". A window's start that fails without a cancel
-//! gets no toast, as before this module.
+//! gets no toast.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
