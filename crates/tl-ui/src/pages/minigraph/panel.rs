@@ -11,13 +11,15 @@
 //! Dragging a card (UI-PRF-043, PERF-082) previews the new order while the pointer is over a slot
 //! and moves the card there on drop, with no holes.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext as _, Bounds, Context, DragMoveEvent, ElementId,
     Entity, Global, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
     ParentElement as _, Pixels, Point, Render, StyleRefinement, Styled as _, Subscription,
-    WeakEntity, Window, div, px,
+    WeakEntity, Window, canvas, div, px,
 };
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::settings::GraphsSettings;
@@ -72,8 +74,6 @@ struct DragPreview {
     from: Option<u16>,
     /// Counts the changes of `over`, so each shift starts a new animation.
     epoch: usize,
-    /// The panel bounds from the last drag move.
-    bounds: Bounds<Pixels>,
 }
 
 /// The app's panel, set by `MinigraphPanel::new` (ADR-009: one panel per app). The shell menu
@@ -97,6 +97,8 @@ pub struct MinigraphPanel {
     drag: Option<DragPreview>,
     /// `ui_scale` of the last render, for `slot_at`.
     scale: f32,
+    /// The panel bounds of the last paint, for the slot under a release.
+    bounds: Rc<Cell<Bounds<Pixels>>>,
     _settings_sub: Option<Subscription>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
@@ -146,6 +148,7 @@ impl MinigraphPanel {
             graphs: graphs.clone(),
             drag: None,
             scale: 1.,
+            bounds: Rc::default(),
             _settings_sub,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -264,36 +267,39 @@ impl MinigraphPanel {
         slots
     }
 
+    /// Starts the preview of a drag of `id` once `pos` is 4 px from the press on the card.
+    fn start_drag(&mut self, id: MinigraphId, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some((_, card)) = self.cards.iter().find(|(c, _)| *c == id) else {
+            return false;
+        };
+        if !card
+            .read(cx)
+            .press()
+            .is_some_and(|p| past_threshold(p, pos))
+        {
+            return false;
+        }
+        card.update(cx, |c, cx| c.set_dragging(true, cx));
+        self.drag = Some(DragPreview {
+            id,
+            over: None,
+            from: None,
+            epoch: 0,
+        });
+        true
+    }
+
     /// A drag move of a card: starts the preview past 4 px and follows the slot under the
     /// pointer. Re-renders only when that slot changes.
     fn on_drag_move(&mut self, ev: &DragMoveEvent<DraggedMinigraph>, cx: &mut Context<Self>) {
-        let id = ev.drag(cx).id;
         let pos = ev.event.position;
-        if self.drag.is_none() {
-            let Some((_, card)) = self.cards.iter().find(|(c, _)| *c == id) else {
-                return;
-            };
-            if !card
-                .read(cx)
-                .press()
-                .is_some_and(|p| past_threshold(p, pos))
-            {
-                return;
-            }
-            card.update(cx, |c, cx| c.set_dragging(true, cx));
-            self.drag = Some(DragPreview {
-                id,
-                over: None,
-                from: None,
-                epoch: 0,
-                bounds: ev.bounds,
-            });
+        if self.drag.is_none() && !self.start_drag(ev.drag(cx).id, pos, cx) {
+            return;
         }
         let over = self.slot_at(pos, ev.bounds);
         let Some(drag) = self.drag.as_mut() else {
             return;
         };
-        drag.bounds = ev.bounds;
         if drag.over != over {
             drag.from = drag.over;
             drag.over = over;
@@ -305,6 +311,18 @@ impl MinigraphPanel {
     /// A left release. After a drag, a release at `at` over a slot moves the card there;
     /// anywhere else the cards go back to their slots.
     fn end_drag(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        // GPUI starts its drag on a move after the panel's drag-move listener ran, so a release
+        // right after one move past 4 px finds no preview yet.
+        if self.drag.is_none() {
+            let held = self
+                .cards
+                .iter()
+                .find(|(_, c)| c.read(cx).gpui_drag())
+                .map(|(id, _)| *id);
+            if let Some(id) = held {
+                self.start_drag(id, at, cx);
+            }
+        }
         let drag = self.drag.take();
         for (_, card) in &self.cards {
             card.update(cx, |c, cx| c.end_drag(cx));
@@ -312,7 +330,7 @@ impl MinigraphPanel {
         let Some(drag) = drag else {
             return;
         };
-        if let Some(slot) = self.slot_at(at, drag.bounds) {
+        if let Some(slot) = self.slot_at(at, self.bounds.get()) {
             self.move_to_slot(drag.id, slot, cx);
         }
         cx.notify();
@@ -682,6 +700,12 @@ impl Render for MinigraphPanel {
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseUpEvent, _, cx| this.end_drag(ev.position, cx)),
             );
+        let bounds = Rc::clone(&self.bounds);
+        root = root.child(
+            canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
+        );
         let s = metrics(cx).ui_scale;
         self.scale = s;
         if self.cards.is_empty() {
@@ -704,8 +728,19 @@ impl Render for MinigraphPanel {
             }
             _ => None,
         };
-        for (i, (id, card)) in self.cards.iter().enumerate() {
-            let slot = now[i];
+        // The dragged card shows its home outline at its stored slot, under the card that
+        // shifts there, so it comes first.
+        let dragged = drag.and_then(|(id, ..)| self.cards.iter().position(|(c, _)| *c == id));
+        let order = dragged
+            .into_iter()
+            .chain((0..self.cards.len()).filter(|i| Some(*i) != dragged));
+        for i in order {
+            let (id, card) = &self.cards[i];
+            let slot = if Some(i) == dragged {
+                card.read(cx).entry.slot
+            } else {
+                now[i]
+            };
             let (right, bottom) = offset(slot);
             let el = div()
                 .id(("MinigraphSlot", u64::from(id.0)))
@@ -719,7 +754,11 @@ impl Render for MinigraphPanel {
                     card.clone()
                         .cached(StyleRefinement::default().w(px(w)).h(px(h))),
                 );
-            let old = before.as_ref().map(|b| b[i]).filter(|old| *old != slot);
+            let old = before
+                .as_ref()
+                .filter(|_| Some(i) != dragged)
+                .map(|b| b[i])
+                .filter(|old| *old != slot);
             match (old, drag) {
                 (Some(old), Some((_, _, _, epoch))) => {
                     let (r0, b0) = offset(old);

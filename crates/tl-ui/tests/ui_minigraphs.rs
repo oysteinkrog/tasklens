@@ -1184,6 +1184,7 @@ mod panel {
     fn drag_shifts_cards(cx: &mut TestAppContext) {
         let mut r = four_cards(cx);
         let before = r.attached();
+        let home = slot_bounds(&mut r, 0);
         let target = slot_bounds(&mut r, 2).center();
         let from = press_cpu(&mut r);
         drag_to(&mut r, from, target);
@@ -1191,7 +1192,24 @@ mod panel {
         // Memory and Disk shift right by one slot; the stored layout stays until the drop.
         assert_eq!(preview(&mut r), reordered());
         assert_eq!(r.attached(), before);
-        assert!(r.vcx.debug_bounds("MinigraphCard-home").is_some());
+        assert_eq!(
+            r.vcx.debug_bounds("MinigraphCard-home"),
+            Some(home),
+            "the outline stays at the home slot"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn drop_after_one_move_reorders(cx: &mut TestAppContext) {
+        let mut r = four_cards(cx);
+        let target = slot_bounds(&mut r, 2).center();
+        press_cpu(&mut r);
+        r.vcx
+            .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
+        draw(&mut r.vcx);
+        release(&mut r, target);
+        assert_eq!(r.attached(), reordered());
+        assert!(!cpu_dragging(&mut r));
     }
 
     #[gpui_kit::test]
@@ -1277,10 +1295,19 @@ mod panel {
 
         // 4 px does start one.
         let from = press_cpu(&mut r);
-        drag_to(&mut r, from, point(from.x - px(4.), from.y));
+        let at = point(from.x - px(4.), from.y);
+        drag_to(&mut r, from, at);
         let cpu = r.id_of(&MinigraphSource::Cpu);
         let dragging = r.vcx.update(|_, cx| r.panel.read(cx).dragging());
         assert_eq!(dragging, Some(cpu));
+        assert!(r.vcx.debug_bounds("MinigraphDragGhost").is_some());
+
+        // Back within 4 px of the press, the drag and the ghost stay.
+        drag_to(&mut r, at, point(from.x - px(1.), from.y));
+        let dragging = r.vcx.update(|_, cx| r.panel.read(cx).dragging());
+        assert_eq!(dragging, Some(cpu));
+        assert!(cpu_dragging(&mut r));
+        assert!(r.vcx.debug_bounds("MinigraphDragGhost").is_some());
     }
 
     #[gpui_kit::test]

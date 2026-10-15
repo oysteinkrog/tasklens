@@ -97,6 +97,8 @@ pub struct MinigraphCard {
     dragging: bool,
     /// Where the left button went down on the card, for the 4 px drag threshold.
     press: Option<Point<Pixels>>,
+    /// GPUI runs a drag of this card. It starts at 2 px, before the 4 px threshold.
+    gpui_drag: bool,
     hub: Entity<SnapshotHub>,
     _hub_sub: Subscription,
     /// Where the menu items go when nothing in the window has focus (cards take no focus).
@@ -150,6 +152,7 @@ impl MinigraphCard {
             row_hover: false,
             dragging: false,
             press: None,
+            gpui_drag: false,
             hub: hub.clone(),
             _hub_sub,
             menu_focus: cx.focus_handle(),
@@ -188,6 +191,11 @@ impl MinigraphCard {
         self.press
     }
 
+    /// GPUI runs a drag of this card, past 2 px or not past 4 px.
+    pub fn gpui_drag(&self) -> bool {
+        self.gpui_drag
+    }
+
     pub fn set_dragging(&mut self, dragging: bool, cx: &mut Context<Self>) {
         if self.dragging != dragging {
             self.dragging = dragging;
@@ -198,6 +206,7 @@ impl MinigraphCard {
     /// Clears the press and the drag look.
     pub fn end_drag(&mut self, cx: &mut Context<Self>) {
         self.press = None;
+        self.gpui_drag = false;
         self.set_dragging(false, cx);
     }
 
@@ -213,6 +222,9 @@ impl MinigraphCard {
             cx.listener(|this, ev: &MouseDownEvent, _, _| this.press = Some(ev.position)),
         )
         .on_drag(DraggedMinigraph { id: self.id }, move |_, _, _, cx| {
+            if let Some(c) = card.upgrade() {
+                c.update(cx, |c, _| c.gpui_drag = true);
+            }
             MinigraphDragGhost::new(&card, cx)
         })
     }
@@ -553,11 +565,14 @@ pub fn card_shadow(theme: &TlTheme, ui_scale: f32) -> Option<BoxShadow> {
 
 /// The card that follows the pointer during a drag (UI-PRF-043): the label and value on the card
 /// background at opacity 0.85 with the card shadow. GPUI shows it from 2 px; it draws nothing
-/// until the pointer is `DRAG_THRESHOLD` from the press.
+/// until the pointer is `DRAG_THRESHOLD` from the press, then stays until the drag ends.
 pub struct MinigraphDragGhost {
+    card: WeakEntity<MinigraphCard>,
     label: SharedString,
     value: SharedString,
     press: Option<Point<Pixels>>,
+    /// The pointer has been `DRAG_THRESHOLD` from the press once.
+    shown: bool,
 }
 
 impl MinigraphDragGhost {
@@ -567,18 +582,25 @@ impl MinigraphDragGhost {
             (c.label.clone(), c.value.clone(), c.press)
         });
         cx.new(|_| Self {
+            card: card.clone(),
             label,
             value,
             press,
+            shown: false,
         })
     }
 }
 
 impl Render for MinigraphDragGhost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mouse = window.mouse_position();
-        if self.press.is_some_and(|p| !past_threshold(p, mouse)) {
-            return div();
+        if !self.shown {
+            let mouse = window.mouse_position();
+            let past = self.press.is_none_or(|p| past_threshold(p, mouse))
+                || self.card.upgrade().is_some_and(|c| c.read(cx).dragging);
+            if !past {
+                return div();
+            }
+            self.shown = true;
         }
         let m = metrics(cx);
         let t = current(cx);
