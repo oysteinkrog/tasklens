@@ -5,6 +5,8 @@
 //! strings only when their source values change.
 
 use std::cell::Cell;
+use std::cmp::Ordering;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,23 +16,25 @@ use gpui_kit::base::Root;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, Context,
-    Entity, EntityId, FocusHandle, Focusable as _, FontWeight, ImageSource,
+    Action, AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem,
+    Context, Entity, EntityId, FocusHandle, Focusable as _, FontWeight, ImageSource,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, StyledImage as _, Subscription,
     Window, WindowHandle, canvas, div, img, point, prelude::FluentBuilder as _, px,
 };
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest};
+use tl_model::command::Tab;
 use tl_model::demand::{Demand, DetailDemand};
 use tl_model::details::{AppGeneralDetail, AppKind, DetailTab, DetailTarget, TabPayload};
-use tl_model::ids::GroupKey;
-use tl_model::process::GroupRow;
+use tl_model::ids::{GroupKey, ProcessKey};
+use tl_model::process::{GroupRow, ProcFlags, ProcessRecord, is_row_member};
 use tl_model::settings::NetworkUnit;
-use tl_model::snapshot::{ComponentMask, Snapshot};
+use tl_model::snapshot::{ComponentMask, ProcessSnapshot, Snapshot};
 use tl_model::table::Total;
 use tl_model::units::{self, NetUnit};
-use tl_model::validity::Validity;
+use tl_model::validity::{ProcessField, Validity};
 use tracing::warn;
 
 use super::actions::{
@@ -40,7 +44,9 @@ use super::actions::{
     PropsPrevTab, PropsRefreshNow, PropsSelectTab,
 };
 use super::frame::{EscStep, PwnWindow, app_props_title, esc_step, open_pwn};
-use super::props::filter::{FilterChanged, PropsFilter, filter_bar, lowercase, matches, on_clear};
+use super::props::filter::{
+    FilterChanged, NO_MATCH, PropsFilter, filter_bar, lowercase, matches, on_clear,
+};
 use super::props::general::escape_controls;
 use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::app::EngineGlobal;
@@ -58,11 +64,22 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::TlSecondaryWindow;
 use crate::demand::GlobalDemand;
 use crate::hub::{GlobalHub, SnapshotChanged};
-use crate::i18n::tr;
+use crate::i18n::{Strings, tr};
+use crate::pages::processes::ProcessesPage;
+use crate::pages::processes::jump::JumpTexts;
 use crate::settings_global::TlSettings;
+use crate::table::actions::CopyRowsAsTable;
+use crate::table::cells::CellOut;
+use crate::table::columns::{
+    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
+};
+use crate::table::tree_table::{
+    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
+    TreeTableDelegate, TreeTableEvent,
+};
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{current, metrics};
-use crate::window::main::push_main_toast;
+use crate::window::main::{ShellState, main_window_view, push_main_toast};
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 gpui_kit::actions!(
@@ -1104,12 +1121,775 @@ impl Render for AppGeneralTab {
     }
 }
 
-/// Placeholder child owned by this window. E23-027 adds its table implementation.
-pub struct AppProcessesTab;
+// ---- Processes tab (UI-PWN-020, PROC-085) ----
+
+/// The longest command line the table shows, in bytes (UI-PWN-020).
+const CMDLINE_SHOWN: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct AppProcsCopyCell(AppProcColumn);
+
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct AppProcsOpenProps;
+
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct AppProcsGoTo;
+
+/// The columns of the member table, in their fixed order.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum AppProcColumn {
+    Name,
+    Pid,
+    Cpu,
+    Memory,
+    Disk,
+    User,
+    Cmdline,
+}
+
+impl AppProcColumn {
+    pub const ALL: [AppProcColumn; 7] = [
+        Self::Name,
+        Self::Pid,
+        Self::Cpu,
+        Self::Memory,
+        Self::Disk,
+        Self::User,
+        Self::Cmdline,
+    ];
+
+    /// Header key, width at 100%, minimum width, alignment. The command line takes the most room.
+    fn meta(self) -> (&'static str, f32, f32, ColumnAlign) {
+        use ColumnAlign::{Left, Right};
+        match self {
+            Self::Name => ("pwn-app-procs-col-name", 220., 120., Left),
+            Self::Pid => ("pwn-app-procs-col-pid", 80., 60., Right),
+            Self::Cpu => ("pwn-app-procs-col-cpu", 70., 60., Right),
+            Self::Memory => ("pwn-app-procs-col-memory", 100., 70., Right),
+            Self::Disk => ("pwn-app-procs-col-disk", 90., 70., Right),
+            Self::User => ("pwn-app-procs-col-user", 110., 60., Left),
+            Self::Cmdline => ("pwn-app-procs-col-cmdline", 480., 160., Left),
+        }
+    }
+}
+
+impl TableColumn for AppProcColumn {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Pid => "pid",
+            Self::Cpu => "cpu",
+            Self::Memory => "mem",
+            Self::Disk => "disk",
+            Self::User => "user",
+            Self::Cmdline => "cmd",
+        }
+    }
+
+    /// The layout is never saved, so no stored key maps to it.
+    fn parse(_: TableId, _: &str) -> Option<Self> {
+        None
+    }
+
+    fn pinned_first(self) -> bool {
+        false
+    }
+
+    fn min_width(self) -> Option<f32> {
+        Some(self.meta().2)
+    }
+}
+
+/// The sort of the member table, kept for the window's life.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AppProcSort {
+    pub column: AppProcColumn,
+    pub ascending: bool,
+}
+
+impl Default for AppProcSort {
+    /// PID ascending.
+    fn default() -> Self {
+        Self {
+            column: AppProcColumn::Pid,
+            ascending: true,
+        }
+    }
+}
+
+impl TableSort<AppProcColumn> for AppProcSort {
+    fn column(&self) -> AppProcColumn {
+        self.column
+    }
+    fn ascending(&self) -> bool {
+        self.ascending
+    }
+}
+
+/// The tab's words, translated once per strings version.
+struct AppProcWords {
+    strings_version: Option<u64>,
+    headers: [SharedString; 7],
+    loading: SharedString,
+    empty: SharedString,
+    no_match: SharedString,
+    open: SharedString,
+    go_to: SharedString,
+    copy: SharedString,
+    copy_table: SharedString,
+    copied: SharedString,
+}
+
+impl AppProcWords {
+    fn new(cx: &App) -> Self {
+        let t = |key: &str| tr(cx, key);
+        Self {
+            strings_version: cx.try_global::<Strings>().map(|s| s.strings_version),
+            headers: AppProcColumn::ALL.map(|c| t(c.meta().0)),
+            loading: t("pwn-app-procs-loading"),
+            empty: t("pwn-app-procs-empty"),
+            no_match: t(NO_MATCH),
+            open: t("pwn-app-procs-menu-open"),
+            go_to: t("pwn-app-procs-menu-go-to"),
+            copy: t("pwn-app-procs-menu-copy"),
+            copy_table: t("pwn-app-procs-menu-copy-table"),
+            copied: t("pwn-app-procs-copied"),
+        }
+    }
+}
+
+/// The first 1 KiB of a command line, cut on a character boundary.
+fn shown_cmdline(cmdline: &str) -> &str {
+    if cmdline.len() <= CMDLINE_SHOWN {
+        return cmdline;
+    }
+    let mut end = CMDLINE_SHOWN;
+    while !cmdline.is_char_boundary(end) {
+        end -= 1;
+    }
+    &cmdline[..end]
+}
+
+fn record_cmdline(record: &ProcessRecord) -> &str {
+    record.meta.cmdline.as_deref().map_or("", shown_cmdline)
+}
+
+fn disk_bps(record: &ProcessRecord) -> f32 {
+    record.io_read_bps + record.io_write_bps
+}
+
+fn compare(a: &ProcessRecord, b: &ProcessRecord, col: AppProcColumn) -> Ordering {
+    let by = match col {
+        AppProcColumn::Pid => Ordering::Equal,
+        AppProcColumn::Name => a.meta.name.cmp(&b.meta.name),
+        AppProcColumn::Cpu => a.cpu_pct.total_cmp(&b.cpu_pct),
+        AppProcColumn::Memory => a.rss_anon_bytes.cmp(&b.rss_anon_bytes),
+        AppProcColumn::Disk => disk_bps(a).total_cmp(&disk_bps(b)),
+        AppProcColumn::User => a.meta.user.cmp(&b.meta.user),
+        AppProcColumn::Cmdline => record_cmdline(a).cmp(record_cmdline(b)),
+    };
+    by.then(a.key.cmp(&b.key))
+}
+
+fn app_proc_specs(words: &AppProcWords) -> Vec<ColumnSpec<AppProcColumn>> {
+    AppProcColumn::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| {
+            let (_, width, _, align) = id.meta();
+            let label = words.headers[i].clone();
+            ColumnSpec {
+                id,
+                full_name: label.clone(),
+                group: label.clone(),
+                label,
+                align,
+                kind: match align {
+                    ColumnAlign::Left => ColumnKind::Text,
+                    ColumnAlign::Right => ColumnKind::Numeric,
+                },
+                sortable: true,
+                template: None,
+                default_width: px(width),
+                tooltip: None,
+                availability: Availability::Available,
+                hideable: false,
+            }
+        })
+        .collect()
+}
+
+/// What the row menu captured for its handlers.
+#[derive(Clone)]
+struct CapturedProcs {
+    keys: SmallVec<[ProcessKey; 1]>,
+    cell: Option<String>,
+}
+
+/// The member table's rows, columns and sort. Rows are positions in `members`, which are
+/// indexes into the process records of `procs`.
+pub struct AppProcsDelegate {
+    procs: Arc<ProcessSnapshot>,
+    members: Arc<[u32]>,
+    /// Positions in `members`, in sort order.
+    order: Vec<u32>,
+    /// Positions in `members` the filter keeps, `None` for all.
+    filtered: Option<Arc<[u32]>>,
+    /// Positions in `members` shown, in sort order.
+    view: Vec<u32>,
+    index: FxHashMap<ProcessKey, u32>,
+    /// True before the first member pass.
+    loading: bool,
+    version: u64,
+    sort: AppProcSort,
+    specs: Vec<ColumnSpec<AppProcColumn>>,
+    layout: ColumnLayout<AppProcColumn>,
+    words: Rc<AppProcWords>,
+    captured: Option<CapturedProcs>,
+}
+
+impl AppProcsDelegate {
+    fn new(words: Rc<AppProcWords>) -> Self {
+        let specs = app_proc_specs(&words);
+        let layout = ColumnLayout::defaults(
+            TableId::Processes,
+            &specs,
+            &AppProcColumn::ALL,
+            &AppProcColumn::ALL,
+        );
+        Self {
+            procs: Arc::new(ProcessSnapshot::default()),
+            members: Arc::from([]),
+            order: Vec::new(),
+            filtered: None,
+            view: Vec::new(),
+            index: FxHashMap::default(),
+            loading: true,
+            version: 0,
+            sort: AppProcSort::default(),
+            specs,
+            layout,
+            words,
+            captured: None,
+        }
+    }
+
+    /// Stands in for the row menu: captures `keys` as the menu's targets.
+    #[cfg(feature = "test-hooks")]
+    pub fn capture_for_test(&mut self, keys: &[ProcessKey]) {
+        self.captured = Some(CapturedProcs {
+            keys: keys.iter().copied().collect(),
+            cell: None,
+        });
+    }
+
+    /// The keys shown, in view order.
+    pub fn view_keys(&self) -> impl Iterator<Item = ProcessKey> + '_ {
+        (0..self.view.len()).map(|ix| self.record(ix).key)
+    }
+
+    /// The text the `col` cell of process `key` shows, `None` when the process is not shown.
+    pub fn cell_text(&self, key: ProcessKey, col: AppProcColumn) -> Option<String> {
+        let ix = self.row_index(key)?;
+        let mut out = String::new();
+        write_text(self.record(ix), col, &mut out);
+        Some(out)
+    }
+
+    fn record(&self, ix: usize) -> &ProcessRecord {
+        let member = self.members[self.view[ix] as usize];
+        &self.procs.records[member as usize]
+    }
+
+    fn set_members(&mut self, procs: Arc<ProcessSnapshot>, members: Arc<[u32]>) {
+        self.procs = procs;
+        self.members = members;
+        self.loading = false;
+        self.filtered = None;
+        self.resort();
+    }
+
+    fn set_filtered(&mut self, filtered: Option<Arc<[u32]>>) {
+        self.filtered = filtered;
+        self.rebuild_view();
+    }
+
+    fn set_words(&mut self, words: Rc<AppProcWords>) {
+        self.specs = app_proc_specs(&words);
+        self.words = words;
+        self.version += 1;
+    }
+
+    fn resort(&mut self) {
+        let AppProcSort { column, ascending } = self.sort;
+        let (procs, members) = (&self.procs, &self.members);
+        let record = |pos: u32| &procs.records[members[pos as usize] as usize];
+        self.order.clear();
+        self.order.extend(0..members.len() as u32);
+        self.order.sort_unstable_by(|&a, &b| {
+            let o = compare(record(a), record(b), column);
+            if ascending { o } else { o.reverse() }
+        });
+        self.rebuild_view();
+    }
+
+    fn rebuild_view(&mut self) {
+        self.view.clear();
+        match &self.filtered {
+            None => self.view.extend_from_slice(&self.order),
+            Some(keep) => {
+                let mut shown = vec![false; self.members.len()];
+                for &i in keep.iter() {
+                    if let Some(s) = shown.get_mut(i as usize) {
+                        *s = true;
+                    }
+                }
+                self.view
+                    .extend(self.order.iter().copied().filter(|&i| shown[i as usize]));
+            }
+        }
+        self.index.clear();
+        for pos in 0..self.view.len() {
+            let key = self.record(pos).key;
+            self.index.insert(key, pos as u32);
+        }
+        self.version += 1;
+    }
+}
+
+fn write_text(r: &ProcessRecord, col: AppProcColumn, out: &mut String) {
+    match col {
+        AppProcColumn::Name => out.push_str(&r.meta.name),
+        AppProcColumn::Pid => {
+            let _ = write!(out, "{}", r.key.pid);
+        }
+        AppProcColumn::Cpu => units::percent(out, r.cpu_pct.max(0.0)),
+        AppProcColumn::Memory => units::bytes(out, r.rss_anon_bytes),
+        AppProcColumn::Disk => units::rate_mib_fixed(out, f64::from(disk_bps(r).max(0.0))),
+        AppProcColumn::User => out.push_str(&r.meta.user),
+        AppProcColumn::Cmdline => out.push_str(record_cmdline(r)),
+    }
+}
+
+/// A text cell's identity bits: the pointer identifies the text, the length guards a reuse.
+fn text_bits(text: &str) -> u64 {
+    (text.as_ptr() as u64) ^ ((text.len() as u64) << 48)
+}
+
+impl TreeTableDelegate for AppProcsDelegate {
+    type RowId = ProcessKey;
+    type Column = AppProcColumn;
+    type Sort = AppProcSort;
+
+    fn row_count(&self) -> usize {
+        self.view.len()
+    }
+    fn row_id(&self, ix: usize) -> ProcessKey {
+        self.record(ix).key
+    }
+    fn row_index(&self, id: ProcessKey) -> Option<usize> {
+        self.index.get(&id).map(|&p| p as usize)
+    }
+    fn row_kind(&self, _: usize) -> RowKind {
+        RowKind::Plain
+    }
+    fn row_depth(&self, _: usize) -> u8 {
+        0
+    }
+    fn row_expandable(&self, _: usize) -> Option<bool> {
+        None
+    }
+    fn row_flags(&self, _: usize) -> RowFlags {
+        RowFlags::default()
+    }
+    fn table_version(&self) -> u64 {
+        self.version
+    }
+    fn columns(&self) -> &ColumnLayout<AppProcColumn> {
+        &self.layout
+    }
+    fn column_spec(&self, id: AppProcColumn) -> &ColumnSpec<AppProcColumn> {
+        let i = AppProcColumn::ALL
+            .iter()
+            .position(|c| *c == id)
+            .unwrap_or(0);
+        &self.specs[i]
+    }
+
+    fn cell(&self, ix: usize, col: AppProcColumn, out: &mut CellOut) {
+        let r = self.record(ix);
+        out.bits = match col {
+            AppProcColumn::Name => text_bits(&r.meta.name),
+            AppProcColumn::Pid => u64::from(r.key.pid),
+            AppProcColumn::Cpu => u64::from(r.cpu_pct.to_bits()),
+            AppProcColumn::Memory => r.rss_anon_bytes,
+            AppProcColumn::Disk => u64::from(disk_bps(r).to_bits()),
+            AppProcColumn::User => text_bits(&r.meta.user),
+            AppProcColumn::Cmdline => text_bits(record_cmdline(r)),
+        };
+        out.validity = match col {
+            AppProcColumn::Cpu => r.validity.get(ProcessField::Cpu),
+            AppProcColumn::Memory => r.validity.get(ProcessField::RssAnon),
+            AppProcColumn::Disk => worst(
+                r.validity.get(ProcessField::IoRead),
+                r.validity.get(ProcessField::IoWrite),
+            ),
+            _ => Validity::Valid,
+        };
+        if out.want_text {
+            write_text(r, col, &mut out.text);
+        }
+    }
+
+    fn name_cell(&self, ix: usize) -> NameCell {
+        let r = self.record(ix);
+        NameCell {
+            icon: r
+                .meta
+                .icon
+                .as_ref()
+                .map_or(NameIcon::None, |i| NameIcon::File(Arc::clone(i))),
+            icon_size: IconSlot::Small,
+            primary: SharedString::from(&r.meta.name),
+            count_run: None,
+            secondary: None,
+            glyphs: SmallVec::new(),
+            highlight_fffd: true,
+            trailing: None,
+        }
+    }
+
+    fn name_column(&self) -> Option<AppProcColumn> {
+        Some(AppProcColumn::Name)
+    }
+
+    fn header_total(&self, _: AppProcColumn, _: &mut CellOut) -> bool {
+        false
+    }
+    fn sort(&self) -> AppProcSort {
+        self.sort
+    }
+    fn selectable(&self, _: usize) -> bool {
+        true
+    }
+
+    fn context_menu(
+        &mut self,
+        ids: &[ProcessKey],
+        clicked_col: Option<AppProcColumn>,
+        menu: TlMenu,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> TlMenu {
+        let keys: SmallVec<[ProcessKey; 1]> = ids
+            .iter()
+            .copied()
+            .filter(|key| self.index.contains_key(key))
+            .collect();
+        if keys.is_empty() {
+            return menu;
+        }
+        let cell = clicked_col.and_then(|col| self.cell_text(keys[0], col));
+        let one = keys.len() == 1;
+        self.captured = Some(CapturedProcs { keys, cell });
+        let w = self.words.clone();
+        let mut menu = menu.item(w.open.clone(), Box::new(AppProcsOpenProps));
+        menu = if one {
+            menu.item(w.go_to.clone(), Box::new(AppProcsGoTo))
+        } else {
+            menu.item_disabled(w.go_to.clone(), None)
+        };
+        menu = menu.separator();
+        if let Some(col) = clicked_col {
+            menu = menu.item(w.copy.clone(), Box::new(AppProcsCopyCell(col)));
+        }
+        menu.item(w.copy_table.clone(), Box::new(CopyRowsAsTable))
+    }
+
+    fn on_toggle_expand(&mut self, _: ProcessKey, _: &mut Context<TlTreeTable<Self>>) {}
+
+    /// A new column sorts descending first; the same column flips.
+    fn on_sort(&mut self, col: AppProcColumn, _: &mut Context<TlTreeTable<Self>>) {
+        self.sort = AppProcSort {
+            column: col,
+            ascending: self.sort.column == col && !self.sort.ascending,
+        };
+        self.resort();
+    }
+
+    /// Widths live in memory only.
+    fn on_columns_changed(
+        &mut self,
+        layout: &ColumnLayout<AppProcColumn>,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) {
+        self.layout = layout.clone();
+    }
+
+    fn on_visible_range(&mut self, _: &[ProcessKey], _: &mut Context<TlTreeTable<Self>>) {}
+
+    /// Enter, Alt+Enter, Ctrl+I and double-click open the row's Process Properties (D-008).
+    fn on_activate(&mut self, id: ProcessKey, cx: &mut Context<TlTreeTable<Self>>) {
+        crate::windows::props::open_process_properties(id, cx);
+    }
+
+    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
+        None
+    }
+
+    fn empty_text(&self) -> Option<SharedString> {
+        let w = &self.words;
+        Some(if self.loading {
+            w.loading.clone()
+        } else if self.members.is_empty() {
+            w.empty.clone()
+        } else {
+            w.no_match.clone()
+        })
+    }
+
+    fn header_lines(&self) -> HeaderLines {
+        HeaderLines::One
+    }
+
+    fn columns_fixed(&self) -> bool {
+        true
+    }
+}
+
+/// The Processes child view. It lists the member processes of the window's row while it is the
+/// active tab, and does no work while it is not.
+pub struct AppProcessesTab {
+    group: GroupKey,
+    table: Entity<TlTreeTable<AppProcsDelegate>>,
+    filter: Entity<PropsFilter>,
+    active: bool,
+    exited: bool,
+    /// How many member passes ran, for the tests.
+    passes: u32,
+    words: Rc<AppProcWords>,
+    _subs: SmallVec<[Subscription; 3]>,
+}
+
+impl AppProcessesTab {
+    pub fn new(
+        group: GroupKey,
+        filter: Entity<PropsFilter>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let words = Rc::new(AppProcWords::new(cx));
+        let table = cx.new(|cx| TlTreeTable::new(AppProcsDelegate::new(words.clone()), window, cx));
+        let mut subs = SmallVec::new();
+        subs.push(cx.subscribe(&filter, |this, _, ev: &FilterChanged, cx| {
+            this.run_filter(ev.generation, cx);
+        }));
+        subs.push(cx.subscribe_in(
+            &table,
+            window,
+            |this, _, ev: &TreeTableEvent, window, cx| {
+                if matches!(ev, TreeTableEvent::CopiedRows { .. }) {
+                    this.toast_copied(window, cx);
+                }
+            },
+        ));
+        subs.push(cx.observe_global::<Strings>(|this: &mut Self, cx| {
+            let version = cx.try_global::<Strings>().map(|s| s.strings_version);
+            if this.words.strings_version != version {
+                this.words = Rc::new(AppProcWords::new(cx));
+                let words = this.words.clone();
+                this.table.update(cx, |t, cx| {
+                    t.delegate_mut().set_words(words);
+                    t.on_new_version(cx);
+                });
+            }
+        }));
+        Self {
+            group,
+            table,
+            filter,
+            active: false,
+            exited: false,
+            passes: 0,
+            words,
+            _subs: subs,
+        }
+    }
+
+    pub fn table(&self) -> &Entity<TlTreeTable<AppProcsDelegate>> {
+        &self.table
+    }
+
+    /// How many member passes ran so far.
+    pub fn passes(&self) -> u32 {
+        self.passes
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// The tab became the active one or stopped being it. Becoming active collects the members
+    /// from `snapshot` at once.
+    pub fn set_active(
+        &mut self,
+        active: bool,
+        snapshot: Option<&Snapshot>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if let Some(snapshot) = snapshot.filter(|_| active) {
+            self.take_snapshot(snapshot, cx);
+        }
+    }
+
+    /// Freezes the rows once the row left the process table.
+    pub fn set_exited(&mut self, exited: bool) {
+        self.exited = exited;
+    }
+
+    /// One sweep: while the tab is active, one linear pass over the records picks the members.
+    pub fn take_snapshot(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
+        if !self.active || self.exited {
+            return;
+        }
+        self.passes += 1;
+        let procs = snapshot.processes.clone();
+        let group = self.group;
+        let members: Arc<[u32]> = procs
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| {
+                !r.flags.contains(ProcFlags::EXITED)
+                    && is_row_member(r, procs.extras.get(*i), group)
+            })
+            .map(|(i, _)| i as u32)
+            .collect();
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().set_members(procs, members);
+            t.on_new_version(cx);
+        });
+        if !self.filter.read(cx).needle().is_empty() {
+            let generation = self.filter.read(cx).generation();
+            self.run_filter(generation, cx);
+        }
+    }
+
+    /// The lowercase `name pid user command line` of each member, for the filter.
+    fn haystacks(&self, cx: &App) -> Arc<[Box<str>]> {
+        let d = &self.table.read(cx).delegate;
+        let mut hay = String::new();
+        d.members
+            .iter()
+            .map(|&i| {
+                let r = &d.procs.records[i as usize];
+                hay.clear();
+                let _ = write!(hay, "{} {} {} ", r.meta.name, r.key.pid, r.meta.user);
+                hay.push_str(record_cmdline(r));
+                lowercase(&hay).into_boxed_str()
+            })
+            .collect()
+    }
+
+    fn run_filter(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if !self.filter.read(cx).is_current(generation) {
+            return;
+        }
+        if self.filter.read(cx).needle().is_empty() {
+            self.apply_filter(generation, None, cx);
+            return;
+        }
+        let rows = self.haystacks(cx);
+        let task = self.filter.update(cx, |f, cx| f.run_filter(rows, cx));
+        cx.spawn(async move |this, cx| {
+            if let Some((generation, keep)) = task.await {
+                let _ = this.update(cx, |this, cx| this.apply_filter(generation, Some(keep), cx));
+            }
+        })
+        .detach();
+    }
+
+    fn apply_filter(&mut self, generation: u64, keep: Option<Arc<[u32]>>, cx: &mut Context<Self>) {
+        if !self.filter.update(cx, |f, _| f.accept(generation)) {
+            return;
+        }
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().set_filtered(keep);
+            t.on_new_version(cx);
+        });
+    }
+
+    fn toast_copied(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.words.copied.clone();
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |q, cx| q.push(ToastKind::Success, text, None, None, cx));
+        }
+    }
+
+    fn captured(&self, cx: &App) -> Option<CapturedProcs> {
+        self.table.read(cx).delegate.captured.clone()
+    }
+
+    fn on_copy_cell(&mut self, _: &AppProcsCopyCell, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.captured(cx).and_then(|c| c.cell) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.toast_copied(window, cx);
+    }
+
+    fn on_open_props(&mut self, _: &AppProcsOpenProps, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(captured) = self.captured(cx) else {
+            return;
+        };
+        for key in captured.keys {
+            super::props::open_process_properties(key, cx);
+        }
+    }
+
+    /// "Go to process": the Processes page selects the process through its jump target
+    /// (PROC-071), and the main window comes to the front.
+    fn on_go_to(&mut self, _: &AppProcsGoTo, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.captured(cx).and_then(|c| c.keys.first().copied()) else {
+            return;
+        };
+        go_to_process(key, cx);
+    }
+}
+
+/// Selects `key` on the Processes tab and brings the main window to the front.
+fn go_to_process(key: ProcessKey, cx: &mut App) {
+    let main = cx.try_global::<ShellState>().and_then(|s| s.main_window);
+    let page =
+        main_window_view(cx).and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
+    let (Some(main), Some(page)) = (main, page) else {
+        warn!(target: "tasklens::ui", "no Processes page for Go to process");
+        return;
+    };
+    let _ = main.update(cx, |_, window, cx| {
+        window.activate_window();
+        page.update(cx, |p, cx| {
+            p.select_by_key(key, JumpTexts::default(), window, cx)
+        });
+    });
+}
 
 impl Render for AppProcessesTab {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .debug_selector(|| "AppPropsProcesses".into())
+            .size_full()
+            .on_action(cx.listener(Self::on_copy_cell))
+            .on_action(cx.listener(Self::on_open_props))
+            .on_action(cx.listener(Self::on_go_to))
+            .child(self.table.clone())
     }
 }
 
@@ -1138,7 +1918,7 @@ impl AppPropsWindow {
         ];
         let general = cx.new(|cx| AppGeneralTab::new(group, filters[0].clone(), cx));
         general.update(cx, |g, cx| g.set_group(Some(&row), cx));
-        let processes = cx.new(|_| AppProcessesTab);
+        let processes = cx.new(|cx| AppProcessesTab::new(group, filters[1].clone(), window, cx));
         let mut subs = Vec::new();
         let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
         if let Some(hub) = &hub {
@@ -1208,6 +1988,10 @@ impl AppPropsWindow {
         &self.general
     }
 
+    pub fn processes(&self) -> &Entity<AppProcessesTab> {
+        &self.processes
+    }
+
     pub fn filter(&self, tab: DetailTab) -> &Entity<PropsFilter> {
         &self.filters[usize::from(tab == DetailTab::AppProcesses)]
     }
@@ -1228,9 +2012,22 @@ impl AppPropsWindow {
             return;
         }
         self.active = tab;
+        self.sync_processes_tab(cx);
         self.register_demand(window, cx);
         self.focus_filter(window, cx);
         cx.notify();
+    }
+
+    /// Tells the Processes tab whether it is active; becoming active collects its members from
+    /// the current snapshot.
+    fn sync_processes_tab(&self, cx: &mut Context<Self>) {
+        let active = self.active == DetailTab::AppProcesses;
+        let snapshot = cx
+            .try_global::<GlobalHub>()
+            .map(|hub| hub.0.read(cx).current().clone());
+        self.processes.update(cx, |tab, cx| {
+            tab.set_active(active, snapshot.as_deref(), cx)
+        });
     }
 
     fn register_demand(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1295,6 +2092,10 @@ impl AppPropsWindow {
                 }
             }
         }
+        if mask.intersects(ComponentMask::PROCESSES) {
+            self.processes
+                .update(cx, |tab, cx| tab.take_snapshot(snapshot, cx));
+        }
         if mask.intersects(ComponentMask::DETAILS) {
             let slot = snapshot
                 .details
@@ -1319,6 +2120,7 @@ impl AppPropsWindow {
             return;
         }
         self.exited = true;
+        self.processes.update(cx, |tab, _| tab.set_exited(true));
         self.general.update(cx, |g, cx| g.set_exited(true, cx));
         self.remove_demand(cx);
         let title = app_props_title(&self.name, true);

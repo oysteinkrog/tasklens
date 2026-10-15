@@ -1654,6 +1654,21 @@ pwn-app-props-rate-read = Read
 pwn-app-props-rate-write = write
 pwn-app-props-rate-receive = Receive
 pwn-app-props-rate-send = send
+# App Properties Processes tab (UI-PWN-020, PROC-085).
+pwn-app-procs-col-name = Name
+pwn-app-procs-col-pid = PID
+pwn-app-procs-col-cpu = CPU
+pwn-app-procs-col-memory = Memory
+pwn-app-procs-col-disk = Disk
+pwn-app-procs-col-user = User
+pwn-app-procs-col-cmdline = Command line
+pwn-app-procs-loading = Loading processes...
+pwn-app-procs-empty = No processes.
+pwn-app-procs-menu-open = Open properties
+pwn-app-procs-menu-go-to = Go to process
+pwn-app-procs-menu-copy = Copy
+pwn-app-procs-menu-copy-table = Copy rows as table
+pwn-app-procs-copied = Copied to clipboard
 # General tab field labels and value words (UI-PWN-007 to UI-PWN-009, R-132).
 pwn-general-label-process = Process:
 pwn-general-label-pid = PID:
