@@ -480,8 +480,11 @@ fn sync_display_unit(model: &mut KeyValueModel, unit: NetworkUnit, auto_scale: b
 #[derive(Clone, Copy, Default)]
 pub struct NetP2Inputs<'a> {
     pub now_boot_ns: u64,
-    /// `observed_end` of the system component, for the Stale age.
+    /// `observed_end` of the system component, for the Link speed Stale age.
     pub observed_end_ns: u64,
+    /// `observed_end` of the device details component, for the MAC address and Driver Stale
+    /// age.
+    pub details_observed_end_ns: u64,
     /// The interface's record in `Snapshot.device_details`; `None` before the first read.
     pub details: Option<&'a NetDetails>,
     /// The interface's record in `Snapshot.system` (1 Hz): state and link speed.
@@ -796,6 +799,7 @@ pub fn update_net_details_p2(model: &mut KeyValueModel, inp: &NetP2Inputs) -> bo
         model.set_text(ROW_ADAPTER, word.text())
     };
     let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
+    let details_age_ns = inp.now_boot_ns.saturating_sub(inp.details_observed_end_ns);
     let word = model.text(type_key(&d.type_label, d.kind));
     changed |= model.set_text(ROW_TYPE, word.text());
     if has_wifi {
@@ -803,12 +807,12 @@ pub fn update_net_details_p2(model: &mut KeyValueModel, inp: &NetP2Inputs) -> bo
     }
     changed |= link_speed_row(model, inp.totals, d.wifi.as_ref(), age_ns);
     changed |= address_rows(model, &d.addresses);
-    changed |= field_row(model, ROW_MAC, &d.mac, age_ns);
+    changed |= field_row(model, ROW_MAC, &d.mac, details_age_ns);
     let index = d.ifindex;
     changed |= model.set_valid(ROW_IFINDEX, u64::from(index), |o| {
         let _ = write!(o, "{index}");
     });
-    changed |= field_row(model, ROW_DRIVER, &d.driver, age_ns);
+    changed |= field_row(model, ROW_DRIVER, &d.driver, details_age_ns);
     changed
 }
 
@@ -1125,6 +1129,7 @@ impl NetPage {
         let p2 = NetP2Inputs {
             now_boot_ns: inputs.now_boot_ns,
             observed_end_ns: inputs.observed_end_ns,
+            details_observed_end_ns: snap.device_details.header.observed_end,
             details,
             totals: inputs.totals,
             iface,
