@@ -12,7 +12,7 @@
 
 use gpui_kit::{Action, App, Entity, Global, Window, gpui};
 use smallvec::SmallVec;
-use tl_model::actions::{ActionKind, ActionTarget};
+use tl_model::actions::{ActionId, ActionKind, ActionTarget};
 use tl_model::command::Tab;
 use tl_model::process::ProcFlags;
 use tl_model::snapshot::{Snapshot, StartupType, UnitRecord};
@@ -200,7 +200,7 @@ pub fn startup_change_kind(current: StartupType, choice: StartupChoice) -> Optio
     })
 }
 
-fn startup_texts(cx: &App) -> ActionTexts {
+pub fn startup_texts(cx: &App) -> ActionTexts {
     ActionTexts {
         pending_one: tr(cx, "services-sys019-changing-startup-type"),
         pending_many: "services-sys019-changing-n-services",
@@ -224,6 +224,19 @@ pub fn run_set_startup(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let texts = startup_texts(cx);
+    submit_set_startup(choice, units, texts, actions, window, cx);
+}
+
+/// `run_set_startup` with the caller's toast texts. Returns the id of the request sent, if any.
+pub fn submit_set_startup(
+    choice: StartupChoice,
+    units: &[(UnitRef, StartupType)],
+    texts: ActionTexts,
+    actions: &Entity<SysActions>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<ActionId> {
     let mut kind = None;
     let mut targets: SmallVec<[ActionTarget; 1]> = SmallVec::new();
     for (unit, current) in units {
@@ -232,13 +245,10 @@ pub fn run_set_startup(
             targets.push(ActionTarget::Unit(unit.clone()));
         }
     }
-    let Some(kind) = kind else {
-        return;
-    };
-    let texts = startup_texts(cx);
+    let kind = kind?;
     actions.update(cx, |a, cx| {
-        a.submit(kind, ActionKindTag::SetStartup, targets, texts, window, cx);
-    });
+        a.submit(kind, ActionKindTag::SetStartup, targets, texts, window, cx)
+    })
 }
 
 /// `file://` plus `path` with every byte outside `A-Z a-z 0-9 - . _ ~ /` written as `%XX`.
@@ -301,7 +311,7 @@ fn submit_targetless(
     actions: &Entity<SysActions>,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> Option<ActionId> {
     actions.update(cx, |a, cx| {
         a.submit(
             kind,
@@ -310,8 +320,8 @@ fn submit_targetless(
             texts,
             window,
             cx,
-        );
-    });
+        )
+    })
 }
 
 fn image_unavailable(window: &mut Window, cx: &mut App) {
@@ -339,7 +349,7 @@ pub fn run_file_properties(
         "services-sys017-file-properties-failed",
         cx,
     );
-    submit_targetless(kind, texts, actions, window, cx);
+    let _ = submit_targetless(kind, texts, actions, window, cx);
 }
 
 /// Open file location: the ExecStart binary in the file manager.
@@ -362,7 +372,7 @@ pub fn run_open_file_location(
         "services-sys017-file-location-failed",
         cx,
     );
-    submit_targetless(kind, texts, actions, window, cx);
+    let _ = submit_targetless(kind, texts, actions, window, cx);
 }
 
 /// Open unit file: the unit file as a `file://` URI. No success toast.
@@ -377,7 +387,21 @@ pub fn run_open_unit_file(
     };
     let kind = ActionKind::OpenUri(file_uri(path).into());
     let texts = opener_texts("", "services-sys017-unit-file-failed", cx);
-    submit_targetless(kind, texts, actions, window, cx);
+    let _ = submit_targetless(kind, texts, actions, window, cx);
+}
+
+/// Opens `uri` (a documentation link or a `file://` URI) with no success toast. A failure shows
+/// the text of `failed_key`.
+pub fn run_open_uri(
+    uri: String,
+    failed_key: &str,
+    actions: &Entity<SysActions>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let kind = ActionKind::OpenUri(uri.into());
+    let texts = opener_texts("", failed_key, cx);
+    let _ = submit_targetless(kind, texts, actions, window, cx);
 }
 
 /// Jump to process: selects the service's main process on the Processes tab (UI-SYS-021).

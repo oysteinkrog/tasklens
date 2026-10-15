@@ -1,4 +1,5 @@
-//! Service Properties window frame tests (E27-A3, UI-SYS-030). Run with `--features test-hooks`.
+//! Service Properties window frame tests (E27-A3, UI-SYS-030) and General tab tests (UI-SYS-031).
+//! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::cell::{Cell, RefCell};
@@ -8,15 +9,15 @@ use std::sync::Arc;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext,
-    Window, WindowHandle, div,
+    AppContext as _, Context, Entity, IntoElement, Modifiers, Render, TestAppContext,
+    VisualTestContext, Window, WindowHandle, div,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionState, ActionTarget,
 };
 use tl_model::client::EngineClient;
-use tl_model::command::Tab;
+use tl_model::command::{Command, Tab};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{
     RecoverySettings, ServiceBackend, ServiceStatus, StartupType, UnitDetails, UnitRecord,
@@ -24,6 +25,7 @@ use tl_model::snapshot::{
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::GlobalDemand;
 use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
@@ -31,7 +33,7 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::windows::service_properties::{
-    ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
+    GeneralTab, ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
 };
 
 use tl_ui::pages::services::actions::ServicePropsOk;
@@ -576,4 +578,349 @@ fn service_props_tab_keys(cx: &mut TestAppContext) {
     assert_eq!(active(&mut vcx), ServicePropsTab::LogOn);
     vcx.simulate_keystrokes("ctrl-5 ctrl-pagedown");
     assert_eq!(active(&mut vcx), ServicePropsTab::General, "wraps around");
+}
+
+// General tab (UI-SYS-031).
+
+const GENERAL_LABELS: [&str; 13] = [
+    "Name",
+    "Display",
+    "Desc",
+    "Path",
+    "Unit file",
+    "Drop-ins",
+    "Startup",
+    "Status",
+    "Main PID",
+    "Memory",
+    "Tasks",
+    "CPU time",
+    "Manager",
+];
+
+/// `details(name)` changed by `f`.
+fn details_with(name: &str, f: impl FnOnce(&mut UnitDetails)) -> Arc<UnitDetails> {
+    let mut d = Arc::into_inner(details(name)).expect("one owner");
+    f(&mut d);
+    Arc::new(d)
+}
+
+/// sshd.service as systemd reports it on a running system.
+fn sshd() -> Arc<UnitDetails> {
+    details_with("sshd.service", |d| {
+        d.description = a("OpenSSH Daemon");
+        d.documentation = Arc::from([a("man:sshd(8)"), a("man:sshd_config(5)")]);
+        d.exec_start_argv = Arc::from([a("/usr/bin/sshd"), a("-D")]);
+        d.fragment_path = Some(a("/usr/lib/systemd/system/sshd.service"));
+        d.drop_in_paths = Arc::from([a("/etc/systemd/system/sshd.service.d/override.conf")]);
+        d.active_enter_timestamp_us = Some(1_700_000_000_000_000);
+        d.memory_current = Some(5 * 1024 * 1024);
+        d.tasks_current = Some(3);
+        d.cpu_usage_nsec = Some(3_723_000_000_000);
+    })
+}
+
+/// A unit with nothing reported: no docs, no drop-ins, no unit file, not running.
+fn bare_inactive() -> Arc<UnitDetails> {
+    details_with("sshd.service", |d| {
+        d.active_state = a("inactive");
+        d.sub_state = a("dead");
+        d.main_pid = 0;
+        d.active_enter_timestamp_us = Some(1_700_000_000_000_000);
+    })
+}
+
+struct General {
+    engine: Arc<FakeEngine>,
+    _main: VisualTestContext,
+    handle: WindowHandle<Root>,
+    win: Entity<ServicePropertiesWindow>,
+    tab: Entity<GeneralTab>,
+}
+
+/// Opens sshd.service on General with `d` published, or with no details.
+fn open_general(cx: &mut TestAppContext, d: Option<Arc<UnitDetails>>) -> General {
+    let (engine, main) = setup(cx);
+    let mut map = HashMap::new();
+    if let Some(d) = d {
+        map.insert(unit("sshd.service"), d);
+    }
+    publish(
+        cx,
+        &engine,
+        &["sshd.service"],
+        &map,
+        ServiceBackend::Systemd,
+    );
+    let handle = open(cx, "sshd.service", ServicePropsTab::General).expect("opened");
+    let win = view(cx, handle);
+    let tab = cx
+        .read(|cx| win.read(cx).general_tab())
+        .expect("the General tab is built");
+    General {
+        engine,
+        _main: main,
+        handle,
+        win,
+        tab,
+    }
+}
+
+impl General {
+    fn rows(&self, cx: &mut TestAppContext) -> Vec<(String, String)> {
+        cx.read(|cx| {
+            self.tab
+                .read(cx)
+                .rows_for_test(cx)
+                .into_iter()
+                .map(|(l, v)| (l.to_string(), v.to_string()))
+                .collect()
+        })
+    }
+
+    fn value(&self, cx: &mut TestAppContext, label: &str) -> String {
+        let rows = self.rows(cx);
+        let row = rows
+            .iter()
+            .find(|(l, _)| l.trim_end_matches(':') == label)
+            .unwrap_or_else(|| panic!("no {label} row"));
+        row.1.clone()
+    }
+
+    fn vcx(&self, cx: &mut TestAppContext) -> VisualTestContext {
+        let mut vcx = VisualTestContext::from_window(self.handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        vcx
+    }
+
+    fn click(&self, cx: &mut TestAppContext, selector: &'static str) {
+        let mut vcx = self.vcx(cx);
+        let bounds = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"));
+        vcx.simulate_click(bounds.center(), Modifiers::none());
+        vcx.run_until_parked();
+    }
+
+    fn sent(&self) -> Vec<(ActionId, ActionKind)> {
+        self.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(r) => Some((r.id, r.kind)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `Started`, `state` for the one target, then the summary.
+    fn finish(&self, cx: &mut TestAppContext, id: ActionId, state: ActionState) {
+        for (target, state) in [
+            (None, ActionState::Started),
+            (Some(0), state.clone()),
+            (None, state),
+        ] {
+            self.engine.emit(ActionEvent { id, target, state });
+            cx.run_until_parked();
+        }
+    }
+
+    fn toasts(&self, cx: &mut TestAppContext) -> Vec<String> {
+        self.handle
+            .update(cx, |_, window, cx| {
+                ToastQueue::of_window(window, cx)
+                    .map(|q| {
+                        let texts = q.read(cx).visible_texts();
+                        texts.iter().map(|t| t.to_string()).collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .expect("window")
+    }
+}
+
+#[gpui_kit::test]
+fn general_tab_labels_golden(cx: &mut TestAppContext) {
+    let g = open_general(cx, Some(sshd()));
+    let rows = g.rows(cx);
+    let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
+    let expected: Vec<String> = GENERAL_LABELS.iter().map(|l| format!("{l}:")).collect();
+    assert_eq!(labels, expected);
+
+    assert_eq!(g.value(cx, "Name"), "sshd.service");
+    assert_eq!(g.value(cx, "Display"), "OpenSSH Daemon");
+    assert_eq!(g.value(cx, "Desc"), "man:sshd(8)  man:sshd_config(5)");
+    assert_eq!(g.value(cx, "Path"), "/usr/bin/sshd -D");
+    assert_eq!(
+        g.value(cx, "Unit file"),
+        "/usr/lib/systemd/system/sshd.service"
+    );
+    assert_eq!(
+        g.value(cx, "Drop-ins"),
+        "/etc/systemd/system/sshd.service.d/override.conf"
+    );
+    assert_eq!(g.value(cx, "Startup"), "Enabled");
+    let status = g.value(cx, "Status");
+    let since = status
+        .strip_prefix("Running (running) since ")
+        .unwrap_or_else(|| panic!("status {status:?}"));
+    assert_eq!(since.len(), "2023-11-14 22:13:20".len(), "{since:?}");
+    assert_eq!(g.value(cx, "Main PID"), "812");
+    assert_eq!(g.value(cx, "Memory"), "5.00 MiB");
+    assert_eq!(g.value(cx, "Tasks"), "3");
+    assert_eq!(g.value(cx, "CPU time"), "1:02:03");
+    assert_eq!(g.value(cx, "Manager"), "System");
+    let _ = g.vcx(cx);
+    assert!(
+        cx.read(|cx| g.tab.read(cx).render_count()) > 0,
+        "the tab drew"
+    );
+}
+
+#[gpui_kit::test]
+fn general_tab_missing_values(cx: &mut TestAppContext) {
+    let g = open_general(cx, None);
+    for (label, value) in g.rows(cx) {
+        assert_eq!(value, "Collecting…", "{label} before the details arrive");
+    }
+
+    publish(
+        cx,
+        &g.engine,
+        &["sshd.service"],
+        &HashMap::from([(unit("sshd.service"), bare_inactive())]),
+        ServiceBackend::Systemd,
+    );
+    assert_eq!(g.value(cx, "Desc"), "Not reported");
+    assert_eq!(g.value(cx, "Drop-ins"), "None");
+    assert_eq!(g.value(cx, "Unit file"), "None");
+    assert_eq!(g.value(cx, "Main PID"), "None");
+    assert_eq!(g.value(cx, "Status"), "Stopped (dead)");
+    assert_eq!(g.value(cx, "Memory"), "Not reported");
+    assert_eq!(g.value(cx, "Tasks"), "Not reported");
+    assert_eq!(g.value(cx, "CPU time"), "Not reported");
+}
+
+#[gpui_kit::test]
+fn startup_combo_disabled_for_static(cx: &mut TestAppContext) {
+    let g = open_general(
+        cx,
+        Some(details_with("sshd.service", |d| {
+            d.startup = StartupType::Static;
+        })),
+    );
+    let (enabled, tooltip) = cx.read(|cx| g.tab.read(cx).combo_for_test(cx));
+    assert!(!enabled, "a Static unit's combo is disabled");
+    assert_eq!(tooltip.as_deref(), Some("This unit has no install section"));
+    assert_eq!(g.value(cx, "Startup"), "Static");
+
+    // "Enabled (runtime)" shows "Enabled" and can change.
+    publish(
+        cx,
+        &g.engine,
+        &["sshd.service"],
+        &HashMap::from([(
+            unit("sshd.service"),
+            details_with("sshd.service", |d| d.startup = StartupType::EnabledRuntime),
+        )]),
+        ServiceBackend::Systemd,
+    );
+    let (enabled, tooltip) = cx.read(|cx| g.tab.read(cx).combo_for_test(cx));
+    assert!(enabled);
+    assert_eq!(tooltip, None);
+    assert_eq!(g.value(cx, "Startup"), "Enabled");
+}
+
+#[gpui_kit::test]
+fn apply_startup_toast_changes_applied(cx: &mut TestAppContext) {
+    let g = open_general(cx, Some(sshd()));
+    cx.read(|cx| assert!(!g.win.read(cx).apply_enabled(cx), "clean at first"));
+    g.tab.update(cx, |t, cx| t.choose_for_test("disabled", cx));
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert!(g.tab.read(cx).is_dirty(cx));
+        assert!(
+            g.win.read(cx).apply_enabled(cx),
+            "a new choice enables Apply"
+        );
+    });
+
+    g.click(cx, "TlButton-ServicePropsApply");
+    let sent = g.sent();
+    let (id, kind) = sent.last().cloned().expect("a request was sent");
+    assert_eq!(kind, ActionKind::UnitDisable);
+    g.finish(cx, id, ActionState::Succeeded);
+
+    let toasts = g.toasts(cx);
+    assert!(toasts.iter().any(|t| t == "Changes applied"), "{toasts:?}");
+    assert!(
+        !toasts.iter().any(|t| t == "Startup type changed"),
+        "{toasts:?}"
+    );
+    cx.read(|cx| {
+        assert!(!g.tab.read(cx).is_dirty(cx), "the tab is clean");
+        assert!(!g.win.read(cx).apply_enabled(cx), "Apply is off again");
+    });
+    assert_eq!(
+        g.value(cx, "Startup"),
+        "Disabled",
+        "shows the applied value"
+    );
+    assert_eq!(count(cx), 1, "Apply keeps the window open");
+}
+
+#[gpui_kit::test]
+fn general_buttons_pending_disabled(cx: &mut TestAppContext) {
+    let g = open_general(cx, Some(bare_inactive()));
+    let buttons = |cx: &mut TestAppContext| cx.read(|cx| g.tab.read(cx).buttons_for_test(cx));
+    assert_eq!(
+        buttons(cx),
+        [true, false, false],
+        "Start only for an inactive unit"
+    );
+
+    g.click(cx, "TlButton-ServiceGeneralStart");
+    let (id, kind) = g.sent().last().cloned().expect("Start was sent");
+    assert_eq!(kind, ActionKind::UnitStart);
+    assert_eq!(buttons(cx), [false, false, false], "all off while pending");
+    assert_eq!(g.value(cx, "Status"), "Starting…");
+
+    g.finish(cx, id, ActionState::Succeeded);
+    assert_eq!(buttons(cx), [true, false, false]);
+    assert_eq!(g.value(cx, "Status"), "Stopped (dead)");
+
+    // A running unit: Stop and Restart. Not loaded: none.
+    publish(
+        cx,
+        &g.engine,
+        &["sshd.service"],
+        &HashMap::from([(unit("sshd.service"), sshd())]),
+        ServiceBackend::Systemd,
+    );
+    assert_eq!(buttons(cx), [false, true, true]);
+    publish(cx, &g.engine, &[], &HashMap::new(), ServiceBackend::Systemd);
+    assert_eq!(buttons(cx), [false, false, false], "not loaded");
+}
+
+#[gpui_kit::test]
+fn general_links_send_open_uri(cx: &mut TestAppContext) {
+    let g = open_general(cx, Some(sshd()));
+    g.click(cx, "ServiceGeneral-link-2-0");
+    let kinds: Vec<ActionKind> = g.sent().into_iter().map(|(_, k)| k).collect();
+    assert_eq!(kinds, vec![ActionKind::OpenUri(a("man:sshd(8)"))]);
+
+    g.click(cx, "ServiceGeneral-link-4-0");
+    let kinds: Vec<ActionKind> = g.sent().into_iter().map(|(_, k)| k).collect();
+    assert_eq!(
+        kinds.last(),
+        Some(&ActionKind::OpenUri(a(
+            "file:///usr/lib/systemd/system/sshd.service"
+        )))
+    );
+    assert!(
+        g.toasts(cx).is_empty(),
+        "no success toast: {:?}",
+        g.toasts(cx)
+    );
 }

@@ -2,7 +2,12 @@
 //!
 //! This file is the frame: the five tabs, the OK, Cancel and Apply footer, the window cap, the
 //! demand for the unit's details and the apply flow. The tab contents live in their own beads;
-//! a tab that has no view yet shows an empty area.
+//! a tab that has no view yet shows an empty area. The window pushes each new details Arc into
+//! every built tab view with `set_details`.
+
+mod general;
+
+pub use general::GeneralTab;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -10,7 +15,7 @@ use std::sync::Arc;
 use fluent_bundle::FluentValue;
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AnyView, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
+    AnyView, App, AppContext as _, Context, Entity, EntityId, FocusHandle, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
     Subscription, Window, div, px, size,
 };
@@ -100,6 +105,17 @@ pub trait ServicePropsTabView {
     fn apply(&mut self, window: &mut Window, cx: &mut App) -> SmallVec<[ActionId; 2]>;
 
     fn reset(&mut self, cx: &mut App);
+
+    /// The unit's latest details (`None` until they arrive) and whether the unit is gone or not
+    /// loaded. Called once after the view is built and again on every change. A view drawn
+    /// through `.cached()` notifies itself here.
+    fn set_details(
+        &mut self,
+        _details: Option<&Arc<UnitDetails>>,
+        _not_loaded: bool,
+        _cx: &mut App,
+    ) {
+    }
 }
 
 /// The footer's view of a tab entity, without the tab's concrete type.
@@ -108,6 +124,7 @@ trait TabHandle {
     fn is_valid(&self, cx: &App) -> bool;
     fn apply(&self, window: &mut Window, cx: &mut App) -> SmallVec<[ActionId; 2]>;
     fn reset(&self, cx: &mut App);
+    fn set_details(&self, details: Option<&Arc<UnitDetails>>, not_loaded: bool, cx: &mut App);
 }
 
 impl<T: Render + ServicePropsTabView> TabHandle for Entity<T> {
@@ -126,6 +143,10 @@ impl<T: Render + ServicePropsTabView> TabHandle for Entity<T> {
     fn reset(&self, cx: &mut App) {
         self.update(cx, |tab, cx| tab.reset(cx));
     }
+
+    fn set_details(&self, details: Option<&Arc<UnitDetails>>, not_loaded: bool, cx: &mut App) {
+        self.update(cx, |tab, cx| tab.set_details(details, not_loaded, cx));
+    }
 }
 
 struct TabSlot {
@@ -134,8 +155,6 @@ struct TabSlot {
 }
 
 impl TabSlot {
-    // Until a tab bead's `create_tab` arm lands, only `install_tab_view` builds slots.
-    #[cfg(any(test, feature = "test-hooks"))]
     fn new<T: Render + ServicePropsTabView>(view: Entity<T>) -> Self {
         Self {
             view: AnyView::from(view.clone()),
@@ -147,12 +166,29 @@ impl TabSlot {
 /// One slot per tab, filled the first time the tab is shown.
 type TabViews = [Option<TabSlot>; 5];
 
+/// What a tab view is built with.
+struct TabInput {
+    unit: UnitRef,
+    /// The window's action layer.
+    actions: Entity<SysActions>,
+    /// The window view, notified when a tab's dirty state changes.
+    parent: EntityId,
+}
+
 /// Builds the view of `tab`. Each tab bead adds its arm; until then a tab has no view.
-fn create_tab(tab: ServicePropsTab, window: &mut Window, cx: &mut App) -> Option<TabSlot> {
-    let _ = (window, cx);
+fn create_tab(
+    tab: ServicePropsTab,
+    input: TabInput,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<TabSlot> {
     match tab {
-        ServicePropsTab::General
-        | ServicePropsTab::LogOn
+        ServicePropsTab::General => {
+            let view =
+                cx.new(|cx| GeneralTab::new(input.unit, input.actions, input.parent, window, cx));
+            Some(TabSlot::new(view))
+        }
+        ServicePropsTab::LogOn
         | ServicePropsTab::Recovery
         | ServicePropsTab::Dependencies
         | ServicePropsTab::Logs => None,
@@ -397,9 +433,18 @@ impl ServicePropertiesWindow {
             return;
         }
         self.active = tab;
-        let slot = &mut self.tabs[tab.index()];
-        if slot.is_none() {
-            *slot = create_tab(tab, window, cx);
+        if self.tabs[tab.index()].is_none() {
+            let input = TabInput {
+                unit: self.unit.clone(),
+                actions: self.actions.clone(),
+                parent: cx.entity_id(),
+            };
+            let slot = create_tab(tab, input, window, cx);
+            if let Some(slot) = &slot {
+                slot.handle
+                    .set_details(self.details.as_ref(), self.not_loaded, cx);
+            }
+            self.tabs[tab.index()] = slot;
         }
         cx.notify();
     }
@@ -524,6 +569,10 @@ impl ServicePropertiesWindow {
             changed = true;
         }
         if changed {
+            let handles: Vec<_> = self.handles().map(|(_, h)| h.clone()).collect();
+            for handle in handles {
+                handle.set_details(self.details.as_ref(), self.not_loaded, cx);
+            }
             cx.notify();
         }
     }
@@ -553,6 +602,13 @@ impl ServicePropertiesWindow {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn render_count(&self) -> u32 {
         self.renders
+    }
+
+    /// The General tab view, once built.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn general_tab(&self) -> Option<Entity<GeneralTab>> {
+        let slot = self.tabs[ServicePropsTab::General.index()].as_ref()?;
+        slot.view.clone().downcast::<GeneralTab>().ok()
     }
 
     /// Puts `view` in the slot of `tab`, in place of a tab bead's view.

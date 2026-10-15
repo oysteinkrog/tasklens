@@ -70,7 +70,7 @@ pub fn services_copy_texts() -> CopyTexts {
     }
 }
 
-fn status_word(status: ServiceStatus) -> SysStatus {
+pub(crate) fn status_word(status: ServiceStatus) -> SysStatus {
     match status {
         ServiceStatus::Running => SysStatus::Running,
         ServiceStatus::Active => SysStatus::Active,
