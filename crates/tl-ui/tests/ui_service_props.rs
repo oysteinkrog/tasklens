@@ -919,3 +919,97 @@ fn general_links_send_open_uri(cx: &mut TestAppContext) {
         g.toasts(cx)
     );
 }
+
+#[gpui_kit::test]
+fn apply_startup_rejected_keeps_choice_and_window(cx: &mut TestAppContext) {
+    let g = open_general(cx, Some(sshd()));
+    g.tab.update(cx, |t, cx| t.choose_for_test("disabled", cx));
+    cx.run_until_parked();
+
+    // A startup change already runs on this unit in this window, so the submit is refused.
+    let mut vcx = g.vcx(cx);
+    let actions = vcx.read_entity(&g.win, |w, _| w.actions().clone());
+    let busy = vcx.update(|window, cx| {
+        let texts = tl_ui::pages::services::flows::startup_texts(cx);
+        let busy = texts.busy.to_string();
+        let id = actions.update(cx, |a, cx| {
+            a.submit(
+                ActionKind::UnitMask,
+                ActionKindTag::SetStartup,
+                smallvec![ActionTarget::Unit(unit("sshd.service"))],
+                texts,
+                window,
+                cx,
+            )
+        });
+        assert!(id.is_some(), "the first change was sent");
+        busy
+    });
+    vcx.dispatch_action(ServicePropsOk);
+    vcx.run_until_parked();
+    drop(vcx);
+
+    assert!(g.toasts(cx).contains(&busy), "{:?}", g.toasts(cx));
+    assert_eq!(count(cx), 1, "OK does not close when nothing was applied");
+    cx.read(|cx| {
+        assert!(g.tab.read(cx).is_dirty(cx), "the choice is kept");
+        assert_eq!(g.win.read(cx).active(), ServicePropsTab::General);
+    });
+    assert_eq!(g.value(cx, "Startup"), "Disabled");
+}
+
+#[gpui_kit::test]
+fn apply_startup_locks_combo_until_done(cx: &mut TestAppContext) {
+    let g = open_general(cx, Some(sshd()));
+    let combo = |cx: &mut TestAppContext| cx.read(|cx| g.tab.read(cx).combo_for_test(cx).0);
+    g.tab.update(cx, |t, cx| t.choose_for_test("disabled", cx));
+    cx.run_until_parked();
+    g.click(cx, "TlButton-ServicePropsApply");
+    let (id, _) = g.sent().last().cloned().expect("a request was sent");
+    assert!(!combo(cx), "the combo is locked while the apply runs");
+
+    // A pick while locked does not count.
+    g.tab.update(cx, |t, cx| t.choose_for_test("masked", cx));
+    cx.run_until_parked();
+    assert_eq!(g.value(cx, "Startup"), "Disabled");
+
+    g.finish(cx, id, ActionState::Failed(ActionError::PermissionDenied));
+    assert!(combo(cx), "a failed apply unlocks the combo");
+    cx.read(|cx| {
+        assert!(
+            g.tab.read(cx).is_dirty(cx),
+            "a failed apply keeps the choice"
+        );
+        assert!(g.win.read(cx).apply_enabled(cx));
+    });
+    assert_eq!(g.value(cx, "Startup"), "Disabled");
+
+    g.click(cx, "TlButton-ServicePropsApply");
+    let (id, kind) = g.sent().last().cloned().expect("a second request was sent");
+    assert_eq!(kind, ActionKind::UnitDisable);
+    g.finish(cx, id, ActionState::Succeeded);
+    assert!(combo(cx));
+    cx.read(|cx| assert!(!g.tab.read(cx).is_dirty(cx)));
+    assert_eq!(g.value(cx, "Startup"), "Disabled");
+}
+
+#[gpui_kit::test]
+fn general_values_selectable(cx: &mut TestAppContext) {
+    let g = open_general(cx, Some(sshd()));
+    let mut vcx = g.vcx(cx);
+    let path = vcx
+        .debug_bounds("ServiceGeneral-path")
+        .expect("Path value drawn");
+    let (from, to) = (
+        gpui_kit::point(path.left() + gpui_kit::px(1.), path.center().y),
+        gpui_kit::point(path.right() - gpui_kit::px(1.), path.center().y),
+    );
+    vcx.simulate_mouse_down(from, gpui_kit::MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(to, Some(gpui_kit::MouseButton::Left), Modifiers::none());
+    vcx.simulate_mouse_up(to, gpui_kit::MouseButton::Left, Modifiers::none());
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("ctrl-c");
+    vcx.run_until_parked();
+    let copied = vcx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied.as_deref(), Some("/usr/bin/sshd -D"));
+}

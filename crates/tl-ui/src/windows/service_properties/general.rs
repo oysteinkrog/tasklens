@@ -11,6 +11,8 @@
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
+use gpui_kit::base::input::Copy;
+use gpui_kit::base::{SelectableText, TextSelection};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EntityId,
@@ -27,9 +29,11 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::ServicePropsTabView;
+use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::kv_grid::{
-    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
+    KEY_CONTEXT, KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
+    UnsupportedWord,
 };
 use crate::components::link::TlLink;
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -44,10 +48,12 @@ use crate::pages::services::flows::{
     UnitVerb, file_uri, run_jump_to_process, run_open_uri, run_unit_verb, startup_texts,
     submit_set_startup,
 };
-use crate::pages::sys_status::{SysStatus, status_cell, status_label, status_look};
+use crate::pages::sys_status::{
+    DotStyle, StatusLook, SysStatus, cell_colors, status_label, status_look,
+};
 use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
 use crate::text::style::t_base;
-use crate::theme::{current, metrics};
+use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::window::main::ShellState;
 
 /// Label column width at 100% scale.
@@ -450,6 +456,45 @@ struct ComboState {
     tooltip: Option<SharedString>,
 }
 
+/// Value text the user can select, as the grid draws its values. `t_base`.
+fn selectable(id: (&'static str, usize), text: SharedString, m: &UiMetrics) -> SelectableText {
+    SelectableText::new(id, text).text_style(t_base(m))
+}
+
+/// The Status value: the dot and label of `status_cell` (UI-SYS-003), with selectable text.
+fn status_value(
+    look: StatusLook,
+    text: SharedString,
+    theme: &TlTheme,
+    m: &UiMetrics,
+) -> AnyElement {
+    let colors = cell_colors(look, false, false, theme);
+    let dot = colors.dot.map(|color| {
+        let d = div()
+            .debug_selector(|| "sys-status-dot".into())
+            .flex_none()
+            .size(px(8.0 * m.ui_scale))
+            .rounded_full();
+        match look.dot {
+            DotStyle::Ring(_) => d.border(px(1.5 * m.ui_scale)).border_color(color),
+            _ => d.bg(color),
+        }
+    });
+    let mut row = h_flex().min_w_0().items_center();
+    if let Some(dot) = dot {
+        row = row.gap(m.sp[3]).child(dot);
+    }
+    row.child(
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_color(colors.label)
+            .child(selectable(("svc-general-text", 7), text, m)),
+    )
+    .into_any_element()
+}
+
 /// A toast in `window`'s own stack.
 fn window_toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: SharedString) {
     match ToastQueue::of_window(window, cx) {
@@ -472,8 +517,8 @@ pub struct GeneralTab {
     startup: Entity<TlSelectState>,
     /// The user's choice, while it differs from the current value.
     chosen: Option<StartupChoice>,
-    /// The choice of the apply in flight.
-    sent: Option<StartupChoice>,
+    /// The action and choice of the apply in flight. The combo is locked until it finishes.
+    sent: Option<(ActionId, StartupChoice)>,
     /// The choice applied last, shown until the next details Arc.
     applied: Option<StartupChoice>,
     /// The text "Copy value" copies.
@@ -495,12 +540,21 @@ impl GeneralTab {
         let words = Words::new(cx);
         let labels = LABEL_KEYS.map(|key| tr(cx, key));
         let startup = cx.new(|cx| TlSelectState::new(Vec::new(), None, cx));
-        let subs = vec![cx.subscribe(&actions, |this, _, ev: &SysActionsEvent, cx| {
+        let mut subs = vec![cx.subscribe(&actions, |this, _, ev: &SysActionsEvent, cx| {
             let SysActionsEvent::PendingChanged { target } = ev;
             if matches!(target, ActionTarget::Unit(u) if *u == this.unit) {
                 cx.notify();
             }
         })];
+        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+            subs.push(
+                cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, cx| {
+                    if let ActionTrackerEvent::Finished { id, failed, .. } = *ev {
+                        this.on_apply_finished(id, failed, cx);
+                    }
+                }),
+            );
+        }
         let this = Self {
             unit,
             actions,
@@ -568,7 +622,7 @@ impl GeneralTab {
         ComboState {
             items: three(),
             selected: shown.as_ref().map_or("", choice_value),
-            enabled: !self.not_loaded,
+            enabled: !self.not_loaded && self.sent.is_none(),
             tooltip: None,
         }
     }
@@ -584,10 +638,32 @@ impl GeneralTab {
     }
 
     fn choose(&mut self, value: &str, cx: &mut Context<Self>) {
+        // The combo is locked while an apply runs.
+        if self.sent.is_some() {
+            return;
+        }
         let Some(choice) = parse_choice(value) else {
             return;
         };
         self.chosen = (self.current_choice().as_ref() != Some(&choice)).then_some(choice);
+        cx.notify();
+        App::notify(cx, self.parent);
+    }
+
+    /// The apply in flight finished. Success shows the applied value; failure keeps the choice
+    /// so the tab stays dirty. Either way the combo unlocks.
+    fn on_apply_finished(&mut self, id: ActionId, failed: u16, cx: &mut Context<Self>) {
+        if self.sent.as_ref().is_none_or(|(sent, _)| *sent != id) {
+            return;
+        }
+        let Some((_, choice)) = self.sent.take() else {
+            return;
+        };
+        if failed == 0 {
+            self.applied = Some(choice);
+            self.chosen = None;
+        }
+        self.sync_combo(cx);
         cx.notify();
         App::notify(cx, self.parent);
     }
@@ -775,6 +851,12 @@ impl GeneralTab {
             .items_center()
             .text_color(theme.text_primary)
             .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.focus.focus(window, cx);
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
@@ -795,6 +877,7 @@ impl GeneralTab {
     /// The links of a link row, `separator` apart, or the row's empty word.
     fn links(&self, row: usize, list: &LinkList, stacked: bool, cx: &App) -> AnyElement {
         let theme = current(cx);
+        let m = metrics(cx);
         if list.items.is_empty() {
             let color = match list.empty.word {
                 Word::Value => theme.text_primary,
@@ -802,7 +885,11 @@ impl GeneralTab {
             };
             return div()
                 .text_color(color)
-                .child(list.empty.text.clone())
+                .child(selectable(
+                    ("svc-general-text", row * 100),
+                    list.empty.text.clone(),
+                    m,
+                ))
                 .into_any_element();
         }
         let items = list.items.iter().enumerate().map(|(i, item)| {
@@ -815,10 +902,15 @@ impl GeneralTab {
                         Box::new(link.clone()),
                     ))
                     .into_any_element(),
-                None => entry.child(item.text.clone()).into_any_element(),
+                None => entry
+                    .child(selectable(
+                        ("svc-general-text", row * 100 + i),
+                        item.text.clone(),
+                        m,
+                    ))
+                    .into_any_element(),
             }
         });
-        let m = metrics(cx);
         if stacked {
             v_flex().children(items).into_any_element()
         } else {
@@ -883,15 +975,18 @@ impl ServicePropsTabView for GeneralTab {
             ..startup_texts(cx)
         };
         let units = [(self.unit.clone(), current)];
+        // A rejected submit (the unit is busy, say) returns no id. `chosen` stays, so the tab
+        // stays dirty and the window keeps it open.
         let id = submit_set_startup(choice.clone(), &units, texts, &self.actions, window, cx);
-        if id.is_some() {
-            self.sent = Some(choice);
+        if let Some(id) = id {
+            self.sent = Some((id, choice));
+            cx.notify(self.entity_id);
         }
         id.into_iter().collect()
     }
 
     fn reset(&mut self, cx: &mut App) {
-        if let Some(sent) = self.sent.take() {
+        if let Some((_, sent)) = self.sent.take() {
             self.applied = Some(sent);
         }
         self.chosen = None;
@@ -963,7 +1058,7 @@ impl Render for GeneralTab {
                 Word::Value => theme.text_primary,
                 _ => theme.text_secondary,
             })
-            .child(f.path.text.clone());
+            .child(selectable(("svc-general-text", 3), f.path.text.clone(), &m));
         *path.text_style() = t_base(&m);
         let unit_file = self.links(4, &f.unit_file, false, cx);
         let drop_ins = self.links(5, &f.drop_ins, true, cx);
@@ -1003,11 +1098,10 @@ impl Render for GeneralTab {
         // Status and its buttons.
         let status_text = self.status_text(cx);
         let status = match f.status {
-            Some(s) => status_cell(status_look(s), status_text, false, false, &theme, &m)
-                .into_any_element(),
+            Some(s) => status_value(status_look(s), status_text, &theme, &m),
             None => div()
                 .text_color(theme.text_secondary)
-                .child(status_text)
+                .child(selectable(("svc-general-text", 7), status_text, &m))
                 .into_any_element(),
         };
         let [start_on, stop_on, restart_on] = self.buttons_enabled(cx);
@@ -1065,7 +1159,18 @@ impl Render for GeneralTab {
         v_flex()
             .id("ServiceGeneralTab")
             .debug_selector(|| "ServiceGeneralTab".into())
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
+            // Ctrl+C with a selection in a drawn row copies it, as the grids do.
+            .on_action(|_: &Copy, window, cx| {
+                let text = TextSelection::selected_text(window, cx);
+                let text = text.trim();
+                if text.is_empty() {
+                    cx.propagate();
+                    return;
+                }
+                cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+            })
             .on_action(cx.listener(Self::on_copy_value))
             .on_action(cx.listener(Self::on_open_link))
             .on_action(cx.listener(Self::on_jump))

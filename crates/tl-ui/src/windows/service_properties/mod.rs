@@ -101,7 +101,9 @@ pub trait ServicePropsTabView {
         true
     }
 
-    /// Starts the apply and returns the action ids it submitted (empty when nothing to do).
+    /// Starts the apply and returns the action ids it submitted. A tab that returns none and is
+    /// still dirty was not applied (the unit was busy, say): the window treats it as a failed
+    /// tab, keeps its edit and does not close.
     fn apply(&mut self, window: &mut Window, cx: &mut App) -> SmallVec<[ActionId; 2]>;
 
     fn reset(&mut self, cx: &mut App);
@@ -484,14 +486,24 @@ impl ServicePropertiesWindow {
             .collect();
         self.failed_tab = None;
         for (tab, handle) in dirty {
-            for id in handle.apply(window, cx) {
+            let ids = handle.apply(window, cx);
+            if ids.is_empty() && handle.is_dirty(cx) {
+                // `dirty` is in tab order, so the first rejected tab is the leftmost.
+                self.failed_tab.get_or_insert(tab);
+            }
+            for id in ids {
                 self.applying.push((id, tab));
             }
         }
         if self.applying.is_empty() {
-            self.reset_tabs(cx);
-            if close {
-                window.remove_window();
+            match self.failed_tab.take() {
+                None => {
+                    self.reset_tabs(cx);
+                    if close {
+                        window.remove_window();
+                    }
+                }
+                Some(tab) => self.select_tab(tab, window, cx),
             }
         } else {
             self.close_after_apply = close;
