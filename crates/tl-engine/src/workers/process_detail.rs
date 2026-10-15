@@ -63,10 +63,15 @@ impl Source for ProcessDetailSource {
     }
 
     fn period(&self, d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-        if wants_pss(d) {
-            *self.keys.borrow_mut() = d.detail_keys.clone();
-        }
-        (wants_pss(d) && !d.detail_keys.is_empty()).then_some(PSS_PERIOD)
+        // A forced `RefreshNow` samples even without a period, so hidden columns must leave
+        // no keys behind.
+        let shown = wants_pss(d);
+        *self.keys.borrow_mut() = if shown {
+            d.detail_keys.clone()
+        } else {
+            Arc::from([])
+        };
+        (shown && !d.detail_keys.is_empty()).then_some(PSS_PERIOD)
     }
 
     fn sample(mut self) -> (Self, SourceUpdate) {
@@ -186,6 +191,19 @@ mod tests {
             Some(Duration::from_secs(1))
         );
         assert_eq!(src.period(&demand(&[ColumnId::Pss], &[]), &s), None);
+    }
+
+    #[test]
+    fn hidden_columns_clear_keys_for_forced_sample() {
+        let (_tmp, cfg, keys) = fake_procs(3);
+        let (src, out) = run(
+            ProcessDetailSource::new(cfg),
+            &demand(&[ColumnId::Pss], &keys),
+        );
+        assert_eq!(out.len(), 3);
+        let (src, out) = run(src, &demand(&[], &keys));
+        assert!(out.is_empty());
+        assert_eq!(src.cached_fds(), 0);
     }
 
     #[test]
