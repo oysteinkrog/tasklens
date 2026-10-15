@@ -715,6 +715,27 @@ fn memory_zram_failed_mm_stat_not_valid() {
     assert_eq!(s.totals.validity, Validity::Valid);
 }
 
+/// Two zram devices: one unreadable `mm_stat` makes the totals unavailable, not a partial sum.
+#[test]
+fn memory_zram_partial_mm_stat_unavailable() {
+    let dir = fixture_copy("mem-composition", None);
+    copy_tree(&dir.join("sys/block/zram0"), &dir.join("sys/block/zram1"));
+    let (src, s) = memory_sample(MemorySource::new(SysRoot::at(&dir)), SEC);
+    assert_eq!(s.zram.len(), 2);
+    assert_eq!(s.totals.zram.validity, Validity::Valid);
+    assert_eq!(
+        s.totals.zram.value.orig_data,
+        2 * 1_048_576,
+        "both reads ok give the sum"
+    );
+
+    fs::write(dir.join("sys/block/zram1/mm_stat"), "1 2\n").expect("write mm_stat");
+    let (_, s) = memory_sample(src, 2 * SEC);
+    assert_eq!(s.zram.len(), 2);
+    assert_eq!(s.totals.zram.validity, Validity::Failed);
+    assert_eq!(s.totals.validity, Validity::Valid);
+}
+
 #[test]
 fn memory_zram_rescan_every_5s() {
     let (dir, zram0) = memory_without_zram();

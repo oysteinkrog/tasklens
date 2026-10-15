@@ -99,23 +99,19 @@ impl MemorySource {
         let r = &self.reading;
         let info = &r.info;
 
-        // The sum covers the devices whose `mm_stat` was read. When none was, it is not a
-        // value: the first device's validity says why.
+        // The sum is a value only when every device's `mm_stat` was read. A partial sum would
+        // read as complete, so the first unread device's validity says why there is none.
         let zram = if r.zram.is_empty() {
             Metric::with(Validity::Unsupported)
-        } else if r.zram.iter().all(|z| z.mm.validity != Validity::Valid) {
-            Metric::with(r.zram[0].mm.validity)
+        } else if let Some(bad) = r.zram.iter().find(|z| z.mm.validity != Validity::Valid) {
+            Metric::with(bad.mm.validity)
         } else {
-            let (orig_data, compr_data) = r
-                .zram
-                .iter()
-                .filter(|z| z.mm.validity == Validity::Valid)
-                .fold((0u64, 0u64), |(o, c), z| {
-                    (
-                        o.saturating_add(z.mm.value.orig_data_size),
-                        c.saturating_add(z.mm.value.compr_data_size),
-                    )
-                });
+            let (orig_data, compr_data) = r.zram.iter().fold((0u64, 0u64), |(o, c), z| {
+                (
+                    o.saturating_add(z.mm.value.orig_data_size),
+                    c.saturating_add(z.mm.value.compr_data_size),
+                )
+            });
             Metric::valid(ZramTotals {
                 orig_data,
                 compr_data,
