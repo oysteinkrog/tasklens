@@ -2046,12 +2046,15 @@ mod bottom {
             samples: vec![Sample::valid(now_boot_ns(), 10.)].into(),
         });
         r.publish(|s| {
+            // The net series stay at their versions; only the CPU series is new.
+            let mut series = s.series.series.to_vec();
+            series.push(view);
             s.series = Arc::new(SeriesSet {
                 header: ComponentHeader {
                     version,
                     ..ComponentHeader::default()
                 },
-                series: Arc::from([view]),
+                series: Arc::from(series),
                 slow: Arc::from([]),
             });
         });
