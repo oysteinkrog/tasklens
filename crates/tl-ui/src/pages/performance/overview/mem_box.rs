@@ -9,11 +9,12 @@
 
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, Context, Entity, Hsla, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Window, div, px,
+    AnyElement, Context, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
 };
 use rustc_hash::FxHasher;
 use smallvec::smallvec;
@@ -28,7 +29,8 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::parts::{
-    ChartSettings, Meter, SPARK_GRID, SPARK_W, box_frame, chart_section_versions, spark_chart,
+    ChartSettings, Meter, SPARK_GRID, SPARK_W, box_frame, chart_section_versions, class_probe,
+    spark_chart,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, ValueFormat, YScale, format_value};
@@ -51,12 +53,28 @@ const KEY_ROWS: [&str; ROWS] = [
     "perf-overview-mem-swap",
     "perf-overview-mem-commit",
 ];
+/// The debug selector of row `i`'s sparkline column.
+pub fn spark_id(i: usize) -> String {
+    format!("{MEM_BOX_ID}-spark-{i}")
+}
+
 const KEY_NO_SWAP: &str = "perf-overview-mem-no-swap";
 const SWAP: usize = 3;
 const COMMIT: usize = 4;
 
 /// The percent column ("244.3%"), logical px before `ui_scale`.
 const ROW_PCT_W: f32 = 48.;
+
+/// The narrowest meter a wide row keeps, logical px before `ui_scale`.
+const ROW_MIN_METER_W: f32 = 32.;
+
+/// Whether a body `width` wide (0 before the first paint) has room for the full row: label,
+/// value, a meter of at least `ROW_MIN_METER_W`, percent and the sparkline, with their 4 gaps.
+/// Narrower bodies get the narrow row: label, sparkline and one text column.
+fn row_wide(width: Pixels, m: &UiMetrics) -> bool {
+    let fixed = (ROW_LABEL_W + ROW_VALUE_W + ROW_MIN_METER_W + ROW_PCT_W + SPARK_W) * m.ui_scale;
+    width == px(0.) || f32::from(width) >= fixed + 4. * f32::from(m.sp[4])
+}
 
 /// The meter label column, logical px before `ui_scale`.
 pub(super) const ROW_LABEL_W: f32 = 72.;
@@ -184,6 +202,8 @@ pub struct MemBox {
     value: SharedString,
     /// Hash of the inputs `value`, `rows` and `percents` were formatted from.
     text_bits: u64,
+    /// The body size the last paint measured, for `class_probe`.
+    body: Rc<Cell<gpui_kit::Size<Pixels>>>,
     settings: ChartSettings,
     settings_versions: [u64; 3],
     style_version: u64,
@@ -222,6 +242,7 @@ impl MemBox {
             title: tr(cx, KEY_TITLE),
             value: SharedString::default(),
             text_bits: 0,
+            body: Rc::default(),
             settings,
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
@@ -481,6 +502,8 @@ fn memory_row(
     row: &MeterRow,
     percent: &SharedString,
     chart: &Entity<ChartView>,
+    index: usize,
+    wide: bool,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
@@ -494,6 +517,42 @@ fn memory_row(
         .text_color(theme.text_secondary)
         .child(row.label.clone());
     *label.text_style() = t_sm(m);
+    if !wide {
+        // One text column: the percent, or the value text when there is none ("No swap").
+        let text = if percent.is_empty() {
+            row.value.clone()
+        } else {
+            percent.clone()
+        };
+        let mut text_el = div()
+            .flex_none()
+            .w(px(ROW_PCT_W * s))
+            .flex()
+            .justify_end()
+            .whitespace_nowrap()
+            .text_color(theme.text_primary)
+            .child(text);
+        *text_el.text_style() = numeric_style(m, m.text.sm);
+        return div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(LABEL_ROW * s))
+            .items_center()
+            .gap(m.sp[4])
+            .child(label)
+            .child(
+                div()
+                    .debug_selector(move || spark_id(index))
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(chart.clone().cached(StyleRefinement::default().size_full())),
+            )
+            .child(text_el)
+            .into_any_element();
+    }
     let mut value = div()
         .flex_none()
         .w(px(ROW_VALUE_W * s))
@@ -528,6 +587,7 @@ fn memory_row(
         .child(pct)
         .child(
             div()
+                .debug_selector(move || spark_id(index))
                 .relative()
                 .flex_none()
                 .w(px(SPARK_W * s))
@@ -543,7 +603,10 @@ impl Render for MemBox {
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
+        let probe_m = m;
+        let wide = row_wide(self.body.get().width, &m);
         let body = div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -553,8 +616,15 @@ impl Render for MemBox {
                     .iter()
                     .zip(&self.percents)
                     .zip(&self.sparks)
-                    .map(|((r, p), c)| memory_row(r, p, c, &m, &theme)),
+                    .enumerate()
+                    .map(|(i, ((r, p), c))| memory_row(r, p, c, i, wide, &m, &theme)),
             )
+            .child(class_probe(
+                Rc::clone(&self.body),
+                u32::from(wide),
+                move |b| u32::from(row_wide(b.width, &probe_m)),
+                cx.entity_id(),
+            ))
             .into_any_element();
         box_frame(
             MEM_BOX_ID,

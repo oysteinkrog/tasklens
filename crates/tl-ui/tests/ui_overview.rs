@@ -291,7 +291,7 @@ mod boxes {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::overview::cpu_box::{CPU_BOX_ID, CpuBox};
-    use tl_ui::pages::performance::overview::mem_box::MemBox;
+    use tl_ui::pages::performance::overview::mem_box::{MEM_BOX_ID, MemBox};
     use tl_ui::pages::performance::overview::parts::core_spark_id;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -305,6 +305,8 @@ mod boxes {
         /// The CPU box size.
         cpu_w: f32,
         cpu_h: f32,
+        /// The Memory box width.
+        mem_w: f32,
     }
 
     impl Render for Host {
@@ -322,7 +324,7 @@ mod boxes {
                 )
                 .child(
                     div()
-                        .w(px(800.))
+                        .w(px(self.mem_w))
                         .h(px(300.))
                         .child(self.mem.clone().cached(cached())),
                 )
@@ -428,6 +430,7 @@ mod boxes {
             mem: cx.new(|cx| MemBox::new(&hub, memory, cx)),
             cpu_w: cpu.0,
             cpu_h: cpu.1,
+            mem_w: 800.,
         });
         vcx.simulate_scale_factor_change(1.0);
         let driver = vcx.update(|window, cx| {
@@ -678,6 +681,50 @@ mod boxes {
         let swap = r.vcx.update(|_, cx| mem.read(cx).rows()[3].clone());
         assert_eq!(swap.fraction, Some(0.25));
         assert_eq!(swap.value.as_ref(), "2.00 GiB");
+    }
+
+    #[gpui_kit::test]
+    fn mem_box_narrow_keeps_sparklines_inside(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::mem_box::spark_id;
+        let mut r = open(cx);
+        r.system(|s| {
+            s.memory.validity = Validity::Valid;
+            s.memory.total = 64 * GIB;
+            s.memory.used = 32 * GIB;
+        });
+        let spark = |r: &mut Rig, i: usize| {
+            let id: &'static str = Box::leak(spark_id(i).into_boxed_str());
+            r.vcx.debug_bounds(id).expect("sparkline drawn")
+        };
+        assert_eq!(
+            f32::from(spark(&mut r, 0).size.width),
+            96.,
+            "800 px: full row"
+        );
+        let host = r.host.clone();
+        // A 720 px page leaves a body of about 198 px.
+        for w in [240., 220.] {
+            r.vcx.update(|_, cx| {
+                host.update(cx, |h, cx| {
+                    h.mem_w = w;
+                    cx.notify();
+                })
+            });
+            draw(r.vcx);
+            let frame = r.vcx.debug_bounds(MEM_BOX_ID).expect("Memory box drawn");
+            for i in 0..5 {
+                let b = spark(&mut r, i);
+                assert!(
+                    b.right() <= frame.right(),
+                    "{w} px: sparkline {i} stays inside the box"
+                );
+                assert!(
+                    f32::from(b.size.width) >= 40.,
+                    "{w} px: sparkline {i} keeps its width, got {:?}",
+                    b.size.width
+                );
+            }
+        }
     }
 
     #[gpui_kit::test]
