@@ -3979,7 +3979,9 @@ mod window {
     fn count_helper_starts(cx: &mut TestAppContext) -> Rc<Cell<u32>> {
         let starts = Rc::new(Cell::new(0));
         let count = starts.clone();
-        cx.update(|cx| cx.on_action(move |_: &StartHelperSession, _| count.set(count.get() + 1)));
+        cx.update(|cx| {
+            cx.on_action(move |_: &StartHelperSession, _| count.set(count.get() + 1));
+        });
         starts
     }
 
