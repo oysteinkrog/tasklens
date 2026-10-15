@@ -482,6 +482,7 @@ mod toasts {
             ppid: 1,
             nice: Some(0),
             exe_deleted: false,
+            unit: None,
         }
     }
 
@@ -1002,8 +1003,9 @@ mod end {
     };
     use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::snapshot::{ServiceStatus, ServicesSnapshot, StartupType, UnitRecord};
     use tl_model::system::CpuSet;
-    use tl_model::table::{Manager, UnitRef};
+    use tl_model::table::{Manager, Total, UnitRef, UnitType};
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
@@ -1025,6 +1027,7 @@ mod end {
     };
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::{ProcessesPage, SuspendLabel, suspend_or_resume};
+    use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
     use tl_ui::table::actions::{CopyCell, CopyRowsAsTable};
     use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -1923,7 +1926,9 @@ mod end {
         app.extend(COPIES);
         app.extend(["-", "Properties"]);
         assert_eq!(menu(&mut rig, &[7]), app, "an app row");
-        assert_eq!(menu(&mut rig, &[8]), app, "a unit row");
+        let mut unit = app.clone();
+        unit.extend(["-", "Go to service"]);
+        assert_eq!(menu(&mut rig, &[8]), unit, "a unit row");
 
         assert_eq!(
             menu(&mut rig, &[9]),
@@ -2058,6 +2063,117 @@ mod end {
         assert_eq!(selected, [ProcRowId::Process(key(301))]);
     }
 
+    fn service_unit(manager: Manager, name: &str, main_pid: u32) -> UnitRecord {
+        let a = |s: &str| -> Arc<str> { Arc::from(s) };
+        fn missing<T: Default>() -> Total<T> {
+            Total {
+                value: T::default(),
+                validity: Validity::Missing,
+            }
+        }
+        UnitRecord {
+            unit: UnitRef {
+                manager,
+                name: a(name),
+            },
+            kind: UnitType::Service,
+            description: a(name),
+            status: ServiceStatus::Running,
+            sub_state: a("running"),
+            load_state: a("loaded"),
+            startup: StartupType::Enabled,
+            main_pid,
+            user: a("root"),
+            path: a(""),
+            unit_file: None,
+            active_since_us: None,
+            triggered_by: Arc::from([]),
+            control_group: None,
+            can_reload: false,
+            has_cgroup_procs: false,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: missing(),
+            memory_bytes: missing(),
+            disk_bps: missing(),
+            tasks: missing(),
+        }
+    }
+
+    /// Publishes `units` with the service data first, then the rows of [`publish_kinds`]. The
+    /// page only takes a new snapshot when a component it draws changes, so the rows publish
+    /// carries the services in.
+    fn publish_units(rig: &mut Rig, units: Vec<UnitRecord>) {
+        rig.engine.publish_with(|s| {
+            s.services = Arc::new(ServicesSnapshot {
+                units: units.into(),
+                ..ServicesSnapshot::default()
+            });
+        });
+        publish_kinds(rig);
+    }
+
+    fn pid_units() -> Vec<UnitRecord> {
+        vec![
+            service_unit(Manager::User, "pipewire.service", 301),
+            service_unit(Manager::System, "old.service", 4300),
+        ]
+    }
+
+    /// The "Go to service" entry of the menu on `rows`, if any.
+    fn go_to_service(rig: &mut Rig, rows: &[usize]) -> Option<MenuEntryInfo> {
+        let menu = build_menu(rig, rows, ColumnId::Name);
+        entries(rig, &menu)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Go to service"))
+    }
+
+    #[gpui_kit::test]
+    fn process_menu_go_to_service_on_unit_row(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        let menu = build_menu(&mut rig, &[8], ColumnId::Name);
+        let last = entries(&mut rig, &menu).pop().expect("an entry");
+        assert_eq!(last.label.as_deref(), Some("Go to service"));
+        let action = last.action.expect("an action");
+        assert!(action.partial_eq(&GoToService {
+            manager: ManagerArg::System,
+            name: "foo.service".into(),
+            origin: JumpOrigin::Processes,
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn process_menu_go_to_service_on_main_pid_row(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_units(&mut rig, pid_units());
+        let menu = build_menu(&mut rig, &[2], ColumnId::Name);
+        let last = entries(&mut rig, &menu).pop().expect("an entry");
+        assert_eq!(last.label.as_deref(), Some("Go to service"));
+        let action = last.action.expect("an action");
+        assert!(action.partial_eq(&GoToService {
+            manager: ManagerArg::User,
+            name: "pipewire.service".into(),
+            origin: JumpOrigin::Processes,
+        }));
+        let menu = build_menu(&mut rig, &[4], ColumnId::Name);
+        let last = entries(&mut rig, &menu).pop().expect("an entry");
+        assert_eq!(last.label.as_deref(), Some("Go to service"));
+        assert!(matches!(last.kind, MenuEntryKind::Disabled));
+        assert_eq!(last.tooltip.as_deref(), Some("Process exited"));
+    }
+
+    #[gpui_kit::test]
+    fn process_menu_go_to_service_hidden_otherwise(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_units(&mut rig, pid_units());
+        for rows in [&[1][..], &[7], &[9], &[0], &[1, 2]] {
+            assert!(go_to_service(&mut rig, rows).is_none(), "rows {rows:?}");
+        }
+        assert!(go_to_service(&mut rig, &[2]).is_some());
+        publish_units(&mut rig, Vec::new());
+        assert!(go_to_service(&mut rig, &[2]).is_none(), "no services data");
+    }
+
     #[gpui_kit::test]
     fn row_menu_hides_unshipped_phases(cx: &mut TestAppContext) {
         let mut rig = Rig::new(cx);
@@ -2074,7 +2190,6 @@ mod end {
             "Minigraph",
             "Graph",
             "tray",
-            "Go to service",
             "Realtime",
             "Idle",
         ];

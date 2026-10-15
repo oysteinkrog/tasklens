@@ -1786,6 +1786,7 @@ mod signal {
             ppid: 1,
             nice: Some(0),
             exe_deleted: false,
+            unit: None,
         }
     }
 
@@ -1959,6 +1960,7 @@ mod signal {
             ppid: 0,
             nice: None,
             exe_deleted: false,
+            unit: None,
         };
         let (targets, names) = signal_targets_for_test(&[app], &snapshot).expect("signal targets");
         assert_eq!(

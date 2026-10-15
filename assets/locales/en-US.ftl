@@ -425,7 +425,8 @@ perf-overview-gpu-vram = VRAM
 perf-overview-gpu-enc-dec = Video Encode/Decode
 perf-overview-gpu-more-engines = +{$n} more engines
 perf-overview-more = +{$n} more
-perf-overview-since-boot = {$size} since boot
+perf-overview-net-peak = Peak
+perf-overview-net-total = Total (since boot)
 
 perf-menu-select-pages = Select Pages
 perf-menu-hide-page = Hide This Page
@@ -2067,6 +2068,7 @@ processes-menu-open-file-location = Open file location
 processes-menu-open-virustotal = Open in VirusTotal
 processes-menu-executable-deleted = Executable deleted
 processes-menu-go-to-parent = Go to parent process
+processes-menu-go-to-service = Go to service
 processes-menu-process-exited = Process exited
 processes-menu-expand = Expand
 processes-menu-collapse = Collapse

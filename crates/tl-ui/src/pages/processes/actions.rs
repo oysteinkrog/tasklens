@@ -161,6 +161,9 @@ pub struct CapturedTarget {
     pub nice: Option<i8>,
     /// The executable was deleted (E22-020). False when the extras are not known.
     pub exe_deleted: bool,
+    /// The unit this row is, or the unit whose MainPID this process is. `None` otherwise, and
+    /// with no services data.
+    pub unit: Option<UnitRef>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -326,6 +329,7 @@ mod tests {
             ppid: 1,
             nice: Some(0),
             exe_deleted: false,
+            unit: None,
         }
     }
 

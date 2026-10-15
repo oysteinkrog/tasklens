@@ -1417,6 +1417,7 @@ mod window {
             ppid: 1,
             nice: Some(0),
             exe_deleted: false,
+            unit: None,
         };
         let build = |targets: CapturedTargets, main: &mut VisualTestContext| {
             let focus = main.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());

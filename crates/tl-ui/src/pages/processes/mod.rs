@@ -37,7 +37,8 @@ use tl_model::client::EngineClient;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
-use tl_model::snapshot::{ProcessSnapshot, Snapshot};
+use tl_model::snapshot::{ProcessSnapshot, ServicesSnapshot, Snapshot};
+use tl_model::table::UnitRef;
 use tracing::warn;
 
 use self::actions::{
@@ -1203,6 +1204,7 @@ pub(crate) fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<Capt
             node: row.node.clone(),
             kind,
             exe_deleted: exe_deleted(&r.meta) || p.extras.get(i).is_some_and(|e| e.exe_deleted),
+            unit: main_pid_unit(&s.services, r.key.pid),
             ..record_target(r)
         });
     }
@@ -1232,7 +1234,22 @@ pub(crate) fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<Capt
         ppid: 0,
         nice: None,
         exe_deleted: false,
+        unit: match &row.node {
+            NodeId::Unit(u) => Some(u.clone()),
+            _ => None,
+        },
     })
+}
+
+/// The first unit whose MainPID is `pid`. Pid 0 means no MainPID and never matches.
+fn main_pid_unit(s: &ServicesSnapshot, pid: u32) -> Option<UnitRef> {
+    if pid == 0 {
+        return None;
+    }
+    s.units
+        .iter()
+        .find(|u| u.main_pid == pid)
+        .map(|u| u.unit.clone())
 }
 
 /// The target of one process record, as a process row. `exe_deleted` is false: it is in the
@@ -1251,6 +1268,7 @@ fn record_target(r: &ProcessRecord) -> CapturedTarget {
         ppid: r.ppid,
         nice: Some(r.nice),
         exe_deleted: false,
+        unit: None,
     }
 }
 

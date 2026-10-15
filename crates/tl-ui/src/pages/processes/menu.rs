@@ -10,6 +10,7 @@
 
 use gpui_kit::{App, SharedString, Window, px};
 use tl_model::ids::NodeId;
+use tl_model::table::Manager;
 
 use super::actions::{
     CapturedTargets, CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree, EndTask, GoToParent,
@@ -19,6 +20,7 @@ use super::actions::{
 use super::{SuspendLabel, suspend_or_resume};
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
+use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::RowKind;
 use crate::windows::actions::{OpenCustomPriority, SetAffinity};
@@ -115,7 +117,8 @@ pub fn row_menu(
     menu = add_open_file_location(menu, targets, shape, cx);
     menu = add_open_virustotal(menu, shape, cx);
     menu = menu.separator();
-    add_go_to_parent(menu, targets, shape, cx)
+    menu = add_go_to_parent(menu, targets, shape, cx);
+    add_go_to_service(menu, targets, shape, cx)
 }
 
 /// The group header menu: one item, "Collapse" on an expanded group, else "Expand". It acts on
@@ -381,4 +384,31 @@ fn add_go_to_parent(menu: TlMenu, targets: &CapturedTargets, shape: Shape, cx: &
     }
     let label = tr(cx, "processes-menu-go-to-parent");
     exitable(menu, shape, label, Box::new(GoToParent), cx)
+}
+
+/// Item 25: Go to service, on one unit row or one process row that is a unit's MainPID.
+fn add_go_to_service(menu: TlMenu, targets: &CapturedTargets, shape: Shape, cx: &App) -> TlMenu {
+    let [target] = targets.items.as_slice() else {
+        return menu;
+    };
+    let Some(unit) = &target.unit else {
+        return menu;
+    };
+    if !matches!(
+        target.kind,
+        RowKind::Unit | RowKind::Process | RowKind::KernelThread
+    ) {
+        return menu;
+    }
+    let manager = match unit.manager {
+        Manager::System => ManagerArg::System,
+        Manager::User => ManagerArg::User,
+    };
+    let action = GoToService {
+        manager,
+        name: SharedString::from(&*unit.name),
+        origin: JumpOrigin::Processes,
+    };
+    let label = tr(cx, "processes-menu-go-to-service");
+    exitable(menu, shape, label, Box::new(action), cx)
 }
