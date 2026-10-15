@@ -1314,7 +1314,9 @@ mod sidebar {
 
     /// An edit card is not a cached card view, so the sidebar draws it again at the stale
     /// deadline when the samples stop, as `value_goes_stale_without_samples` does for a normal
-    /// card. Same timing: the deadline is 0.5 s after the first draw.
+    /// card. Same timing: the deadline is 0.5 s after the first draw. The live edit charts may
+    /// ask for other frames, so the test reads the timer, not the draw count: the timer clears
+    /// itself when it fires, and a draw that still finds a Valid value arms it again.
     #[gpui_kit::test]
     fn edit_card_value_goes_stale_without_samples(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
@@ -1335,11 +1337,7 @@ mod sidebar {
                 .update(|_, cx| sidebar.read(cx).edit_stale_at_for_test())
         };
         let renders = |r: &mut Rig| r.vcx.update(|_, cx| sidebar.read(cx).render_count.get());
-        assert!(
-            armed(&mut r).is_some(),
-            "a Valid edit card value arms the timer"
-        );
-        let before = renders(&mut r);
+        let deadline = armed(&mut r).expect("a Valid edit card value arms the timer");
 
         let advance = |r: &mut Rig, ms: u64| {
             r.vcx
@@ -1348,10 +1346,15 @@ mod sidebar {
             draw(r.vcx);
         };
         advance(&mut r, 400);
-        assert_eq!(renders(&mut r), before, "no draw before the deadline");
+        assert_eq!(
+            armed(&mut r),
+            Some(deadline),
+            "still Valid before the deadline"
+        );
         std::thread::sleep(std::time::Duration::from_millis(700));
+        let before = renders(&mut r);
         advance(&mut r, 200);
-        assert_eq!(renders(&mut r), before + 1, "one draw at the deadline");
+        assert!(renders(&mut r) > before, "the timer draws the sidebar");
         assert_eq!(
             armed(&mut r),
             None,
@@ -1359,7 +1362,7 @@ mod sidebar {
         );
 
         advance(&mut r, 5000);
-        assert_eq!(renders(&mut r), before + 1, "a Stale value sets no timer");
+        assert_eq!(armed(&mut r), None, "a Stale value sets no timer");
     }
 
     #[gpui_kit::test]
