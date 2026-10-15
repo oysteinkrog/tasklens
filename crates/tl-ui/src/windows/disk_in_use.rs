@@ -407,8 +407,9 @@ impl EjectWatch {
     }
 }
 
-/// Opens the window of disk `idx`, or leaves the open one, which follows the hub itself. A tool
-/// window "tasklens Disk is in use", 520 × 400 × ui_scale, keyed `WindowKey::DiskInUse(idx)`.
+/// Opens the window of disk `idx`, or brings the open one to the front; it follows the hub
+/// itself. A tool window "tasklens Disk is in use", 520 × 400 × ui_scale, keyed
+/// `WindowKey::DiskInUse(idx)`.
 pub fn open_disk_in_use(
     key: DeviceKey,
     idx: DeviceIdx,
@@ -416,7 +417,9 @@ pub fn open_disk_in_use(
     disk_label: SharedString,
     cx: &mut App,
 ) {
-    if find_disk_in_use(idx, cx).is_some() {
+    if let Some((handle, _)) = find_disk_in_use(idx, cx) {
+        // A new eject that is blocked again shows the window the user may have left behind.
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
         return;
     }
     let s = metrics(cx).ui_scale;

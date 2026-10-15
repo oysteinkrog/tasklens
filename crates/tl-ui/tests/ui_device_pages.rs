@@ -1626,6 +1626,26 @@ mod disk_in_use {
     }
 
     #[gpui_kit::test]
+    fn disk_in_use_eject_again_activates(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (_, _, first) = open_blocked(&mut r, false);
+        r.vcx.update(|window, _| window.activate_window());
+        r.vcx.run_until_parked();
+        let seq = eject(&mut r);
+        publish(&mut r, Some((seq, blocked(false))));
+        r.vcx.run_until_parked();
+        let (handle, view) = r
+            .vcx
+            .update(|_, cx| find_disk_in_use(IDX, cx))
+            .expect("the window is still open");
+        assert_eq!(view, first, "the same window, not a second one");
+        let active = r
+            .vcx
+            .update(|_, cx| cx.active_window().map(|w| w.window_id()));
+        assert_eq!(active, Some(handle.window_id()), "brought to the front");
+    }
+
+    #[gpui_kit::test]
     fn disk_in_use_eacces_note(cx: &mut TestAppContext) {
         let mut r = setup(cx);
         let (_, mut vcx, view) = open_blocked(&mut r, true);
