@@ -32,7 +32,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::demand::{ColumnSet, Demand};
 use tl_model::devices::{DeviceIdentity, DeviceKind};
-use tl_model::health::SourceId;
+use tl_model::health::{EngineCaps, SourceId};
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{GroupRow, GroupRowKind, ProcFlags, ProcState};
 use tl_model::settings::{NetworkUnit, Settings, UiState};
@@ -315,8 +315,6 @@ pub struct ProcessDelegate {
     cell_tips: RefCell<CellTips>,
     /// The page that owns the table, where the row menu stores its captured targets.
     page: Option<WeakEntity<ProcessesPage>>,
-    /// What the desktop offers for the row menu items.
-    menu_caps: MenuCaps,
     /// A fixed clock for tests.
     #[cfg(any(test, feature = "test-hooks"))]
     fixed_now: Option<TimeNs>,
@@ -373,7 +371,6 @@ impl ProcessDelegate {
             cell_tip_words: CellTipWords::new(cx),
             cell_tips: RefCell::default(),
             page: None,
-            menu_caps: MenuCaps::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             fixed_now: None,
         };
@@ -1210,7 +1207,13 @@ impl TreeTableDelegate for ProcessDelegate {
             let stored = captured.clone();
             page.update(cx, |p, _| p.set_menu_targets(stored));
         }
-        row_menu(menu, &captured, &self.menu_caps, window, cx)
+        let engine_caps = self.snapshot.health.caps;
+        let caps = MenuCaps {
+            gdb: engine_caps.contains(EngineCaps::GDB),
+            file_manager1: engine_caps.contains(EngineCaps::FILE_MANAGER1),
+            ..MenuCaps::default()
+        };
+        row_menu(menu, &captured, &caps, window, cx)
     }
 
     fn on_menu_closed(&mut self, cx: &mut Context<TlTreeTable<Self>>) {

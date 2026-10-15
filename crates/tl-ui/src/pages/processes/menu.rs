@@ -13,9 +13,9 @@ use tl_model::ids::NodeId;
 use tl_model::table::Manager;
 
 use super::actions::{
-    CapturedTargets, CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree, EndTask, GoToParent,
-    OpenFileLocation, OpenVirusTotal, PriorityClass, ResumeProcess, SetPriority, SuspendProcess,
-    ToggleGroupRow,
+    CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree, EndTask,
+    GoToParent, OpenFileLocation, OpenVirusTotal, PriorityClass, ResumeProcess, SetPriority,
+    SuspendProcess, ToggleGroupRow,
 };
 use super::{SuspendLabel, suspend_or_resume};
 use crate::components::menu::TlMenu;
@@ -88,7 +88,7 @@ impl Shape {
 pub fn row_menu(
     menu: TlMenu,
     targets: &CapturedTargets,
-    _caps: &MenuCaps,
+    caps: &MenuCaps,
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
@@ -116,6 +116,7 @@ pub fn row_menu(
     menu = add_properties(menu, shape, cx);
     menu = add_open_file_location(menu, targets, shape, cx);
     menu = add_open_virustotal(menu, shape, cx);
+    menu = add_create_dump(menu, caps, shape, cx);
     menu = menu.separator();
     menu = add_go_to_parent(menu, targets, shape, cx);
     add_go_to_service(menu, targets, shape, cx)
@@ -375,6 +376,19 @@ fn add_open_virustotal(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
         Box::new(OpenVirusTotal),
         cx,
     )
+}
+
+/// Item 23: Create dump file, on one process row (PROC-075). Disabled without gdb (gcore). An
+/// exited row shows the exited reason first.
+fn add_create_dump(menu: TlMenu, caps: &MenuCaps, shape: Shape, cx: &App) -> TlMenu {
+    if !shape.process {
+        return menu;
+    }
+    let label = tr(cx, "processes-menu-create-dump");
+    if !shape.exited && !caps.gdb {
+        return menu.item_disabled(label, Some(tr(cx, "processes-menu-install-gdb")));
+    }
+    exitable(menu, shape, label, Box::new(CreateDump), cx)
 }
 
 /// Item 24: Go to parent process, on one process row whose parent PID is not 0.

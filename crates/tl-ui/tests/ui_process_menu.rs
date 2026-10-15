@@ -1017,7 +1017,7 @@ mod end {
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
-        CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree, EndTask, GoToParent,
+        CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree, EndTask, GoToParent,
         OpenFileLocation, OpenVirusTotal, PriorityClass, ProcessesShowHidden, ResumeProcess,
         SetPriority, SuspendProcess,
     };
@@ -1841,7 +1841,13 @@ mod end {
             "-",
         ];
         out.extend(COPIES);
-        out.extend(["-", "Properties", open_file, "Open in VirusTotal"]);
+        out.extend([
+            "-",
+            "Properties",
+            open_file,
+            "Open in VirusTotal",
+            "(Create dump file: Install gdb to create dumps)",
+        ]);
         if let Some(parent) = parent {
             out.extend(["-", parent]);
         }
@@ -1910,6 +1916,7 @@ mod end {
             "(Properties: Process exited)",
             "(Open file location: Process exited)",
             "(Open in VirusTotal: Process exited)",
+            "(Create dump file: Process exited)",
             "-",
             "(Go to parent process: Process exited)",
         ]);
@@ -2186,7 +2193,6 @@ mod end {
             "I/O",
             "Restart",
             "File properties",
-            "dump",
             "Minigraph",
             "Graph",
             "tray",
@@ -2481,6 +2487,26 @@ mod end {
         notice.vcx.simulate_click(at.center(), Modifiers::none());
         notice.vcx.run_until_parked();
         assert_eq!(hashes(&rig), 1, "ComputeHashes with the captured key");
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_dump_calls_start_dump(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300]), &[300], Vec::new());
+        rig.select_pids(&[300]);
+        assert!(
+            rig.dispatch(CreateDump).is_none(),
+            "no confirmation under 2 GiB"
+        );
+        let dumps: Vec<_> = actions_sent(&rig.engine)
+            .into_iter()
+            .filter(|r| matches!(r.kind, ActionKind::Dump { .. }))
+            .collect();
+        assert_eq!(dumps.len(), 1, "{dumps:?}");
+        assert!(matches!(
+            dumps[0].targets.as_slice(),
+            [ActionTarget::Process(k)] if *k == key(300)
+        ));
     }
 
     #[gpui_kit::test]

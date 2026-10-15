@@ -43,9 +43,9 @@ use tl_model::table::UnitRef;
 use tracing::warn;
 
 use self::actions::{
-    CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree,
-    EndTask, GoToParent, MAX_TARGETS, OpenFileLocation, OpenVirusTotal, ResumeProcess, SetPriority,
-    SuspendProcess, ToggleGroupRow,
+    CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump, EndProcess,
+    EndProcessTree, EndTask, GoToParent, MAX_TARGETS, OpenFileLocation, OpenVirusTotal,
+    ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
 };
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
@@ -923,6 +923,18 @@ impl ProcessesPage {
         crate::windows::notices::open_virustotal(key, window, cx);
     }
 
+    /// Create dump file (PROC-075, UI-PWN-034): the dump flow for the one captured process row.
+    fn on_create_dump(&mut self, _: &CreateDump, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        let [t] = &targets.items[..] else {
+            return;
+        };
+        let NodeId::Process(key) = t.node else {
+            return;
+        };
+        crate::windows::notices::start_dump(key, window, cx);
+    }
+
     /// Copy, Copy details and Copy all metrics (PROC-070, ADR-015): the captured targets in
     /// view order, exited rows too, onto the clipboard, then a Success toast (UI-PRC-015).
     /// Command lines leave only through Copy all metrics and Copy on the Command line cell.
@@ -1642,6 +1654,7 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_go_to_parent))
             .on_action(cx.listener(Self::on_open_file_location))
             .on_action(cx.listener(Self::on_open_virustotal))
+            .on_action(cx.listener(Self::on_create_dump))
             .child(
                 div()
                     .relative()

@@ -1940,6 +1940,71 @@ mod signal {
     }
 
     #[gpui_kit::test]
+    fn dump_disabled_without_gcore_tooltip(cx: &mut TestAppContext) {
+        super::setup(cx);
+        let handle = cx.add_window(|window, cx| Root::new(cx.new(|_| Host), window, cx));
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        let mut labels = |targets: Vec<CapturedTarget>, gdb: bool| {
+            let menu = vcx.update(|window, cx| {
+                let focus = cx.focus_handle();
+                let targets = CapturedTargets::new(targets, None);
+                let caps = MenuCaps {
+                    gdb,
+                    ..MenuCaps::default()
+                };
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    row_menu(menu, &targets, &caps, window, cx)
+                })
+            });
+            vcx.update(|window, cx| menu.read(cx).entries_for_test(window))
+        };
+        let find = |entries: &[_], label: &str| -> Option<usize> {
+            entries
+                .iter()
+                .position(|e: &tl_ui::components::menu::MenuEntryInfo| {
+                    e.label.as_deref().is_some_and(|l| l.contains(label))
+                })
+        };
+        let proc = || captured(4321, RowKind::Process, ProcFlags::empty());
+
+        let entries = labels(vec![proc()], true);
+        let vt = find(&entries, "Open in VirusTotal").expect("VirusTotal item");
+        let dump = find(&entries, "Create dump file").expect("dump item");
+        assert_eq!(dump, vt + 1, "item 23 follows item 22");
+        assert_eq!(entries[dump].kind, MenuEntryKind::Item);
+
+        let entries = labels(vec![proc()], false);
+        let dump = find(&entries, "Create dump file").expect("disabled item");
+        assert_eq!(entries[dump].kind, MenuEntryKind::Disabled);
+        assert_eq!(
+            entries[dump].tooltip.as_deref(),
+            Some("Install gdb to create dumps")
+        );
+
+        for gdb in [true, false] {
+            let entries = labels(
+                vec![captured(4321, RowKind::Process, ProcFlags::EXITED)],
+                gdb,
+            );
+            let dump = find(&entries, "Create dump file").expect("disabled item");
+            assert_eq!(entries[dump].kind, MenuEntryKind::Disabled);
+            assert_eq!(entries[dump].tooltip.as_deref(), Some("Process exited"));
+        }
+
+        let mut app = captured(4321, RowKind::App, ProcFlags::empty());
+        app.pid = None;
+        let pseudo = captured(5, RowKind::Pseudo, ProcFlags::empty());
+        let two = vec![
+            captured(1, RowKind::Process, ProcFlags::empty()),
+            captured(2, RowKind::Process, ProcFlags::empty()),
+        ];
+        for targets in [vec![app], vec![pseudo], two] {
+            let entries = labels(targets, true);
+            assert!(find(&entries, "Create dump file").is_none());
+        }
+    }
+
+    #[gpui_kit::test]
     fn row_menu_signal_app_row_targets_primaries(cx: &mut TestAppContext) {
         super::setup(cx);
         let group = GroupKind::App {
