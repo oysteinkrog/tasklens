@@ -5,19 +5,23 @@
 //! The words come from `perf-card-*`, `perf-unknown-*`, `perf-net-state-*` and `perf-net-type-*`
 //! in `en-US.ftl`, translated once per strings version into [`CardWords`] ([`card_words`]).
 
+use std::cell::Cell;
 use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 #[cfg(any(test, feature = "test-hooks"))]
 use gpui_kit::canvas;
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::h_flex;
 use gpui_kit::{
-    AnyElement, App, Context, ElementId, Entity, FontWeight, Global, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div, px,
+    AnyElement, App, AsyncApp, Context, ElementId, Entity, EntityId, Font, FontWeight, Global,
+    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Task, TextRun,
+    WeakEntity, Window, black, div, font, px,
 };
-use smallvec::SmallVec;
+use rustc_hash::FxHashMap;
+use smallvec::{SmallVec, smallvec};
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::NetworkUnit;
@@ -25,19 +29,25 @@ use tl_model::snapshot::{DiskDetails, DiskDrive, Snapshot};
 use tl_model::system::{LinkState, Metric, SensorKind, SensorReading};
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::actions::PerfSelectDevice;
 use super::details::Template;
 use super::{DeviceKey, DeviceKind};
-use crate::chart::{ChartBg, ChartLabels, ChartView, GridStyle, ValueAlign, ValueFormat};
+use crate::chart::{
+    ChartBg, ChartLabels, ChartView, GridStyle, ValueAlign, ValueFormat, format_value,
+};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::i18n::{Strings, tr, tr_en};
-use crate::text::style::label_style;
+use crate::settings_global::TlSettings;
+use crate::text::ellipsis::{ELLIPSIS, middle_ellipsis};
+use crate::text::fonts::UI_FAMILY;
+use crate::text::style::{TNUM, label_style, numeric_style};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
-/// Card height, × ui_scale.
+/// Least card height, × ui_scale. A card grows when its wrapped text needs more.
 pub const CARD_H: f32 = 80.0;
 /// Mini graph width, × ui_scale.
 pub const CARD_GRAPH_W: f32 = 116.0;
@@ -48,6 +58,11 @@ pub const CARD_GRAPH_H: f32 = 56.0;
 const HEADING_LINE_H: f32 = 18.0;
 /// Line 1 and line 2 height, × ui_scale.
 const DETAIL_LINE_H: f32 = 16.0;
+/// Space above and below the text column, × ui_scale (sp2).
+const TEXT_PAD_Y: f32 = 4.0;
+/// A card whose value is Valid draws again after this long, so the value turns Stale when the
+/// samples stop (the 1.5 s stale floor of UI-PRF-001).
+const STALE_CHECK: Duration = Duration::from_millis(1500);
 /// Opacity of a disconnected interface and of a hidden card in edit mode.
 const DIM_OPACITY: f32 = 0.6;
 /// Alpha of the pressed tint and of the focus ring.
@@ -760,13 +775,13 @@ fn present_gpus(snap: &Snapshot) -> impl Iterator<Item = &DeviceEntry> {
         .filter(|e| e.present && matches!(e.identity, DeviceIdentity::Gpu { .. }))
 }
 
-/// The labels of a card's mini graph: no heading, value at the top-left, no legend, no range
-/// word, no axis max (UI-PRF-011).
+/// The labels of a card's mini graph: no heading, no legend, no range word, no axis max. The
+/// card draws the value in its heading row, so the graph draws none (UI-PRF-011).
 pub fn card_chart_labels(value_fmt: ValueFormat) -> ChartLabels {
     ChartLabels {
         heading: None,
         value_fmt,
-        value_align: ValueAlign::Left,
+        value_align: ValueAlign::Hidden,
         range_word: SharedString::default(),
         legend: SmallVec::new(),
         show_axis_max: false,
@@ -786,8 +801,467 @@ pub fn card_chart_grid() -> GridStyle {
 /// The surface a card's mini graph sits on.
 pub const CARD_CHART_BG: ChartBg = ChartBg::List;
 
+/// The fonts of the card text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CardFont {
+    /// The heading: `t_md` 500.
+    Heading,
+    /// Line 1 and line 2: `t_sm` 400.
+    Detail,
+    /// The value: `t_md` 400 with tabular figures.
+    Value,
+}
+
+impl CardFont {
+    pub fn size(self, m: &UiMetrics) -> Pixels {
+        match self {
+            Self::Heading | Self::Value => m.text.md,
+            Self::Detail => m.text.sm,
+        }
+    }
+
+    fn font(self) -> Font {
+        let base = font(UI_FAMILY);
+        match self {
+            Self::Heading => Font {
+                weight: FontWeight::MEDIUM,
+                ..base
+            },
+            Self::Detail => Font {
+                weight: FontWeight::NORMAL,
+                ..base
+            },
+            Self::Value => Font {
+                weight: FontWeight::NORMAL,
+                features: TNUM.clone(),
+                ..base
+            },
+        }
+    }
+}
+
+/// One drawn row of a card line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CardRow {
+    pub text: SharedString,
+    /// Byte offsets into `text` where a lock icon goes.
+    pub locks: LockOffsets,
+}
+
+/// One card line in at most two rows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CardLineLayout {
+    pub rows: SmallVec<[CardRow; 2]>,
+    /// The line did not fit: its last row is cut in the middle and the tooltip has the full line.
+    pub cut: bool,
+}
+
+/// The card text in rows, from [`card_text_layout`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CardTextLayout {
+    pub heading: CardLineLayout,
+    /// The value fits after the last heading row. Otherwise it has a row of its own under it.
+    pub value_inline: bool,
+    pub line1: CardLineLayout,
+    pub line2: CardLineLayout,
+}
+
+impl CardTextLayout {
+    /// Text column height, × ui_scale.
+    pub fn text_height(&self) -> f32 {
+        let value_row = if self.value_inline {
+            0.0
+        } else {
+            HEADING_LINE_H
+        };
+        self.heading.rows.len() as f32 * HEADING_LINE_H
+            + value_row
+            + (self.line1.rows.len() + self.line2.rows.len()) as f32 * DETAIL_LINE_H
+    }
+
+    /// The card height: the text column with sp2 above and below it and the 1 px border, at
+    /// least [`CARD_H`].
+    pub fn card_height(&self, ui_scale: f32) -> Pixels {
+        px((self.text_height() + 2.0 * (TEXT_PAD_Y + 1.0)).max(CARD_H) * ui_scale)
+    }
+}
+
+/// The text column width of a card `card_w` wide: less the 1 px border on both sides, the sp5
+/// inset, the graph and the sp4 gap.
+pub fn card_text_width(card_w: Pixels, m: &UiMetrics) -> Pixels {
+    let s = m.ui_scale;
+    (card_w - px(2.0 * s) - m.sp[5] - px(CARD_GRAPH_W * s) - m.sp[4]).max(Pixels::ZERO)
+}
+
+/// Lays out the card text in a column `text_w` wide (UI-PRF-011). Each line wraps at spaces to
+/// at most 2 rows, and what does not fit row 2 is cut in the middle ([`middle_ellipsis`]). A
+/// line whose first word does not fit is cut in the middle on one row. The value goes `gap`
+/// after the last heading row when `value_w` fits there, else on a row of its own; a value is
+/// never cut. `measure` returns the width of a string in a card font; `lock_w` is the width of
+/// one lock icon.
+pub fn card_text_layout(
+    lines: &CardLines,
+    value_w: Pixels,
+    text_w: Pixels,
+    gap: Pixels,
+    lock_w: Pixels,
+    measure: &mut impl FnMut(CardFont, &str) -> Pixels,
+) -> CardTextLayout {
+    let heading = wrap_line(
+        &lines.heading,
+        &[],
+        CardFont::Heading,
+        text_w,
+        lock_w,
+        measure,
+    );
+    let last_w = heading.rows.last().map_or(Pixels::ZERO, |row| {
+        measure(CardFont::Heading, &row.text) + lock_w * row.locks.len() as f32
+    });
+    let value_inline = value_w == Pixels::ZERO || last_w + gap + value_w <= text_w;
+    let line1 = wrap_line(
+        &lines.line1,
+        &lines.line1_locks,
+        CardFont::Detail,
+        text_w,
+        lock_w,
+        measure,
+    );
+    let line2 = wrap_line(
+        &lines.line2,
+        &lines.line2_locks,
+        CardFont::Detail,
+        text_w,
+        lock_w,
+        measure,
+    );
+    CardTextLayout {
+        heading,
+        value_inline,
+        line1,
+        line2,
+    }
+}
+
+/// Number of `locks` in `start..end`.
+fn lock_count(locks: &[u16], start: usize, end: usize) -> usize {
+    locks
+        .iter()
+        .filter(|&&at| (start..end).contains(&usize::from(at)))
+        .count()
+}
+
+/// The locks in `start..end` of a line, as offsets into the row that starts at `start`.
+fn row_locks(locks: &[u16], start: usize, end: usize) -> LockOffsets {
+    locks
+        .iter()
+        .map(|&at| usize::from(at))
+        .filter(|at| (start..end).contains(at))
+        .map(|at| u16::try_from(at - start).unwrap_or(u16::MAX))
+        .collect()
+}
+
+/// The places a line may wrap: the end of the text before each run of spaces and the start of
+/// the text after it. Runs at the start or the end of the line are not places to wrap.
+fn space_breaks(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let bytes = text.as_bytes();
+    (1..bytes.len())
+        .filter(move |&i| bytes[i] == b' ' && bytes[i - 1] != b' ')
+        .filter_map(move |end| {
+            let next = end + bytes[end..].iter().take_while(|&&b| b == b' ').count();
+            (next < bytes.len()).then_some((end, next))
+        })
+}
+
+/// `text` in at most 2 rows of `max` (see [`card_text_layout`]). A lock at the end of the text
+/// belongs to the last row.
+fn wrap_line(
+    text: &SharedString,
+    locks: &[u16],
+    font: CardFont,
+    max: Pixels,
+    lock_w: Pixels,
+    measure: &mut impl FnMut(CardFont, &str) -> Pixels,
+) -> CardLineLayout {
+    let len = text.len();
+    if measure(font, text) + lock_w * locks.len() as f32 <= max {
+        return CardLineLayout {
+            rows: smallvec![CardRow {
+                text: text.clone(),
+                locks: LockOffsets::from_slice(locks),
+            }],
+            cut: false,
+        };
+    }
+    // The widest row 1 that ends before a run of spaces; row 2 starts after the run.
+    let mut best = None;
+    for (end, next) in space_breaks(text) {
+        let w = measure(font, &text[..end]) + lock_w * lock_count(locks, 0, next) as f32;
+        if w > max {
+            break;
+        }
+        best = Some((end, next));
+    }
+    let Some((end, next)) = best else {
+        let (row, cut) = cut_row(text, locks, font, max, lock_w, measure);
+        return CardLineLayout {
+            rows: smallvec![row],
+            cut,
+        };
+    };
+    let row1 = CardRow {
+        text: SharedString::from(text[..end].to_owned()),
+        locks: row_locks(locks, 0, next),
+    };
+    let rest = &text[next..];
+    let rest_locks = row_locks(locks, next, len + 1);
+    let (row2, cut) = if measure(font, rest) + lock_w * rest_locks.len() as f32 <= max {
+        let row = CardRow {
+            text: SharedString::from(rest.to_owned()),
+            locks: rest_locks,
+        };
+        (row, false)
+    } else {
+        cut_row(rest, &rest_locks, font, max, lock_w, measure)
+    };
+    CardLineLayout {
+        rows: smallvec![row1, row2],
+        cut,
+    }
+}
+
+/// `text` on one row of `max`, cut in the middle. A lock in the cut-out part goes with it. The
+/// bool is false when the text is kept whole, which [`middle_ellipsis`] does when the cut would
+/// remove fewer than 2 characters.
+fn cut_row(
+    text: &str,
+    locks: &[u16],
+    font: CardFont,
+    max: Pixels,
+    lock_w: Pixels,
+    measure: &mut impl FnMut(CardFont, &str) -> Pixels,
+) -> (CardRow, bool) {
+    let budget = (max - lock_w * locks.len() as f32).max(Pixels::ZERO);
+    let mut width = |s: &str| measure(font, s);
+    let out = middle_ellipsis(text, budget, &mut width);
+    let points = if width(&out) <= budget {
+        cut_points(text, &out)
+    } else {
+        Some(balanced_cut(text, budget, &mut width))
+    };
+    let Some((head, tail)) = points else {
+        let row = CardRow {
+            text: out,
+            locks: LockOffsets::from_slice(locks),
+        };
+        return (row, false);
+    };
+    let mut out = String::with_capacity(head + ELLIPSIS.len_utf8() + text.len() - tail);
+    out.push_str(&text[..head]);
+    out.push(ELLIPSIS);
+    out.push_str(&text[tail..]);
+    let out = SharedString::from(out);
+    let shift = head + ELLIPSIS.len_utf8();
+    let locks = locks
+        .iter()
+        .map(|&at| usize::from(at))
+        .filter_map(|at| {
+            if at <= head {
+                Some(at)
+            } else {
+                (at >= tail).then(|| at - tail + shift)
+            }
+        })
+        .map(|at| u16::try_from(at).unwrap_or(u16::MAX))
+        .collect();
+    (CardRow { text: out, locks }, true)
+}
+
+/// The middle cut for text that [`middle_ellipsis`] cannot fit in `max`: it keeps up to 12
+/// characters of the end whole, more than a narrow card has room for. This keeps graphemes from
+/// the start and the end in turn while they fit. Returns the end of the kept start and the start
+/// of the kept end, as byte offsets into `text`.
+fn balanced_cut(
+    text: &str,
+    max: Pixels,
+    measure: &mut impl FnMut(&str) -> Pixels,
+) -> (usize, usize) {
+    let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+    let mut buf = [0u8; 4];
+    let mut budget = max - measure(ELLIPSIS.encode_utf8(&mut buf));
+    // Graphemes `..head` and `tail..` are kept.
+    let (mut head, mut tail) = (0, graphemes.len());
+    let mut front = true;
+    while head < tail {
+        let w = measure(graphemes[if front { head } else { tail - 1 }].1);
+        if w > budget {
+            break;
+        }
+        budget -= w;
+        if front {
+            head += 1;
+        } else {
+            tail -= 1;
+        }
+        front = !front;
+    }
+    let at = |i: usize| graphemes.get(i).map_or(text.len(), |(byte, _)| *byte);
+    (at(head), at(tail))
+}
+
+/// Where [`middle_ellipsis`] cut `text` into `out`: the end of the kept start and the start of
+/// the kept end, as byte offsets into `text`. `None` when `out` is `text` whole.
+fn cut_points(text: &str, out: &str) -> Option<(usize, usize)> {
+    if out == text {
+        return None;
+    }
+    let ellipsis = ELLIPSIS.len_utf8();
+    out.match_indices(ELLIPSIS).find_map(|(head, _)| {
+        let tail = text.len().checked_sub(out.len() - head - ellipsis)?;
+        let same_head = text.get(..head) == Some(&out[..head]);
+        let same_tail = text.get(tail..) == Some(&out[head + ellipsis..]);
+        (tail >= head && same_head && same_tail).then_some((head, tail))
+    })
+}
+
+/// Per-character advances of the card fonts, by character, font, size and window scale. A line
+/// is measured as the sum of its characters, as
+/// [`crate::text::metrics::TextMetricsCache::char_advance`] does for the label font, so a card
+/// render shapes nothing after the first. Cleared when the `UiMetrics` style version changes.
+#[derive(Default)]
+struct CardAdvances {
+    map: FxHashMap<(char, CardFont, u32, u32), Pixels>,
+    style_version: u64,
+}
+
+impl Global for CardAdvances {}
+
+impl CardAdvances {
+    fn width(&mut self, text: &str, f: CardFont, m: &UiMetrics, window: &Window) -> Pixels {
+        let size = f.size(m);
+        let (size_bits, scale_bits) = (f32::from(size).to_bits(), window.scale_factor().to_bits());
+        text.chars().fold(Pixels::ZERO, |sum, ch| {
+            let advance = self
+                .map
+                .entry((ch, f, size_bits, scale_bits))
+                .or_insert_with(|| {
+                    let mut buf = [0u8; 4];
+                    let one = ch.encode_utf8(&mut buf);
+                    let run = TextRun {
+                        len: one.len(),
+                        font: f.font(),
+                        color: black(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    window
+                        .text_system()
+                        .layout_line(one, size, &[run], None)
+                        .width
+                });
+            sum + *advance
+        })
+    }
+}
+
+/// The value in the heading row: the newest value of the graph's first series (UI-PRF-011).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CardValue {
+    /// The formatted value, or its UI-FND-026 glyph word. Restricted draws the lock icon.
+    pub text: SharedString,
+    pub validity: Validity,
+    /// The widest text of the value format. The heading row keeps room for it, so the rows do
+    /// not move as the value changes.
+    template: &'static str,
+}
+
+impl CardValue {
+    /// Reads the value of `chart`, or `None` when the chart has no series.
+    pub fn of(chart: &ChartView, unit: NetworkUnit) -> Option<Self> {
+        let (v, validity) = chart.value_now()?;
+        let fmt = chart.labels.value_fmt;
+        let text = match validity {
+            Validity::Valid | Validity::Stale => {
+                let mut out = String::new();
+                format_value(fmt, v, unit, &mut out);
+                SharedString::from(out)
+            }
+            Validity::Restricted => SharedString::default(),
+            other => copy_text(other, &SharedString::default()),
+        };
+        Some(Self {
+            text,
+            validity,
+            template: value_template(fmt),
+        })
+    }
+
+    /// `text_primary` when Valid, `status.warning` when Failed, else `text_secondary`, as the
+    /// graph value label (UI-PRF-001).
+    pub fn color(&self, theme: &TlTheme) -> Hsla {
+        match self.validity {
+            Validity::Valid => theme.text_primary,
+            Validity::Failed => theme.status.warning,
+            _ => theme.text_secondary,
+        }
+    }
+}
+
+/// The widest text of each value format.
+fn value_template(fmt: ValueFormat) -> &'static str {
+    match fmt {
+        ValueFormat::Percent | ValueFormat::PercentOf { .. } => "100.0%",
+        ValueFormat::Bytes => "999.99 GiB",
+        ValueFormat::RateIec | ValueFormat::RateNetwork => "999.9 KiB/s",
+        ValueFormat::Mhz => "9999 MHz",
+        ValueFormat::Celsius => "100 °C",
+        ValueFormat::Watts => "999.9 W",
+        ValueFormat::Rpm => "9999 RPM",
+        ValueFormat::Count => "99999",
+    }
+}
+
+/// What a card measured for one render.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CardPrepared {
+    pub layout: CardTextLayout,
+    pub value: Option<CardValue>,
+    pub height: Pixels,
+}
+
+/// The tooltip lines: the full text of each cut line, then the owner's tooltip (the Memory
+/// commit note, a network adapter and connection). An owner tooltip that only repeats line 1
+/// shows only when line 1 is cut. Empty when there is nothing to show.
+pub fn card_tooltip(lines: &CardLines, layout: &CardTextLayout) -> SmallVec<[SharedString; 3]> {
+    let mut out = SmallVec::new();
+    for (text, line) in [
+        (&lines.heading, &layout.heading),
+        (&lines.line1, &layout.line1),
+        (&lines.line2, &layout.line2),
+    ] {
+        if line.cut {
+            out.push(text.clone());
+        }
+    }
+    if let Some(tip) = lines.tooltip.as_ref().filter(|tip| **tip != *lines.line1) {
+        for part in tip.split('\n') {
+            if !out.iter().any(|seen| &**seen == part) {
+                out.push(if part.len() == tip.len() {
+                    tip.clone()
+                } else {
+                    SharedString::from(part.to_owned())
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Persistent view for one complete sidebar card. The sidebar embeds this entity with
 /// [`gpui_kit::Entity::cached`], so a clean sibling reuses its text, background and chart paint.
+/// The card re-renders when its chart notifies (its own series), so its value follows the
+/// graph.
 pub struct CardView {
     key: DeviceKey,
     chart: Entity<ChartView>,
@@ -796,19 +1270,30 @@ pub struct CardView {
     focused: bool,
     edit_mode: bool,
     hidden_in_edit: bool,
-    width: Rc<std::cell::Cell<Pixels>>,
+    width: Rc<Cell<Pixels>>,
+    /// The height the sidebar lays this card out with. Render writes the measured height and
+    /// notifies `sidebar` when it changed, so the cards below move on the next frame.
+    height: Rc<Cell<Pixels>>,
+    sidebar: EntityId,
+    /// Draws the card again once a Valid value may have gone Stale. Replaced by every render.
+    stale_check: Option<Task<()>>,
     #[cfg(any(test, feature = "test-hooks"))]
-    pub render_count: std::cell::Cell<u32>,
+    pub render_count: Cell<u32>,
     /// Whole-card paint callbacks. A cached paint replay does not increment this counter.
     #[cfg(any(test, feature = "test-hooks"))]
-    pub paint_count: Rc<std::cell::Cell<u32>>,
+    pub paint_count: Rc<Cell<u32>>,
+    /// What the last render measured.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub prepared: Option<CardPrepared>,
 }
 
 impl CardView {
     pub fn new(
         key: DeviceKey,
         chart: Entity<ChartView>,
-        width: Rc<std::cell::Cell<Pixels>>,
+        width: Rc<Cell<Pixels>>,
+        height: Rc<Cell<Pixels>>,
+        sidebar: EntityId,
     ) -> Self {
         Self {
             key,
@@ -819,10 +1304,15 @@ impl CardView {
             edit_mode: false,
             hidden_in_edit: false,
             width,
+            height,
+            sidebar,
+            stale_check: None,
             #[cfg(any(test, feature = "test-hooks"))]
-            render_count: std::cell::Cell::new(0),
+            render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
-            paint_count: Rc::new(std::cell::Cell::new(0)),
+            paint_count: Rc::new(Cell::new(0)),
+            #[cfg(any(test, feature = "test-hooks"))]
+            prepared: None,
         }
     }
 
@@ -855,10 +1345,10 @@ impl CardView {
 }
 
 impl Render for CardView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
-        let card = DeviceCard {
+        let mut card = DeviceCard {
             key: self.key.clone(),
             chart: self.chart.clone(),
             lines: self.lines.clone(),
@@ -867,7 +1357,28 @@ impl Render for CardView {
             edit_mode: self.edit_mode,
             hidden_in_edit: self.hidden_in_edit,
             width: self.width.get(),
+            prepared: None,
         };
+        let prepared = card.prepare(window, cx);
+        let height = prepared.height;
+        let live = prepared
+            .value
+            .as_ref()
+            .is_some_and(|v| v.validity == Validity::Valid);
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.prepared = Some(prepared.clone());
+        }
+        if self.height.get() != height {
+            self.height.set(height);
+            App::notify(cx, self.sidebar);
+        }
+        self.stale_check = live.then(|| {
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor().timer(STALE_CHECK).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+        });
 
         #[cfg(any(test, feature = "test-hooks"))]
         {
@@ -894,6 +1405,8 @@ pub struct DeviceCard {
     pub edit_mode: bool,
     pub hidden_in_edit: bool,
     pub width: Pixels,
+    /// Filled by [`DeviceCard::prepare`]. Owners pass `None`.
+    pub prepared: Option<CardPrepared>,
 }
 
 impl DeviceCard {
@@ -924,10 +1437,52 @@ impl DeviceCard {
             theme.text_secondary
         }
     }
+
+    /// Reads the value from the chart and lays the text out for `width`. [`CardView`] calls it
+    /// before render to learn the card height; render calls it when no one did.
+    pub fn prepare(&mut self, window: &Window, cx: &mut App) -> &CardPrepared {
+        if self.prepared.is_none() {
+            let m = *metrics(cx);
+            let unit = if cx.has_global::<TlSettings>() {
+                TlSettings::settings(cx).units.network
+            } else {
+                NetworkUnit::default()
+            };
+            let value = CardValue::of(self.chart.read(cx), unit);
+            if !cx.has_global::<CardAdvances>() {
+                cx.set_global(CardAdvances::default());
+            }
+            let advances = cx.global_mut::<CardAdvances>();
+            if advances.style_version != m.style_version {
+                advances.map.clear();
+                advances.style_version = m.style_version;
+            }
+            let mut measure = |f: CardFont, s: &str| advances.width(s, f, &m, window);
+            let value_w = value
+                .as_ref()
+                .map_or(Pixels::ZERO, |v| measure(CardFont::Value, v.template));
+            let layout = card_text_layout(
+                &self.lines,
+                value_w,
+                card_text_width(self.width, &m),
+                m.sp[3],
+                m.icon.xs,
+                &mut measure,
+            );
+            let height = layout.card_height(m.ui_scale);
+            self.prepared = Some(CardPrepared {
+                layout,
+                value,
+                height,
+            });
+        }
+        self.prepared.as_ref().expect("prepared above")
+    }
 }
 
 impl RenderOnce for DeviceCard {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.prepare(window, cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let s = m.ui_scale;
@@ -935,55 +1490,94 @@ impl RenderOnce for DeviceCard {
         let (selected_border, focus_ring) = (self.draws_selected_border(), self.draws_focus_ring());
         let id = ElementId::Name(SharedString::from(self.key.0.clone()));
         let line2_color = self.line2_color(&theme);
+        let CardPrepared {
+            layout,
+            value,
+            height,
+        } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
+        let key = self.key;
 
-        let mut text = v_flex()
-            .debug_selector(|| "perf-card-text".into())
+        let mut value = value.map(|v| value_element(&v, &key, &m, &theme));
+        let inline = if layout.value_inline {
+            value.take()
+        } else {
+            None
+        };
+        let text_key = key.0.clone();
+        let mut text = div()
+            .debug_selector(move || format!("perf-card-text:{text_key}"))
             .relative()
+            .flex()
+            .flex_col()
+            .items_start()
+            .justify_center()
             .flex_1()
             .min_w_0()
-            .justify_center()
-            .child(line(
-                "perf-card-heading",
-                lines.heading.clone(),
-                &[],
-                HEADING_LINE_H * s,
-                label_style(&m, m.text.md, FontWeight::MEDIUM),
-                theme.text_primary,
-                &m,
-            ))
-            .child(line(
-                "perf-card-line1",
-                lines.line1.clone(),
-                &lines.line1_locks,
-                DETAIL_LINE_H * s,
-                label_style(&m, m.text.sm, FontWeight::NORMAL),
-                theme.text_secondary,
-                &m,
-            ))
-            .child(line(
-                "perf-card-line2",
-                lines.line2.clone(),
-                &lines.line2_locks,
-                DETAIL_LINE_H * s,
-                label_style(&m, m.text.sm, FontWeight::NORMAL),
-                line2_color,
+            .h_full()
+            .overflow_hidden()
+            .child(line_rows(
+                LineSpec {
+                    key: &key,
+                    name: "heading",
+                    selector: "perf-card-heading",
+                    height: HEADING_LINE_H * s,
+                    style: label_style(&m, CardFont::Heading.size(&m), FontWeight::MEDIUM),
+                    color: theme.text_primary,
+                },
+                &layout.heading,
+                inline,
                 &m,
             ));
-        if let Some(tip) = lines.tooltip {
+        if let Some(value) = value {
+            text = text.child(
+                div()
+                    .debug_selector(|| "perf-card-value-row".into())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(px(HEADING_LINE_H * s))
+                    .child(value),
+            );
+        }
+        text = text
+            .child(line_rows(
+                LineSpec {
+                    key: &key,
+                    name: "line1",
+                    selector: "perf-card-line1",
+                    height: DETAIL_LINE_H * s,
+                    style: label_style(&m, CardFont::Detail.size(&m), FontWeight::NORMAL),
+                    color: theme.text_secondary,
+                },
+                &layout.line1,
+                None,
+                &m,
+            ))
+            .child(line_rows(
+                LineSpec {
+                    key: &key,
+                    name: "line2",
+                    selector: "perf-card-line2",
+                    height: DETAIL_LINE_H * s,
+                    style: label_style(&m, CardFont::Detail.size(&m), FontWeight::NORMAL),
+                    color: line2_color,
+                },
+                &layout.line2,
+                None,
+                &m,
+            ));
+        let mut tip = card_tooltip(&lines, &layout);
+        if !tip.is_empty() {
             let state = HoverTooltip::state(
                 ElementId::NamedChild(std::sync::Arc::new(id.clone()), "tooltip".into()),
                 window,
                 cx,
             );
-            let content = if tip.contains('\n') {
-                TlTooltip::lines(
-                    tip.split('\n')
-                        .map(|l| SharedString::from(l.to_owned()))
-                        .collect(),
-                )
+            let content = if tip.len() == 1 {
+                TlTooltip::text(tip.swap_remove(0))
             } else {
-                TlTooltip::text(tip)
+                TlTooltip::lines(tip.into_vec())
             };
             text = HoverTooltip::attach(&state, text, DELAY_CONTROL, content.build(), window, cx);
         }
@@ -995,7 +1589,6 @@ impl RenderOnce for DeviceCard {
             .h(px(CARD_GRAPH_H * s))
             .child(self.chart.cached(StyleRefinement::default().size_full()));
 
-        let key = self.key;
         let pressed = theme.row_selected.opacity(PRESSED_ALPHA);
         let hover = theme.row_hover;
         let mut card = h_flex()
@@ -1004,7 +1597,7 @@ impl RenderOnce for DeviceCard {
             .relative()
             .flex_none()
             .w(self.width)
-            .h(px(CARD_H * s))
+            .h(height)
             .pl(m.sp[5])
             .gap(m.sp[4])
             .bg(theme.list_bg)
@@ -1052,63 +1645,101 @@ impl RenderOnce for DeviceCard {
     }
 }
 
-/// One single-line text row with an end ellipsis. A line with lock offsets is split into text
-/// runs with a 12 px lock icon at each offset.
-fn line(
+/// How one card line is drawn.
+struct LineSpec<'a> {
+    key: &'a DeviceKey,
+    /// The line in row selectors: "perf-card-row:{key}:{name}:{row}".
+    name: &'static str,
+    /// The selector of the whole line.
     selector: &'static str,
-    text: SharedString,
-    locks: &[u16],
+    /// Row height, scaled.
     height: f32,
     style: gpui_kit::TextStyleRefinement,
     color: Hsla,
-    m: &UiMetrics,
-) -> AnyElement {
-    let mut row = div()
-        .debug_selector(move || selector.into())
-        .flex_none()
-        .h(px(height))
-        .min_w_0()
-        .overflow_hidden()
-        .text_color(color);
-    *row.text_style() = style;
-    if locks.is_empty() {
-        return row
-            .flex()
-            .items_center()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(text)
-            .into_any_element();
-    }
-    let mut row = row.flex().flex_row().items_center().whitespace_nowrap();
-    let mut start = 0usize;
-    for &at in locks {
-        let at = usize::from(at).min(text.len());
-        if at > start {
-            row = row.child(segment(&text[start..at]));
-        }
-        row = row.child(
-            div()
-                .debug_selector(|| "perf-card-lock".into())
-                .flex_none()
-                .child(icon(TlIcon::Lock, m.icon.xs, color)),
-        );
-        start = at;
-    }
-    if start < text.len() {
-        row = row.child(segment(&text[start..]));
-    }
-    row.into_any_element()
 }
 
-/// A text run of a line with locks. It shrinks with an ellipsis, so the locks stay visible.
-fn segment(text: &str) -> gpui_kit::Div {
-    div()
-        .flex_shrink(1.)
-        .min_w_0()
-        .overflow_hidden()
-        .text_ellipsis()
-        .child(SharedString::from(text.to_owned()))
+/// The rows of one card line. Each row is one unwrapped run as wide as its text, with a 12 px
+/// lock icon at each lock offset. `trailing` (the value) goes sp3 after the last row.
+fn line_rows(
+    spec: LineSpec,
+    line: &CardLineLayout,
+    mut trailing: Option<AnyElement>,
+    m: &UiMetrics,
+) -> AnyElement {
+    let LineSpec {
+        key,
+        name,
+        selector,
+        height,
+        style,
+        color,
+    } = spec;
+    let mut col = div()
+        .debug_selector(move || selector.into())
+        .flex()
+        .flex_col()
+        .flex_none()
+        .items_start();
+    // The style first: it replaces the whole text refinement, colour included.
+    *col.text_style() = style;
+    col = col.text_color(color);
+    let last = line.rows.len().saturating_sub(1);
+    for (i, row) in line.rows.iter().enumerate() {
+        let row_key = key.0.clone();
+        let mut el = h_flex()
+            .debug_selector(move || format!("perf-card-row:{row_key}:{name}:{i}"))
+            .flex_none()
+            .h(px(height))
+            .whitespace_nowrap();
+        let text = &row.text;
+        let mut start = 0usize;
+        for &at in &row.locks {
+            let at = usize::from(at).min(text.len());
+            if at > start {
+                el = el.child(SharedString::from(text[start..at].to_owned()));
+            }
+            el = el.child(
+                div()
+                    .debug_selector(|| "perf-card-lock".into())
+                    .flex_none()
+                    .child(icon(TlIcon::Lock, m.icon.xs, color)),
+            );
+            start = at;
+        }
+        if row.locks.is_empty() {
+            el = el.child(text.clone());
+        } else if start < text.len() {
+            el = el.child(SharedString::from(text[start..].to_owned()));
+        }
+        if i == last
+            && let Some(value) = trailing.take()
+        {
+            el = el.child(div().flex_none().ml(m.sp[3]).child(value));
+        }
+        col = col.child(el);
+    }
+    col.into_any_element()
+}
+
+/// The value: tabular `t_md` 400 in its validity colour, or the lock icon when Restricted.
+fn value_element(v: &CardValue, key: &DeviceKey, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let value_key = key.0.clone();
+    let mut el = div()
+        .debug_selector(move || format!("perf-card-row:{value_key}:value:0"))
+        .flex()
+        .flex_none()
+        .items_center();
+    if v.validity == Validity::Restricted {
+        return el
+            .child(icon(TlIcon::Lock, m.icon.xs, theme.text_secondary))
+            .into_any_element();
+    }
+    // The style first: it replaces the whole text refinement.
+    *el.text_style() = numeric_style(m, CardFont::Value.size(m));
+    el.whitespace_nowrap()
+        .text_color(v.color(theme))
+        .child(v.text.clone())
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -1816,5 +2447,146 @@ mod tests {
         );
         let l = lines(&input(DeviceKind::Cpu, &cpu, &s));
         assert!(same(&tip(&l), &l.line1));
+    }
+
+    /// Monospace test measure: 1 px per character in every font, the ellipsis included.
+    fn mono(_: CardFont, s: &str) -> Pixels {
+        px(s.chars().count() as f32)
+    }
+
+    fn card_text(heading: &str, line1: &str, line2: &str) -> CardLines {
+        CardLines {
+            heading: SharedString::from(heading.to_owned()),
+            line1: SharedString::from(line1.to_owned()),
+            line2: SharedString::from(line2.to_owned()),
+            ..CardLines::default()
+        }
+    }
+
+    /// `card_text_layout` with a 1 px gap and a 2 px lock.
+    fn layout(lines: &CardLines, value_w: f32, text_w: f32) -> CardTextLayout {
+        card_text_layout(lines, px(value_w), px(text_w), px(1.), px(2.), &mut mono)
+    }
+
+    fn rows(line: &CardLineLayout) -> Vec<&str> {
+        line.rows.iter().map(|r| &*r.text).collect()
+    }
+
+    #[test]
+    fn card_text_layout_fits_in_one_row() {
+        let lines = card_text("GPU 0", "AMD Radeon", "52 °C");
+        let l = layout(&lines, 6., 20.);
+        assert_eq!(rows(&l.heading), ["GPU 0"]);
+        assert_eq!(rows(&l.line1), ["AMD Radeon"]);
+        assert_eq!(rows(&l.line2), ["52 °C"]);
+        assert!(l.value_inline, "5 + 1 + 6 fits 20");
+        assert!(!l.heading.cut && !l.line1.cut && !l.line2.cut);
+        assert_eq!(l.card_height(1.0), px(80.));
+        assert_eq!(l.card_height(1.5), px(120.));
+        assert!(card_tooltip(&lines, &l).is_empty());
+    }
+
+    #[test]
+    fn card_text_layout_wraps_to_two_rows() {
+        let l = layout(&card_text("GPU 0", "NVIDIA GeForce RTX 4090", ""), 6., 16.);
+        assert_eq!(rows(&l.line1), ["NVIDIA GeForce", "RTX 4090"]);
+        assert!(!l.line1.cut);
+        // An empty line keeps its row.
+        assert_eq!(rows(&l.line2), [""]);
+        // 18 + 2 × 16 + 16 + 10 = 76: still the least height.
+        assert_eq!(l.card_height(1.0), px(80.));
+    }
+
+    #[test]
+    fn card_text_layout_middle_cut_past_two_rows() {
+        let name = "NVIDIA GeForce RTX 4090 Laptop GPU 16 GB";
+        assert_eq!(name.len(), 40);
+        let lines = CardLines {
+            tooltip: Some(SharedString::from(name)),
+            ..card_text("GPU 0", name, "52 °C")
+        };
+        let l = layout(&lines, 6., 16.);
+        // Row 2 keeps the last 12 characters (middle_ellipsis) and as much of the start as fits.
+        assert_eq!(rows(&l.line1), ["NVIDIA GeForce", "RTX…op GPU 16 GB"]);
+        assert!(l.line1.cut);
+        assert!(
+            l.line1
+                .rows
+                .iter()
+                .all(|r| mono(CardFont::Detail, &r.text) <= px(16.))
+        );
+        assert_eq!(&*card_tooltip(&lines, &l), [SharedString::from(name)]);
+        // 18 + 2 × 16 + 16 + 10 = 76.
+        assert_eq!(l.card_height(1.0), px(80.));
+    }
+
+    #[test]
+    fn card_text_layout_cuts_a_name_without_spaces() {
+        // middle_ellipsis keeps 12 characters of the end, which do not fit 10 px: the balanced
+        // cut keeps both ends instead.
+        let l = layout(&card_text("enp0s20f0u1u2u3", "Ethernet", ""), 0., 10.);
+        assert_eq!(rows(&l.heading), ["enp0s…u2u3"]);
+        assert!(l.heading.cut);
+        let l = layout(&card_text("enp0s20f0u1u2u3", "Ethernet", ""), 0., 14.);
+        assert_eq!(rows(&l.heading), ["e…0s20f0u1u2u3"]);
+        // A path keeps its last component.
+        let l = layout(
+            &card_text("Disk 0", "NVMe - /run/media/oystein/Backup", ""),
+            0.,
+            20.,
+        );
+        assert_eq!(rows(&l.line1), ["NVMe -", "/run/media/o…/Backup"]);
+        assert!(l.line1.cut);
+    }
+
+    #[test]
+    fn card_text_layout_value_takes_its_own_row() {
+        let lines = card_text("Aggregate graphics", "2 adapters", "AMD");
+        let l = layout(&lines, 6., 20.);
+        assert_eq!(rows(&l.heading), ["Aggregate graphics"]);
+        assert!(!l.value_inline, "18 + 1 + 6 > 20");
+        // 18 + 18 + 2 × 16.
+        assert_eq!(l.text_height(), 68.);
+        assert_eq!(l.card_height(1.0), px(80.));
+        // No value: nothing to place.
+        assert!(layout(&lines, 0., 20.).value_inline);
+
+        // Seven rows grow the card: 2 × 18 + 18 + 4 × 16 + 10.
+        let tall = card_text("Aggregate graphics", "aaaa bbbb cccc", "dddd eeee ffff");
+        let l = layout(&tall, 6., 10.);
+        assert_eq!(rows(&l.heading), ["Aggregate", "graphics"]);
+        assert!(!l.value_inline, "8 + 1 + 6 > 10");
+        assert_eq!(rows(&l.line1), ["aaaa bbbb", "cccc"]);
+        assert_eq!(rows(&l.line2), ["dddd eeee", "ffff"]);
+        assert_eq!(l.text_height(), 118.);
+        assert_eq!(l.card_height(1.0), px(128.));
+    }
+
+    #[test]
+    fn card_text_layout_keeps_locks_with_their_row() {
+        // A Restricted temperature: a lock at the end of the line.
+        let text = "Samsung SSD 990 PRO · ";
+        let lines = CardLines {
+            line2_locks: smallvec![text.len() as u16],
+            ..card_text("Disk 0", "NVMe", text)
+        };
+        let l = layout(&lines, 0., 14.);
+        assert_eq!(rows(&l.line2), ["Samsung SSD", "990 PRO · "]);
+        assert!(l.line2.rows[0].locks.is_empty());
+        // "·" is 2 bytes: the lock sits at byte 11, the end of row 2.
+        assert_eq!(&l.line2.rows[1].locks[..], [11]);
+        assert!(!l.line2.cut);
+
+        // Cut: the lock at the end stays at the end of the cut row.
+        let text = "Samsung SSD 990 PRO 2TB NVMe M.2 · ";
+        let lines = CardLines {
+            line2_locks: smallvec![text.len() as u16],
+            ..card_text("Disk 0", "NVMe", text)
+        };
+        let l = layout(&lines, 0., 14.);
+        let last = &l.line2.rows[1];
+        assert!(l.line2.cut);
+        assert_eq!(&last.locks[..], [last.text.len() as u16]);
+        assert!(mono(CardFont::Detail, &last.text) + px(2.) <= px(14.));
     }
 }

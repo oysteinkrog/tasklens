@@ -34,7 +34,7 @@ Shared sizes used by more than one entry (all chosen unless marked):
 | `graph_h_overall` | 300 | height of the CPU "Overall" chart and of overlaid and stacked modes |
 | `secondary_graph_h` | 120 | CPU secondary graph (PERF-032) |
 | `card_w` | nav_width − 2 × sp4 | sidebar card width |
-| `card_h` | 80 | sidebar card height (measured 78 at 200%) |
+| `card_h` | 80 (least) | sidebar card height (measured 78 at 200%); a card grows when its wrapped text needs more (UI-PRF-011) |
 | `card_graph` | 116 × 56 | sidebar mini graph (PERF-001, spec) |
 | `mini_card` | 180 × 90 | minigraph card (PERF-080, spec) |
 
@@ -335,20 +335,23 @@ element height = rows × cell_h + (rows − 1) × gap
 ### UI-PRF-011 Device sidebar card
 
 - **Implements**: PERF-001, PERF-005 (gap after re-plug), PERF-008 (headings), PERF-013 (glyphs), R-055, PERF-053 (disk temperature on line 2), PERF-054 (network state).
-- **Anatomy** (card_w × 80; measured proportions from `performance.png`: graph 116 × 56 at left with sp5 (12) inset, text column starts 8 px after the graph):
+- **Anatomy** (card_w × card height, at least 80; measured proportions from `performance.png`: graph 116 × 56 at left with sp5 (12) inset, text column starts 8 px after the graph):
 
 ```
 ┌──────────────────────────────────────────────────────┐ bg list_bg, 1 px divider, r_md
-│ sp5 ┌────────────────┐ sp4  CPU                  t_md 500 text_primary   │
-│     │ 12.0%  (value) │      AMD Ryzen 7 7800X3…  t_sm 400 text_secondary│  single line, ellipsis
-│     │  ▁▂▃▅▃▂▁▂▃     │      4631 MHz · 52 °C     t_sm 400 text_secondary│
-│     └────────────────┘ 116×56, chart with grid, no heading, value at top-left                │
+│ sp5 ┌────────────────┐ sp4  CPU  12.0%           heading t_md 500 text_primary, value t_md 400 tnum │
+│     │                │      AMD Ryzen 7          t_sm 400 text_secondary, wraps to 2 rows        │
+│     │  ▁▂▃▅▃▂▁▂▃     │      780…re Processor     row 2 cut in the middle when the rest is too long │
+│     └────────────────┘      4631 MHz · 52 °C     t_sm 400 text_secondary│
+│                        116×56, chart with grid, no heading, no value                              │
 └──────────────────────────────────────────────────────┘
 ```
 
-  Parts:
-  - **Mini graph**: a UI-PRF-001 chart in a 116 × 56 box, `ChartLabels { heading: None, value shown at top-left, no legend, no range label, no axis max }`. The value label sits top-left inside the graph (`performance.png` shows "12.0%" over the graph's top-left), `t_sm` 500 `text_primary`. Grid on. Outline per UI-PRF-001.
-  - **Text column**: three lines, left-aligned, vertically centred in the card: heading `t_md` 500 `text_primary` (18 px line); line 1 and line 2 `t_sm` 400 `text_secondary` (16 px lines); each one line with `text_ellipsis` and `overflow_hidden`. Network line 2 uses the `accent` colour (R-055) because TaskSlinger draws the rate in the accent.
+  Parts (2026-10-15 leader decision for crw.57: keep the heading and both detail lines, fix only the cut-off text; the cards keep their width):
+  - **Mini graph**: a UI-PRF-001 chart in a 116 × 56 box, `ChartLabels { heading: None, value_align: Hidden, no legend, no range label, no axis max }`. The graph draws no value; the card draws it in the heading row. Grid on. Outline per UI-PRF-001.
+  - **Value**: in the heading row, sp3 (6) after the heading: "GPU 0  22%". `t_md` 400 with tabular figures. Colour by validity as the graph value label: Valid `text_primary`, Stale and the glyph words `text_secondary`, Failed `status.warning`, Restricted the lock icon. The value is the newest value of the graph's first series (`ChartView::value_now`), formatted by the graph's `value_fmt`. When the widest value of the format ("100.0%", "999.9 KiB/s", "9999 RPM") does not fit after the last heading row, the value gets its own 18 px row under the heading, so the rows do not move as the value changes. A value is never cut.
+  - **Text column**: from the graph's right edge + sp4 to the card's right border (98 px at nav_width 252), left-aligned, vertically centred in the card: heading `t_md` 500 `text_primary` (18 px rows); line 1 and line 2 `t_sm` 400 `text_secondary` (16 px rows). Each line wraps at spaces to at most 2 rows. What does not fit row 2 is cut in the middle (`middle_ellipsis`, so a mount path keeps its last component). A line whose first word does not fit, such as a long interface name, is cut in the middle on one row. Text is never cut at the end. Widths are the sum of cached per-character advances of each card font, so a render shapes nothing after the first. Network line 2 uses the `accent` colour (R-055) because TaskSlinger draws the rate in the accent.
+  - **Height**: the text rows plus sp2 above and below and the 1 px border, at least 80. Each card measures its height when it renders and tells the sidebar when it changed; the cards below move on the next frame.
   - Headings and lines per device (PERF-001, R-055):
 
 | Kind | Heading | Line 1 | Line 2 | Graph series | Value |
@@ -364,7 +367,7 @@ element height = rows × cell_h + (rows − 1) × gap
 
   - Numbering: "Disk N", "GPU N", "Fan N" count from 0 in sidebar order (`performance.png` shows "GPU 0", "Disk 0"), re-numbered when the order changes.
   - Disconnected interface: the whole card at opacity 0.6 (PERF-001).
-  - Tooltip (`TlTooltip`, 500 ms): the full model on line 1 when it is truncated; network cards add the NetworkManager connection name on its own line when known. The Memory card says "Memory the system has promised to programs, as a share of the commit limit. It can pass 100% because Linux allows overcommit."
+  - Tooltip (`TlTooltip`, 500 ms): the full text of every line that is cut, one per row; network cards add the adapter name and the NetworkManager connection name on their own rows when known. The Memory card says "Memory the system has promised to programs, as a share of the commit limit. It can pass 100% because Linux allows overcommit."
 - **States**:
   - Default: bg `list_bg`, border 1 px `divider`.
   - Hover: bg `row_hover`.
@@ -381,9 +384,9 @@ element height = rows × cell_h + (rows − 1) × gap
 - **Build**: `pages/performance/sidebar.rs`: `DeviceCard` is a `RenderOnce` struct built by `DeviceSidebar::render` from `DeviceCatalog`; its chart is a `ChartView` entity kept in `DeviceSidebar.cards: IndexMap<DeviceKey, CardState { chart: Entity<ChartView>, lines: [SharedString; 3] }>`, created when a device appears. All card graphs of one device kind could share a `ChartGridElement` (ADR-009 rule 7); since the cards are separate rows, each card keeps its own `ChartView` but the sidebar is a single `.cached()` entity that re-renders on data change. The line strings re-format only when their value bits change (same rule as `CellTextCache`).
 - **Performance**: 9 cards at 1 Hz (CPU card at 10 Hz when `cpu_fast`): 9 path clone sets per frame while sliding; text re-shape only when the formatted text changes.
 - **Accessibility**: the card's text lines are the graph's alternative. Selection is keyboard-reachable (Up, Down, F1..F8).
-- **Tests**: `card_lines_cpu`, `card_lines_network_both_directions` ("↓ 1.2 Mbps ↑ 0.3 Mbps"), `card_lines_network_one_direction` (total only), `card_disconnected_opacity`, `card_value_glyph_for_restricted`.
+- **Tests**: `card_lines_cpu`, `card_lines_network_both_directions` ("↓ 1.2 Mbps ↑ 0.3 Mbps"), `card_lines_network_one_direction` (total only), `card_disconnected_opacity`, `card_value_glyph_for_restricted`, `card_text_layout_*`, `card_long_gpu_name_wraps_then_middle_cut`, `sidebar_cards_unclipped_at_1200x900`, `height_change_relays_out_sidebar`, `card_value_in_heading_row`, `value_goes_stale_without_samples`.
 - **Phase**: P1 (fan and battery cards P2 with their pages; aggregate P4).
-- **Decided here**: `card_h` 80, inset `sp5`, text line heights, selected border 2 px inside, focus ring form, pressed tint, double-click does nothing on cards, numbering from 0.
+- **Decided here**: `card_h` 80 as the least height, inset `sp5`, text line heights, wrap to 2 rows then a middle cut, value in the heading row, selected border 2 px inside, focus ring form, pressed tint, double-click does nothing on cards, numbering from 0.
 
 ### UI-PRF-012 Sidebar list: selection, keys, hotplug and visibility
 
@@ -393,8 +396,8 @@ element height = rows × cell_h + (rows − 1) × gap
   - **Visibility**: a device is visible when `device_overrides[key]` is `"show"`, or when there is no override and its type default (`show_disks`, `show_gpus`, `show_fans`, `show_batteries`, `show_network_*` by PERF-054 type class) is on. CPU and Memory are visible unless overridden `"hide"`. `lo` never appears. Aggregates (P4) default hidden.
   - **Selection**: `state.performance.selected_device`. If the saved key is missing or hidden at start, select the first visible card. When the selected device vanishes or is hidden, select the next visible card below it, else the one above (PERF-002, PERF-005).
   - **Keys** (context `Performance`): F1..F8 select the Nth visible card; Up and Down move selection when the sidebar has focus; Home and End select first and last (chosen, matching Table conventions); Enter and Space do nothing extra (selection already switched the page). Selecting scrolls the card into view (`ScrollHandle::scroll_to_item` Nearest).
-  - **Hotplug add**: a new card appears at its place with an insert animation: height 0 → 80 and opacity 0 → 1 over `m_base`, `ease_out_cubic`; the cards below slide down with the same curve. Reduced motion or `motion.animations = false`: instant.
-  - **Hotplug remove**: the card fades to opacity 0 and its height collapses 80 → 0 over `m_base`; cards below slide up. Reduced motion: instant. The device's page entity is dropped once the animation ends.
+  - **Hotplug add**: a new card appears at its place with an insert animation: height 0 → card height (min 80) and opacity 0 → 1 over `m_base`, `ease_out_cubic`; the cards below slide down with the same curve. Reduced motion or `motion.animations = false`: instant.
+  - **Hotplug remove**: the card fades to opacity 0 and its height collapses from the card height (min 80) to 0 over `m_base`; cards below slide up. Reduced motion: instant. The device's page entity is dropped once the animation ends.
   - **Re-plug**: a device that returns with a new generation is a new card at its saved order position; its series start with `GAP_BEFORE`, so the mini graph shows the gap (PERF-005).
   - **Empty sidebar**: cannot happen (at least one page visible, PERF-002).
 - **Data binding**: `Snapshot.devices` (`DEVICES` bit), settings `device_order`, `device_overrides`, `show_*`. Demand: the sidebar adds `memory`, `disks`, `nets`, `gpus`, `sensors` to `DemandAggregator` for each visible card type, and `cpu: Total`.
@@ -1162,14 +1165,14 @@ background window_bg; 1 px divider border; no shadow (the compositor's); the car
 ```
 ┌ window "tasklens Mini Window", borderless Floating, width 260 ─┐
 │ sp4                                                            │
-│ ┌ UI-PRF-011 card, width 260 − 2 sp4 = 244, height 80 ───────┐ │  one card per visible sidebar card, in sidebar order
+│ ┌ UI-PRF-011 card, width 260 − 2 sp4 = 244, card height (min 80) ┐ │  one card per visible sidebar card, in sidebar order
 │ └────────────────────────────────────────────────────────────┘ │
 │ sp4 gap                                                        │
 │ ┌ card ──────────────────────────────────────────────────────┐ │
 │ ...                                                            │
 │ sp4                                                            │
 └────────────────────────────────────────────────────────────────┘
-height = n × 80 + (n + 1) × sp4, capped at 90% of the output's work area height; beyond that the list scrolls (kit scrollbar)
+height = the sum of the card heights (min 80 each) + (n + 1) × sp4, capped at 90% of the output's work area height; beyond that the list scrolls (kit scrollbar)
 bg window_bg; 1 px divider border; not resizable
 ```
 

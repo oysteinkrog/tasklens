@@ -172,11 +172,11 @@ const TEXT_MASK: ComponentMask = ComponentMask(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardAnim {
     Steady,
-    /// Height 0 to `CARD_H` and opacity 0 to 1.
+    /// Height 0 to the card height and opacity 0 to 1.
     Inserting {
         started: Instant,
     },
-    /// Opacity 1 to 0 and height `CARD_H` to 0; the card goes when it ends.
+    /// Opacity 1 to 0 and height from the card height to 0; the card goes when it ends.
     Removing {
         started: Instant,
     },
@@ -188,6 +188,8 @@ pub struct CardState {
     pub chart: Entity<ChartView>,
     pub view: Entity<CardView>,
     pub lines: CardLines,
+    /// The card height from its last render: at least `CARD_H`, more when its text wraps.
+    pub height: Rc<Cell<Pixels>>,
     /// Index among the visible cards of its kind: "Disk 0".
     pub number: u16,
     pub anim: CardAnim,
@@ -245,6 +247,7 @@ impl Render for DragGhost {
             edit_mode: true,
             hidden_in_edit: false,
             width: self.width,
+            prepared: None,
         })
     }
 }
@@ -728,6 +731,7 @@ impl DeviceSidebar {
                 edit_mode: true,
                 hidden_in_edit: !visible,
                 width: px(0.),
+                prepared: None,
             }
             .opacity(),
         )
@@ -793,13 +797,22 @@ impl DeviceSidebar {
         let (spec, fmt) = card_spec(row, scale, &self.settings, current(cx));
         let hub = self.hub.clone();
         let chart = cx.new(|cx| ChartView::new(spec, card_chart_labels(fmt), &hub, cx));
-        let view =
-            cx.new(|_| CardView::new(row.key.clone(), chart.clone(), Rc::clone(&self.card_width)));
+        let height = Rc::new(Cell::new(px(CARD_H * metrics(cx).ui_scale)));
+        let view = cx.new(|_| {
+            CardView::new(
+                row.key.clone(),
+                chart.clone(),
+                Rc::clone(&self.card_width),
+                Rc::clone(&height),
+                self.id,
+            )
+        });
         CardState {
             row: row.clone(),
             chart,
             view,
             lines: CardLines::default(),
+            height,
             number,
             anim,
             anim_seq: self.anim_seq,
@@ -1698,11 +1711,12 @@ impl Render for DeviceSidebar {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let width = self.card_width.get();
-        let card_h = CARD_H * m.ui_scale;
         let normal_cards: Vec<AnyElement> = self
             .cards
             .iter()
             .map(|c| {
+                // The height the card measured on its last render; it notifies on a change.
+                let card_h = c.height.get();
                 let menu_key = c.row.key.clone();
                 // Right-click opens the card menu and leaves the selection alone (UI-PRF-014).
                 let on_right = cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -1715,7 +1729,7 @@ impl Render for DeviceSidebar {
                     .child(
                         c.view
                             .clone()
-                            .cached(StyleRefinement::default().w(width).h(px(card_h))),
+                            .cached(StyleRefinement::default().w(width).h(card_h)),
                     );
                 let showing = match c.anim {
                     CardAnim::Steady => return card.into_any_element(),
@@ -1733,7 +1747,7 @@ impl Render for DeviceSidebar {
                         Animation::new(M_BASE).with_easing(ease_out_cubic),
                         move |el, t| {
                             let t = if showing { t } else { 1. - t };
-                            el.h(px(card_h * t)).opacity(t)
+                            el.h(card_h * t).opacity(t)
                         },
                     )
                     .into_any_element()
@@ -1918,6 +1932,7 @@ impl Render for DeviceSidebar {
                                         edit_mode: true,
                                         hidden_in_edit: !checked && !dragging,
                                         width: edit_card_w,
+                                        prepared: None,
                                     }),
                             )
                             .child(div().flex_none().w(px(28. * m.ui_scale)).child(switch));

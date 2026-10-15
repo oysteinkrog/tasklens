@@ -1,14 +1,14 @@
 //! Device sidebar card rendering (E24, UI-PRF-011). Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render, Styled as _,
-    TestAppContext, VisualTestContext, Window, div, point, px,
+    App, AppContext as _, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Pixels,
+    Render, SharedString, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
@@ -24,14 +24,29 @@ use tl_ui::chart::{ChartSpec, ValueFormat};
 use tl_ui::hub::SnapshotHub;
 use tl_ui::pages::performance::actions::PerfSelectDevice;
 use tl_ui::pages::performance::card::{
-    CARD_CHART_BG, CardLines, CardTextInput, CardWords, DeviceCard, card_chart_grid,
-    card_chart_labels, card_lines,
+    CARD_CHART_BG, CardLines, CardPrepared, CardTextInput, CardWords, DeviceCard, card_chart_grid,
+    card_chart_labels, card_lines, card_tooltip,
 };
 use tl_ui::pages::performance::{DeviceKey, DeviceKind};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
 
 const CARD_W: f32 = 244.;
+/// 40 characters (crw.57 AC).
+const LONG_GPU: &str = "NVIDIA GeForce RTX 4090 Laptop GPU 16 GB";
+
+/// A debug selector built at run time.
+fn sel(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// `inner` lies inside `outer`.
+fn inside(inner: Bounds<Pixels>, outer: Bounds<Pixels>) -> bool {
+    inner.left() >= outer.left()
+        && inner.right() <= outer.right()
+        && inner.top() >= outer.top()
+        && inner.bottom() <= outer.bottom()
+}
 
 struct Host {
     chart: Entity<ChartView>,
@@ -39,6 +54,7 @@ struct Host {
     selected: bool,
     focused: bool,
     edit_mode: bool,
+    width: f32,
     clicked: Rc<RefCell<Vec<DeviceKey>>>,
     focus: FocusHandle,
 }
@@ -53,7 +69,8 @@ impl Host {
             focused: self.focused,
             edit_mode: self.edit_mode,
             hidden_in_edit: false,
-            width: px(CARD_W),
+            width: px(self.width),
+            prepared: None,
         }
     }
 }
@@ -112,6 +129,7 @@ fn open(cx: &mut TestAppContext, lines: CardLines) -> (Entity<Host>, &mut Visual
             selected: false,
             focused: false,
             edit_mode: false,
+            width: CARD_W,
             clicked: Rc::default(),
             focus,
         }
@@ -203,13 +221,30 @@ fn card_layout_and_click(cx: &mut TestAppContext) {
         card.center().y,
         "graph centred vertically"
     );
-    let text = cx.debug_bounds("perf-card-text").expect("text column");
+    let text = cx
+        .debug_bounds("perf-card-text:net:enp38s0")
+        .expect("text column");
     assert_eq!(text.left() - graph.right(), px(8.), "sp4 gap");
     let heights: Vec<_> = ["perf-card-heading", "perf-card-line1", "perf-card-line2"]
         .iter()
         .map(|s| cx.debug_bounds(s).expect("line").size.height)
         .collect();
     assert_eq!(heights, [px(18.), px(16.), px(16.)]);
+    // Short lines: one row each.
+    for line in ["heading", "line1", "line2"] {
+        let row = cx
+            .debug_bounds(sel(format!("perf-card-row:net:enp38s0:{line}:0")))
+            .expect("row");
+        assert!(inside(row, text), "{line}: {row:?} in {text:?}");
+        assert!(
+            cx.debug_bounds(sel(format!("perf-card-row:net:enp38s0:{line}:1")))
+                .is_none()
+        );
+    }
+    // The card draws the value; the graph draws none.
+    let chart = cx.read_entity(&host, |h, _| h.chart.clone());
+    let painted = cx.read_entity(&chart, |c, _| c.painted_value_text().map(str::to_owned));
+    assert_eq!(painted, None);
 
     let at = card.center();
     cx.simulate_event(MouseDownEvent {
@@ -228,6 +263,64 @@ fn card_layout_and_click(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let clicked = cx.read_entity(&host, |h, _| h.clicked.borrow().clone());
     assert_eq!(clicked, [DeviceKey(Arc::from("net:enp38s0"))]);
+}
+
+/// crw.57 AC: a 40-character GPU name on a card of the default width (nav_width 252 less 2 ×
+/// sp4) wraps to 2 rows. The rest of the name is cut in the middle, and the tooltip has the full
+/// name. 18 + 2 × 16 + 16 px of text still fit the least card height.
+#[gpui_kit::test]
+fn card_long_gpu_name_wraps_then_middle_cut(cx: &mut TestAppContext) {
+    assert_eq!(LONG_GPU.chars().count(), 40);
+    let gpu = DeviceEntry {
+        display_name: Arc::from(LONG_GPU),
+        ..entry(
+            9,
+            DeviceIdentity::Gpu {
+                uuid: [0; 16],
+                pci_bus_id: Arc::from("0000:2d:00.0"),
+            },
+            None,
+        )
+    };
+    let lines = lines_for(
+        DeviceKind::Gpu,
+        &gpu,
+        &snap(SystemSnapshot::default(), DeviceDetailsSnapshot::default()),
+    );
+    assert_eq!(lines.line1, LONG_GPU);
+    let (host, cx) = open(cx, lines.clone());
+    host.update(cx, |h, cx| {
+        h.width = 236.;
+        cx.notify();
+    });
+    draw(cx);
+    let prepared = cx.update(|window, cx| {
+        let mut card = host.read(cx).card();
+        card.prepare(window, cx).clone()
+    });
+    let line1 = &prepared.layout.line1;
+    assert!(line1.cut);
+    assert_eq!(line1.rows.len(), 2);
+    assert!(LONG_GPU.starts_with(&*line1.rows[0].text), "{line1:?}");
+    assert!(line1.rows[1].text.contains('\u{2026}'), "{line1:?}");
+    assert!(line1.rows[1].text.ends_with("GPU 16 GB"), "{line1:?}");
+    assert_eq!(
+        &*card_tooltip(&lines, &prepared.layout),
+        [SharedString::from(LONG_GPU)]
+    );
+    assert_eq!(prepared.height, px(80.));
+
+    let card = cx.debug_bounds("perf-card").expect("card");
+    assert_eq!(card.size, gpui_kit::size(px(236.), px(80.)));
+    let text = cx
+        .debug_bounds("perf-card-text:net:enp38s0")
+        .expect("text column");
+    for i in 0..2 {
+        let row = cx
+            .debug_bounds(sel(format!("perf-card-row:net:enp38s0:line1:{i}")))
+            .expect("line 1 row");
+        assert!(inside(row, text), "row {i}: {row:?} in {text:?}");
+    }
 }
 
 #[gpui_kit::test]
@@ -395,6 +488,8 @@ mod sidebar {
     struct SidebarHost {
         sidebar: Entity<DeviceSidebar>,
         global_escapes: Rc<RefCell<u32>>,
+        /// The sidebar width, 260 unless a test sets it.
+        width: Rc<Cell<f32>>,
     }
 
     impl Render for SidebarHost {
@@ -405,7 +500,7 @@ mod sidebar {
                 .on_action(move |_: &tl_ui::actions::EscapeChain, _, _| {
                     *global_escapes.borrow_mut() += 1
                 })
-                .w(px(260.))
+                .w(px(self.width.get()))
                 .h(px(900.))
                 .child(self.sidebar.clone())
         }
@@ -420,6 +515,7 @@ mod sidebar {
         /// The window's toast queue, when the rig has a kit `Root`.
         toasts: Option<Entity<ToastQueue>>,
         global_escapes: Rc<RefCell<u32>>,
+        host_w: Rc<Cell<f32>>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -547,12 +643,15 @@ mod sidebar {
         let host = sidebar.clone();
         let global_escapes = Rc::new(RefCell::new(0));
         let host_escapes = Rc::clone(&global_escapes);
+        let host_w = Rc::new(Cell::new(260.));
+        let width = Rc::clone(&host_w);
         let (vcx, toasts) = if rooted {
             cx.update(tl_ui::components::toast::init);
             let window = cx.add_window(move |window, cx| {
                 let host = cx.new(|_| SidebarHost {
                     sidebar: host,
                     global_escapes: host_escapes,
+                    width,
                 });
                 gpui_kit::base::Root::new(host, window, cx)
             });
@@ -563,6 +662,7 @@ mod sidebar {
             let (_, vcx) = cx.add_window_view(move |_, _| SidebarHost {
                 sidebar: host,
                 global_escapes: host_escapes,
+                width,
             });
             (vcx, None)
         };
@@ -578,6 +678,7 @@ mod sidebar {
             events,
             toasts,
             global_escapes,
+            host_w,
             vcx,
         }
     }
@@ -632,7 +733,11 @@ mod sidebar {
     }
 
     fn publish_cpu_series(r: &mut Rig) {
-        let newest = now_boot_ns();
+        publish_cpu_series_at(r, now_boot_ns());
+    }
+
+    /// CPU total samples of 20% and 30%, 100 ms apart, the newest at `newest`.
+    fn publish_cpu_series_at(r: &mut Rig, newest: u64) {
         r.engine.publish_with(|s| {
             let version = s.series.header.version + 1;
             s.series = Arc::new(SeriesSet {
@@ -840,6 +945,170 @@ mod sidebar {
             assert_eq!(renders, expected, "{key} render delta");
             assert_eq!(paints, expected, "{key} paint delta");
         }
+    }
+
+    /// What the card of `key` measured on its last render.
+    fn prepared(r: &mut Rig, key: &str) -> CardPrepared {
+        let sidebar = r.sidebar.clone();
+        let key = DeviceKey(Arc::from(key));
+        r.vcx.update(|_, cx| {
+            let view = sidebar.read(cx).card(&key).expect("card").view.clone();
+            view.read(cx).prepared.clone().expect("card rendered")
+        })
+    }
+
+    fn text_column(r: &mut Rig, key: &str) -> Bounds<Pixels> {
+        r.vcx
+            .debug_bounds(sel(format!("perf-card-text:{key}")))
+            .unwrap_or_else(|| panic!("{key} text column"))
+    }
+
+    /// crw.57 AC: at 1200 × 900 with the default nav_width (252), no card text is clipped. Every
+    /// row of every card, a 40-character GPU name included, lies inside its card, and each card
+    /// is laid out at its measured height, so no card overlaps the next.
+    #[gpui_kit::test]
+    fn sidebar_cards_unclipped_at_1200x900(cx: &mut TestAppContext) {
+        let mut devices = nine();
+        for e in &mut devices {
+            if matches!(e.identity, DeviceIdentity::Gpu { .. }) {
+                e.display_name = Arc::from(LONG_GPU);
+            }
+        }
+        let mut r = open(cx, devices, Settings::default(), UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
+        r.host_w.set(252.);
+        r.vcx.update(|window, _| window.refresh());
+        // New width, then the cards' new heights.
+        draw(r.vcx);
+        draw(r.vcx);
+
+        let card = r.vcx.debug_bounds("perf-card").expect("card");
+        assert_eq!(card.size.width, px(236.), "252 less sp4 on each side");
+        let keys = keys(&mut r);
+        assert_eq!(keys.len(), 9);
+        let mut above: Option<Bounds<Pixels>> = None;
+        for key in &keys {
+            let col = text_column(&mut r, key);
+            let height = prepared(&mut r, key).height;
+            assert!(height >= px(80.), "{key}");
+            // The text column fills the card inside its 1 px border.
+            assert_eq!(
+                col.size.height + px(2.),
+                height,
+                "{key} laid out at its height"
+            );
+            let mut drawn = 0;
+            for line in ["heading", "value", "line1", "line2"] {
+                for i in 0..2 {
+                    let id = sel(format!("perf-card-row:{key}:{line}:{i}"));
+                    let Some(row) = r.vcx.debug_bounds(id) else {
+                        continue;
+                    };
+                    drawn += 1;
+                    assert!(inside(row, col), "{key} {line} row {i}: {row:?} in {col:?}");
+                }
+            }
+            assert!(drawn >= 3, "{key}: a heading and two lines, got {drawn}");
+            if let Some(above) = above {
+                assert!(col.top() > above.bottom(), "{key} overlaps the card above");
+            }
+            above = Some(col);
+        }
+        // The GPU name wraps, then is cut in the middle.
+        let line1 = prepared(&mut r, GPU).layout.line1;
+        assert!(line1.cut && line1.rows.len() == 2, "{line1:?}");
+        assert!(line1.rows[1].text.ends_with("GB"), "{line1:?}");
+    }
+
+    /// A line that gains a row grows its card on the next draw, and the cards below move down.
+    #[gpui_kit::test]
+    fn height_change_relays_out_sidebar(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        draw(r.vcx);
+        let before = prepared(&mut r, "cpu");
+        assert_eq!(before.layout.line2.rows.len(), 1, "{:?}", before.layout);
+        assert_eq!(before.height, px(80.));
+        let (cpu, memory) = (text_column(&mut r, "cpu"), text_column(&mut r, "memory"));
+
+        r.engine.publish_with(|s| {
+            let mut sys = system(10);
+            sys.header.version = 50;
+            sys.cpu.freq_mhz = Metric::valid(4631);
+            sys.cpu.temp_c = Metric::valid(52.0);
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+        draw(r.vcx);
+
+        let after = prepared(&mut r, "cpu");
+        assert_eq!(lines(&mut r, "cpu").line2, "4631 MHz · 52 °C");
+        assert_eq!(after.layout.line2.rows.len(), 2, "{:?}", after.layout);
+        let grown = after.height - before.height;
+        assert!(grown > px(0.), "{after:?}");
+        let (cpu2, memory2) = (text_column(&mut r, "cpu"), text_column(&mut r, "memory"));
+        assert_eq!(cpu2.size.height - cpu.size.height, grown);
+        assert_eq!(
+            memory2.top() - memory.top(),
+            grown,
+            "the memory card moves down"
+        );
+    }
+
+    /// The value sits in the heading row, read from the card's own series. The graph draws none.
+    #[gpui_kit::test]
+    fn card_value_in_heading_row(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let warming = prepared(&mut r, "cpu").value.expect("value");
+        assert_eq!(
+            (&*warming.text, warming.validity),
+            ("…", Validity::WarmingUp)
+        );
+
+        publish_cpu_series(&mut r);
+        let p = prepared(&mut r, "cpu");
+        let value = p.value.expect("value");
+        assert_eq!((&*value.text, value.validity), ("30.0%", Validity::Valid));
+        assert!(p.layout.value_inline);
+        let chart = chart_of(&mut r, "cpu");
+        let painted = r
+            .vcx
+            .read_entity(&chart, |c, _| c.painted_value_text().map(str::to_owned));
+        assert_eq!(painted, None, "the graph draws no value");
+        let heading = r
+            .vcx
+            .debug_bounds("perf-card-row:cpu:heading:0")
+            .expect("heading row");
+        let value = r
+            .vcx
+            .debug_bounds("perf-card-row:cpu:value:0")
+            .expect("value");
+        assert!(
+            heading.contains(&value.center()),
+            "{value:?} in {heading:?}"
+        );
+    }
+
+    /// The value turns Stale when the samples stop: a Valid value draws its card again 1.5 s
+    /// later without a new snapshot. The newest sample is 1 s old at the first draw; the stale
+    /// floor is 1.5 s for a 100 ms period.
+    #[gpui_kit::test]
+    fn value_goes_stale_without_samples(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        publish_cpu_series_at(&mut r, now_boot_ns() - 1_000_000_000);
+        let value = prepared(&mut r, "cpu").value.expect("value");
+        assert_eq!(value.validity, Validity::Valid);
+
+        // The sample age follows the real boot clock; the check timer follows the test clock.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        r.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(1600));
+        draw(r.vcx);
+        let value = prepared(&mut r, "cpu").value.expect("value");
+        assert_eq!(value.validity, Validity::Stale);
+        assert_eq!(&*value.text, "30.0%", "a Stale value keeps its number");
+        let theme = r.vcx.update(|_, cx| current(cx).clone());
+        assert_eq!(value.color(&theme), theme.text_secondary);
     }
 
     #[gpui_kit::test]
@@ -1533,7 +1802,8 @@ mod sidebar {
         assert_eq!(opacity, 0.6);
         assert!(r.vcx.debug_bounds("perf-edit-row-disk:sdb").is_some());
         let card = r.vcx.debug_bounds("perf-card").expect("edit card");
-        assert_eq!(card.size.height, px(80.));
+        // The narrow edit card wraps its text, so it may grow past the least height.
+        assert!(card.size.height >= px(80.), "{card:?}");
     }
 
     #[gpui_kit::test]
