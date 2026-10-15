@@ -5,14 +5,27 @@
 //! and the toast is replaced in place as the engine reports. Service jobs have no client-side
 //! timeout, so the Progress toast stays until the final event (R-197). The Status cell overlay
 //! while pending comes from `SysActions::pending_tag`, not from this module.
+//!
+//! It also holds the startup type flow (UI-SYS-019), the three file openers (UI-SYS-017) and
+//! Jump to process (UI-SYS-021). Paths and URIs go to the engine only and are never logged
+//! (ADR-015).
 
 use gpui_kit::{Action, App, Entity, Global, Window, gpui};
 use smallvec::SmallVec;
 use tl_model::actions::{ActionKind, ActionTarget};
-use tl_model::table::UnitRef;
+use tl_model::command::Tab;
+use tl_model::process::ProcFlags;
+use tl_model::snapshot::{Snapshot, StartupType, UnitRecord};
+use tl_model::table::{UnitRef, UnitType};
+use tracing::warn;
 
+use super::actions::StartupChoice;
+use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::tr;
+use crate::pages::processes::ProcessesPage;
+use crate::pages::processes::jump::JumpTexts;
 use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
+use crate::window::main::main_window_view;
 use crate::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
 
 /// The five service verbs that share one flow.
@@ -163,4 +176,241 @@ pub fn run_unit_verb(
     actions.update(cx, |a, cx| {
         a.submit(kind, tag, targets, texts, window, cx);
     });
+}
+
+/// Request kind for a startup change, or None when the choice equals the current value.
+/// "Enabled (runtime)" counts as Enabled. Leaving Masked sends `UnitEnable` or `UnitDisable`;
+/// the engine unmasks first as part of that request.
+pub fn startup_change_kind(current: StartupType, choice: StartupChoice) -> Option<ActionKind> {
+    let same = matches!(
+        (current, choice),
+        (
+            StartupType::Enabled | StartupType::EnabledRuntime,
+            StartupChoice::Enabled
+        ) | (StartupType::Disabled, StartupChoice::Disabled)
+            | (StartupType::Masked, StartupChoice::Masked)
+    );
+    if same {
+        return None;
+    }
+    Some(match choice {
+        StartupChoice::Enabled => ActionKind::UnitEnable,
+        StartupChoice::Disabled => ActionKind::UnitDisable,
+        StartupChoice::Masked => ActionKind::UnitMask,
+    })
+}
+
+fn startup_texts(cx: &App) -> ActionTexts {
+    ActionTexts {
+        pending_one: tr(cx, "services-sys019-changing-startup-type"),
+        pending_many: "services-sys019-changing-n-services",
+        done_one: tr(cx, "services-sys019-startup-type-changed"),
+        done_many: "services-sys019-n-services-changed",
+        partial_many: "services-sys019-ok-of-n-services-changed",
+        failed_prefix: tr(cx, "services-sys019-failed-to-change-startup-type"),
+        failed_suffix: true,
+        unknown: tr(cx, "services-sys018-service-action-finished"),
+        busy: tr(cx, "services-sys018-a-service-action-is-already"),
+        failed_button: None,
+    }
+}
+
+/// Sends one request for the units whose startup type differs from `choice`. The kind depends
+/// only on the choice, so there is at most one request.
+pub fn run_set_startup(
+    choice: StartupChoice,
+    units: &[(UnitRef, StartupType)],
+    actions: &Entity<SysActions>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let mut kind = None;
+    let mut targets: SmallVec<[ActionTarget; 1]> = SmallVec::new();
+    for (unit, current) in units {
+        if let Some(k) = startup_change_kind(*current, choice) {
+            kind = Some(k);
+            targets.push(ActionTarget::Unit(unit.clone()));
+        }
+    }
+    let Some(kind) = kind else {
+        return;
+    };
+    let texts = startup_texts(cx);
+    actions.update(cx, |a, cx| {
+        a.submit(kind, ActionKindTag::SetStartup, targets, texts, window, cx);
+    });
+}
+
+/// `file://` plus `path` with every byte outside `A-Z a-z 0-9 - . _ ~ /` written as `%XX`.
+pub fn file_uri(path: &str) -> String {
+    let mut uri = String::with_capacity(7 + path.len());
+    uri.push_str("file://");
+    for &b in path.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            uri.push(char::from(b));
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
+
+/// A toast in `window`'s own stack.
+fn toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: gpui_kit::SharedString) {
+    match ToastQueue::of_window(window, cx) {
+        Some(queue) => queue.update(cx, |q, cx| q.push(kind, text, None, None, cx)),
+        None => warn!(target: "tasklens::ui", "no toast stack for a Services toast"),
+    }
+}
+
+/// The ExecStart binary: only services have one.
+fn binary_path(unit: &UnitRecord) -> Option<&str> {
+    (unit.kind == UnitType::Service && !unit.path.is_empty()).then_some(&*unit.path)
+}
+
+fn unit_file_path(unit: &UnitRecord) -> Option<&str> {
+    unit.unit_file.as_deref().filter(|p| !p.is_empty())
+}
+
+fn opener_texts(done: &str, failed: &str, cx: &App) -> ActionTexts {
+    let text = |key: &str| {
+        if key.is_empty() {
+            Default::default()
+        } else {
+            tr(cx, key)
+        }
+    };
+    ActionTexts {
+        pending_one: Default::default(),
+        pending_many: "",
+        done_one: text(done),
+        done_many: "",
+        partial_many: "",
+        failed_prefix: tr(cx, failed),
+        failed_suffix: false,
+        unknown: tr(cx, "services-sys018-service-action-finished"),
+        busy: tr(cx, "services-sys018-a-service-action-is-already"),
+        failed_button: None,
+    }
+}
+
+/// Opener requests have no targets.
+fn submit_targetless(
+    kind: ActionKind,
+    texts: ActionTexts,
+    actions: &Entity<SysActions>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    actions.update(cx, |a, cx| {
+        a.submit(
+            kind,
+            ActionKindTag::Other,
+            SmallVec::new(),
+            texts,
+            window,
+            cx,
+        );
+    });
+}
+
+fn image_unavailable(window: &mut Window, cx: &mut App) {
+    let text = tr(cx, "services-sys017-image-unavailable");
+    toast(window, cx, ToastKind::Warning, text);
+}
+
+/// File properties: the ExecStart binary, else the unit file.
+pub fn run_file_properties(
+    unit: &UnitRecord,
+    actions: &Entity<SysActions>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(path) = binary_path(unit).or_else(|| unit_file_path(unit)) else {
+        image_unavailable(window, cx);
+        return;
+    };
+    let kind = ActionKind::ShowInFileManager {
+        path: path.into(),
+        properties: true,
+    };
+    let texts = opener_texts(
+        "services-sys017-opened-file-properties",
+        "services-sys017-file-properties-failed",
+        cx,
+    );
+    submit_targetless(kind, texts, actions, window, cx);
+}
+
+/// Open file location: the ExecStart binary in the file manager.
+pub fn run_open_file_location(
+    unit: &UnitRecord,
+    actions: &Entity<SysActions>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(path) = binary_path(unit) else {
+        image_unavailable(window, cx);
+        return;
+    };
+    let kind = ActionKind::ShowInFileManager {
+        path: path.into(),
+        properties: false,
+    };
+    let texts = opener_texts(
+        "services-sys017-opening-file-location",
+        "services-sys017-file-location-failed",
+        cx,
+    );
+    submit_targetless(kind, texts, actions, window, cx);
+}
+
+/// Open unit file: the unit file as a `file://` URI. No success toast.
+pub fn run_open_unit_file(
+    unit: &UnitRecord,
+    actions: &Entity<SysActions>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(path) = unit_file_path(unit) else {
+        return;
+    };
+    let kind = ActionKind::OpenUri(file_uri(path).into());
+    let texts = opener_texts("", "services-sys017-unit-file-failed", cx);
+    submit_targetless(kind, texts, actions, window, cx);
+}
+
+/// Jump to process: selects the service's main process on the Processes tab (UI-SYS-021).
+pub fn run_jump_to_process(unit: &UnitRecord, snap: &Snapshot, window: &mut Window, cx: &mut App) {
+    if unit.main_pid == 0 {
+        let text = tr(cx, "services-sys017-not-running");
+        toast(window, cx, ToastKind::Info, text);
+        return;
+    }
+    let key = snap
+        .processes
+        .records
+        .iter()
+        .find(|r| r.key.pid == unit.main_pid && !r.flags.contains(ProcFlags::EXITED))
+        .map(|r| r.key);
+    let Some(key) = key else {
+        let text = tr(cx, "processes-jump-not-found");
+        toast(window, cx, ToastKind::Warning, text);
+        return;
+    };
+    let Some(view) = main_window_view(cx) else {
+        return;
+    };
+    view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
+    let Some(page) = view.read(cx).page_entity::<ProcessesPage>(Tab::Processes) else {
+        warn!(target: "tasklens::ui", "no Processes page for Jump to process");
+        return;
+    };
+    let texts = JumpTexts {
+        switched_tab: None,
+        success: Some(tr(cx, "services-sys021-switched-to-process")),
+        not_found: Default::default(),
+        hidden: Some(tr(cx, "services-sys021-process-not-visible")),
+    };
+    page.update(cx, |p, cx| p.select_by_key(key, texts, window, cx));
 }

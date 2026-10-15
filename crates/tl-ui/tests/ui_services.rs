@@ -1547,12 +1547,20 @@ mod flows {
         ActionError, ActionEvent, ActionId, ActionRequest, ActionState, ActionTarget,
     };
     use tl_model::command::Tab;
+    use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::settings::Settings;
+    use tl_model::snapshot::{ProcessSnapshot, StartupType, UnitRecord};
     use tl_model::table::{Manager, UnitRef};
+    use tl_model::table::{NodeId, ProcessTableView, TableRow, Total};
+    use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::action_tracker::{GlobalActionTracker, PushedToast};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::toast::{ToastKey, ToastKind};
-    use tl_ui::pages::services::flows::{UnitVerb, run_unit_verb, unit_action_texts};
+    use tl_ui::pages::services::actions::StartupChoice;
+    use tl_ui::pages::services::flows::{
+        UnitVerb, file_uri, run_file_properties, run_jump_to_process, run_open_file_location,
+        run_open_unit_file, run_set_startup, run_unit_verb, startup_change_kind, unit_action_texts,
+    };
     use tl_ui::pages::sys_table::{ActionKindTag, SysActions};
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
@@ -1784,5 +1792,304 @@ mod flows {
         rig.finish(id, &[ActionState::OutcomeUnknown("timeout".into())]);
         assert_eq!(rig.toasts(), ["Service action finished."]);
         assert_eq!(rig.pushed().last().expect("toast").kind, ToastKind::Warning);
+    }
+    fn unit_rec(name: &str, path: &str, unit_file: Option<&str>, pid: u32) -> UnitRecord {
+        let missing = || Total {
+            value: Default::default(),
+            validity: Validity::Missing,
+        };
+        UnitRecord {
+            unit: unit(name),
+            kind: UnitType::Service,
+            description: Arc::from("Unit"),
+            status: tl_model::snapshot::ServiceStatus::Running,
+            sub_state: Arc::from("running"),
+            load_state: Arc::from("loaded"),
+            startup: StartupType::Enabled,
+            main_pid: pid,
+            user: Arc::from("root"),
+            path: Arc::from(path),
+            unit_file: unit_file.map(Arc::from),
+            active_since_us: None,
+            triggered_by: Arc::from([]),
+            control_group: None,
+            can_reload: false,
+            has_cgroup_procs: false,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: missing(),
+            memory_bytes: missing(),
+            disk_bps: missing(),
+            tasks: missing(),
+        }
+    }
+
+    impl Rig {
+        fn startup(&mut self, choice: StartupChoice, units: &[(&str, StartupType)]) {
+            let units: Vec<(UnitRef, StartupType)> =
+                units.iter().map(|(n, t)| (unit(n), *t)).collect();
+            let actions = self.actions.clone();
+            self.main
+                .update(|window, cx| run_set_startup(choice, &units, &actions, window, cx));
+            self.main.run_until_parked();
+        }
+
+        fn open(
+            &mut self,
+            f: fn(&UnitRecord, &Entity<SysActions>, &mut Window, &mut App),
+            u: &UnitRecord,
+        ) {
+            let actions = self.actions.clone();
+            self.main.update(|window, cx| f(u, &actions, window, cx));
+            self.main.run_until_parked();
+        }
+
+        fn active_tab(&mut self) -> Tab {
+            self.main.update(|_, cx| {
+                main_window_view(cx)
+                    .expect("main window")
+                    .read(cx)
+                    .active_tab()
+            })
+        }
+
+        fn queries(&self) -> usize {
+            self.engine
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, Command::SetTableQuery(_)))
+                .count()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn startup_change_from_masked_unmasks_first(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.startup(
+            StartupChoice::Enabled,
+            &[("a.service", StartupType::Masked)],
+        );
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].kind, ActionKind::UnitEnable);
+        assert_eq!(
+            sent[0].targets.as_slice(),
+            [ActionTarget::Unit(unit("a.service"))]
+        );
+        assert_eq!(rig.toasts(), ["Changing startup type..."]);
+        assert_eq!(
+            rig.pending_tag("a.service"),
+            Some(ActionKindTag::SetStartup)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_same_value_sends_nothing(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        assert_eq!(
+            startup_change_kind(StartupType::EnabledRuntime, StartupChoice::Enabled),
+            None
+        );
+        assert_eq!(
+            startup_change_kind(StartupType::Static, StartupChoice::Masked),
+            Some(ActionKind::UnitMask)
+        );
+        rig.startup(
+            StartupChoice::Enabled,
+            &[("a.service", StartupType::EnabledRuntime)],
+        );
+        assert!(rig.sent().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn startup_access_denied_toast(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.startup(
+            StartupChoice::Enabled,
+            &[("a.service", StartupType::Disabled)],
+        );
+        let id = only_id(&rig);
+        let failed = ActionState::Failed(ActionError::UnitJob {
+            result: "failed".into(),
+            error_name: Some("org.freedesktop.DBus.Error.AccessDenied".into()),
+        });
+        rig.finish(id, &[failed]);
+        assert_eq!(
+            rig.toasts(),
+            ["Failed to change startup type: not authorized"]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn file_properties_falls_back_to_unit_file(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let u = unit_rec("sshd.service", "/usr/bin/sshd", Some("/etc/x.service"), 0);
+        rig.open(run_file_properties, &u);
+        assert!(rig.toasts().is_empty());
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::ShowInFileManager {
+                path: "/usr/bin/sshd".into(),
+                properties: true
+            }
+        );
+        let u = unit_rec("b.service", "", Some("/etc/b.service"), 0);
+        rig.open(run_file_properties, &u);
+        // The first request is still pending, so the second is rejected as busy; check the kind
+        // through the first completing.
+        let id = sent[0].id;
+        rig.emit(id, None, ActionState::Started);
+        rig.emit(id, None, ActionState::Succeeded);
+        rig.open(run_file_properties, &u);
+        let sent = rig.sent();
+        assert_eq!(
+            sent.last().expect("request").kind,
+            ActionKind::ShowInFileManager {
+                path: "/etc/b.service".into(),
+                properties: true
+            }
+        );
+    }
+
+    #[gpui_kit::test]
+    fn open_file_location_no_exec_start(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let u = unit_rec("a.service", "", Some("/etc/a.service"), 0);
+        rig.open(run_open_file_location, &u);
+        assert_eq!(rig.toasts(), ["Service image unavailable"]);
+        assert!(rig.sent().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn open_unit_file_uri_encoding(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        assert_eq!(file_uri("/a b/é"), "file:///a%20b/%C3%A9");
+        let u = unit_rec(
+            "a b.service",
+            "",
+            Some("/usr/lib/systemd/system/a b.service"),
+            0,
+        );
+        rig.open(run_open_unit_file, &u);
+        let sent = rig.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::OpenUri("file:///usr/lib/systemd/system/a%20b.service".into())
+        );
+        rig.emit(sent[0].id, None, ActionState::Started);
+        rig.emit(sent[0].id, None, ActionState::Succeeded);
+        assert!(rig.toasts().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn jump_to_process_main_pid_zero_toast(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let u = unit_rec("a.service", "/usr/bin/a", None, 0);
+        let snap = (*rig.engine.latest()).clone();
+        rig.main
+            .update(|window, cx| run_jump_to_process(&u, &snap, window, cx));
+        rig.main.run_until_parked();
+        assert_eq!(rig.toasts(), ["Service not running"]);
+        assert_eq!(rig.active_tab(), Tab::Services);
+    }
+
+    fn proc_record(pid: u32) -> ProcessRecord {
+        let a = |s: &str| Arc::<str>::from(s);
+        ProcessRecord {
+            key: ProcessKey {
+                start_ticks: u64::from(pid),
+                boot_id: tl_model::time::BootId(0),
+                pid,
+            },
+            ppid: 1,
+            uid: 0,
+            meta: Arc::new(ProcessMeta {
+                comm: a("daemon"),
+                name: a("daemon"),
+                exe: None,
+                cmdline: None,
+                user: a("root"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a("daemon"),
+            }),
+            group: GroupKind::System.key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn jump_to_process_calls_entry_point(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let record = proc_record(812);
+        let key = record.key;
+        rig.engine.publish_with(|s| {
+            s.processes = Arc::new(ProcessSnapshot {
+                records: vec![record].into(),
+                ..ProcessSnapshot::default()
+            });
+        });
+        rig.main.run_until_parked();
+        let u = unit_rec("a.service", "/usr/bin/a", None, 812);
+        let snap = (*rig.engine.latest()).clone();
+        let before = rig.queries();
+        rig.main
+            .update(|window, cx| run_jump_to_process(&u, &snap, window, cx));
+        rig.main.run_until_parked();
+        assert_eq!(rig.active_tab(), Tab::Processes);
+        assert_eq!(rig.queries(), before + 1, "the jump sent one query");
+        let generation = rig
+            .engine
+            .commands()
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                Command::SetTableQuery(q) => Some(q.generation),
+                _ => None,
+            })
+            .expect("query");
+        rig.engine.publish_with(|s| {
+            s.table = Arc::new(ProcessTableView {
+                query_generation: generation,
+                rows: vec![TableRow {
+                    node: NodeId::Process(key),
+                    depth: 0,
+                    expanded: false,
+                    has_children: false,
+                    record: Some(0),
+                    group: None,
+                    descendants: 0,
+                    subtree: None,
+                }]
+                .into(),
+                ..ProcessTableView::default()
+            });
+        });
+        rig.main.run_until_parked();
+        assert_eq!(rig.toasts(), ["Switched to service process."]);
     }
 }
