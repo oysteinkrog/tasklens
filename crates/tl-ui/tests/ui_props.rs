@@ -3975,12 +3975,16 @@ mod window {
         cx.run_until_parked();
     }
 
-    /// Counts `StartHelperSession` dispatches that reach the app.
+    /// Counts `StartHelperSession` dispatches that reach the app. The counter passes the
+    /// Action on, so the helper flow still sends the command.
     fn count_helper_starts(cx: &mut TestAppContext) -> Rc<Cell<u32>> {
         let starts = Rc::new(Cell::new(0));
         let count = starts.clone();
         cx.update(|cx| {
-            cx.on_action(move |_: &StartHelperSession, _| count.set(count.get() + 1));
+            cx.on_action(move |_: &StartHelperSession, cx| {
+                count.set(count.get() + 1);
+                cx.propagate();
+            });
         });
         starts
     }
@@ -4074,12 +4078,15 @@ mod window {
 
         press(&mut vcx, "enter");
         assert_eq!(starts.get(), 1, "Enter dispatches StartHelperSession");
-        assert!(
-            !engine
+        // The button only dispatches the Action; the app's helper flow sends the command.
+        assert_eq!(
+            engine
                 .commands()
                 .iter()
-                .any(|c| matches!(c, Command::StartHelperSession)),
-            "the button only dispatches the Action"
+                .filter(|c| matches!(c, Command::StartHelperSession))
+                .count(),
+            1,
+            "one StartHelperSession command, from the helper flow"
         );
 
         publish_helper(cx, &engine, HelperState::Starting, None);

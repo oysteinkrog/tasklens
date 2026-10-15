@@ -357,6 +357,7 @@ impl TasklensUi {
 
         // ActionTracker
         crate::action_tracker::install(hub.read(cx).client().clone(), cx);
+        crate::helper_flow::install(cx);
 
         // open hooks
         crate::window::main::init(cx);
