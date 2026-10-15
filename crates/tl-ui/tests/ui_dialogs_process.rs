@@ -2198,3 +2198,470 @@ mod signal {
         );
     }
 }
+
+// ---- Dump confirmation, progress and result toasts (tasklens-gma.36, UI-PWN-034, UI-PWN-035) ----
+
+mod dump {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, Modifiers,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window, div,
+        px, size,
+    };
+    use tl_model::actions::{
+        ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, DumpMode,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Command;
+    use tl_model::ids::{GroupKey, ProcessKey};
+    use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::dialog::TlDialogView;
+    use tl_ui::components::toast::ToastKey;
+    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::windows::notices::{DUMP_POLL, DumpToast, set_test_home, start_dump};
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    struct Body;
+
+    impl Render for Body {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("parent")
+        }
+    }
+
+    type ParentFrame = TlSecondaryWindow<Body>;
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        parent: Entity<ParentFrame>,
+        pcx: VisualTestContext,
+        parent_id: gpui_kit::WindowId,
+    }
+
+    fn key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: 4_242,
+            boot_id: BootId(7),
+            pid,
+        }
+    }
+
+    fn record(pid: u32, name: &str, rss: u64) -> ProcessRecord {
+        let name: Arc<str> = Arc::from(name);
+        ProcessRecord {
+            key: key(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: name.clone(),
+                name: name.clone(),
+                exe: None,
+                cmdline: None,
+                user: Arc::from("u"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: name,
+            }),
+            group: GroupKey(0),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.,
+            rss_anon_bytes: rss,
+            rss_bytes: rss,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.,
+            io_write_bps: 0.,
+            net_rx_bps: 0.,
+            net_tx_bps: 0.,
+            gpu_util_pct: 0.,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    /// A parent window with toasts, `records` in the snapshot, dumps under `state_dir`.
+    fn rig(
+        cx: &mut TestAppContext,
+        state_dir: &Path,
+        mode: DumpMode,
+        mut records: Vec<ProcessRecord>,
+    ) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let mut settings = Settings::default();
+        settings.processes.dump_type = mode;
+        let init = UiInit {
+            settings,
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv {
+                state_dir: state_dir.to_path_buf(),
+                ..AppEnv::test()
+            },
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        records.sort_by_key(|r| r.key);
+        engine.publish_with(|s| {
+            s.published_ns += 1_000_000_000;
+            let p = Arc::make_mut(&mut s.processes);
+            p.header.version += 1;
+            p.records = Arc::from(records);
+        });
+        cx.run_until_parked();
+        let spec = TlWindowSpec::new(
+            TlWindowKind::Tool { resizable: true },
+            "parent",
+            size(px(600.), px(400.)),
+        );
+        let handle = cx
+            .update(|cx| ParentFrame::open(cx, spec, |_, cx| cx.new(|_| Body)))
+            .expect("parent opens");
+        let parent = cx
+            .update(|cx| ParentFrame::find(handle, cx))
+            .expect("parent frame");
+        let mut pcx = VisualTestContext::from_window(handle.into(), cx);
+        pcx.update(|window, _| window.activate_window());
+        pcx.run_until_parked();
+        Rig {
+            engine,
+            parent,
+            pcx,
+            parent_id: handle.window_id(),
+        }
+    }
+
+    fn start(r: &mut Rig, pid: u32) {
+        r.pcx.update(|window, cx| start_dump(key(pid), window, cx));
+        r.pcx.run_until_parked();
+    }
+
+    /// Every action request sent, in order.
+    fn actions(r: &Rig) -> Vec<ActionRequest> {
+        r.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(req) => Some(req),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one dump request: its mode and path.
+    fn dump(r: &Rig) -> (ActionRequest, DumpMode, String) {
+        let sent = actions(r);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        match &sent[0].kind {
+            ActionKind::Dump { mode, path } => (sent[0].clone(), *mode, path.to_string()),
+            other => panic!("not Dump: {other:?}"),
+        }
+    }
+
+    fn toasts(r: &mut Rig) -> Vec<String> {
+        let parent = r.parent.clone();
+        r.pcx.update(|window, cx| window.draw(cx).clear(cx));
+        r.pcx.read(|cx| {
+            parent
+                .read(cx)
+                .toasts()
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        })
+    }
+
+    fn advance(r: &mut Rig, by: Duration) {
+        r.pcx.executor().advance_clock(by);
+        r.pcx.run_until_parked();
+    }
+
+    /// The target result and the summary, both `state`.
+    fn finish(r: &mut Rig, request: &ActionRequest, state: ActionState) {
+        r.engine.emit(ActionEvent {
+            id: request.id,
+            target: Some(0),
+            state: state.clone(),
+        });
+        r.engine.emit(ActionEvent {
+            id: request.id,
+            target: None,
+            state,
+        });
+        r.pcx.run_until_parked();
+    }
+
+    /// The confirmation window, drawn.
+    fn confirmation(
+        r: &Rig,
+        cx: &mut TestAppContext,
+    ) -> Option<(VisualTestContext, Entity<TlDialogView>)> {
+        let parent_id = r.parent_id;
+        let (any, frame): (AnyWindowHandle, _) = cx.update(|cx| {
+            cx.windows().into_iter().find_map(|window| {
+                if window.window_id() == parent_id {
+                    return None;
+                }
+                let handle = window.downcast::<Root>()?;
+                let frame = TlSecondaryWindow::<TlDialogView>::find(handle, cx)?;
+                Some((window, frame))
+            })
+        })?;
+        let view = cx.read(|cx| frame.read(cx).content().clone());
+        let mut vcx = VisualTestContext::from_window(any, cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        Some((vcx, view))
+    }
+
+    /// `{name}_{pid}_{yyyymmdd_hhmmss}.core`.
+    fn assert_file_name(file: &str, stem: &str, pid: u32) {
+        let prefix = format!("{stem}_{pid}_");
+        let stamp = file
+            .strip_prefix(&prefix)
+            .and_then(|f| f.strip_suffix(".core"))
+            .unwrap_or_else(|| panic!("{file}"));
+        let (date, time) = stamp.split_once('_').expect("date_time");
+        assert_eq!(date.len(), 8, "{file}");
+        assert_eq!(time.len(), 6, "{file}");
+        assert!(
+            date.bytes().chain(time.bytes()).all(|b| b.is_ascii_digit()),
+            "{file}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn dump_confirm_only_over_2gib(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let mut r = rig(
+            cx,
+            &state,
+            DumpMode::Mini,
+            vec![
+                record(100, "Isolated Web Co", GIB),
+                record(200, "big", 34 * GIB / 10),
+            ],
+        );
+
+        // 1 GiB: no confirmation, the Dump goes out with the computed path.
+        start(&mut r, 100);
+        assert!(confirmation(&r, cx).is_none(), "no confirmation at 1 GiB");
+        let (request, mode, path) = dump(&r);
+        assert_eq!(mode, DumpMode::Mini);
+        assert_eq!(
+            request.targets.as_slice(),
+            &[ActionTarget::Process(key(100))]
+        );
+        assert!(!request.privileged);
+        let (dir, file) = path.rsplit_once('/').expect("a file name");
+        assert_eq!(dir, "/s/tasklens/dumps");
+        assert_file_name(file, "Isolated_Web_Co", 100);
+
+        // 3.4 GiB: the confirmation comes first; Cancel sends nothing.
+        start(&mut r, 200);
+        let (mut vcx, view) = confirmation(&r, cx).expect("the confirmation opens");
+        let expected = vcx.update(|_, cx| {
+            confirm_texts(
+                &ConfirmKind::LargeDump {
+                    name: "big".into(),
+                    size: "3.40 GiB".into(),
+                },
+                cx,
+            )
+        });
+        assert_eq!(expected.title.as_ref(), "Create a large dump?");
+        assert_eq!(expected.confirm_label.as_ref(), "Create dump");
+        assert!(vcx.debug_bounds("TlDialogHeading").is_some());
+        let text = vcx.update(|_, cx| view.read(cx).dialog().text().to_string());
+        assert_eq!(text, expected.description.as_ref());
+        assert_eq!(
+            text,
+            "big uses 3.40 GiB. The process pauses while the core is written and the file \
+             will be about that size. Continue?"
+        );
+        assert_eq!(actions(&r).len(), 1, "nothing before the answer");
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        r.pcx.run_until_parked();
+        assert!(confirmation(&r, cx).is_none(), "closed");
+        assert_eq!(actions(&r).len(), 1, "Cancel sends nothing");
+
+        // "Create dump" sends it.
+        start(&mut r, 200);
+        let (mut vcx, _) = confirmation(&r, cx).expect("the confirmation opens again");
+        let at = vcx
+            .debug_bounds("TlDialogAction")
+            .expect("Create dump drawn");
+        vcx.simulate_click(at.center(), Modifiers::none());
+        r.pcx.run_until_parked();
+        let sent = actions(&r);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        match &sent[1].kind {
+            ActionKind::Dump { path, .. } => {
+                let file = path.rsplit_once('/').expect("a file name").1;
+                assert_file_name(file, "big", 200);
+            }
+            other => panic!("not Dump: {other:?}"),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn dump_mode_follows_setting(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let mut r = rig(
+            cx,
+            &state,
+            DumpMode::Full,
+            vec![record(7, "kworker/0:1H", 0)],
+        );
+        start(&mut r, 7);
+        let (_, mode, path) = dump(&r);
+        assert_eq!(mode, DumpMode::Full);
+        let file = path.rsplit_once('/').expect("a file name").1;
+        assert_file_name(file, "kworker_0_1H", 7);
+    }
+
+    #[gpui_kit::test]
+    fn dump_progress_toast_updates_in_place(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut r = rig(cx, tmp.path(), DumpMode::Mini, vec![record(5, "x", GIB)]);
+        start(&mut r, 5);
+        let (request, _, path) = dump(&r);
+        assert_eq!(toasts(&mut r), ["Writing core…"], "before the first size");
+        advance(&mut r, DUMP_POLL);
+        assert_eq!(toasts(&mut r), ["Writing core…"], "no file yet");
+
+        // The file grows to 1.2 GiB. A sparse file has that size and holds no data.
+        std::fs::create_dir_all(tmp.path().join("dumps")).expect("dumps dir");
+        let file = std::fs::File::create(&path).expect("core file");
+        file.set_len(12 * GIB / 10).expect("sparse size");
+        advance(&mut r, DUMP_POLL);
+        assert_eq!(toasts(&mut r), ["Writing core… 1.20 GiB"], "same toast");
+
+        file.set_len(2 * GIB).expect("sparse size");
+        advance(&mut r, DUMP_POLL);
+        assert_eq!(toasts(&mut r), ["Writing core… 2.00 GiB"]);
+
+        // The Info toast stays while the dump runs, past its 5 s.
+        for _ in 0..16 {
+            advance(&mut r, DUMP_POLL);
+        }
+        assert_eq!(toasts(&mut r), ["Writing core… 2.00 GiB"], "after 8 s");
+
+        // The toast key is DumpToast(action id).
+        let key: ToastKey = DumpToast(request.id.0).into();
+        let selector = format!("TlToast-k{}", key.0);
+        r.pcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(r.pcx.debug_bounds(&selector).is_some(), "{selector}");
+
+        // After the result the size is no longer read.
+        finish(&mut r, &request, ActionState::Succeeded);
+        file.set_len(3 * GIB).expect("sparse size");
+        advance(&mut r, DUMP_POLL);
+        let shown = toasts(&mut r);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].starts_with("Dump created: "), "{shown:?}");
+    }
+
+    #[gpui_kit::test]
+    fn dump_success_toast_text_and_button(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/home/u/.local/state/tasklens");
+        let mut r = rig(cx, &state, DumpMode::Mini, vec![record(1, "x", GIB)]);
+        r.pcx.update(|_, cx| set_test_home(cx, "/home/u"));
+        start(&mut r, 1);
+        let (request, _, path) = dump(&r);
+        let file = path.rsplit_once('/').expect("a file name").1.to_owned();
+        assert_file_name(&file, "x", 1);
+        finish(&mut r, &request, ActionState::Succeeded);
+        assert_eq!(
+            toasts(&mut r),
+            [format!(
+                "Dump created: ~/.local/state/tasklens/dumps/{file}"
+            )]
+        );
+
+        // "Open folder" shows the file in the file manager.
+        let key: ToastKey = DumpToast(request.id.0).into();
+        let button = format!("TlButton-TlToast-k{}-action", key.0);
+        let at = r.pcx.debug_bounds(&button).expect("Open folder drawn");
+        r.pcx.simulate_click(at.center(), Modifiers::none());
+        r.pcx.run_until_parked();
+        let sent = actions(&r);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(
+            sent[1].kind,
+            ActionKind::ShowInFileManager {
+                path: path.as_str().into(),
+                properties: false,
+            }
+        );
+        assert_eq!(toasts(&mut r), ["Opening file location"]);
+    }
+
+    #[gpui_kit::test]
+    fn dump_failure_toast_text(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let mut r = rig(cx, &state, DumpMode::Mini, vec![record(3, "x", GIB)]);
+        start(&mut r, 3);
+        let (request, _, _) = dump(&r);
+        finish(
+            &mut r,
+            &request,
+            ActionState::Failed(ActionError::Internal("gcore exited 1".into())),
+        );
+        let shown = toasts(&mut r);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        let (first, second) = shown[0].split_once('\n').expect("two lines");
+        assert_eq!(first, "Could not create dump file.");
+        assert!(second.contains("gcore exited 1"), "{second}");
+
+        // An error toast closes after 8 s.
+        advance(&mut r, Duration::from_secs(9));
+        assert!(toasts(&mut r).is_empty());
+
+        // Refused for privileges.
+        start(&mut r, 3);
+        let request = actions(&r).pop().expect("second dump");
+        finish(
+            &mut r,
+            &request,
+            ActionState::Failed(ActionError::PermissionDenied),
+        );
+        assert_eq!(
+            toasts(&mut r),
+            ["Creating a dump needs administrator rights"]
+        );
+    }
+}

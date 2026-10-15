@@ -1418,7 +1418,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ### R-224 Dump file name sanitising (OI-U54)
 - Question: `{name}` in `<name>_<pid>_<yyyymmdd_hhmmss>.core` can contain `/` and control characters. Raised by B7-E23-4.
-- Resolution: replace `/`, `\0` and every control character with `_`, cut the name part to 64 bytes on a char boundary, use `process` when the result is empty. The timestamp is local time formatted with `jiff`. The write is engine side (R-145).
+- Resolution: every character outside `[A-Za-z0-9._-]` becomes `_`, and a run of such characters becomes one `_`, so the name always passes the engine's file name check (`valid_dump_path`, `^[A-Za-z0-9._-]+\.core$`). Then cut the name part to 64 bytes and use `process` when the result is empty. The timestamp is local time formatted with `jiff`. The write is engine side (R-145).
 - Basis: PROC-075, UI-PWN-034 [verified]; rule [inferred].
 - Edits: UI-PWN-034.
 

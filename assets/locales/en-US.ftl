@@ -146,6 +146,14 @@ pwn-notices-vt-computing = Computing SHA-256…
 pwn-notices-vt-hash-failed = SHA-256 unavailable
 pwn-notices-vt-no-image = Process image unavailable
 pwn-notices-vt-browser-failed = Could not open the browser.
+# Dump toasts (tasklens-gma.36, UI-PWN-034, UI-PWN-035).
+pwn-notices-dump-writing = Writing core…
+pwn-notices-dump-writing-size = Writing core… {$size}
+pwn-notices-dump-created = Dump created: {$path}
+pwn-notices-dump-open-folder = Open folder
+pwn-notices-dump-opening = Opening file location
+pwn-notices-dump-failed = Could not create dump file.
+pwn-notices-dump-needs-admin = Creating a dump needs administrator rights
 
 pwn-run-prompt = Type the name of a program, folder, document, or Internet resource.
 pwn-run-open = Open:
