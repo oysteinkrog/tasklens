@@ -61,22 +61,62 @@ pub enum Part {
     Outside,
 }
 
-/// The part under `x`, for a box from `l` to `r` (map-local logical px) and a grab distance of
-/// `grab`. Inside a box narrower than 4 grab widths the box wins, so a small box can still be
-/// dragged; its edges are then grabbed from just outside.
-pub fn hit(x: f32, l: f32, r: f32, grab: f32) -> Part {
-    let inside = x >= l && x <= r;
-    if !inside || r - l >= 4.0 * grab {
-        let (dl, dr) = ((x - l).abs(), (x - r).abs());
-        if dl.min(dr) <= grab {
-            return if dl <= dr {
-                Part::LeftEdge
-            } else {
-                Part::RightEdge
-            };
-        }
+/// The part under `x`, for a box from `l` to `r` on a map `width` wide (map-local logical px)
+/// and a grab distance of `grab`. Inside a box narrower than 4 grab widths the box wins, so a
+/// small box can still be dragged; its edges are then grabbed from just outside. An edge with
+/// less than `grab` of map outside it cannot be reached that way, so it takes the third of the
+/// box next to it instead.
+pub fn hit(x: f32, l: f32, r: f32, grab: f32, width: f32) -> Part {
+    let (dl, dr) = ((x - l).abs(), (x - r).abs());
+    let nearer = if dl <= dr {
+        Part::LeftEdge
+    } else {
+        Part::RightEdge
+    };
+    if x < l || x > r {
+        return if dl.min(dr) <= grab {
+            nearer
+        } else {
+            Part::Outside
+        };
     }
-    if inside { Part::Box } else { Part::Outside }
+    if r - l >= 4.0 * grab {
+        return if dl.min(dr) <= grab {
+            nearer
+        } else {
+            Part::Box
+        };
+    }
+    let third = (r - l) / 3.0;
+    if l < grab && dl < third {
+        Part::LeftEdge
+    } else if width - r < grab && dr < third {
+        Part::RightEdge
+    } else {
+        Part::Box
+    }
+}
+
+/// Zooms `view` by `notches` like the strip's [`zoom`] (1.25 per notch, 60 s up to all of
+/// `span`), around a `cursor` that may lie outside the view: the cursor keeps its place relative
+/// to the view, so the box grows or shrinks about the pointer. The result stays inside `span`.
+pub fn zoom_at(
+    view: (TimeNs, TimeNs),
+    cursor: TimeNs,
+    notches: f32,
+    span: (TimeNs, TimeNs),
+) -> (TimeNs, TimeNs) {
+    let old = view.1.saturating_sub(view.0);
+    // Zooming about the left end changes only the width.
+    let sized = zoom(view, view.0, notches, span);
+    let width = sized.1 - sized.0;
+    if old == 0 || width == 0 {
+        return sized;
+    }
+    let frac = (i128::from(cursor) - i128::from(view.0)) as f64 / old as f64;
+    let start = i128::from(cursor) - (frac * width as f64).round() as i128;
+    let delta = (start - i128::from(sized.0)).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+    pan(sized, delta as i64, span)
 }
 
 /// The window after an edge drag to `t`: the edge that does not move stays at `fixed`, the
@@ -542,7 +582,7 @@ fn on_mouse_down(
         };
         let (l, r) = geo.box_x(view, span);
         p.minimap.hover = None;
-        let drag = match hit(x, l, r, geo.grab) {
+        let drag = match hit(x, l, r, geo.grab, width) {
             Part::LeftEdge => MinDrag::Edge {
                 fixed: view.1,
                 left: true,
@@ -585,7 +625,7 @@ fn on_mouse_move(
         let Some(drag) = p.minimap.drag else {
             let part = view_and_span(p).filter(|_| hovered).map(|(view, span)| {
                 let (l, r) = geo.box_x(view, span);
-                hit(x, l, r, geo.grab)
+                hit(x, l, r, geo.grab, width)
             });
             let changed = p.minimap.hover != part;
             p.minimap.hover = part;
@@ -642,9 +682,9 @@ fn on_scroll(
         let Some((view, span)) = view_and_span(p) else {
             return;
         };
-        // Outside the box the zoom centres on its nearer edge, so the box does not jump.
-        let cursor = x_to_t(x, width, span).clamp(view.0, view.1);
-        p.set_view_range(zoom(view, cursor, notches, span), cx);
+        // The time under the pointer keeps its place in the box, inside or outside it.
+        let cursor = x_to_t(x, width, span);
+        p.set_view_range(zoom_at(view, cursor, notches, span), cx);
     });
     cx.stop_propagation();
 }
@@ -689,16 +729,58 @@ mod tests {
 
     #[test]
     fn hit_parts() {
-        // A 100 px box from 100 to 200, grab 4.
-        assert_eq!(hit(150.0, 100.0, 200.0, 4.0), Part::Box);
-        assert_eq!(hit(102.0, 100.0, 200.0, 4.0), Part::LeftEdge);
-        assert_eq!(hit(97.0, 100.0, 200.0, 4.0), Part::LeftEdge);
-        assert_eq!(hit(203.0, 100.0, 200.0, 4.0), Part::RightEdge);
-        assert_eq!(hit(50.0, 100.0, 200.0, 4.0), Part::Outside);
-        // A 6 px box: inside is the box, just outside is an edge.
-        assert_eq!(hit(101.0, 100.0, 106.0, 4.0), Part::Box);
-        assert_eq!(hit(98.0, 100.0, 106.0, 4.0), Part::LeftEdge);
-        assert_eq!(hit(109.0, 100.0, 106.0, 4.0), Part::RightEdge);
+        // A 100 px box from 100 to 200 on a 600 px map, grab 4.
+        let hit = |x| hit(x, 100.0, 200.0, 4.0, 600.0);
+        assert_eq!(hit(150.0), Part::Box);
+        assert_eq!(hit(102.0), Part::LeftEdge);
+        assert_eq!(hit(97.0), Part::LeftEdge);
+        assert_eq!(hit(203.0), Part::RightEdge);
+        assert_eq!(hit(50.0), Part::Outside);
+    }
+
+    #[test]
+    fn hit_narrow_box() {
+        // A 6 px box in the middle: inside is the box, just outside is an edge.
+        let mid = |x| hit(x, 100.0, 106.0, 4.0, 600.0);
+        assert_eq!(mid(100.5), Part::Box);
+        assert_eq!(mid(105.5), Part::Box);
+        assert_eq!(mid(98.0), Part::LeftEdge);
+        assert_eq!(mid(109.0), Part::RightEdge);
+        // At the left end of the map the left edge has no room outside: it takes the left third.
+        let left = |x| hit(x, 0.0, 6.0, 4.0, 600.0);
+        assert_eq!(left(0.0), Part::LeftEdge);
+        assert_eq!(left(1.5), Part::LeftEdge);
+        assert_eq!(left(3.0), Part::Box);
+        assert_eq!(left(5.5), Part::Box);
+        assert_eq!(left(8.0), Part::RightEdge);
+        // At the right end the same holds for the right edge.
+        let right = |x| hit(x, 594.0, 600.0, 4.0, 600.0);
+        assert_eq!(right(600.0), Part::RightEdge);
+        assert_eq!(right(598.5), Part::RightEdge);
+        assert_eq!(right(597.0), Part::Box);
+        assert_eq!(right(594.5), Part::Box);
+        assert_eq!(right(592.0), Part::LeftEdge);
+    }
+
+    #[test]
+    fn zoom_at_keeps_the_pointer_place() {
+        let span = (0, 1000 * S);
+        let view = (400 * S, 600 * S);
+        // Inside the box it matches the strip's zoom.
+        assert_eq!(
+            zoom_at(view, 450 * S, 1.0, span),
+            zoom(view, 450 * S, 1.0, span)
+        );
+        // Outside: the pointer at 200 s is one box width left of the box. Zooming out by one notch
+        // (250 s wide) keeps it one box width left: 200 + 250 = 450.
+        assert_eq!(zoom_at(view, 200 * S, -1.0, span), (450 * S, 700 * S));
+        // Zooming in (160 s wide) moves the box towards the pointer: 200 + 160 = 360.
+        assert_eq!(zoom_at(view, 200 * S, 1.0, span), (360 * S, 520 * S));
+        // Pushed past the end of the span: kept inside it at the zoomed width.
+        assert_eq!(
+            zoom_at((800 * S, 1000 * S), 0, -1.0, span),
+            (750 * S, 1000 * S)
+        );
     }
 
     #[test]

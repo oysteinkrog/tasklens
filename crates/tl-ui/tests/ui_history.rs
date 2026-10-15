@@ -2144,6 +2144,49 @@ fn minimap_click_centres(cx: &mut TestAppContext) {
     assert_eq!(b - a, 200 * S);
 }
 
+#[gpui_kit::test]
+fn minimap_narrow_box_edge_at_map_end(cx: &mut TestAppContext) {
+    // 6 h retained, a 2 minute box: a few px wide, touching one end of the map.
+    let span = (0, 6 * 3600 * S);
+    let (_engine, page, vcx) = minimap_page(cx, span, (span.1 - 120 * S, span.1));
+    let map = map(&page, vcx);
+    let y = map.top() + map.size.height / 2.0;
+    // A press just inside the right end grabs the right edge; a drag far left stops 60 s short
+    // of the left edge, which does not move.
+    let from = gpui_kit::point(map.right() - gpui_kit::px(0.25), y);
+    drag(vcx, from, at(map, 0.5));
+    assert_eq!(view_range(&page, vcx), (span.1 - 120 * S, span.1 - 60 * S));
+    // The same for the left edge at the left end.
+    page.update(vcx, |p, cx| p.set_view_range((0, 120 * S), cx));
+    settle(vcx);
+    let from = gpui_kit::point(map.left() + gpui_kit::px(0.25), y);
+    drag(vcx, from, at(map, 0.5));
+    assert_eq!(view_range(&page, vcx), (60 * S, 120 * S));
+}
+
+#[gpui_kit::test]
+fn minimap_wheel_zooms_at_pointer(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase};
+    let (_engine, page, vcx) = minimap_page(cx, (100 * S, 1000 * S), (400 * S, 600 * S));
+    let map = map(&page, vcx);
+    // 200 s, one box width left of the box.
+    let p = at(map, 100.0 / 900.0);
+    vcx.simulate_mouse_move(p, None, Modifiers::none());
+    settle(vcx);
+    vcx.simulate_event(ScrollWheelEvent {
+        position: p,
+        delta: ScrollDelta::Lines(gpui_kit::point(0., -1.)),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    settle(vcx);
+    // One notch out is 250 s wide, and 200 s stays one box width left of it: 450..700 s.
+    let (a, b) = view_range(&page, vcx);
+    assert_eq!(b - a, 250 * S);
+    let px_ns = 900.0 * S as f64 / f64::from(f32::from(map.size.width));
+    assert!((a as f64 - 450.0 * S as f64).abs() <= 2.0 * px_ns, "{a}");
+}
+
 /// A view at `version` spanning 100..1000 s with `overview` as its overview.
 fn overview_view(version: u64, overview: Arc<[HistoryPoint]>) -> HistoryView {
     HistoryView {
