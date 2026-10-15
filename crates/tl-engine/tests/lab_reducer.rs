@@ -2213,13 +2213,24 @@ fn restart_marks_gap_for_source_only() {
 /// tasklens-hjn.35: MemAvailable of 6 GiB gives a MEM_AVAILABLE sample of 6 GiB.
 #[test]
 fn memory_available_series() {
+    // Parse a real meminfo buffer so the 6 GiB comes from `MemAvailable`.
+    let meminfo = "MemTotal:        8388608 kB\nMemFree:          524288 kB\n\
+        MemAvailable:    6291456 kB\nBuffers:               0 kB\nCached:           524288 kB\n\
+        SwapCached:            0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n\
+        Dirty:                 0 kB\nWriteback:             0 kB\nShmem:                 0 kB\n\
+        SReclaimable:          0 kB\nSUnreclaim:            0 kB\nCommitLimit:     4194304 kB\n\
+        Committed_AS:    2097152 kB\n";
+    let mut info = tl_collect::parse::meminfo::MemInfo::default();
+    tl_collect::parse::meminfo::parse_meminfo(meminfo.as_bytes(), &mut info)
+        .expect("meminfo parses");
+    assert_eq!(info.mem_available, 6 << 30);
     let mut rig = Rig::new();
     rig.run(vec![src(SourceUpdate::Memory(MemorySample {
         t_ns: SEC,
         totals: MemoryTotals {
             validity: Validity::Valid,
             total: 8 << 30,
-            available: 6 << 30,
+            available: info.mem_available,
             used: 2 << 30,
             ..MemoryTotals::default()
         },
