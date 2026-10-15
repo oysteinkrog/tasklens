@@ -869,3 +869,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 leader decision: gma.30 option C; tasklens-8q0.40 gives unit rows a unique GroupKey (Opus) and a member helper; gma.30 after it.
 - 2026-10-15 leader decision: 9o0.10 option B, the startup delete confirmation has no busy state; UI-SYS-047 States updated by that bead.
 - 2026-10-15 leader decision: tasklens-y6k.29 adds all remaining B8-E28-12 StartupEntry fields in one model change; 9o0.11 and 9o0.12 wait for it.
+- 2026-10-15 leader decision: crw.47 narrow layout keeps sparkline over meter, never hides all engine charts (busiest engine stays), sections sized by content, '+n more' as a body row like Disk.
