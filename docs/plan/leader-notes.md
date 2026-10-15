@@ -877,3 +877,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-15 owner decision: crw.57 keeps all three card lines (parity), fixes cut-off by wrap plus middle cut past 2 lines, value in the heading row, nav_width unchanged, graph left, card height min 80.
 - 2026-10-15 leader decision: 8fx.23 deleted series leave with the next HistoryView (no scrubber.rs edit); new TlMenu::danger_item plus TlIcon::Trash (Lucide trash.svg); HistoryPage handlers in history/mod.rs.
 - 2026-10-15 leader decision: crw.57 graph narrows (40 px minimum, hidden below) on narrow cards; value reserve must cover 1023.9 KiB/s.
+- 2026-10-15 leader decision: crw.57 value moves to its own line under the name when both do not fit on the heading row (any mode, any width).
