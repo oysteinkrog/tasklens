@@ -1072,7 +1072,7 @@ mod disk_p2 {
         let mut t = totals();
         t.read_bps = Metric::with(Validity::Missing);
         let m = model(cx, &t, &nvme_details());
-        assert_eq!(value(&m, "Total read").as_deref(), Some("Unavailable"));
+        assert_eq!(value(&m, "Total read").as_deref(), Some("Collecting…"));
         assert_eq!(value(&m, "Total written").as_deref(), Some("400.00 GiB"));
     }
 }
