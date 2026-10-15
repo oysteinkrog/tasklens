@@ -15,7 +15,9 @@
 //! The close decision, the window actions, reopening and size saving are E20-A1 (UI-SHL-002,
 //! UI-SHL-005, UI-SHL-112, UI-SHL-113, APP-045). Every quit goes through
 //! `request_exit(cx, UiExit::Quit)`; `tl_ui::run` sets `QuitMode::Explicit`, so removing the last
-//! window does not quit (ADR-010).
+//! window does not quit (ADR-010). Close row 2 (E20-028) removes the main window and keeps the app
+//! while detached graph windows stay open; a [`DetachedWatch`] on the registry quits when the
+//! last one closes.
 //!
 //! The process-view Actions `ToggleHideSystem`, `CycleViewMode` and `SetViewMode` are app-level
 //! handlers here (E20-017, UI-SHL-012, UI-SHL-013, UI-SHL-035, PROC-015, PROC-016).
@@ -870,6 +872,7 @@ pub fn reopen_main_window(cx: &mut App) {
         }
     };
     let _ = handle.update(cx, |_, window, _| window.activate_window());
+    cx.default_global::<DetachedWatch>().0 = None;
     // after reopen (E31-009 chain edit): tell the tray bridge the main window is visible
 }
 
@@ -946,6 +949,39 @@ pub fn restored_bounds(state: &WindowState) -> WindowBounds {
 fn tray_available(cx: &App) -> bool {
     let _ = cx;
     false
+}
+
+/// Whether any detached graph window is open. False when no registry is installed.
+fn detached_graph_open(cx: &App) -> bool {
+    cx.try_global::<GlobalRegistry>().is_some_and(|registry| {
+        registry
+            .0
+            .read(cx)
+            .has_key(|key| matches!(key, WindowKey::DetachedGraph(_)))
+    })
+}
+
+/// The registry observer that quits the app once the last detached graph window closes after
+/// close row 2 removed the main window (E20-028, UI-SHL-113 row 2). Dropped on reopen.
+#[derive(Default)]
+struct DetachedWatch(Option<Subscription>);
+
+impl Global for DetachedWatch {}
+
+/// Starts the [`DetachedWatch`]. The registry notifies on every insert and removal.
+fn watch_detached(cx: &mut App) {
+    let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) else {
+        return;
+    };
+    let sub = cx.observe(&registry, |_, cx| {
+        let main_gone = cx
+            .try_global::<ShellState>()
+            .is_some_and(|state| state.main_window.is_none());
+        if main_gone && !detached_graph_open(cx) && !tray_available(cx) {
+            request_exit(cx, UiExit::Quit);
+        }
+    });
+    cx.default_global::<DetachedWatch>().0 = Some(sub);
 }
 
 /// `--start-minimized` with a tray to hide in: the main window opens hidden (APP-048).
@@ -1729,9 +1765,11 @@ impl MainWindow {
 
     /// The close decision (UI-SHL-113). Rows are checked in order; first match wins.
     fn close_decision(&self, cx: &App) -> CloseOutcome {
-        let _ = cx;
         // close decision: row 1, close to tray (E31-009 chain edit)
         // close decision: row 2, keep detached graphs (E20-028)
+        if TlSettings::settings(cx).graphs.keep_detached_on_close && detached_graph_open(cx) {
+            return CloseOutcome::RemoveWindow;
+        }
         CloseOutcome::Quit
     }
 
@@ -1753,6 +1791,9 @@ impl MainWindow {
                 let state = cx.default_global::<ShellState>();
                 state.main_window = None;
                 state.main_view = None;
+                if keep_detached && detached_graph_open(cx) {
+                    watch_detached(cx);
+                }
                 window.remove_window();
             }
         }

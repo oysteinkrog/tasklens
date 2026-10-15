@@ -3363,6 +3363,78 @@ mod main_window {
         }
     }
 
+    /// A rig with a registry and `graphs.keep_detached_on_close = keep`.
+    fn keep_rig(cx: &mut TestAppContext, keep: bool) -> VisualTestContext {
+        setup(cx, &Opts::default());
+        cx.update(|cx| {
+            GlobalRegistry::init(cx);
+            TlSettings::update(cx, |d| d.settings.graphs.keep_detached_on_close = keep);
+        });
+        open(cx)
+    }
+
+    fn main_is_gone(cx: &mut TestAppContext) -> bool {
+        cx.read(|cx| cx.global::<ShellState>().main_window.is_none())
+    }
+
+    fn close_graph(cx: &mut TestAppContext, graph: AnyWindowHandle) {
+        cx.update(|cx| graph.update(cx, |_, window, _| window.remove_window()))
+            .ok();
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn close_keeps_app_with_detached_graph(cx: &mut TestAppContext) {
+        let mut vcx = keep_rig(cx, true);
+        let graph = open_child(cx, WindowKey::DetachedGraph(0));
+        vcx.dispatch_action(CloseWindow);
+        cx.run_until_parked();
+        assert!(main_is_gone(cx));
+        assert!(is_open(cx, graph));
+        assert_eq!(exit(cx), None);
+    }
+
+    #[gpui_kit::test]
+    fn last_detached_close_quits(cx: &mut TestAppContext) {
+        let mut vcx = keep_rig(cx, true);
+        let graph = open_child(cx, WindowKey::DetachedGraph(0));
+        vcx.dispatch_action(CloseWindow);
+        cx.run_until_parked();
+        assert_eq!(exit(cx), None);
+        close_graph(cx, graph);
+        assert_eq!(exit(cx), Some(UiExit::Quit));
+    }
+
+    #[gpui_kit::test]
+    fn reopen_cancels_detached_watch(cx: &mut TestAppContext) {
+        let mut vcx = keep_rig(cx, true);
+        let graph = open_child(cx, WindowKey::DetachedGraph(0));
+        vcx.dispatch_action(CloseWindow);
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&ShowMainWindow));
+        cx.run_until_parked();
+        assert!(!main_is_gone(cx));
+        close_graph(cx, graph);
+        assert_eq!(exit(cx), None);
+        assert!(!main_is_gone(cx));
+    }
+
+    #[gpui_kit::test]
+    fn close_quits_without_keep_setting(cx: &mut TestAppContext) {
+        let mut vcx = keep_rig(cx, false);
+        open_child(cx, WindowKey::DetachedGraph(0));
+        act(&mut vcx, CloseWindow);
+        assert_eq!(exit(cx), Some(UiExit::Quit));
+        assert!(!main_is_gone(cx));
+    }
+
+    #[gpui_kit::test]
+    fn close_quits_without_detached_windows(cx: &mut TestAppContext) {
+        let mut vcx = keep_rig(cx, true);
+        act(&mut vcx, CloseWindow);
+        assert_eq!(exit(cx), Some(UiExit::Quit));
+    }
+
     /// Records every `PauseChanged` on `GlobalShellEvents`.
     fn pause_events(vcx: &mut VisualTestContext) -> Rc<RefCell<Vec<bool>>> {
         let seen = Rc::new(RefCell::new(Vec::new()));
