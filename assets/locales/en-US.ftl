@@ -2103,6 +2103,16 @@ shell-theme-editor-readout-rgb = R { $r } G { $g } B { $b }
 shell-theme-editor-readout-hsv = H { $h } S { $s } V { $v }
 shell-toast-theme-saved = Theme saved
 shell-toast-theme-copy-first = Built-in themes cannot be edited. Copy it first.
+shell-toast-theme-random = Random theme generated.
+shell-theme-editor-preview-tab-processes = Processes
+shell-theme-editor-preview-tab-performance = Performance
+shell-theme-editor-preview-col-name = Name
+shell-theme-editor-preview-col-cpu = CPU
+shell-theme-editor-preview-col-memory = Memory
+shell-theme-editor-preview-row-normal = Normal
+shell-theme-editor-preview-row-alternate = Alternate
+shell-theme-editor-preview-row-hover = Hover
+shell-theme-editor-preview-row-selected = Selected
 # Graph Color submenu (tasklens-bj6.35, UI-SHL-085, APP-039).
 shell-graph-color-accent = Accent (theme default)
 shell-graph-color-coral = Coral

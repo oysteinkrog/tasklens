@@ -6,7 +6,8 @@
 //! window-closed hook, so every way of closing cancels. Done checks the name first and then
 //! commits. The picker column holds a saturation and value plane, a hue strip, RGB and HSV
 //! readouts and a hex input, all editing the selected slot (E21-028). E21-029 fills the preview
-//! column and the Random, Share and Import buttons.
+//! column (a mini tab strip, a mini table and a static graph, all painted from the live theme) and
+//! the Random, Share and Import buttons.
 
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ use gpui_kit::{
     Action, AnyWindowHandle, App, AppContext as _, BorderStyle, Bounds, Context, Corners, Edges,
     Entity, EventEmitter, FocusHandle, Focusable, Hitbox, HitboxBehavior, Hsla, InteractiveElement,
     IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, Rgba, SharedString,
+    MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, Render, Rgba, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window, WindowHandle, black, canvas, div,
     fill, gpui, hsla, linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px,
     quad, size, transparent_black, white,
@@ -27,7 +28,9 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::main::{ShellState, push_main_toast};
+use super::menus_view::import_from_clipboard;
 use super::registry::{GlobalRegistry, WindowKey};
+use super::share_theme::open_share_window;
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::input::TlTextInput;
 use crate::components::toast::{ToastKind, ToastQueue};
@@ -74,6 +77,23 @@ const READOUT_RGB: &str = "shell-theme-editor-readout-rgb";
 const READOUT_HSV: &str = "shell-theme-editor-readout-hsv";
 const TOAST_SAVED: &str = "shell-toast-theme-saved";
 const TOAST_COPY_FIRST: &str = "shell-toast-theme-copy-first";
+const TOAST_RANDOM: &str = "shell-toast-theme-random";
+const TOAST_NO_CODE: &str = "shell-toast-theme-no-code";
+const PREVIEW_TAB_PROCESSES: &str = "shell-theme-editor-preview-tab-processes";
+const PREVIEW_TAB_PERFORMANCE: &str = "shell-theme-editor-preview-tab-performance";
+const PREVIEW_COL_NAME: &str = "shell-theme-editor-preview-col-name";
+const PREVIEW_COL_CPU: &str = "shell-theme-editor-preview-col-cpu";
+const PREVIEW_COL_MEMORY: &str = "shell-theme-editor-preview-col-memory";
+const PREVIEW_ROW_NORMAL: &str = "shell-theme-editor-preview-row-normal";
+const PREVIEW_ROW_ALTERNATE: &str = "shell-theme-editor-preview-row-alternate";
+const PREVIEW_ROW_HOVER: &str = "shell-theme-editor-preview-row-hover";
+const PREVIEW_ROW_SELECTED: &str = "shell-theme-editor-preview-row-selected";
+/// The preview graph size, × ui_scale, and its fixed sample values (0..=1).
+const GRAPH_W: f32 = 236.;
+const GRAPH_H: f32 = 60.;
+const GRAPH_SAMPLES: [f32; 12] = [
+    0.15, 0.25, 0.2, 0.45, 0.4, 0.7, 0.55, 0.6, 0.35, 0.5, 0.3, 0.4,
+];
 
 /// Opens "tasklens Theme Editor" for the named custom theme (View > Theme > Edit colors, E21-031).
 #[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, Action)]
@@ -87,7 +107,13 @@ gpui_kit::actions!(
     tasklens,
     [
         /// Enter in the editor: Done when the name is valid.
-        ThemeEditorDone
+        ThemeEditorDone,
+        /// The Random button.
+        ThemeEditorRandom,
+        /// The Share button.
+        ThemeEditorShare,
+        /// The Import button.
+        ThemeEditorImport
     ]
 );
 
@@ -675,6 +701,12 @@ struct EditorWords {
     done: SharedString,
     name_error: SharedString,
     saved: SharedString,
+    random_toast: SharedString,
+    no_code: SharedString,
+    /// The preview pane's texts: two tabs, three column headers, four row names.
+    preview_tabs: [SharedString; 2],
+    preview_cols: [SharedString; 3],
+    preview_rows: [SharedString; 4],
     hex_hint: SharedString,
     /// "R \u{1} G \u{2} B \u{3}" and "H \u{1} S \u{2} V \u{3}": the numbers go in at the
     /// marker characters, without `cx`.
@@ -712,6 +744,18 @@ impl EditorWords {
             done: tr(cx, DONE),
             name_error: tr(cx, NAME_ERROR),
             saved: tr(cx, TOAST_SAVED),
+            random_toast: tr(cx, TOAST_RANDOM),
+            no_code: tr(cx, TOAST_NO_CODE),
+            preview_tabs: [PREVIEW_TAB_PROCESSES, PREVIEW_TAB_PERFORMANCE].map(|k| tr(cx, k)),
+            preview_cols: [PREVIEW_COL_NAME, PREVIEW_COL_CPU, PREVIEW_COL_MEMORY]
+                .map(|k| tr(cx, k)),
+            preview_rows: [
+                PREVIEW_ROW_NORMAL,
+                PREVIEW_ROW_ALTERNATE,
+                PREVIEW_ROW_HOVER,
+                PREVIEW_ROW_SELECTED,
+            ]
+            .map(|k| tr(cx, k)),
             hex_hint: tr(cx, HEX_HINT),
             rgb_tpl: marked(cx, READOUT_RGB, ["r", "g", "b"]),
             hsv_tpl: marked(cx, READOUT_HSV, ["h", "s", "v"]),
@@ -744,6 +788,8 @@ pub struct ThemeEditor {
     strings_version: u64,
     /// The 23 hex readouts of the theme with this `version`.
     hexes: (u64, Vec<SharedString>),
+    /// The 4 row backgrounds the preview table painted last (test probe).
+    painted_rows: [Hsla; 4],
     _subs: Vec<Subscription>,
 }
 
@@ -839,6 +885,7 @@ impl ThemeEditor {
             words,
             strings_version: strings_version(cx),
             hexes: (u64::MAX, Vec::new()),
+            painted_rows: [Hsla::default(); 4],
             _subs: subs,
         };
         this.load_slot(window, cx);
@@ -856,6 +903,11 @@ impl ThemeEditor {
     /// The RGB and the HSV readout texts under the plane.
     pub fn readouts(&self) -> (&str, &str) {
         (&self.readouts.0, &self.readouts.1)
+    }
+
+    /// The text of the name input.
+    pub fn name_text(&self, cx: &App) -> SharedString {
+        self.name.read(cx).value()
     }
 
     /// The text of the hex input.
@@ -1101,17 +1153,212 @@ impl ThemeEditor {
         cx.stop_propagation();
     }
 
-    /// The hex readouts of the current theme, rebuilt only when its version changes.
+    /// The 4 row backgrounds the preview table painted last: normal, alternate, hover, selected.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn preview_row_bgs(&self) -> [Hsla; 4] {
+        self.painted_rows
+    }
+
+    /// Random: new colours for all 23 slots, then the toast.
+    fn on_random(&mut self, _: &ThemeEditorRandom, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(token) = &self.token else {
+            return;
+        };
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        ThemeStore::random_preview(token, seed, cx);
+        self.load_slot(window, cx);
+        push_toast(
+            ToastKind::Success,
+            self.words.random_toast.clone(),
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Share: opens the Share Theme window with the preview as it is now, unsaved edits included.
+    fn on_share(&mut self, _: &ThemeEditorShare, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(token) = &self.token else {
+            return;
+        };
+        let def = ThemeStore::preview_def(token, cx);
+        let parent = window.window_handle();
+        cx.defer(move |cx| open_share_window(&def, parent, cx));
+    }
+
+    /// Import: loads the first theme of the clipboard into the preview (slots and name). The
+    /// clipboard text is never logged.
+    fn on_import(&mut self, _: &ThemeEditorImport, window: &mut Window, cx: &mut Context<Self>) {
+        let defs = match import_from_clipboard(cx) {
+            Ok(defs) if !defs.is_empty() => defs,
+            result => {
+                if let Err(e) = result {
+                    tracing::debug!(target: "tasklens::ui", ?e, "clipboard theme not imported");
+                }
+                push_toast(ToastKind::Info, self.words.no_code.clone(), window, cx);
+                return;
+            }
+        };
+        let Some(token) = &self.token else {
+            return;
+        };
+        let d = &defs[0];
+        for slot in ThemeSlot::ALL {
+            ThemeStore::set_preview_slot(token, slot, def_slot(d, slot), cx);
+        }
+        ThemeStore::set_preview_name(token, d.name.clone(), cx);
+        self.name
+            .update(cx, |s, cx| s.set_value(d.name.to_string(), window, cx));
+        self.name_error = self.check_name(&d.name, cx);
+        self.load_slot(window, cx);
+        cx.notify();
+    }
+
+    /// The hex readouts of the current theme, rebuilt only when its style version changes.
     fn hexes(&mut self, cx: &App) -> &[SharedString] {
         let theme = current(cx);
-        if self.hexes.0 != theme.version {
+        // Preview frames keep the base theme's `version`, so key on the style version.
+        let version = metrics(cx).style_version;
+        if self.hexes.0 != version {
             let hexes = ThemeSlot::ALL
                 .iter()
                 .map(|s| SharedString::from(rgb_hex(s.get(theme))))
                 .collect();
-            self.hexes = (theme.version, hexes);
+            self.hexes = (version, hexes);
         }
         &self.hexes.1
+    }
+}
+
+impl ThemeEditor {
+    /// The preview column: mini tabs, a mini table and a static graph, painted from `theme`.
+    fn preview_pane(
+        &mut self,
+        theme: &crate::theme::TlTheme,
+        m: &crate::theme::UiMetrics,
+    ) -> impl IntoElement {
+        let s = m.ui_scale;
+        let text = |t: SharedString, color: Hsla, xs: bool| {
+            let mut d = div();
+            *d.text_style() = if xs { t_xs(m) } else { t_sm(m) };
+            d.text_color(color).child(t)
+        };
+        let tabs = div().flex().flex_row().gap(m.sp[2]).children(
+            self.words
+                .preview_tabs
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, t)| {
+                    div()
+                        .px(m.sp[4])
+                        .py(m.sp[2])
+                        .bg(theme.tab_bg)
+                        .when(i == 0, |d| d.border_1().border_color(theme.accent))
+                        .child(text(t, theme.text_primary, false))
+                }),
+        );
+        let [c_name, c_cpu, c_mem] = self.words.preview_cols.clone();
+        let cell = |t: SharedString, color: Hsla, grow: bool| {
+            let d = div().overflow_hidden().child(text(t, color, false));
+            if grow { d.flex_1() } else { d.w(px(60. * s)) }
+        };
+        let header = div()
+            .flex()
+            .flex_row()
+            .px(m.sp[4])
+            .bg(theme.header)
+            .child(cell(c_name, theme.text_secondary, true))
+            .child(cell(c_cpu, theme.text_secondary, false))
+            .child(cell(c_mem, theme.text_secondary, false));
+        let bgs = [
+            theme.list_bg,
+            theme.row_alt,
+            theme.row_hover,
+            theme.row_selected,
+        ];
+        self.painted_rows = bgs;
+        let table = div().flex().flex_col().child(header).children(
+            self.words
+                .preview_rows
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, name)| {
+                    let (primary, secondary) = if i == 3 {
+                        (theme.text_selected_primary, theme.text_selected_secondary)
+                    } else {
+                        (theme.text_primary, theme.text_secondary)
+                    };
+                    div()
+                        .flex()
+                        .flex_row()
+                        .px(m.sp[4])
+                        .py(m.sp[2])
+                        .bg(bgs[i])
+                        .child(cell(name, primary, true))
+                        .child(cell("1.2%".into(), secondary, false))
+                        .child(cell("180 MB".into(), secondary, false))
+                }),
+        );
+        let g = theme.graph;
+        let graph = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.paint_quad(fill(bounds, g.chart_bg));
+                let (w, h) = (bounds.size.width, bounds.size.height);
+                for k in 1..=3 {
+                    let y = bounds.origin.y + h * (k as f32 / 4.0);
+                    window.paint_quad(fill(
+                        Bounds::new(point(bounds.origin.x, y), size(w, px(1.))),
+                        g.grid,
+                    ));
+                }
+                let at = |i: usize, v: f32| {
+                    point(
+                        bounds.origin.x + w * (i as f32 / (GRAPH_SAMPLES.len() - 1) as f32),
+                        bounds.origin.y + h - h * v,
+                    )
+                };
+                let base = |i: usize| at(i, 0.0);
+                let last = GRAPH_SAMPLES.len() - 1;
+                let mut area = PathBuilder::fill();
+                area.move_to(base(0));
+                for (i, v) in GRAPH_SAMPLES.iter().enumerate() {
+                    area.line_to(at(i, *v));
+                }
+                area.line_to(base(last));
+                area.close();
+                if let Ok(path) = area.build() {
+                    window.paint_path(path, g.cpu_fill);
+                }
+                let mut line = PathBuilder::stroke(px(1.));
+                for (i, v) in GRAPH_SAMPLES.iter().enumerate() {
+                    if i == 0 {
+                        line.move_to(at(i, *v));
+                    } else {
+                        line.line_to(at(i, *v));
+                    }
+                }
+                if let Ok(path) = line.build() {
+                    window.paint_path(path, g.cpu_line);
+                }
+            },
+        )
+        .w(px(GRAPH_W * s))
+        .h(px(GRAPH_H * s));
+        div()
+            .debug_selector(|| "ThemeEditor-preview".into())
+            .w(px(PREVIEW_COLUMN_W * s))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(m.sp[4])
+            .child(tabs)
+            .child(table)
+            .child(graph)
     }
 }
 
@@ -1258,10 +1505,7 @@ impl Render for ThemeEditor {
                             .child(hint.clone())
                     })),
             )
-            .child(
-                // E21-029 fills this column with the preview.
-                div().w(px(PREVIEW_COLUMN_W * s)).flex_none(),
-            );
+            .child(self.preview_pane(&theme, &m));
 
         let footer = div()
             .debug_selector(|| "ThemeEditor-footer".into())
@@ -1273,17 +1517,17 @@ impl Render for ThemeEditor {
             .child(
                 TlButton::new("ThemeEditor-random", TlButtonKind::Secondary)
                     .label(self.words.random.clone())
-                    .disabled(true),
+                    .action(Box::new(ThemeEditorRandom)),
             )
             .child(
                 TlButton::new("ThemeEditor-share", TlButtonKind::Secondary)
                     .label(self.words.share.clone())
-                    .disabled(true),
+                    .action(Box::new(ThemeEditorShare)),
             )
             .child(
                 TlButton::new("ThemeEditor-import", TlButtonKind::Secondary)
                     .label(self.words.import.clone())
-                    .disabled(true),
+                    .action(Box::new(ThemeEditorImport)),
             )
             .child(div().flex_1())
             .child(
@@ -1303,6 +1547,9 @@ impl Render for ThemeEditor {
             .id("ThemeEditor")
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::on_done))
+            .on_action(cx.listener(Self::on_random))
+            .on_action(cx.listener(Self::on_share))
+            .on_action(cx.listener(Self::on_import))
             .size_full()
             .flex()
             .flex_col()

@@ -2218,3 +2218,159 @@ fn editor_drag_coalesced(cx: &mut TestAppContext) {
     r.parent.update(|window, cx| window.simulate_next_frame(cx));
     assert_eq!(style_version(cx), n + 1);
 }
+
+// ---- Theme Editor preview, Random, Share and Import (E21-029) ----
+
+fn click_editor_button(vcx: &mut VisualTestContext, id: &str) {
+    let at = vcx
+        .debug_bounds(&format!("TlButton-ThemeEditor-{id}"))
+        .expect("button drawn");
+    vcx.simulate_click(at.center(), gpui_kit::Modifiers::none());
+    vcx.run_until_parked();
+    draw(vcx);
+}
+
+fn current_slots(cx: &mut TestAppContext) -> Vec<gpui_kit::Hsla> {
+    cx.update(|cx| {
+        let t = current(cx);
+        tl_ui::theme::ThemeSlot::ALL
+            .iter()
+            .map(|s| s.get(t))
+            .collect()
+    })
+}
+
+fn wcag_luminance(c: gpui_kit::Hsla) -> f32 {
+    let c: gpui_kit::Rgba = c.into();
+    let lin = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+fn wcag_contrast(a: gpui_kit::Hsla, b: gpui_kit::Hsla) -> f32 {
+    let (la, lb) = (wcag_luminance(a), wcag_luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+fn set_clipboard(vcx: &mut VisualTestContext, text: &str) {
+    vcx.update(|_, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.to_owned())));
+}
+
+#[gpui_kit::test]
+fn editor_preview_follows_slot(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (frame, mut vcx) = editor_vcx(cx);
+    let at = vcx.debug_bounds("ThemeEditor-slot-9").expect("row 9 drawn");
+    vcx.simulate_click(at.center(), gpui_kit::Modifiers::none());
+    draw(&mut vcx);
+    type_hex(&mut vcx, "#FF0000");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    let ed = editor_content(&frame, &mut vcx);
+    let rows = vcx.read(|cx| ed.read(cx).preview_row_bgs());
+    assert_eq!(rows[3], builtin::parse_hex("#FF0000").expect("hex"));
+}
+
+#[gpui_kit::test]
+fn editor_random_contrast_and_toast(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (frame, mut vcx) = editor_vcx(cx);
+    let before = current_slots(cx);
+    click_editor_button(&mut vcx, "random");
+    vcx.run_until_parked();
+    let after = current_slots(cx);
+    assert_eq!(before.len(), 23);
+    for (i, (a, b)) in before.iter().zip(&after).enumerate() {
+        assert_ne!(a, b, "slot {i} changed");
+    }
+    let (text, list) = cx.update(|cx| {
+        let t = current(cx);
+        (t.text_primary, t.list_bg)
+    });
+    assert!(wcag_contrast(text, list) >= 4.5);
+    let toasts = vcx.read(|cx| frame.read(cx).toasts().read(cx).visible_texts());
+    assert_eq!(toasts, ["Random theme generated."]);
+}
+
+#[gpui_kit::test]
+fn editor_share_encodes_preview(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (_frame, mut vcx) = editor_vcx(cx);
+    let at = vcx.debug_bounds("ThemeEditor-slot-1").expect("row 1 drawn");
+    vcx.simulate_click(at.center(), gpui_kit::Modifiers::none());
+    draw(&mut vcx);
+    type_hex(&mut vcx, "#123456");
+    click_editor_button(&mut vcx, "share");
+    vcx.run_until_parked();
+    let handle = cx
+        .update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::ShareTheme)
+        })
+        .and_then(|h| h.downcast::<Root>())
+        .expect("share window registered");
+    let share = cx
+        .update(|cx| Frame::find(handle, cx))
+        .expect("share frame");
+    let code = cx.update(|cx| share.read(cx).content().read(cx).code().to_string());
+    let def = decode_tl1(&code).expect("decodes");
+    assert_eq!(&*def.name, "Mine");
+    assert_eq!(
+        def.slots[tl_ui::theme::ThemeSlot::Titlebar as usize],
+        builtin::parse_hex("#123456").expect("hex")
+    );
+}
+
+#[gpui_kit::test]
+fn editor_import_loads_preview(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (frame, mut vcx) = editor_vcx(cx);
+    let mut def = builtin::load()[0].clone();
+    def.name = "Imported".into();
+    def.slots[tl_ui::theme::ThemeSlot::RowSelected as usize] =
+        builtin::parse_hex("#FF0000").expect("hex");
+    set_clipboard(&mut vcx, &encode_tl1(&def));
+    click_editor_button(&mut vcx, "import");
+    vcx.run_until_parked();
+    cx.update(|cx| {
+        let t = current(cx);
+        assert_eq!(&*t.name, "Imported");
+        assert_eq!(t.row_selected, builtin::parse_hex("#FF0000").expect("hex"));
+    });
+    let ed = editor_content(&frame, &mut vcx);
+    let name = vcx.read(|cx| ed.read(cx).name_text(cx));
+    assert_eq!(name, "Imported");
+    let users: Vec<String> = cx.update(|cx| {
+        cx.global::<ThemeStore>()
+            .user
+            .iter()
+            .map(|d| d.name.to_string())
+            .collect()
+    });
+    assert_eq!(users, ["Mine"], "no theme is added");
+}
+
+#[gpui_kit::test]
+fn editor_import_garbage_toast(cx: &mut TestAppContext) {
+    let mut r = editor_rig(cx, &[mine()]);
+    edit(&mut r, "Mine");
+    let (frame, mut vcx) = editor_vcx(cx);
+    let before = current_slots(cx);
+    set_clipboard(&mut vcx, "hello");
+    click_editor_button(&mut vcx, "import");
+    vcx.run_until_parked();
+    let toasts = vcx.read(|cx| frame.read(cx).toasts().read(cx).visible_texts());
+    assert_eq!(toasts, ["Clipboard does not contain a theme code"]);
+    assert_eq!(current_slots(cx), before);
+}
