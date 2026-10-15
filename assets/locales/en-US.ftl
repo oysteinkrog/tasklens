@@ -163,6 +163,35 @@ pwn-run-toast-failed = Failed to run command
 pwn-run-toast-auth-cancelled = Authentication cancelled
 pwn-run-toast-history-cleared = Command history cleared
 
+# Search File Handles window (tasklens-gma.33, UI-PWN-030).
+pwn-handle-search-pattern = Pattern:
+pwn-handle-search-pattern-tooltip = Case-insensitive. * and ? work as wildcards.
+pwn-handle-search-include-maps = Include memory-mapped files, working directories and executables
+pwn-handle-search-search = Search
+pwn-handle-search-stop = Stop
+pwn-handle-search-clear = Clear
+pwn-handle-search-search-all = Search all
+pwn-handle-search-close = Close
+pwn-handle-search-empty = Enter a file name or path pattern, then press Search.
+pwn-handle-search-initializing = Initializing... please wait.
+pwn-handle-search-retrieving = Retrieving file handles... { $pct }% ({ $n } total handles)
+pwn-handle-search-searching = Searching...
+pwn-handle-search-found =
+    { $n ->
+        [one] Found { $n } match
+       *[other] Found { $n } matches
+    }
+pwn-handle-search-none = No results found.
+pwn-handle-search-stopped =
+    { $n ->
+        [one] Search stopped. Found { $n } match
+       *[other] Search stopped. Found { $n } matches
+    }
+pwn-handle-search-failed = Handle search failed
+pwn-handle-search-footer = Searched { $searched } of { $total } processes. { $skipped } need administrator rights.
+pwn-handle-search-toast-failed = Handle search failed
+pwn-handle-search-toast-auth-cancelled = Authentication cancelled
+
 ## Performance (E24)
 
 perf-fallback-collecting = Collecting…

@@ -7,6 +7,7 @@ pub mod confirm_startup_delete;
 pub mod connection_properties;
 pub mod disk_in_use;
 pub mod frame;
+pub mod handle_search;
 pub mod low_memory;
 pub mod notices;
 pub mod priority;
