@@ -638,8 +638,9 @@ impl GeneralTab {
     }
 
     fn choose(&mut self, value: &str, cx: &mut Context<Self>) {
-        // The combo is locked while an apply runs.
+        // The combo is locked while an apply runs: put back the shown value.
         if self.sent.is_some() {
+            self.sync_combo(cx);
             return;
         }
         let Some(choice) = parse_choice(value) else {
