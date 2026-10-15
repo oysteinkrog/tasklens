@@ -10,6 +10,7 @@
 
 use gpui_kit::{App, SharedString, Window, px};
 use tl_model::ids::NodeId;
+use tl_model::process::{GroupKind, GroupRowKind};
 use tl_model::table::Manager;
 
 use super::actions::{
@@ -18,11 +19,15 @@ use super::actions::{
     SuspendProcess, ToggleGroupRow,
 };
 use super::{SuspendLabel, suspend_or_resume};
+use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
+use crate::pages::minigraph::sources::MinigraphSource;
 use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::RowKind;
+use crate::tray_bridge::{AddTrayGraph, RemoveTrayGraph, TrayBridge};
+use crate::window::main::tray_available;
 use crate::windows::actions::{OpenCustomPriority, SetAffinity};
 use crate::windows::signal::signal_submenu;
 
@@ -112,6 +117,8 @@ pub fn row_menu(
     menu = add_copy_details(menu, cx);
     menu = add_copy_all_metrics(menu, cx);
     menu = add_copy_rows_as_table(menu, cx);
+    menu = menu.separator();
+    menu = add_tray_graph(menu, targets, shape, window, cx);
     menu = menu.separator();
     menu = add_properties(menu, shape, cx);
     menu = add_open_file_location(menu, targets, shape, cx);
@@ -315,6 +322,100 @@ fn add_set_affinity(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
     }
     let label = tr(cx, "processes-menu-set-affinity");
     exitable(menu, shape, label, Box::new(SetAffinity), cx)
+}
+
+/// The tray graph columns of the Add submenu, in order, with their label keys.
+const TRAY_COLUMNS: [(&str, &str); 6] = [
+    ("cpu", "processes-menu-metric-cpu"),
+    ("memory", "processes-menu-metric-memory"),
+    ("disk", "processes-menu-metric-disk"),
+    ("network", "processes-menu-metric-network"),
+    ("gpu", "processes-menu-metric-gpu"),
+    ("vram", "processes-menu-metric-vram"),
+];
+
+/// The tray source string of the one captured target (R-100): a process row, an app row or a
+/// unit row. `None` for anything else, which leaves the item out.
+fn tray_source(targets: &CapturedTargets, cx: &App) -> Option<SharedString> {
+    let [target] = targets.items.as_slice() else {
+        return None;
+    };
+    let source = match (&target.node, target.kind) {
+        (NodeId::Process(key), RowKind::Process | RowKind::KernelThread) => {
+            MinigraphSource::Process { key: *key }
+        }
+        (NodeId::Unit(unit), RowKind::Unit) => MinigraphSource::App(unit.name.clone()),
+        (node, RowKind::App) => {
+            let engine = cx.try_global::<EngineGlobal>()?;
+            let snapshot = engine.0.latest();
+            let group = snapshot.table.groups.iter().find(|g| &g.node == node)?;
+            match &group.class {
+                GroupKind::App { app_id } if group.kind == GroupRowKind::App => {
+                    MinigraphSource::App(app_id.clone())
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(source.to_state_string().into())
+}
+
+/// Item 18: Add tray icon graph >, or Remove tray icon graph when one exists for this source
+/// (UI-PRC-013, PROC-094, PERF-088). One process, app or unit row only. Add has no "Already
+/// added" state: any graph with the source turns the item into Remove.
+fn add_tray_graph(
+    menu: TlMenu,
+    targets: &CapturedTargets,
+    shape: Shape,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    if shape.multi || shape.pseudo {
+        return menu;
+    }
+    let Some(source) = tray_source(targets, cx) else {
+        return menu;
+    };
+    let available = tray_available(cx);
+    let existing = if available {
+        TrayBridge::global(cx)
+            .read(cx)
+            .graphs()
+            .iter()
+            .find(|g| g.source == source)
+            .map(|g| g.column.clone())
+    } else {
+        None
+    };
+    let label = tr(
+        cx,
+        if existing.is_some() {
+            "processes-menu-remove-tray-graph"
+        } else {
+            "processes-menu-add-tray-graph"
+        },
+    );
+    if shape.exited {
+        return menu.item_disabled(label, Some(tr(cx, "processes-menu-process-exited")));
+    }
+    if !available {
+        return menu.item_disabled(label, Some(tr(cx, "perf-tip-no-tray")));
+    }
+    if let Some(column) = existing {
+        return menu.item(label, Box::new(RemoveTrayGraph { source, column }));
+    }
+    menu.submenu(label, window, cx, move |sub, _window, cx| {
+        TRAY_COLUMNS.iter().fold(sub, |sub, (column, key)| {
+            sub.item(
+                tr(cx, key),
+                Box::new(AddTrayGraph {
+                    source: source.clone(),
+                    column: (*column).into(),
+                }),
+            )
+        })
+    })
 }
 
 /// Item 11: Copy, for the column under the pointer. Not built from the keyboard.

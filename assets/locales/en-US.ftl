@@ -2411,6 +2411,14 @@ shell-public-ip-continue = Continue
 # Set Affinity… row menu item (tasklens-gma.7, UI-PRC-013 item 7)
 processes-menu-send-signal = Send Signal
 processes-menu-set-affinity = Set Affinity…
+processes-menu-add-tray-graph = Add tray icon graph
+processes-menu-remove-tray-graph = Remove tray icon graph
+processes-menu-metric-cpu = CPU
+processes-menu-metric-memory = Memory
+processes-menu-metric-disk = Disk
+processes-menu-metric-network = Network
+processes-menu-metric-gpu = GPU
+processes-menu-metric-vram = VRAM
 processes-affinity-subtitle = { $name } (PID { $pid })
 # Minigraph cards (tasklens-xdh.5, PERF-080, UI-PRF-041).
 minigraph-label-cpu = CPU

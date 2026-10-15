@@ -393,11 +393,12 @@ struct Full {
     vcx: VisualTestContext,
     service: TrayServiceEnd,
     persists: Rc<Cell<u32>>,
+    engine: Arc<FakeEngine>,
 }
 
 fn full(cx: &mut TestAppContext, graphs: Vec<TrayGraphEntry>) -> Full {
     let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine;
+    let client: Arc<dyn EngineClient> = engine.clone();
     let (_tx, rx) = async_channel::bounded(4);
     let persists = Rc::new(Cell::new(0));
     let init = UiInit {
@@ -432,6 +433,7 @@ fn full(cx: &mut TestAppContext, graphs: Vec<TrayGraphEntry>) -> Full {
         vcx,
         service,
         persists,
+        engine,
     }
 }
 
@@ -902,4 +904,204 @@ fn settings_tray_rows_toggle_keys(cx: &mut TestAppContext) {
         seen = f.persists.get();
     }
     assert!(f.tick().expect("a tray model").show_main_icon);
+}
+
+// ---- Process row menu item 18 (tasklens-wox.13, UI-PRC-013, PROC-094, PERF-088) ----
+
+mod row_menu_tray {
+    use super::*;
+    use gpui_kit::VisualTestContext;
+    use tl_model::ids::{GroupKey, NodeId, ProcessKey, PseudoKind};
+    use tl_model::process::{GroupKind, GroupRow, GroupRowKind, ProcFlags};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu};
+    use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
+    use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
+    use tl_ui::table::tree_table::RowKind;
+
+    const SOURCE: &str = "process:0000000000000007:4321:4242";
+
+    fn key() -> ProcessKey {
+        ProcessKey {
+            start_ticks: 4_242,
+            boot_id: BootId(7),
+            pid: 4321,
+        }
+    }
+
+    fn target(node: NodeId, kind: RowKind) -> CapturedTarget {
+        CapturedTarget {
+            node,
+            kind,
+            name: "target".into(),
+            pid: matches!(kind, RowKind::Process).then_some(4321),
+            uid: 1000,
+            user: "me".into(),
+            flags: ProcFlags::empty(),
+            member_count: 1,
+            stopped: false,
+            ppid: 1,
+            nice: Some(0),
+            exe_deleted: false,
+            unit: None,
+        }
+    }
+
+    fn process() -> CapturedTarget {
+        target(NodeId::Process(key()), RowKind::Process)
+    }
+
+    fn app_key() -> GroupKey {
+        GroupKind::App {
+            app_id: Arc::from("firefox"),
+        }
+        .key()
+    }
+
+    fn app_group() -> GroupRow {
+        GroupRow {
+            node: NodeId::Group(app_key()),
+            key: app_key(),
+            kind: GroupRowKind::App,
+            class: GroupKind::App {
+                app_id: Arc::from("firefox"),
+            },
+            name: Arc::from("Firefox"),
+            icon: None,
+            members: 1,
+            pids: 1,
+            note: None,
+            memory_bytes: 0,
+            disk_bps: 0.0,
+            net_bps: 0.0,
+            gpu_pct: 0.0,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            threads: 0,
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            commit_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            handles: None,
+            desktop_path: None,
+            description: None,
+            user: None,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    /// The entries of the row menu for `targets`.
+    fn entries(vcx: &mut VisualTestContext, targets: Vec<CapturedTarget>) -> Vec<MenuEntryInfo> {
+        let targets = CapturedTargets::new(targets, None);
+        let menu = vcx.update(|window, cx| {
+            let focus = cx.focus_handle();
+            TlMenu::build(window, cx, focus, |menu, window, cx| {
+                row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+            })
+        });
+        vcx.update(|window, cx| menu.read(cx).entries_for_test(window))
+    }
+
+    fn tray_entry(entries: Vec<MenuEntryInfo>) -> Option<MenuEntryInfo> {
+        entries.into_iter().find(|e| {
+            matches!(
+                e.label.as_deref(),
+                Some("Add tray icon graph" | "Remove tray icon graph")
+            )
+        })
+    }
+
+    fn submenu_entries(f: &mut Full, entry: &MenuEntryInfo) -> Vec<MenuEntryInfo> {
+        let sub = entry.submenu.clone().expect("a submenu");
+        f.vcx
+            .update(|window, cx| sub.read(cx).entries_for_test(window))
+    }
+
+    #[gpui_kit::test]
+    fn process_menu_tray_item_add(cx: &mut TestAppContext) {
+        let mut f = full(cx, Vec::new());
+        let entry = tray_entry(entries(&mut f.vcx, vec![process()])).expect("item 18");
+        assert_eq!(entry.label.as_deref(), Some("Add tray icon graph"));
+        assert_eq!(entry.kind, MenuEntryKind::Submenu);
+        let items = submenu_entries(&mut f, &entry);
+        let labels: Vec<_> = items
+            .iter()
+            .filter_map(|e| e.label.as_deref().map(str::to_owned))
+            .collect();
+        assert_eq!(labels, ["CPU", "Memory", "Disk", "Network", "GPU", "VRAM"]);
+        let memory = items[1].action.as_deref().expect("memory action");
+        assert!(memory.partial_eq(&AddTrayGraph {
+            source: SOURCE.into(),
+            column: "memory".into(),
+        }));
+        f.act(memory);
+        assert_eq!(f.saved(), vec![row(SOURCE, "memory", "accent", 60)]);
+        assert_eq!(f.toasts(), ["Tray icon graph added"]);
+    }
+
+    #[gpui_kit::test]
+    fn process_menu_tray_item_remove_when_exists(cx: &mut TestAppContext) {
+        let mut f = full(cx, vec![graph(SOURCE, "accent")]);
+        let entry = tray_entry(entries(&mut f.vcx, vec![process()])).expect("item 18");
+        assert_eq!(entry.label.as_deref(), Some("Remove tray icon graph"));
+        assert_eq!(entry.kind, MenuEntryKind::Item);
+        let action = entry.action.as_deref().expect("action");
+        assert!(action.partial_eq(&RemoveTrayGraph {
+            source: SOURCE.into(),
+            column: "cpu".into(),
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn process_menu_tray_item_app_source(cx: &mut TestAppContext) {
+        let mut f = full(cx, Vec::new());
+        f.engine.publish_with(|snap| {
+            let mut table = (*snap.table).clone();
+            table.groups = Arc::from(vec![app_group()]);
+            snap.table = Arc::new(table);
+        });
+        let app = target(NodeId::Group(app_key()), RowKind::App);
+        let entry = tray_entry(entries(&mut f.vcx, vec![app])).expect("item 18");
+        let items = submenu_entries(&mut f, &entry);
+        f.act(items[0].action.as_deref().expect("cpu action"));
+        assert_eq!(f.saved(), vec![row("app:firefox", "cpu", "accent", 60)]);
+    }
+
+    #[gpui_kit::test]
+    fn process_menu_tray_item_hidden_multi_and_group(cx: &mut TestAppContext) {
+        let mut f = full(cx, Vec::new());
+        let other = target(
+            NodeId::Process(ProcessKey { pid: 4322, ..key() }),
+            RowKind::Process,
+        );
+        assert!(tray_entry(entries(&mut f.vcx, vec![process(), other])).is_none());
+        let pseudo = target(NodeId::Pseudo(PseudoKind::Interrupts), RowKind::Pseudo);
+        assert!(tray_entry(entries(&mut f.vcx, vec![pseudo])).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn process_menu_tray_item_disabled_without_tray(cx: &mut TestAppContext) {
+        let mut f = full(cx, Vec::new());
+        f.vcx
+            .update(|_, cx| cx.global_mut::<TrayStatus>().available = false);
+        let entry = tray_entry(entries(&mut f.vcx, vec![process()])).expect("item 18");
+        assert_eq!(entry.kind, MenuEntryKind::Disabled);
+        assert_eq!(entry.tooltip.as_deref(), Some("No system tray available"));
+    }
 }
