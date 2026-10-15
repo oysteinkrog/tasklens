@@ -1551,6 +1551,140 @@ fn ns_inode(ns_dir: BorrowedFd<'_>, name: &str) -> Option<u64> {
     bracket_inode(rest.strip_prefix(b":")?)
 }
 
+// Environment tab (PROC-083).
+
+/// Read limit for `environ`: 1 MiB.
+pub const ENVIRON_MAX: usize = 1024 * 1024;
+/// Read limit for the `cwd` and `root` links.
+const LINK_MAX: usize = 4096;
+
+/// The environment of one process. Values are raw: masking (R-099) is done by the UI.
+#[derive(Clone, Default, PartialEq)]
+pub struct EnvInfo {
+    pub vars: Vec<(Box<str>, Box<str>)>,
+    /// `environ` was longer than [`ENVIRON_MAX`]; the last partial entry is dropped.
+    pub truncated: bool,
+}
+
+/// Prints only the counts. The environment never reaches a log (ADR-015).
+impl std::fmt::Debug for EnvInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvInfo")
+            .field("vars", &self.vars.len())
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What `read_environ` found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnvRead {
+    Ok,
+    /// EACCES or EPERM.
+    Restricted,
+    /// Zero bytes: a zombie or a kernel thread.
+    Empty,
+    /// Another read error, with the raw errno.
+    Failed(i32),
+    /// The process exited, or its pid now belongs to another process.
+    Gone,
+}
+
+/// Splits `raw` (NUL-separated `NAME=value` entries) into `out`. When `truncated`, the last
+/// partial entry is dropped.
+pub fn parse_environ(raw: &[u8], truncated: bool, out: &mut EnvInfo) {
+    out.vars.clear();
+    out.truncated = truncated;
+    let raw = if truncated {
+        match memchr::memrchr(0, raw) {
+            Some(end) => &raw[..end + 1],
+            None => &[],
+        }
+    } else {
+        raw
+    };
+    let mut scratch = String::new();
+    for entry in raw.split(|&b| b == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, value) = match memchr::memchr(b'=', entry) {
+            Some(i) => (&entry[..i], &entry[i + 1..]),
+            None => (entry, &entry[entry.len()..]),
+        };
+        sanitize_text(name, ENVIRON_MAX, &mut scratch);
+        let name: Box<str> = Box::from(scratch.as_str());
+        sanitize_text(value, ENVIRON_MAX, &mut scratch);
+        out.vars.push((name, Box::from(scratch.as_str())));
+    }
+}
+
+/// Reads `/proc/<pid>/environ` of `key` into `out`, up to [`ENVIRON_MAX`] bytes. Call it when
+/// the tab opens and on Refresh only. `out` is reset first.
+pub fn read_environ(
+    root: &SysRoot,
+    key: ProcessKey,
+    buf: &mut Vec<u8>,
+    out: &mut EnvInfo,
+) -> Result<EnvRead, CollectError> {
+    *out = EnvInfo::default();
+    let pid_dir = match open_checked(root, key, buf)? {
+        Ok(dir) => dir,
+        Err(DetailRead::Gone) => return Ok(EnvRead::Gone),
+        Err(_) => return Ok(EnvRead::Restricted),
+    };
+    let read = open_beneath(pid_dir.as_fd(), &["environ"], READ_FLAGS)
+        .and_then(|fd| read_bounded(fd.as_fd(), buf, ENVIRON_MAX));
+    let truncated = match read {
+        Ok(truncated) => truncated,
+        Err(e) if is_gone(e) => return Ok(EnvRead::Gone),
+        Err(e) if is_denied(e) => return Ok(EnvRead::Restricted),
+        Err(e) => return Ok(EnvRead::Failed(e.raw_os_error())),
+    };
+    if buf.is_empty() {
+        return Ok(EnvRead::Empty);
+    }
+    parse_environ(buf, truncated, out);
+    Ok(EnvRead::Ok)
+}
+
+/// What `read_cwd` and `read_root` found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkRead {
+    Path(Arc<str>),
+    /// EACCES or EPERM.
+    Restricted,
+    /// The process exited or the link cannot be read.
+    Gone,
+}
+
+/// The sanitized target of the link `pid_dir/<name>`.
+fn read_link(pid_dir: BorrowedFd<'_>, name: &str, buf: &mut Vec<u8>) -> LinkRead {
+    // One byte past the limit, so `sanitize_link` sees the cut and adds `…`.
+    buf.clear();
+    buf.resize(LINK_MAX + 1, 0);
+    match rustix::fs::readlinkat_raw(pid_dir, name, &mut buf[..]) {
+        Ok(n) => {
+            buf.truncate(n);
+            let mut text = String::new();
+            sanitize_link(buf, &mut text);
+            LinkRead::Path(Arc::from(text))
+        }
+        Err(e) if is_denied(e) => LinkRead::Restricted,
+        Err(_) => LinkRead::Gone,
+    }
+}
+
+/// The working directory of the process behind `pid_dir`.
+pub fn read_cwd(pid_dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> LinkRead {
+    read_link(pid_dir, "cwd", buf)
+}
+
+/// The root directory of the process behind `pid_dir`.
+pub fn read_root(pid_dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> LinkRead {
+    read_link(pid_dir, "root", buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

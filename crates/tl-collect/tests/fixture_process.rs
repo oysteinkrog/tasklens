@@ -3880,3 +3880,122 @@ mod strings_utf16_alphabet {
         assert_eq!(hits[1].address, 0x4002 + 8);
     }
 }
+
+// Environment, cwd and root readers (E05-029).
+
+mod environ {
+    use std::fs;
+
+    use rustix::fd::AsFd;
+    use rustix::fs::{Mode, OFlags};
+    use tl_collect::SysRoot;
+    use tl_collect::proc::detail::{
+        ENVIRON_MAX, EnvInfo, EnvRead, LinkRead, read_cwd, read_environ, read_root,
+    };
+
+    use super::{FAKE_START_TICKS, rollup_key};
+    use crate::common;
+
+    fn read(root: &SysRoot) -> (EnvRead, EnvInfo) {
+        let mut out = EnvInfo::default();
+        let r = read_environ(
+            root,
+            rollup_key(4201, FAKE_START_TICKS),
+            &mut Vec::new(),
+            &mut out,
+        );
+        (r.expect("read environ"), out)
+    }
+
+    fn copy_with_environ(bytes: &[u8]) -> (tempfile::TempDir, SysRoot) {
+        let tmp = common::fixture_copy("process-edge", None);
+        fs::write(tmp.path().join("proc/4201/environ"), bytes).expect("write environ");
+        let root = SysRoot::at(tmp.path());
+        (tmp, root)
+    }
+
+    #[test]
+    fn environ_vars_parsed() {
+        let root = SysRoot::at(common::fixture_dir("process-edge"));
+        let (r, out) = read(&root);
+        assert_eq!(r, EnvRead::Ok);
+        let vars: Vec<(&str, &str)> = out.vars.iter().map(|(n, v)| (&**n, &**v)).collect();
+        assert_eq!(
+            vars,
+            [
+                ("HOME", "/home/user1"),
+                ("PATH", "/usr/bin"),
+                ("API_KEY", "abc"),
+                ("EMPTY", ""),
+            ]
+        );
+        assert!(!out.truncated);
+    }
+
+    #[test]
+    fn environ_truncated_at_1mib() {
+        let mut bytes = Vec::new();
+        let mut written = Vec::new();
+        let mut i = 0;
+        while bytes.len() < 2 * ENVIRON_MAX {
+            let entry = format!("VAR_{i:06}={}", "x".repeat(40));
+            bytes.extend_from_slice(entry.as_bytes());
+            bytes.push(0);
+            written.push(entry);
+            i += 1;
+        }
+        let (_tmp, root) = copy_with_environ(&bytes);
+        let (r, out) = read(&root);
+        assert_eq!(r, EnvRead::Ok);
+        assert!(out.truncated);
+        assert!(!out.vars.is_empty() && out.vars.len() < written.len());
+        for (n, (name, value)) in out.vars.iter().enumerate() {
+            assert_eq!(format!("{name}={value}"), written[n]);
+        }
+    }
+
+    #[test]
+    fn environ_empty_is_unavailable() {
+        let (_tmp, root) = copy_with_environ(b"");
+        let (r, out) = read(&root);
+        assert_eq!(r, EnvRead::Empty);
+        assert!(out.vars.is_empty());
+    }
+
+    #[test]
+    fn environ_values_sanitized() {
+        let (_tmp, root) = copy_with_environ("NAME=a\u{202e}b\0".as_bytes());
+        let (r, out) = read(&root);
+        assert_eq!(r, EnvRead::Ok);
+        assert_eq!(&*out.vars[0].1, "ab");
+        assert!(!out.vars[0].1.contains('\u{202e}'));
+    }
+
+    /// Security regression: the environment never reaches logs through `Debug`.
+    #[test]
+    fn environ_debug_redacted() {
+        let info = EnvInfo {
+            vars: vec![("SECRET".into(), "hunter2".into())],
+            truncated: false,
+        };
+        let text = format!("{info:?}");
+        assert!(!text.contains("SECRET"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+    }
+
+    #[test]
+    fn cwd_and_root_links() {
+        let dir = rustix::fs::open(
+            common::fixture_dir("process-edge").join("proc/4201"),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open 4201");
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_cwd(dir.as_fd(), &mut buf),
+            LinkRead::Path("/home/user1".into())
+        );
+        assert_eq!(read_root(dir.as_fd(), &mut buf), LinkRead::Path("/".into()));
+    }
+}

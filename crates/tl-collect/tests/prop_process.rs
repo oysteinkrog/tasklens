@@ -456,3 +456,17 @@ mod strings_scan {
         }
     }
 }
+
+proptest! {
+    #[test]
+    fn environ_arbitrary_bytes_never_panic(
+        bytes in prop::collection::vec(any::<u8>(), 0..=4096),
+        truncated in any::<bool>(),
+    ) {
+        use tl_collect::proc::detail::{EnvInfo, parse_environ};
+
+        let mut out = EnvInfo::default();
+        parse_environ(&bytes, truncated, &mut out);
+        prop_assert_eq!(out.truncated, truncated);
+    }
+}

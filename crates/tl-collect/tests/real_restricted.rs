@@ -444,3 +444,50 @@ fn pacman_owns_itself() {
     assert_eq!(&*info.name, "pacman");
     assert!(pacman.db_stamp().is_some());
 }
+
+/// PROC-083: the environment of another user's process is Restricted without the helper
+/// (security regression).
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn environ_pid1_restricted() {
+    use tl_collect::SysRoot;
+    use tl_collect::proc::detail::{EnvInfo, EnvRead, read_environ};
+    use tl_collect::proc::pid_stat::read_start_ticks;
+    use tl_model::ids::ProcessKey;
+    use tl_model::time::BootId;
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let dir = open_dir("/proc/1");
+    let start_ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).expect("pid 1 start ticks");
+    let key = ProcessKey {
+        start_ticks,
+        boot_id: BootId(1),
+        pid: 1,
+    };
+    let mut out = EnvInfo::default();
+    let r = read_environ(&SysRoot::host(), key, &mut Vec::new(), &mut out);
+    assert_eq!(r.expect("read pid 1 environ"), EnvRead::Restricted);
+    assert!(out.vars.is_empty());
+}
+
+/// PROC-078: the working directory of another user's process is Restricted without the helper
+/// (security regression).
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn cwd_pid1_restricted() {
+    use tl_collect::proc::detail::{LinkRead, read_cwd, read_root};
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let dir = open_dir("/proc/1");
+    assert_eq!(read_cwd(dir.as_fd(), &mut Vec::new()), LinkRead::Restricted);
+    assert_eq!(
+        read_root(dir.as_fd(), &mut Vec::new()),
+        LinkRead::Restricted
+    );
+}
