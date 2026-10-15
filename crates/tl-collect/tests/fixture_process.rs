@@ -4157,4 +4157,74 @@ mod general_static {
         let empty = LocationCtx::default();
         assert_eq!(location("/.local/bin/b", false, &empty), Location::Other);
     }
+
+    /// A 64-bit ELF with a PT_GNU_RELRO and a PT_DYNAMIC header. The dynamic segment starts
+    /// right after the two program headers and holds `filler` DT_DEBUG entries, then `last`
+    /// (if any) and a DT_NULL. `dyn_len` overrides the segment's p_filesz.
+    fn relro_elf(filler: usize, last: Option<(u64, u64)>, dyn_len: Option<u64>) -> Vec<u8> {
+        const DT_DEBUG: u64 = 21;
+        let dyn_off: u64 = 64 + 2 * 56;
+        let mut entries: Vec<(u64, u64)> = vec![(DT_DEBUG, 0); filler];
+        entries.extend(last);
+        entries.push((0, 0));
+        let filesz = dyn_len.unwrap_or(entries.len() as u64 * 16);
+
+        let mut b = Vec::new();
+        b.extend_from_slice(b"\x7fELF\x02\x01\x01");
+        b.resize(16, 0);
+        b.extend_from_slice(&3u16.to_le_bytes()); // e_type ET_DYN
+        b.extend_from_slice(&62u16.to_le_bytes()); // e_machine x86-64
+        b.extend_from_slice(&1u32.to_le_bytes()); // e_version
+        b.extend_from_slice(&0u64.to_le_bytes()); // e_entry
+        b.extend_from_slice(&64u64.to_le_bytes()); // e_phoff
+        b.extend_from_slice(&0u64.to_le_bytes()); // e_shoff
+        b.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+        b.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+        b.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        b.extend_from_slice(&2u16.to_le_bytes()); // e_phnum
+        b.resize(64, 0);
+        for (p_type, off, len) in [(0x6474_e552u32, 0, 0), (2, dyn_off, filesz)] {
+            b.extend_from_slice(&p_type.to_le_bytes());
+            b.extend_from_slice(&4u32.to_le_bytes()); // p_flags R
+            b.extend_from_slice(&off.to_le_bytes()); // p_offset
+            b.extend_from_slice(&[0; 16]); // p_vaddr, p_paddr
+            b.extend_from_slice(&len.to_le_bytes()); // p_filesz
+            b.extend_from_slice(&len.to_le_bytes()); // p_memsz
+            b.extend_from_slice(&8u64.to_le_bytes()); // p_align
+        }
+        for (tag, val) in entries {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        }
+        b
+    }
+
+    fn read_bytes(bytes: &[u8]) -> Result<tl_collect::proc::detail::ElfInfo, CollectError> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("elf");
+        fs::write(&path, bytes).expect("write");
+        let file = open(&path, OFlags::empty());
+        read_elf(file.as_fd(), &mut Vec::new())
+    }
+
+    #[test]
+    fn elf_bind_now_after_64_kib_of_dynamic() {
+        // 5000 entries of 16 bytes put DT_FLAGS 80000 bytes into the segment.
+        let late = relro_elf(5000, Some((30, 0x8)), None);
+        assert_eq!(read_bytes(&late).expect("read").relro, Relro::Full);
+        let late_flags_1 = relro_elf(5000, Some((0x6fff_fffb, 0x1)), None);
+        assert_eq!(read_bytes(&late_flags_1).expect("read").relro, Relro::Full);
+        let none = relro_elf(5000, None, None);
+        assert_eq!(read_bytes(&none).expect("read").relro, Relro::Partial);
+        let early = relro_elf(0, Some((24, 0)), None);
+        assert_eq!(read_bytes(&early).expect("read").relro, Relro::Full);
+    }
+
+    #[test]
+    fn elf_dynamic_past_end_of_file_is_not_elf() {
+        let bytes = relro_elf(0, None, Some(4096));
+        assert!(matches!(read_bytes(&bytes), Err(CollectError::NotElf)));
+        let bytes = relro_elf(0, None, Some(u64::MAX));
+        assert!(matches!(read_bytes(&bytes), Err(CollectError::NotElf)));
+    }
 }

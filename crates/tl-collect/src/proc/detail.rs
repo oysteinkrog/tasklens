@@ -1727,9 +1727,6 @@ const DF_1_NOW: u64 = 0x1;
 pub const ADDR_NO_RANDOMIZE: u32 = 0x004_0000;
 /// The `PT_DYNAMIC` segment is read in chunks of this size, a multiple of both entry sizes.
 const DYNAMIC_CHUNK: u64 = 4096;
-/// At most this many bytes of `PT_DYNAMIC` are walked. Real executables use well under 1 KiB,
-/// so a hostile file cannot make the walk read the whole file.
-const DYNAMIC_MAX: u64 = 64 * 1024;
 /// The MZ header holds `e_lfanew`, the offset of the PE header, at this offset.
 const PE_LFANEW_OFFSET: u64 = 0x3c;
 
@@ -1882,7 +1879,9 @@ pub fn read_elf(file: BorrowedFd<'_>, buf: &mut Vec<u8>) -> Result<ElfInfo, Coll
 
     let relro = if !has_relro {
         Relro::None
-    } else if dynamic.is_some_and(|(off, len)| binds_now(file, size, buf, off, len, class64)) {
+    } else if let Some((off, len)) = dynamic
+        && binds_now(file, size, buf, off, len, class64)?
+    {
         Relro::Full
     } else {
         Relro::Partial
@@ -1896,8 +1895,9 @@ pub fn read_elf(file: BorrowedFd<'_>, buf: &mut Vec<u8>) -> Result<ElfInfo, Coll
     })
 }
 
-/// Whether the `PT_DYNAMIC` segment at `off..off + len` asks for immediate binding. The range is
-/// clamped to the file size and to [`DYNAMIC_MAX`]. A read error counts as no.
+/// Whether the `PT_DYNAMIC` segment at `off..off + len` asks for immediate binding. The walk
+/// stops at `DT_NULL` and reads one chunk at a time, so it never reads past the segment. A
+/// segment that runs past the end of the file gives `NotElf`, and a read error gives `ProcRead`.
 fn binds_now(
     file: BorrowedFd<'_>,
     size: u64,
@@ -1905,34 +1905,35 @@ fn binds_now(
     off: u64,
     len: u64,
     class64: bool,
-) -> bool {
+) -> Result<bool, CollectError> {
     let (entry, word) = if class64 { (16, 8) } else { (8, 4) };
-    let end = off.saturating_add(len.min(DYNAMIC_MAX)).min(size);
+    let end = off.checked_add(len).ok_or(CollectError::NotElf)?;
+    if end > size {
+        return Err(CollectError::NotElf);
+    }
     let mut pos = off;
-    while pos < end {
-        // Whole entries only.
+    // Whole entries only. Trailing bytes shorter than one entry are ignored.
+    while end - pos >= entry as u64 {
         let chunk = (end - pos).min(DYNAMIC_CHUNK) / entry as u64 * entry as u64;
-        if chunk == 0 || pread_exact(file, size, buf, pos, chunk).is_err() {
-            return false;
-        }
+        pread_exact(file, size, buf, pos, chunk)?;
         for dyn_entry in buf.chunks_exact(entry) {
             let (Some(tag), Some(val)) = (
                 le_word(dyn_entry, 0, class64),
                 le_word(dyn_entry, word, class64),
             ) else {
-                return false;
+                return Err(CollectError::NotElf);
             };
             match tag {
-                DT_NULL => return false,
-                DT_BIND_NOW => return true,
-                DT_FLAGS if val & DF_BIND_NOW != 0 => return true,
-                DT_FLAGS_1 if val & DF_1_NOW != 0 => return true,
+                DT_NULL => return Ok(false),
+                DT_BIND_NOW => return Ok(true),
+                DT_FLAGS if val & DF_BIND_NOW != 0 => return Ok(true),
+                DT_FLAGS_1 if val & DF_1_NOW != 0 => return Ok(true),
                 _ => {}
             }
         }
         pos += chunk;
     }
-    false
+    Ok(false)
 }
 
 /// The architecture word on the General tab. The class does not change the word.
