@@ -25,7 +25,6 @@ use tl_model::snapshot::{
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::GlobalDemand;
 use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
@@ -726,17 +725,13 @@ impl General {
         }
     }
 
+    /// Every toast this window's action layer pushed, oldest first.
     fn toasts(&self, cx: &mut TestAppContext) -> Vec<String> {
-        self.handle
-            .update(cx, |_, window, cx| {
-                ToastQueue::of_window(window, cx)
-                    .map(|q| {
-                        let texts = q.read(cx).visible_texts();
-                        texts.iter().map(|t| t.to_string()).collect()
-                    })
-                    .unwrap_or_default()
-            })
-            .expect("window")
+        cx.read(|cx| {
+            let actions = self.win.read(cx).actions().clone();
+            let pushed = actions.read(cx).pushed();
+            pushed.iter().map(|t| t.text.to_string()).collect()
+        })
     }
 }
 

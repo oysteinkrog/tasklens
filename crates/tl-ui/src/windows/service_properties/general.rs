@@ -15,8 +15,8 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EntityId,
     FocusHandle, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement as _, Pixels, Point, Render, Role, SharedString, Styled as _, Subscription,
-    Window, div, gpui, px,
+    ParentElement as _, Pixels, Point, Render, Role, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionTarget};
