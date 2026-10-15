@@ -1617,6 +1617,33 @@ mod window {
         (g, h)
     }
 
+    /// A later sweep: new versions of the process records and the table groups, so the
+    /// windows see both components change.
+    fn sweep(
+        engine: &FakeEngine,
+        main: &mut VisualTestContext,
+        records: Vec<ProcessRecord>,
+        groups: Vec<GroupRow>,
+    ) {
+        engine.publish_with(|s| {
+            let p = Arc::make_mut(&mut s.processes);
+            p.records = Arc::from(records);
+            p.header.version += 1;
+            let t = Arc::make_mut(&mut s.table);
+            t.groups = Arc::from(groups);
+            t.header.version += 1;
+        });
+        main.run_until_parked();
+    }
+
+    /// `publish_two_apps` again as a later sweep, with G's row count set to `g_members`.
+    fn sweep_two_apps(engine: &FakeEngine, main: &mut VisualTestContext, g_members: u32) {
+        let g = app_group("Firefox", GroupRowKind::App, g_members);
+        let h = app_group("Chrome", GroupRowKind::App, 1);
+        let records = vec![member(101, g.key), member(102, h.key), member(103, g.key)];
+        sweep(engine, main, records, vec![g, h]);
+    }
+
     fn open_processes_tab(
         cx: &mut TestAppContext,
         group: GroupKey,
@@ -1671,7 +1698,7 @@ mod window {
 
         // Not active: sweeps arrive and no member pass runs, in the tab or in the window. The
         // row says 5 while two records belong to G, so a window scan for the label would show 2.
-        publish_two_apps(&engine, &mut main, 5);
+        sweep_two_apps(&engine, &mut main, 5);
         assert_eq!(passes(&mut vcx), 0);
         assert_eq!(
             vcx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses)),
@@ -1689,7 +1716,7 @@ mod window {
         assert_eq!(view_pids(&mut vcx, &view), [101, 103]);
 
         // Active: one pass per sweep, and the label counts that pass.
-        publish_two_apps(&engine, &mut main, 5);
+        sweep_two_apps(&engine, &mut main, 5);
         assert_eq!(passes(&mut vcx), 2);
         assert_eq!(
             vcx.read(|cx| view.read(cx).tab_text(DetailTab::AppProcesses)),
@@ -1757,7 +1784,7 @@ mod window {
         assert_eq!(label(cx), "Processes [34]");
 
         let filtered = app_group("Firefox", GroupRowKind::App, 5);
-        publish_table(&engine, &mut main, records, vec![filtered], Vec::new());
+        sweep(&engine, &mut main, records, vec![filtered]);
         assert_eq!(label(cx), "Processes [34]", "the label follows the list");
     }
 
