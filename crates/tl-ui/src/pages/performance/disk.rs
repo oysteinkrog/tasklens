@@ -538,10 +538,18 @@ pub fn update_disk_details_p2(
                 (ROW_TOTAL_READ, t.read_total, t.read_bps),
                 (ROW_TOTAL_WRITTEN, t.written_total, t.write_bps),
             ] {
-                changed |= model.set_valid(label, n, |o| units::bytes(o, n));
-                if rate.validity == Validity::Stale {
-                    changed |= model.set_stale(label, age_ns(inp));
-                }
+                // The totals share the diskstats read with the rates, so the rate's
+                // validity decides whether the byte count can be shown.
+                changed |= match rate.validity {
+                    Validity::Valid | Validity::Stale => {
+                        let mut c = model.set_valid(label, n, |o| units::bytes(o, n));
+                        if rate.validity == Validity::Stale {
+                            c |= model.set_stale(label, age_ns(inp));
+                        }
+                        c
+                    }
+                    v => field_fallback(model, label, v, inp),
+                };
             }
         }
         None => {

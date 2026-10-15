@@ -1056,4 +1056,23 @@ mod disk_p2 {
         let m = model(cx, &t, &d);
         assert_eq!(value(&m, "Temperature").as_deref(), Some("Not reported"));
     }
+
+    #[gpui_kit::test]
+    fn disk_totals_failed_read_shows_fallback(cx: &mut TestAppContext) {
+        let mut t = totals();
+        t.read_bps = Metric::with(Validity::Failed);
+        t.write_bps = Metric::with(Validity::Unsupported);
+        let m = model(cx, &t, &nvme_details());
+        assert_eq!(value(&m, "Total read").as_deref(), Some("Unavailable"));
+        assert_eq!(value(&m, "Total written").as_deref(), Some("Not reported"));
+    }
+
+    #[gpui_kit::test]
+    fn disk_totals_missing_read_is_warming_up(cx: &mut TestAppContext) {
+        let mut t = totals();
+        t.read_bps = Metric::with(Validity::Missing);
+        let m = model(cx, &t, &nvme_details());
+        assert_eq!(value(&m, "Total read").as_deref(), Some("Unavailable"));
+        assert_eq!(value(&m, "Total written").as_deref(), Some("400.00 GiB"));
+    }
 }
