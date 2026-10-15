@@ -650,7 +650,34 @@ fn general_restricted_word_and_tooltip(cx: &mut TestAppContext) {
     assert_eq!(look.text.as_ref(), "Restricted");
     assert_eq!(look.color, secondary);
     assert_eq!(tooltip.as_deref(), Some(RESTRICTED_TOOLTIP));
-    assert_eq!(RESTRICTED_TOOLTIP, "Needs administrator access.");
+    assert_eq!(
+        RESTRICTED_TOOLTIP,
+        "Needs administrator access. Click the shield to grant it."
+    );
+}
+
+/// UI-PWN-006, R-050: in P3 a Restricted value tells the user to click the shield.
+#[gpui_kit::test]
+fn restricted_tooltip_p3_text(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    let mut d = detail("firefox");
+    d.cwd = Total {
+        value: text(""),
+        validity: Validity::Restricted,
+    };
+    feed(&t, cx, Some(&payload(d)), 1.);
+    draw(cx);
+    let tooltip = cx.update(|_, cx| {
+        (0..3)
+            .flat_map(|i| t.read(cx).rows(i))
+            .find(|r| r.value.validity == Validity::Restricted)
+            .and_then(|r| r.value.tooltip.clone())
+    });
+    assert_eq!(
+        tooltip.as_deref(),
+        Some("Needs administrator access. Click the shield to grant it.")
+    );
 }
 
 fn exe_and_pid_looks(
@@ -1090,6 +1117,7 @@ mod window {
     use tl_model::command::{Command, Tab};
     use tl_model::demand::DetailDemand;
     use tl_model::details::{DetailTab, DetailTarget, TargetDetail};
+    use tl_model::health::{HelperStartOutcome, HelperState};
     use tl_model::ids::{ColumnId, NodeId};
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind};
     use tl_model::settings::{Settings, UiState};
@@ -1097,6 +1125,7 @@ mod window {
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::menu::TlMenu;
+    use tl_ui::components::shield::StartHelperSession;
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::demand::GlobalDemand;
     use tl_ui::pages::processes::ProcessesPage;
@@ -1111,8 +1140,8 @@ mod window {
         APP_EXITED_BANNER, AppProcsGoTo, AppPropsWindow, open_app_properties,
     };
     use tl_ui::windows::props::{
-        ACCESS_ENV, ACCESS_FDS, ACCESS_MAPS, ACCESS_SECURITY, ACCESS_STRINGS, PropsWindow,
-        open_process_properties, props_words,
+        ACCESS_ENV, ACCESS_FDS, ACCESS_MAPS, ACCESS_SECURITY, ACCESS_STRINGS, AccessButton,
+        PropsWindow, open_process_properties, props_words,
     };
 
     use super::*;
@@ -3928,6 +3957,225 @@ mod window {
         rig.vcx.run_until_parked();
         assert!(!window_open(cx, rig.handle));
     }
+
+    // ---- Grant access and Enable (E23-025, UI-PWN-018 P3) ----
+
+    fn publish_helper(
+        cx: &mut TestAppContext,
+        engine: &FakeEngine,
+        helper: HelperState,
+        start: Option<(u64, HelperStartOutcome)>,
+    ) {
+        engine.publish_with(|s| {
+            let health = Arc::make_mut(&mut s.health);
+            health.helper = helper;
+            health.helper_start = start;
+            health.version += 1;
+        });
+        cx.run_until_parked();
+    }
+
+    /// Counts `StartHelperSession` dispatches that reach the app.
+    fn count_helper_starts(cx: &mut TestAppContext) -> Rc<Cell<u32>> {
+        let starts = Rc::new(Cell::new(0));
+        let count = starts.clone();
+        cx.update(|cx| cx.on_action(move |_: &StartHelperSession, _| count.set(count.get() + 1)));
+        starts
+    }
+
+    /// A Properties window for pid 4321 with `tab` active and `Restricted`.
+    fn restricted_window(
+        cx: &mut TestAppContext,
+        engine: &FakeEngine,
+        tab: DetailTab,
+    ) -> (AnyWindowHandle, Entity<PropsWindow>, VisualTestContext) {
+        publish_records(cx, engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        publish_detail(cx, engine, 4321, |d| {
+            d.tabs[tab.index()].validity = Validity::Restricted;
+        });
+        vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(tab, window, cx)));
+        draw(&mut vcx);
+        (handle, view, vcx)
+    }
+
+    fn button_label(vcx: &mut VisualTestContext, view: &Entity<PropsWindow>) -> Option<String> {
+        vcx.update(|_, cx| view.read(cx).access_button().map(|b| b.label.to_string()))
+    }
+
+    #[gpui_kit::test]
+    fn access_buttons_per_tab(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_helper(cx, &engine, HelperState::Locked, None);
+        let (_, view, mut vcx) = restricted_window(cx, &engine, DetailTab::Fds);
+        for tab in [
+            DetailTab::Fds,
+            DetailTab::Maps,
+            DetailTab::Environment,
+            DetailTab::Strings,
+            DetailTab::Security,
+        ] {
+            publish_detail(cx, &engine, 4321, |d| {
+                d.tabs[tab.index()].validity = Validity::Restricted;
+            });
+            vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(tab, window, cx)));
+            draw(&mut vcx);
+            assert!(vcx.debug_bounds("PropsAccessBlock").is_some(), "{tab:?}");
+            let button = vcx.update(|_, cx| view.read(cx).access_button());
+            match tab {
+                DetailTab::Security => {
+                    assert_eq!(button, None, "Security has no button");
+                    assert!(vcx.debug_bounds("PropsAccessButton").is_none());
+                }
+                DetailTab::Strings => {
+                    let b = button.expect("Strings button");
+                    assert_eq!(b.kind, AccessButton::Enable);
+                    assert_eq!(b.label.as_ref(), "Enable");
+                    assert!(!b.disabled && !b.loading);
+                    assert!(vcx.debug_bounds("PropsAccessButton").is_some());
+                }
+                _ => {
+                    let b = button.expect("button");
+                    assert_eq!(b.kind, AccessButton::GrantAccess, "{tab:?}");
+                    assert_eq!(b.label.as_ref(), "Grant access", "{tab:?}");
+                    assert!(!b.disabled && !b.loading, "{tab:?}");
+                    assert!(vcx.debug_bounds("PropsAccessButton").is_some(), "{tab:?}");
+                }
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn access_button_waiting_label(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        let starts = count_helper_starts(cx);
+        publish_helper(cx, &engine, HelperState::Locked, None);
+        let (_, view, mut vcx) = restricted_window(cx, &engine, DetailTab::Fds);
+        let focused = vcx.update(|window, cx| view.read(cx).access_focus().is_focused(window));
+        assert!(focused, "the button is the body's first focus stop");
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert_eq!(starts.get(), 1, "Enter dispatches StartHelperSession");
+        assert!(
+            !engine
+                .commands()
+                .iter()
+                .any(|c| matches!(c, Command::StartHelperSession)),
+            "the button only dispatches the Action"
+        );
+
+        publish_helper(cx, &engine, HelperState::Starting, None);
+        draw(&mut vcx);
+        let b = vcx
+            .update(|_, cx| view.read(cx).access_button())
+            .expect("button");
+        assert_eq!(b.label.as_ref(), "Waiting for authentication\u{2026}");
+        assert!(b.loading);
+        assert!(vcx.debug_bounds("TlButton-spinner").is_some());
+
+        vcx.simulate_keystrokes("space");
+        vcx.run_until_parked();
+        assert_eq!(starts.get(), 1, "a loading button is inert");
+    }
+
+    #[gpui_kit::test]
+    fn access_cancelled_toast(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        let starts = count_helper_starts(cx);
+        publish_helper(cx, &engine, HelperState::Locked, None);
+        let (handle, view, mut vcx) = restricted_window(cx, &engine, DetailTab::Maps);
+
+        // A cancel of a start this window did not make does not toast here.
+        publish_helper(
+            cx,
+            &engine,
+            HelperState::Locked,
+            Some((1, HelperStartOutcome::Cancelled)),
+        );
+        assert!(props_toasts(cx, handle).is_empty());
+
+        vcx.simulate_keystrokes("space");
+        vcx.run_until_parked();
+        assert_eq!(starts.get(), 1, "Space dispatches StartHelperSession");
+        publish_helper(cx, &engine, HelperState::Starting, None);
+        for _ in 0..2 {
+            publish_helper(
+                cx,
+                &engine,
+                HelperState::Locked,
+                Some((2, HelperStartOutcome::Cancelled)),
+            );
+        }
+        draw(&mut vcx);
+        assert_eq!(props_toasts(cx, handle), ["Authentication cancelled"]);
+        assert_eq!(
+            button_label(&mut vcx, &view).as_deref(),
+            Some("Grant access")
+        );
+        let b = vcx
+            .update(|_, cx| view.read(cx).access_button())
+            .expect("button");
+        assert!(!b.loading && !b.disabled, "back to default");
+    }
+
+    #[gpui_kit::test]
+    fn access_session_active_sends_refresh(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_helper(cx, &engine, HelperState::Locked, None);
+        let (_, view, mut vcx) = restricted_window(cx, &engine, DetailTab::Fds);
+        let refreshes = |engine: &FakeEngine| {
+            engine
+                .commands()
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        Command::DetailRefresh { target, tab: DetailTab::Fds }
+                            if *target == DetailTarget::Process(key(4321))
+                    )
+                })
+                .count()
+        };
+        assert_eq!(refreshes(&engine), 0);
+        publish_helper(cx, &engine, HelperState::Unlocked, None);
+        publish_helper(cx, &engine, HelperState::Unlocked, None);
+        draw(&mut vcx);
+        assert_eq!(
+            refreshes(&engine),
+            1,
+            "one DetailRefresh for the active tab"
+        );
+        assert!(
+            vcx.debug_bounds("PropsAccessBlock").is_none(),
+            "the tab shows its loading state"
+        );
+        assert_eq!(vcx.update(|_, cx| view.read(cx).access_button()), None);
+    }
+
+    #[gpui_kit::test]
+    fn access_button_disabled_without_helper(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        let starts = count_helper_starts(cx);
+        publish_helper(cx, &engine, HelperState::Missing, None);
+        let (_, view, mut vcx) = restricted_window(cx, &engine, DetailTab::Environment);
+        let b = vcx
+            .update(|_, cx| view.read(cx).access_button())
+            .expect("button");
+        assert!(b.disabled);
+        assert_eq!(b.label.as_ref(), "Grant access");
+        assert_eq!(
+            b.tooltip.as_deref(),
+            Some("Needs administrator helper (not installed)")
+        );
+        assert!(vcx.debug_bounds("PropsAccessButton").is_some());
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert_eq!(starts.get(), 0, "a disabled button dispatches nothing");
+    }
 }
 
 // ---- Threads tab (E23-016, UI-PWN-010) ----
@@ -5112,6 +5360,21 @@ mod security {
             );
         });
         assert!(cx.debug_bounds("TlTreeTable-empty").is_some());
+    }
+
+    /// R-050 P3 text on a Restricted Security row.
+    #[gpui_kit::test]
+    fn security_restricted_tooltip_p3_text(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.namespaces[2].validity = Validity::Restricted;
+        feed(&view, cx, d);
+        let ns = SecField::Ns(NsKind::Net);
+        let tip = cx.update(|_, cx| view.read(cx).tab.read(cx).tooltip(ns));
+        assert_eq!(
+            tip.as_deref(),
+            Some("Needs administrator access. Click the shield to grant it.")
+        );
     }
 
     #[gpui_kit::test]

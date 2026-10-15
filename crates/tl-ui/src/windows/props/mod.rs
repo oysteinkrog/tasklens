@@ -9,6 +9,8 @@
 //! their own setters and notify themselves.
 //!
 //! Every tab has its view. A tab whose payload is `Restricted` shows the access block instead.
+//! Its Grant access or Enable button dispatches `StartHelperSession`, the shield's Action. When
+//! the helper session becomes active the window sends one `DetailRefresh` for its active tab.
 
 pub mod environ;
 pub mod fds;
@@ -35,6 +37,7 @@ use gpui_kit::{
 use tl_model::command::Command;
 use tl_model::demand::{Demand, DetailDemand};
 use tl_model::details::{DetailTab, DetailTarget, TabSlot, TargetDetail};
+use tl_model::health::{HelperStartOutcome, HelperState};
 use tl_model::ids::ProcessKey;
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::{ComponentMask, Snapshot};
@@ -52,7 +55,9 @@ use self::security::SecurityTab;
 use self::strings::StringsTab;
 use self::threads::ThreadsTab;
 use crate::app::EngineGlobal;
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::menu::{close_context_menu, context_menu_open};
+use crate::components::shield::StartHelperSession;
 use crate::components::tabs::{TlTabSpec, TlTabs};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::TlSecondaryWindow;
@@ -121,6 +126,11 @@ const KEY_TOO_MANY: &str = "pwn-props-too-many-windows";
 const KEY_OPEN_FAILED: &str = "fnd-props-open-failed";
 const KEY_EXITED: &str = "pwn-props-exited-banner";
 const KEY_NOT_RUNNING: &str = "pwn-props-not-running";
+const KEY_ACCESS_GRANT: &str = "pwn-props-access-grant";
+const KEY_ACCESS_ENABLE: &str = "pwn-props-access-enable";
+const KEY_ACCESS_WAITING: &str = "pwn-props-access-waiting";
+const KEY_ACCESS_NO_HELPER: &str = "pwn-props-access-no-helper";
+const KEY_AUTH_CANCELLED: &str = "pwn-props-toast-auth-cancelled";
 const KEY_ACCESS: [(&str, &str); 5] = [
     (ACCESS_FDS, "pwn-props-access-fds"),
     (ACCESS_MAPS, "pwn-props-access-maps"),
@@ -144,6 +154,12 @@ pub struct PropsWords {
     pub not_running: SharedString,
     /// The access block texts, in [`KEY_ACCESS`] order.
     access: [SharedString; 5],
+    pub access_grant: SharedString,
+    pub access_enable: SharedString,
+    pub access_waiting: SharedString,
+    /// Tooltip of the disabled access button when the helper is not installed.
+    pub access_no_helper: SharedString,
+    pub auth_cancelled: SharedString,
 }
 
 impl PropsWords {
@@ -162,6 +178,11 @@ impl PropsWords {
             exited_banner: t(KEY_EXITED),
             not_running: t(KEY_NOT_RUNNING),
             access: KEY_ACCESS.map(|(_, key)| t(key)),
+            access_grant: t(KEY_ACCESS_GRANT),
+            access_enable: t(KEY_ACCESS_ENABLE),
+            access_waiting: t(KEY_ACCESS_WAITING),
+            access_no_helper: t(KEY_ACCESS_NO_HELPER),
+            auth_cancelled: t(KEY_AUTH_CANCELLED),
         }
     }
 
@@ -216,21 +237,116 @@ pub fn props_words(cx: &mut App) -> Rc<PropsWords> {
 
 // ---- Access block (UI-PWN-018) ----
 
+/// The button under the access block text (UI-PWN-018, P3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessButton {
+    /// "Grant access": File descriptors, Memory maps and Environment.
+    GrantAccess,
+    /// "Enable": Strings.
+    Enable,
+}
+
+/// The access button of `tab`. Security has none: only hidepid hides its world-readable files.
+pub fn access_button(tab: DetailTab) -> Option<AccessButton> {
+    match tab {
+        DetailTab::Fds | DetailTab::Maps | DetailTab::Environment => {
+            Some(AccessButton::GrantAccess)
+        }
+        DetailTab::Strings => Some(AccessButton::Enable),
+        _ => None,
+    }
+}
+
+/// What the access button shows for one helper state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccessButtonView {
+    pub kind: AccessButton,
+    pub label: SharedString,
+    pub disabled: bool,
+    pub loading: bool,
+    pub tooltip: Option<SharedString>,
+}
+
+/// The access button for `helper`. An exited process or a missing helper disables it; while the
+/// authentication prompt is pending it shows "Waiting for authentication…" as loading.
+pub fn access_button_view(
+    kind: AccessButton,
+    helper: HelperState,
+    exited: bool,
+    words: &PropsWords,
+) -> AccessButtonView {
+    let label = match kind {
+        AccessButton::GrantAccess => words.access_grant.clone(),
+        AccessButton::Enable => words.access_enable.clone(),
+    };
+    let view = AccessButtonView {
+        kind,
+        label,
+        disabled: false,
+        loading: false,
+        tooltip: None,
+    };
+    if exited {
+        return AccessButtonView {
+            disabled: true,
+            tooltip: Some(words.not_running.clone()),
+            ..view
+        };
+    }
+    match helper {
+        HelperState::Missing => AccessButtonView {
+            disabled: true,
+            tooltip: Some(words.access_no_helper.clone()),
+            ..view
+        },
+        HelperState::Starting => AccessButtonView {
+            label: words.access_waiting.clone(),
+            loading: true,
+            ..view
+        },
+        HelperState::Locked | HelperState::Unlocked => view,
+    }
+}
+
 /// The block a tab shows instead of its body when its payload is `Restricted`.
 #[derive(IntoElement)]
 pub struct AccessBlock {
     text: &'static str,
+    button: Option<AccessButton>,
+    view: Option<AccessButtonView>,
+    focus: Option<FocusHandle>,
 }
 
 /// Centred 64 px under the body top: the `shield-alert` icon, then `text` (an `ACCESS_*`
-/// constant), translated. P2 has no button.
-pub fn access_block(text: &'static str) -> impl IntoElement {
-    AccessBlock { text }
+/// constant), translated, then the button, if any. The button dispatches `StartHelperSession`
+/// and never runs anything itself.
+pub fn access_block(text: &'static str, button: Option<AccessButton>) -> AccessBlock {
+    AccessBlock {
+        text,
+        button,
+        view: None,
+        focus: None,
+    }
+}
+
+impl AccessBlock {
+    /// The button state. Without it the button shows its default look.
+    pub fn view(mut self, view: AccessButtonView) -> Self {
+        self.view = Some(view);
+        self
+    }
+
+    /// The owner's focus handle for the button, so the owner can focus it first.
+    pub fn focus(mut self, focus: FocusHandle) -> Self {
+        self.focus = Some(focus);
+        self
+    }
 }
 
 impl RenderOnce for AccessBlock {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let text = props_words(cx).access(self.text);
+        let words = props_words(cx);
+        let text = words.access(self.text);
         let theme = current(cx);
         let m = *metrics(cx);
         let s = m.ui_scale;
@@ -240,6 +356,24 @@ impl RenderOnce for AccessBlock {
             .text_center()
             .text_color(theme.text_primary);
         *message.text_style() = t_base(&m);
+        let button = self.button.map(|kind| {
+            let view = self
+                .view
+                .unwrap_or_else(|| access_button_view(kind, HelperState::Locked, false, &words));
+            div()
+                .debug_selector(|| "PropsAccessButton".into())
+                .mt(m.sp[5] - m.sp[4])
+                .child(
+                    TlButton::new("PropsAccessButton", TlButtonKind::Secondary)
+                        .size(TlButtonSize::Sm)
+                        .label(view.label)
+                        .action(Box::new(StartHelperSession))
+                        .disabled(view.disabled)
+                        .loading(view.loading)
+                        .when_some(view.tooltip, |b, tip| b.tooltip(tip))
+                        .when_some(self.focus, |b, focus| b.focus_handle(focus)),
+                )
+        });
         v_flex()
             .debug_selector(|| "PropsAccessBlock".into())
             .size_full()
@@ -253,6 +387,7 @@ impl RenderOnce for AccessBlock {
                     .text_color(theme.text_secondary),
             )
             .child(message.child(text))
+            .children(button)
     }
 }
 
@@ -380,6 +515,15 @@ pub struct PropsWindow {
     online: CpuSet,
     words: Rc<PropsWords>,
     focus: FocusHandle,
+    /// The helper session state from `Snapshot.health`.
+    helper: HelperState,
+    /// The last `helper_start` seq seen, so an outcome toasts at most once.
+    start_seq: Option<u64>,
+    /// The access button of this window started the helper and no outcome has come yet. Only
+    /// then does a cancel toast here; the shield's own starts toast in the main window.
+    grant_pending: bool,
+    /// Focus handle of the access button, the body's first focus stop while it shows.
+    access_focus: FocusHandle,
     /// The demand source id; `None` once the entry is removed.
     demand: Option<EntityId>,
     renders: u64,
@@ -427,6 +571,10 @@ impl PropsWindow {
             online: CpuSet::empty(),
             words,
             focus: cx.focus_handle(),
+            helper: HelperState::default(),
+            start_seq: None,
+            grant_pending: false,
+            access_focus: cx.focus_handle(),
             demand: None,
             renders: 0,
             _subs: subs,
@@ -445,6 +593,9 @@ impl PropsWindow {
 
         if let Some(hub) = hub {
             let snap = hub.read(cx).current().clone();
+            // An outcome from before the window opened never toasts here.
+            this.helper = snap.health.helper;
+            this.start_seq = snap.health.helper_start.as_ref().map(|(seq, _)| *seq);
             this.take_snapshot(&snap, ComponentMask::ALL, window, cx);
         }
         this.focus_first(window, cx);
@@ -490,6 +641,41 @@ impl PropsWindow {
     /// The window texts.
     pub fn words(&self) -> &Rc<PropsWords> {
         &self.words
+    }
+
+    /// The helper session state this window last read.
+    pub fn helper(&self) -> HelperState {
+        self.helper
+    }
+
+    /// The access button the body shows now, or `None` when it shows none.
+    pub fn access_button(&self) -> Option<AccessButtonView> {
+        self.shown_access_button()
+            .map(|kind| access_button_view(kind, self.helper, self.exited, &self.words))
+    }
+
+    /// The focus handle of the access button.
+    pub fn access_focus(&self) -> &FocusHandle {
+        &self.access_focus
+    }
+
+    /// The payload of the active tab is `Restricted`.
+    fn active_restricted(&self) -> bool {
+        self.last_detail
+            .as_ref()
+            .is_some_and(|d| d.tab(self.active).validity == Validity::Restricted)
+    }
+
+    /// The body shows the access block: the active tab is `Restricted` and the helper session
+    /// is not active. Once it is, the tab shows its loading state until the helper read comes.
+    fn shows_access_block(&self) -> bool {
+        self.active != DetailTab::General
+            && self.active_restricted()
+            && self.helper != HelperState::Unlocked
+    }
+
+    fn shown_access_button(&self) -> Option<AccessButton> {
+        access_button(self.active).filter(|_| self.shows_access_block())
     }
 
     /// The label of `tab` with its count, such as "File descriptors [1 204]". For tests and the
@@ -675,9 +861,23 @@ impl PropsWindow {
         }
     }
 
-    /// Focuses the active tab's first focusable element: the filter for General and Security,
-    /// the table for Threads, else the window root until the tab has its view.
+    /// Focuses the active tab's first focusable element: the access button while the block
+    /// shows it, the filter for General and Security, the table for Threads, else the window
+    /// root until the tab has its view.
     fn focus_first(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.access_button() {
+            if view.disabled {
+                self.focus.focus(window, cx);
+            } else {
+                self.access_focus.focus(window, cx);
+            }
+            return;
+        }
+        if self.shows_access_block() {
+            // Security: the block has no button, so the filter comes first.
+            self.focus_filter(window, cx);
+            return;
+        }
         match self.active {
             DetailTab::General | DetailTab::Security => self.focus_filter(window, cx),
             DetailTab::Threads => match &self.tabs.threads {
@@ -732,6 +932,29 @@ impl PropsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let button_before = self.access_button().map(|v| v.disabled);
+        self.take_snapshot_inner(snap, mask, window, cx);
+        // The block came or went, or the button was enabled or disabled: move focus to the new
+        // first stop, unless the user is typing in the filter.
+        if button_before != self.access_button().map(|v| v.disabled) {
+            let input = self.filter[strip_index(self.active)].read(cx).input.clone();
+            let typing = input.read(cx).focus_handle(cx).contains_focused(window, cx);
+            if !typing {
+                self.focus_first(window, cx);
+            }
+        }
+    }
+
+    fn take_snapshot_inner(
+        &mut self,
+        snap: &Snapshot,
+        mask: ComponentMask,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if mask.intersects(ComponentMask::HEALTH) {
+            self.take_health(snap, window, cx);
+        }
         if self.exited {
             return;
         }
@@ -856,6 +1079,57 @@ impl PropsWindow {
             if self.active != DetailTab::General && (active_changed || validity_changed) {
                 cx.notify();
             }
+        }
+    }
+
+    /// Reads the helper session state (UI-PWN-018). A cancel of this window's own start toasts
+    /// once per `helper_start` seq. When the session becomes active and the active tab or
+    /// General is `Restricted`, one `DetailRefresh` for the active tab re-reads it through the
+    /// helper.
+    fn take_health(&mut self, snap: &Snapshot, window: &mut Window, cx: &mut Context<Self>) {
+        let health = &snap.health;
+        if let Some((seq, outcome)) = &health.helper_start
+            && self.start_seq != Some(*seq)
+        {
+            self.start_seq = Some(*seq);
+            if std::mem::take(&mut self.grant_pending) && *outcome == HelperStartOutcome::Cancelled
+            {
+                let text = self.words.auth_cancelled.clone();
+                if let Some(queue) = ToastQueue::of_window(window, cx) {
+                    queue.update(cx, |q, cx| q.push(ToastKind::Info, text, None, None, cx));
+                }
+            }
+        }
+        let helper = health.helper;
+        if helper == self.helper {
+            return;
+        }
+        let unlocked = helper == HelperState::Unlocked && self.helper != HelperState::Unlocked;
+        self.helper = helper;
+        if helper == HelperState::Unlocked {
+            self.grant_pending = false;
+        }
+        let restricted = |tab| {
+            self.last_detail
+                .as_ref()
+                .is_some_and(|d| d.tab(tab).validity == Validity::Restricted)
+        };
+        if unlocked && !self.exited && (restricted(self.active) || restricted(DetailTab::General)) {
+            self.send(
+                Command::DetailRefresh {
+                    target: DetailTarget::Process(self.key),
+                    tab: self.active,
+                },
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// The access button started the helper: a cancel of this start toasts here.
+    fn on_start_helper(&mut self, _: &StartHelperSession, _: &mut Window, _: &mut Context<Self>) {
+        if !self.exited && self.helper == HelperState::Locked {
+            self.grant_pending = true;
         }
     }
 
@@ -1077,10 +1351,9 @@ impl PropsWindow {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element();
         }
-        let restricted_now = self
-            .last_detail
-            .as_ref()
-            .is_some_and(|d| d.tab(self.active).validity == Validity::Restricted);
+        // With the helper session active a Restricted tab shows its view, which shows its
+        // loading state until the helper read comes.
+        let restricted_now = self.shows_access_block();
         if self.active == DetailTab::Threads
             && !restricted_now
             && let Some(threads) = &self.tabs.threads
@@ -1129,12 +1402,15 @@ impl PropsWindow {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element();
         }
-        let restricted = self
-            .last_detail
-            .as_ref()
-            .is_some_and(|d| d.tab(self.active).validity == Validity::Restricted);
-        match access_text(self.active).filter(|_| restricted) {
-            Some(text) => access_block(text).into_any_element(),
+        match access_text(self.active).filter(|_| restricted_now) {
+            Some(text) => {
+                let mut block =
+                    access_block(text, access_button(self.active)).focus(self.access_focus.clone());
+                if let Some(view) = self.access_button() {
+                    block = block.view(view);
+                }
+                block.into_any_element()
+            }
             None => div().size_full().into_any_element(),
         }
     }
@@ -1207,6 +1483,7 @@ impl gpui_kit::Render for PropsWindow {
             .on_action(cx.listener(Self::on_start_string_scan))
             .on_action(cx.listener(Self::on_cancel_string_scan))
             .capture_action(cx.listener(Self::on_field_escape))
+            .capture_action(cx.listener(Self::on_start_helper))
             .on_action(on_clear(filter))
             .size_full()
             .flex()

@@ -98,9 +98,9 @@ gpui_kit::actions!(
     ]
 );
 
-/// The en-US tooltip of a Restricted value (R-050, P2 text; E23-025 adds the shield sentence in
-/// P3), for tests. The tab shows `pwn-general-restricted-tooltip`.
-pub const RESTRICTED_TOOLTIP: &str = "Needs administrator access.";
+/// The en-US tooltip of a Restricted value (R-050, P3 text with the shield sentence), for
+/// tests. The tab shows `pwn-general-restricted-tooltip`.
+pub const RESTRICTED_TOOLTIP: &str = "Needs administrator access. Click the shield to grant it.";
 
 /// Body width from which the three panels sit side by side, × ui_scale.
 pub const THREE_COLUMN_MIN: f32 = 840.;
