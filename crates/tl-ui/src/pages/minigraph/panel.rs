@@ -225,7 +225,7 @@ impl MinigraphPanel {
     /// is the next free slot.
     pub fn move_to_slot(&mut self, id: MinigraphId, slot: u16, cx: &mut Context<Self>) {
         let mut order: Vec<(u16, MinigraphId)> = self.attached().map(|e| (e.slot, e.id)).collect();
-        order.sort_unstable();
+        order.sort_unstable_by_key(|(slot, _)| *slot);
         let mut order: Vec<MinigraphId> = order.into_iter().map(|(_, id)| id).collect();
         let Some(from) = order.iter().position(|o| *o == id) else {
             return;

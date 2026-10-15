@@ -205,7 +205,7 @@ impl MinigraphCard {
     fn draggable(
         &self,
         el: Stateful<gpui_kit::Div>,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Stateful<gpui_kit::Div> {
         let card = cx.weak_entity();
         el.on_mouse_down(
