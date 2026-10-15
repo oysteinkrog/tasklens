@@ -479,6 +479,9 @@ fn sync_display_unit(model: &mut KeyValueModel, unit: NetworkUnit, auto_scale: b
 /// What the P2 rows are read from.
 #[derive(Clone, Copy, Default)]
 pub struct NetP2Inputs<'a> {
+    pub now_boot_ns: u64,
+    /// `observed_end` of the system component, for the Stale age.
+    pub observed_end_ns: u64,
     /// The interface's record in `Snapshot.device_details`; `None` before the first read.
     pub details: Option<&'a NetDetails>,
     /// The interface's record in `Snapshot.system` (1 Hz): state and link speed.
@@ -525,9 +528,17 @@ fn set_row_tooltip(
 
 /// A text row from an inventory string: Valid and non-empty shows the text, Unsupported and an
 /// empty value read "Not reported", anything else "Unavailable".
-fn field_row(model: &mut KeyValueModel, label: &'static str, f: &InvField<Arc<str>>) -> bool {
+fn field_row(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    f: &InvField<Arc<str>>,
+    age_ns: u64,
+) -> bool {
     match f.validity {
-        Validity::Valid | Validity::Stale if !f.value.is_empty() => model.set_text(label, &f.value),
+        Validity::Valid if !f.value.is_empty() => model.set_text(label, &f.value),
+        Validity::Stale if !f.value.is_empty() => {
+            model.set_text(label, &f.value) | model.set_stale(label, age_ns)
+        }
         Validity::Valid | Validity::Stale | Validity::Unsupported => {
             model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None)
         }
@@ -569,6 +580,7 @@ fn link_speed_row(
     model: &mut KeyValueModel,
     t: Option<&NetTotals>,
     wifi: Option<&WifiInfo>,
+    age_ns: u64,
 ) -> bool {
     if let Some(WifiInfo {
         rx_mbps: Some(rx),
@@ -590,15 +602,31 @@ fn link_speed_row(
             Fallback::Unavailable,
             None,
         ),
-        Some(t) => match t.link_speed_mbps {
-            m if m.validity == Validity::Valid && m.value > 0 => {
+        Some(t) => {
+            let m = t.link_speed_mbps;
+            let valid = |model: &mut KeyValueModel| {
                 let (mbps, template) = (m.value, model.text(KEY_LINK_SPEED));
                 model.set_valid(ROW_LINK_SPEED, u64::from(mbps), |o| {
                     let _ = template.write(o, &[&mbps]);
                 })
+            };
+            match m.validity {
+                Validity::Valid if m.value > 0 => valid(model),
+                Validity::Stale if m.value > 0 => {
+                    valid(model) | model.set_stale(ROW_LINK_SPEED, age_ns)
+                }
+                Validity::Valid | Validity::Stale | Validity::Unsupported => {
+                    not_reported(model, ROW_LINK_SPEED)
+                }
+                Validity::Missing => model.set_fallback(
+                    ROW_LINK_SPEED,
+                    Validity::WarmingUp,
+                    Fallback::Unavailable,
+                    None,
+                ),
+                v => model.set_fallback(ROW_LINK_SPEED, v, Fallback::Unavailable, None),
             }
-            _ => not_reported(model, ROW_LINK_SPEED),
-        },
+        }
     }
 }
 
@@ -630,8 +658,8 @@ fn address_rows(model: &mut KeyValueModel, addresses: &[Arc<str>]) -> bool {
         SharedString::from(out)
     });
     let (shown, tip) = if global.is_empty() {
-        // Only link-local addresses: they are the value, so there is no tooltip.
-        (local, None)
+        // Only link-local addresses: they are the value and the tooltip keeps them too.
+        (local, tip)
     } else {
         (global, tip)
     };
@@ -749,7 +777,7 @@ pub fn update_net_details_p2(model: &mut KeyValueModel, inp: &NetP2Inputs) -> bo
         ] {
             changed |= model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None);
         }
-        changed |= link_speed_row(model, inp.totals, None);
+        changed |= link_speed_row(model, inp.totals, None, 0);
         changed |= set_row_tooltip(model, ROW_IPV6, None);
         if has_wifi {
             for label in WIFI_ROWS {
@@ -767,19 +795,20 @@ pub fn update_net_details_p2(model: &mut KeyValueModel, inp: &NetP2Inputs) -> bo
         let word = model.text(KEY_UNKNOWN_ADAPTER);
         model.set_text(ROW_ADAPTER, word.text())
     };
+    let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
     let word = model.text(type_key(&d.type_label, d.kind));
     changed |= model.set_text(ROW_TYPE, word.text());
     if has_wifi {
         changed |= wifi_rows(model, d.wifi.as_ref());
     }
-    changed |= link_speed_row(model, inp.totals, d.wifi.as_ref());
+    changed |= link_speed_row(model, inp.totals, d.wifi.as_ref(), age_ns);
     changed |= address_rows(model, &d.addresses);
-    changed |= field_row(model, ROW_MAC, &d.mac);
+    changed |= field_row(model, ROW_MAC, &d.mac, age_ns);
     let index = d.ifindex;
     changed |= model.set_valid(ROW_IFINDEX, u64::from(index), |o| {
         let _ = write!(o, "{index}");
     });
-    changed |= field_row(model, ROW_DRIVER, &d.driver);
+    changed |= field_row(model, ROW_DRIVER, &d.driver, age_ns);
     changed
 }
 
@@ -1094,6 +1123,8 @@ impl NetPage {
                 _ => None,
             });
         let p2 = NetP2Inputs {
+            now_boot_ns: inputs.now_boot_ns,
+            observed_end_ns: inputs.observed_end_ns,
             details,
             totals: inputs.totals,
             iface,

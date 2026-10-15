@@ -1727,6 +1727,8 @@ mod net_p2 {
     ) -> KeyValueModel {
         let mut model = net_details_model(wifi);
         let inp = NetP2Inputs {
+            now_boot_ns: 0,
+            observed_end_ns: 0,
             details: d,
             totals: Some(t),
             iface: Some("enp38s0"),
@@ -1882,6 +1884,51 @@ mod net_p2 {
     }
 
     #[gpui_kit::test]
+    fn net_link_speed_validity_words(cx: &mut TestAppContext) {
+        let d = ethernet();
+        for (v, word) in [
+            (Validity::Failed, "Unavailable"),
+            (Validity::Restricted, "Restricted"),
+            (Validity::WarmingUp, "Collecting…"),
+            (Validity::Unsupported, "Not reported"),
+        ] {
+            let t = totals(LinkState::Up, Metric::with(v));
+            let m = model(cx, false, Some(&d), &t);
+            assert_eq!(value(&m, "Link speed"), word, "{v:?}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn net_stale_mac_keeps_value_and_marks_stale(cx: &mut TestAppContext) {
+        let t = totals(LinkState::Up, Metric::valid(1000));
+        let mut d = ethernet();
+        d.mac.validity = Validity::Stale;
+        let m = model(cx, false, Some(&d), &t);
+        assert_eq!(value(&m, "MAC address"), "aa:bb:cc:dd:ee:ff");
+        let row = m
+            .rows
+            .iter()
+            .find(|r| r.label == "perf-net-row-mac")
+            .unwrap();
+        assert_eq!(row.validity, Validity::Stale);
+        assert!(row.tooltip.is_some());
+    }
+
+    #[gpui_kit::test]
+    fn net_ipv6_link_local_only_keeps_tooltip(cx: &mut TestAppContext) {
+        let t = totals(LinkState::Up, Metric::valid(1000));
+        let mut d = ethernet();
+        d.addresses = Arc::from([Arc::<str>::from("fe80::1/64")]);
+        let m = model(cx, false, Some(&d), &t);
+        assert_eq!(value(&m, "IPv6 address"), "fe80::1/64");
+        let tip = m
+            .to_kv_rows()
+            .find(|r| r.label.as_ref() == "IPv6 address")
+            .and_then(|r| r.value.tooltip.clone());
+        assert_eq!(tip.as_deref(), Some("Link-local: fe80::1/64"));
+    }
+
+    #[gpui_kit::test]
     fn net_tunnel_unknown_state(cx: &mut TestAppContext) {
         let t = totals(LinkState::Unknown, Metric::with(Validity::Unsupported));
         let mut d = ethernet();
@@ -1890,6 +1937,8 @@ mod net_p2 {
         let m = {
             let mut model = net_details_model(false);
             let inp = NetP2Inputs {
+                now_boot_ns: 0,
+                observed_end_ns: 0,
                 details: Some(&d),
                 totals: Some(&t),
                 iface: Some("tailscale0"),
