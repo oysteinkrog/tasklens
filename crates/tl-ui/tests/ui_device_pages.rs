@@ -1500,7 +1500,7 @@ mod disk_in_use {
             assert_eq!(w.groups()[0].rows.len(), 2, "101 and 103 share an app");
             assert_eq!(w.groups()[1].name.as_ref(), "Editor");
             assert_eq!(w.row_label().as_ref(), "End Task");
-            assert_eq!(w.intro().as_ref(), "These programs are using Disk 1 (sda):");
+            assert_eq!(w.intro().as_ref(), "These programs are using Disk 0 (sda):");
             assert!(!w.eacces_note());
         });
         assert!(vcx.debug_bounds("DiskInUseGroup-0").is_some());
@@ -1568,7 +1568,8 @@ mod disk_in_use {
         let sent = sent(&r);
         assert_eq!(sent.len(), 1, "one request");
         assert_eq!(sent[0].kind, ActionKind::Signal(Signal::Term));
-        let targets: Vec<_> = PIDS
+        // List order: the Files group (101, 103), then Editor (102).
+        let targets: Vec<_> = [101, 103, 102]
             .iter()
             .map(|p| ActionTarget::Process(pkey(*p)))
             .collect();
