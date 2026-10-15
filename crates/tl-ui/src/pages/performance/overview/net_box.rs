@@ -366,7 +366,7 @@ impl NetBox {
             notify_count: Cell::new(0),
         };
         this.sync_peaks(&snap, true);
-        this.sync_text(&snap, true, cx);
+        this.sync_text(&snap, true);
         this
     }
 
@@ -471,7 +471,7 @@ impl NetBox {
             }
         }
         let peaks = ev.mask.contains(ComponentMask::SERIES) && self.sync_peaks(&snap, false);
-        if self.sync_text(&snap, peaks, cx) {
+        if self.sync_text(&snap, peaks) {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
@@ -480,7 +480,7 @@ impl NetBox {
 
     /// The rates and totals when their inputs changed, or always with `force`. True when the
     /// text was formatted again.
-    fn sync_text(&mut self, snap: &Snapshot, force: bool, cx: &mut Context<Self>) -> bool {
+    fn sync_text(&mut self, snap: &Snapshot, force: bool) -> bool {
         let s = sums(snap, &self.net);
         let mut h = FxHasher::default();
         h.write_u64(s.rx.to_bits());
@@ -561,7 +561,7 @@ impl NetBox {
             self.rebuild_specs(cx);
         }
         let snap = Arc::clone(self.hub.read(cx).current());
-        if self.sync_text(&snap, false, cx) {
+        if self.sync_text(&snap, false) {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
@@ -597,7 +597,7 @@ impl NetBox {
             v.update(cx, |v, cx| v.set_labels(labels, cx));
         }
         let snap = Arc::clone(self.hub.read(cx).current());
-        self.sync_text(&snap, true, cx);
+        self.sync_text(&snap, true);
         cx.notify();
     }
 
