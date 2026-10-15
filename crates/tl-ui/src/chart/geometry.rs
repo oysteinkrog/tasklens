@@ -793,12 +793,10 @@ impl StrokeMesh {
     }
 }
 
-/// Unit direction, normal scaled to the half width, and length of the segment `a` to `b`.
-fn segment_frame(
-    a: Point<Pixels>,
-    b: Point<Pixels>,
-    half_width: f32,
-) -> Option<((f32, f32), (f32, f32), f32)> {
+/// Unit direction, normal scaled to the half width, and length of one segment.
+type SegmentFrame = ((f32, f32), (f32, f32), f32);
+
+fn segment_frame(a: Point<Pixels>, b: Point<Pixels>, half_width: f32) -> Option<SegmentFrame> {
     let (dx, dy) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
     let len = (dx * dx + dy * dy).sqrt();
     (len > f32::EPSILON).then(|| {
@@ -875,8 +873,8 @@ type StrokeJoin = (
 
 fn stroke_join(
     p: Point<Pixels>,
-    (direction, previous_normal, previous_length): ((f32, f32), (f32, f32), f32),
-    (next_direction, next_normal, next_length): ((f32, f32), (f32, f32), f32),
+    (direction, previous_normal, previous_length): SegmentFrame,
+    (next_direction, next_normal, next_length): SegmentFrame,
     half_width: f32,
 ) -> StrokeJoin {
     let tangent = (
