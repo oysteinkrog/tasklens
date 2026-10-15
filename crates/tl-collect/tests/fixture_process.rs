@@ -3999,3 +3999,162 @@ mod environ {
         assert_eq!(read_root(dir.as_fd(), &mut buf), LinkRead::Path("/".into()));
     }
 }
+
+// General tab static readers: ELF hardening, ASLR, location (E05-030).
+
+mod general_static {
+    use std::fs;
+    use std::path::Path;
+
+    use rustix::fd::{AsFd, OwnedFd};
+    use rustix::fs::{Mode, OFlags};
+    use tl_collect::CollectError;
+    use tl_collect::proc::detail::{
+        Location, LocationCtx, Relro, ShadowStack, arch_column_label, arch_label, aslr_text,
+        location, pe_machine_label, read_autogroup, read_elf, read_pe_machine, shadow_stack,
+    };
+
+    use crate::common;
+
+    fn open(path: &Path, flags: OFlags) -> OwnedFd {
+        rustix::fs::open(
+            path,
+            flags | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open")
+    }
+
+    fn fixture(name: &str) -> OwnedFd {
+        open(&common::fixture_dir("elf").join(name), OFlags::empty())
+    }
+
+    #[test]
+    fn elf_usr_bin_ls_hardened() {
+        let path = Path::new("/usr/bin/ls");
+        if !path.exists() {
+            eprintln!("skipped: /usr/bin/ls is absent");
+            return;
+        }
+        let file = open(path, OFlags::empty());
+        let info = read_elf(file.as_fd(), &mut Vec::new()).expect("read /usr/bin/ls");
+        assert!(info.class64);
+        assert!(info.pie);
+        assert!(info.nx_stack);
+        assert_eq!(info.relro, Relro::Full);
+        assert_eq!(arch_label(info.class64, info.machine), "x86-64");
+        assert_eq!(
+            arch_column_label(info.class64, info.machine),
+            "x86-64 (64-bit)"
+        );
+    }
+
+    /// `exec-nostack.bin` is 120 bytes: a 64-bit little-endian ELF header (64 bytes, e_type 2
+    /// ET_EXEC, e_machine 62 x86-64, e_phoff 64, e_phentsize 56, e_phnum 1) and one PT_LOAD
+    /// program header (56 bytes, flags R+X). No PT_INTERP, PT_GNU_STACK or PT_GNU_RELRO.
+    #[test]
+    fn elf_exec_no_hardening() {
+        let file = fixture("exec-nostack.bin");
+        let mut buf = Vec::new();
+        let info = read_elf(file.as_fd(), &mut buf).expect("read fixture");
+        assert!(info.class64);
+        assert_eq!(info.machine, 62);
+        assert!(!info.pie);
+        assert!(!info.nx_stack);
+        assert_eq!(info.relro, Relro::None);
+        assert!(buf.len() <= 120);
+    }
+
+    #[test]
+    fn elf_not_elf_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("text");
+        fs::write(&path, "hello\n").expect("write");
+        let file = open(&path, OFlags::empty());
+        assert!(matches!(
+            read_elf(file.as_fd(), &mut Vec::new()),
+            Err(CollectError::NotElf)
+        ));
+        assert!(matches!(
+            read_pe_machine(file.as_fd()),
+            Err(CollectError::NotElf)
+        ));
+    }
+
+    /// `pe32-header.bin` is 70 bytes: "MZ" at 0, e_lfanew 0x40 (little-endian u32) at 0x3c,
+    /// "PE\0\0" at 0x40 and the COFF Machine field 0x014c (i386) at 0x44.
+    #[test]
+    fn pe_machine_i386() {
+        let file = fixture("pe32-header.bin");
+        let machine = read_pe_machine(file.as_fd()).expect("read PE");
+        assert_eq!(machine, 0x14c);
+        assert_eq!(pe_machine_label(machine), "x86 (32-bit, Wine)");
+        assert_eq!(pe_machine_label(0x8664), "x64 (64-bit, Wine)");
+        assert_eq!(pe_machine_label(0xaa64), "Unknown");
+    }
+
+    #[test]
+    fn aslr_text_personality() {
+        let mut out = String::new();
+        aslr_text(b"2\n", Some(0x0040000), &mut out);
+        assert_eq!(out, "Full (2), disabled for this process");
+        aslr_text(b"1", None, &mut out);
+        assert_eq!(out, "Partial (1)");
+        aslr_text(b"0\n", Some(0), &mut out);
+        assert_eq!(out, "Off (0)");
+        aslr_text(b"7", Some(0x0040000), &mut out);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn shadow_stack_states() {
+        assert_eq!(shadow_stack(Some(b"shstk wrss")), ShadowStack::Enabled);
+        assert_eq!(shadow_stack(Some(b"")), ShadowStack::Disabled);
+        assert_eq!(shadow_stack(None), ShadowStack::NotSupported);
+        assert_eq!(ShadowStack::NotSupported.label(), "Not supported");
+    }
+
+    #[test]
+    fn autogroup_parsed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = open(tmp.path(), OFlags::DIRECTORY);
+        let mut buf = Vec::new();
+        assert_eq!(read_autogroup(dir.as_fd(), &mut buf), None);
+        fs::write(tmp.path().join("autogroup"), "/autogroup-123 nice 0\n").expect("write");
+        assert_eq!(read_autogroup(dir.as_fd(), &mut buf), Some((123, 0)));
+        fs::write(tmp.path().join("autogroup"), "/autogroup-7 nice -5\n").expect("write");
+        assert_eq!(read_autogroup(dir.as_fd(), &mut buf), Some((7, -5)));
+        fs::write(tmp.path().join("autogroup"), "autogroup-7 nice 0\n").expect("write");
+        assert_eq!(read_autogroup(dir.as_fd(), &mut buf), None);
+    }
+
+    #[test]
+    fn location_categories() {
+        let ctx = LocationCtx {
+            home: "/home/u".into(),
+            runtime_dir: Some("/run/user/1000".into()),
+            downloads: Some("/home/u/Downloads".into()),
+        };
+        let cases = [
+            ("/home/u/.wine/drive_c/x.exe", Location::WinePrefix),
+            ("/home/u/Downloads/a", Location::UserDownloads),
+            ("/home/u/.local/bin/b", Location::UserData),
+            ("/usr/bin/c", Location::System),
+            ("/opt/d/e", Location::OptionalSoftware),
+            ("/tmp/.mount_x/AppRun", Location::AppImage),
+            ("/home/u/.local/share/flatpak/app/f", Location::Flatpak),
+            ("/run/user/1000/g", Location::TempDirectory),
+            ("/home/u/bin/h", Location::UserProfile),
+            ("/home/user2/bin/i", Location::Other),
+        ];
+        for (path, want) in cases {
+            assert_eq!(location(path, false, &ctx), want, "{path}");
+        }
+        assert_eq!(location("/usr/bin/c", true, &ctx), Location::Deleted);
+        assert_eq!(Location::UserDownloads.label(), "User Downloads");
+
+        // An empty home matches nothing below `/`.
+        let empty = LocationCtx::default();
+        assert_eq!(location("/.local/bin/b", false, &empty), Location::Other);
+    }
+}

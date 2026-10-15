@@ -469,4 +469,48 @@ proptest! {
         parse_environ(&bytes, truncated, &mut out);
         prop_assert_eq!(out.truncated, truncated);
     }
+
+    /// Security regression: a hostile executable never panics `read_elf` or `read_pe_machine`,
+    /// and nothing is read past the end of the file.
+    #[test]
+    fn elf_arbitrary_bytes_never_panic(
+        mut bytes in prop::collection::vec(any::<u8>(), 0..=65_536),
+        shape in 0..3u8,
+        phnum in 0..=8u16,
+        types in prop::collection::vec(
+            prop_oneof![Just(2u32), Just(3), Just(0x6474_e551), Just(0x6474_e552), any::<u32>()],
+            8,
+        ),
+    ) {
+        use std::io::Write as _;
+
+        use rustix::fd::AsFd;
+        use tl_collect::proc::detail::{read_elf, read_pe_machine};
+
+        // Shape 0 is raw bytes. Shape 1 has a 64-bit little-endian ELF ident, so the header
+        // path runs. Shape 2 also has a valid program header table at 64, so the program
+        // header and PT_DYNAMIC paths run with random offsets and sizes.
+        if shape >= 1 {
+            let ident = b"\x7fELF\x02\x01";
+            let n = ident.len().min(bytes.len());
+            bytes[..n].copy_from_slice(&ident[..n]);
+        }
+        if shape == 2 && bytes.len() >= 64 {
+            bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+            bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+            bytes[56..58].copy_from_slice(&phnum.to_le_bytes());
+            for (i, p_type) in types.iter().enumerate() {
+                let at = 64 + 56 * i;
+                if let Some(slot) = bytes.get_mut(at..at + 4) {
+                    slot.copy_from_slice(&p_type.to_le_bytes());
+                }
+            }
+        }
+        let mut file = tempfile::tempfile().expect("tempfile");
+        file.write_all(&bytes).expect("write");
+        let mut buf = Vec::new();
+        let _ = read_elf(file.as_fd(), &mut buf);
+        prop_assert!(buf.len() <= bytes.len());
+        let _ = read_pe_machine(file.as_fd());
+    }
 }

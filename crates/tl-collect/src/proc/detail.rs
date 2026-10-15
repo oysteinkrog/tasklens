@@ -1685,6 +1685,444 @@ pub fn read_root(pid_dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> LinkRead {
     read_link(pid_dir, "root", buf)
 }
 
+// General tab static readers (E05-030): ELF hardening, architecture, ASLR, autogroup, location.
+
+/// RELRO hardening of an ELF executable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Relro {
+    /// `PT_GNU_RELRO` plus immediate binding.
+    Full,
+    /// `PT_GNU_RELRO` without immediate binding.
+    Partial,
+    None,
+}
+
+/// What `read_elf` found in the executable's headers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElfInfo {
+    pub class64: bool,
+    pub machine: u16,
+    pub pie: bool,
+    pub nx_stack: bool,
+    pub relro: Relro,
+}
+
+const ELF_MAGIC: &[u8] = b"\x7fELF";
+const ELFCLASS32: u8 = 1;
+const ELFCLASS64: u8 = 2;
+const ELFDATA2LSB: u8 = 1;
+const ET_DYN: u16 = 3;
+const PT_DYNAMIC: u32 = 2;
+const PT_INTERP: u32 = 3;
+const PT_GNU_STACK: u32 = 0x6474_e551;
+const PT_GNU_RELRO: u32 = 0x6474_e552;
+const PF_X: u32 = 1;
+const DT_NULL: u64 = 0;
+const DT_BIND_NOW: u64 = 24;
+const DT_FLAGS: u64 = 30;
+const DT_FLAGS_1: u64 = 0x6fff_fffb;
+const DF_BIND_NOW: u64 = 0x8;
+const DF_1_NOW: u64 = 0x1;
+/// The `personality(2)` flag that turns ASLR off for one process.
+pub const ADDR_NO_RANDOMIZE: u32 = 0x004_0000;
+/// The `PT_DYNAMIC` segment is read in chunks of this size, a multiple of both entry sizes.
+const DYNAMIC_CHUNK: u64 = 4096;
+/// At most this many bytes of `PT_DYNAMIC` are walked. Real executables use well under 1 KiB,
+/// so a hostile file cannot make the walk read the whole file.
+const DYNAMIC_MAX: u64 = 64 * 1024;
+/// The MZ header holds `e_lfanew`, the offset of the PE header, at this offset.
+const PE_LFANEW_OFFSET: u64 = 0x3c;
+
+fn exe_error(e: rustix::io::Errno) -> CollectError {
+    CollectError::ProcRead {
+        file: "exe",
+        errno: e.raw_os_error(),
+    }
+}
+
+/// The size of the open file. A negative size counts as empty.
+fn file_size(file: BorrowedFd<'_>) -> Result<u64, CollectError> {
+    let st = rustix::fs::fstat(file).map_err(exe_error)?;
+    Ok(u64::try_from(st.st_size).unwrap_or(0))
+}
+
+/// Reads exactly `len` bytes at `off` into `buf`. `NotElf` when the range is not inside the
+/// first `size` bytes of the file, or when the file is shorter than `size` says.
+fn pread_exact(
+    file: BorrowedFd<'_>,
+    size: u64,
+    buf: &mut Vec<u8>,
+    off: u64,
+    len: u64,
+) -> Result<(), CollectError> {
+    buf.clear();
+    let end = off.checked_add(len).ok_or(CollectError::NotElf)?;
+    if end > size {
+        return Err(CollectError::NotElf);
+    }
+    let len = usize::try_from(len).map_err(|_| CollectError::NotElf)?;
+    buf.resize(len, 0);
+    let mut done = 0;
+    while done < len {
+        // Cannot overflow: `off + len` was checked above.
+        let at = off + done as u64;
+        match rustix::io::pread(file, &mut buf[done..], at) {
+            Ok(0) => {
+                buf.clear();
+                return Err(CollectError::NotElf);
+            }
+            Ok(n) => done += n,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(e) => {
+                buf.clear();
+                return Err(exe_error(e));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn le_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+}
+
+/// A word of the file's class: 8 bytes for 64-bit, 4 bytes zero-extended for 32-bit.
+fn le_word(bytes: &[u8], at: usize, class64: bool) -> Option<u64> {
+    if class64 {
+        le_u64(bytes, at)
+    } else {
+        le_u32(bytes, at).map(u64::from)
+    }
+}
+
+/// `(e_type, e_machine, e_phoff, e_phentsize, e_phnum)` from the ELF header.
+fn elf_header(header: &[u8], class64: bool) -> Option<(u16, u16, u64, u16, u16)> {
+    let (phoff_at, phentsize_at, phnum_at) = if class64 { (32, 54, 56) } else { (28, 42, 44) };
+    Some((
+        le_u16(header, 16)?,
+        le_u16(header, 18)?,
+        le_word(header, phoff_at, class64)?,
+        le_u16(header, phentsize_at)?,
+        le_u16(header, phnum_at)?,
+    ))
+}
+
+/// `(p_type, p_flags, p_offset, p_filesz)` from one program header.
+fn program_header(ph: &[u8], class64: bool) -> Option<(u32, u32, u64, u64)> {
+    if class64 {
+        Some((
+            le_u32(ph, 0)?,
+            le_u32(ph, 4)?,
+            le_u64(ph, 8)?,
+            le_u64(ph, 32)?,
+        ))
+    } else {
+        Some((
+            le_u32(ph, 0)?,
+            le_u32(ph, 24)?,
+            u64::from(le_u32(ph, 4)?),
+            u64::from(le_u32(ph, 16)?),
+        ))
+    }
+}
+
+/// Reads the hardening of the executable open at `file`. Only the ELF header, the program
+/// headers and the `PT_DYNAMIC` segment are read, each with `pread` and checked against the
+/// file size first. Little-endian 32- and 64-bit only. Anything else, or a header that does not
+/// fit in the file, gives `NotElf`.
+pub fn read_elf(file: BorrowedFd<'_>, buf: &mut Vec<u8>) -> Result<ElfInfo, CollectError> {
+    let size = file_size(file)?;
+    pread_exact(file, size, buf, 0, size.min(64))?;
+    if buf.get(..4) != Some(ELF_MAGIC) {
+        return Err(CollectError::NotElf);
+    }
+    let class64 = match buf.get(4) {
+        Some(&ELFCLASS64) => true,
+        Some(&ELFCLASS32) => false,
+        _ => return Err(CollectError::NotElf),
+    };
+    if buf.get(5) != Some(&ELFDATA2LSB) {
+        return Err(CollectError::NotElf);
+    }
+    let (e_type, machine, phoff, phentsize, phnum) =
+        elf_header(buf, class64).ok_or(CollectError::NotElf)?;
+    let phent_len = if class64 { 56 } else { 32 };
+    if phentsize != phent_len {
+        return Err(CollectError::NotElf);
+    }
+    let table_len = u64::from(phnum)
+        .checked_mul(u64::from(phentsize))
+        .ok_or(CollectError::NotElf)?;
+    pread_exact(file, size, buf, phoff, table_len)?;
+
+    let mut has_interp = false;
+    let mut stack_flags = None;
+    let mut has_relro = false;
+    let mut dynamic = None;
+    for ph in buf.chunks_exact(usize::from(phent_len)) {
+        let Some((p_type, p_flags, p_offset, p_filesz)) = program_header(ph, class64) else {
+            continue;
+        };
+        match p_type {
+            PT_INTERP => has_interp = true,
+            PT_GNU_STACK if stack_flags.is_none() => stack_flags = Some(p_flags),
+            PT_GNU_RELRO => has_relro = true,
+            PT_DYNAMIC if dynamic.is_none() => dynamic = Some((p_offset, p_filesz)),
+            _ => {}
+        }
+    }
+
+    let relro = if !has_relro {
+        Relro::None
+    } else if dynamic.is_some_and(|(off, len)| binds_now(file, size, buf, off, len, class64)) {
+        Relro::Full
+    } else {
+        Relro::Partial
+    };
+    Ok(ElfInfo {
+        class64,
+        machine,
+        pie: e_type == ET_DYN && has_interp,
+        nx_stack: stack_flags.is_some_and(|flags| flags & PF_X == 0),
+        relro,
+    })
+}
+
+/// Whether the `PT_DYNAMIC` segment at `off..off + len` asks for immediate binding. The range is
+/// clamped to the file size and to [`DYNAMIC_MAX`]. A read error counts as no.
+fn binds_now(
+    file: BorrowedFd<'_>,
+    size: u64,
+    buf: &mut Vec<u8>,
+    off: u64,
+    len: u64,
+    class64: bool,
+) -> bool {
+    let (entry, word) = if class64 { (16, 8) } else { (8, 4) };
+    let end = off.saturating_add(len.min(DYNAMIC_MAX)).min(size);
+    let mut pos = off;
+    while pos < end {
+        // Whole entries only.
+        let chunk = (end - pos).min(DYNAMIC_CHUNK) / entry as u64 * entry as u64;
+        if chunk == 0 || pread_exact(file, size, buf, pos, chunk).is_err() {
+            return false;
+        }
+        for dyn_entry in buf.chunks_exact(entry) {
+            let (Some(tag), Some(val)) = (
+                le_word(dyn_entry, 0, class64),
+                le_word(dyn_entry, word, class64),
+            ) else {
+                return false;
+            };
+            match tag {
+                DT_NULL => return false,
+                DT_BIND_NOW => return true,
+                DT_FLAGS if val & DF_BIND_NOW != 0 => return true,
+                DT_FLAGS_1 if val & DF_1_NOW != 0 => return true,
+                _ => {}
+            }
+        }
+        pos += chunk;
+    }
+    false
+}
+
+/// The architecture word on the General tab. The class does not change the word.
+pub fn arch_label(_class64: bool, machine: u16) -> &'static str {
+    match machine {
+        62 => "x86-64",
+        3 => "x86 (32-bit)",
+        183 => "AArch64",
+        _ => "Unknown",
+    }
+}
+
+/// The Architecture column word (PROC-027). The class does not change the word.
+pub fn arch_column_label(_class64: bool, machine: u16) -> &'static str {
+    match machine {
+        62 => "x86-64 (64-bit)",
+        3 => "i386 (32-bit)",
+        183 => "AArch64 (64-bit)",
+        _ => "Unknown",
+    }
+}
+
+/// The architecture word for a Wine `.exe`, from the COFF `Machine` field.
+pub fn pe_machine_label(machine: u16) -> &'static str {
+    match machine {
+        0x8664 => "x64 (64-bit, Wine)",
+        0x14c => "x86 (32-bit, Wine)",
+        _ => "Unknown",
+    }
+}
+
+/// The COFF `Machine` field of the PE file open at `file`: `e_lfanew` at 0x3c, then `PE\0\0` at
+/// that offset and the field right after it. Every offset is checked against the file size.
+/// Any mismatch gives `NotElf`.
+pub fn read_pe_machine(file: BorrowedFd<'_>) -> Result<u16, CollectError> {
+    let size = file_size(file)?;
+    let mut buf = Vec::with_capacity(8);
+    pread_exact(file, size, &mut buf, PE_LFANEW_OFFSET, 4)?;
+    let lfanew = le_u32(&buf, 0).ok_or(CollectError::NotElf)?;
+    pread_exact(file, size, &mut buf, u64::from(lfanew), 6)?;
+    if buf.get(..4) != Some(&b"PE\0\0"[..]) {
+        return Err(CollectError::NotElf);
+    }
+    le_u16(&buf, 4).ok_or(CollectError::NotElf)
+}
+
+/// The Shadow stack row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShadowStack {
+    Enabled,
+    Disabled,
+    /// No `x86_Thread_features` line in `status`.
+    NotSupported,
+}
+
+impl ShadowStack {
+    /// The Shadow stack row word.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Enabled => "Enabled",
+            Self::Disabled => "Disabled",
+            Self::NotSupported => "Not supported",
+        }
+    }
+}
+
+/// Maps `PidStatus.x86_thread_features` to the Shadow stack row.
+pub fn shadow_stack(features: Option<&[u8]>) -> ShadowStack {
+    match features {
+        None => ShadowStack::NotSupported,
+        Some(value) if memchr::memmem::find(value, b"shstk").is_some() => ShadowStack::Enabled,
+        Some(_) => ShadowStack::Disabled,
+    }
+}
+
+/// Writes the ASLR row from `/proc/sys/kernel/randomize_va_space` and the process personality.
+/// `personality` is `None` when `/proc/<pid>/personality` is restricted, and then no suffix is
+/// added. A value other than 0, 1 or 2 leaves `out` empty.
+pub fn aslr_text(randomize_va_space: &[u8], personality: Option<u32>, out: &mut String) {
+    out.clear();
+    out.push_str(match randomize_va_space.trim_ascii() {
+        b"2" => "Full (2)",
+        b"1" => "Partial (1)",
+        b"0" => "Off (0)",
+        _ => return,
+    });
+    if personality.is_some_and(|p| p & ADDR_NO_RANDOMIZE != 0) {
+        out.push_str(", disabled for this process");
+    }
+}
+
+/// Parses `/proc/<pid>/autogroup`, `/autogroup-<n> nice <k>`, into `(n, k)`. `None` when the
+/// file cannot be read or does not match.
+pub fn read_autogroup(pid_dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> Option<(u32, i8)> {
+    read_at(pid_dir, "autogroup", buf, SMALL_FILE_LIMIT).ok()?;
+    let mut words = std::str::from_utf8(buf).ok()?.split_ascii_whitespace();
+    let id = words.next()?.strip_prefix("/autogroup-")?.parse().ok()?;
+    if words.next()? != "nice" {
+        return None;
+    }
+    let nice = words.next()?.parse().ok()?;
+    words.next().is_none().then_some((id, nice))
+}
+
+/// The Location row category of the executable path (PROC-078).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Location {
+    TempDirectory,
+    UserDownloads,
+    UserData,
+    UserProfile,
+    System,
+    OptionalSoftware,
+    Flatpak,
+    AppImage,
+    WinePrefix,
+    Deleted,
+    Other,
+}
+
+impl Location {
+    /// The Location row word.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TempDirectory => "Temp directory",
+            Self::UserDownloads => "User Downloads",
+            Self::UserData => "User data",
+            Self::UserProfile => "User profile",
+            Self::System => "System",
+            Self::OptionalSoftware => "Optional software",
+            Self::Flatpak => "Flatpak",
+            Self::AppImage => "AppImage",
+            Self::WinePrefix => "Wine prefix",
+            Self::Deleted => "Deleted",
+            Self::Other => "Other",
+        }
+    }
+}
+
+/// The user directories `location` compares against. `downloads` is `XDG_DOWNLOAD_DIR` from
+/// `~/.config/user-dirs.dirs` with `$HOME` expanded, resolved by the caller.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LocationCtx {
+    pub home: String,
+    pub runtime_dir: Option<String>,
+    pub downloads: Option<String>,
+}
+
+/// The part of `path` below the directory `dir`, or `None` when `path` is not inside it. An
+/// empty `dir`, or `/`, matches nothing.
+fn below<'p>(path: &'p str, dir: &str) -> Option<&'p str> {
+    let dir = dir.trim_end_matches('/');
+    if dir.is_empty() {
+        return None;
+    }
+    path.strip_prefix(dir)?.strip_prefix('/')
+}
+
+/// The Location category of the executable `path`, first match in the PROC-078 order.
+pub fn location(path: &str, deleted: bool, ctx: &LocationCtx) -> Location {
+    let in_home = below(path, &ctx.home);
+    let home_under = |sub: &str| in_home.is_some_and(|rest| rest.starts_with(sub));
+    let in_dir =
+        |dir: &Option<String>| dir.as_deref().is_some_and(|dir| below(path, dir).is_some());
+    if deleted {
+        Location::Deleted
+    } else if path.starts_with("/tmp/.mount_") {
+        Location::AppImage
+    } else if path.contains("/drive_c/") {
+        Location::WinePrefix
+    } else if path.starts_with("/var/lib/flatpak/") || home_under(".local/share/flatpak/") {
+        Location::Flatpak
+    } else if path.starts_with("/tmp/") || path.starts_with("/var/tmp/") || in_dir(&ctx.runtime_dir)
+    {
+        Location::TempDirectory
+    } else if in_dir(&ctx.downloads) {
+        Location::UserDownloads
+    } else if home_under(".local/") || home_under(".cache/") || home_under(".config/") {
+        Location::UserData
+    } else if in_home.is_some() {
+        Location::UserProfile
+    } else if path.starts_with("/usr/") {
+        Location::System
+    } else if path.starts_with("/opt/") {
+        Location::OptionalSoftware
+    } else {
+        Location::Other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
