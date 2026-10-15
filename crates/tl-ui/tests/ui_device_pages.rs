@@ -1248,10 +1248,17 @@ mod disk_buttons {
         r.vcx.update(|_, cx| {
             let order = page.read(cx).focus_order();
             assert_eq!(order.len(), 2, "SMART then Eject");
+            let p = page.read(cx);
+            assert_eq!(order[0], *p.smart_focus(), "SMART first");
+            assert_eq!(order[1], *p.eject_focus(), "Eject second");
             assert_ne!(order[0], order[1]);
         });
         publish(&mut r, SmartKind::None, true, false);
-        r.vcx
-            .update(|_, cx| assert_eq!(page.read(cx).focus_order().len(), 1));
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let order = p.focus_order();
+            assert_eq!(order.len(), 1);
+            assert_eq!(order[0], *p.eject_focus(), "only Eject remains");
+        });
     }
 }

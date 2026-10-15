@@ -839,6 +839,14 @@ impl DiskPage {
         self.ejectable
     }
 
+    pub fn smart_focus(&self) -> &FocusHandle {
+        &self.smart_focus
+    }
+
+    pub fn eject_focus(&self) -> &FocusHandle {
+        &self.eject_focus
+    }
+
     pub fn words(&self) -> &Words {
         &self.words
     }
