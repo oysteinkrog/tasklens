@@ -439,7 +439,7 @@ fn gpu_samples_rerender_page_only_on_change(cx: &mut TestAppContext) {
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
             sys.header.version += 1;
-            let mut t = totals(false);
+            let mut t = full_totals();
             t.util_pct = Metric::valid(util);
             sys.gpus = Arc::from([(GPU, t)].as_slice());
         });
