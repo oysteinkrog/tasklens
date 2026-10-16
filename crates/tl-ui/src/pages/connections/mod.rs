@@ -7,6 +7,7 @@
 pub mod actions;
 mod copy;
 pub mod delegate;
+mod flows;
 mod menu;
 
 use std::sync::Arc;
@@ -407,6 +408,37 @@ impl ConnectionsPage {
         }
     }
 
+    fn on_jump_to_process(
+        &mut self,
+        _: &actions::ConnectionJumpToProcess,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.take_targets(cx);
+        if let [record] = targets.records.as_slice() {
+            // The tab switch updates this page, so run after the current update ends.
+            let record = record.clone();
+            window.defer(cx, move |window, cx| {
+                flows::run_jump_to_process(&record, window, cx);
+            });
+        }
+    }
+
+    fn on_go_to_service(
+        &mut self,
+        _: &actions::ConnectionGoToService,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.take_targets(cx);
+        if let [record] = targets.records.as_slice() {
+            let record = record.clone();
+            window.defer(cx, move |window, cx| {
+                flows::run_go_to_service(&record, window, cx);
+            });
+        }
+    }
+
     fn copy_address(
         &self,
         value: &str,
@@ -458,6 +490,8 @@ impl Render for ConnectionsPage {
             .on_action(cx.listener(Self::on_copy_rows_as_table))
             .on_action(cx.listener(Self::on_copy_local))
             .on_action(cx.listener(Self::on_copy_foreign))
+            .on_action(cx.listener(Self::on_jump_to_process))
+            .on_action(cx.listener(Self::on_go_to_service))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }

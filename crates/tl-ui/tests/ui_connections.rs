@@ -1396,3 +1396,327 @@ fn connections_page_registered(cx: &mut TestAppContext) {
         "the Connections tab builds a ConnectionsPage"
     );
 }
+
+/// Jump to process and Go to service from the Connections tab (tasklens-9o0.18).
+mod jump {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::*;
+    use gpui_kit::{AppContext as _, VisualTestContext};
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::ids::NodeId;
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::ConnCounts;
+    use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::pages::connections::ConnectionsPage;
+    use tl_ui::pages::connections::actions::{ConnectionGoToService, ConnectionJumpToProcess};
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window_on};
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        page: gpui_kit::Entity<ConnectionsPage>,
+    }
+
+    fn rig(cx: &mut TestAppContext, record: ConnRecord, processes: Vec<ProcessRecord>) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let handle = cx
+            .update(|cx| open_main_window_on(Tab::Connections, cx))
+            .expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let page = vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .page_entity::<ConnectionsPage>(Tab::Connections)
+                .expect("Connections page")
+        });
+        let mut rig = Rig { engine, vcx, page };
+        rig.publish(record, processes);
+        rig
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        fn publish(&mut self, record: ConnRecord, mut processes: Vec<ProcessRecord>) {
+            let generation = self
+                .engine
+                .commands()
+                .into_iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::SetSysTableQuery(query) => Some(query.generation),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            processes.sort_unstable_by_key(|process| process.key);
+            let cookie = record.cookie;
+            self.engine.publish_with(|snapshot| {
+                snapshot.connections = Arc::new(ConnectionsSnapshot {
+                    header: ComponentHeader {
+                        version: 1,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    rows: vec![SysRow {
+                        node: SysNodeId::Conn(cookie),
+                        depth: 0,
+                        expanded: false,
+                        has_children: false,
+                        record: Some(0),
+                    }]
+                    .into(),
+                    query_generation: generation,
+                    records: vec![record].into(),
+                    counts: ConnCounts {
+                        total: 1,
+                        tcp: 1,
+                        ..ConnCounts::default()
+                    },
+                    ..ConnectionsSnapshot::default()
+                });
+                snapshot.processes = Arc::new(ProcessSnapshot {
+                    records: processes.into(),
+                    ..ProcessSnapshot::default()
+                });
+            });
+            self.draw();
+        }
+
+        /// Selects the only row, focuses the table and dispatches `action`.
+        fn dispatch(&mut self, select: bool, action: impl gpui_kit::Action) {
+            let table = self.vcx.read_entity(&self.page, |p, _| p.table().clone());
+            if select {
+                let cookie = 1;
+                table.update(&mut self.vcx, |table, cx| {
+                    table.selection.click(cookie);
+                    cx.notify();
+                });
+            }
+            self.vcx
+                .update(|window, cx| table.read(cx).focus_handle().clone().focus(window, cx));
+            self.draw();
+            self.vcx.dispatch_action(action);
+            self.vcx.run_until_parked();
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.vcx.update(|_, cx| {
+                let view = main_window_view(cx).expect("main window");
+                let texts = view.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(ToString::to_string).collect()
+            })
+        }
+
+        fn active_tab(&mut self) -> Tab {
+            self.vcx.update(|_, cx| {
+                main_window_view(cx)
+                    .expect("main window")
+                    .read(cx)
+                    .active_tab()
+            })
+        }
+
+        fn table_queries(&self) -> Vec<tl_model::table::TableQuery> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::SetTableQuery(q) => Some(q),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Answers the latest Processes query with `keys` as the view.
+        fn answer(&mut self, keys: &[ProcessKey]) {
+            let generation = self
+                .table_queries()
+                .last()
+                .expect("a Processes query was sent")
+                .generation;
+            let rows: Vec<TableRow> = keys
+                .iter()
+                .map(|key| TableRow {
+                    node: NodeId::Process(*key),
+                    depth: 0,
+                    expanded: false,
+                    has_children: false,
+                    record: Some(0),
+                    group: None,
+                    descendants: 0,
+                    subtree: None,
+                })
+                .collect();
+            self.engine.publish_with(|s| {
+                let header = ComponentHeader {
+                    version: s.sequence,
+                    ..ComponentHeader::default()
+                };
+                s.table = Arc::new(ProcessTableView {
+                    header,
+                    query_generation: generation,
+                    rows: rows.into(),
+                    ..ProcessTableView::default()
+                });
+            });
+            self.draw();
+        }
+
+        fn selected(&mut self) -> Vec<tl_ui::pages::processes::delegate::ProcRowId> {
+            self.vcx.update(|_, cx| {
+                let view = main_window_view(cx).expect("main window");
+                let page = view
+                    .read(cx)
+                    .page_entity::<ProcessesPage>(Tab::Processes)
+                    .expect("Processes page");
+                page.read(cx).table().read(cx).selection.ids().collect()
+            })
+        }
+    }
+
+    fn owned(pids: &[u32]) -> ConnRecord {
+        let owners: SmallVec<[ProcessKey; 1]> = pids.iter().map(|p| super::key(*p)).collect();
+        super::connection(1, owners)
+    }
+
+    fn procs(pids: &[u32]) -> Vec<ProcessRecord> {
+        pids.iter()
+            .map(|p| super::process(*p, "daemon", "root", 0))
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn conn_jump_uses_lowest_pid(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, owned(&[5000, 4321]), procs(&[5000, 4321]));
+        rig.dispatch(true, ConnectionJumpToProcess);
+        rig.answer(&[super::key(4321)]);
+        assert_eq!(
+            rig.selected(),
+            [tl_ui::pages::processes::delegate::ProcRowId::Process(
+                super::key(4321)
+            )]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_jump_success_toast(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
+        rig.dispatch(true, ConnectionJumpToProcess);
+        rig.answer(&[super::key(4321)]);
+        assert_eq!(rig.active_tab(), Tab::Processes);
+        assert_eq!(rig.selected().len(), 1);
+        assert_eq!(rig.toasts(), ["Switched to owning process."]);
+    }
+
+    #[gpui_kit::test]
+    fn conn_jump_hidden_show_button(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
+        // Build the lazy Processes page, then come back.
+        rig.vcx.update(|window, cx| {
+            let view = main_window_view(cx).expect("main window");
+            view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
+            view.update(cx, |v, cx| v.select_tab(Tab::Connections, window, cx));
+        });
+        rig.draw();
+        let processes = rig.vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .page_entity::<ProcessesPage>(Tab::Processes)
+                .expect("Processes page")
+        });
+        rig.vcx.update(|_, cx| {
+            processes.update(cx, |p, cx| {
+                p.table()
+                    .update(cx, |t, _| t.delegate.query_mut().set_filter("foo".into()));
+            });
+        });
+        rig.dispatch(true, ConnectionJumpToProcess);
+        rig.answer(&[]);
+        assert_eq!(
+            rig.toasts(),
+            ["Owning process not visible in the current process view."]
+        );
+        assert!(rig.selected().is_empty());
+        // The Show button dispatches this action and clears the filter.
+        let before = rig.table_queries().len();
+        rig.vcx
+            .dispatch_action(tl_ui::pages::processes::actions::ProcessesShowHidden);
+        rig.draw();
+        let queries = rig.table_queries();
+        assert!(queries.len() > before, "Show sends a new query");
+        assert_eq!(queries.last().map(|q| q.filter.as_ref()), Some(""));
+    }
+
+    #[gpui_kit::test]
+    fn conn_jump_exited_toast(cx: &mut TestAppContext) {
+        // The owner is no longer in the process snapshot.
+        let mut rig = rig(cx, owned(&[4321]), Vec::new());
+        rig.dispatch(true, ConnectionJumpToProcess);
+        assert_eq!(rig.toasts(), ["Process not found in current view"]);
+    }
+
+    #[gpui_kit::test]
+    fn conn_jump_no_owner_toast(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, owned(&[]), Vec::new());
+        let before = rig.table_queries().len();
+        rig.dispatch(true, ConnectionJumpToProcess);
+        assert_eq!(rig.toasts(), ["No owning process for this connection"]);
+        assert_eq!(rig.active_tab(), Tab::Connections);
+        assert_eq!(rig.table_queries().len(), before, "no query is sent");
+    }
+
+    #[gpui_kit::test]
+    fn conn_go_to_service(cx: &mut TestAppContext) {
+        let mut record = owned(&[4321]);
+        record.unit = Some(UnitRef {
+            manager: Manager::System,
+            name: Arc::from("sshd.service"),
+        });
+        let mut rig = rig(cx, record, procs(&[4321]));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            cx.on_action(move |a: &GoToService, _| sink.borrow_mut().push(a.clone()));
+        });
+        rig.dispatch(true, ConnectionGoToService);
+        assert_eq!(
+            *seen.borrow(),
+            [GoToService {
+                manager: ManagerArg::System,
+                name: "sshd.service".into(),
+                origin: JumpOrigin::Connections,
+            }]
+        );
+    }
+}

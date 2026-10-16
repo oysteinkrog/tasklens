@@ -1071,6 +1071,9 @@ connections-copy-failed = Failed to copy to clipboard
 connections-copy-nothing-selected = Select a connection row first.
 connections-copy-local-ok = Local address copied
 connections-copy-foreign-ok = Foreign address copied
+connections-jump-switched = Switched to owning process.
+connections-jump-not-visible = Owning process not visible in the current process view.
+connections-jump-no-owner = No owning process for this connection
 
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.
