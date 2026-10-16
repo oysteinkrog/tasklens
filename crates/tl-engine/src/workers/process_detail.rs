@@ -3961,11 +3961,13 @@ mod tests {
         let (_tmp, src, index) = package_src_with(Some("usr-bin-app"), outcome);
         let d = tabs(&[(a(), DetailTab::General)]);
         let s = every_ms(500);
-        let (mut src, out, _) = step_all(src, &d, &s, 0);
+        let (src, out, _) = step_all(src, &d, &s, 0);
         assert_eq!(general(&out).0.package_check, PackageCheck::NotVerified);
         assert_eq!(index.run_batch().expect("batch"), 1);
+        // The next read settles the package; the request then runs.
+        let (mut src, _, _) = step_all(src, &d, &s, 500);
         assert!(src.command(&WorkerCommand::VerifyPackage(a())));
-        let (src, out, _) = step_all(src, &d, &s, 500);
+        let (src, out, _) = step_all(src, &d, &s, 1000);
         assert!(src.verify_requests.is_empty());
         general(&out).0.package_check
     }
@@ -3999,8 +4001,10 @@ mod tests {
         let s = every_ms(500);
         let (mut src, _, _) = step_all(src, &d, &s, 0);
         assert_eq!(index.run_batch().expect("batch"), 1);
+        // The next read settles the package; the request then runs.
+        let (mut src, _, _) = step_all(src, &d, &s, 500);
         assert!(src.command(&WorkerCommand::VerifyPackage(a())));
-        let (src, out, _) = step_all(src, &d, &s, 500);
+        let (src, out, _) = step_all(src, &d, &s, 1000);
         assert!(src.verify_requests.is_empty());
         assert_eq!(general(&out).0.package, valid(None));
         assert_eq!(general(&out).0.package_check, PackageCheck::NotVerified);
