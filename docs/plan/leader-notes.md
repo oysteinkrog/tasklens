@@ -898,3 +898,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: qfx.32 Shift-at-launch built now with a debug log line; Wayland measurement (U-43) deferred to an OWNER bead.
 - 2026-10-16 leader decision: xdh.14 adds a frozen ChartView mode so Ended process cards stop at their last sample; Ended is a caller-side latch (cards and tray).
 - 2026-10-16 leader decision: xdh.15 Add Minigraph on app and unit rows adds the app card; hidden on pseudo rows until a pseudo source exists; exited rows disabled.
+- 2026-10-16 leader decision: xdh.21 MiniWindow owns a hidden DeviceSidebar for its card list and demand; card.rs gets a pointer flag.
