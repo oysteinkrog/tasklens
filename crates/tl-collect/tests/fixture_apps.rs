@@ -17,7 +17,7 @@ use tl_collect::apps::icons::{
     theme_order,
 };
 use tl_collect::apps::launchers::{
-    GameId, assign_games, env_game, steam_app_id, steam_game, steam_manifest_name,
+    GameId, assign_games, env_game, steam_app_id, steam_game, steam_manifest_name as manifest_name,
 };
 use tl_collect::apps::naming::{
     NameInput, display_name, exe_basename, image_name, is_wine, search_lower,
@@ -1791,9 +1791,9 @@ fn steam_manifest_name() {
     assert_eq!(game.icon_name.as_deref(), Some("steam_icon_570"));
     assert!(steam_game(999, &root, &mut buf).is_none());
     let nested = b"\"AppState\" { \"UserConfig\" { \"name\" \"Nope\" } }";
-    assert_eq!(steam_manifest_name(nested), None);
+    assert_eq!(manifest_name(nested), None);
     let top = b"\"AppState\" { \"name\" \"A \\\"B\\\"\" }";
-    assert_eq!(steam_manifest_name(top).as_deref(), Some("A \"B\""));
+    assert_eq!(manifest_name(top).as_deref(), Some("A \"B\""));
 }
 
 #[test]
