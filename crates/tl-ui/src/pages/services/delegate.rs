@@ -778,6 +778,24 @@ impl ServicesDelegate {
         cx.notify();
     }
 
+    /// Expands `manager`'s group for a jump to one of its units and saves the group's state as
+    /// a toggle does. Returns the expanded set for the page's query. It sets no
+    /// `expanded_request`: the caller sends the query itself.
+    pub fn expand_group(
+        &mut self,
+        manager: Manager,
+        cx: &mut Context<TlTreeTable<Self>>,
+    ) -> Arc<[SysNodeId]> {
+        if self.expanded.insert(SysNodeId::ServiceGroup(manager)) && cx.has_global::<TlSettings>() {
+            TlSettings::update(cx, |data| match manager {
+                Manager::System => data.state.services.group_expanded.system = true,
+                Manager::User => data.state.services.group_expanded.user = true,
+            });
+        }
+        cx.notify();
+        self.requested_expanded()
+    }
+
     /// Marks `unit` as having `tag` in flight, or clears the mark with `None`.
     pub fn set_pending(&mut self, unit: UnitRef, tag: Option<ActionKindTag>) {
         let changed = match tag {

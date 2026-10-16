@@ -8,7 +8,8 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::settings::ServicesSettings;
-use tl_model::table::{ServiceFilter, ServiceStateFilter, UnitType};
+use tl_model::snapshot::{ServiceStatus, StartupType, UnitRecord};
+use tl_model::table::{Manager, ServiceFilter, ServiceStateFilter, UnitType};
 
 use super::actions::{
     ManagerArg, ServicesRemoveFilters, ServicesResetUnitTypes, ServicesToggleManagerFilter,
@@ -370,6 +371,61 @@ pub fn apply_reset_unit_types(
     state.reset_unit_types();
     send_filter(state, query, client);
     persist(state, cx);
+}
+
+/// Turns on only the strip parts that hide `record` (UI-SYS-021): its state class when some
+/// states are on and not its own, its unit type, its manager. Sends one query and persists
+/// once when anything changed. The text filter is not touched. Returns whether the strip changed.
+pub fn apply_reveal(
+    state: &mut ServiceFilterState,
+    record: &UnitRecord,
+    query: &mut SysQuery,
+    client: &dyn EngineClient,
+    cx: &mut App,
+) -> bool {
+    let mut changed = false;
+    let class = state_arg(&state_class(record));
+    if !state.states.is_empty() && !state.states.contains(&class) {
+        state.states.push(class);
+        changed = true;
+    }
+    let kind = unit_type_arg(&record.kind);
+    if !state.unit_types.contains(&kind) {
+        state.unit_types.push(kind);
+        changed = true;
+    }
+    let manager = match record.unit.manager {
+        Manager::System => &mut state.system,
+        Manager::User => &mut state.user,
+    };
+    if !*manager {
+        *manager = true;
+        changed = true;
+    }
+    if changed {
+        send_filter(state, query, client);
+        persist(state, cx);
+    }
+    changed
+}
+
+/// The strip's state class of a unit, as the engine computes it (SYS-004): running, failed,
+/// stopped (enabled and not running), else disabled.
+fn state_class(u: &UnitRecord) -> ServiceStateFilter {
+    match u.status {
+        ServiceStatus::Running | ServiceStatus::Active | ServiceStatus::Reloading => {
+            ServiceStateFilter::Running
+        }
+        ServiceStatus::Failed => ServiceStateFilter::Failed,
+        _ if matches!(
+            u.startup,
+            StartupType::Enabled | StartupType::EnabledRuntime
+        ) =>
+        {
+            ServiceStateFilter::Stopped
+        }
+        _ => ServiceStateFilter::Disabled,
+    }
 }
 
 /// Handler for `ServicesRemoveFilters`. The text filter lives in `query` and is kept.

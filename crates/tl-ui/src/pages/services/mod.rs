@@ -24,9 +24,9 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, Bounds, Context, DismissEvent, Entity, EventEmitter,
-    FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div, point,
+    Action as _, AnyElement, AnyWindowHandle, App, Bounds, Context, DismissEvent, Entity,
+    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div, point,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
@@ -44,16 +44,16 @@ use tl_model::units;
 use tracing::warn;
 
 use self::actions::{
-    SERVICE_TABLE_CONTEXT, ServiceFileProperties, ServiceJumpToProcess, ServiceOpenFileLocation,
-    ServiceOpenUnitFile, ServiceReload, ServiceResetFailed, ServiceRestart, ServiceSetStartupType,
-    ServiceStart, ServiceStop, ServiceViewLogs, ServicesClearAllFilters, ServicesRemoveFilters,
-    ServicesResetUnitTypes, ServicesToggleManagerFilter, ServicesToggleStateFilter,
-    ServicesToggleUnitType,
+    JumpOrigin, SERVICE_TABLE_CONTEXT, ServiceFileProperties, ServiceJumpToProcess,
+    ServiceOpenFileLocation, ServiceOpenUnitFile, ServiceReload, ServiceResetFailed,
+    ServiceRestart, ServiceSetStartupType, ServiceStart, ServiceStop, ServiceViewLogs,
+    ServicesClearAllFilters, ServicesRemoveFilters, ServicesResetUnitTypes, ServicesShowHidden,
+    ServicesToggleManagerFilter, ServicesToggleStateFilter, ServicesToggleUnitType,
 };
 use self::delegate::{ServicesDelegate, row_key};
 use self::filter_strip::{
     ServiceFilterState, ServicesOpenUnitTypes, apply_remove_filters, apply_reset_unit_types,
-    apply_toggle_manager, apply_toggle_state, apply_toggle_unit_type, render_strip,
+    apply_reveal, apply_toggle_manager, apply_toggle_state, apply_toggle_unit_type, render_strip,
     unit_types_menu,
 };
 use self::flows::UnitVerb;
@@ -62,7 +62,9 @@ use crate::action_tracker::{GlobalActionTracker, ToastTexts, action_words};
 use crate::actions::ClearFilter;
 use crate::app::EngineGlobal;
 use crate::components::menu::{TlMenu, close_context_menu, open_context_menu_at};
-use crate::components::toast::{SERVICES_LOADING_TOAST, ToastKey, ToastKind, ToastQueue};
+use crate::components::toast::{
+    SERVICES_LOADING_TOAST, ToastAction, ToastKey, ToastKind, ToastQueue,
+};
 use crate::hub::{GlobalHub, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
 use crate::pages::processes::actions::{CapturedTargets, CopyDetails, EndProcess, EndTask};
@@ -100,6 +102,13 @@ enum MenuTargets {
     Process(CapturedTargets),
 }
 
+/// A Go to service jump waiting for the view of the last query sent.
+struct PendingUnitJump {
+    unit: UnitRef,
+    /// Show already cleared the text filter: a missing row is not found.
+    after_show: bool,
+}
+
 /// The Services tab entity.
 pub struct ServicesPage {
     frame: SysTableFrame<ServicesDelegate>,
@@ -117,6 +126,10 @@ pub struct ServicesPage {
     menu_targets: Option<MenuTargets>,
     /// Row keys of the rows the open row menu acts on, in view order, for its copy items.
     menu_rows: Option<SmallVec<[u64; 8]>>,
+    /// The jump waiting for its view.
+    jump: Option<PendingUnitJump>,
+    /// The jump the "not found" toast's Show button continues.
+    jump_hidden: Option<PendingUnitJump>,
     focus: FocusHandle,
     window: AnyWindowHandle,
     /// Where the strip was drawn last frame, for the Unit types menu anchor.
@@ -189,6 +202,7 @@ impl ServicesPage {
             let SysActionsEvent::PendingChanged { target } = ev;
             this.on_pending_changed(target, cx);
         }));
+        register_show_hidden(cx);
         Self {
             frame,
             strip,
@@ -200,6 +214,8 @@ impl ServicesPage {
             status_buf: loading_status_text(cx).to_string(),
             menu_targets: None,
             menu_rows: None,
+            jump: None,
+            jump_hidden: None,
             focus,
             window: window.window_handle(),
             strip_bounds: Rc::default(),
@@ -268,6 +284,129 @@ impl ServicesPage {
         self.refresh_pending = Some((version, timer));
     }
 
+    /// Go to service (UI-SYS-021, SYS-010): called after the main window made Services the
+    /// active tab. Every origin is another tab, so "Switched to Services tab" always shows.
+    ///
+    /// Removes only the strip filters that hide the unit, expands its manager group with one
+    /// query and waits for that view. The view decides whether the text filter hides the row
+    /// (the engine matches more columns than id, description and path), so the page asks it
+    /// instead of predicting. Toasts are deferred: the caller may be inside the window's update.
+    pub fn select_unit(
+        &mut self,
+        unit: UnitRef,
+        _origin: JumpOrigin,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump = None;
+        self.jump_hidden = None;
+        let snapshot = Arc::clone(cx.global::<GlobalHub>().0.read(cx).current());
+        let Some(record) = snapshot.services.units.iter().find(|u| u.unit == unit) else {
+            let text = tr(cx, "services-sys021-service-not-found");
+            self.defer_toast(ToastKind::Warning, text, None, cx);
+            return;
+        };
+        let text = tr(cx, "services-sys021-switched-to-services-tab");
+        self.defer_toast(ToastKind::Info, text, None, cx);
+        if let Some(client) = engine(cx) {
+            apply_reveal(&mut self.strip, record, &mut self.frame.query, &*client, cx);
+            let expanded = self.frame.table.update(cx, |table, cx| {
+                table.delegate.expand_group(unit.manager, cx)
+            });
+            self.frame.query.set_expanded(expanded, &*client);
+        }
+        self.jump = Some(PendingUnitJump {
+            unit,
+            after_show: false,
+        });
+        cx.notify();
+    }
+
+    /// Runs after each services snapshot: once the view of the last query sent is installed,
+    /// the jump selects the unit or explains why it cannot.
+    fn resolve_jump(&mut self, cx: &mut Context<Self>) {
+        if self.jump.is_none() {
+            return;
+        }
+        let installed = self
+            .frame
+            .table
+            .read(cx)
+            .delegate
+            .services()
+            .query_generation;
+        if installed != self.frame.query.last_sent() {
+            return;
+        }
+        let Some(job) = self.jump.take() else {
+            return;
+        };
+        let id = row_key(&SysNodeId::Unit(job.unit.clone()));
+        if self
+            .frame
+            .table
+            .update(cx, |table, cx| table.jump_to(id, cx))
+        {
+            let focus = self.focus.clone();
+            let window = self.window;
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| window.focus(&focus, cx));
+            });
+            let text = tr(cx, "services-sys021-switched-to-service");
+            self.defer_toast(ToastKind::Info, text, None, cx);
+            return;
+        }
+        let text = tr(cx, "services-sys021-service-not-found");
+        if !job.after_show && !self.filter_text().is_empty() {
+            let show = ToastAction {
+                label: tr(cx, "services-sys021-show"),
+                action: ServicesShowHidden.boxed_clone(),
+            };
+            self.defer_toast(ToastKind::Warning, text, Some(show), cx);
+            self.jump_hidden = Some(job);
+        } else {
+            self.defer_toast(ToastKind::Warning, text, None, cx);
+        }
+    }
+
+    /// The Show button: clears the text filter (the shell box and the query), then waits for the
+    /// view and selects the unit.
+    fn show_hidden(&mut self, cx: &mut Context<Self>) {
+        let Some(mut job) = self.jump_hidden.take() else {
+            return;
+        };
+        // Deferred: the button's click is still inside the window's update.
+        let window = self.window;
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                window.dispatch_action(ClearFilter.boxed_clone(), cx);
+            });
+        });
+        if let Some(client) = engine(cx) {
+            self.frame.query.set_filter("", &*client);
+        }
+        job.after_show = true;
+        self.jump = Some(job);
+    }
+
+    /// A toast in the page's window, pushed after the current update ends.
+    fn defer_toast(
+        &self,
+        kind: ToastKind,
+        text: SharedString,
+        action: Option<ToastAction>,
+        cx: &mut Context<Self>,
+    ) {
+        let window = self.window;
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                if let Some(queue) = ToastQueue::of_window(window, cx) {
+                    queue.update(cx, |q, cx| q.push(kind, text, None, action, cx));
+                }
+            });
+        });
+    }
+
     /// Forgets the targets captured when the row menu opened.
     pub(super) fn clear_menu_targets(&mut self) {
         self.menu_targets = None;
@@ -295,6 +434,7 @@ impl ServicesPage {
             self.loading_toast_up = false;
             self.remove_toast(SERVICES_LOADING_TOAST, cx);
         }
+        self.resolve_jump(cx);
         if !changed {
             return;
         }
@@ -899,6 +1039,17 @@ impl ServicesPage {
             .child(strip)
             .into_any_element()
     }
+}
+
+/// Installs the `ServicesShowHidden` handler for `page`. The toast button dispatches from the
+/// toast layer, outside the page's element tree, so the handler is app-level.
+fn register_show_hidden(cx: &mut Context<ServicesPage>) {
+    let page = cx.weak_entity();
+    // `App::on_action`: `Context::on_action` is the element-level form.
+    let app: &mut App = cx;
+    app.on_action(move |_: &ServicesShowHidden, cx| {
+        let _ = page.update(cx, |p, cx| p.show_hidden(cx));
+    });
 }
 
 /// The engine client, absent only in tests that install none.

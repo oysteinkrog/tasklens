@@ -28,6 +28,7 @@ gpui::actions!(
         ServiceOpenFileLocation,
         ServiceOpenUnitFile,
         ServiceJumpToProcess,
+        ServicesShowHidden,
         ServicesRemoveFilters,
         ServicesClearAllFilters,
         ServicesResetUnitTypes,

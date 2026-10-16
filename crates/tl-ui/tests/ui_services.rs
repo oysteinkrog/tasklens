@@ -2725,7 +2725,8 @@ mod page {
         UnitRecord,
     };
     use tl_model::table::{
-        Manager, ServiceColumn, SysNodeId, SysRow, SysTable, SysTableQuery, UnitType,
+        Manager, ServiceColumn, ServiceStateFilter, SysNodeId, SysRow, SysTable, SysTableQuery,
+        UnitType,
     };
     use tl_model::validity::Validity;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -2737,7 +2738,8 @@ mod page {
     use tl_ui::demand::DEMAND_COALESCE;
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::services::actions::{
-        ServicesClearAllFilters, ServicesToggleStateFilter, StateFilterArg,
+        JumpOrigin, ServicesClearAllFilters, ServicesShowHidden, ServicesToggleStateFilter,
+        StateFilterArg,
     };
     use tl_ui::pages::services::delegate::ServicesDelegate;
     use tl_ui::pages::services::{REFRESH_TOAST_AFTER, ServicesPage};
@@ -3565,6 +3567,244 @@ mod page {
         let query = last_services_query(&engine).expect("a query");
         assert!(query.filter.is_empty());
         assert!(query.services.expect("a strip filter").states.is_empty());
+    }
+
+    /// Publishes `units` as the unfiltered records and group and unit rows for the first `shown`
+    /// of them, stamped with `generation`.
+    fn publish_view(
+        engine: &FakeEngine,
+        version: u64,
+        units: &[UnitRecord],
+        shown: usize,
+        generation: u64,
+    ) {
+        let rows = rows(&units[..shown], &[]);
+        engine.publish_with(|snapshot| {
+            snapshot.services = Arc::new(ServicesSnapshot {
+                header: ComponentHeader {
+                    version,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                rows: rows.into(),
+                query_generation: generation,
+                units: units.to_vec().into(),
+                counts: ServiceCounts::default(),
+                managers: [ManagerState::Connected; 2],
+                manager_counts: [units.len() as u32, 0],
+                ..ServicesSnapshot::default()
+            });
+        });
+    }
+
+    fn sshd() -> UnitRecord {
+        record("sshd.service", UnitType::Service, ServiceStatus::Running)
+    }
+
+    /// The fixture plus sshd.service, last, so a view can leave it out.
+    fn units_with_sshd() -> Vec<UnitRecord> {
+        let mut units = fixture();
+        units.push(sshd());
+        units
+    }
+
+    fn go_to(
+        vcx: &mut VisualTestContext,
+        page: &Entity<ServicesPage>,
+        unit: tl_model::table::UnitRef,
+    ) {
+        vcx.update(|window, cx| {
+            page.update(cx, |p, cx| {
+                p.select_unit(unit, JumpOrigin::Processes, window, cx)
+            });
+        });
+        vcx.run_until_parked();
+    }
+
+    fn selected_ids(vcx: &mut VisualTestContext, page: &Entity<ServicesPage>) -> Vec<u64> {
+        let table = vcx.read_entity(page, |p, _| p.table().clone());
+        vcx.read_entity(&table, |t, _| t.selection.ids().collect())
+    }
+
+    #[gpui_kit::test]
+    fn go_to_service_expands_and_selects(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let units = units_with_sshd();
+        let all = units.len();
+        let gen_of = |rig: &Rig| rig.last_query().map_or(0, |q| q.generation);
+        publish_view(&rig.engine, 1, &units, all, gen_of(&rig));
+        rig.vcx.run_until_parked();
+        rig.draw();
+        let system = rig.row_id(0);
+        let table = rig.table();
+        table.update(&mut rig.vcx, |t, cx| {
+            t.delegate.on_toggle_expand(system, cx)
+        });
+        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+        rig.vcx.run_until_parked();
+
+        let unit = sshd().unit;
+        go_to(&mut rig.vcx, &rig.page, unit.clone());
+        let query = rig.last_query().expect("a query");
+        assert!(
+            query
+                .expanded
+                .contains(&SysNodeId::ServiceGroup(Manager::System))
+        );
+        publish_view(&rig.engine, 2, &units, all, gen_of(&rig));
+        rig.vcx.run_until_parked();
+        rig.draw();
+
+        let id = tl_ui::pages::services::delegate::row_key(&SysNodeId::Unit(unit));
+        assert_eq!(selected_ids(&mut rig.vcx, &rig.page), [id]);
+        let focused = rig
+            .vcx
+            .update(|window, cx| table.read(cx).focus_handle().is_focused(window));
+        assert!(focused);
+        assert_eq!(
+            rig.toasts(),
+            ["Switched to Services tab", "Switched to service."]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn go_to_service_removes_only_hiding_strip_filters(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let units = units_with_sshd();
+        let all = units.len();
+        rig.focus_table();
+        rig.vcx.update(|window, cx| {
+            window.dispatch_action(
+                Box::new(ServicesToggleStateFilter {
+                    state: StateFilterArg::Failed,
+                }),
+                cx,
+            );
+        });
+        rig.vcx.run_until_parked();
+        let generation = rig.last_query().map_or(0, |q| q.generation);
+        publish_view(&rig.engine, 1, &units, all, generation);
+        rig.vcx.run_until_parked();
+
+        go_to(&mut rig.vcx, &rig.page, sshd().unit);
+        let strip = rig.vcx.read_entity(&rig.page, |p, _| p.strip().clone());
+        assert_eq!(strip.states.len(), 2);
+        assert!(strip.states.contains(&StateFilterArg::Failed));
+        assert!(strip.states.contains(&StateFilterArg::Running));
+        let sent = rig.last_query().expect("a query").services.expect("strip");
+        assert_eq!(sent.states.len(), 2);
+        assert!(sent.states.contains(&ServiceStateFilter::Failed));
+        assert!(sent.states.contains(&ServiceStateFilter::Running));
+        assert!(strip.system && strip.user);
+    }
+
+    #[gpui_kit::test]
+    fn go_to_service_filtered_shows_button(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        init(cx, engine.clone());
+        let handle = cx.update(|cx| {
+            set_test_page(cx, Tab::Services, services_page);
+            open_main_window_on(Tab::Services, cx).expect("main window opens")
+        });
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let page = vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window view")
+                .read(cx)
+                .page_entity::<ServicesPage>(Tab::Services)
+                .expect("services page")
+        });
+        let focus = vcx.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
+        let draw = |vcx: &mut VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        let toasts = |vcx: &mut VisualTestContext| -> Vec<String> {
+            vcx.update(|_, cx| {
+                let view = main_window_view(cx).expect("main window");
+                let texts = view.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(|t| t.to_string()).collect()
+            })
+        };
+        let generation =
+            |engine: &FakeEngine| last_services_query(engine).map_or(0, |q| q.generation);
+
+        vcx.update(|window, cx| window.focus(&focus, cx));
+        vcx.simulate_keystrokes("n g i n x");
+        vcx.executor().advance_clock(FILTER_DEBOUNCE);
+        draw(&mut vcx);
+        let units = units_with_sshd();
+        let others = units.len() - 1;
+        publish_view(&engine, 1, &units, others, generation(&engine));
+        draw(&mut vcx);
+
+        go_to(&mut vcx, &page, sshd().unit);
+        publish_view(&engine, 2, &units, others, generation(&engine));
+        draw(&mut vcx);
+        assert_eq!(
+            toasts(&mut vcx),
+            [
+                "Switched to Services tab",
+                "Service not found in current view"
+            ]
+        );
+        assert_eq!(
+            vcx.read_entity(&page, |p, _| p.filter_text().to_owned()),
+            "nginx"
+        );
+
+        vcx.update(|window, cx| window.dispatch_action(Box::new(ServicesShowHidden), cx));
+        vcx.executor().advance_clock(FILTER_DEBOUNCE);
+        draw(&mut vcx);
+        assert_eq!(
+            vcx.read_entity(&page, |p, _| p.filter_text().to_owned()),
+            ""
+        );
+        publish_view(&engine, 3, &units, units.len(), generation(&engine));
+        draw(&mut vcx);
+        let id = tl_ui::pages::services::delegate::row_key(&SysNodeId::Unit(sshd().unit));
+        assert_eq!(selected_ids(&mut vcx, &page), [id]);
+    }
+
+    #[gpui_kit::test]
+    fn go_to_service_unknown_unit_toast(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        rig.publish_fixture();
+        let sent = rig.engine.commands().len();
+        let mut unknown = sshd().unit;
+        unknown.name = Arc::from("nope.service");
+        go_to(&mut rig.vcx, &rig.page, unknown);
+        rig.draw();
+        assert_eq!(rig.toasts(), ["Service not found in current view"]);
+        assert_eq!(rig.engine.commands().len(), sent);
+    }
+
+    #[gpui_kit::test]
+    fn go_to_service_waits_for_generation(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let units = units_with_sshd();
+        let all = units.len();
+        let generation = rig.last_query().map_or(0, |q| q.generation);
+        publish_view(&rig.engine, 1, &units, all, generation);
+        rig.vcx.run_until_parked();
+
+        go_to(&mut rig.vcx, &rig.page, sshd().unit);
+        let sent = rig.last_query().expect("a query").generation;
+        publish_view(&rig.engine, 2, &units, all, sent - 1);
+        rig.vcx.run_until_parked();
+        rig.draw();
+        assert!(selected_ids(&mut rig.vcx, &rig.page).is_empty());
+        publish_view(&rig.engine, 3, &units, all, sent);
+        rig.vcx.run_until_parked();
+        rig.draw();
+        assert_eq!(selected_ids(&mut rig.vcx, &rig.page).len(), 1);
     }
 
     /// Publishes a process update with no services update.
