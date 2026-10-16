@@ -673,6 +673,8 @@ pub struct ServicesDelegate {
     sort_request: Option<SysSortSpec>,
     expanded_request: Option<Arc<[SysNodeId]>>,
     version: u64,
+    /// Row installs: one per services view shown.
+    row_builds: u64,
     active: bool,
     window: Option<AnyWindowHandle>,
     words: ServicesWords,
@@ -726,6 +728,7 @@ impl ServicesDelegate {
             sort_request: None,
             expanded_request: None,
             version: 0,
+            row_builds: 0,
             active: false,
             window: None,
             words: ServicesWords::en(),
@@ -1085,6 +1088,23 @@ impl ServicesDelegate {
 
     pub fn take_sort_request(&mut self) -> Option<SysSortSpec> {
         self.sort_request.take()
+    }
+
+    /// A process update with no services update. With a unit row expanded, the child rows read
+    /// the new process records; the rows, their index and the group labels stay. False, and
+    /// nothing changes, while every unit row is collapsed.
+    pub fn install_processes(&mut self, snap: &Arc<Snapshot>) -> bool {
+        if self.expanded_units() == 0 {
+            return false;
+        }
+        self.snapshot = Arc::clone(snap);
+        self.version += 1;
+        true
+    }
+
+    /// How many times the rows were installed, for the re-render tests.
+    pub fn row_builds(&self) -> u64 {
+        self.row_builds
     }
 
     pub fn take_expanded_request(&mut self) -> Option<Arc<[SysNodeId]>> {
@@ -1525,6 +1545,7 @@ impl SysDelegate for ServicesDelegate {
         self.backend = self.snap.backend;
         self.build_group_labels();
         self.version += 1;
+        self.row_builds += 1;
     }
     fn mask(&self) -> ComponentMask {
         ComponentMask::SERVICES | ComponentMask::PROCESSES

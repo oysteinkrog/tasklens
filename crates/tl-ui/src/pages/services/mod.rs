@@ -275,6 +275,12 @@ impl ServicesPage {
     }
 
     fn on_snapshot(&mut self, snap: &Arc<Snapshot>, mask: ComponentMask, cx: &mut Context<Self>) {
+        if !mask.contains(ComponentMask::SERVICES) {
+            if mask.contains(ComponentMask::PROCESSES) {
+                self.on_processes(snap, cx);
+            }
+            return;
+        }
         let changed = self.frame.on_snapshot(snap, mask, cx);
         if mask.contains(ComponentMask::SERVICES)
             && self
@@ -298,6 +304,23 @@ impl ServicesPage {
             self.refresh_status(snap.services.counts, cx);
         }
         cx.notify();
+    }
+
+    /// A process update with no services update. Rows rebuild only on a new services version.
+    /// While every unit row is collapsed nothing changes and nothing renders; with a unit
+    /// expanded only the table redraws, so its child rows show the new process records.
+    fn on_processes(&mut self, snap: &Arc<Snapshot>, cx: &mut Context<Self>) {
+        if let Some(client) = engine(cx) {
+            self.frame.query.on_snapshot(&*client);
+        }
+        if self.frame.is_paused() {
+            return;
+        }
+        self.frame.table.update(cx, |table, cx| {
+            if table.delegate.install_processes(snap) {
+                table.on_new_version(cx);
+            }
+        });
     }
 
     /// Forwards the delegate's sort and expansion requests to the query, and recounts the

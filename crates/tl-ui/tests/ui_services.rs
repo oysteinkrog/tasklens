@@ -2709,8 +2709,9 @@ mod page {
     use gpui_kit::base::Root;
     use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton,
-        MouseDownEvent, ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext,
-        VisualTestContext, Window, WindowBounds, WindowOptions, div, point, px, size,
+        MouseDownEvent, ParentElement as _, Render, StyleRefinement, Styled as _, Subscription,
+        TestAppContext, VisualTestContext, Window, WindowBounds, WindowOptions, div, point, px,
+        size,
     };
     use tl_model::actions::{ActionKind, ActionTarget, Signal};
     use tl_model::client::EngineClient;
@@ -2723,7 +2724,9 @@ mod page {
         ComponentHeader, ProcessSnapshot, ServiceCounts, ServiceStatus, ServicesSnapshot,
         UnitRecord,
     };
-    use tl_model::table::{Manager, SysNodeId, SysRow, SysTable, SysTableQuery, UnitType};
+    use tl_model::table::{
+        Manager, ServiceColumn, SysNodeId, SysRow, SysTable, SysTableQuery, UnitType,
+    };
     use tl_model::validity::Validity;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::menu::{
@@ -2892,7 +2895,7 @@ mod page {
         rig
     }
 
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     impl Rig {
@@ -3562,5 +3565,108 @@ mod page {
         let query = last_services_query(&engine).expect("a query");
         assert!(query.filter.is_empty());
         assert!(query.services.expect("a strip filter").states.is_empty());
+    }
+
+    /// Publishes a process update with no services update.
+    fn publish_processes(rig: &mut Rig, version: u64, records: Vec<ProcessRecord>) {
+        rig.engine.publish_with(|snapshot| {
+            snapshot.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                records: records.into(),
+                ..ProcessSnapshot::default()
+            });
+        });
+        rig.vcx.run_until_parked();
+        rig.draw();
+    }
+
+    /// Counts `cx.notify` calls on the page and on its table.
+    fn notify_counters(rig: &mut Rig) -> (Rc<Cell<u32>>, Rc<Cell<u32>>, [Subscription; 2]) {
+        let (page_n, table_n) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let table = rig.table();
+        let page = rig.page.clone();
+        let (p, t) = (Rc::clone(&page_n), Rc::clone(&table_n));
+        let subs = rig.vcx.update(|_, cx| {
+            [
+                cx.observe(&page, move |_, _| p.set(p.get() + 1)),
+                cx.observe(&table, move |_, _| t.set(t.get() + 1)),
+            ]
+        });
+        (page_n, table_n, subs)
+    }
+
+    #[gpui_kit::test]
+    fn processes_only_update_with_units_collapsed_does_nothing(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let key = child_key(812);
+        rig.publish(
+            fixture(),
+            &[(0, key)],
+            vec![child_process(812, ProcFlags::empty())],
+            ServiceCounts::default(),
+        );
+        let table = rig.table();
+        let builds = rig.vcx.read_entity(&table, |t, _| t.delegate.row_builds());
+        let (page_n, table_n, _subs) = notify_counters(&mut rig);
+        for version in 1..=3 {
+            publish_processes(
+                &mut rig,
+                version,
+                vec![child_process(812, ProcFlags::empty())],
+            );
+        }
+        assert_eq!(
+            rig.vcx.read_entity(&table, |t, _| t.delegate.row_builds()),
+            builds,
+            "no row rebuild"
+        );
+        assert_eq!(page_n.get(), 0, "no page notify");
+        assert_eq!(table_n.get(), 0, "no table notify");
+    }
+
+    #[gpui_kit::test]
+    fn processes_only_update_refreshes_expanded_children(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let key = child_key(812);
+        rig.publish(
+            fixture(),
+            &[(0, key)],
+            vec![child_process(812, ProcFlags::empty())],
+            ServiceCounts::default(),
+        );
+        // Row 0 is the System group, row 1 unit00.service, row 2 its child.
+        let unit = rig.row_id(1);
+        let table = rig.table();
+        table.update(&mut rig.vcx, |table, cx| {
+            table.delegate_mut().on_toggle_expand(unit, cx);
+        });
+        rig.vcx.run_until_parked();
+        rig.draw();
+        let tasks = |rig: &mut Rig| {
+            rig.vcx.read_entity(&table, |t, _| {
+                super::shown(&super::cell(&t.delegate, 2, ServiceColumn::Tasks))
+            })
+        };
+        assert_eq!(tasks(&mut rig), "3");
+        let builds = rig.vcx.read_entity(&table, |t, _| t.delegate.row_builds());
+        let (page_n, table_n, _subs) = notify_counters(&mut rig);
+
+        let mut busier = child_process(812, ProcFlags::empty());
+        busier.threads = 7;
+        publish_processes(&mut rig, 1, vec![busier]);
+        assert_eq!(tasks(&mut rig), "7", "the child row reads the new record");
+        assert_eq!(
+            rig.vcx.read_entity(&table, |t, _| t.delegate.row_builds()),
+            builds,
+            "the rows stay; only the child records change"
+        );
+        assert!(table_n.get() > 0, "the table redraws");
+        assert_eq!(page_n.get(), 0, "the page itself does not notify");
     }
 }
