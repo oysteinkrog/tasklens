@@ -14,7 +14,7 @@
 //! worker checks `PackageIndex::due` and runs `run_batch` as its own blocking job, beside the
 //! sweep job and never inside it. The index keeps the 2 s debounce.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -122,6 +122,8 @@ pub struct ProcessesSource {
     cfg: Arc<EngineConfig>,
     /// Set by `period`: the optional reads run only while something shows them.
     wants: Cell<SweepWants>,
+    /// `Demand.detail_keys`, set by `period`: the visible rows whose P2 columns the sweep reads.
+    detail_keys: RefCell<Arc<[ProcessKey]>>,
     /// The sampler's clock, also used for the helper's I/O rates.
     clock: fn() -> (TimeNs, u64),
     /// Set by `helper_reads`.
@@ -181,6 +183,7 @@ impl ProcessesSource {
             protect,
             cfg,
             wants: Cell::new(SweepWants::default()),
+            detail_keys: RefCell::new(Arc::from([])),
             clock: real_clock,
             helper: None,
         })
@@ -247,6 +250,7 @@ impl Source for ProcessesSource {
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.wants.set(sweep_wants(d, s));
+        self.detail_keys.replace(Arc::clone(&d.detail_keys));
         processes_period(d, s)
     }
 
@@ -256,10 +260,12 @@ impl Source for ProcessesSource {
         self.ctx.want_fd_count = wants.fd_count;
         self.ctx.want_status_fields = wants.status_fields;
         self.ctx.want_io = wants.io;
+        let detail_keys = Arc::clone(&self.detail_keys.borrow());
         let inputs = SweepInputs {
             protect: &self.protect,
+            // P2 columns, the package among them, for the visible rows (R-163 item 2).
+            detail_keys: &detail_keys,
             // PSS and USS for detail keys come from the ProcessDetail worker (E10-A2).
-            detail_keys: &[],
             want_pss: false,
             window_pids: None,
             wm_class: None,
@@ -278,7 +284,8 @@ impl Source for ProcessesSource {
         }
 
         let file_nr = self.read_file_nr();
-        let mut extras_p2 = Vec::new();
+        // Index aligned with `records` when `detail_keys` is not empty, else empty.
+        let mut extras_p2 = std::mem::take(&mut self.out.extras_p2);
         if let Some(helper) = &mut self.helper {
             helper.after_sweep(&mut self.out, &mut extras_p2);
         }
@@ -293,8 +300,8 @@ impl Source for ProcessesSource {
             observed_end: out.observed_end,
             records,
             extras: std::mem::take(&mut out.extras),
-            // Filled for detail keys by the P2 readers (R-163 item 2); for now only the
-            // helper's cwd values.
+            // Filled for detail keys by the P2 readers (R-163 item 2), plus the helper's cwd
+            // values.
             extras_p2,
             app_stats: out.apps.iter().map(|a| a.to_model()).collect(),
             // Unit resource columns are P2.
@@ -1026,7 +1033,6 @@ mod tests {
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
     use tl_collect::SysRoot;
-    use tl_collect::apps::classify::ProtectInputs;
     use tl_collect::pkg::{PathOwners, PkgBackend, VerifyOutcome};
     use tl_model::process::PackageInfo;
 
@@ -1146,8 +1152,8 @@ mod tests {
         }
     }
 
-    /// The sweep reads the shared index: a P2 read of a detail key queues its exe, and after the
-    /// batch `ProcessExtrasP2.package` holds the owner.
+    /// `sample` reads the shared index for the demand's detail keys: the first sweep queues the
+    /// exe, and after the batch `ProcessSweep.extras_p2` holds the owner.
     #[test]
     fn sweep_extras_package_from_shared_index() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1180,42 +1186,57 @@ mod tests {
         };
         let users = PasswdUserNames::load(&base.join("etc/passwd"));
         let (index, calls) = fake_index(&exe);
-        let mut src = ProcessesSource::with_parts(cfg, &paths, Box::new(users))
+        let src = ProcessesSource::with_parts(cfg, &paths, Box::new(users))
             .expect("fixture source opens")
             .with_package_index(index.clone());
         assert!(src.sampler.package_index().same_index(&index));
 
-        let protect = ProtectInputs::default();
-        let sweep = |src: &mut ProcessesSource, keys: &[ProcessKey]| {
-            let inputs = SweepInputs {
-                protect: &protect,
-                detail_keys: keys,
-                want_pss: false,
-                window_pids: None,
-                wm_class: None,
+        // The production path: `period` takes the visible rows from the demand, `sample`
+        // sweeps and builds the `ProcessSweep`.
+        let sample = |src: ProcessesSource, keys: &[ProcessKey]| {
+            let demand = Demand {
+                process_table: true,
+                detail_keys: Arc::from(keys),
+                ..Demand::default()
             };
-            let mut out = SweepOutput::default();
-            src.sampler.sweep(&src.ctx, &inputs, &mut out);
-            out
+            assert!(src.period(&demand, &settings(1000)).is_some());
+            match src.sample() {
+                (src, SourceUpdate::Processes(sweep)) => (src, sweep),
+                _ => panic!("sample gives a sweep"),
+            }
         };
-        let out = sweep(&mut src, &[]);
-        let key = out
+        let (src, sweep) = sample(src, &[]);
+        assert!(
+            sweep.extras_p2.is_empty(),
+            "no P2 reads without detail keys"
+        );
+        let key = sweep
             .records
             .iter()
             .find(|r| r.key.pid == 4201)
             .expect("4201 swept")
             .key;
 
-        let out = sweep(&mut src, &[key]);
-        let at = out.records.iter().position(|r| r.key == key).expect("4201");
-        assert_eq!(out.extras_p2[at].package, None, "not looked up yet");
+        let (src, sweep) = sample(src, &[key]);
+        assert_eq!(sweep.extras_p2.len(), sweep.records.len());
+        let at = sweep
+            .records
+            .iter()
+            .position(|r| r.key == key)
+            .expect("4201");
+        assert_eq!(sweep.extras_p2[at].key, Some(key));
+        assert_eq!(sweep.extras_p2[at].package, None, "not looked up yet");
         assert!(index.due(Instant::now() + Duration::from_secs(3)));
 
         assert_eq!(index.run_batch().expect("batch"), 1);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        let out = sweep(&mut src, &[key]);
-        let at = out.records.iter().position(|r| r.key == key).expect("4201");
-        let p2 = &out.extras_p2[at];
+        let (_src, sweep) = sample(src, &[key]);
+        let at = sweep
+            .records
+            .iter()
+            .position(|r| r.key == key)
+            .expect("4201");
+        let p2 = &sweep.extras_p2[at];
         assert_eq!(p2.package.as_deref().map(|i| &*i.name), Some("firefox"));
         assert_eq!(
             p2.package_status,
