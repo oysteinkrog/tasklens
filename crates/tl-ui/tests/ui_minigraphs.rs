@@ -2321,7 +2321,7 @@ mod panel {
     /// The process row menu items 15 to 17 and `add_process` (tasklens-xdh.15, UI-PRC-020).
     mod graph_items {
         use super::*;
-        use tl_model::ids::ProcessKey;
+        use tl_model::ids::{NodeId, ProcessKey};
         use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
         use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
         use tl_model::table::{Manager, UnitRef};
@@ -2441,7 +2441,7 @@ mod panel {
                 .update(|window, cx| menu.read(cx).entries_for_test(window))
         }
 
-        fn graph_entries(entries: &[MenuEntryInfo]) -> Vec<(String, MenuEntryInfo)> {
+        fn graph_entries(entries: &[MenuEntryInfo]) -> Vec<(String, &MenuEntryInfo)> {
             entries
                 .iter()
                 .filter(|e| {
@@ -2450,7 +2450,7 @@ mod panel {
                         Some("Add Minigraph" | "Add Process Name Graph" | "Add App Name Graph")
                     )
                 })
-                .map(|e| (e.label.as_deref().unwrap_or_default().to_owned(), e.clone()))
+                .map(|e| (e.label.as_deref().unwrap_or_default().to_owned(), e))
                 .collect()
         }
 
@@ -2602,7 +2602,7 @@ mod panel {
             );
             let entries = menu_entries(&mut r, vec![process(4242)]);
             let items = graph_entries(&entries);
-            let columns = sub(&mut r, &items[0].1);
+            let columns = sub(&mut r, items[0].1);
             assert_eq!(columns[0].kind, MenuEntryKind::Disabled);
             assert!(columns[0].checked);
             assert_eq!(columns[0].tooltip.as_deref(), Some("Already added"));
