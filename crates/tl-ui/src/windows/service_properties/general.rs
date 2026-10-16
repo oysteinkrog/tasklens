@@ -1054,13 +1054,14 @@ impl Render for GeneralTab {
             .debug_selector(|| "ServiceGeneral-path".into())
             .w_full()
             .whitespace_normal()
-            .line_clamp(PATH_LINES)
             .text_color(match f.path.word {
                 Word::Value => theme.text_primary,
                 _ => theme.text_secondary,
             })
             .child(selectable(("svc-general-text", 3), f.path.text.clone(), &m));
         *path.text_style() = t_base(&m);
+        // After the base style: assigning it would reset the clamp.
+        let path = path.line_clamp(PATH_LINES);
         let unit_file = self.links(4, &f.unit_file, false, cx);
         let drop_ins = self.links(5, &f.drop_ins, true, cx);
 

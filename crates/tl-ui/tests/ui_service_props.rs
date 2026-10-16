@@ -1013,3 +1013,31 @@ fn general_values_selectable(cx: &mut TestAppContext) {
     let copied = vcx.read_from_clipboard().and_then(|item| item.text());
     assert_eq!(copied.as_deref(), Some("/usr/bin/sshd -D"));
 }
+
+#[gpui_kit::test]
+fn general_long_path_clamps_to_three_lines(cx: &mut TestAppContext) {
+    let height = |cx: &mut TestAppContext, d: Arc<UnitDetails>| {
+        let g = open_general(cx, Some(d));
+        let mut vcx = g.vcx(cx);
+        vcx.debug_bounds("ServiceGeneral-path")
+            .expect("Path value drawn")
+            .size
+            .height
+    };
+    let short = height(cx, sshd());
+    let long = height(
+        cx,
+        details_with("sshd.service", |d| {
+            d.exec_start_argv = Arc::from(
+                (0..400)
+                    .map(|i| a(&format!("/usr/lib/very/long/argument/{i}")))
+                    .collect::<Vec<_>>(),
+            );
+        }),
+    );
+    assert!(long > short, "a long path wraps");
+    assert!(
+        long <= short * 3.0 + gpui_kit::px(1.),
+        "a long path is clamped to three lines: {long:?} vs {short:?}"
+    );
+}
