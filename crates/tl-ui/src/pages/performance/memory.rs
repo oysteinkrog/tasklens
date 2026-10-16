@@ -1565,17 +1565,18 @@ impl TreeTableDelegate for SwapTableDelegate {
     }
 }
 
-/// A flat table box: the one-line header plus `rows` rows, at most [`SWAP_TABLE_MAX_ROWS`]
-/// (more rows scroll). The partitions and SMART tables use it too.
+/// A flat table box: the one-line header plus `rows` rows, at most `max_rows` (more rows
+/// scroll). The partitions and SMART tables use it too.
 pub(super) fn flat_static_table<D: TreeTableDelegate>(
     table: &Entity<TlTreeTable<D>>,
     rows: usize,
+    max_rows: usize,
     m: &UiMetrics,
 ) -> Div {
     div()
         .flex_none()
         .w_full()
-        .h(px(HEADER_H_ONE * m.ui_scale) + m.row_height * rows.min(SWAP_TABLE_MAX_ROWS) as f32)
+        .h(px(HEADER_H_ONE * m.ui_scale) + m.row_height * rows.min(max_rows) as f32)
         .child(table.clone())
 }
 
@@ -2347,7 +2348,7 @@ impl DevicePage for MemoryPage {
                     .gap(m.sp[4])
                     .child(heading(self.words.block_swap.clone(), md.clone()))
                     .child(
-                        flat_static_table(table, self.swap_rows.len(), m)
+                        flat_static_table(table, self.swap_rows.len(), SWAP_TABLE_MAX_ROWS, m)
                             .debug_selector(|| SWAP_TABLE_ID.into()),
                     )
                     .into_any_element(),

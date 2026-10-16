@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
-    Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    AppContext as _, Context, Entity, Focusable as _, Hsla, IntoElement, ParentElement as _,
+    Render, Styled as _, TestAppContext, VisualTestContext, Window, div, px,
 };
 use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
@@ -16,7 +16,7 @@ use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
-use tl_model::snapshot::{DiskDetails, SmartKind};
+use tl_model::snapshot::{DiskDetails, PartitionRow, PartitionTable, SmartKind};
 use tl_model::table::Total;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -28,11 +28,16 @@ use tl_ui::components::kv_grid;
 use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::disk::{ACTIVE_ID, DiskPage, TRANSFER_ID};
+use tl_ui::pages::performance::disk::{
+    ACTIVE_ID, DiskPage, PARTITIONS_TABLE_ID, PartColumn, TRANSFER_ID,
+};
 use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
+use tl_ui::table::cells::CellOut;
+use tl_ui::table::tree_table::{RowFlags, TreeTableDelegate};
 use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui::theme::{current, metrics};
 
 const MIB: f32 = 1024. * 1024.;
 /// The disk in the fake catalog.
@@ -480,4 +485,263 @@ mod details {
             ["12.0%", "0.42 ms", "4.2 MiB/s", "1.5 MiB/s", "931.51 GiB"]
         );
     }
+}
+
+fn part(name: &str, start: u64, size: u64) -> PartitionRow {
+    PartitionRow {
+        name: Arc::from(name),
+        start_bytes: start,
+        size_bytes: size,
+        holder: None,
+        mount: None,
+        extra_mounts: Arc::from([]),
+        label: None,
+        fs_type: Some(Arc::from("ext4")),
+        usage_pct: Total {
+            value: 42.1,
+            validity: Validity::Valid,
+        },
+        flags: Arc::from([]),
+        type_name: Arc::from("Linux filesystem"),
+        read_only: false,
+        unallocated: false,
+    }
+}
+
+fn gap(start: u64, size: u64) -> PartitionRow {
+    PartitionRow {
+        name: Arc::from(""),
+        fs_type: None,
+        usage_pct: Total {
+            value: 0.,
+            validity: Validity::Failed,
+        },
+        type_name: Arc::from(""),
+        unallocated: true,
+        ..part("", start, size)
+    }
+}
+
+fn publish_partitions(r: &mut Rig, kind: &str, rows: Vec<PartitionRow>) {
+    r.engine.publish_with(|s| {
+        let disks = Arc::make_mut(&mut s.device_details).disks.to_vec();
+        let disks: Vec<_> = disks
+            .into_iter()
+            .map(|(i, mut d)| {
+                d.partitions = Some(Arc::new(PartitionTable {
+                    kind: Arc::from(kind),
+                    rows: Arc::from(rows.clone()),
+                }));
+                (i, d)
+            })
+            .collect();
+        Arc::make_mut(&mut s.device_details).disks = Arc::from(disks);
+    });
+    draw(r.vcx);
+}
+
+fn heading(r: &mut Rig) -> String {
+    let page = r.page.clone();
+    r.vcx.update(|_, cx| {
+        page.read(cx)
+            .partitions()
+            .map(|p| p.heading.to_string())
+            .unwrap_or_default()
+    })
+}
+
+#[gpui_kit::test]
+fn partitions_heading_text(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    assert_eq!(heading(&mut r), "", "no table yet");
+    let three = vec![
+        part("nvme0n1p1", MIB_U, 512 * MIB_U),
+        part("nvme0n1p2", 513 * MIB_U, MIB_U * 100),
+        part("nvme0n1p3", 700 * MIB_U, MIB_U * 100),
+    ];
+    publish_partitions(&mut r, "GPT", three);
+    assert_eq!(heading(&mut r), "3 partitions - GPT");
+    publish_partitions(&mut r, "MBR", vec![part("sda1", MIB_U, MIB_U * 8)]);
+    assert_eq!(heading(&mut r), "1 partition - MBR");
+    publish_partitions(&mut r, "none", vec![part("sda1", MIB_U, MIB_U * 8)]);
+    assert_eq!(heading(&mut r), "1 partition");
+    publish_partitions(&mut r, "GPT", Vec::new());
+    assert_eq!(heading(&mut r), "No partitions");
+    assert!(
+        r.vcx.debug_bounds(PARTITIONS_TABLE_ID).is_none(),
+        "no table"
+    );
+}
+
+const MIB_U: u64 = 1024 * 1024;
+
+fn cells(r: &mut Rig, ix: usize) -> Vec<(String, Option<Hsla>, bool)> {
+    let page = r.page.clone();
+    r.vcx.update(|_, cx| {
+        let table = page.read(cx).partitions_table().expect("table").clone();
+        table.update(cx, |t, _| {
+            let d = t.delegate_mut();
+            PartColumn::ALL
+                .iter()
+                .map(|&col| {
+                    let mut out = CellOut {
+                        want_text: true,
+                        want_tooltip: true,
+                        ..CellOut::default()
+                    };
+                    TreeTableDelegate::cell(d, ix, col, &mut out);
+                    let name = TreeTableDelegate::name_cell(d, ix).primary.to_string();
+                    let text = if col == PartColumn::Partition {
+                        name
+                    } else {
+                        out.text.clone()
+                    };
+                    (text, out.text_color, out.bar.is_some())
+                })
+                .collect()
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn partitions_columns(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let rows = vec![
+        part("nvme0n1p1", MIB_U, MIB_U * 512),
+        part("nvme0n1p2", 513 * MIB_U, MIB_U * 100),
+        part("nvme0n1p3", 700 * MIB_U, MIB_U * 100),
+    ];
+    publish_partitions(&mut r, "GPT", rows);
+    let page = r.page.clone();
+    r.vcx.update(|_, cx| {
+        let table = page.read(cx).partitions_table().expect("table").clone();
+        table.update(cx, |t, _| {
+            let layout = t.columns();
+            assert_eq!(&**layout.visible_columns(), &PartColumn::ALL[..]);
+            let s = layout.ui_scale();
+            for (col, w) in [
+                (PartColumn::Partition, 120.),
+                (PartColumn::Size, 90.),
+                (PartColumn::Offset, 110.),
+                (PartColumn::Device, 110.),
+                (PartColumn::Label, 120.),
+                (PartColumn::FileSystem, 90.),
+                (PartColumn::Usage, 140.),
+                (PartColumn::Flags, 110.),
+            ] {
+                assert_eq!(layout.width(col).as_f32(), w * s, "{col:?}");
+            }
+            let tsv = t.rows_as_tsv(&[0]);
+            let header = tsv.lines().next().expect("header");
+            assert_eq!(
+                header,
+                "Partition\tSize\tOffset\tDevice\tMount path\tLabel\tFile system\tUsage\tFlags\tType"
+            );
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn unallocated_row_rendering(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    publish_partitions(
+        &mut r,
+        "GPT",
+        vec![
+            part("nvme0n1p1", MIB_U, MIB_U * 100),
+            gap(101 * MIB_U, 5 * MIB_U),
+        ],
+    );
+    let secondary = r.vcx.update(|_, cx| current(cx).text_secondary);
+    let row = cells(&mut r, 1);
+    for (i, col) in PartColumn::ALL.iter().enumerate() {
+        let (text, color, bar) = &row[i];
+        assert_eq!(*color, Some(secondary), "{col:?} colour");
+        assert!(!bar, "{col:?} has no bar");
+        match col {
+            PartColumn::Size => assert_eq!(text, "5.00 MiB"),
+            PartColumn::Offset => assert_eq!(text, "101.00 MiB"),
+            PartColumn::Type => assert_eq!(text, "Unallocated"),
+            _ => assert_eq!(text, "-", "{col:?}"),
+        }
+    }
+    let page = r.page.clone();
+    let flags = r.vcx.update(|_, cx| {
+        let table = page.read(cx).partitions_table().expect("table").clone();
+        table.update(cx, |t, _| TreeTableDelegate::row_flags(t.delegate_mut(), 1))
+    });
+    assert!(
+        flags.has(RowFlags::SECONDARY_NAME),
+        "Partition in text_secondary"
+    );
+}
+
+#[gpui_kit::test]
+fn partition_mount_tooltip(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let mut p = part("nvme0n1p2", MIB_U, MIB_U * 100);
+    p.mount = Some(Arc::from("/"));
+    p.extra_mounts = Arc::from([Arc::from("/mnt/a")]);
+    let mut q = part("nvme0n1p3", 200 * MIB_U, MIB_U * 100);
+    q.mount = Some(Arc::from("/home"));
+    publish_partitions(&mut r, "GPT", vec![p, q]);
+    let page = r.page.clone();
+    let tip = |r: &mut Rig, ix: usize| {
+        r.vcx.update(|_, cx| {
+            let table = page.read(cx).partitions_table().expect("table").clone();
+            table.update(cx, |t, _| {
+                let mut out = CellOut {
+                    want_text: true,
+                    want_tooltip: true,
+                    ..CellOut::default()
+                };
+                TreeTableDelegate::cell(t.delegate_mut(), ix, PartColumn::Mount, &mut out);
+                (out.text.clone(), out.tooltip.map(|t| t.to_string()))
+            })
+        })
+    };
+    assert_eq!(
+        tip(&mut r, 0),
+        ("/".into(), Some("Additional mount points: /mnt/a".into()))
+    );
+    assert_eq!(tip(&mut r, 1), ("/home".into(), None));
+}
+
+#[gpui_kit::test]
+fn partition_usage_bar(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let mut failed = part("nvme0n1p2", 200 * MIB_U, MIB_U * 100);
+    failed.usage_pct = Total {
+        value: 0.,
+        validity: Validity::Failed,
+    };
+    publish_partitions(
+        &mut r,
+        "GPT",
+        vec![part("nvme0n1p1", MIB_U, MIB_U * 100), failed],
+    );
+    let ok = cells(&mut r, 0);
+    assert_eq!(ok[7].0, "42.1%");
+    assert!(ok[7].2, "bar set");
+    let bad = cells(&mut r, 1);
+    assert_eq!(bad[7].0, "-");
+    assert!(!bad[7].2, "no bar when statvfs failed");
+
+    let m = r.vcx.update(|_, cx| *metrics(cx));
+    let track = r.vcx.debug_bounds("TlCell-bar").expect("bar track drawn");
+    let fill = r
+        .vcx
+        .debug_bounds("TlCell-bar-fill")
+        .expect("bar fill drawn");
+    assert_eq!(track.size.height, px(12. * m.ui_scale));
+    let want = track.size.width.as_f32() * 0.421;
+    assert!(
+        (fill.size.width.as_f32() - want).abs() < 1.0,
+        "fill {fill:?} track {track:?}"
+    );
+    let text = r.vcx.debug_bounds("TlCell-bar-text").expect("text box");
+    assert!(
+        (track.size.width.as_f32() + text.size.width.as_f32()) < 140. * m.ui_scale,
+        "track plus text fit the 140 px cell"
+    );
 }

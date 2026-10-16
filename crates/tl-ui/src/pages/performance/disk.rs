@@ -14,17 +14,22 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use fluent_bundle::FluentValue;
+use gpui_kit::base::ScrollbarHandle;
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Window, div, px,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
+    FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StyleRefinement, Styled as _, Subscription, Window,
+    div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::{DiskDetails, InvField, SmartKind, Snapshot};
+use tl_model::snapshot::{
+    DiskDetails, InvField, PartitionRow, PartitionTable, SmartKind, Snapshot,
+};
 use tl_model::system::{DiskTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
@@ -32,6 +37,7 @@ use tl_model::validity::Validity;
 
 use super::actions::{PerfEject, PerfShowSmart};
 use super::details::{Fallback, KeyValueModel};
+use super::memory::flat_static_table;
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
@@ -46,8 +52,17 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
+use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::{Section, TlSettings};
+use crate::table::cells::CellOut;
+use crate::table::columns::{
+    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
+};
+use crate::table::tree_table::{
+    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, SCROLLBAR_W, TableSort,
+    TlTreeTable, TreeTableDelegate,
+};
+use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::windows::disk_in_use::start_eject;
 
@@ -65,6 +80,28 @@ const KEY_BTN_EJECT: &str = "perf-disk-btn-eject";
 const KEY_MENU_SMART: &str = "perf-disk-menu-smart";
 const KEY_MENU_EJECT: &str = "perf-disk-menu-eject";
 const KEY_TIP_EJECT: &str = "perf-disk-tip-eject";
+const KEY_PART_HEADING: &str = "perf-part-heading";
+const KEY_PART_HEADING_PLAIN: &str = "perf-part-heading-plain";
+const KEY_PART_NONE: &str = "perf-part-none";
+const KEY_PART_UNALLOCATED: &str = "perf-part-unallocated";
+const KEY_PART_MORE_MOUNTS: &str = "perf-part-more-mounts";
+const KEY_PART_COLS: [&str; 10] = [
+    "perf-part-col-partition",
+    "perf-part-col-size",
+    "perf-part-col-offset",
+    "perf-part-col-device",
+    "perf-part-col-mount",
+    "perf-part-col-label",
+    "perf-part-col-fs",
+    "perf-part-col-usage",
+    "perf-part-col-flags",
+    "perf-part-col-type",
+];
+
+/// Debug selector of the partitions table box.
+pub const PARTITIONS_TABLE_ID: &str = "perf-disk-partitions-table";
+/// The partitions table scrolls beyond this many rows (UI-PRF-030).
+pub const PARTITIONS_MAX_ROWS: usize = 12;
 
 /// Debug selector of the `Show SMART data` button.
 pub const SMART_BUTTON_ID: &str = "perf-disk-smart";
@@ -88,6 +125,10 @@ pub struct Words {
     pub menu_smart: SharedString,
     pub menu_eject: SharedString,
     pub tip_eject: SharedString,
+    pub part_none: SharedString,
+    pub part_unallocated: SharedString,
+    /// Header labels in `PartColumn::ALL` order.
+    pub part_cols: [SharedString; 10],
 }
 
 impl Words {
@@ -109,6 +150,9 @@ impl Words {
         self.menu_smart = t(KEY_MENU_SMART);
         self.menu_eject = t(KEY_MENU_EJECT);
         self.tip_eject = t(KEY_TIP_EJECT);
+        self.part_none = t(KEY_PART_NONE);
+        self.part_unallocated = t(KEY_PART_UNALLOCATED);
+        self.part_cols = KEY_PART_COLS.map(t);
         true
     }
 }
@@ -718,6 +762,424 @@ fn disk_number(key: &DeviceKey, snap: &Snapshot, cx: &App) -> u16 {
     type_number(&visible, key)
 }
 
+/// The partitions block (PERF-050): the heading and the rows the table shows.
+#[derive(Clone, Debug)]
+pub struct PartitionsBlock {
+    pub heading: SharedString,
+    pub rows: Arc<[PartitionRow]>,
+}
+
+/// The heading: `3 partitions - GPT`, `1 partition - MBR`, `3 partitions` for a table of kind
+/// `none`, `No partitions` without rows.
+fn partitions_heading(table: &PartitionTable, words: &Words, cx: &App) -> SharedString {
+    if table.rows.is_empty() {
+        return words.part_none.clone();
+    }
+    let n = FluentValue::from(table.rows.iter().filter(|r| !r.unallocated).count() as i64);
+    if &*table.kind == "none" {
+        return tr_args(cx, KEY_PART_HEADING_PLAIN, &[("n", n)]);
+    }
+    tr_args(
+        cx,
+        KEY_PART_HEADING,
+        &[("n", n), ("table", FluentValue::from(&*table.kind))],
+    )
+}
+
+/// The columns of the partitions table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PartColumn {
+    Partition,
+    Size,
+    Offset,
+    Device,
+    Mount,
+    Label,
+    FileSystem,
+    Usage,
+    Flags,
+    Type,
+}
+
+impl PartColumn {
+    pub const ALL: [Self; 10] = [
+        Self::Partition,
+        Self::Size,
+        Self::Offset,
+        Self::Device,
+        Self::Mount,
+        Self::Label,
+        Self::FileSystem,
+        Self::Usage,
+        Self::Flags,
+        Self::Type,
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|c| *c == self).unwrap_or(0)
+    }
+
+    /// Mount path and Type share the rest of the width.
+    fn flex(self) -> bool {
+        matches!(self, Self::Mount | Self::Type)
+    }
+
+    /// Logical px at 100%. A flex column's width is its width before the first fit.
+    pub fn width(self) -> f32 {
+        match self {
+            Self::Partition | Self::Label => 120.,
+            Self::Size | Self::FileSystem => 90.,
+            Self::Offset | Self::Device | Self::Flags => 110.,
+            Self::Usage => 140.,
+            Self::Mount | Self::Type => 150.,
+        }
+    }
+
+    fn kind(self) -> ColumnKind {
+        match self {
+            Self::Size | Self::Offset | Self::Usage => ColumnKind::Numeric,
+            Self::Partition => ColumnKind::Path,
+            _ => ColumnKind::Text,
+        }
+    }
+}
+
+impl TableColumn for PartColumn {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Partition => "part-partition",
+            Self::Size => "part-size",
+            Self::Offset => "part-offset",
+            Self::Device => "part-device",
+            Self::Mount => "part-mount",
+            Self::Label => "part-label",
+            Self::FileSystem => "part-fs",
+            Self::Usage => "part-usage",
+            Self::Flags => "part-flags",
+            Self::Type => "part-type",
+        }
+    }
+    fn parse(_: TableId, _: &str) -> Option<Self> {
+        None
+    }
+    fn pinned_first(self) -> bool {
+        false
+    }
+    fn min_width(self) -> Option<f32> {
+        self.flex().then_some(100.)
+    }
+}
+
+/// The table has no sort; this state only names the first column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PartSort;
+
+impl TableSort<PartColumn> for PartSort {
+    fn column(&self) -> PartColumn {
+        PartColumn::Partition
+    }
+    fn ascending(&self) -> bool {
+        true
+    }
+}
+
+fn partition_specs(words: &Words) -> Vec<ColumnSpec<PartColumn>> {
+    PartColumn::ALL
+        .iter()
+        .map(|&id| {
+            let label = words.part_cols[id.index()].clone();
+            ColumnSpec {
+                id,
+                label: label.clone(),
+                full_name: label.clone(),
+                group: label,
+                align: match id.kind() {
+                    ColumnKind::Numeric => ColumnAlign::Right,
+                    _ => ColumnAlign::Left,
+                },
+                kind: id.kind(),
+                sortable: false,
+                template: None,
+                default_width: px(id.width()),
+                tooltip: None,
+                availability: Availability::Available,
+                hideable: false,
+            }
+        })
+        .collect()
+}
+
+/// The flat, static table of partitions (E25-017).
+pub struct PartitionsDelegate {
+    rows: Arc<[PartitionRow]>,
+    /// `Additional mount points: ...` per row, built with the strings.
+    tips: Vec<Option<SharedString>>,
+    version: u64,
+    specs: Vec<ColumnSpec<PartColumn>>,
+    layout: ColumnLayout<PartColumn>,
+    unallocated: SharedString,
+    /// `text_secondary`, for the Unallocated rows.
+    dim: Hsla,
+}
+
+impl PartitionsDelegate {
+    fn new(words: &Words, dim: Hsla, ui_scale: f32) -> Self {
+        let specs = partition_specs(words);
+        let mut layout = ColumnLayout::defaults(
+            TableId::Processes,
+            &specs,
+            &PartColumn::ALL,
+            &PartColumn::ALL,
+        );
+        layout.rebuild(ui_scale);
+        Self {
+            rows: Arc::from([]),
+            tips: Vec::new(),
+            version: 0,
+            specs,
+            layout,
+            unallocated: words.part_unallocated.clone(),
+            dim,
+        }
+    }
+
+    /// Takes new rows and their tooltips. False, with the version unchanged, when both equal
+    /// the current ones.
+    fn set_rows(&mut self, rows: Arc<[PartitionRow]>, tips: Vec<Option<SharedString>>) -> bool {
+        if (Arc::ptr_eq(&self.rows, &rows) || self.rows == rows) && self.tips == tips {
+            return false;
+        }
+        self.rows = rows;
+        self.tips = tips;
+        self.version += 1;
+        true
+    }
+
+    fn set_words(&mut self, words: &Words) {
+        self.specs = partition_specs(words);
+        self.unallocated = words.part_unallocated.clone();
+        self.version += 1;
+    }
+
+    fn set_dim(&mut self, dim: Hsla) -> bool {
+        if self.dim == dim {
+            return false;
+        }
+        self.dim = dim;
+        self.version += 1;
+        true
+    }
+
+    /// Re-lays the columns at `ui_scale`. False when the scale is unchanged.
+    fn set_scale(&mut self, ui_scale: f32) -> bool {
+        if (self.layout.ui_scale() - ui_scale).abs() < f32::EPSILON {
+            return false;
+        }
+        self.layout.rebuild(ui_scale);
+        self.version += 1;
+        true
+    }
+
+    /// Splits the width the fixed columns leave in a body `body_px` wide (logical px at the
+    /// layout's scale, scrollbar excluded) between the two flex columns, never below their
+    /// minimum. True when a width changed.
+    fn fit_flex_columns(&mut self, body_px: f32) -> bool {
+        let scale = self.layout.ui_scale().max(0.1);
+        let fixed: f32 = PartColumn::ALL
+            .iter()
+            .filter(|c| !c.flex())
+            .map(|c| self.layout.widths.get(c).map_or(0.0, |w| w.as_f32()))
+            .sum();
+        let share = ((body_px / scale - SCROLLBAR_W - fixed) / 2.)
+            .max(100.)
+            .floor();
+        let mut changed = false;
+        for col in PartColumn::ALL.into_iter().filter(|c| c.flex()) {
+            let current = self.layout.widths.get(&col).map_or(0.0, |w| w.as_f32());
+            if (share - current).abs() >= 0.5 {
+                self.layout.widths.insert(col, px(share));
+                changed = true;
+            }
+        }
+        if changed {
+            self.layout.rebuild(scale);
+            self.version += 1;
+        }
+        changed
+    }
+
+    /// The table scrolls, so it is a Tab stop (UI-PRC-016).
+    pub fn scrolls(&self) -> bool {
+        self.rows.len() > PARTITIONS_MAX_ROWS
+    }
+}
+
+impl TreeTableDelegate for PartitionsDelegate {
+    type RowId = u32;
+    type Column = PartColumn;
+    type Sort = PartSort;
+
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+    fn row_id(&self, ix: usize) -> u32 {
+        ix as u32
+    }
+    fn row_index(&self, id: u32) -> Option<usize> {
+        ((id as usize) < self.rows.len()).then_some(id as usize)
+    }
+    fn row_kind(&self, _: usize) -> RowKind {
+        RowKind::Plain
+    }
+    fn row_depth(&self, _: usize) -> u8 {
+        0
+    }
+    fn row_expandable(&self, _: usize) -> Option<bool> {
+        None
+    }
+    fn row_flags(&self, ix: usize) -> RowFlags {
+        if self.rows.get(ix).is_some_and(|r| r.unallocated) {
+            RowFlags {
+                bits: RowFlags::SECONDARY_NAME,
+                ..RowFlags::default()
+            }
+        } else {
+            RowFlags::default()
+        }
+    }
+    fn table_version(&self) -> u64 {
+        self.version
+    }
+    fn columns(&self) -> &ColumnLayout<PartColumn> {
+        &self.layout
+    }
+    fn column_spec(&self, id: PartColumn) -> &ColumnSpec<PartColumn> {
+        &self.specs[id.index()]
+    }
+    fn cell(&self, ix: usize, col: PartColumn, out: &mut CellOut) {
+        let Some(row) = self.rows.get(ix) else {
+            return;
+        };
+        out.validity = Validity::Valid;
+        if row.unallocated {
+            out.text_color = Some(self.dim);
+            out.selected_text_color = Some(self.dim);
+        }
+        let usage = match row.usage_pct.validity {
+            Validity::Valid | Validity::Stale => Some(row.usage_pct.value),
+            _ => None,
+        };
+        if col == PartColumn::Usage && !row.unallocated {
+            out.bar = usage.map(|pct| pct / 100.);
+            out.bits = u64::from(usage.unwrap_or(f32::NAN).to_bits());
+        }
+        if col == PartColumn::Mount && out.want_tooltip && !row.extra_mounts.is_empty() {
+            out.tooltip = self.tips.get(ix).cloned().flatten();
+        }
+        if !out.want_text {
+            return;
+        }
+        let dash = |out: &mut CellOut, text: Option<&str>| out.text.push_str(text.unwrap_or("-"));
+        match col {
+            PartColumn::Partition => {
+                out.text
+                    .push_str(if row.unallocated { "-" } else { &row.name })
+            }
+            PartColumn::Size => units::bytes(&mut out.text, row.size_bytes),
+            PartColumn::Offset => units::bytes(&mut out.text, row.start_bytes),
+            PartColumn::Type if row.unallocated => out.text.push_str(&self.unallocated),
+            PartColumn::Type => out.text.push_str(&row.type_name),
+            _ if row.unallocated => out.text.push('-'),
+            PartColumn::Device => dash(out, row.holder.as_deref()),
+            PartColumn::Mount => dash(out, row.mount.as_deref()),
+            PartColumn::Label => dash(out, row.label.as_deref()),
+            PartColumn::FileSystem => dash(out, row.fs_type.as_deref()),
+            PartColumn::Usage => match usage {
+                Some(pct) => units::percent(&mut out.text, pct),
+                None => out.text.push('-'),
+            },
+            PartColumn::Flags => {
+                if row.flags.is_empty() {
+                    out.text.push('-');
+                }
+                for (i, flag) in row.flags.iter().enumerate() {
+                    if i > 0 {
+                        out.text.push_str(", ");
+                    }
+                    out.text.push_str(flag);
+                }
+            }
+        }
+    }
+    fn name_cell(&self, ix: usize) -> NameCell {
+        let primary = self.rows.get(ix).map_or_else(SharedString::default, |r| {
+            if r.unallocated {
+                SharedString::from("-")
+            } else {
+                SharedString::from(r.name.clone())
+            }
+        });
+        NameCell {
+            icon: NameIcon::None,
+            icon_size: IconSlot::Small,
+            primary,
+            count_run: None,
+            secondary: None,
+            glyphs: SmallVec::new(),
+            highlight_fffd: true,
+            trailing: None,
+        }
+    }
+    fn name_column(&self) -> Option<PartColumn> {
+        Some(PartColumn::Partition)
+    }
+    fn header_total(&self, _: PartColumn, _: &mut CellOut) -> bool {
+        false
+    }
+    fn sort(&self) -> PartSort {
+        PartSort
+    }
+    fn selectable(&self, _: usize) -> bool {
+        false
+    }
+    fn context_menu(
+        &mut self,
+        _: &[u32],
+        _: Option<PartColumn>,
+        menu: TlMenu,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> TlMenu {
+        menu
+    }
+    fn on_toggle_expand(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_sort(&mut self, _: PartColumn, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_columns_changed(
+        &mut self,
+        layout: &ColumnLayout<PartColumn>,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) {
+        self.layout = layout.clone();
+    }
+    fn on_visible_range(&mut self, _: &[u32], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_activate(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
+        None
+    }
+    fn empty_text(&self) -> Option<SharedString> {
+        None
+    }
+    fn header_lines(&self) -> HeaderLines {
+        HeaderLines::One
+    }
+    fn columns_fixed(&self) -> bool {
+        true
+    }
+    fn tab_stop(&self) -> bool {
+        self.scrolls()
+    }
+}
+
 /// The Disk device page.
 pub struct DiskPage {
     key: DeviceKey,
@@ -726,7 +1188,13 @@ pub struct DiskPage {
     transfer: Entity<ChartView>,
     /// The rows from `update_disk_details_p1` and `update_disk_details_p2`.
     details: KeyValueModel,
-    // E25-016: partitions: Option<PartitionsBlock> (added by o55.17 as a chain edit, R-262)
+    /// The partitions block; `None` until the table is read.
+    partitions: Option<PartitionsBlock>,
+    /// The table behind `partitions`, for the heading when the strings change.
+    partition_table: Option<Arc<PartitionTable>>,
+    partitions_table: Option<Entity<TlTreeTable<PartitionsDelegate>>>,
+    /// The table body width of the last frame, for the flex columns.
+    partitions_body: f32,
     /// The `Show SMART data` button and menu item are present.
     smart_available: bool,
     /// The `Eject` button and menu item are present (ejectable or removable drive).
@@ -801,6 +1269,10 @@ impl DiskPage {
             active,
             transfer,
             details: disk_details_model(),
+            partitions: None,
+            partition_table: None,
+            partitions_table: None,
+            partitions_body: 0.,
             smart_available: false,
             ejectable: false,
             smart_focus: cx.focus_handle(),
@@ -850,6 +1322,16 @@ impl DiskPage {
 
     pub fn words(&self) -> &Words {
         &self.words
+    }
+
+    /// The partitions block, once the table is read.
+    pub fn partitions(&self) -> Option<&PartitionsBlock> {
+        self.partitions.as_ref()
+    }
+
+    /// The partitions table, once the page has rendered with rows.
+    pub fn partitions_table(&self) -> Option<&Entity<TlTreeTable<PartitionsDelegate>>> {
+        self.partitions_table.as_ref()
     }
 
     /// The page is the shown page (`set_active`).
@@ -922,12 +1404,107 @@ impl DiskPage {
             changed |= update_disk_details_p1(&mut self.details, &inputs);
             changed |= update_disk_details_p2(&mut self.details, &inputs, d);
         }
+        if details {
+            let table = d.and_then(|d| d.partitions.clone());
+            let same = match (&self.partition_table, &table) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || **a == **b,
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                self.partition_table = table;
+                self.sync_partitions(cx);
+                changed = true;
+            }
+        }
         // The model comes from the disk details or the inventory.
         if details || mask.intersects(ComponentMask::DEVICES.union(ComponentMask::INVENTORY)) {
             changed |= self.sync_header(snap, cx);
         }
         if changed {
             cx.notify();
+        }
+    }
+
+    /// Rebuilds the block and the table rows from `partition_table`.
+    fn sync_partitions(&mut self, cx: &mut Context<Self>) {
+        self.partitions = self.partition_table.as_deref().map(|t| PartitionsBlock {
+            heading: partitions_heading(t, &self.words, cx),
+            rows: Arc::clone(&t.rows),
+        });
+        let Some(table) = &self.partitions_table else {
+            return;
+        };
+        let (rows, tips) = self.rows_and_tips(cx);
+        table.update(cx, |t, cx| {
+            if t.delegate_mut().set_rows(rows, tips) {
+                t.on_new_version(cx);
+            }
+        });
+    }
+
+    /// The rows of the table and the tooltip of each row's Mount path.
+    fn rows_and_tips(&self, cx: &App) -> (Arc<[PartitionRow]>, Vec<Option<SharedString>>) {
+        let rows = self
+            .partitions
+            .as_ref()
+            .map_or_else(|| Arc::from([]), |p| Arc::clone(&p.rows));
+        let tips = rows
+            .iter()
+            .map(|r| {
+                (!r.extra_mounts.is_empty()).then(|| {
+                    let paths = r.extra_mounts.join(", ");
+                    tr_args(
+                        cx,
+                        KEY_PART_MORE_MOUNTS,
+                        &[("paths", FluentValue::from(paths))],
+                    )
+                })
+            })
+            .collect();
+        (rows, tips)
+    }
+
+    /// Creates the partitions table on the first render with rows, and keeps its scale, colour
+    /// and flex columns current.
+    fn sync_partitions_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.partitions.as_ref().is_none_or(|p| p.rows.is_empty()) {
+            return;
+        }
+        let (scale, dim) = (metrics(cx).ui_scale, current(cx).text_secondary);
+        let table = match &self.partitions_table {
+            Some(table) => table.clone(),
+            None => {
+                let (rows, tips) = self.rows_and_tips(cx);
+                let mut delegate = PartitionsDelegate::new(&self.words, dim, scale);
+                delegate.set_rows(rows, tips);
+                let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
+                self.partitions_table = Some(table.clone());
+                table
+            }
+        };
+        let rescaled = table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            let changed = d.set_scale(scale) | d.set_dim(dim);
+            if changed {
+                t.on_new_version(cx);
+            }
+            changed
+        });
+        if rescaled {
+            self.partitions_body = 0.;
+        }
+        let body = ScrollbarHandle::viewport_bounds(&table.read(cx).scroll_handle())
+            .size
+            .width
+            .as_f32();
+        if body > 0. && body != self.partitions_body {
+            self.partitions_body = body;
+            table.update(cx, |t, cx| {
+                if t.delegate_mut().fit_flex_columns(body) {
+                    t.on_new_version(cx);
+                }
+            });
         }
     }
 
@@ -995,6 +1572,14 @@ impl DiskPage {
         let (active, transfer) = (active_labels(&self.words), transfer_labels(&self.words));
         self.active.update(cx, |v, cx| v.set_labels(active, cx));
         self.transfer.update(cx, |v, cx| v.set_labels(transfer, cx));
+        self.sync_partitions(cx);
+        if let Some(table) = &self.partitions_table {
+            let words = self.words.clone();
+            table.update(cx, |t, cx| {
+                t.delegate_mut().set_words(&words);
+                t.on_new_version(cx);
+            });
+        }
         let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_header(&snap, cx);
         cx.notify();
@@ -1080,9 +1665,29 @@ impl DevicePage for DiskPage {
         &self.details
     }
 
-    /// E25-016 adds the partitions table.
-    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
-        SmallVec::new()
+    fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
+        let mut blocks = SmallVec::new();
+        let Some(block) = &self.partitions else {
+            return blocks;
+        };
+        let (m, theme) = (metrics(cx), current(cx));
+        let mut heading = div()
+            .text_color(theme.text_primary)
+            .child(block.heading.clone());
+        *heading.text_style() = label_style(m, m.text.md, FontWeight::MEDIUM);
+        let mut el = v_flex().gap(m.sp[4]).child(heading);
+        if let Some(table) = self
+            .partitions_table
+            .as_ref()
+            .filter(|_| !block.rows.is_empty())
+        {
+            el = el.child(
+                flat_static_table(table, block.rows.len(), PARTITIONS_MAX_ROWS, m)
+                    .debug_selector(|| PARTITIONS_TABLE_ID.into()),
+            );
+        }
+        blocks.push(el.into_any_element());
+        blocks
     }
 
     fn menu_items(&self, mut menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
@@ -1156,6 +1761,7 @@ impl Render for DiskPage {
         self.details.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
+        self.sync_partitions_table(window, cx);
         div()
             .size_full()
             .track_focus(&self.focus)

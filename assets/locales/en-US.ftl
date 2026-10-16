@@ -518,6 +518,29 @@ perf-disk-btn-eject = Eject
 perf-disk-menu-smart = Show SMART data…
 perf-disk-menu-eject = Eject
 perf-disk-tip-eject = Eject this disk
+perf-part-heading =
+    { $n ->
+        [one] 1 partition - {$table}
+       *[other] {$n} partitions - {$table}
+    }
+perf-part-heading-plain =
+    { $n ->
+        [one] 1 partition
+       *[other] {$n} partitions
+    }
+perf-part-none = No partitions
+perf-part-col-partition = Partition
+perf-part-col-size = Size
+perf-part-col-offset = Offset
+perf-part-col-device = Device
+perf-part-col-mount = Mount path
+perf-part-col-label = Label
+perf-part-col-fs = File system
+perf-part-col-usage = Usage
+perf-part-col-flags = Flags
+perf-part-col-type = Type
+perf-part-unallocated = Unallocated
+perf-part-more-mounts = Additional mount points: {$paths}
 perf-diu-title = tasklens Disk is in use
 perf-diu-intro = These programs are using {$disk} ({$model}):
 perf-diu-end-task = End Task

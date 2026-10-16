@@ -56,6 +56,10 @@ use crate::text::style::{TNUM, label_style, numeric_style, t_base};
 use crate::text::untrusted::{debug_assert_clean, split_fffd_runs};
 use crate::theme::{TlTheme, UiMetrics};
 
+/// Height of a cell's usage bar and the width of the text beside it, in logical px at 100%.
+const BAR_H: f32 = 12.0;
+const BAR_TEXT_W: f32 = 44.0;
+
 /// Filled by `TreeTableDelegate::cell`. The table calls `cell()` with `want_text = false`, looks
 /// up `CellTextCache` with (row, col, bits, validity); only on a miss it calls `cell()` again
 /// with `want_text = true` and the delegate writes `text`.
@@ -77,6 +81,10 @@ pub struct CellOut {
     pub selected_text_color: Option<Hsla>,
     /// A status dot drawn before the value, in the colours of a status cell. Not drawn on glyphs.
     pub dot: Option<DotStyle>,
+    /// A usage bar before the text, as a fraction 0..=1 (clamped): a track on `divider` and an
+    /// `accent` fill. The text then sits right of the bar in a fixed-width box. Not drawn on
+    /// glyphs.
+    pub bar: Option<f32>,
     /// Page override (dim zero values, PROC-041): the text draws at [`DIM_OPACITY`].
     pub dim: bool,
     /// Drawn before a numeric value in its own colour (the process table's "Σ ", UI-PRC-002).
@@ -113,6 +121,7 @@ impl CellOut {
         self.text_color = None;
         self.selected_text_color = None;
         self.dot = None;
+        self.bar = None;
         self.dim = false;
         self.prefix = None;
         self.suffix = None;
@@ -268,6 +277,26 @@ pub fn value_cell(
             });
         }
     }
+    if let Some(fraction) = out.bar {
+        let scale = ctx.m.ui_scale;
+        let fill = div()
+            .debug_selector(|| "TlCell-bar-fill".into())
+            .h_full()
+            .w(relative(fraction.clamp(0., 1.)))
+            .bg(ctx.theme.accent);
+        cell = cell.child(
+            div()
+                .debug_selector(|| "TlCell-bar".into())
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(BAR_H * scale))
+                .mr(ctx.m.sp[3])
+                .overflow_hidden()
+                .rounded(ctx.m.radius_small)
+                .bg(ctx.theme.divider)
+                .child(fill),
+        );
+    }
     if let Some((prefix, color)) = &out.prefix {
         let color = if ctx.selected {
             ctx.theme.text_selected_secondary
@@ -287,7 +316,18 @@ pub fn value_cell(
         ColumnKind::Path => CellText::new(text, Align::Start, Fit::Clip, None),
         ColumnKind::Numeric => CellText::new(text, Align::End, Fit::Clip, Some(clipped)),
     };
-    cell.child(text.with_suffix(suffix))
+    let text = text.with_suffix(suffix);
+    if out.bar.is_some() {
+        // The bar takes the rest of the cell; the text keeps a width of its own.
+        return cell.child(
+            div()
+                .debug_selector(|| "TlCell-bar-text".into())
+                .flex_none()
+                .w(px(BAR_TEXT_W * ctx.m.ui_scale))
+                .child(text),
+        );
+    }
+    cell.child(text)
 }
 
 /// A cell showing `TlValidityGlyph`: the glyph for any validity other than Valid, right-aligned
@@ -1200,6 +1240,7 @@ mod tests {
             text_color: Some(gpui_kit::red()),
             selected_text_color: Some(gpui_kit::red()),
             dot: Some(DotStyle::Filled(LabelTone::Danger)),
+            bar: Some(0.4),
             dim: true,
             prefix: Some(("Σ ".into(), gpui_kit::red())),
             suffix: Some(CellSuffix {
@@ -1215,7 +1256,7 @@ mod tests {
         assert_eq!(out.bits, 0);
         assert_eq!(out.validity, Validity::WarmingUp);
         assert!(out.arc.is_none() && out.background.is_none() && out.text_color.is_none());
-        assert!(out.selected_text_color.is_none() && out.dot.is_none());
+        assert!(out.selected_text_color.is_none() && out.dot.is_none() && out.bar.is_none());
         assert!(out.tooltip.is_none() && !out.want_text && !out.want_tooltip);
         assert!(!out.dim && out.prefix.is_none() && out.suffix.is_none());
         assert!(out.text.is_empty());

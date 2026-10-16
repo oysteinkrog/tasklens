@@ -419,6 +419,8 @@ struct TDelegate {
     medium_row: Option<usize>,
     /// Status dots: (row id, column, style).
     dots: Vec<(u32, ColumnId, DotStyle)>,
+    /// Usage bars: (row id, column, fraction).
+    bars: Vec<(u32, ColumnId, f32)>,
     /// `selected_text_color` overrides: (row id, column, colour).
     selected_colors: Vec<(u32, ColumnId, Hsla)>,
 }
@@ -455,6 +457,7 @@ impl TDelegate {
             tips_built: RefCell::new(Vec::new()),
             medium_row: None,
             dots: Vec::new(),
+            bars: Vec::new(),
             selected_colors: Vec::new(),
         }
     }
@@ -523,6 +526,9 @@ impl TreeTableDelegate for TDelegate {
         let id = self.rows[ix].id;
         if let Some(d) = self.dots.iter().find(|d| d.0 == id && d.1 == col) {
             out.dot = Some(d.2);
+        }
+        if let Some(b) = self.bars.iter().find(|b| b.0 == id && b.1 == col) {
+            out.bar = Some(b.2);
         }
         if let Some(c) = self
             .selected_colors
@@ -2996,6 +3002,25 @@ fn cell_dot_paints_dot() {
     let mut cx = cosmic_cx();
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![plain(1)]), 600., 200.);
     assert!(vcx.debug_bounds("TlCell-dot").is_none(), "no dots set");
+}
+
+#[test]
+fn cell_bar_paints_fill() {
+    let mut cx = cosmic_cx();
+    let mut d = TDelegate::new(vec![plain(1), plain(2)]);
+    d.bars.push((1, ColumnId::Cpu, 0.5));
+    let (_, vcx) = open_table(&mut cx, d, 600., 200.);
+    let (theme, m) = vcx.update(|_, cx| (current(cx).clone(), *metrics(cx)));
+    let track = vcx.debug_bounds("TlCell-bar").expect("track drawn");
+    let fill = vcx.debug_bounds("TlCell-bar-fill").expect("fill drawn");
+    assert_eq!(track.size.height, px(12. * m.ui_scale));
+    assert!((fill.size.width.as_f32() - track.size.width.as_f32() / 2.).abs() < 1.0);
+    assert_eq!(quads_filled(vcx, theme.accent), 1, "one accent fill");
+    assert_eq!(quads_filled(vcx, theme.divider), 1, "one divider track");
+
+    let mut cx = cosmic_cx();
+    let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![plain(1)]), 600., 200.);
+    assert!(vcx.debug_bounds("TlCell-bar").is_none(), "no bars set");
 }
 
 #[test]
