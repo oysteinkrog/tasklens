@@ -2552,7 +2552,7 @@ mod tests {
             pcie_width: Metric::default(),
             info: Arc::default(),
         };
-        sys.gpus = Arc::from(vec![(DeviceIdx(9), totals)]);
+        sys.gpus = Arc::from(vec![(DeviceIdx(9), totals.clone())]);
         let s = snap(
             sys.clone(),
             InventorySnapshot::default(),

@@ -1019,7 +1019,7 @@ mod tests {
         assert_eq!(t.dec_pct.validity, Validity::WarmingUp);
 
         // Warm, but no client on the card: both 0.
-        let t = totals(&s, Some(&[]), 0, false);
+        let t = totals(&s, Some(&[]), 0, false, no_link());
         assert_eq!(t.enc_pct, Metric::valid(0.0));
         assert_eq!(t.dec_pct, Metric::valid(0.0));
     }
@@ -1056,9 +1056,19 @@ mod tests {
             seen: 0,
             partial: false,
         };
-        let t = intel(&s, None, SEC, warm, (None, None, None), false);
+        let t = intel(&s, None, SEC, warm, (None, None, None), false, no_link());
         assert_eq!(t.util_pct, Metric::valid(0.0));
         assert_eq!(t.dec_pct, Metric::valid(0.0));
+    }
+
+    /// No PCIe link files and no static values.
+    fn no_link() -> CardLink<'static> {
+        static NO_INFO: std::sync::LazyLock<Arc<DeviceStatic>> =
+            std::sync::LazyLock::new(Arc::default);
+        CardLink {
+            link: PcieLink::default(),
+            info: &NO_INFO,
+        }
     }
 
     fn engine_list(t: &GpuTotals) -> Vec<(GpuEngine, Metric<f32>)> {
@@ -1103,7 +1113,7 @@ mod tests {
             ..AmdSample::default()
         };
         // First scan: fdinfo engines are WarmingUp, and JPEG is not named yet.
-        let t = totals(&s, None, 0, false);
+        let t = totals(&s, None, 0, false, no_link());
         assert_eq!(
             engine_list(&t),
             [
@@ -1116,7 +1126,7 @@ mod tests {
         );
         // JPEG seen in an earlier sample stays listed, at 0 without clients, and a denied fdinfo
         // read is passed on.
-        let t = totals(&s, Some(&[]), bit(GpuEngine::Jpeg), true);
+        let t = totals(&s, Some(&[]), bit(GpuEngine::Jpeg), true, no_link());
         assert_eq!(t.engines.get(GpuEngine::Jpeg), Metric::valid(0.0));
         assert_eq!(t.engines.get(GpuEngine::Compute), Metric::valid(0.0));
         assert!(t.fdinfo_partial);
@@ -1128,7 +1138,7 @@ mod tests {
             }),
             ..s
         };
-        let t = totals(&vcn, Some(&busy(&[("compute", 7.0)])), 0, false);
+        let t = totals(&vcn, Some(&busy(&[("compute", 7.0)])), 0, false, no_link());
         assert_eq!(t.engines.get(GpuEngine::Enc), Metric::valid(25.0));
         assert_eq!(t.engines.get(GpuEngine::Dec), Metric::valid(25.0));
         assert_eq!(t.engines.get(GpuEngine::Compute), Metric::valid(7.0));
@@ -1165,7 +1175,7 @@ mod tests {
             seen: 0,
             partial: true,
         };
-        let t = intel(&s, None, SEC, fd, (None, None, None), false);
+        let t = intel(&s, None, SEC, fd, (None, None, None), false, no_link());
         assert_eq!(
             engine_list(&t),
             [
