@@ -15,14 +15,14 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
+    AnyWindowHandle, App, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::SourceId;
-use tl_model::snapshot::{ConnCounts, ConnectionsSnapshot, ProcessSnapshot};
+use tl_model::snapshot::{ConnCounts, ConnRecord, ConnectionsSnapshot, ProcessSnapshot};
 use tl_model::units;
 
 use self::delegate::{ConnectionsDelegate, DEFAULT_SORT};
@@ -37,11 +37,15 @@ use crate::pages::processes::actions::CopyDetails;
 use crate::pages::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
 use crate::pages::sys_table::{SysBody, SysTableFrame, loading_status_text};
 use crate::table::TreeTableDelegate as _;
-use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable};
+use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::TreeTableEvent;
 use crate::util::clipboard_write;
-use crate::window::main::{FilterChanged, GlobalShellEvents, PauseChanged, ShellPage};
+use crate::window::main::{FilterChanged, GlobalShellEvents, PauseChanged, ShellPage, ShellState};
 use crate::window::status::StatusChanged;
+use crate::windows::connection_properties::open_connection_properties;
+
+/// The most Properties windows one command opens (the window cap).
+const MAX_PROPERTIES_WINDOWS: usize = 10;
 
 /// The latest a manual refresh waits for a new Connections component version.
 pub const REFRESH_TOAST_AFTER: Duration = Duration::from_secs(2);
@@ -52,6 +56,7 @@ const STATUS_UNSET: (u32, u32, u32, u32, u32, usize) =
 /// The Connections tab entity.
 pub struct ConnectionsPage {
     frame: SysTableFrame<ConnectionsDelegate>,
+    window: AnyWindowHandle,
     focus: FocusHandle,
     status_buf: String,
     last_status: (u32, u32, u32, u32, u32, usize),
@@ -132,12 +137,26 @@ impl ConnectionsPage {
         }
         subs.push(cx.observe(&table, |this, _, cx| this.on_table_changed(cx)));
         subs.push(cx.subscribe(&table, |this, _, event: &TreeTableEvent, cx| {
-            if matches!(event, TreeTableEvent::CopiedRows { .. }) {
-                this.show_copy_toast(ToastKind::Success, this.copy_texts.row_ok.clone(), cx);
+            match event {
+                TreeTableEvent::CopiedRows { .. } => {
+                    this.show_copy_toast(ToastKind::Success, this.copy_texts.row_ok.clone(), cx);
+                }
+                // A double-click reaches the page as an event; the mouse handler cannot raise
+                // OpenProperties by propagating.
+                TreeTableEvent::Activate { .. } => {
+                    let window = this.window;
+                    cx.defer(move |cx| {
+                        let _ = window.update(cx, |_, window, cx| {
+                            window.dispatch_action(Box::new(OpenProperties), cx);
+                        });
+                    });
+                }
+                _ => {}
             }
         }));
         Self {
             frame,
+            window: window.window_handle(),
             focus,
             status_buf: loading_status_text(cx).to_string(),
             last_status: STATUS_UNSET,
@@ -424,6 +443,15 @@ impl ConnectionsPage {
         }
     }
 
+    /// Enter, Alt+Enter, Ctrl+I, double-click and the menu's Properties: one window per selected
+    /// socket, at most 10.
+    fn on_open_properties(&mut self, _: &OpenProperties, _: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        for cookie in targets.cookies.iter().take(MAX_PROPERTIES_WINDOWS) {
+            open_connection_properties(*cookie, cx);
+        }
+    }
+
     fn on_go_to_service(
         &mut self,
         _: &actions::ConnectionGoToService,
@@ -480,6 +508,19 @@ impl ConnectionsPage {
     }
 }
 
+/// Runs Jump to process for `record`'s owner in the main window. The Connection Properties
+/// window calls it from its Process link.
+pub fn jump_to_owner(record: &ConnRecord, cx: &mut App) {
+    let record = menu::ConnRecordRef::from(record);
+    let Some(main) = cx.try_global::<ShellState>().and_then(|s| s.main_window) else {
+        return;
+    };
+    let _ = main.update(cx, |_, window, cx| {
+        window.activate_window();
+        flows::run_jump_to_process(&record, window, cx);
+    });
+}
+
 impl Render for ConnectionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -492,6 +533,7 @@ impl Render for ConnectionsPage {
             .on_action(cx.listener(Self::on_copy_foreign))
             .on_action(cx.listener(Self::on_jump_to_process))
             .on_action(cx.listener(Self::on_go_to_service))
+            .on_action(cx.listener(Self::on_open_properties))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }

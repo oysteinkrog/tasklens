@@ -1770,6 +1770,36 @@ connections-status-total = { $total } Total | { $tcp } TCP | { $udp } UDP | { $e
 connections-status-selected = { $selected } selected
 connections-refreshed = Connections refreshed.
 
+# Connection Properties window (tasklens-9o0.19, UI-SYS-068).
+connections-props-title = Connection properties: { $proto } { $state }
+connections-props-title-closed = Connection properties: { $proto } { $state } (closed)
+connections-props-too-many-windows = Too many connection properties windows are already open
+connections-props-label-protocol = Protocol / State / Family
+connections-props-label-local = Local
+connections-props-label-foreign = Foreign
+connections-props-label-process = Process
+connections-props-label-user = User
+connections-props-label-inode = Inode
+connections-props-label-interface = Interface
+connections-props-label-queues = Recv-Q / Send-Q
+connections-props-label-rtt = RTT
+connections-props-label-cwnd = Congestion window
+connections-props-label-bytes = Bytes sent / received
+connections-props-label-retransmits = Retransmits
+connections-props-label-last-data = Last data received
+connections-props-label-closable = Closable here
+connections-props-address = { $address } Port { $port }
+connections-props-process = { $name } PID { $pid }
+connections-props-no-owner = No owner (kernel)
+connections-props-none = None
+connections-props-rtt = { $rtt } (var { $var })
+connections-props-segments = { $n } segments
+connections-props-ms-ago = { $ms } ms ago
+connections-props-closable-no = No (not supported in this version)
+connections-props-copy = Copy { $label }
+connections-props-copied = Copied to clipboard
+connections-props-close = Close
+
 # Process Properties window (E23-A1)
 pwn-props-tab-general = General
 pwn-props-tab-threads = Threads
