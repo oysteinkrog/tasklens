@@ -909,6 +909,7 @@ perf-legend-kernel = <kernel>
                     view_types: Some(&[(DeviceKind::Cpu, true)]),
                     clicked_value: false,
                     tray_available: tray,
+                    cell_engine: None,
                 };
                 let menu = TlMenu::build(window, cx, focus, |menu, w, cx| {
                     page.update(cx, |p, cx| page_menu(menu, p, &ctx, w, cx))

@@ -51,7 +51,7 @@ use self::actions::{
     PerfSetGraphRange, PerfToggleSidebar, PerfToggleSummaryMode,
 };
 use self::details::ClickedValue;
-use self::menu::{PageMenuCtx, VIEW_KINDS, page_menu};
+use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
 use self::page::DevicePage;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
@@ -763,11 +763,16 @@ impl PerformancePage {
             .then(|| cx.remove_global::<ClickedValue>().0)
             .flatten();
         let clicked_value = self.clicked_value.is_some();
+        let cell_engine = cx
+            .has_global::<ClickedEngine>()
+            .then(|| cx.remove_global::<ClickedEngine>().0)
+            .flatten();
         let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
             let types = view_types(sidebar.read(cx));
             let ctx = PageMenuCtx {
                 view_types: Some(&types),
                 clicked_value,
+                cell_engine: cell_engine.clone(),
                 ..page_menu_ctx(summary_on, cx)
             };
             let mut slot = Some(menu);
@@ -874,6 +879,7 @@ pub fn page_menu_ctx(summary_on: bool, cx: &App) -> PageMenuCtx<'static> {
         view_types: None,
         clicked_value: false,
         tray_available: tray_available(cx),
+        cell_engine: None,
     }
 }
 
@@ -1035,6 +1041,7 @@ impl Render for PerformancePage {
                     return;
                 }
                 cx.set_global(ClickedValue(None));
+                cx.set_global(ClickedEngine(None));
                 let at = ev.position;
                 cx.defer_in(window, move |this, window, cx| {
                     this.open_page_menu(at, window, cx)

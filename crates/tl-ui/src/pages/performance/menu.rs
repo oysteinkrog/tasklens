@@ -2,11 +2,13 @@
 //! PERF-010, PERF-011, PERF-016): the card menu of a sidebar card, and the page menu of a device
 //! page, whose common part a summary tile also opens.
 
-use gpui_kit::{App, SharedString, Window};
+use std::sync::Arc;
+
+use gpui_kit::{App, Global, SharedString, Window};
 
 use super::actions::{
     PerfAddTrayGraph, PerfCopyDeviceInfo, PerfCopyValue, PerfEnterEditMode, PerfJumpToType,
-    PerfSetGraphRange, PerfSetPageVisible, PerfToggleSummaryMode,
+    PerfSetGraphRange, PerfSetPageVisible, PerfToggleGpuEngine, PerfToggleSummaryMode,
 };
 use super::page::DevicePage;
 use super::{DeviceKey, DeviceKind};
@@ -87,7 +89,17 @@ pub struct PageMenuCtx<'a> {
     pub clicked_value: bool,
     /// The tray item after "View": `None` leaves it out, `Some(false)` disables it.
     pub tray_available: Option<bool>,
+    /// The right-click landed on a GPU engine cell: "Hide this engine graph" comes first. The
+    /// value is the engine's `performance.hidden_gpu_engines` key.
+    pub cell_engine: Option<Arc<str>>,
 }
+
+/// The GPU engine cell under the last right-click. The Performance tab clears it when a right
+/// press starts and takes it once the press is handled, like `ClickedValue`.
+#[derive(Default)]
+pub struct ClickedEngine(pub Option<Arc<str>>);
+
+impl Global for ClickedEngine {}
 
 /// The time range items: seconds and string key.
 const RANGES: [(u16, &str); 4] = [
@@ -122,6 +134,16 @@ pub fn page_menu(
         menu.item(tr(cx, "perf-menu-copy-value"), Box::new(PerfCopyValue))
     } else {
         menu
+    };
+    let menu = match &ctx.cell_engine {
+        Some(engine) => menu.item(
+            tr(cx, "perf-gpu-menu-hide-engine"),
+            Box::new(PerfToggleGpuEngine {
+                key: page.key().clone(),
+                engine: engine.clone(),
+            }),
+        ),
+        None => menu,
     };
     let menu = page_menu_common(menu, ctx, window, cx).separator();
     // `TlMenu` drops a doubled or trailing separator, so a page with no items leaves one.

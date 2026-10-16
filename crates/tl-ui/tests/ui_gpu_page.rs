@@ -680,3 +680,243 @@ fn gpu_memory_value_text_painted(cx: &mut TestAppContext) {
         assert_eq!(memory.read(cx).painted_value_text(), Some("3.00 GiB"));
     });
 }
+
+mod engines {
+    use std::time::Duration;
+
+    use gpui_kit::{Focusable as _, TestAppContext};
+    use tl_model::system::GpuEngine;
+    use tl_ui::components::menu::{MenuEntryKind, TlMenu};
+    use tl_ui::pages::performance::actions::PerfToggleGpuEngine;
+    use tl_ui::pages::performance::gpu::{ENGINES_ID, MEMORY_ID};
+    use tl_ui::pages::performance::menu::{PageMenuCtx, page_menu};
+
+    use super::*;
+
+    /// The NVIDIA totals with the memory controller reported.
+    fn with_memctl() -> GpuTotals {
+        let mut t = totals(false);
+        t.engines.set(GpuEngine::MemCtl, Metric::valid(4.0));
+        t
+    }
+
+    fn open_memctl(cx: &mut TestAppContext) -> Rig<'_> {
+        let mut r = nvidia(cx);
+        publish_totals(&mut r, &with_memctl());
+        r
+    }
+
+    fn cell_keys(r: &mut Rig) -> Vec<String> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            page.read(cx)
+                .engine_keys()
+                .iter()
+                .map(|k| k.to_string())
+                .collect()
+        })
+    }
+
+    fn hidden(r: &mut Rig) -> Vec<String> {
+        r.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .performance
+                .hidden_gpu_engines
+                .clone()
+        })
+    }
+
+    fn toggle(r: &mut Rig, engine: &str) {
+        let page = r.page.clone();
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        r.vcx.dispatch_action(PerfToggleGpuEngine {
+            key: DeviceKey(Arc::from("gpu:GPU-0100")),
+            engine: Arc::from(engine),
+        });
+        draw(r.vcx);
+    }
+
+    fn box_height(r: &mut Rig) -> f32 {
+        f32::from(
+            r.vcx
+                .debug_bounds(ENGINES_ID)
+                .expect("engine box")
+                .size
+                .height,
+        )
+    }
+
+    #[gpui_kit::test]
+    fn gpu_memctl_cell_for_nvidia(cx: &mut TestAppContext) {
+        let mut r = open_memctl(cx);
+        assert_eq!(cell_keys(&mut r), ["gpu", "memctl", "enc", "dec"]);
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let grid = page.read(cx).engines().read(cx);
+            let headings: Vec<&str> = grid.spec.cells.iter().map(|c| c.heading.as_ref()).collect();
+            assert_eq!(
+                headings,
+                [
+                    "3D / Compute",
+                    "Memory controller",
+                    "Video Encode",
+                    "Video Decode"
+                ]
+            );
+            assert_eq!(
+                grid.spec.cells[1].fill_series.metric,
+                MetricId::GPU_ENGINE_MEMCTL
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn gpu_hidden_engine_retiles(cx: &mut TestAppContext) {
+        let mut r = open_memctl(cx);
+        // 4 cells in 3 columns at 1000 px: two rows.
+        let two_rows = box_height(&mut r);
+        assert_eq!(two_rows, 112. * 2. + 8.);
+        toggle(&mut r, "memctl");
+        assert_eq!(hidden(&mut r), ["memctl"]);
+        assert_eq!(cell_keys(&mut r), ["gpu", "enc", "dec"]);
+        assert_eq!(box_height(&mut r), 112., "3 cells fit one row");
+    }
+
+    #[gpui_kit::test]
+    fn gpu_all_engines_hidden_collapses_row(cx: &mut TestAppContext) {
+        let mut r = open_memctl(cx);
+        for e in ["gpu", "memctl", "enc"] {
+            toggle(&mut r, e);
+        }
+        let before = r.vcx.debug_bounds(MEMORY_ID).expect("memory").top();
+        toggle(&mut r, "dec");
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
+        draw(r.vcx);
+        assert!(cell_keys(&mut r).is_empty());
+        assert_eq!(box_height(&mut r), 0.);
+        let after = r.vcx.debug_bounds(MEMORY_ID).expect("memory").top();
+        assert_eq!(f32::from(before - after), 112. + 8., "rows 2 and 3 move up");
+        toggle(&mut r, "dec");
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
+        draw(r.vcx);
+        assert_eq!(box_height(&mut r), 112.);
+    }
+
+    #[gpui_kit::test]
+    fn gpu_toggle_engine_setting_round_trip(cx: &mut TestAppContext) {
+        let mut r = open_memctl(cx);
+        toggle(&mut r, "memctl");
+        assert_eq!(hidden(&mut r), ["memctl"]);
+        toggle(&mut r, "memctl");
+        assert!(hidden(&mut r).is_empty());
+        assert_eq!(cell_keys(&mut r), ["gpu", "memctl", "enc", "dec"]);
+    }
+
+    fn menu_entries(
+        r: &mut Rig,
+        cell_engine: Option<&str>,
+    ) -> Vec<(MenuEntryKind, String, bool, Option<bool>)> {
+        let page = r.page.clone();
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            let ctx = PageMenuCtx {
+                range_s: 60,
+                summary_on: false,
+                ranges_long_enabled: true,
+                view_types: None,
+                clicked_value: false,
+                tray_available: None,
+                cell_engine: cell_engine.map(Arc::from),
+            };
+            let menu = TlMenu::build(window, cx, focus, |menu, w, cx| {
+                page.update(cx, |p, cx| page_menu(menu, p, &ctx, w, cx))
+            });
+            let list = menu.read(cx).entries_for_test(window);
+            list.iter()
+                .map(|e| {
+                    let hide = e.action.as_ref().map(|a| {
+                        a.partial_eq(&PerfToggleGpuEngine {
+                            key: DeviceKey(Arc::from("gpu:GPU-0100")),
+                            engine: Arc::from("memctl"),
+                        })
+                    });
+                    (
+                        e.kind,
+                        e.label.as_ref().map(|l| l.to_string()).unwrap_or_default(),
+                        e.checked,
+                        hide,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn gpu_cell_menu_hide_item_first(cx: &mut TestAppContext) {
+        let mut r = open_memctl(cx);
+        let over = menu_entries(&mut r, Some("memctl"));
+        assert_eq!(over[0].1, "Hide this engine graph");
+        assert_eq!(
+            over[0].3,
+            Some(true),
+            "dispatches PerfToggleGpuEngine memctl"
+        );
+        let plain = menu_entries(&mut r, None);
+        assert_ne!(plain[0].1, "Hide this engine graph");
+        assert!(plain.iter().any(|e| e.1 == "Select GPU engine graphs"));
+    }
+
+    #[gpui_kit::test]
+    fn gpu_select_engines_submenu(cx: &mut TestAppContext) {
+        let mut r = open_memctl(cx);
+        toggle(&mut r, "enc");
+        let page = r.page.clone();
+        let items = r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            let menu = TlMenu::build(window, cx, focus, |menu, w, cx| {
+                page.update(cx, |p, cx| p.menu_items(menu, w, cx))
+            });
+            let list = menu.read(cx).entries_for_test(window);
+            let sub = list
+                .iter()
+                .find(|e| e.label.as_deref() == Some("Select GPU engine graphs"))
+                .and_then(|e| e.submenu.clone())
+                .expect("submenu");
+            sub.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.kind,
+                        e.label.map(|l| l.to_string()).unwrap_or_default(),
+                        e.checked,
+                        e.tooltip.map(|t| t.to_string()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let names: Vec<&str> = items.iter().map(|e| e.1.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "3D / Compute",
+                "Memory controller",
+                "Video Encode",
+                "Video Decode",
+                "",
+                "Power",
+                "Clocks"
+            ]
+        );
+        let checked: Vec<bool> = items[..4].iter().map(|e| e.2).collect();
+        assert_eq!(checked, [true, true, false, true], "Video Encode is hidden");
+        assert_eq!(items[4].0, MenuEntryKind::Separator);
+        for e in &items[5..] {
+            assert_eq!(e.0, MenuEntryKind::Disabled);
+            assert_eq!(e.3.as_deref(), Some("Available in a later version"));
+        }
+    }
+}

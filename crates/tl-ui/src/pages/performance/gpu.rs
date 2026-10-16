@@ -14,21 +14,24 @@ use std::sync::Arc;
 
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Div, ElementId, Entity, EntityId,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, canvas, div, px,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
+    Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render,
+    SharedString, StyleRefinement, Styled as _, Subscription, WeakEntity, Window, canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::snapshot::{GraphicsAdapter, Snapshot};
-use tl_model::system::{GpuTotals, Metric};
+use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
+use super::actions::PerfToggleGpuEngine;
 use super::details::{Fallback, KeyValueModel};
+use super::menu::ClickedEngine;
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::{
@@ -37,11 +40,12 @@ use crate::chart::{
     grid_layout,
 };
 use crate::components::menu::TlMenu;
+use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_en};
-use crate::settings_global::{Section, TlSettings};
+use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// `grid_cell_h`, × ui_scale.
@@ -154,13 +158,20 @@ pub(crate) struct Engine {
     bit: u8,
 }
 
-/// The P1 engines in grid order (PERF-063). E25-022 adds the full per-vendor lists.
-const P1_ENGINES: [Engine; 3] = [
+/// The engines in grid order (PERF-063): NVIDIA draws all four, other vendors skip the memory
+/// controller. E25-022 (o55.40) adds the AMD and Intel lists.
+const ENGINES: [Engine; 4] = [
     Engine {
         key: "gpu",
         name: "perf-gpu-engine-3d",
         metric: MetricId::GPU_UTIL,
         bit: 1,
+    },
+    Engine {
+        key: "memctl",
+        name: "perf-gpu-engine-memctl",
+        metric: MetricId::GPU_ENGINE_MEMCTL,
+        bit: 8,
     },
     Engine {
         key: "enc",
@@ -176,11 +187,15 @@ const P1_ENGINES: [Engine; 3] = [
     },
 ];
 
+/// The engines of the other vendors until o55.40 gives them their own lists.
+const OTHER_ENGINES: [Engine; 3] = [ENGINES[0], ENGINES[2], ENGINES[3]];
+
 /// The engines of `vendor` in grid order.
 fn vendor_engines(vendor: GpuVendor) -> &'static [Engine] {
-    // E25-022: AMD and Intel get their own lists.
-    let _ = vendor;
-    &P1_ENGINES
+    match vendor {
+        GpuVendor::Nvidia => &ENGINES,
+        _ => &OTHER_ENGINES,
+    }
 }
 
 /// The engine cells of a GPU, (key, name), in the vendor's order: every engine in `reported`
@@ -210,6 +225,8 @@ pub(crate) fn shown_engines<'a, H: AsRef<str>>(
     vendor_engines(vendor)
         .iter()
         .filter(move |e| reported & e.bit != 0)
+        // The Overview box has no memory controller row.
+        .filter(|e| e.metric != MetricId::GPU_ENGINE_MEMCTL)
         .filter(move |e| !hidden.iter().any(|k| k.as_ref() == e.key))
 }
 
@@ -239,21 +256,25 @@ pub fn engine_columns(n: usize, width_px: f32, min_cell_w: f32) -> usize {
     want.min(fit).max(1)
 }
 
-/// The engines a GPU reports, as a mask of [`Engine::bit`]: every P1 engine whose metric is not
-/// Unsupported. A GPU without a record yet reports all of them, so the page keeps its shape.
+/// The engines a GPU reports, as a mask of [`Engine::bit`]: every engine whose metric is not
+/// Unsupported. The memory controller counts only when the record's engine list reports it. A GPU
+/// without a record yet reports the three P1 engines, so the page keeps its shape.
 fn reported_bits(totals: Option<&GpuTotals>) -> u8 {
     let Some(t) = totals else {
-        return P1_ENGINES.iter().fold(0, |m, e| m | e.bit);
+        return OTHER_ENGINES.iter().fold(0, |m, e| m | e.bit);
     };
     let mut bits = 0;
     for (e, validity) in
-        P1_ENGINES
+        OTHER_ENGINES
             .iter()
             .zip([t.util_pct.validity, t.enc_pct.validity, t.dec_pct.validity])
     {
         if validity != Validity::Unsupported {
             bits |= e.bit;
         }
+    }
+    if t.engines.is_reported(GpuEngine::MemCtl) {
+        bits |= ENGINES[1].bit;
     }
     bits
 }
@@ -263,8 +284,8 @@ fn reported_bits(totals: Option<&GpuTotals>) -> u8 {
 pub struct Words {
     /// `None` before the first refresh; then the strings version, `None` without strings.
     version: Option<Option<u64>>,
-    /// In [`P1_ENGINES`] order.
-    pub engines: [SharedString; 3],
+    /// In [`ENGINES`] order.
+    pub engines: [SharedString; 4],
     pub memory: SharedString,
     pub temperature: SharedString,
     pub memory_usage: SharedString,
@@ -283,7 +304,7 @@ impl Words {
         }
         self.version = version;
         let t = |key| tr(cx, key);
-        self.engines = P1_ENGINES.map(|e| t(e.name));
+        self.engines = ENGINES.map(|e| t(e.name));
         self.memory = t(KEY_MEMORY);
         self.temperature = t(KEY_TEMPERATURE);
         self.memory_usage = t(KEY_MEMORY_USAGE);
@@ -295,7 +316,7 @@ impl Words {
     }
 
     fn engine(&self, key: &str) -> SharedString {
-        P1_ENGINES
+        ENGINES
             .iter()
             .position(|e| e.key == key)
             .map(|i| self.engines[i].clone())
@@ -530,9 +551,27 @@ pub struct GpuPage {
     words: Words,
     /// The engine box width of the last paint; 0 before the first.
     width: Rc<Cell<Pixels>>,
+    /// The engine box's top-left corner in the window at the last paint, for the cell under a
+    /// right-click.
+    origin: Rc<Cell<Point<Pixels>>>,
+    /// The number of cells the grid was last built with.
+    shown_cells: usize,
+    /// Row 1 growing from or shrinking to height 0 (UI-PRF-032).
+    row_anim: Option<RowAnim>,
+    anim_generation: u32,
     _subs: SmallVec<[Subscription; 3]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+}
+
+/// Row 1's height animation after the last engine is hidden or the first is shown again.
+#[derive(Clone, Copy, Debug)]
+struct RowAnim {
+    showing: bool,
+    /// The cell count the full height is measured for.
+    cells: usize,
+    /// Bumped on each change, so a new change restarts the animation.
+    generation: u32,
 }
 
 impl GpuPage {
@@ -563,6 +602,7 @@ impl GpuPage {
             metrics(cx),
             &mut engine_keys,
         );
+        let shown_cells = spec.cells.len();
         let engines = cx.new(|cx| ChartGridView::new(spec, &hub, cx));
 
         let memory_shape = MemoryShape::of(totals);
@@ -613,6 +653,10 @@ impl GpuPage {
             style_version: metrics(cx).style_version,
             words,
             width: Rc::new(Cell::new(px(0.))),
+            origin: Rc::new(Cell::new(Point::default())),
+            shown_cells,
+            row_anim: None,
+            anim_generation: 0,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -812,7 +856,69 @@ impl GpuPage {
             metrics(cx),
             &mut self.engine_keys,
         );
+        let new = spec.cells.len();
         self.engines.update(cx, |v, cx| v.set_spec(spec, cx));
+        self.sync_row_anim(new, cx);
+    }
+
+    /// Starts row 1's height animation when the cell count moved between 0 and more over
+    /// `m_base`; with animations off the height jumps.
+    fn sync_row_anim(&mut self, new: usize, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.shown_cells, new);
+        if (old == 0) == (new == 0) {
+            return;
+        }
+        self.anim_generation = self.anim_generation.wrapping_add(1);
+        if !animations_on(cx) {
+            self.row_anim = None;
+            return;
+        }
+        let generation = self.anim_generation;
+        self.row_anim = Some(RowAnim {
+            showing: new > 0,
+            cells: old.max(new),
+            generation,
+        });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(M_BASE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.anim_generation == generation {
+                    this.row_anim = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// `PerfToggleGpuEngine`: hides or shows the graph of one engine in
+    /// `performance.hidden_gpu_engines`. The page follows through its settings observer.
+    fn on_toggle_engine(
+        &mut self,
+        a: &PerfToggleGpuEngine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if a.key != self.key {
+            return;
+        }
+        let engine = GpuEngine::from_key(&a.engine);
+        TlSettings::update(cx, |d| {
+            let hidden = &mut d.settings.performance.hidden_gpu_engines;
+            match engine {
+                Some(e) => {
+                    let hide = !e.is_hidden(hidden);
+                    e.set_hidden(hidden, hide);
+                }
+                None => match hidden.iter().position(|k| **k == *a.engine) {
+                    Some(i) => {
+                        hidden.remove(i);
+                    }
+                    None => hidden.push(a.engine.to_string()),
+                },
+            }
+        });
+        self.sync_settings(cx);
     }
 
     fn rebuild_memory(&mut self, labels_too: bool, cx: &mut Context<Self>) {
@@ -870,7 +976,8 @@ impl GpuPage {
     }
 
     /// Row 1: the engine grid in a box as tall as its rows for the measured width, or the
-    /// placeholder cell while the probe is missing.
+    /// placeholder cell while the probe is missing. The box ends with the gap to row 2 and has
+    /// height 0 when every engine is hidden.
     fn engines_element(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         let spec = &self.engines.read(cx).spec;
         let (min_w, cell_h, gap) = (spec.cell_min_w, spec.cell_h, spec.gap);
@@ -889,8 +996,10 @@ impl GpuPage {
 
         let measure = {
             let cell = Rc::clone(&self.width);
+            let origin = Rc::clone(&self.origin);
             canvas(
                 move |bounds, window, cx| {
+                    origin.set(bounds.origin);
                     let old = cell.replace(bounds.size.width);
                     let at = |w: Pixels| {
                         let w = if w > px(0.) { w } else { px(UNMEASURED_W) };
@@ -906,11 +1015,38 @@ impl GpuPage {
             .inset_0()
         };
 
+        // The cell under a right-press, named for the page menu's "Hide this engine graph".
+        let hit = {
+            let keys = self.engine_keys.clone();
+            let origin = Rc::clone(&self.origin);
+            move |ev: &MouseDownEvent, cx: &mut App| {
+                if ev.button != MouseButton::Right {
+                    return;
+                }
+                let p = ev.position - origin.get();
+                let (x, y) = (f32::from(p.x), f32::from(p.y));
+                let (w, h, g) = (f32::from(layout.cell_w), f32::from(cell_h), f32::from(gap));
+                let (col, row) = (x / (w + g), y / (h + g));
+                let inside = x >= 0.
+                    && y >= 0.
+                    && x - col.floor() * (w + g) < w
+                    && y - row.floor() * (h + g) < h;
+                let cell = (row.floor() as usize) * layout.cols + col.floor() as usize;
+                if inside
+                    && (col.floor() as usize) < layout.cols
+                    && let Some(key) = keys.get(cell)
+                {
+                    cx.set_global(ClickedEngine(Some(key.clone())));
+                }
+            }
+        };
+
         let root = div()
             .debug_selector(|| ENGINES_ID.into())
             .relative()
             .w_full()
-            .h(height);
+            .h(height)
+            .capture_any_mouse_down(move |ev, _, cx| hit(ev, cx));
         let root = match (&self.placeholder, self.probe) {
             (Some(p), ProbeState::Missing) => {
                 let cell = div()
@@ -929,7 +1065,30 @@ impl GpuPage {
                 root.child(self.with_probe_tip(grid, "perf-gpu-tip-engines", window, cx))
             }
         };
-        root.child(measure).into_any_element()
+        let root = root.child(measure);
+
+        // The gap to row 2 belongs to the box, so rows 2 and 3 move up when it collapses.
+        let outer = div().w_full().flex_none().overflow_hidden();
+        match self.row_anim.filter(|_| self.probe != ProbeState::Missing) {
+            Some(RowAnim {
+                showing,
+                cells,
+                generation,
+            }) => {
+                let full =
+                    grid_height(&grid_layout(cells, measured, min_w, gap), cell_h, gap) + gap;
+                outer
+                    .child(root.h(full - gap).mb(gap))
+                    .with_animation(
+                        ("perf-gpu-row-anim", generation as usize),
+                        Animation::new(M_BASE).with_easing(ease_out_cubic),
+                        move |el, t| el.h(full * if showing { t } else { 1. - t }),
+                    )
+                    .into_any_element()
+            }
+            None if n == 0 => outer.h(px(0.)).child(root).into_any_element(),
+            None => outer.pb(gap).child(root).into_any_element(),
+        }
     }
 
     /// A chart box of `(W − sp4) / 2 × GRAPH_H_STACKED`.
@@ -1418,7 +1577,6 @@ impl DevicePage for GpuPage {
         v_flex()
             .w_full()
             .child(self.engines_element(window, cx))
-            .child(div().h(m.sp[4]))
             .child(row2)
             .into_any_element()
     }
@@ -1431,9 +1589,46 @@ impl DevicePage for GpuPage {
         SmallVec::new()
     }
 
-    /// E25-022 adds the engine items.
-    fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
-        menu
+    /// "Select GPU engine graphs >": one check item per reported engine, then Power and Clocks
+    /// until E25-023 lands (PERF-063, UI-PRF-032).
+    fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+        let key = self.key.clone();
+        let items: Vec<(Arc<str>, SharedString, bool)> = vendor_engines(self.vendor)
+            .iter()
+            .filter(|e| self.reported & e.bit != 0)
+            .map(|e| {
+                (
+                    Arc::from(e.key),
+                    self.words.engine(e.key),
+                    !self.settings.hidden.iter().any(|k| &**k == e.key),
+                )
+            })
+            .collect();
+        let (power, clocks) = (
+            tr(cx, "perf-gpu-menu-power"),
+            tr(cx, "perf-gpu-menu-clocks"),
+        );
+        let later = tr(cx, "perf-later-version");
+        menu.submenu(
+            tr(cx, "perf-gpu-menu-select-engines"),
+            window,
+            cx,
+            move |mut menu, _, _| {
+                for (engine, name, shown) in &items {
+                    menu = menu.check_item(
+                        name.clone(),
+                        *shown,
+                        Box::new(PerfToggleGpuEngine {
+                            key: key.clone(),
+                            engine: engine.clone(),
+                        }),
+                    );
+                }
+                menu.separator()
+                    .item_disabled(power.clone(), Some(later.clone()))
+                    .item_disabled(clocks.clone(), Some(later.clone()))
+            },
+        )
     }
 
     /// E25-029 replaces this with the full GPU copy text.
@@ -1500,14 +1695,18 @@ impl Render for GpuPage {
         }
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        div().size_full().track_focus(&self.focus).child(
-            DevicePageFrame {
-                page: self,
-                m: &m,
-                theme: &theme,
-            }
-            .render(window, cx),
-        )
+        div()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_toggle_engine))
+            .child(
+                DevicePageFrame {
+                    page: self,
+                    m: &m,
+                    theme: &theme,
+                }
+                .render(window, cx),
+            )
     }
 }
 
