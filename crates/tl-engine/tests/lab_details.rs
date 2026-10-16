@@ -345,7 +345,7 @@ fn engine_environment_once_then_on_refresh() {
 }
 
 /// A window that closes and opens again between two worker polls gets its tabs again: the
-/// reducer drops the payloads on the close and sends a `DetailRefresh` for each tab on the
+/// reducer drops the payloads on the close and sends a `DetailOpened` for each tab on the
 /// reopen. With a 4 s interval the worker samples at 0 s, 4 s and 8 s, and the reducer ticks
 /// every second.
 #[test]
