@@ -908,3 +908,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: 8q0.41 frozen flag for app rows only (UNIT_WANT.events off); unit rows in tasklens-8q0.42 via the sweep reading cgroup.events.
 - 2026-10-16 leader decision: dwy.7 option A. Reducer builds AppGeneral (tasklens-dwy.12); General tab split to tasklens-dwy.13 (opus); order on process_detail.rs is dwy.7, tasklens-dwy.13, qfx.18.
 - 2026-10-16 leader decision: hjn.37 closed; NVIDIA JPEG and OFA split to tasklens-hjn.42 with one raw NVML file allowed unsafe (ADR-001 rule 4 amended there).
+- 2026-10-16 leader decision: dwy.7 review fixes; reducer sends a refresh on newly added detail demand; period = interval / ceil(interval / 1 s) when PSS and details both apply.
