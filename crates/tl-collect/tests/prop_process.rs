@@ -459,6 +459,11 @@ mod strings_scan {
 
 proptest! {
     #[test]
+    fn acf_arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
+        let _ = tl_collect::apps::launchers::steam_manifest_name(&bytes);
+    }
+
+    #[test]
     fn environ_arbitrary_bytes_never_panic(
         bytes in prop::collection::vec(any::<u8>(), 0..=4096),
         truncated in any::<bool>(),

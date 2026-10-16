@@ -550,3 +550,43 @@ fn hash_pid1_no_argv_unavailable() {
     );
     assert_eq!(got, Err(HashError::ExeUnavailable));
 }
+
+/// U-19 (Steam half): the live `reaper` argv carries `AppId=<n>`. Prints only the app id.
+#[test]
+#[ignore = "real system: needs a running Steam game"]
+fn steam_reaper_argv_live() {
+    use std::sync::Arc;
+    use tl_collect::apps::launchers::steam_app_id;
+
+    let uid = rustix::process::geteuid().as_raw();
+    let mut found = 0;
+    for entry in std::fs::read_dir("/proc").expect("read /proc").flatten() {
+        let dir = entry.path();
+        let Ok(comm) = std::fs::read_to_string(dir.join("comm")) else {
+            continue;
+        };
+        if comm.trim_end() != "reaper" {
+            continue;
+        }
+        let owned =
+            std::fs::metadata(&dir).is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == uid);
+        let Ok(raw) = std::fs::read(dir.join("cmdline")) else {
+            continue;
+        };
+        if !owned {
+            continue;
+        }
+        let argv: Vec<Arc<str>> = raw
+            .split(|&b| b == 0)
+            .filter(|t| !t.is_empty())
+            .map(|t| Arc::from(String::from_utf8_lossy(t).as_ref()))
+            .collect();
+        let id = steam_app_id(&argv, "");
+        assert!(id.is_some(), "reaper argv has no AppId");
+        eprintln!("reaper AppId={}", id.unwrap_or(0));
+        found += 1;
+    }
+    if found == 0 {
+        eprintln!("skipped: no reaper process");
+    }
+}

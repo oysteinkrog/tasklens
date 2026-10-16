@@ -16,6 +16,9 @@ use tl_collect::apps::icons::{
     GenericIcon, IconCache, ThemeDir, ThemeDirs, generic_icon, kde_icon_theme, load_theme, resolve,
     theme_order,
 };
+use tl_collect::apps::launchers::{
+    GameId, assign_games, env_game, steam_app_id, steam_game, steam_manifest_name,
+};
 use tl_collect::apps::naming::{
     NameInput, display_name, exe_basename, image_name, is_wine, search_lower,
 };
@@ -1749,4 +1752,96 @@ fn resolver_fixture_snapshot() {
         })
         .collect();
     insta::assert_debug_snapshot!(rows);
+}
+
+const STEAM_REAPER: [&str; 5] = [
+    "/home/u/.local/share/Steam/ubuntu12_32/reaper",
+    "SteamLaunch",
+    "AppId=570",
+    "--",
+    "game",
+];
+
+#[test]
+fn steam_app_id_from_reaper() {
+    assert_eq!(steam_app_id(&argv(&STEAM_REAPER), ""), Some(570));
+    let cmdline = STEAM_REAPER.join(" ");
+    assert_eq!(steam_app_id(&[], &cmdline), Some(570));
+}
+
+#[test]
+fn steam_app_id_requires_steamlaunch() {
+    let no_launch = argv(&["/x/reaper", "AppId=570"]);
+    assert_eq!(steam_app_id(&no_launch, "/x/reaper AppId=570"), None);
+    let bash = argv(&["/usr/bin/bash", "SteamLaunch", "AppId=570"]);
+    assert_eq!(steam_app_id(&bash, ""), None);
+    for bad in ["AppId=+5", "AppId=abc", "AppId=", "AppId=99999999999"] {
+        let a = argv(&["/x/reaper", "SteamLaunch", bad]);
+        assert_eq!(steam_app_id(&a, ""), None, "{bad}");
+    }
+}
+
+#[test]
+fn steam_manifest_name() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/apps-steam");
+    let mut buf = Vec::new();
+    let game = steam_game(570, &root, &mut buf).expect("dota manifest");
+    assert_eq!(game.id, GameId::Steam(570));
+    assert_eq!(&*game.name, "Dota 2");
+    assert_eq!(game.icon_name.as_deref(), Some("steam_icon_570"));
+    assert!(steam_game(999, &root, &mut buf).is_none());
+    let nested = b"\"AppState\" { \"UserConfig\" { \"name\" \"Nope\" } }";
+    assert_eq!(steam_manifest_name(nested), None);
+    let top = b"\"AppState\" { \"name\" \"A \\\"B\\\"\" }";
+    assert_eq!(steam_manifest_name(top).as_deref(), Some("A \"B\""));
+}
+
+#[test]
+fn env_game_lutris_heroic() {
+    use tl_collect::proc::detail::EnvInfo;
+    let env = |vars: &[(&str, &str)]| EnvInfo {
+        vars: vars
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect(),
+        truncated: false,
+    };
+    assert_eq!(
+        env_game(&env(&[("LUTRIS_GAME_UUID", "abc-123")])),
+        Some(GameId::Lutris(Arc::from("abc-123")))
+    );
+    assert_eq!(
+        env_game(&env(&[("HEROIC_APP_NAME", "Fortnite")])),
+        Some(GameId::Heroic(Arc::from("Fortnite")))
+    );
+    assert_eq!(
+        env_game(&env(&[("HEROIC_APP_NAME", "h"), ("LUTRIS_GAME_UUID", "l")])),
+        Some(GameId::Heroic(Arc::from("h")))
+    );
+    assert_eq!(env_game(&env(&[("PATH", "/bin")])), None);
+}
+
+#[test]
+fn assign_games_descendants() {
+    use rustc_hash::FxHashMap;
+    let records = [(10, 1), (11, 10), (12, 11), (13, 1)];
+    let mut roots = FxHashMap::default();
+    roots.insert(10, GameId::Steam(570));
+    let mut out = FxHashMap::default();
+    assign_games(&records, &roots, &mut out);
+    for pid in [10, 11, 12] {
+        assert_eq!(out.get(&pid), Some(&GameId::Steam(570)));
+    }
+    assert!(!out.contains_key(&13));
+    roots.insert(11, GameId::Steam(730));
+    assign_games(&records, &roots, &mut out);
+    assert_eq!(out.get(&10), Some(&GameId::Steam(570)));
+    assert_eq!(out.get(&11), Some(&GameId::Steam(730)));
+    assert_eq!(out.get(&12), Some(&GameId::Steam(730)));
+    assign_games(&[(20, 21), (21, 20)], &FxHashMap::default(), &mut out);
+    assert!(out.is_empty());
+    let mut one = FxHashMap::default();
+    one.insert(99, GameId::Steam(1));
+    assign_games(&[(20, 21), (21, 20)], &one, &mut out);
+    assert!(out.is_empty());
 }
