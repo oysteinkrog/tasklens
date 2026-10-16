@@ -13,8 +13,9 @@
 //! `DetailRefresh`. A tab is sent only when the reader output changed, so an unchanged tab keeps
 //! its `Arc` in the reducer. EACCES gives an empty `Restricted` payload. A gone process resends
 //! the last payload as `Missing`, another read error resends it as `Failed`. Targets that leave
-//! the demand are forgotten. Tab updates go out through `take_extra`. When PSS is not due the
-//! sample itself is the last tab update or `Health { Running }`, never an empty `Pss`.
+//! the demand are forgotten as soon as `period` sees the new demand, so a reopened window gets
+//! its tabs again. Tab updates go out through `take_extra`. When PSS is not due the sample
+//! itself is the last tab update or `Health { Running }`, never an empty `Pss`.
 //!
 //! Per-key errors become `Validity`, never `WorkerError`. Environment values, command lines and
 //! paths are never logged (ADR-015).
@@ -66,10 +67,6 @@ pub const PSS_PERIOD: Duration = Duration::from_secs(1);
 /// Memory maps reads `smaps` (per-region RSS) at most this often (ADR-008).
 pub const SMAPS_MIN_PERIOD: Duration = Duration::from_secs(1);
 
-/// The `smaps` due check allows a sample this much early, so scheduling jitter on a 250 or
-/// 500 ms grid does not skip a whole period.
-const SMAPS_SLACK_NS: u64 = 5_000_000;
-
 /// Read limit for `<root>/etc/group`.
 const GROUP_FILE_MAX: usize = 1024 * 1024;
 
@@ -115,6 +112,22 @@ fn tab_interval(s: &EngineSettings) -> Duration {
     Duration::from_millis(u64::from(
         s.interval_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS),
     ))
+}
+
+/// The sample grid when PSS and tabs both run: the longest period that divides both, so each
+/// read keeps its own rate (1500 ms tabs beside 1 s PSS sample every 500 ms). An interval that
+/// is not a multiple of 250 ms would give a grid under `MIN_INTERVAL_MS`; then the grid is the
+/// shorter period and the other read rounds up to the next sample.
+fn shared_grid(a: Duration, b: Duration) -> Duration {
+    let (mut x, mut y) = (a.as_millis(), b.as_millis());
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    if x >= u128::from(MIN_INTERVAL_MS) {
+        Duration::from_millis(u64::try_from(x).unwrap_or(u64::MAX))
+    } else {
+        a.min(b)
+    }
 }
 
 /// Samples per read for a read that is due every `every` on a sample grid of `period`. Rounds
@@ -204,6 +217,8 @@ struct TargetState {
     threads: Option<ThreadReader>,
     /// Memory maps: RSS by region start from the last `smaps` read.
     rss: FxHashMap<u64, u64>,
+    /// File descriptors: protocol by socket inode. A socket keeps its protocol.
+    sockets: FxHashMap<u64, FdType>,
 }
 
 pub struct ProcessDetailSource {
@@ -230,11 +245,12 @@ pub struct ProcessDetailSource {
     cap_warnings: Cell<u32>,
     /// `DetailRefresh` commands for the next sample.
     refresh: Vec<(DetailTarget, DetailTab)>,
-    targets: FxHashMap<ProcessKey, TargetState>,
+    /// Pruned by `period`, which runs on every loop turn, also while no sample is due.
+    targets: RefCell<FxHashMap<ProcessKey, TargetState>>,
     /// Tab updates for `take_extra`.
     extra: VecDeque<SourceUpdate>,
     bufs: ReadBufs,
-    /// `<root>/etc/passwd`, loaded at the first Security read.
+    /// `<root>/etc/passwd`, loaded when the first Security payload is built.
     users: Option<PasswdUserNames>,
     group_file: Vec<u8>,
     ticks_per_sec: u64,
@@ -282,7 +298,7 @@ impl ProcessDetailSource {
             over_cap: Cell::new(false),
             cap_warnings: Cell::new(0),
             refresh: Vec::new(),
-            targets: FxHashMap::default(),
+            targets: RefCell::default(),
             extra: VecDeque::new(),
             bufs: ReadBufs::default(),
             users: None,
@@ -317,7 +333,7 @@ impl ProcessDetailSource {
 
     /// Process targets with tab state.
     pub fn targets_len(&self) -> usize {
-        self.targets.len()
+        self.targets.borrow().len()
     }
 
     /// `sample()` is `self.sample_at(now_boot_ns())`; tests call this with an injected clock.
@@ -396,11 +412,6 @@ impl ProcessDetailSource {
     /// Reads the demanded tabs that are due and queues the changed ones in `extra`.
     fn read_tabs(&mut self, now: TimeNs) {
         let details = self.details.borrow().clone();
-        self.targets.retain(|key, _| {
-            details
-                .iter()
-                .any(|d| d.target == DetailTarget::Process(*key))
-        });
         let refresh = std::mem::take(&mut self.refresh);
         let periodic = wants_tabs(&details) && self.tabs_stride.ready();
         for d in details.iter() {
@@ -415,6 +426,7 @@ impl ProcessDetailSource {
                 refreshed
                     || !self
                         .targets
+                        .get_mut()
                         .get(&key)
                         .is_some_and(|t| t.tabs[d.tab.index()].env_loaded)
             } else {
@@ -433,12 +445,8 @@ impl ProcessDetailSource {
             self.online_cpus = read_online_cpus(&self.cfg.sys_root, self.online_cpus);
         }
         if tab == DetailTab::Security {
-            let base = root_base(&self.cfg.sys_root);
-            if self.users.is_none() {
-                self.users = Some(PasswdUserNames::load(&base.join("etc/passwd")));
-            }
             if read_file(
-                &base.join("etc/group"),
+                &root_base(&self.cfg.sys_root).join("etc/group"),
                 &mut self.group_file,
                 GROUP_FILE_MAX,
             )
@@ -449,7 +457,7 @@ impl ProcessDetailSource {
         }
         let root = &self.cfg.sys_root;
         let bufs = &mut self.bufs;
-        let state = self.targets.entry(key).or_default();
+        let state = self.targets.get_mut().entry(key).or_default();
         let read = match tab {
             DetailTab::Threads => {
                 let clock = self.thread_clock;
@@ -470,8 +478,10 @@ impl ProcessDetailSource {
             }
             DetailTab::Fds => {
                 let mut rows = Vec::new();
-                detail_result(rd::read_fds(root, key, bufs, &mut rows), tab)
-                    .map(|()| TabRead::Fds(rows))
+                detail_result(rd::read_fds(root, key, bufs, &mut rows), tab).map(|()| {
+                    resolve_sockets(root, key.pid, &mut state.sockets, &mut rows);
+                    TabRead::Fds(rows)
+                })
             }
             DetailTab::Maps => {
                 let with_rss = state.tabs[tab.index()]
@@ -523,8 +533,12 @@ impl ProcessDetailSource {
                 if same_validity && slot.last.as_ref() == Some(&read) {
                     return None;
                 }
-                let users = self.users.get_or_insert_with(PasswdUserNames::default);
-                let payload = Arc::new(build_payload(&read, users, &self.group_file, root));
+                let payload = Arc::new(build_payload(
+                    &read,
+                    &mut self.users,
+                    &self.group_file,
+                    root,
+                ));
                 slot.last = Some(read);
                 (payload, validity)
             }
@@ -554,8 +568,8 @@ impl Source for ProcessDetailSource {
         SourceId::ProcessDetail
     }
 
-    /// PSS alone runs at 1 Hz, tabs alone at `processes.interval_ms`, both at the shorter of the
-    /// two, with each read on its own stride of samples.
+    /// PSS alone runs at 1 Hz, tabs alone at `processes.interval_ms`, both on `shared_grid`,
+    /// with each read on its own stride of samples.
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         // A forced `RefreshNow` samples even without a period, so hidden columns must leave
         // no keys behind.
@@ -566,12 +580,19 @@ impl Source for ProcessDetailSource {
             Arc::from([])
         };
         let details = self.cap_details(d);
+        // Done here, not in `sample`: with no demand left no sample runs, and a window that
+        // opens again must get its tabs, not "unchanged" from the old state.
+        self.targets.borrow_mut().retain(|key, _| {
+            details
+                .iter()
+                .any(|d| d.target == DetailTarget::Process(*key))
+        });
         let pss = shown && !d.detail_keys.is_empty();
         let tabs = wants_tabs(&details);
         *self.details.borrow_mut() = details;
         let interval = tab_interval(s);
         let period = match (pss, tabs) {
-            (true, true) => Some(PSS_PERIOD.min(interval)),
+            (true, true) => Some(shared_grid(PSS_PERIOD, interval)),
             (true, false) => Some(PSS_PERIOD),
             (false, true) => Some(interval),
             (false, false) => None,
@@ -584,7 +605,7 @@ impl Source for ProcessDetailSource {
 
     /// The Threads tab CPU baselines start over.
     fn reset_baselines(&mut self) {
-        for target in self.targets.values_mut() {
+        for target in self.targets.get_mut().values_mut() {
             target.threads = None;
         }
     }
@@ -617,10 +638,11 @@ impl Source for ProcessDetailSource {
     }
 }
 
-/// True when at least `every` has passed from `last` to `now`, less `SMAPS_SLACK_NS`.
+/// True when at least `every` has passed from `last` to `now`. A sample that wakes a little
+/// early waits for the next one, so two reads are never closer than `every`.
 fn due_ns(last: TimeNs, now: TimeNs, every: Duration) -> bool {
     let every = u64::try_from(every.as_nanos()).unwrap_or(u64::MAX);
-    now.saturating_sub(last).saturating_add(SMAPS_SLACK_NS) >= every
+    now.saturating_sub(last) >= every
 }
 
 /// Maps a reader result to `Ok` or the validity of a tab without data. Errors are logged
@@ -676,10 +698,58 @@ fn apply_rss(rss: &FxHashMap<u64, u64>, regions: &mut [MapRegionInfo], nodes: &m
     }
 }
 
+/// Sets the protocol of each unresolved socket row from the `system.sockprotoname` xattr of its
+/// `fd/<n>` link. `known` caches the protocol by inode and keeps only the inodes still open. A
+/// row whose xattr cannot be read stays `Socket`.
+fn resolve_sockets(
+    root: &SysRoot,
+    pid: u32,
+    known: &mut FxHashMap<u64, FdType>,
+    rows: &mut [FdInfo],
+) {
+    let mut next = FxHashMap::default();
+    let fd_dir = root.proc.join(pid.to_string()).join("fd");
+    for row in rows.iter_mut().filter(|r| r.kind == FdType::Socket) {
+        let Some(inode) = row.inode else {
+            continue;
+        };
+        let kind = match known.get(&inode) {
+            Some(&kind) => kind,
+            None => socket_protocol(&fd_dir.join(row.fd.to_string())),
+        };
+        row.kind = kind;
+        if kind != FdType::Socket {
+            next.insert(inode, kind);
+        }
+    }
+    *known = next;
+}
+
+/// The fd type of a socket from the protocol name the kernel gives its inode.
+fn socket_protocol(link: &Path) -> FdType {
+    let mut name = [0u8; 32];
+    match rustix::fs::getxattr(link, "system.sockprotoname", &mut name[..]) {
+        Ok(len) => protocol_type(&name[..len]),
+        Err(_) => FdType::Socket,
+    }
+}
+
+/// "TCP", "UDPv6", "UNIX-STREAM" and the like, with or without the trailing NUL.
+fn protocol_type(name: &[u8]) -> FdType {
+    match name.strip_suffix(b"\0").unwrap_or(name) {
+        b"TCP" | b"TCPv6" | b"MPTCP" | b"MPTCPv6" => FdType::Tcp,
+        b"UDP" | b"UDPv6" | b"UDP-Lite" | b"UDPLITEv6" => FdType::Udp,
+        b"UNIX" | b"UNIX-STREAM" => FdType::Unix,
+        b"NETLINK" => FdType::Netlink,
+        _ => FdType::Socket,
+    }
+}
+
 /// The tl-model payload of one reader output.
+/// `users` is loaded from `<root>/etc/passwd` the first time a Security payload is built.
 fn build_payload(
     read: &TabRead,
-    users: &mut dyn UserNames,
+    users: &mut Option<PasswdUserNames>,
     group_file: &[u8],
     root: &SysRoot,
 ) -> TabPayload {
@@ -688,6 +758,8 @@ fn build_payload(
         TabRead::Fds(rows) => TabPayload::Fds(Arc::new(fd_detail(rows))),
         TabRead::Maps { regions, nodes } => TabPayload::Maps(Arc::new(maps_detail(regions, nodes))),
         TabRead::Security(info) => {
+            let users = users
+                .get_or_insert_with(|| PasswdUserNames::load(&root_base(root).join("etc/passwd")));
             TabPayload::Security(Arc::new(security_detail(info, users, group_file, root)))
         }
         TabRead::Environ { info, read } => TabPayload::Environ(Arc::new(EnvDetail {
@@ -751,15 +823,15 @@ fn thread_row(t: &ThreadInfo) -> ThreadRow {
     }
 }
 
-/// tl-model has no unresolved socket kind. An unresolved socket shows as `unix` until the
-/// connections map resolves its `socket_inode`.
+/// tl-model has no plain socket kind. A socket whose protocol could not be read shows as
+/// `anon_inode`, the "other" type (PROC-080); its name still reads `socket:[<inode>]`.
 fn fd_kind(kind: FdType) -> FdKind {
     match kind {
         FdType::File => FdKind::File,
         FdType::Directory => FdKind::Directory,
         FdType::Tcp => FdKind::Tcp,
         FdType::Udp => FdKind::Udp,
-        FdType::Unix | FdType::Socket => FdKind::Unix,
+        FdType::Unix => FdKind::Unix,
         FdType::Netlink => FdKind::Netlink,
         FdType::Pipe => FdKind::Pipe,
         FdType::Fifo => FdKind::Fifo,
@@ -774,7 +846,7 @@ fn fd_kind(kind: FdType) -> FdKind {
         FdType::Drm => FdKind::Drm,
         FdType::PidFd => FdKind::Pidfd,
         FdType::IoUring => FdKind::IoUring,
-        FdType::AnonInode => FdKind::AnonInode,
+        FdType::AnonInode | FdType::Socket => FdKind::AnonInode,
         FdType::Device => FdKind::Device,
     }
 }
@@ -1384,6 +1456,52 @@ mod tests {
         assert_eq!(src.tab_reads(DetailTab::Threads), 2);
     }
 
+    /// A 1500 ms interval beside PSS keeps both rates: the grid is 500 ms, PSS reads every
+    /// second sample and tabs every third.
+    #[test]
+    fn tabs_keep_1500_ms_beside_pss() {
+        let (_tmp, cfg) = edge_root();
+        let mut d = tabs(&[(a(), DetailTab::Threads)]);
+        d.process_columns.insert(ColumnId::Pss);
+        d.detail_keys = Arc::from([a()]);
+        let s = every_ms(1500);
+        let mut src = ProcessDetailSource::new(cfg);
+        assert_eq!(src.period(&d, &s), Some(Duration::from_millis(500)));
+        let mut pss_reads = 0;
+        for t in 0..6 {
+            let (next, _, update) = step(src, &d, &s, t * 500);
+            if matches!(update, SourceUpdate::Details(DetailsUpdate::Pss { .. })) {
+                pss_reads += 1;
+            }
+            src = next;
+        }
+        assert_eq!(pss_reads, 3);
+        assert_eq!(src.tab_reads(DetailTab::Threads), 2);
+    }
+
+    #[test]
+    fn shared_grid_divides_both_rates() {
+        let ms = Duration::from_millis;
+        for (interval, grid) in [
+            (250, 250),
+            (500, 500),
+            (750, 250),
+            (1000, 1000),
+            (1500, 500),
+            (2000, 1000),
+            (10_000, 1000),
+            // Not a multiple of 250 ms: the shorter period.
+            (1100, 1000),
+            (300, 300),
+        ] {
+            assert_eq!(
+                shared_grid(PSS_PERIOD, ms(interval)),
+                ms(grid),
+                "{interval}"
+            );
+        }
+    }
+
     /// E10-004 AC 2.
     #[test]
     fn smaps_capped_1hz() {
@@ -1435,6 +1553,22 @@ mod tests {
         let (src, second, _) = step(src, &d, &s, 250);
         assert!(second.is_empty(), "same maps and RSS send nothing");
         assert_eq!(src.smaps_reads(), 1);
+    }
+
+    /// A sample that wakes 5 ms before the second is up does not read `smaps`.
+    #[test]
+    fn smaps_never_closer_than_1_s() {
+        let (_tmp, cfg) = edge_root();
+        let d = tabs(&[(a(), DetailTab::Maps)]);
+        let s = every_ms(250);
+        let mut src = ProcessDetailSource::new(cfg);
+        for now_ms in [0, 250, 500, 750, 995] {
+            let (next, _, _) = step(src, &d, &s, now_ms);
+            src = next;
+        }
+        assert_eq!(src.smaps_reads(), 1);
+        let (src, _, _) = step(src, &d, &s, 1000);
+        assert_eq!(src.smaps_reads(), 2);
     }
 
     /// E10-004 AC 3.
@@ -1557,6 +1691,25 @@ mod tests {
         assert_eq!(src.targets_len(), 0);
     }
 
+    /// With no demand left no sample runs, so `period` alone forgets the target. A window that
+    /// opens again gets its unchanged tabs and a new Environment read.
+    #[test]
+    fn reopened_window_gets_its_tabs_again() {
+        let (_tmp, cfg) = edge_root();
+        let d = tabs(&[(a(), DetailTab::Threads), (a(), DetailTab::Environment)]);
+        let s = every_ms(500);
+        let mut src = ProcessDetailSource::new(cfg);
+        src.thread_clock = Some(fixed_clock);
+        let (src, first, _) = step(src, &d, &s, 0);
+        assert_eq!(first.len(), 2);
+        assert_eq!(src.period(&Demand::default(), &s), None);
+        assert_eq!(src.targets_len(), 0);
+        let (src, again, _) = step(src, &d, &s, 500);
+        let tabs_sent: Vec<DetailTab> = again.iter().map(|(tab, _, _)| *tab).collect();
+        assert_eq!(tabs_sent, vec![DetailTab::Threads, DetailTab::Environment]);
+        assert_eq!(src.tab_reads(DetailTab::Environment), 2);
+    }
+
     /// A gone process resends the last payload as `Missing`, once.
     #[test]
     fn gone_target_keeps_last_payload_as_missing() {
@@ -1583,7 +1736,8 @@ mod tests {
         };
         assert!(fds.fdinfo_available);
         let row = |fd: i32| fds.rows.iter().find(|r| r.fd == fd).expect("fd row");
-        assert_eq!(row(0).kind, FdKind::Unix);
+        // The fixture link `socket:[1234]` has no socket inode behind it: "other", not unix.
+        assert_eq!(row(0).kind, FdKind::AnonInode);
         assert_eq!(row(0).socket_inode, Some(1234));
         assert_eq!(row(0).pos, None);
         assert_eq!(row(1).kind, FdKind::Pipe);
@@ -1594,6 +1748,82 @@ mod tests {
         assert_eq!(row(4).kind, FdKind::Drm);
         assert_eq!(row(12).kind, FdKind::File);
         assert!(!row(12).unnamed);
+    }
+
+    #[test]
+    fn socket_protocol_names() {
+        for (name, kind) in [
+            (&b"TCP\0"[..], FdType::Tcp),
+            (b"TCPv6\0", FdType::Tcp),
+            (b"UDP\0", FdType::Udp),
+            (b"UDPv6", FdType::Udp),
+            (b"UNIX\0", FdType::Unix),
+            (b"UNIX-STREAM\0", FdType::Unix),
+            (b"NETLINK\0", FdType::Netlink),
+            (b"RAW\0", FdType::Socket),
+            (b"", FdType::Socket),
+        ] {
+            assert_eq!(protocol_type(name), kind, "{name:?}");
+        }
+    }
+
+    /// TCP, UDP and unix sockets of this test process get their own type, not unix.
+    #[test]
+    fn fds_resolve_socket_protocols() {
+        use std::os::fd::AsRawFd;
+
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").expect("bind tcp");
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind udp");
+        let (unix, _peer) = std::os::unix::net::UnixStream::pair().expect("unix pair");
+        let stat = fs::read_to_string("/proc/self/stat").expect("own stat");
+        // Field 22 is start_ticks; field 3 is the first after the ")".
+        let start_ticks = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+            .and_then(|t| t.parse().ok())
+            .expect("start_ticks");
+        let cfg = EngineConfig::new(EngineMode::Full, PathBuf::from("/nonexistent"))
+            .with_sys_root(SysRoot::host());
+        let me = key(std::process::id(), start_ticks);
+        let d = tabs(&[(me, DetailTab::Fds)]);
+        let (_src, out, _) = step(
+            ProcessDetailSource::new(Arc::new(cfg)),
+            &d,
+            &every_ms(500),
+            0,
+        );
+        assert_eq!(out[0].2, Validity::Valid);
+        let TabPayload::Fds(fds) = &*out[0].1 else {
+            panic!("expected Fds");
+        };
+        let kind = |fd: i32| fds.rows.iter().find(|r| r.fd == fd).map(|r| r.kind);
+        assert_eq!(kind(tcp.as_raw_fd()), Some(FdKind::Tcp));
+        assert_eq!(kind(udp.as_raw_fd()), Some(FdKind::Udp));
+        assert_eq!(kind(unix.as_raw_fd()), Some(FdKind::Unix));
+    }
+
+    /// Another tab read first must not leave an empty user table behind for Security.
+    #[test]
+    fn security_names_after_other_tab() {
+        let (tmp, cfg) = edge_root();
+        fs::create_dir_all(tmp.path().join("etc")).expect("create etc");
+        fs::write(
+            tmp.path().join("etc/passwd"),
+            b"alice:x:1000:1000::/home/alice:/bin/sh\n",
+        )
+        .expect("write passwd");
+        let s = every_ms(500);
+        let (src, _, _) = step(
+            ProcessDetailSource::new(cfg),
+            &tabs(&[(a(), DetailTab::Threads)]),
+            &s,
+            0,
+        );
+        let (_src, out, _) = step(src, &tabs(&[(a(), DetailTab::Security)]), &s, 500);
+        let TabPayload::Security(sec) = &*out[0].1 else {
+            panic!("expected Security");
+        };
+        assert_eq!(&*sec.uid_names.value[0], "alice");
     }
 
     #[test]
