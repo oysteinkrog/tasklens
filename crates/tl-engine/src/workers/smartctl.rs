@@ -234,40 +234,60 @@ fn ata_attr(a: &Value) -> Option<SmartAttr> {
     })
 }
 
-/// The `nvme_smart_health_information_log` rows, with the E12-021 labels and order.
+/// The `nvme_smart_health_information_log` rows, with the PERF-051 labels and order.
 fn nvme_rows(log: &Value) -> Arc<[(Arc<str>, Arc<str>)]> {
     let get = |key: &str| log.get(key).and_then(Value::as_u64);
     let mut rows: Vec<(Arc<str>, Arc<str>)> = Vec::new();
     let mut row = |label: &str, text: String| rows.push((Arc::from(label), Arc::from(text)));
 
-    if let Some(bits) = get("critical_warning") {
-        row("Critical warning", critical_warning(bits));
+    let before: [NvmeField; 7] = [
+        ("percentage_used", "Percent used", percent),
+        ("available_spare", "Available spare", percent),
+        ("available_spare_threshold", "Spare threshold", percent),
+        ("data_units_read", "Total data read", data_units),
+        ("data_units_written", "Total data written", data_units),
+        ("warning_temp_time", "Warning temp time", minutes),
+        ("critical_comp_time", "Critical temp time", minutes),
+    ];
+    for (key, label, format) in before {
+        if let Some(n) = get(key) {
+            row(label, format(n));
+        }
     }
-    if let Some(c) = log.get("temperature").and_then(Value::as_i64) {
+    if let Some(n) = get("controller_busy_time") {
+        row("Controller busy time", minutes(n));
+    }
+    let celsius = |c: i64| {
         let mut text = String::new();
         units::celsius(&mut text, c as f32);
-        row("Temperature", text);
+        text
+    };
+    // smartctl reports the thresholds only when the drive's identify data carries them.
+    for (key, label) in [
+        ("warning_temp_threshold", "Warning temperature"),
+        ("critical_temp_threshold", "Critical temperature"),
+    ] {
+        if let Some(c) = log.get(key).and_then(Value::as_i64) {
+            row(label, celsius(c));
+        }
     }
-    let fields: [NvmeField; 13] = [
-        ("available_spare", "Available spare", percent),
-        (
-            "available_spare_threshold",
-            "Available spare threshold",
-            percent,
-        ),
-        ("percentage_used", "Percentage used", percent),
-        ("data_units_read", "Data read", data_units),
-        ("data_units_written", "Data written", data_units),
-        ("controller_busy_time", "Controller busy time", minutes),
-        ("power_cycles", "Power cycles", count),
-        ("power_on_hours", "Power-on hours", count),
+    if let Some(sensors) = log.get("temperature_sensors").and_then(Value::as_array) {
+        let sensors: Vec<String> = sensors
+            .iter()
+            .filter_map(Value::as_i64)
+            .map(celsius)
+            .collect();
+        if !sensors.is_empty() {
+            row("Temperature sensors", sensors.join(", "));
+        }
+    }
+    let after: [NvmeField; 4] = [
         ("unsafe_shutdowns", "Unsafe shutdowns", count),
-        ("media_errors", "Media and data integrity errors", count),
+        ("media_errors", "Media errors", count),
         ("num_err_log_entries", "Error log entries", count),
-        ("warning_temp_time", "Warning temperature time", minutes),
-        ("critical_comp_time", "Critical temperature time", minutes),
+        ("power_cycles", "Power cycles", count),
     ];
-    for (key, label, format) in fields {
+    for (key, label, format) in after {
         if let Some(n) = get(key) {
             row(label, format(n));
         }
@@ -277,29 +297,6 @@ fn nvme_rows(log: &Value) -> Arc<[(Arc<str>, Arc<str>)]> {
 
 /// smartctl JSON key, row label, value format.
 type NvmeField = (&'static str, &'static str, fn(u64) -> String);
-
-/// The NVMe critical warning bits, in UDisks2's words, as the E12-021 row shows them.
-fn critical_warning(bits: u64) -> String {
-    const NAMES: [&str; 6] = [
-        "spare",
-        "temperature",
-        "degraded",
-        "readonly",
-        "volatile_mem",
-        "pmr_readonly",
-    ];
-    let set: Vec<&str> = NAMES
-        .iter()
-        .enumerate()
-        .filter(|(bit, _)| bits & (1 << bit) != 0)
-        .map(|(_, name)| *name)
-        .collect();
-    if set.is_empty() {
-        "None".to_owned()
-    } else {
-        set.join(", ")
-    }
-}
 
 fn percent(n: u64) -> String {
     format!("{n} %")
@@ -354,6 +351,7 @@ pub(crate) const NVME_JSON: &str = r#"{
   "nvme_smart_health_information_log": {
     "critical_warning": 0,
     "temperature": 38,
+    "temperature_sensors": [38, 41],
     "available_spare": 100,
     "available_spare_threshold": 10,
     "percentage_used": 3,
@@ -468,31 +466,30 @@ mod tests {
         assert_eq!(data.power_on_s, valid(4_442_400));
         assert_eq!(data.selftest.validity, Validity::Unsupported);
         assert!(data.ata.is_empty());
-        assert_eq!(row(&data, "Data written"), Some("12.0 TB"));
-        assert_eq!(row(&data, "Data read"), Some("16.0 TB"));
-        assert_eq!(row(&data, "Percentage used"), Some("3 %"));
-        assert_eq!(row(&data, "Critical warning"), Some("None"));
-        assert_eq!(row(&data, "Power-on hours"), Some("1234"));
+        assert_eq!(row(&data, "Total data written"), Some("12.0 TB"));
+        assert_eq!(row(&data, "Total data read"), Some("16.0 TB"));
+        assert_eq!(row(&data, "Percent used"), Some("3 %"));
+        assert_eq!(row(&data, "Temperature sensors"), Some("38 °C, 41 °C"));
+        assert_eq!(row(&data, "Critical warning"), None);
+        assert_eq!(row(&data, "Power-on hours"), None);
         assert_eq!(row(&data, "Controller busy time"), Some("820 min"));
         let labels: Vec<&str> = data.nvme.iter().map(|(l, _)| &**l).collect();
         assert_eq!(
             labels,
             [
-                "Critical warning",
-                "Temperature",
+                "Percent used",
                 "Available spare",
-                "Available spare threshold",
-                "Percentage used",
-                "Data read",
-                "Data written",
+                "Spare threshold",
+                "Total data read",
+                "Total data written",
+                "Warning temp time",
+                "Critical temp time",
                 "Controller busy time",
-                "Power cycles",
-                "Power-on hours",
+                "Temperature sensors",
                 "Unsafe shutdowns",
-                "Media and data integrity errors",
+                "Media errors",
                 "Error log entries",
-                "Warning temperature time",
-                "Critical temperature time",
+                "Power cycles",
             ]
         );
     }
@@ -532,7 +529,6 @@ mod tests {
         assert_eq!(data.health.validity, Validity::Unsupported);
         assert_eq!(data.power_on_s.validity, Validity::Unsupported);
         assert!(data.ata.is_empty() && data.nvme.is_empty());
-        assert_eq!(critical_warning(0b101), "spare, degraded");
     }
 
     /// A directory under `target/tmp`, removed on drop.

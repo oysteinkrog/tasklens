@@ -942,8 +942,8 @@ fn ata_attr(a: &AtaAttrRaw) -> SmartAttr {
     }
 }
 
-/// `SmartData` for an NVMe controller. `map` is the `SmartGetAttributes` dictionary; it may also
-/// carry the controller's `SmartTemperature` property for the temperature row.
+/// `SmartData` for an NVMe controller. `map` is the `SmartGetAttributes` dictionary. The rows follow
+/// PERF-051; the header shows health and Powered on, so those have no row.
 pub fn smart_from_nvme(
     map: &BTreeMap<String, OwnedValue>,
     props: &NvmeSmartProps,
@@ -954,48 +954,58 @@ pub fn smart_from_nvme(
     let mut row = |label: &str, text: String| rows.push((Arc::from(label), Arc::from(text)));
 
     let warning = props.critical_warning.join(", ");
-    let warning_text = if warning.is_empty() {
-        "None".to_owned()
-    } else {
-        warning.clone()
-    };
-    row("Critical warning", warning_text);
-    let kelvin = map
-        .get("temp_sensors")
-        .and_then(|v| match unwrap_variant(v) {
-            Value::Array(a) => a.iter().next().and_then(uint),
-            _ => None,
-        })
-        .or_else(|| get("SmartTemperature"))
-        .filter(|k| *k > 0);
-    if let Some(k) = kelvin {
+    let celsius = |k: u64| {
         let mut text = String::new();
         units::celsius(&mut text, (k as f64 - KELVIN_ZERO) as f32);
-        row("Temperature", text);
-    }
-    let fields: [NvmeField; 13] = [
+        text
+    };
+    // PERF-051 order. A row appears only when its key exists.
+    let before: [NvmeField; 7] = [
+        ("percent_used", "Percent used", percent),
         ("avail_spare", "Available spare", percent),
-        ("spare_thresh", "Available spare threshold", percent),
-        ("percent_used", "Percentage used", percent),
-        ("total_data_read", "Data read", units::bytes_si_1dp),
-        ("total_data_written", "Data written", units::bytes_si_1dp),
-        ("ctrl_busy_time", "Controller busy time", minutes),
-        ("power_cycles", "Power cycles", count),
-        ("", "Power-on hours", count),
-        ("unsafe_shutdowns", "Unsafe shutdowns", count),
-        ("media_errors", "Media and data integrity errors", count),
-        ("num_err_log_entries", "Error log entries", count),
-        ("warning_temp_time", "Warning temperature time", minutes),
-        ("critical_temp_time", "Critical temperature time", minutes),
+        ("spare_thresh", "Spare threshold", percent),
+        ("total_data_read", "Total data read", units::bytes_si_1dp),
+        (
+            "total_data_written",
+            "Total data written",
+            units::bytes_si_1dp,
+        ),
+        ("warning_temp_time", "Warning temp time", minutes),
+        ("critical_temp_time", "Critical temp time", minutes),
     ];
-    for (key, label, format) in fields {
-        // Power-on hours is a property, not a map key.
-        let n = if key.is_empty() {
-            Some(props.power_on_hours)
-        } else {
-            get(key)
-        };
-        if let Some(n) = n {
+    for (key, label, format) in before {
+        if let Some(n) = get(key) {
+            row(label, format(n));
+        }
+    }
+    if let Some(n) = get("ctrl_busy_time") {
+        row("Controller busy time", minutes(n));
+    }
+    if let Some(k) = get("wctemp").filter(|k| *k > 0) {
+        row("Warning temperature", celsius(k));
+    }
+    if let Some(k) = get("cctemp").filter(|k| *k > 0) {
+        row("Critical temperature", celsius(k));
+    }
+    if let Some(Value::Array(a)) = map.get("temp_sensors").map(|v| unwrap_variant(v)) {
+        let sensors: Vec<String> = a
+            .iter()
+            .filter_map(uint)
+            .filter(|k| *k > 0)
+            .map(celsius)
+            .collect();
+        if !sensors.is_empty() {
+            row("Temperature sensors", sensors.join(", "));
+        }
+    }
+    let after: [NvmeField; 4] = [
+        ("unsafe_shutdowns", "Unsafe shutdowns", count),
+        ("media_errors", "Media errors", count),
+        ("num_err_log_entries", "Error log entries", count),
+        ("power_cycles", "Power cycles", count),
+    ];
+    for (key, label, format) in after {
+        if let Some(n) = get(key) {
             row(label, format(n));
         }
     }
@@ -1015,7 +1025,7 @@ pub fn smart_from_nvme(
     }
 }
 
-/// Map key (empty for the `SmartPowerOnHours` property), row label, value format.
+/// Map key, row label, value format.
 type NvmeField = (&'static str, &'static str, fn(u64) -> String);
 
 fn percent(n: u64) -> String {
@@ -2304,11 +2314,9 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("Critical warning", "None"),
+                ("Percent used", "3 %"),
                 ("Available spare", "100 %"),
-                ("Percentage used", "3 %"),
-                ("Data written", "12.0 TB"),
-                ("Power-on hours", "10"),
+                ("Total data written", "12.0 TB"),
             ]
         );
         assert!(data.ata.is_empty());
@@ -2316,16 +2324,59 @@ mod tests {
         assert_eq!(data.power_on_s, valid(36_000));
         assert_eq!(data.selftest.validity, Validity::Unsupported);
 
-        // Temperature from the property when the map has no sensors.
+        // Every key present: all 15 rows, in PERF-051 order.
         let mut map = map;
-        map.insert("SmartTemperature".into(), OwnedValue::from(308u16));
+        for (key, v) in [
+            ("spare_thresh", Value::U8(10)),
+            ("total_data_read", Value::U64(16_000_000_000_000)),
+            ("warning_temp_time", Value::U32(1)),
+            ("critical_temp_time", Value::U32(2)),
+            ("ctrl_busy_time", Value::U64(820)),
+            ("wctemp", Value::U16(358)),
+            ("cctemp", Value::U16(363)),
+            ("unsafe_shutdowns", Value::U64(17)),
+            ("media_errors", Value::U64(0)),
+            ("num_err_log_entries", Value::U64(4)),
+            ("power_cycles", Value::U64(412)),
+        ] {
+            map.insert(key.into(), OwnedValue::try_from(v).expect("value"));
+        }
+        map.insert(
+            "temp_sensors".into(),
+            OwnedValue::try_from(Value::new(vec![311u16, 314u16])).expect("array"),
+        );
         p.critical_warning = vec!["spare".into(), "temperature".into()];
         let data = smart_from_nvme(&map, &p, 1_800_000_000);
+        let labels: Vec<&str> = data.nvme.iter().map(|(k, _)| &**k).collect();
         assert_eq!(
-            (&*data.nvme[1].0, &*data.nvme[1].1),
-            ("Temperature", "35 °C")
+            labels,
+            [
+                "Percent used",
+                "Available spare",
+                "Spare threshold",
+                "Total data read",
+                "Total data written",
+                "Warning temp time",
+                "Critical temp time",
+                "Controller busy time",
+                "Warning temperature",
+                "Critical temperature",
+                "Temperature sensors",
+                "Unsafe shutdowns",
+                "Media errors",
+                "Error log entries",
+                "Power cycles",
+            ]
         );
-        assert_eq!(&*data.nvme[0].1, "spare, temperature");
+        let text = |label: &str| {
+            data.nvme
+                .iter()
+                .find(|(k, _)| &**k == label)
+                .map(|(_, v)| &**v)
+        };
+        assert_eq!(text("Warning temperature"), Some("85 °C"));
+        assert_eq!(text("Critical temperature"), Some("90 °C"));
+        assert_eq!(text("Temperature sensors"), Some("38 °C, 41 °C"));
         assert_eq!(data.health, valid(Arc::from("Warning: spare, temperature")));
     }
 
