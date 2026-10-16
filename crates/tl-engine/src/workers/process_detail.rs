@@ -444,16 +444,15 @@ impl ProcessDetailSource {
         if tab == DetailTab::Threads {
             self.online_cpus = read_online_cpus(&self.cfg.sys_root, self.online_cpus);
         }
-        if tab == DetailTab::Security {
-            if read_file(
+        if tab == DetailTab::Security
+            && read_file(
                 &root_base(&self.cfg.sys_root).join("etc/group"),
                 &mut self.group_file,
                 GROUP_FILE_MAX,
             )
             .is_err()
-            {
-                self.group_file.clear();
-            }
+        {
+            self.group_file.clear();
         }
         let root = &self.cfg.sys_root;
         let bufs = &mut self.bufs;
