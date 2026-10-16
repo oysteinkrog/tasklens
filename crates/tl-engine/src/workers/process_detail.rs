@@ -1930,10 +1930,10 @@ mod tests {
         for tab in [DetailTab::Fds, DetailTab::Environment] {
             opened(&mut src, tab);
         }
-        let (src, opened, _) = step(src, &d, &s, 500);
-        assert_eq!(opened.len(), 2);
-        assert!(Arc::ptr_eq(&first[0].1, &opened[0].1));
-        assert!(Arc::ptr_eq(&first[1].1, &opened[1].1));
+        let (src, resent, _) = step(src, &d, &s, 500);
+        assert_eq!(resent.len(), 2);
+        assert!(Arc::ptr_eq(&first[0].1, &resent[0].1));
+        assert!(Arc::ptr_eq(&first[1].1, &resent[1].1));
         fs::write(tmp.path().join("proc/4201/environ"), b"NEW=1\0").expect("rewrite environ");
         let (mut src, same, _) = step(src, &d, &s, 1000);
         assert!(
