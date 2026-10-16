@@ -2,10 +2,13 @@
 //!
 //! `state_dir`, `history_dir` and `app_paths` hold user paths. Never log them above `debug`.
 
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
+use tl_collect::pkg::{PackageIndex, Pacman, PkgBackend};
 
 /// Which worker set the engine runs. Fixed at start (ADR-004).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -15,6 +18,42 @@ pub enum EngineMode {
     /// The `Processes` worker with the stripped sweep, and the `KWin` worker for
     /// `KWinCommand::KeepAbove` only (R-152 OI-9).
     LowMemory,
+}
+
+/// Makes a package owner backend, once per session.
+pub type PkgBackendFn = Arc<dyn Fn() -> Box<dyn PkgBackend> + Send + Sync>;
+
+/// The package owner backend of the shared package index (R-163 item 1).
+#[derive(Clone, Default)]
+pub enum PkgSource {
+    /// `pacman -Qo` and the pacman local database.
+    #[default]
+    Pacman,
+    /// No backend: the package fields are `Unsupported`.
+    Disabled,
+    /// A backend from tests.
+    Custom(PkgBackendFn),
+}
+
+impl PkgSource {
+    /// A new index over this backend, or `None` for `Disabled`.
+    pub fn index(&self) -> Option<PackageIndex> {
+        match self {
+            PkgSource::Pacman => Some(PackageIndex::new(Box::new(Pacman::default()))),
+            PkgSource::Disabled => None,
+            PkgSource::Custom(make) => Some(PackageIndex::new(make())),
+        }
+    }
+}
+
+impl fmt::Debug for PkgSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PkgSource::Pacman => "Pacman",
+            PkgSource::Disabled => "Disabled",
+            PkgSource::Custom(_) => "Custom",
+        })
+    }
 }
 
 /// Start settings for the engine. There is no `Default`: the state directory is mandatory.
@@ -33,6 +72,9 @@ pub struct EngineConfig {
     /// `Processes` worker reads them from the environment, with the icon cache at
     /// `$XDG_CACHE_HOME/tasklens/icons.toml`. Tests set it so they never write the real cache.
     pub app_paths: Option<AppPaths>,
+    /// The backend of the package index the `Processes` and `ProcessDetail` workers share.
+    /// Production uses pacman; tests inject a fake.
+    pub pkg_backend: PkgSource,
 }
 
 impl EngineConfig {
@@ -45,6 +87,7 @@ impl EngineConfig {
             history_dir: None,
             helper_path: None,
             app_paths: None,
+            pkg_backend: PkgSource::Pacman,
         }
     }
 
@@ -65,6 +108,11 @@ impl EngineConfig {
 
     pub fn with_app_paths(mut self, paths: AppPaths) -> Self {
         self.app_paths = Some(paths);
+        self
+    }
+
+    pub fn with_pkg_backend(mut self, backend: PkgSource) -> Self {
+        self.pkg_backend = backend;
         self
     }
 }
@@ -99,6 +147,10 @@ mod tests {
         assert_eq!(config.history_dir, None);
         assert_eq!(config.helper_path, None);
         assert!(config.app_paths.is_none());
+        assert!(matches!(config.pkg_backend, PkgSource::Pacman));
+        assert!(config.pkg_backend.index().is_some());
+        let off = config.clone().with_pkg_backend(PkgSource::Disabled);
+        assert!(off.pkg_backend.index().is_none());
 
         let config = config
             .with_history_dir("/s/h".into())

@@ -1,17 +1,17 @@
 //! Package owner index (R-163 item 1): which package owns an executable, for the PROC-027
 //! package columns, the PROC-078 integrity check and SYS-020's Publisher.
 //!
-//! The sweep only calls [`PackageIndex::get`] and [`PackageIndex::request`], which never block.
-//! The engine runs [`PackageIndex::run_batch`] in its own blocking job when
-//! [`PackageIndex::due`] is true. pacman output and `desc` files are untrusted text: reads are
+//! The sweep only calls [`PackageIndex::get`] and [`PackageIndex::request`], which never wait
+//! for pacman. The engine runs [`PackageIndex::run_batch`] in its own blocking job when
+//! [`PackageIndex::due`] is true. One index is shared by clones of its handle. pacman output and `desc` files are untrusted text: reads are
 //! bounded, values are sanitized and no shell is used.
 
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
@@ -392,49 +392,75 @@ struct CacheEntry {
     info: Option<Arc<PackageInfo>>,
 }
 
-/// Cache of exe path to owning package, filled in debounced batches.
-pub struct PackageIndex {
+/// The lookup side of the index. Its lock is held only for a lookup, a request and the taking
+/// and filling of a batch.
+#[derive(Default)]
+struct Lookups {
     cache: FxHashMap<Arc<str>, CacheEntry>,
-    /// Package metadata by name, shared by every path the package owns.
-    infos: FxHashMap<Arc<str>, Arc<PackageInfo>>,
-    /// Requested paths with their mtime, waiting for the next batch.
+    /// Requested paths with their mtime, waiting for the next batch. A path stays here while its
+    /// batch runs, so a lookup in that time does not queue it a second time.
     pending: FxHashMap<Arc<str>, i64>,
     last_new: Option<Instant>,
-    stamp: Option<i64>,
+}
+
+/// The batch side of the index. Its lock is held while pacman runs; lookups never take it.
+struct Owners {
     backend: Box<dyn PkgBackend>,
+    /// Package metadata by name, shared by every path the package owns.
+    infos: FxHashMap<Arc<str>, Arc<PackageInfo>>,
+    stamp: Option<i64>,
+}
+
+/// Cache of exe path to owning package, filled in debounced batches.
+///
+/// A clone is a handle to the same index, so the sweep and the detail worker share one cache
+/// (R-163 item 1). [`PackageIndex::run_batch`] holds the lookup lock only to take the batch and
+/// to store its result, never while the backend runs.
+#[derive(Clone)]
+pub struct PackageIndex {
+    lookups: Arc<Mutex<Lookups>>,
+    owners: Arc<Mutex<Owners>>,
+}
+
+/// A poisoned lock still holds a usable cache: every write leaves it consistent.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl PackageIndex {
     pub fn new(backend: Box<dyn PkgBackend>) -> Self {
         Self {
-            cache: FxHashMap::default(),
-            infos: FxHashMap::default(),
-            pending: FxHashMap::default(),
-            last_new: None,
-            stamp: None,
-            backend,
+            lookups: Arc::new(Mutex::new(Lookups::default())),
+            owners: Arc::new(Mutex::new(Owners {
+                backend,
+                infos: FxHashMap::default(),
+                stamp: None,
+            })),
         }
     }
 
-    /// Cache lookup; never blocks. `None` = not looked up yet (the cell shows `…`),
-    /// `Some(None)` = not packaged.
+    /// True when `other` is a handle to the same index.
+    pub fn same_index(&self, other: &PackageIndex) -> bool {
+        Arc::ptr_eq(&self.lookups, &other.lookups)
+    }
+
+    /// Cache lookup; never blocks on the backend. `None` = not looked up yet (the cell shows
+    /// `…`), `Some(None)` = not packaged.
     pub fn get(&self, path: &str, mtime_s: i64) -> Option<Option<Arc<PackageInfo>>> {
-        self.cache
-            .get(path)
-            .filter(|e| e.mtime_s == mtime_s)
-            .map(|e| e.info.clone())
+        lock(&self.lookups).get(path, mtime_s)
     }
 
     /// Queues a path that `get` did not know.
-    pub fn request(&mut self, path: &str, mtime_s: i64, now: Instant) {
-        if self.get(path, mtime_s).is_some() {
+    pub fn request(&self, path: &str, mtime_s: i64, now: Instant) {
+        let mut l = lock(&self.lookups);
+        if l.get(path, mtime_s).is_some() {
             return;
         }
-        match self.pending.get_mut(path) {
+        match l.pending.get_mut(path) {
             Some(m) => *m = mtime_s,
             None => {
-                self.pending.insert(Arc::from(path), mtime_s);
-                self.last_new = Some(now);
+                l.pending.insert(Arc::from(path), mtime_s);
+                l.last_new = Some(now);
             }
         }
     }
@@ -442,58 +468,93 @@ impl PackageIndex {
     /// True when a batch is due: pending paths exist and PKG_DEBOUNCE passed since the last new
     /// one.
     pub fn due(&self, now: Instant) -> bool {
-        !self.pending.is_empty()
-            && self
-                .last_new
+        let l = lock(&self.lookups);
+        !l.pending.is_empty()
+            && l.last_new
                 .is_none_or(|t| now.saturating_duration_since(t) >= PKG_DEBOUNCE)
     }
 
     /// Blocking: runs one batch of at most PKG_BATCH_MAX paths through the backend and fills the
     /// cache. Checks `db_stamp` first and clears the cache when it changed. Returns the number of
     /// paths looked up. On a backend error the batch is dropped; the sweep requests those paths
-    /// again.
-    pub fn run_batch(&mut self) -> Result<usize, CollectError> {
-        let stamp = self.backend.db_stamp();
-        if stamp != self.stamp {
-            self.cache.clear();
-            self.infos.clear();
-            self.stamp = stamp;
+    /// again. Batches run one at a time; lookups go on while one runs.
+    pub fn run_batch(&self) -> Result<usize, CollectError> {
+        let mut owners = lock(&self.owners);
+        let stamp = owners.backend.db_stamp();
+        let changed = stamp != owners.stamp;
+        if changed {
+            owners.infos.clear();
+            owners.stamp = stamp;
         }
-        let batch: Vec<(Arc<str>, i64)> = self
-            .pending
-            .iter()
-            .take(PKG_BATCH_MAX)
-            .map(|(p, m)| (p.clone(), *m))
-            .collect();
-        for (path, _) in &batch {
-            self.pending.remove(path);
-        }
+        let batch: Vec<(Arc<str>, i64)> = {
+            let mut l = lock(&self.lookups);
+            if changed {
+                l.cache.clear();
+            }
+            l.pending
+                .iter()
+                .take(PKG_BATCH_MAX)
+                .map(|(p, m)| (p.clone(), *m))
+                .collect()
+        };
         if batch.is_empty() {
             return Ok(0);
         }
         let mtimes: FxHashMap<&[u8], i64> = batch.iter().map(|(p, m)| (p.as_bytes(), *m)).collect();
         let paths: Vec<&Path> = batch.iter().map(|(p, _)| Path::new(&**p)).collect();
-        let owners = self.backend.owners(&paths)?;
-        let mut filled = 0;
-        for (path, owner) in owners {
+        let found = match owners.backend.owners(&paths) {
+            Ok(found) => found,
+            Err(e) => {
+                let mut l = lock(&self.lookups);
+                for (path, mtime_s) in &batch {
+                    if l.pending.get(path) == Some(mtime_s) {
+                        l.pending.remove(path);
+                    }
+                }
+                return Err(e);
+            }
+        };
+        let mut entries = Vec::with_capacity(found.len());
+        for (path, owner) in found {
             let Some(path) = path.to_str() else { continue };
             let Some(&mtime_s) = mtimes.get(path.as_bytes()) else {
                 continue;
             };
-            let info = owner.map(|name| self.info_for(name));
-            self.cache
-                .insert(Arc::from(path), CacheEntry { mtime_s, info });
-            filled += 1;
+            let info = owner.map(|name| owners.info_for(name));
+            entries.push((Arc::<str>::from(path), CacheEntry { mtime_s, info }));
         }
+        let filled = entries.len();
+        let mut l = lock(&self.lookups);
+        for (path, mtime_s) in &batch {
+            // A path requested again with a new mtime while the batch ran stays queued.
+            if l.pending.get(path) == Some(mtime_s) {
+                l.pending.remove(path);
+            }
+        }
+        for (path, entry) in entries {
+            l.cache.insert(path, entry);
+        }
+        drop(l);
         tracing::debug!(paths = batch.len(), filled, "pkg: owner batch done");
         Ok(filled)
     }
 
-    /// Blocking: PROC-078 check for one package.
-    pub fn verify(&mut self, name: &str) -> Result<VerifyOutcome, CollectError> {
-        self.backend.verify(name)
+    /// Blocking: PROC-078 check for one package. Waits for a running batch.
+    pub fn verify(&self, name: &str) -> Result<VerifyOutcome, CollectError> {
+        lock(&self.owners).backend.verify(name)
     }
+}
 
+impl Lookups {
+    fn get(&self, path: &str, mtime_s: i64) -> Option<Option<Arc<PackageInfo>>> {
+        self.cache
+            .get(path)
+            .filter(|e| e.mtime_s == mtime_s)
+            .map(|e| e.info.clone())
+    }
+}
+
+impl Owners {
     /// Metadata of `name`, read once per database stamp. A package whose `desc` cannot be read
     /// still counts as packaged, with its name only.
     fn info_for(&mut self, name: Arc<str>) -> Arc<PackageInfo> {
@@ -524,7 +585,6 @@ impl PackageIndex {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicI64;
 
     /// Fake backend: owns the paths in `owned`, records every owners call.
@@ -580,7 +640,7 @@ mod tests {
 
     #[test]
     fn lookup_after_batch() {
-        let mut index = PackageIndex::new(Box::new(firefox_fake()));
+        let index = PackageIndex::new(Box::new(firefox_fake()));
         let t0 = Instant::now();
         assert_eq!(index.get("/usr/bin/firefox", 100), None);
         index.request("/usr/bin/firefox", 100, t0);
@@ -597,7 +657,7 @@ mod tests {
 
     #[test]
     fn debounce_2s() {
-        let mut index = PackageIndex::new(Box::new(firefox_fake()));
+        let index = PackageIndex::new(Box::new(firefox_fake()));
         let t0 = Instant::now();
         assert!(!index.due(t0));
         index.request("/usr/bin/firefox", 100, t0);
@@ -616,23 +676,23 @@ mod tests {
     fn batch_cap_256() {
         let fake = firefox_fake();
         let seen = fake.seen.clone();
-        let mut index = PackageIndex::new(Box::new(fake));
+        let index = PackageIndex::new(Box::new(fake));
         let t0 = Instant::now();
         for i in 0..300 {
             index.request(&format!("/usr/bin/p{i}"), 1, t0);
         }
         assert_eq!(index.run_batch().unwrap(), PKG_BATCH_MAX);
         assert!(seen.lock().unwrap().iter().all(|&n| n <= PKG_BATCH_MAX));
-        assert_eq!(index.pending.len(), 44);
+        assert_eq!(lock(&index.lookups).pending.len(), 44);
         assert_eq!(index.run_batch().unwrap(), 44);
-        assert!(index.pending.is_empty());
+        assert!(lock(&index.lookups).pending.is_empty());
     }
 
     #[test]
     fn db_stamp_clears_cache() {
         let fake = firefox_fake();
         let stamp = fake.stamp.clone();
-        let mut index = PackageIndex::new(Box::new(fake));
+        let index = PackageIndex::new(Box::new(fake));
         let t0 = Instant::now();
         index.request("/usr/bin/firefox", 100, t0);
         index.run_batch().unwrap();
@@ -643,7 +703,101 @@ mod tests {
         stamp.store(7, Ordering::Relaxed);
         index.run_batch().unwrap();
         assert_eq!(index.get("/usr/bin/firefox", 100), None);
-        assert!(index.infos.is_empty());
+        assert!(lock(&index.owners).infos.is_empty());
+    }
+
+    /// Clones share one cache, so a batch run through one handle fills the other.
+    #[test]
+    fn clones_share_the_cache() {
+        let index = PackageIndex::new(Box::new(firefox_fake()));
+        let other = index.clone();
+        assert!(index.same_index(&other));
+        assert!(!index.same_index(&PackageIndex::new(Box::new(firefox_fake()))));
+        other.request("/usr/bin/firefox", 100, Instant::now());
+        assert_eq!(index.run_batch().unwrap(), 1);
+        assert!(other.get("/usr/bin/firefox", 100).unwrap().is_some());
+    }
+
+    /// Backend that runs `during` on another thread from inside `owners`, as the detail worker
+    /// does lookups while a batch runs. A lookup lock held across the backend call would make
+    /// `during` wait; `ok` is set when it finished in time and returned true.
+    struct DuringBatch {
+        index: Arc<Mutex<Option<PackageIndex>>>,
+        during: fn(&PackageIndex) -> bool,
+        ok: Arc<AtomicBool>,
+    }
+
+    impl PkgBackend for DuringBatch {
+        fn owners(&mut self, paths: &[&Path]) -> Result<PathOwners, CollectError> {
+            let index = self.index.lock().unwrap().clone().expect("index set");
+            let during = self.during;
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(during(&index));
+            });
+            let got = rx.recv_timeout(Duration::from_secs(5));
+            self.ok.store(got == Ok(true), Ordering::Relaxed);
+            Ok(paths.iter().map(|p| (p.to_path_buf(), None)).collect())
+        }
+
+        fn info(&mut self, _name: &str) -> Result<Option<PackageInfo>, CollectError> {
+            Ok(None)
+        }
+
+        fn verify(&mut self, _name: &str) -> Result<VerifyOutcome, CollectError> {
+            Ok(VerifyOutcome::Unmodified)
+        }
+
+        fn db_stamp(&mut self) -> Option<i64> {
+            Some(1)
+        }
+    }
+
+    /// An index whose backend runs `during` in the middle of each batch.
+    fn index_with(during: fn(&PackageIndex) -> bool) -> (PackageIndex, Arc<AtomicBool>) {
+        let slot = Arc::new(Mutex::new(None));
+        let ok = Arc::new(AtomicBool::new(false));
+        let index = PackageIndex::new(Box::new(DuringBatch {
+            index: slot.clone(),
+            during,
+            ok: ok.clone(),
+        }));
+        *slot.lock().unwrap() = Some(index.clone());
+        (index, ok)
+    }
+
+    #[test]
+    fn lookups_run_while_the_backend_runs() {
+        let (index, ok) = index_with(|i| {
+            let miss = i.get("/usr/bin/firefox", 100).is_none();
+            i.request("/usr/bin/other", 1, Instant::now());
+            miss
+        });
+        index.request("/usr/bin/firefox", 100, Instant::now());
+        assert_eq!(index.run_batch().unwrap(), 1);
+        assert!(ok.load(Ordering::Relaxed), "lookup waited for the batch");
+        assert_eq!(index.get("/usr/bin/firefox", 100), Some(None));
+        // The path requested during the batch waits for the next one.
+        let l = lock(&index.lookups);
+        assert_eq!(l.pending.len(), 1);
+        assert!(l.pending.contains_key("/usr/bin/other"));
+    }
+
+    /// A path requested again with a new mtime while its batch ran stays queued.
+    #[test]
+    fn new_mtime_during_batch_stays_queued() {
+        let (index, ok) = index_with(|i| {
+            i.request("/usr/bin/firefox", 101, Instant::now());
+            true
+        });
+        index.request("/usr/bin/firefox", 100, Instant::now());
+        assert_eq!(index.run_batch().unwrap(), 1);
+        assert!(ok.load(Ordering::Relaxed));
+        assert_eq!(index.get("/usr/bin/firefox", 100), Some(None));
+        assert_eq!(
+            lock(&index.lookups).pending.get("/usr/bin/firefox"),
+            Some(&101)
+        );
     }
 
     #[test]

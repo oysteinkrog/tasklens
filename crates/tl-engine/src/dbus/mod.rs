@@ -264,6 +264,9 @@ pub struct SharedHandles {
     pub systemd_user: ManagerConnSlot,
     /// The session's helper queue (E29-020). `None` when the session runs no helper task.
     pub helper: Option<crate::helper::HelperHandle>,
+    /// The package owner index (R-163 item 1): the `Processes` worker runs its batches and the
+    /// `ProcessDetail` worker reads it. `None` when no backend is set up.
+    pub pkg: Option<tl_collect::pkg::PackageIndex>,
 }
 
 #[cfg(test)]

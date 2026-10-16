@@ -198,6 +198,10 @@ async fn run_session(
     };
     let shared = SharedHandles {
         helper,
+        // The low-memory engine has no detail panels and no P2 reads (R-152).
+        pkg: (ep.config.mode == EngineMode::Full)
+            .then(|| ep.config.pkg_backend.index())
+            .flatten(),
         ..SharedHandles::default()
     };
     reducer.action_gate = ep.hooks.action_gate.as_ref().map(|make| {

@@ -38,6 +38,11 @@
 //! file reads nothing. The package check stays `NotVerified` until `VerifyPackage` has a handler
 //! (tasklens-dwy.15).
 //!
+//! Package (PROC-078, R-163 item 1): a General read looks the executable's path and mtime up in
+//! the session's shared package index. A path the index does not know yet is queued for the
+//! `Processes` worker's next batch and shows `WarmingUp`; a later read sends the name. A deleted
+//! executable is not looked up. Without an index the field is `Unsupported`.
+//!
 //! Affinity (UI-PWN-021): while `affinity_targets` is not empty, every `AFFINITY_PERIOD` worth
 //! of samples sends `DetailsUpdate::Affinity` with the `Cpus_allowed_list` mask and the cgroup's
 //! `cpuset.cpus.effective` of every target. A gone process is left out; an unread cpuset gives an
@@ -52,13 +57,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::supervision::ManagedGeneration;
 use rustc_hash::FxHashMap;
 use rustix::fd::{AsFd, BorrowedFd};
-use rustix::fs::{Dir, Mode, OFlags};
+use rustix::fs::{AtFlags, Dir, Mode, OFlags, StatxFlags};
 use smallvec::SmallVec;
 use tl_collect::apps::AppPaths;
 use tl_collect::apps::cgroup_app::parse_app_unit;
@@ -66,6 +71,7 @@ use tl_collect::apps::classify::{ClassifyInput, MatchInput, ProcClass, classify,
 use tl_collect::apps::desktop::{DesktopIndex, DesktopWatch, data_dirs_from_env};
 use tl_collect::hash::{self, HashCache, hash_process_exe};
 use tl_collect::parse::topology::parse_cpu_list;
+use tl_collect::pkg::PackageIndex;
 use tl_collect::proc::cgroup::{
     UserPlacement, app_slice_unit, parse_cgroup_file, placement, unescape_unit,
 };
@@ -91,8 +97,8 @@ use tl_model::demand::{AFFINITY_TARGETS_MAX, DETAILS_MAX, Demand, DetailDemand};
 use tl_model::details::{
     AffinityInfo, CapRow, DetailTab, DetailTarget, Elevated, ElfArch, EnvDetail, ExeLocation,
     FdDetail, FdKind, FdRow, GeneralDetail, GroupMembershipRow, HashError, HashState, IdTriple,
-    MapNode, MapRegion, MapsDetail, NsKind, NsRow, NsState, PackageCheck, Relro, Seccomp,
-    SecurityDetail, TabPayload, ThreadRow,
+    MapNode, MapRegion, MapsDetail, NsKind, NsRow, NsState, PackageCheck, PackageInfo, Relro,
+    Seccomp, SecurityDetail, TabPayload, ThreadRow,
 };
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, ProcessKey};
@@ -278,8 +284,8 @@ impl TabRead {
 }
 
 /// The General tab values of one process, compared to detect a change. User names are looked
-/// up when the payload is built. Package and GPU fields are not read here, and `hashes` is the
-/// target's last `ComputeHashes` result.
+/// up when the payload is built. GPU fields are not read here, `package` is set from the package
+/// index after the read, and `hashes` is the target's last `ComputeHashes` result.
 #[derive(Clone, PartialEq)]
 struct GeneralRead {
     started_s: Total<i64>,
@@ -303,7 +309,11 @@ struct GeneralRead {
     /// The sanitized link text, with the kernel's " (deleted)" suffix kept.
     exe: Total<Arc<str>>,
     exe_deleted: bool,
+    /// `statx` mtime of the file `exe` points to, the package index key with the path.
+    exe_mtime_s: Option<i64>,
     location: Total<ExeLocation>,
+    /// `Valid(None)` is "Not packaged", `WarmingUp` while the index has not looked the path up.
+    package: Total<Option<PackageInfo>>,
     cwd: Total<Arc<str>>,
     root: Total<Arc<str>>,
     cgroup: Total<Option<Arc<str>>>,
@@ -429,6 +439,8 @@ pub struct ProcessDetailSource {
     /// Reader calls per tab and `smaps` reads, for tests.
     tab_reads: [u32; 9],
     smaps_reads: u32,
+    /// The session's shared package index. `None` when no backend is set up.
+    pkg: Option<PackageIndex>,
 }
 
 /// Only in full mode: the low-memory build has no detail panels (ADR-004).
@@ -446,7 +458,8 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
         let io = io.clone();
         let cfg = cfg.clone();
-        async move { source::run(cx, io, ProcessDetailSource::new(cfg)).await }
+        let src = ProcessDetailSource::new(cfg).with_package_index(io.shared.pkg.clone());
+        async move { source::run(cx, io, src).await }
     })
 }
 
@@ -486,7 +499,14 @@ impl ProcessDetailSource {
             thread_clock: None,
             tab_reads: [0; 9],
             smaps_reads: 0,
+            pkg: None,
         }
+    }
+
+    /// General reads look packages up in `index`, the session's shared index.
+    pub fn with_package_index(mut self, index: Option<PackageIndex>) -> Self {
+        self.pkg = index;
+        self
     }
 
     /// Commands waiting for the next sample.
@@ -726,6 +746,7 @@ impl ProcessDetailSource {
         }
         let root = &self.cfg.sys_root;
         let bufs = &mut self.bufs;
+        let pkg = self.pkg.as_ref();
         let state = self.targets.get_mut().entry(key).or_default();
         let read = match tab {
             DetailTab::General => read_general(
@@ -739,6 +760,7 @@ impl ProcessDetailSource {
             )
             .map(|mut read| {
                 read.hashes = state.hashes.clone();
+                read.package = package_of(pkg, &read, Instant::now());
                 TabRead::General(Box::new(read))
             }),
             DetailTab::Threads => {
@@ -1942,6 +1964,11 @@ fn read_general(
     };
     let no_new_privs = from_status(no_new_privs, status_err);
 
+    // The mtime of the file the process runs, also when it was deleted.
+    let exe_mtime_s = rustix::fs::statx(dir, "exe", AtFlags::empty(), StatxFlags::MTIME)
+        .ok()
+        .map(|st| st.stx_mtime.tv_sec);
+
     // Executable path and its Location category.
     bufs.small.clear();
     bufs.small.resize(EXE_LINK_MAX + 1, 0);
@@ -2090,7 +2117,10 @@ fn read_general(
         architecture,
         exe,
         exe_deleted,
+        exe_mtime_s,
         location,
+        // `read_tab` sets it from the package index.
+        package: total(None, Validity::Unsupported),
         cwd,
         root: root_dir,
         cgroup,
@@ -2105,6 +2135,40 @@ fn read_general(
         // `read_tab` sets the target's hashes.
         hashes: HashState::Pending,
     })
+}
+
+/// The General package of `read` from `index` (PROC-078). A path the index has not looked up
+/// is queued and gives `WarmingUp`. No index gives `Unsupported`; so does a deleted executable,
+/// whose path may now belong to another version. The lookup never waits for pacman.
+fn package_of(
+    index: Option<&PackageIndex>,
+    read: &GeneralRead,
+    now: Instant,
+) -> Total<Option<PackageInfo>> {
+    let Some(index) = index else {
+        return total(None, Validity::Unsupported);
+    };
+    if read.exe.validity != Validity::Valid {
+        return total(None, read.exe.validity);
+    }
+    if read.exe_deleted {
+        return total(None, Validity::Unsupported);
+    }
+    let Some(mtime_s) = read.exe_mtime_s else {
+        return total(None, Validity::Failed);
+    };
+    match index.get(&read.exe.value, mtime_s) {
+        Some(Some(info)) => valid(Some(PackageInfo {
+            name: Arc::clone(&info.name),
+            version: Arc::clone(&info.version),
+            packager: info.packager.clone(),
+        })),
+        Some(None) => valid(None),
+        None => {
+            index.request(&read.exe.value, mtime_s, now);
+            total(None, Validity::WarmingUp)
+        }
+    }
 }
 
 /// The General payload of one read. `users` turns the uids into names.
@@ -2139,8 +2203,7 @@ fn general_detail(r: &GeneralRead, users: &mut dyn UserNames) -> GeneralDetail {
         exe: r.exe.clone(),
         exe_deleted: r.exe_deleted,
         location: r.location,
-        // The package index fills these in a later bead.
-        package: total(None, Validity::Unsupported),
+        package: r.package.clone(),
         description: total(Arc::from(""), Validity::Unsupported),
         cwd: r.cwd.clone(),
         root: r.root.clone(),
@@ -3702,6 +3765,122 @@ mod tests {
         let (gone, validity) = general(&out);
         assert_eq!(validity, Validity::Missing);
         assert!(Arc::ptr_eq(&first, &gone));
+    }
+
+    /// Owns `owned` as package `firefox 131.0-1` by Jan Doe; every other path is not packaged.
+    struct FakePkg {
+        owned: std::path::PathBuf,
+    }
+
+    impl tl_collect::pkg::PkgBackend for FakePkg {
+        fn owners(&mut self, paths: &[&Path]) -> Result<tl_collect::pkg::PathOwners, CollectError> {
+            Ok(paths
+                .iter()
+                .map(|p| {
+                    (
+                        p.to_path_buf(),
+                        (*p == self.owned).then(|| Arc::from("firefox")),
+                    )
+                })
+                .collect())
+        }
+
+        fn info(
+            &mut self,
+            name: &str,
+        ) -> Result<Option<tl_model::process::PackageInfo>, CollectError> {
+            Ok(Some(tl_model::process::PackageInfo {
+                name: Arc::from(name),
+                version: Arc::from("131.0-1"),
+                description: Some(Arc::from("Web browser")),
+                packager: Some(Arc::from("Jan Doe")),
+                build_date_s: None,
+                url: None,
+            }))
+        }
+
+        fn verify(&mut self, _name: &str) -> Result<tl_collect::pkg::VerifyOutcome, CollectError> {
+            Ok(tl_collect::pkg::VerifyOutcome::Unmodified)
+        }
+
+        fn db_stamp(&mut self) -> Option<i64> {
+            Some(1)
+        }
+    }
+
+    /// `general_src` with 4201's exe linked to a real file, and an index whose backend owns
+    /// `owned` (relative to the root) or nothing.
+    fn package_src(owned: Option<&str>) -> (tempfile::TempDir, ProcessDetailSource, PackageIndex) {
+        let (tmp, src) = general_src();
+        let exe = tmp.path().join("usr-bin-app");
+        fs::write(&exe, b"#!/bin/sh\n").expect("write exe");
+        relink_exe(&tmp, &exe);
+        let owned = owned.map_or_else(Default::default, |name| tmp.path().join(name));
+        let index = PackageIndex::new(Box::new(FakePkg { owned }));
+        let src = src.with_package_index(Some(index.clone()));
+        (tmp, src, index)
+    }
+
+    /// A packaged executable: `WarmingUp` until the batch, then name, version and packager, and
+    /// the change goes out at the next General read.
+    #[test]
+    fn general_package_from_index() {
+        let (_tmp, src, index) = package_src(Some("usr-bin-app"));
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let s = every_ms(500);
+        let (src, out, _) = step_all(src, &d, &s, 0);
+        let (g, _) = general(&out);
+        assert_eq!(g.package, total(None, Validity::WarmingUp));
+        assert!(
+            index.due(Instant::now() + Duration::from_secs(3)),
+            "exe queued"
+        );
+
+        assert_eq!(index.run_batch().expect("batch"), 1);
+        let (_src, out, _) = step_all(src, &d, &s, 500);
+        let (g, validity) = general(&out);
+        assert_eq!(validity, Validity::Valid);
+        assert_eq!(
+            g.package,
+            valid(Some(PackageInfo {
+                name: Arc::from("firefox"),
+                version: Arc::from("131.0-1"),
+                packager: Some(Arc::from("Jan Doe")),
+            }))
+        );
+    }
+
+    /// No package owns the executable: `Valid(None)`, "Not packaged".
+    #[test]
+    fn general_package_not_packaged() {
+        let (_tmp, src, index) = package_src(None);
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let s = every_ms(500);
+        let (src, _, _) = step_all(src, &d, &s, 0);
+        assert_eq!(index.run_batch().expect("batch"), 1);
+        let (_src, out, _) = step_all(src, &d, &s, 500);
+        assert_eq!(general(&out).0.package, valid(None));
+    }
+
+    /// Without a package backend the field is `Unsupported` and nothing is queued.
+    #[test]
+    fn general_package_without_backend() {
+        let (tmp, src) = general_src();
+        relink_exe(&tmp, &std::env::current_exe().expect("test binary path"));
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        assert_eq!(general(&out).0.package, total(None, Validity::Unsupported));
+    }
+
+    /// A deleted executable is not looked up: its path may belong to a newer version now.
+    #[test]
+    fn general_package_deleted_exe_not_looked_up() {
+        let (tmp, src, index) = package_src(Some("usr-bin-app"));
+        relink_exe(&tmp, Path::new("/home/user1/bin/app (deleted)"));
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        assert_eq!(general(&out).0.package, total(None, Validity::Unsupported));
+        assert!(!index.due(Instant::now() + Duration::from_secs(3)));
     }
 
     #[test]

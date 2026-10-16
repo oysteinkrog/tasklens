@@ -9,12 +9,16 @@
 //! While the helper is `Unlocked`, `HelperReads` fills the Restricted cells of visible rows
 //! through `ReadProcessFiles` at 1 Hz, after the sweep and outside it (PROC-076). The next sweep
 //! applies the values. Exe and cwd paths from the helper are never logged.
+//!
+//! The sweep uses the session's shared package index (R-163 item 1). Every `PKG_CHECK` the
+//! worker checks `PackageIndex::due` and runs `run_batch` as its own blocking job, beside the
+//! sweep job and never inside it. The index keeps the 2 s debounce.
 
 use std::cell::Cell;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::channel::watch;
 use asupersync::runtime::JoinError;
@@ -31,6 +35,7 @@ use tl_collect::apps::naming::exe_basename;
 use tl_collect::counters::{Clock, resumed_between};
 use tl_collect::parse::filenr::parse_file_nr;
 use tl_collect::parse::topology::parse_cpu_list;
+use tl_collect::pkg::PackageIndex;
 use tl_collect::proc::io::{PidIo, parse_io};
 use tl_collect::proc::meta::{PasswdUserNames, UserNames};
 use tl_collect::proc::sweep::{ProcessSampler, SweepCtx, SweepInputs, SweepOutput};
@@ -181,6 +186,12 @@ impl ProcessesSource {
         })
     }
 
+    /// The sweep reads packages from `index`, the session's shared index.
+    pub fn with_package_index(mut self, index: PackageIndex) -> Self {
+        *self.sampler.pkg_mut() = index;
+        self
+    }
+
     /// The sampler with a test clock (CLOCK_BOOTTIME ns, CLOCK_MONOTONIC ns).
     pub fn with_clock(mut self, clock: fn() -> (TimeNs, u64)) -> Self {
         self.sampler = self.sampler.with_clock(clock);
@@ -329,8 +340,16 @@ fn full_factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
         let io = io.clone();
         let cfg = cfg.clone();
+        let pkg = io.shared.pkg.clone();
         async move {
-            let mut job = match cx.spawn_blocking(move |_| ProcessesSource::new(cfg)) {
+            let make = move |_| {
+                let src = ProcessesSource::new(cfg)?;
+                Ok::<_, CollectError>(match pkg {
+                    Some(index) => src.with_package_index(index),
+                    None => src,
+                })
+            };
+            let mut job = match cx.spawn_blocking(make) {
                 Ok(job) => job,
                 Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
             };
@@ -353,21 +372,67 @@ fn full_factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     })
 }
 
-/// `source::run` for the sweep, with `HelperReads` beside it when the session has a helper.
+/// `source::run` for the sweep, with `HelperReads` beside it when the session has a helper and
+/// the package batches beside it when the session has a package index.
 pub async fn run(cx: Cx, io: WorkerIo, mut src: ProcessesSource) -> Outcome<(), WorkerError> {
-    let Some(handle) = io.shared.helper.clone() else {
+    let reads = io.shared.helper.clone().map(|h| src.helper_reads(h));
+    let pkg = io.shared.pkg.clone();
+    if reads.is_none() && pkg.is_none() {
         return source::run(cx, io, src).await;
-    };
-    let reads = src.helper_reads(handle);
+    }
     let demand = io.demand.clone();
-    let helper_cx = cx.clone();
+    let side_cx = cx.clone();
     let sweeps = source::run(cx, io, src);
-    let helper = async move {
-        reads.run(&helper_cx, demand).await;
-        // Only a cancel ends the reads; the sweep loop returns for it.
+    let side = async move {
+        let helper = async {
+            if let Some(reads) = reads {
+                reads.run(&side_cx, demand).await;
+            }
+        };
+        let batches = async {
+            if let Some(index) = pkg {
+                package_batches(&side_cx, index).await;
+            }
+        };
+        futures_lite::future::zip(helper, batches).await;
+        // Only a cancel ends them; the sweep loop returns for it.
         std::future::pending().await
     };
-    futures_lite::future::or(sweeps, helper).await
+    futures_lite::future::or(sweeps, side).await
+}
+
+// ---- Package owner batches (R-163 item 1) ----
+
+/// How often the worker checks whether a package batch is due.
+pub const PKG_CHECK: Duration = Duration::from_millis(500);
+
+/// Runs `index.run_batch()` as a blocking job every `PKG_CHECK` while `index.due`, until `cx`
+/// is cancelled. Batch errors are logged at debug and the paths are requested again.
+pub async fn package_batches(cx: &Cx, index: PackageIndex) {
+    loop {
+        sleep_until(cx.now() + PKG_CHECK).await;
+        if cx.checkpoint().is_err() {
+            return;
+        }
+        if !index.due(Instant::now()) {
+            continue;
+        }
+        let batch = index.clone();
+        let mut job = match cx.spawn_blocking(move |_| batch.run_batch()) {
+            Ok(job) => job,
+            Err(e) => {
+                tracing::debug!(error = %e, "pkg: batch job not started");
+                continue;
+            }
+        };
+        match job.join(cx).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::debug!(error = %e, "pkg: owner batch failed"),
+            Err(JoinError::Cancelled(_)) => return,
+            Err(JoinError::Panicked(_)) => tracing::warn!("pkg: owner batch panicked"),
+            Err(JoinError::PolledAfterCompletion) => {}
+        }
+    }
 }
 
 /// The app lookup paths of the user tasklens runs as. The icon cache is
@@ -952,5 +1017,209 @@ mod tests {
         columns.insert(ColumnId::Cpu);
         let want = ProcFiles::IO | ProcFiles::FD_LIST | ProcFiles::EXE | ProcFiles::CWD;
         assert_eq!(helper_files(&columns), want);
+    }
+
+    // ---- Package owner batches ----
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use asupersync::types::Budget;
+    use asupersync::{LabConfig, LabRuntime};
+    use tl_collect::SysRoot;
+    use tl_collect::apps::classify::ProtectInputs;
+    use tl_collect::pkg::{PathOwners, PkgBackend, VerifyOutcome};
+    use tl_model::process::PackageInfo;
+
+    /// Owns `owned` as package `firefox 131.0-1`; counts `owners` calls.
+    struct FakePkg {
+        owned: PathBuf,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl PkgBackend for FakePkg {
+        fn owners(&mut self, paths: &[&Path]) -> Result<PathOwners, CollectError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(paths
+                .iter()
+                .map(|p| {
+                    (
+                        p.to_path_buf(),
+                        (*p == self.owned).then(|| Arc::from("firefox")),
+                    )
+                })
+                .collect())
+        }
+
+        fn info(
+            &mut self,
+            name: &str,
+        ) -> Result<Option<tl_model::process::PackageInfo>, CollectError> {
+            Ok(Some(PackageInfo {
+                name: Arc::from(name),
+                version: Arc::from("131.0-1"),
+                description: None,
+                packager: Some(Arc::from("Jan Doe")),
+                build_date_s: None,
+                url: None,
+            }))
+        }
+
+        fn verify(&mut self, _name: &str) -> Result<VerifyOutcome, CollectError> {
+            Ok(VerifyOutcome::Unmodified)
+        }
+
+        fn db_stamp(&mut self) -> Option<i64> {
+            Some(1)
+        }
+    }
+
+    fn fake_index(owned: &Path) -> (PackageIndex, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = FakePkg {
+            owned: owned.to_path_buf(),
+            calls: Arc::clone(&calls),
+        };
+        (PackageIndex::new(Box::new(backend)), calls)
+    }
+
+    fn advance(lab: &mut LabRuntime, d: Duration) {
+        lab.advance_time(u64::try_from(d.as_nanos()).expect("fits in u64"));
+        // `run_until_idle` stops when no task is ready; one step fires the due timers.
+        lab.step_for_test();
+        lab.run_until_idle();
+    }
+
+    /// The batch loop runs a due batch as its own job at the next check, and nothing while no
+    /// path waits.
+    #[test]
+    fn batch_loop_runs_due_batches() {
+        let (index, calls) = fake_index(Path::new("/usr/bin/firefox"));
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let looped = index.clone();
+        let (task, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                package_batches(&cx, looped).await;
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+
+        advance(&mut lab, PKG_CHECK);
+        assert_eq!(calls.load(Ordering::Relaxed), 0, "nothing pending");
+
+        // A request older than the 2 s debounce is due at the next check.
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(3))
+            .expect("monotonic clock is past 3 s");
+        index.request("/usr/bin/firefox", 100, past);
+        index.request("/home/u/a.out", 5, past);
+        advance(&mut lab, PKG_CHECK);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let info = index.get("/usr/bin/firefox", 100).expect("looked up");
+        assert_eq!(info.as_deref().map(|i| &*i.name), Some("firefox"));
+        assert_eq!(index.get("/home/u/a.out", 5), Some(None));
+
+        // A new request waits out the debounce.
+        index.request("/usr/bin/other", 1, Instant::now());
+        advance(&mut lab, PKG_CHECK);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// Copies `src` into `dst`, symlinks included.
+    fn copy_tree(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("create dir");
+        for entry in std::fs::read_dir(src).expect("read dir") {
+            let entry = entry.expect("dir entry");
+            let to = dst.join(entry.file_name());
+            let kind = entry.file_type().expect("file type");
+            if kind.is_symlink() {
+                let target = std::fs::read_link(entry.path()).expect("read link");
+                std::os::unix::fs::symlink(target, &to).expect("create link");
+            } else if kind.is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).expect("copy file");
+            }
+        }
+    }
+
+    /// The sweep reads the shared index: a P2 read of a detail key queues its exe, and after the
+    /// batch `ProcessExtrasP2.package` holds the owner.
+    #[test]
+    fn sweep_extras_package_from_shared_index() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tl-collect/tests/fixtures/process-edge");
+        copy_tree(&fixture, base);
+        std::fs::create_dir_all(base.join("proc/sys/kernel/random")).expect("create random dir");
+        std::fs::write(
+            base.join("proc/sys/kernel/random/boot_id"),
+            "8a8a3a3e-7d55-4b6e-9a43-1f0b0c3a2d11\n",
+        )
+        .expect("write boot_id");
+        let exe = base.join("firefox");
+        std::fs::write(&exe, b"#!/bin/sh\n").expect("write exe");
+        let link = base.join("proc/4201/exe");
+        std::fs::remove_file(&link).expect("remove exe link");
+        std::os::unix::fs::symlink(&exe, &link).expect("create exe link");
+
+        let cfg = Arc::new(
+            EngineConfig::new(EngineMode::Full, base.join("state"))
+                .with_sys_root(SysRoot::at(base)),
+        );
+        let paths = AppPaths {
+            home: base.join("home"),
+            xdg_data_home: None,
+            xdg_data_dirs: None,
+            xdg_config_home: None,
+            icon_cache: base.join("cache/icons.toml"),
+        };
+        let users = PasswdUserNames::load(&base.join("etc/passwd"));
+        let (index, calls) = fake_index(&exe);
+        let mut src = ProcessesSource::with_parts(cfg, &paths, Box::new(users))
+            .expect("fixture source opens")
+            .with_package_index(index.clone());
+        assert!(src.sampler.package_index().same_index(&index));
+
+        let protect = ProtectInputs::default();
+        let sweep = |src: &mut ProcessesSource, keys: &[ProcessKey]| {
+            let inputs = SweepInputs {
+                protect: &protect,
+                detail_keys: keys,
+                want_pss: false,
+                window_pids: None,
+                wm_class: None,
+            };
+            let mut out = SweepOutput::default();
+            src.sampler.sweep(&src.ctx, &inputs, &mut out);
+            out
+        };
+        let out = sweep(&mut src, &[]);
+        let key = out
+            .records
+            .iter()
+            .find(|r| r.key.pid == 4201)
+            .expect("4201 swept")
+            .key;
+
+        let out = sweep(&mut src, &[key]);
+        let at = out.records.iter().position(|r| r.key == key).expect("4201");
+        assert_eq!(out.extras_p2[at].package, None, "not looked up yet");
+        assert!(index.due(Instant::now() + Duration::from_secs(3)));
+
+        assert_eq!(index.run_batch().expect("batch"), 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let out = sweep(&mut src, &[key]);
+        let at = out.records.iter().position(|r| r.key == key).expect("4201");
+        let p2 = &out.extras_p2[at];
+        assert_eq!(p2.package.as_deref().map(|i| &*i.name), Some("firefox"));
+        assert_eq!(
+            p2.package_status,
+            Some(tl_model::process::PackageStatus::Packaged)
+        );
     }
 }

@@ -794,9 +794,15 @@ impl ProcessSampler {
         })
     }
 
-    /// The package index, so the engine can run `run_batch` in its own job.
+    /// The package index the P2 reads use. The engine puts its shared index here and runs
+    /// `run_batch` in its own job.
     pub fn pkg_mut(&mut self) -> &mut PackageIndex {
         &mut self.pkg
+    }
+
+    /// A handle to the package index the P2 reads use.
+    pub fn package_index(&self) -> PackageIndex {
+        self.pkg.clone()
     }
 
     /// Test hook: `clock` returns (CLOCK_BOOTTIME ns, CLOCK_MONOTONIC ns) in place of the real
