@@ -3989,7 +3989,10 @@ mod main_window {
         let information = toolbar_shape(&mut vcx);
         select(&mut vcx, &main, Tab::Services);
         let services = toolbar_shape(&mut vcx);
-        assert_eq!(services, information, "the same slots 1 and 4 as the other default tabs");
+        assert_eq!(
+            services, information,
+            "the same slots 1 and 4 as the other default tabs"
+        );
         assert!(
             services.0 < processes.0,
             "no Processes page buttons on Services"
