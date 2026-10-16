@@ -1167,6 +1167,58 @@ fn battery_details_append_battery_pct() {
 }
 
 #[test]
+fn battery_power_is_signed_by_state() {
+    let mut rig = Rig::new();
+    let bat0 = DeviceIdentity::Battery {
+        native_path: Arc::from("BAT0"),
+    };
+    let mouse = DeviceIdentity::Battery {
+        native_path: Arc::from("hidpp_battery_0"),
+    };
+    rig.run(vec![health_msg(0)])
+        .expect("no invariant violation");
+    let with_rate = |path: &str, state: &str, supply: bool| {
+        let mut b = battery(path, 50.0);
+        b.energy_rate_w = Total {
+            value: 12.4,
+            validity: Validity::Valid,
+        };
+        b.state = Arc::from(state);
+        b.power_supply = supply;
+        b
+    };
+    let send = |rig: &mut Rig, state: &str| {
+        rig.run(vec![src(SourceUpdate::DeviceDetails(
+            DeviceDetailsUpdate::Batteries(vec![
+                (bat0.clone(), with_rate("BAT0", state, true)),
+                (mouse.clone(), with_rate("hidpp_battery_0", state, false)),
+            ]),
+        ))])
+        .expect("no invariant violation");
+        let idx = rig.idx(&bat0);
+        rig.last_sample(SeriesId {
+            device: idx,
+            metric: MetricId::BATTERY_POWER,
+        })
+        .value
+    };
+    assert_eq!(send(&mut rig, "Discharging"), -12.4);
+    assert_eq!(send(&mut rig, "Charging"), 12.4);
+    assert_eq!(send(&mut rig, "Fully charged"), 0.0);
+    let idx = rig.idx(&mouse);
+    assert!(
+        rig.latest()
+            .series
+            .get(SeriesId {
+                device: idx,
+                metric: MetricId::BATTERY_POWER,
+            })
+            .is_none(),
+        "a peripheral has no power series"
+    );
+}
+
+#[test]
 fn on_battery_publishes_only_on_change() {
     let mut rig = Rig::new();
     rig.run(vec![health_msg(0)])

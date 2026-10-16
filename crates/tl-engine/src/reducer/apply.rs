@@ -259,7 +259,7 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
         DeviceKind::Net => &NET_METRICS,
         DeviceKind::Sensor => &[MetricId::SENSOR_TEMP],
         DeviceKind::Fan => &[MetricId::FAN_RPM, MetricId::FAN_PWM],
-        DeviceKind::Battery => &[MetricId::BATTERY_PCT],
+        DeviceKind::Battery => &[MetricId::BATTERY_PCT, MetricId::BATTERY_POWER],
         DeviceKind::Aggregate => &[],
     }
 }
@@ -1535,6 +1535,22 @@ impl Reducer {
                         pct.validity.is_valid(),
                         period,
                     );
+                    if battery.power_supply {
+                        let rate = battery.energy_rate_w;
+                        let power = match &*battery.state {
+                            "Charging" => rate.value,
+                            "Discharging" => -rate.value,
+                            _ => 0.0,
+                        };
+                        self.push(
+                            idx,
+                            MetricId::BATTERY_POWER,
+                            t,
+                            power,
+                            rate.validity.is_valid(),
+                            period,
+                        );
+                    }
                     rows.push((idx, battery));
                 }
                 rows.sort_unstable_by_key(|(idx, _)| *idx);

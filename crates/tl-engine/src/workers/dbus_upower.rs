@@ -1,7 +1,7 @@
 //! The `UPower` worker (ADR-004, PERF-078): battery rows for the battery pages.
 //!
-//! It lists devices with `EnumerateDevices`, keeps the `Type == 2` devices with
-//! `PowerSupply == true`, and follows `DeviceAdded`, `DeviceRemoved` and each device's
+//! It lists devices with `EnumerateDevices`, keeps every device except line power and the display device
+//! and follows `DeviceAdded`, `DeviceRemoved` and each device's
 //! `PropertiesChanged`. Without UPower it reads `/sys/class/power_supply` every `SYSFS_PERIOD`
 //! and tries the bus again every 60 s. It runs while any surface is visible or recording is on.
 //! A forwarded `BatteryHistory` command also wakes it and fills that battery's `history` from
@@ -56,7 +56,7 @@ const PROPS_IFACE: &str = "org.freedesktop.DBus.Properties";
 /// The resync period with UPower, and the bus retry period without it.
 const RESYNC: Duration = Duration::from_secs(60);
 /// UPower `Type` for a battery.
-const TYPE_BATTERY: f64 = 2.0;
+const TYPE_LINE_POWER: u32 = 1;
 /// The health text while the worker reads sysfs.
 const NOT_AVAILABLE: &str = "UPower not available, reading /sys/class/power_supply";
 /// The `GetHistory` timeout.
@@ -162,6 +162,9 @@ async fn resync<B: UpowerBus>(
     for path in bus.devices(cx).await? {
         match bus.props(cx, &path).await {
             Ok(props) => {
+                if is_display_device(&path) {
+                    continue;
+                }
                 if let Some(battery) = battery_from_props(&props) {
                     batteries.insert(path, battery);
                 }
@@ -316,6 +319,7 @@ async fn apply_event<B: UpowerBus>(
         // Changes of other devices (the display device, a mouse) are ignored; the resync
         // picks up a device that becomes a battery.
         Event::Changed(path) if !batteries.contains_key(&path) => Ok(false),
+        Event::Added(path) if is_display_device(&path) => Ok(false),
         Event::Added(path) | Event::Changed(path) => {
             let props = match bus.props(cx, &path).await {
                 Ok(props) => props,
@@ -471,7 +475,7 @@ async fn read_sysfs(cx: &Cx, sys: &Path) -> Result<SysfsRead, Outcome<(), Worker
     }
 }
 
-/// Every `type == Battery` entry of `dir` except peripheral ones (`scope == Device`), by name.
+/// Every `type == Battery` entry of `dir`, peripheral ones (`scope == Device`) included, by name.
 fn sysfs_batteries(dir: &Path) -> Vec<BatteryDetails> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -481,7 +485,6 @@ fn sysfs_batteries(dir: &Path) -> Vec<BatteryDetails> {
     paths
         .iter()
         .filter_map(|path| battery_from_sysfs(path))
-        .filter(|battery| battery.power_supply)
         .collect()
 }
 
@@ -761,10 +764,51 @@ fn technology_text(tech: Option<f64>) -> &'static str {
     }
 }
 
-/// One battery from UPower `Device` properties. `None` unless `Type` is 2 (battery) and
-/// `PowerSupply` is true, so UPS units and peripheral batteries are skipped.
+/// The UPower device `Type` as a stable English word. The UI maps it to its own text.
+fn kind_text(ty: u32) -> &'static str {
+    match ty {
+        2 => "Battery",
+        3 => "UPS",
+        4 => "Monitor",
+        5 => "Mouse",
+        6 => "Keyboard",
+        7 => "PDA",
+        8 => "Phone",
+        9 => "Media player",
+        10 => "Tablet",
+        11 => "Computer",
+        12 => "Gaming input",
+        13 => "Pen",
+        14 => "Touchpad",
+        15 => "Modem",
+        16 => "Network",
+        17 => "Headset",
+        18 => "Speakers",
+        19 => "Headphones",
+        20 => "Video",
+        21 => "Other audio",
+        22 => "Remote control",
+        23 => "Printer",
+        24 => "Scanner",
+        25 => "Camera",
+        26 => "Wearable",
+        27 => "Toy",
+        28 => "Bluetooth generic",
+        _ => "Unknown",
+    }
+}
+
+/// Whether `path` is the UPower composite `DisplayDevice`, which is not a device of its own.
+fn is_display_device(path: &str) -> bool {
+    path.ends_with("/DisplayDevice")
+}
+
+/// One device from UPower `Device` properties. `None` when `Type` is missing or 1 (line
+/// power). Every other type is kept, with `kind` from the `Type` and `power_supply` from the
+/// `PowerSupply` flag.
 pub fn battery_from_props(p: &Props) -> Option<BatteryDetails> {
-    if number(p, "Type") != Some(TYPE_BATTERY) || flag(p, "PowerSupply") != Some(true) {
+    let ty = number(p, "Type")? as u32;
+    if ty == TYPE_LINE_POWER {
         return None;
     }
     let time = |key: &str| opt(number(p, key).filter(|v| *v != 0.0).map(|v| v as i64));
@@ -776,7 +820,7 @@ pub fn battery_from_props(p: &Props) -> Option<BatteryDetails> {
         )
     });
     Some(BatteryDetails {
-        kind: "Battery".into(),
+        kind: kind_text(ty).into(),
         vendor: opt(string(p, "Vendor")),
         model: opt(string(p, "Model")),
         serial: opt(string(p, "Serial")),
@@ -798,7 +842,7 @@ pub fn battery_from_props(p: &Props) -> Option<BatteryDetails> {
         energy_full_design_wh: nonzero(p, "EnergyFullDesign"),
         voltage_min_design_v: nonzero(p, "VoltageMinDesign"),
         voltage_max_design_v: nonzero(p, "VoltageMaxDesign"),
-        power_supply: true,
+        power_supply: flag(p, "PowerSupply") == Some(true),
         charge_threshold,
         temperature_c: nonzero(p, "Temperature"),
         history: None,
@@ -819,7 +863,8 @@ fn sysfs_technology(text: Option<&str>) -> Arc<str> {
 }
 
 /// One battery from a `/sys/class/power_supply/<name>` directory. `None` unless `type` is
-/// `Battery`. `power_supply` is false for `scope == Device` (a peripheral battery). Times are
+/// `Battery`. `kind` is Battery and `power_supply` true for the system scope; `scope == Device`
+/// (a peripheral battery) gives `Other` and false. Times are
 /// `Unsupported`: the kernel does not report them.
 pub fn battery_from_sysfs(dir: &Path) -> Option<BatteryDetails> {
     let mut buf = Vec::new();
@@ -831,7 +876,7 @@ pub fn battery_from_sysfs(dir: &Path) -> Option<BatteryDetails> {
     if text("type").as_deref() != Some("Battery") {
         return None;
     }
-    let scope = text("scope");
+    let system = text("scope").as_deref() != Some("Device");
     let mut num = |name: &str| text(name)?.parse::<i64>().ok();
     // µV, µW and µWh to V, W and Wh.
     let micro = |v: Option<i64>| opt(v.map(|v| (v as f64 / 1e6) as f32));
@@ -869,7 +914,7 @@ pub fn battery_from_sysfs(dir: &Path) -> Option<BatteryDetails> {
     let serial = opt(text("serial_number").map(Arc::from));
     let native_path: Arc<str> = dir.file_name()?.to_string_lossy().into();
     Some(BatteryDetails {
-        kind: "Battery".into(),
+        kind: if system { "Battery" } else { "Other" }.into(),
         vendor,
         model,
         serial,
@@ -889,7 +934,7 @@ pub fn battery_from_sysfs(dir: &Path) -> Option<BatteryDetails> {
         energy_full_design_wh,
         voltage_min_design_v: micro(vmin),
         voltage_max_design_v,
-        power_supply: scope.as_deref() != Some("Device"),
+        power_supply: system,
         charge_threshold,
         temperature_c: unsupported(),
         history: None,
@@ -1157,14 +1202,35 @@ mod tests {
     }
 
     #[test]
-    fn skip_ups_and_peripherals() {
+    fn keep_ups_and_peripherals() {
         let mut ups = discharging();
         ups.insert("Type".into(), OwnedValue::from(3u32));
-        assert!(battery_from_props(&ups).is_none());
+        let ups = battery_from_props(&ups).expect("a UPS");
+        assert_eq!(&*ups.kind, "UPS");
+        assert!(ups.power_supply);
         let mut mouse = discharging();
+        mouse.insert("Type".into(), OwnedValue::from(5u32));
         mouse.insert("PowerSupply".into(), OwnedValue::from(false));
-        assert!(battery_from_props(&mouse).is_none());
+        let mouse = battery_from_props(&mouse).expect("a mouse");
+        assert_eq!(&*mouse.kind, "Mouse");
+        assert!(!mouse.power_supply);
+        let mut line = discharging();
+        line.insert("Type".into(), OwnedValue::from(1u32));
+        assert!(battery_from_props(&line).is_none());
         assert!(battery_from_props(&Props::new()).is_none());
+        let mut odd = discharging();
+        odd.insert("Type".into(), OwnedValue::from(99u32));
+        assert_eq!(&*battery_from_props(&odd).expect("kept").kind, "Unknown");
+        assert_eq!(
+            &*battery_from_props(&discharging()).expect("kept").kind,
+            "Battery"
+        );
+        assert!(is_display_device(
+            "/org/freedesktop/UPower/devices/DisplayDevice"
+        ));
+        assert!(!is_display_device(
+            "/org/freedesktop/UPower/devices/battery_BAT0"
+        ));
     }
 
     #[test]
@@ -1272,9 +1338,13 @@ mod tests {
 
         let mouse = battery_from_sysfs(&dir.path().join("hidpp_battery_0")).expect("read");
         assert!(!mouse.power_supply);
+        assert_eq!(&*mouse.kind, "Other");
         let all = sysfs_batteries(dir.path());
-        assert_eq!(all.len(), 1, "the peripheral battery is skipped");
+        assert_eq!(all.len(), 2, "the peripheral battery is kept");
         assert_eq!(&*all[0].native_path, "BAT1");
+        assert_eq!(&*all[0].kind, "Battery");
+        assert_eq!(&*all[1].native_path, "hidpp_battery_0");
+        assert_eq!(&*all[1].kind, "Other");
     }
 
     // ---- The worker loop over a fake bus ----
