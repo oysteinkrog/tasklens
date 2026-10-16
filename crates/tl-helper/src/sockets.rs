@@ -6,6 +6,11 @@
 //!
 //! `SockDestroy`: closes one TCP connection with a netlink `SOCK_DESTROY` message (SYS-031,
 //! R-004). The kernel also matches the socket cookie, so a reused 4-tuple is never hit.
+//!
+//! `NetnsSockDiagDump`: dumps the TCP and UDP sockets of another network namespace (SYS-037,
+//! R-004). Only a short-lived thread enters that namespace, to open the netlink socket. The
+//! socket stays in the namespace it was opened in, so the dump runs on the calling thread and
+//! that thread never leaves its own namespace.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -16,6 +21,7 @@ use rustix::io::Errno;
 use rustix::net::netlink::{self, SocketAddrNetlink};
 use rustix::net::sockopt::{self, Timeout};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
+use rustix::thread::LinkNameSpaceType;
 use tl_model::actions::{Family, FourTuple, Proto};
 use tl_model::helper_proto::{HelperError, HelperReplyBody};
 use tl_model::ids::ProcessKey;
@@ -256,6 +262,234 @@ fn scope_id(addr: SocketAddr) -> Option<u32> {
     }
 }
 
+/// `nlmsghdr` (16 bytes) plus `inet_diag_req_v2` (56 bytes).
+const DUMP_MSG_LEN: usize = 72;
+const SOCK_DIAG_BY_FAMILY: u16 = 20;
+const NLM_F_DUMP: u16 = 0x300;
+const NLMSG_DONE: u16 = 3;
+const NLMSG_HDR_LEN: usize = 16;
+const IPPROTO_UDP: u8 = 17;
+const INET_DIAG_INFO: u8 = 2;
+/// One `NetlinkDump` body is at most this many bytes, so its frame stays under 64 KiB.
+const NETNS_REPLY_MAX: usize = 60 * 1024;
+/// The kernel sends dump datagrams of at most 32 KiB.
+const RECV_BUF: usize = 64 * 1024;
+/// The four dumps, in the order the engine reads them. Each ends with its own `NLMSG_DONE`.
+const NETNS_DUMPS: [(u8, u8); 4] = [
+    (AF_INET, IPPROTO_TCP),
+    (AF_INET6, IPPROTO_TCP),
+    (AF_INET, IPPROTO_UDP),
+    (AF_INET6, IPPROTO_UDP),
+];
+
+/// Why a namespace dump stopped early.
+enum DumpStop {
+    /// Sent to the engine as the final `Err` reply.
+    Fail(HelperError),
+    /// `out` failed: the engine is gone, nothing more is sent.
+    Out(std::io::Error),
+}
+
+impl From<Errno> for DumpStop {
+    fn from(e: Errno) -> Self {
+        DumpStop::Fail(dump_error(e))
+    }
+}
+
+fn dump_error(e: Errno) -> HelperError {
+    match e {
+        Errno::PERM | Errno::ACCESS => HelperError::PermissionDenied,
+        // The receive timeout ran out.
+        Errno::AGAIN => HelperError::Os(Errno::TIMEDOUT.raw_os_error()),
+        e => HelperError::Os(e.raw_os_error()),
+    }
+}
+
+/// Answers one `NetnsSockDiagDump` request. Streams the raw netlink dump datagrams of the
+/// namespace with inode `netns_ino` as `NetlinkDump` bodies with `last: false`, each under
+/// 60 KiB, then an empty `NetlinkDump` with `last: true`. A failure is sent as one `Err` body
+/// with `last: true`. Returns an error only when `out` fails. Addresses are never logged.
+pub fn netns_sock_diag_dump(
+    netns_ino: u64,
+    out: &mut dyn FnMut(HelperReplyBody, bool) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match dump_netns(netns_ino, out) {
+        Ok(()) => out(HelperReplyBody::NetlinkDump(Vec::new()), true),
+        Err(DumpStop::Fail(e)) => out(HelperReplyBody::Err(e), true),
+        Err(DumpStop::Out(e)) => Err(e),
+    }
+}
+
+fn dump_netns(
+    netns_ino: u64,
+    out: &mut dyn FnMut(HelperReplyBody, bool) -> std::io::Result<()>,
+) -> Result<(), DumpStop> {
+    let pid = find_netns_pid(netns_ino)?.ok_or(DumpStop::Fail(HelperError::NoSuchProcess))?;
+    let ns = open_netns(pid, netns_ino).map_err(DumpStop::Fail)?;
+    let fd = netns_socket(ns, netns_ino)?;
+    sockopt::set_socket_timeout(&fd, Timeout::Recv, Some(ACK_TIMEOUT))?;
+    let mut buf = vec![0u8; RECV_BUF];
+    // One dump at a time: a netlink socket refuses a second dump while one runs.
+    for (seq, (af, proto)) in (1..).zip(NETNS_DUMPS) {
+        let msg = build_dump_msg(af, proto, seq);
+        rustix::net::sendto(&fd, &msg, SendFlags::empty(), &SocketAddrNetlink::new(0, 0))?;
+        loop {
+            let (_, n) = rustix::net::recv(&fd, &mut buf, RecvFlags::empty())?;
+            if n > buf.len() {
+                // The datagram did not fit and its tail is lost.
+                return Err(Errno::MSGSIZE.into());
+            }
+            let (chunks, ended) = split_messages(&buf[..n], NETNS_REPLY_MAX)?;
+            for chunk in chunks {
+                out(HelperReplyBody::NetlinkDump(chunk.to_vec()), false).map_err(DumpStop::Out)?;
+            }
+            if ended {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The lowest pid whose `ns/net` link is `net:[ino]`. Pids we cannot read are skipped.
+fn find_netns_pid(ino: u64) -> rustix::io::Result<Option<u32>> {
+    let proc_fd = rustix::fs::openat(CWD, "/proc", DIR_FLAGS, Mode::empty())?;
+    let mut found: Option<u32> = None;
+    let mut link = Vec::with_capacity(32);
+    for entry in Dir::read_from(&proc_fd)? {
+        let Ok(entry) = entry else { break };
+        let Some(pid) = parse_pid(entry.file_name().to_bytes()) else {
+            continue;
+        };
+        if found.is_some_and(|f| f < pid) {
+            continue;
+        }
+        let Ok(target) =
+            rustix::fs::readlinkat(&proc_fd, format!("{pid}/ns/net"), std::mem::take(&mut link))
+        else {
+            continue;
+        };
+        let target = target.into_bytes();
+        if parse_net_target(&target) == Some(ino) {
+            found = Some(pid);
+        }
+        link = target;
+        link.clear();
+    }
+    Ok(found)
+}
+
+/// `net:[<n>]` gives `n`. Any other target gives `None`.
+fn parse_net_target(target: &[u8]) -> Option<u64> {
+    let digits = target.strip_prefix(b"net:[")?.strip_suffix(b"]")?;
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
+}
+
+/// Opens the namespace of `pid` and checks that it is still the one with inode `ino`.
+fn open_netns(pid: u32, ino: u64) -> Result<OwnedFd, HelperError> {
+    // No NOFOLLOW: `ns/net` is a magic link and opening it is the point.
+    let ns = rustix::fs::openat(
+        CWD,
+        format!("/proc/{pid}/ns/net"),
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| match e {
+        Errno::NOENT | Errno::SRCH => HelperError::NoSuchProcess,
+        e => dump_error(e),
+    })?;
+    // The pid may have exited and been reused by a process in another namespace.
+    if rustix::fs::fstat(&ns).map_err(dump_error)?.st_ino != ino {
+        return Err(HelperError::IdentityChanged);
+    }
+    Ok(ns)
+}
+
+/// Opens a `NETLINK_SOCK_DIAG` socket inside the namespace `ns` (inode `ino`). Only a new
+/// thread enters the namespace, and it ends right after, so the caller's thread keeps its own.
+fn netns_socket(ns: OwnedFd, ino: u64) -> rustix::io::Result<OwnedFd> {
+    let worker = std::thread::Builder::new()
+        .name("tl-netns".into())
+        .spawn(move || {
+            // Entering a network namespace needs CAP_SYS_ADMIN even when it is our own, so
+            // skip it then.
+            let own = rustix::fs::stat("/proc/thread-self/ns/net")?.st_ino;
+            if own != ino {
+                rustix::thread::move_into_link_name_space(
+                    ns.as_fd(),
+                    Some(LinkNameSpaceType::Network),
+                )?;
+            }
+            rustix::net::socket_with(
+                AddressFamily::NETLINK,
+                SocketType::RAW,
+                SocketFlags::CLOEXEC,
+                Some(netlink::SOCK_DIAG),
+            )
+        })
+        .map_err(|_| Errno::IO)?;
+    worker.join().map_err(|_| Errno::IO)?
+}
+
+/// Builds one `SOCK_DIAG_BY_FAMILY` dump request for all states, with `INET_DIAG_INFO`.
+fn build_dump_msg(af: u8, proto: u8, seq: u32) -> [u8; DUMP_MSG_LEN] {
+    let mut m = [0u8; DUMP_MSG_LEN];
+    // nlmsghdr
+    m[0..4].copy_from_slice(&(DUMP_MSG_LEN as u32).to_ne_bytes());
+    m[4..6].copy_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+    m[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
+    m[8..12].copy_from_slice(&seq.to_ne_bytes());
+    // nlmsg_pid stays 0.
+    // inet_diag_req_v2
+    m[16] = af;
+    m[17] = proto;
+    m[18] = 1 << (INET_DIAG_INFO - 1);
+    // pad stays 0.
+    m[20..24].copy_from_slice(&u32::MAX.to_ne_bytes());
+    // Ports, addresses and interface stay 0; the cookie is INET_DIAG_NOCOOKIE.
+    m[64..72].fill(0xFF);
+    m
+}
+
+/// Splits one datagram into chunks of whole netlink messages, each at most `max` bytes. The
+/// second value is true when the dump ended: the last chunk then ends with its `NLMSG_DONE` or
+/// `NLMSG_ERROR`, and any bytes after it are dropped. A bad message length gives `PROTO`.
+fn split_messages(buf: &[u8], max: usize) -> rustix::io::Result<(Vec<&[u8]>, bool)> {
+    let mut chunks = Vec::new();
+    let (mut start, mut at) = (0, 0);
+    let mut ended = false;
+    while at < buf.len() {
+        let rest = &buf[at..];
+        let len = rest
+            .get(0..4)
+            .map_or(0, |b| u32::from_ne_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        if len < NLMSG_HDR_LEN || len > rest.len() {
+            return Err(Errno::PROTO);
+        }
+        let end = at + len.next_multiple_of(4).min(rest.len());
+        if end - at > max {
+            return Err(Errno::PROTO);
+        }
+        if end - start > max {
+            chunks.push(&buf[start..at]);
+            start = at;
+        }
+        at = end;
+        let kind = u16::from_ne_bytes([rest[4], rest[5]]);
+        if kind == NLMSG_DONE || kind == NLMSG_ERROR {
+            ended = true;
+            break;
+        }
+    }
+    if at > start {
+        chunks.push(&buf[start..at]);
+    }
+    Ok((chunks, ended))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +697,194 @@ mod tests {
             ),
             "{got:?}"
         );
+    }
+
+    fn netns_link() -> Vec<u8> {
+        std::fs::read_link("/proc/thread-self/ns/net")
+            .unwrap()
+            .into_os_string()
+            .into_encoded_bytes()
+    }
+
+    fn run_netns_dump(ino: u64) -> Vec<(HelperReplyBody, bool)> {
+        let mut calls = Vec::new();
+        netns_sock_diag_dump(ino, &mut |body, last| {
+            calls.push((body, last));
+            Ok(())
+        })
+        .unwrap();
+        calls
+    }
+
+    /// A minimal reader of whole netlink messages: `(type, payload)` for each.
+    fn nl_messages(mut bytes: &[u8]) -> Vec<(u16, &[u8])> {
+        let mut msgs = Vec::new();
+        while !bytes.is_empty() {
+            let len = u32::from_ne_bytes(bytes[0..4].try_into().unwrap()) as usize;
+            let kind = u16::from_ne_bytes(bytes[4..6].try_into().unwrap());
+            msgs.push((kind, &bytes[NLMSG_HDR_LEN..len]));
+            bytes = bytes.get(len.next_multiple_of(4)..).unwrap_or(&[]);
+        }
+        msgs
+    }
+
+    /// Checks the shape of a successful dump and returns its message bodies.
+    fn dump_bodies(calls: &[(HelperReplyBody, bool)]) -> Vec<&[u8]> {
+        let (final_call, rest) = calls.split_last().expect("no reply");
+        assert_eq!(
+            final_call,
+            &(HelperReplyBody::NetlinkDump(Vec::new()), true)
+        );
+        let bodies: Vec<&[u8]> = rest
+            .iter()
+            .map(|(body, last)| {
+                assert!(!last);
+                match body {
+                    HelperReplyBody::NetlinkDump(b) if !b.is_empty() => b.as_slice(),
+                    other => panic!("unexpected reply {other:?}"),
+                }
+            })
+            .collect();
+        assert!(bodies.iter().all(|b| b.len() <= NETNS_REPLY_MAX));
+        let done = bodies
+            .iter()
+            .flat_map(|b| nl_messages(b))
+            .filter(|&(kind, _)| kind == NLMSG_DONE)
+            .count();
+        assert_eq!(done, 4, "one NLMSG_DONE per dump");
+        bodies
+    }
+
+    #[test]
+    fn netns_dump_own_namespace() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ino = rustix::fs::stat("/proc/self/ns/net").unwrap().st_ino;
+
+        let calls = run_netns_dump(ino);
+
+        // inet_diag_msg: family, state, timer, retrans, then sport big-endian.
+        const TCP_LISTEN: u8 = 10;
+        let found = dump_bodies(&calls)
+            .iter()
+            .flat_map(|b| nl_messages(b))
+            .any(|(kind, p)| {
+                kind == SOCK_DIAG_BY_FAMILY
+                    && p[0] == AF_INET
+                    && p[1] == TCP_LISTEN
+                    && u16::from_be_bytes([p[4], p[5]]) == port
+            });
+        assert!(found, "listener on port {port} not in the dump");
+    }
+
+    #[test]
+    fn netns_unknown_inode() {
+        assert_eq!(
+            run_netns_dump(1),
+            vec![(HelperReplyBody::Err(HelperError::NoSuchProcess), true)]
+        );
+    }
+
+    #[test]
+    fn netns_main_thread_unchanged() {
+        // Security regression: the namespace switch stays on the short-lived worker thread.
+        let before = netns_link();
+        let ino = rustix::fs::stat("/proc/self/ns/net").unwrap().st_ino;
+        run_netns_dump(ino);
+        run_netns_dump(1);
+        assert_eq!(netns_link(), before);
+    }
+
+    #[test]
+    fn netns_dump_other_namespace_as_root() {
+        if !rustix::process::geteuid().is_root() {
+            eprintln!("skipped: entering another network namespace needs root");
+            return;
+        }
+        let before = netns_link();
+        let own = rustix::fs::stat("/proc/self/ns/net").unwrap().st_ino;
+        let mut child = Command::new("unshare")
+            .args(["--net", "sleep", "30"])
+            .spawn()
+            .unwrap();
+        let path = format!("/proc/{}/ns/net", child.id());
+        // `unshare` enters the new namespace just after it starts.
+        let mut ino = own;
+        for _ in 0..200 {
+            ino = rustix::fs::stat(path.as_str()).unwrap().st_ino;
+            if ino != own {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let calls = run_netns_dump(ino);
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert_ne!(ino, own, "the child never left our namespace");
+        dump_bodies(&calls);
+        assert_eq!(netns_link(), before);
+    }
+
+    #[test]
+    fn dump_msg_bytes() {
+        let got = build_dump_msg(AF_INET6, IPPROTO_UDP, 4);
+        #[rustfmt::skip]
+        let want: [u8; 72] = [
+            // nlmsghdr: len 72, type 20, flags 0x301, seq 4, pid 0
+            72, 0, 0, 0, 20, 0, 0x01, 0x03, 4, 0, 0, 0, 0, 0, 0, 0,
+            // family 10, protocol 17, ext INET_DIAG_INFO bit, pad 0, states 0xFFFF_FFFF
+            10, 17, 2, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+            // ports, addresses and interface 0
+            0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+            // cookie INET_DIAG_NOCOOKIE
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        assert_eq!(got, want);
+    }
+
+    fn nlmsg(kind: u16, len: u32) -> Vec<u8> {
+        let mut m = vec![0u8; (len as usize).next_multiple_of(4)];
+        m[0..4].copy_from_slice(&len.to_ne_bytes());
+        m[4..6].copy_from_slice(&kind.to_ne_bytes());
+        m
+    }
+
+    #[test]
+    fn split_keeps_whole_messages() {
+        let msg = nlmsg(SOCK_DIAG_BY_FAMILY, 20);
+        let three = [msg.clone(), msg.clone(), msg.clone()].concat();
+        let (chunks, ended) = split_messages(&three, 40).unwrap();
+        assert_eq!(chunks, vec![&three[..40], &three[40..]]);
+        assert!(!ended);
+
+        // DONE ends the dump and what follows it is dropped.
+        let done = nlmsg(NLMSG_DONE, 20);
+        let buf = [msg.clone(), done, msg.clone()].concat();
+        let (chunks, ended) = split_messages(&buf, NETNS_REPLY_MAX).unwrap();
+        assert_eq!(chunks, vec![&buf[..40]]);
+        assert!(ended);
+
+        // An unpadded last message ends at the buffer end.
+        let short = nlmsg(SOCK_DIAG_BY_FAMILY, 18);
+        let (chunks, _) = split_messages(&short[..18], NETNS_REPLY_MAX).unwrap();
+        assert_eq!(chunks, vec![&short[..18]]);
+
+        assert_eq!(split_messages(&nlmsg(20, 8), 1024), Err(Errno::PROTO));
+        assert_eq!(split_messages(&msg[..12], 1024), Err(Errno::PROTO));
+        let mut long = msg.clone();
+        long[0..4].copy_from_slice(&64u32.to_ne_bytes());
+        assert_eq!(split_messages(&long, 1024), Err(Errno::PROTO));
+    }
+
+    #[test]
+    fn parses_net_targets_only() {
+        assert_eq!(parse_net_target(b"net:[4026531840]"), Some(4026531840));
+        assert_eq!(parse_net_target(b"net:[]"), None);
+        assert_eq!(parse_net_target(b"socket:[4026531840]"), None);
     }
 }

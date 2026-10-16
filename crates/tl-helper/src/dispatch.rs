@@ -7,8 +7,8 @@
 //!
 //! `Writer` is the multi-frame reply writer on fd 1. Frames are at most `MAX_HELPER_FRAME`
 //! bytes. A non-streamed reply is encoded in full before any byte is written, so a reply over
-//! the 4 MiB total becomes one `Err(TooLarge)`. A streamed reply (`ScanStrings`) is written one
-//! message at a time, and the cap applies to each message.
+//! the 4 MiB total becomes one `Err(TooLarge)`. A streamed reply (`ScanStrings`,
+//! `NetnsSockDiagDump`) is written one message at a time, and the cap applies to each message.
 
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -187,10 +187,7 @@ pub fn handle(received: ReceivedFrame, ctx: &mut Ctx<'_>, out: &mut Writer<'_>) 
         HelperRequest::WriteServiceDropIn { unit, keys } => {
             vec![dropin::write_service_dropin(unit, keys)]
         }
-        // Rule "unsupported": E29-010 replaces this arm in P4.
-        HelperRequest::NetnsSockDiagDump { .. } => {
-            vec![HelperReplyBody::Err(HelperError::NotAllowed)]
-        }
+        HelperRequest::NetnsSockDiagDump { netns_ino } => return netns_dump(seq, *netns_ino, out),
         // Rule "hello twice".
         HelperRequest::Hello { .. } => vec![HelperReplyBody::Err(HelperError::NotAllowed)],
     };
@@ -214,6 +211,29 @@ fn split_owners(body: HelperReplyBody) -> Vec<HelperReplyBody> {
             .map(|chunk| HelperReplyBody::SocketOwners(chunk.to_vec()))
             .collect(),
         body => vec![body],
+    }
+}
+
+/// Runs `NetnsSockDiagDump` and streams its replies. It cannot be cancelled.
+fn netns_dump(seq: u32, netns_ino: u64, out: &mut Writer<'_>) -> Next {
+    let mut write_failed = false;
+    let mut send = |body: HelperReplyBody, last: bool| match out.send_streamed(seq, body, last) {
+        Ok(ended) if ended && !last => {
+            // A body did not fit one frame and `Err(TooLarge)` ended the request: stop the dump.
+            Err(io::Error::other("reply too large"))
+        }
+        Ok(_) => Ok(()),
+        Err(e) => {
+            write_failed = true;
+            Err(e)
+        }
+    };
+    // The result only says that `send` failed; the flag says how.
+    let _ = sockets::netns_sock_diag_dump(netns_ino, &mut send);
+    if write_failed {
+        Next::Exit(0)
+    } else {
+        Next::Continue
     }
 }
 

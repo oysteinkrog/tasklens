@@ -558,7 +558,7 @@ fn every_request_variant_has_an_arm() {
         ),
         (
             HelperRequest::NetnsSockDiagDump { netns_ino: 0 },
-            refused.clone(),
+            Some(HelperReplyBody::Err(HelperError::NoSuchProcess)),
         ),
         (
             HelperRequest::CancelScan { seq: 999 },
