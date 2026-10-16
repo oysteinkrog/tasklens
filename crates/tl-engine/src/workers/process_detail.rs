@@ -8,7 +8,9 @@
 //! left the demand.
 //!
 //! Tabs (E10-004): the demanded tab of each demanded process target (at most `DETAILS_MAX`) is
-//! read at `processes.interval_ms`: Threads, File descriptors, Memory maps and Security. Memory
+//! read at `processes.interval_ms`: Threads, File descriptors, Memory maps and Security. General
+//! (PROC-078, tasklens-dwy.13) is read at the same rate for every demanded process target,
+//! whatever its tab, because it feeds the window title and the exited state. Memory
 //! maps reads `smaps` for the RSS at most once per `SMAPS_MIN_PERIOD` per process, and keeps the
 //! last RSS in between. The PSS and `smaps` limits use the clock passed to `sample_at`, not the
 //! sample count, so a late sample, a period change or a reopened tab never reads early.
@@ -24,7 +26,9 @@
 //! resends the payload, because the worker already read the tab for this open. For any other
 //! tab it drops the state and reads at once, which sends the tab again. A user `DetailRefresh`
 //! always drops the state and reads at once; `open_pending` never applies to it, and it keeps the
-//! flag for the notice still to come. Tab updates go out through `take_extra`. When PSS is not
+//! flag for the notice still to come. General stays in this worker's demand while its target
+//! does, so the worker never sees it open: every open notice for a target resends its General
+//! payload and never reads it. Tab updates go out through `take_extra`. When PSS is not
 //! due the sample itself is the last tab update or `Health { Running }`, never an empty `Pss`.
 //!
 //! Per-key errors become `Validity`, never `WorkerError`. Environment values, command lines and
@@ -39,28 +43,43 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::supervision::ManagedGeneration;
 use rustc_hash::FxHashMap;
+use rustix::fd::{AsFd, BorrowedFd};
+use rustix::fs::{Dir, Mode, OFlags};
 use smallvec::SmallVec;
-use tl_collect::SysRoot;
+use tl_collect::apps::AppPaths;
+use tl_collect::apps::cgroup_app::parse_app_unit;
 use tl_collect::parse::topology::parse_cpu_list;
-use tl_collect::proc::detail::{
-    self as rd, DetailRead, EnvInfo, EnvRead, FdInfo, FdType, LsmLabel, MapNodeInfo, MapRegionInfo,
-    SecurityInfo, ThreadInfo, ThreadReader, WchanValue,
+use tl_collect::proc::cgroup::{
+    UserPlacement, app_slice_unit, parse_cgroup_file, placement, unescape_unit,
 };
+use tl_collect::proc::detail::{
+    self as rd, DetailRead, EnvInfo, EnvRead, FdInfo, FdType, LinkRead, LocationCtx, LsmLabel,
+    MapNodeInfo, MapRegionInfo, SecurityInfo, ShadowStack, ThreadInfo, ThreadReader, WchanValue,
+};
+use tl_collect::proc::fdcount::{FdCount, fd_count};
+use tl_collect::proc::io::{IoRead, PidIo, read_io};
 use tl_collect::proc::meta::{PasswdUserNames, ReadBufs, UserNames};
+use tl_collect::proc::pid_stat::{PidStat, parse_pid_stat};
 use tl_collect::proc::smaps::{PssReader, RollupRead};
-use tl_collect::sysroot::read_file;
+use tl_collect::proc::status::{
+    PidStatus, STATUS_READ_MAX, commit_bytes, parse_status, ws_shared_bytes,
+};
+use tl_collect::sanitize::{CMDLINE_MAX, EXE_LINK_MAX, sanitize_cmdline, sanitize_link};
+use tl_collect::sysroot::{SMALL_FILE_LIMIT, read_at, read_file};
+use tl_collect::{CollectError, SysRoot};
 use tl_model::actions::SchedPolicy;
 use tl_model::demand::{DETAILS_MAX, Demand, DetailDemand};
 use tl_model::details::{
-    CapRow, DetailTab, DetailTarget, Elevated, EnvDetail, FdDetail, FdKind, FdRow,
-    GroupMembershipRow, IdTriple, MapNode, MapRegion, MapsDetail, NsKind, NsRow, NsState, Seccomp,
-    SecurityDetail, TabPayload, ThreadRow,
+    CapRow, DetailTab, DetailTarget, Elevated, ElfArch, EnvDetail, ExeLocation, FdDetail, FdKind,
+    FdRow, GeneralDetail, GroupMembershipRow, HashState, IdTriple, MapNode, MapRegion, MapsDetail,
+    NsKind, NsRow, NsState, PackageCheck, Relro, Seccomp, SecurityDetail, TabPayload, ThreadRow,
 };
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::process::ProcState;
 use tl_model::settings::EngineSettings;
-use tl_model::table::Total;
+use tl_model::system::CpuSet;
+use tl_model::table::{Manager, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
@@ -80,6 +99,15 @@ pub const SMAPS_MIN_PERIOD: Duration = Duration::from_secs(1);
 /// Read limit for `<root>/etc/group`.
 const GROUP_FILE_MAX: usize = 1024 * 1024;
 
+/// Read limit for `/proc/stat`, whose `intr` line comes before `btime` and can be long.
+const PROC_STAT_MAX: usize = 1024 * 1024;
+
+/// Read limit for `user-dirs.dirs`.
+const USER_DIRS_MAX: usize = 64 * 1024;
+
+/// The `/proc/<pid>/exe` link of a deleted executable ends with this (PROC-027).
+const DELETED_SUFFIX: &str = " (deleted)";
+
 /// Namespace link names in `NsKind` declaration order.
 const NAMESPACES: [(NsKind, &str); 8] = [
     (NsKind::User, "user"),
@@ -97,12 +125,14 @@ pub fn wants_pss(d: &Demand) -> bool {
     d.process_columns.contains(ColumnId::Pss) || d.process_columns.contains(ColumnId::Uss)
 }
 
-/// The tabs read from demand. General follows in tasklens-dwy.13. Strings is never read from
-/// demand, the reducer builds AppGeneral, and AppProcesses has no payload.
+/// The tabs read from demand. General is also read for every process target whatever its tab.
+/// Strings is never read from demand, the reducer builds AppGeneral, and AppProcesses has no
+/// payload.
 fn reads_from_demand(tab: DetailTab) -> bool {
     matches!(
         tab,
-        DetailTab::Threads
+        DetailTab::General
+            | DetailTab::Threads
             | DetailTab::Fds
             | DetailTab::Maps
             | DetailTab::Security
@@ -110,11 +140,11 @@ fn reads_from_demand(tab: DetailTab) -> bool {
     )
 }
 
-/// True when `details` holds a process target with a tab this worker reads.
+/// True when `details` holds a process target: its General tab is always read.
 fn wants_tabs(details: &[DetailDemand]) -> bool {
     details
         .iter()
-        .any(|d| matches!(d.target, DetailTarget::Process(_)) && reads_from_demand(d.tab))
+        .any(|d| matches!(d.target, DetailTarget::Process(_)))
 }
 
 /// `processes.interval_ms`, clamped as the Processes worker clamps it.
@@ -172,6 +202,7 @@ impl Stride {
 /// `PartialEq`, and the `Debug` of the environment hides the values.
 #[derive(PartialEq)]
 enum TabRead {
+    General(Box<GeneralRead>),
     Threads(Vec<ThreadInfo>),
     Fds(Vec<FdInfo>),
     Maps {
@@ -195,6 +226,59 @@ impl TabRead {
             _ => Validity::Valid,
         }
     }
+}
+
+/// The General tab values of one process, compared to detect a change. User names are looked
+/// up when the payload is built. Hashes, package and GPU fields are not read here.
+#[derive(Clone, PartialEq)]
+struct GeneralRead {
+    started_s: Total<i64>,
+    /// Real, effective, saved and filesystem uid.
+    uids: [u32; 4],
+    policy: SchedPolicy,
+    rt_prio: u8,
+    kernel_prio: Total<i32>,
+    autogroup: Total<(Arc<str>, i8)>,
+    affinity: Total<CpuSet>,
+    affinity_threads_differ: bool,
+    pie: Total<bool>,
+    nx_stack: Total<bool>,
+    relro: Total<Relro>,
+    shadow_stack: Total<bool>,
+    aslr_system: Total<u8>,
+    aslr_disabled_for_process: Total<bool>,
+    no_new_privs: Total<bool>,
+    seccomp: Total<Seccomp>,
+    architecture: Total<ElfArch>,
+    /// The sanitized link text, with the kernel's " (deleted)" suffix kept.
+    exe: Total<Arc<str>>,
+    exe_deleted: bool,
+    location: Total<ExeLocation>,
+    cwd: Total<Arc<str>>,
+    root: Total<Arc<str>>,
+    cgroup: Option<Arc<str>>,
+    unit: Option<UnitRef>,
+    app_id: Option<Arc<str>>,
+    cmdline: Total<Arc<str>>,
+    handles: Total<u32>,
+    rss_shared_bytes: Total<u64>,
+    commit_bytes: Total<u64>,
+    cpu_time_ms: Total<u64>,
+    io: Total<PidIo>,
+}
+
+/// What the General reader keeps between reads.
+#[derive(Default)]
+struct GeneralReader {
+    /// `btime` from `/proc/stat`. It does not change within a boot, so it is read once.
+    btime: Option<u64>,
+    /// The tasklens user's directories, made at the first read. Tests set it.
+    location: Option<LocationCtx>,
+    stat: PidStat,
+    status: PidStatus,
+    /// The `status` of one thread, for the affinity check.
+    thread_status: PidStatus,
+    cpus: SmallVec<[u16; 64]>,
 }
 
 /// The state of one tab of one target. Made when the tab enters the demand, dropped when it
@@ -257,7 +341,8 @@ pub struct ProcessDetailSource {
     /// Tab updates for `take_extra`.
     extra: VecDeque<SourceUpdate>,
     bufs: ReadBufs,
-    /// `<root>/etc/passwd`, loaded when the first Security payload is built.
+    general: GeneralReader,
+    /// `<root>/etc/passwd`, loaded when the first General or Security payload is built.
     users: Option<PasswdUserNames>,
     group_file: Vec<u8>,
     ticks_per_sec: u64,
@@ -308,6 +393,7 @@ impl ProcessDetailSource {
             targets: RefCell::default(),
             extra: VecDeque::new(),
             bufs: ReadBufs::default(),
+            general: GeneralReader::default(),
             users: None,
             group_file: Vec::new(),
             ticks_per_sec: rustix::param::clock_ticks_per_second(),
@@ -427,6 +513,28 @@ impl ProcessDetailSource {
             let DetailTarget::Process(key) = target else {
                 continue;
             };
+            if opened {
+                // The reducer may have dropped the General payload with its target. General is
+                // read at every interval anyway, so a notice only sends it again.
+                let general = self
+                    .targets
+                    .get_mut()
+                    .get(&key)
+                    .and_then(|t| t.tabs[DetailTab::General.index()].as_ref())
+                    .and_then(|s| s.published.as_ref());
+                if let Some((payload, validity)) = general {
+                    self.extra
+                        .push_back(SourceUpdate::Details(DetailsUpdate::Tab {
+                            target,
+                            tab: DetailTab::General,
+                            payload: Arc::clone(payload),
+                            validity: *validity,
+                        }));
+                }
+                if tab == DetailTab::General {
+                    continue;
+                }
+            }
             if !reads_from_demand(tab) {
                 continue;
             }
@@ -464,25 +572,31 @@ impl ProcessDetailSource {
 
         let details = self.details.borrow().clone();
         let periodic = wants_tabs(&details) && self.tabs_stride.ready();
+        // General first and once per target, then the demanded tab.
+        let mut reads: SmallVec<[(ProcessKey, DetailTab); 2 * DETAILS_MAX]> = SmallVec::new();
         for d in details.iter() {
             let DetailTarget::Process(key) = d.target else {
                 continue;
             };
-            if !reads_from_demand(d.tab) {
-                continue;
+            for tab in [DetailTab::General, d.tab] {
+                if reads_from_demand(tab) && !reads.contains(&(key, tab)) {
+                    reads.push((key, tab));
+                }
             }
+        }
+        for (key, tab) in reads {
             let state = self
                 .targets
                 .get_mut()
                 .get(&key)
-                .and_then(|t| t.tabs[d.tab.index()].as_ref());
+                .and_then(|t| t.tabs[tab.index()].as_ref());
             // A tab not read yet is read at once.
             let wanted = match state {
                 None => true,
-                Some(s) if d.tab == DetailTab::Environment => !s.env_loaded,
+                Some(s) if tab == DetailTab::Environment => !s.env_loaded,
                 Some(s) => periodic || s.published.is_none(),
             };
-            if wanted && let Some(update) = self.read_tab(key, d.tab, now) {
+            if wanted && let Some(update) = self.read_tab(key, tab, now) {
                 self.extra.push_back(SourceUpdate::Details(update));
             }
         }
@@ -508,6 +622,15 @@ impl ProcessDetailSource {
         let bufs = &mut self.bufs;
         let state = self.targets.get_mut().entry(key).or_default();
         let read = match tab {
+            DetailTab::General => read_general(
+                root,
+                self.cfg.app_paths.as_ref(),
+                key,
+                self.ticks_per_sec,
+                &mut self.general,
+                bufs,
+            )
+            .map(|read| TabRead::General(Box::new(read))),
             DetailTab::Threads => {
                 let clock = self.thread_clock;
                 let reader = state.threads.get_or_insert_with(|| match clock {
@@ -639,26 +762,35 @@ impl Source for ProcessDetailSource {
         {
             let mut targets = self.targets.borrow_mut();
             targets.retain(|key, target| {
+                let process = DetailTarget::Process(*key);
+                let shown = details.iter().any(|d| d.target == process);
                 for tab in DetailTab::ALL {
-                    let demanded = DetailDemand {
-                        target: DetailTarget::Process(*key),
-                        tab,
+                    // General stays while any tab of its target is demanded.
+                    let demanded = if tab == DetailTab::General {
+                        shown
+                    } else {
+                        details.contains(&DetailDemand {
+                            target: process,
+                            tab,
+                        })
                     };
-                    if !details.contains(&demanded) {
+                    if !demanded {
                         target.tabs[tab.index()] = None;
                     }
                 }
                 target.tabs.iter().any(Option::is_some)
             });
             for d in details.iter() {
-                if let DetailTarget::Process(key) = d.target
-                    && reads_from_demand(d.tab)
-                {
-                    targets.entry(key).or_default().tabs[d.tab.index()].get_or_insert_with(|| {
-                        TabState {
-                            open_pending: true,
-                            ..TabState::default()
-                        }
+                let DetailTarget::Process(key) = d.target else {
+                    continue;
+                };
+                let tabs = &mut targets.entry(key).or_default().tabs;
+                // General never waits for an open notice: every notice resends it.
+                tabs[DetailTab::General.index()].get_or_insert_with(TabState::default);
+                if d.tab != DetailTab::General && reads_from_demand(d.tab) {
+                    tabs[d.tab.index()].get_or_insert_with(|| TabState {
+                        open_pending: true,
+                        ..TabState::default()
                     });
                 }
             }
@@ -828,6 +960,11 @@ fn build_payload(
     root: &SysRoot,
 ) -> TabPayload {
     match read {
+        TabRead::General(read) => {
+            let users = users
+                .get_or_insert_with(|| PasswdUserNames::load(&root_base(root).join("etc/passwd")));
+            TabPayload::General(Arc::new(general_detail(read, users)))
+        }
         TabRead::Threads(rows) => TabPayload::Threads(rows.iter().map(thread_row).collect()),
         TabRead::Fds(rows) => TabPayload::Fds(Arc::new(fd_detail(rows))),
         TabRead::Maps { regions, nodes } => TabPayload::Maps(Arc::new(maps_detail(regions, nodes))),
@@ -851,6 +988,7 @@ fn build_payload(
 /// A payload with no data, for a tab that was never read with data.
 fn empty_payload(tab: DetailTab, validity: Validity) -> TabPayload {
     match tab {
+        DetailTab::General => TabPayload::General(Arc::new(empty_general(validity))),
         DetailTab::Threads => TabPayload::Threads(Arc::from([])),
         DetailTab::Fds => TabPayload::Fds(Arc::default()),
         DetailTab::Maps => TabPayload::Maps(Arc::default()),
@@ -1068,14 +1206,7 @@ fn security_detail(
     group_file: &[u8],
     root: &SysRoot,
 ) -> SecurityDetail {
-    let seccomp = match info.seccomp {
-        Some(0) => valid(Seccomp::Disabled),
-        Some(1) => valid(Seccomp::Strict),
-        Some(2) => valid(Seccomp::Filter {
-            filters: info.seccomp_filters.unwrap_or(0),
-        }),
-        _ => total(Seccomp::Disabled, Validity::Unsupported),
-    };
+    let seccomp = seccomp_total(info.seccomp, info.seccomp_filters);
     let security_label = match &info.lsm_label {
         LsmLabel::Label(label) => valid(Arc::clone(label)),
         LsmLabel::NotApplicable => total(Arc::from(""), Validity::Unsupported),
@@ -1172,7 +1303,551 @@ fn security_detail(
     }
 }
 
-/// A Security payload with no data: every field carries `validity`.
+/// Seccomp from status `Seccomp:` and `Seccomp_filters:`.
+fn seccomp_total(mode: Option<u8>, filters: Option<u32>) -> Total<Seccomp> {
+    match mode {
+        Some(0) => valid(Seccomp::Disabled),
+        Some(1) => valid(Seccomp::Strict),
+        Some(2) => valid(Seccomp::Filter {
+            filters: filters.unwrap_or(0),
+        }),
+        _ => total(Seccomp::Disabled, Validity::Unsupported),
+    }
+}
+
+/// The validity of a field or a tab whose read gave `e`.
+fn error_validity(e: &CollectError) -> Validity {
+    match e {
+        CollectError::PermissionDenied => Validity::Restricted,
+        CollectError::NotFound => Validity::Missing,
+        _ => Validity::Failed,
+    }
+}
+
+/// The validity of the executable fields after `e`. A process without an executable (a kernel
+/// thread or a zombie) gives `NotFound`, shown as "Not reported".
+fn exe_validity(e: &CollectError) -> Validity {
+    match e {
+        CollectError::PermissionDenied => Validity::Restricted,
+        CollectError::NotFound => Validity::Unsupported,
+        _ => Validity::Failed,
+    }
+}
+
+fn link_total(read: LinkRead) -> Total<Arc<str>> {
+    match read {
+        LinkRead::Path(path) => valid(path),
+        LinkRead::Restricted => total(Arc::from(""), Validity::Restricted),
+        LinkRead::Gone => total(Arc::from(""), Validity::Missing),
+    }
+}
+
+fn elf_arch(machine: u16) -> ElfArch {
+    match machine {
+        62 => ElfArch::X86_64,
+        3 => ElfArch::X86,
+        183 => ElfArch::AArch64,
+        _ => ElfArch::Unknown,
+    }
+}
+
+fn exe_location(location: rd::Location) -> ExeLocation {
+    match location {
+        rd::Location::TempDirectory => ExeLocation::TempDirectory,
+        rd::Location::UserDownloads => ExeLocation::UserDownloads,
+        rd::Location::UserData => ExeLocation::UserData,
+        rd::Location::UserProfile => ExeLocation::UserProfile,
+        rd::Location::System => ExeLocation::System,
+        rd::Location::OptionalSoftware => ExeLocation::OptionalSoftware,
+        rd::Location::Flatpak => ExeLocation::Flatpak,
+        rd::Location::AppImage => ExeLocation::AppImage,
+        rd::Location::WinePrefix => ExeLocation::WinePrefix,
+        rd::Location::Deleted => ExeLocation::Deleted,
+        rd::Location::Other => ExeLocation::Other,
+    }
+}
+
+/// The value as text when it is set, not empty and absolute.
+fn absolute_text(value: Option<std::ffi::OsString>) -> Option<String> {
+    let text = value?.into_string().ok()?;
+    text.starts_with('/').then_some(text)
+}
+
+/// `XDG_DOWNLOAD_DIR` from a `user-dirs.dirs` file, with `$HOME` expanded. `None` when it is
+/// not set, not absolute, or the home directory itself (xdg-user-dirs writes `$HOME/` for a
+/// disabled directory).
+fn download_dir(file: &[u8], home: &str) -> Option<String> {
+    let text = std::str::from_utf8(file).ok()?;
+    let value = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("XDG_DOWNLOAD_DIR="))?;
+    let value = value.trim().trim_matches('"');
+    let path = match value.strip_prefix("$HOME") {
+        Some(rest) => format!("{home}{rest}"),
+        None => value.to_owned(),
+    };
+    let dir = path.trim_end_matches('/');
+    (path.starts_with('/') && dir != home.trim_end_matches('/')).then(|| dir.to_owned())
+}
+
+/// The tasklens user's home, runtime and download directories. `paths` overrides the home and
+/// config directories from the environment.
+fn location_ctx(paths: Option<&AppPaths>) -> LocationCtx {
+    let home = match paths {
+        Some(p) => p.home.to_str().map(str::to_owned),
+        None => absolute_text(std::env::var_os("HOME")),
+    }
+    .unwrap_or_default();
+    let config = match paths {
+        Some(p) => p.xdg_config_home.clone(),
+        None => std::env::var_os("XDG_CONFIG_HOME"),
+    };
+    let config = absolute_text(config).unwrap_or_else(|| format!("{home}/.config"));
+    let mut buf = Vec::new();
+    let downloads = (!home.is_empty())
+        .then(|| {
+            read_file(
+                Path::new(&config).join("user-dirs.dirs").as_path(),
+                &mut buf,
+                USER_DIRS_MAX,
+            )
+            .ok()
+        })
+        .flatten()
+        .and_then(|_| download_dir(&buf, &home));
+    LocationCtx {
+        home,
+        runtime_dir: absolute_text(std::env::var_os("XDG_RUNTIME_DIR")),
+        downloads,
+    }
+}
+
+/// `btime` from `<proc>/stat`, read until it is found once.
+fn boot_time(root: &SysRoot, g: &mut GeneralReader) -> Option<u64> {
+    if g.btime.is_none() {
+        let mut buf = Vec::new();
+        if read_file(&root.proc.join("stat"), &mut buf, PROC_STAT_MAX).is_ok() {
+            g.btime = buf
+                .split(|&b| b == b'\n')
+                .find_map(|line| line.strip_prefix(b"btime "))
+                .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse().ok());
+        }
+    }
+    g.btime
+}
+
+/// True when a thread other than the leader has a `Cpus_allowed_list` that differs from
+/// `leader`. Threads that exit during the walk are skipped.
+fn threads_differ(
+    pid_dir: BorrowedFd<'_>,
+    pid: u32,
+    leader: &[u8],
+    buf: &mut Vec<u8>,
+    status: &mut PidStatus,
+) -> bool {
+    let Ok(task) = rustix::fs::openat(
+        pid_dir,
+        "task",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    let Ok(dir) = Dir::read_from(&task) else {
+        return false;
+    };
+    for entry in dir {
+        let Ok(entry) = entry else {
+            break;
+        };
+        let Some(tid) = std::str::from_utf8(entry.file_name().to_bytes())
+            .ok()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if tid == pid {
+            continue;
+        }
+        let path = format!("{tid}/status");
+        if read_at(task.as_fd(), &path, buf, STATUS_READ_MAX).is_ok()
+            && parse_status(buf, status).is_ok()
+            && status.cpus_allowed_list.trim_ascii() != leader.trim_ascii()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Reads the General tab of `key` (PROC-078). `Err` is the validity of a tab without data: the
+/// process is gone, or its directory, `stat` or `status` cannot be read. A field whose own file
+/// cannot be read gets the validity of that error, so EACCES gives `Restricted` for that field
+/// only.
+fn read_general(
+    root: &SysRoot,
+    paths: Option<&AppPaths>,
+    key: ProcessKey,
+    ticks_per_sec: u64,
+    g: &mut GeneralReader,
+    bufs: &mut ReadBufs,
+) -> Result<GeneralRead, Validity> {
+    let dir = rustix::fs::open(
+        root.proc.join(key.pid.to_string()),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| error_validity(&CollectError::from(e)))?;
+    let dir = dir.as_fd();
+    // The directory fd pins the process, so a start time that matches here holds for every
+    // file read below.
+    let stat = read_at(dir, "stat", &mut bufs.small, SMALL_FILE_LIMIT)
+        .and_then(|_| parse_pid_stat(&bufs.small, &mut g.stat));
+    if let Err(e) = stat {
+        tracing::debug!(error = %e, "general tab: stat not read");
+        return Err(error_validity(&e));
+    }
+    if g.stat.start_ticks != key.start_ticks {
+        return Err(Validity::Missing);
+    }
+    let status = read_at(dir, "status", &mut bufs.small, STATUS_READ_MAX)
+        .and_then(|_| parse_status(&bufs.small, &mut g.status));
+    if let Err(e) = status {
+        tracing::debug!(error = %e, "general tab: status not read");
+        return Err(error_validity(&e));
+    }
+    let ticks = ticks_per_sec.max(1);
+    let started_s = match boot_time(root, g) {
+        Some(btime) => valid(
+            i64::try_from(btime.saturating_add(g.stat.start_ticks / ticks)).unwrap_or(i64::MAX),
+        ),
+        None => total(0, Validity::Failed),
+    };
+    if g.location.is_none() {
+        g.location = Some(location_ctx(paths));
+    }
+
+    // Affinity from the leader's `Cpus_allowed_list`.
+    let affinity =
+        if parse_cpu_list(&g.status.cpus_allowed_list, &mut g.cpus).is_ok() && !g.cpus.is_empty() {
+            let mut set = CpuSet::empty();
+            for &cpu in &g.cpus {
+                set.insert(cpu);
+            }
+            valid(set)
+        } else {
+            total(CpuSet::empty(), Validity::Unsupported)
+        };
+    let affinity_threads_differ = affinity.validity == Validity::Valid
+        && g.stat.num_threads > 1
+        && threads_differ(
+            dir,
+            key.pid,
+            &g.status.cpus_allowed_list,
+            &mut bufs.small,
+            &mut g.thread_status,
+        );
+
+    let (stat, status) = (&g.stat, &g.status);
+    let kernel_prio = match i32::try_from(stat.priority.saturating_add(100)) {
+        Ok(prio) => valid(prio),
+        Err(_) => total(0, Validity::Failed),
+    };
+    let autogroup = match rd::read_autogroup(dir, &mut bufs.small) {
+        Some((id, nice)) => valid((Arc::from(format!("autogroup-{id}")), nice)),
+        None => total((Arc::from(""), 0), Validity::Unsupported),
+    };
+
+    // ELF hardening of the executable the process runs.
+    let elf = rustix::fs::openat(dir, "exe", OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
+        .map_err(CollectError::from)
+        .and_then(|file| rd::read_elf(file.as_fd(), &mut bufs.small));
+    let (pie, nx_stack, relro, architecture) = match elf {
+        Ok(info) => (
+            valid(info.pie),
+            valid(info.nx_stack),
+            valid(match info.relro {
+                rd::Relro::Full => Relro::Full,
+                rd::Relro::Partial => Relro::Partial,
+                rd::Relro::None => Relro::None,
+            }),
+            valid(elf_arch(info.machine)),
+        ),
+        Err(CollectError::NotElf) => (
+            total(false, Validity::Unsupported),
+            total(false, Validity::Unsupported),
+            total(Relro::None, Validity::Unsupported),
+            valid(ElfArch::Unknown),
+        ),
+        Err(e) => {
+            let v = exe_validity(&e);
+            (
+                total(false, v),
+                total(false, v),
+                total(Relro::None, v),
+                total(ElfArch::Unknown, v),
+            )
+        }
+    };
+    let shadow_stack = match rd::shadow_stack(status.x86_thread_features.as_deref()) {
+        ShadowStack::Enabled => valid(true),
+        ShadowStack::Disabled => valid(false),
+        ShadowStack::NotSupported => total(false, Validity::Unsupported),
+    };
+    let aslr_system = match read_file(
+        &root.proc.join("sys/kernel/randomize_va_space"),
+        &mut bufs.small,
+        SMALL_FILE_LIMIT,
+    ) {
+        Ok(_) => match bufs.small.trim_ascii() {
+            b"0" => valid(0),
+            b"1" => valid(1),
+            b"2" => valid(2),
+            _ => total(0, Validity::Unsupported),
+        },
+        Err(_) => total(0, Validity::Unsupported),
+    };
+    let aslr_disabled_for_process = match read_at(dir, "personality", &mut bufs.small, 64) {
+        Ok(_) => std::str::from_utf8(bufs.small.trim_ascii())
+            .ok()
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+            .map_or(total(false, Validity::Failed), |p| {
+                valid(p & rd::ADDR_NO_RANDOMIZE != 0)
+            }),
+        Err(e) => total(false, error_validity(&e)),
+    };
+    let no_new_privs = match status.no_new_privs {
+        Some(on) => valid(on),
+        None => total(false, Validity::Unsupported),
+    };
+
+    // Executable path and its Location category.
+    bufs.small.clear();
+    bufs.small.resize(EXE_LINK_MAX + 1, 0);
+    let (exe, exe_deleted, location) =
+        match rustix::fs::readlinkat_raw(dir, "exe", &mut bufs.small[..]) {
+            Ok(n) => {
+                bufs.small.truncate(n);
+                sanitize_link(&bufs.small, &mut bufs.text);
+                let deleted = bufs.text.ends_with(DELETED_SUFFIX);
+                let ctx = g.location.as_ref().expect("location context made above");
+                let location = exe_location(rd::location(&bufs.text, deleted, ctx));
+                (
+                    valid(Arc::from(bufs.text.as_str())),
+                    deleted,
+                    valid(location),
+                )
+            }
+            Err(e) => {
+                let v = exe_validity(&CollectError::from(e));
+                (total(Arc::from(""), v), false, total(ExeLocation::Other, v))
+            }
+        };
+
+    let cwd = link_total(rd::read_cwd(dir, &mut bufs.small));
+    let root_dir = link_total(rd::read_root(dir, &mut bufs.small));
+
+    // Cgroup, systemd unit and app id from the `0::` line.
+    let cgroup_path = match read_at(dir, "cgroup", &mut bufs.small, SMALL_FILE_LIMIT) {
+        Ok((_, false)) => parse_cgroup_file(&bufs.small),
+        _ => None,
+    };
+    let (cgroup, unit, app_id) = match &cgroup_path {
+        Some(path) => {
+            let unit = path.unit.as_deref().map(|name| {
+                unescape_unit(name, &mut bufs.text);
+                UnitRef {
+                    manager: match placement(path) {
+                        UserPlacement::InUserManager { .. } => Manager::User,
+                        _ => Manager::System,
+                    },
+                    name: Arc::from(bufs.text.as_str()),
+                }
+            });
+            let app_id = app_slice_unit(path, status.uid[0])
+                .and_then(parse_app_unit)
+                .map(|id| id.app_id);
+            (Some(Arc::from(format!("/{}", path.rel))), unit, app_id)
+        }
+        None => (None, None, None),
+    };
+
+    let cmdline = match read_at(dir, "cmdline", &mut bufs.cmdline, CMDLINE_MAX + 1) {
+        Ok(_) => {
+            sanitize_cmdline(&bufs.cmdline, &mut bufs.text);
+            // Kernel threads have an empty command line.
+            let validity = if bufs.text.is_empty() {
+                Validity::Unsupported
+            } else {
+                Validity::Valid
+            };
+            total(Arc::from(bufs.text.as_str()), validity)
+        }
+        Err(e) => total(Arc::from(""), error_validity(&e)),
+    };
+    let handles = match fd_count(dir) {
+        FdCount::Count(n) => valid(n),
+        FdCount::Restricted => total(0, Validity::Restricted),
+        FdCount::Gone => total(0, Validity::Missing),
+    };
+    let io = match read_io(dir, &mut bufs.small) {
+        Ok(IoRead::Ok(io)) => valid(io),
+        Ok(IoRead::Restricted) => total(PidIo::default(), Validity::Restricted),
+        Ok(IoRead::Gone) => total(PidIo::default(), Validity::Missing),
+        Err(_) => total(PidIo::default(), Validity::Failed),
+    };
+    let bytes = |value: Option<u64>| value.map_or(total(0, Validity::Unsupported), valid);
+    let cpu_ticks = stat.utime.saturating_add(stat.stime);
+
+    Ok(GeneralRead {
+        started_s,
+        uids: status.uid,
+        policy: sched_policy(stat.policy),
+        rt_prio: u8::try_from(stat.rt_priority).unwrap_or(u8::MAX),
+        kernel_prio,
+        autogroup,
+        affinity,
+        affinity_threads_differ,
+        pie,
+        nx_stack,
+        relro,
+        shadow_stack,
+        aslr_system,
+        aslr_disabled_for_process,
+        no_new_privs,
+        seccomp: seccomp_total(status.seccomp, status.seccomp_filters),
+        architecture,
+        exe,
+        exe_deleted,
+        location,
+        cwd,
+        root: root_dir,
+        cgroup,
+        unit,
+        app_id,
+        cmdline,
+        handles,
+        rss_shared_bytes: bytes(ws_shared_bytes(status)),
+        commit_bytes: bytes(commit_bytes(status)),
+        cpu_time_ms: valid(cpu_ticks.saturating_mul(1000) / ticks),
+        io,
+    })
+}
+
+/// The General payload of one read. `users` turns the uids into names.
+fn general_detail(r: &GeneralRead, users: &mut dyn UserNames) -> GeneralDetail {
+    let io = |value: fn(&PidIo) -> u64| total(value(&r.io.value), r.io.validity);
+    GeneralDetail {
+        started_s: r.started_s,
+        uids: valid(triple(r.uids)),
+        uid_names: valid((
+            users.name(r.uids[0]),
+            users.name(r.uids[1]),
+            users.name(r.uids[2]),
+        )),
+        policy: valid(r.policy),
+        rt_prio: r.rt_prio,
+        kernel_prio: r.kernel_prio,
+        autogroup: r.autogroup.clone(),
+        affinity: r.affinity,
+        affinity_threads_differ: r.affinity_threads_differ,
+        pie: r.pie,
+        nx_stack: r.nx_stack,
+        relro: r.relro,
+        shadow_stack: r.shadow_stack,
+        aslr_system: r.aslr_system,
+        aslr_disabled_for_process: r.aslr_disabled_for_process,
+        no_new_privs: r.no_new_privs,
+        seccomp: r.seccomp,
+        architecture: r.architecture,
+        exe: r.exe.clone(),
+        exe_deleted: r.exe_deleted,
+        location: r.location,
+        // The package index fills these in a later bead.
+        package: total(None, Validity::Unsupported),
+        description: total(Arc::from(""), Validity::Unsupported),
+        cwd: r.cwd.clone(),
+        root: r.root.clone(),
+        cgroup: r.cgroup.clone(),
+        unit: r.unit.clone(),
+        app_id: r.app_id.clone(),
+        cmdline: r.cmdline.clone(),
+        // E10-005 (tasklens-dwy.8) fills the hashes and the package check.
+        hashes: HashState::Pending,
+        package_check: PackageCheck::NotVerified,
+        handles: r.handles,
+        rss_shared_bytes: r.rss_shared_bytes,
+        commit_bytes: r.commit_bytes,
+        cpu_time_ms: r.cpu_time_ms,
+        io_rchar: io(|io| io.rchar),
+        io_wchar: io(|io| io.wchar),
+        io_syscr: io(|io| io.syscr),
+        io_syscw: io(|io| io.syscw),
+        disk_read_bytes: io(|io| io.read_bytes),
+        disk_write_bytes: io(|io| io.write_bytes),
+        cancelled_write_bytes: io(|io| io.cancelled_write_bytes),
+        // GPU values are not read by this worker.
+        gpu_mem_shared_bytes: total(0, Validity::Unsupported),
+        gpu_engine: total(None, Validity::Unsupported),
+    }
+}
+
+/// A General payload with no data: every field carries `validity`.
+fn empty_general(validity: Validity) -> GeneralDetail {
+    let text = || -> Total<Arc<str>> { total(Arc::from(""), validity) };
+    let ids = IdTriple {
+        real: 0,
+        effective: 0,
+        saved: 0,
+        fs: 0,
+    };
+    GeneralDetail {
+        started_s: total(0, validity),
+        uids: total(ids, validity),
+        uid_names: total((Arc::from(""), Arc::from(""), Arc::from("")), validity),
+        policy: total(SchedPolicy::Other, validity),
+        rt_prio: 0,
+        kernel_prio: total(0, validity),
+        autogroup: total((Arc::from(""), 0), validity),
+        affinity: total(CpuSet::empty(), validity),
+        affinity_threads_differ: false,
+        pie: total(false, validity),
+        nx_stack: total(false, validity),
+        relro: total(Relro::None, validity),
+        shadow_stack: total(false, validity),
+        aslr_system: total(0, validity),
+        aslr_disabled_for_process: total(false, validity),
+        no_new_privs: total(false, validity),
+        seccomp: total(Seccomp::Disabled, validity),
+        architecture: total(ElfArch::Unknown, validity),
+        exe: text(),
+        exe_deleted: false,
+        location: total(ExeLocation::Other, validity),
+        package: total(None, validity),
+        description: text(),
+        cwd: text(),
+        root: text(),
+        cgroup: None,
+        unit: None,
+        app_id: None,
+        cmdline: text(),
+        hashes: HashState::Pending,
+        package_check: PackageCheck::NotVerified,
+        handles: total(0, validity),
+        rss_shared_bytes: total(0, validity),
+        commit_bytes: total(0, validity),
+        cpu_time_ms: total(0, validity),
+        io_rchar: total(0, validity),
+        io_wchar: total(0, validity),
+        io_syscr: total(0, validity),
+        io_syscw: total(0, validity),
+        disk_read_bytes: total(0, validity),
+        disk_write_bytes: total(0, validity),
+        cancelled_write_bytes: total(0, validity),
+        gpu_mem_shared_bytes: total(0, validity),
+        gpu_engine: total(None, validity),
+    }
+}
 fn empty_security(validity: Validity) -> SecurityDetail {
     let ids = IdTriple {
         real: 0,
@@ -1455,9 +2130,21 @@ mod tests {
 
     type TabOut = (DetailTab, Arc<TabPayload>, Validity);
 
+    /// `step_all` without the General updates, which go out beside every demanded tab.
+    fn step(
+        src: ProcessDetailSource,
+        d: &Demand,
+        s: &EngineSettings,
+        now_ms: u64,
+    ) -> (ProcessDetailSource, Vec<TabOut>, SourceUpdate) {
+        let (src, mut out, update) = step_all(src, d, s, now_ms);
+        out.retain(|(tab, _, _)| *tab != DetailTab::General);
+        (src, out, update)
+    }
+
     /// `period`, `sample_at(now_ms)`, then every update the loop would send: the tab updates
     /// in order and the sample's own update.
-    fn step(
+    fn step_all(
         src: ProcessDetailSource,
         d: &Demand,
         s: &EngineSettings,
@@ -1495,7 +2182,7 @@ mod tests {
         }
     }
 
-    /// E10-004 AC 1. General moved to tasklens-dwy.13, so only Threads is read here.
+    /// E10-004 AC 1: the demanded tab and General are read at the interval.
     #[test]
     fn tabs_read_at_interval_plus_general() {
         let (_tmp, cfg) = edge_root();
@@ -1508,7 +2195,11 @@ mod tests {
             src = next;
         }
         for tab in DetailTab::ALL {
-            let want = if tab == DetailTab::Threads { 4 } else { 0 };
+            let want = if matches!(tab, DetailTab::Threads | DetailTab::General) {
+                4
+            } else {
+                0
+            };
             assert_eq!(src.tab_reads(tab), want, "{tab:?}");
         }
     }
@@ -2223,5 +2914,282 @@ mod tests {
                 ("wheel", 998, false, true, false),
             ]
         );
+    }
+
+    // ---- General tab (tasklens-dwy.13) ----
+
+    /// `btime` in the General fixture's `proc/stat`.
+    const BTIME: i64 = 1_700_000_000;
+
+    /// `edge_root` plus the files the General tab reads that process-edge lacks, a passwd entry
+    /// for uid 1000, 100 ticks per second and a fixed Location context.
+    fn general_src() -> (tempfile::TempDir, ProcessDetailSource) {
+        let (tmp, cfg) = edge_root();
+        let base = tmp.path();
+        fs::write(
+            base.join("proc/stat"),
+            format!("cpu  1 2 3 4 5 6 7 8 9 10\nintr 1 2 3\nbtime {BTIME}\n"),
+        )
+        .expect("write proc/stat");
+        fs::create_dir_all(base.join("proc/sys/kernel")).expect("create proc/sys/kernel");
+        fs::write(base.join("proc/sys/kernel/randomize_va_space"), b"2\n").expect("write aslr");
+        fs::write(base.join("proc/4201/personality"), b"00040000\n").expect("write personality");
+        fs::write(base.join("proc/4201/autogroup"), b"/autogroup-12 nice 0\n")
+            .expect("write autogroup");
+        fs::write(
+            base.join("etc/passwd"),
+            b"user1:x:1000:1000::/home/user1:/bin/sh\n",
+        )
+        .expect("write passwd");
+        let mut src = ProcessDetailSource::new(cfg);
+        src.ticks_per_sec = 100;
+        src.general.location = Some(LocationCtx {
+            home: "/home/user1".into(),
+            runtime_dir: Some("/run/user/1000".into()),
+            downloads: Some("/home/user1/Downloads".into()),
+        });
+        (tmp, src)
+    }
+
+    /// The General payload in `out` and its validity.
+    fn general(out: &[TabOut]) -> (Arc<GeneralDetail>, Validity) {
+        out.iter()
+            .find_map(|(tab, payload, validity)| match (tab, &**payload) {
+                (DetailTab::General, TabPayload::General(g)) => Some((Arc::clone(g), *validity)),
+                _ => None,
+            })
+            .expect("a General payload")
+    }
+
+    fn relink_exe(tmp: &tempfile::TempDir, target: &Path) {
+        let link = tmp.path().join("proc/4201/exe");
+        fs::remove_file(&link).expect("remove exe link");
+        std::os::unix::fs::symlink(target, &link).expect("create exe link");
+    }
+
+    /// General is read beside another tab, first, with the PROC-078 fields from the fixture.
+    #[test]
+    fn general_fields_from_fixture() {
+        let (_tmp, src) = general_src();
+        let d = tabs(&[(a(), DetailTab::Threads)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        let sent: Vec<DetailTab> = out.iter().map(|(tab, _, _)| *tab).collect();
+        assert_eq!(sent, vec![DetailTab::General, DetailTab::Threads]);
+        let (g, validity) = general(&out);
+        assert_eq!(validity, Validity::Valid);
+
+        // Started, user and priority.
+        assert_eq!(g.started_s, valid(BTIME + 3512));
+        assert_eq!(g.uids.value.real, 1000);
+        assert_eq!(&*g.uid_names.value.0, "user1");
+        assert_eq!(g.policy, valid(SchedPolicy::Other));
+        assert_eq!(g.rt_prio, 0);
+        assert_eq!(g.kernel_prio, valid(120));
+        assert_eq!(&*g.autogroup.value.0, "autogroup-12");
+        assert_eq!(g.autogroup.value.1, 0);
+        assert_eq!(g.autogroup.validity, Validity::Valid);
+
+        // Affinity 0-7,16-23; thread 4211 has 8-11.
+        assert_eq!(g.affinity.validity, Validity::Valid);
+        assert_eq!(g.affinity.value.count(), 16);
+        assert!(g.affinity.value.contains(0) && g.affinity.value.contains(23));
+        assert!(!g.affinity.value.contains(8));
+        assert!(g.affinity_threads_differ);
+
+        // Hardening from status, the ASLR setting and the personality.
+        assert_eq!(g.shadow_stack, valid(true));
+        assert_eq!(g.aslr_system, valid(2));
+        assert_eq!(g.aslr_disabled_for_process, valid(true));
+        assert_eq!(g.no_new_privs, valid(true));
+        assert_eq!(g.seccomp, valid(Seccomp::Filter { filters: 3 }));
+
+        // Paths, cgroup, unit and app id.
+        assert_eq!(&*g.exe.value, "/usr/lib/firefox/firefox");
+        assert!(!g.exe_deleted);
+        assert_eq!(g.location, valid(ExeLocation::System));
+        assert_eq!(&*g.cwd.value, "/home/user1");
+        assert_eq!(g.cwd.validity, Validity::Valid);
+        assert_eq!(&*g.root.value, "/");
+        assert_eq!(
+            g.cgroup.as_deref(),
+            Some(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@3a1b.service"
+            )
+        );
+        assert_eq!(
+            g.unit,
+            Some(UnitRef {
+                manager: Manager::User,
+                name: Arc::from("app-firefox@3a1b.service"),
+            })
+        );
+        assert_eq!(g.app_id.as_deref(), Some("firefox"));
+        assert_eq!(&*g.cmdline.value, "firefox -P default");
+        assert_eq!(g.cmdline.validity, Validity::Valid);
+
+        // Memory, CPU time, I/O and disk counters.
+        assert_eq!(g.handles.validity, Validity::Valid);
+        assert_eq!(g.rss_shared_bytes, valid((198_520 + 45_182) * 1024));
+        assert_eq!(g.commit_bytes, valid((100 + 132) * 1024));
+        assert_eq!(g.cpu_time_ms, valid((8812 + 1204) * 10));
+        assert_eq!(g.io_rchar, valid(48_213_377));
+        assert_eq!(g.io_wchar, valid(9_120_044));
+        assert_eq!(g.io_syscr, valid(61_204));
+        assert_eq!(g.io_syscw, valid(18_840));
+        assert_eq!(g.disk_read_bytes, valid(31_571_968));
+        assert_eq!(g.disk_write_bytes, valid(6_627_328));
+        assert_eq!(g.cancelled_write_bytes, valid(1_048_576));
+        // Left to E10-005.
+        assert_eq!(g.hashes, HashState::Pending);
+    }
+
+    /// The ELF hardening and architecture of a real executable: this test binary.
+    #[test]
+    fn general_elf_hardening() {
+        let (tmp, src) = general_src();
+        relink_exe(&tmp, &std::env::current_exe().expect("test binary path"));
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        let (g, _) = general(&out);
+        assert_eq!(g.pie.validity, Validity::Valid);
+        assert_eq!(g.relro.validity, Validity::Valid);
+        assert_eq!(g.nx_stack, valid(true));
+        let arch = if cfg!(target_arch = "x86_64") {
+            ElfArch::X86_64
+        } else if cfg!(target_arch = "aarch64") {
+            ElfArch::AArch64
+        } else {
+            ElfArch::Unknown
+        };
+        assert_eq!(g.architecture, valid(arch));
+    }
+
+    /// A deleted executable keeps the kernel's suffix and is in the Deleted location. Its ELF
+    /// cannot be opened, so the hardening rows are "Not reported".
+    #[test]
+    fn general_deleted_exe() {
+        let (tmp, src) = general_src();
+        relink_exe(&tmp, Path::new("/home/user1/bin/app (deleted)"));
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        let (g, _) = general(&out);
+        assert_eq!(&*g.exe.value, "/home/user1/bin/app (deleted)");
+        assert!(g.exe_deleted);
+        assert_eq!(g.location, valid(ExeLocation::Deleted));
+        assert_eq!(g.pie.validity, Validity::Unsupported);
+    }
+
+    /// Realtime: stat priority -51 is kernel prio 49.
+    #[test]
+    fn general_realtime_priority() {
+        let (tmp, src) = general_src();
+        let stat = std::str::from_utf8(STAT)
+            .expect("stat is text")
+            .replace(" 20 0 27 0 351220 ", " -51 0 27 0 351220 ")
+            .replace(" 17 3 0 0 ", " 17 3 50 1 ");
+        fs::write(tmp.path().join("proc/4201/stat"), stat).expect("rewrite stat");
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        let (g, _) = general(&out);
+        assert_eq!(g.policy, valid(SchedPolicy::Fifo));
+        assert_eq!(g.rt_prio, 50);
+        assert_eq!(g.kernel_prio, valid(49));
+    }
+
+    /// EACCES on a field's own file makes that field `Restricted`; the tab stays `Valid`.
+    #[test]
+    fn general_restricted_fields() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skipped: running as root");
+            return;
+        }
+        let (tmp, src) = general_src();
+        for file in ["io", "personality", "cmdline"] {
+            let path = tmp.path().join("proc/4201").join(file);
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        }
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        let (g, validity) = general(&out);
+        assert_eq!(validity, Validity::Valid);
+        assert_eq!(g.io_rchar.validity, Validity::Restricted);
+        assert_eq!(g.disk_read_bytes.validity, Validity::Restricted);
+        assert_eq!(g.aslr_disabled_for_process.validity, Validity::Restricted);
+        assert_eq!(g.cmdline.validity, Validity::Restricted);
+        assert_eq!(g.uids.validity, Validity::Valid);
+        assert_eq!(g.cpu_time_ms.validity, Validity::Valid);
+    }
+
+    /// An unchanged General keeps its `Arc`. An open notice resends it, a changed file sends a
+    /// new payload, and a user refresh reads it again.
+    #[test]
+    fn general_change_detection_and_notices() {
+        let (tmp, src) = general_src();
+        let d = tabs(&[(a(), DetailTab::Threads)]);
+        let s = every_ms(500);
+        let (mut src, out, _) = step_all(src, &d, &s, 0);
+        let (first, _) = general(&out);
+
+        // The reducer's notice for the Threads tab resends General.
+        opened(&mut src, DetailTab::Threads);
+        let (src, out, _) = step_all(src, &d, &s, 500);
+        let (resent, _) = general(&out);
+        assert!(Arc::ptr_eq(&first, &resent));
+
+        let (src, out, _) = step_all(src, &d, &s, 1000);
+        assert!(out.iter().all(|(tab, _, _)| *tab != DetailTab::General));
+
+        let io = fs::read_to_string(tmp.path().join("proc/4201/io")).expect("read io");
+        fs::write(
+            tmp.path().join("proc/4201/io"),
+            io.replace("rchar: 48213377", "rchar: 50000000"),
+        )
+        .expect("rewrite io");
+        let (mut src, out, _) = step_all(src, &d, &s, 1500);
+        let (changed, _) = general(&out);
+        assert_eq!(changed.io_rchar, valid(50_000_000));
+
+        // A user refresh of General drops its state, so the same values go out again.
+        user_refresh(&mut src, DetailTab::General);
+        let (_src, out, _) = step_all(src, &d, &s, 1600);
+        let (refreshed, _) = general(&out);
+        assert!(!Arc::ptr_eq(&changed, &refreshed));
+        assert_eq!(refreshed.io_rchar, valid(50_000_000));
+    }
+
+    /// An exited process keeps its last General values as `Missing`, so the window shows the
+    /// exited state.
+    #[test]
+    fn general_gone_is_missing() {
+        let (tmp, src) = general_src();
+        let d = tabs(&[(a(), DetailTab::Fds)]);
+        let s = every_ms(500);
+        let (src, out, _) = step_all(src, &d, &s, 0);
+        let (first, _) = general(&out);
+        fs::remove_dir_all(tmp.path().join("proc/4201")).expect("remove process");
+        let (_src, out, _) = step_all(src, &d, &s, 500);
+        let (gone, validity) = general(&out);
+        assert_eq!(validity, Validity::Missing);
+        assert!(Arc::ptr_eq(&first, &gone));
+    }
+
+    #[test]
+    fn download_dir_from_user_dirs() {
+        let file =
+            b"# comment\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Downloads\"\n";
+        assert_eq!(
+            download_dir(file, "/home/u").as_deref(),
+            Some("/home/u/Downloads")
+        );
+        assert_eq!(
+            download_dir(b"XDG_DOWNLOAD_DIR=\"/data/dl/\"\n", "/home/u").as_deref(),
+            Some("/data/dl")
+        );
+        assert_eq!(
+            download_dir(b"XDG_DOWNLOAD_DIR=\"$HOME/\"\n", "/home/u"),
+            None
+        );
+        assert_eq!(download_dir(b"XDG_DOWNLOAD_DIR=\"dl\"\n", "/home/u"), None);
+        assert_eq!(download_dir(b"", "/home/u"), None);
     }
 }

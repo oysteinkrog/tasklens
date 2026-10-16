@@ -402,3 +402,44 @@ fn engine_reopened_tabs_between_polls_publish_again() {
     );
     stop(fl, ui, handle);
 }
+
+fn general_rchar(slot: &TabSlot) -> u64 {
+    match slot.payload.as_deref() {
+        Some(TabPayload::General(g)) => {
+            assert_eq!(g.io_rchar.validity, Validity::Valid);
+            g.io_rchar.value
+        }
+        other => panic!("expected a General payload, got {other:?}"),
+    }
+}
+
+/// tasklens-dwy.13: General reaches the snapshot beside the demanded tab. An unchanged General
+/// keeps its `Arc` and version, and a rewritten `io` file gives a new payload.
+#[test]
+fn engine_general_follows_fixture_changes() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    let (mut fl, ui, handle) = start_detail_engine(&root, 500);
+    ui.demand_tx
+        .send(tab_demand(DetailTab::Threads))
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+    let first = slot(&ui, DetailTab::General);
+    assert_eq!(first.validity, Validity::Valid);
+    assert_eq!(general_rchar(&first), 48_213_377);
+
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+    let same = slot(&ui, DetailTab::General);
+    assert_eq!(same.version, first.version);
+    assert!(Arc::ptr_eq(
+        same.payload.as_ref().expect("payload"),
+        first.payload.as_ref().expect("payload")
+    ));
+
+    let io = fs::read_to_string(root.pid_dir(4201).join("io")).expect("read io");
+    root.write(4201, "io", io.replace("rchar: 48213377", "rchar: 50000000"));
+    fl.run_for(Duration::from_secs(1), Duration::from_millis(10));
+    let changed = slot(&ui, DetailTab::General);
+    assert_eq!(general_rchar(&changed), 50_000_000);
+    assert!(changed.version > first.version);
+    stop(fl, ui, handle);
+}
