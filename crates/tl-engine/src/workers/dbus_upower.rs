@@ -1134,7 +1134,7 @@ mod tests {
     use crate::source::{QueuedCommand, WorkerControl};
 
     const BAT_PATH: &str = "/org/freedesktop/UPower/devices/battery_BAT0";
-    const MOUSE_PATH: &str = "/org/freedesktop/UPower/devices/mouse_hidpp_battery_0";
+    const LINE_PATH: &str = "/org/freedesktop/UPower/devices/line_power_AC";
 
     fn fixture_sys() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/power-supply-bat0/sys")
@@ -1678,11 +1678,11 @@ mod tests {
     fn properties_changed_resends() {
         let connector = FakeConnector::default();
         let fake = Arc::clone(&connector.0);
-        let mut mouse = discharging();
-        mouse.insert("PowerSupply".into(), OwnedValue::from(false));
+        let mut line = discharging();
+        line.insert("Type".into(), OwnedValue::from(1u32));
         fake.lock().expect("fake lock").devices = Some(BTreeMap::from([
             (BAT_PATH.to_owned(), discharging()),
-            (MOUSE_PATH.to_owned(), mouse),
+            (LINE_PATH.to_owned(), line),
         ]));
         let mut rig = Rig::start(connector);
 
@@ -1720,9 +1720,7 @@ mod tests {
             let devices = state.devices.as_mut().expect("devices");
             let bat = devices.get_mut(BAT_PATH).expect("battery");
             bat.insert("Percentage".into(), OwnedValue::from(80.0f64));
-            state
-                .events
-                .push_back(Event::Changed(MOUSE_PATH.to_owned()));
+            state.events.push_back(Event::Changed(LINE_PATH.to_owned()));
             state.events.push_back(Event::Changed(BAT_PATH.to_owned()));
         }
         rig.advance(IDLE_RECHECK);
