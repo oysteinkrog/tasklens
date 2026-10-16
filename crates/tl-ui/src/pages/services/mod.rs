@@ -24,9 +24,9 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, Styled as _, Subscription, Task, WeakEntity, Window, div, point,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, DismissEvent, Entity, EventEmitter,
+    FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    Styled as _, Subscription, Task, WeakEntity, Window, div, point,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};

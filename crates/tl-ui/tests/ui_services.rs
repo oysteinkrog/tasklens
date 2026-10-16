@@ -3114,7 +3114,7 @@ mod page {
         ] {
             let b = rig
                 .vcx
-                .debug_bounds(&format!("TlButton-{id}"))
+                .debug_bounds(format!("TlButton-{id}").leak())
                 .unwrap_or_else(|| panic!("{id} drawn"));
             assert!(b.origin.x > last_x, "{id} is right of the one before");
             assert!(
@@ -3146,7 +3146,7 @@ mod page {
         ] {
             let b = rig
                 .vcx
-                .debug_bounds(&format!("TlTreeTableHeader-label-{key}"))
+                .debug_bounds(format!("TlTreeTableHeader-label-{key}").leak())
                 .unwrap_or_else(|| panic!("{key} header drawn"));
             assert!(b.origin.x > last_x, "{key} is in column order");
             last_x = b.origin.x;
