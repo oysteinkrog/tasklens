@@ -6,8 +6,10 @@
 //! every built tab view with `set_details`.
 
 mod general;
+mod logon;
 
 pub use general::GeneralTab;
+pub use logon::LogOnTab;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -190,10 +192,11 @@ fn create_tab(
                 cx.new(|cx| GeneralTab::new(input.unit, input.actions, input.parent, window, cx));
             Some(TabSlot::new(view))
         }
-        ServicePropsTab::LogOn
-        | ServicePropsTab::Recovery
-        | ServicePropsTab::Dependencies
-        | ServicePropsTab::Logs => None,
+        ServicePropsTab::LogOn => {
+            let view = cx.new(LogOnTab::new);
+            Some(TabSlot::new(view))
+        }
+        ServicePropsTab::Recovery | ServicePropsTab::Dependencies | ServicePropsTab::Logs => None,
     }
 }
 
@@ -621,6 +624,13 @@ impl ServicePropertiesWindow {
     pub fn general_tab(&self) -> Option<Entity<GeneralTab>> {
         let slot = self.tabs[ServicePropsTab::General.index()].as_ref()?;
         slot.view.clone().downcast::<GeneralTab>().ok()
+    }
+
+    /// The Log On tab view, once built.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn logon_tab(&self) -> Option<Entity<LogOnTab>> {
+        let slot = self.tabs[ServicePropsTab::LogOn.index()].as_ref()?;
+        slot.view.clone().downcast::<LogOnTab>().ok()
     }
 
     /// Puts `view` in the slot of `tab`, in place of a tab bead's view.

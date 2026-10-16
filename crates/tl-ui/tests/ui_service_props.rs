@@ -20,7 +20,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{
-    RecoverySettings, ServiceBackend, ServiceStatus, StartupType, UnitDetails, UnitRecord,
+    PidIds, RecoverySettings, ServiceBackend, ServiceStatus, StartupType, UnitDetails, UnitRecord,
 };
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::validity::Validity;
@@ -32,7 +32,7 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::windows::service_properties::{
-    GeneralTab, ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
+    GeneralTab, LogOnTab, ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
 };
 
 use tl_ui::pages::services::actions::ServicePropsOk;
@@ -1040,4 +1040,153 @@ fn general_long_path_clamps_to_three_lines(cx: &mut TestAppContext) {
         long <= short * 3.0 + gpui_kit::px(1.),
         "a long path is clamped to three lines: {long:?} vs {short:?}"
     );
+}
+
+struct LogOn {
+    engine: Arc<FakeEngine>,
+    _main: VisualTestContext,
+    tab: Entity<LogOnTab>,
+}
+
+/// Opens sshd.service on Log On with `d` published, or with no details.
+fn open_logon(cx: &mut TestAppContext, d: Option<Arc<UnitDetails>>) -> LogOn {
+    let (engine, main) = setup(cx);
+    let mut map = HashMap::new();
+    if let Some(d) = d {
+        map.insert(unit("sshd.service"), d);
+    }
+    publish(
+        cx,
+        &engine,
+        &["sshd.service"],
+        &map,
+        ServiceBackend::Systemd,
+    );
+    let handle = open(cx, "sshd.service", ServicePropsTab::LogOn).expect("opened");
+    let win = view(cx, handle);
+    let tab = cx
+        .read(|cx| win.read(cx).logon_tab())
+        .expect("the Log On tab is built");
+    LogOn {
+        engine,
+        _main: main,
+        tab,
+    }
+}
+
+impl LogOn {
+    fn publish(&self, cx: &mut TestAppContext, d: Arc<UnitDetails>) {
+        publish(
+            cx,
+            &self.engine,
+            &["sshd.service"],
+            &HashMap::from([(unit("sshd.service"), d)]),
+            ServiceBackend::Systemd,
+        );
+    }
+
+    fn rows(&self, cx: &mut TestAppContext) -> Vec<(String, String)> {
+        cx.read(|cx| {
+            self.tab
+                .read(cx)
+                .rows_for_test(cx)
+                .into_iter()
+                .map(|(l, v)| (l.to_string(), v.to_string()))
+                .collect()
+        })
+    }
+
+    fn value(&self, cx: &mut TestAppContext, label: &str) -> String {
+        self.rows(cx)
+            .into_iter()
+            .find(|(l, _)| l.trim_end_matches(':') == label)
+            .unwrap_or_else(|| panic!("no {label} row"))
+            .1
+    }
+}
+
+#[gpui_kit::test]
+fn logon_missing_shows_not_reported(cx: &mut TestAppContext) {
+    let t = open_logon(cx, None);
+    for (label, value) in t.rows(cx) {
+        assert_eq!(value, "Collecting…", "{label} before the details arrive");
+    }
+
+    t.publish(cx, details("sshd.service"));
+    assert_eq!(t.value(cx, "Log on"), "root");
+    assert_eq!(t.value(cx, "Group"), "Not reported");
+    assert_eq!(t.value(cx, "Supplementary groups"), "Not reported");
+    assert_eq!(t.value(cx, "Runs as"), "Not reported");
+    assert_eq!(t.value(cx, "PAM service"), "Not reported");
+    assert_eq!(t.value(cx, "Manager"), "System manager");
+    assert_eq!(t.value(cx, "Session"), "none");
+    for (label, value) in t.rows(cx) {
+        assert!(!value.contains("N/A"), "{label} reads {value}");
+    }
+}
+
+#[gpui_kit::test]
+fn logon_runs_as_format(cx: &mut TestAppContext) {
+    let t = open_logon(
+        cx,
+        Some(details_with("sshd.service", |d| {
+            d.main_pid_ids = Some(PidIds {
+                uid: 1000,
+                gid: 1000,
+            });
+        })),
+    );
+    assert_eq!(t.value(cx, "Runs as"), "uid 1000, gid 1000");
+
+    t.publish(
+        cx,
+        details_with("sshd.service", |d| {
+            d.main_pid = 0;
+            d.main_pid_ids = None;
+        }),
+    );
+    assert_eq!(t.value(cx, "Runs as"), "Not running");
+}
+
+#[gpui_kit::test]
+fn logon_dynamic_user(cx: &mut TestAppContext) {
+    let t = open_logon(
+        cx,
+        Some(details_with("systemd-timesyncd.service", |d| {
+            d.dynamic_user = true;
+        })),
+    );
+    assert_eq!(t.value(cx, "Log on"), "dynamic user (systemd-timesyncd)");
+
+    t.publish(
+        cx,
+        details_with("systemd-timesyncd.service", |d| {
+            d.dynamic_user = true;
+            d.user = Some(a("timesync"));
+        }),
+    );
+    assert_eq!(t.value(cx, "Log on"), "dynamic user (timesync)");
+}
+
+#[gpui_kit::test]
+fn logon_user_manager(cx: &mut TestAppContext) {
+    let t = open_logon(
+        cx,
+        Some(details_with("sshd.service", |d| {
+            d.manager = Manager::User;
+            d.graphical_session = true;
+            d.group = Some(a("users"));
+            d.supplementary_groups = Arc::from([a("wheel"), a("video")]);
+            d.pam_name = Some(a("systemd-user"));
+        })),
+    );
+    t.tab.update(cx, |tab, cx| {
+        tab.set_user_name_for_test(Some("oystein".into()), cx)
+    });
+    assert_eq!(t.value(cx, "Manager"), "User manager (oystein)");
+    assert_eq!(t.value(cx, "Log on"), "oystein");
+    assert_eq!(t.value(cx, "Session"), "graphical session");
+    assert_eq!(t.value(cx, "Group"), "users");
+    assert_eq!(t.value(cx, "Supplementary groups"), "wheel, video");
+    assert_eq!(t.value(cx, "PAM service"), "systemd-user");
 }

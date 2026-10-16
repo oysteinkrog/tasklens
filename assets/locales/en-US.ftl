@@ -2702,6 +2702,23 @@ services-sys031-startup-transient = Transient
 services-sys031-changes-applied = Changes applied
 services-sys031-link-failed = Could not open the link
 services-sys031-copy-value = Copy value
+# Service Properties, Log On tab (tasklens-hk6.35, UI-SYS-032).
+services-sys032-label-log-on = Log on:
+services-sys032-label-group = Group:
+services-sys032-label-supplementary-groups = Supplementary groups:
+services-sys032-label-runs-as = Runs as:
+services-sys032-label-pam-service = PAM service:
+services-sys032-label-manager = Manager:
+services-sys032-label-session = Session:
+services-sys032-root = root
+services-sys032-dynamic-user = dynamic user ({ $name })
+services-sys032-runs-as = uid { $uid }, gid { $gid }
+services-sys032-not-running = Not running
+services-sys032-manager-system = System manager
+services-sys032-manager-user = User manager ({ $user })
+services-sys032-session-graphical = graphical session
+services-sys032-session-none = none
+services-sys032-copy-value = Copy value
 shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar
