@@ -38,7 +38,7 @@ use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::DiskDetails;
-use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading, ZramTotals};
+use tl_model::system::{FanControlMode, GpuEngine, Metric, SensorKind, SensorReading, ZramTotals};
 use tl_model::validity::Validity;
 
 const SEC: u64 = 1_000_000_000;
@@ -3222,11 +3222,32 @@ fn gpu_drm_fixture_sample() {
     assert_eq!(t.shared_total.validity, Validity::Unsupported);
     assert_eq!(t.fan_pct.validity, Validity::Unsupported);
     assert_eq!(t.enc_pct.validity, Validity::WarmingUp);
+    // No mem_busy_percent file, and JPEG was never named in fdinfo.
+    let engines: Vec<GpuEngine> = t.engines.reported().map(|(e, _)| e).collect();
+    assert_eq!(
+        engines,
+        [
+            GpuEngine::Gpu,
+            GpuEngine::Enc,
+            GpuEngine::Dec,
+            GpuEngine::Compute,
+            GpuEngine::Dma
+        ]
+    );
+    assert_eq!(t.engines.get(GpuEngine::Gpu), Metric::valid(37.0));
+    assert_eq!(
+        t.engines.get(GpuEngine::Compute).validity,
+        Validity::WarmingUp
+    );
+    assert!(!t.fdinfo_partial);
 
     // The set did not change: no new lists, and fdinfo is warm.
     let (mut src, s) = gpu_sample(src, 2 * SEC);
     assert!(gpu_extras(&mut src).is_empty());
-    assert_eq!(s.devices[0].1.enc_pct, Metric::valid(0.0));
+    let t = &s.devices[0].1;
+    assert_eq!(t.enc_pct, Metric::valid(0.0));
+    assert_eq!(t.engines.get(GpuEngine::Compute), Metric::valid(0.0));
+    assert_eq!(t.engines.get(GpuEngine::Dma), Metric::valid(0.0));
 }
 
 #[test]
@@ -3311,6 +3332,15 @@ fn gpu_drm_intel_i915_fixture() {
     assert!((t.power_w.value - 12.0).abs() < 1e-4, "{:?}", t.power_w);
     // Warm, and no fdinfo client on the card.
     assert_eq!(t.util_pct, Metric::valid(0.0));
+    let engines: Vec<(GpuEngine, Metric<f32>)> = t.engines.reported().collect();
+    assert_eq!(
+        engines,
+        [
+            (GpuEngine::Render, Metric::valid(0.0)),
+            (GpuEngine::Copy, Metric::valid(0.0)),
+            (GpuEngine::Video, Metric::valid(0.0)),
+        ]
+    );
 }
 
 #[test]

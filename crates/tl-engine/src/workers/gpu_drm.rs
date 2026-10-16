@@ -7,10 +7,10 @@
 //! and a `GpuInfo` go out through `take_extra` before the sample.
 //!
 //! AMD encode and decode come from the `gpu_metrics` VCN activity when the blob has it, else
-//! from two DRM fdinfo scans. Intel engines, memory, encode and decode always come from fdinfo,
-//! and Intel power from the hwmon energy counter. One fdinfo walk per tick serves every card and
-//! the per-process VRAM rows, which go out while the processes page shows a GPU column or history
-//! records. AMD and Intel cards have no UUID, so their identity is `uuid: [0; 16]` plus the PCI slot
+//! from two DRM fdinfo scans. AMD compute, DMA and JPEG always come from fdinfo (PERF-074). Intel
+//! engines, memory, encode and decode always come from fdinfo, and Intel power from the hwmon
+//! energy counter. One fdinfo walk per tick serves every card and the per-process VRAM rows, which
+//! go out while the processes page shows a GPU column or history records. AMD and Intel cards have no UUID, so their identity is `uuid: [0; 16]` plus the PCI slot
 //! (R-166). Everything here is read-only.
 
 use std::cell::Cell;
@@ -39,7 +39,7 @@ use tl_model::devices::DeviceIdentity;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::EngineSettings;
-use tl_model::system::{GpuTotals, Metric};
+use tl_model::system::{GpuEngine, GpuEngines, GpuTotals, Metric};
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 
@@ -111,7 +111,11 @@ const VRAM_REGIONS: [&str; 3] = ["vram", "vram0", "local0"];
 /// The reader state of one card, reused every sample.
 #[derive(Clone, Debug)]
 enum CardState {
-    Amd(AmdSample),
+    Amd {
+        sample: AmdSample,
+        /// The fdinfo engines seen on this card so far, as a mask of `bit`.
+        seen: u16,
+    },
     Intel {
         drv: IntelDriver,
         sample: IntelSample,
@@ -119,6 +123,8 @@ enum CardState {
         discrete: bool,
         /// `energy_uj` and the time of the last sample; `None` makes the next power `WarmingUp`.
         prev_energy: Option<(u64, TimeNs)>,
+        /// The fdinfo engines seen on this card so far, as a mask of `bit`.
+        seen: u16,
     },
 }
 
@@ -126,7 +132,10 @@ impl CardState {
     /// `None` for a card this worker does not read.
     fn new(root: &SysRoot, card: &DrmCard) -> Option<Self> {
         if card.driver.as_deref() == Some(AMD_DRIVER) {
-            return Some(Self::Amd(AmdSample::default()));
+            return Some(Self::Amd {
+                sample: AmdSample::default(),
+                seen: 0,
+            });
         }
         let drv = IntelDriver::from_card(card)?;
         let device = root.sys.join(format!("class/drm/card{}/device", card.card));
@@ -136,21 +145,14 @@ impl CardState {
             sample: IntelSample::default(),
             discrete,
             prev_energy: None,
+            seen: 0,
         })
     }
 
     fn read(&mut self, card: &DrmCard, root: &SysRoot) {
         match self {
-            Self::Amd(amd) => read_amd(card, &root.sys, amd),
+            Self::Amd { sample, .. } => read_amd(card, &root.sys, sample),
             Self::Intel { drv, sample, .. } => read_intel(card, &root.sys, *drv, sample),
-        }
-    }
-
-    /// An AMD card with VCN activity in `gpu_metrics` needs no fdinfo; every Intel card does.
-    fn needs_fdinfo(&self) -> bool {
-        match self {
-            Self::Amd(amd) => !has_vcn(amd),
-            Self::Intel { .. } => true,
         }
     }
 }
@@ -217,12 +219,11 @@ impl GpuDrmSource {
             state.read(card, &self.root);
         }
 
-        // One fdinfo walk serves every card that needs it and the process rows.
+        // One fdinfo walk serves every card and the process rows. Every card needs it: AMD for
+        // compute, DMA and JPEG, Intel for every engine.
         let processes = self.processes.get();
-        let need_fdinfo = processes || self.state.iter().any(CardState::needs_fdinfo);
-        if need_fdinfo {
-            scan(&self.root, &mut self.cur_scan);
-        }
+        scan(&self.root, &mut self.cur_scan);
+        let partial = self.cur_scan.partial;
         let drm_processes = processes.then(|| {
             process_vram(&self.cur_scan, &self.cards, &mut self.vram);
             self.vram.clone()
@@ -234,42 +235,48 @@ impl GpuDrmSource {
         for (card, state) in self.cards.iter().zip(&mut self.state) {
             let pdev = &*card.pci_slot;
             let t = match state {
-                CardState::Amd(amd) => {
-                    let fdinfo = match (&self.prev_scan, has_vcn(amd)) {
-                        (Some(prev), false) => {
+                CardState::Amd { sample, seen } => {
+                    let fdinfo = match &self.prev_scan {
+                        Some(prev) => {
                             engine_busy(prev, &self.cur_scan, pdev, &mut busy);
+                            *seen |= seen_mask(&busy);
                             Some(&busy[..])
                         }
-                        _ => None,
+                        None => None,
                     };
-                    totals(amd, fdinfo)
+                    totals(sample, fdinfo, *seen, partial)
                 }
                 CardState::Intel {
                     drv,
                     sample,
                     discrete,
                     prev_energy,
+                    seen,
                 } => {
                     let fdinfo = match &self.prev_scan {
                         Some(prev) => {
                             intel_busy(*drv, prev, &self.cur_scan, pdev, &mut raw, &mut busy);
+                            *seen |= seen_mask(&busy);
                             Some(&busy[..])
                         }
                         None => None,
                     };
                     let mem = fdinfo_memory(&self.cur_scan, pdev);
                     let discrete = *discrete || mem.1.is_some();
-                    let t = intel(sample, *prev_energy, t_ns, fdinfo, mem, discrete);
+                    let fd = FdinfoEngines {
+                        busy: fdinfo,
+                        seen: *seen,
+                        partial,
+                    };
+                    let t = intel(sample, *prev_energy, t_ns, fd, mem, discrete);
                     *prev_energy = sample.energy_uj.map(|e| (e, t_ns));
                     t
                 }
             };
             devices.push((identity(card), t));
         }
-        if need_fdinfo {
-            let cur = std::mem::take(&mut self.cur_scan);
-            self.cur_scan = self.prev_scan.replace(cur).unwrap_or_default();
-        }
+        let cur = std::mem::take(&mut self.cur_scan);
+        self.cur_scan = self.prev_scan.replace(cur).unwrap_or_default();
 
         let sample = GpuSample {
             t_ns,
@@ -302,7 +309,9 @@ impl GpuDrmSource {
         for (card, state) in self.cards.iter().zip(&mut self.state) {
             state.read(card, &self.root);
             let (vendor, mem_total, power_limit_uw) = match state {
-                CardState::Amd(amd) => ("AMD", amd.vram_total.unwrap_or(0), amd.power_cap_uw),
+                CardState::Amd { sample, .. } => {
+                    ("AMD", sample.vram_total.unwrap_or(0), sample.power_cap_uw)
+                }
                 // No sysfs file gives the Intel VRAM total (R-164); the samples carry fdinfo's.
                 CardState::Intel { sample, .. } => ("Intel", 0, sample.power_max_uw),
             };
@@ -414,13 +423,30 @@ pub fn identity(card: &DrmCard) -> DeviceIdentity {
 
 /// Device totals from one AMD sample and the fdinfo busy percent per engine. An empty `busy`
 /// list is the first fdinfo scan: encode and decode are `WarmingUp` unless VCN activity is in
-/// the `gpu_metrics` blob.
+/// the `gpu_metrics` blob, and so are compute and DMA. JPEG is listed when `busy` names it.
 pub fn amd_totals(s: &AmdSample, busy: &[(Arc<str>, f32)]) -> GpuTotals {
-    totals(s, (!busy.is_empty()).then_some(busy))
+    totals(
+        s,
+        (!busy.is_empty()).then_some(busy),
+        seen_mask(busy),
+        false,
+    )
 }
 
+/// The AMD engines every amdgpu card has that only fdinfo reports.
+const AMD_FDINFO_ENGINES: [GpuEngine; 2] = [GpuEngine::Compute, GpuEngine::Dma];
+/// AMD engines listed once fdinfo has named them on the card: cards before Vega have no JPEG.
+const AMD_OPTIONAL_ENGINES: [GpuEngine; 1] = [GpuEngine::Jpeg];
+/// The Intel engines every i915 and xe card has.
+const INTEL_ENGINES: [GpuEngine; 3] = [GpuEngine::Render, GpuEngine::Copy, GpuEngine::Video];
+/// Intel engines listed once fdinfo has named them on the card (i915 and xe print every engine
+/// class the card has).
+const INTEL_OPTIONAL_ENGINES: [GpuEngine; 2] = [GpuEngine::Compute, GpuEngine::VideoEnhance];
+
 /// `busy` is `None` before the second fdinfo scan. Once warm, an engine with no clients is 0.
-fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>) -> GpuTotals {
+/// `seen` is the mask of fdinfo engines named on the card so far; `partial` is
+/// `FdinfoScan::partial`.
+fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>, seen: u16, partial: bool) -> GpuTotals {
     let vcn = s
         .metrics
         .as_ref()
@@ -442,10 +468,25 @@ fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>) -> GpuTotals {
             .find(|&&(k, _)| k == kind)
             .map(|&(_, milli)| milli as f32 / 1000.0))
     };
+    let util_pct = opt(s.gpu_busy_pct.map(f32::from));
+    let mem_util_pct = opt(s.mem_busy_pct.map(f32::from));
+    // Graphics, Compute, Memory controller, Video Encode, Video Decode, JPEG, DMA (PERF-063).
+    let mut engines = GpuEngines::none();
+    engines.set(GpuEngine::Gpu, util_pct);
+    engines.set(GpuEngine::MemCtl, mem_util_pct);
+    engines.set(GpuEngine::Enc, enc_pct);
+    engines.set(GpuEngine::Dec, dec_pct);
+    set_fdinfo_engines(
+        &mut engines,
+        busy,
+        &AMD_FDINFO_ENGINES,
+        &AMD_OPTIONAL_ENGINES,
+        seen,
+    );
     GpuTotals {
         device: DeviceIdx(0),
-        util_pct: opt(s.gpu_busy_pct.map(f32::from)),
-        mem_util_pct: opt(s.mem_busy_pct.map(f32::from)),
+        util_pct,
+        mem_util_pct,
         mem_used: opt(s.vram_used),
         mem_total: opt(s.vram_total),
         shared_used: opt(s.gtt_used),
@@ -467,6 +508,8 @@ fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>) -> GpuTotals {
         fan_pct: opt(s.fan_pwm.map(|pwm| f32::from(pwm) / 255.0 * 100.0)),
         pcie_rx_bps: Metric::with(Validity::Unsupported),
         pcie_tx_bps: Metric::with(Validity::Unsupported),
+        engines,
+        fdinfo_partial: partial,
     }
 }
 
@@ -482,25 +525,34 @@ pub fn intel_totals(
     mem: (Option<u64>, Option<u64>, Option<u64>),
     discrete: bool,
 ) -> GpuTotals {
-    intel(
-        s,
-        prev_energy,
-        now,
-        (!busy.is_empty()).then_some(busy),
-        mem,
-        discrete,
-    )
+    let fd = FdinfoEngines {
+        busy: (!busy.is_empty()).then_some(busy),
+        seen: seen_mask(busy),
+        partial: false,
+    };
+    intel(s, prev_energy, now, fd, mem, discrete)
 }
 
-/// `busy` is `None` before the second fdinfo scan. Once warm, an engine with no clients is 0.
+/// The fdinfo engine data of one card for one sample.
+#[derive(Clone, Copy)]
+struct FdinfoEngines<'a> {
+    /// `None` before the second fdinfo scan. Once warm, an engine with no clients is 0.
+    busy: Option<&'a [(Arc<str>, f32)]>,
+    /// The fdinfo engines named on the card so far, as a mask of `bit`.
+    seen: u16,
+    /// `FdinfoScan::partial`.
+    partial: bool,
+}
+
 fn intel(
     s: &IntelSample,
     prev_energy: Option<(u64, TimeNs)>,
     now: TimeNs,
-    busy: Option<&[(Arc<str>, f32)]>,
+    fd: FdinfoEngines<'_>,
     (local_used, local_total, system_used): (Option<u64>, Option<u64>, Option<u64>),
     discrete: bool,
 ) -> GpuTotals {
+    let busy = fd.busy;
     let (util_pct, video) = match busy {
         // Utilization is the busiest engine (PERF-063).
         Some(busy) => (
@@ -520,6 +572,16 @@ fn intel(
         }
         (Some(_), _) => Metric::with(Validity::WarmingUp),
     };
+    // Render/3D, Compute, Copy, Video, Video Processing (PERF-063). The video engine is listed
+    // once, as Video, not as Encode and Decode.
+    let mut engines = GpuEngines::none();
+    set_fdinfo_engines(
+        &mut engines,
+        busy,
+        &INTEL_ENGINES,
+        &INTEL_OPTIONAL_ENGINES,
+        fd.seen,
+    );
     let (mem_used, mem_total, temp_c) = if discrete {
         (
             opt(local_used),
@@ -558,6 +620,8 @@ fn intel(
         fan_pct: Metric::with(Validity::Unsupported),
         pcie_rx_bps: Metric::with(Validity::Unsupported),
         pcie_tx_bps: Metric::with(Validity::Unsupported),
+        engines,
+        fdinfo_partial: fd.partial,
     }
 }
 
@@ -599,18 +663,65 @@ fn xe_engine_name(class: &str) -> Option<&'static str> {
     }
 }
 
+/// The engine of an fdinfo engine name: the amdgpu names and the i915 names (xe classes are
+/// mapped to those first). Graphics, encode and decode do not come from here.
+fn fdinfo_engine(name: &str) -> Option<GpuEngine> {
+    match name {
+        "compute" => Some(GpuEngine::Compute),
+        "dma" => Some(GpuEngine::Dma),
+        "jpeg" => Some(GpuEngine::Jpeg),
+        "render" => Some(GpuEngine::Render),
+        "copy" => Some(GpuEngine::Copy),
+        "video" => Some(GpuEngine::Video),
+        "video-enhance" => Some(GpuEngine::VideoEnhance),
+        _ => None,
+    }
+}
+
+/// The bit of `engine` in a `seen` mask.
+const fn bit(engine: GpuEngine) -> u16 {
+    1 << engine as u16
+}
+
+/// The engines `busy` names, as a mask of `bit`.
+fn seen_mask(busy: &[(Arc<str>, f32)]) -> u16 {
+    busy.iter()
+        .filter_map(|(n, _)| fdinfo_engine(n))
+        .fold(0, |m, e| m | bit(e))
+}
+
+/// Sets every engine of `always`, and every engine of `optional` that is in `seen`, from
+/// `busy`: `WarmingUp` before the second scan, else the engine's busy percent, 0 without
+/// clients. The other engines keep their value.
+fn set_fdinfo_engines(
+    out: &mut GpuEngines,
+    busy: Option<&[(Arc<str>, f32)]>,
+    always: &[GpuEngine],
+    optional: &[GpuEngine],
+    seen: u16,
+) {
+    let listed = always
+        .iter()
+        .chain(optional.iter().filter(|&&e| seen & bit(e) != 0));
+    for &e in listed {
+        let value = match busy {
+            Some(busy) => Metric::valid(
+                busy.iter()
+                    .find(|(n, _)| fdinfo_engine(n) == Some(e))
+                    .map_or(0.0, |&(_, p)| p),
+            ),
+            None => Metric::with(Validity::WarmingUp),
+        };
+        out.set(e, value);
+    }
+}
+
 fn engine(busy: &[(Arc<str>, f32)], name: &str) -> Metric<f32> {
     let pct = busy
         .iter()
         .find(|(n, _)| &**n == name)
         .map_or(0.0, |&(_, p)| p);
     Metric::valid(pct)
-}
-
-fn has_vcn(s: &AmdSample) -> bool {
-    s.metrics
-        .as_ref()
-        .is_some_and(|m| !m.vcn_activity.is_empty())
 }
 
 fn opt<T: Copy + Default>(v: Option<T>) -> Metric<T> {
@@ -839,7 +950,7 @@ mod tests {
         assert_eq!(t.dec_pct.validity, Validity::WarmingUp);
 
         // Warm, but no client on the card: both 0.
-        let t = totals(&s, Some(&[]));
+        let t = totals(&s, Some(&[]), 0, false);
         assert_eq!(t.enc_pct, Metric::valid(0.0));
         assert_eq!(t.dec_pct, Metric::valid(0.0));
     }
@@ -871,9 +982,144 @@ mod tests {
         assert_eq!(t.enc_pct.validity, Validity::WarmingUp);
 
         // Warm, but no client on the card.
-        let t = intel(&s, None, SEC, Some(&[]), (None, None, None), false);
+        let warm = FdinfoEngines {
+            busy: Some(&[]),
+            seen: 0,
+            partial: false,
+        };
+        let t = intel(&s, None, SEC, warm, (None, None, None), false);
         assert_eq!(t.util_pct, Metric::valid(0.0));
         assert_eq!(t.dec_pct, Metric::valid(0.0));
+    }
+
+    fn engine_list(t: &GpuTotals) -> Vec<(GpuEngine, Metric<f32>)> {
+        t.engines.reported().collect()
+    }
+
+    #[test]
+    fn amd_reports_every_engine() {
+        let s = AmdSample {
+            gpu_busy_pct: Some(30),
+            mem_busy_pct: Some(10),
+            ..AmdSample::default()
+        };
+        let b = busy(&[
+            ("gfx", 30.0),
+            ("compute", 12.5),
+            ("dma", 2.0),
+            ("jpeg", 4.0),
+            ("enc", 1.0),
+            ("dec", 3.0),
+        ]);
+        let t = amd_totals(&s, &b);
+        assert_eq!(
+            engine_list(&t),
+            [
+                (GpuEngine::Gpu, Metric::valid(30.0)),
+                (GpuEngine::MemCtl, Metric::valid(10.0)),
+                (GpuEngine::Enc, Metric::valid(1.0)),
+                (GpuEngine::Dec, Metric::valid(3.0)),
+                (GpuEngine::Jpeg, Metric::valid(4.0)),
+                (GpuEngine::Compute, Metric::valid(12.5)),
+                (GpuEngine::Dma, Metric::valid(2.0)),
+            ]
+        );
+        assert!(!t.fdinfo_partial);
+    }
+
+    #[test]
+    fn amd_engines_before_and_after_warm_up() {
+        let s = AmdSample {
+            gpu_busy_pct: Some(5),
+            ..AmdSample::default()
+        };
+        // First scan: fdinfo engines are WarmingUp, and JPEG is not named yet.
+        let t = totals(&s, None, 0, false);
+        assert_eq!(
+            engine_list(&t),
+            [
+                (GpuEngine::Gpu, Metric::valid(5.0)),
+                (GpuEngine::Enc, Metric::with(Validity::WarmingUp)),
+                (GpuEngine::Dec, Metric::with(Validity::WarmingUp)),
+                (GpuEngine::Compute, Metric::with(Validity::WarmingUp)),
+                (GpuEngine::Dma, Metric::with(Validity::WarmingUp)),
+            ]
+        );
+        // JPEG seen in an earlier sample stays listed, at 0 without clients, and a denied fdinfo
+        // read is passed on.
+        let t = totals(&s, Some(&[]), bit(GpuEngine::Jpeg), true);
+        assert_eq!(t.engines.get(GpuEngine::Jpeg), Metric::valid(0.0));
+        assert_eq!(t.engines.get(GpuEngine::Compute), Metric::valid(0.0));
+        assert!(t.fdinfo_partial);
+        // The VCN engine still gives encode and decode, and fdinfo still gives compute.
+        let vcn = AmdSample {
+            metrics: Some(GpuMetrics {
+                vcn_activity: SmallVec::from_slice(&[2500]),
+                ..GpuMetrics::default()
+            }),
+            ..s
+        };
+        let t = totals(&vcn, Some(&busy(&[("compute", 7.0)])), 0, false);
+        assert_eq!(t.engines.get(GpuEngine::Enc), Metric::valid(25.0));
+        assert_eq!(t.engines.get(GpuEngine::Dec), Metric::valid(25.0));
+        assert_eq!(t.engines.get(GpuEngine::Compute), Metric::valid(7.0));
+    }
+
+    #[test]
+    fn intel_reports_its_engines() {
+        let s = IntelSample::default();
+        let b = busy(&[
+            ("render", 40.0),
+            ("copy", 1.0),
+            ("video", 10.0),
+            ("video-enhance", 2.0),
+            ("compute", 6.0),
+        ]);
+        let t = intel_totals(&s, None, SEC, &b, (None, None, None), false);
+        // The video engine is listed once, as Video; GPU_UTIL stays the busiest engine.
+        assert_eq!(
+            engine_list(&t),
+            [
+                (GpuEngine::Compute, Metric::valid(6.0)),
+                (GpuEngine::Render, Metric::valid(40.0)),
+                (GpuEngine::Copy, Metric::valid(1.0)),
+                (GpuEngine::Video, Metric::valid(10.0)),
+                (GpuEngine::VideoEnhance, Metric::valid(2.0)),
+            ]
+        );
+        assert_eq!(t.util_pct, Metric::valid(40.0));
+        assert_eq!(t.enc_pct, Metric::valid(10.0));
+
+        // A card that never named compute or video-enhance does not list them.
+        let fd = FdinfoEngines {
+            busy: None,
+            seen: 0,
+            partial: true,
+        };
+        let t = intel(&s, None, SEC, fd, (None, None, None), false);
+        assert_eq!(
+            engine_list(&t),
+            [
+                (GpuEngine::Render, Metric::with(Validity::WarmingUp)),
+                (GpuEngine::Copy, Metric::with(Validity::WarmingUp)),
+                (GpuEngine::Video, Metric::with(Validity::WarmingUp)),
+            ]
+        );
+        assert!(t.fdinfo_partial);
+    }
+
+    #[test]
+    fn seen_mask_names() {
+        let b = busy(&[
+            ("gfx", 1.0),
+            ("jpeg", 0.0),
+            ("video-enhance", 0.0),
+            ("xyz", 1.0),
+        ]);
+        assert_eq!(
+            seen_mask(&b),
+            bit(GpuEngine::Jpeg) | bit(GpuEngine::VideoEnhance)
+        );
     }
 
     #[test]

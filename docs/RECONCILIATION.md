@@ -1081,7 +1081,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 ### R-170 Smaller tl-model and engine contract additions asked by the UI batches (OI-E32)
 - Question: the engine-side half of UI open items that add a field, constant or command. Raised by E19-OI-1 to OI-3, B5 item 6, E24 item 9, E27 items 3, 5 and 7, E28 items 4 and 11, E22 item 10, E25-OI-6, E23 items 3 and 6, B7 item 4.
 - Resolution:
-  - `MetricId` constants appended in E03-004: `CPU_POWER_PKG = 5`, `CPU_POWER_CORE = 6`, `CPU_CLOCK_MAX = 7`, `MEM_DIRTY = 14`, `GPU_MEM_SHARED = 47`, `GPU_MEM_CLOCK = 48`, `GPU_PCIE_RX = 49`, `GPU_PCIE_TX = 52`, `GPU_FAN = 53`, `GPU_ENGINE_MEMCTL = 54`, `GPU_ENGINE_JPEG = 55`, `GPU_ENGINE_OFA = 56`, `GPU_ENGINE_OTHER = 57` (busiest vendor-specific engine, named by `GpuDeviceInfo`), `FAN_PWM = 58`, `BATTERY_POWER = 61` (50, 51 and 60 are taken). `ALL` grows to 39 entries.
+  - `MetricId` constants appended in E03-004: `CPU_POWER_PKG = 5`, `CPU_POWER_CORE = 6`, `CPU_CLOCK_MAX = 7`, `MEM_DIRTY = 14`, `GPU_MEM_SHARED = 47`, `GPU_MEM_CLOCK = 48`, `GPU_PCIE_RX = 49`, `GPU_PCIE_TX = 52`, `GPU_FAN = 53`, `GPU_ENGINE_MEMCTL = 54`, `GPU_ENGINE_JPEG = 55`, `GPU_ENGINE_OFA = 56`, `GPU_ENGINE_OTHER = 57` (busiest vendor-specific engine, named by `GpuDeviceInfo`), `FAN_PWM = 58`, `BATTERY_POWER = 61` (50, 51 and 60 are taken). `ALL` grows to 39 entries. Later appends: `MEM_AVAILABLE = 15` (hjn.35) and `GPU_ENGINE_COMPUTE = 70` to `GPU_ENGINE_VIDEO_ENHANCE = 75` (R-292) bring `ALL` to 46.
   - `TIER_1HZ` is bit 15 of `MetricId` (`0x8000`) with `with_tier_1hz()`, `is_tier_1hz()` and `base()`; metric numbers stay below 0x8000; the reducer publishes slow views in `SeriesSet.slow` with the flagged id from P2.
   - `ceil_pow2(u64) -> u64` and `ceil_125(f64) -> f64` in `tl_model::units` with tests `ceil_125(1234) = 2000`, `ceil_125(60) = 100`, `ceil_125(0.3) = 0.5`, `ceil_pow2(3 MiB) = 4 MiB`.
   - `SystemSnapshot.color_scheme: u8` (portal `color-scheme` 0, 1, 2) from `org.freedesktop.portal.Settings` `Read("org.freedesktop.appearance", "color-scheme")` plus `SettingChanged`, read by E14's session-bus opener worker, shipped as `SourceUpdate::ColorScheme(u8)`.
@@ -1906,6 +1906,51 @@ test in a child process with `VK_ICD_FILENAMES` set, or skips with a printed rea
   gpui-pre 0.3.7 [verified in code]; the U-4 capture [measured].
 - Edits: ARCHITECTURE tl-ui row and ADR-013 headless screenshot text; `xtask/src/check_deps.rs` allows image
   for tl-ui.
+
+### R-292 Per-engine GPU utilisation: GpuEngine keys and series
+
+PERF-063 lists six NVIDIA, seven AMD and five Intel engines, but `GpuTotals` had only `util_pct`,
+`mem_util_pct`, `enc_pct` and `dec_pct`, and the frozen list had four engine ids. Leader decision (bead
+hjn.37): no dynamic per-engine id scheme; new `MetricId` constants go at the end of the frozen list.
+`tl_model::system::GpuEngine` has 12 engines, each with a fixed settings key and a fixed series:
+
+| Engine | Key | Series | Vendors |
+|---|---|---|---|
+| `Gpu` | `gpu` | `GPU_UTIL` 40 | NVIDIA 3D / Compute, AMD Graphics |
+| `MemCtl` | `memctl` | `GPU_ENGINE_MEMCTL` 54 | NVIDIA, AMD |
+| `Enc` | `enc` | `GPU_ENC` 42 | NVIDIA, AMD |
+| `Dec` | `dec` | `GPU_DEC` 43 | NVIDIA, AMD |
+| `Jpeg` | `jpeg` | `GPU_ENGINE_JPEG` 55 | NVIDIA, AMD |
+| `Ofa` | `ofa` | `GPU_ENGINE_OFA` 56 | NVIDIA |
+| `Compute` | `compute` | `GPU_ENGINE_COMPUTE` 70 | AMD, Intel |
+| `Dma` | `dma` | `GPU_ENGINE_DMA` 71 | AMD |
+| `Render` | `render` | `GPU_ENGINE_RENDER` 72 | Intel |
+| `Copy` | `copy` | `GPU_ENGINE_COPY` 73 | Intel |
+| `Video` | `video` | `GPU_ENGINE_VIDEO` 74 | Intel |
+| `VideoEnhance` | `video-enhance` | `GPU_ENGINE_VIDEO_ENHANCE` 75 | Intel |
+
+`GpuTotals.engines: GpuEngines` holds one `Metric<f32>` per engine; `Unsupported` means the device does
+not report it, so the UI does not list it. `GpuTotals.fdinfo_partial` is `FdinfoScan::partial` for AMD
+and Intel (some fdinfo read was denied: "Own processes only") and false for NVIDIA. `GPU_UTIL`,
+`GPU_ENC` and `GPU_DEC` keep their meaning: on Intel `GPU_UTIL` is still the busiest engine and
+`GPU_ENC` and `GPU_DEC` the video engine, but the Intel engine list has no `Gpu`, `Enc` or `Dec`; it
+has `Render` and `Video`, so the same value is not drawn three times. Stored `hidden_gpu_engines` keys
+`gpu`, `enc` and `dec` keep naming the same engines on NVIDIA and AMD. 57 (`GPU_ENGINE_OTHER`) stays
+unused, and 70 to 79 are kept for GPU engines. The reducer records one series per reported engine.
+
+AMD lists Graphics, Memory controller, encode and decode from sysfs and `gpu_metrics`, Compute and DMA
+from fdinfo always, and JPEG once fdinfo has named it on the card (amdgpu prints only engines with
+usage, and cards before Vega have none). Intel lists Render, Copy and Video always, and Compute and
+Video Processing once fdinfo has named them on the card (i915 and xe print every engine class the card
+has). Every AMD and Intel card now needs the fdinfo walk each tick.
+
+- Basis: PERF-063, PERF-074, PERF-075; amdgpu `amdgpu_fdinfo.c` prints `drm-engine-<ip>` only when its
+  usage is non-zero [inferred, not re-read here]; Fable consulted on the id list.
+- Open: the probe JPEG and OFA readings. nvml-wrapper 0.13.0 has no safe `jpg_utilization` or
+  `ofa_utilization`; the raw `nvmlDeviceGetJpgUtilization` and `nvmlDeviceGetOfaUtilization` need
+  `unsafe` in `crates/tl-gpu-probe/src/nvml.rs`, which ADR-001 rule 4 does not allow. Leader decision
+  needed. Until then the NVIDIA list is Gpu, MemCtl, Enc and Dec.
+- Edits: ADR-003 `MetricId` block and the R-170 totals line in ARCHITECTURE; bead hjn.37.
 
 ## Owner questions
 

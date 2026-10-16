@@ -74,10 +74,24 @@ impl MetricId {
     pub const BATTERY_POWER: Self = Self(61);
     /// MemAvailable in bytes (tasklens-hjn.35).
     pub const MEM_AVAILABLE: Self = Self(15);
+    // Per-engine GPU series (tasklens-hjn.37). 70 to 79 are kept for GPU engines.
+    // GPU_ENGINE_OTHER (57) stays unused: no engine maps to it.
+    /// AMD and Intel compute engine.
+    pub const GPU_ENGINE_COMPUTE: Self = Self(70);
+    /// AMD SDMA engine.
+    pub const GPU_ENGINE_DMA: Self = Self(71);
+    /// Intel render engine (Render/3D).
+    pub const GPU_ENGINE_RENDER: Self = Self(72);
+    /// Intel copy (blitter) engine.
+    pub const GPU_ENGINE_COPY: Self = Self(73);
+    /// Intel video engine, which both encodes and decodes.
+    pub const GPU_ENGINE_VIDEO: Self = Self(74);
+    /// Intel video-enhance engine (Video Processing).
+    pub const GPU_ENGINE_VIDEO_ENHANCE: Self = Self(75);
 
-    /// Every constant with its name: the 24 base ones in order, then the 16 appended ones in
-    /// order (40 entries). Used by the frozen-id test.
-    pub const ALL: [(&'static str, MetricId); 40] = [
+    /// Every constant with its name: the 24 base ones in order, then the 22 appended ones in
+    /// order (46 entries). Used by the frozen-id test.
+    pub const ALL: [(&'static str, MetricId); 46] = [
         ("CPU_TOTAL", Self::CPU_TOTAL),
         ("CPU_KERNEL", Self::CPU_KERNEL),
         ("CPU_FREQ", Self::CPU_FREQ),
@@ -118,6 +132,12 @@ impl MetricId {
         ("FAN_PWM", Self::FAN_PWM),
         ("BATTERY_POWER", Self::BATTERY_POWER),
         ("MEM_AVAILABLE", Self::MEM_AVAILABLE),
+        ("GPU_ENGINE_COMPUTE", Self::GPU_ENGINE_COMPUTE),
+        ("GPU_ENGINE_DMA", Self::GPU_ENGINE_DMA),
+        ("GPU_ENGINE_RENDER", Self::GPU_ENGINE_RENDER),
+        ("GPU_ENGINE_COPY", Self::GPU_ENGINE_COPY),
+        ("GPU_ENGINE_VIDEO", Self::GPU_ENGINE_VIDEO),
+        ("GPU_ENGINE_VIDEO_ENHANCE", Self::GPU_ENGINE_VIDEO_ENHANCE),
     ];
 
     /// Bit 15 marks the 1 Hz slow-tier view of a metric (R-170 item 2).
@@ -792,7 +812,7 @@ mod tests {
 
     #[test]
     fn metric_all_matches_constants() {
-        let expected: [(&str, u16); 40] = [
+        let expected: [(&str, u16); 46] = [
             ("CPU_TOTAL", 1),
             ("CPU_KERNEL", 2),
             ("CPU_FREQ", 3),
@@ -833,17 +853,23 @@ mod tests {
             ("FAN_PWM", 58),
             ("BATTERY_POWER", 61),
             ("MEM_AVAILABLE", 15),
+            ("GPU_ENGINE_COMPUTE", 70),
+            ("GPU_ENGINE_DMA", 71),
+            ("GPU_ENGINE_RENDER", 72),
+            ("GPU_ENGINE_COPY", 73),
+            ("GPU_ENGINE_VIDEO", 74),
+            ("GPU_ENGINE_VIDEO_ENHANCE", 75),
         ];
-        assert_eq!(MetricId::ALL.len(), 40);
+        assert_eq!(MetricId::ALL.len(), 46);
         for ((name, id), (want_name, want_num)) in MetricId::ALL.iter().zip(expected) {
             assert_eq!(*name, want_name);
             assert_eq!(id.0, want_num, "{name}");
             assert!(id.0 < MetricId::TIER_1HZ, "{name}");
         }
         let numbers: HashSet<u16> = MetricId::ALL.iter().map(|(_, id)| id.0).collect();
-        assert_eq!(numbers.len(), 40, "a metric number is used twice");
+        assert_eq!(numbers.len(), 46, "a metric number is used twice");
         let names: HashSet<&str> = MetricId::ALL.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names.len(), 40, "a metric name is used twice");
+        assert_eq!(names.len(), 46, "a metric name is used twice");
     }
 
     #[test]

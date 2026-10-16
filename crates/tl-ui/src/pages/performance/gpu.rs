@@ -1568,6 +1568,8 @@ mod tests {
             fan_pct: Metric::default(),
             pcie_rx_bps: Metric::default(),
             pcie_tx_bps: Metric::default(),
+            engines: Default::default(),
+            fdinfo_partial: false,
         };
         assert_eq!(reported_bits(Some(&t)), 1 | 4);
         t.enc_pct = Metric::valid(0.0);
@@ -1609,6 +1611,8 @@ mod tests {
             fan_pct: Metric::default(),
             pcie_rx_bps: Metric::default(),
             pcie_tx_bps: Metric::default(),
+            engines: Default::default(),
+            fdinfo_partial: false,
         };
         Arc::make_mut(&mut snap.system).gpus = Arc::from([(device, t)].as_slice());
         let engines = device_engines(&snap, device);

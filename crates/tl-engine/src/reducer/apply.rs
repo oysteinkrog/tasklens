@@ -27,7 +27,7 @@ use tl_model::snapshot::{
     DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails, ProcessSnapshot,
     ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord, WindowsSnapshot,
 };
-use tl_model::system::{GpuTotals, Metric, SensorKind};
+use tl_model::system::{GpuEngine, GpuTotals, Metric, SensorKind};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
@@ -73,6 +73,19 @@ const GPU_METRICS: [MetricId; 7] = [
     MetricId::GPU_TEMP,
     MetricId::GPU_POWER,
     MetricId::GPU_CLOCK,
+];
+/// The engines whose series are not in `GPU_METRICS` (PERF-063). Gpu, Enc and Dec are
+/// `GPU_UTIL`, `GPU_ENC` and `GPU_DEC`, pushed from the device totals.
+const GPU_ENGINE_SERIES: [GpuEngine; 9] = [
+    GpuEngine::MemCtl,
+    GpuEngine::Jpeg,
+    GpuEngine::Ofa,
+    GpuEngine::Compute,
+    GpuEngine::Dma,
+    GpuEngine::Render,
+    GpuEngine::Copy,
+    GpuEngine::Video,
+    GpuEngine::VideoEnhance,
 ];
 
 /// Reducer state that only `apply` reads and writes.
@@ -1297,6 +1310,7 @@ impl Reducer {
             g.device = idx;
             if !present {
                 self.gaps(idx, &GPU_METRICS, t);
+                self.gaps(idx, &GPU_ENGINE_SERIES.map(GpuEngine::metric), t);
                 self.apply_state.set_gpu_power(idx, &identity, None);
                 rows.push((idx, g));
                 continue;
@@ -1320,6 +1334,20 @@ impl Reducer {
             ];
             for (metric, value, validity) in values {
                 self.push(idx, metric, t, value, validity.is_valid(), period);
+            }
+            // One series per reported engine; an engine the device does not report has none.
+            for engine in GPU_ENGINE_SERIES {
+                let m = g.engines.get(engine);
+                if g.engines.is_reported(engine) {
+                    self.push(
+                        idx,
+                        engine.metric(),
+                        t,
+                        m.value,
+                        m.validity.is_valid(),
+                        period,
+                    );
+                }
             }
             let power = g.power_w.validity.is_valid().then_some(g.power_w.value);
             self.apply_state.set_gpu_power(idx, &identity, power);

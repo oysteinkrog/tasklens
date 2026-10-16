@@ -46,8 +46,8 @@ use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{BatteryDetails, ComponentMask, DiskDetails, ServiceBackend, Snapshot};
 use tl_model::system::{
-    CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState, MemoryTotals, Metric,
-    NetTotals,
+    CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuEngine, GpuTotals, LinkState, MemoryTotals,
+    Metric, NetTotals,
 };
 use tl_model::table::{
     Manager, SysColumnId, SysSortSpec, SysTable, SysTableQuery, TableQuery, Total,
@@ -1393,6 +1393,8 @@ fn every_source_update() -> Vec<SourceUpdate> {
                     fan_pct: Metric::default(),
                     pcie_rx_bps: Metric::default(),
                     pcie_tx_bps: Metric::default(),
+                    engines: Default::default(),
+                    fdinfo_partial: false,
                 },
             )],
             processes: Some(Vec::new()),
@@ -2016,6 +2018,8 @@ fn gpu_power_msg(uuid: [u8; 16], watts: f32, sm: &[(u32, u32)]) -> EngineMsg {
                 fan_pct: Metric::default(),
                 pcie_rx_bps: Metric::default(),
                 pcie_tx_bps: Metric::default(),
+                engines: Default::default(),
+                fdinfo_partial: false,
             },
         )],
         processes: Some(
@@ -3147,6 +3151,8 @@ fn gpu_sample(cards: &[(&DeviceIdentity, f32)]) -> EngineMsg {
                         fan_pct: Metric::default(),
                         pcie_rx_bps: Metric::default(),
                         pcie_tx_bps: Metric::default(),
+                        engines: Default::default(),
+                        fdinfo_partial: false,
                     },
                 )
             })
@@ -3191,6 +3197,45 @@ fn vram_of(snap: &Snapshot, pid: u32) -> Vec<u64> {
         .position(|r| r.key == proc_key(pid))
         .expect("the record is published");
     snap.processes.extras_p2[i].gpu_vram_bytes.to_vec()
+}
+
+/// tasklens-hjn.37: every reported engine gets its series; an engine the card does not report
+/// gets none.
+#[test]
+fn gpu_engine_series_per_reported_engine() {
+    let mut rig = Rig::new();
+    let amd = gpu_id([0; 16], "0000:03:00.0");
+    let mut msg = gpu_sample(&[(&amd, 10.0)]);
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut msg {
+        let engines = &mut s.devices[0].1.engines;
+        engines.set(GpuEngine::Gpu, Metric::valid(10.0));
+        engines.set(GpuEngine::Compute, Metric::valid(12.5));
+        engines.set(GpuEngine::Dma, Metric::with(Validity::WarmingUp));
+    }
+    rig.run(vec![drm_list(&[&amd]), msg])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    let series = |metric| {
+        snap.series.get(SeriesId {
+            device: rig.idx(&amd),
+            metric,
+        })
+    };
+    let compute = series(MetricId::GPU_ENGINE_COMPUTE).expect("compute series exists");
+    assert_eq!(compute.samples.len(), 1);
+    assert_eq!(compute.samples[0].value, 12.5);
+    assert!(!has_gap(compute.samples[0]));
+    assert!(compute.samples[0].flags.contains(SampleFlags::VALID));
+    // A WarmingUp engine is listed, so its series exists with a sample that is not valid.
+    let dma = series(MetricId::GPU_ENGINE_DMA).expect("dma series exists");
+    assert!(!dma.samples[0].flags.contains(SampleFlags::VALID));
+    assert!(series(MetricId::GPU_ENGINE_JPEG).is_none());
+    assert!(series(MetricId::GPU_ENGINE_MEMCTL).is_none());
+    assert_eq!(
+        series(MetricId::GPU_UTIL).expect("util series").samples[0].value,
+        10.0
+    );
+    rig.passed();
 }
 
 #[test]

@@ -867,6 +867,8 @@ impl OverviewSynth {
             fan_pct: none(),
             pcie_rx_bps: none(),
             pcie_tx_bps: none(),
+            engines: Default::default(),
+            fdinfo_partial: false,
         };
         system.gpus = Arc::from([(gpu, row)]);
     }

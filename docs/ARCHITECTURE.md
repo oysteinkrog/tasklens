@@ -456,7 +456,12 @@ impl MetricId {
     pub const GPU_ENGINE_JPEG: Self = Self(55); pub const GPU_ENGINE_OFA: Self = Self(56);
     pub const GPU_ENGINE_OTHER: Self = Self(57); // busiest vendor-specific engine, named by GpuDeviceInfo
     pub const FAN_PWM: Self = Self(58);       pub const BATTERY_POWER: Self = Self(61);
-    // ALL lists 39 metrics. Bit 15 (0x8000) marks the 1 Hz tier view of a metric:
+    pub const MEM_AVAILABLE: Self = Self(15);
+    // per-engine GPU series (R-292); 70 to 79 are kept for GPU engines, 57 stays unused
+    pub const GPU_ENGINE_COMPUTE: Self = Self(70); pub const GPU_ENGINE_DMA: Self = Self(71);
+    pub const GPU_ENGINE_RENDER: Self = Self(72);  pub const GPU_ENGINE_COPY: Self = Self(73);
+    pub const GPU_ENGINE_VIDEO: Self = Self(74);   pub const GPU_ENGINE_VIDEO_ENHANCE: Self = Self(75);
+    // ALL lists 46 metrics. Bit 15 (0x8000) marks the 1 Hz tier view of a metric:
     pub const TIER_1HZ: u16 = 0x8000;
     pub fn with_tier_1hz(self) -> Self; pub fn is_tier_1hz(self) -> bool; pub fn base(self) -> Self;
     // metric numbers stay below 0x8000
@@ -691,7 +696,7 @@ pub struct ComponentMask(pub u16); // one bit per Snapshot component, computed b
 - `WindowsSnapshot.pick: Option<PickResult { seq: u64, outcome: PickOutcome { Picked { pid: u32 }, NoWindow, Cancelled } }>` carries the window picker result (R-149).
 - `InventorySnapshot` holds one struct per Information section (R-156), `public_ip: PublicIpState { NotFetched, Fetching, Fetched { v4: Option<Arc<str>>, v6: Option<Arc<str>>, fetched_at_s: i64 }, Failed(Arc<str>) }` (R-139) and `ProcessorInfo.bits: InvField<u8>` (64 for `x86_64`, `aarch64`, `riscv64`, `ppc64`, `ppc64le`, `s390x`, `loongarch64`, `mips64`, else 32; R-170). Inventory rows arrive with `device: None`; the reducer matches disk name, PCI slot or interface name against the catalog (R-166). `MemoryInfo.peak_committed_bytes` is the reducer's running maximum of `Committed_AS` (R-166).
 - `DeviceDetailsSnapshot { header, cpu: Arc<CpuStaticInfo>, memory: Arc<MemoryDetails>, disks: Arc<[(DeviceIdx, DiskDetails)]>, nets: Arc<[(DeviceIdx, NetDetails)]>, batteries: Arc<[(DeviceIdx, BatteryDetails)]> }` (R-139). `DiskDetails` carries `model`, `wwn`, `serial`, `interface`, `scheduler` as `InvField<Arc<str>>`, `rotation_rpm`, `smart: SmartKind { Ata, Nvme, NeedsFallback, None }`, `smart_data: Option<InvField<Arc<SmartData>>>`, `smart_temp_c`, `ejectable`, `can_power_off`, `eject: Option<(u64, EjectState { Running, Blocked { blockers: Arc<[Blocker]>, others_may_hold: bool }, Done, Failed(Arc<str>) })>`, `partitions: Arc<[PartitionRow]>` (R-140), `formatted_bytes`, `used_bytes`, `free_bytes`, `system_disk`, `swap`. `NetDetails` carries `adapter_name`, `driver`, `mac`, `ifindex`, `link_speed_mbps`, `state: LinkState`, `addresses`, `kind: NetKind`, `wifi: Option<WifiInfo>`. `BatteryDetails` is the E12-023 field list plus `history: Option<Arc<[(i64, f32)]>>`. The reducer merges one record per device: the sysfs source fills every field it knows and a D-Bus source (`Udisks`, `NetworkManager`) overwrites `model`, `wwn`, `serial`, `rotation_rpm`, `smart*`, `ejectable`, `can_power_off`, `eject`, `kind` and `wifi`.
-- Totals in `system.rs` (R-139, R-155, R-170): `DiskTotals.temp_c: Metric<f32>`; `NetTotals.state: LinkState { Up, Down, Dormant, Unknown }` from sysfs `operstate`; `GpuTotals.pcie_rx_bps`, `pcie_tx_bps: Metric<f32>`; `SensorReading.fan_control: Option<FanControlMode { FullSpeed, Manual, Automatic }>` from `pwm<n>_enable` 0, 1, 2 and `fan_connected: bool` (a non-zero RPM seen this session, or a label).
+- Totals in `system.rs` (R-139, R-155, R-170): `DiskTotals.temp_c: Metric<f32>`; `NetTotals.state: LinkState { Up, Down, Dormant, Unknown }` from sysfs `operstate`; `GpuTotals.pcie_rx_bps`, `pcie_tx_bps: Metric<f32>`; `GpuTotals.engines: GpuEngines` (busy percent per `GpuEngine`, `Unsupported` for an engine the device does not report) and `fdinfo_partial: bool` (R-292); `SensorReading.fan_control: Option<FanControlMode { FullSpeed, Manual, Automatic }>` from `pwm<n>_enable` 0, 1, 2 and `fan_connected: bool` (a non-zero RPM seen this session, or a label).
 
 ```rust
 // tl-model/src/table.rs: one query type for the three system tables (UI-SYS-002)

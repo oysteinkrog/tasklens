@@ -3317,6 +3317,8 @@ mod tests {
                 fan_pct: Metric::with(Validity::Unsupported),
                 pcie_rx_bps: Metric::with(Validity::Unsupported),
                 pcie_tx_bps: Metric::with(Validity::Unsupported),
+                engines: Default::default(),
+                fdinfo_partial: false,
             };
             (DeviceIdx(idx), g)
         }

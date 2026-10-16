@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use crate::ids::DeviceIdx;
+use crate::ids::{DeviceIdx, MetricId};
 use crate::validity::Validity;
 
 /// A value with its validity. Never read `value` unless `validity == Valid` or `Stale`.
@@ -289,6 +289,139 @@ pub struct GpuTotals {
     pub pcie_rx_bps: Metric<f32>,
     /// PCIe transmit throughput, bytes per second (R-155).
     pub pcie_tx_bps: Metric<f32>,
+    /// Busy percent of every engine the device reports (PERF-063). The page draws one graph per
+    /// reported engine.
+    pub engines: GpuEngines,
+    /// Some DRM fdinfo read was denied, so the fdinfo-based engines count only the processes
+    /// tasklens can read (PERF-074 "Own processes only"). Always false for NVIDIA.
+    pub fdinfo_partial: bool,
+}
+
+/// One GPU engine (PERF-063). Each engine has a fixed key, stored in
+/// `performance.hidden_gpu_engines`, and a fixed series. Display order and names are per vendor
+/// and belong to the UI.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum GpuEngine {
+    /// NVIDIA 3D / Compute, AMD Graphics. Same value as `GpuTotals.util_pct`.
+    Gpu,
+    /// NVIDIA and AMD memory controller. Same value as `GpuTotals.mem_util_pct`.
+    MemCtl,
+    /// NVIDIA and AMD video encode. Same value as `GpuTotals.enc_pct`.
+    Enc,
+    /// NVIDIA and AMD video decode. Same value as `GpuTotals.dec_pct`.
+    Dec,
+    Jpeg,
+    /// NVIDIA optical flow accelerator.
+    Ofa,
+    /// AMD and Intel compute.
+    Compute,
+    /// AMD SDMA.
+    Dma,
+    /// Intel Render/3D.
+    Render,
+    /// Intel copy (blitter).
+    Copy,
+    /// Intel video, which both encodes and decodes.
+    Video,
+    /// Intel video-enhance (Video Processing).
+    VideoEnhance,
+}
+
+impl GpuEngine {
+    pub const COUNT: usize = 12;
+
+    pub const ALL: [GpuEngine; Self::COUNT] = [
+        Self::Gpu,
+        Self::MemCtl,
+        Self::Enc,
+        Self::Dec,
+        Self::Jpeg,
+        Self::Ofa,
+        Self::Compute,
+        Self::Dma,
+        Self::Render,
+        Self::Copy,
+        Self::Video,
+        Self::VideoEnhance,
+    ];
+
+    /// The frozen settings key. "gpu", "enc" and "dec" are the keys of the first engine graphs.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Gpu => "gpu",
+            Self::MemCtl => "memctl",
+            Self::Enc => "enc",
+            Self::Dec => "dec",
+            Self::Jpeg => "jpeg",
+            Self::Ofa => "ofa",
+            Self::Compute => "compute",
+            Self::Dma => "dma",
+            Self::Render => "render",
+            Self::Copy => "copy",
+            Self::Video => "video",
+            Self::VideoEnhance => "video-enhance",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<GpuEngine> {
+        Self::ALL.into_iter().find(|e| e.key() == key)
+    }
+
+    /// The series of this engine.
+    pub const fn metric(self) -> MetricId {
+        match self {
+            Self::Gpu => MetricId::GPU_UTIL,
+            Self::MemCtl => MetricId::GPU_ENGINE_MEMCTL,
+            Self::Enc => MetricId::GPU_ENC,
+            Self::Dec => MetricId::GPU_DEC,
+            Self::Jpeg => MetricId::GPU_ENGINE_JPEG,
+            Self::Ofa => MetricId::GPU_ENGINE_OFA,
+            Self::Compute => MetricId::GPU_ENGINE_COMPUTE,
+            Self::Dma => MetricId::GPU_ENGINE_DMA,
+            Self::Render => MetricId::GPU_ENGINE_RENDER,
+            Self::Copy => MetricId::GPU_ENGINE_COPY,
+            Self::Video => MetricId::GPU_ENGINE_VIDEO,
+            Self::VideoEnhance => MetricId::GPU_ENGINE_VIDEO_ENHANCE,
+        }
+    }
+}
+
+/// Busy percent per `GpuEngine`, indexed by the enum. `Unsupported` marks an engine the device
+/// does not report; the UI does not list it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuEngines([Metric<f32>; GpuEngine::COUNT]);
+
+impl GpuEngines {
+    /// No engine reported.
+    pub fn none() -> Self {
+        Self([Metric::with(Validity::Unsupported); GpuEngine::COUNT])
+    }
+
+    pub fn get(&self, engine: GpuEngine) -> Metric<f32> {
+        self.0[engine as usize]
+    }
+
+    pub fn set(&mut self, engine: GpuEngine, value: Metric<f32>) {
+        self.0[engine as usize] = value;
+    }
+
+    pub fn is_reported(&self, engine: GpuEngine) -> bool {
+        self.get(engine).validity != Validity::Unsupported
+    }
+
+    /// The reported engines with their values, in `GpuEngine::ALL` order.
+    pub fn reported(&self) -> impl Iterator<Item = (GpuEngine, Metric<f32>)> + '_ {
+        GpuEngine::ALL
+            .into_iter()
+            .map(|e| (e, self.get(e)))
+            .filter(|(_, m)| m.validity != Validity::Unsupported)
+    }
+}
+
+impl Default for GpuEngines {
+    fn default() -> Self {
+        Self::none()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -388,6 +521,52 @@ mod tests {
     #[test]
     fn link_state_default_unknown() {
         assert_eq!(LinkState::default(), LinkState::Unknown);
+    }
+
+    #[test]
+    fn gpu_engine_keys_and_series() {
+        let keys: Vec<&str> = GpuEngine::ALL.iter().map(|e| e.key()).collect();
+        assert_eq!(
+            keys,
+            [
+                "gpu",
+                "memctl",
+                "enc",
+                "dec",
+                "jpeg",
+                "ofa",
+                "compute",
+                "dma",
+                "render",
+                "copy",
+                "video",
+                "video-enhance"
+            ]
+        );
+        for (i, e) in GpuEngine::ALL.into_iter().enumerate() {
+            assert_eq!(e as usize, i);
+            assert_eq!(GpuEngine::from_key(e.key()), Some(e));
+        }
+        assert_eq!(GpuEngine::from_key("engine"), None);
+        // The stored keys of the first engine graphs keep their series.
+        assert_eq!(GpuEngine::Gpu.metric(), MetricId::GPU_UTIL);
+        assert_eq!(GpuEngine::Enc.metric(), MetricId::GPU_ENC);
+        assert_eq!(GpuEngine::Dec.metric(), MetricId::GPU_DEC);
+        let metrics: BTreeSet<u16> = GpuEngine::ALL.iter().map(|e| e.metric().0).collect();
+        assert_eq!(metrics.len(), GpuEngine::COUNT);
+    }
+
+    #[test]
+    fn gpu_engines_report_only_set_engines() {
+        let mut e = GpuEngines::none();
+        assert_eq!(e.reported().count(), 0);
+        e.set(GpuEngine::Dma, Metric::valid(12.0));
+        e.set(GpuEngine::Gpu, Metric::with(Validity::WarmingUp));
+        let got: Vec<GpuEngine> = e.reported().map(|(k, _)| k).collect();
+        assert_eq!(got, [GpuEngine::Gpu, GpuEngine::Dma]);
+        assert!(e.is_reported(GpuEngine::Gpu));
+        assert!(!e.is_reported(GpuEngine::Jpeg));
+        assert_eq!(e.get(GpuEngine::Dma), Metric::valid(12.0));
     }
 
     proptest! {

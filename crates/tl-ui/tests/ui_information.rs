@@ -1140,6 +1140,8 @@ mod hardware_builders {
                 fan_pct: Metric::default(),
                 pcie_rx_bps: Metric::default(),
                 pcie_tx_bps: Metric::default(),
+                engines: Default::default(),
+                fdinfo_partial: false,
             },
         )]
         .into();

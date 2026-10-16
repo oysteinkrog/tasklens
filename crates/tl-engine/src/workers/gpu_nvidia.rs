@@ -35,7 +35,7 @@ use tl_model::gpu_proto::{
 };
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::DeviceIdx;
-use tl_model::system::{GpuTotals, Metric};
+use tl_model::system::{GpuEngine, GpuEngines, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
@@ -325,6 +325,12 @@ pub fn identity(info: &GpuDeviceInfo) -> DeviceIdentity {
 pub fn to_totals(s: &GpuDeviceSample, info: &GpuDeviceInfo) -> GpuTotals {
     let pct = |r: Reading<u32>| metric(r, |v| v as f32);
     let kbps = |r: Reading<u32>| metric(r, |v| v as f32 * 1024.0);
+    // NVML engines (PERF-063). An engine whose call returns NotSupported is not listed.
+    let mut engines = GpuEngines::none();
+    engines.set(GpuEngine::Gpu, pct(s.util_pct));
+    engines.set(GpuEngine::MemCtl, pct(s.mem_util_pct));
+    engines.set(GpuEngine::Enc, pct(s.enc_pct));
+    engines.set(GpuEngine::Dec, pct(s.dec_pct));
     GpuTotals {
         device: DEVICE_PLACEHOLDER,
         util_pct: pct(s.util_pct),
@@ -356,6 +362,9 @@ pub fn to_totals(s: &GpuDeviceSample, info: &GpuDeviceInfo) -> GpuTotals {
         // NVML reports KB/s.
         pcie_rx_bps: kbps(s.pcie_rx_kbps),
         pcie_tx_bps: kbps(s.pcie_tx_kbps),
+        engines,
+        // NVIDIA engines come from NVML, not fdinfo.
+        fdinfo_partial: false,
     }
 }
 
@@ -626,6 +635,30 @@ mod tests {
         let t = to_totals(&unsupported, &device_info());
         assert_eq!(t.mem_reserved.validity, Validity::Unsupported);
         assert_eq!(t.enc_sessions.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn to_totals_engines() {
+        let t = to_totals(&device_sample(), &device_info());
+        let engines: Vec<(GpuEngine, Metric<f32>)> = t.engines.reported().collect();
+        // Decode is NotSupported in the sample, so it is not listed.
+        assert_eq!(
+            engines,
+            [
+                (GpuEngine::Gpu, Metric::valid(37.0)),
+                (GpuEngine::MemCtl, Metric::valid(12.0)),
+                (GpuEngine::Enc, Metric::valid(0.0)),
+            ]
+        );
+        assert!(!t.fdinfo_partial);
+
+        let failed = GpuDeviceSample {
+            util_pct: Reading::Failed,
+            ..device_sample()
+        };
+        let t = to_totals(&failed, &device_info());
+        // A failed call keeps the engine listed.
+        assert_eq!(t.engines.get(GpuEngine::Gpu).validity, Validity::Failed);
     }
 
     #[test]
