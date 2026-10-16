@@ -2072,7 +2072,13 @@ mod flows {
             .update(|window, cx| run_jump_to_process(&u, &snap, window, cx));
         rig.main.run_until_parked();
         assert_eq!(rig.active_tab(), Tab::Processes);
-        assert_eq!(rig.queries(), before + 1, "the jump sent one query");
+        // The window starts on Services, so the jump is the first visit to Processes: that page
+        // sends its first query (generation 1), then the jump sends one more (generation 2).
+        assert_eq!(
+            rig.queries(),
+            before + 2,
+            "the first visit and the jump each sent a query"
+        );
         let generation = rig
             .engine
             .commands()
