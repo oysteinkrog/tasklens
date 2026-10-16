@@ -60,6 +60,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
     let gpu = tr(cx, "shell-settings-perf-group-gpu");
     let devices = tr(cx, "shell-settings-perf-group-devices");
     let network = tr(cx, "shell-settings-perf-group-network");
+    let overview = tr(cx, "shell-settings-perf-group-overview");
 
     let ranges: Vec<(SharedString, SettingValue)> = GRAPH_RANGES_S
         .into_iter()
@@ -140,6 +141,13 @@ pub fn page(cx: &mut App) -> PageBuilder {
     ] {
         page.switch(memory.clone(), key, tr(cx, label), None);
     }
+
+    page.switch(
+        overview,
+        SettingKey::PerformanceOverviewTopProcesses,
+        tr(cx, "shell-settings-perf-overview-top-processes"),
+        None,
+    );
 
     let optional = CheckSection {
         heading: SharedString::default(),

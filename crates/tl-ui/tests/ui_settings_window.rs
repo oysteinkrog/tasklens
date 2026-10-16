@@ -770,6 +770,7 @@ fn performance_page_keys(cx: &mut TestAppContext) {
             SettingKey::PerformanceCpuSecondaryGraph,
             SettingKey::PerformanceMemoryComposition,
             SettingKey::PerformanceMemorySwapGraph,
+            SettingKey::PerformanceOverviewTopProcesses,
             SettingKey::PerformanceGpuOptionalGraphs,
             SettingKey::PerformanceHiddenGpuEngines,
             SettingKey::PerformanceShowDisks,
@@ -1676,6 +1677,46 @@ fn settings_p2_keys_present(cx: &mut TestAppContext) {
         .map(|key| key.as_str())
         .collect();
     assert!(missing.is_empty(), "P2 keys not bound: {missing:?}");
+}
+
+/// UI-SHL-060, APP-023: every `settings.toml` key of table (a) is bound by exactly one row.
+/// `SettingKey::ALL` lists `fans` once.
+#[gpui_kit::test]
+fn settings_every_key_once(cx: &mut TestAppContext) {
+    setup(cx);
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for key in p2_pages(cx).iter().flat_map(|page| page.keys()) {
+        *counts.entry(key.as_str()).or_default() += 1;
+    }
+    let missing: Vec<&str> = SettingKey::ALL
+        .iter()
+        .map(|key| key.as_str())
+        .filter(|name| !counts.contains_key(name))
+        .collect();
+    let repeated: Vec<&str> = counts
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(
+        missing.is_empty() && repeated.is_empty(),
+        "keys not bound: {missing:?}; keys bound more than once: {repeated:?}"
+    );
+}
+
+/// UI-SHL-060: `SettingKey` holds only table (a) keys, so a bound key outside it would be a
+/// `state.toml` key (those live in `UiState`).
+#[gpui_kit::test]
+fn settings_no_state_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    let canonical: HashSet<SettingKey> = SettingKey::ALL.into_iter().collect();
+    for key in p2_pages(cx).iter().flat_map(|page| page.keys()) {
+        assert!(
+            canonical.contains(key),
+            "{} is not a settings.toml key",
+            key.as_str()
+        );
+    }
 }
 
 #[gpui_kit::test]

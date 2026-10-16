@@ -956,6 +956,7 @@ x=0, bottom=0
 | CPU | Secondary graph | dropdown | `performance.cpu_secondary_graph` | None, Power draw, Clock speed, Temperature | P2 |
 | Memory | Show memory composition | switch | `performance.memory_composition` | | P2 |
 | Memory | Show swap usage | switch | `performance.memory_swap_graph` | | P2 |
+| Overview | Show top processes box | switch | `performance.overview_top_processes` | | P2 |
 | GPU | Optional GPU graphs | two checkboxes "Power", "Clocks" | `performance.gpu_optional_graphs` | subset of power, clocks | P2 |
 | GPU | Hidden engine graphs | custom: checklist per GPU of its engines (checked = shown) | `performance.hidden_gpu_engines` | engine keys | P2 |
 | Devices | Disks / GPUs / Fans / Batteries | four switches | `performance.show_disks`, `show_gpus`, `show_fans`, `show_batteries` | | P2 |
