@@ -920,3 +920,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: dwy.14 checks the package db stamp every 5 s even with no pending paths (PackageIndex::check_stamp).
 - 2026-10-16 leader decision: o55.24 option A; model inputs in tasklens-hjn.43 (after hjn.42, proto 4); Power tooltip uses the limit range when the minimum is known, else the max form.
 - 2026-10-16 leader decision: o55.28 option A; engine part in tasklens-hjn.44 (all UPower devices, real kind, signed BATTERY_POWER).
+- 2026-10-16 leader decision: o55.30 option A; Battery copy_text and its update_page arm move to o55.28; o55.30 adds the Fan and aggregate arms.
