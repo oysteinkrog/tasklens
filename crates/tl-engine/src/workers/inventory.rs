@@ -913,6 +913,7 @@ pub struct SystemEnv {
     pub xdg_current_desktop: Option<String>,
     pub xdg_session_type: Option<String>,
     pub xdg_vtnr: Option<String>,
+    pub xdg_session_class: Option<String>,
     pub xdg_session_id: Option<String>,
     /// `$PATH` split on ':', absolute entries only.
     pub path_dirs: Vec<PathBuf>,
@@ -932,6 +933,7 @@ impl SystemEnv {
             xdg_current_desktop: var("XDG_CURRENT_DESKTOP"),
             xdg_session_type: var("XDG_SESSION_TYPE"),
             xdg_vtnr: var("XDG_VTNR"),
+            xdg_session_class: var("XDG_SESSION_CLASS"),
             xdg_session_id: var("XDG_SESSION_ID"),
             path_dirs,
         }
@@ -947,6 +949,8 @@ pub struct SystemBus {
     pub static_name: InvField<Arc<str>>,
     /// logind's session `VTNr`. `None` when not read or 0.
     pub vtnr: Option<u32>,
+    /// logind's session `Class`. `None` when not read or empty.
+    pub class: Option<Arc<str>>,
 }
 
 impl SystemBus {
@@ -956,6 +960,7 @@ impl SystemBus {
             pretty: with(Validity::Failed),
             static_name: with(Validity::Failed),
             vtnr: None,
+            class: None,
         }
     }
 }
@@ -973,13 +978,30 @@ pub async fn read_system_bus(cx: &Cx, env: &SystemEnv) -> SystemBus {
             pretty: bus_text(&pretty),
             static_name: bus_text(&static_name),
             vtnr: None,
+            class: None,
         },
         Err(_) => SystemBus::failed(),
     };
-    if env.xdg_vtnr.is_none()
+    let need_vt = env.xdg_vtnr.is_none();
+    let need_class = env.xdg_session_class.is_none();
+    if (need_vt || need_class)
         && let Some(id) = &env.xdg_session_id
+        && let Ok(session) = session_path(cx, &conn, id).await
     {
-        bus.vtnr = read_vtnr(cx, &conn, id).await.ok().filter(|&vt| vt != 0);
+        if need_vt {
+            bus.vtnr = read_session_property::<u32>(cx, &conn, &session, "VTNr")
+                .await
+                .ok()
+                .filter(|&vt| vt != 0);
+        }
+        if need_class {
+            bus.class = read_session_property::<String>(cx, &conn, &session, "Class")
+                .await
+                .ok()
+                .map(|c| bus_text(&c))
+                .filter(|c| c.validity == Validity::Valid)
+                .map(|c| c.value);
+        }
     }
     drop(conn);
     bus
@@ -1007,21 +1029,37 @@ async fn read_hostnames(cx: &Cx, conn: &DbusConn) -> Result<(String, String), Db
     Ok((pretty, static_name))
 }
 
-/// `Manager.GetSession(id)`, then that session's `VTNr`. Both only read state.
-async fn read_vtnr(cx: &Cx, conn: &DbusConn, id: &str) -> Result<u32, DbusError> {
-    let session: zbus::zvariant::OwnedObjectPath = conn
-        .read(cx, async {
-            let proxy = uncached_proxy(conn, LOGIN1_NAME, LOGIN1_PATH, LOGIN1_MANAGER).await?;
-            proxy.call("GetSession", &(id,)).await
-        })
-        .await?;
-    read_property::<u32>(
+/// `Manager.GetSession(id)`. Only reads state.
+async fn session_path(
+    cx: &Cx,
+    conn: &DbusConn,
+    id: &str,
+) -> Result<zbus::zvariant::OwnedObjectPath, DbusError> {
+    conn.read(cx, async {
+        let proxy = uncached_proxy(conn, LOGIN1_NAME, LOGIN1_PATH, LOGIN1_MANAGER).await?;
+        proxy.call("GetSession", &(id,)).await
+    })
+    .await
+}
+
+/// One property of a logind session.
+async fn read_session_property<T>(
+    cx: &Cx,
+    conn: &DbusConn,
+    session: &zbus::zvariant::OwnedObjectPath,
+    property: &str,
+) -> Result<T, DbusError>
+where
+    T: TryFrom<zbus::zvariant::OwnedValue>,
+    T::Error: Into<zbus::Error>,
+{
+    read_property::<T>(
         cx,
         conn,
         LOGIN1_NAME,
         session.as_str(),
         LOGIN1_SESSION,
-        "VTNr",
+        property,
     )
     .await
 }
@@ -1115,6 +1153,7 @@ pub fn build_system(
         desktop,
         windowing_system,
         session_type: opt(env_text(&env.xdg_session_type)),
+        session_class: opt(env_text(&env.xdg_session_class).or_else(|| bus.class.clone())),
         virtual_terminal,
     }
 }

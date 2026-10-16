@@ -888,6 +888,8 @@ pub struct SystemInfo {
     pub desktop: InvField<Arc<str>>,
     pub windowing_system: InvField<Arc<str>>,
     pub session_type: InvField<Arc<str>>,
+    /// logind session Class, raw, for example user (R-205).
+    pub session_class: InvField<Arc<str>>,
     pub virtual_terminal: InvField<Arc<str>>,
 }
 
@@ -2106,6 +2108,7 @@ mod tests {
             s.desktop.validity,
             s.windowing_system.validity,
             s.session_type.validity,
+            s.session_class.validity,
             s.virtual_terminal.validity,
         ] {
             assert_eq!(v, w);

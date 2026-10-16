@@ -78,6 +78,12 @@ enum W {
     SysDesktop,
     SysWindowing,
     SysSessionType,
+    SysClassUser,
+    SysClassGreeter,
+    SysClassLockScreen,
+    SysClassBackground,
+    SysTypeGraphical,
+    SysTypeText,
     SysVirtualTerminal,
     BiosFirmwareType,
     BiosUefi,
@@ -146,7 +152,7 @@ enum W {
     NetIpNone,
 }
 
-const KEYS: [&str; 103] = [
+const KEYS: [&str; 109] = [
     "information-os-name",
     "information-os-version",
     "information-os-build",
@@ -184,6 +190,12 @@ const KEYS: [&str; 103] = [
     "information-system-desktop",
     "information-system-windowing-system",
     "information-system-session-type",
+    "information-system-session-class-user",
+    "information-system-session-class-greeter",
+    "information-system-session-class-lock-screen",
+    "information-system-session-class-background",
+    "information-system-session-graphical",
+    "information-system-session-text",
     "information-system-virtual-terminal",
     "information-bios-firmware-type",
     "information-bios-uefi",
@@ -263,6 +275,7 @@ const KEY_ARCH_BITS: &str = "information-os-architecture-bits";
 const KEY_IDENTIFIER: &str = "information-cpu-identifier-value";
 const KEY_FLAGS: &str = "information-cpu-flags-value";
 const KEY_COMPUTER_NAME: &str = "information-system-computer-name-value";
+const KEY_SESSION_TYPE: &str = "information-system-session-type-value";
 const KEY_PAGE_SIZE: &str = "information-memory-page-size-value";
 const KEY_MODULE_N: &str = "information-modules-module-value";
 const KEY_SPEED_MTS: &str = "information-modules-speed-value";
@@ -296,6 +309,8 @@ pub struct InfoWords {
     flags: Template,
     /// "{pretty} ({static})".
     computer_name: Template,
+    /// "{class} ({type})".
+    session_type: Template,
     /// "{bytes} bytes".
     page_size: Template,
     /// "Module {n}".
@@ -339,6 +354,7 @@ impl InfoWords {
             identifier: template(KEY_IDENTIFIER, &["family", "model", "stepping"]),
             flags: template(KEY_FLAGS, &["virtualization", "avx512"]),
             computer_name: template(KEY_COMPUTER_NAME, &["pretty", "static"]),
+            session_type: template(KEY_SESSION_TYPE, &["class", "type"]),
             page_size: template(KEY_PAGE_SIZE, &["bytes"]),
             module_n: template(KEY_MODULE_N, &["n"]),
             speed_mts: template(KEY_SPEED_MTS, &["speed"]),
@@ -579,14 +595,32 @@ pub fn build_system(i: &InfoInputs, out: &mut Vec<InfoRow>) {
         text_value(&s.windowing_system),
         false,
     );
-    // `SystemInfo` holds one session string. R-205's "<Class> (<word>)" needs logind's Class
-    // too, which the snapshot does not carry yet, so the string is shown as given.
-    push(
-        out,
-        w.get(W::SysSessionType),
-        text_value(&s.session_type),
-        false,
-    );
+    let (class, kind) = (&s.session_class, &s.session_type);
+    let session = if shows(class.validity)
+        && shows(kind.validity)
+        && !class.value.trim().is_empty()
+        && !kind.value.trim().is_empty()
+    {
+        let (class_raw, kind_raw) = (class.value.trim(), kind.value.trim());
+        let class_word = match class_raw {
+            "user" => w.get(W::SysClassUser).as_ref(),
+            "greeter" => w.get(W::SysClassGreeter).as_ref(),
+            "lock-screen" => w.get(W::SysClassLockScreen).as_ref(),
+            "background" => w.get(W::SysClassBackground).as_ref(),
+            other => other,
+        };
+        let kind_word = match kind_raw {
+            "x11" | "wayland" | "mir" => w.get(W::SysTypeGraphical).as_ref(),
+            "tty" => w.get(W::SysTypeText).as_ref(),
+            other => other,
+        };
+        let mut t = String::new();
+        let _ = w.session_type.write(&mut t, &[&class_word, &kind_word]);
+        formatted(t, combined(&[class.validity, kind.validity]))
+    } else {
+        text_value(kind)
+    };
+    push(out, w.get(W::SysSessionType), session, false);
     if !absent(s.virtual_terminal.validity, &s.virtual_terminal.value) {
         push(
             out,

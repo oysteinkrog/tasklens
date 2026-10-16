@@ -2838,6 +2838,7 @@ fn bus(static_name: &str) -> SystemBus {
         pretty: inv_text("Oystein's desktop"),
         static_name: inv_text(static_name),
         vtnr: None,
+        class: None,
     }
 }
 
@@ -2890,6 +2891,34 @@ fn inventory_system_section() {
     );
     assert_eq!(sys.windowing_system.validity, Validity::Unsupported);
     assert_eq!(sys.session_type.validity, Validity::Unsupported);
+}
+
+#[test]
+fn inventory_session_class() {
+    let build = |env: &SystemEnv, bus: &SystemBus| {
+        build_system(env, bus, &kernel(None), inv_text("oystein"), None).session_class
+    };
+    let with_class = |c: &str| SystemEnv {
+        xdg_session_class: Some(c.into()),
+        ..kde_env()
+    };
+    let bus_class = |c: &str| SystemBus {
+        class: Some(Arc::from(c)),
+        ..bus("hawk")
+    };
+    assert_eq!(build(&with_class("user"), &bus("hawk")), inv_text("user"));
+    assert_eq!(
+        build(&kde_env(), &bus_class("greeter")),
+        inv_text("greeter")
+    );
+    assert_eq!(
+        build(&with_class("user"), &bus_class("greeter")),
+        inv_text("user")
+    );
+    assert_eq!(
+        build(&kde_env(), &bus("hawk")).validity,
+        Validity::Unsupported
+    );
 }
 
 #[test]

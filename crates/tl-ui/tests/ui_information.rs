@@ -732,6 +732,40 @@ mod row_builders {
     }
 
     #[test]
+    fn info_session_type_with_class() {
+        let session = |class: InvField<Arc<str>>, kind: InvField<Arc<str>>| {
+            let mut inv = inventory();
+            inv.system.session_class = class;
+            inv.system.session_type = kind;
+            let rows = rows(&inv, &system(0), build_system);
+            value_of(&rows, "Session type")
+        };
+        for (class, kind, expected) in [
+            ("user", "wayland", "User (graphical)"),
+            ("user", "x11", "User (graphical)"),
+            ("greeter", "mir", "Greeter (graphical)"),
+            ("user", "tty", "User (text)"),
+            ("lock-screen", "unspecified", "Lock screen (unspecified)"),
+            ("manager", "wayland", "manager (graphical)"),
+        ] {
+            assert_eq!(
+                session(s(class), s(kind)).as_deref(),
+                Some(expected),
+                "{class} {kind}"
+            );
+        }
+        assert_eq!(
+            session(with(Validity::Unsupported), s("wayland")).as_deref(),
+            Some("wayland")
+        );
+        assert_eq!(session(s(""), s("wayland")).as_deref(), Some("wayland"));
+        assert_eq!(
+            session(s("user"), with(Validity::Unsupported)).as_deref(),
+            Some("Not reported")
+        );
+    }
+
+    #[test]
     fn info_system_optional_rows_hidden() {
         let mut inv = inventory();
         inv.system.desktop = with(Validity::Unsupported);
