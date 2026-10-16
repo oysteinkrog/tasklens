@@ -2,7 +2,7 @@
 //! switch only writes `privilege.unlock_at_launch`; the button opens the Additional Setup window.
 //! No privileged call happens here. The Skip password prompts switch (E21-042) dispatches
 //! `TogglePasswordless`, which asks first and runs the polkit rule setup step; the key follows
-//! the step's result. The helper status line (E29, tasklens-qfx.29) goes after the button.
+//! the step's result, and the switch is disabled while the step runs. The helper status line (E29, tasklens-qfx.29) goes after the button.
 
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use crate::components::button::TlButtonKind;
 use crate::hub::GlobalHub;
 use crate::i18n::tr;
 use crate::settings_global::SettingKey;
-use crate::window::menus_settings::TogglePasswordless;
+use crate::window::menus_settings::{TogglePasswordless, passwordless_running};
 
 pub fn page(cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(PageId::Privileges);
@@ -26,6 +26,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
         tr(cx, "shell-menu-settings-unlock-at-launch"),
         None,
     );
+    page.disable_next(passwordless_running(cx));
     page.action_switch(
         group,
         SettingKey::PrivilegePasswordless,

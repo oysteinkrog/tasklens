@@ -11,17 +11,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::base::Root;
+use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
     AnyWindowHandle, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent,
-    Keystroke, Modifiers, ParentElement as _, Pixels, Render, Styled as _, TestAppContext, TextRun,
-    VisualTestContext, Window, div, font, point, px,
+    Keystroke, Modifiers, ParentElement as _, Pixels, Render, Role, Styled as _, TestAppContext,
+    TextRun, VisualTestContext, Window, div, font, point, px,
 };
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
     Signal,
 };
 use tl_model::client::EngineClient;
-use tl_model::command::{Command, Tab};
+use tl_model::command::{Command, SetupPhase, SetupRun, SetupState, SetupStep, Tab};
 use tl_model::details::{
     DetailTab, DetailTarget, HandleHit, HandleKind, HandlePhase, HandleSearchState, SearchId,
     TargetDetail,
@@ -36,6 +37,7 @@ use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::action_tracker::{GlobalActionTracker, ToastTexts};
 use tl_ui::actions::OpenSettings;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::shield::TlShield;
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::tooltip::DELAY_CONTROL;
@@ -926,4 +928,217 @@ fn privileges_helper_status_line(cx: &mut TestAppContext) {
     let page = privileges_page(cx);
     assert!(vcx.update(|window, cx| page.render_custom(INSTALLED, window, cx).is_some()));
     assert!(vcx.update(|window, cx| page.render_custom(NOT_INSTALLED, window, cx).is_none()));
+}
+
+// ---- Skip password prompts (tasklens-qfx.30) ----
+
+const PASSWORDLESS_TEXT: &str = "tasklens actions that change other users' processes, system \
+     services and network connections will run without asking for a password. Continue?";
+
+/// The `on` values of every `RunSetup { PolkitRule }` the engine received, in order.
+fn polkit_steps(engine: &FakeEngine) -> Vec<bool> {
+    engine
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::RunSetup {
+                step: SetupStep::PolkitRule { on },
+            } => Some(on),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Publishes `health.setup.run` for the polkit rule step.
+fn publish_polkit(engine: &FakeEngine, seq: u64, on: bool, phase: SetupPhase) {
+    engine.publish_with(|s| {
+        let mut health = (*s.health).clone();
+        health.version += 1;
+        health.setup = Arc::new(SetupState {
+            status: None,
+            run: Some(SetupRun {
+                seq,
+                step: SetupStep::PolkitRule { on },
+                phase,
+                output: Arc::from(""),
+            }),
+        });
+        s.health = Arc::new(health);
+    });
+}
+
+fn passwordless(cx: &mut TestAppContext) -> bool {
+    cx.update(|cx| TlSettings::settings(cx).privilege.passwordless)
+}
+
+fn window_count(cx: &mut TestAppContext) -> usize {
+    cx.update(|cx| cx.windows().len())
+}
+
+fn switch_disabled(cx: &mut TestAppContext) -> bool {
+    privileges_page(cx).is_disabled(SettingKey::PrivilegePasswordless)
+}
+
+/// Settings open with the switch off, and the switch turned on from the page: the confirm is
+/// open. Returns the engine, the Settings window and the confirm window.
+fn open_page_confirm(
+    cx: &mut TestAppContext,
+    persists: Rc<Cell<u32>>,
+) -> (Arc<FakeEngine>, VisualTestContext, VisualTestContext) {
+    let (engine, mut main) = setup_counting(cx, Settings::default(), persists);
+    let (_frame, mut settings) = open_settings(cx, &mut main);
+    let page = privileges_page(cx);
+    settings.update(|_, cx| page.set_bool(SettingKey::PrivilegePasswordless, true, cx));
+    settings.run_until_parked();
+    let main_id = main.update(|window, _| window.window_handle().window_id());
+    let settings_id = settings.update(|window, _| window.window_handle().window_id());
+    let handle = cx
+        .update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find(|w| w.window_id() != main_id && w.window_id() != settings_id)
+        })
+        .and_then(|w: AnyWindowHandle| w.downcast::<Root>())
+        .expect("confirm window");
+    let mut dialog = VisualTestContext::from_window(handle.into(), cx);
+    dialog.update(|window, _| window.activate_window());
+    draw(&mut dialog);
+    (engine, settings, dialog)
+}
+
+fn confirm_view(dialog: &mut VisualTestContext) -> Entity<TlDialogView> {
+    let handle = dialog
+        .update(|window, _| window.window_handle())
+        .downcast::<Root>()
+        .expect("root window");
+    dialog
+        .update(|_, cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+        .map(|frame| dialog.read(|cx| frame.read(cx).content().clone()))
+        .expect("confirm view")
+}
+
+#[gpui_kit::test]
+fn passwordless_confirm_text(cx: &mut TestAppContext) {
+    let (engine, _settings, mut dialog) = open_page_confirm(cx, Rc::new(Cell::new(0)));
+    let view = confirm_view(&mut dialog);
+    let (title, text) = dialog.read(|cx| {
+        let d = view.read(cx).dialog();
+        (d.window_title().to_string(), d.text().to_string())
+    });
+    assert_eq!(title, "tasklens");
+    assert_eq!(text, PASSWORDLESS_TEXT);
+    let buttons: Vec<String> = dialog
+        .update(|window, _| snapshots(window))
+        .into_iter()
+        .filter(|s| s.role() == Some(Role::Button))
+        .filter_map(|s| s.label().map(str::to_owned))
+        .collect();
+    assert!(
+        buttons.iter().any(|b| b == "Skip prompts") && buttons.iter().any(|b| b == "Cancel"),
+        "buttons: {buttons:?}"
+    );
+    // R-104: a non-destructive confirm focuses the action button.
+    assert_eq!(
+        dialog.update(|window, cx| view.read(cx).focused_button(window)),
+        Some(DialogButton::Action)
+    );
+    assert!(polkit_steps(&engine).is_empty(), "nothing sent yet");
+
+    dialog.simulate_keystrokes("escape");
+    dialog.run_until_parked();
+    cx.run_until_parked();
+    assert!(polkit_steps(&engine).is_empty());
+    assert!(!passwordless(cx));
+}
+
+#[gpui_kit::test]
+fn passwordless_on_sends_rule_on(cx: &mut TestAppContext) {
+    let (engine, _settings, mut dialog) = open_page_confirm(cx, Rc::new(Cell::new(0)));
+    dialog.simulate_keystrokes("enter");
+    dialog.run_until_parked();
+    cx.run_until_parked();
+    assert_eq!(polkit_steps(&engine), [true]);
+    assert!(switch_disabled(cx), "disabled while the step runs");
+    assert!(!passwordless(cx));
+}
+
+#[gpui_kit::test]
+fn passwordless_success_persists(cx: &mut TestAppContext) {
+    let persists = Rc::new(Cell::new(0));
+    let (engine, _settings, mut dialog) = open_page_confirm(cx, persists.clone());
+    dialog.simulate_keystrokes("enter");
+    dialog.run_until_parked();
+    let before = persists.get();
+
+    publish_polkit(&engine, 1, true, SetupPhase::Running);
+    cx.run_until_parked();
+    assert!(!passwordless(cx));
+    assert!(switch_disabled(cx));
+
+    publish_polkit(&engine, 1, true, SetupPhase::Succeeded);
+    cx.run_until_parked();
+    assert!(passwordless(cx));
+    assert!(persists.get() > before, "persisted");
+    assert!(!switch_disabled(cx));
+}
+
+#[gpui_kit::test]
+fn passwordless_cancelled_stays_off(cx: &mut TestAppContext) {
+    let (engine, mut settings, mut dialog) = open_page_confirm(cx, Rc::new(Cell::new(0)));
+    dialog.simulate_keystrokes("enter");
+    dialog.run_until_parked();
+
+    publish_polkit(&engine, 1, true, SetupPhase::Cancelled);
+    cx.run_until_parked();
+    assert!(!passwordless(cx));
+    assert!(!switch_disabled(cx));
+    // UI-SHL-040 overrules the bead: a cancelled prompt toasts "Authentication cancelled".
+    let mut toasts = window_toasts(&mut settings);
+    toasts.extend(main_toasts(cx));
+    assert!(toasts.iter().any(|t| t == CANCELLED), "toasts: {toasts:?}");
+}
+
+/// Settings open with the key on; the switch is turned off from the page.
+fn turn_off_from_page(
+    cx: &mut TestAppContext,
+    persists: Rc<Cell<u32>>,
+) -> (Arc<FakeEngine>, VisualTestContext, usize) {
+    let mut settings = Settings::default();
+    settings.privilege.passwordless = true;
+    let (engine, mut main) = setup_counting(cx, settings, persists);
+    let (_frame, mut vcx) = open_settings(cx, &mut main);
+    let windows = window_count(cx);
+    let page = privileges_page(cx);
+    vcx.update(|_, cx| page.set_bool(SettingKey::PrivilegePasswordless, false, cx));
+    vcx.run_until_parked();
+    (engine, vcx, windows)
+}
+
+#[gpui_kit::test]
+fn passwordless_off_no_confirm(cx: &mut TestAppContext) {
+    let persists = Rc::new(Cell::new(0));
+    let (engine, _vcx, windows) = turn_off_from_page(cx, persists.clone());
+    assert_eq!(window_count(cx), windows, "no confirm opened");
+    assert_eq!(polkit_steps(&engine), [false]);
+    assert!(passwordless(cx), "not before the step ends");
+    let before = persists.get();
+
+    publish_polkit(&engine, 1, false, SetupPhase::Succeeded);
+    cx.run_until_parked();
+    assert!(!passwordless(cx));
+    assert!(persists.get() > before, "persisted");
+}
+
+#[gpui_kit::test]
+fn passwordless_off_failure_toast(cx: &mut TestAppContext) {
+    let (engine, mut vcx, _) = turn_off_from_page(cx, Rc::new(Cell::new(0)));
+    publish_polkit(&engine, 1, false, SetupPhase::Failed(Arc::from("x")));
+    cx.run_until_parked();
+    assert!(passwordless(cx), "stays on");
+    let mut toasts = window_toasts(&mut vcx);
+    toasts.extend(main_toasts(cx));
+    assert!(
+        toasts.iter().any(|t| t == "Setup failed"),
+        "toasts: {toasts:?}"
+    );
 }

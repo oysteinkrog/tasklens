@@ -734,6 +734,12 @@ impl PasswordlessFlow {
     }
 }
 
+/// True while a polkit rule step is running. The Privileges switch is disabled meanwhile.
+pub fn passwordless_running(cx: &App) -> bool {
+    cx.try_global::<GlobalPasswordlessFlow>()
+        .is_some_and(|flow| flow.0.read(cx).pending.is_some())
+}
+
 fn current_setup_seq(hub: &Entity<SnapshotHub>, cx: &App) -> u64 {
     hub.read(cx)
         .current()
