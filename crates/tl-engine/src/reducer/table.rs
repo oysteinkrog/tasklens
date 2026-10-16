@@ -1452,6 +1452,10 @@ fn sort_items(input: &TableInput<'_>, groups: &[GroupRow], items: &mut [Item], s
 
 /// The unit's cgroup sample: the one whose path ends in the unit name, under `user@` for a
 /// user-manager unit and outside it for a system unit.
+///
+/// Production does not feed this yet: the processes and lowmem workers send empty
+/// `unit_stats`, so unit rows have no cgroup sample and `frozen` stays false. See
+/// tasklens-8q0.42.
 fn unit_stat<'a>(stats: &'a [CgroupStats], unit: &UnitRef) -> Option<&'a CgroupStats> {
     stats.iter().find(|s| {
         let path: &str = &s.cgroup.rel_path;
