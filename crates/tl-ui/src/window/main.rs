@@ -309,7 +309,6 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
             let page = cx.new(|cx| InformationPage::new(&hub, &demand, window, cx));
             PageSlot::new(page, cx)
         }),
-        _ => None,
     }
 }
 
