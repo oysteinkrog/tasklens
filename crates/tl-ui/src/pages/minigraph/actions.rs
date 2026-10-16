@@ -20,6 +20,8 @@ gpui_kit::actions!(
         ResetMinigraphLayout,
         /// Attaches every detached card again (E26-016, E26-018).
         MinigraphAttachAll,
+        /// Fills the free slots with CPU cards of random processes (Debug menu, APP-026).
+        AddRandomMinigraphs,
         ToggleMiniAlwaysOnTop,
         CloseMiniWindow,
     ]

@@ -7,10 +7,10 @@ use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
 use tl_ui::pages::minigraph::GraphColor;
 use tl_ui::pages::minigraph::actions::{
-    AddAppGraph, AddMinigraph, AddNameGraph, CloseMiniWindow, MinigraphAddToWindow,
-    MinigraphAttach, MinigraphAttachAll, MinigraphCloseDetachedWindow, MinigraphDetach,
-    MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor, MinigraphSetRange,
-    ResetMinigraphLayout, ToggleMiniAlwaysOnTop,
+    AddAppGraph, AddMinigraph, AddNameGraph, AddRandomMinigraphs, CloseMiniWindow,
+    MinigraphAddToWindow, MinigraphAttach, MinigraphAttachAll, MinigraphCloseDetachedWindow,
+    MinigraphDetach, MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor,
+    MinigraphSetRange, ResetMinigraphLayout, ToggleMiniAlwaysOnTop,
 };
 use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphId, MinigraphSource};
 
@@ -21,6 +21,7 @@ fn id() -> MinigraphId {
 fn all() -> Vec<Box<dyn Action>> {
     vec![
         Box::new(ResetMinigraphLayout),
+        Box::new(AddRandomMinigraphs),
         Box::new(MinigraphAttachAll),
         Box::new(ToggleMiniAlwaysOnTop),
         Box::new(CloseMiniWindow),
@@ -63,7 +64,7 @@ fn all() -> Vec<Box<dyn Action>> {
 #[gpui_kit::test]
 fn minigraph_actions_in_namespace(cx: &mut TestAppContext) {
     let all = all();
-    assert_eq!(all.len(), 16);
+    assert_eq!(all.len(), 17);
     cx.read(|cx| {
         let names = cx.all_action_names();
         for action in &all {
@@ -2328,6 +2329,7 @@ mod panel {
         use tl_model::time::BootId;
         use tl_model::validity::{FieldValidity, Validity};
         use tl_ui::components::menu::{MenuEntryInfo, TlMenu};
+        use tl_ui::pages::minigraph::actions::AddRandomMinigraphs;
         use tl_ui::pages::minigraph::panel::AddError;
         use tl_ui::pages::minigraph::sources::GraphColumn;
         use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
@@ -2608,6 +2610,117 @@ mod panel {
             assert_eq!(columns[0].tooltip.as_deref(), Some("Already added"));
             assert_eq!(columns[1].kind, MenuEntryKind::Item);
             assert!(!columns[1].checked);
+        }
+
+        fn random_records(from: u32, n: u32) -> Vec<ProcessRecord> {
+            (from..from + n)
+                .map(|pid| record(pid, "proc", None))
+                .collect()
+        }
+
+        fn dispatch_random(r: &mut Rig) {
+            r.vcx.dispatch_action(AddRandomMinigraphs);
+            draw(&mut r.vcx);
+        }
+
+        fn process_cpu_cards(r: &mut Rig) -> usize {
+            let panel = r.panel.clone();
+            r.vcx.update(|_, cx| {
+                panel
+                    .read(cx)
+                    .attached()
+                    .filter(|e| {
+                        matches!(e.source, MinigraphSource::Process { .. })
+                            && e.column == GraphColumn::Cpu
+                    })
+                    .count()
+            })
+        }
+
+        #[gpui_kit::test]
+        fn add_random_fills_free_slots(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            r.set(SettingKey::GraphsMinigraphDisk, false);
+            r.set(SettingKey::GraphsMinigraphNetwork, false);
+            r.set(SettingKey::GraphsMinigraphGpu, false);
+            publish(&mut r, random_records(5000, 50));
+            dispatch_random(&mut r);
+            assert_eq!(r.attached().len(), 12);
+            assert_eq!(process_cpu_cards(&mut r), 9);
+            assert_eq!(
+                r.toasts(),
+                vec![(
+                    ToastKind::Success,
+                    "Added 9 random process minigraphs.".to_owned()
+                )]
+            );
+        }
+
+        #[gpui_kit::test]
+        fn add_random_full_panel_toast(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            publish(&mut r, random_records(5000, 50));
+            dispatch_random(&mut r);
+            dispatch_random(&mut r);
+            assert_eq!(r.attached().len(), 12);
+            assert_eq!(
+                r.toasts().last(),
+                Some(&(
+                    ToastKind::Info,
+                    "No process minigraphs available.".to_owned()
+                ))
+            );
+        }
+
+        #[gpui_kit::test]
+        fn add_random_no_candidates_toast(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            let mut kernel = record(100, "kthread", None);
+            kernel.flags = ProcFlags::KERNEL_THREAD;
+            let mut exited = record(101, "gone", None);
+            exited.flags = ProcFlags::EXITED;
+            let own = record(std::process::id(), "tasklens", None);
+            publish(&mut r, vec![kernel, exited, own]);
+            dispatch_random(&mut r);
+            assert_eq!(r.attached().len(), 6);
+            assert_eq!(
+                r.toasts(),
+                vec![(
+                    ToastKind::Info,
+                    "No process minigraphs available.".to_owned()
+                )]
+            );
+        }
+
+        #[gpui_kit::test]
+        fn add_random_skips_existing(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            publish(&mut r, random_records(4242, 2));
+            let source = MinigraphSource::Process { key: key(4242) };
+            add(&mut r, Some(source), GraphColumn::Cpu).expect("a free slot");
+            dispatch_random(&mut r);
+            let attached = r.attached();
+            for pid in [4242, 4243] {
+                let want = MinigraphSource::Process { key: key(pid) };
+                assert_eq!(attached.iter().filter(|(s, _)| *s == want).count(), 1);
+            }
+            assert_eq!(
+                r.toasts().last(),
+                Some(&(
+                    ToastKind::Success,
+                    "Added 1 random process minigraphs.".to_owned()
+                ))
+            );
+        }
+
+        #[gpui_kit::test]
+        fn add_random_single_result_toast(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            publish(&mut r, random_records(5000, 5));
+            dispatch_random(&mut r);
+            let toasts = r.toasts();
+            assert_eq!(toasts.len(), 1);
+            assert!(toasts.iter().all(|(_, t)| t != "Minigraph added"));
         }
 
         #[gpui_kit::test]

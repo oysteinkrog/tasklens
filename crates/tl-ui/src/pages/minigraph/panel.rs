@@ -16,20 +16,22 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext as _, Bounds, Context, DragMoveEvent, ElementId,
     Entity, Global, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
-    ParentElement as _, Pixels, Point, Render, StyleRefinement, Styled as _, Subscription,
-    WeakEntity, Window, canvas, div, px,
+    ParentElement as _, Pixels, Point, Render, SharedString, StyleRefinement, Styled as _,
+    Subscription, WeakEntity, Window, canvas, div, px,
 };
 use tl_model::demand::{CpuDemand, Demand, GRAPH_TARGETS_MAX};
+use tl_model::process::ProcFlags;
 use tl_model::settings::GraphsSettings;
 
 use super::GraphColor;
 use super::actions::{
-    MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor, MinigraphSetRange,
-    ResetMinigraphLayout,
+    AddRandomMinigraphs, MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor,
+    MinigraphSetRange, ResetMinigraphLayout,
 };
 use super::card::{
     CardEnded, DraggedMinigraph, MINI_CARD_H, MINI_CARD_W, MinigraphCard, past_threshold,
@@ -42,7 +44,7 @@ use crate::components::motion::{M_FAST, ease_out_cubic};
 use crate::components::toast::ToastKind;
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::{SettingValue, TlSettings, animations_on};
 use crate::theme::metrics;
@@ -393,26 +395,40 @@ impl MinigraphPanel {
             self.toast(ToastKind::Error, "minigraph-toast-unable", cx);
             return Err(AddError::Unavailable);
         };
-        if self.has_source(&source, column) {
-            self.toast(ToastKind::Info, "minigraph-toast-exists", cx);
-            return Err(AddError::Exists);
-        }
         let added = match &source {
             MinigraphSource::Name(_) => "minigraph-toast-name-added",
             MinigraphSource::App(_) => "minigraph-toast-app-added",
             _ => "minigraph-toast-added",
         };
-        match self.insert(source, column) {
+        match self.try_add(source, column) {
             Ok(id) => {
                 self.changed(cx);
                 self.toast(ToastKind::Success, added, cx);
                 Ok(id)
             }
-            Err(PanelFull) => {
+            Err(AddError::Exists) => {
+                self.toast(ToastKind::Info, "minigraph-toast-exists", cx);
+                Err(AddError::Exists)
+            }
+            Err(e) => {
                 self.toast(ToastKind::Warning, "minigraph-toast-full", cx);
-                Err(AddError::Full)
+                Err(e)
             }
         }
+    }
+
+    /// Adds a card at the next free slot without a toast or a persist: `Exists` for a duplicate,
+    /// `Full` when all slots are used.
+    fn try_add(
+        &mut self,
+        source: MinigraphSource,
+        column: GraphColumn,
+    ) -> Result<MinigraphId, AddError> {
+        if self.has_source(&source, column) {
+            return Err(AddError::Exists);
+        }
+        self.insert(source, column)
+            .map_err(|PanelFull| AddError::Full)
     }
 
     /// Hides a card. A system card's setting turns off, so View > Graphs unchecks; any other
@@ -680,6 +696,10 @@ impl MinigraphPanel {
 
     fn toast(&mut self, kind: ToastKind, key: &'static str, cx: &mut Context<Self>) {
         let text = tr(cx, key);
+        self.toast_text(kind, text, cx);
+    }
+
+    fn toast_text(&mut self, kind: ToastKind, text: SharedString, cx: &mut Context<Self>) {
         #[cfg(any(test, feature = "test-hooks"))]
         self.toasts.push((kind, text.clone()));
         cx.defer(move |cx| push_main_toast(cx, kind, text, None, None));
@@ -691,6 +711,68 @@ pub fn toast_full(panel: &Entity<MinigraphPanel>, cx: &mut App) {
     panel.update(cx, |p, cx| {
         p.toast(ToastKind::Warning, "minigraph-toast-full", cx)
     });
+}
+
+/// SplitMix64 step (Steele, Lea and Flood).
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Handles `AddRandomMinigraphs`: fills the free slots with CPU cards of random processes and
+/// shows one result toast. Skips exited rows, kernel threads and this process. Returns the
+/// number of cards added.
+pub fn add_random(cx: &mut App) -> u32 {
+    let Some(panel) = MinigraphPanel::global(cx) else {
+        return 0;
+    };
+    panel.update(cx, |p, cx| {
+        let self_pid = std::process::id();
+        let mut keys: Vec<_> = p
+            .hub
+            .read(cx)
+            .current()
+            .processes
+            .records
+            .iter()
+            .filter(|r| {
+                !r.flags
+                    .intersects(ProcFlags::EXITED | ProcFlags::KERNEL_THREAD | ProcFlags::IS_SELF)
+                    && r.key.pid != self_pid
+            })
+            .map(|r| r.key)
+            .collect();
+        let mut seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        for i in (1..keys.len()).rev() {
+            let j = (splitmix64(&mut seed) % (i as u64 + 1)) as usize;
+            keys.swap(i, j);
+        }
+        let mut count = 0u32;
+        for key in keys {
+            match p.try_add(MinigraphSource::Process { key }, GraphColumn::Cpu) {
+                Ok(_) => count += 1,
+                Err(AddError::Full) => break,
+                Err(_) => {}
+            }
+        }
+        if count > 0 {
+            p.changed(cx);
+            let text = tr_args(
+                cx,
+                "prf-minigraph-random-added",
+                &[("count", count.to_string().into())],
+            );
+            p.toast_text(ToastKind::Success, text, cx);
+        } else {
+            p.toast(ToastKind::Info, "prf-minigraph-random-none", cx);
+        }
+        count
+    })
 }
 
 /// The minigraph actions reach the panel from the shell menu and the card menus through the
@@ -718,6 +800,9 @@ fn register_actions(cx: &mut Context<MinigraphPanel>) {
     let panel = weak.clone();
     app.on_action(move |a: &MinigraphSetColor, cx| {
         let _ = panel.update(cx, |p, cx| p.set_color(a.id, a.color, cx));
+    });
+    app.on_action(|_: &AddRandomMinigraphs, cx| {
+        add_random(cx);
     });
     app.on_action(move |a: &MinigraphSetRange, cx| {
         let _ = weak.update(cx, |p, cx| p.set_range(a.id, a.secs, cx));
