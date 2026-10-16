@@ -1050,8 +1050,14 @@ mod virustotal {
             description: valid(text("")),
             cwd: valid(text("/home/u")),
             root: valid(text("/")),
-            cgroup: None,
-            unit: None,
+            cgroup: Total {
+                value: None,
+                validity: Validity::Valid,
+            },
+            unit: Total {
+                value: None,
+                validity: Validity::Valid,
+            },
             app_id: None,
             cmdline: valid(text("secret-tool --token abc")),
             hashes,

@@ -2656,34 +2656,62 @@ impl GeneralTab {
             Some(root) if root.validity.is_valid() && &*root.value == "/" => {}
             root => b.text(FieldId::Root, KvKind::Text, root),
         }
-        match d {
-            Some(d) => match &d.cgroup {
-                Some(path) => b.add(
-                    FieldId::Cgroup,
-                    KvKind::Text,
-                    Validity::Valid,
-                    UnsupportedWord::NotReported,
-                    ptr_bits(path),
-                    |s| {
-                        if !path.starts_with('/') {
-                            s.push('/');
-                        }
-                        s.push_str(path);
-                    },
-                ),
-                None => b.unsupported(FieldId::Cgroup, KvKind::Text, UnsupportedWord::NotReported),
-            },
+        match d.map(|d| &d.cgroup) {
+            Some(Total {
+                value: Some(path),
+                validity,
+            }) if validity.is_valid() => b.add(
+                FieldId::Cgroup,
+                KvKind::Text,
+                *validity,
+                UnsupportedWord::NotReported,
+                ptr_bits(path),
+                |s| {
+                    if !path.starts_with('/') {
+                        s.push('/');
+                    }
+                    s.push_str(path);
+                },
+            ),
+            Some(Total {
+                value: None,
+                validity,
+            }) if validity.is_valid() => {
+                b.unsupported(FieldId::Cgroup, KvKind::Text, UnsupportedWord::NotReported)
+            }
+            // Restricted or failed: the validity word.
+            Some(c) => b.add(
+                FieldId::Cgroup,
+                KvKind::Text,
+                c.validity,
+                UnsupportedWord::NotReported,
+                0,
+                |_| {},
+            ),
             None => b.collecting(FieldId::Cgroup, KvKind::Text),
         }
-        if let Some(unit) = d.and_then(|d| d.unit.as_ref()) {
-            b.add(
+        match d.map(|d| &d.unit) {
+            Some(Total {
+                value: Some(unit),
+                validity,
+            }) if validity.is_valid() => b.add(
                 FieldId::Unit,
                 KvKind::Link(LinkTarget::Unit),
-                Validity::Valid,
+                *validity,
                 UnsupportedWord::NotSupported,
                 ptr_bits(&unit.name),
                 |s| s.push_str(&unit.name),
-            );
+            ),
+            // No unit: no row. Restricted or failed: the validity word, as plain text.
+            Some(u) if !u.validity.is_valid() => b.add(
+                FieldId::Unit,
+                KvKind::Text,
+                u.validity,
+                UnsupportedWord::NotSupported,
+                0,
+                |_| {},
+            ),
+            _ => {}
         }
         if let Some(app_id) = d.and_then(|d| d.app_id.as_ref()) {
             b.add(

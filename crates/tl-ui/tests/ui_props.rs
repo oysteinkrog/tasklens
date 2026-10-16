@@ -92,8 +92,14 @@ fn detail(cmdline: &str) -> GeneralDetail {
         description: valid(text("Web browser")),
         cwd: valid(text("/home/oystein")),
         root: valid(text("/")),
-        cgroup: Some(text("/user.slice/app.slice/app-firefox.scope")),
-        unit: None,
+        cgroup: Total {
+            value: Some(text("/user.slice/app.slice/app-firefox.scope")),
+            validity: Validity::Valid,
+        },
+        unit: Total {
+            value: None,
+            validity: Validity::Valid,
+        },
         app_id: None,
         cmdline: valid(text(cmdline)),
         hashes: HashState::Pending,
@@ -796,7 +802,7 @@ fnd-kv-not-reported = <not-reported>
         GeneralTab::new(KEY, filter, cx)
     });
     let mut d = detail("firefox");
-    d.cgroup = None;
+    d.cgroup.value = None;
     d.cmdline = Total {
         value: text(""),
         validity: Validity::Unsupported,
