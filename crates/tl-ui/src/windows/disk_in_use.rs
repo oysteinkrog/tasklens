@@ -184,7 +184,7 @@ fn model_text(snap: &Snapshot, idx: DeviceIdx) -> SharedString {
 }
 
 /// The target of one live process record. A copy of the Processes page's `record_target`.
-fn record_target(r: &ProcessRecord) -> CapturedTarget {
+pub(crate) fn record_target(r: &ProcessRecord) -> CapturedTarget {
     CapturedTarget {
         node: NodeId::Process(r.key),
         kind: RowKind::Process,
@@ -204,7 +204,11 @@ fn record_target(r: &ProcessRecord) -> CapturedTarget {
 
 /// The confirmation an end action on `targets` needs first, if any (R-036, D-009): a protected
 /// target, then two or more targets, then another user's target.
-fn confirm_kind(targets: &[CapturedTarget], kill: bool, cx: &App) -> Option<ConfirmKind> {
+pub(crate) fn confirm_kind(
+    targets: &[CapturedTarget],
+    kill: bool,
+    cx: &App,
+) -> Option<ConfirmKind> {
     if let Some(t) = targets
         .iter()
         .find(|t| t.flags.contains(ProcFlags::PROTECTED))

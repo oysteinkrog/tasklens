@@ -14,7 +14,7 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, IntoElement,
-    ParentElement as _, Render, SharedString, Window, div, px,
+    ParentElement as _, Render, SharedString, WeakEntity, Window, div, px,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -699,6 +699,8 @@ pub struct ServicesDelegate {
     proc_tip: Rc<RefCell<ProcTipState>>,
     proc_tip_view: Option<AnyView>,
     proc_tip_words: RowTipWords,
+    /// The page that builds the row menu and keeps its captured targets.
+    page: Option<WeakEntity<super::ServicesPage>>,
 }
 
 impl ServicesDelegate {
@@ -742,7 +744,25 @@ impl ServicesDelegate {
             proc_tip: Rc::default(),
             proc_tip_view: None,
             proc_tip_words: RowTipWords::from_fn(|key| tr_en(key, &[])),
+            page: None,
         }
+    }
+
+    pub(super) fn set_page(&mut self, page: WeakEntity<super::ServicesPage>) {
+        self.page = Some(page);
+    }
+
+    /// Ctrl+L: collapses every unit row. Group rows keep their state (UI-SYS-014).
+    pub fn collapse_units(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
+        let before = self.expanded.len();
+        self.expanded
+            .retain(|node| matches!(node, SysNodeId::ServiceGroup(_)));
+        if self.expanded.len() == before {
+            return;
+        }
+        self.expanded_request = Some(self.requested_expanded());
+        self.send_demand(cx);
+        cx.notify();
     }
 
     /// Marks `unit` as having `tag` in flight, or clears the mark with `None`.
@@ -1317,13 +1337,25 @@ impl TreeTableDelegate for ServicesDelegate {
     }
     fn context_menu(
         &mut self,
-        _: &[u64],
-        _: Option<SysColumnId>,
+        targets: &[u64],
+        clicked_col: Option<SysColumnId>,
         menu: TlMenu,
-        _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
-        menu
+        let Some(page) = self.page.clone() else {
+            return menu;
+        };
+        let nodes: SmallVec<[SysNodeId; 8]> = targets
+            .iter()
+            .filter_map(|id| Some(self.rows.get(self.row_index(*id)?)?.node.clone()))
+            .collect();
+        super::row_menu(&page, self, &nodes, clicked_col, menu, window, cx)
+    }
+    fn on_menu_closed(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
+        if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
+            page.update(cx, |page, _| page.clear_menu_targets());
+        }
     }
     fn on_toggle_expand(&mut self, id: u64, cx: &mut Context<TlTreeTable<Self>>) {
         let Some(node) = self
