@@ -36,6 +36,7 @@ use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, ValueTone,
 };
+use crate::components::menu::TlMenu;
 use crate::components::toast::ToastKind;
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
@@ -639,6 +640,21 @@ impl TreeTableDelegate for SmartAtaDelegate {
         false
     }
 
+    fn context_menu(
+        &mut self,
+        _: &[u8],
+        _: Option<SmartColumn>,
+        menu: TlMenu,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> TlMenu {
+        menu
+    }
+
+    fn empty_text(&self) -> Option<SharedString> {
+        None
+    }
+
     fn on_toggle_expand(&mut self, _: u8, _: &mut Context<TlTreeTable<Self>>) {}
 
     /// A new column sorts descending first; the same column flips.
@@ -683,7 +699,6 @@ pub struct SmartWindow {
     key: DeviceKey,
     /// The kernel name, as the engine addresses the disk.
     disk: Arc<str>,
-    hub: Entity<SnapshotHub>,
     data: Option<Arc<SmartData>>,
     /// The reason of a failed read.
     error: Option<SharedString>,
@@ -738,7 +753,6 @@ impl SmartWindow {
             idx,
             key,
             disk,
-            hub: hub.clone(),
             data: None,
             error: None,
             refreshing: false,
@@ -959,7 +973,7 @@ impl Render for SmartWindow {
                 t.on_new_version(cx);
             });
         }
-        let m = metrics(cx).clone();
+        let m = *metrics(cx);
         let s = m.ui_scale;
         let this = cx.entity().downgrade();
         let refresh = TlButton::new("SmartRefresh", TlButtonKind::Secondary)
@@ -979,7 +993,12 @@ impl Render for SmartWindow {
             .gap(m.sp[3])
             .p(m.sp[3])
             .child(div().flex_1().min_w_0().child(self.header_grid(cx)))
-            .child(div().flex_none().child(refresh));
+            .child(
+                div()
+                    .debug_selector(|| "SmartRefresh".into())
+                    .flex_none()
+                    .child(refresh),
+            );
         let body: AnyElement = if let Some(reason) = &self.error {
             self.render_failure(reason, &theme, &m)
         } else if self.data.as_ref().is_some_and(|d| !d.nvme.is_empty()) {
@@ -1011,6 +1030,7 @@ impl SmartWindow {
         *detail.text_style() = t_sm(m);
         div()
             .id("SmartFailure")
+            .debug_selector(|| "SmartFailure".into())
             .flex_1()
             .flex()
             .flex_col()
@@ -1088,23 +1108,6 @@ impl SmartWindow {
 
 /// Handles the page's `PerfSmartRefresh`: sends the read through the open window.
 pub fn refresh_open(key: &DeviceKey, cx: &mut App) {
-    let windows: Vec<_> = cx
-        .windows()
-        .into_iter()
-        .filter_map(|w| w.downcast::<gpui_kit::base::Root>())
-        .collect();
-    for handle in windows {
-        if let Some(frame) = TlSecondaryWindow::<SmartWindow>::find(handle, cx) {
-            let content = frame.read(cx).content().clone();
-            if content.read(cx).key == *key {
-                content.update(cx, |w, cx| w.refresh(cx));
-            }
-        }
-    }
-}
-
-/// Sends the refresh through the open window of `key`.
-fn refresh_open(key: &DeviceKey, cx: &mut App) {
     let windows: Vec<_> = cx
         .windows()
         .into_iter()
