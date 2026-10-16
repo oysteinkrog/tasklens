@@ -900,3 +900,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: xdh.15 Add Minigraph on app and unit rows adds the app card; hidden on pseudo rows until a pseudo source exists; exited rows disabled.
 - 2026-10-16 leader decision: xdh.21 MiniWindow owns a hidden DeviceSidebar for its card list and demand; card.rs gets a pointer flag.
 - 2026-10-16 leader decision: bj6.44 list_adapters returns a Receiver, raced against a 2 s timer; TlMenuPopup::rebuild added; real adapter probe in tasklens-bj6.50.
+- 2026-10-16 leader decision: bj6.45 TaskSlinger themes.json read through a new AppEnv.read_ts_themes hook in tl-app (keeps ADR-011); import callbacks stay on the main thread.
