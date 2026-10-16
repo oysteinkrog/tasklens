@@ -906,7 +906,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
   - tl-helper row gains `tl-collect` (shared strings scanner, R-157).
   - `unicode-segmentation = "1.12"` pinned; tl-ui row. E15-003 is unblocked.
   - `image`: not added. E16-005 goes through gpui-kit's image support; fallback if it cannot: `image = { version = "0.25", default-features = false, features = ["png"] }` in the tl-ui row.
-  - `wgpu`: not in any row. tl-app probes adapters through GPUI (`AppEnv::list_adapters`).
+  - `wgpu = { version = "=29.0.4" }` with default features: tl-app row only. tl-app probes adapters with wgpu directly for `AppEnv::list_adapters`, because GPUI exposes no adapter list. It builds the instance the way gpui-pre-wgpu does and lists with `enumerate_adapters`. GPUI already pulls in this version, so nothing new compiles (amended by the leader on tasklens-bj6.50, 2026-10-16).
   - Dev-dependencies (`insta`, `proptest`, `tempfile`, `criterion`, `toml`, `tracing-subscriber`) are outside the rows; `xtask check-deps` checks `normal` edges only. E05's `[[bench]] sweep`, `criterion` and `tracing-subscriber` lines are allowed chain edits.
 - Basis: ADR-001, ADR-002, APP-052, UI-PRF-053 and the manifests on disk [verified].
 - Edits: ADR-001 rows (tl-app + `clap`, `async-channel`; tl-ui + `async-channel`, `jiff`, `unicode-segmentation`; tl-model + `rustc-hash`; tl-engine + `serde_json`; tl-helper + `tl-collect`); ADR-002 pins; UI-PRF-053; beads v9m.4, v9m.10, cr0.4, fut.4, y6k.4, hjn.22, yms.26, yms.1; b2-collect-ops.md E06 item 1.

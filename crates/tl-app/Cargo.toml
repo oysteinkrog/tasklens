@@ -26,6 +26,8 @@ rustix    = { workspace = true }
 clap          = { workspace = true }   # R-142 item 1
 async-channel = { workspace = true }   # R-142 item 2
 serde_json    = { workspace = true }   # themes.json and run-history.json (R-245)
+# Rendering GPU adapter probe (R-142). The version GPUI already uses, default features.
+wgpu          = { version = "=29.0.4" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

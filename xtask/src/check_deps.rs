@@ -140,6 +140,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "rustix",
             "clap",
             "async-channel",
+            "wgpu",
         ],
     ),
     (
