@@ -35,8 +35,11 @@
 //! `hash_process_exe` in the next sample, where the target has a General tab state, and the
 //! General payload then carries the `HashState`. A request for a target not in the demand yet
 //! waits for it. The `HashCache` keys on (dev, inode, mtime), so a second request for the same
-//! file reads nothing. The package check stays `NotVerified` until `VerifyPackage` has a handler
-//! (tasklens-dwy.15).
+//! file reads nothing.
+//!
+//! Package check (PROC-078): `VerifyPackage(key)` runs `PackageIndex::verify` on the owner of the
+//! General read in the next sample, once the package is known, and the General payload carries
+//! the `PackageCheck`. A process that is not packaged is not verified and the check stays as is.
 //!
 //! Package (PROC-078, R-163 item 1): a General read looks the executable's path and mtime up in
 //! the session's shared package index. A path the index does not know yet is queued for the
@@ -71,7 +74,7 @@ use tl_collect::apps::classify::{ClassifyInput, MatchInput, ProcClass, classify,
 use tl_collect::apps::desktop::{DesktopIndex, DesktopWatch, data_dirs_from_env};
 use tl_collect::hash::{self, HashCache, hash_process_exe};
 use tl_collect::parse::topology::parse_cpu_list;
-use tl_collect::pkg::PackageIndex;
+use tl_collect::pkg::{PackageIndex, VerifyOutcome};
 use tl_collect::proc::cgroup::{
     UserPlacement, app_slice_unit, parse_cgroup_file, placement, unescape_unit,
 };
@@ -327,6 +330,8 @@ struct GeneralRead {
     cpu_time_ms: Total<u64>,
     io: Total<PidIo>,
     hashes: HashState,
+    /// The last `VerifyPackage` result, `NotVerified` before one.
+    package_check: PackageCheck,
 }
 
 /// What the General reader keeps between reads.
@@ -384,6 +389,8 @@ struct TargetState {
     sockets: FxHashMap<u64, FdType>,
     /// The last `ComputeHashes` result, sent in the General payload.
     hashes: HashState,
+    /// The last `VerifyPackage` result, sent in the General payload.
+    package_check: PackageCheck,
 }
 
 pub struct ProcessDetailSource {
@@ -401,6 +408,9 @@ pub struct ProcessDetailSource {
     /// target has a General tab state.
     hash_requests: Vec<ProcessKey>,
     hash_cache: HashCache,
+    /// `VerifyPackage` keys, oldest first, at most `DETAILS_MAX`. A key waits here until its
+    /// target has a General read whose package is known.
+    verify_requests: Vec<ProcessKey>,
     /// Set by `period`: the first `AFFINITY_TARGETS_MAX` entries of `Demand.affinity_targets`.
     affinity_keys: RefCell<Arc<[ProcessKey]>>,
     /// Set by `period`: samples per affinity read.
@@ -474,6 +484,7 @@ impl ProcessDetailSource {
             pending: Vec::new(),
             hash_requests: Vec::new(),
             hash_cache: HashCache::new(),
+            verify_requests: Vec::new(),
             affinity_keys: RefCell::new(Arc::from([])),
             affinity_every: Cell::new(1),
             affinity_stride: Stride::default(),
@@ -695,6 +706,36 @@ impl ProcessDetailSource {
             hashed.push(key);
         }
 
+        // Verify requests whose target has a General read with a settled package. A package
+        // still warming up waits; no package drops the request and leaves the check as is.
+        for key in std::mem::take(&mut self.verify_requests) {
+            let owner = self
+                .targets
+                .get_mut()
+                .get(&key)
+                .and_then(|t| t.tabs[DetailTab::General.index()].as_ref())
+                .and_then(|s| match s.last.as_ref() {
+                    Some(TabRead::General(read)) => Some(read.package.clone()),
+                    _ => None,
+                });
+            let Some(package) = owner else {
+                self.verify_requests.push(key);
+                continue;
+            };
+            if package.validity == Validity::WarmingUp {
+                self.verify_requests.push(key);
+                continue;
+            }
+            let (Validity::Valid, Some(info)) = (package.validity, package.value) else {
+                continue;
+            };
+            let check = self.verify_package(&info.name);
+            if let Some(target) = self.targets.get_mut().get_mut(&key) {
+                target.package_check = check;
+            }
+            hashed.push(key);
+        }
+
         let details = self.details.borrow().clone();
         let periodic = wants_tabs(&details) && self.tabs_stride.ready();
         // General first and once per target, then the demanded tab.
@@ -760,6 +801,7 @@ impl ProcessDetailSource {
             )
             .map(|mut read| {
                 read.hashes = state.hashes.clone();
+                read.package_check = state.package_check;
                 read.package = package_of(pkg, &read, Instant::now());
                 TabRead::General(Box::new(read))
             }),
@@ -864,6 +906,18 @@ impl ProcessDetailSource {
             payload,
             validity,
         })
+    }
+
+    /// Runs the PROC-078 integrity check of package `name` on the blocking path.
+    fn verify_package(&self, name: &str) -> PackageCheck {
+        let Some(index) = &self.pkg else {
+            return PackageCheck::NotVerified;
+        };
+        match index.verify(name) {
+            Ok(VerifyOutcome::Unmodified) => PackageCheck::Matches,
+            Ok(VerifyOutcome::Modified { .. }) => PackageCheck::DoesNotMatch,
+            Ok(VerifyOutcome::Failed(_)) | Err(_) => PackageCheck::Failed,
+        }
     }
 
     /// SHA-256 and MD5 of the executable of `key`, from the cache when the file is unchanged.
@@ -1033,8 +1087,16 @@ impl Source for ProcessDetailSource {
                 }
                 true
             }
-            WorkerCommand::VerifyPackage(_)
-            | WorkerCommand::StringScan { .. }
+            WorkerCommand::VerifyPackage(key) => {
+                if !self.verify_requests.contains(key) {
+                    if self.verify_requests.len() >= DETAILS_MAX {
+                        self.verify_requests.remove(0);
+                    }
+                    self.verify_requests.push(*key);
+                }
+                true
+            }
+            WorkerCommand::StringScan { .. }
             | WorkerCommand::CancelStringScan(_)
             | WorkerCommand::HandleSearch { .. }
             | WorkerCommand::CancelHandleSearch(_) => {
@@ -2134,6 +2196,7 @@ fn read_general(
         io,
         // `read_tab` sets the target's hashes.
         hashes: HashState::Pending,
+        package_check: PackageCheck::NotVerified,
     })
 }
 
@@ -2212,8 +2275,7 @@ fn general_detail(r: &GeneralRead, users: &mut dyn UserNames) -> GeneralDetail {
         app_id: r.app_id.clone(),
         cmdline: r.cmdline.clone(),
         hashes: r.hashes.clone(),
-        // tasklens-dwy.15 fills the package check.
-        package_check: PackageCheck::NotVerified,
+        package_check: r.package_check,
         handles: r.handles,
         rss_shared_bytes: r.rss_shared_bytes,
         commit_bytes: r.commit_bytes,
@@ -2405,17 +2467,18 @@ mod tests {
         assert_eq!(src.hash_requests, vec![keys[0]]);
         assert!(src.command(&WorkerCommand::CancelStringScan(ScanId(1))));
         assert!(src.command(&WorkerCommand::VerifyPackage(keys[0])));
-        assert_eq!(src.pending_len(), 2);
+        assert_eq!(src.verify_requests, vec![keys[0]]);
+        assert_eq!(src.pending_len(), 1);
         assert!(!src.command(&WorkerCommand::RefreshNow));
         assert!(!src.command(&WorkerCommand::Reprobe));
         assert!(!src.command(&WorkerCommand::SetupStatus));
-        assert_eq!(src.pending_len(), 2);
+        assert_eq!(src.pending_len(), 1);
         // DetailRefresh is handled, not queued.
         assert!(src.command(&WorkerCommand::DetailRefresh {
             target: DetailTarget::Process(keys[0]),
             tab: DetailTab::Environment,
         }));
-        assert_eq!(src.pending_len(), 2);
+        assert_eq!(src.pending_len(), 1);
         let (src, _) = src.sample();
         assert_eq!(src.pending_len(), 0);
     }
@@ -3770,6 +3833,7 @@ mod tests {
     /// Owns `owned` as package `firefox 131.0-1` by Jan Doe; every other path is not packaged.
     struct FakePkg {
         owned: std::path::PathBuf,
+        outcome: tl_collect::pkg::VerifyOutcome,
     }
 
     impl tl_collect::pkg::PkgBackend for FakePkg {
@@ -3799,8 +3863,9 @@ mod tests {
             }))
         }
 
-        fn verify(&mut self, _name: &str) -> Result<tl_collect::pkg::VerifyOutcome, CollectError> {
-            Ok(tl_collect::pkg::VerifyOutcome::Unmodified)
+        fn verify(&mut self, name: &str) -> Result<tl_collect::pkg::VerifyOutcome, CollectError> {
+            assert_eq!(name, "firefox");
+            Ok(self.outcome.clone())
         }
 
         fn db_stamp(&mut self) -> Option<i64> {
@@ -3811,12 +3876,20 @@ mod tests {
     /// `general_src` with 4201's exe linked to a real file, and an index whose backend owns
     /// `owned` (relative to the root) or nothing.
     fn package_src(owned: Option<&str>) -> (tempfile::TempDir, ProcessDetailSource, PackageIndex) {
+        package_src_with(owned, tl_collect::pkg::VerifyOutcome::Unmodified)
+    }
+
+    /// `package_src` with the result `PackageIndex::verify` gives.
+    fn package_src_with(
+        owned: Option<&str>,
+        outcome: tl_collect::pkg::VerifyOutcome,
+    ) -> (tempfile::TempDir, ProcessDetailSource, PackageIndex) {
         let (tmp, src) = general_src();
         let exe = tmp.path().join("usr-bin-app");
         fs::write(&exe, b"#!/bin/sh\n").expect("write exe");
         relink_exe(&tmp, &exe);
         let owned = owned.map_or_else(Default::default, |name| tmp.path().join(name));
-        let index = PackageIndex::new(Box::new(FakePkg { owned }));
+        let index = PackageIndex::new(Box::new(FakePkg { owned, outcome }));
         let src = src.with_package_index(Some(index.clone()));
         (tmp, src, index)
     }
@@ -3881,6 +3954,56 @@ mod tests {
         let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
         assert_eq!(general(&out).0.package, total(None, Validity::Unsupported));
         assert!(!index.due(Instant::now() + Duration::from_secs(3)));
+    }
+
+    /// `VerifyPackage` on a packaged process: the General payload carries the check.
+    fn verified(outcome: VerifyOutcome) -> PackageCheck {
+        let (_tmp, src, index) = package_src_with(Some("usr-bin-app"), outcome);
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let s = every_ms(500);
+        let (mut src, out, _) = step_all(src, &d, &s, 0);
+        assert_eq!(general(&out).0.package_check, PackageCheck::NotVerified);
+        assert_eq!(index.run_batch().expect("batch"), 1);
+        assert!(src.command(&WorkerCommand::VerifyPackage(a())));
+        let (src, out, _) = step_all(src, &d, &s, 500);
+        assert!(src.verify_requests.is_empty());
+        general(&out).0.package_check
+    }
+
+    #[test]
+    fn verify_package_matches() {
+        assert_eq!(verified(VerifyOutcome::Unmodified), PackageCheck::Matches);
+    }
+
+    #[test]
+    fn verify_package_does_not_match() {
+        assert_eq!(
+            verified(VerifyOutcome::Modified { altered_files: 2 }),
+            PackageCheck::DoesNotMatch
+        );
+    }
+
+    #[test]
+    fn verify_package_failed() {
+        assert_eq!(
+            verified(VerifyOutcome::Failed(Arc::from("pacman not found"))),
+            PackageCheck::Failed
+        );
+    }
+
+    /// Not packaged: nothing is verified, the check stays and no payload goes out.
+    #[test]
+    fn verify_package_not_packaged() {
+        let (_tmp, src, index) = package_src_with(None, VerifyOutcome::Unmodified);
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let s = every_ms(500);
+        let (mut src, _, _) = step_all(src, &d, &s, 0);
+        assert_eq!(index.run_batch().expect("batch"), 1);
+        assert!(src.command(&WorkerCommand::VerifyPackage(a())));
+        let (src, out, _) = step_all(src, &d, &s, 500);
+        assert!(src.verify_requests.is_empty());
+        assert_eq!(general(&out).0.package, valid(None));
+        assert_eq!(general(&out).0.package_check, PackageCheck::NotVerified);
     }
 
     #[test]
