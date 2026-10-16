@@ -263,6 +263,7 @@ fn main() -> ExitCode {
         set_autostart: Arc::new(|_, _| Ok(())),
         global_shortcut: None,
         import_taskslinger: Arc::new(import_ts::import_file),
+        read_ts_themes: Arc::new(import_ts::read_themes_file),
         // No real probe yet (tasklens-bj6.50): a thread sends an empty list.
         list_adapters: Arc::new(|| {
             let (tx, rx) = async_channel::bounded(1);
@@ -315,8 +316,8 @@ fn main() -> ExitCode {
             start_minimized: args.start_minimized,
             shift_held: false,
             pending_crash_report: None,
-        },
             app_id: args.app_id.clone(),
+        },
         tray,
     });
 

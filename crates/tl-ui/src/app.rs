@@ -40,6 +40,9 @@ pub type SetShortcutFn = Arc<dyn Fn(Option<&str>) -> Result<(), String>>;
 /// The error is shown to the user.
 pub type ImportTaskslingerFn =
     Arc<dyn Fn(&Path, &Settings, &UiState) -> Result<ImportedSettings, String>>;
+/// Reads a picked TaskSlinger `themes.json` and returns its text. tl-ui does no file I/O
+/// (ADR-011). The text is capped at `MAX_IMPORT_BYTES`. The error is shown to the user.
+pub type ReadTsThemesFn = Arc<dyn Fn(&Path) -> Result<String, String>>;
 /// Handles one `AppRequest` on the main thread.
 pub type AppRequestFn = Box<dyn Fn(AppRequest, &mut App)>;
 
@@ -148,6 +151,8 @@ pub struct AppEnv {
     /// Writes nothing. The caller must apply the result through `TlSettings::update`, so the UI
     /// and the settings store stay in sync.
     pub import_taskslinger: ImportTaskslingerFn,
+    /// Reads a picked TaskSlinger `themes.json` for "Import from TaskSlinger…".
+    pub read_ts_themes: ReadTsThemesFn,
     /// Starts the wgpu probe in tl-app and returns at once. tl-app runs the probe on its own
     /// thread and sends the adapters on the channel; tl-ui waits up to 2 s (UI-SHL-040a).
     pub list_adapters: Arc<dyn Fn() -> async_channel::Receiver<Vec<AdapterInfo>>>,
@@ -179,6 +184,7 @@ impl AppEnv {
                     summary: ImportSummary::default(),
                 })
             }),
+            read_ts_themes: Arc::new(|_| Ok(String::new())),
             list_adapters: Arc::new(|| {
                 let (tx, rx) = async_channel::bounded(1);
                 let _ = tx.try_send(Vec::new());
@@ -455,18 +461,12 @@ pub struct StartOptions {
     pub shift_held: bool,
     /// UI-SHL-093.
     pub pending_crash_report: Option<PathBuf>,
+    /// `--app-id`. `None` means `APP_ID`.
+    pub app_id: Option<String>,
 }
 
 impl Global for StartOptions {}
 
-/// Why the UI stopped.
-#[derive(Clone, Debug, PartialEq, Eq)]
-    /// `--app-id`. `None` means `APP_ID`.
-    pub app_id: Option<String>,
-pub enum UiExit {
-    Quit,
-    /// The renderer failed before the first window opened. Holds the panic message.
-    RendererFailed(String),
 /// The Wayland app_id for new windows: the `--app-id` value, or `APP_ID` when none was given.
 pub fn window_app_id(cx: &App) -> String {
     cx.try_global::<StartOptions>()
@@ -474,6 +474,12 @@ pub fn window_app_id(cx: &App) -> String {
         .unwrap_or_else(|| crate::window::main::APP_ID.to_owned())
 }
 
+/// Why the UI stopped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiExit {
+    Quit,
+    /// The renderer failed before the first window opened. Holds the panic message.
+    RendererFailed(String),
     DeviceLost,
 }
 
