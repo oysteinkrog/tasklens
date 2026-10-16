@@ -18,4 +18,5 @@ pub mod run;
 pub mod run_history;
 pub mod service_properties;
 pub mod signal;
+pub mod smart;
 pub mod startup_properties;

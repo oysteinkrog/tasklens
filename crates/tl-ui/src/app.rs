@@ -379,6 +379,7 @@ impl TasklensUi {
         crate::window::shortcuts::init(cx);
         crate::window::about::init(cx);
         crate::windows::run::init(cx);
+        crate::windows::smart::init(cx);
         crate::windows::handle_search::init(cx);
         crate::window::confirm::init(cx);
         crate::window::settings::init(cx);
