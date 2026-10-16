@@ -2677,7 +2677,8 @@ fn two_adapters() -> Vec<tl_ui::app::AdapterInfo> {
 }
 
 /// The sender of the last probe the fake `list_adapters` started.
-type ProbeSender = Rc<RefCell<Option<async_channel::Sender<Vec<tl_ui::app::AdapterInfo>>>>>;
+type ProbeSender =
+    Arc<std::sync::Mutex<Option<async_channel::Sender<Vec<tl_ui::app::AdapterInfo>>>>>;
 
 /// Installs an `AppEnv` whose `list_adapters` keeps each probe's sender for the test, or answers
 /// at once with `answer` when it is set.
@@ -2685,7 +2686,7 @@ fn fake_probe(
     cx: &mut VisualTestContext,
     answer: Option<Vec<tl_ui::app::AdapterInfo>>,
 ) -> ProbeSender {
-    let sender: ProbeSender = Rc::default();
+    let sender: ProbeSender = Arc::default();
     let slot = sender.clone();
     cx.update(|_, cx| {
         cx.set_global(tl_ui::app::AppEnv {
@@ -2694,7 +2695,7 @@ fn fake_probe(
                 if let Some(adapters) = &answer {
                     tx.try_send(adapters.clone()).expect("room for one answer");
                 }
-                *slot.borrow_mut() = Some(tx);
+                *slot.lock().expect("probe sender") = Some(tx);
                 rx
             }),
             ..tl_ui::app::AppEnv::test()
@@ -2769,7 +2770,8 @@ fn rendering_gpu_detecting_then_rebuild(cx: &mut TestAppContext) {
 
     // The probe answers well within 2 s.
     let tx = sender
-        .borrow_mut()
+        .lock()
+        .expect("probe sender")
         .take()
         .expect("the open started a probe");
     tx.try_send(two_adapters()).expect("probe answer");
@@ -2799,7 +2801,10 @@ fn rendering_gpu_probe_timeout(cx: &mut TestAppContext) {
     // The fake keeps the sender and never answers.
     let sender = fake_probe(r.cx, None);
     open_rendering_gpu(r.cx);
-    assert!(sender.borrow().is_some(), "the open started a probe");
+    assert!(
+        sender.lock().expect("probe sender").is_some(),
+        "the open started a probe"
+    );
     r.cx.executor().advance_clock(
         menus_settings::ADAPTER_PROBE_TIMEOUT - std::time::Duration::from_millis(100),
     );
