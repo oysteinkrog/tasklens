@@ -80,6 +80,13 @@ fn totals(shared: bool) -> GpuTotals {
         pcie_tx_bps: Metric::default(),
         engines: Default::default(),
         fdinfo_partial: false,
+        energy_since_boot: Metric::default(),
+        clock_video_mhz: Metric::default(),
+        pstate: Metric::default(),
+        fan_rpm: Metric::default(),
+        pcie_gen: Metric::default(),
+        pcie_width: Metric::default(),
+        info: Arc::default(),
     }
 }
 

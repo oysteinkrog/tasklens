@@ -3366,6 +3366,65 @@ fn gpu_drm_intel_xe_fixture() {
     assert_eq!(t.power_limit_w, Metric::valid(190.0));
 }
 
+#[test]
+fn gpu_drm_amd_details_fields() {
+    let dir = fixture_copy("drm-amd", None);
+    let device = dir.join("sys/class/drm/card0/device");
+    let write_link = |cur: &str, width: &str| {
+        for (file, text) in [
+            ("current_link_speed", cur),
+            ("current_link_width", width),
+            ("max_link_speed", "16.0 GT/s PCIe"),
+            ("max_link_width", "16"),
+        ] {
+            fs::write(device.join(file), format!("{text}\n")).expect("write link");
+        }
+    };
+    write_link("8.0 GT/s PCIe", "8");
+    fs::write(device.join("hwmon/hwmon3/fan1_input"), "1100\n").expect("write fan");
+
+    let (src, s) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    let t = &s.devices[0].1;
+    assert_eq!(t.pcie_gen, Metric::valid(3));
+    assert_eq!(t.pcie_width, Metric::valid(8));
+    assert_eq!(t.fan_rpm, Metric::valid(1100));
+    assert_eq!(t.pstate.validity, Validity::Unsupported);
+    assert_eq!(t.clock_video_mhz.validity, Validity::Unsupported);
+    assert_eq!(t.energy_since_boot.validity, Validity::Unsupported);
+    let info = Arc::clone(&t.info);
+    assert_eq!(info.pcie_max_gen, Some(4));
+    assert_eq!(info.pcie_max_width, Some(16));
+    // The last pp_dpm_sclk line; the fixture has no pp_dpm_mclk.
+    assert_eq!(info.clock_gfx_max_mhz, Some(2500));
+    assert_eq!(info.clock_mem_max_mhz, None);
+    assert_eq!(info.cuda_version, None);
+    assert_eq!(info.power_max_limit_w, None);
+    assert_eq!(info.slowdown_temp_c, None);
+
+    // The link drops while the card idles. The static values stay the same `Arc`.
+    write_link("2.5 GT/s PCIe", "1");
+    let (_, s) = gpu_sample(src, 2 * SEC);
+    let t = &s.devices[0].1;
+    assert_eq!(t.pcie_gen, Metric::valid(1));
+    assert_eq!(t.pcie_width, Metric::valid(1));
+    assert!(Arc::ptr_eq(&t.info, &info));
+}
+
+#[test]
+fn gpu_drm_intel_details_fields() {
+    let dir = fixture_copy("drm-intel", None);
+    let (_, s) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    let t = gpu_by_slot(&s, INTEL_I915);
+    // hwmon energy1_input is 123456789 µJ.
+    assert_eq!(t.energy_since_boot, Metric::valid(123.456_789));
+    assert_eq!(t.info.clock_gfx_max_mhz, Some(2200));
+    assert_eq!(t.info.clock_mem_max_mhz, None);
+    // No link files in the fixture.
+    assert_eq!(t.pcie_gen.validity, Validity::Unsupported);
+    assert_eq!(t.info.pcie_max_gen, None);
+    assert_eq!(t.fan_rpm.validity, Validity::Unsupported);
+}
+
 /// Writes a second AMD card, `card1` at `0000:0b:00.0`, into the fixture copy.
 fn add_amd_card1(dir: &Path) {
     let device = dir.join("sys/class/drm/card1/device");

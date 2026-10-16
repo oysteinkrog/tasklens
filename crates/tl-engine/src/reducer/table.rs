@@ -3319,6 +3319,13 @@ mod tests {
                 pcie_tx_bps: Metric::with(Validity::Unsupported),
                 engines: Default::default(),
                 fdinfo_partial: false,
+                energy_since_boot: Metric::with(Validity::Unsupported),
+                clock_video_mhz: Metric::with(Validity::Unsupported),
+                pstate: Metric::with(Validity::Unsupported),
+                fan_rpm: Metric::with(Validity::Unsupported),
+                pcie_gen: Metric::with(Validity::Unsupported),
+                pcie_width: Metric::with(Validity::Unsupported),
+                info: Arc::default(),
             };
             (DeviceIdx(idx), g)
         }

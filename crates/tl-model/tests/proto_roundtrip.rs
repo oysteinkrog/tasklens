@@ -100,9 +100,19 @@ fn device_sample(r32: Reading<u32>, r64: Reading<u64>) -> GpuDeviceSample {
         power_mw: r32,
         clock_gfx_mhz: r32,
         clock_mem_mhz: r32,
+        clock_video_mhz: r32,
+        pstate: match r32 {
+            Reading::Ok(v) => Reading::Ok(v as u8),
+            Reading::Unsupported => Reading::Unsupported,
+            Reading::Failed => Reading::Failed,
+        },
         fan_pct: r32,
+        fan_rpm: r32,
         pcie_rx_kbps: r32,
         pcie_tx_kbps: r32,
+        pcie_gen: r32,
+        pcie_width: r32,
+        energy_mj: r64,
     }
 }
 
@@ -138,6 +148,13 @@ fn probe_messages_roundtrip() {
                 cuda_version: Some("13.0".to_string()),
                 vbios: None,
                 architecture: Some("Ada Lovelace".to_string()),
+                clock_gfx_max_mhz: Some(3_105),
+                clock_mem_max_mhz: Some(11_501),
+                power_max_limit_mw: Some(350_000),
+                slowdown_temp_c: Some(88),
+                shutdown_temp_c: None,
+                pcie_max_gen: Some(4),
+                pcie_max_width: Some(16),
             }],
         },
         MAX_PROBE_FRAME,

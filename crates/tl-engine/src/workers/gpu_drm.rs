@@ -29,8 +29,8 @@ use tl_collect::gpu_drm::intel::{
     IntelDriver, IntelSample, fdinfo_memory, i915_engine_name, read_intel,
 };
 use tl_collect::gpu_drm::{
-    AmdSample, AmdTemp, DrmCard, FdinfoScan, discover_cards, engine_busy, engine_busy_cycles,
-    main_temp, read_amd, scan,
+    AmdSample, AmdTemp, DrmCard, FdinfoScan, PcieLink, discover_cards, engine_busy,
+    engine_busy_cycles, main_temp, read_amd, read_pcie_link, scan,
 };
 use tl_collect::parse::udev::{UdevProps, pci_entry, read_udev_props};
 use tl_collect::sanitize::sanitize_text;
@@ -40,6 +40,7 @@ use tl_model::devices::DeviceIdentity;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::EngineSettings;
+use tl_model::system::GpuStaticInfo as DeviceStatic;
 use tl_model::system::{GpuEngine, GpuEngines, GpuTotals, Metric};
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
@@ -166,6 +167,8 @@ pub struct GpuDrmSource {
     enum_clock: EnumClock,
     /// One per card.
     state: Vec<CardState>,
+    /// One per card: its static values, built at each card scan (PERF-066 to PERF-071).
+    statics: Vec<Arc<DeviceStatic>>,
     /// The last fdinfo scan; `None` until the first scan and after `reset_baselines`.
     prev_scan: Option<FdinfoScan>,
     /// Reused for the next fdinfo scan.
@@ -185,6 +188,7 @@ impl GpuDrmSource {
             cards: Vec::new(),
             enum_clock: EnumClock::default(),
             state: Vec::new(),
+            statics: Vec::new(),
             prev_scan: None,
             cur_scan: FdinfoScan::default(),
             pending_extra: VecDeque::new(),
@@ -233,8 +237,12 @@ impl GpuDrmSource {
         let mut raw = SmallVec::<[(Arc<str>, f32); 8]>::new();
         let mut busy = SmallVec::<[(Arc<str>, f32); 8]>::new();
         let mut devices = Vec::with_capacity(self.cards.len());
-        for (card, state) in self.cards.iter().zip(&mut self.state) {
+        for ((card, state), info) in self.cards.iter().zip(&mut self.state).zip(&self.statics) {
             let pdev = &*card.pci_slot;
+            let card_link = CardLink {
+                link: read_pcie_link(&self.root.sys, card),
+                info,
+            };
             let t = match state {
                 CardState::Amd { sample, seen } => {
                     let fdinfo = match &self.prev_scan {
@@ -245,7 +253,7 @@ impl GpuDrmSource {
                         }
                         None => None,
                     };
-                    totals(sample, fdinfo, *seen, partial)
+                    totals(sample, fdinfo, *seen, partial, card_link)
                 }
                 CardState::Intel {
                     drv,
@@ -269,7 +277,7 @@ impl GpuDrmSource {
                         seen: *seen,
                         partial,
                     };
-                    let t = intel(sample, *prev_energy, t_ns, fd, mem, discrete);
+                    let t = intel(sample, *prev_energy, t_ns, fd, mem, discrete, card_link);
                     *prev_energy = sample.energy_uj.map(|e| (e, t_ns));
                     t
                 }
@@ -303,6 +311,7 @@ impl GpuDrmSource {
         }
         self.cards = cards;
         self.state = state;
+        self.statics.clear();
 
         let mut props = UdevProps::default();
         let mut entries = Vec::with_capacity(self.cards.len());
@@ -316,6 +325,8 @@ impl GpuDrmSource {
                 // No sysfs file gives the Intel VRAM total (R-164); the samples carry fdinfo's.
                 CardState::Intel { sample, .. } => ("Intel", 0, sample.power_max_uw),
             };
+            self.statics
+                .push(card_static(state, read_pcie_link(&self.root.sys, card)));
             let name = display_name(&self.root, card, vendor, &mut props);
             let key: Arc<str> = Arc::from(format!("gpu:{}", card.pci_slot));
             entries.push(DeviceDesc {
@@ -414,6 +425,29 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     })
 }
 
+/// The static values of one card (PERF-066, PERF-070). sysfs gives no CUDA version,
+/// architecture, power limit range or temperature thresholds for AMD and Intel.
+fn card_static(state: &CardState, link: PcieLink) -> Arc<DeviceStatic> {
+    let (clock_gfx_max_mhz, clock_mem_max_mhz) = match state {
+        CardState::Amd { sample, .. } => (sample.sclk_max_mhz, sample.mclk_max_mhz),
+        CardState::Intel { sample, .. } => (sample.max_freq_mhz, None),
+    };
+    Arc::new(DeviceStatic {
+        pcie_max_gen: link.max_gen,
+        pcie_max_width: link.max_width,
+        clock_gfx_max_mhz,
+        clock_mem_max_mhz,
+        ..DeviceStatic::default()
+    })
+}
+
+/// What one card adds to each sample: its current PCIe link and its static values.
+#[derive(Clone, Copy)]
+struct CardLink<'a> {
+    link: PcieLink,
+    info: &'a Arc<DeviceStatic>,
+}
+
 /// AMD and Intel cards have no UUID (R-166): the PCI slot in sysfs form names the card.
 pub fn identity(card: &DrmCard) -> DeviceIdentity {
     DeviceIdentity::Gpu {
@@ -426,11 +460,17 @@ pub fn identity(card: &DrmCard) -> DeviceIdentity {
 /// list is the first fdinfo scan: encode and decode are `WarmingUp` unless VCN activity is in
 /// the `gpu_metrics` blob, and so are compute and DMA. JPEG is listed when `busy` names it.
 pub fn amd_totals(s: &AmdSample, busy: &[(Arc<str>, f32)]) -> GpuTotals {
+    let info = Arc::default();
+    let card = CardLink {
+        link: PcieLink::default(),
+        info: &info,
+    };
     totals(
         s,
         (!busy.is_empty()).then_some(busy),
         seen_mask(busy),
         false,
+        card,
     )
 }
 
@@ -447,7 +487,13 @@ const INTEL_OPTIONAL_ENGINES: [GpuEngine; 2] = [GpuEngine::Compute, GpuEngine::V
 /// `busy` is `None` before the second fdinfo scan. Once warm, an engine with no clients is 0.
 /// `seen` is the mask of fdinfo engines named on the card so far; `partial` is
 /// `FdinfoScan::partial`.
-fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>, seen: u16, partial: bool) -> GpuTotals {
+fn totals(
+    s: &AmdSample,
+    busy: Option<&[(Arc<str>, f32)]>,
+    seen: u16,
+    partial: bool,
+    card: CardLink<'_>,
+) -> GpuTotals {
     let vcn = s
         .metrics
         .as_ref()
@@ -504,13 +550,20 @@ fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>, seen: u16, partial: b
         temp_mem_c: sensor(AmdTemp::Mem),
         power_w: opt(s.power_uw.map(|uw| uw as f32 / 1e6)),
         power_limit_w: opt(s.power_cap_uw.map(|uw| uw as f32 / 1e6)),
+        energy_since_boot: Metric::with(Validity::Unsupported),
         clock_gfx_mhz: opt(s.sclk_mhz),
         clock_mem_mhz: opt(s.mclk_mhz),
+        clock_video_mhz: Metric::with(Validity::Unsupported),
+        pstate: Metric::with(Validity::Unsupported),
         fan_pct: opt(s.fan_pwm.map(|pwm| f32::from(pwm) / 255.0 * 100.0)),
+        fan_rpm: opt(s.fan_rpm),
         pcie_rx_bps: Metric::with(Validity::Unsupported),
         pcie_tx_bps: Metric::with(Validity::Unsupported),
+        pcie_gen: opt(card.link.cur_gen),
+        pcie_width: opt(card.link.cur_width),
         engines,
         fdinfo_partial: partial,
+        info: Arc::clone(card.info),
     }
 }
 
@@ -531,7 +584,12 @@ pub fn intel_totals(
         seen: seen_mask(busy),
         partial: false,
     };
-    intel(s, prev_energy, now, fd, mem, discrete)
+    let info = Arc::default();
+    let card = CardLink {
+        link: PcieLink::default(),
+        info: &info,
+    };
+    intel(s, prev_energy, now, fd, mem, discrete, card)
 }
 
 /// The fdinfo engine data of one card for one sample.
@@ -552,6 +610,7 @@ fn intel(
     fd: FdinfoEngines<'_>,
     (local_used, local_total, system_used): (Option<u64>, Option<u64>, Option<u64>),
     discrete: bool,
+    card: CardLink<'_>,
 ) -> GpuTotals {
     let busy = fd.busy;
     let (util_pct, video) = match busy {
@@ -616,13 +675,21 @@ fn intel(
         temp_mem_c: Metric::with(Validity::Unsupported),
         power_w,
         power_limit_w: opt(s.power_max_uw.map(|uw| uw as f32 / 1e6)),
+        // The hwmon energy counter, µJ since the driver loaded.
+        energy_since_boot: opt(s.energy_uj.map(|uj| uj as f64 / 1e6)),
         clock_gfx_mhz: opt(s.act_freq_mhz),
         clock_mem_mhz: Metric::with(Validity::Unsupported),
+        clock_video_mhz: Metric::with(Validity::Unsupported),
+        pstate: Metric::with(Validity::Unsupported),
         fan_pct: Metric::with(Validity::Unsupported),
+        fan_rpm: Metric::with(Validity::Unsupported),
         pcie_rx_bps: Metric::with(Validity::Unsupported),
         pcie_tx_bps: Metric::with(Validity::Unsupported),
+        pcie_gen: opt(card.link.cur_gen),
+        pcie_width: opt(card.link.cur_width),
         engines,
         fdinfo_partial: fd.partial,
+        info: Arc::clone(card.info),
     }
 }
 

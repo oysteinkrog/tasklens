@@ -255,8 +255,31 @@ pub enum LinkState {
     Unknown,
 }
 
-/// One per GPU (PERF-063 to PERF-068).
-#[derive(Clone, Copy, Debug)]
+/// GPU values that do not change while the driver runs (PERF-066 to PERF-071). The worker builds
+/// one per probe `Hello` or DRM card scan, and every sample of that device shares it. `None`
+/// means the device or driver does not report the value.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GpuStaticInfo {
+    /// The CUDA version the driver supports, for example "13.2". NVIDIA only.
+    pub cuda_version: Option<Arc<str>>,
+    pub vbios: Option<Arc<str>>,
+    /// For example "Ada Lovelace". NVIDIA only.
+    pub architecture: Option<Arc<str>>,
+    /// The card's maximum PCIe generation and lane count (PERF-070).
+    pub pcie_max_gen: Option<u8>,
+    pub pcie_max_width: Option<u8>,
+    /// Maximum graphics and memory clocks, MHz (PERF-066).
+    pub clock_gfx_max_mhz: Option<u32>,
+    pub clock_mem_max_mhz: Option<u32>,
+    /// The highest power limit the card accepts, W (PERF-067 "max 350 W").
+    pub power_max_limit_w: Option<f32>,
+    /// Temperatures where the card slows down and shuts down, °C (PERF-068).
+    pub slowdown_temp_c: Option<f32>,
+    pub shutdown_temp_c: Option<f32>,
+}
+
+/// One per GPU (PERF-063 to PERF-071).
+#[derive(Clone, Debug)]
 pub struct GpuTotals {
     pub device: DeviceIdx,
     pub util_pct: Metric<f32>,
@@ -282,19 +305,33 @@ pub struct GpuTotals {
     pub temp_mem_c: Metric<f32>,
     pub power_w: Metric<f32>,
     pub power_limit_w: Metric<f32>,
+    /// Energy used since the driver loaded, joules: NVML total energy, Intel dGPU hwmon
+    /// `energy1_input` (PERF-067).
+    pub energy_since_boot: Metric<f64>,
     pub clock_gfx_mhz: Metric<u32>,
     pub clock_mem_mhz: Metric<u32>,
+    /// NVML video clock, MHz (PERF-066).
+    pub clock_video_mhz: Metric<u32>,
+    /// Performance state, 0 for P0 to 15 for P15. NVIDIA only (PERF-066).
+    pub pstate: Metric<u8>,
     pub fan_pct: Metric<f32>,
+    /// NVML fan 0 or amdgpu hwmon `fan1_input` (PERF-068).
+    pub fan_rpm: Metric<u32>,
     /// PCIe receive throughput, bytes per second (R-155).
     pub pcie_rx_bps: Metric<f32>,
     /// PCIe transmit throughput, bytes per second (R-155).
     pub pcie_tx_bps: Metric<f32>,
+    /// Current PCIe generation and lane count. They drop while the card idles (PERF-070).
+    pub pcie_gen: Metric<u8>,
+    pub pcie_width: Metric<u8>,
     /// Busy percent of every engine the device reports (PERF-063). The page draws one graph per
     /// reported engine.
     pub engines: GpuEngines,
     /// Some DRM fdinfo read was denied, so the fdinfo-based engines count only the processes
     /// tasklens can read (PERF-074 "Own processes only"). Always false for NVIDIA.
     pub fdinfo_partial: bool,
+    /// The device's static values, shared by every sample until the next `Hello` or card scan.
+    pub info: Arc<GpuStaticInfo>,
 }
 
 /// One GPU engine (PERF-063). Each engine has a fixed key, stored in

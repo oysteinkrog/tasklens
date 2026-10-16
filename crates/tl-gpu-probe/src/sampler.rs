@@ -171,6 +171,13 @@ mod tests {
             cuda_version: None,
             vbios: None,
             architecture: None,
+            clock_gfx_max_mhz: None,
+            clock_mem_max_mhz: None,
+            power_max_limit_mw: None,
+            slowdown_temp_c: None,
+            shutdown_temp_c: None,
+            pcie_max_gen: None,
+            pcie_max_width: None,
         }
     }
 
@@ -188,9 +195,15 @@ mod tests {
             power_mw: Reading::Failed,
             clock_gfx_mhz: Reading::Ok(1800),
             clock_mem_mhz: Reading::Ok(7000),
+            clock_video_mhz: Reading::Unsupported,
+            pstate: Reading::Unsupported,
             fan_pct: Reading::Ok(30),
+            fan_rpm: Reading::Unsupported,
             pcie_rx_kbps: Reading::Ok(100),
             pcie_tx_kbps: Reading::Ok(200),
+            pcie_gen: Reading::Unsupported,
+            pcie_width: Reading::Unsupported,
+            energy_mj: Reading::Unsupported,
         }
     }
 

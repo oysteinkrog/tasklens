@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::validity::Validity;
 
 /// Protocol version sent in both `Hello` messages. 2 added `mem_reserved` and `enc_sessions`
-/// to `GpuDeviceSample`. The `Hello` messages keep their layout, so a probe of another version
-/// is refused at `Hello` before any sample is decoded.
-pub const GPU_PROTO_VERSION: u16 = 2;
+/// to `GpuDeviceSample`. 3 added the PERF-066 to PERF-070 limits to `GpuDeviceInfo` and fan RPM,
+/// video clock, P-state, PCIe link and energy to `GpuDeviceSample`. A probe of another version
+/// answers `Hello` with an empty device list, so its reply decodes whatever the device layout,
+/// and it is refused there before any sample is decoded.
+pub const GPU_PROTO_VERSION: u16 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProbeRequest {
@@ -62,6 +64,18 @@ pub struct GpuDeviceInfo {
     pub cuda_version: Option<String>,
     pub vbios: Option<String>,
     pub architecture: Option<String>,
+    /// `nvmlDeviceGetMaxClockInfo` graphics and memory, MHz (PERF-066).
+    pub clock_gfx_max_mhz: Option<u32>,
+    pub clock_mem_max_mhz: Option<u32>,
+    /// `nvmlDeviceGetPowerManagementLimitConstraints` `max_limit`, milliwatts (PERF-067).
+    pub power_max_limit_mw: Option<u32>,
+    /// `nvmlDeviceGetTemperatureThreshold` slowdown and shutdown, °C (PERF-068).
+    pub slowdown_temp_c: Option<u32>,
+    pub shutdown_temp_c: Option<u32>,
+    /// `nvmlDeviceGetMaxPcieLinkGeneration` and `nvmlDeviceGetMaxPcieLinkWidth` (PERF-070). The
+    /// generation is the lower of the card's and the host's maximum.
+    pub pcie_max_gen: Option<u32>,
+    pub pcie_max_width: Option<u32>,
 }
 
 /// One NVML reading. Missing is never encoded as zero.
@@ -107,9 +121,20 @@ pub struct GpuDeviceSample {
     pub power_mw: Reading<u32>,
     pub clock_gfx_mhz: Reading<u32>,
     pub clock_mem_mhz: Reading<u32>,
+    /// `nvmlDeviceGetClockInfo(NVML_CLOCK_VIDEO)`, MHz (PERF-066).
+    pub clock_video_mhz: Reading<u32>,
+    /// `nvmlDeviceGetPerformanceState`, 0 to 15 for P0 to P15 (PERF-066).
+    pub pstate: Reading<u8>,
     pub fan_pct: Reading<u32>,
+    /// `nvmlDeviceGetFanSpeedRPM` of fan 0 (PERF-068).
+    pub fan_rpm: Reading<u32>,
     pub pcie_rx_kbps: Reading<u32>,
     pub pcie_tx_kbps: Reading<u32>,
+    /// `nvmlDeviceGetCurrPcieLinkGeneration` and `nvmlDeviceGetCurrPcieLinkWidth` (PERF-070).
+    pub pcie_gen: Reading<u32>,
+    pub pcie_width: Reading<u32>,
+    /// `nvmlDeviceGetTotalEnergyConsumption`, millijoules since the driver loaded (PERF-067).
+    pub energy_mj: Reading<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -161,9 +186,15 @@ mod tests {
             power_mw: Reading::Ok(u32::MAX),
             clock_gfx_mhz: Reading::Ok(u32::MAX),
             clock_mem_mhz: Reading::Ok(u32::MAX),
+            clock_video_mhz: Reading::Ok(u32::MAX),
+            pstate: Reading::Ok(u8::MAX),
             fan_pct: Reading::Unsupported,
+            fan_rpm: Reading::Ok(u32::MAX),
             pcie_rx_kbps: Reading::Ok(u32::MAX),
             pcie_tx_kbps: Reading::Failed,
+            pcie_gen: Reading::Ok(u32::MAX),
+            pcie_width: Reading::Ok(u32::MAX),
+            energy_mj: Reading::Ok(u64::MAX),
         }
     }
 
@@ -202,8 +233,8 @@ mod tests {
     }
 
     #[test]
-    fn proto_version_two() {
-        assert_eq!(GPU_PROTO_VERSION, 2);
+    fn proto_version_three() {
+        assert_eq!(GPU_PROTO_VERSION, 3);
     }
 
     #[test]

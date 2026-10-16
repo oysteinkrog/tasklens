@@ -1570,6 +1570,13 @@ mod tests {
             pcie_tx_bps: Metric::default(),
             engines: Default::default(),
             fdinfo_partial: false,
+            energy_since_boot: Metric::default(),
+            clock_video_mhz: Metric::default(),
+            pstate: Metric::default(),
+            fan_rpm: Metric::default(),
+            pcie_gen: Metric::default(),
+            pcie_width: Metric::default(),
+            info: Arc::default(),
         };
         assert_eq!(reported_bits(Some(&t)), 1 | 4);
         t.enc_pct = Metric::valid(0.0);
@@ -1613,6 +1620,13 @@ mod tests {
             pcie_tx_bps: Metric::default(),
             engines: Default::default(),
             fdinfo_partial: false,
+            energy_since_boot: Metric::default(),
+            clock_video_mhz: Metric::default(),
+            pstate: Metric::default(),
+            fan_rpm: Metric::default(),
+            pcie_gen: Metric::default(),
+            pcie_width: Metric::default(),
+            info: Arc::default(),
         };
         Arc::make_mut(&mut snap.system).gpus = Arc::from([(device, t)].as_slice());
         let engines = device_engines(&snap, device);

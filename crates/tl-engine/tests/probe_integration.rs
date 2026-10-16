@@ -688,6 +688,13 @@ fn device_info() -> GpuDeviceInfo {
         cuda_version: None,
         vbios: None,
         architecture: None,
+        clock_gfx_max_mhz: Some(3_105),
+        clock_mem_max_mhz: Some(14_001),
+        power_max_limit_mw: Some(350_000),
+        slowdown_temp_c: Some(88),
+        shutdown_temp_c: Some(95),
+        pcie_max_gen: Some(5),
+        pcie_max_width: Some(16),
     }
 }
 
@@ -714,9 +721,15 @@ fn device_sample() -> GpuDeviceSample {
         power_mw: Reading::Ok(31_900),
         clock_gfx_mhz: Reading::Ok(2_100),
         clock_mem_mhz: Reading::Ok(10_501),
+        clock_video_mhz: Reading::Ok(1_620),
+        pstate: Reading::Ok(3),
         fan_pct: Reading::Ok(30),
+        fan_rpm: Reading::Ok(1_100),
         pcie_rx_kbps: Reading::Ok(1_000),
         pcie_tx_kbps: Reading::Ok(500),
+        pcie_gen: Reading::Ok(4),
+        pcie_width: Reading::Ok(16),
+        energy_mj: Reading::Ok(4_464_000_000),
     }
 }
 

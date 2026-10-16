@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use nvml_wrapper::enum_wrappers::device::{Clock, PcieUtilCounter, TemperatureSensor};
+use nvml_wrapper::enum_wrappers::device::{
+    Clock, PcieUtilCounter, PerformanceState, TemperatureSensor, TemperatureThreshold,
+};
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::struct_wrappers::device::{MemoryInfo, ProcessInfo, ProcessUtilizationSample};
@@ -90,7 +92,51 @@ fn read_device(nvml: &Nvml, index: u32, cuda: Option<&str>) -> Option<GpuDeviceI
         cuda_version: cuda.map(str::to_owned),
         vbios: device.vbios_version().ok(),
         architecture: device.architecture().ok().map(|a| a.to_string()),
+        clock_gfx_max_mhz: device.max_clock_info(Clock::Graphics).ok(),
+        clock_mem_max_mhz: device.max_clock_info(Clock::Memory).ok(),
+        power_max_limit_mw: device
+            .power_management_limit_constraints()
+            .ok()
+            .map(|c| c.max_limit),
+        slowdown_temp_c: device
+            .temperature_threshold(TemperatureThreshold::Slowdown)
+            .ok(),
+        shutdown_temp_c: device
+            .temperature_threshold(TemperatureThreshold::Shutdown)
+            .ok(),
+        // nvmlDeviceGetGpuMaxPcieLinkGeneration (the card's own maximum) has no safe wrapper,
+        // and this file may not hold `unsafe` (R-143). The engine prefers sysfs `max_link_speed`.
+        pcie_max_gen: device.max_pcie_link_gen().ok(),
+        pcie_max_width: device.max_pcie_link_width().ok(),
     })
+}
+
+/// P0 to P15 as 0 to 15. NVML's "unknown" state is `Unsupported`.
+pub fn pstate_reading(r: Reading<PerformanceState>) -> Reading<u8> {
+    let n = match r {
+        Reading::Ok(state) => match state {
+            PerformanceState::Zero => 0,
+            PerformanceState::One => 1,
+            PerformanceState::Two => 2,
+            PerformanceState::Three => 3,
+            PerformanceState::Four => 4,
+            PerformanceState::Five => 5,
+            PerformanceState::Six => 6,
+            PerformanceState::Seven => 7,
+            PerformanceState::Eight => 8,
+            PerformanceState::Nine => 9,
+            PerformanceState::Ten => 10,
+            PerformanceState::Eleven => 11,
+            PerformanceState::Twelve => 12,
+            PerformanceState::Thirteen => 13,
+            PerformanceState::Fourteen => 14,
+            PerformanceState::Fifteen => 15,
+            PerformanceState::Unknown => return Reading::Unsupported,
+        },
+        Reading::Unsupported => return Reading::Unsupported,
+        Reading::Failed => return Reading::Failed,
+    };
+    Reading::Ok(n)
 }
 
 /// Maps one NVML call result to a `Reading`. `NotSupported` is `Unsupported`; every other error
@@ -137,11 +183,17 @@ pub fn device_sample(dev: &Device<'_>, uuid: [u8; 16]) -> GpuDeviceSample {
         power_mw: reading(dev.power_usage()),
         clock_gfx_mhz: reading(dev.clock_info(Clock::Graphics)),
         clock_mem_mhz: reading(dev.clock_info(Clock::Memory)),
+        clock_video_mhz: reading(dev.clock_info(Clock::Video)),
+        pstate: pstate_reading(reading(dev.performance_state())),
         fan_pct: reading(dev.fan_speed(0)),
+        fan_rpm: reading(dev.fan_speed_rpm(0)),
         // NVML reports KB/s measured over a 20 ms window, and each call blocks for that window.
         // The two calls run one after the other, so they add about 42 ms to a sample (R-277).
         pcie_rx_kbps: reading(dev.pcie_throughput(PcieUtilCounter::Receive)),
         pcie_tx_kbps: reading(dev.pcie_throughput(PcieUtilCounter::Send)),
+        pcie_gen: reading(dev.current_pcie_link_gen()),
+        pcie_width: reading(dev.current_pcie_link_width()),
+        energy_mj: reading(dev.total_energy_consumption()),
     }
 }
 
@@ -267,9 +319,15 @@ fn failed_sample(uuid: [u8; 16]) -> GpuDeviceSample {
         power_mw: Reading::Failed,
         clock_gfx_mhz: Reading::Failed,
         clock_mem_mhz: Reading::Failed,
+        clock_video_mhz: Reading::Failed,
+        pstate: Reading::Failed,
         fan_pct: Reading::Failed,
+        fan_rpm: Reading::Failed,
         pcie_rx_kbps: Reading::Failed,
         pcie_tx_kbps: Reading::Failed,
+        pcie_gen: Reading::Failed,
+        pcie_width: Reading::Failed,
+        energy_mj: Reading::Failed,
     }
 }
 
@@ -428,6 +486,9 @@ mod tests {
             d.vbios,
             d.architecture
         );
+        eprintln!("{d:?}");
+        assert!(d.clock_gfx_max_mhz.is_some());
+        assert!(d.pcie_max_width.is_some());
         // U-35: the power limit NVML reports on the owner machine.
         eprintln!("U-35 power_limit_mw = {:?}", d.power_limit_mw);
         assert!(d.name.contains("5070"), "{}", d.name);
@@ -482,6 +543,34 @@ mod tests {
         let s = failed_sample([1; 16]);
         assert_eq!(s.mem_reserved, Reading::Failed);
         assert_eq!(s.enc_sessions, Reading::Failed);
+        assert_eq!(s.fan_rpm, Reading::Failed);
+        assert_eq!(s.clock_video_mhz, Reading::Failed);
+        assert_eq!(s.pstate, Reading::Failed);
+        assert_eq!(s.pcie_gen, Reading::Failed);
+        assert_eq!(s.pcie_width, Reading::Failed);
+        assert_eq!(s.energy_mj, Reading::Failed);
+    }
+
+    #[test]
+    fn pstate_mapping() {
+        assert_eq!(
+            pstate_reading(Reading::Ok(PerformanceState::Zero)),
+            Reading::Ok(0)
+        );
+        assert_eq!(
+            pstate_reading(Reading::Ok(PerformanceState::Three)),
+            Reading::Ok(3)
+        );
+        assert_eq!(
+            pstate_reading(Reading::Ok(PerformanceState::Fifteen)),
+            Reading::Ok(15)
+        );
+        assert_eq!(
+            pstate_reading(Reading::Ok(PerformanceState::Unknown)),
+            Reading::Unsupported
+        );
+        assert_eq!(pstate_reading(Reading::Unsupported), Reading::Unsupported);
+        assert_eq!(pstate_reading(Reading::Failed), Reading::Failed);
     }
 
     /// Starts NVML and returns the backend after `hello`, with one device or more.
@@ -534,6 +623,10 @@ mod tests {
             "{:?}",
             s.enc_sessions
         );
+        assert!(matches!(s.pstate, Reading::Ok(0..=15)), "{:?}", s.pstate);
+        assert!(matches!(s.pcie_gen, Reading::Ok(1..=6)), "{:?}", s.pcie_gen);
+        assert!(matches!(s.pcie_width, Reading::Ok(_)), "{:?}", s.pcie_width);
+        assert!(matches!(s.energy_mj, Reading::Ok(_)), "{:?}", s.energy_mj);
         // U-35: whether the owner card reports a fan speed.
         eprintln!("U-35 fan_pct = {:?}", s.fan_pct);
         assert!(

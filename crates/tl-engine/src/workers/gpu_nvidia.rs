@@ -28,6 +28,8 @@ use asupersync::runtime::JoinError;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time::{MissedTickBehavior, interval, sleep, sleep_until};
 use asupersync::{Cx, Outcome};
+use tl_collect::SysRoot;
+use tl_collect::gpu_drm::{discover_cards, read_pcie_link, same_pci_slot};
 use tl_model::demand::Demand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::gpu_proto::{
@@ -35,6 +37,7 @@ use tl_model::gpu_proto::{
 };
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::DeviceIdx;
+use tl_model::system::GpuStaticInfo as DeviceStatic;
 use tl_model::system::{GpuEngine, GpuEngines, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -84,12 +87,13 @@ pub trait ProbeLink: Sized + Send + 'static {
 }
 
 impl ProbeLink for ProbeClient {
-    type Starter = ();
+    /// Where sysfs lives, for the PCIe link maximum.
+    type Starter = SysRoot;
 
-    fn start((): (), probe: &Path) -> Result<(Self, HelloOutcome), ProbeError> {
+    fn start(root: SysRoot, probe: &Path) -> Result<(Self, HelloOutcome), ProbeError> {
         let client = ProbeClient::start(probe)?;
         let hello = match (&client.info, &client.init_failed) {
-            (Some(info), _) => HelloOutcome::Ready(info.clone()),
+            (Some(info), _) => HelloOutcome::Ready(with_sysfs_pcie_max(info.clone(), &root.sys)),
             (None, Some((kind, message))) => HelloOutcome::InitFailed {
                 kind: *kind,
                 message: Arc::clone(message),
@@ -138,10 +142,11 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
 pub async fn run(
     cx: Cx,
     io: WorkerIo,
-    _cfg: Arc<EngineConfig>,
+    cfg: Arc<EngineConfig>,
     locate: fn() -> Option<PathBuf>,
 ) -> Outcome<(), WorkerError> {
-    run_with::<ProbeClient>(cx, io, locate, (), &ONCE_PER_PROCESS).await
+    let root = cfg.sys_root.clone();
+    run_with::<ProbeClient>(cx, io, locate, root, &ONCE_PER_PROCESS).await
 }
 
 /// The worker body over any [`ProbeLink`]. `locate` is called once. `--api-versions` runs only
@@ -189,6 +194,8 @@ pub async fn run_with<L: ProbeLink>(
     for device in info.devices.iter() {
         tracing::debug!(name = %device.name, "GPU probe device");
     }
+    // One per Hello device, shared by every sample (PERF-066 to PERF-071).
+    let statics: Vec<Arc<DeviceStatic>> = info.devices.iter().map(device_static).collect();
 
     // Stays true until a process sample shows that the driver has no per-process utilisation.
     let mut supports_process_util = true;
@@ -294,7 +301,11 @@ pub async fn run_with<L: ProbeLink>(
             supports_process_util = false;
             updates.push(SourceUpdate::GpuInfo(info_update(&info, false)));
         }
-        updates.push(SourceUpdate::Gpu(gpu_sample(sample, &info.devices)));
+        updates.push(SourceUpdate::Gpu(gpu_sample(
+            sample,
+            &info.devices,
+            &statics,
+        )));
         for update in updates {
             if let Some(stop) = send(&cx, &io, update).await {
                 link.shutdown();
@@ -321,8 +332,13 @@ pub fn identity(info: &GpuDeviceInfo) -> DeviceIdentity {
     }
 }
 
-/// `device` is a placeholder the reducer overwrites (R-155 item 8).
-pub fn to_totals(s: &GpuDeviceSample, info: &GpuDeviceInfo) -> GpuTotals {
+/// `device` is a placeholder the reducer overwrites (R-155 item 8). `statics` is the device's
+/// [`device_static`].
+pub fn to_totals(
+    s: &GpuDeviceSample,
+    info: &GpuDeviceInfo,
+    statics: &Arc<DeviceStatic>,
+) -> GpuTotals {
     let pct = |r: Reading<u32>| metric(r, |v| v as f32);
     let kbps = |r: Reading<u32>| metric(r, |v| v as f32 * 1024.0);
     // NVML engines (PERF-063). An engine whose call returns NotSupported is not listed.
@@ -356,16 +372,72 @@ pub fn to_totals(s: &GpuDeviceSample, info: &GpuDeviceInfo) -> GpuTotals {
             Some(mw) => Metric::valid(milliwatts(mw)),
             None => Metric::with(Validity::Unsupported),
         },
+        // NVML reports millijoules.
+        energy_since_boot: metric(s.energy_mj, |mj| mj as f64 / 1000.0),
         clock_gfx_mhz: metric(s.clock_gfx_mhz, |v| v),
         clock_mem_mhz: metric(s.clock_mem_mhz, |v| v),
+        clock_video_mhz: metric(s.clock_video_mhz, |v| v),
+        pstate: metric(s.pstate, |v| v),
         fan_pct: pct(s.fan_pct),
+        fan_rpm: metric(s.fan_rpm, |v| v),
         // NVML reports KB/s.
         pcie_rx_bps: kbps(s.pcie_rx_kbps),
         pcie_tx_bps: kbps(s.pcie_tx_kbps),
+        pcie_gen: small(s.pcie_gen),
+        pcie_width: small(s.pcie_width),
         engines,
         // NVIDIA engines come from NVML, not fdinfo.
         fdinfo_partial: false,
+        info: Arc::clone(statics),
     }
+}
+
+/// The static values of one `Hello` device (PERF-066 to PERF-071).
+pub fn device_static(info: &GpuDeviceInfo) -> Arc<DeviceStatic> {
+    let text = |v: &Option<String>| v.as_deref().map(Arc::from);
+    let byte = |v: Option<u32>| v.and_then(|v| u8::try_from(v).ok());
+    Arc::new(DeviceStatic {
+        cuda_version: text(&info.cuda_version),
+        vbios: text(&info.vbios),
+        architecture: text(&info.architecture),
+        pcie_max_gen: byte(info.pcie_max_gen),
+        pcie_max_width: byte(info.pcie_max_width),
+        clock_gfx_max_mhz: info.clock_gfx_max_mhz,
+        clock_mem_max_mhz: info.clock_mem_max_mhz,
+        power_max_limit_w: info.power_max_limit_mw.map(milliwatts),
+        slowdown_temp_c: info.slowdown_temp_c.map(|c| c as f32),
+        shutdown_temp_c: info.shutdown_temp_c.map(|c| c as f32),
+    })
+}
+
+/// Replaces each device's maximum PCIe generation and width with sysfs `max_link_speed` and
+/// `max_link_width` of its card, where sysfs has them (PERF-070). NVML's
+/// `nvmlDeviceGetMaxPcieLinkGeneration` gives the lower of the card's and the host's maximum,
+/// while the row shows the card's own maximum. Runs on the blocking pool.
+pub fn with_sysfs_pcie_max(mut info: HelloInfo, sys: &Path) -> HelloInfo {
+    let cards = discover_cards(sys);
+    let devices: Vec<GpuDeviceInfo> = info
+        .devices
+        .iter()
+        .map(|d| {
+            let mut d = d.clone();
+            if let Some(card) = cards
+                .iter()
+                .find(|c| same_pci_slot(&c.pci_slot, &d.pci_bus_id))
+            {
+                let link = read_pcie_link(sys, card);
+                if let Some(generation) = link.max_gen {
+                    d.pcie_max_gen = Some(u32::from(generation));
+                }
+                if let Some(width) = link.max_width {
+                    d.pcie_max_width = Some(u32::from(width));
+                }
+            }
+            d
+        })
+        .collect();
+    info.devices = devices.into();
+    info
 }
 
 /// `persistent_key` is `gpu:<NVML UUID>` (PERF-005, R-155 items 7 and 8).
@@ -411,6 +483,14 @@ fn milliwatts(mw: u32) -> f32 {
     mw as f32 / 1000.0
 }
 
+/// A PCIe generation or lane count. A value above 255 is not a real link, so it is `Failed`.
+fn small(r: Reading<u32>) -> Metric<u8> {
+    match r {
+        Reading::Ok(v) => u8::try_from(v).map_or(Metric::with(Validity::Failed), Metric::valid),
+        Reading::Unsupported | Reading::Failed => Metric::with(r.validity()),
+    }
+}
+
 fn info_update(hello: &HelloInfo, supports_process_util: bool) -> GpuInfoUpdate {
     GpuInfoUpdate {
         devices: hello
@@ -422,13 +502,19 @@ fn info_update(hello: &HelloInfo, supports_process_util: bool) -> GpuInfoUpdate 
 }
 
 /// Device rows keyed by identity. A device that was not in the `Hello` list is dropped.
-fn gpu_sample(s: ProbeResponseSample, devices: &[GpuDeviceInfo]) -> GpuSample {
+/// `statics` holds one entry per `devices` entry, in the same order.
+fn gpu_sample(
+    s: ProbeResponseSample,
+    devices: &[GpuDeviceInfo],
+    statics: &[Arc<DeviceStatic>],
+) -> GpuSample {
     let rows = s
         .devices
         .iter()
         .filter_map(|d| {
-            let info = devices.iter().find(|i| i.uuid == d.uuid)?;
-            Some((identity(info), to_totals(d, info)))
+            let i = devices.iter().position(|i| i.uuid == d.uuid)?;
+            let info = &devices[i];
+            Some((identity(info), to_totals(d, info, statics.get(i)?)))
         })
         .collect();
     GpuSample {
@@ -542,6 +628,13 @@ mod tests {
             cuda_version: None,
             vbios: None,
             architecture: None,
+            clock_gfx_max_mhz: Some(3_105),
+            clock_mem_max_mhz: Some(14_001),
+            power_max_limit_mw: Some(350_000),
+            slowdown_temp_c: Some(88),
+            shutdown_temp_c: Some(95),
+            pcie_max_gen: Some(5),
+            pcie_max_width: Some(16),
         }
     }
 
@@ -568,9 +661,15 @@ mod tests {
             power_mw: Reading::Ok(31_900),
             clock_gfx_mhz: Reading::Ok(2_100),
             clock_mem_mhz: Reading::Ok(10_501),
+            clock_video_mhz: Reading::Ok(1_620),
+            pstate: Reading::Ok(3),
             fan_pct: Reading::Unsupported,
+            fan_rpm: Reading::Ok(0),
             pcie_rx_kbps: Reading::Ok(1_000),
             pcie_tx_kbps: Reading::Failed,
+            pcie_gen: Reading::Ok(4),
+            pcie_width: Reading::Ok(16),
+            energy_mj: Reading::Ok(4_464_000_000),
         }
     }
 
@@ -597,7 +696,7 @@ mod tests {
     #[test]
     fn to_totals_mapping() {
         let info = device_info();
-        let t = to_totals(&device_sample(), &info);
+        let t = to_totals(&device_sample(), &info, &device_static(&info));
         assert_eq!(t.device, DEVICE_PLACEHOLDER);
         assert_eq!(t.util_pct, Metric::valid(37.0));
         assert_eq!(t.mem_util_pct, Metric::valid(12.0));
@@ -624,7 +723,7 @@ mod tests {
             power_limit_mw: None,
             ..info
         };
-        let t = to_totals(&device_sample(), &no_limit);
+        let t = to_totals(&device_sample(), &no_limit, &device_static(&no_limit));
         assert_eq!(t.power_limit_w.validity, Validity::Unsupported);
 
         let unsupported = GpuDeviceSample {
@@ -632,14 +731,117 @@ mod tests {
             enc_sessions: Reading::Unsupported,
             ..device_sample()
         };
-        let t = to_totals(&unsupported, &device_info());
+        let t = to_totals(&unsupported, &device_info(), &device_static(&device_info()));
         assert_eq!(t.mem_reserved.validity, Validity::Unsupported);
         assert_eq!(t.enc_sessions.validity, Validity::Unsupported);
     }
 
     #[test]
+    fn to_totals_details_fields() {
+        let info = device_info();
+        let statics = device_static(&info);
+        let t = to_totals(&device_sample(), &info, &statics);
+        assert_eq!(t.fan_rpm, Metric::valid(0));
+        assert_eq!(t.clock_video_mhz, Metric::valid(1_620));
+        assert_eq!(t.pstate, Metric::valid(3));
+        assert_eq!(t.pcie_gen, Metric::valid(4));
+        assert_eq!(t.pcie_width, Metric::valid(16));
+        // 4,464,000,000 mJ is 1.24 kWh.
+        assert_eq!(t.energy_since_boot, Metric::valid(4_464_000.0));
+        assert!(Arc::ptr_eq(&t.info, &statics));
+
+        let unsupported = GpuDeviceSample {
+            fan_rpm: Reading::Unsupported,
+            clock_video_mhz: Reading::Unsupported,
+            pstate: Reading::Unsupported,
+            pcie_gen: Reading::Failed,
+            pcie_width: Reading::Ok(300),
+            energy_mj: Reading::Unsupported,
+            ..device_sample()
+        };
+        let t = to_totals(&unsupported, &info, &statics);
+        assert_eq!(t.fan_rpm.validity, Validity::Unsupported);
+        assert_eq!(t.clock_video_mhz.validity, Validity::Unsupported);
+        assert_eq!(t.pstate.validity, Validity::Unsupported);
+        assert_eq!(t.pcie_gen.validity, Validity::Failed);
+        // No link has 300 lanes.
+        assert_eq!(t.pcie_width.validity, Validity::Failed);
+        assert_eq!(t.energy_since_boot.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn device_static_mapping() {
+        let s = device_static(&GpuDeviceInfo {
+            cuda_version: Some("13.2".into()),
+            vbios: Some("98.06.1f.00.dc".into()),
+            architecture: Some("Ada Lovelace".into()),
+            ..device_info()
+        });
+        assert_eq!(s.cuda_version.as_deref(), Some("13.2"));
+        assert_eq!(s.vbios.as_deref(), Some("98.06.1f.00.dc"));
+        assert_eq!(s.architecture.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(s.clock_gfx_max_mhz, Some(3_105));
+        assert_eq!(s.clock_mem_max_mhz, Some(14_001));
+        assert_eq!(s.power_max_limit_w, Some(350.0));
+        assert_eq!(s.slowdown_temp_c, Some(88.0));
+        assert_eq!(s.shutdown_temp_c, Some(95.0));
+        assert_eq!(s.pcie_max_gen, Some(5));
+        assert_eq!(s.pcie_max_width, Some(16));
+
+        let none = device_static(&GpuDeviceInfo {
+            clock_gfx_max_mhz: None,
+            clock_mem_max_mhz: None,
+            power_max_limit_mw: None,
+            slowdown_temp_c: None,
+            shutdown_temp_c: None,
+            pcie_max_gen: None,
+            pcie_max_width: Some(300),
+            ..device_info()
+        });
+        assert_eq!(*none, DeviceStatic::default());
+    }
+
+    #[test]
+    fn sysfs_pcie_max_wins_over_nvml() {
+        let sys = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tl-collect/tests/fixtures/drm-basic/sys");
+        // card1 in the fixture is the NVIDIA card at 0000:2d:00.0: 32 GT/s x16 maximum.
+        let on_card = GpuDeviceInfo {
+            pci_bus_id: "00000000:2D:00.0".into(),
+            pcie_max_gen: Some(4),
+            pcie_max_width: Some(8),
+            ..device_info()
+        };
+        // No card in the fixture has this slot, so NVML's values stay.
+        let elsewhere = GpuDeviceInfo {
+            uuid: [9; 16],
+            pci_bus_id: "00000000:41:00.0".into(),
+            pcie_max_gen: Some(4),
+            pcie_max_width: Some(8),
+            ..device_info()
+        };
+        let hello = HelloInfo {
+            devices: Arc::from([on_card, elsewhere]),
+            ..hello_info()
+        };
+        let out = with_sysfs_pcie_max(hello, &sys);
+        assert_eq!(out.devices[0].pcie_max_gen, Some(5));
+        assert_eq!(out.devices[0].pcie_max_width, Some(16));
+        assert_eq!(out.devices[1].pcie_max_gen, Some(4));
+        assert_eq!(out.devices[1].pcie_max_width, Some(8));
+
+        // No sysfs at all keeps NVML's values.
+        let out = with_sysfs_pcie_max(hello_info(), Path::new("/nonexistent-tasklens-sys"));
+        assert_eq!(out.devices[0].pcie_max_gen, Some(5));
+    }
+
+    #[test]
     fn to_totals_engines() {
-        let t = to_totals(&device_sample(), &device_info());
+        let t = to_totals(
+            &device_sample(),
+            &device_info(),
+            &device_static(&device_info()),
+        );
         let engines: Vec<(GpuEngine, Metric<f32>)> = t.engines.reported().collect();
         // Decode is NotSupported in the sample, so it is not listed.
         assert_eq!(
@@ -656,7 +858,7 @@ mod tests {
             util_pct: Reading::Failed,
             ..device_sample()
         };
-        let t = to_totals(&failed, &device_info());
+        let t = to_totals(&failed, &device_info(), &device_static(&device_info()));
         // A failed call keeps the engine listed.
         assert_eq!(t.engines.get(GpuEngine::Gpu).validity, Validity::Failed);
     }
