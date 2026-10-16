@@ -910,3 +910,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: hjn.37 closed; NVIDIA JPEG and OFA split to tasklens-hjn.42 with one raw NVML file allowed unsafe (ADR-001 rule 4 amended there).
 - 2026-10-16 leader decision: dwy.7 review fixes; reducer sends a refresh on newly added detail demand; period = interval / ceil(interval / 1 s) when PSS and details both apply.
 - 2026-10-16 leader decision: dwy.7 smaps and PSS 1 s minimum by elapsed time on the injected clock; open refresh republishes from cache when the worker already saw the open.
+- 2026-10-16 leader decision: dwy.7 open notice is its own command; a user DetailRefresh always rereads.
