@@ -18,13 +18,12 @@
 //! as `Missing`, another read error resends it as `Failed`.
 //!
 //! `period` sees every demand: it forgets targets and tabs that left it, and gives a tab that
-//! appears a new state marked `open_pending`. The first demand a new source sees is the
-//! exception: after a worker restart its tabs can be open already, and the reducer sends no
-//! refresh for them, so their states are not marked. A new tab is read at the next sample. A
-//! tab that closes and opens again between two polls is not seen here, so the reducer sends a
-//! `DetailRefresh` for every tab that opens. For a tab marked `open_pending` that refresh only
+//! appears a new state marked `open_pending`. A new tab is read at the next sample. A tab that
+//! closes and opens again between two polls is not seen here, so the reducer sends a
+//! `DetailOpened` for every tab that opens. For a tab marked `open_pending` that notice only
 //! resends the payload, because the worker already read the tab for this open. For any other
-//! tab it drops the state and reads at once, which sends the tab again. Tab updates go out
+//! tab it drops the state and reads at once, which sends the tab again. A user `DetailRefresh`
+//! always drops the state and reads at once; `open_pending` never applies to it. Tab updates go out
 //! through `take_extra`. When PSS is not due the sample itself is the last tab update or
 //! `Health { Running }`, never an empty `Pss`.
 //!
@@ -209,7 +208,7 @@ struct TabState {
     /// Environment: read once; later reads only on `DetailRefresh`.
     env_loaded: bool,
     /// Set when `period` made this state because it saw the tab appear. The reducer's
-    /// `DetailRefresh` for this open then only resends the payload.
+    /// `DetailOpened` for this open then only resends the payload.
     open_pending: bool,
 }
 
@@ -247,15 +246,12 @@ pub struct ProcessDetailSource {
     /// Clock time of the last `smaps` read per process. Kept for `SMAPS_MIN_PERIOD`, also when
     /// the tab or the target leaves the demand.
     smaps_at: FxHashMap<ProcessKey, TimeNs>,
-    /// Set by the first `period` call. Until then the source has seen no demand, so a tab in it
-    /// may have opened before a restart, and no `open_pending` is set.
-    demand_seen: Cell<bool>,
     /// True while the demand holds more than `DETAILS_MAX` targets, so the warning is logged
     /// once per overflow.
     over_cap: Cell<bool>,
     cap_warnings: Cell<u32>,
-    /// `DetailRefresh` commands for the next sample.
-    refresh: Vec<(DetailTarget, DetailTab)>,
+    /// `DetailRefresh` (false) and `DetailOpened` (true) commands for the next sample.
+    refresh: Vec<(DetailTarget, DetailTab, bool)>,
     /// Pruned by `period`, which runs on every loop turn, also while no sample is due.
     targets: RefCell<FxHashMap<ProcessKey, TargetState>>,
     /// Tab updates for `take_extra`.
@@ -306,7 +302,6 @@ impl ProcessDetailSource {
             tabs_stride: Stride::default(),
             last_pss: None,
             smaps_at: FxHashMap::default(),
-            demand_seen: Cell::new(false),
             over_cap: Cell::new(false),
             cap_warnings: Cell::new(0),
             refresh: Vec::new(),
@@ -425,10 +420,10 @@ impl ProcessDetailSource {
         Arc::from(&d.details[..DETAILS_MAX])
     }
 
-    /// Applies the `DetailRefresh` commands, then reads the demanded tabs that are due and
-    /// queues the changed ones in `extra`.
+    /// Applies the `DetailRefresh` and `DetailOpened` commands, then reads the demanded tabs
+    /// that are due and queues the changed ones in `extra`.
     fn read_tabs(&mut self, now: TimeNs) {
-        for (target, tab) in std::mem::take(&mut self.refresh) {
+        for (target, tab, opened) in std::mem::take(&mut self.refresh) {
             let DetailTarget::Process(key) = target else {
                 continue;
             };
@@ -437,9 +432,9 @@ impl ProcessDetailSource {
             }
             let slot = &mut self.targets.get_mut().entry(key).or_default().tabs[tab.index()];
             match slot {
-                // The reducer's refresh for an open this worker saw. The tab was read for that
+                // The reducer's notice for an open this worker saw. The tab was read for that
                 // open, so its payload is only sent again.
-                Some(state) if state.open_pending => {
+                Some(state) if opened && state.open_pending => {
                     state.open_pending = false;
                     if let Some((payload, validity)) = &state.published {
                         self.extra
@@ -452,10 +447,12 @@ impl ProcessDetailSource {
                     }
                 }
                 // A user refresh, or a tab that closed and opened again between two polls. The
-                // reducer may have dropped the payload, so the tab is read and sent again.
+                // reducer may have dropped the payload, so the tab is read and sent again. This
+                // also drops `open_pending`, so a later notice for the same open reads again
+                // instead of resending.
                 Some(state) => *state = TabState::default(),
                 // The tab is not in the demand this worker saw yet. Its first read serves this
-                // refresh, so the state is made without `open_pending`.
+                // command, so the state is made without `open_pending`.
                 None => *slot = Some(TabState::default()),
             }
         }
@@ -631,10 +628,9 @@ impl Source for ProcessDetailSource {
         let details = self.cap_details(d);
         // Done here, not in `sample`: with no demand left no sample runs, and a window that
         // opens again must get its tabs, not "unchanged" from the old state. A tab that appears
-        // gets a state marked `open_pending`, except in the first demand this source sees: a
-        // restarted worker gets no reducer refresh for tabs that were open already, and a mark
-        // there would swallow the next user refresh.
-        let opened = self.demand_seen.replace(true);
+        // gets a state marked `open_pending`. Only the reducer's `DetailOpened` clears it, so
+        // after a worker restart, when no notice comes for tabs open already, a user refresh
+        // still reads.
         {
             let mut targets = self.targets.borrow_mut();
             targets.retain(|key, target| {
@@ -655,7 +651,7 @@ impl Source for ProcessDetailSource {
                 {
                     targets.entry(key).or_default().tabs[d.tab.index()].get_or_insert_with(|| {
                         TabState {
-                            open_pending: opened,
+                            open_pending: true,
                             ..TabState::default()
                         }
                     });
@@ -689,7 +685,11 @@ impl Source for ProcessDetailSource {
     fn command(&mut self, cmd: &WorkerCommand) -> bool {
         match cmd {
             WorkerCommand::DetailRefresh { target, tab } => {
-                self.refresh.push((*target, *tab));
+                self.refresh.push((*target, *tab, false));
+                true
+            }
+            WorkerCommand::DetailOpened { target, tab } => {
+                self.refresh.push((*target, *tab, true));
                 true
             }
             WorkerCommand::ComputeHashes(_)
@@ -1758,8 +1758,16 @@ mod tests {
         src
     }
 
-    /// The `DetailRefresh` the reducer sends for each tab that opens.
-    fn refresh(src: &mut ProcessDetailSource, tab: DetailTab) {
+    /// The `DetailOpened` the reducer sends for each tab that opens.
+    fn opened(src: &mut ProcessDetailSource, tab: DetailTab) {
+        assert!(src.command(&WorkerCommand::DetailOpened {
+            target: DetailTarget::Process(a()),
+            tab,
+        }));
+    }
+
+    /// A user `DetailRefresh`.
+    fn user_refresh(src: &mut ProcessDetailSource, tab: DetailTab) {
         assert!(src.command(&WorkerCommand::DetailRefresh {
             target: DetailTarget::Process(a()),
             tab,
@@ -1779,7 +1787,7 @@ mod tests {
         assert_eq!(out[0].2, Validity::Valid);
         assert!(env_vars(&out[0].1).contains(&("API_KEY".into(), "abc".into())));
         // The reducer's refresh for this open, after the read: the payload again, no read.
-        refresh(&mut src, DetailTab::Environment);
+        opened(&mut src, DetailTab::Environment);
         let (next, out, _) = step(src, &d, &s, 250);
         src = next;
         assert_eq!(out.len(), 1);
@@ -1794,7 +1802,7 @@ mod tests {
         }
         assert_eq!(src.tab_reads(DetailTab::Environment), 1);
 
-        refresh(&mut src, DetailTab::Environment);
+        user_refresh(&mut src, DetailTab::Environment);
         let (src, out, _) = step(src, &d, &s, 5000);
         assert_eq!(src.tab_reads(DetailTab::Environment), 2);
         assert_eq!(env_vars(&out[0].1), vec![("NEW".into(), "1".into())]);
@@ -1920,7 +1928,7 @@ mod tests {
         assert_eq!(first.len(), 2);
         // The reducer's refreshes for the first open resend the same payloads.
         for tab in [DetailTab::Fds, DetailTab::Environment] {
-            refresh(&mut src, tab);
+            opened(&mut src, tab);
         }
         let (src, opened, _) = step(src, &d, &s, 500);
         assert_eq!(opened.len(), 2);
@@ -1934,7 +1942,7 @@ mod tests {
         );
         // Closed and opened again between two polls: the reducer sends a refresh again.
         for tab in [DetailTab::Fds, DetailTab::Environment] {
-            refresh(&mut src, tab);
+            opened(&mut src, tab);
         }
         let (src, again, _) = step(src, &d, &s, 1500);
         let sent: Vec<DetailTab> = again.iter().map(|(tab, _, _)| *tab).collect();
@@ -1954,12 +1962,12 @@ mod tests {
         let d = tabs(&[(a(), DetailTab::Environment)]);
         let s = every_ms(500);
         let mut src = ProcessDetailSource::new(cfg);
-        refresh(&mut src, DetailTab::Environment);
+        opened(&mut src, DetailTab::Environment);
         let (mut src, out, _) = step(src, &d, &s, 0);
         assert_eq!(out.len(), 1);
         assert_eq!(src.tab_reads(DetailTab::Environment), 1);
         fs::write(tmp.path().join("proc/4201/environ"), b"NEW=1\0").expect("rewrite environ");
-        refresh(&mut src, DetailTab::Environment);
+        user_refresh(&mut src, DetailTab::Environment);
         let (src, out, _) = step(src, &d, &s, 500);
         assert_eq!(src.tab_reads(DetailTab::Environment), 2);
         assert_eq!(env_vars(&out[0].1), vec![("NEW".into(), "1".into())]);
@@ -1976,20 +1984,20 @@ mod tests {
         let mut src = running(cfg);
         src.thread_clock = Some(fixed_clock);
         let (mut src, _, _) = step(src, &env, &s, 0);
-        refresh(&mut src, DetailTab::Environment);
+        opened(&mut src, DetailTab::Environment);
         let (src, _, _) = step(src, &env, &s, 500);
         let (src, _, _) = step(src, &threads, &s, 1000);
         let (mut src, out, _) = step(src, &env, &s, 1500);
         assert_eq!(out.len(), 1);
         assert_eq!(src.tab_reads(DetailTab::Environment), 2);
-        refresh(&mut src, DetailTab::Environment);
+        opened(&mut src, DetailTab::Environment);
         let (src, out, _) = step(src, &env, &s, 2000);
         assert_eq!(out.len(), 1);
         assert_eq!(src.tab_reads(DetailTab::Environment), 2);
     }
 
     /// A restarted worker finds the Environment tab open in its first demand. The reducer sends
-    /// no refresh for a tab it already had open, so the next user refresh reads again.
+    /// no open notice for a tab it already had open, so the next user refresh reads again.
     #[test]
     fn restart_with_open_tab_keeps_user_refresh() {
         let (tmp, cfg) = edge_root();
@@ -1999,13 +2007,43 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(src.tab_reads(DetailTab::Environment), 1);
         fs::write(tmp.path().join("proc/4201/environ"), b"NEW=1\0").expect("rewrite environ");
-        refresh(&mut src, DetailTab::Environment);
+        user_refresh(&mut src, DetailTab::Environment);
         let (src, out, _) = step(src, &d, &s, 500);
         assert_eq!(src.tab_reads(DetailTab::Environment), 2);
         assert_eq!(env_vars(&out[0].1), vec![("NEW".into(), "1".into())]);
         let (src, out, _) = step(src, &d, &s, 1000);
         assert!(out.is_empty());
         assert_eq!(src.tab_reads(DetailTab::Environment), 2);
+    }
+
+    /// A tab open in the first demand a new source sees is read once. The reducer's open
+    /// notice that comes after that read only resends the payload.
+    #[test]
+    fn first_demand_open_notice_reads_once() {
+        let (_tmp, cfg) = edge_root();
+        let d = tabs(&[(a(), DetailTab::Environment)]);
+        let s = every_ms(500);
+        let (mut src, first, _) = step(ProcessDetailSource::new(cfg), &d, &s, 0);
+        assert_eq!(first.len(), 1);
+        opened(&mut src, DetailTab::Environment);
+        let (src, out, _) = step(src, &d, &s, 500);
+        assert_eq!(out.len(), 1);
+        assert!(Arc::ptr_eq(&first[0].1, &out[0].1));
+        assert_eq!(src.tab_reads(DetailTab::Environment), 1);
+    }
+
+    /// A user refresh reads again even while the tab still waits for its open notice.
+    #[test]
+    fn user_refresh_ignores_open_pending() {
+        let (tmp, cfg) = edge_root();
+        let d = tabs(&[(a(), DetailTab::Environment)]);
+        let s = every_ms(500);
+        let (mut src, _, _) = step(running(cfg), &d, &s, 0);
+        fs::write(tmp.path().join("proc/4201/environ"), b"NEW=1\0").expect("rewrite environ");
+        user_refresh(&mut src, DetailTab::Environment);
+        let (src, out, _) = step(src, &d, &s, 500);
+        assert_eq!(src.tab_reads(DetailTab::Environment), 2);
+        assert_eq!(env_vars(&out[0].1), vec![("NEW".into(), "1".into())]);
     }
 
     /// A gone process resends the last payload as `Missing`, once.

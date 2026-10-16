@@ -148,6 +148,11 @@ pub enum WorkerCommand {
         target: DetailTarget,
         tab: DetailTab,
     },
+    /// From the reducer, not the user: this process tab opened since the last tick.
+    DetailOpened {
+        target: DetailTarget,
+        tab: DetailTab,
+    },
     ComputeHashes(ProcessKey),
     VerifyPackage(ProcessKey),
     StringScan {
@@ -188,6 +193,7 @@ impl WorkerCommand {
             WorkerCommand::Reprobe => "Reprobe",
             WorkerCommand::KWin(_) => "KWin",
             WorkerCommand::DetailRefresh { .. } => "DetailRefresh",
+            WorkerCommand::DetailOpened { .. } => "DetailOpened",
             WorkerCommand::ComputeHashes(_) => "ComputeHashes",
             WorkerCommand::VerifyPackage(_) => "VerifyPackage",
             WorkerCommand::StringScan { .. } => "StringScan",

@@ -803,7 +803,7 @@ impl Reducer {
         self.refresh_app_details();
     }
 
-    /// Sends the ProcessDetail worker a `DetailRefresh` for each process tab that opened since
+    /// Sends the ProcessDetail worker a `DetailOpened` for each process tab that opened since
     /// the last tick. A window that closed and opened again between two worker polls lost its
     /// payloads here, but the worker kept its state and would send nothing for an unchanged tab.
     fn refresh_opened_tabs(&mut self, demand: &Demand) {
@@ -815,7 +815,7 @@ impl Reducer {
             if matches!(d.target, DetailTarget::Process(_)) && !seen.contains(d) {
                 self.forward(
                     SourceId::ProcessDetail,
-                    WorkerCommand::DetailRefresh {
+                    WorkerCommand::DetailOpened {
                         target: d.target,
                         tab: d.tab,
                     },
