@@ -1879,9 +1879,14 @@ fn logs_open_terminal_two_clicks_each_fall_back(cx: &mut TestAppContext) {
     }
     cx.run_until_parked();
     assert_eq!(launches(&t.engine).len(), 4);
+    // The stack merges the two identical error toasts into one with a count suffix.
     let toasts = t.toasts(cx);
-    assert!(!toasts.is_empty());
-    assert!(toasts.iter().all(|t| t == "Could not open a terminal"));
+    assert_eq!(toasts.len(), 1, "{toasts:?}");
+    assert!(
+        toasts[0].starts_with("Could not open a terminal"),
+        "{toasts:?}"
+    );
+    assert_ne!(toasts[0], "Could not open a terminal", "both failures show");
 }
 
 #[gpui_kit::test]
