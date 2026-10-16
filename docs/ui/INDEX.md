@@ -103,6 +103,7 @@ Keys and their contexts are canonical table (b) in `docs/RECONCILIATION.md`.
 | `HandleSearch` | "tasklens Handle Search" | process-windows UI-PWN-030 |
 | `Columns` | "tasklens Columns" | processes UI-PRC-007 |
 | `Settings`, `ThemeEditor`, `ShareTheme`, `About`, `CrashReport`, `AdditionalSetup`, `Shortcuts`, `PublicIpNotice`, `CollectorHealth` | shell tool windows | shell UI-SHL-060, 081, 082, 092 to 099 |
+| `SetupScript(&'static str)` | "tasklens-setup <subcommand>" script viewer, one per subcommand | shell UI-SHL-094, UI-PRF-052 |
 | `Smart(DeviceIdx)`, `DiskInUse(DeviceIdx)` | "tasklens SMART Data", "tasklens Disk is in use" | performance UI-PRF-030 |
 | `DetachedGraph(u8)`, `Mini` | detached graph windows, mini window | performance UI-PRF-044, 045 |
 | none (modal child of its parent) | confirmations (`TlDialog::confirm`), Set Affinity, Set Priority, Send Signal | foundation UI-FND-021, process-windows UI-PWN-021 to 027 |

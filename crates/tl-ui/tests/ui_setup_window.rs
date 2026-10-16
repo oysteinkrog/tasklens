@@ -23,7 +23,10 @@ use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::i18n::tr;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-use tl_ui::window::setup::{CardView, SetupRow, SetupWindow, confirm_words, row_status};
+use tl_ui::window::setup::{
+    CardView, SETUP_SCRIPT, ScriptWindow, SetupRow, SetupWindow, confirm_words, open_script_window,
+    row_status,
+};
 
 struct Parent;
 
@@ -379,7 +382,7 @@ fn press(cx: &mut TestAppContext, vcx: &mut VisualTestContext, enable: bool) {
 fn setup_enable_confirm_text(cx: &mut TestAppContext) {
     let engine = setup(cx, true);
     let mut vcx = open_with(cx, &engine, not_readable(), None);
-    assert_eq!(cards(cx)[0].buttons, vec![("Enable".to_owned(), false)]);
+    assert_eq!(cards(cx)[0].buttons[0], ("Enable".to_owned(), false));
     press(cx, &mut vcx, true);
     let words = cx.update(|cx| confirm_words(SetupStep::RaplEnable, cx));
     assert_eq!(words.heading.as_ref(), "Enable CPU power draw?");
@@ -422,7 +425,7 @@ fn setup_enable_sends_run_setup(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(run_setup_count(&engine, SetupStep::RaplEnable), 1);
     assert_eq!(cards(cx)[0].failure, None);
-    assert_eq!(cards(cx)[0].buttons, vec![("Enable".to_owned(), false)]);
+    assert_eq!(cards(cx)[0].buttons[0], ("Enable".to_owned(), false));
 }
 
 #[gpui_kit::test]
@@ -436,7 +439,7 @@ fn setup_running_disables_buttons(cx: &mut TestAppContext) {
     );
     let card = cards(cx).remove(0);
     assert_eq!(card.status.as_deref(), Some("Running…"));
-    assert_eq!(card.buttons, vec![("Enable".to_owned(), true)]);
+    assert_eq!(card.buttons[0], ("Enable".to_owned(), true));
 }
 
 #[gpui_kit::test]
@@ -522,7 +525,7 @@ fn setup_cancelled_pkexec_keeps_status(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn setup_existing_rule_no_buttons(cx: &mut TestAppContext) {
+fn setup_existing_rule_script_buttons_only(cx: &mut TestAppContext) {
     let engine = setup(cx, true);
     open_with(
         cx,
@@ -536,14 +539,20 @@ fn setup_existing_rule_no_buttons(cx: &mut TestAppContext) {
         ),
         None,
     );
-    assert!(cards(cx)[0].buttons.is_empty());
+    assert_eq!(
+        cards(cx)[0].buttons,
+        vec![
+            ("View script".to_owned(), false),
+            ("Copy command".to_owned(), false)
+        ]
+    );
 }
 
 #[gpui_kit::test]
 fn setup_revert_confirm_and_send(cx: &mut TestAppContext) {
     let engine = setup(cx, true);
     let mut vcx = open_with(cx, &engine, tasklens_rule(), None);
-    assert_eq!(cards(cx)[0].buttons, vec![("Revert".to_owned(), false)]);
+    assert_eq!(cards(cx)[0].buttons[0], ("Revert".to_owned(), false));
     press(cx, &mut vcx, false);
     let words = cx.update(|cx| confirm_words(SetupStep::RaplRevert, cx));
     assert_eq!(words.heading.as_ref(), "Revert CPU power draw?");
@@ -560,4 +569,126 @@ fn setup_revert_confirm_and_send(cx: &mut TestAppContext) {
     dvcx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(run_setup_count(&engine, SetupStep::RaplRevert), 1);
+}
+
+fn clipboard(cx: &mut TestAppContext) -> Option<String> {
+    cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()))
+}
+
+fn toasts(vcx: &mut VisualTestContext) -> Vec<String> {
+    vcx.update(|window, cx| {
+        ToastQueue::of_window(window, cx)
+            .expect("toast queue")
+            .read(cx)
+            .visible_texts()
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    })
+}
+
+fn copy_command(cx: &mut TestAppContext, vcx: &mut VisualTestContext, step: SetupStep) {
+    let w = content(cx);
+    vcx.update(|window, cx| w.update(cx, |w, cx| w.copy_command(step, window, cx)));
+    vcx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn setup_copy_command_enable(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, not_readable(), None);
+    assert_eq!(
+        cards(cx)[0].buttons,
+        vec![
+            ("Enable".to_owned(), false),
+            ("View script".to_owned(), false),
+            ("Copy command".to_owned(), false)
+        ]
+    );
+    copy_command(cx, &mut vcx, SetupStep::RaplEnable);
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("pkexec /usr/lib/tasklens/tasklens-setup rapl-enable")
+    );
+    assert!(toasts(&mut vcx).iter().any(|t| t == "Command copied"));
+}
+
+#[gpui_kit::test]
+fn setup_copy_command_revert(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, tasklens_rule(), None);
+    assert_eq!(
+        cards(cx)[0].buttons,
+        vec![
+            ("Revert".to_owned(), false),
+            ("View script".to_owned(), false),
+            ("Copy command".to_owned(), false)
+        ]
+    );
+    copy_command(cx, &mut vcx, SetupStep::RaplRevert);
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("pkexec /usr/lib/tasklens/tasklens-setup rapl-revert")
+    );
+}
+
+#[gpui_kit::test]
+fn setup_view_script_window(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let _vcx = open_with(cx, &engine, not_readable(), None);
+    cx.update(|cx| open_script_window(SetupStep::RaplEnable, cx));
+    cx.run_until_parked();
+    let key = WindowKey::SetupScript("rapl-enable");
+    let h = cx
+        .update(|cx| cx.global::<GlobalRegistry>().0.read(cx).get(&key))
+        .and_then(|h| h.downcast::<Root>())
+        .expect("script window registered");
+    let frame = cx
+        .update(|cx| TlSecondaryWindow::<ScriptWindow>::find(h, cx))
+        .expect("script frame");
+    let (title, text) = cx.update(|cx| {
+        let f = frame.read(cx);
+        (f.title().to_string(), f.content().read(cx).text())
+    });
+    assert_eq!(title, "tasklens-setup rapl-enable");
+    assert_eq!(text, SETUP_SCRIPT);
+    // A second click focuses the open window.
+    let before = cx.update(|cx| cx.windows().len());
+    cx.update(|cx| open_script_window(SetupStep::RaplEnable, cx));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), before);
+    // The Copy button copies the text and shows the toast.
+    let mut scx = VisualTestContext::from_window(h.into(), cx);
+    scx.update(|window, _| window.activate_window());
+    let content = cx.update(|cx| frame.read(cx).content().clone());
+    scx.update(|window, cx| content.update(cx, |w, cx| w.copy(window, cx)));
+    scx.run_until_parked();
+    assert_eq!(clipboard(cx).as_deref(), Some(SETUP_SCRIPT));
+    assert!(toasts(&mut scx).iter().any(|t| t == "Copied to clipboard"));
+}
+
+#[gpui_kit::test]
+fn setup_journal_copy_only(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, not_readable(), None);
+    assert_eq!(cards(cx)[1].buttons, vec![("Copy".to_owned(), false)]);
+    let before = engine.commands().len();
+    let w = content(cx);
+    vcx.update(|window, cx| w.update(cx, |w, cx| w.copy_journal(window, cx)));
+    vcx.run_until_parked();
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("sudo usermod -aG systemd-journal $USER")
+    );
+    assert!(toasts(&mut vcx).iter().any(|t| t == "Command copied"));
+    assert_eq!(engine.commands().len(), before, "no command sent");
+}
+
+#[gpui_kit::test]
+fn setup_not_needed_no_buttons(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let _vcx = open_with(cx, &engine, status(RaplStatus::NoZone, true, true), None);
+    let card = cards(cx).remove(0);
+    assert_eq!(card.status.as_deref(), Some("Not needed"));
+    assert!(card.buttons.is_empty());
 }

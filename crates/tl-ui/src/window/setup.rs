@@ -4,8 +4,9 @@
 //! A Tool window keyed `WindowKey::AdditionalSetup`. `OpenAdditionalSetup` opens or focuses it
 //! and asks the engine for the status once per dispatch. The statuses come from
 //! `HealthSnapshot.setup.status`; the window reads no system file (ADR-001 rule 1). The buttons
-//! row of each card holds Enable and Revert for CPU power draw (E29-025); View script and Copy
-//! command are E29-026, the Fan sensors card is E29-031.
+//! row of each card holds Enable and Revert for CPU power draw (E29-025), then View script and
+//! Copy command (E29-026); the Journal access card has one Copy button. The Fan sensors card is
+//! E29-031.
 //!
 //! Enable and Revert open a confirmation, then send `Command::RunSetup` with a closed
 //! `SetupStep`. The result comes back as `HealthSnapshot.setup.run`. The window shows the
@@ -37,12 +38,18 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
-use crate::i18n::{Strings, tr};
+use crate::i18n::{Strings, tr, tr_args};
 use crate::text::fonts::MONO_FAMILY;
 use crate::text::style::{t_md, t_sm};
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
 
+/// The packaged `tasklens-setup` script, embedded at build time. The UI reads no system file
+/// (E29-OI-15).
+pub const SETUP_SCRIPT: &str = include_str!("../../../../packaging/tasklens-setup");
+
+/// Script window size, × ui_scale.
+const SCRIPT_SIZE: (f32, f32) = (640., 480.);
 /// Window size, × ui_scale.
 const SIZE: (f32, f32) = (640., 520.);
 const MIN_SIZE: (f32, f32) = (560., 400.);
@@ -123,6 +130,25 @@ pub struct SetupConfirmStep {
 pub struct SetupRetryStep {
     pub step: SetupStep,
 }
+
+/// Opens the script window of a step, from a card button.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct SetupViewScript {
+    pub step: SetupStep,
+}
+
+/// Copies the `pkexec` command line of a step.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct SetupCopyCommand {
+    pub step: SetupStep,
+}
+
+/// Copies the command of the Journal access card.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct SetupCopyJournal;
 
 /// Copies the output of the failed step.
 #[derive(Clone, PartialEq, Debug, Action)]
@@ -338,16 +364,48 @@ enum Outcome {
     Failed { step: SetupStep, text: Arc<str> },
 }
 
+/// What a card button does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ButtonAction {
+    /// Enable or Revert: opens the confirmation.
+    Confirm(SetupStep),
+    ViewScript(SetupStep),
+    CopyCommand(SetupStep),
+    CopyJournal,
+}
+
 /// One button of a card's buttons row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ButtonSpec {
     label_key: &'static str,
-    step: SetupStep,
+    action: ButtonAction,
     disabled: bool,
 }
 
+/// The step whose script the CPU card shows: Enable while the files are not readable, else
+/// Revert (also for a rule that tasklens did not write, which has no Revert button).
+fn script_step(rapl: RaplStatus) -> SetupStep {
+    match rapl {
+        RaplStatus::NotReadable => SetupStep::RaplEnable,
+        _ => SetupStep::RaplRevert,
+    }
+}
+
+/// The subcommand of a script step, as `tasklens-setup` takes it.
+fn subcommand(step: SetupStep) -> &'static str {
+    step.args()[0]
+}
+
+/// The command line the Copy command button copies.
+pub fn setup_command_line(step: SetupStep) -> String {
+    format!(
+        "pkexec /usr/lib/tasklens/tasklens-setup {}",
+        subcommand(step)
+    )
+}
+
 /// The buttons of `row`. None before the engine answered, and none for a status without a
-/// change to make. Later beads add View script, Copy command and the Fan row here.
+/// change to make or a script to show. Later beads add the Fan row here.
 fn row_buttons(
     row: SetupRow,
     st: Option<&SetupStatus>,
@@ -356,22 +414,153 @@ fn row_buttons(
     let Some(st) = st else {
         return Vec::new();
     };
-    let spec = |label_key, step| ButtonSpec {
+    let spec = |label_key, action| ButtonSpec {
         label_key,
-        step,
-        disabled: running.is_some_and(|r| step_row(r) == Some(row)),
+        action,
+        disabled: false,
     };
-    match (row, st.rapl) {
-        (SetupRow::CpuPower, RaplStatus::NotReadable) => {
-            vec![spec("setup-button-enable", SetupStep::RaplEnable)]
+    match row {
+        SetupRow::CpuPower => {
+            let mut buttons = Vec::new();
+            let change = match st.rapl {
+                RaplStatus::NotReadable => Some(("setup-button-enable", SetupStep::RaplEnable)),
+                RaplStatus::Readable {
+                    tasklens_rule: true,
+                } => Some(("setup-button-revert", SetupStep::RaplRevert)),
+                _ => None,
+            };
+            if let Some((label_key, step)) = change {
+                buttons.push(ButtonSpec {
+                    disabled: running.is_some_and(|r| step_row(r) == Some(row)),
+                    ..spec(label_key, ButtonAction::Confirm(step))
+                });
+            }
+            if st.rapl != RaplStatus::NoZone {
+                let step = script_step(st.rapl);
+                buttons.push(spec(
+                    "setup-button-view-script",
+                    ButtonAction::ViewScript(step),
+                ));
+                buttons.push(spec(
+                    "setup-button-copy-command",
+                    ButtonAction::CopyCommand(step),
+                ));
+            }
+            buttons
         }
-        (
-            SetupRow::CpuPower,
-            RaplStatus::Readable {
-                tasklens_rule: true,
-            },
-        ) => vec![spec("setup-button-revert", SetupStep::RaplRevert)],
+        SetupRow::JournalAccess => vec![spec("setup-button-copy", ButtonAction::CopyJournal)],
         _ => Vec::new(),
+    }
+}
+
+/// Pushes a Success toast with the text of `key` on `window`.
+fn toast(key: &str, window: &mut Window, cx: &mut App) {
+    let text = tr(cx, key);
+    if let Some(queue) = ToastQueue::of_window(window, cx) {
+        queue.update(cx, |q, cx| q.push(ToastKind::Success, text, None, None, cx));
+    }
+}
+
+/// Copies `text` and shows the toast of `key`.
+fn copy_with_toast(text: String, key: &str, window: &mut Window, cx: &mut App) {
+    if clipboard_write(cx, text).is_ok() {
+        toast(key, window, cx);
+    }
+}
+
+/// Opens the script window of `step`, or focuses it. Without a window registry (tests) it always
+/// opens one.
+pub fn open_script_window(step: SetupStep, cx: &mut App) {
+    let name = subcommand(step);
+    let s = metrics(cx).ui_scale;
+    let spec = TlWindowSpec::new(
+        TlWindowKind::Tool { resizable: true },
+        tr_args(cx, "setup-script-title", &[("subcommand", name.into())]),
+        size(px(SCRIPT_SIZE.0 * s), px(SCRIPT_SIZE.1 * s)),
+    )
+    .key(WindowKey::SetupScript(name));
+    let open = move |cx: &mut App| {
+        TlSecondaryWindow::open(cx, spec, |_, cx| cx.new(|_| ScriptWindow::new())).map(Into::into)
+    };
+    match cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
+        Some(registry) => {
+            registry.update(cx, |r, cx| {
+                r.open_or_focus(WindowKey::SetupScript(name), cx, open)
+            });
+        }
+        None => {
+            let _ = open(cx);
+        }
+    }
+}
+
+/// The content of a script window: the packaged script, read-only, with a Copy button.
+pub struct ScriptWindow {
+    scroll: ScrollHandle,
+}
+
+/// Copies the script text.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct SetupCopyScript;
+
+impl ScriptWindow {
+    fn new() -> Self {
+        Self {
+            scroll: ScrollHandle::new(),
+        }
+    }
+
+    /// The text shown.
+    pub fn text(&self) -> &'static str {
+        SETUP_SCRIPT
+    }
+
+    /// The Copy button.
+    pub fn copy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        copy_with_toast(SETUP_SCRIPT.to_owned(), "shell-toast-copied", window, cx);
+    }
+}
+
+impl gpui_kit::Render for ScriptWindow {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = current(cx).clone();
+        let m = *metrics(cx);
+        let mut root = div()
+            .id("SetupScript")
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(m.sp[4])
+            .p(m.sp[5])
+            .bg(theme.window_bg)
+            .text_color(theme.text_primary)
+            .on_action(cx.listener(|this, _: &SetupCopyScript, window, cx| {
+                this.copy(window, cx);
+            }))
+            .child(
+                div()
+                    .id("SetupScript-text")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .p(m.sp[3])
+                    .bg(theme.input)
+                    .rounded(m.radius_small)
+                    .font_family(MONO_FAMILY)
+                    .child(SharedString::from(SETUP_SCRIPT)),
+            )
+            .child(
+                div().flex().flex_row().child(
+                    TlButton::new("SetupScript-copy", TlButtonKind::Primary)
+                        .size(TlButtonSize::Sm)
+                        .label(tr(cx, "setup-button-copy"))
+                        .action(Box::new(SetupCopyScript)),
+                ),
+            );
+        *root.text_style() = t_sm(&m);
+        root
     }
 }
 
@@ -551,12 +740,23 @@ impl SetupWindow {
         if clipboard_write(cx, text.to_string()).is_err() {
             return;
         }
-        let copied = tr(cx, "shell-toast-copied");
-        if let Some(queue) = ToastQueue::of_window(window, cx) {
-            queue.update(cx, |q, cx| {
-                q.push(ToastKind::Success, copied, None, None, cx)
-            });
-        }
+        toast("shell-toast-copied", window, cx);
+    }
+
+    /// The Copy command button of the CPU card.
+    pub fn copy_command(&mut self, step: SetupStep, window: &mut Window, cx: &mut Context<Self>) {
+        copy_with_toast(
+            setup_command_line(step),
+            "setup-toast-command-copied",
+            window,
+            cx,
+        );
+    }
+
+    /// The Copy button of the Journal access card. It sends nothing to the engine.
+    pub fn copy_journal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let command = tr(cx, "setup-row-journal-command").to_string();
+        copy_with_toast(command, "setup-toast-command-copied", window, cx);
     }
 
     /// Scrolls the card of `row` into view and flashes its border for `M_SLOW`. With reduced
@@ -697,6 +897,13 @@ impl gpui_kit::Render for SetupWindow {
             .on_action(cx.listener(|_, a: &SetupConfirmStep, window, cx| {
                 confirm_step(a.step, window, cx);
             }))
+            .on_action(cx.listener(|_, a: &SetupViewScript, _, cx| open_script_window(a.step, cx)))
+            .on_action(cx.listener(|this, a: &SetupCopyCommand, window, cx| {
+                this.copy_command(a.step, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SetupCopyJournal, window, cx| {
+                this.copy_journal(window, cx);
+            }))
             .on_action(cx.listener(|_, a: &SetupRetryStep, _, cx| send_step(a.step, cx)))
             .on_action(cx.listener(|this, _: &SetupCopyOutput, window, cx| {
                 this.copy_output(window, cx);
@@ -818,12 +1025,30 @@ impl RenderOnce for SetupRowCard {
         if !self.buttons.is_empty() {
             let mut row = div().mt(m.sp[4]).flex().flex_row().gap(m.sp[3]);
             for (b, label) in self.buttons {
+                let button = match b.action {
+                    ButtonAction::Confirm(step) => {
+                        TlButton::new(("AdditionalSetup-button", ix), TlButtonKind::Primary)
+                            .action(Box::new(SetupConfirmStep { step }))
+                    }
+                    ButtonAction::ViewScript(step) => {
+                        TlButton::new(("AdditionalSetup-view", ix), TlButtonKind::Secondary)
+                            .action(Box::new(SetupViewScript { step }))
+                    }
+                    ButtonAction::CopyCommand(step) => {
+                        TlButton::new(("AdditionalSetup-copy-cmd", ix), TlButtonKind::Secondary)
+                            .action(Box::new(SetupCopyCommand { step }))
+                    }
+                    ButtonAction::CopyJournal => TlButton::new(
+                        ("AdditionalSetup-copy-journal", ix),
+                        TlButtonKind::Secondary,
+                    )
+                    .action(Box::new(SetupCopyJournal)),
+                };
                 row = row.child(
-                    TlButton::new(("AdditionalSetup-button", ix), TlButtonKind::Primary)
+                    button
                         .size(TlButtonSize::Sm)
                         .label(label)
-                        .disabled(b.disabled)
-                        .action(Box::new(SetupConfirmStep { step: b.step })),
+                        .disabled(b.disabled),
                 );
             }
             card = card.child(row);

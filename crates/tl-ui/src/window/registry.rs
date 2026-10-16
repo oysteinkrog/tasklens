@@ -34,6 +34,8 @@ pub enum WindowKey {
     About,
     CrashReport,
     AdditionalSetup,
+    /// The packaged `tasklens-setup` script of one subcommand (`SetupStep::args()[0]`).
+    SetupScript(&'static str),
     Shortcuts,
     PublicIpNotice,
     CollectorHealth,
