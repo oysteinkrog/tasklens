@@ -2762,6 +2762,14 @@ services-sys035-ordering = Ordering ({ $n })
 services-sys035-none = (None)
 services-sys035-not-loaded = Not loaded
 services-sys035-copy-value = Copy value
+services-sys036-filter-placeholder = Filter logs
+services-sys036-follow = Follow
+services-sys036-load-older = Load older
+services-sys036-copy-tooltip = Copy logs to clipboard
+services-sys036-terminal-tooltip = Open in terminal
+services-sys036-more-lines = {" "}(+{ $n } lines)
+services-sys036-pid = PID { $pid }
+services-sys036-no-terminal = Could not open a terminal
 shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar

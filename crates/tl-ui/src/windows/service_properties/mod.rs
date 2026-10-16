@@ -8,11 +8,15 @@
 mod dependencies;
 mod general;
 mod logon;
+mod logs;
 mod recovery;
 
 pub use dependencies::DependenciesTab;
 pub use general::GeneralTab;
 pub use logon::LogOnTab;
+#[cfg(any(test, feature = "test-hooks"))]
+pub use logs::LogRowForTest;
+pub use logs::{LogLine, LogsView};
 pub use recovery::RecoveryTab;
 
 use std::rc::Rc;
@@ -208,7 +212,10 @@ fn create_tab(
             let view = cx.new(DependenciesTab::new);
             Some(TabSlot::new(view))
         }
-        ServicePropsTab::Logs => None,
+        ServicePropsTab::Logs => {
+            let view = cx.new(|cx| LogsView::new(input.unit, window, cx));
+            Some(TabSlot::new(view))
+        }
     }
 }
 
@@ -657,6 +664,13 @@ impl ServicePropertiesWindow {
     pub fn dependencies_tab(&self) -> Option<Entity<DependenciesTab>> {
         let slot = self.tabs[ServicePropsTab::Dependencies.index()].as_ref()?;
         slot.view.clone().downcast::<DependenciesTab>().ok()
+    }
+
+    /// The Logs tab view, once built.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn logs_tab(&self) -> Option<Entity<LogsView>> {
+        let slot = self.tabs[ServicePropsTab::Logs.index()].as_ref()?;
+        slot.view.clone().downcast::<LogsView>().ok()
     }
 
     /// Puts `view` in the slot of `tab`, in place of a tab bead's view.

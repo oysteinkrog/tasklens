@@ -50,10 +50,12 @@ pub enum TlIcon {
     Eject,
     Trash,
     ScanSearch,
+    Terminal,
+    ArrowDownToLine,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 39] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -91,6 +93,8 @@ impl TlIcon {
         Self::Eject,
         Self::Trash,
         Self::ScanSearch,
+        Self::Terminal,
+        Self::ArrowDownToLine,
     ];
 
     /// The kit name for this icon.
@@ -133,6 +137,8 @@ impl TlIcon {
             Self::Eject => IconName::Eject,
             Self::Trash => IconName::Trash,
             Self::ScanSearch => IconName::ScanSearch,
+            Self::Terminal => IconName::Terminal,
+            Self::ArrowDownToLine => IconName::ArrowDownToLine,
         }
     }
 }
@@ -211,7 +217,8 @@ impl IconNamed for AppIcon {
 // (UI-SYS-041). `FunnelX` is the Services Remove filters button and the system tables' No matches
 // icon (UI-SYS-011, UI-SYS-005). `Eject` is the Disk page Eject button (UI-PRF-029). `Trash` is the History
 // menu's Delete from history item (UI-PRC-037). `ScanSearch` is the Properties Strings tab Scan
-// button (UI-PWN-017).
+// button (UI-PWN-017). `Terminal` and `ArrowDownToLine` are the Service Properties Logs Open in
+// terminal and Follow buttons (UI-SYS-036).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
@@ -219,7 +226,7 @@ gpui_kit::assets::icon_assets!(
         Square,
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
         Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive, Cog, FileCode,
-        FunnelX, Eject, Trash, ScanSearch
+        FunnelX, Eject, Trash, ScanSearch, Terminal, ArrowDownToLine
     ]
 );
 

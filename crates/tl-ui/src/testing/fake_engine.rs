@@ -30,7 +30,7 @@ struct FakeState {
     settings: Vec<EngineSettings>,
     commands: Vec<Command>,
     journals: Vec<JournalQuery>,
-    /// The engine ends of each journal handle. Kept so the handle's channels stay open and empty.
+    /// The engine ends of each journal handle. Kept so the handle's channels stay open.
     journal_ends: Vec<(
         async_channel::Sender<JournalEvent>,
         async_channel::Receiver<JournalControl>,
@@ -102,6 +102,18 @@ impl FakeEngine {
     /// Every `journal` query, in call order.
     pub fn journals(&self) -> Vec<JournalQuery> {
         self.state().journals.clone()
+    }
+
+    /// The engine ends of the `i`th journal handle: the event sender a test feeds and the
+    /// control receiver it reads. The event channel holds 1 event.
+    pub fn journal_end(
+        &self,
+        i: usize,
+    ) -> Option<(
+        async_channel::Sender<JournalEvent>,
+        async_channel::Receiver<JournalControl>,
+    )> {
+        self.state().journal_ends.get(i).cloned()
     }
 
     /// While `busy` is true, `send` returns `Err(CommandError::Busy)` and records nothing.

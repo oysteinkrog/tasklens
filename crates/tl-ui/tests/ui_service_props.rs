@@ -1,4 +1,5 @@
-//! Service Properties window frame tests (E27-A3, UI-SYS-030) and General tab tests (UI-SYS-031).
+//! Service Properties window frame tests (E27-A3, UI-SYS-030), General tab tests (UI-SYS-031) and
+//! the other tabs' tests up to Logs (UI-SYS-036).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -6,6 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
@@ -14,10 +16,12 @@ use gpui_kit::{
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{
-    ActionError, ActionEvent, ActionId, ActionKind, ActionState, ActionTarget,
+    ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
+    LaunchWhat,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
+use tl_model::journal::{JournalEntry, JournalEvent};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{
     DepEntry, PidIds, RecoverySettings, Relation, ServiceBackend, ServiceStatus, StartupType,
@@ -26,6 +30,7 @@ use tl_model::snapshot::{
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::GlobalDemand;
 use tl_ui::pages::sys_status::{DotStyle, LabelTone};
@@ -34,8 +39,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::windows::service_properties::{
-    DependenciesTab, GeneralTab, LogOnTab, RecoveryTab, ServicePropertiesWindow, ServicePropsTab,
-    ServicePropsTabView,
+    DependenciesTab, GeneralTab, LogOnTab, LogRowForTest, LogsView, RecoveryTab,
+    ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
 };
 
 use tl_ui::pages::services::actions::ServicePropsOk;
@@ -1534,4 +1539,322 @@ fn deps_double_click_opens_props(cx: &mut TestAppContext) {
     });
     assert!(opened, "the unit's window is open");
     assert_eq!(count(cx), 2);
+}
+
+// Logs tab (UI-SYS-036).
+
+struct Logs {
+    engine: Arc<FakeEngine>,
+    _main: VisualTestContext,
+    handle: WindowHandle<Root>,
+    tab: Entity<LogsView>,
+}
+
+/// 2023-11-14 22:13:20 UTC plus `s` seconds, in microseconds.
+fn at(s: u64) -> u64 {
+    (1_700_000_000 + s) * 1_000_000
+}
+
+fn entry(s: u64, priority: u8, message: &str) -> JournalEntry {
+    JournalEntry {
+        realtime_us: at(s),
+        priority,
+        pid: Some(812),
+        message: a(message),
+        cursor: Arc::from(format!("s=1;i={s}")),
+    }
+}
+
+/// Opens `unit` on the Logs tab. The services list holds sshd.service.
+fn open_logs_of(cx: &mut TestAppContext, unit: UnitRef) -> Logs {
+    let (engine, main) = setup(cx);
+    publish(
+        cx,
+        &engine,
+        &["sshd.service"],
+        &HashMap::new(),
+        ServiceBackend::Systemd,
+    );
+    let key = WindowKey::Service(unit.clone());
+    cx.update(|cx| ServicePropertiesWindow::open(unit, ServicePropsTab::Logs, cx));
+    cx.run_until_parked();
+    let handle = cx
+        .update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            let handle = registry.read(cx).get(&key);
+            handle.and_then(|h| h.downcast::<Root>())
+        })
+        .expect("opened");
+    let win = view(cx, handle);
+    let tab = cx
+        .read(|cx| win.read(cx).logs_tab())
+        .expect("the Logs tab is built");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    draw(&mut vcx);
+    Logs {
+        engine,
+        _main: main,
+        handle,
+        tab,
+    }
+}
+
+fn open_logs(cx: &mut TestAppContext) -> Logs {
+    open_logs_of(cx, unit("sshd.service"))
+}
+
+impl Logs {
+    /// Sends one batch through the first journal handle. The channel holds one event.
+    fn feed(&self, cx: &mut TestAppContext, entries: Vec<JournalEntry>) {
+        let (events, _) = self.engine.journal_end(0).expect("a journal was opened");
+        events
+            .try_send(JournalEvent::Batch {
+                entries: entries.into(),
+                older: false,
+                exhausted: false,
+            })
+            .expect("the event channel has room");
+        cx.run_until_parked();
+    }
+
+    fn rows(&self, cx: &mut TestAppContext) -> Vec<LogRowForTest> {
+        cx.read(|cx| self.tab.read(cx).rows_for_test(cx))
+    }
+
+    fn messages(&self, cx: &mut TestAppContext) -> Vec<String> {
+        self.rows(cx).into_iter().map(|r| r.message).collect()
+    }
+
+    fn vcx(&self, cx: &mut TestAppContext) -> VisualTestContext {
+        let mut vcx = VisualTestContext::from_window(self.handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        vcx
+    }
+
+    fn click(&self, vcx: &mut VisualTestContext, selector: &'static str, mods: Modifiers) {
+        let at = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"))
+            .center();
+        vcx.simulate_click(at, mods);
+        vcx.run_until_parked();
+    }
+
+    fn toasts(&self, cx: &mut TestAppContext) -> Vec<String> {
+        let mut vcx = VisualTestContext::from_window(self.handle.into(), cx);
+        vcx.update(|window, cx| {
+            ToastQueue::of_window(window, cx)
+                .expect("toast queue")
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        })
+    }
+}
+
+fn launches(engine: &FakeEngine) -> Vec<ActionRequest> {
+    engine
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::Action(req) if matches!(req.kind, ActionKind::Launch(_)) => Some(req),
+            _ => None,
+        })
+        .collect()
+}
+
+fn launch_command(req: &ActionRequest) -> String {
+    match &req.kind {
+        ActionKind::Launch(spec) => {
+            assert!(!spec.as_admin);
+            match &spec.what {
+                LaunchWhat::Command(c) => c.to_string(),
+                other => panic!("expected a command, got {other:?}"),
+            }
+        }
+        other => panic!("expected a launch, got {other:?}"),
+    }
+}
+
+#[gpui_kit::test]
+fn logs_priority_colors(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    let queries = t.engine.journals();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].unit, unit("sshd.service"));
+    assert!(queries[0].follow);
+    t.feed(
+        cx,
+        vec![
+            entry(0, 3, "failed"),
+            entry(1, 4, "slow"),
+            entry(2, 6, "started"),
+            entry(3, 7, "detail"),
+        ],
+    );
+    let mut vcx = t.vcx(cx);
+    assert!(vcx.debug_bounds("ServiceLogs-row-3").is_some());
+    drop(vcx);
+    let theme = cx.read(|cx| tl_ui::theme::current(cx).clone());
+    let rows = t.rows(cx);
+    let words: Vec<_> = rows.iter().map(|r| r.priority.as_str()).collect();
+    assert_eq!(words, ["err", "warning", "info", "debug"]);
+    let colors: Vec<_> = rows.iter().map(|r| r.text_color).collect();
+    assert_eq!(
+        colors,
+        [
+            theme.status.danger,
+            theme.status.warning,
+            theme.text_primary,
+            theme.text_secondary
+        ]
+    );
+    assert!(rows.iter().all(|r| r.time_color == theme.text_secondary));
+    assert_eq!(rows[0].time, LogsView::time_for_test(at(0)));
+}
+
+#[gpui_kit::test]
+fn logs_multiline_suffix(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, vec![entry(0, 6, "a\nb\nc"), entry(1, 6, "single")]);
+    let rows = t.rows(cx);
+    assert_eq!(rows[0].message, "a");
+    assert_eq!(rows[0].suffix.as_deref(), Some(" (+2 lines)"));
+    assert_eq!(rows[1].message, "single");
+    assert_eq!(rows[1].suffix, None);
+    let theme = cx.read(|cx| tl_ui::theme::current(cx).clone());
+    assert_eq!(rows[0].time_color, theme.text_secondary);
+}
+
+#[gpui_kit::test]
+fn logs_filter_debounced(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(
+        cx,
+        vec![
+            entry(0, 6, "Connection TIMEOUT"),
+            entry(1, 6, "started"),
+            entry(2, 4, "first line\nthen a timeout"),
+            entry(3, 3, "other"),
+        ],
+    );
+    let all = ["Connection TIMEOUT", "started", "first line", "other"];
+    assert_eq!(t.messages(cx), all);
+    let input = cx.read(|cx| t.tab.read(cx).filter_input_for_test());
+    let mut vcx = t.vcx(cx);
+    vcx.update(|window, cx| input.update(cx, |s, cx| s.focus(window, cx)));
+    vcx.simulate_input("time");
+    vcx.executor().advance_clock(Duration::from_millis(50));
+    vcx.run_until_parked();
+    vcx.simulate_input("out");
+    vcx.executor().advance_clock(Duration::from_millis(50));
+    vcx.run_until_parked();
+    drop(vcx);
+    assert_eq!(t.messages(cx), all, "a key within 100 ms restarts the wait");
+    cx.executor().advance_clock(Duration::from_millis(50));
+    cx.run_until_parked();
+    assert_eq!(t.messages(cx), ["Connection TIMEOUT", "first line"]);
+
+    // The priority word matches too.
+    let mut vcx = t.vcx(cx);
+    vcx.simulate_keystrokes("ctrl-a backspace");
+    vcx.simulate_input("WARN");
+    vcx.executor().advance_clock(Duration::from_millis(100));
+    vcx.run_until_parked();
+    drop(vcx);
+    assert_eq!(t.messages(cx), ["first line"]);
+}
+
+#[gpui_kit::test]
+fn logs_copy_format(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(
+        cx,
+        vec![
+            entry(0, 3, "first"),
+            entry(1, 6, "a\nb"),
+            entry(2, 6, "not copied"),
+        ],
+    );
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "ServiceLogs-row-0", Modifiers::none());
+    t.click(&mut vcx, "ServiceLogs-row-1", Modifiers::shift());
+    vcx.simulate_keystrokes("ctrl-c");
+    vcx.run_until_parked();
+    let copied = vcx.read_from_clipboard().and_then(|item| item.text());
+    let expected = format!(
+        "{} err first\n{} info a\nb",
+        LogsView::time_for_test(at(0)),
+        LogsView::time_for_test(at(1))
+    );
+    assert_eq!(copied.as_deref(), Some(expected.as_str()));
+    drop(vcx);
+    assert_eq!(t.toasts(cx), ["Copied to clipboard"]);
+}
+
+#[gpui_kit::test]
+fn logs_open_terminal_command_quoting(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "TlButton-ServiceLogsTerminal", Modifiers::none());
+    drop(vcx);
+    let sent = launches(&t.engine);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        launch_command(&sent[0]),
+        "xdg-terminal-exec journalctl -u \"sshd.service\" -b"
+    );
+}
+
+#[gpui_kit::test]
+fn logs_open_terminal_quoting_user_unit(cx: &mut TestAppContext) {
+    let user = UnitRef {
+        manager: Manager::User,
+        name: a("a$b\"c`d\\e.service"),
+    };
+    let t = open_logs_of(cx, user);
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "TlButton-ServiceLogsTerminal", Modifiers::none());
+    drop(vcx);
+    let sent = launches(&t.engine);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        launch_command(&sent[0]),
+        "xdg-terminal-exec journalctl --user-unit \"a\\$b\\\"c\\`d\\\\e.service\" -b"
+    );
+}
+
+#[gpui_kit::test]
+fn logs_open_terminal_fallback_to_konsole(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "TlButton-ServiceLogsTerminal", Modifiers::none());
+    drop(vcx);
+    let sent = launches(&t.engine);
+    assert_eq!(sent.len(), 1);
+    t.engine.emit(ActionEvent {
+        id: sent[0].id,
+        target: None,
+        state: ActionState::Failed(ActionError::Os(2)),
+    });
+    cx.run_until_parked();
+    let sent = launches(&t.engine);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        launch_command(&sent[1]),
+        "konsole -e journalctl -u \"sshd.service\" -b"
+    );
+    assert!(t.toasts(cx).is_empty(), "the first failure shows nothing");
+    t.engine.emit(ActionEvent {
+        id: sent[1].id,
+        target: None,
+        state: ActionState::Failed(ActionError::Os(2)),
+    });
+    cx.run_until_parked();
+    assert_eq!(launches(&t.engine).len(), 2);
+    assert_eq!(t.toasts(cx), ["Could not open a terminal"]);
 }
