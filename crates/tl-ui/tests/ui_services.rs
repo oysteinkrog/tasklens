@@ -2701,3 +2701,764 @@ fn collapsing_last_unit_clears_process_demand(cx: &mut TestAppContext) {
     assert!(sent.detail_keys.is_empty());
     assert_eq!(child_demand(0, &keys), (false, SmallVec::new()));
 }
+
+/// The Services page (tasklens-hk6.2, UI-SYS-010, UI-SYS-022, UI-SYS-023, UI-SYS-004).
+mod page {
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
+        StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, WindowBounds,
+        WindowOptions, div, point, px, size,
+    };
+    use tl_model::actions::{ActionKind, ActionTarget, Signal};
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::health::{ManagerState, SourceId};
+    use tl_model::ids::ProcessKey;
+    use tl_model::process::{ProcFlags, ProcessRecord};
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::{
+        ComponentHeader, ProcessSnapshot, ServiceCounts, ServiceStatus, ServicesSnapshot,
+        UnitRecord,
+    };
+    use tl_model::table::{Manager, SysNodeId, SysRow, SysTable, SysTableQuery, UnitType};
+    use tl_model::validity::Validity;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::menu::{MenuEntryInfo, TlMenu, TlMenuPopup};
+    use tl_ui::components::toast::ToastQueue;
+    use tl_ui::demand::DEMAND_COALESCE;
+    use tl_ui::hub::GlobalHub;
+    use tl_ui::pages::services::actions::{
+        ServicesClearAllFilters, ServicesToggleStateFilter, StateFilterArg,
+    };
+    use tl_ui::pages::services::delegate::ServicesDelegate;
+    use tl_ui::pages::services::{REFRESH_TOAST_AFTER, ServicesPage};
+    use tl_ui::pages::sys_table::SysBody;
+    use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::filter::FILTER_DEBOUNCE;
+    use tl_ui::window::main::{
+        MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
+    };
+
+    use super::{child_key, child_process, record};
+
+    /// System units in the fixture; the other five are User units.
+    const SYSTEM_UNITS: usize = 15;
+
+    struct Host {
+        page: Entity<ServicesPage>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.page
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    /// The fake engine's 20-unit services fixture: 15 System units, then 5 User units.
+    fn fixture() -> Vec<UnitRecord> {
+        (0..20)
+            .map(|i| {
+                let status = if i % 4 == 3 {
+                    ServiceStatus::Stopped
+                } else {
+                    ServiceStatus::Running
+                };
+                let mut unit = record(&format!("unit{i:02}.service"), UnitType::Service, status);
+                if i >= SYSTEM_UNITS {
+                    unit.unit.manager = Manager::User;
+                }
+                unit
+            })
+            .collect()
+    }
+
+    /// Group rows and unit rows for `units`; `children` adds child rows under unit indexes.
+    fn rows(units: &[UnitRecord], children: &[(usize, ProcessKey)]) -> Vec<SysRow> {
+        let mut rows = Vec::new();
+        for manager in [Manager::System, Manager::User] {
+            rows.push(SysRow {
+                node: SysNodeId::ServiceGroup(manager),
+                depth: 0,
+                expanded: true,
+                has_children: true,
+                record: None,
+            });
+            for (i, unit) in units.iter().enumerate() {
+                if unit.unit.manager != manager {
+                    continue;
+                }
+                let kids: Vec<ProcessKey> = children
+                    .iter()
+                    .filter(|(ix, _)| *ix == i)
+                    .map(|(_, key)| *key)
+                    .collect();
+                rows.push(SysRow {
+                    node: SysNodeId::Unit(unit.unit.clone()),
+                    depth: 1,
+                    expanded: !kids.is_empty(),
+                    has_children: !kids.is_empty(),
+                    record: Some(i as u32),
+                });
+                for key in kids {
+                    rows.push(SysRow {
+                        node: SysNodeId::UnitProcess(unit.unit.clone(), key),
+                        depth: 2,
+                        expanded: false,
+                        has_children: false,
+                        record: Some(0),
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    fn init(cx: &mut TestAppContext, client: Arc<dyn EngineClient>) {
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_reduce_motion(true);
+        });
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        page: Entity<ServicesPage>,
+        _queue: Option<Entity<ToastQueue>>,
+        vcx: VisualTestContext,
+        version: u64,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        init(cx, engine.clone());
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(1280.), px(800.)),
+            })),
+            ..WindowOptions::default()
+        };
+        let slot = Rc::new(RefCell::new(None));
+        let keep = Rc::clone(&slot);
+        let handle = cx
+            .update(|cx| {
+                cx.open_window(options, move |window, cx| {
+                    let page = cx.new(|cx| ServicesPage::new(window, cx));
+                    *keep.borrow_mut() = Some(page.clone());
+                    let host = cx.new(|_| Host { page });
+                    cx.new(|cx| Root::new(host, window, cx))
+                })
+            })
+            .expect("the window opens");
+        let page = slot.borrow_mut().take().expect("the page opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.))));
+        let mut rig = Rig {
+            engine,
+            page,
+            _queue: Some(queue),
+            vcx,
+            version: 0,
+        };
+        rig.draw();
+        rig
+    }
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    impl Rig {
+        /// Draws a frame and tells the hub the main window rendered, as `MainWindow::render`
+        /// does. Without it the hub goes hidden after 1 s and drops Info toasts.
+        fn draw(&mut self) {
+            self.vcx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let hub = cx.global::<GlobalHub>().0.clone();
+                hub.update(cx, |hub, cx| hub.note_render(cx));
+            });
+            self.vcx.run_until_parked();
+        }
+
+        fn activate(&mut self) {
+            self.page
+                .update(&mut self.vcx, |page, cx| page.set_active(true, cx));
+            self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+            self.vcx.run_until_parked();
+        }
+
+        fn last_query(&self) -> Option<SysTableQuery> {
+            last_services_query(&self.engine)
+        }
+
+        fn publish(
+            &mut self,
+            units: Vec<UnitRecord>,
+            children: &[(usize, ProcessKey)],
+            records: Vec<ProcessRecord>,
+            counts: ServiceCounts,
+        ) {
+            self.version += 1;
+            let version = self.version;
+            publish_services(&self.engine, version, units, children, records, counts);
+            self.vcx.run_until_parked();
+            self.draw();
+        }
+
+        fn publish_fixture(&mut self) {
+            let counts = ServiceCounts {
+                total: 20,
+                running: 15,
+                stopped: 5,
+            };
+            self.publish(fixture(), &[], Vec::new(), counts);
+        }
+
+        fn table(&mut self) -> Entity<TlTreeTable<ServicesDelegate>> {
+            self.vcx
+                .read_entity(&self.page, |page, _| page.table().clone())
+        }
+
+        fn row_id(&mut self, ix: usize) -> u64 {
+            let table = self.table();
+            self.vcx
+                .read_entity(&table, |table, _| table.delegate.row_id(ix))
+        }
+
+        fn select(&mut self, rows: &[usize]) {
+            let ids: Vec<u64> = rows.iter().map(|ix| self.row_id(*ix)).collect();
+            let table = self.table();
+            table.update(&mut self.vcx, |table, cx| {
+                for (n, id) in ids.iter().enumerate() {
+                    if n == 0 {
+                        table.selection.click(*id);
+                    } else {
+                        table.selection.ctrl_click(*id);
+                    }
+                }
+                cx.notify();
+            });
+            self.vcx.run_until_parked();
+        }
+
+        fn focus_table(&mut self) {
+            let table = self.table();
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+            });
+            self.draw();
+        }
+
+        fn keys(&mut self, keys: &str) {
+            self.focus_table();
+            self.vcx.simulate_keystrokes(keys);
+            self.vcx.run_until_parked();
+            self.draw();
+        }
+
+        fn status(&mut self) -> String {
+            self.vcx.update(|_, cx| {
+                let mut out = String::new();
+                self.page.read(cx).status_text(&mut out);
+                out
+            })
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.vcx.update(|window, cx| {
+                ToastQueue::of_window(window, cx)
+                    .map(|queue| {
+                        queue
+                            .read(cx)
+                            .visible_texts()
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+        }
+
+        fn count_toast(&mut self, text: &str) -> usize {
+            self.toasts().iter().filter(|t| t.as_str() == text).count()
+        }
+
+        fn build_menu(&mut self, rows: &[usize]) -> Entity<TlMenuPopup> {
+            let ids: Vec<u64> = rows.iter().map(|ix| self.row_id(*ix)).collect();
+            let table = self.table();
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    table.update(cx, |table, cx| {
+                        table.delegate.context_menu(&ids, None, menu, window, cx)
+                    })
+                })
+            })
+        }
+
+        fn menu_labels(&mut self, rows: &[usize]) -> Vec<String> {
+            let menu = self.build_menu(rows);
+            let entries: Vec<MenuEntryInfo> = self
+                .vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window));
+            entries
+                .into_iter()
+                .filter_map(|e| e.label.map(|l| l.to_string()))
+                .collect()
+        }
+
+        fn window_count(&mut self) -> usize {
+            self.vcx.update(|_, cx| cx.windows().len())
+        }
+    }
+
+    fn last_services_query(engine: &FakeEngine) -> Option<SysTableQuery> {
+        engine
+            .commands()
+            .into_iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::SetSysTableQuery(query) if query.table == SysTable::Services => {
+                    Some(query)
+                }
+                _ => None,
+            })
+    }
+
+    /// Publishes a services view for the last query the page sent.
+    fn publish_services(
+        engine: &FakeEngine,
+        version: u64,
+        units: Vec<UnitRecord>,
+        children: &[(usize, ProcessKey)],
+        mut records: Vec<ProcessRecord>,
+        counts: ServiceCounts,
+    ) {
+        let generation = last_services_query(engine).map_or(0, |q| q.generation);
+        let rows = rows(&units, children);
+        records.sort_by_key(|r| r.key);
+        let system = units
+            .iter()
+            .filter(|u| u.unit.manager == Manager::System)
+            .count() as u32;
+        let user = units.len() as u32 - system;
+        engine.publish_with(|snapshot| {
+            snapshot.services = Arc::new(ServicesSnapshot {
+                header: ComponentHeader {
+                    version,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                rows: rows.into(),
+                query_generation: generation,
+                units: units.into(),
+                counts,
+                managers: [ManagerState::Connected; 2],
+                manager_counts: [system, user],
+                ..ServicesSnapshot::default()
+            });
+            snapshot.processes = Arc::new(ProcessSnapshot {
+                records: records.into(),
+                ..ProcessSnapshot::default()
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn services_page_layout_golden(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        rig.publish_fixture();
+        assert_eq!(
+            rig.vcx.read_entity(&rig.page, |p, _| p.body()),
+            SysBody::Rows
+        );
+
+        let strip = rig
+            .vcx
+            .debug_bounds("ServicesFilterStrip")
+            .expect("strip drawn");
+        assert_eq!(strip.size.height, px(28.));
+        assert_eq!(strip.origin.y, px(0.));
+        let mut last_x = px(-1.);
+        for id in [
+            "services-filter-running",
+            "services-filter-failed",
+            "services-filter-stopped",
+            "services-filter-disabled",
+            "services-filter-unit-types",
+            "services-filter-system",
+            "services-filter-user",
+            "services-filter-remove",
+        ] {
+            let b = rig
+                .vcx
+                .debug_bounds(&format!("TlButton-{id}"))
+                .unwrap_or_else(|| panic!("{id} drawn"));
+            assert!(b.origin.x > last_x, "{id} is right of the one before");
+            assert!(
+                b.origin.y >= strip.origin.y && b.bottom() <= strip.bottom(),
+                "{id}"
+            );
+            last_x = b.origin.x;
+        }
+
+        let header = rig
+            .vcx
+            .debug_bounds("TlTreeTableHeader")
+            .expect("header drawn");
+        assert_eq!(header.size.height, px(28.));
+        assert_eq!(
+            header.origin.y,
+            strip.bottom(),
+            "the header is right below the strip"
+        );
+        let mut last_x = px(-1.);
+        for key in [
+            "name",
+            "display_name",
+            "status",
+            "startup_type",
+            "pid",
+            "user",
+            "path",
+        ] {
+            let b = rig
+                .vcx
+                .debug_bounds(&format!("TlTreeTableHeader-label-{key}"))
+                .unwrap_or_else(|| panic!("{key} header drawn"));
+            assert!(b.origin.x > last_x, "{key} is in column order");
+            last_x = b.origin.x;
+        }
+        assert!(
+            rig.vcx
+                .debug_bounds("TlTreeTableHeader-label-manager")
+                .is_none(),
+            "Manager is hidden by default"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn services_status_text_counts(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        assert_eq!(rig.status(), "Loading…");
+        rig.activate();
+        let counts = ServiceCounts {
+            total: 255,
+            running: 198,
+            stopped: 57,
+        };
+        rig.publish(fixture(), &[], Vec::new(), counts);
+        assert_eq!(rig.status(), "255 Total | 198 Running | 57 Stopped");
+        rig.select(&[1, 2, 3]);
+        assert_eq!(
+            rig.status(),
+            "255 Total | 198 Running | 57 Stopped | 3 selected"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn services_loading_toast_removed_on_data(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        rig.draw();
+        assert_eq!(rig.count_toast("Loading service data..."), 1);
+        rig.publish_fixture();
+        assert_eq!(rig.count_toast("Loading service data..."), 0);
+
+        // Only the first visit of the session shows it.
+        rig.page
+            .update(&mut rig.vcx, |page, cx| page.set_active(false, cx));
+        rig.activate();
+        assert_eq!(rig.count_toast("Loading service data..."), 0);
+    }
+
+    #[gpui_kit::test]
+    fn f5_refresh_toast_after_update(cx: &mut TestAppContext) {
+        const DONE: &str = "Services refreshed.";
+        let mut rig = rig(cx);
+        rig.activate();
+        rig.publish_fixture();
+
+        // A newer services version 300 ms after F5.
+        let before = rig.engine.commands().len();
+        rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
+        let sent: Vec<Command> = rig.engine.commands()[before..].to_vec();
+        for source in [SourceId::SystemdSystem, SourceId::SystemdUser] {
+            assert!(
+                sent.iter()
+                    .any(|c| matches!(c, Command::RefreshNow(s) if *s == source)),
+                "RefreshNow({source:?})"
+            );
+        }
+        rig.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        rig.draw();
+        assert_eq!(rig.count_toast(DONE), 0);
+        rig.publish_fixture();
+        assert_eq!(
+            rig.count_toast(DONE),
+            1,
+            "shown when the new version arrives"
+        );
+        rig.vcx.executor().advance_clock(REFRESH_TOAST_AFTER);
+        rig.draw();
+        assert_eq!(rig.count_toast(DONE), 1, "shown once");
+        rig.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_secs(10));
+        rig.draw();
+
+        // No new version: shown after 2 s.
+        rig.page.update(&mut rig.vcx, |page, cx| page.refresh(cx));
+        rig.vcx
+            .executor()
+            .advance_clock(REFRESH_TOAST_AFTER - std::time::Duration::from_millis(100));
+        rig.draw();
+        assert_eq!(rig.count_toast(DONE), 0);
+        rig.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        rig.draw();
+        assert_eq!(rig.count_toast(DONE), 1, "shown when the timer fires");
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_e_on_child_ends_process(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let key = child_key(812);
+        let counts = ServiceCounts::default();
+        rig.publish(
+            fixture(),
+            &[(0, key)],
+            vec![child_process(812, ProcFlags::empty())],
+            counts,
+        );
+        // Row 0 is the System group, row 1 unit00.service, row 2 its child.
+        rig.select(&[2]);
+        let before = rig.engine.commands().len();
+        rig.keys("ctrl-e");
+        let sent: Vec<Command> = rig.engine.commands()[before..].to_vec();
+        let actions: Vec<_> = sent
+            .iter()
+            .filter_map(|c| match c {
+                Command::Action(request) => Some(request.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actions.len(), 1, "one request: {sent:?}");
+        assert_eq!(actions[0].kind, ActionKind::Signal(Signal::Term));
+        assert_eq!(&*actions[0].targets, &[ActionTarget::Process(key)]);
+    }
+
+    #[gpui_kit::test]
+    fn enter_on_group_row_toggles(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        rig.publish_fixture();
+        let group = rig.row_id(0);
+        let table = rig.table();
+        table.update(&mut rig.vcx, |table, cx| {
+            table.selection.set_focus_only(group);
+            cx.notify();
+        });
+        let windows = rig.window_count();
+        rig.keys("enter");
+        let expanded = rig.vcx.read_entity(&table, |t, _| {
+            t.delegate
+                .expanded()
+                .contains(&SysNodeId::ServiceGroup(Manager::System))
+        });
+        assert!(!expanded, "the System group collapsed");
+        assert_eq!(rig.window_count(), windows, "no window opened");
+        let query = rig.last_query().expect("a query");
+        assert!(
+            !query
+                .expanded
+                .contains(&SysNodeId::ServiceGroup(Manager::System)),
+            "the collapse is sent"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn properties_one_window_per_selected_unit(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        rig.publish_fixture();
+        rig.select(&[1, 2, 3]);
+        let windows = rig.window_count();
+        rig.keys("enter");
+        assert_eq!(rig.window_count(), windows + 3);
+    }
+
+    #[gpui_kit::test]
+    fn collapse_all_keeps_groups_open(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let (a, b) = (child_key(812), child_key(813));
+        rig.publish(
+            fixture(),
+            &[(0, a), (1, b)],
+            vec![
+                child_process(812, ProcFlags::empty()),
+                child_process(813, ProcFlags::empty()),
+            ],
+            ServiceCounts::default(),
+        );
+        // Rows: 0 System group, 1 unit00, 2 child, 3 unit01, 4 child.
+        let units = [rig.row_id(1), rig.row_id(3)];
+        let table = rig.table();
+        table.update(&mut rig.vcx, |table, cx| {
+            for id in units {
+                table.delegate_mut().on_toggle_expand(id, cx);
+            }
+        });
+        rig.vcx.run_until_parked();
+        let expanded = rig
+            .vcx
+            .read_entity(&table, |t, _| t.delegate.expanded().len());
+        assert_eq!(expanded, 4, "two groups and two units");
+
+        rig.keys("ctrl-l");
+        let groups = [
+            SysNodeId::ServiceGroup(Manager::System),
+            SysNodeId::ServiceGroup(Manager::User),
+        ];
+        let expanded: Vec<SysNodeId> = rig.vcx.read_entity(&table, |t, _| {
+            t.delegate.expanded().iter().cloned().collect()
+        });
+        assert_eq!(expanded.len(), 2, "{expanded:?}");
+        assert!(groups.iter().all(|g| expanded.contains(g)));
+        let query = rig.last_query().expect("a query");
+        assert_eq!(query.expanded.len(), 2, "{:?}", query.expanded);
+        assert!(groups.iter().all(|g| query.expanded.contains(g)));
+    }
+
+    #[gpui_kit::test]
+    fn child_rows_use_process_menu(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let key = child_key(812);
+        rig.publish(
+            fixture(),
+            &[(0, key)],
+            vec![child_process(812, ProcFlags::empty())],
+            ServiceCounts::default(),
+        );
+        let child = rig.menu_labels(&[2]);
+        assert!(child.iter().any(|l| l == "End Task"), "{child:?}");
+        assert!(!child.iter().any(|l| l == "Start"), "{child:?}");
+
+        let unit = rig.menu_labels(&[1]);
+        assert!(unit.iter().any(|l| l == "Start"), "{unit:?}");
+        assert!(!unit.iter().any(|l| l == "End Task"), "{unit:?}");
+
+        let mixed = rig.menu_labels(&[1, 2]);
+        assert!(
+            mixed.iter().any(|l| l == "Start"),
+            "a mixed selection gets the unit menu"
+        );
+
+        assert!(rig.menu_labels(&[0]).is_empty(), "group rows have no menu");
+    }
+
+    fn services_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+        let page = cx.new(|cx| ServicesPage::new(window, cx));
+        PageSlot::new(page, cx)
+    }
+
+    #[gpui_kit::test]
+    fn empty_state_filter_clear_resets_strip(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        init(cx, engine.clone());
+        let handle = cx.update(|cx| {
+            set_test_page(cx, Tab::Services, services_page);
+            open_main_window_on(Tab::Services, cx).expect("main window opens")
+        });
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let page = vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window view")
+                .read(cx)
+                .page_entity::<ServicesPage>(Tab::Services)
+                .expect("services page")
+        });
+        let focus = vcx.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
+        let draw = |vcx: &mut VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+
+        // Text "zzz" through type-to-filter, then Failed on.
+        vcx.update(|window, cx| window.focus(&focus, cx));
+        vcx.simulate_keystrokes("z z z");
+        vcx.executor().advance_clock(FILTER_DEBOUNCE);
+        draw(&mut vcx);
+        assert_eq!(
+            vcx.read_entity(&page, |p, _| p.filter_text().to_owned()),
+            "zzz"
+        );
+        vcx.update(|window, cx| {
+            window.focus(&focus, cx);
+            window.dispatch_action(
+                Box::new(ServicesToggleStateFilter {
+                    state: StateFilterArg::Failed,
+                }),
+                cx,
+            );
+        });
+        draw(&mut vcx);
+        assert!(!vcx.read_entity(&page, |p, _| p.strip().is_default()));
+        publish_services(
+            &engine,
+            1,
+            Vec::new(),
+            &[],
+            Vec::new(),
+            ServiceCounts::default(),
+        );
+        draw(&mut vcx);
+        assert_eq!(vcx.read_entity(&page, |p, _| p.body()), SysBody::NoMatches);
+
+        vcx.update(|window, cx| {
+            window.focus(&focus, cx);
+            window.dispatch_action(Box::new(ServicesClearAllFilters), cx);
+        });
+        vcx.executor().advance_clock(FILTER_DEBOUNCE);
+        draw(&mut vcx);
+        assert_eq!(
+            vcx.read_entity(&page, |p, _| p.filter_text().to_owned()),
+            ""
+        );
+        assert!(vcx.read_entity(&page, |p, _| p.strip().is_default()));
+        let query = last_services_query(&engine).expect("a query");
+        assert!(query.filter.is_empty());
+        assert!(query.services.expect("a strip filter").states.is_empty());
+    }
+}
