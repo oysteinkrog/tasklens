@@ -1175,10 +1175,9 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
     cache.y_max = input.y_max;
 }
 
-/// Dotted-gap spans of one series: between consecutive runs, from the window's left edge to the
-/// first run when that run starts more than 2 periods in, and from the last run to the newest
-/// sample when gap samples follow it. The stale tail reaches the right edge, so a series that
-/// ends on a valid sample adds no span on the right.
+/// Dotted-gap spans of one series: between consecutive runs, and from the window's left edge to
+/// the first run when that run starts more than 2 periods in. Nothing on the right: a stale tail
+/// reaches the right edge, and trailing gap samples draw no dotted span (leader note o55.7).
 fn push_gaps(
     samples: &[Sample],
     runs: &[Run],
@@ -1198,12 +1197,6 @@ fn push_gaps(
         let a = samples[w[0].end - 1].t_ns;
         let b = samples[w[1].start].t_ns;
         gaps.push(map.x_local(a)..map.x_local(b));
-    }
-    if let (Some(last), Some(newest)) = (runs.last(), samples.last())
-        && last.end < samples.len()
-    {
-        let a = samples[last.end - 1].t_ns;
-        gaps.push(map.x_local(a)..map.x_local(newest.t_ns));
     }
 }
 
