@@ -59,6 +59,17 @@ const NEW_RANGE_S: u16 = 60;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PanelFull;
 
+/// Why `add_process` added no card (UI-PRC-020 items 15 to 17).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddError {
+    /// A card with this source and column exists, attached or detached.
+    Exists,
+    /// All 12 slots hold an attached card.
+    Full,
+    /// The row's identity could not be resolved to a source.
+    Unavailable,
+}
+
 /// The seven system kinds in default slot order, each with its column.
 const SYSTEM: [(MinigraphSource, GraphColumn); 7] = [
     (MinigraphSource::Cpu, GraphColumn::Cpu),
@@ -359,6 +370,49 @@ impl MinigraphPanel {
         let id = self.insert(source, column)?;
         self.changed(cx);
         Ok(id)
+    }
+
+    /// True when a card with this source and column exists, attached or detached.
+    pub fn has_source(&self, source: &MinigraphSource, column: GraphColumn) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.column == column && &e.source == source)
+    }
+
+    /// Adds a process, name or app card at the next free slot and shows its toast: `Minigraph
+    /// added`, `Process name minigraph added` or `App name minigraph added` (Success), `Minigraph
+    /// already exists` (Info), `No space for more minigraphs` (Warning) or `Unable to add
+    /// minigraph` (Error, for a `source` of `None`: the row could not be resolved). Persists.
+    pub fn add_process(
+        &mut self,
+        source: Option<MinigraphSource>,
+        column: GraphColumn,
+        cx: &mut Context<Self>,
+    ) -> Result<MinigraphId, AddError> {
+        let Some(source) = source else {
+            self.toast(ToastKind::Error, "minigraph-toast-unable", cx);
+            return Err(AddError::Unavailable);
+        };
+        if self.has_source(&source, column) {
+            self.toast(ToastKind::Info, "minigraph-toast-exists", cx);
+            return Err(AddError::Exists);
+        }
+        let added = match &source {
+            MinigraphSource::Name(_) => "minigraph-toast-name-added",
+            MinigraphSource::App(_) => "minigraph-toast-app-added",
+            _ => "minigraph-toast-added",
+        };
+        match self.insert(source, column) {
+            Ok(id) => {
+                self.changed(cx);
+                self.toast(ToastKind::Success, added, cx);
+                Ok(id)
+            }
+            Err(PanelFull) => {
+                self.toast(ToastKind::Warning, "minigraph-toast-full", cx);
+                Err(AddError::Full)
+            }
+        }
     }
 
     /// Hides a card. A system card's setting turns off, so View > Graphs unchecks; any other

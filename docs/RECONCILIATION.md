@@ -197,7 +197,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ### R-032 Pseudo-process rows
 - Sources in conflict: r2 PROC-010 [now PROC-012] three rows (System Idle Process, System interrupts, Memory compression), toggle "Show pseudo processes" default on, Type "Pseudo"; add PROC-100 [now PROC-012] two rows ("Interrupts", "Memory compression (zram)"), no idle row, no toggle, Type "Kernel".
-- Resolution: add PROC-100 [now PROC-012] wins: two rows, names "Interrupts" and "Memory compression (zram)", no extra toggle, hidden by Hide system processes, excluded from the process count, menu Copy, Copy details, Copy all metrics, Add Minigraph only. Type column shows "Pseudo" (r2's value list, R-007). Phase P2.
+- Resolution: add PROC-100 [now PROC-012] wins: two rows, names "Interrupts" and "Memory compression (zram)", no extra toggle, hidden by Hide system processes, excluded from the process count, menu Copy, Copy details, Copy all metrics only (Add Minigraph is hidden on pseudo rows until a pseudo source exists). Type column shows "Pseudo" (r2's value list, R-007). Phase P2.
 - Rule: addendum later and more specific; it also uses the verified `CONFIG_IRQ_TIME_ACCOUNTING=y` fact.
 - Edits: r2 PROC-010 [now PROC-012]; r2 PROC-017 [now PROC-027] Type list stays.
 

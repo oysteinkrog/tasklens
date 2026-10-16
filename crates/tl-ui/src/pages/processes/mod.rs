@@ -53,12 +53,15 @@ use self::delegate::ProcessDelegate;
 use self::filter::FilterBinding;
 use self::history::HistoryPage;
 use self::jump::JumpTexts;
+use self::menu::{GraphKind, graph_source};
 use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
 use crate::components::toast::ToastKind;
 use crate::demand::GlobalDemand;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr};
+use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
+use crate::pages::minigraph::sources::GraphColumn;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::{CollapseAll, CopyCell, OpenProperties};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
@@ -833,6 +836,35 @@ impl ProcessesPage {
         if let Err(err) = open_rt_signal(targets, names, window.window_handle(), cx) {
             warn!(target: "tasklens::ui", %err, "the real-time signal dialog did not open");
         }
+    }
+
+    fn on_add_minigraph(&mut self, a: &AddMinigraph, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_graph(GraphKind::Minigraph, a.column, cx);
+    }
+
+    fn on_add_name_graph(&mut self, a: &AddNameGraph, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_graph(GraphKind::Name, a.column, cx);
+    }
+
+    fn on_add_app_graph(&mut self, a: &AddAppGraph, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_graph(GraphKind::App, a.column, cx);
+    }
+
+    /// Items 15 to 17: resolves the one captured row to a card source and adds the card. The
+    /// panel shows the toast. An identity that is not in the snapshot gives `Unable to add
+    /// minigraph`.
+    fn add_graph(&mut self, kind: GraphKind, column: GraphColumn, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        let [target] = &targets.items[..] else {
+            return;
+        };
+        let Some(panel) = MinigraphPanel::global(cx) else {
+            warn!(target: "tasklens::ui", "no minigraph panel for an Add graph action");
+            return;
+        };
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let source = graph_source(kind, target, &snapshot);
+        let _ = panel.update(cx, |p, cx| p.add_process(source, column, cx));
     }
 
     /// Go to parent process (PROC-071): selects the live record whose PID is the target's
@@ -1671,6 +1703,9 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_send_signal))
             .on_action(cx.listener(Self::on_signal_open_realtime))
             .on_action(cx.listener(Self::on_go_to_parent))
+            .on_action(cx.listener(Self::on_add_minigraph))
+            .on_action(cx.listener(Self::on_add_name_graph))
+            .on_action(cx.listener(Self::on_add_app_graph))
             .on_action(cx.listener(Self::on_open_file_location))
             .on_action(cx.listener(Self::on_open_virustotal))
             .on_action(cx.listener(Self::on_create_dump))

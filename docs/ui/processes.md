@@ -898,7 +898,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   | 25 | Go to service | same (U only) | hidden | `GoToService` | unless MainPID or U; A, S, G, M; before P2 | X |
 
   Group header rows: a two-item menu "Expand" / "Collapse" (the one that applies) →
-  `ToggleExpand`. Pseudo rows: items 11, 12, 13 and 15 only. Items whose phase has not shipped
+  `ToggleExpand`. Pseudo rows: items 11, 12, 13 only. Add Minigraph is hidden on pseudo rows until a pseudo source exists. Items whose phase has not shipped
   are not built. Leading, trailing and doubled separators collapse (kit behaviour).
   Items 1 to 3 on a protected target keep their label; the confirmation (UI-PRC-014) carries the
   warning. Items 9 and 17 for app rows use the app's PID set.

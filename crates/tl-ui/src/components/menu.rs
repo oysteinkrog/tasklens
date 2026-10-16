@@ -127,6 +127,8 @@ enum Entry {
         label: SharedString,
         tooltip: Option<SharedString>,
         indent: Pixels,
+        /// The mark column shows a check ([`TlMenu::item_disabled_checked`]).
+        checked: bool,
     },
     Painted {
         label: SharedString,
@@ -313,7 +315,22 @@ impl TlMenu {
             label: label.into(),
             tooltip,
             indent: px(0.),
+            checked: false,
         });
+        self
+    }
+
+    /// A disabled item with a check mark: the state it stands for is already on.
+    pub fn item_disabled_checked(
+        mut self,
+        label: impl Into<SharedString>,
+        tooltip: Option<SharedString>,
+    ) -> Self {
+        self = self.item_disabled(label, tooltip);
+        self.has_mark_column = true;
+        if let Some(Entry::Disabled { checked, .. }) = self.entries.last_mut() {
+            *checked = true;
+        }
         self
     }
 
@@ -683,9 +700,15 @@ impl TlMenuPopup {
                         Some(action.boxed_clone()),
                         None,
                     ),
-                    Entry::Disabled { tooltip, .. } => {
-                        (MenuEntryKind::Disabled, tooltip.clone(), false, None, None)
-                    }
+                    Entry::Disabled {
+                        tooltip, checked, ..
+                    } => (
+                        MenuEntryKind::Disabled,
+                        tooltip.clone(),
+                        *checked,
+                        None,
+                        None,
+                    ),
                     Entry::Painted {
                         action, selected, ..
                     } => (
@@ -1269,9 +1292,14 @@ impl TlMenuPopup {
                 label,
                 tooltip,
                 indent,
+                checked,
             } => row(Some(label), cx)
                 .px(m.sp[4])
-                .children(mark_column(Mark::None))
+                .children(mark_column(if *checked {
+                    Mark::Check(true)
+                } else {
+                    Mark::None
+                }))
                 .when(*indent > px(0.), |d| d.child(div().flex_none().w(*indent)))
                 .child(menu_label(label.clone(), tooltip.clone(), true, window, cx))
                 .into_any_element(),

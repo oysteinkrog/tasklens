@@ -2317,6 +2317,345 @@ mod panel {
         );
         assert_eq!(frames(&mut r), 0, "no animation frames");
     }
+
+    /// The process row menu items 15 to 17 and `add_process` (tasklens-xdh.15, UI-PRC-020).
+    mod graph_items {
+        use super::*;
+        use tl_model::ids::ProcessKey;
+        use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+        use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+        use tl_model::table::{Manager, UnitRef};
+        use tl_model::time::BootId;
+        use tl_model::validity::{FieldValidity, Validity};
+        use tl_ui::components::menu::{MenuEntryInfo, TlMenu};
+        use tl_ui::pages::minigraph::panel::AddError;
+        use tl_ui::pages::minigraph::sources::GraphColumn;
+        use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
+        use tl_ui::pages::processes::menu::{GraphKind, MenuCaps, graph_source, row_menu};
+        use tl_ui::table::tree_table::RowKind;
+
+        fn key(pid: u32) -> ProcessKey {
+            ProcessKey {
+                start_ticks: 42_420,
+                boot_id: BootId(7),
+                pid,
+            }
+        }
+
+        fn record(pid: u32, name: &str, app: Option<&str>) -> ProcessRecord {
+            let a = |s: &str| Arc::<str>::from(s);
+            ProcessRecord {
+                key: key(pid),
+                ppid: 1,
+                uid: 1000,
+                meta: Arc::new(ProcessMeta {
+                    comm: a(name),
+                    name: a(name),
+                    exe: None,
+                    cmdline: None,
+                    user: a("u"),
+                    cgroup: None,
+                    app_id: app.map(a),
+                    icon: None,
+                    description: None,
+                    desktop_path: None,
+                    search_lower: a(name),
+                }),
+                group: GroupKind::System.key(),
+                state: ProcState::Sleeping,
+                flags: ProcFlags::empty(),
+                nice: 0,
+                threads: 1,
+                cpu_pct: 0.0,
+                rss_anon_bytes: 0,
+                rss_bytes: 0,
+                pss_bytes: 0,
+                uss_bytes: 0,
+                swap_bytes: 0,
+                io_read_bps: 0.0,
+                io_write_bps: 0.0,
+                net_rx_bps: 0.0,
+                net_tx_bps: 0.0,
+                gpu_util_pct: 0.0,
+                gpu_mem_bytes: 0,
+                euid: None,
+                net_shared: false,
+                cancelled_write_bps: 0.0,
+                validity: FieldValidity::all(Validity::Valid),
+            }
+        }
+
+        fn publish(r: &mut Rig, records: Vec<ProcessRecord>) {
+            r.engine.publish_with(|s| {
+                s.processes = Arc::new(ProcessSnapshot {
+                    header: ComponentHeader {
+                        version: 1,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    records: records.into(),
+                    ..ProcessSnapshot::default()
+                });
+            });
+            draw(&mut r.vcx);
+        }
+
+        fn target(node: NodeId, kind: RowKind, pid: Option<u32>) -> CapturedTarget {
+            CapturedTarget {
+                node,
+                kind,
+                name: "target".into(),
+                pid,
+                uid: 1000,
+                user: "u".into(),
+                flags: ProcFlags::empty(),
+                member_count: 1,
+                stopped: false,
+                ppid: 1,
+                nice: Some(0),
+                exe_deleted: false,
+                unit: None,
+            }
+        }
+
+        fn process(pid: u32) -> CapturedTarget {
+            target(NodeId::Process(key(pid)), RowKind::Process, Some(pid))
+        }
+
+        fn unit_node() -> NodeId {
+            NodeId::Unit(UnitRef {
+                manager: Manager::System,
+                name: Arc::from("ssh.service"),
+            })
+        }
+
+        fn menu_entries(r: &mut Rig, targets: Vec<CapturedTarget>) -> Vec<MenuEntryInfo> {
+            let targets = CapturedTargets::new(targets, None);
+            let menu = r.vcx.update(|window, cx| {
+                let focus = cx.focus_handle();
+                TlMenu::build(window, cx, focus, |menu, window, cx| {
+                    row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                })
+            });
+            r.vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window))
+        }
+
+        fn graph_entries(entries: &[MenuEntryInfo]) -> Vec<(String, MenuEntryInfo)> {
+            entries
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.label.as_deref(),
+                        Some("Add Minigraph" | "Add Process Name Graph" | "Add App Name Graph")
+                    )
+                })
+                .map(|e| (e.label.as_deref().unwrap_or_default().to_owned(), e.clone()))
+                .collect()
+        }
+
+        fn sub(r: &mut Rig, entry: &MenuEntryInfo) -> Vec<MenuEntryInfo> {
+            let sub = entry.submenu.clone().expect("a submenu");
+            r.vcx
+                .update(|window, cx| sub.read(cx).entries_for_test(window))
+        }
+
+        fn add(
+            r: &mut Rig,
+            source: Option<MinigraphSource>,
+            column: GraphColumn,
+        ) -> Result<MinigraphId, AddError> {
+            let panel = r.panel.clone();
+            let out = r
+                .vcx
+                .update(|_, cx| panel.update(cx, |p, cx| p.add_process(source, column, cx)));
+            draw(&mut r.vcx);
+            out
+        }
+
+        #[gpui_kit::test]
+        fn row_menu_graph_items_process_row(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            publish(&mut r, vec![record(4242, "firefox", Some("org.firefox"))]);
+            let entries = menu_entries(&mut r, vec![process(4242)]);
+            let items = graph_entries(&entries);
+            let labels: Vec<_> = items.iter().map(|(l, _)| l.as_str()).collect();
+            assert_eq!(
+                labels,
+                [
+                    "Add Minigraph",
+                    "Add Process Name Graph",
+                    "Add App Name Graph"
+                ]
+            );
+            for (_, item) in &items {
+                let columns: Vec<_> = sub(&mut r, item)
+                    .iter()
+                    .map(|e| e.label.as_deref().unwrap_or_default().to_owned())
+                    .collect();
+                assert_eq!(columns, ["CPU", "Memory", "Disk", "Network", "GPU", "VRAM"]);
+            }
+            // Before Add tray icon graph, after the Copy group.
+            let pos = |label: &str| {
+                entries
+                    .iter()
+                    .position(|e| e.label.as_deref() == Some(label))
+                    .unwrap_or(usize::MAX)
+            };
+            assert!(pos("Copy rows as table") < pos("Add Minigraph"));
+            assert!(pos("Add App Name Graph") < pos("Add tray icon graph"));
+        }
+
+        #[gpui_kit::test]
+        fn row_menu_graph_items_hidden_on_group(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            publish(
+                &mut r,
+                vec![
+                    record(4242, "firefox", Some("org.firefox")),
+                    record(4243, "firefox", Some("org.firefox")),
+                ],
+            );
+            assert!(graph_entries(&menu_entries(&mut r, Vec::new())).is_empty());
+            let multi = vec![process(4242), process(4243)];
+            assert!(graph_entries(&menu_entries(&mut r, multi)).is_empty());
+            let pseudo = target(
+                NodeId::Pseudo(tl_model::ids::PseudoKind::Interrupts),
+                RowKind::Pseudo,
+                None,
+            );
+            assert!(graph_entries(&menu_entries(&mut r, vec![pseudo])).is_empty());
+            // A process without an app has no App Name Graph item.
+            publish(&mut r, vec![record(4242, "firefox", None)]);
+            let entries = menu_entries(&mut r, vec![process(4242)]);
+            assert_eq!(graph_entries(&entries).len(), 2);
+            // An exited row disables all three.
+            let mut gone = process(4242);
+            gone.flags = ProcFlags::EXITED;
+            let entries = menu_entries(&mut r, vec![gone]);
+            for (_, item) in graph_entries(&entries) {
+                assert_eq!(item.tooltip.as_deref(), Some("Process exited"));
+            }
+        }
+
+        #[gpui_kit::test]
+        fn add_minigraph_creates_card_and_toasts(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            let source = MinigraphSource::Process { key: key(4242) };
+            let id = add(&mut r, Some(source.clone()), GraphColumn::Cpu).expect("added");
+            assert_eq!(r.id_of(&source), id);
+            assert_eq!(
+                r.toasts(),
+                [(ToastKind::Success, "Minigraph added".to_owned())]
+            );
+            let name = MinigraphSource::Name(Arc::from("firefox"));
+            add(&mut r, Some(name), GraphColumn::Cpu).expect("added");
+            let app = MinigraphSource::App(Arc::from("org.firefox"));
+            add(&mut r, Some(app), GraphColumn::Cpu).expect("added");
+            let toasts: Vec<_> = r.toasts().into_iter().skip(1).collect();
+            assert_eq!(
+                toasts,
+                [
+                    (
+                        ToastKind::Success,
+                        "Process name minigraph added".to_owned()
+                    ),
+                    (ToastKind::Success, "App name minigraph added".to_owned()),
+                ]
+            );
+            let saved = r
+                .saved
+                .lock()
+                .expect("lock")
+                .last()
+                .cloned()
+                .expect("saved");
+            assert!(
+                saved
+                    .minigraphs
+                    .iter()
+                    .any(|m| m.source.starts_with("process:"))
+            );
+            assert_eq!(
+                add(&mut r, None, GraphColumn::Cpu),
+                Err(AddError::Unavailable)
+            );
+            assert_eq!(
+                r.toasts().last(),
+                Some(&(ToastKind::Error, "Unable to add minigraph".to_owned()))
+            );
+        }
+
+        #[gpui_kit::test]
+        fn add_minigraph_already_exists(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            publish(&mut r, vec![record(4242, "firefox", Some("org.firefox"))]);
+            let source = MinigraphSource::Process { key: key(4242) };
+            add(&mut r, Some(source.clone()), GraphColumn::Cpu).expect("added");
+            assert_eq!(
+                add(&mut r, Some(source), GraphColumn::Cpu),
+                Err(AddError::Exists)
+            );
+            assert_eq!(
+                r.toasts().last(),
+                Some(&(ToastKind::Info, "Minigraph already exists".to_owned()))
+            );
+            let entries = menu_entries(&mut r, vec![process(4242)]);
+            let items = graph_entries(&entries);
+            let columns = sub(&mut r, &items[0].1);
+            assert_eq!(columns[0].kind, MenuEntryKind::Disabled);
+            assert!(columns[0].checked);
+            assert_eq!(columns[0].tooltip.as_deref(), Some("Already added"));
+            assert_eq!(columns[1].kind, MenuEntryKind::Item);
+            assert!(!columns[1].checked);
+        }
+
+        #[gpui_kit::test]
+        fn add_graph_full_toast(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            for pid in 1..=6 {
+                let source = MinigraphSource::Process { key: key(pid) };
+                add(&mut r, Some(source), GraphColumn::Cpu).expect("a free slot");
+            }
+            let name = MinigraphSource::Name(Arc::from("firefox"));
+            assert_eq!(
+                add(&mut r, Some(name), GraphColumn::Memory),
+                Err(AddError::Full)
+            );
+            assert_eq!(
+                r.toasts().last(),
+                Some(&(
+                    ToastKind::Warning,
+                    "No space for more minigraphs".to_owned()
+                ))
+            );
+        }
+
+        #[gpui_kit::test]
+        fn add_app_graph_unit_row(cx: &mut TestAppContext) {
+            let mut r = rig(cx);
+            publish(&mut r, Vec::new());
+            let snapshot = r.vcx.update(|_, cx| cx.global::<EngineGlobal>().0.latest());
+            let unit = target(unit_node(), RowKind::Unit, None);
+            let want = MinigraphSource::App(Arc::from("ssh.service"));
+            assert_eq!(
+                graph_source(GraphKind::App, &unit, &snapshot),
+                Some(want.clone())
+            );
+            assert_eq!(
+                graph_source(GraphKind::Minigraph, &unit, &snapshot),
+                Some(want)
+            );
+            assert_eq!(graph_source(GraphKind::Name, &unit, &snapshot), None);
+            // The unit row menu offers items 15 and 17 only.
+            let entries = menu_entries(&mut r, vec![unit]);
+            let labels: Vec<_> = graph_entries(&entries)
+                .into_iter()
+                .map(|(l, _)| l)
+                .collect();
+            assert_eq!(labels, ["Add Minigraph", "Add App Name Graph"]);
+        }
+    }
 }
 
 /// The panel mounted in the Processes page (tasklens-xdh.8, UI-PRF-040).

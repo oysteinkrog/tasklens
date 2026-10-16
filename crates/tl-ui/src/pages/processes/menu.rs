@@ -11,18 +11,21 @@
 use gpui_kit::{App, SharedString, Window, px};
 use tl_model::ids::NodeId;
 use tl_model::process::{GroupKind, GroupRowKind};
+use tl_model::snapshot::Snapshot;
 use tl_model::table::Manager;
 
 use super::actions::{
-    CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree, EndTask,
-    GoToParent, OpenFileLocation, OpenVirusTotal, PriorityClass, ResumeProcess, SetPriority,
-    SuspendProcess, ToggleGroupRow,
+    CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump, EndProcess,
+    EndProcessTree, EndTask, GoToParent, OpenFileLocation, OpenVirusTotal, PriorityClass,
+    ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
 };
 use super::{SuspendLabel, suspend_or_resume};
 use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
-use crate::pages::minigraph::sources::MinigraphSource;
+use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
+use crate::pages::minigraph::panel::MinigraphPanel;
+use crate::pages::minigraph::sources::{GraphColumn, MinigraphSource};
 use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::RowKind;
@@ -118,6 +121,7 @@ pub fn row_menu(
     menu = add_copy_all_metrics(menu, cx);
     menu = add_copy_rows_as_table(menu, cx);
     menu = menu.separator();
+    menu = add_graph_menus(menu, targets, shape, window, cx);
     menu = add_tray_graph(menu, targets, shape, window, cx);
     menu = menu.separator();
     menu = add_properties(menu, shape, cx);
@@ -322,6 +326,127 @@ fn add_set_affinity(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
     }
     let label = tr(cx, "processes-menu-set-affinity");
     exitable(menu, shape, label, Box::new(SetAffinity), cx)
+}
+
+/// Which of the three minigraph items (UI-PRC-013 items 15 to 17) a source is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphKind {
+    /// Add Minigraph: the process, or the app on an app or unit row.
+    Minigraph,
+    /// Add Process Name Graph: every process with this image name.
+    Name,
+    /// Add App Name Graph: every process of the app or unit.
+    App,
+}
+
+/// The graph columns of the three submenus, in order, with their label keys (PERF-087).
+const GRAPH_COLUMNS: [(GraphColumn, &str); 6] = [
+    (GraphColumn::Cpu, "processes-menu-metric-cpu"),
+    (GraphColumn::Memory, "processes-menu-metric-memory"),
+    (GraphColumn::Disk, "processes-menu-metric-disk"),
+    (GraphColumn::Network, "processes-menu-metric-network"),
+    (GraphColumn::Gpu, "processes-menu-metric-gpu"),
+    (GraphColumn::Vram, "processes-menu-metric-vram"),
+];
+
+/// The card source `kind` creates for one captured row, `None` when the item is not offered on
+/// it or the row's identity is not in `snapshot`. A process row gives its process, image name
+/// and app id. A unit row gives `App(<unit name>)` for items 15 and 17. An app row gives
+/// `App(<app id>)` for the same two. Name has no source on an app or unit row.
+pub fn graph_source(
+    kind: GraphKind,
+    target: &CapturedTarget,
+    snapshot: &Snapshot,
+) -> Option<MinigraphSource> {
+    match (&target.node, target.kind) {
+        (NodeId::Process(key), RowKind::Process | RowKind::KernelThread) => {
+            let meta = || {
+                snapshot
+                    .processes
+                    .records
+                    .iter()
+                    .find(|r| r.key == *key)
+                    .map(|r| &r.meta)
+            };
+            match kind {
+                GraphKind::Minigraph => Some(MinigraphSource::Process { key: *key }),
+                GraphKind::Name => meta().map(|m| MinigraphSource::Name(m.name.clone())),
+                GraphKind::App => meta()?.app_id.clone().map(MinigraphSource::App),
+            }
+        }
+        _ if kind == GraphKind::Name => None,
+        (NodeId::Unit(unit), RowKind::Unit) => Some(MinigraphSource::App(unit.name.clone())),
+        (node, RowKind::App) => {
+            let group = snapshot.table.groups.iter().find(|g| &g.node == node)?;
+            match &group.class {
+                GroupKind::App { app_id } if group.kind == GroupRowKind::App => {
+                    Some(MinigraphSource::App(app_id.clone()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Items 15 to 17: Add Minigraph >, Add Process Name Graph > and Add App Name Graph >, on one
+/// process, app or unit row. Each lists the six columns; one whose card exists is checked and
+/// disabled with "Already added". An exited row disables the three items.
+fn add_graph_menus(
+    mut menu: TlMenu,
+    targets: &CapturedTargets,
+    shape: Shape,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let [target] = targets.items.as_slice() else {
+        return menu;
+    };
+    if shape.multi || shape.pseudo {
+        return menu;
+    }
+    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+        return menu;
+    };
+    let snapshot = engine.0.latest();
+    let items = [
+        (GraphKind::Minigraph, "processes-menu-add-minigraph"),
+        (GraphKind::Name, "processes-menu-add-name-graph"),
+        (GraphKind::App, "processes-menu-add-app-graph"),
+    ];
+    for (kind, key) in items {
+        let Some(source) = graph_source(kind, target, &snapshot) else {
+            continue;
+        };
+        let label = tr(cx, key);
+        if shape.exited {
+            menu = menu.item_disabled(label, Some(tr(cx, "processes-menu-process-exited")));
+            continue;
+        }
+        menu = menu.submenu(label, window, cx, move |sub, _window, cx| {
+            let panel = MinigraphPanel::global(cx);
+            GRAPH_COLUMNS.iter().fold(sub, |sub, (column, key)| {
+                let column = *column;
+                let label = tr(cx, key);
+                let added = panel
+                    .as_ref()
+                    .is_some_and(|p| p.read(cx).has_source(&source, column));
+                if added {
+                    return sub.item_disabled_checked(
+                        label,
+                        Some(tr(cx, "processes-menu-already-added")),
+                    );
+                }
+                let action: Box<dyn gpui_kit::Action> = match kind {
+                    GraphKind::Minigraph => Box::new(AddMinigraph { column }),
+                    GraphKind::Name => Box::new(AddNameGraph { column }),
+                    GraphKind::App => Box::new(AddAppGraph { column }),
+                };
+                sub.item(label, action)
+            })
+        });
+    }
+    menu
 }
 
 /// The tray graph columns of the Add submenu, in order, with their label keys.
