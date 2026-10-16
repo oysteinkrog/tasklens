@@ -10,7 +10,8 @@
 //! (Shift held) SIGKILL, both through the app's `ActionTracker`; the window never sends a signal
 //! itself (ADR-006). End All with more than one process, and any action on a protected process or
 //! another user's process, asks first (R-036, D-009). 500 ms after an end action finishes, the
-//! eject is sent again, once per action.
+//! eject is sent again, once per action. While an eject is in flight nothing new is sent and
+//! Retry is disabled, because the worker drops an `Eject` that arrives while one runs.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -284,10 +285,28 @@ fn remove_watch(idx: DeviceIdx, watch: &Entity<EjectWatch>, cx: &mut App) {
     if watches.get(&idx).is_some_and(|w| w == watch) {
         watches.remove(&idx);
     }
+    notify_window(idx, cx);
+}
+
+/// True while the eject of `idx` is sent and not yet `Blocked`, `Done` or `Failed`. The worker
+/// drops an `Eject` that arrives while one runs, so nothing new is sent then.
+pub fn eject_in_flight(idx: DeviceIdx, cx: &App) -> bool {
+    cx.try_global::<EjectWatches>()
+        .and_then(|w| w.0.get(&idx))
+        .is_some_and(|w| matches!(w.read(cx).last, None | Some(EjectState::Running)))
+}
+
+/// Draws the open window of `idx` again, so Retry follows the eject state.
+fn notify_window(idx: DeviceIdx, cx: &mut App) {
+    if let Some((_, content)) = find_disk_in_use(idx, cx) {
+        content.update(cx, |_, cx| cx.notify());
+    }
 }
 
 /// Sends the eject of disk `idx` with a new sequence number and follows its state. `disk_label`
-/// is the page header word ("Disk 1"). A busy engine shows the tracker's busy warning.
+/// is the page header word ("Disk 1"). A busy engine shows the tracker's busy warning. While an
+/// eject of `idx` is in flight nothing is sent and its watch stays; its open window comes to the
+/// front.
 pub fn start_eject(
     key: DeviceKey,
     idx: DeviceIdx,
@@ -295,6 +314,15 @@ pub fn start_eject(
     disk_label: SharedString,
     cx: &mut App,
 ) {
+    if eject_in_flight(idx, cx) {
+        // The caller may be the window itself, which is being updated now.
+        cx.defer(move |cx| {
+            if let Some((handle, _)) = find_disk_in_use(idx, cx) {
+                let _ = handle.update(cx, |_, window, _| window.activate_window());
+            }
+        });
+        return;
+    }
     let Some(disk) = kernel_name(hub.read(cx).current(), idx) else {
         warn!(target: "tasklens::ui", ?idx, "eject: the disk is not in the catalog");
         return;
@@ -318,6 +346,7 @@ pub fn start_eject(
     }
     let watch = cx.new(|cx| EjectWatch::new(key, idx, seq, hub, disk_label, cx));
     cx.default_global::<EjectWatches>().0.insert(idx, watch);
+    cx.defer(move |cx| notify_window(idx, cx));
 }
 
 /// Follows the `eject` state of one disk for one sequence number.
@@ -381,7 +410,11 @@ impl EjectWatch {
             EjectState::Blocked { .. } => {
                 let (key, hub, label) =
                     (self.key.clone(), self.hub.clone(), self.disk_label.clone());
-                cx.defer(move |cx| open_disk_in_use(key, idx, hub, label, cx));
+                cx.defer(move |cx| {
+                    open_disk_in_use(key, idx, hub, label, cx);
+                    // Retry is allowed again.
+                    notify_window(idx, cx);
+                });
             }
             EjectState::Done => {
                 let text = tr(cx, "perf-toast-ejected");
@@ -749,8 +782,11 @@ impl DiskInUseWindow {
         .detach();
     }
 
-    /// Sends the eject again.
+    /// Sends the eject again, unless one is in flight.
     fn retry(&mut self, cx: &mut Context<Self>) {
+        if eject_in_flight(self.idx, cx) {
+            return;
+        }
         start_eject(
             self.key.clone(),
             self.idx,
@@ -916,6 +952,7 @@ impl Render for DiskInUseWindow {
             let this = this.clone();
             TlButton::new("DiskInUseRetry", TlButtonKind::Secondary)
                 .label(self.words.retry.clone())
+                .disabled(eject_in_flight(self.idx, cx))
                 .on_click(move |_, _, cx| {
                     let _ = this.update(cx, |w, cx| w.retry(cx));
                 })

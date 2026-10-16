@@ -1654,6 +1654,63 @@ mod disk_in_use {
         assert_eq!(active, Some(handle.window_id()), "brought to the front");
     }
 
+    fn eject_toasts(r: &mut Rig) -> Vec<(ToastKind, SharedString)> {
+        r.vcx.update(|_, cx| {
+            cx.try_global::<EjectToasts>()
+                .map(|t| t.0.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_eject_while_running_keeps_watch(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let seq = eject(&mut r);
+        publish(&mut r, Some((seq, EjectState::Running)));
+        eject(&mut r);
+        assert_eq!(eject_seqs(&r), vec![seq], "nothing sent while it runs");
+        publish(&mut r, Some((seq, EjectState::Done)));
+        r.vcx.run_until_parked();
+        assert!(
+            r.vcx.update(|_, cx| find_disk_in_use(IDX, cx)).is_none(),
+            "no window"
+        );
+        assert_eq!(
+            eject_toasts(&mut r),
+            vec![(ToastKind::Success, SharedString::from("Disk ejected"))]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn disk_in_use_retry_while_running_keeps_watch(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (first, mut vcx, _) = open_blocked(&mut r, false);
+        click(&mut vcx, "DiskInUseRetry");
+        let seqs = eject_seqs(&r);
+        assert_eq!(seqs.len(), 2, "Retry after Blocked sends a new eject");
+        let second = seqs[1];
+        assert!(second > first);
+        publish(&mut r, Some((second, EjectState::Running)));
+        redraw(&mut vcx);
+        click(&mut vcx, "DiskInUseRetry");
+        eject(&mut r);
+        assert_eq!(
+            eject_seqs(&r),
+            vec![first, second],
+            "nothing sent while it runs"
+        );
+        publish(&mut r, Some((second, EjectState::Done)));
+        r.vcx.run_until_parked();
+        assert!(
+            r.vcx.update(|_, cx| find_disk_in_use(IDX, cx)).is_none(),
+            "the window closed"
+        );
+        assert_eq!(
+            eject_toasts(&mut r),
+            vec![(ToastKind::Success, SharedString::from("Disk ejected"))]
+        );
+    }
+
     #[gpui_kit::test]
     fn disk_in_use_eacces_note(cx: &mut TestAppContext) {
         let mut r = setup(cx);
