@@ -1059,7 +1059,7 @@ pub fn main_window_options(cx: &App) -> WindowOptions {
         }),
         window_background: WindowBackgroundAppearance::Opaque,
         window_min_size: Some(size(px(MIN_W), px(MIN_H))),
-        app_id: Some(APP_ID.into()),
+        app_id: Some(crate::app::window_app_id(cx)),
         window_bounds: Some(restored_bounds(&TlSettings::state(cx).window)),
         focus: !start_hidden,
         show: !start_hidden,

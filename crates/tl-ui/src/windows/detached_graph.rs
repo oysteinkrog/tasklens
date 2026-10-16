@@ -22,7 +22,7 @@ use crate::pages::minigraph::card::{MINI_CARD_H, MINI_CARD_W, MinigraphCard};
 use crate::pages::minigraph::panel::{MinigraphPanel, gpu_order};
 use crate::pages::minigraph::sources::{MinigraphEntry, MinigraphId};
 use crate::theme::{current, metrics};
-use crate::window::main::{APP_ID, push_main_toast};
+use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 /// The `sp[2]` spacing at ui_scale 1: the window padding and the gap between cards.
@@ -47,7 +47,7 @@ pub fn detached_window_options(size: Size<Pixels>, cx: &mut App) -> WindowOption
         titlebar: None,
         is_resizable: false,
         is_movable: true,
-        app_id: Some(APP_ID.into()),
+        app_id: Some(crate::app::window_app_id(cx)),
         window_background: WindowBackgroundAppearance::Opaque,
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         ..Default::default()

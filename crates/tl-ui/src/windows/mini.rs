@@ -39,7 +39,7 @@ use crate::pages::performance::card::{CARD_H, CardLines, CardView};
 use crate::pages::performance::sidebar::DeviceSidebar;
 use crate::settings_global::TlSettings;
 use crate::theme::{UiMetrics, current, metrics};
-use crate::window::main::{APP_ID, push_main_toast};
+use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 /// The window width at ui_scale 1 (PERF-093).
@@ -90,7 +90,7 @@ pub fn mini_window_options(size: Size<Pixels>, cx: &mut App) -> WindowOptions {
         titlebar: None,
         is_resizable: false,
         is_movable: true,
-        app_id: Some(APP_ID.into()),
+        app_id: Some(crate::app::window_app_id(cx)),
         window_background: WindowBackgroundAppearance::Opaque,
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         ..Default::default()

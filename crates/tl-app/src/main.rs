@@ -316,6 +316,7 @@ fn main() -> ExitCode {
             shift_held: false,
             pending_crash_report: None,
         },
+            app_id: args.app_id.clone(),
         tray,
     });
 

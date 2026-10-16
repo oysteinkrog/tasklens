@@ -2373,6 +2373,7 @@ mod main_window {
     use tl_ui::anim::AnimationDriver;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions, UiExit, UiExitSlot};
     use tl_ui::components::toast::{self, ToastKind};
+    use tl_ui::components::window_frame::{TlWindowKind, TlWindowSpec, window_options};
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::settings_global::TlSettings;
@@ -2385,6 +2386,8 @@ mod main_window {
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::window::status::StatusChanged;
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui::windows::detached_graph::detached_window_options;
+    use tl_ui::windows::mini::mini_window_options;
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata, Subscriber};
 
@@ -2701,6 +2704,29 @@ mod main_window {
             Some("tasklens")
         );
         assert!(options.show && options.focus);
+    }
+
+    #[gpui_kit::test]
+    fn instance_app_id_reaches_window_options(cx: &mut TestAppContext) {
+        const ID: &str = "io.github.oysteinkrog.TasklensTest";
+        setup(cx, &Opts::default());
+        cx.update(|cx| cx.global_mut::<StartOptions>().app_id = Some(ID.into()));
+        let spec = TlWindowSpec::new(
+            TlWindowKind::Tool { resizable: true },
+            "t".to_owned(),
+            size(px(600.), px(400.)),
+        );
+        let (main, tool, mini, detached) = cx.update(|cx| {
+            (
+                main_window_options(cx),
+                window_options(&spec, Decorations::Client, cx),
+                mini_window_options(size(px(300.), px(200.)), cx),
+                detached_window_options(size(px(300.), px(200.)), cx),
+            )
+        });
+        for options in [main, tool, mini, detached] {
+            assert_eq!(options.app_id.as_deref(), Some(ID));
+        }
     }
 
     #[test]

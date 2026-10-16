@@ -461,10 +461,19 @@ impl Global for StartOptions {}
 
 /// Why the UI stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
+    /// `--app-id`. `None` means `APP_ID`.
+    pub app_id: Option<String>,
 pub enum UiExit {
     Quit,
     /// The renderer failed before the first window opened. Holds the panic message.
     RendererFailed(String),
+/// The Wayland app_id for new windows: the `--app-id` value, or `APP_ID` when none was given.
+pub fn window_app_id(cx: &App) -> String {
+    cx.try_global::<StartOptions>()
+        .and_then(|s| s.app_id.clone())
+        .unwrap_or_else(|| crate::window::main::APP_ID.to_owned())
+}
+
     DeviceLost,
 }
 
