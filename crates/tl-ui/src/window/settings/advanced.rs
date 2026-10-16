@@ -7,7 +7,7 @@
 //! probe. A change shows "Takes effect after restart" and the toast "Restart tasklens to use the
 //! new GPU".
 
-use gpui_kit::{App, AppContext as _, Global, SharedString};
+use gpui_kit::{App, Global, SharedString};
 use tracing::warn;
 
 use super::{PageBuilder, PageId, SettingsWindow};
