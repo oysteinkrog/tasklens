@@ -17,9 +17,14 @@ use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::session::engine_root;
+use tl_engine::update::EngineMsg;
 use tl_engine::workers::{process_detail, processes};
-use tl_model::demand::{ColumnSet, Demand};
+use tl_model::command::Command;
+use tl_model::demand::{ColumnSet, Demand, DetailDemand};
+use tl_model::details::{DetailTab, DetailTarget, TabPayload, TabSlot};
 use tl_model::ids::{ColumnId, ProcessKey};
+use tl_model::settings::EngineSettings;
+use tl_model::time::BootId;
 use tl_model::validity::{ProcessField, Validity};
 
 fn fixtures() -> PathBuf {
@@ -200,4 +205,140 @@ fn engine_publishes_pss_coverage() {
     assert!(handle.is_finished(), "engine_root returned after cancel");
     drop(ui);
     fl.finish();
+}
+
+/// process-edge 4201. The worker checks only the start ticks.
+fn edge_key() -> ProcessKey {
+    ProcessKey {
+        start_ticks: 351_220,
+        boot_id: BootId(1),
+        pid: 4201,
+    }
+}
+
+fn tab_demand(tab: DetailTab) -> Demand {
+    Demand {
+        any_surface_visible: true,
+        details: Arc::from([DetailDemand {
+            target: DetailTarget::Process(edge_key()),
+            tab,
+        }]),
+        ..Demand::default()
+    }
+}
+
+/// The slot of `tab` of process-edge 4201 in the latest snapshot.
+fn slot(ui: &fake_sources::UiSide, tab: DetailTab) -> TabSlot {
+    let snap = ui.latest.load_full();
+    snap.details
+        .targets
+        .get(&DetailTarget::Process(edge_key()))
+        .map(|t| t.tab(tab).clone())
+        .unwrap_or_default()
+}
+
+fn env_vars(slot: &TabSlot) -> Vec<(String, String)> {
+    match slot.payload.as_deref() {
+        Some(TabPayload::Environ(e)) => e
+            .vars
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect(),
+        other => panic!("expected an Environ payload, got {other:?}"),
+    }
+}
+
+fn start_detail_engine(
+    root: &FixtureRoot,
+) -> (
+    FakeLab,
+    fake_sources::UiSide,
+    asupersync::runtime::TaskHandle<()>,
+) {
+    let mut fl = FakeLab::new();
+    let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![process_detail::spec()]);
+    ui.settings_tx
+        .send(EngineSettings {
+            interval_ms: 500,
+            ..EngineSettings::default()
+        })
+        .expect("watch has receivers");
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+    (fl, ui, handle)
+}
+
+fn stop(mut fl: FakeLab, ui: fake_sources::UiSide, handle: asupersync::runtime::TaskHandle<()>) {
+    handle.abort();
+    fl.advance(Duration::from_millis(10));
+    assert!(handle.is_finished(), "engine_root returned after cancel");
+    drop(ui);
+    fl.finish();
+}
+
+/// E10-004: the Threads tab reaches the snapshot, and once the CPU column is warm an unchanged
+/// tab keeps its `Arc` and version.
+#[test]
+fn engine_publishes_threads_tab_and_keeps_its_arc() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    let (mut fl, ui, handle) = start_detail_engine(&root);
+    ui.demand_tx
+        .send(tab_demand(DetailTab::Threads))
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+
+    let first = slot(&ui, DetailTab::Threads);
+    assert_eq!(first.validity, Validity::Valid);
+    let Some(TabPayload::Threads(rows)) = first.payload.as_deref() else {
+        panic!("expected a Threads payload, got {:?}", first.payload);
+    };
+    let tids: Vec<u32> = rows.iter().map(|r| r.tid).collect();
+    assert_eq!(tids, vec![4201, 4211]);
+
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+    let later = slot(&ui, DetailTab::Threads);
+    assert_eq!(later.version, first.version);
+    assert!(Arc::ptr_eq(
+        later.payload.as_ref().expect("payload"),
+        first.payload.as_ref().expect("payload")
+    ));
+    stop(fl, ui, handle);
+}
+
+/// E10-004: Environment is read once on open and again only on `DetailRefresh`.
+#[test]
+fn engine_environment_once_then_on_refresh() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    root.write(4201, "environ", b"A=1\0");
+    let (mut fl, ui, handle) = start_detail_engine(&root);
+    ui.demand_tx
+        .send(tab_demand(DetailTab::Environment))
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+    assert_eq!(
+        env_vars(&slot(&ui, DetailTab::Environment)),
+        vec![("A".into(), "1".into())]
+    );
+
+    root.write(4201, "environ", b"B=2\0");
+    fl.run_for(Duration::from_secs(3), Duration::from_millis(10));
+    assert_eq!(
+        env_vars(&slot(&ui, DetailTab::Environment)),
+        vec![("A".into(), "1".into())]
+    );
+
+    ui.msgs_tx
+        .try_send(EngineMsg::Command(Command::DetailRefresh {
+            target: DetailTarget::Process(edge_key()),
+            tab: DetailTab::Environment,
+        }))
+        .expect("the queue has room for the message");
+    fl.run_for(Duration::from_secs(1), Duration::from_millis(10));
+    assert_eq!(
+        env_vars(&slot(&ui, DetailTab::Environment)),
+        vec![("B".into(), "2".into())]
+    );
+    stop(fl, ui, handle);
 }
