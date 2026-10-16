@@ -310,6 +310,8 @@ pub struct CgroupStats {
     pub io_rbytes: u64,
     pub io_wbytes: u64,
     pub pids_current: u32,
+    /// `cgroup.events` has `frozen 1`. False when the file was not read.
+    pub frozen: bool,
     pub validity: Validity,
 }
 

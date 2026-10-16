@@ -392,6 +392,7 @@ mod values {
             desktop_path: None,
             description: None,
             user: None,
+            frozen: false,
             validity: FieldValidity::all(Validity::Valid),
         }
     }
@@ -2139,6 +2140,7 @@ mod group_fields {
             desktop_path: None,
             description: None,
             user: None,
+            frozen: false,
             validity: FieldValidity::all(Validity::Valid),
         }
     }
@@ -3326,6 +3328,7 @@ mod row_tooltip {
             desktop_path: Some(a("/usr/share/applications/firefox.desktop")),
             description: None,
             user: None,
+            frozen: false,
             validity: FieldValidity::all(Validity::Valid),
         }
     }

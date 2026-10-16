@@ -283,6 +283,9 @@ pub struct GroupRow {
     pub description: Option<Arc<str>>,
     /// Unit rows: `UnitRecord.user` (owner of MainPID, else `User=`, SYS-003).
     pub user: Option<Arc<str>>,
+    /// App and unit rows: the cgroup's `cgroup.events` has `frozen 1` (PROC-064). False when
+    /// it was not read.
+    pub frozen: bool,
     pub validity: FieldValidity,
 }
 
@@ -346,6 +349,8 @@ pub struct AppCgroupSample {
     pub rios: u64,
     pub wios: u64,
     pub pids: u32,
+    /// `cgroup.events` has `frozen 1`. False when the file was not read.
+    pub frozen: bool,
     pub cgroup: CgroupRef,
     pub validity: FieldValidity,
 }

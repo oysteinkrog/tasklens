@@ -2311,6 +2311,7 @@ fn sweep_frozen_app_members() {
         .find(|a| a.rel.ends_with("app-firefox@3a1b.service"))
         .expect("firefox unit sampled");
     assert_eq!(unit.stats.frozen, Some(true));
+    assert!(unit.to_model().frozen);
 }
 
 sweep_clock!(deadline_clock);

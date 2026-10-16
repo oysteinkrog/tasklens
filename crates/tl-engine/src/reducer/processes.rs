@@ -1015,6 +1015,7 @@ mod tests {
             rios: 0,
             wios: 0,
             pids: 1,
+            frozen: false,
             cgroup: CgroupRef {
                 rel_path: "app.slice".into(),
                 cgroup_id: g,

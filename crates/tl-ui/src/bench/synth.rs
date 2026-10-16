@@ -614,6 +614,7 @@ fn group_row(node: NodeId, key: GroupKey, name: Arc<str>, members: &[ProcessReco
         desktop_path: None,
         description: None,
         user: members.first().map(|r| Arc::clone(&r.meta.user)),
+        frozen: false,
         validity: FieldValidity::all(Validity::Valid),
     };
     for r in members {

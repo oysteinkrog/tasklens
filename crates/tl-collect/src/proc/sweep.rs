@@ -651,6 +651,7 @@ impl AppUnitSample {
                 .stats
                 .pids_current
                 .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)),
+            frozen: self.stats.frozen == Some(true),
             cgroup: CgroupRef {
                 rel_path: self.rel.clone(),
                 cgroup_id: self.cgroup_id,

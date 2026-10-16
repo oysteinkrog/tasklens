@@ -393,6 +393,7 @@ mod delegate {
             desktop_path: None,
             description: None,
             user: None,
+            frozen: false,
             validity: FieldValidity::all(Validity::Valid),
         }
     }

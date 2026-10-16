@@ -22,7 +22,9 @@ use tl_collect::proc::cgroup::{UserPlacement, parse_cgroup_file, placement};
 use tl_engine::reducer::table::{self, GROUP_ORDER, IRQ_NOT_ACCOUNTED, PseudoInput, TableInput};
 use tl_engine::reducer::{Publisher, Reducer};
 use tl_engine::source::WorkerControl;
-use tl_engine::update::{EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate, ZramStat};
+use tl_engine::update::{
+    CgroupStats, EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate, ZramStat,
+};
 use tl_model::actions::{CgroupRef, SchedPolicy};
 use tl_model::command::Command;
 use tl_model::devices::DeviceCatalog;
@@ -209,7 +211,7 @@ fn build_with(
     q: &TableQuery,
     settings: &EngineSettings,
 ) -> ProcessTableView {
-    build_full(records, app_stats, None, q, settings)
+    build_full(records, app_stats, &[], None, q, settings)
 }
 
 /// `build` with pseudo rows.
@@ -219,12 +221,23 @@ fn build_pseudo(
     q: &TableQuery,
     settings: &EngineSettings,
 ) -> ProcessTableView {
-    build_full(records, &[], Some(pseudo), q, settings)
+    build_full(records, &[], &[], Some(pseudo), q, settings)
+}
+
+/// `build` with unit cgroup samples.
+fn build_units(
+    records: &[ProcessRecord],
+    unit_stats: &[CgroupStats],
+    q: &TableQuery,
+    settings: &EngineSettings,
+) -> ProcessTableView {
+    build_full(records, &[], unit_stats, None, q, settings)
 }
 
 fn build_full(
     records: &[ProcessRecord],
     app_stats: &[AppCgroupSample],
+    unit_stats: &[CgroupStats],
     pseudo: Option<&PseudoInput>,
     q: &TableQuery,
     settings: &EngineSettings,
@@ -241,7 +254,7 @@ fn build_full(
         records,
         extras: &extras,
         app_stats,
-        unit_stats: &[],
+        unit_stats,
         system: &system,
         devices: &devices,
         settings,
@@ -687,6 +700,7 @@ fn app_memory_from_cgroup_anon() {
         rios: 0,
         wios: 0,
         pids: 2,
+        frozen: false,
         cgroup: CgroupRef {
             rel_path: format!("{USER_MANAGER}/app.slice/app-firefox.scope").into(),
             cgroup_id: 1,
@@ -695,6 +709,104 @@ fn app_memory_from_cgroup_anon() {
     }];
     let view = build_with(&records, &stats, &q, &settings());
     assert_eq!(view.groups[0].memory_bytes, GIB);
+}
+
+/// An app row is frozen when its cgroup's `cgroup.events` says so (tasklens-8q0.41).
+#[test]
+fn app_row_frozen_from_cgroup_events() {
+    let mut records = app_pc();
+    records.push(in_app(rec(200, 1, "Tool", 1.0), "tool"));
+    let q = query(TableMode::Grouped, "pid", true, "", &[]);
+    let frozen_of = |view: &ProcessTableView, app: &str| {
+        view.groups
+            .iter()
+            .find(|g| g.key == app_key(app))
+            .expect("app row built")
+            .frozen
+    };
+
+    let view = build(&records, &q, &settings());
+    assert!(!frozen_of(&view, "firefox"), "no cgroup sample, not frozen");
+
+    let sample = |app: &str, id: u64, frozen: bool| AppCgroupSample {
+        group: app_key(app),
+        anon_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.0,
+        io_write_bps: 0.0,
+        rios: 0,
+        wios: 0,
+        pids: 1,
+        frozen,
+        cgroup: CgroupRef {
+            rel_path: format!("{USER_MANAGER}/app.slice/app-{app}.scope").into(),
+            cgroup_id: id,
+        },
+        validity: FieldValidity::all(Validity::Valid),
+    };
+    let stats = [sample("firefox", 1, true), sample("tool", 2, false)];
+    let view = build_with(&records, &stats, &q, &settings());
+    assert!(frozen_of(&view, "firefox"));
+    assert!(!frozen_of(&view, "tool"));
+}
+
+/// A unit row is frozen when its unit cgroup sample says so (tasklens-8q0.41). The sample is
+/// matched by the unit name and manager in its cgroup path.
+#[test]
+fn unit_row_frozen_from_unit_stats() {
+    // A unit folds into a row when it has more than one process.
+    let proc_in = |pid: u32, name: &str, slice: &str, unit: &str| {
+        in_unit(rec(pid, 1, name, 1.0), slice, unit)
+    };
+    let records = vec![
+        proc_in(10, "pipewire", "session.slice", "pipewire.service"),
+        proc_in(11, "wireplumber", "session.slice", "pipewire.service"),
+        proc_in(20, "kded6", "session.slice", "plasma-kded6.service"),
+        proc_in(21, "kded6-helper", "session.slice", "plasma-kded6.service"),
+        proc_in(30, "sshd", "system.slice", "sshd.service"),
+        proc_in(31, "sshd-session", "system.slice", "sshd.service"),
+    ];
+    let sample = |rel: String, frozen: bool| CgroupStats {
+        group: GroupKind::Background.key(),
+        cgroup: CgroupRef {
+            rel_path: rel.into(),
+            cgroup_id: 0,
+        },
+        anon_bytes: 0,
+        swap_bytes: 0,
+        cpu_usage_usec: 0,
+        io_rbytes: 0,
+        io_wbytes: 0,
+        pids_current: 1,
+        frozen,
+        validity: Validity::Valid,
+    };
+    let stats = [
+        sample(
+            format!("{USER_MANAGER}/session.slice/pipewire.service"),
+            true,
+        ),
+        sample("system.slice/sshd.service".into(), false),
+    ];
+    let view = build_units(
+        &records,
+        &stats,
+        &query(TableMode::Grouped, "pid", true, "", &[]),
+        &settings(),
+    );
+    let frozen_of = |name: &str| {
+        view.groups
+            .iter()
+            .find(|g| g.kind == GroupRowKind::Unit && &*g.name == name)
+            .expect("unit row built")
+            .frozen
+    };
+    assert!(frozen_of("pipewire.service"));
+    assert!(!frozen_of("sshd.service"));
+    assert!(
+        !frozen_of("plasma-kded6.service"),
+        "no cgroup sample, not frozen"
+    );
 }
 
 #[test]

@@ -1068,7 +1068,8 @@ fn worse(a: Validity, b: Validity) -> Validity {
 /// Memory is the cgroup `anon` of `stats` (app) or `unit` when given, with the cgroup's
 /// validity, else the RssAnon sum (PROC-008, R-137). When a member's disk is `Restricted`, an
 /// app row takes disk from its cgroup `io.stat` rate instead (R-103). `pids` is the cgroup's
-/// process count, else the member count.
+/// process count, else the member count. `frozen` is the cgroup's frozen state, false without a
+/// cgroup.
 ///
 /// The identity fields are a starting point the grouped builder overwrites: node
 /// `NodeId::Group` of the cgroup's (else the first member's) group key, kind `Unit` when `unit`
@@ -1196,6 +1197,10 @@ pub fn aggregate(
         },
         description: None,
         user: None,
+        frozen: stats
+            .map(|s| s.frozen)
+            .or(unit.map(|u| u.frozen))
+            .unwrap_or(false),
         validity,
     }
 }
@@ -1526,6 +1531,7 @@ fn pseudo_base(kind: PseudoKind, name: &str) -> GroupRow {
         desktop_path: None,
         description: None,
         user: None,
+        frozen: false,
         validity: FieldValidity::all(Validity::Unsupported),
     }
 }
@@ -2863,6 +2869,7 @@ mod tests {
             rios: 0,
             wios: 0,
             pids: 2,
+            frozen: false,
             cgroup: tl_model::actions::CgroupRef {
                 rel_path: "user.slice/app.slice/app-firefox.scope".into(),
                 cgroup_id: 1,

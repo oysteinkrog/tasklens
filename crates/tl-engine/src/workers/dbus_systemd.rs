@@ -2783,7 +2783,7 @@ trait CgroupPass {
     fn procs(&mut self, rel: &str, out: &mut Vec<u32>) -> Result<(), Validity>;
     /// Appends the names of the child cgroups of `rel` to `out`.
     fn children(&mut self, rel: &str, out: &mut Vec<Arc<str>>) -> Result<(), Validity>;
-    /// `memory.stat`, `cpu.stat`, `io.stat` and `pids.current` of cgroup `rel`.
+    /// `memory.stat`, `cpu.stat`, `io.stat`, `pids.current` and `cgroup.events` of cgroup `rel`.
     fn stats(&mut self, rel: &str, out: &mut CgroupStats) -> Result<(), Validity>;
     /// `/proc/<pid>/stat` field 22. `None` when the process is gone or unreadable.
     fn start_ticks(&mut self, pid: u32) -> Option<u64>;
@@ -2799,7 +2799,7 @@ const UNIT_WANT: CgroupWant = CgroupWant {
     cpu_stat: true,
     io_stat: true,
     pids: true,
-    events: false,
+    events: true,
 };
 
 /// The host roots in `SysRoot`.
