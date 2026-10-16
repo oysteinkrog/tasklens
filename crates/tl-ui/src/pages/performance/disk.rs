@@ -92,7 +92,7 @@ pub struct Words {
 
 impl Words {
     /// Translates every word when the strings changed since the last call. True when it did.
-    fn refresh(&mut self, cx: &App) -> bool {
+    pub(super) fn refresh(&mut self, cx: &App) -> bool {
         let version = Some(cx.try_global::<Strings>().map(|s| s.strings_version));
         if self.version == version {
             return false;
@@ -115,14 +115,14 @@ impl Words {
 
 /// The settings the charts draw from.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct PageSettings {
+pub(super) struct PageSettings {
     range_ns: u64,
     smooth: bool,
     rounded: bool,
 }
 
 impl PageSettings {
-    fn read(cx: &App) -> Self {
+    pub(super) fn read(cx: &App) -> Self {
         let s = TlSettings::settings(cx);
         Self {
             range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
@@ -133,7 +133,7 @@ impl PageSettings {
 }
 
 /// The versions of the sections [`PageSettings`] and the disk number read.
-fn section_versions(cx: &App) -> [u64; 3] {
+pub(super) fn section_versions(cx: &App) -> [u64; 3] {
     let tl = TlSettings::get(cx);
     [
         tl.version(Section::Performance),
@@ -146,7 +146,7 @@ fn series(device: DeviceIdx, metric: MetricId) -> SeriesId {
     SeriesId { device, metric }
 }
 
-fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettings) -> ChartSpec {
+pub(super) fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettings) -> ChartSpec {
     ChartSpec {
         series,
         y,
@@ -164,7 +164,7 @@ fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettings) -> Char
 }
 
 /// Active time with fill, 0..100.
-fn active_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
+pub(super) fn active_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
     let series = smallvec![ChartSeries {
         id: series(device, MetricId::DISK_ACTIVE),
         fill: Some(theme.graph.disk_fill),
@@ -179,7 +179,7 @@ fn active_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSpe
 }
 
 /// Read with fill and write as a dashed line, on a power-of-two scale.
-fn transfer_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
+pub(super) fn transfer_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
     let line = theme.graph.disk_line;
     let series = smallvec![
         ChartSeries {
@@ -198,7 +198,7 @@ fn transfer_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartS
     spec(series, YScale::AutoRate { iec: true }, s)
 }
 
-fn active_labels(w: &Words) -> ChartLabels {
+pub(super) fn active_labels(w: &Words) -> ChartLabels {
     ChartLabels {
         heading: Some(w.active.clone()),
         value_fmt: ValueFormat::Percent,
@@ -209,7 +209,7 @@ fn active_labels(w: &Words) -> ChartLabels {
     }
 }
 
-fn transfer_labels(w: &Words) -> ChartLabels {
+pub(super) fn transfer_labels(w: &Words) -> ChartLabels {
     ChartLabels {
         heading: Some(w.transfer.clone()),
         value_fmt: ValueFormat::RateIec,
@@ -225,7 +225,7 @@ fn transfer_labels(w: &Words) -> ChartLabels {
 
 /// The chart state from the disk source health: Failed with its error, else Live (the views
 /// derive WarmingUp and Stale themselves).
-fn health_state(snap: &Snapshot) -> ChartState {
+pub(super) fn health_state(snap: &Snapshot) -> ChartState {
     let h = snap.health.get(SourceId::Disk);
     match h.state {
         SourceState::Failed => ChartState::Failed(
@@ -292,7 +292,7 @@ const KEY_NO: &str = "perf-disk-no";
 const KEY_RPM: &str = "perf-disk-rpm-value";
 
 /// The Type words, by the kind name the engine gives (the E04-021 `DiskKind` names).
-const KIND_KEYS: [(&str, &str); 8] = [
+pub(super) const KIND_KEYS: [(&str, &str); 8] = [
     ("NVMe", "perf-disk-kind-nvme"),
     ("SSD", "perf-disk-kind-ssd"),
     ("HDD", "perf-disk-kind-hdd"),
@@ -304,7 +304,7 @@ const KIND_KEYS: [(&str, &str); 8] = [
 ];
 
 /// The word key of an engine kind name; `None` for a name this page does not know.
-fn kind_key(kind: &str) -> Option<&'static str> {
+pub(super) fn kind_key(kind: &str) -> Option<&'static str> {
     KIND_KEYS.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
 }
 

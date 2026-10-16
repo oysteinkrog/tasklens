@@ -13,12 +13,12 @@ use gpui_kit::{
 };
 use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
-use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{
-    InvField, InventorySnapshot, MemoryDetails, MemoryModule, SwapDevice, SwapKindModel,
-    ZramDetail, ZswapInfo,
+    DiskDetails, InvField, InventorySnapshot, MemoryDetails, MemoryModule, SwapDevice,
+    SwapKindModel, ZramDetail, ZswapInfo,
 };
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::validity::Validity;
@@ -28,6 +28,9 @@ use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::actions::PerfSetGraphRange;
+use tl_ui::pages::performance::aggregate::{
+    AggregateDiskPage, AggregateGpuPage, ROW_ADAPTERS, ROW_DISKS, ROW_TYPE as AGG_ROW_TYPE,
+};
 use tl_ui::pages::performance::cpu::CpuPage;
 use tl_ui::pages::performance::disk::{
     DiskPage, ROW_ACTIVE, ROW_CAPACITY, ROW_READ, ROW_RESPONSE, ROW_WRITE,
@@ -49,7 +52,9 @@ use tl_ui::pages::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
 };
 use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage, build_page};
-use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow, PerformancePage};
+use tl_ui::pages::performance::{
+    DeviceKey, DeviceKind, DeviceRow, PerformancePage, PerformanceSettingsView, sidebar_order,
+};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::metrics;
@@ -221,6 +226,8 @@ fn header_of(view: &AnyView, cx: &App) -> (SharedString, SharedString) {
             .map(|e| e.read(cx).header())
     }
     read::<CpuPage>(view, cx)
+        .or_else(|| read::<AggregateDiskPage>(view, cx))
+        .or_else(|| read::<AggregateGpuPage>(view, cx))
         .or_else(|| read::<MemoryPage>(view, cx))
         .or_else(|| read::<DiskPage>(view, cx))
         .or_else(|| read::<NetPage>(view, cx))
@@ -2571,4 +2578,158 @@ mod net_settings {
             "{texts:?}"
         );
     }
+}
+
+// ---- Aggregate pages (E25-035) ----
+
+fn gpu_entry(idx: u16, name: &str, bus: &str) -> DeviceEntry {
+    let mut e = entry(
+        idx,
+        DeviceIdentity::Gpu {
+            uuid: [0; 16],
+            pci_bus_id: Arc::from(bus),
+        },
+        None,
+    );
+    e.display_name = Arc::from(name);
+    e
+}
+
+fn aggregate_entry(idx: u16, kind: AggregateKind) -> DeviceEntry {
+    entry(idx, DeviceIdentity::Aggregate(kind), None)
+}
+
+fn aggregate_row(kind: DeviceKind, k: &DeviceKey, idx: u16) -> DeviceRow {
+    DeviceRow {
+        key: k.clone(),
+        kind,
+        idx: DeviceIdx(idx),
+        generation: 0,
+        net_class: None,
+        fan_connected: None,
+    }
+}
+
+/// A hub and demand over a catalog of `entries` and the disk kinds in `kinds` (idx, kind).
+fn aggregate_hub(
+    cx: &mut TestAppContext,
+    entries: Vec<DeviceEntry>,
+    kinds: &[(u16, &str)],
+) -> (Entity<SnapshotHub>, Entity<DemandAggregator>) {
+    let engine = install(cx);
+    let kinds: Vec<_> = kinds
+        .iter()
+        .map(|(i, k)| {
+            (
+                DeviceIdx(*i),
+                DiskDetails {
+                    kind: Arc::from(*k),
+                    ..DiskDetails::default()
+                },
+            )
+        })
+        .collect();
+    engine.publish_with(|s| {
+        s.devices = Arc::new(DeviceCatalog {
+            version: 2,
+            entries: Arc::from(entries),
+        });
+        let details = Arc::make_mut(&mut s.device_details);
+        details.header.version += 1;
+        details.disks = Arc::from(kinds);
+    });
+    let client: Arc<dyn EngineClient> = engine;
+    let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+    let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+    (hub, demand)
+}
+
+#[gpui_kit::test]
+fn aggregate_type_multiple(cx: &mut TestAppContext) {
+    let entries = vec![
+        disk(0, "nvme0n1"),
+        disk(1, "nvme1n1"),
+        disk(2, "sda"),
+        aggregate_entry(3, AggregateKind::Disks),
+    ];
+    let (hub, demand) = aggregate_hub(cx, entries, &[(0, "NVMe"), (1, "NVMe"), (2, "SSD")]);
+    let k = key("aggregate:disk");
+    let row = aggregate_row(DeviceKind::AggregateDisk, &k, 3);
+    let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
+    let page = view
+        .downcast::<AggregateDiskPage>()
+        .expect("an AggregateDiskPage");
+    cx.update(|cx| {
+        let page = page.read(cx);
+        assert_eq!(
+            page.header(),
+            (
+                SharedString::from("Aggregate storage"),
+                SharedString::from("3 disks")
+            )
+        );
+        assert_eq!(value_of(page.details(), AGG_ROW_TYPE), "Multiple");
+        assert_eq!(value_of(page.details(), ROW_DISKS), "nvme0n1, nvme1n1, sda");
+    });
+}
+
+#[gpui_kit::test]
+fn aggregate_exists_only_with_two_devices(cx: &mut TestAppContext) {
+    let entries = vec![
+        gpu_entry(0, "NVIDIA GeForce RTX 4090", "0000:2d:00.0"),
+        aggregate_entry(1, AggregateKind::Gpus),
+    ];
+    let catalog = DeviceCatalog {
+        version: 2,
+        entries: Arc::from(entries.clone()),
+    };
+    let (hub, demand) = aggregate_hub(cx, entries, &[]);
+    let k = key("aggregate:gpu");
+    let row = aggregate_row(DeviceKind::AggregateGpu, &k, 1);
+    let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
+    assert!(view.downcast::<PlaceholderPage>().is_ok());
+
+    let (order, overrides) = (Vec::new(), std::collections::HashMap::new());
+    let settings = PerformanceSettingsView {
+        order: &order,
+        overrides: &overrides,
+        show_disks: true,
+        show_gpus: true,
+        show_fans: true,
+        show_disconnected_fans: true,
+        show_batteries: true,
+        show_network_wired: true,
+        show_network_wireless: true,
+        show_network_vpn: true,
+        show_network_virtual: true,
+        show_network_other: true,
+    };
+    let mut rows = Vec::new();
+    sidebar_order(&catalog, &[], &settings, &mut rows);
+    assert!(rows.iter().all(|r| &*r.key.0 != "aggregate:gpu"));
+}
+
+#[gpui_kit::test]
+fn aggregate_gpu_adapters_row(cx: &mut TestAppContext) {
+    let entries = vec![
+        gpu_entry(0, "AMD Radeon RX 7900 XTX", "0000:03:00.0"),
+        gpu_entry(1, "NVIDIA GeForce RTX 4090", "0000:2d:00.0"),
+        aggregate_entry(2, AggregateKind::Gpus),
+    ];
+    let (hub, demand) = aggregate_hub(cx, entries, &[]);
+    let k = key("aggregate:gpu");
+    let row = aggregate_row(DeviceKind::AggregateGpu, &k, 2);
+    let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
+    let page = view
+        .downcast::<AggregateGpuPage>()
+        .expect("an AggregateGpuPage");
+    cx.update(|cx| {
+        let page = page.read(cx);
+        assert_eq!(
+            value_of(page.details(), ROW_ADAPTERS),
+            "AMD Radeon RX 7900 XTX, NVIDIA GeForce RTX 4090"
+        );
+        assert_eq!(value_of(page.details(), AGG_ROW_TYPE), "Multiple");
+        assert_eq!(page.header().1, "2 adapters");
+    });
 }

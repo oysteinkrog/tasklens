@@ -22,6 +22,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
 use super::actions::PerfShowMiniWindow;
+use super::aggregate::{AggregateDiskPage, AggregateGpuPage};
 use super::cpu::CpuPage;
 use super::details::{KeyValueModel, Template, render_details};
 use super::disk::DiskPage;
@@ -554,8 +555,34 @@ pub fn build_page(
         DeviceKind::Gpu => cx
             .new(|cx| GpuPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
             .into(),
+        // An aggregate page needs two or more devices of its type (PERF-009).
+        DeviceKind::AggregateDisk
+            if aggregate_has_members(hub, cx, |id| matches!(id, DeviceIdentity::Disk { .. })) =>
+        {
+            cx.new(|cx| {
+                AggregateDiskPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx)
+            })
+            .into()
+        }
+        DeviceKind::AggregateGpu
+            if aggregate_has_members(hub, cx, |id| matches!(id, DeviceIdentity::Gpu { .. })) =>
+        {
+            cx.new(|cx| {
+                AggregateGpuPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx)
+            })
+            .into()
+        }
         _ => cx.new(|cx| PlaceholderPage::new(key.clone(), cx)).into(),
     }
+}
+
+/// Two or more present devices of a type, the rule for an aggregate page.
+fn aggregate_has_members(
+    hub: &Entity<SnapshotHub>,
+    cx: &App,
+    f: impl Fn(&DeviceIdentity) -> bool,
+) -> bool {
+    present_count(hub.read(cx).current(), f) >= 2
 }
 
 /// The frame with an empty header, graph area and Details grid, for a kind whose page is not

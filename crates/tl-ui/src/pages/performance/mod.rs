@@ -7,6 +7,7 @@
 //! `ChartView::set_state` from `Snapshot.health`.
 
 pub mod actions;
+pub mod aggregate;
 pub mod card;
 pub mod cpu;
 pub mod cpu_details;
