@@ -1908,7 +1908,10 @@ fn privileges_page_keys(cx: &mut TestAppContext) {
     setup(cx);
     assert_eq!(
         page(cx, PageId::Privileges).keys(),
-        [SettingKey::PrivilegeUnlockAtLaunch]
+        [
+            SettingKey::PrivilegeUnlockAtLaunch,
+            SettingKey::PrivilegePasswordless
+        ]
     );
 }
 

@@ -18,7 +18,7 @@ use gpui_kit::{
     TestAppContext, VisualTestContext, Window, WindowHandle, div, px, size,
 };
 use tl_model::client::EngineClient;
-use tl_model::command::Tab;
+use tl_model::command::{Command, SetupPhase, SetupRun, SetupState, SetupStep, Tab};
 use tl_model::settings::{
     AppearanceSettings, ColumnResize, NetworkUnit, Settings, StartTab, ThemeSettings, UiState,
 };
@@ -869,7 +869,7 @@ fn shapes(cx: &mut VisualTestContext) -> Vec<String> {
         .collect()
 }
 
-const SETTINGS_ROOT: [&str; 28] = [
+const SETTINGS_ROOT: [&str; 29] = [
     "header:Monitoring",
     "item:Refresh",
     "item:Network transfer unit",
@@ -892,6 +892,7 @@ const SETTINGS_ROOT: [&str; 28] = [
     "item:Start minimized",
     "item:Default tab",
     "item:Unlock privileged actions at launch",
+    "item:Skip password prompts (experimental)",
     "item:Auto-fetch Public IP on launch",
     "item:Open rescue window on critical memory pressure",
     "header:Language",
@@ -1067,6 +1068,7 @@ fn settings_menu_p2_order(cx: &mut TestAppContext) {
             "Start minimized",
             "Default tab",
             "Unlock privileged actions at launch",
+            "Skip password prompts (experimental)",
             "Auto-fetch Public IP on launch",
             "Open rescue window on critical memory pressure"
         ]
@@ -1944,6 +1946,7 @@ fn settings_menu_p3_order(cx: &mut TestAppContext) {
             "Start minimized",
             "Default tab",
             "Unlock privileged actions at launch",
+            "Skip password prompts (experimental)",
             "Auto-fetch Public IP on launch",
             "Open rescue window on critical memory pressure"
         ]
@@ -2860,4 +2863,209 @@ fn rendering_gpu_restart_toast(cx: &mut TestAppContext) {
     open_rendering_gpu(r.cx);
     keys(r.cx, "down down enter");
     assert_eq!(gpu(&mut r), "name:llvmpipe");
+}
+
+// Settings > Skip password prompts (E21-042, UI-SHL-040, UI-SHL-091, R-222).
+
+const PASSWORDLESS: &str = "Skip password prompts (experimental)";
+
+/// A rig with toasts, a window tall enough for every Settings row, and a hub on the fake engine
+/// (the flow reads the setup result from it).
+fn passwordless_rig(cx: &mut TestAppContext) -> Rig<'_> {
+    let r = rig_with_toasts(cx);
+    tall_window(r.cx);
+    let client: Arc<dyn EngineClient> = r.engine.clone();
+    r.cx.update(|_, cx| {
+        let hub = cx.new(|cx| tl_ui::hub::SnapshotHub::new(client, cx));
+        cx.set_global(tl_ui::hub::GlobalHub(hub));
+    });
+    draw(r.cx);
+    r
+}
+
+/// The `on` values of every `RunSetup { PolkitRule }` the engine received, in order.
+fn polkit_steps(engine: &FakeEngine) -> Vec<bool> {
+    engine
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::RunSetup {
+                step: SetupStep::PolkitRule { on },
+            } => Some(on),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Publishes `health.setup.run` for the polkit rule step.
+fn publish_polkit(engine: &FakeEngine, seq: u64, on: bool, phase: SetupPhase) {
+    engine.publish_with(|s| {
+        let mut health = (*s.health).clone();
+        health.version += 1;
+        health.setup = Arc::new(SetupState {
+            status: None,
+            run: Some(SetupRun {
+                seq,
+                step: SetupStep::PolkitRule { on },
+                phase,
+                output: Arc::from(""),
+            }),
+        });
+        s.health = Arc::new(health);
+    });
+}
+
+fn passwordless(cx: &mut TestAppContext) -> bool {
+    cx.update(|cx| TlSettings::settings(cx).privilege.passwordless)
+}
+
+fn queue_texts(cx: &mut TestAppContext, queue: &Entity<ToastQueue>) -> Vec<String> {
+    cx.update(|cx| {
+        queue
+            .read(cx)
+            .visible_texts()
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    })
+}
+
+/// Clicks the row with the key off. Returns the engine, the main window's toast queue and a
+/// context on the confirmation, which is the active window.
+fn open_passwordless_confirm(
+    cx: &mut TestAppContext,
+) -> (
+    Arc<FakeEngine>,
+    Entity<ToastQueue>,
+    Entity<TlDialogView>,
+    VisualTestContext,
+) {
+    let r = passwordless_rig(cx);
+    assert!(!settings(r.cx).privilege.passwordless);
+    keys(r.cx, "alt-s");
+    click_label(r.cx, PASSWORDLESS);
+    r.cx.run_until_parked();
+    let handle = delete_dialog_handle(r.cx);
+    let view = delete_dialog_view(r.cx, handle);
+    let engine = r.engine.clone();
+    let queue = r.toasts.clone().expect("rig with toasts");
+    drop(r);
+    let mut dialog = VisualTestContext::from_window(handle.into(), cx);
+    dialog.update(|window, _| window.activate_window());
+    dialog.run_until_parked();
+    (engine, queue, view, dialog)
+}
+
+#[gpui_kit::test]
+fn passwordless_confirm_first(cx: &mut TestAppContext) {
+    let (engine, _, view, mut dialog) = open_passwordless_confirm(cx);
+    let (title, text, destructive) = dialog.read(|cx| {
+        let dialog = view.read(cx).dialog();
+        (
+            dialog.window_title().to_string(),
+            dialog.text().to_string(),
+            dialog.is_destructive(),
+        )
+    });
+    assert_eq!(title, "tasklens");
+    assert_eq!(
+        text,
+        "tasklens actions that change other users' processes, system services and network \
+         connections will run without asking for a password. Continue?"
+    );
+    draw(&mut dialog);
+    let buttons: Vec<String> = dialog
+        .update(|window, _| snapshots(window))
+        .into_iter()
+        .filter(|s| s.role() == Some(Role::Button))
+        .filter_map(|s| s.label().map(str::to_owned))
+        .collect();
+    assert!(
+        buttons.iter().any(|b| b == "Skip prompts") && buttons.iter().any(|b| b == "Cancel"),
+        "buttons: {buttons:?}"
+    );
+    assert!(!destructive);
+    assert_eq!(
+        dialog.update(|window, cx| view.read(cx).focused_button(window)),
+        Some(DialogButton::Action)
+    );
+    assert!(
+        polkit_steps(&engine).is_empty(),
+        "nothing sent before the answer"
+    );
+}
+
+#[gpui_kit::test]
+fn passwordless_success_writes_key(cx: &mut TestAppContext) {
+    let (engine, _, _, mut dialog) = open_passwordless_confirm(cx);
+    dialog.simulate_keystrokes("enter");
+    dialog.run_until_parked();
+    drop(dialog);
+    assert_eq!(polkit_steps(&engine), [true]);
+    assert!(!passwordless(cx), "not before the step ends");
+
+    publish_polkit(&engine, 1, true, SetupPhase::Running);
+    cx.run_until_parked();
+    assert!(!passwordless(cx), "not while the step runs");
+
+    publish_polkit(&engine, 1, true, SetupPhase::Succeeded);
+    cx.run_until_parked();
+    assert!(passwordless(cx));
+}
+
+#[gpui_kit::test]
+fn passwordless_cancel_no_command(cx: &mut TestAppContext) {
+    let (engine, queue, _, mut dialog) = open_passwordless_confirm(cx);
+    dialog.simulate_keystrokes("escape");
+    dialog.run_until_parked();
+    drop(dialog);
+    cx.run_until_parked();
+    assert!(polkit_steps(&engine).is_empty(), "no setup step sent");
+    assert!(!passwordless(cx));
+    assert!(queue_texts(cx, &queue).is_empty(), "no toast");
+}
+
+#[gpui_kit::test]
+fn passwordless_dismissed_prompt_toast(cx: &mut TestAppContext) {
+    let (engine, queue, _, mut dialog) = open_passwordless_confirm(cx);
+    dialog.simulate_keystrokes("enter");
+    dialog.run_until_parked();
+    drop(dialog);
+    assert_eq!(polkit_steps(&engine), [true]);
+
+    publish_polkit(&engine, 1, true, SetupPhase::Cancelled);
+    cx.run_until_parked();
+    assert_eq!(queue_texts(cx, &queue), ["Authentication cancelled"]);
+    assert!(!passwordless(cx));
+
+    // The answered run does not count again.
+    publish_polkit(&engine, 1, true, SetupPhase::Succeeded);
+    cx.run_until_parked();
+    assert!(!passwordless(cx));
+}
+
+#[gpui_kit::test]
+fn passwordless_off_no_confirm(cx: &mut TestAppContext) {
+    let r = passwordless_rig(cx);
+    r.cx.update(|_, cx| {
+        TlSettings::set(
+            cx,
+            tl_ui::settings_global::SettingKey::PrivilegePasswordless,
+            tl_ui::settings_global::SettingValue::Bool(true),
+        )
+    });
+    let windows = window_count(r.cx);
+    keys(r.cx, "alt-s");
+    click_label(r.cx, PASSWORDLESS);
+    r.cx.run_until_parked();
+    assert_eq!(window_count(r.cx), windows, "no confirmation opened");
+    assert_eq!(polkit_steps(&r.engine), [false]);
+    assert!(
+        settings(r.cx).privilege.passwordless,
+        "not before the step ends"
+    );
+
+    publish_polkit(&r.engine, 1, false, SetupPhase::Succeeded);
+    r.cx.run_until_parked();
+    assert!(!settings(r.cx).privilege.passwordless);
 }

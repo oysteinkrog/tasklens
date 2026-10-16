@@ -80,6 +80,30 @@ pub fn confirm_delete_theme(name: SharedString, window: &mut Window, cx: &mut Ap
     }
 }
 
+/// Opens "tasklens actions that change other users' processes, …" with Cancel and a Primary
+/// "Skip prompts" (UI-SHL-091). Not destructive, so focus starts on "Skip prompts" (R-104).
+/// `on_confirm` runs only on "Skip prompts"; Cancel and Esc do nothing.
+pub fn confirm_passwordless(
+    window: &mut Window,
+    cx: &mut App,
+    on_confirm: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
+    let dialog = TlDialog::confirm(
+        tr(cx, "shell-confirm-passwordless-text"),
+        tr(cx, "shell-confirm-passwordless-button"),
+    )
+    .title(tr(cx, "shell-confirm-title"))
+    .cancel_label(tr(cx, "shell-confirm-cancel"));
+    let opened = dialog.open(window, cx, move |result, window, cx| {
+        if let DialogResult::Confirmed { .. } = result {
+            on_confirm(window, cx);
+        }
+    });
+    if opened.is_err() {
+        warn!(target: "tasklens::ui", "skip password prompts confirmation did not open");
+    }
+}
+
 fn delete_theme(name: &str, window: &mut Window, cx: &mut App) {
     match ThemeStore::delete_theme(name, cx) {
         Ok(ThemeEvent::Deleted { .. }) => {

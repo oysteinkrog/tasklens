@@ -1,8 +1,8 @@
-//! Settings window, Privileges page (E21-035, UI-SHL-070, APP-023, APP-049, R-028). The switch
-//! only writes `privilege.unlock_at_launch`; the button opens the Additional Setup window. No
-//! privileged call happens here. The Skip password prompts row (E21-042, tasklens-bj6.46) goes
-//! before the button and the helper status line (E29, tasklens-qfx.29) after it, both by chain
-//! edit.
+//! Settings window, Privileges page (E21-035, UI-SHL-070, APP-023, APP-049, R-028). The first
+//! switch only writes `privilege.unlock_at_launch`; the button opens the Additional Setup window.
+//! No privileged call happens here. The Skip password prompts switch (E21-042) dispatches
+//! `TogglePasswordless`, which asks first and runs the polkit rule setup step; the key follows
+//! the step's result. The helper status line (E29, tasklens-qfx.29) goes after the button.
 
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ use crate::components::button::TlButtonKind;
 use crate::hub::GlobalHub;
 use crate::i18n::tr;
 use crate::settings_global::SettingKey;
+use crate::window::menus_settings::TogglePasswordless;
 
 pub fn page(cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(PageId::Privileges);
@@ -25,7 +26,12 @@ pub fn page(cx: &mut App) -> PageBuilder {
         tr(cx, "shell-menu-settings-unlock-at-launch"),
         None,
     );
-    // E21-042 (tasklens-bj6.46) adds the Skip password prompts row here.
+    page.action_switch(
+        group,
+        SettingKey::PrivilegePasswordless,
+        tr(cx, "shell-menu-settings-passwordless"),
+        || Box::new(TogglePasswordless),
+    );
     page.button(
         group,
         tr(cx, "shell-menu-help-setup"),

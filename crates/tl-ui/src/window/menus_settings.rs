@@ -28,28 +28,41 @@
 //! its own thread) and rebuilds the submenu with one row per adapter, or "No adapters found".
 //! A row writes `rendering.gpu`; a new value shows the Info toast "Restart tasklens to use the new
 //! GPU".
+//!
+//! P4 row (E21-042, UI-SHL-040, UI-SHL-091, R-222): "Skip password prompts (experimental)" in
+//! Window & startup, after "Unlock privileged actions at launch". Turning it on asks first
+//! ([`confirm_passwordless`]), then sends `RunSetup { PolkitRule { on: true } }`; turning it off
+//! sends `PolkitRule { on: false }` at once. The UI never writes the polkit rule itself.
+//! [`PasswordlessFlow`] writes `privilege.passwordless` only when `health.setup.run` reports the
+//! step succeeded. A cancelled prompt shows the Info toast "Authentication cancelled", another
+//! failure the Error toast "Setup failed", and the key stays as it was.
 
 use std::future::Future;
 use std::time::Duration;
 
 use fluent_bundle::FluentValue;
-use gpui_kit::{App, Entity, FocusHandle, FutureExt as _, SharedString, Window, px};
-use tl_model::command::Tab;
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, FutureExt as _, Global,
+    SharedString, Subscription, Window, px,
+};
+use tl_model::command::{Command, SetupPhase, SetupStep, Tab};
 use tl_model::settings::{
     HISTORY_RETENTION_MENU_H, NetworkUnit, PROCESS_INTERVAL_MENU_MS, Settings, StartTab,
 };
 use tracing::warn;
 
-use super::confirm::ResetSettings;
+use super::confirm::{ResetSettings, confirm_passwordless};
 use super::main::ShellState;
 use super::menubar::{MenuSliders, TAB_SWITCH};
 use super::public_ip::request_public_ip_fetch;
 use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
-use crate::app::{AdapterInfo, AppEnv};
+use crate::app::{AdapterInfo, AppEnv, EngineGlobal};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
+use crate::window::main::push_main_toast;
 
 /// The Refresh items: label key and `processes.interval_ms`, in `PROCESS_INTERVAL_MENU_MS` order.
 pub(crate) const REFRESH_KEYS: [&str; 6] = [
@@ -93,6 +106,9 @@ gpui_kit::actions!(
         ToggleStartMinimized,
         /// Flips `history.enabled` and shows the Info toast "History recording on" or "off".
         ToggleRecordHistory,
+        /// Asks, then installs the polkit rule; or removes it. `privilege.passwordless` follows
+        /// the setup result.
+        TogglePasswordless,
     ]
 );
 
@@ -139,6 +155,31 @@ pub fn init(cx: &mut App) {
         }
         TlSettings::set(cx, SettingKey::RenderingGpu, SettingValue::Str(a.0.clone()));
         info_toast(cx, "shell-toast-gpu-restart");
+    });
+    cx.on_action(|_: &TogglePasswordless, cx| {
+        let Some(flow) = PasswordlessFlow::get(cx) else {
+            warn!(target: "tasklens::ui", "no hub, skip password prompts not changed");
+            return;
+        };
+        if flow.read(cx).pending.is_some() {
+            return;
+        }
+        let active = cx.active_window();
+        if settings_now(cx).privilege.passwordless {
+            flow.update(cx, |flow, cx| flow.send(false, active, cx));
+            return;
+        }
+        let Some(handle) = active else {
+            return;
+        };
+        // The window is busy dispatching this action; the confirmation needs it.
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                confirm_passwordless(window, cx, move |_, cx| {
+                    flow.update(cx, |flow, cx| flow.send(true, Some(handle), cx));
+                });
+            });
+        });
     });
     cx.on_action(|_: &TogglePublicIpAutoFetch, cx| {
         if settings_now(cx).network.auto_fetch_public_ip {
@@ -286,6 +327,11 @@ pub fn build(
             tr(cx, "shell-menu-settings-unlock-at-launch"),
             s.privilege.unlock_at_launch,
             toggle(SettingKey::PrivilegeUnlockAtLaunch),
+        )
+        .check_item(
+            tr(cx, "shell-menu-settings-passwordless"),
+            s.privilege.passwordless,
+            Box::new(TogglePasswordless),
         )
         .check_item(
             tr(cx, "shell-menu-settings-public-ip"),
@@ -588,4 +634,126 @@ pub fn language_marks(cx: &App) -> Vec<bool> {
         .chain(SHIPPED_LANGUAGES.map(|(value, _)| value))
         .map(|value| value == current)
         .collect()
+}
+
+/// Sends the `polkit-rule on|off` setup step for "Skip password prompts" and writes
+/// `privilege.passwordless` from its result (E21-042, R-222). One step runs at a time.
+pub struct PasswordlessFlow {
+    hub: Entity<SnapshotHub>,
+    /// The value asked for while its step runs.
+    pending: Option<bool>,
+    /// The window that asked, for the result toast.
+    requester: Option<AnyWindowHandle>,
+    /// The `setup.run` seq when the step was sent. Only a newer run answers it.
+    seen_seq: u64,
+    _health: Subscription,
+}
+
+struct GlobalPasswordlessFlow(Entity<PasswordlessFlow>);
+
+impl Global for GlobalPasswordlessFlow {}
+
+impl PasswordlessFlow {
+    /// The app's flow, created on first use. `None` without the hub: no result could arrive.
+    fn get(cx: &mut App) -> Option<Entity<Self>> {
+        if let Some(flow) = cx.try_global::<GlobalPasswordlessFlow>() {
+            return Some(flow.0.clone());
+        }
+        let hub = cx.try_global::<GlobalHub>()?.0.clone();
+        let flow = cx.new(|cx| {
+            let _health = cx.subscribe(&hub, |this: &mut Self, _, ev: &SnapshotChanged, cx| {
+                if ev.mask.contains(ComponentMask::HEALTH) {
+                    this.take_health(cx);
+                }
+            });
+            Self {
+                hub,
+                pending: None,
+                requester: None,
+                seen_seq: 0,
+                _health,
+            }
+        });
+        cx.set_global(GlobalPasswordlessFlow(flow.clone()));
+        Some(flow)
+    }
+
+    fn send(&mut self, on: bool, requester: Option<AnyWindowHandle>, cx: &mut Context<Self>) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(engine) = cx.try_global::<EngineGlobal>() else {
+            warn!(target: "tasklens::ui", "no engine, polkit rule step not sent");
+            return;
+        };
+        let step = SetupStep::PolkitRule { on };
+        if let Err(err) = engine.0.send(Command::RunSetup { step }) {
+            warn!(target: "tasklens::ui", ?err, "polkit rule step not sent");
+            return;
+        }
+        self.seen_seq = current_setup_seq(&self.hub, cx);
+        self.pending = Some(on);
+        self.requester = requester;
+    }
+
+    /// Takes the end of the pending step from `health.setup.run`: success writes the key, a
+    /// cancel or a failure shows a toast and leaves it.
+    fn take_health(&mut self, cx: &mut Context<Self>) {
+        let Some(on) = self.pending else {
+            return;
+        };
+        let Some(run) = self.hub.read(cx).current().health.setup.run.clone() else {
+            return;
+        };
+        if run.seq <= self.seen_seq || run.step != (SetupStep::PolkitRule { on }) {
+            return;
+        }
+        let toast = match &run.phase {
+            SetupPhase::Running => return,
+            SetupPhase::Succeeded => None,
+            SetupPhase::Cancelled => Some((ToastKind::Info, "fnd-shield-auth-cancelled")),
+            SetupPhase::Failed(_) => {
+                warn!(target: "tasklens::ui", on, "polkit rule step failed");
+                Some((ToastKind::Error, "setup-failed"))
+            }
+        };
+        self.seen_seq = run.seq;
+        self.pending = None;
+        let requester = self.requester.take();
+        match toast {
+            None => TlSettings::set(
+                cx,
+                SettingKey::PrivilegePasswordless,
+                SettingValue::Bool(on),
+            ),
+            Some((kind, key)) => {
+                let text = tr(cx, key);
+                toast_in(requester, kind, text, cx);
+            }
+        }
+    }
+}
+
+fn current_setup_seq(hub: &Entity<SnapshotHub>, cx: &App) -> u64 {
+    hub.read(cx)
+        .current()
+        .health
+        .setup
+        .run
+        .as_ref()
+        .map_or(0, |run| run.seq)
+}
+
+/// Pushes the toast into `window`'s stack when it is open and has one, else into the main
+/// window's.
+fn toast_in(window: Option<AnyWindowHandle>, kind: ToastKind, text: SharedString, cx: &mut App) {
+    let queue = window.and_then(|w| {
+        w.update(cx, |_, window, cx| ToastQueue::of_window(window, cx))
+            .ok()
+            .flatten()
+    });
+    match queue {
+        Some(queue) => queue.update(cx, |q, cx| q.push(kind, text, None, None, cx)),
+        None => push_main_toast(cx, kind, text, None, None),
+    }
 }
