@@ -1754,6 +1754,11 @@ fn advanced_rendering_gpu_row(cx: &mut TestAppContext) {
         window_toasts(&mut vcx),
         ["Restart tasklens to use the new GPU"]
     );
+    // Past the 1 s toast coalesce window, so a repeated toast shows as a second entry.
+    let past_coalesce =
+        tl_ui::components::toast::COALESCE_WINDOW + std::time::Duration::from_millis(500);
+    vcx.executor().advance_clock(past_coalesce);
+    vcx.run_until_parked();
     vcx.update(|_, cx| advanced.pick(SettingKey::RenderingGpu, "NVIDIA GeForce RTX 4070", cx));
     vcx.run_until_parked();
     assert_eq!(
@@ -1763,6 +1768,8 @@ fn advanced_rendering_gpu_row(cx: &mut TestAppContext) {
     let toasts = window_toasts(&mut vcx);
     assert_eq!(toasts.len(), 2, "each change of GPU toasts once");
 
+    vcx.executor().advance_clock(past_coalesce);
+    vcx.run_until_parked();
     vcx.update(|_, cx| advanced.pick(SettingKey::RenderingGpu, "NVIDIA GeForce RTX 4070", cx));
     vcx.run_until_parked();
     assert_eq!(
