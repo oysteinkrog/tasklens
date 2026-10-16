@@ -9,6 +9,7 @@
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
 use std::cell::Cell;
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use gpui_kit::{
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
+use tl_model::devices::{DeviceEntry, DeviceIdentity};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::snapshot::{GraphicsAdapter, Snapshot};
@@ -88,9 +90,10 @@ pub enum GpuVendor {
 
 impl GpuVendor {
     /// The vendor from the adapter's kernel module: `nvidia`, `amdgpu` or `radeon`, `i915` or
-    /// `xe`. Anything else is `Unknown`.
+    /// `xe`. Anything else is `Unknown`. The inventory adds the module version after the name
+    /// ("nvidia 615.71.09"), which is ignored here.
     pub fn from_kernel_module(module: &str) -> Self {
-        match module.trim() {
+        match module.split_whitespace().next().unwrap_or_default() {
             "nvidia" => Self::Nvidia,
             "amdgpu" | "radeon" => Self::Amd,
             "i915" | "xe" => Self::Intel,
@@ -775,9 +778,21 @@ impl GpuPage {
                 changed = true;
             }
         }
-        if mask.intersects(ComponentMask::SYSTEM | ComponentMask::INVENTORY | ComponentMask::HEALTH)
-            || vendor_changed
+        if mask.intersects(
+            ComponentMask::SYSTEM
+                | ComponentMask::INVENTORY
+                | ComponentMask::HEALTH
+                | ComponentMask::DEVICES,
+        ) || vendor_changed
         {
+            let (uuid, pci_bus_id) =
+                match snap.devices.entries.iter().find(|e| e.idx == self.row.idx) {
+                    Some(DeviceEntry {
+                        identity: DeviceIdentity::Gpu { uuid, pci_bus_id },
+                        ..
+                    }) => (Some(*uuid), Some(&**pci_bus_id)),
+                    _ => (None, None),
+                };
             let inputs = GpuDetailInputs {
                 now_boot_ns: now_boot_ns(),
                 observed_end_ns: snap.system.header.observed_end,
@@ -785,8 +800,11 @@ impl GpuPage {
                 adapter: adapter(snap, self.row.idx),
                 vendor: self.vendor,
                 probe: self.probe,
+                uuid,
+                pci_bus_id,
             };
             changed |= update_gpu_details_p1(&mut self.details, &inputs);
+            changed |= update_gpu_details_p2(&mut self.details, &inputs);
         }
         if (devices || inventory)
             && let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == self.row.idx)
@@ -1190,22 +1208,30 @@ const TIP_SESSIONS: &str = "perf-gpu-enc-sessions";
 const DOT: &str = " · ";
 
 /// The GPU Details model: the 28 rows in order plus `Video encode/decode` after
-/// `Video decode`. Rows 9 to 28 are hidden until E25-024; the merged row is hidden until a
-/// record reports a shared engine.
+/// `Video decode`. The merged row is hidden until a record reports a shared engine.
 pub fn gpu_details_model() -> KeyValueModel {
     let mut labels = GPU_DETAIL_ROWS.to_vec();
     labels.insert(6, ROW_ENCODE_DECODE);
-    let mut model = KeyValueModel::new(&labels).with_counted_text(TIP_SESSIONS, &["n"], 0);
-    for label in GPU_DETAIL_ROWS[P1_ROWS..]
-        .iter()
-        .chain([&ROW_ENCODE_DECODE])
-    {
-        model.hide(label);
-    }
+    let mut model = KeyValueModel::new(&labels)
+        .with_counted_text(TIP_SESSIONS, &["n"], 0)
+        .with_texts(&[
+            (TEXT_FAN, &["pct", "rpm"]),
+            (TEXT_PCIE, &["gen", "width"]),
+            (TEXT_THROUGHPUT, &["rx", "tx"]),
+            (TEXT_LOCATION, &["bus", "dev", "fn"]),
+            (TEXT_POWER_TIP, &["max", "kwh"]),
+        ]);
+    model.hide(ROW_ENCODE_DECODE);
     model
 }
 
-/// What rows 1 to 8 are read from.
+const TEXT_FAN: &str = "perf-gpu-fan-value";
+const TEXT_PCIE: &str = "perf-gpu-pcie-value";
+const TEXT_THROUGHPUT: &str = "perf-gpu-pcie-throughput-value";
+const TEXT_LOCATION: &str = "perf-gpu-location-value";
+const TEXT_POWER_TIP: &str = "perf-gpu-power-row-tooltip";
+
+/// What the Details rows are read from.
 #[derive(Clone, Copy)]
 pub struct GpuDetailInputs<'a> {
     pub now_boot_ns: u64,
@@ -1215,6 +1241,10 @@ pub struct GpuDetailInputs<'a> {
     pub adapter: Option<&'a GraphicsAdapter>,
     pub vendor: GpuVendor,
     pub probe: ProbeState,
+    /// The NVML UUID from the device catalog; all zero for AMD and Intel.
+    pub uuid: Option<[u8; 16]>,
+    /// The PCI bus id from the device catalog, for example "0000:2d:00.0".
+    pub pci_bus_id: Option<&'a str>,
 }
 
 /// A metric of a GPU with no record yet.
@@ -1377,6 +1407,426 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
             None,
         ),
     };
+    changed
+}
+
+const ROW_FAN: &str = "perf-gpu-row-fan";
+const ROW_SLOWDOWN: &str = "perf-gpu-row-slowdown";
+const ROW_SHUTDOWN: &str = "perf-gpu-row-shutdown";
+const ROW_MEM_TEMP: &str = "perf-gpu-row-mem-temp";
+const ROW_CLOCK: &str = "perf-gpu-row-clock";
+const ROW_MEM_CLOCK: &str = "perf-gpu-row-mem-clock";
+const ROW_VIDEO_CLOCK: &str = "perf-gpu-row-video-clock";
+const ROW_POWER: &str = "perf-gpu-row-power";
+const ROW_PCIE: &str = "perf-gpu-row-pcie";
+const ROW_PCIE_MAX: &str = "perf-gpu-row-pcie-max";
+const ROW_PCIE_THROUGHPUT: &str = "perf-gpu-row-pcie-throughput";
+const ROW_DRIVER: &str = "perf-gpu-row-driver";
+const ROW_MODULE: &str = "perf-gpu-row-module";
+const ROW_CUDA: &str = "perf-gpu-row-cuda";
+const ROW_VULKAN: &str = "perf-gpu-row-vulkan";
+const ROW_OPENGL: &str = "perf-gpu-row-opengl";
+const ROW_LOCATION: &str = "perf-gpu-row-location";
+const ROW_VBIOS: &str = "perf-gpu-row-vbios";
+const ROW_UUID: &str = "perf-gpu-row-uuid";
+const ROW_ARCH: &str = "perf-gpu-row-arch";
+
+/// The rows 9 to 28 that come from the GPU record or the probe's static info. They read
+/// "Unavailable" or "Not supported" in a probe state. The inventory rows (driver, module, Vulkan,
+/// OpenGL, location, UUID) do not.
+const PROBE_ROWS: [&str; 14] = [
+    ROW_FAN,
+    ROW_SLOWDOWN,
+    ROW_SHUTDOWN,
+    ROW_MEM_TEMP,
+    ROW_CLOCK,
+    ROW_MEM_CLOCK,
+    ROW_VIDEO_CLOCK,
+    ROW_POWER,
+    ROW_PCIE,
+    ROW_PCIE_MAX,
+    ROW_PCIE_THROUGHPUT,
+    ROW_CUDA,
+    ROW_VBIOS,
+    ROW_ARCH,
+];
+
+/// The value of a `Metric` when it is shown.
+fn shown<T: Copy + Default>(m: Metric<T>) -> Option<T> {
+    matches!(m.validity, Validity::Valid | Validity::Stale).then_some(m.value)
+}
+
+/// Two metrics as one value: shown when both are, Stale when either is, else the first one's
+/// state that is not shown.
+fn both<A: Copy + Default, B: Copy + Default>(a: Metric<A>, b: Metric<B>) -> Metric<(A, B)> {
+    let validity = match (shown(a).is_some(), shown(b).is_some()) {
+        (true, true) if a.validity == Validity::Stale || b.validity == Validity::Stale => {
+            Validity::Stale
+        }
+        (true, true) => Validity::Valid,
+        (false, _) => a.validity,
+        (true, false) => b.validity,
+    };
+    Metric {
+        value: (a.value, b.value),
+        validity,
+    }
+}
+
+/// A row from a text the inventory or the probe reports once. A blank or missing text reads
+/// "Not reported"; `failed_unknown` makes a failed read "Unknown".
+fn static_text(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    text: Option<&str>,
+    validity: Validity,
+    failed_unknown: bool,
+) -> bool {
+    let text = text.map(str::trim).filter(|t| !t.is_empty());
+    match (text, validity) {
+        (Some(t), Validity::Valid | Validity::Stale) => model.set_text(label, t),
+        (_, Validity::Failed) if failed_unknown => {
+            model.set_fallback(label, Validity::Unsupported, Fallback::Unknown, None)
+        }
+        (_, Validity::WarmingUp) => {
+            model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None)
+        }
+        _ => model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None),
+    }
+}
+
+/// Bus, device and function of a PCI id such as "0000:2d:00.0", in decimal.
+fn parse_pci(id: &str) -> Option<[u32; 3]> {
+    let mut parts = id.trim().rsplit(':');
+    let (dev, func) = parts.next()?.split_once('.')?;
+    let bus = parts.next()?;
+    let hex = |s: &str| u32::from_str_radix(s, 16).ok();
+    Some([hex(bus)?, hex(dev)?, hex(func)?])
+}
+
+/// The NVML text form of a UUID: `GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+fn write_uuid(out: &mut String, uuid: &[u8; 16]) {
+    out.push_str("GPU");
+    for (i, byte) in uuid.iter().enumerate() {
+        if matches!(i, 0 | 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        let _ = write!(out, "{byte:02x}");
+    }
+}
+
+/// An Intel GPU with no dedicated memory shares the CPU package's power meter.
+fn is_intel_igpu(inp: &GpuDetailInputs) -> bool {
+    let dedicated = inp
+        .adapter
+        .and_then(|a| shown_u64(a.dedicated_bytes.value, a.dedicated_bytes.validity))
+        .or_else(|| {
+            inp.totals
+                .and_then(|t| shown_u64(t.mem_total.value, t.mem_total.validity))
+        });
+    inp.vendor == GpuVendor::Intel && dedicated.is_none_or(|n| n == 0)
+}
+
+/// Fills rows 9 to 28 (UI-PRF-033). `Max PCI Express` is hidden when it equals the current link,
+/// and `CUDA version` off NVIDIA. An Intel iGPU whose power is Restricted or Unsupported reads
+/// "Needs setup" (a link). In a probe state the rows that come from the probe read "Unavailable"
+/// or "Not supported". True when the grid needs a redraw.
+pub fn update_gpu_details_p2(model: &mut KeyValueModel, inp: &GpuDetailInputs) -> bool {
+    let mut changed = show_if(model, ROW_CUDA, inp.vendor == GpuVendor::Nvidia);
+    let probe_word = match inp.probe {
+        ProbeState::Ok => None,
+        ProbeState::Restarting => Some(Fallback::Unavailable),
+        ProbeState::Missing => Some(Fallback::NotSupported),
+    };
+    if let Some(f) = probe_word {
+        changed |= show_if(model, ROW_PCIE_MAX, true);
+        for label in PROBE_ROWS {
+            changed |= model.set_fallback(label, Validity::Unsupported, f, None);
+        }
+    } else {
+        changed |= update_gpu_live_rows(model, inp);
+    }
+
+    let a = inp.adapter;
+    changed |= static_text(
+        model,
+        ROW_DRIVER,
+        a.map(|a| &*a.driver_version.value),
+        a.map_or(Validity::Missing, |a| a.driver_version.validity),
+        false,
+    );
+    changed |= static_text(
+        model,
+        ROW_MODULE,
+        a.map(|a| &*a.kernel_module.value),
+        a.map_or(Validity::Missing, |a| a.kernel_module.validity),
+        false,
+    );
+    changed |= static_text(
+        model,
+        ROW_VULKAN,
+        a.map(|a| &*a.vulkan_version.value),
+        a.map_or(Validity::Missing, |a| a.vulkan_version.validity),
+        true,
+    );
+    changed |= static_text(
+        model,
+        ROW_OPENGL,
+        a.map(|a| &*a.opengl_version.value),
+        a.map_or(Validity::Missing, |a| a.opengl_version.validity),
+        true,
+    );
+
+    let slot = inp
+        .pci_bus_id
+        .or_else(|| a.and_then(|a| a.pci_slot.as_deref()));
+    changed |= match slot.and_then(parse_pci) {
+        Some(ids) => {
+            let bits = ids.iter().fold(0u64, |acc, &n| acc << 16 | u64::from(n));
+            let tmpl = model.text(TEXT_LOCATION);
+            model.set_valid(ROW_LOCATION, bits, |o| {
+                tmpl.write_each(o, |i, o| {
+                    let _ = write!(o, "{}", ids[i]);
+                })
+            })
+        }
+        None => model.set_fallback(
+            ROW_LOCATION,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        ),
+    };
+
+    match inp.uuid.filter(|u| *u != [0; 16]) {
+        Some(uuid) => {
+            let bits = uuid.chunks(8).fold(0u64, |acc, c| {
+                acc ^ c.iter().fold(0u64, |n, &b| n << 8 | u64::from(b))
+            });
+            changed |= model.set_valid(ROW_UUID, bits, |o| write_uuid(o, &uuid));
+            // The cell cuts a long value with "…"; the tooltip holds the whole UUID.
+            changed |= set_tip(model, ROW_UUID, |o| write_uuid(o, &uuid));
+        }
+        None => {
+            changed |=
+                model.set_fallback(ROW_UUID, Validity::Unsupported, Fallback::NotReported, None);
+        }
+    }
+    changed
+}
+
+/// The rows of 9 to 28 that read the GPU record and the probe's static info, while the probe is
+/// Ok.
+fn update_gpu_live_rows(model: &mut KeyValueModel, inp: &GpuDetailInputs) -> bool {
+    let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
+    let rows = DetailRows { age_ns };
+    let t = inp.totals;
+    let info = t.map(|t| &*t.info);
+    let f32_bits = |v: f32| u64::from(v.to_bits());
+    let mut changed = false;
+
+    // Fan speed: "0% (0 RPM)", or one of the two when the card reports only that one.
+    let (pct, rpm) = t.map_or((None, None), |t| (shown(t.fan_pct), shown(t.fan_rpm)));
+    let fan_tmpl = model.text(TEXT_FAN);
+    changed |= if pct.is_none() && rpm.is_none() {
+        fallback(
+            model,
+            ROW_FAN,
+            t.map_or(Validity::Missing, |t| t.fan_pct.validity),
+        )
+    } else {
+        let stale = t.is_some_and(|t| {
+            (pct.is_some() && t.fan_pct.validity == Validity::Stale)
+                || (rpm.is_some() && t.fan_rpm.validity == Validity::Stale)
+        });
+        let validity = if stale {
+            Validity::Stale
+        } else {
+            Validity::Valid
+        };
+        let value = (pct.unwrap_or_default(), rpm.unwrap_or_default());
+        let bits = f32_bits(value.0)
+            ^ u64::from(value.1) << 32
+            ^ u64::from(pct.is_some()) << 63
+            ^ u64::from(rpm.is_some()) << 62;
+        rows.metric(
+            model,
+            ROW_FAN,
+            Metric { value, validity },
+            |_| bits,
+            |o, (p, r)| match (pct, rpm) {
+                (Some(_), Some(_)) => fan_tmpl.write_each(o, |i, o| {
+                    let _ = if i == 0 {
+                        write!(o, "{p:.0}")
+                    } else {
+                        write!(o, "{r}")
+                    };
+                }),
+                (Some(_), None) => units::percent(o, p),
+                _ => {
+                    let _ = write!(o, "{r} RPM");
+                }
+            },
+        )
+    };
+
+    let temp_c = |model: &mut KeyValueModel, label, v: Option<f32>| match v {
+        Some(c) => model.set_valid(label, f32_bits(c), |o| units::celsius(o, c)),
+        None => model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None),
+    };
+    changed |= temp_c(model, ROW_SLOWDOWN, info.and_then(|i| i.slowdown_temp_c));
+    changed |= temp_c(model, ROW_SHUTDOWN, info.and_then(|i| i.shutdown_temp_c));
+    let mem_temp = t.map_or(missing(), |t| t.temp_mem_c);
+    changed |= if mem_temp.validity == Validity::Unsupported {
+        model.set_fallback(
+            ROW_MEM_TEMP,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        )
+    } else {
+        rows.metric(model, ROW_MEM_TEMP, mem_temp, f32_bits, units::celsius)
+    };
+
+    // Clock speed and Memory speed: current / maximum.
+    for (label, cur, max) in [
+        (
+            ROW_CLOCK,
+            t.map_or(missing(), |t| t.clock_gfx_mhz),
+            info.and_then(|i| i.clock_gfx_max_mhz),
+        ),
+        (
+            ROW_MEM_CLOCK,
+            t.map_or(missing(), |t| t.clock_mem_mhz),
+            info.and_then(|i| i.clock_mem_max_mhz),
+        ),
+    ] {
+        changed |= rows.metric(
+            model,
+            label,
+            cur,
+            |v| u64::from(v) | u64::from(max.unwrap_or(0)) << 32,
+            |o, v| match max {
+                Some(m) => units::mhz_pair(o, v as f32, m as f32),
+                None => units::mhz(o, v as f32),
+            },
+        );
+    }
+    // The P-state, "P3", in the Clock speed tooltip.
+    if t.is_some_and(|t| t.clock_gfx_mhz.validity == Validity::Valid) {
+        changed |= match t.and_then(|t| shown(t.pstate)) {
+            Some(p) => set_tip(model, ROW_CLOCK, |o| {
+                let _ = write!(o, "P{p}");
+            }),
+            None => clear_tip(model, ROW_CLOCK),
+        };
+    }
+    changed |= rows.metric(
+        model,
+        ROW_VIDEO_CLOCK,
+        t.map_or(missing(), |t| t.clock_video_mhz),
+        u64::from,
+        |o, v| units::mhz(o, v as f32),
+    );
+
+    // Power draw: "31.9 / 300 W". An Intel iGPU reads the CPU package meter, which needs setup.
+    let power = t.map_or(missing(), |t| t.power_w);
+    if is_intel_igpu(inp) && matches!(power.validity, Validity::Restricted | Validity::Unsupported)
+    {
+        changed |= model.set_fallback(ROW_POWER, Validity::Unsupported, Fallback::NeedsSetup, None);
+    } else {
+        let limit = t.and_then(|t| shown(t.power_limit_w));
+        changed |= rows.metric(
+            model,
+            ROW_POWER,
+            power,
+            |v| f32_bits(v) ^ limit.map_or(0, f32_bits) << 32,
+            |o, v| match limit {
+                Some(l) => units::watts_pair(o, v, l),
+                None => units::watts(o, v),
+            },
+        );
+        if power.validity == Validity::Valid {
+            // "max 350 W · 1.24 kWh since boot".
+            let max = info.and_then(|i| i.power_max_limit_w);
+            let joules = t.and_then(|t| shown(t.energy_since_boot));
+            let tmpl = model.text(TEXT_POWER_TIP);
+            changed |= match (max, joules) {
+                (Some(max), Some(joules)) => set_tip(model, ROW_POWER, |o| {
+                    tmpl.write_each(o, |i, o| {
+                        let _ = if i == 0 {
+                            write!(o, "{max:.0}")
+                        } else {
+                            write!(o, "{:.2}", joules / 3.6e6)
+                        };
+                    })
+                }),
+                _ => clear_tip(model, ROW_POWER),
+            };
+        }
+    }
+
+    // PCI Express: "Gen 4 x16". The maximum is hidden when the link runs at it.
+    let link = both(
+        t.map_or(missing::<u8>(), |t| t.pcie_gen),
+        t.map_or(missing::<u8>(), |t| t.pcie_width),
+    );
+    let pcie_tmpl = model.text(TEXT_PCIE);
+    let write_link = |o: &mut String, (g, w): (u8, u8)| {
+        pcie_tmpl.write_each(o, |i, o| {
+            let _ = write!(o, "{}", if i == 0 { g } else { w });
+        })
+    };
+    changed |= rows.metric(
+        model,
+        ROW_PCIE,
+        link,
+        |(g, w)| u64::from(g) << 8 | u64::from(w),
+        write_link,
+    );
+    let max = info.and_then(|i| Some((i.pcie_max_gen?, i.pcie_max_width?)));
+    match max {
+        Some(m) => {
+            changed |= show_if(model, ROW_PCIE_MAX, shown(link) != Some(m));
+            changed |= model.set_valid(ROW_PCIE_MAX, u64::from(m.0) << 8 | u64::from(m.1), |o| {
+                write_link(o, m)
+            });
+        }
+        None => {
+            changed |= show_if(model, ROW_PCIE_MAX, true);
+            changed |= model.set_fallback(
+                ROW_PCIE_MAX,
+                Validity::Unsupported,
+                Fallback::NotReported,
+                None,
+            );
+        }
+    }
+    let rate = both(
+        t.map_or(missing::<f32>(), |t| t.pcie_rx_bps),
+        t.map_or(missing::<f32>(), |t| t.pcie_tx_bps),
+    );
+    let rate_tmpl = model.text(TEXT_THROUGHPUT);
+    changed |= rows.metric(
+        model,
+        ROW_PCIE_THROUGHPUT,
+        rate,
+        |(rx, tx)| f32_bits(rx) << 32 | f32_bits(tx),
+        |o, (rx, tx)| {
+            rate_tmpl.write_each(o, |i, o| {
+                units::rate_iec_auto(o, f64::from(if i == 0 { rx } else { tx }))
+            })
+        },
+    );
+
+    // Texts the probe reports once. A card without one reads "Not reported".
+    for (label, text) in [
+        (ROW_CUDA, info.and_then(|i| i.cuda_version.as_deref())),
+        (ROW_VBIOS, info.and_then(|i| i.vbios.as_deref())),
+        (ROW_ARCH, info.and_then(|i| i.architecture.as_deref())),
+    ] {
+        changed |= static_text(model, label, text, Validity::Valid, false);
+    }
     changed
 }
 

@@ -15,7 +15,7 @@ use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId};
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{GraphicsAdapter, InvField};
-use tl_model::system::{GpuTotals, Metric};
+use tl_model::system::{GpuStaticInfo, GpuTotals, Metric};
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -90,6 +90,45 @@ fn totals(shared: bool) -> GpuTotals {
     }
 }
 
+fn text(value: &str) -> InvField<Arc<str>> {
+    InvField {
+        value: Arc::from(value),
+        validity: Validity::Valid,
+    }
+}
+
+/// The fake NVIDIA record with every P2 value of UI-PRF-033.
+fn full_totals() -> GpuTotals {
+    GpuTotals {
+        fan_pct: Metric::valid(0.0),
+        fan_rpm: Metric::valid(0),
+        clock_gfx_mhz: Metric::valid(1905),
+        clock_mem_mhz: Metric::valid(7001),
+        clock_video_mhz: Metric::valid(1620),
+        pstate: Metric::valid(3),
+        power_w: Metric::valid(31.9),
+        power_limit_w: Metric::valid(300.0),
+        energy_since_boot: Metric::valid(1.24 * 3.6e6),
+        pcie_gen: Metric::valid(4),
+        pcie_width: Metric::valid(16),
+        pcie_rx_bps: Metric::valid(12.3 * MIB as f32),
+        pcie_tx_bps: Metric::valid(1.2 * MIB as f32),
+        info: Arc::new(GpuStaticInfo {
+            cuda_version: Some(Arc::from("13.2")),
+            vbios: Some(Arc::from("95.03.3A.00.1B")),
+            architecture: Some(Arc::from("Ada Lovelace")),
+            pcie_max_gen: Some(5),
+            pcie_max_width: Some(16),
+            clock_gfx_max_mhz: Some(3105),
+            clock_mem_max_mhz: Some(14001),
+            power_max_limit_w: Some(350.0),
+            slowdown_temp_c: Some(88.0),
+            shutdown_temp_c: Some(95.0),
+        }),
+        ..totals(false)
+    }
+}
+
 struct Rig<'a> {
     page: Entity<GpuPage>,
     demand: Entity<DemandAggregator>,
@@ -108,7 +147,7 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
                 idx: GPU,
                 identity: DeviceIdentity::Gpu {
                     uuid: [1; 16],
-                    pci_bus_id: Arc::from("0000:01:00.0"),
+                    pci_bus_id: Arc::from("0000:2d:00.0"),
                 },
                 generation: 0,
                 display_name: Arc::from("NVIDIA GeForce RTX 4080"),
@@ -126,10 +165,7 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
         inv.graphics = Arc::from(
             [GraphicsAdapter {
                 device: Some(GPU),
-                kernel_module: InvField {
-                    value: Arc::from(module),
-                    validity: Validity::Valid,
-                },
+                kernel_module: text(module),
                 temperature_source: InvField {
                     value: Arc::from(temp_source),
                     validity: Validity::Valid,
@@ -138,6 +174,9 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
                     value: 16 * GIB,
                     validity: Validity::Valid,
                 },
+                driver_version: text("615.71.09"),
+                vulkan_version: text("1.4.312"),
+                opengl_version: text("4.6.0 NVIDIA 615.71.09"),
                 ..GraphicsAdapter::default()
             }]
             .as_slice(),
@@ -194,7 +233,9 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
 }
 
 fn nvidia(cx: &mut TestAppContext) -> Rig<'_> {
-    open(cx, "nvidia", "NVML (GPU core)", false)
+    let mut r = open(cx, "nvidia 615.71.09", "NVML (GPU core)", false);
+    publish_totals(&mut r, &full_totals());
+    r
 }
 
 fn draw(cx: &mut VisualTestContext) {
@@ -442,44 +483,59 @@ fn detail_rows(r: &mut Rig) -> Vec<(String, String, Option<String>)> {
 fn gpu_details_order(cx: &mut TestAppContext) {
     let mut r = nvidia(cx);
     let rows = detail_rows(&mut r);
-    let labels: Vec<&str> = rows.iter().map(|(l, _, _)| l.as_str()).collect();
-    assert_eq!(
-        labels,
-        [
-            "Utilization",
-            "Dedicated memory",
-            "Shared memory",
-            "Hardware reserved memory",
-            "Video encode",
-            "Video decode",
-            "Temperature",
-            "Temperature source",
-        ]
-    );
-    let values: Vec<&str> = rows.iter().map(|(_, v, _)| v.as_str()).collect();
-    assert_eq!(
-        values,
-        [
-            "10.9%",
-            "3.00 GiB / 16.00 GiB",
-            "Not supported",
-            "380.00 MiB",
-            // `units::percent` writes zero as "0%" (table (d)).
-            "0%",
-            "0%",
-            "52 °C",
-            "NVML (GPU core)",
-        ]
-    );
+    let expected = [
+        ("Utilization", "10.9%"),
+        ("Dedicated memory", "3.00 GiB / 16.00 GiB"),
+        ("Shared memory", "Not supported"),
+        ("Hardware reserved memory", "380.00 MiB"),
+        // `units::percent` writes zero as "0%" (table (d)).
+        ("Video encode", "0%"),
+        ("Video decode", "0%"),
+        ("Temperature", "52 °C"),
+        ("Temperature source", "NVML (GPU core)"),
+        ("Fan speed", "0% (0 RPM)"),
+        ("Slowdown temperature", "88 °C"),
+        ("Shutdown temperature", "95 °C"),
+        ("Memory temperature", "Not reported"),
+        ("Clock speed", "1905 / 3105 MHz"),
+        ("Memory speed", "7001 / 14001 MHz"),
+        ("Video clock", "1620 MHz"),
+        ("Power draw", "31.9 / 300 W"),
+        ("PCI Express", "Gen 4 x16"),
+        ("Max PCI Express", "Gen 5 x16"),
+        ("PCIe throughput", "↓ 12.3 MiB/s ↑ 1.2 MiB/s"),
+        ("Driver version", "615.71.09"),
+        ("Kernel module", "nvidia 615.71.09"),
+        ("CUDA version", "13.2"),
+        ("Vulkan version", "1.4.312"),
+        ("OpenGL version", "4.6.0 NVIDIA 615.71.09"),
+        ("Physical location", "PCI bus 45, device 0, function 0"),
+        ("VBIOS version", "95.03.3A.00.1B"),
+        ("UUID", "GPU-01010101-0101-0101-0101-010101010101"),
+        ("Architecture", "Ada Lovelace"),
+    ];
+    let got: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(l, v, _)| (l.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(got, expected);
     assert_eq!(rows[2].2.as_deref(), Some("Not available on this device"));
-    // The 28 rows and the merged encode/decode row exist in the model. The merged row and
-    // rows 9 to 28 are hidden.
+    assert_eq!(
+        find(&rows, "Clock speed").and_then(|r| r.2.as_deref()),
+        Some("P3")
+    );
+    assert_eq!(
+        find(&rows, "Power draw").and_then(|r| r.2.as_deref()),
+        Some("max 350 W · 1.24 kWh since boot")
+    );
+    // The 28 rows and the merged encode/decode row exist in the model. Only the merged row is
+    // hidden.
     r.vcx.update(|_, cx| {
         let d = r.page.read(cx).details();
         assert_eq!(d.rows.len(), 29);
         assert_eq!(d.rows[6].label, "perf-gpu-row-encode-decode");
         assert!(d.rows[6].hidden);
-        assert!(d.rows[9..].iter().all(|row| row.hidden));
+        assert!(d.rows.iter().filter(|row| row.hidden).count() == 1);
     });
 }
 
@@ -613,25 +669,46 @@ fn gpu_temperature_source_amd(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn gpu_details_probe_states(cx: &mut TestAppContext) {
     let mut r = nvidia(cx);
+    // The rows the probe feeds. The driver, module, Vulkan, OpenGL, location and UUID rows come
+    // from the inventory and the device list, so they keep their values.
+    let inventory = [
+        "Driver version",
+        "Kernel module",
+        "Vulkan version",
+        "OpenGL version",
+        "Physical location",
+        "UUID",
+    ];
     set_gpu_health(&mut r, SourceState::Failed, None);
     let rows = detail_rows(&mut r);
-    assert!(rows.iter().all(|(_, v, _)| v == "Unavailable"), "{rows:?}");
+    for (label, value, _) in &rows {
+        if !inventory.contains(&label.as_str()) {
+            assert_eq!(value, "Unavailable", "{label}");
+        }
+    }
+    assert_eq!(rows.len(), 28, "Max PCI Express and CUDA stay visible");
+    assert_eq!(
+        find(&rows, "Driver version").map(|r| r.1.as_str()),
+        Some("615.71.09")
+    );
     set_gpu_health(
         &mut r,
         SourceState::Unsupported,
         Some("GPU probe not installed"),
     );
     let rows = detail_rows(&mut r);
-    assert!(
-        rows.iter().all(|(_, v, _)| v == "Not supported"),
-        "{rows:?}"
-    );
+    for (label, value, _) in &rows {
+        if !inventory.contains(&label.as_str()) {
+            assert_eq!(value, "Not supported", "{label}");
+        }
+    }
 }
 
 #[test]
 fn gpu_vendor_from_kernel_module() {
     for (module, vendor) in [
         ("nvidia", GpuVendor::Nvidia),
+        ("nvidia 615.71.09", GpuVendor::Nvidia),
         ("amdgpu", GpuVendor::Amd),
         ("radeon", GpuVendor::Amd),
         ("i915", GpuVendor::Intel),
@@ -919,4 +996,100 @@ mod engines {
             assert_eq!(e.3.as_deref(), Some("Available in a later version"));
         }
     }
+}
+
+// Details grid rows 9 to 28 (tasklens-o55.25, UI-PRF-033).
+
+#[gpui_kit::test]
+fn gpu_max_pcie_hidden_when_equal(cx: &mut TestAppContext) {
+    let mut r = nvidia(cx);
+    assert!(find(&detail_rows(&mut r), "Max PCI Express").is_some());
+    let mut t = full_totals();
+    t.info = Arc::new(GpuStaticInfo {
+        pcie_max_gen: Some(4),
+        pcie_max_width: Some(16),
+        ..(*t.info).clone()
+    });
+    publish_totals(&mut r, &t);
+    let rows = detail_rows(&mut r);
+    assert!(find(&rows, "Max PCI Express").is_none(), "{rows:?}");
+    assert_eq!(
+        find(&rows, "PCI Express").map(|r| r.1.as_str()),
+        Some("Gen 4 x16")
+    );
+    // The card drops to Gen 1 while idle: the maximum shows again.
+    t.pcie_gen = Metric::valid(1);
+    publish_totals(&mut r, &t);
+    assert_eq!(
+        find(&detail_rows(&mut r), "Max PCI Express").map(|r| r.1.as_str()),
+        Some("Gen 4 x16")
+    );
+}
+
+#[gpui_kit::test]
+fn gpu_cuda_hidden_off_nvidia(cx: &mut TestAppContext) {
+    let mut r = open(cx, "amdgpu", "hwmon amdgpu: junction", true);
+    publish_totals(&mut r, &full_totals());
+    let rows = detail_rows(&mut r);
+    assert!(find(&rows, "CUDA version").is_none(), "{rows:?}");
+    assert!(find(&rows, "Vulkan version").is_some());
+}
+
+#[gpui_kit::test]
+fn gpu_power_needs_setup_link(cx: &mut TestAppContext) {
+    let mut r = open(cx, "i915", "hwmon i915", false);
+    // An iGPU has no dedicated memory.
+    r.engine.publish_with(|s| {
+        let inv = Arc::make_mut(&mut s.inventory);
+        inv.header.version += 1;
+        let graphics: Vec<GraphicsAdapter> = inv
+            .graphics
+            .iter()
+            .cloned()
+            .map(|a| GraphicsAdapter {
+                dedicated_bytes: InvField::default(),
+                ..a
+            })
+            .collect();
+        inv.graphics = Arc::from(graphics);
+    });
+    let mut t = full_totals();
+    t.mem_total = Metric::with(Validity::Unsupported);
+    t.power_w = Metric::with(Validity::Unsupported);
+    publish_totals(&mut r, &t);
+    let rows = detail_rows(&mut r);
+    assert_eq!(
+        find(&rows, "Power draw").map(|r| r.1.as_str()),
+        Some("Needs setup")
+    );
+    r.vcx.update(|_, cx| {
+        let d = r.page.read(cx).details();
+        let power = d.rows.iter().find(|row| row.label == "perf-gpu-row-power");
+        let power = power.expect("power row");
+        assert!(power.link, "Needs setup is a link");
+        assert!(power.action.is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn gpu_power_not_supported_on_discrete_intel(cx: &mut TestAppContext) {
+    let mut r = open(cx, "xe", "hwmon xe: pkg", false);
+    let mut t = full_totals();
+    t.power_w = Metric::with(Validity::Unsupported);
+    publish_totals(&mut r, &t);
+    assert_eq!(
+        find(&detail_rows(&mut r), "Power draw").map(|r| r.1.as_str()),
+        Some("Not supported")
+    );
+}
+
+#[gpui_kit::test]
+fn gpu_uuid_truncates_with_tooltip(cx: &mut TestAppContext) {
+    let mut r = nvidia(cx);
+    let rows = detail_rows(&mut r);
+    let uuid = "GPU-01010101-0101-0101-0101-010101010101";
+    let row = find(&rows, "UUID").expect("UUID row");
+    assert_eq!(row.1, uuid);
+    // The grid cuts the cell to the column width with "…"; the tooltip holds the whole UUID.
+    assert_eq!(row.2.as_deref(), Some(uuid));
 }

@@ -403,6 +403,11 @@ perf-gpu-enc-sessions =
         [one] {$n} active session
        *[other] {$n} active sessions
     }
+perf-gpu-fan-value = {$pct}% ({$rpm} RPM)
+perf-gpu-pcie-value = Gen {$gen} x{$width}
+perf-gpu-pcie-throughput-value = ↓ {$rx} ↑ {$tx}
+perf-gpu-location-value = PCI bus {$bus}, device {$dev}, function {$fn}
+perf-gpu-power-row-tooltip = max {$max} W · {$kwh} kWh since boot
 perf-mem-heading-physical = Physical memory
 perf-mem-heading-commit = Commit
 perf-mem-heading-swap = Swap
