@@ -10,8 +10,9 @@
 //! from two DRM fdinfo scans. AMD compute, DMA and JPEG always come from fdinfo (PERF-074). Intel
 //! engines, memory, encode and decode always come from fdinfo, and Intel power from the hwmon
 //! energy counter. One fdinfo walk per tick serves every card and the per-process VRAM rows, which
-//! go out while the processes page shows a GPU column or history records. AMD and Intel cards have no UUID, so their identity is `uuid: [0; 16]` plus the PCI slot
-//! (R-166). Everything here is read-only.
+//! go out while the processes page shows a GPU column or history records. AMD and Intel cards
+//! have no UUID, so their identity is `uuid: [0; 16]` plus the PCI slot (R-166). Everything here
+//! is read-only.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
