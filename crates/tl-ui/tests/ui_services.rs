@@ -2756,6 +2756,7 @@ mod page {
     use tl_ui::window::main::{
         MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
     };
+    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 
     use super::{child_key, child_process, record};
 
@@ -3311,6 +3312,123 @@ mod page {
             .advance_clock(std::time::Duration::from_millis(100));
         rig.draw();
         assert_eq!(rig.count_toast(DONE), 1, "shown when the timer fires");
+    }
+
+    fn registered(rig: &mut Rig, key: &WindowKey) -> bool {
+        rig.vcx.update(|_, cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.read(cx).get(key).is_some()
+        })
+    }
+
+    fn process_props_count(rig: &mut Rig) -> usize {
+        rig.vcx.update(|_, cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.read(cx).count(CapClass::ProcessProps)
+        })
+    }
+
+    fn publish_child(rig: &mut Rig, flags: ProcFlags) {
+        rig.publish(
+            fixture(),
+            &[(0, child_key(812))],
+            vec![child_process(812, flags)],
+            ServiceCounts::default(),
+        );
+    }
+
+    #[gpui_kit::test]
+    fn enter_on_child_opens_process_properties(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        publish_child(&mut rig, ProcFlags::empty());
+        // Row 0 is the System group, row 1 unit00.service, row 2 its child.
+        rig.select(&[2]);
+        rig.keys("enter");
+        assert!(registered(&mut rig, &WindowKey::Properties(child_key(812))));
+        assert_eq!(process_props_count(&mut rig), 1);
+    }
+
+    #[gpui_kit::test]
+    fn enter_on_mixed_selection_opens_both(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        publish_child(&mut rig, ProcFlags::empty());
+        let before = rig.window_count();
+        rig.select(&[1, 2]);
+        rig.keys("enter");
+        let unit = fixture()[0].unit.clone();
+        assert!(registered(&mut rig, &WindowKey::Properties(child_key(812))));
+        assert!(registered(&mut rig, &WindowKey::Service(unit)));
+        assert_eq!(rig.window_count(), before + 2);
+    }
+
+    #[gpui_kit::test]
+    fn child_menu_properties_opens_process_properties(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        publish_child(&mut rig, ProcFlags::empty());
+        let menu = rig.right_click(2).expect("a child row menu");
+        rig.run_item(&menu, "Properties");
+        assert!(registered(&mut rig, &WindowKey::Properties(child_key(812))));
+    }
+
+    #[gpui_kit::test]
+    fn enter_on_exited_child_shows_open_failed(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        init(cx, engine.clone());
+        let handle = cx.update(|cx| {
+            set_test_page(cx, Tab::Services, services_page);
+            open_main_window_on(Tab::Services, cx).expect("main window opens")
+        });
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let page = vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window view")
+                .read(cx)
+                .page_entity::<ServicesPage>(Tab::Services)
+                .expect("services page")
+        });
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        publish_services(
+            &engine,
+            1,
+            fixture(),
+            &[(0, child_key(812))],
+            vec![child_process(812, ProcFlags::EXITED)],
+            ServiceCounts::default(),
+        );
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let table = vcx.read_entity(&page, |p, _| p.table().clone());
+        let id = vcx.read_entity(&table, |t, _| t.delegate.row_id(2));
+        table.update(&mut vcx, |table, cx| {
+            table.selection.click(id);
+            cx.notify();
+        });
+        let focus = vcx.update(|_, cx| table.read(cx).focus_handle().clone());
+        vcx.update(|window, cx| window.focus(&focus, cx));
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let failed = vcx
+            .update(|_, cx| tl_ui::windows::props::props_words(cx))
+            .open_failed
+            .to_string();
+        let toasts: Vec<String> = vcx.update(|_, cx| {
+            let view = main_window_view(cx).expect("main window");
+            let texts = view.read(cx).toasts().read(cx).visible_texts();
+            texts.iter().map(|t| t.to_string()).collect()
+        });
+        assert!(toasts.contains(&failed), "toasts: {toasts:?}");
+        let count = vcx.update(|_, cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.read(cx).count(CapClass::ProcessProps)
+        });
+        assert_eq!(count, 0);
     }
 
     #[gpui_kit::test]

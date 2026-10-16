@@ -6,9 +6,9 @@
 //! Menu items act on the targets captured when the menu opened; keyboard commands read the
 //! selection when they run.
 //!
-//! Child process rows get the process row menu. Only End Task and End Process run on this tab;
-//! they follow the "Disk is in use" window's end path. The other process items do nothing here
-//! until tasklens-pdu.58.
+//! Child process rows get the process row menu. End Task, End Process and Properties run on this
+//! tab; End Task and End Process follow the "Disk is in use" window's end path, and Properties
+//! opens Process Properties. The other process items do nothing here until tasklens-pdu.58.
 
 pub mod actions;
 pub mod copy;
@@ -79,8 +79,10 @@ use crate::table::actions::{CollapseAll, CopyCell, CopyRow, CopyRowsAsTable, Ope
 use crate::table::tree_table::{TlTreeTable, TreeTableEvent};
 use crate::theme::metrics;
 use crate::window::main::{FilterChanged, GlobalShellEvents, PauseChanged, ShellPage};
+use crate::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::window::status::StatusChanged;
 use crate::windows::disk_in_use::{confirm_kind, record_target};
+use crate::windows::props::open_process_properties;
 use crate::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
 
 /// The latest a manual refresh waits for a new services version.
@@ -733,13 +735,49 @@ impl ServicesPage {
         }
     }
 
-    /// Enter, Alt+Enter, Ctrl+I, double-click and the menu's Properties: one window per selected
-    /// unit, at most 10. The table toggles a group row itself. Child rows belong to
-    /// tasklens-hk6.23.
+    /// Enter, Alt+Enter, Ctrl+I, double-click and the menu's Properties: one Service Properties
+    /// window per selected unit (at most 10) and one Process Properties window per selected
+    /// child row. The table toggles a group row itself. Process Properties owns its cap of 8
+    /// and its toasts; one cap toast shows per command.
     fn on_open_properties(&mut self, _: &OpenProperties, _: &mut Window, cx: &mut Context<Self>) {
-        let targets = self.take_unit_targets(cx);
-        for unit in targets.units.iter().take(MAX_PROPERTIES_WINDOWS) {
-            ServicePropertiesWindow::open(unit.clone(), ServicePropsTab::General, cx);
+        let (units, keys): (Vec<UnitRef>, SmallVec<[ProcessKey; 1]>) =
+            match self.menu_targets.take() {
+                Some(MenuTargets::Unit(targets)) => {
+                    (targets.units.iter().cloned().collect(), SmallVec::new())
+                }
+                Some(MenuTargets::Process(targets)) => (Vec::new(), targets.process_keys()),
+                None => {
+                    let nodes = self.selected_nodes(cx);
+                    let services = Arc::clone(self.frame.table.read(cx).delegate.services());
+                    let targets = ServiceMenuTargets::capture(
+                        &services,
+                        &nodes,
+                        None,
+                        self.frame.actions.read(cx),
+                    );
+                    let keys = nodes
+                        .iter()
+                        .filter_map(|node| match node {
+                            SysNodeId::UnitProcess(_, key) => Some(*key),
+                            _ => None,
+                        })
+                        .collect();
+                    (targets.units.iter().cloned().collect(), keys)
+                }
+            };
+        for unit in units.into_iter().take(MAX_PROPERTIES_WINDOWS) {
+            ServicePropertiesWindow::open(unit, ServicePropsTab::General, cx);
+        }
+        let mut cap_notified = false;
+        for key in keys {
+            if should_attempt_properties(
+                &WindowKey::Properties(key),
+                CapClass::ProcessProps,
+                &mut cap_notified,
+                cx,
+            ) {
+                open_process_properties(key, cx);
+            }
         }
     }
 
@@ -1275,5 +1313,28 @@ impl ShellPage for ServicesPage {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         ServicesPage::refresh(self, cx);
+    }
+}
+
+/// Lets the first over-cap open call show its toast, then suppresses the same cap toast for the
+/// rest of this action. An already-open key still gets focused when the class is full.
+fn should_attempt_properties(
+    key: &WindowKey,
+    class: CapClass,
+    cap_notified: &mut bool,
+    cx: &App,
+) -> bool {
+    let Some(registry) = cx.try_global::<GlobalRegistry>() else {
+        return true;
+    };
+    let registry = registry.0.read(cx);
+    if registry.get(key).is_some() || registry.count(class) < class.cap() {
+        return true;
+    }
+    if *cap_notified {
+        false
+    } else {
+        *cap_notified = true;
+        true
     }
 }
