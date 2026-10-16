@@ -2708,9 +2708,9 @@ mod page {
 
     use gpui_kit::base::Root;
     use gpui_kit::{
-        AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
-        StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, WindowBounds,
-        WindowOptions, div, point, px, size,
+        AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton,
+        MouseDownEvent, ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext,
+        VisualTestContext, Window, WindowBounds, WindowOptions, div, point, px, size,
     };
     use tl_model::actions::{ActionKind, ActionTarget, Signal};
     use tl_model::client::EngineClient;
@@ -2726,7 +2726,10 @@ mod page {
     use tl_model::table::{Manager, SysNodeId, SysRow, SysTable, SysTableQuery, UnitType};
     use tl_model::validity::Validity;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::{MenuEntryInfo, TlMenu, TlMenuPopup};
+    use tl_ui::components::menu::{
+        MenuEntryInfo, TlMenu, TlMenuPopup, close_context_menu, context_menu_open,
+        open_context_menu,
+    };
     use tl_ui::components::toast::ToastQueue;
     use tl_ui::demand::DEMAND_COALESCE;
     use tl_ui::hub::GlobalHub;
@@ -3035,6 +3038,56 @@ mod page {
         fn window_count(&mut self) -> usize {
             self.vcx.update(|_, cx| cx.windows().len())
         }
+
+        /// Right-clicks the Name cell of row `ix`; returns the menu that opened, if any.
+        fn right_click(&mut self, ix: usize) -> Option<Entity<TlMenuPopup>> {
+            self.draw();
+            let body = self
+                .vcx
+                .debug_bounds("TlTreeTable-body")
+                .expect("the table body");
+            let row_h = self
+                .vcx
+                .update(|_, cx| tl_ui::theme::metrics(cx).row_height);
+            let at = point(
+                body.origin.x + px(40.),
+                body.origin.y + row_h * (ix as f32 + 0.5),
+            );
+            self.vcx.simulate_event(MouseDownEvent {
+                position: at,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Right,
+                click_count: 1,
+                first_mouse: false,
+            });
+            self.vcx.run_until_parked();
+            self.draw();
+            self.vcx.update(|window, cx| open_context_menu(window, cx))
+        }
+
+        /// Runs the item labelled `label` of `menu` as a click does: in the table's context.
+        fn run_item(&mut self, menu: &Entity<TlMenuPopup>, label: &str) {
+            let action = self
+                .vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window))
+                .into_iter()
+                .find(|e| e.label.as_deref() == Some(label))
+                .and_then(|e| e.action)
+                .unwrap_or_else(|| panic!("a {label} item"));
+            let table = self.table();
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                window.dispatch_action(action, cx);
+            });
+            self.vcx.run_until_parked();
+        }
+
+        fn clipboard(&mut self) -> String {
+            self.vcx
+                .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .unwrap_or_default()
+        }
     }
 
     fn last_services_query(engine: &FakeEngine) -> Option<SysTableQuery> {
@@ -3332,19 +3385,28 @@ mod page {
             ],
             ServiceCounts::default(),
         );
-        // Rows: 0 System group, 1 unit00, 2 child, 3 unit01, 4 child.
-        let units = [rig.row_id(1), rig.row_id(3)];
+        // Rows: 0 System group, 1 unit00, 2 child, 3 unit01, 4 child; the User group later.
         let table = rig.table();
+        let user_ix = rig.vcx.read_entity(&table, |t, _| {
+            t.delegate
+                .services()
+                .rows
+                .iter()
+                .position(|r| r.node == SysNodeId::ServiceGroup(Manager::User))
+                .expect("the User group row")
+        });
+        let ids = [rig.row_id(1), rig.row_id(3), rig.row_id(user_ix)];
         table.update(&mut rig.vcx, |table, cx| {
-            for id in units {
+            for id in ids {
                 table.delegate_mut().on_toggle_expand(id, cx);
             }
         });
         rig.vcx.run_until_parked();
-        let expanded = rig
-            .vcx
-            .read_entity(&table, |t, _| t.delegate.expanded().len());
-        assert_eq!(expanded, 4, "two groups and two units");
+        let expanded = rig.vcx.read_entity(&table, |t, _| {
+            t.delegate.expanded().iter().cloned().collect::<Vec<_>>()
+        });
+        assert_eq!(expanded.len(), 3, "the System group and two units");
+        assert!(!expanded.contains(&SysNodeId::ServiceGroup(Manager::User)));
 
         rig.keys("ctrl-l");
         let groups = [
@@ -3355,7 +3417,10 @@ mod page {
             t.delegate.expanded().iter().cloned().collect()
         });
         assert_eq!(expanded.len(), 2, "{expanded:?}");
-        assert!(groups.iter().all(|g| expanded.contains(g)));
+        assert!(
+            groups.iter().all(|g| expanded.contains(g)),
+            "the collapsed User group is expanded again"
+        );
         let query = rig.last_query().expect("a query");
         assert_eq!(query.expanded.len(), 2, "{:?}", query.expanded);
         assert!(groups.iter().all(|g| query.expanded.contains(g)));
@@ -3386,15 +3451,40 @@ mod page {
             "a mixed selection gets the unit menu"
         );
 
-        // The table still opens a popup for a group row; it holds no item.
-        let menu = rig.build_menu(&[0]);
-        let entries: Vec<MenuEntryInfo> = rig
-            .vcx
-            .update(|window, cx| menu.read(cx).entries_for_test(window));
-        assert!(
-            entries.iter().all(|e| e.action.is_none()),
-            "group rows have no menu items"
-        );
+        assert!(rig.right_click(1).is_some(), "a unit row opens a menu");
+        rig.vcx.update(close_context_menu);
+        rig.draw();
+        assert!(rig.right_click(0).is_none(), "a group row opens no menu");
+        let table = rig.table();
+        let focused = rig.vcx.update(|window, cx| {
+            !context_menu_open(window, cx) && table.read(cx).focus_handle().is_focused(window)
+        });
+        assert!(focused, "the table keeps the keys");
+    }
+
+    /// The menu's copy items copy the rows captured when it opened, not the live selection.
+    #[gpui_kit::test]
+    fn menu_copy_uses_captured_rows(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        rig.publish_fixture();
+        rig.select(&[3]);
+        // Rows: 0 System group, 1 unit00, 2 unit01, 3 unit02.
+        let menu = rig.right_click(1).expect("the unit menu");
+        rig.select(&[2]);
+        rig.run_item(&menu, "Copy row");
+        let text = rig.clipboard();
+        assert!(text.contains("unit00.service"), "{text}");
+        assert!(!text.contains("unit01.service"), "{text}");
+
+        rig.vcx.update(close_context_menu);
+        rig.draw();
+        let menu = rig.right_click(1).expect("the unit menu");
+        rig.select(&[2]);
+        rig.run_item(&menu, "Copy rows as table");
+        let text = rig.clipboard();
+        assert!(text.contains("unit00.service"), "{text}");
+        assert!(!text.contains("unit01.service"), "{text}");
     }
 
     fn services_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {

@@ -26,14 +26,14 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, Bounds, Context, DismissEvent, Entity, EventEmitter,
     FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    Styled as _, Subscription, Task, WeakEntity, Window, div, point,
+    SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div, point,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::{EngineCaps, SourceId};
-use tl_model::ids::{NodeId, ProcessKey};
+use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::ProcFlags;
 use tl_model::settings::UiState;
 use tl_model::snapshot::{
@@ -61,7 +61,7 @@ use self::menu::{MenuChoice, ServiceMenuTargets, menu_choice, service_menu};
 use crate::action_tracker::{GlobalActionTracker, ToastTexts, action_words};
 use crate::actions::ClearFilter;
 use crate::app::EngineGlobal;
-use crate::components::menu::{TlMenu, open_context_menu_at};
+use crate::components::menu::{TlMenu, close_context_menu, open_context_menu_at};
 use crate::components::toast::{SERVICES_LOADING_TOAST, ToastKey, ToastKind, ToastQueue};
 use crate::hub::{GlobalHub, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
@@ -69,7 +69,7 @@ use crate::pages::processes::actions::{CapturedTargets, CopyDetails, EndProcess,
 use crate::pages::processes::confirm::{ConfirmResult, confirm};
 use crate::pages::processes::menu::{MenuCaps, row_menu as process_row_menu};
 use crate::pages::processes::toasts::{refuse, toast_words};
-use crate::pages::sys_copy::{copy_cell, copy_row, copy_rows_as_table};
+use crate::pages::sys_copy::{CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table};
 use crate::pages::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
 use crate::settings_global::TlSettings;
 use crate::table::TreeTableDelegate as _;
@@ -115,6 +115,8 @@ pub struct ServicesPage {
     status_cache: (u32, u32, u32, usize),
     status_buf: String,
     menu_targets: Option<MenuTargets>,
+    /// Row keys of the rows the open row menu acts on, in view order, for its copy items.
+    menu_rows: Option<SmallVec<[u64; 8]>>,
     focus: FocusHandle,
     window: AnyWindowHandle,
     /// Where the strip was drawn last frame, for the Unit types menu anchor.
@@ -197,6 +199,7 @@ impl ServicesPage {
             status_cache: STATUS_UNSET,
             status_buf: loading_status_text(cx).to_string(),
             menu_targets: None,
+            menu_rows: None,
             focus,
             window: window.window_handle(),
             strip_bounds: Rc::default(),
@@ -268,6 +271,7 @@ impl ServicesPage {
     /// Forgets the targets captured when the row menu opened.
     pub(super) fn clear_menu_targets(&mut self) {
         self.menu_targets = None;
+        self.menu_rows = None;
     }
 
     fn on_snapshot(&mut self, snap: &Arc<Snapshot>, mask: ComponentMask, cx: &mut Context<Self>) {
@@ -370,7 +374,7 @@ impl ServicesPage {
     fn push_toast(
         &self,
         kind: ToastKind,
-        text: gpui_kit::SharedString,
+        text: SharedString,
         key: ToastKey,
         cx: &mut Context<Self>,
     ) {
@@ -664,12 +668,14 @@ impl ServicesPage {
     // ---- Copy and expansion ----
 
     fn on_copy_cell(&mut self, a: &CopyCell, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.menu_rows.take();
         let row = match self.menu_targets.take() {
             Some(MenuTargets::Unit(t)) => t
                 .units
                 .first()
                 .map(|u| row_key(&SysNodeId::Unit(u.clone()))),
-            _ => self.frame.table.read(cx).selection.focus(),
+            Some(MenuTargets::Process(_)) => rows.and_then(|rows| rows.first().copied()),
+            None => self.frame.table.read(cx).selection.focus(),
         };
         let Some(row) = row else {
             return;
@@ -681,17 +687,22 @@ impl ServicesPage {
     }
 
     fn on_copy_row(&mut self, _: &CopyRow, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu_targets = None;
-        self.frame
-            .table
-            .update(cx, |table, cx| copy_row(table, window, cx));
+        self.copy_blocks(window, cx);
     }
 
+    /// The menu's "Copy row" and the process menu's "Copy details".
     fn on_copy_details(&mut self, _: &CopyDetails, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_blocks(window, cx);
+    }
+
+    /// One block per row: the rows captured when the menu opened, else the selection.
+    fn copy_blocks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_targets = None;
-        self.frame
-            .table
-            .update(cx, |table, cx| copy_row(table, window, cx));
+        let rows = self.menu_rows.take();
+        self.frame.table.update(cx, |table, cx| match rows {
+            Some(rows) => copy_row(&MenuRows { table, rows }, window, cx),
+            None => copy_row(table, window, cx),
+        });
     }
 
     /// Runs before the table's own TSV handler, so the Services toasts and cell text apply.
@@ -703,12 +714,14 @@ impl ServicesPage {
     ) {
         cx.stop_propagation();
         self.menu_targets = None;
-        self.frame
-            .table
-            .update(cx, |table, cx| copy_rows_as_table(table, window, cx));
+        let rows = self.menu_rows.take();
+        self.frame.table.update(cx, |table, cx| match rows {
+            Some(rows) => copy_rows_as_table(&MenuRows { table, rows }, window, cx),
+            None => copy_rows_as_table(table, window, cx),
+        });
     }
 
-    /// Ctrl+L: every unit collapses, group rows stay as they are (UI-SYS-014).
+    /// Ctrl+L: every unit collapses and both group rows are expanded (UI-SYS-014).
     fn on_collapse_all(&mut self, _: &CollapseAll, _: &mut Window, cx: &mut Context<Self>) {
         self.frame
             .table
@@ -924,7 +937,7 @@ fn child_targets(processes: &ProcessSnapshot, nodes: &[SysNodeId]) -> CapturedTa
 
 /// The row menu for `nodes`, called by the delegate while the table is being updated. A unit in
 /// the selection gets the unit menu; only child rows get the process row menu; group rows get
-/// none (UI-SYS-016, UI-SYS-017). The captured targets are stored on the page.
+/// none (UI-SYS-016, UI-SYS-017). The captured targets and row keys are stored on the page.
 pub(super) fn row_menu(
     page: &WeakEntity<ServicesPage>,
     delegate: &ServicesDelegate,
@@ -937,6 +950,11 @@ pub(super) fn row_menu(
     let Some(page) = page.upgrade() else {
         return menu;
     };
+    let rows: SmallVec<[u64; 8]> = nodes
+        .iter()
+        .filter(|node| !matches!(node, SysNodeId::ServiceGroup(_)))
+        .map(row_key)
+        .collect();
     match menu_choice(nodes) {
         MenuChoice::Unit => {
             let actions = page.read(cx).frame.actions.clone();
@@ -947,16 +965,19 @@ pub(super) fn row_menu(
                 actions.read(cx),
             );
             if targets.units.is_empty() {
-                return menu;
+                return no_menu(&page, menu, window, cx);
             }
             let stored = MenuTargets::Unit(targets.clone());
-            page.update(cx, |page, _| page.menu_targets = Some(stored));
+            page.update(cx, |page, _| {
+                page.menu_targets = Some(stored);
+                page.menu_rows = Some(rows);
+            });
             service_menu(menu, &targets, delegate.backend(), window, cx)
         }
         MenuChoice::Process => {
             let targets = child_targets(delegate.processes(), nodes);
             if targets.items.is_empty() {
-                return menu;
+                return no_menu(&page, menu, window, cx);
             }
             let engine_caps = cx
                 .try_global::<GlobalHub>()
@@ -968,10 +989,62 @@ pub(super) fn row_menu(
                 ..MenuCaps::default()
             };
             let stored = MenuTargets::Process(targets.clone());
-            page.update(cx, |page, _| page.menu_targets = Some(stored));
+            page.update(cx, |page, _| {
+                page.menu_targets = Some(stored);
+                page.menu_rows = Some(rows);
+            });
             process_row_menu(menu, &targets, &caps, window, cx)
         }
-        MenuChoice::None => menu,
+        MenuChoice::None => no_menu(&page, menu, window, cx),
+    }
+}
+
+/// No menu for these rows (a group row, UI-SYS-023). The table opens a popup for every
+/// right-click, so it is closed again before the next frame and the table gets the keys back.
+fn no_menu(page: &Entity<ServicesPage>, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+    let focus = page.read(cx).focus.clone();
+    window.defer(cx, move |window, cx| {
+        close_context_menu(window, cx);
+        focus.focus(window, cx);
+    });
+    menu
+}
+
+/// The table's copy text for the rows captured when the row menu opened, in view order. Rows
+/// that left the view since then are skipped.
+struct MenuRows<'a> {
+    table: &'a TlTreeTable<ServicesDelegate>,
+    rows: SmallVec<[u64; 8]>,
+}
+
+impl SysCopySource for MenuRows<'_> {
+    type RowId = u64;
+
+    fn copy_rows(&self) -> SmallVec<[u64; 8]> {
+        let delegate = &self.table.delegate;
+        let mut rows: SmallVec<[(usize, u64); 8]> = self
+            .rows
+            .iter()
+            .filter_map(|&id| Some((delegate.row_index(id)?, id)))
+            .collect();
+        rows.sort_unstable_by_key(|&(ix, _)| ix);
+        rows.into_iter().map(|(_, id)| id).collect()
+    }
+
+    fn write_block(&self, row: u64, out: &mut String) {
+        self.table.write_block(row, out);
+    }
+
+    fn visible_columns(&self) -> SmallVec<[(SharedString, ColumnId); 24]> {
+        SysCopySource::visible_columns(self.table)
+    }
+
+    fn write_cell(&self, row: u64, col: ColumnId, out: &mut String) {
+        self.table.write_cell(row, col, out);
+    }
+
+    fn copy_texts(&self) -> &CopyTexts {
+        self.table.copy_texts()
     }
 }
 

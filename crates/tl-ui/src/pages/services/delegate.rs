@@ -752,13 +752,23 @@ impl ServicesDelegate {
         self.page = Some(page);
     }
 
-    /// Ctrl+L: collapses every unit row. Group rows keep their state (UI-SYS-014).
+    /// Ctrl+L: collapses every unit row and expands both group rows (UI-SYS-014). The groups'
+    /// state is saved as on a toggle.
     pub fn collapse_units(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
-        let before = self.expanded.len();
-        self.expanded
-            .retain(|node| matches!(node, SysNodeId::ServiceGroup(_)));
-        if self.expanded.len() == before {
+        let groups = [
+            SysNodeId::ServiceGroup(Manager::System),
+            SysNodeId::ServiceGroup(Manager::User),
+        ];
+        if self.expanded.len() == groups.len() && groups.iter().all(|g| self.expanded.contains(g)) {
             return;
+        }
+        self.expanded.clear();
+        self.expanded.extend(groups);
+        if cx.has_global::<TlSettings>() {
+            TlSettings::update(cx, |data| {
+                data.state.services.group_expanded.system = true;
+                data.state.services.group_expanded.user = true;
+            });
         }
         self.expanded_request = Some(self.requested_expanded());
         self.send_demand(cx);
