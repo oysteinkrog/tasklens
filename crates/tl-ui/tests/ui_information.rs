@@ -995,8 +995,8 @@ mod hardware_builders {
     use tl_model::devices::DeviceCatalog;
     use tl_model::ids::DeviceIdx;
     use tl_model::snapshot::{
-        DiskDrive, DisplayConnector, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot, MemoryModule,
-        NetworkAdapter, SystemSnapshot,
+        DiskDrive, DisplayConnector, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot,
+        MemoryModule, NetworkAdapter, SystemSnapshot,
     };
     use tl_model::system::{GpuTotals, Metric};
     use tl_model::table::Total;
