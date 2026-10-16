@@ -514,6 +514,8 @@ pub struct SensorReading {
     pub fan_control: Option<FanControlMode>,
     /// Fan only: true once the fan reported a non-zero RPM this session or carries a label (R-170).
     pub fan_connected: bool,
+    /// Fan only: `fan<n>_max` in RPM when the chip reports it; None for Temperature or no file.
+    pub fan_max_rpm: Option<u32>,
 }
 
 /// hwmon `pwm<n>_enable`: 0 FullSpeed, 1 Manual, 2 Automatic (R-139). Other values give None.

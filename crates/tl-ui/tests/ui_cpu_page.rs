@@ -77,6 +77,7 @@ fn snapshot() -> SystemSnapshot {
                         pwm_pct: Metric::with(Validity::Unsupported),
                         fan_control: None,
                         fan_connected: false,
+                        fan_max_rpm: None,
                     },
                 )
             })

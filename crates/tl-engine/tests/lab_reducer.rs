@@ -2266,6 +2266,52 @@ fn memory_available_series() {
     assert_eq!(s[0].value, (6u64 << 30) as f32);
 }
 
+/// tasklens-hjn.41: each fan gets its own FAN_PWM series, and `fan_max_rpm` reaches the snapshot.
+#[test]
+fn fan_pwm_series_and_max_rpm() {
+    use tl_model::system::{SensorKind, SensorReading};
+    let fan_id = |index| DeviceIdentity::Fan {
+        chip: "nct6797".into(),
+        index,
+    };
+    let reading = |rpm: f32, pwm: f32, max: Option<u32>| SensorReading {
+        device: DeviceIdx(0),
+        kind: SensorKind::Fan,
+        value: Metric::valid(rpm),
+        pwm_pct: Metric::valid(pwm),
+        fan_control: None,
+        fan_connected: true,
+        fan_max_rpm: max,
+    };
+    let mut rig = Rig::new();
+    rig.run(vec![src(SourceUpdate::Sensors(SensorSample {
+        t_ns: SEC,
+        readings: vec![
+            (fan_id(1), reading(1200.0, 50.0, Some(2400))),
+            (fan_id(2), reading(800.0, 25.0, None)),
+        ],
+    }))])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    for (index, pwm, max) in [(1, 50.0, Some(2400)), (2, 25.0, None)] {
+        let device = rig.idx(&fan_id(index));
+        let id = SeriesId {
+            device,
+            metric: MetricId::FAN_PWM,
+        };
+        let s = &snap.series.get(id).expect("FAN_PWM exists").samples;
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].value, pwm);
+        let row = snap
+            .system
+            .sensors
+            .iter()
+            .find(|(idx, _)| *idx == device)
+            .expect("fan row");
+        assert_eq!(row.1.fan_max_rpm, max);
+    }
+}
+
 /// R-289: the first Running of a session adds no gap, even after Off.
 #[test]
 fn first_running_no_extra_gap() {

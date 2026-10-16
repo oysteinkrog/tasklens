@@ -3114,6 +3114,7 @@ mod sidebar {
                     pwm_pct: Metric::with(Validity::Unsupported),
                     fan_control: None,
                     fan_connected: true,
+                    fan_max_rpm: None,
                 },
             )]);
         });

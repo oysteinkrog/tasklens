@@ -256,7 +256,7 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
         DeviceKind::Disk => &DISK_METRICS,
         DeviceKind::Net => &NET_METRICS,
         DeviceKind::Sensor => &[MetricId::SENSOR_TEMP],
-        DeviceKind::Fan => &[MetricId::FAN_RPM],
+        DeviceKind::Fan => &[MetricId::FAN_RPM, MetricId::FAN_PWM],
         DeviceKind::Battery => &[MetricId::BATTERY_PCT],
         DeviceKind::Aggregate => &[],
     }
@@ -1254,6 +1254,7 @@ impl Reducer {
                 SensorKind::Temperature => MetricId::SENSOR_TEMP,
                 SensorKind::Fan => MetricId::FAN_RPM,
             };
+            let fan = r.kind == SensorKind::Fan;
             if present {
                 self.push(
                     idx,
@@ -1263,8 +1264,22 @@ impl Reducer {
                     r.value.validity.is_valid(),
                     period,
                 );
+                if fan {
+                    self.push(
+                        idx,
+                        MetricId::FAN_PWM,
+                        t,
+                        r.pwm_pct.value,
+                        r.pwm_pct.validity.is_valid(),
+                        period,
+                    );
+                }
             } else {
-                self.gaps(idx, &[metric], t);
+                if fan {
+                    self.gaps(idx, &[metric, MetricId::FAN_PWM], t);
+                } else {
+                    self.gaps(idx, &[metric], t);
+                }
                 r.value = Metric::with(Validity::Missing);
             }
             rows.push((idx, r));

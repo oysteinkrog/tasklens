@@ -181,6 +181,7 @@ fn temp_reading(t: &TempReading) -> (DeviceIdentity, SensorReading) {
         pwm_pct: Metric::with(Validity::Unsupported),
         fan_control: None,
         fan_connected: false,
+        fan_max_rpm: None,
     };
     (identity, reading)
 }
@@ -197,6 +198,7 @@ fn fan_reading(f: &FanReading, connected: bool) -> SensorReading {
         pwm_pct: metric(f.pwm_pct),
         fan_control: (f.control.validity == Validity::Valid).then(|| control_mode(f.control.value)),
         fan_connected: connected,
+        fan_max_rpm: f.max_rpm,
     }
 }
 
