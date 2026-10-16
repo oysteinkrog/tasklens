@@ -603,6 +603,14 @@ pub fn format_value(fmt: ValueFormat, value: f32, unit: NetworkUnit, out: &mut S
         }
         ValueFormat::Mhz => units::mhz(out, value),
         ValueFormat::Celsius => units::celsius(out, value),
+        // Battery power is signed: discharge reads "-12.4 W".
+        ValueFormat::Watts if value < 0.0 => {
+            let start = out.len();
+            units::watts(out, -value);
+            if out[start..] != *"0 W" {
+                out.insert(start, '-');
+            }
+        }
         ValueFormat::Watts => units::watts(out, value),
         ValueFormat::Rpm => {
             let _ = write!(out, "{} RPM", whole(value));

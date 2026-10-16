@@ -946,6 +946,10 @@ fn update_page(view: &AnyView, cx: &mut App, f: impl FnOnce(&mut dyn DevicePage,
         Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
         Err(view) => view,
     };
+    let view = match view.downcast::<sensors::BatteryPage>() {
+        Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
+        Err(view) => view,
+    };
     if let Ok(e) = view.downcast::<page::PlaceholderPage>() {
         e.update(cx, |p, cx| f(p, cx));
     }

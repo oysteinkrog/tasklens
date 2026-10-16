@@ -1,4 +1,4 @@
-//! The Fan page: the Fan speed chart with the PWM series on its own 0..100 axis, the Temperature
+//! The Fan and Battery pages. The Fan page: the Fan speed chart with the PWM series on its own 0..100 axis, the Temperature
 //! chart of the paired sensor, and the Details rows (docs/ui/performance.md UI-PRF-034; PERF-024,
 //! PERF-076, PERF-077).
 //!
@@ -25,7 +25,7 @@ use tl_model::demand::Demand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::snapshot::Snapshot;
+use tl_model::snapshot::{BatteryDetails, InvField, Snapshot};
 use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
@@ -55,6 +55,8 @@ use crate::theme::{TlTheme, current, metrics};
 pub const SPEED_ID: &str = "perf-fan-speed";
 /// Debug selector of the Temperature chart box.
 pub const TEMPERATURE_ID: &str = "perf-fan-temperature";
+/// Debug selector of the Battery chart box.
+pub const BATTERY_CHART_ID: &str = "perf-battery-chart";
 
 /// `<hwmon name>:<device path>:temp<n>`, the persistent key of a temperature sensor without its
 /// `sensor:` prefix (table (a) `[fans]`).
@@ -80,6 +82,81 @@ pub const ROW_CHIP: &str = "perf-fan-row-chip";
 
 /// The five Details rows in grid order (UI-PRF-034).
 pub const FAN_DETAIL_ROWS: [&str; 5] = [ROW_SPEED, ROW_PWM, ROW_MODE, ROW_TEMPERATURE, ROW_CHIP];
+
+/// The battery colour name (UI-PRF-005: "Mint").
+const BAT_COLOR: &str = "mint";
+
+const BAT_KEY_POWER: &str = "perf-bat-heading-power";
+const BAT_KEY_PERCENTAGE: &str = "perf-bat-heading-percentage";
+const BAT_KEY_RANGE_POWER: &str = "perf-bat-range-power";
+
+pub const BAT_ROW_PERCENTAGE: &str = "perf-bat-row-percentage";
+pub const BAT_ROW_ENERGY: &str = "perf-bat-row-energy";
+pub const BAT_ROW_VOLTAGE: &str = "perf-bat-row-voltage";
+pub const BAT_ROW_POWER: &str = "perf-bat-row-power";
+pub const BAT_ROW_STATE: &str = "perf-bat-row-state";
+pub const BAT_ROW_TIME_EMPTY: &str = "perf-bat-row-time-to-empty";
+pub const BAT_ROW_TIME_FULL: &str = "perf-bat-row-time-to-full";
+pub const BAT_ROW_CYCLES: &str = "perf-bat-row-cycles";
+pub const BAT_ROW_SERIAL: &str = "perf-bat-row-serial";
+pub const BAT_ROW_TYPE: &str = "perf-bat-row-type";
+pub const BAT_ROW_POWERING: &str = "perf-bat-row-powering";
+pub const BAT_ROW_TECHNOLOGY: &str = "perf-bat-row-technology";
+pub const BAT_ROW_CAPACITY: &str = "perf-bat-row-capacity";
+pub const BAT_ROW_ENERGY_EMPTY: &str = "perf-bat-row-energy-empty";
+pub const BAT_ROW_ENERGY_FULL: &str = "perf-bat-row-energy-full";
+pub const BAT_ROW_ENERGY_DESIGN: &str = "perf-bat-row-energy-full-design";
+pub const BAT_ROW_VOLTAGE_MIN: &str = "perf-bat-row-voltage-min";
+pub const BAT_ROW_VOLTAGE_MAX: &str = "perf-bat-row-voltage-max";
+pub const BAT_ROW_THRESHOLD: &str = "perf-bat-row-threshold";
+pub const BAT_ROW_THRESHOLD_START: &str = "perf-bat-row-threshold-start";
+pub const BAT_ROW_THRESHOLD_END: &str = "perf-bat-row-threshold-end";
+pub const BAT_ROW_TEMPERATURE: &str = "perf-bat-row-temperature";
+
+/// The Battery Details rows in grid order (PERF-078). The two time rows share one slot: the
+/// page shows the one the state asks for and hides the other.
+pub const BATTERY_DETAIL_ROWS: [&str; 22] = [
+    BAT_ROW_PERCENTAGE,
+    BAT_ROW_ENERGY,
+    BAT_ROW_VOLTAGE,
+    BAT_ROW_POWER,
+    BAT_ROW_STATE,
+    BAT_ROW_TIME_EMPTY,
+    BAT_ROW_TIME_FULL,
+    BAT_ROW_CYCLES,
+    BAT_ROW_SERIAL,
+    BAT_ROW_TYPE,
+    BAT_ROW_POWERING,
+    BAT_ROW_TECHNOLOGY,
+    BAT_ROW_CAPACITY,
+    BAT_ROW_ENERGY_EMPTY,
+    BAT_ROW_ENERGY_FULL,
+    BAT_ROW_ENERGY_DESIGN,
+    BAT_ROW_VOLTAGE_MIN,
+    BAT_ROW_VOLTAGE_MAX,
+    BAT_ROW_THRESHOLD,
+    BAT_ROW_THRESHOLD_START,
+    BAT_ROW_THRESHOLD_END,
+    BAT_ROW_TEMPERATURE,
+];
+
+const BAT_KEY_WH: &str = "perf-bat-wh-value";
+const BAT_KEY_V: &str = "perf-bat-v-value";
+const BAT_KEY_YES: &str = "perf-bat-yes";
+const BAT_KEY_NO: &str = "perf-bat-no";
+const BAT_KEY_ENABLED: &str = "perf-bat-enabled";
+const BAT_KEY_DISABLED: &str = "perf-bat-disabled";
+
+/// The engine's state names and the Fluent key of each word.
+const BAT_STATES: [(&str, &str); 7] = [
+    ("Charging", "perf-bat-state-charging"),
+    ("Discharging", "perf-bat-state-discharging"),
+    ("Empty", "perf-bat-state-empty"),
+    ("Fully charged", "perf-bat-state-full"),
+    ("Pending charge", "perf-bat-state-pending-charge"),
+    ("Pending discharge", "perf-bat-state-pending-discharge"),
+    ("Unknown", "perf-bat-state-unknown"),
+];
 
 /// The value the Temperature chart shows without a sensor.
 const NO_VALUE: &str = "-";
@@ -972,6 +1049,682 @@ impl Render for FanPage {
             let labels = temperature_labels(self.sensor_device.is_some(), &self.words);
             self.temperature
                 .update(cx, |v, cx| v.set_labels(labels, cx));
+            let snap = Arc::clone(self.hub.read(cx).current());
+            self.apply_snapshot(&snap, ComponentMask::ALL, cx);
+        }
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        div().size_full().track_focus(&self.focus).child(
+            DevicePageFrame {
+                page: self,
+                m: &m,
+                theme: &theme,
+            }
+            .render(window, cx),
+        )
+    }
+}
+
+// ---- Battery ----
+
+/// The battery chart colour.
+fn battery_line(theme: &TlTheme) -> gpui_kit::Hsla {
+    accent_color(BAT_COLOR).unwrap_or(theme.graph.gpu_line)
+}
+
+/// The battery chart (UI-PRF-035). A system battery draws its signed power: charge above the
+/// zero line, discharge below. Any other device draws its charge percentage.
+pub fn battery_spec(
+    device: DeviceIdx,
+    system: bool,
+    s: &PageSettingsView,
+    theme: &TlTheme,
+) -> ChartSpec {
+    let line = battery_line(theme);
+    let (metric, y) = if system {
+        (MetricId::BATTERY_POWER, YScale::Symmetric)
+    } else {
+        (
+            MetricId::BATTERY_PCT,
+            YScale::Fixed {
+                min: 0.0,
+                max: 100.0,
+            },
+        )
+    };
+    ChartSpec {
+        series: smallvec![ChartSeries {
+            id: series(device, metric),
+            fill: Some(line.opacity(FILL_ALPHA)),
+            line,
+            ..ChartSeries::default()
+        }],
+        y,
+        range_ns: s.range_ns,
+        smooth: s.smooth,
+        grid: s.grid.clone(),
+        background: ChartBg::Window,
+        ..ChartSpec::default()
+    }
+}
+
+/// The battery page's words, translated once per strings version.
+#[derive(Clone, Debug, Default)]
+struct BatWords {
+    version: Option<Option<u64>>,
+    power: SharedString,
+    percentage: SharedString,
+    range_power: SharedString,
+}
+
+impl BatWords {
+    /// True when the strings changed since the last call.
+    fn refresh(&mut self, cx: &App) -> bool {
+        let version = Some(
+            cx.try_global::<crate::i18n::Strings>()
+                .map(|s| s.strings_version),
+        );
+        if self.version == version {
+            return false;
+        }
+        self.version = version;
+        self.power = tr(cx, BAT_KEY_POWER);
+        self.percentage = tr(cx, BAT_KEY_PERCENTAGE);
+        self.range_power = tr(cx, BAT_KEY_RANGE_POWER);
+        true
+    }
+}
+
+fn battery_labels(system: bool, words: &BatWords) -> ChartLabels {
+    if system {
+        ChartLabels {
+            heading: Some(words.power.clone()),
+            value_fmt: ValueFormat::Watts,
+            value_align: ValueAlign::Right,
+            range_word: words.range_power.clone(),
+            legend: SmallVec::new(),
+            show_axis_max: true,
+        }
+    } else {
+        ChartLabels {
+            heading: Some(words.percentage.clone()),
+            value_fmt: ValueFormat::Percent,
+            value_align: ValueAlign::Right,
+            range_word: words.percentage.clone(),
+            legend: SmallVec::new(),
+            show_axis_max: false,
+        }
+    }
+}
+
+/// The Battery Details model: the rows in order, with the owner texts the rows use.
+pub fn battery_details_model() -> KeyValueModel {
+    let mut model = KeyValueModel::new(&BATTERY_DETAIL_ROWS).with_texts(&[
+        (BAT_KEY_WH, &["wh"]),
+        (BAT_KEY_V, &["v"]),
+        (BAT_KEY_YES, &[]),
+        (BAT_KEY_NO, &[]),
+        (BAT_KEY_ENABLED, &[]),
+        (BAT_KEY_DISABLED, &[]),
+        (BAT_STATES[0].1, &[]),
+        (BAT_STATES[1].1, &[]),
+        (BAT_STATES[2].1, &[]),
+        (BAT_STATES[3].1, &[]),
+        (BAT_STATES[4].1, &[]),
+        (BAT_STATES[5].1, &[]),
+        (BAT_STATES[6].1, &[]),
+    ]);
+    model.hide(BAT_ROW_TIME_FULL);
+    model
+}
+
+fn set_hidden(model: &mut KeyValueModel, label: &'static str, hidden: bool) -> bool {
+    let was = model
+        .rows
+        .iter()
+        .find(|r| r.label == label)
+        .is_some_and(|r| r.hidden);
+    if was == hidden {
+        return false;
+    }
+    if hidden {
+        model.hide(label);
+    } else {
+        model.show(label);
+    }
+    true
+}
+
+/// The state word key; "Unknown" for a name the page does not know.
+fn state_key(state: &str) -> &'static str {
+    BAT_STATES
+        .iter()
+        .find(|(name, _)| *name == state)
+        .map_or(BAT_STATES[6].1, |(_, key)| key)
+}
+
+/// The states that show "Time to full" instead of "Time to empty".
+fn shows_time_to_full(state: &str) -> bool {
+    matches!(state, "Charging" | "Pending charge")
+}
+
+fn inv_shown(validity: Validity) -> bool {
+    matches!(validity, Validity::Valid | Validity::Stale)
+}
+
+/// A numeric row. Valid and Stale run `write`; the rest show a fallback.
+fn inv_row(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    f: InvField<f32>,
+    age_ns: u64,
+    write: impl FnOnce(&mut KeyValueModel, u32) -> bool,
+) -> bool {
+    match f.validity {
+        Validity::Valid => write(model, f.value.to_bits()),
+        Validity::Stale => write(model, f.value.to_bits()) | model.set_stale(label, age_ns),
+        Validity::Unsupported => {
+            model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None)
+        }
+        v => model.set_fallback(label, v, Fallback::Unavailable, None),
+    }
+}
+
+fn float_row(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    f: InvField<f32>,
+    age_ns: u64,
+    fmt: fn(&mut String, f32),
+) -> bool {
+    let value = f.value;
+    inv_row(model, label, f, age_ns, move |m, bits| {
+        m.set_valid(label, u64::from(bits), |o| fmt(o, value))
+    })
+}
+
+/// A row whose text is a template with one argument written with two decimals.
+fn unit_row(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    key: &'static str,
+    f: InvField<f32>,
+    age_ns: u64,
+) -> bool {
+    let value = f.value;
+    let template = model.text(key);
+    inv_row(model, label, f, age_ns, move |m, bits| {
+        m.set_valid(label, u64::from(bits), |o| {
+            template.write_each(o, |_, o| {
+                let _ = write!(o, "{value:.2}");
+            });
+        })
+    })
+}
+
+fn text_row(model: &mut KeyValueModel, label: &'static str, text: &str) -> bool {
+    if text.trim().is_empty() {
+        model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None)
+    } else {
+        model.set_text(label, text.trim())
+    }
+}
+
+/// The time row of the state: a positive number of seconds shows the short age, anything else
+/// reads "Unknown" (UPower reports 0 when it does not know).
+fn time_row(model: &mut KeyValueModel, label: &'static str, f: InvField<i64>) -> bool {
+    match u64::try_from(f.value) {
+        Ok(secs) if inv_shown(f.validity) && secs > 0 => {
+            model.set_valid(label, secs, |o| units::short_age(o, secs))
+        }
+        _ => model.set_fallback(label, Validity::Unsupported, Fallback::Unknown, None),
+    }
+}
+
+/// Fills the Details rows from the battery record; without one every row reads "Unavailable".
+/// True when a row changed.
+fn update_battery_details(
+    model: &mut KeyValueModel,
+    b: Option<&BatteryDetails>,
+    kind_word: &str,
+    age_ns: u64,
+) -> bool {
+    let mut changed = false;
+    let Some(b) = b else {
+        for label in BATTERY_DETAIL_ROWS {
+            changed |=
+                model.set_fallback(label, Validity::Unsupported, Fallback::Unavailable, None);
+        }
+        return changed;
+    };
+    changed |= float_row(
+        model,
+        BAT_ROW_PERCENTAGE,
+        b.percentage,
+        age_ns,
+        units::percent,
+    );
+    changed |= unit_row(model, BAT_ROW_ENERGY, BAT_KEY_WH, b.energy_wh, age_ns);
+    changed |= unit_row(model, BAT_ROW_VOLTAGE, BAT_KEY_V, b.voltage_v, age_ns);
+    changed |= float_row(model, BAT_ROW_POWER, b.energy_rate_w, age_ns, units::watts);
+    let state = model.text(state_key(&b.state));
+    changed |= model.set_text(BAT_ROW_STATE, state.text());
+
+    let full = shows_time_to_full(&b.state);
+    changed |= set_hidden(model, BAT_ROW_TIME_EMPTY, full);
+    changed |= set_hidden(model, BAT_ROW_TIME_FULL, !full);
+    changed |= time_row(model, BAT_ROW_TIME_EMPTY, b.time_to_empty_s);
+    changed |= time_row(model, BAT_ROW_TIME_FULL, b.time_to_full_s);
+
+    changed |= if inv_shown(b.charge_cycles.validity) {
+        let n = b.charge_cycles.value;
+        model.set_valid(BAT_ROW_CYCLES, u64::from(n), |o| {
+            let _ = write!(o, "{n}");
+        })
+    } else {
+        model.set_fallback(
+            BAT_ROW_CYCLES,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        )
+    };
+    changed |= if inv_shown(b.serial.validity) {
+        text_row(model, BAT_ROW_SERIAL, &b.serial.value)
+    } else {
+        model.set_fallback(
+            BAT_ROW_SERIAL,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        )
+    };
+    changed |= model.set_text(BAT_ROW_TYPE, kind_word);
+    let powering = model.text(if b.power_supply {
+        BAT_KEY_YES
+    } else {
+        BAT_KEY_NO
+    });
+    changed |= model.set_text(BAT_ROW_POWERING, powering.text());
+    changed |= text_row(model, BAT_ROW_TECHNOLOGY, &b.technology);
+    changed |= float_row(
+        model,
+        BAT_ROW_CAPACITY,
+        b.capacity_pct,
+        age_ns,
+        units::percent,
+    );
+    changed |= unit_row(
+        model,
+        BAT_ROW_ENERGY_EMPTY,
+        BAT_KEY_WH,
+        b.energy_empty_wh,
+        age_ns,
+    );
+    changed |= unit_row(
+        model,
+        BAT_ROW_ENERGY_FULL,
+        BAT_KEY_WH,
+        b.energy_full_wh,
+        age_ns,
+    );
+    changed |= unit_row(
+        model,
+        BAT_ROW_ENERGY_DESIGN,
+        BAT_KEY_WH,
+        b.energy_full_design_wh,
+        age_ns,
+    );
+    changed |= unit_row(
+        model,
+        BAT_ROW_VOLTAGE_MIN,
+        BAT_KEY_V,
+        b.voltage_min_design_v,
+        age_ns,
+    );
+    changed |= unit_row(
+        model,
+        BAT_ROW_VOLTAGE_MAX,
+        BAT_KEY_V,
+        b.voltage_max_design_v,
+        age_ns,
+    );
+
+    let thresholds = [
+        BAT_ROW_THRESHOLD,
+        BAT_ROW_THRESHOLD_START,
+        BAT_ROW_THRESHOLD_END,
+    ];
+    match b.charge_threshold {
+        Some((enabled, start, end)) => {
+            for label in thresholds {
+                changed |= set_hidden(model, label, false);
+            }
+            let word = model.text(if enabled {
+                BAT_KEY_ENABLED
+            } else {
+                BAT_KEY_DISABLED
+            });
+            changed |= model.set_text(BAT_ROW_THRESHOLD, word.text());
+            changed |= model.set_valid(BAT_ROW_THRESHOLD_START, u64::from(start), |o| {
+                let _ = write!(o, "{start}%");
+            });
+            changed |= model.set_valid(BAT_ROW_THRESHOLD_END, u64::from(end), |o| {
+                let _ = write!(o, "{end}%");
+            });
+        }
+        None => {
+            for label in thresholds {
+                changed |= set_hidden(model, label, true);
+            }
+        }
+    }
+    changed |= float_row(
+        model,
+        BAT_ROW_TEMPERATURE,
+        b.temperature_c,
+        age_ns,
+        units::celsius,
+    );
+    changed
+}
+
+/// The battery record of `device` in the snapshot.
+fn battery_of(snap: &Snapshot, device: DeviceIdx) -> Option<&BatteryDetails> {
+    snap.device_details
+        .batteries
+        .iter()
+        .find(|(i, _)| *i == device)
+        .map(|(_, b)| b)
+}
+
+/// The Battery device page: one chart (Power for a system battery, Percentage for any other
+/// UPower device) and the Details rows.
+pub struct BatteryPage {
+    key: DeviceKey,
+    row: DeviceRow,
+    chart: Entity<ChartView>,
+    details: KeyValueModel,
+    /// The device powers the system (`PowerSupply`), so the chart shows power.
+    is_system: bool,
+    focus: FocusHandle,
+    hub: Entity<SnapshotHub>,
+    demand: Entity<DemandAggregator>,
+    id: EntityId,
+    active: bool,
+    window: Option<AnyWindowHandle>,
+    header: (SharedString, SharedString),
+    settings: PageSettings,
+    settings_versions: [u64; 4],
+    style_version: u64,
+    words: BatWords,
+    _subs: SmallVec<[Subscription; 3]>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub render_count: Cell<u32>,
+}
+
+impl BatteryPage {
+    pub fn new(
+        key: DeviceKey,
+        row: DeviceRow,
+        hub: Entity<SnapshotHub>,
+        demand: Entity<DemandAggregator>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let theme = current(cx).clone();
+        let settings = PageSettings::read(&key, cx);
+        let snap = Arc::clone(hub.read(cx).current());
+        let mut words = BatWords::default();
+        words.refresh(cx);
+        let is_system = battery_of(&snap, row.idx).is_some_and(|b| b.power_supply);
+        let view = PageSettingsView::of(&settings);
+        let spec = battery_spec(row.idx, is_system, &view, &theme);
+        let labels = battery_labels(is_system, &words);
+        let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+
+        let mut subs = SmallVec::new();
+        subs.push(cx.subscribe(&hub, Self::on_snapshot));
+        subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
+        subs.push(cx.observe_global::<crate::theme::UiMetrics>(Self::sync_style));
+        let id = cx.entity_id();
+        let release_demand = demand.clone();
+        cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
+            .detach();
+
+        let mut this = Self {
+            key,
+            row,
+            chart,
+            details: battery_details_model(),
+            is_system,
+            focus: cx.focus_handle(),
+            hub,
+            demand,
+            id,
+            active: false,
+            window: None,
+            header: (SharedString::default(), SharedString::default()),
+            settings,
+            settings_versions: section_versions(cx),
+            style_version: metrics(cx).style_version,
+            words,
+            _subs: subs,
+            #[cfg(any(test, feature = "test-hooks"))]
+            render_count: Cell::new(0),
+        };
+        this.apply_snapshot(&snap, ComponentMask::ALL, cx);
+        this
+    }
+
+    pub fn chart(&self) -> &Entity<ChartView> {
+        &self.chart
+    }
+
+    /// True when the chart shows power (the battery powers the system).
+    pub fn is_system(&self) -> bool {
+        self.is_system
+    }
+
+    /// This page's demand part while it is active: batteries ride on the sensors bit.
+    pub fn demand_part(&self) -> Demand {
+        Demand {
+            any_surface_visible: true,
+            sensors: true,
+            ..Demand::default()
+        }
+    }
+
+    fn send_demand(&self, cx: &mut App) {
+        if !self.active {
+            return;
+        }
+        let (id, window, part) = (self.id, self.window, self.demand_part());
+        self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
+    }
+
+    fn on_snapshot(
+        &mut self,
+        hub: Entity<SnapshotHub>,
+        ev: &SnapshotChanged,
+        cx: &mut Context<Self>,
+    ) {
+        let snap = Arc::clone(hub.read(cx).current());
+        self.apply_snapshot(&snap, ev.mask, cx);
+    }
+
+    /// Brings the chart kind, Details rows and header up to date. Notifies only when something
+    /// the page draws changed.
+    fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
+        let details = mask.contains(ComponentMask::DEVICE_DETAILS);
+        let devices = mask.contains(ComponentMask::DEVICES);
+        let mut changed = false;
+        let record = battery_of(snap, self.row.idx);
+        if details {
+            let system = record.is_some_and(|b| b.power_supply);
+            if system != self.is_system {
+                self.is_system = system;
+                self.rebuild_chart(cx);
+                changed = true;
+            }
+            let kind = record.map_or("", |b| &*b.kind);
+            let word = page_words(cx).battery_kind(kind).clone();
+            let age_ns = now_boot_ns().saturating_sub(snap.device_details.header.observed_end);
+            changed |= update_battery_details(&mut self.details, record, &word, age_ns);
+        }
+        if details || devices {
+            changed |= self.sync_header(snap, cx);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn sync_header(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
+        let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == self.row.idx) else {
+            return false;
+        };
+        let header = header_text(page_words(cx), DeviceKind::Battery, 0, entry, snap);
+        if header == self.header {
+            return false;
+        }
+        self.header = header;
+        true
+    }
+
+    fn rebuild_chart(&mut self, cx: &mut Context<Self>) {
+        let theme = current(cx).clone();
+        let view = PageSettingsView::of(&self.settings);
+        let spec = battery_spec(self.row.idx, self.is_system, &view, &theme);
+        let labels = battery_labels(self.is_system, &self.words);
+        self.chart.update(cx, |v, cx| {
+            v.set_spec(spec, cx);
+            v.set_labels(labels, cx);
+        });
+    }
+
+    fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        let versions = section_versions(cx);
+        if versions == self.settings_versions {
+            return;
+        }
+        self.settings_versions = versions;
+        let new = PageSettings::read(&self.key, cx);
+        if new == self.settings {
+            return;
+        }
+        self.settings = new;
+        self.rebuild_chart(cx);
+        cx.notify();
+    }
+
+    fn sync_style(&mut self, cx: &mut Context<Self>) {
+        let version = metrics(cx).style_version;
+        if version == self.style_version {
+            return;
+        }
+        self.style_version = version;
+        self.rebuild_chart(cx);
+        cx.notify();
+    }
+}
+
+impl DevicePage for BatteryPage {
+    fn key(&self) -> &DeviceKey {
+        &self.key
+    }
+
+    fn header(&self) -> (SharedString, SharedString) {
+        self.header.clone()
+    }
+
+    fn toggles(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 2]> {
+        SmallVec::new()
+    }
+
+    fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
+        let m = *metrics(cx);
+        v_flex()
+            .w_full()
+            .child(
+                div()
+                    .debug_selector(|| BATTERY_CHART_ID.into())
+                    .w_full()
+                    .h(px(GRAPH_H_STACKED * m.ui_scale))
+                    .child(
+                        self.chart
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn details(&self) -> &KeyValueModel {
+        &self.details
+    }
+
+    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
+        SmallVec::new()
+    }
+
+    fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
+        menu
+    }
+
+    /// The CPU copy form (PERF-011): the header word and the model on their own lines, then
+    /// every Details row indented. The page has no blocks.
+    fn copy_text(&self, out: &mut String) {
+        let (word, model) = &self.header;
+        out.push_str(word);
+        out.push('\n');
+        if !model.is_empty() {
+            out.push_str(model);
+            out.push('\n');
+        }
+        let rows_from = out.len();
+        self.details.copy_into(out);
+        if out.len() > rows_from {
+            out.push('\n');
+        }
+    }
+
+    fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
+        SmallVec::new()
+    }
+
+    fn set_active(&mut self, active: bool, cx: &mut App) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if active {
+            self.send_demand(cx);
+        } else {
+            let id = self.id;
+            self.demand.update(cx, |d, cx| d.remove(id, cx));
+        }
+    }
+}
+
+impl Focusable for BatteryPage {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for BatteryPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let handle = window.window_handle();
+        if self.window != Some(handle) {
+            self.window = Some(handle);
+            self.send_demand(cx);
+        }
+        self.details.refresh_strings(cx);
+        if self.words.refresh(cx) {
+            let labels = battery_labels(self.is_system, &self.words);
+            self.chart.update(cx, |v, cx| v.set_labels(labels, cx));
             let snap = Arc::clone(self.hub.read(cx).current());
             self.apply_snapshot(&snap, ComponentMask::ALL, cx);
         }

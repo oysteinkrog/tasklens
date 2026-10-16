@@ -79,6 +79,8 @@ pub struct PageWords {
     /// "Fan {$n}".
     pub fan: Template,
     pub battery: SharedString,
+    /// The battery kind words, in [`BATTERY_KINDS`] order.
+    battery_kinds: Vec<SharedString>,
     pub aggregate_disk: SharedString,
     pub aggregate_gpu: SharedString,
     /// "{$k} disks".
@@ -100,7 +102,30 @@ impl Default for PageWords {
     }
 }
 
+/// The UPower device kinds the engine stores in `BatteryDetails.kind`, with the Fluent key of
+/// each kind word. Any other kind shows the last word, "Other".
+pub const BATTERY_KINDS: [(&str, &str); 9] = [
+    ("Battery", "perf-bat-kind-battery"),
+    ("UPS", "perf-bat-kind-ups"),
+    ("Mouse", "perf-bat-kind-mouse"),
+    ("Keyboard", "perf-bat-kind-keyboard"),
+    ("Headset", "perf-bat-kind-headset"),
+    ("Gaming input", "perf-bat-kind-gaming"),
+    ("Phone", "perf-bat-kind-phone"),
+    ("Tablet", "perf-bat-kind-tablet"),
+    ("Other", "perf-bat-kind-other"),
+];
+
 impl PageWords {
+    /// The translated word of the battery `kind` the engine stored.
+    pub fn battery_kind(&self, kind: &str) -> &SharedString {
+        let i = BATTERY_KINDS
+            .iter()
+            .position(|(k, _)| *k == kind)
+            .unwrap_or(BATTERY_KINDS.len() - 1);
+        &self.battery_kinds[i]
+    }
+
     /// The words in the current strings; en-US without strings (tests).
     fn new(cx: &App) -> Self {
         let version = strings_version(cx);
@@ -128,6 +153,7 @@ impl PageWords {
             disk: template("perf-header-disk", &["n"]),
             fan: template("perf-header-fan", &["n"]),
             battery: t("perf-header-battery"),
+            battery_kinds: BATTERY_KINDS.iter().map(|(_, key)| t(key)).collect(),
             aggregate_disk: t("perf-card-aggregate-storage"),
             aggregate_gpu: t("perf-card-aggregate-graphics"),
             disks_count: template("perf-header-disks-count", &["k"]),
@@ -301,9 +327,7 @@ pub fn header_text(
                 .iter()
                 .find(|(i, _)| *i == idx)
                 .map(|(_, b)| b);
-            let word = details
-                .and_then(|b| shown(&b.kind, Validity::Valid))
-                .unwrap_or(w.battery.as_ref());
+            let word = details.map_or(w.battery.as_ref(), |b| w.battery_kind(&b.kind).as_ref());
             let mut text = String::new();
             if let Some(b) = details {
                 for part in [&b.vendor, &b.model] {
