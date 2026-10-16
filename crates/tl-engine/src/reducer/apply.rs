@@ -13,7 +13,7 @@ use asupersync::Cx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::actions::{ActionEvent, ActionState, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
-use tl_model::demand::Demand;
+use tl_model::demand::{Demand, DetailDemand};
 use tl_model::details::{DetailTab, DetailTarget};
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::gpu_proto::ApiVersions;
@@ -131,6 +131,8 @@ pub struct ApplyState {
     /// (ADR-012). Filled only while `collect` is set; the buffer keeps its capacity.
     batch: Vec<(SeriesId, Sample)>,
     collect: bool,
+    /// `Demand.details` at the last tick, to find the tabs that opened since (tasklens-dwy.7).
+    details_seen: Arc<[DetailDemand]>,
 }
 
 impl ApplyState {
@@ -796,8 +798,30 @@ impl Reducer {
         // Closed Properties windows and Set Affinity dialogs free their data (E09-026).
         if let Some(demand) = self.demand_rx.as_ref().map(|rx| rx.borrow_and_clone()) {
             self.details.retain(&demand);
+            self.refresh_opened_tabs(&demand);
         }
         self.refresh_app_details();
+    }
+
+    /// Sends the ProcessDetail worker a `DetailRefresh` for each process tab that opened since
+    /// the last tick. A window that closed and opened again between two worker polls lost its
+    /// payloads here, but the worker kept its state and would send nothing for an unchanged tab.
+    fn refresh_opened_tabs(&mut self, demand: &Demand) {
+        let seen = std::mem::replace(
+            &mut self.apply_state.details_seen,
+            Arc::clone(&demand.details),
+        );
+        for d in demand.details.iter() {
+            if matches!(d.target, DetailTarget::Process(_)) && !seen.contains(d) {
+                self.forward(
+                    SourceId::ProcessDetail,
+                    WorkerCommand::DetailRefresh {
+                        target: d.target,
+                        tab: d.tab,
+                    },
+                );
+            }
+        }
     }
 
     /// Builds the App General tab of each `DetailTarget::App` in `Demand.details` from the

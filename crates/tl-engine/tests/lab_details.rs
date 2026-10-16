@@ -250,6 +250,7 @@ fn env_vars(slot: &TabSlot) -> Vec<(String, String)> {
 
 fn start_detail_engine(
     root: &FixtureRoot,
+    interval_ms: u32,
 ) -> (
     FakeLab,
     fake_sources::UiSide,
@@ -259,7 +260,7 @@ fn start_detail_engine(
     let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![process_detail::spec()]);
     ui.settings_tx
         .send(EngineSettings {
-            interval_ms: 500,
+            interval_ms,
             ..EngineSettings::default()
         })
         .expect("watch has receivers");
@@ -283,7 +284,7 @@ fn stop(mut fl: FakeLab, ui: fake_sources::UiSide, handle: asupersync::runtime::
 #[test]
 fn engine_publishes_threads_tab_and_keeps_its_arc() {
     let root = FixtureRoot::new(&["process-edge"]);
-    let (mut fl, ui, handle) = start_detail_engine(&root);
+    let (mut fl, ui, handle) = start_detail_engine(&root, 500);
     ui.demand_tx
         .send(tab_demand(DetailTab::Threads))
         .expect("watch has receivers");
@@ -312,7 +313,7 @@ fn engine_publishes_threads_tab_and_keeps_its_arc() {
 fn engine_environment_once_then_on_refresh() {
     let root = FixtureRoot::new(&["process-edge"]);
     root.write(4201, "environ", b"A=1\0");
-    let (mut fl, ui, handle) = start_detail_engine(&root);
+    let (mut fl, ui, handle) = start_detail_engine(&root, 500);
     ui.demand_tx
         .send(tab_demand(DetailTab::Environment))
         .expect("watch has receivers");
@@ -336,6 +337,65 @@ fn engine_environment_once_then_on_refresh() {
         }))
         .expect("the queue has room for the message");
     fl.run_for(Duration::from_secs(1), Duration::from_millis(10));
+    assert_eq!(
+        env_vars(&slot(&ui, DetailTab::Environment)),
+        vec![("B".into(), "2".into())]
+    );
+    stop(fl, ui, handle);
+}
+
+/// A window that closes and opens again between two worker polls gets its tabs again: the
+/// reducer drops the payloads on the close and sends a `DetailRefresh` for each tab on the
+/// reopen. With a 4 s interval the worker samples at 0 s, 4 s and 8 s, and the reducer ticks
+/// every second.
+#[test]
+fn engine_reopened_tabs_between_polls_publish_again() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    root.write(4201, "environ", b"A=1\0");
+    let (mut fl, ui, handle) = start_detail_engine(&root, 4000);
+    let open = Demand {
+        any_surface_visible: true,
+        details: Arc::from([
+            DetailDemand {
+                target: DetailTarget::Process(edge_key()),
+                tab: DetailTab::Fds,
+            },
+            DetailDemand {
+                target: DetailTarget::Process(edge_key()),
+                tab: DetailTab::Environment,
+            },
+        ]),
+        ..Demand::default()
+    };
+    ui.demand_tx
+        .send(open.clone())
+        .expect("watch has receivers");
+    // Past the 4 s sample, which also serves the refresh of the first open.
+    fl.run_for(Duration::from_millis(4300), Duration::from_millis(10));
+    assert!(slot(&ui, DetailTab::Fds).payload.is_some());
+    assert_eq!(
+        env_vars(&slot(&ui, DetailTab::Environment)),
+        vec![("A".into(), "1".into())]
+    );
+
+    // Closed for one reducer tick, which drops the payloads. The worker does not poll.
+    ui.demand_tx
+        .send(Demand {
+            any_surface_visible: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_millis(1200), Duration::from_millis(10));
+    assert!(slot(&ui, DetailTab::Fds).payload.is_none());
+    assert!(slot(&ui, DetailTab::Environment).payload.is_none());
+
+    root.write(4201, "environ", b"B=2\0");
+    ui.demand_tx.send(open).expect("watch has receivers");
+    // Past the 8 s sample.
+    fl.run_for(Duration::from_millis(3000), Duration::from_millis(10));
+    let fds = slot(&ui, DetailTab::Fds);
+    assert_eq!(fds.validity, Validity::Valid);
+    assert!(matches!(fds.payload.as_deref(), Some(TabPayload::Fds(_))));
     assert_eq!(
         env_vars(&slot(&ui, DetailTab::Environment)),
         vec![("B".into(), "2".into())]
