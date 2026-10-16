@@ -1,0 +1,14 @@
+Protocol / State / Family: TCP / ESTABLISHED / IPv4
+Local: 192.168.1.10 Port 51234
+Foreign: 93.184.216.34 Port 443
+Process: curl PID 4321
+User: alice
+Inode: 1234567
+Interface: eth0
+Recv-Q / Send-Q: 0 / 0
+RTT: 0.42 ms (var 0.10 ms)
+Congestion window: 10 segments
+Bytes sent / received: 1.22 MiB / 34.68 MiB
+Retransmits: 3
+Last data received: 1 240 ms ago
+Closable here: No (not supported in this version)

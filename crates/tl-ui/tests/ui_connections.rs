@@ -1720,3 +1720,334 @@ mod jump {
         );
     }
 }
+
+/// The Connection Properties window (tasklens-9o0.19).
+mod props {
+    use super::*;
+    use gpui_kit::base::Root;
+    use gpui_kit::{VisualTestContext, WindowHandle};
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::snapshot::{ConnCounts, ProcessSnapshot, TcpInfoView};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::demand::GlobalDemand;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui::windows::connection_properties::{
+        ConnectionPropertiesView, open_connection_properties,
+    };
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        main: VisualTestContext,
+        version: u64,
+    }
+
+    fn rig(
+        cx: &mut TestAppContext,
+        records: Vec<ConnRecord>,
+        processes: Vec<ProcessRecord>,
+    ) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let handle = cx
+            .update(|cx| open_main_window_on(Tab::Connections, cx))
+            .expect("the main window opens");
+        let mut main = VisualTestContext::from_window(handle.into(), cx);
+        main.update(|window, _| window.activate_window());
+        main.run_until_parked();
+        let mut rig = Rig {
+            engine,
+            main,
+            version: 0,
+        };
+        rig.publish(records, processes);
+        rig
+    }
+
+    impl Rig {
+        fn publish(&mut self, records: Vec<ConnRecord>, mut processes: Vec<ProcessRecord>) {
+            self.version += 1;
+            processes.sort_unstable_by_key(|process| process.key);
+            let version = self.version;
+            self.engine.publish_with(|snapshot| {
+                snapshot.connections = Arc::new(ConnectionsSnapshot {
+                    header: ComponentHeader {
+                        version,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    records: records.into(),
+                    counts: ConnCounts::default(),
+                    ..ConnectionsSnapshot::default()
+                });
+                snapshot.processes = Arc::new(ProcessSnapshot {
+                    records: processes.into(),
+                    ..ProcessSnapshot::default()
+                });
+            });
+            self.main.run_until_parked();
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.main.update(|_, cx| {
+                let view = main_window_view(cx).expect("main window");
+                let texts = view.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(ToString::to_string).collect()
+            })
+        }
+    }
+
+    fn open(cx: &mut TestAppContext, cookie: u64) -> Option<WindowHandle<Root>> {
+        cx.update(|cx| open_connection_properties(cookie, cx));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            let handle = registry
+                .read(cx)
+                .get(&WindowKey::ConnectionProperties(cookie));
+            handle.and_then(|h| h.downcast::<Root>())
+        })
+    }
+
+    fn frame(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+    ) -> gpui_kit::Entity<TlSecondaryWindow<ConnectionPropertiesView>> {
+        cx.update(|cx| TlSecondaryWindow::<ConnectionPropertiesView>::find(handle, cx))
+            .expect("connection properties frame")
+    }
+
+    fn title(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> String {
+        let frame = frame(cx, handle);
+        cx.update(|cx| frame.read(cx).title().to_string())
+    }
+
+    fn lines(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> Vec<String> {
+        let frame = frame(cx, handle);
+        cx.update(|cx| {
+            let view = frame.read(cx).content().clone();
+            let words = tl_ui::components::kv_grid::kv_words(cx);
+            view.read(cx).line_texts(&words)
+        })
+    }
+
+    fn tcp_info() -> TcpInfoView {
+        TcpInfoView {
+            rtt_us: 420,
+            rttvar_us: 100,
+            snd_cwnd: 10,
+            bytes_acked: 1_280_000,
+            bytes_received: 36_363_000,
+            retransmits: 3,
+            last_data_recv_ms: 1240,
+        }
+    }
+
+    fn tcp_record(cookie: u64) -> ConnRecord {
+        let mut record = super::connection(cookie, SmallVec::from_slice(&[super::key(4321)]));
+        record.local = Arc::from("192.168.1.10:51234");
+        record.foreign = Arc::from("93.184.216.34:443");
+        record.recv_q = 0;
+        record.interface = Some(Arc::from("eth0"));
+        record.tcp = Some(tcp_info());
+        record
+    }
+
+    fn procs() -> Vec<ProcessRecord> {
+        vec![super::process(4321, "curl", "alice", 1000)]
+    }
+
+    fn golden(name: &str, actual: &str) {
+        let path = format!("{}/tests/golden/{name}", env!("CARGO_MANIFEST_DIR"));
+        if std::env::var("TL_UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, actual).expect("write the golden");
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(actual, expected, "{name}");
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_lines_golden(cx: &mut TestAppContext) {
+        let _rig = rig(cx, vec![tcp_record(1)], procs());
+        let handle = open(cx, 1).expect("opened");
+        assert_eq!(title(cx, handle), "Connection properties: TCP ESTABLISHED");
+        let text = lines(cx, handle).join("\n") + "\n";
+        golden("conn_props_lines.txt", &text);
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_tcp_lines_only_for_tcp(cx: &mut TestAppContext) {
+        let mut udp = tcp_record(1);
+        udp.proto = Proto::Udp;
+        udp.state = ConnState::Unconnected;
+        udp.foreign = Arc::from("*:*");
+        udp.tcp = None;
+        let _rig = rig(cx, vec![udp], procs());
+        let handle = open(cx, 1).expect("opened");
+        let all = lines(cx, handle);
+        for label in [
+            "RTT",
+            "Congestion window",
+            "Bytes sent / received",
+            "Retransmits",
+            "Last data received",
+        ] {
+            assert!(
+                !all.iter().any(|l| l.starts_with(label)),
+                "{label} in {all:?}"
+            );
+        }
+        assert!(all.iter().any(|l| l == "Foreign: *"), "{all:?}");
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_tcp_value_not_reported(cx: &mut TestAppContext) {
+        let mut record = tcp_record(1);
+        record.tcp = None;
+        let _rig = rig(cx, vec![record], procs());
+        let handle = open(cx, 1).expect("opened");
+        assert!(
+            lines(cx, handle).iter().any(|l| l == "RTT: Not reported"),
+            "{:?}",
+            lines(cx, handle)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_closed_title(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, vec![tcp_record(1)], procs());
+        let handle = open(cx, 1).expect("opened");
+        let before = lines(cx, handle);
+        rig.publish(Vec::new(), procs());
+        cx.run_until_parked();
+        assert_eq!(
+            title(cx, handle),
+            "Connection properties: TCP ESTABLISHED (closed)"
+        );
+        assert_eq!(lines(cx, handle), before, "the last values stay");
+        let frame = frame(cx, handle);
+        let secondary = cx.update(|cx| {
+            let view = frame.read(cx).content().clone();
+            let words = tl_ui::components::kv_grid::kv_words(cx);
+            let theme = current(cx).clone();
+            view.read(cx)
+                .value_looks(&words, &theme)
+                .iter()
+                .all(|look| look.color == theme.text_secondary && !look.link)
+        });
+        assert!(secondary, "every value is text_secondary");
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_cap(cx: &mut TestAppContext) {
+        let records: Vec<ConnRecord> = (1..=11).map(tcp_record).collect();
+        let mut rig = rig(cx, records, procs());
+        for cookie in 1..=10 {
+            assert!(open(cx, cookie).is_some());
+        }
+        rig.main.update(|window, _| window.activate_window());
+        rig.main.run_until_parked();
+        assert!(open(cx, 11).is_none());
+        let count = cx.update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .count(CapClass::ConnectionProps)
+        });
+        assert_eq!(count, 10);
+        assert!(
+            rig.toasts()
+                .iter()
+                .any(|t| t == "Too many connection properties windows are already open"),
+            "{:?}",
+            rig.toasts()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_same_cookie_focuses(cx: &mut TestAppContext) {
+        let _rig = rig(cx, vec![tcp_record(1)], procs());
+        let first = open(cx, 1).expect("opened");
+        let again = open(cx, 1).expect("still open");
+        assert_eq!(first.window_id(), again.window_id());
+        let count = cx.update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .count(CapClass::ConnectionProps)
+        });
+        assert_eq!(count, 1);
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_keeps_demand_while_open(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, vec![tcp_record(1)], procs());
+        let handle = open(cx, 1).expect("opened");
+        rig.main.update(|window, cx| {
+            let view = main_window_view(cx).expect("main window");
+            view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
+        });
+        rig.main.run_until_parked();
+        let demanded = |cx: &mut TestAppContext| {
+            cx.update(|cx| cx.global::<GlobalDemand>().0.read(cx).merged().connections)
+        };
+        assert!(demanded(cx), "the open window holds Connections demand");
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        cx.run_until_parked();
+        assert!(!demanded(cx), "released after the window closes");
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_process_link_jumps(cx: &mut TestAppContext) {
+        let rig = rig(cx, vec![tcp_record(1)], procs());
+        let handle = open(cx, 1).expect("opened");
+        let mut win = VisualTestContext::from_window(handle.into(), cx);
+        let frame = frame(cx, handle);
+        let view = cx.update(|cx| frame.read(cx).content().clone());
+        win.update(|window, _| window.activate_window());
+        win.run_until_parked();
+        win.update(|window, cx| window.draw(cx).clear(cx));
+        win.update(|window, cx| view.read(cx).link_focus_handle().clone().focus(window, cx));
+        win.run_until_parked();
+        win.update(|window, cx| window.draw(cx).clear(cx));
+        let focused = win.update(|window, cx| view.read(cx).link_focus_handle().is_focused(window));
+        assert!(focused, "the Process link has focus");
+        let keystroke = gpui_kit::Keystroke::parse("enter").unwrap();
+        win.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        win.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+        win.run_until_parked();
+        let mut rig = rig;
+        let tab = rig.main.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .active_tab()
+        });
+        assert_eq!(tab, Tab::Processes);
+    }
+}

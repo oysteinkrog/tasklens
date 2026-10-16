@@ -12,9 +12,9 @@ use fluent_bundle::FluentValue;
 use gpui_kit::base::Root;
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, size,
+    App, AppContext as _, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px, size,
 };
 use tl_model::actions::{Family, Proto};
 use tl_model::demand::Demand;
@@ -136,7 +136,7 @@ fn not_reported() -> TlValue {
 fn owner_of<'a>(
     record: &ConnRecord,
     processes: &'a ProcessSnapshot,
-) -> Option<&'a tl_model::snapshot::ProcessRecord> {
+) -> Option<&'a tl_model::process::ProcessRecord> {
     record
         .owners
         .iter()
@@ -328,6 +328,21 @@ fn signature(lines: &[PropLine]) -> Vec<(SharedString, SharedString, Validity)> 
         .collect()
 }
 
+fn copy_value(value: &TlValue, window: &mut Window, cx: &mut App) {
+    let words = kv_words(cx);
+    let Some(text) = shown_text_in(value, &words) else {
+        return;
+    };
+    if clipboard_write(cx, text.to_string()).is_ok() {
+        let toast = tr(cx, "connections-props-copied");
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |q, cx| {
+                q.push(ToastKind::Success, toast, None, None, cx)
+            });
+        }
+    }
+}
+
 pub struct ConnectionPropertiesView {
     cookie: u64,
     /// The last record seen. Kept after the socket closes.
@@ -501,20 +516,8 @@ impl ConnectionPropertiesView {
 
     /// Copies line `row` and shows the toast in this window.
     fn copy_line(&self, row: usize, window: &mut Window, cx: &mut App) {
-        let Some(line) = self.lines.get(row) else {
-            return;
-        };
-        let words = kv_words(cx);
-        let Some(text) = shown_text_in(&line.value, &words) else {
-            return;
-        };
-        if clipboard_write(cx, text.to_string()).is_ok() {
-            let toast = tr(cx, "connections-props-copied");
-            if let Some(queue) = ToastQueue::of_window(window, cx) {
-                queue.update(cx, |q, cx| {
-                    q.push(ToastKind::Success, toast, None, None, cx)
-                });
-            }
+        if let Some(line) = self.lines.get(row).cloned() {
+            copy_value(&line.value, window, cx);
         }
     }
 
@@ -547,24 +550,25 @@ impl ConnectionPropertiesView {
 
     /// The lines as "label: value", the way the golden file stores them.
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn line_texts(&self, cx: &mut App) -> Vec<String> {
-        let words = kv_words(cx);
+    pub fn line_texts(&self, words: &crate::components::kv_grid::KvWords) -> Vec<String> {
         self.lines
             .iter()
             .filter_map(|l| {
-                shown_text_in(&l.value, &words).map(|text| format!("{}: {text}", l.label))
+                shown_text_in(&l.value, words).map(|text| format!("{}: {text}", l.label))
             })
             .collect()
     }
 
     /// How each value draws, for the closed-colour check.
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn value_looks(&self, cx: &mut App) -> Vec<crate::components::kv_grid::ValueLook> {
-        let words = kv_words(cx);
-        let theme = current(cx).clone();
+    pub fn value_looks(
+        &self,
+        words: &crate::components::kv_grid::KvWords,
+        theme: &crate::theme::TlTheme,
+    ) -> Vec<crate::components::kv_grid::ValueLook> {
         self.lines
             .iter()
-            .filter_map(|l| crate::components::kv_grid::value_look_in(&l.value, &words, &theme))
+            .filter_map(|l| crate::components::kv_grid::value_look_in(&l.value, words, theme))
             .collect()
     }
 
@@ -630,8 +634,11 @@ impl Render for ConnectionPropertiesView {
                 .accessible_name(label)
                 .focus_handle(handle)
                 .on_click(move |_, window, cx| {
-                    if let Some(view) = this.upgrade() {
-                        view.read(cx).copy_line(i, window, cx);
+                    let line = this
+                        .upgrade()
+                        .and_then(|view| view.read(cx).lines.get(i).cloned());
+                    if let Some(line) = line {
+                        copy_value(&line.value, window, cx);
                     }
                 });
             buttons = buttons.child(
