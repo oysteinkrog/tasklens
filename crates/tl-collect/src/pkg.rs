@@ -3,7 +3,8 @@
 //!
 //! The sweep only calls [`PackageIndex::get`] and [`PackageIndex::request`], which never wait
 //! for pacman. The engine runs [`PackageIndex::run_batch`] in its own blocking job when
-//! [`PackageIndex::due`] is true. One index is shared by clones of its handle. pacman output and `desc` files are untrusted text: reads are
+//! [`PackageIndex::due`] is true, and [`PackageIndex::check_stamp`] every few seconds when it is
+//! not. One index is shared by clones of its handle. pacman output and `desc` files are untrusted text: reads are
 //! bounded, values are sanitized and no shell is used.
 
 use std::io::Read;
@@ -480,17 +481,9 @@ impl PackageIndex {
     /// again. Batches run one at a time; lookups go on while one runs.
     pub fn run_batch(&self) -> Result<usize, CollectError> {
         let mut owners = lock(&self.owners);
-        let stamp = owners.backend.db_stamp();
-        let changed = stamp != owners.stamp;
-        if changed {
-            owners.infos.clear();
-            owners.stamp = stamp;
-        }
+        self.refresh_stamp(&mut owners);
         let batch: Vec<(Arc<str>, i64)> = {
-            let mut l = lock(&self.lookups);
-            if changed {
-                l.cache.clear();
-            }
+            let l = lock(&self.lookups);
             l.pending
                 .iter()
                 .take(PKG_BATCH_MAX)
@@ -537,6 +530,26 @@ impl PackageIndex {
         drop(l);
         tracing::debug!(paths = batch.len(), filled, "pkg: owner batch done");
         Ok(filled)
+    }
+
+    /// Blocking: reads `db_stamp` and clears the owner and metadata cache when it changed, so a
+    /// package change is seen even when no path is pending (R-163). Returns true when it
+    /// cleared. Waits for a running batch.
+    pub fn check_stamp(&self) -> bool {
+        self.refresh_stamp(&mut lock(&self.owners))
+    }
+
+    /// Stamp check shared by `run_batch` and `check_stamp`. The caller holds the owners lock;
+    /// the lookup lock is held only to clear the cache.
+    fn refresh_stamp(&self, owners: &mut Owners) -> bool {
+        let stamp = owners.backend.db_stamp();
+        if stamp == owners.stamp {
+            return false;
+        }
+        owners.infos.clear();
+        owners.stamp = stamp;
+        lock(&self.lookups).cache.clear();
+        true
     }
 
     /// Blocking: PROC-078 check for one package. Waits for a running batch.
@@ -704,6 +717,23 @@ mod tests {
         index.run_batch().unwrap();
         assert_eq!(index.get("/usr/bin/firefox", 100), None);
         assert!(lock(&index.owners).infos.is_empty());
+    }
+
+    /// `check_stamp` clears the cache with no batch and no pending path.
+    #[test]
+    fn check_stamp_clears_without_a_batch() {
+        let fake = firefox_fake();
+        let stamp = fake.stamp.clone();
+        let index = PackageIndex::new(Box::new(fake));
+        index.request("/usr/bin/firefox", 100, Instant::now());
+        index.run_batch().unwrap();
+        assert!(!index.check_stamp(), "same stamp");
+        assert!(index.get("/usr/bin/firefox", 100).is_some());
+        stamp.store(7, Ordering::Relaxed);
+        assert!(index.check_stamp());
+        assert_eq!(index.get("/usr/bin/firefox", 100), None);
+        assert!(lock(&index.owners).infos.is_empty());
+        assert!(!index.check_stamp(), "the new stamp is stored");
     }
 
     /// Clones share one cache, so a batch run through one handle fills the other.

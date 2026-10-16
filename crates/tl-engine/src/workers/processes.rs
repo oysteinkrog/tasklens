@@ -12,7 +12,8 @@
 //!
 //! The sweep uses the session's shared package index (R-163 item 1). Every `PKG_CHECK` the
 //! worker checks `PackageIndex::due` and runs `run_batch` as its own blocking job, beside the
-//! sweep job and never inside it. The index keeps the 2 s debounce.
+//! sweep job and never inside it. The index keeps the 2 s debounce. While no batch is due, a
+//! `check_stamp` job every `PKG_STAMP_CHECK` clears the cache after a package change.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
@@ -412,20 +413,37 @@ pub async fn run(cx: Cx, io: WorkerIo, mut src: ProcessesSource) -> Outcome<(), 
 
 /// How often the worker checks whether a package batch is due.
 pub const PKG_CHECK: Duration = Duration::from_millis(500);
+/// How often the worker checks the package database stamp while no batch runs (R-163).
+pub const PKG_STAMP_CHECK: Duration = Duration::from_secs(5);
 
 /// Runs `index.run_batch()` as a blocking job every `PKG_CHECK` while `index.due`, until `cx`
-/// is cancelled. Batch errors are logged at debug and the paths are requested again.
+/// is cancelled. While no batch is due it runs `index.check_stamp()` as a blocking job every
+/// `PKG_STAMP_CHECK`, so a package change clears the cache with no path pending; the next sweep
+/// queues the shown paths again. Batch errors are logged at debug and the paths are requested
+/// again.
 pub async fn package_batches(cx: &Cx, index: PackageIndex) {
+    // A batch checks the stamp too, so each batch restarts the stamp period.
+    let mut next_stamp = cx.now() + PKG_STAMP_CHECK;
     loop {
         sleep_until(cx.now() + PKG_CHECK).await;
         if cx.checkpoint().is_err() {
             return;
         }
-        if !index.due(Instant::now()) {
+        let batch = index.due(Instant::now());
+        if !batch && cx.now() < next_stamp {
             continue;
         }
-        let batch = index.clone();
-        let mut job = match cx.spawn_blocking(move |_| batch.run_batch()) {
+        next_stamp = cx.now() + PKG_STAMP_CHECK;
+        let job_index = index.clone();
+        let spawned = cx.spawn_blocking(move |_| {
+            if batch {
+                job_index.run_batch().map(|_| ())
+            } else {
+                job_index.check_stamp();
+                Ok(())
+            }
+        });
+        let mut job = match spawned {
             Ok(job) => job,
             Err(e) => {
                 tracing::debug!(error = %e, "pkg: batch job not started");
@@ -433,7 +451,7 @@ pub async fn package_batches(cx: &Cx, index: PackageIndex) {
             }
         };
         match job.join(cx).await {
-            Ok(Ok(_)) => {}
+            Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::debug!(error = %e, "pkg: owner batch failed"),
             Err(JoinError::Cancelled(_)) => return,
             Err(JoinError::Panicked(_)) => tracing::warn!("pkg: owner batch panicked"),
@@ -1028,7 +1046,7 @@ mod tests {
 
     // ---- Package owner batches ----
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
@@ -1040,6 +1058,7 @@ mod tests {
     struct FakePkg {
         owned: PathBuf,
         calls: Arc<AtomicUsize>,
+        stamp: Arc<AtomicI64>,
     }
 
     impl PkgBackend for FakePkg {
@@ -1075,17 +1094,25 @@ mod tests {
         }
 
         fn db_stamp(&mut self) -> Option<i64> {
-            Some(1)
+            Some(self.stamp.load(Ordering::Relaxed))
         }
     }
 
     fn fake_index(owned: &Path) -> (PackageIndex, Arc<AtomicUsize>) {
+        let (index, calls, _stamp) = fake_index_stamped(owned);
+        (index, calls)
+    }
+
+    /// `fake_index` with a handle to the fake database stamp.
+    fn fake_index_stamped(owned: &Path) -> (PackageIndex, Arc<AtomicUsize>, Arc<AtomicI64>) {
         let calls = Arc::new(AtomicUsize::new(0));
+        let stamp = Arc::new(AtomicI64::new(1));
         let backend = FakePkg {
             owned: owned.to_path_buf(),
             calls: Arc::clone(&calls),
+            stamp: Arc::clone(&stamp),
         };
-        (PackageIndex::new(Box::new(backend)), calls)
+        (PackageIndex::new(Box::new(backend)), calls, stamp)
     }
 
     fn advance(lab: &mut LabRuntime, d: Duration) {
@@ -1132,6 +1159,62 @@ mod tests {
         index.request("/usr/bin/other", 1, Instant::now());
         advance(&mut lab, PKG_CHECK);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// R-163 invalidation with no path pending: the loop checks the stamp every
+    /// `PKG_STAMP_CHECK`, a changed stamp clears the cached owner within one period, and the
+    /// next request (as the next sweep makes) resolves it again.
+    #[test]
+    fn batch_loop_clears_on_db_change_without_pending() {
+        let (index, calls, stamp) = fake_index_stamped(Path::new("/usr/bin/firefox"));
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let looped = index.clone();
+        let (task, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                package_batches(&cx, looped).await;
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+
+        let past = || {
+            Instant::now()
+                .checked_sub(Duration::from_secs(3))
+                .expect("monotonic clock is past 3 s")
+        };
+        index.request("/usr/bin/firefox", 100, past());
+        advance(&mut lab, PKG_CHECK);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(index.get("/usr/bin/firefox", 100).is_some());
+        assert!(
+            !index.due(Instant::now() + PKG_STAMP_CHECK),
+            "nothing pending"
+        );
+
+        // Same stamp: the stamp checks keep the cache.
+        for _ in 0..(2 * PKG_STAMP_CHECK.as_millis() / PKG_CHECK.as_millis()) {
+            advance(&mut lab, PKG_CHECK);
+        }
+        assert!(index.get("/usr/bin/firefox", 100).is_some());
+
+        // The package database changes. Within one stamp period the cache is cleared, with no
+        // batch run.
+        stamp.store(2, Ordering::Relaxed);
+        for _ in 0..(PKG_STAMP_CHECK.as_millis() / PKG_CHECK.as_millis()) {
+            advance(&mut lab, PKG_CHECK);
+        }
+        assert_eq!(index.get("/usr/bin/firefox", 100), None, "cleared");
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "no batch ran");
+
+        // The next sweep queues the path again and the next batch resolves it.
+        index.request("/usr/bin/firefox", 100, past());
+        advance(&mut lab, PKG_CHECK);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let info = index.get("/usr/bin/firefox", 100).expect("looked up again");
+        assert_eq!(info.as_deref().map(|i| &*i.name), Some("firefox"));
     }
 
     /// Copies `src` into `dst`, symlinks included.
