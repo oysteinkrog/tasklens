@@ -980,11 +980,16 @@ fn switch_disabled(cx: &mut TestAppContext) -> bool {
 }
 
 /// Settings open with the switch off, and the switch turned on from the page: the confirm is
-/// open. Returns the engine, the Settings window and the confirm window.
+/// open. Returns the engine, the Settings window, the confirm window and its view.
 fn open_page_confirm(
     cx: &mut TestAppContext,
     persists: Rc<Cell<u32>>,
-) -> (Arc<FakeEngine>, VisualTestContext, VisualTestContext) {
+) -> (
+    Arc<FakeEngine>,
+    VisualTestContext,
+    VisualTestContext,
+    Entity<TlDialogView>,
+) {
     let (engine, mut main) = setup_counting(cx, Settings::default(), persists);
     let (_frame, mut settings) = open_settings(cx, &mut main);
     let page = privileges_page(cx);
@@ -1000,27 +1005,19 @@ fn open_page_confirm(
         })
         .and_then(|w: AnyWindowHandle| w.downcast::<Root>())
         .expect("confirm window");
+    let view = cx
+        .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+        .map(|frame| cx.read(|cx| frame.read(cx).content().clone()))
+        .expect("confirm view");
     let mut dialog = VisualTestContext::from_window(handle.into(), cx);
     dialog.update(|window, _| window.activate_window());
     draw(&mut dialog);
-    (engine, settings, dialog)
-}
-
-fn confirm_view(dialog: &mut VisualTestContext) -> Entity<TlDialogView> {
-    let handle = dialog
-        .update(|window, _| window.window_handle())
-        .downcast::<Root>()
-        .expect("root window");
-    dialog
-        .update(|_, cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
-        .map(|frame| dialog.read(|cx| frame.read(cx).content().clone()))
-        .expect("confirm view")
+    (engine, settings, dialog, view)
 }
 
 #[gpui_kit::test]
 fn passwordless_confirm_text(cx: &mut TestAppContext) {
-    let (engine, _settings, mut dialog) = open_page_confirm(cx, Rc::new(Cell::new(0)));
-    let view = confirm_view(&mut dialog);
+    let (engine, _settings, mut dialog, view) = open_page_confirm(cx, Rc::new(Cell::new(0)));
     let (title, text) = dialog.read(|cx| {
         let d = view.read(cx).dialog();
         (d.window_title().to_string(), d.text().to_string())
@@ -1053,7 +1050,7 @@ fn passwordless_confirm_text(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn passwordless_on_sends_rule_on(cx: &mut TestAppContext) {
-    let (engine, _settings, mut dialog) = open_page_confirm(cx, Rc::new(Cell::new(0)));
+    let (engine, _settings, mut dialog, _) = open_page_confirm(cx, Rc::new(Cell::new(0)));
     dialog.simulate_keystrokes("enter");
     dialog.run_until_parked();
     cx.run_until_parked();
@@ -1065,7 +1062,7 @@ fn passwordless_on_sends_rule_on(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn passwordless_success_persists(cx: &mut TestAppContext) {
     let persists = Rc::new(Cell::new(0));
-    let (engine, _settings, mut dialog) = open_page_confirm(cx, persists.clone());
+    let (engine, _settings, mut dialog, _) = open_page_confirm(cx, persists.clone());
     dialog.simulate_keystrokes("enter");
     dialog.run_until_parked();
     let before = persists.get();
@@ -1084,7 +1081,7 @@ fn passwordless_success_persists(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn passwordless_cancelled_stays_off(cx: &mut TestAppContext) {
-    let (engine, mut settings, mut dialog) = open_page_confirm(cx, Rc::new(Cell::new(0)));
+    let (engine, mut settings, mut dialog, _) = open_page_confirm(cx, Rc::new(Cell::new(0)));
     dialog.simulate_keystrokes("enter");
     dialog.run_until_parked();
 
