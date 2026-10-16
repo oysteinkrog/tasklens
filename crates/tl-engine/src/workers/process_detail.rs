@@ -48,6 +48,8 @@ use rustix::fs::{Dir, Mode, OFlags};
 use smallvec::SmallVec;
 use tl_collect::apps::AppPaths;
 use tl_collect::apps::cgroup_app::parse_app_unit;
+use tl_collect::apps::classify::{ClassifyInput, MatchInput, ProcClass, classify, match_app};
+use tl_collect::apps::desktop::{DesktopIndex, DesktopWatch, data_dirs_from_env};
 use tl_collect::parse::topology::parse_cpu_list;
 use tl_collect::proc::cgroup::{
     UserPlacement, app_slice_unit, parse_cgroup_file, placement, unescape_unit,
@@ -59,12 +61,14 @@ use tl_collect::proc::detail::{
 use tl_collect::proc::fdcount::{FdCount, fd_count};
 use tl_collect::proc::io::{IoRead, PidIo, read_io};
 use tl_collect::proc::meta::{PasswdUserNames, ReadBufs, UserNames};
-use tl_collect::proc::pid_stat::{PidStat, parse_pid_stat};
+use tl_collect::proc::pid_stat::{PF_KTHREAD, PidStat, parse_pid_stat};
 use tl_collect::proc::smaps::{PssReader, RollupRead};
 use tl_collect::proc::status::{
     PidStatus, STATUS_READ_MAX, commit_bytes, parse_status, ws_shared_bytes,
 };
-use tl_collect::sanitize::{CMDLINE_MAX, EXE_LINK_MAX, sanitize_cmdline, sanitize_link};
+use tl_collect::sanitize::{
+    CMDLINE_MAX, EXE_LINK_MAX, sanitize_cmdline, sanitize_link, sanitize_text,
+};
 use tl_collect::sysroot::{SMALL_FILE_LIMIT, read_at, read_file};
 use tl_collect::{CollectError, SysRoot};
 use tl_model::actions::SchedPolicy;
@@ -104,6 +108,9 @@ const PROC_STAT_MAX: usize = 1024 * 1024;
 
 /// Read limit for `user-dirs.dirs`.
 const USER_DIRS_MAX: usize = 64 * 1024;
+
+/// Read limit for the first command-line token, the same as for `RawMeta::argv`.
+const ARGV0_MAX: usize = 4096;
 
 /// The `/proc/<pid>/exe` link of a deleted executable ends with this (PROC-027).
 const DELETED_SUFFIX: &str = " (deleted)";
@@ -234,7 +241,7 @@ impl TabRead {
 struct GeneralRead {
     started_s: Total<i64>,
     /// Real, effective, saved and filesystem uid.
-    uids: [u32; 4],
+    uids: Total<[u32; 4]>,
     policy: SchedPolicy,
     rt_prio: u8,
     kernel_prio: Total<i32>,
@@ -258,6 +265,7 @@ struct GeneralRead {
     root: Total<Arc<str>>,
     cgroup: Option<Arc<str>>,
     unit: Option<UnitRef>,
+    /// The matched desktop id, set only when the process table would show it as an App.
     app_id: Option<Arc<str>>,
     cmdline: Total<Arc<str>>,
     handles: Total<u32>,
@@ -274,11 +282,24 @@ struct GeneralReader {
     btime: Option<u64>,
     /// The tasklens user's directories, made at the first read. Tests set it.
     location: Option<LocationCtx>,
+    /// The desktop entries the App ID is matched against, made at the first read. Tests set it.
+    apps: Option<AppIndex>,
+    /// `getuid()`, for the same App classification as the process table. Tests set it.
+    self_uid: u32,
     stat: PidStat,
     status: PidStatus,
     /// The `status` of one thread, for the affinity check.
     thread_status: PidStatus,
     cpus: SmallVec<[u16; 64]>,
+    /// The sanitized first command-line token, for the Wine step of the app match.
+    argv0: String,
+}
+
+/// The desktop index for the App ID row and the watch that rebuilds it when desktop files
+/// change, the same as the process sweep's `AppResolver`.
+struct AppIndex {
+    index: DesktopIndex,
+    watch: Option<DesktopWatch>,
 }
 
 /// The state of one tab of one target. Made when the tab enters the demand, dropped when it
@@ -393,7 +414,10 @@ impl ProcessDetailSource {
             targets: RefCell::default(),
             extra: VecDeque::new(),
             bufs: ReadBufs::default(),
-            general: GeneralReader::default(),
+            general: GeneralReader {
+                self_uid: rustix::process::getuid().as_raw(),
+                ..GeneralReader::default()
+            },
             users: None,
             group_file: Vec::new(),
             ticks_per_sec: rustix::param::clock_ticks_per_second(),
@@ -627,6 +651,7 @@ impl ProcessDetailSource {
                 self.cfg.app_paths.as_ref(),
                 key,
                 self.ticks_per_sec,
+                now,
                 &mut self.general,
                 bufs,
             )
@@ -1324,13 +1349,22 @@ fn error_validity(e: &CollectError) -> Validity {
     }
 }
 
-/// The validity of the executable fields after `e`. A process without an executable (a kernel
-/// thread or a zombie) gives `NotFound`, shown as "Not reported".
-fn exe_validity(e: &CollectError) -> Validity {
+/// The validity of a field after `e`, for a file that may not exist: the `exe` of a kernel
+/// thread or a zombie, or an `autogroup` or `randomize_va_space` file the kernel does not
+/// have. `NotFound` is shown as "Not reported".
+fn optional_validity(e: &CollectError) -> Validity {
     match e {
         CollectError::PermissionDenied => Validity::Restricted,
         CollectError::NotFound => Validity::Unsupported,
         _ => Validity::Failed,
+    }
+}
+
+/// `field` with the validity of an unread `status` (`status_err`), else as it is.
+fn from_status<T>(field: Total<T>, status_err: Option<Validity>) -> Total<T> {
+    match status_err {
+        Some(v) => total(field.value, v),
+        None => field,
     }
 }
 
@@ -1422,6 +1456,37 @@ fn location_ctx(paths: Option<&AppPaths>) -> LocationCtx {
     }
 }
 
+/// The desktop index from the XDG data directories, which `paths` overrides as in
+/// `location_ctx`. A failed watch only means new desktop files are not seen until a restart.
+fn app_index(paths: Option<&AppPaths>) -> AppIndex {
+    let dirs = match paths {
+        Some(p) => data_dirs_from_env(
+            &p.home,
+            p.xdg_data_home.as_deref(),
+            p.xdg_data_dirs.as_deref(),
+        ),
+        None => {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            data_dirs_from_env(
+                Path::new(&home),
+                std::env::var_os("XDG_DATA_HOME").as_deref(),
+                std::env::var_os("XDG_DATA_DIRS").as_deref(),
+            )
+        }
+    };
+    let watch = match DesktopWatch::new(&dirs) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::debug!(error = %e, "general tab: desktop file watch not started");
+            None
+        }
+    };
+    AppIndex {
+        index: DesktopIndex::build(&dirs),
+        watch,
+    }
+}
+
 /// `btime` from `<proc>/stat`, read until it is found once.
 fn boot_time(root: &SysRoot, g: &mut GeneralReader) -> Option<u64> {
     if g.btime.is_none() {
@@ -1481,14 +1546,15 @@ fn threads_differ(
 }
 
 /// Reads the General tab of `key` (PROC-078). `Err` is the validity of a tab without data: the
-/// process is gone, or its directory, `stat` or `status` cannot be read. A field whose own file
-/// cannot be read gets the validity of that error, so EACCES gives `Restricted` for that field
-/// only.
+/// process is gone, or its directory or `stat` cannot be read. A field whose own file cannot be
+/// read gets the validity of that error, so EACCES gives `Restricted` for that field only. The
+/// fields from `status` all take its validity. `now` times the desktop index rebuild.
 fn read_general(
     root: &SysRoot,
     paths: Option<&AppPaths>,
     key: ProcessKey,
     ticks_per_sec: u64,
+    now: TimeNs,
     g: &mut GeneralReader,
     bufs: &mut ReadBufs,
 ) -> Result<GeneralRead, Validity> {
@@ -1512,10 +1578,20 @@ fn read_general(
     }
     let status = read_at(dir, "status", &mut bufs.small, STATUS_READ_MAX)
         .and_then(|_| parse_status(&bufs.small, &mut g.status));
-    if let Err(e) = status {
-        tracing::debug!(error = %e, "general tab: status not read");
-        return Err(error_validity(&e));
-    }
+    // `None` when `status` was read; else the validity of every field that comes from it.
+    let status_err = match status {
+        Ok(()) => None,
+        Err(e) => {
+            tracing::debug!(error = %e, "general tab: status not read");
+            match error_validity(&e) {
+                Validity::Missing => return Err(Validity::Missing),
+                v => {
+                    g.status = PidStatus::default();
+                    Some(v)
+                }
+            }
+        }
+    };
     let ticks = ticks_per_sec.max(1);
     let started_s = match boot_time(root, g) {
         Some(btime) => valid(
@@ -1538,6 +1614,7 @@ fn read_general(
         } else {
             total(CpuSet::empty(), Validity::Unsupported)
         };
+    let affinity = from_status(affinity, status_err);
     let affinity_threads_differ = affinity.validity == Validity::Valid
         && g.stat.num_threads > 1
         && threads_differ(
@@ -1555,7 +1632,14 @@ fn read_general(
     };
     let autogroup = match rd::read_autogroup(dir, &mut bufs.small) {
         Some((id, nice)) => valid((Arc::from(format!("autogroup-{id}")), nice)),
-        None => total((Arc::from(""), 0), Validity::Unsupported),
+        // Read again only on this path, to tell EACCES from a kernel without autogroups.
+        None => total(
+            (Arc::from(""), 0),
+            match read_at(dir, "autogroup", &mut bufs.small, SMALL_FILE_LIMIT) {
+                Err(e) => optional_validity(&e),
+                Ok(_) => Validity::Unsupported,
+            },
+        ),
     };
 
     // ELF hardening of the executable the process runs.
@@ -1580,7 +1664,7 @@ fn read_general(
             valid(ElfArch::Unknown),
         ),
         Err(e) => {
-            let v = exe_validity(&e);
+            let v = optional_validity(&e);
             (
                 total(false, v),
                 total(false, v),
@@ -1594,6 +1678,7 @@ fn read_general(
         ShadowStack::Disabled => valid(false),
         ShadowStack::NotSupported => total(false, Validity::Unsupported),
     };
+    let shadow_stack = from_status(shadow_stack, status_err);
     let aslr_system = match read_file(
         &root.proc.join("sys/kernel/randomize_va_space"),
         &mut bufs.small,
@@ -1605,7 +1690,7 @@ fn read_general(
             b"2" => valid(2),
             _ => total(0, Validity::Unsupported),
         },
-        Err(_) => total(0, Validity::Unsupported),
+        Err(e) => total(0, optional_validity(&e)),
     };
     let aslr_disabled_for_process = match read_at(dir, "personality", &mut bufs.small, 64) {
         Ok(_) => std::str::from_utf8(bufs.small.trim_ascii())
@@ -1620,6 +1705,7 @@ fn read_general(
         Some(on) => valid(on),
         None => total(false, Validity::Unsupported),
     };
+    let no_new_privs = from_status(no_new_privs, status_err);
 
     // Executable path and its Location category.
     bufs.small.clear();
@@ -1639,7 +1725,7 @@ fn read_general(
                 )
             }
             Err(e) => {
-                let v = exe_validity(&CollectError::from(e));
+                let v = optional_validity(&CollectError::from(e));
                 (total(Arc::from(""), v), false, total(ExeLocation::Other, v))
             }
         };
@@ -1647,12 +1733,34 @@ fn read_general(
     let cwd = link_total(rd::read_cwd(dir, &mut bufs.small));
     let root_dir = link_total(rd::read_root(dir, &mut bufs.small));
 
-    // Cgroup, systemd unit and app id from the `0::` line.
-    let cgroup_path = match read_at(dir, "cgroup", &mut bufs.small, SMALL_FILE_LIMIT) {
-        Ok((_, false)) => parse_cgroup_file(&bufs.small),
-        _ => None,
+    let cmdline = match read_at(dir, "cmdline", &mut bufs.cmdline, CMDLINE_MAX + 1) {
+        Ok(_) => {
+            let raw = bufs.cmdline.strip_suffix(b"\0").unwrap_or(&bufs.cmdline);
+            let first = raw.split(|&b| b == 0).next().unwrap_or_default();
+            sanitize_text(first, ARGV0_MAX, &mut g.argv0);
+            sanitize_cmdline(&bufs.cmdline, &mut bufs.text);
+            // Kernel threads have an empty command line.
+            let validity = if bufs.text.is_empty() {
+                Validity::Unsupported
+            } else {
+                Validity::Valid
+            };
+            total(Arc::from(bufs.text.as_str()), validity)
+        }
+        Err(e) => {
+            g.argv0.clear();
+            total(Arc::from(""), error_validity(&e))
+        }
     };
-    let (cgroup, unit, app_id) = match &cgroup_path {
+
+    // Cgroup and systemd unit from the `0::` line.
+    let (cgroup_path, cgroup_denied) =
+        match read_at(dir, "cgroup", &mut bufs.small, SMALL_FILE_LIMIT) {
+            Ok((_, false)) => (parse_cgroup_file(&bufs.small), false),
+            Ok((_, true)) => (None, false),
+            Err(e) => (None, matches!(e, CollectError::PermissionDenied)),
+        };
+    let (cgroup, unit) = match &cgroup_path {
         Some(path) => {
             let unit = path.unit.as_deref().map(|name| {
                 unescape_unit(name, &mut bufs.text);
@@ -1664,27 +1772,48 @@ fn read_general(
                     name: Arc::from(bufs.text.as_str()),
                 }
             });
-            let app_id = app_slice_unit(path, status.uid[0])
-                .and_then(parse_app_unit)
-                .map(|id| id.app_id);
-            (Some(Arc::from(format!("/{}", path.rel))), unit, app_id)
+            (Some(Arc::from(format!("/{}", path.rel))), unit)
         }
-        None => (None, None, None),
+        None => (None, None),
     };
 
-    let cmdline = match read_at(dir, "cmdline", &mut bufs.cmdline, CMDLINE_MAX + 1) {
-        Ok(_) => {
-            sanitize_cmdline(&bufs.cmdline, &mut bufs.text);
-            // Kernel threads have an empty command line.
-            let validity = if bufs.text.is_empty() {
-                Validity::Unsupported
-            } else {
-                Validity::Valid
+    // App ID: the desktop match and App class of the process sweep's `AppResolver`. It needs
+    // the real uid, so an unread `status` leaves it empty.
+    let kernel_thread = stat.flags & PF_KTHREAD != 0;
+    let apps = g.apps.get_or_insert_with(|| app_index(paths));
+    if let Some(watch) = &mut apps.watch {
+        apps.index.rebuild_if(watch, now);
+    }
+    let app_id = (status_err.is_none() && !kernel_thread)
+        .then(|| {
+            let unit_app = cgroup_path
+                .as_ref()
+                .and_then(|c| app_slice_unit(c, g.self_uid))
+                .and_then(parse_app_unit);
+            let m = MatchInput {
+                unit_app: unit_app.as_ref(),
+                exe: (exe.validity == Validity::Valid).then_some(&*exe.value),
+                argv0: (!g.argv0.is_empty()).then_some(g.argv0.as_str()),
+                cmdline: (cmdline.validity == Validity::Valid).then_some(&*cmdline.value),
+                wm_class: None,
             };
-            total(Arc::from(bufs.text.as_str()), validity)
-        }
-        Err(e) => total(Arc::from(""), error_validity(&e)),
-    };
+            let entry = match_app(&m, &apps.index)?;
+            let (class, _) = classify(
+                &ClassifyInput {
+                    pid: key.pid,
+                    ruid: status.uid[0],
+                    kernel_thread,
+                    cgroup: cgroup_path.as_ref(),
+                    cgroup_denied,
+                    app_id: Some(&entry.id),
+                    owns_window: false,
+                },
+                g.self_uid,
+            );
+            (class == ProcClass::App).then(|| entry.id.clone())
+        })
+        .flatten();
+
     let handles = match fd_count(dir) {
         FdCount::Count(n) => valid(n),
         FdCount::Restricted => total(0, Validity::Restricted),
@@ -1701,7 +1830,7 @@ fn read_general(
 
     Ok(GeneralRead {
         started_s,
-        uids: status.uid,
+        uids: from_status(valid(status.uid), status_err),
         policy: sched_policy(stat.policy),
         rt_prio: u8::try_from(stat.rt_priority).unwrap_or(u8::MAX),
         kernel_prio,
@@ -1715,7 +1844,10 @@ fn read_general(
         aslr_system,
         aslr_disabled_for_process,
         no_new_privs,
-        seccomp: seccomp_total(status.seccomp, status.seccomp_filters),
+        seccomp: from_status(
+            seccomp_total(status.seccomp, status.seccomp_filters),
+            status_err,
+        ),
         architecture,
         exe,
         exe_deleted,
@@ -1727,8 +1859,8 @@ fn read_general(
         app_id,
         cmdline,
         handles,
-        rss_shared_bytes: bytes(ws_shared_bytes(status)),
-        commit_bytes: bytes(commit_bytes(status)),
+        rss_shared_bytes: from_status(bytes(ws_shared_bytes(status)), status_err),
+        commit_bytes: from_status(bytes(commit_bytes(status)), status_err),
         cpu_time_ms: valid(cpu_ticks.saturating_mul(1000) / ticks),
         io,
     })
@@ -1739,12 +1871,15 @@ fn general_detail(r: &GeneralRead, users: &mut dyn UserNames) -> GeneralDetail {
     let io = |value: fn(&PidIo) -> u64| total(value(&r.io.value), r.io.validity);
     GeneralDetail {
         started_s: r.started_s,
-        uids: valid(triple(r.uids)),
-        uid_names: valid((
-            users.name(r.uids[0]),
-            users.name(r.uids[1]),
-            users.name(r.uids[2]),
-        )),
+        uids: total(triple(r.uids.value), r.uids.validity),
+        uid_names: match r.uids.validity {
+            Validity::Valid => valid((
+                users.name(r.uids.value[0]),
+                users.name(r.uids.value[1]),
+                users.name(r.uids.value[2]),
+            )),
+            v => total((Arc::from(""), Arc::from(""), Arc::from("")), v),
+        },
         policy: valid(r.policy),
         rt_prio: r.rt_prio,
         kernel_prio: r.kernel_prio,
@@ -2948,7 +3083,48 @@ mod tests {
             runtime_dir: Some("/run/user/1000".into()),
             downloads: Some("/home/user1/Downloads".into()),
         });
+        src.general.self_uid = 1000;
+        src.general.apps = Some(desktop_apps(
+            &tmp,
+            &[("firefox", "/usr/lib/firefox/firefox %u")],
+        ));
         (tmp, src)
+    }
+
+    /// A desktop index of `entries` (id, `Exec`) without a watch. The directory under `tmp` is
+    /// named after the ids, so another set of ids never shares it.
+    fn desktop_apps(tmp: &tempfile::TempDir, entries: &[(&str, &str)]) -> AppIndex {
+        let ids: Vec<&str> = entries.iter().map(|(id, _)| *id).collect();
+        let dir = tmp
+            .path()
+            .join(format!("share-{}/applications", ids.join("+")));
+        fs::create_dir_all(&dir).expect("create applications dir");
+        for (id, exec) in entries {
+            fs::write(
+                dir.join(format!("{id}.desktop")),
+                format!("[Desktop Entry]\nType=Application\nName={id}\nExec={exec}\n"),
+            )
+            .expect("write desktop file");
+        }
+        AppIndex {
+            index: DesktopIndex::build_in(&[dir], &[]),
+            watch: None,
+        }
+    }
+
+    fn write_cgroup(tmp: &tempfile::TempDir, unit: &str) {
+        fs::write(
+            tmp.path().join("proc/4201/cgroup"),
+            format!("0::/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}\n"),
+        )
+        .expect("rewrite cgroup");
+    }
+
+    /// The General App ID of 4201 after one read.
+    fn app_id_of(src: ProcessDetailSource) -> Option<Arc<str>> {
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        general(&out).0.app_id.clone()
     }
 
     /// The General payload in `out` and its validity.
@@ -3118,6 +3294,98 @@ mod tests {
         assert_eq!(g.cmdline.validity, Validity::Restricted);
         assert_eq!(g.uids.validity, Validity::Valid);
         assert_eq!(g.cpu_time_ms.validity, Validity::Valid);
+    }
+
+    /// EACCES on `status`, `autogroup` and `randomize_va_space` makes only their fields
+    /// `Restricted`. Without the real uid there is no App ID.
+    #[test]
+    fn general_restricted_status_autogroup_aslr() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skipped: running as root");
+            return;
+        }
+        let (tmp, src) = general_src();
+        for file in [
+            "proc/4201/status",
+            "proc/4201/autogroup",
+            "proc/sys/kernel/randomize_va_space",
+        ] {
+            let path = tmp.path().join(file);
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        }
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        let (g, validity) = general(&out);
+        assert_eq!(validity, Validity::Valid);
+        for v in [
+            g.uids.validity,
+            g.uid_names.validity,
+            g.affinity.validity,
+            g.shadow_stack.validity,
+            g.no_new_privs.validity,
+            g.seccomp.validity,
+            g.rss_shared_bytes.validity,
+            g.commit_bytes.validity,
+            g.autogroup.validity,
+            g.aslr_system.validity,
+        ] {
+            assert_eq!(v, Validity::Restricted);
+        }
+        assert!(!g.affinity_threads_differ);
+        assert_eq!(g.app_id, None);
+        // Fields from other files keep their values.
+        assert_eq!(g.kernel_prio, valid(120));
+        assert_eq!(g.cpu_time_ms, valid((8812 + 1204) * 10));
+        assert_eq!(g.io_rchar, valid(48_213_377));
+        assert_eq!(&*g.exe.value, "/usr/lib/firefox/firefox");
+    }
+
+    /// A missing `autogroup` or `randomize_va_space` is "Not reported", not `Restricted`.
+    #[test]
+    fn general_absent_autogroup_and_aslr() {
+        let (tmp, src) = general_src();
+        fs::remove_file(tmp.path().join("proc/4201/autogroup")).expect("remove autogroup");
+        fs::remove_file(tmp.path().join("proc/sys/kernel/randomize_va_space"))
+            .expect("remove aslr");
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+        let (g, _) = general(&out);
+        assert_eq!(g.autogroup.validity, Validity::Unsupported);
+        assert_eq!(g.aslr_system.validity, Validity::Unsupported);
+    }
+
+    /// The App ID is the desktop match of the process sweep: the unit app id, the launcher
+    /// form's id without its launcher, then the executable. A unit app id with no desktop entry
+    /// is no App ID, and neither is a process of another user.
+    #[test]
+    fn general_app_id_from_desktop_match() {
+        // The unit app id `firefox` is a desktop id.
+        let (_tmp, src) = general_src();
+        assert_eq!(app_id_of(src).as_deref(), Some("firefox"));
+
+        // A launcher scope: `gnome-firefox` is not a desktop id, `firefox` is.
+        let (tmp, mut src) = general_src();
+        write_cgroup(&tmp, "app-gnome-firefox-777.scope");
+        src.general.apps = Some(desktop_apps(&tmp, &[("firefox", "/opt/other/bin")]));
+        assert_eq!(app_id_of(src).as_deref(), Some("firefox"));
+
+        // No desktop id for the unit: the executable matches another entry's `Exec`.
+        let (tmp, mut src) = general_src();
+        src.general.apps = Some(desktop_apps(
+            &tmp,
+            &[("org.mozilla.firefox", "/usr/lib/firefox/firefox %u")],
+        ));
+        assert_eq!(app_id_of(src).as_deref(), Some("org.mozilla.firefox"));
+
+        // The unit parses, but nothing in the index matches.
+        let (tmp, mut src) = general_src();
+        src.general.apps = Some(desktop_apps(&tmp, &[]));
+        assert_eq!(app_id_of(src), None);
+
+        // Another user's process is a System row, so it has no App ID.
+        let (_tmp, mut src) = general_src();
+        src.general.self_uid = 1001;
+        assert_eq!(app_id_of(src), None);
     }
 
     /// An unchanged General keeps its `Arc`. An open notice resends it, a changed file sends a
