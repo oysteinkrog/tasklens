@@ -28,11 +28,23 @@
 //! always drops the state and reads at once; `open_pending` never applies to it, and it keeps the
 //! flag for the notice still to come. General stays in this worker's demand while its target
 //! does, so the worker never sees it open: every open notice for a target resends its General
-//! payload and never reads it. Tab updates go out through `take_extra`. When PSS is not
-//! due the sample itself is the last tab update or `Health { Running }`, never an empty `Pss`.
+//! payload and never reads it. Tab and affinity updates go out through `take_extra`. When PSS is
+//! not due the sample itself is the last of them or `Health { Running }`, never an empty `Pss`.
 //!
-//! Per-key errors become `Validity`, never `WorkerError`. Environment values, command lines and
-//! paths are never logged (ADR-015).
+//! Hashes (PROC-074, E10-005): `ComputeHashes(key)` hashes the executable with
+//! `hash_process_exe` in the next sample, where the target has a General tab state, and the
+//! General payload then carries the `HashState`. A request for a target not in the demand yet
+//! waits for it. The `HashCache` keys on (dev, inode, mtime), so a second request for the same
+//! file reads nothing. The package check stays `NotVerified` until `VerifyPackage` has a handler
+//! (tasklens-dwy.15).
+//!
+//! Affinity (UI-PWN-021): while `affinity_targets` is not empty, a sample at least
+//! `AFFINITY_PERIOD` after the last affinity read sends `DetailsUpdate::Affinity` with the
+//! `Cpus_allowed_list` mask and the cgroup's `cpuset.cpus.effective` of every target. A gone
+//! process is left out; an unread cpuset gives an empty limit, which means no limit.
+//!
+//! Per-key errors become `Validity`, never `WorkerError`. Hash failures are a `HashState`.
+//! Environment values, command lines and paths are never logged (ADR-015).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -50,6 +62,7 @@ use tl_collect::apps::AppPaths;
 use tl_collect::apps::cgroup_app::parse_app_unit;
 use tl_collect::apps::classify::{ClassifyInput, MatchInput, ProcClass, classify, match_app};
 use tl_collect::apps::desktop::{DesktopIndex, DesktopWatch, data_dirs_from_env};
+use tl_collect::hash::{self, HashCache, hash_process_exe};
 use tl_collect::parse::topology::parse_cpu_list;
 use tl_collect::proc::cgroup::{
     UserPlacement, app_slice_unit, parse_cgroup_file, placement, unescape_unit,
@@ -72,11 +85,12 @@ use tl_collect::sanitize::{
 use tl_collect::sysroot::{SMALL_FILE_LIMIT, read_at, read_file};
 use tl_collect::{CollectError, SysRoot};
 use tl_model::actions::SchedPolicy;
-use tl_model::demand::{DETAILS_MAX, Demand, DetailDemand};
+use tl_model::demand::{AFFINITY_TARGETS_MAX, DETAILS_MAX, Demand, DetailDemand};
 use tl_model::details::{
-    CapRow, DetailTab, DetailTarget, Elevated, ElfArch, EnvDetail, ExeLocation, FdDetail, FdKind,
-    FdRow, GeneralDetail, GroupMembershipRow, HashState, IdTriple, MapNode, MapRegion, MapsDetail,
-    NsKind, NsRow, NsState, PackageCheck, Relro, Seccomp, SecurityDetail, TabPayload, ThreadRow,
+    AffinityInfo, CapRow, DetailTab, DetailTarget, Elevated, ElfArch, EnvDetail, ExeLocation,
+    FdDetail, FdKind, FdRow, GeneralDetail, GroupMembershipRow, HashError, HashState, IdTriple,
+    MapNode, MapRegion, MapsDetail, NsKind, NsRow, NsState, PackageCheck, Relro, Seccomp,
+    SecurityDetail, TabPayload, ThreadRow,
 };
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, ProcessKey};
@@ -99,6 +113,10 @@ pub const PSS_PERIOD: Duration = Duration::from_secs(1);
 
 /// Memory maps reads `smaps` (per-region RSS) at most this often (ADR-008).
 pub const SMAPS_MIN_PERIOD: Duration = Duration::from_secs(1);
+
+/// Affinity masks are read once a second while a Set Affinity dialog is open (ADR-008). It is
+/// the PSS rate, so both share the sample period.
+pub const AFFINITY_PERIOD: Duration = PSS_PERIOD;
 
 /// Read limit for `<root>/etc/group`.
 const GROUP_FILE_MAX: usize = 1024 * 1024;
@@ -236,7 +254,8 @@ impl TabRead {
 }
 
 /// The General tab values of one process, compared to detect a change. User names are looked
-/// up when the payload is built. Hashes, package and GPU fields are not read here.
+/// up when the payload is built. Package and GPU fields are not read here, and `hashes` is the
+/// target's last `ComputeHashes` result.
 #[derive(Clone, PartialEq)]
 struct GeneralRead {
     started_s: Total<i64>,
@@ -273,6 +292,7 @@ struct GeneralRead {
     commit_bytes: Total<u64>,
     cpu_time_ms: Total<u64>,
     io: Total<PidIo>,
+    hashes: HashState,
 }
 
 /// What the General reader keeps between reads.
@@ -328,6 +348,8 @@ struct TargetState {
     rss: FxHashMap<u64, u64>,
     /// File descriptors: protocol by socket inode. A socket keeps its protocol.
     sockets: FxHashMap<u64, FdType>,
+    /// The last `ComputeHashes` result, sent in the General payload.
+    hashes: HashState,
 }
 
 pub struct ProcessDetailSource {
@@ -338,9 +360,18 @@ pub struct ProcessDetailSource {
     /// Reused every sample.
     buf: Vec<u8>,
     reads: Vec<(ProcessKey, RollupRead)>,
-    /// Commands the worker owns, drained at the start of every sample. E10-005, E10-006 and
-    /// E10-A3 add their handlers; until then they are logged by kind and dropped.
+    /// Commands the worker owns, drained at the start of every sample. tasklens-dwy.15, E10-006
+    /// and E10-A3 add their handlers; until then they are logged by kind and dropped.
     pending: Vec<WorkerCommand>,
+    /// `ComputeHashes` keys, oldest first, at most `DETAILS_MAX`. A key waits here until its
+    /// target has a General tab state.
+    hash_requests: Vec<ProcessKey>,
+    hash_cache: HashCache,
+    /// Set by `period`: the first `AFFINITY_TARGETS_MAX` entries of `Demand.affinity_targets`.
+    affinity_keys: RefCell<Arc<[ProcessKey]>>,
+    /// Clock time of the last affinity read. `None` while no dialog is open, so a new one reads
+    /// at once.
+    last_affinity: Option<TimeNs>,
     /// Set by `period`: the first `DETAILS_MAX` entries of `Demand.details`.
     details: RefCell<Arc<[DetailDemand]>>,
     /// Set by `period`: samples per tab read.
@@ -403,6 +434,10 @@ impl ProcessDetailSource {
             buf: Vec::new(),
             reads: Vec::new(),
             pending: Vec::new(),
+            hash_requests: Vec::new(),
+            hash_cache: HashCache::new(),
+            affinity_keys: RefCell::new(Arc::from([])),
+            last_affinity: None,
             details: RefCell::new(Arc::from([])),
             tabs_every: Cell::new(1),
             tabs_stride: Stride::default(),
@@ -452,7 +487,6 @@ impl ProcessDetailSource {
     pub fn targets_len(&self) -> usize {
         self.targets.borrow().len()
     }
-
     /// `sample()` is `self.sample_at(now_boot_ns())`; tests call this with an injected clock.
     /// `now` stamps the PSS and health updates and times the PSS and `smaps` limits.
     pub fn sample_at(mut self, now: TimeNs) -> (Self, SourceUpdate) {
@@ -467,6 +501,7 @@ impl ProcessDetailSource {
         self.smaps_at
             .retain(|_, &mut at| !elapsed(Some(at), now, SMAPS_MIN_PERIOD));
         self.read_tabs(now);
+        self.read_affinity(now);
 
         let keys = self.keys.borrow().clone();
         // With no keys the reader still runs while fds are cached, so hidden columns close them.
@@ -594,6 +629,26 @@ impl ProcessDetailSource {
             }
         }
 
+        // Hash requests whose target is demanded. Their General tab is read below to send the
+        // result.
+        let mut hashed: SmallVec<[ProcessKey; DETAILS_MAX]> = SmallVec::new();
+        for key in std::mem::take(&mut self.hash_requests) {
+            let demanded = self
+                .targets
+                .get_mut()
+                .get(&key)
+                .is_some_and(|t| t.tabs[DetailTab::General.index()].is_some());
+            if !demanded {
+                self.hash_requests.push(key);
+                continue;
+            }
+            let hashes = self.compute_hashes(key);
+            if let Some(target) = self.targets.get_mut().get_mut(&key) {
+                target.hashes = hashes;
+            }
+            hashed.push(key);
+        }
+
         let details = self.details.borrow().clone();
         let periodic = wants_tabs(&details) && self.tabs_stride.ready();
         // General first and once per target, then the demanded tab.
@@ -618,6 +673,7 @@ impl ProcessDetailSource {
             let wanted = match state {
                 None => true,
                 Some(s) if tab == DetailTab::Environment => !s.env_loaded,
+                Some(_) if tab == DetailTab::General && hashed.contains(&key) => true,
                 Some(s) => periodic || s.published.is_none(),
             };
             if wanted && let Some(update) = self.read_tab(key, tab, now) {
@@ -655,7 +711,10 @@ impl ProcessDetailSource {
                 &mut self.general,
                 bufs,
             )
-            .map(|read| TabRead::General(Box::new(read))),
+            .map(|mut read| {
+                read.hashes = state.hashes.clone();
+                TabRead::General(Box::new(read))
+            }),
             DetailTab::Threads => {
                 let clock = self.thread_clock;
                 let reader = state.threads.get_or_insert_with(|| match clock {
@@ -758,6 +817,59 @@ impl ProcessDetailSource {
             validity,
         })
     }
+
+    /// SHA-256 and MD5 of the executable of `key`, from the cache when the file is unchanged.
+    /// The first command-line token stands in when the `exe` link is denied.
+    fn compute_hashes(&mut self, key: ProcessKey) -> HashState {
+        let root = &self.cfg.sys_root;
+        let argv0 = read_argv0(root, key.pid, &mut self.bufs.cmdline);
+        match hash_process_exe(root, key, argv0, &mut self.hash_cache, &mut self.buf) {
+            Ok(h) => HashState::Done {
+                sha256: h.sha256,
+                md5: h.md5,
+            },
+            Err(hash::HashError::ExeUnavailable) => {
+                HashState::Failed(HashError::ExePathUnavailable)
+            }
+            Err(hash::HashError::Read { errno }) => {
+                HashState::Failed(HashError::ReadFailed { errno })
+            }
+        }
+    }
+
+    /// Queues `DetailsUpdate::Affinity` for every target of a Set Affinity dialog, at most once
+    /// per `AFFINITY_PERIOD` of clock time.
+    fn read_affinity(&mut self, now: TimeNs) {
+        let keys = self.affinity_keys.borrow().clone();
+        if keys.is_empty() {
+            self.last_affinity = None;
+            return;
+        }
+        if !elapsed(self.last_affinity, now, AFFINITY_PERIOD) {
+            return;
+        }
+        self.last_affinity = Some(now);
+        let g = &mut self.general;
+        let entries = keys
+            .iter()
+            .filter_map(|&key| {
+                let info = affinity_info(
+                    &self.cfg.sys_root,
+                    key,
+                    &mut self.bufs.small,
+                    &mut g.stat,
+                    &mut g.status,
+                    &mut g.cpus,
+                )?;
+                Some((key, info))
+            })
+            .collect();
+        self.extra
+            .push_back(SourceUpdate::Details(DetailsUpdate::Affinity {
+                t_ns: now,
+                entries,
+            }));
+    }
 }
 
 impl Source for ProcessDetailSource {
@@ -765,9 +877,10 @@ impl Source for ProcessDetailSource {
         SourceId::ProcessDetail
     }
 
-    /// PSS alone runs at 1 Hz and tabs alone at `processes.interval_ms`. With both, the period
-    /// splits the interval into `shared_parts` equal parts of at most 1 s: tabs read exactly at
-    /// the interval, and PSS at the first sample 1 s or more after its last read. The period
+    /// PSS and affinity alone run at 1 Hz and tabs alone at `processes.interval_ms`. With both,
+    /// the period splits the interval into `shared_parts` equal parts of at most 1 s: tabs read
+    /// exactly at the interval, and PSS and affinity each at the first sample 1 s or more after
+    /// their last read. The period
     /// depends only on the demand and the settings, so it changes only when they do.
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         // A forced `RefreshNow` samples even without a period, so hidden columns must leave
@@ -820,11 +933,14 @@ impl Source for ProcessDetailSource {
                 }
             }
         }
-        let pss = shown && !d.detail_keys.is_empty();
+        let affinity = &d.affinity_targets[..d.affinity_targets.len().min(AFFINITY_TARGETS_MAX)];
+        *self.affinity_keys.borrow_mut() = Arc::from(affinity);
+        // PSS and affinity both run at 1 Hz.
+        let fast = (shown && !d.detail_keys.is_empty()) || !affinity.is_empty();
         let tabs = wants_tabs(&details);
         *self.details.borrow_mut() = details;
         let interval = tab_interval(s);
-        let (period, tabs_every) = match (pss, tabs) {
+        let (period, tabs_every) = match (fast, tabs) {
             (true, true) => {
                 let parts = shared_parts(interval);
                 (Some(interval / parts), parts)
@@ -854,8 +970,16 @@ impl Source for ProcessDetailSource {
                 self.refresh.push((*target, *tab, true));
                 true
             }
-            WorkerCommand::ComputeHashes(_)
-            | WorkerCommand::VerifyPackage(_)
+            WorkerCommand::ComputeHashes(key) => {
+                if !self.hash_requests.contains(key) {
+                    if self.hash_requests.len() >= DETAILS_MAX {
+                        self.hash_requests.remove(0);
+                    }
+                    self.hash_requests.push(*key);
+                }
+                true
+            }
+            WorkerCommand::VerifyPackage(_)
             | WorkerCommand::StringScan { .. }
             | WorkerCommand::CancelStringScan(_)
             | WorkerCommand::HandleSearch { .. }
@@ -1501,6 +1625,91 @@ fn boot_time(root: &SysRoot, g: &mut GeneralReader) -> Option<u64> {
     g.btime
 }
 
+/// The set of a kernel CPU list such as "0-7,16-23". `None` when the list does not parse or is
+/// empty.
+fn cpu_set(list: &[u8], cpus: &mut SmallVec<[u16; 64]>) -> Option<CpuSet> {
+    if parse_cpu_list(list, cpus).is_err() || cpus.is_empty() {
+        return None;
+    }
+    let mut set = CpuSet::empty();
+    for &cpu in cpus.iter() {
+        set.insert(cpu);
+    }
+    Some(set)
+}
+
+/// The first command-line token of `pid` when it is UTF-8 and not empty.
+fn read_argv0<'a>(root: &SysRoot, pid: u32, buf: &'a mut Vec<u8>) -> Option<&'a str> {
+    let path = root.proc.join(pid.to_string()).join("cmdline");
+    read_file(&path, buf, ARGV0_MAX).ok()?;
+    let first = buf.split(|&b| b == 0).next()?;
+    std::str::from_utf8(first).ok().filter(|s| !s.is_empty())
+}
+
+/// The affinity mask of `key` and the CPUs its cgroup allows. `None` when the process is gone or
+/// its `stat` or `status` cannot be read.
+fn affinity_info(
+    root: &SysRoot,
+    key: ProcessKey,
+    buf: &mut Vec<u8>,
+    stat: &mut PidStat,
+    status: &mut PidStatus,
+    cpus: &mut SmallVec<[u16; 64]>,
+) -> Option<AffinityInfo> {
+    let dir = rustix::fs::open(
+        root.proc.join(key.pid.to_string()),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let dir = dir.as_fd();
+    // The directory fd pins the process, so a matching start time holds for the reads below.
+    read_at(dir, "stat", buf, SMALL_FILE_LIMIT)
+        .and_then(|_| parse_pid_stat(buf, stat))
+        .ok()?;
+    if stat.start_ticks != key.start_ticks {
+        return None;
+    }
+    read_at(dir, "status", buf, STATUS_READ_MAX)
+        .and_then(|_| parse_status(buf, status))
+        .ok()?;
+    let mask = cpu_set(&status.cpus_allowed_list, cpus)?;
+    let cpuset_limit = match read_at(dir, "cgroup", buf, SMALL_FILE_LIMIT) {
+        Ok((_, false)) => parse_cgroup_file(buf)
+            .and_then(|path| cpuset_effective(root, &path.rel, buf, cpus))
+            .unwrap_or(CpuSet::empty()),
+        _ => CpuSet::empty(),
+    };
+    Some(AffinityInfo { mask, cpuset_limit })
+}
+
+/// `cpuset.cpus.effective` of the cgroup `rel` (relative to `<sys>/fs/cgroup`). A cgroup
+/// without the cpuset controller has no such file and takes its parent's set, so the walk goes
+/// up to the root. `None` when no level has a readable list, or when the path has a `..`
+/// component: a process outside tasklens's cgroup namespace shows such a path.
+fn cpuset_effective(
+    root: &SysRoot,
+    rel: &str,
+    buf: &mut Vec<u8>,
+    cpus: &mut SmallVec<[u16; 64]>,
+) -> Option<CpuSet> {
+    if rel.split('/').any(|c| c == "..") {
+        return None;
+    }
+    let base = root.sys.join("fs/cgroup");
+    let mut rel = rel;
+    loop {
+        let path = base.join(rel).join("cpuset.cpus.effective");
+        if read_file(&path, buf, SMALL_FILE_LIMIT).is_ok() {
+            return cpu_set(buf, cpus);
+        }
+        if rel.is_empty() {
+            return None;
+        }
+        rel = rel.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+}
+
 /// True when a thread other than the leader has a `Cpus_allowed_list` that differs from
 /// `leader`. Threads that exit during the walk are skipped.
 fn threads_differ(
@@ -1604,16 +1813,10 @@ fn read_general(
     }
 
     // Affinity from the leader's `Cpus_allowed_list`.
-    let affinity =
-        if parse_cpu_list(&g.status.cpus_allowed_list, &mut g.cpus).is_ok() && !g.cpus.is_empty() {
-            let mut set = CpuSet::empty();
-            for &cpu in &g.cpus {
-                set.insert(cpu);
-            }
-            valid(set)
-        } else {
-            total(CpuSet::empty(), Validity::Unsupported)
-        };
+    let affinity = match cpu_set(&g.status.cpus_allowed_list, &mut g.cpus) {
+        Some(set) => valid(set),
+        None => total(CpuSet::empty(), Validity::Unsupported),
+    };
     let affinity = from_status(affinity, status_err);
     let affinity_threads_differ = affinity.validity == Validity::Valid
         && g.stat.num_threads > 1
@@ -1867,6 +2070,8 @@ fn read_general(
         commit_bytes: from_status(bytes(commit_bytes(status)), status_err),
         cpu_time_ms: valid(cpu_ticks.saturating_mul(1000) / ticks),
         io,
+        // `read_tab` sets the target's hashes.
+        hashes: HashState::Pending,
     })
 }
 
@@ -1911,8 +2116,8 @@ fn general_detail(r: &GeneralRead, users: &mut dyn UserNames) -> GeneralDetail {
         unit: r.unit.clone(),
         app_id: r.app_id.clone(),
         cmdline: r.cmdline.clone(),
-        // E10-005 (tasklens-dwy.8) fills the hashes and the package check.
-        hashes: HashState::Pending,
+        hashes: r.hashes.clone(),
+        // tasklens-dwy.15 fills the package check.
         package_check: PackageCheck::NotVerified,
         handles: r.handles,
         rss_shared_bytes: r.rss_shared_bytes,
@@ -2098,23 +2303,38 @@ mod tests {
     fn command_routing() {
         let (_tmp, cfg, keys) = fake_procs(1);
         let mut src = ProcessDetailSource::new(cfg);
+        // ComputeHashes is handled, and the same key is held once.
         assert!(src.command(&WorkerCommand::ComputeHashes(keys[0])));
-        assert_eq!(src.pending_len(), 1);
+        assert!(src.command(&WorkerCommand::ComputeHashes(keys[0])));
+        assert_eq!(src.pending_len(), 0);
+        assert_eq!(src.hash_requests, vec![keys[0]]);
         assert!(src.command(&WorkerCommand::CancelStringScan(ScanId(1))));
         assert!(src.command(&WorkerCommand::VerifyPackage(keys[0])));
-        assert_eq!(src.pending_len(), 3);
+        assert_eq!(src.pending_len(), 2);
         assert!(!src.command(&WorkerCommand::RefreshNow));
         assert!(!src.command(&WorkerCommand::Reprobe));
         assert!(!src.command(&WorkerCommand::SetupStatus));
-        assert_eq!(src.pending_len(), 3);
+        assert_eq!(src.pending_len(), 2);
         // DetailRefresh is handled, not queued.
         assert!(src.command(&WorkerCommand::DetailRefresh {
             target: DetailTarget::Process(keys[0]),
             tab: DetailTab::Environment,
         }));
-        assert_eq!(src.pending_len(), 3);
+        assert_eq!(src.pending_len(), 2);
         let (src, _) = src.sample();
         assert_eq!(src.pending_len(), 0);
+    }
+
+    /// At most `DETAILS_MAX` hash requests wait; the oldest goes first.
+    #[test]
+    fn hash_requests_capped() {
+        let (_tmp, cfg, keys) = fake_procs(DETAILS_MAX as u32 + 1);
+        let mut src = ProcessDetailSource::new(cfg);
+        for &k in &keys {
+            assert!(src.command(&WorkerCommand::ComputeHashes(k)));
+        }
+        assert_eq!(src.hash_requests.len(), DETAILS_MAX);
+        assert_eq!(src.hash_requests[0], keys[1]);
     }
 
     #[test]
@@ -3220,7 +3440,7 @@ mod tests {
         assert_eq!(g.disk_read_bytes, valid(31_571_968));
         assert_eq!(g.disk_write_bytes, valid(6_627_328));
         assert_eq!(g.cancelled_write_bytes, valid(1_048_576));
-        // Left to E10-005.
+        // No ComputeHashes was sent.
         assert_eq!(g.hashes, HashState::Pending);
     }
 
@@ -3470,5 +3690,268 @@ mod tests {
         );
         assert_eq!(download_dir(b"XDG_DOWNLOAD_DIR=\"dl\"\n", "/home/u"), None);
         assert_eq!(download_dir(b"", "/home/u"), None);
+    }
+
+    // ---- Hashes and affinity masks (E10-005) ----
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// General of 4201 beside the PSS column at a 2 s interval: tabs are read on every second
+    /// sample, so a sample in between reads General only for a reason.
+    fn general_beside_pss() -> (Demand, EngineSettings) {
+        let mut d = tabs(&[(a(), DetailTab::General)]);
+        d.process_columns.insert(ColumnId::Pss);
+        d.detail_keys = Arc::from([a()]);
+        (d, every_ms(2000))
+    }
+
+    /// E10-005 AC 1: the General payload after `ComputeHashes` has both digests, and a second
+    /// request hits the cache and sends nothing.
+    #[test]
+    fn hashes_once_and_cached() {
+        let (tmp, src) = general_src();
+        let exe = tmp.path().join("exe-abc");
+        fs::write(&exe, b"abc").expect("write exe");
+        relink_exe(&tmp, &exe);
+        let (d, s) = general_beside_pss();
+        let (mut src, out, _) = step_all(src, &d, &s, 0);
+        assert_eq!(general(&out).0.hashes, HashState::Pending);
+
+        let reads = hash::hash_reads();
+        assert!(src.command(&WorkerCommand::ComputeHashes(a())));
+        let (mut src, out, _) = step_all(src, &d, &s, 1000);
+        let HashState::Done { sha256, md5 } = general(&out).0.hashes.clone() else {
+            panic!("expected hashes, got {out:?}");
+        };
+        assert_eq!(
+            hex(&sha256),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(hex(&md5), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(hash::hash_reads(), reads + 1);
+        assert!(src.hash_requests.is_empty());
+
+        assert!(src.command(&WorkerCommand::ComputeHashes(a())));
+        let (src, out, _) = step_all(src, &d, &s, 2000);
+        assert!(out.is_empty(), "unchanged General was sent: {out:?}");
+        assert_eq!(hash::hash_reads(), reads + 1);
+        assert_eq!(src.hash_cache.len(), 1);
+    }
+
+    /// E10-005 AC 2: an executable that cannot be opened gives "Executable path unavailable".
+    /// argv0 "firefox" is not absolute, so it cannot stand in.
+    #[test]
+    fn hashes_unreadable_exe() {
+        let (tmp, src) = general_src();
+        relink_exe(&tmp, &tmp.path().join("no-such-exe"));
+        let (d, s) = general_beside_pss();
+        let (mut src, _, _) = step_all(src, &d, &s, 0);
+        assert!(src.command(&WorkerCommand::ComputeHashes(a())));
+        let (_src, out, _) = step_all(src, &d, &s, 1000);
+        assert_eq!(
+            general(&out).0.hashes,
+            HashState::Failed(HashError::ExePathUnavailable)
+        );
+    }
+
+    /// A read error gives "Failed to compute one or more hashes" with its errno.
+    #[test]
+    fn hashes_read_error() {
+        let (tmp, src) = general_src();
+        let dir = tmp.path().join("exe-dir");
+        fs::create_dir_all(&dir).expect("create exe dir");
+        relink_exe(&tmp, &dir);
+        let (d, s) = general_beside_pss();
+        let (mut src, _, _) = step_all(src, &d, &s, 0);
+        assert!(src.command(&WorkerCommand::ComputeHashes(a())));
+        let (_src, out, _) = step_all(src, &d, &s, 1000);
+        assert_eq!(
+            general(&out).0.hashes,
+            HashState::Failed(HashError::ReadFailed {
+                errno: rustix::io::Errno::ISDIR.raw_os_error(),
+            })
+        );
+    }
+
+    /// A request sent before its window's demand waits for it, as the VirusTotal flow sends
+    /// them.
+    #[test]
+    fn hashes_wait_for_demand() {
+        let (tmp, mut src) = general_src();
+        let exe = tmp.path().join("exe-abc");
+        fs::write(&exe, b"abc").expect("write exe");
+        relink_exe(&tmp, &exe);
+        assert!(src.command(&WorkerCommand::ComputeHashes(a())));
+        let (src, out, _) = step_all(src, &Demand::default(), &every_ms(500), 0);
+        assert!(out.is_empty());
+        assert_eq!(src.hash_requests, vec![a()]);
+        let d = tabs(&[(a(), DetailTab::General)]);
+        let (src, out, _) = step_all(src, &d, &every_ms(500), 500);
+        assert!(matches!(general(&out).0.hashes, HashState::Done { .. }));
+        assert!(src.hash_requests.is_empty());
+    }
+
+    /// `period`, `sample_at(now_ms)`, then the entries of every affinity update the loop would
+    /// send.
+    fn affinity_step(
+        src: ProcessDetailSource,
+        d: &Demand,
+        s: &EngineSettings,
+        now_ms: u64,
+    ) -> (ProcessDetailSource, Vec<Vec<(ProcessKey, AffinityInfo)>>) {
+        src.period(d, s);
+        let (mut src, update) = src.sample_at(now_ms * MS + 1);
+        let mut out = Vec::new();
+        let mut push = |u: SourceUpdate| {
+            if let SourceUpdate::Details(DetailsUpdate::Affinity { entries, .. }) = u {
+                out.push(entries);
+            }
+        };
+        while let Some(extra) = src.take_extra() {
+            push(extra);
+        }
+        push(update);
+        (src, out)
+    }
+
+    fn cpus(list: &str) -> CpuSet {
+        cpu_set(list.as_bytes(), &mut SmallVec::new()).expect("cpu list")
+    }
+
+    fn affinity_demand(keys: &[ProcessKey]) -> Demand {
+        Demand {
+            affinity_targets: Arc::from(keys),
+            ..Demand::default()
+        }
+    }
+
+    /// process-edge with 4202, a copy of 4201 in `system.slice/b.service`. 4201's cgroup
+    /// allows 0-7; b.service has no cpuset controller, so its parent's 16-23 applies.
+    fn affinity_root() -> (tempfile::TempDir, Arc<EngineConfig>, ProcessKey) {
+        let (tmp, cfg) = edge_root();
+        let base = tmp.path();
+        copy_tree(&base.join("proc/4201"), &base.join("proc/4202"));
+        fs::write(
+            base.join("proc/4202/cgroup"),
+            b"0::/system.slice/b.service\n",
+        )
+        .expect("write cgroup");
+        let cg = base.join("sys/fs/cgroup");
+        let a_cg = cg.join(
+            "user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@3a1b.service",
+        );
+        fs::create_dir_all(&a_cg).expect("create cgroup dir");
+        fs::write(a_cg.join("cpuset.cpus.effective"), b"0-7\n").expect("write cpuset");
+        fs::create_dir_all(cg.join("system.slice/b.service")).expect("create cgroup dir");
+        fs::write(cg.join("system.slice/cpuset.cpus.effective"), b"16-23\n").expect("write cpuset");
+        (tmp, cfg, key(4202, START_TICKS))
+    }
+
+    /// E10-005 AC 3: one update a second with the mask and the cpuset limit of each target.
+    #[test]
+    fn affinity_targets_1hz() {
+        let (_tmp, cfg, b) = affinity_root();
+        let d = affinity_demand(&[a(), b]);
+        let s = EngineSettings::default();
+        let mut src = ProcessDetailSource::new(cfg);
+        assert_eq!(src.period(&d, &s), Some(AFFINITY_PERIOD));
+        let mut updates = Vec::new();
+        // The forced sample at 500 ms is too early for a read.
+        for t in [0, 500, 1000, 2000] {
+            let (next, out) = affinity_step(src, &d, &s, t);
+            src = next;
+            updates.extend(out);
+        }
+        assert_eq!(updates.len(), 3);
+        for entries in &updates {
+            assert_eq!(
+                entries,
+                &vec![
+                    (
+                        a(),
+                        AffinityInfo {
+                            mask: cpus("0-7,16-23"),
+                            cpuset_limit: cpus("0-7"),
+                        }
+                    ),
+                    (
+                        b,
+                        AffinityInfo {
+                            mask: cpus("0-7,16-23"),
+                            cpuset_limit: cpus("16-23"),
+                        }
+                    ),
+                ]
+            );
+        }
+        // Beside tabs at a 2 s interval, the period stays at 1 s.
+        let mut both = tabs(&[(a(), DetailTab::Threads)]);
+        both.affinity_targets = Arc::from([a()]);
+        assert_eq!(
+            src.period(&both, &every_ms(2000)),
+            Some(Duration::from_secs(1))
+        );
+    }
+
+    /// A gone process is left out; a cgroup without any cpuset file gives no limit.
+    #[test]
+    fn affinity_gone_and_no_cpuset() {
+        let (tmp, cfg, b) = affinity_root();
+        fs::remove_file(
+            tmp.path()
+                .join("sys/fs/cgroup/system.slice/cpuset.cpus.effective"),
+        )
+        .expect("remove cpuset");
+        let gone = key(4201, START_TICKS - 1);
+        let d = affinity_demand(&[gone, b]);
+        let s = EngineSettings::default();
+        let (_src, out) = affinity_step(ProcessDetailSource::new(cfg), &d, &s, 0);
+        assert_eq!(
+            out,
+            vec![vec![(
+                b,
+                AffinityInfo {
+                    mask: cpus("0-7,16-23"),
+                    cpuset_limit: CpuSet::empty(),
+                }
+            )]]
+        );
+    }
+
+    /// A cgroup path outside tasklens's namespace is never joined under `fs/cgroup`.
+    #[test]
+    fn cpuset_outside_namespace_is_no_limit() {
+        let (_tmp, cfg, _) = affinity_root();
+        let mut buf = Vec::new();
+        let mut list = SmallVec::new();
+        assert_eq!(
+            cpuset_effective(&cfg.sys_root, "../../system.slice", &mut buf, &mut list),
+            None
+        );
+        assert_eq!(
+            cpuset_effective(&cfg.sys_root, "system.slice/b.service", &mut buf, &mut list),
+            Some(cpus("16-23"))
+        );
+    }
+
+    /// E10-005 AC 4: no dialog and no details give no period, and a dialog that closes stops
+    /// the reads.
+    #[test]
+    fn affinity_off_when_empty() {
+        let (_tmp, cfg, b) = affinity_root();
+        let s = EngineSettings::default();
+        let src = ProcessDetailSource::new(cfg);
+        assert_eq!(src.period(&Demand::default(), &s), None);
+        let (src, out) = affinity_step(src, &affinity_demand(&[b]), &s, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(src.period(&Demand::default(), &s), None);
+        // A forced sample after the dialog closed reads nothing.
+        let (src, out) = affinity_step(src, &Demand::default(), &s, 1000);
+        assert!(out.is_empty());
+        // A dialog that opens again reads at once.
+        let (_src, out) = affinity_step(src, &affinity_demand(&[b]), &s, 1100);
+        assert_eq!(out.len(), 1);
     }
 }
