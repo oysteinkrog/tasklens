@@ -1935,8 +1935,13 @@ and Intel (some fdinfo read was denied: "Own processes only") and false for NVID
 `GPU_ENC` and `GPU_DEC` keep their meaning: on Intel `GPU_UTIL` is still the busiest engine and
 `GPU_ENC` and `GPU_DEC` the video engine, but the Intel engine list has no `Gpu`, `Enc` or `Dec`; it
 has `Render` and `Video`, so the same value is not drawn three times. Stored `hidden_gpu_engines` keys
-`gpu`, `enc` and `dec` keep naming the same engines on NVIDIA and AMD. 57 (`GPU_ENGINE_OTHER`) stays
-unused, and 70 to 79 are kept for GPU engines. The reducer records one series per reported engine.
+`gpu`, `enc` and `dec` keep naming the same engines on NVIDIA and AMD. On Intel they are read as legacy
+keys (`GpuEngine::legacy_keys` and `is_hidden`): `gpu` hides `Render`, and `enc` with `dec` hides
+`Video`, which needs both, as the shared encode/decode row did. Render and Video are Intel only, so the
+aliases cannot change an NVIDIA or AMD list. Settings are not migrated, because the key list is shared
+by every GPU. `GpuEngine::set_hidden` removes the legacy keys when the user shows the engine again; on a
+computer with an Intel GPU and another GPU that also shows the other GPU's engine of the same key.
+57 (`GPU_ENGINE_OTHER`) stays unused, and 70 to 79 are kept for GPU engines. The reducer records one series per reported engine.
 
 AMD lists Graphics, Memory controller, encode and decode from sysfs and `gpu_metrics`, Compute and DMA
 from fdinfo always, and JPEG once fdinfo has named it on the card (amdgpu prints only engines with

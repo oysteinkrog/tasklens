@@ -367,6 +367,40 @@ impl GpuEngine {
         Self::ALL.into_iter().find(|e| e.key() == key)
     }
 
+    /// Older keys that also hide this engine (R-292). Before hjn.37 an Intel GPU drew "gpu",
+    /// "enc" and "dec" graphs: "gpu" is now Render and "enc" with "dec" is now Video. Render and
+    /// Video are Intel only, so these keys still name Gpu, Enc and Dec on NVIDIA and AMD.
+    pub const fn legacy_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Render => &["gpu"],
+            Self::Video => &["enc", "dec"],
+            _ => &[],
+        }
+    }
+
+    /// True when `hidden` (`performance.hidden_gpu_engines`) hides this engine: it holds the
+    /// engine's key, or every one of its legacy keys. Video needs both "enc" and "dec", as the
+    /// shared encode/decode row did before.
+    pub fn is_hidden<S: AsRef<str>>(self, hidden: &[S]) -> bool {
+        let has = |key: &str| hidden.iter().any(|k| k.as_ref() == key);
+        let legacy = self.legacy_keys();
+        has(self.key()) || (!legacy.is_empty() && legacy.iter().all(|k| has(k)))
+    }
+
+    /// Hides or shows this engine in `hidden`. Showing also removes its legacy keys, so a stored
+    /// "gpu" does not keep Render hidden. On a computer with an Intel GPU and an NVIDIA or AMD
+    /// GPU, that also shows the other GPU's engine of the same key.
+    pub fn set_hidden(self, hidden: &mut Vec<String>, hide: bool) {
+        if hide {
+            if !self.is_hidden(hidden) {
+                hidden.push(self.key().to_owned());
+            }
+        } else {
+            let legacy = self.legacy_keys();
+            hidden.retain(|k| k != self.key() && !legacy.contains(&k.as_str()));
+        }
+    }
+
     /// The series of this engine.
     pub const fn metric(self) -> MetricId {
         match self {
@@ -554,6 +588,55 @@ mod tests {
         assert_eq!(GpuEngine::Dec.metric(), MetricId::GPU_DEC);
         let metrics: BTreeSet<u16> = GpuEngine::ALL.iter().map(|e| e.metric().0).collect();
         assert_eq!(metrics.len(), GpuEngine::COUNT);
+    }
+
+    #[test]
+    fn gpu_engine_stored_hidden_keys_keep_working() {
+        use GpuEngine::*;
+        let hidden = |keys: &[&str]| -> Vec<GpuEngine> {
+            GpuEngine::ALL
+                .into_iter()
+                .filter(|e| e.is_hidden(keys))
+                .collect()
+        };
+        // NVIDIA and AMD: the keys name the same engines as before.
+        assert_eq!(hidden(&["gpu"]), [Gpu, Render]);
+        assert_eq!(hidden(&["enc"]), [Enc]);
+        assert_eq!(hidden(&["dec"]), [Dec]);
+        // Intel: "gpu" hides Render; Video only when both "enc" and "dec" are hidden.
+        assert_eq!(hidden(&["enc", "dec"]), [Enc, Dec, Video]);
+        assert_eq!(
+            hidden(&["gpu", "enc", "dec"]),
+            [Gpu, Enc, Dec, Render, Video]
+        );
+        // The legacy aliases point only at Intel engines, so NVIDIA and AMD lists never change.
+        for e in GpuEngine::ALL {
+            for k in e.legacy_keys() {
+                assert!(matches!(e, Render | Video), "{e:?} has legacy key {k}");
+            }
+        }
+        assert!(hidden(&[] as &[&str]).is_empty());
+        assert_eq!(hidden(&["video-enhance"]), [VideoEnhance]);
+    }
+
+    #[test]
+    fn gpu_engine_set_hidden_clears_legacy_keys() {
+        let mut keys: Vec<String> = vec!["gpu".into(), "enc".into(), "dec".into()];
+        // Already hidden through "gpu": no new key.
+        GpuEngine::Render.set_hidden(&mut keys, true);
+        assert_eq!(keys, ["gpu", "enc", "dec"]);
+        GpuEngine::Render.set_hidden(&mut keys, false);
+        assert!(!GpuEngine::Render.is_hidden(&keys));
+        assert_eq!(keys, ["enc", "dec"]);
+        GpuEngine::Video.set_hidden(&mut keys, false);
+        assert!(!GpuEngine::Video.is_hidden(&keys));
+        assert!(keys.is_empty());
+        GpuEngine::Video.set_hidden(&mut keys, true);
+        assert_eq!(keys, ["video"]);
+        assert!(GpuEngine::Video.is_hidden(&keys));
+        assert!(!GpuEngine::Enc.is_hidden(&keys));
+        GpuEngine::Video.set_hidden(&mut keys, false);
+        assert!(keys.is_empty());
     }
 
     #[test]
