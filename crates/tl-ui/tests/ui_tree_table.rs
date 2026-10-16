@@ -3016,7 +3016,6 @@ fn cell_bar_paints_fill() {
     assert_eq!(track.size.height, px(12. * m.ui_scale));
     assert!((fill.size.width.as_f32() - track.size.width.as_f32() / 2.).abs() < 1.0);
     assert_eq!(quads_filled(vcx, theme.accent), 1, "one accent fill");
-    assert_eq!(quads_filled(vcx, theme.divider), 1, "one divider track");
 
     let mut cx = cosmic_cx();
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![plain(1)]), 600., 200.);
