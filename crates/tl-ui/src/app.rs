@@ -148,8 +148,9 @@ pub struct AppEnv {
     /// Writes nothing. The caller must apply the result through `TlSettings::update`, so the UI
     /// and the settings store stay in sync.
     pub import_taskslinger: ImportTaskslingerFn,
-    /// The wgpu probe runs in tl-app.
-    pub list_adapters: Arc<dyn Fn() -> Vec<AdapterInfo>>,
+    /// Starts the wgpu probe in tl-app and returns at once. tl-app runs the probe on its own
+    /// thread and sends the adapters on the channel; tl-ui waits up to 2 s (UI-SHL-040a).
+    pub list_adapters: Arc<dyn Fn() -> async_channel::Receiver<Vec<AdapterInfo>>>,
     /// `None` in tests.
     pub run_history: Option<Box<dyn RunHistoryStore>>,
 }
@@ -178,7 +179,11 @@ impl AppEnv {
                     summary: ImportSummary::default(),
                 })
             }),
-            list_adapters: Arc::new(Vec::new),
+            list_adapters: Arc::new(|| {
+                let (tx, rx) = async_channel::bounded(1);
+                let _ = tx.try_send(Vec::new());
+                rx
+            }),
             run_history: None,
         }
     }

@@ -1686,6 +1686,82 @@ fn advanced_show_fps_switch(cx: &mut TestAppContext) {
     assert!(cx.update(|cx| TlSettings::settings(cx).debug.show_fps));
 }
 
+/// Rendering GPU (E21-040, UI-SHL-071, R-237): the first Advanced row, filled from the adapter
+/// probe the Settings window starts when it opens.
+#[gpui_kit::test]
+fn advanced_rendering_gpu_row(cx: &mut TestAppContext) {
+    setup(cx);
+    let adapters = vec![
+        tl_ui::app::AdapterInfo {
+            name: "NVIDIA GeForce RTX 4070".to_owned(),
+            backend: "Vulkan".to_owned(),
+            device_type: "DiscreteGpu".to_owned(),
+            pci_bus_id: Some("0000:01:00.0".to_owned()),
+        },
+        tl_ui::app::AdapterInfo {
+            name: "llvmpipe".to_owned(),
+            backend: "Vulkan".to_owned(),
+            device_type: "Cpu".to_owned(),
+            pci_bus_id: None,
+        },
+    ];
+    cx.update(|cx| {
+        cx.global_mut::<AppEnv>().list_adapters = Arc::new(move || {
+            let (tx, rx) = async_channel::bounded(1);
+            tx.try_send(adapters.clone()).expect("room for one answer");
+            rx
+        });
+    });
+    let before = page(cx, PageId::Advanced);
+    assert_eq!(
+        before.dropdown_labels(SettingKey::RenderingGpu),
+        ["Auto", "Software renderer"],
+        "no probe before a Settings window opens"
+    );
+
+    let (_, mut vcx) = open(cx, 1);
+    let advanced = page(cx, PageId::Advanced);
+    assert_eq!(advanced.keys().first(), Some(&SettingKey::RenderingGpu));
+    assert_eq!(
+        advanced
+            .keys()
+            .iter()
+            .filter(|k| **k == SettingKey::RenderingGpu)
+            .count(),
+        1
+    );
+    assert_eq!(
+        advanced.dropdown_labels(SettingKey::RenderingGpu),
+        [
+            "Auto",
+            "NVIDIA GeForce RTX 4070",
+            "llvmpipe",
+            "Software renderer"
+        ]
+    );
+    assert_eq!(
+        advanced.description_of(SettingKey::RenderingGpu).as_deref(),
+        Some("Takes effect after restart")
+    );
+
+    vcx.update(|_, cx| advanced.pick(SettingKey::RenderingGpu, "llvmpipe", cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).rendering.gpu.clone()),
+        "name:llvmpipe"
+    );
+    assert_eq!(
+        window_toasts(&mut vcx),
+        ["Restart tasklens to use the new GPU"]
+    );
+    vcx.update(|_, cx| advanced.pick(SettingKey::RenderingGpu, "NVIDIA GeForce RTX 4070", cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).rendering.gpu.clone()),
+        "pci:0000:01:00.0"
+    );
+}
+
 #[gpui_kit::test]
 fn advanced_reset_opens_confirm(cx: &mut TestAppContext) {
     setup(cx);

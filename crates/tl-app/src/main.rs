@@ -263,7 +263,19 @@ fn main() -> ExitCode {
         set_autostart: Arc::new(|_, _| Ok(())),
         global_shortcut: None,
         import_taskslinger: Arc::new(import_ts::import_file),
-        list_adapters: Arc::new(Vec::new),
+        // No real probe yet (tasklens-bj6.50): a thread sends an empty list.
+        list_adapters: Arc::new(|| {
+            let (tx, rx) = async_channel::bounded(1);
+            let spawned = std::thread::Builder::new()
+                .name("tl-adapter-probe".into())
+                .spawn(move || {
+                    let _ = tx.send_blocking(Vec::new());
+                });
+            if let Err(e) = spawned {
+                warn!(target: "tasklens::ui", "adapter probe thread did not start: {e}");
+            }
+            rx
+        }),
         run_history: None,
     };
     let persist = lowmem_unit::wrap_persist(

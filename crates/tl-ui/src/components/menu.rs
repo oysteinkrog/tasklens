@@ -163,6 +163,10 @@ enum Entry {
 /// Formats a slider value, for example `120` as "120%".
 type ValueText = Rc<dyn Fn(f32) -> SharedString>;
 
+/// Runs each time a submenu opens ([`TlMenu::on_open`]). The task it returns lives until the next
+/// open or until the menu is dropped.
+type OnOpen = Rc<dyn Fn(&mut TlMenuPopup, &mut Window, &mut Context<TlMenuPopup>) -> Task<()>>;
+
 impl Entry {
     /// The arrow keys, Home, End, type-ahead and the mouse can highlight it.
     fn selectable(&self) -> bool {
@@ -201,6 +205,7 @@ pub struct TlMenu {
     min_w: Pixels,
     action_context: FocusHandle,
     ui_scale: f32,
+    on_open: Option<OnOpen>,
 }
 
 /// An independent action on the suffix icon of a painted menu row.
@@ -243,21 +248,7 @@ impl TlMenu {
         f: impl FnOnce(TlMenu, &mut Window, &mut App) -> TlMenu,
     ) -> Entity<TlMenuPopup> {
         let m = *metrics(cx);
-        let tl = TlMenu {
-            entries: Vec::new(),
-            has_mark_column: false,
-            min_w: px(MENU_MIN_W * m.ui_scale),
-            action_context: action_context.clone(),
-            ui_scale: m.ui_scale,
-        };
-        let mut tl = f(tl, window, cx);
-        if matches!(tl.entries.last(), Some(Entry::Separator)) {
-            tl.entries.pop();
-        }
-        if !tl.entries.iter().any(Entry::is_item) {
-            let label = tr(cx, "fnd-menu-no-items");
-            tl = tl.item_disabled(label, None);
-        }
+        let tl = TlMenu::fill(window, cx, action_context.clone(), f);
         let max_h = window.viewport_size().height - m.sp[6];
         let menu = cx.new(|cx| TlMenuPopup {
             focus: cx.focus_handle(),
@@ -273,6 +264,8 @@ impl TlMenu {
             scroll: ScrollHandle::new(),
             bounds: Bounds::default(),
             hover_task: None,
+            on_open: tl.on_open,
+            open_task: None,
         });
         let weak = menu.downgrade();
         for sub in menu.read(cx).submenus() {
@@ -280,6 +273,46 @@ impl TlMenu {
             set_depth(&sub, 1, cx);
         }
         menu
+    }
+
+    /// Runs `f` on an empty builder, drops a trailing separator and adds the "No items" row to a
+    /// menu with no item.
+    fn fill(
+        window: &mut Window,
+        cx: &mut App,
+        action_context: FocusHandle,
+        f: impl FnOnce(TlMenu, &mut Window, &mut App) -> TlMenu,
+    ) -> TlMenu {
+        let ui_scale = metrics(cx).ui_scale;
+        let tl = TlMenu {
+            entries: Vec::new(),
+            has_mark_column: false,
+            min_w: px(MENU_MIN_W * ui_scale),
+            action_context,
+            ui_scale,
+            on_open: None,
+        };
+        let mut tl = f(tl, window, cx);
+        if matches!(tl.entries.last(), Some(Entry::Separator)) {
+            tl.entries.pop();
+        }
+        if !tl.entries.iter().any(Entry::is_item) {
+            let label = tr(cx, "fnd-menu-no-items");
+            tl = tl.item_disabled(label, None);
+        }
+        tl
+    }
+
+    /// Runs `f` each time this menu opens as a submenu, before it takes the keys. `f` may
+    /// [`rebuild`](TlMenuPopup::rebuild) the menu at once and return a task that rebuilds it
+    /// again later, such as when a probe returns (UI-SHL-040a). The task is dropped on the next
+    /// open.
+    pub fn on_open(
+        mut self,
+        f: impl Fn(&mut TlMenuPopup, &mut Window, &mut Context<TlMenuPopup>) -> Task<()> + 'static,
+    ) -> Self {
+        self.on_open = Some(Rc::new(f));
+        self
     }
 
     /// Minimum width before the UI scale: 180 by default, 240 for the process row and header
@@ -633,6 +666,9 @@ pub struct TlMenuPopup {
     bounds: Bounds<Pixels>,
     /// A pending hover open or close of a submenu.
     hover_task: Option<Task<()>>,
+    on_open: Option<OnOpen>,
+    /// The task the last [`TlMenu::on_open`] call returned.
+    open_task: Option<Task<()>>,
 }
 
 impl EventEmitter<DismissEvent> for TlMenuPopup {}
@@ -652,6 +688,50 @@ impl TlMenuPopup {
     /// Highlights the first enabled item, as a menu opened from the keyboard shows it.
     pub fn highlight_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.jump(false, window, cx);
+    }
+
+    /// Replaces the entries with the ones `f` adds, as [`TlMenu::build`] adds them. The highlight
+    /// stays on the item with the same label, if there still is one. An open submenu closes. The
+    /// action context, the parent and the [`TlMenu::on_open`] hook stay.
+    pub fn rebuild(
+        &mut self,
+        f: impl FnOnce(TlMenu, &mut Window, &mut App) -> TlMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_sub(window, cx);
+        self.hover_task = None;
+        let highlighted = self
+            .highlight
+            .and_then(|ix| self.entries.get(ix))
+            .and_then(Entry::label)
+            .cloned();
+        let tl = TlMenu::fill(window, cx, self.action_context.clone(), f);
+        self.entries = tl.entries;
+        self.has_mark_column = tl.has_mark_column;
+        self.min_w = tl.min_w;
+        self.highlight = highlighted.and_then(|label| {
+            self.entries
+                .iter()
+                .position(|e| e.selectable() && e.label() == Some(&label))
+        });
+        if let Some(ix) = self.highlight {
+            self.scroll.scroll_to_item(ix);
+        }
+        let weak = cx.entity().downgrade();
+        let depth = self.depth;
+        for sub in self.submenus() {
+            sub.update(cx, |sub, _| sub.parent = Some(weak.clone()));
+            set_depth(&sub, depth + 1, cx);
+        }
+        cx.notify();
+    }
+
+    /// Runs the [`TlMenu::on_open`] hook, if any, and keeps the task it returns.
+    fn opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(on_open) = self.on_open.clone() {
+            self.open_task = Some(on_open(self, window, cx));
+        }
     }
 
     /// Every entry as built, top to bottom, with the shortcut hint the menu draws (tests).
@@ -863,8 +943,12 @@ impl TlMenuPopup {
         if self.open_sub.is_some_and(|open| open != ix) {
             self.close_sub(window, cx);
         }
+        let fresh = self.open_sub != Some(ix);
         self.open_sub = Some(ix);
         self.highlight = Some(ix);
+        if fresh {
+            sub.update(cx, |sub, cx| sub.opened(window, cx));
+        }
         if focus_first {
             sub.update(cx, |sub, cx| {
                 sub.highlight = None;
@@ -2667,5 +2751,90 @@ mod tests {
         draw(cx);
         assert!(menu_bounds(cx, true).is_empty(), "closed by hovering A");
         assert_eq!(highlighted(cx), vec![(false, 0)]);
+    }
+
+    /// The labels of the drawn submenu rows, top to bottom.
+    fn sub_labels(cx: &mut VisualTestContext) -> Vec<String> {
+        let mut rows: Vec<_> = items(cx).into_iter().filter(in_submenu).collect();
+        rows.sort_by_key(index);
+        rows.iter()
+            .filter_map(|s| s.label().map(str::to_owned))
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn rebuild_replaces_entries_and_keeps_highlight(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let opens = Rc::new(Cell::new(0));
+        let count = opens.clone();
+        let menu = open(
+            &view,
+            cx,
+            point(px(100.), px(100.)),
+            move |menu, window, cx| {
+                menu.item("A", Box::new(RunA))
+                    .submenu("More", window, cx, move |menu, _, _| {
+                        let count = count.clone();
+                        menu.item("X", Box::new(RunX))
+                            .item_disabled("Wait", None)
+                            .item("Y", Box::new(RunY))
+                            .on_open(move |_, _, _| {
+                                count.set(count.get() + 1);
+                                Task::ready(())
+                            })
+                    })
+            },
+        );
+        assert_eq!(
+            opens.get(),
+            0,
+            "building the parent does not open the submenu"
+        );
+
+        keys(cx, "down down right");
+        assert_eq!(opens.get(), 1, "the hook runs on open");
+        assert_eq!(sub_labels(cx), ["X", "Wait", "Y"]);
+        keys(cx, "down");
+        assert_eq!(
+            highlighted(cx),
+            vec![(false, 1), (true, 2)],
+            "Y, Wait skipped"
+        );
+
+        let sub = cx.update(|window, cx| {
+            menu.read(cx).entries_for_test(window)[1]
+                .submenu
+                .clone()
+                .expect("More is a submenu")
+        });
+        cx.update(|window, cx| {
+            sub.update(cx, |sub, cx| {
+                sub.rebuild(
+                    |menu, _, _| {
+                        menu.item("X", Box::new(RunX))
+                            .item("P", Box::new(RunA))
+                            .item("Q", Box::new(RunB))
+                            .item("Y", Box::new(RunY))
+                    },
+                    window,
+                    cx,
+                )
+            })
+        });
+        draw(cx);
+        assert_eq!(sub_labels(cx), ["X", "P", "Q", "Y"]);
+        assert_eq!(
+            highlighted(cx),
+            vec![(false, 1), (true, 3)],
+            "the highlight follows Y"
+        );
+        keys(cx, "up");
+        assert_eq!(highlighted(cx), vec![(false, 1), (true, 2)], "Q");
+
+        // Closing the submenu and opening it again runs the hook again.
+        keys(cx, "left right");
+        assert_eq!(opens.get(), 2);
+        keys(cx, "down down enter");
+        assert_eq!(*view.read_with(cx, |h, _| h.ran.clone()).borrow(), ["B"]);
     }
 }

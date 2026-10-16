@@ -869,7 +869,7 @@ fn shapes(cx: &mut VisualTestContext) -> Vec<String> {
         .collect()
 }
 
-const SETTINGS_ROOT: [&str; 27] = [
+const SETTINGS_ROOT: [&str; 28] = [
     "header:Monitoring",
     "item:Refresh",
     "item:Network transfer unit",
@@ -877,6 +877,7 @@ const SETTINGS_ROOT: [&str; 27] = [
     "item:Record history",
     "item:History storage",
     "item:Save history to disk",
+    "item:Rendering GPU",
     "header:Motion & interaction",
     "item:Animations",
     "item:Smooth Graphs",
@@ -963,10 +964,10 @@ fn settings_menu_network_and_checks(cx: &mut TestAppContext) {
     assert_eq!(settings_sub(r.cx), ["Bits per second", "Bytes per second"]);
     keys(r.cx, "down enter");
     assert_eq!(settings(r.cx).units.network, NetworkUnit::Bytes);
-    // Animations: Network, Auto-scale, Record history, History storage, Animations
-    // ("Save history to disk" is disabled and skipped).
+    // Animations: Network, Auto-scale, Record history, History storage, Rendering GPU,
+    // Animations ("Save history to disk" is disabled and skipped).
     assert!(settings(r.cx).motion.animations);
-    keys(r.cx, "alt-s down down down down down enter");
+    keys(r.cx, "alt-s down down down down down down enter");
     assert!(!settings(r.cx).motion.animations);
 }
 
@@ -977,11 +978,11 @@ fn default_tab_lists_built_tabs(cx: &mut TestAppContext) {
         cx.global_mut::<ShellState>().built_tabs =
             [Tab::Processes, Tab::Performance].into_iter().collect();
     });
-    // Default tab is the 15th enabled item ("Save history to disk" and "Start minimized" are
+    // Default tab is the 16th enabled item ("Save history to disk" and "Start minimized" are
     // disabled).
     keys(
         r.cx,
-        "alt-s down down down down down down down down down down down down down down right",
+        "alt-s down down down down down down down down down down down down down down down right",
     );
     assert_eq!(
         settings_sub(r.cx),
@@ -1929,7 +1930,8 @@ fn settings_menu_p3_order(cx: &mut TestAppContext) {
             "Auto-scale network transfer rates",
             "Record history",
             "History storage",
-            "Save history to disk"
+            "Save history to disk",
+            "Rendering GPU"
         ]
     );
     assert_eq!(
@@ -2652,4 +2654,205 @@ fn graph_color_dispatch(cx: &mut TestAppContext) {
             color: GraphColor::Rose
         }]
     );
+}
+
+// Settings > Rendering GPU (E21-040, UI-SHL-040a, R-237).
+
+/// Two adapters: a discrete card with a PCI bus id and a software one without.
+fn two_adapters() -> Vec<tl_ui::app::AdapterInfo> {
+    vec![
+        tl_ui::app::AdapterInfo {
+            name: "NVIDIA GeForce RTX 4070".to_owned(),
+            backend: "Vulkan".to_owned(),
+            device_type: "DiscreteGpu".to_owned(),
+            pci_bus_id: Some("0000:01:00.0".to_owned()),
+        },
+        tl_ui::app::AdapterInfo {
+            name: "llvmpipe".to_owned(),
+            backend: "Vulkan".to_owned(),
+            device_type: "Cpu".to_owned(),
+            pci_bus_id: None,
+        },
+    ]
+}
+
+/// The sender of the last probe the fake `list_adapters` started.
+type ProbeSender = Rc<RefCell<Option<async_channel::Sender<Vec<tl_ui::app::AdapterInfo>>>>>;
+
+/// Installs an `AppEnv` whose `list_adapters` keeps each probe's sender for the test, or answers
+/// at once with `answer` when it is set.
+fn fake_probe(
+    cx: &mut VisualTestContext,
+    answer: Option<Vec<tl_ui::app::AdapterInfo>>,
+) -> ProbeSender {
+    let sender: ProbeSender = Rc::default();
+    let slot = sender.clone();
+    cx.update(|_, cx| {
+        cx.set_global(tl_ui::app::AppEnv {
+            list_adapters: Arc::new(move || {
+                let (tx, rx) = async_channel::bounded(1);
+                if let Some(adapters) = &answer {
+                    tx.try_send(adapters.clone()).expect("room for one answer");
+                }
+                *slot.borrow_mut() = Some(tx);
+                rx
+            }),
+            ..tl_ui::app::AppEnv::test()
+        })
+    });
+    sender
+}
+
+/// Opens Settings > Rendering GPU from the keyboard: Refresh, Network, Auto-scale, Record
+/// history, History storage, Rendering GPU ("Save history to disk" is disabled and skipped).
+fn open_rendering_gpu(cx: &mut VisualTestContext) {
+    keys(cx, "alt-s down down down down down right");
+}
+
+/// The highlighted rows of the open Rendering GPU submenu.
+fn gpu_highlighted(cx: &mut VisualTestContext) -> Vec<String> {
+    entries(cx)
+        .iter()
+        .filter(|e| e.selected() == Some(true))
+        .filter_map(|e| e.label().map(str::to_owned))
+        .filter(|l| l != "Rendering GPU")
+        .collect()
+}
+
+/// The built Rendering GPU rows as (label, kind, marked).
+fn gpu_rows(
+    cx: &mut VisualTestContext,
+) -> Vec<(String, tl_ui::components::menu::MenuEntryKind, bool)> {
+    let bar = bar(cx);
+    cx.update(|window, cx| {
+        let popup = bar.read(cx).popup().expect("menu open").clone();
+        let sub = popup
+            .read(cx)
+            .entries_for_test(window)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Rendering GPU"))
+            .and_then(|e| e.submenu)
+            .expect("Rendering GPU submenu");
+        sub.read(cx)
+            .entries_for_test(window)
+            .into_iter()
+            .map(|e| {
+                let label = e.label.map(|l| l.to_string()).unwrap_or_default();
+                (label, e.kind, e.checked)
+            })
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn rendering_gpu_detecting_then_rebuild(cx: &mut TestAppContext) {
+    use tl_ui::components::menu::MenuEntryKind;
+    let r = rig(cx);
+    let sender = fake_probe(r.cx, None);
+    open_rendering_gpu(r.cx);
+    assert_eq!(
+        settings_sub(r.cx),
+        ["Auto", "Detecting adapters…", "Software renderer"]
+    );
+    assert_eq!(
+        gpu_rows(r.cx)[1],
+        (
+            "Detecting adapters…".to_owned(),
+            MenuEntryKind::Disabled,
+            false
+        )
+    );
+    // The placeholder is skipped by the arrows.
+    assert_eq!(gpu_highlighted(r.cx), ["Auto"]);
+    keys(r.cx, "down");
+    assert_eq!(gpu_highlighted(r.cx), ["Software renderer"]);
+
+    // The probe answers well within 2 s.
+    let tx = sender
+        .borrow_mut()
+        .take()
+        .expect("the open started a probe");
+    tx.try_send(two_adapters()).expect("probe answer");
+    draw(r.cx);
+    assert_eq!(
+        settings_sub(r.cx),
+        [
+            "Auto",
+            "NVIDIA GeForce RTX 4070",
+            "llvmpipe",
+            "Software renderer"
+        ]
+    );
+    assert_eq!(
+        gpu_highlighted(r.cx),
+        ["Software renderer"],
+        "the highlight stays on its row"
+    );
+    // rendering.gpu = "auto": the mark is on Auto.
+    let marks: Vec<bool> = gpu_rows(r.cx).into_iter().map(|(_, _, on)| on).collect();
+    assert_eq!(marks, [true, false, false, false]);
+}
+
+#[gpui_kit::test]
+fn rendering_gpu_probe_timeout(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    // The fake keeps the sender and never answers.
+    let sender = fake_probe(r.cx, None);
+    open_rendering_gpu(r.cx);
+    assert!(sender.borrow().is_some(), "the open started a probe");
+    r.cx.executor().advance_clock(
+        menus_settings::ADAPTER_PROBE_TIMEOUT - std::time::Duration::from_millis(100),
+    );
+    draw(r.cx);
+    assert_eq!(
+        settings_sub(r.cx),
+        ["Auto", "Detecting adapters…", "Software renderer"],
+        "still waiting at 1.9 s"
+    );
+    r.cx.executor()
+        .advance_clock(std::time::Duration::from_millis(100));
+    draw(r.cx);
+    assert_eq!(
+        settings_sub(r.cx),
+        ["Auto", "No adapters found", "Software renderer"]
+    );
+    assert_eq!(gpu_highlighted(r.cx), ["Auto"]);
+    keys(r.cx, "down");
+    assert_eq!(gpu_highlighted(r.cx), ["Software renderer"], "skipped");
+}
+
+#[gpui_kit::test]
+fn rendering_gpu_restart_toast(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    fake_probe(r.cx, Some(two_adapters()));
+    let gpu = |r: &mut Rig<'_>| {
+        r.cx.update(|_, cx| TlSettings::settings(cx).rendering.gpu.clone())
+    };
+    assert_eq!(gpu(&mut r), "auto");
+
+    // Auto is already stored: choosing it again writes nothing new and shows no toast.
+    open_rendering_gpu(r.cx);
+    keys(r.cx, "enter");
+    assert_eq!(gpu(&mut r), "auto");
+    assert!(toast_texts(&mut r).is_empty(), "no toast without a change");
+
+    // The adapter with a PCI bus id stores pci:<bus id>.
+    open_rendering_gpu(r.cx);
+    assert_eq!(
+        settings_sub(r.cx),
+        [
+            "Auto",
+            "NVIDIA GeForce RTX 4070",
+            "llvmpipe",
+            "Software renderer"
+        ]
+    );
+    keys(r.cx, "down enter");
+    assert_eq!(gpu(&mut r), "pci:0000:01:00.0");
+    assert_eq!(toast_texts(&mut r), ["Restart tasklens to use the new GPU"]);
+
+    // An adapter without one stores name:<adapter name> (R-237).
+    open_rendering_gpu(r.cx);
+    keys(r.cx, "down down enter");
+    assert_eq!(gpu(&mut r), "name:llvmpipe");
 }

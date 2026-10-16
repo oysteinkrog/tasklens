@@ -21,9 +21,19 @@
 //! Monitoring; the three tray checks, "Unlock privileged actions at launch" and "Open rescue
 //! window on critical memory pressure" in Window & startup. These rows only write their keys
 //! (plus the history toast). The features that react to the keys belong to E29 to E32.
+//!
+//! P4 row (E21-040, UI-SHL-040a, R-237): the "Rendering GPU" submenu, last in Monitoring. Each
+//! open shows "Auto", a disabled "Detecting adapters…" and "Software renderer" at once, then a
+//! foreground task waits up to 2 s for the adapter probe (`AppEnv.list_adapters`, run by tl-app on
+//! its own thread) and rebuilds the submenu with one row per adapter, or "No adapters found".
+//! A row writes `rendering.gpu`; a new value shows the Info toast "Restart tasklens to use the new
+//! GPU".
+
+use std::future::Future;
+use std::time::Duration;
 
 use fluent_bundle::FluentValue;
-use gpui_kit::{App, Entity, FocusHandle, SharedString, Window, px};
+use gpui_kit::{App, Entity, FocusHandle, FutureExt as _, SharedString, Window, px};
 use tl_model::command::Tab;
 use tl_model::settings::{
     HISTORY_RETENTION_MENU_H, NetworkUnit, PROCESS_INTERVAL_MENU_MS, Settings, StartTab,
@@ -35,7 +45,7 @@ use super::main::ShellState;
 use super::menubar::{MenuSliders, TAB_SWITCH};
 use super::public_ip::request_public_ip_fetch;
 use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
-use crate::app::AppEnv;
+use crate::app::{AdapterInfo, AppEnv};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{tr, tr_args};
@@ -70,6 +80,9 @@ pub(crate) const SHIPPED_LANGUAGES: [(&str, &str); 1] =
 /// "Start minimized" sits under "Start at login", indented by 16 before the UI scale.
 const START_MINIMIZED_INDENT: f32 = 16.;
 
+/// How long the Rendering GPU rows wait for the adapter probe (UI-SHL-040a).
+pub const ADAPTER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 gpui_kit::actions!(
     tasklens,
     [
@@ -82,6 +95,12 @@ gpui_kit::actions!(
         ToggleRecordHistory,
     ]
 );
+
+/// Writes `rendering.gpu` and, when the value changes, shows the Info toast "Restart tasklens to
+/// use the new GPU".
+#[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct SetRenderingGpu(pub SharedString);
 
 /// Registers the "Auto-fetch Public IP on launch" and autostart handlers. `menubar::init` calls
 /// it.
@@ -113,6 +132,13 @@ pub fn init(cx: &mut App) {
             "shell-toast-history-off"
         };
         info_toast(cx, key);
+    });
+    cx.on_action(|a: &SetRenderingGpu, cx| {
+        if settings_now(cx).rendering.gpu == a.0.as_ref() {
+            return;
+        }
+        TlSettings::set(cx, SettingKey::RenderingGpu, SettingValue::Str(a.0.clone()));
+        info_toast(cx, "shell-toast-gpu-restart");
     });
     cx.on_action(|_: &TogglePublicIpAutoFetch, cx| {
         if settings_now(cx).network.auto_fetch_public_ip {
@@ -185,6 +211,12 @@ pub fn build(
             menu.item_disabled(persist, Some(tr(cx, "shell-menu-settings-history-first")))
         };
         let menu = menu
+            .submenu(
+                tr(cx, "shell-menu-settings-rendering-gpu"),
+                window,
+                cx,
+                rendering_gpu_submenu,
+            )
             .header(tr(cx, "shell-menu-settings-motion"))
             .check_item(
                 tr(cx, "shell-menu-settings-animations"),
@@ -458,6 +490,89 @@ fn language_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
         );
     }
     menu
+}
+
+/// "Auto", one row per adapter and "Software renderer". Each open shows "Detecting adapters…" in
+/// place of the adapters and starts the probe; its result rebuilds the submenu.
+fn rendering_gpu_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+    gpu_rows(menu, None, cx).on_open(|menu, window, cx| {
+        menu.rebuild(|menu, _, cx| gpu_rows(menu, None, cx), window, cx);
+        let probe = probe_adapters(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let adapters = probe.await;
+            let _ = this.update_in(cx, |menu, window, cx| {
+                menu.rebuild(
+                    |menu, _, cx| gpu_rows(menu, Some(&adapters), cx),
+                    window,
+                    cx,
+                );
+            });
+        })
+    })
+}
+
+/// The Rendering GPU rows. `adapters` is `None` while the probe runs.
+fn gpu_rows(menu: TlMenu, adapters: Option<&[AdapterInfo]>, cx: &App) -> TlMenu {
+    let current = settings_now(cx).rendering.gpu;
+    let row = |value: String| Box::new(SetRenderingGpu(value.into()));
+    let mut menu = menu.radio_item(
+        tr(cx, "shell-menu-settings-gpu-auto"),
+        current == "auto",
+        row("auto".to_owned()),
+    );
+    match adapters {
+        None => menu = menu.item_disabled(tr(cx, "shell-menu-settings-gpu-detecting"), None),
+        Some([]) => menu = menu.item_disabled(tr(cx, "shell-menu-settings-gpu-none"), None),
+        Some(adapters) => {
+            for adapter in adapters {
+                let value = adapter_setting_value(adapter);
+                menu = menu.radio_item(adapter.name.clone(), current == value, row(value));
+            }
+        }
+    }
+    menu.radio_item(
+        tr(cx, "shell-menu-settings-gpu-software"),
+        current == "software",
+        row("software".to_owned()),
+    )
+}
+
+/// The `rendering.gpu` value of an adapter: `pci:<bus id>` when the adapter reports one,
+/// otherwise `name:<adapter name>` (R-237).
+pub fn adapter_setting_value(adapter: &AdapterInfo) -> String {
+    match &adapter.pci_bus_id {
+        Some(bus) => format!("pci:{bus}"),
+        None => format!("name:{}", adapter.name),
+    }
+}
+
+/// Starts the adapter probe through `AppEnv.list_adapters` (R-171). The future gives the
+/// adapters, or an empty list when the probe sends nothing within [`ADAPTER_PROBE_TIMEOUT`], ends
+/// without a result or there is no `AppEnv`. tl-app probes on its own thread, so awaiting this on
+/// the main thread never blocks it.
+pub(crate) fn probe_adapters(cx: &App) -> impl Future<Output = Vec<AdapterInfo>> + 'static {
+    let rx = cx.try_global::<AppEnv>().map(|env| (env.list_adapters)());
+    let executor = cx.background_executor().clone();
+    async move {
+        let Some(rx) = rx else {
+            return Vec::new();
+        };
+        match rx
+            .recv()
+            .with_timeout(ADAPTER_PROBE_TIMEOUT, &executor)
+            .await
+        {
+            Ok(Ok(adapters)) => adapters,
+            Ok(Err(_)) => {
+                warn!(target: "tasklens::ui", "adapter probe ended without a result");
+                Vec::new()
+            }
+            Err(_) => {
+                warn!(target: "tasklens::ui", "adapter probe sent nothing within 2 s");
+                Vec::new()
+            }
+        }
+    }
 }
 
 /// The radio marks of the Refresh items, in menu order.

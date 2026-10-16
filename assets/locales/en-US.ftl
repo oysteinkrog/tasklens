@@ -2310,6 +2310,13 @@ shell-menu-settings-unlock-at-launch = Unlock privileged actions at launch
 shell-menu-settings-rescue-window = Open rescue window on critical memory pressure
 shell-toast-history-on = History recording on
 shell-toast-history-off = History recording off
+# Settings menu and Advanced page, Rendering GPU (tasklens-bj6.44, UI-SHL-040a, UI-SHL-071, R-237).
+shell-menu-settings-rendering-gpu = Rendering GPU
+shell-menu-settings-gpu-auto = Auto
+shell-menu-settings-gpu-software = Software renderer
+shell-menu-settings-gpu-detecting = Detecting adapters…
+shell-menu-settings-gpu-none = No adapters found
+shell-toast-gpu-restart = Restart tasklens to use the new GPU
 # Process row menu and group header menu (tasklens-pdu.2, UI-PRC-013, UI-PRC-020)
 processes-menu-end-task = End Task
 processes-menu-end-app = End App
