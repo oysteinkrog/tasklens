@@ -32,7 +32,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::windows::service_properties::{
-    GeneralTab, LogOnTab, ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
+    GeneralTab, LogOnTab, RecoveryTab, ServicePropertiesWindow, ServicePropsTab,
+    ServicePropsTabView,
 };
 
 use tl_ui::pages::services::actions::ServicePropsOk;
@@ -1189,4 +1190,156 @@ fn logon_user_manager(cx: &mut TestAppContext) {
     assert_eq!(t.value(cx, "Group"), "users");
     assert_eq!(t.value(cx, "Supplementary groups"), "wheel, video");
     assert_eq!(t.value(cx, "PAM service"), "systemd-user");
+}
+
+struct Recovery {
+    engine: Arc<FakeEngine>,
+    _main: VisualTestContext,
+    handle: WindowHandle<Root>,
+    tab: Entity<RecoveryTab>,
+}
+
+/// Opens sshd.service on Recovery with `d` published, or with no details.
+fn open_recovery(cx: &mut TestAppContext, d: Option<Arc<UnitDetails>>) -> Recovery {
+    let (engine, main) = setup(cx);
+    let mut map = HashMap::new();
+    if let Some(d) = d {
+        map.insert(unit("sshd.service"), d);
+    }
+    publish(
+        cx,
+        &engine,
+        &["sshd.service"],
+        &map,
+        ServiceBackend::Systemd,
+    );
+    let handle = open(cx, "sshd.service", ServicePropsTab::Recovery).expect("opened");
+    let win = view(cx, handle);
+    let tab = cx
+        .read(|cx| win.read(cx).recovery_tab())
+        .expect("the Recovery tab is built");
+    Recovery {
+        engine,
+        _main: main,
+        handle,
+        tab,
+    }
+}
+
+impl Recovery {
+    fn rows(&self, cx: &mut TestAppContext) -> Vec<(String, String)> {
+        cx.read(|cx| {
+            self.tab
+                .read(cx)
+                .rows_for_test(cx)
+                .into_iter()
+                .map(|(l, v)| (l.to_string(), v.to_string()))
+                .collect()
+        })
+    }
+
+    fn value(&self, cx: &mut TestAppContext, label: &str) -> String {
+        self.rows(cx)
+            .into_iter()
+            .find(|(l, _)| l.trim_end_matches(':') == label)
+            .unwrap_or_else(|| panic!("no {label} row"))
+            .1
+    }
+
+    fn publish(&self, cx: &mut TestAppContext, d: Arc<UnitDetails>) {
+        publish(
+            cx,
+            &self.engine,
+            &["sshd.service"],
+            &HashMap::from([(unit("sshd.service"), d)]),
+            ServiceBackend::Systemd,
+        );
+    }
+
+    fn click(&self, cx: &mut TestAppContext, selector: &'static str) {
+        let mut vcx = VisualTestContext::from_window(self.handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        let bounds = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"));
+        vcx.simulate_click(bounds.center(), Modifiers::none());
+        vcx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn recovery_view_formats(cx: &mut TestAppContext) {
+    let set = |steps: u32| {
+        details_with("sshd.service", move |d| {
+            d.recovery.restart = Some(a("on-failure"));
+            d.recovery.restart_usec = Some(100_000);
+            d.recovery.restart_steps = Some(steps);
+            d.recovery.restart_max_delay_usec = Some(5_000_000);
+            d.recovery.start_limit_burst = Some(5);
+            d.recovery.start_limit_interval_usec = Some(10_000_000);
+            d.recovery.start_limit_action = Some(a("none"));
+            d.recovery.failure_action = Some(a("none"));
+            d.recovery.n_restarts = Some(12345);
+        })
+    };
+    let t = open_recovery(cx, Some(set(5)));
+    assert_eq!(t.value(cx, "On failure"), "on-failure");
+    assert_eq!(
+        t.value(cx, "Restart service after"),
+        "100 ms, rising to 5000 ms in 5 steps"
+    );
+    assert_eq!(t.value(cx, "Give up after"), "5 starts within 10 s");
+    assert_eq!(t.value(cx, "When giving up"), "none");
+    assert_eq!(t.value(cx, "Failure action"), "none");
+    assert_eq!(t.value(cx, "Restarts so far"), "12\u{2009}345");
+    assert_eq!(
+        cx.read(|cx| t.tab.read(cx).note_for_test().to_string()),
+        "Editing recovery settings comes in a later version."
+    );
+    t.publish(cx, set(0));
+    assert_eq!(t.value(cx, "Restart service after"), "100 ms");
+}
+
+#[gpui_kit::test]
+fn recovery_view_run_on_failure_link(cx: &mut TestAppContext) {
+    let t = open_recovery(
+        cx,
+        Some(details_with("sshd.service", |d| {
+            d.recovery.on_failure = Arc::from([a("failure-notify@sshd.service")]);
+        })),
+    );
+    assert_eq!(count(cx), 1);
+    t.click(cx, "ServiceRecovery-link-0");
+    let opened = cx.update(|cx| {
+        let registry = cx.global::<GlobalRegistry>().0.clone();
+        registry
+            .read(cx)
+            .get(&WindowKey::Service(unit("failure-notify@sshd.service")))
+            .is_some()
+    });
+    assert!(opened, "the OnFailure unit's window is open");
+    assert_eq!(count(cx), 2);
+    t.click(cx, "ServiceRecovery-link-0");
+    assert_eq!(count(cx), 2, "a second click focuses the same window");
+}
+
+#[gpui_kit::test]
+fn recovery_view_missing_not_reported(cx: &mut TestAppContext) {
+    let t = open_recovery(cx, None);
+    for (label, value) in t.rows(cx) {
+        assert_eq!(value, "Collecting\u{2026}", "{label}");
+    }
+    t.publish(cx, details("sshd.service"));
+    assert_eq!(t.value(cx, "Run on failure"), "None");
+    for label in [
+        "On failure",
+        "Restart service after",
+        "Give up after",
+        "When giving up",
+        "Failure action",
+        "Restarts so far",
+    ] {
+        assert_eq!(t.value(cx, label), "Not reported", "{label}");
+    }
 }

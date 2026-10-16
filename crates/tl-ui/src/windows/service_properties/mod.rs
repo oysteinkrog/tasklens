@@ -7,9 +7,11 @@
 
 mod general;
 mod logon;
+mod recovery;
 
 pub use general::GeneralTab;
 pub use logon::LogOnTab;
+pub use recovery::RecoveryTab;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -196,7 +198,11 @@ fn create_tab(
             let view = cx.new(LogOnTab::new);
             Some(TabSlot::new(view))
         }
-        ServicePropsTab::Recovery | ServicePropsTab::Dependencies | ServicePropsTab::Logs => None,
+        ServicePropsTab::Recovery => {
+            let view = cx.new(RecoveryTab::new);
+            Some(TabSlot::new(view))
+        }
+        ServicePropsTab::Dependencies | ServicePropsTab::Logs => None,
     }
 }
 
@@ -631,6 +637,13 @@ impl ServicePropertiesWindow {
     pub fn logon_tab(&self) -> Option<Entity<LogOnTab>> {
         let slot = self.tabs[ServicePropsTab::LogOn.index()].as_ref()?;
         slot.view.clone().downcast::<LogOnTab>().ok()
+    }
+
+    /// The Recovery tab view, once built.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn recovery_tab(&self) -> Option<Entity<RecoveryTab>> {
+        let slot = self.tabs[ServicePropsTab::Recovery.index()].as_ref()?;
+        slot.view.clone().downcast::<RecoveryTab>().ok()
     }
 
     /// Puts `view` in the slot of `tab`, in place of a tab bead's view.

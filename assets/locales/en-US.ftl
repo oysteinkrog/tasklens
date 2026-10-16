@@ -2719,6 +2719,20 @@ services-sys032-manager-user = User manager ({ $user })
 services-sys032-session-graphical = graphical session
 services-sys032-session-none = none
 services-sys032-copy-value = Copy value
+# Service Properties, Recovery tab (tasklens-hk6.26, UI-SYS-033).
+services-sys033-label-on-failure = On failure:
+services-sys033-label-restart-after = Restart service after:
+services-sys033-label-give-up-after = Give up after:
+services-sys033-label-when-giving-up = When giving up:
+services-sys033-label-failure-action = Failure action:
+services-sys033-label-run-on-failure = Run on failure:
+services-sys033-label-restarts = Restarts so far:
+services-sys033-restart-ms = { $ms } ms
+services-sys033-restart-steps = { $ms } ms, rising to { $max } ms in { $steps } steps
+services-sys033-give-up = { $burst } starts within { $secs } s
+services-sys033-none = None
+services-sys033-note = Editing recovery settings comes in a later version.
+services-sys033-copy-value = Copy value
 shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar
