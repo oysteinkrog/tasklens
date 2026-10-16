@@ -1829,6 +1829,62 @@ fn logs_open_terminal_quoting_user_unit(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn logs_selected_line_keeps_secondary_time(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, vec![entry(0, 6, "a\nb\nc"), entry(1, 3, "bad")]);
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "ServiceLogs-row-0", Modifiers::none());
+    t.click(&mut vcx, "ServiceLogs-row-1", Modifiers::control());
+    drop(vcx);
+    let theme = cx.read(|cx| tl_ui::theme::current(cx).clone());
+    let rows = t.rows(cx);
+    assert_eq!(rows[0].time_color, theme.text_secondary);
+    assert_eq!(rows[0].text_color, theme.text_selected_primary);
+    assert_eq!(rows[1].time_color, theme.text_secondary);
+    assert_eq!(rows[1].text_color, theme.status.danger);
+}
+
+#[gpui_kit::test]
+fn logs_open_terminal_two_clicks_each_fall_back(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "TlButton-ServiceLogsTerminal", Modifiers::none());
+    t.click(&mut vcx, "TlButton-ServiceLogsTerminal", Modifiers::none());
+    drop(vcx);
+    let first = launches(&t.engine);
+    assert_eq!(first.len(), 2);
+    assert_ne!(first[0].id, first[1].id);
+    for req in &first {
+        t.engine.emit(ActionEvent {
+            id: req.id,
+            target: None,
+            state: ActionState::Failed(ActionError::Os(2)),
+        });
+    }
+    cx.run_until_parked();
+    let sent = launches(&t.engine);
+    assert_eq!(sent.len(), 4, "each failed click falls back to konsole");
+    for req in &sent[2..] {
+        assert_eq!(
+            launch_command(req),
+            "konsole -e journalctl -u \"sshd.service\" -b"
+        );
+    }
+    for req in &sent[2..] {
+        t.engine.emit(ActionEvent {
+            id: req.id,
+            target: None,
+            state: ActionState::Failed(ActionError::Os(2)),
+        });
+    }
+    cx.run_until_parked();
+    assert_eq!(launches(&t.engine).len(), 4);
+    let toasts = t.toasts(cx);
+    assert!(!toasts.is_empty());
+    assert!(toasts.iter().all(|t| t == "Could not open a terminal"));
+}
+
+#[gpui_kit::test]
 fn logs_open_terminal_fallback_to_konsole(cx: &mut TestAppContext) {
     let t = open_logs(cx);
     let mut vcx = t.vcx(cx);

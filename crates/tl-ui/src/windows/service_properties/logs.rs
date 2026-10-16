@@ -214,11 +214,11 @@ fn local_time(unix_s: u64, out: &mut String) {
     );
 }
 
-/// The time colour and the priority and message colour of a line. Danger and warning stay on a
-/// selected line.
+/// The time colour and the priority and message colour of a line. The time is always
+/// `text_secondary`. Danger and warning stay on a selected line.
 fn line_colors(priority: u8, selected: bool, theme: &TlTheme) -> (Hsla, Hsla) {
     (
-        tone_color(LabelTone::Secondary, theme, selected),
+        theme.text_secondary,
         tone_color(priority_tone(priority), theme, selected),
     )
 }
@@ -285,7 +285,8 @@ pub struct LogsView {
     debounce: Option<Task<()>>,
     /// Reads `handle.events()`.
     _reader: Option<Task<()>>,
-    launch: Option<PendingLaunch>,
+    /// Terminal launches in flight. Each click adds one, so each keeps its own fallback.
+    launches: SmallVec<[PendingLaunch; 2]>,
     _subs: SmallVec<[Subscription; 2]>,
 }
 
@@ -343,7 +344,7 @@ impl LogsView {
             filter_input,
             debounce: None,
             _reader: reader,
-            launch: None,
+            launches: SmallVec::new(),
             _subs: subs,
         }
     }
@@ -512,7 +513,9 @@ impl LogsView {
         let sent = tracker.update(cx, |t, cx| {
             t.track_or_toast(request, queue.downgrade(), texts, cx)
         });
-        self.launch = sent.map(|id| PendingLaunch { id, attempt });
+        if let Some(id) = sent {
+            self.launches.push(PendingLaunch { id, attempt });
+        }
     }
 
     fn on_launch_finished(
@@ -522,10 +525,10 @@ impl LogsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pending) = self.launch.filter(|p| p.id == id) else {
+        let Some(at) = self.launches.iter().position(|p| p.id == id) else {
             return;
         };
-        self.launch = None;
+        let pending = self.launches.swap_remove(at);
         if ok {
             return;
         }
@@ -628,7 +631,7 @@ impl LogsView {
             div()
                 .flex_none()
                 .whitespace_nowrap()
-                .text_color(tone_color(LabelTone::Secondary, &theme, selected))
+                .text_color(theme.text_secondary)
                 .child(text)
         });
         let full = line.full.clone();
