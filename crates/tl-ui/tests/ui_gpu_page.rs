@@ -484,11 +484,11 @@ fn gpu_details_order(cx: &mut TestAppContext) {
 }
 
 /// Publishes `t` as the GPU's record and draws.
-fn publish_totals(r: &mut Rig, t: GpuTotals) {
+fn publish_totals(r: &mut Rig, t: &GpuTotals) {
     r.engine.publish_with(|s| {
         let sys = Arc::make_mut(&mut s.system);
         sys.header.version += 1;
-        sys.gpus = Arc::from([(GPU, t)].as_slice());
+        sys.gpus = Arc::from([(GPU, t.clone())].as_slice());
     });
     draw(r.vcx);
 }
@@ -507,7 +507,7 @@ fn gpu_shared_encode_decode_row(cx: &mut TestAppContext) {
     t.enc_dec_shared = true;
     t.enc_pct = Metric::valid(12.5);
     t.dec_pct = Metric::valid(12.5);
-    publish_totals(&mut r, t);
+    publish_totals(&mut r, &t);
     let rows = detail_rows(&mut r);
     let labels: Vec<&str> = rows.iter().map(|(l, _, _)| l.as_str()).collect();
     assert_eq!(
@@ -524,7 +524,7 @@ fn gpu_shared_encode_decode_row(cx: &mut TestAppContext) {
     );
 
     // Separate engines again: two rows.
-    publish_totals(&mut r, totals(false));
+    publish_totals(&mut r, &totals(false));
     let rows = detail_rows(&mut r);
     assert!(find(&rows, "Video encode/decode").is_none());
     assert!(find(&rows, "Video encode").is_some());
@@ -536,21 +536,21 @@ fn gpu_encode_sessions_tooltip(cx: &mut TestAppContext) {
     let mut r = nvidia(cx);
     let mut t = totals(false);
     t.enc_sessions = Metric::valid(2);
-    publish_totals(&mut r, t);
+    publish_totals(&mut r, &t);
     let rows = detail_rows(&mut r);
     let encode = find(&rows, "Video encode").expect("encode row");
     assert_eq!(encode.2.as_deref(), Some("2 active sessions"));
 
     // One session: the singular form (o55.37).
     t.enc_sessions = Metric::valid(1);
-    publish_totals(&mut r, t);
+    publish_totals(&mut r, &t);
     let rows = detail_rows(&mut r);
     let encode = find(&rows, "Video encode").expect("encode row");
     assert_eq!(encode.2.as_deref(), Some("1 active session"));
 
     // No session count: no tooltip.
     t.enc_sessions = Metric::with(Validity::Unsupported);
-    publish_totals(&mut r, t);
+    publish_totals(&mut r, &t);
     let rows = detail_rows(&mut r);
     assert_eq!(find(&rows, "Video encode").and_then(|r| r.2.clone()), None);
 }
@@ -564,7 +564,7 @@ fn gpu_amd_temperature_sensors(cx: &mut TestAppContext) {
     t.temp_edge_c = Metric::valid(48.0);
     t.temp_junction_c = Metric::valid(52.0);
     t.temp_mem_c = Metric::valid(60.0);
-    publish_totals(&mut r, t);
+    publish_totals(&mut r, &t);
     let rows = detail_rows(&mut r);
     let temp = find(&rows, "Temperature").expect("temperature row");
     assert_eq!(temp.1, "52 °C");
@@ -583,7 +583,7 @@ fn gpu_amd_temperature_sensors(cx: &mut TestAppContext) {
 
     // No mem sensor: two in the tooltip.
     t.temp_mem_c = Metric::with(Validity::Unsupported);
-    publish_totals(&mut r, t);
+    publish_totals(&mut r, &t);
     let rows = detail_rows(&mut r);
     assert_eq!(
         find(&rows, "Temperature")
