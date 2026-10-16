@@ -903,3 +903,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: bj6.45 TaskSlinger themes.json read through a new AppEnv.read_ts_themes hook in tl-app (keeps ADR-011); import callbacks stay on the main thread.
 - 2026-10-16 leader decision: bj6.50 adds wgpu =29.0.4 (same as GPUI's, already in the lock) to tl-app for the adapter probe; ADR-001 row and R-142 amended.
 - 2026-10-16 leader decision: crw.26 no aggregate:net card (earlier comment withdrawn); adds the 2-device rule, aggregate card series and tests.
+- 2026-10-16 leader decision: bj6.47 adds a Settings row 'Show top processes box' (Performance, Overview group) for performance.overview_top_processes, so every settings key has a row.
