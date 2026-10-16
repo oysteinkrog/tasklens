@@ -911,3 +911,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: dwy.7 review fixes; reducer sends a refresh on newly added detail demand; period = interval / ceil(interval / 1 s) when PSS and details both apply.
 - 2026-10-16 leader decision: dwy.7 smaps and PSS 1 s minimum by elapsed time on the injected clock; open refresh republishes from cache when the worker already saw the open.
 - 2026-10-16 leader decision: dwy.7 open notice is its own command; a user DetailRefresh always rereads.
+- 2026-10-16 leader decision: dwy.7 closed. Known limit: after a worker restart, a close and reopen between polls resends the cached Environment (environ does not change in a running process).
