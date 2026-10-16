@@ -20,19 +20,21 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{
-    PidIds, RecoverySettings, ServiceBackend, ServiceStatus, StartupType, UnitDetails, UnitRecord,
+    DepEntry, PidIds, RecoverySettings, Relation, ServiceBackend, ServiceStatus, StartupType,
+    UnitDetails, UnitRecord,
 };
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::GlobalDemand;
+use tl_ui::pages::sys_status::{DotStyle, LabelTone};
 use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::windows::service_properties::{
-    GeneralTab, LogOnTab, RecoveryTab, ServicePropertiesWindow, ServicePropsTab,
+    DependenciesTab, GeneralTab, LogOnTab, RecoveryTab, ServicePropertiesWindow, ServicePropsTab,
     ServicePropsTabView,
 };
 
@@ -1342,4 +1344,194 @@ fn recovery_view_missing_not_reported(cx: &mut TestAppContext) {
     ] {
         assert_eq!(t.value(cx, label), "Not reported", "{label}");
     }
+}
+
+// Dependencies tab (UI-SYS-035).
+
+struct Deps {
+    engine: Arc<FakeEngine>,
+    _main: VisualTestContext,
+    handle: WindowHandle<Root>,
+    tab: Entity<DependenciesTab>,
+}
+
+fn dep(name: &str, relation: Relation) -> DepEntry {
+    DepEntry {
+        unit: unit(name),
+        relation,
+    }
+}
+
+fn deps_details(deps: Vec<DepEntry>) -> Arc<UnitDetails> {
+    details_with("sshd.service", move |d| d.deps = deps.into())
+}
+
+/// Opens sshd.service on Dependencies with `d` published, or with no details. The services
+/// list holds sshd.service and system.slice.
+fn open_deps(cx: &mut TestAppContext, d: Option<Arc<UnitDetails>>) -> Deps {
+    let (engine, main) = setup(cx);
+    let mut map = HashMap::new();
+    if let Some(d) = d {
+        map.insert(unit("sshd.service"), d);
+    }
+    publish(
+        cx,
+        &engine,
+        &["sshd.service", "system.slice"],
+        &map,
+        ServiceBackend::Systemd,
+    );
+    let handle = open(cx, "sshd.service", ServicePropsTab::Dependencies).expect("opened");
+    let win = view(cx, handle);
+    let tab = cx
+        .read(|cx| win.read(cx).dependencies_tab())
+        .expect("the Dependencies tab is built");
+    Deps {
+        engine,
+        _main: main,
+        handle,
+        tab,
+    }
+}
+
+impl Deps {
+    fn lines(&self, cx: &mut TestAppContext) -> Vec<String> {
+        cx.read(|cx| self.tab.read(cx).lines_for_test())
+    }
+
+    fn keys(&self, cx: &mut TestAppContext, keys: &str) {
+        let mut vcx = VisualTestContext::from_window(self.handle.into(), cx);
+        vcx.update(|window, cx| {
+            window.activate_window();
+            window.focus(&self.tab.read(cx).focus_handle_for_test(), cx);
+        });
+        draw(&mut vcx);
+        vcx.simulate_keystrokes(keys);
+        vcx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn deps_empty_shows_none(cx: &mut TestAppContext) {
+    let t = open_deps(cx, None);
+    assert_eq!(t.lines(cx), ["Collecting\u{2026}"]);
+    let _ = &t.engine;
+    publish(
+        cx,
+        &t.engine,
+        &["sshd.service", "system.slice"],
+        &HashMap::from([(unit("sshd.service"), details("sshd.service"))]),
+        ServiceBackend::Systemd,
+    );
+    assert_eq!(
+        t.lines(cx),
+        [
+            "Depends on:",
+            "(None)",
+            "Dependents:",
+            "(None)",
+            "Ordering (0)"
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn deps_one_row_per_relation_sorted(cx: &mut TestAppContext) {
+    let t = open_deps(
+        cx,
+        Some(deps_details(vec![
+            dep("system.slice", Relation::Requires),
+            dep("network-online.target", Relation::Wants),
+            dep("network-online.target", Relation::After),
+        ])),
+    );
+    assert_eq!(
+        t.lines(cx),
+        [
+            "Depends on:",
+            "network-online.target Wants",
+            "system.slice Requires",
+            "Dependents:",
+            "(None)",
+            "Ordering (1)",
+        ]
+    );
+    let rows = cx.read(|cx| t.tab.read(cx).rows_for_test());
+    assert_eq!(rows[0].0, "network-online.target, Wants, Not loaded");
+    assert_eq!(rows[0].1.dot, DotStyle::Ring(LabelTone::Secondary));
+    assert_eq!(rows[1].0, "system.slice, Requires, Running");
+    assert_eq!(rows[1].1.dot, DotStyle::Filled(LabelTone::Success));
+}
+
+#[gpui_kit::test]
+fn deps_ordering_collapsed_by_default(cx: &mut TestAppContext) {
+    let entries: Vec<DepEntry> = (0..12)
+        .map(|i| {
+            dep(
+                &format!("o{:02}.service", 11 - i),
+                if i % 2 == 0 {
+                    Relation::After
+                } else {
+                    Relation::Before
+                },
+            )
+        })
+        .collect();
+    let t = open_deps(cx, Some(deps_details(entries)));
+    let tail = |lines: Vec<String>| lines[4..].to_vec();
+    assert_eq!(tail(t.lines(cx)), ["Ordering (12)"]);
+    t.keys(cx, "down enter");
+    let lines = t.lines(cx);
+    assert_eq!(lines.len(), 5 + 12);
+    assert_eq!(lines[5], "o00.service Before");
+    assert_eq!(lines[16], "o11.service After");
+    let mut sorted = lines[5..].to_vec();
+    sorted.sort();
+    assert_eq!(&lines[5..], &sorted[..]);
+    t.keys(cx, "space");
+    assert_eq!(tail(t.lines(cx)), ["Ordering (12)"]);
+}
+
+#[gpui_kit::test]
+fn deps_double_click_opens_props(cx: &mut TestAppContext) {
+    let t = open_deps(
+        cx,
+        Some(deps_details(vec![dep(
+            "multi-user.target",
+            Relation::WantedBy,
+        )])),
+    );
+    assert_eq!(count(cx), 1);
+    let mut vcx = VisualTestContext::from_window(t.handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    draw(&mut vcx);
+    let at = vcx
+        .debug_bounds("ServiceDeps-row-3")
+        .expect("the row is drawn")
+        .center();
+    vcx.simulate_click(at, Modifiers::none());
+    vcx.simulate_event(gpui_kit::MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: gpui_kit::MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui_kit::MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: gpui_kit::MouseButton::Left,
+        click_count: 2,
+    });
+    vcx.run_until_parked();
+    drop(vcx);
+    let opened = cx.update(|cx| {
+        let registry = cx.global::<GlobalRegistry>().0.clone();
+        registry
+            .read(cx)
+            .get(&WindowKey::Service(unit("multi-user.target")))
+            .is_some()
+    });
+    assert!(opened, "the unit's window is open");
+    assert_eq!(count(cx), 2);
 }

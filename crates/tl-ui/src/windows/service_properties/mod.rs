@@ -5,10 +5,12 @@
 //! a tab that has no view yet shows an empty area. The window pushes each new details Arc into
 //! every built tab view with `set_details`.
 
+mod dependencies;
 mod general;
 mod logon;
 mod recovery;
 
+pub use dependencies::DependenciesTab;
 pub use general::GeneralTab;
 pub use logon::LogOnTab;
 pub use recovery::RecoveryTab;
@@ -202,7 +204,11 @@ fn create_tab(
             let view = cx.new(RecoveryTab::new);
             Some(TabSlot::new(view))
         }
-        ServicePropsTab::Dependencies | ServicePropsTab::Logs => None,
+        ServicePropsTab::Dependencies => {
+            let view = cx.new(DependenciesTab::new);
+            Some(TabSlot::new(view))
+        }
+        ServicePropsTab::Logs => None,
     }
 }
 
@@ -644,6 +650,13 @@ impl ServicePropertiesWindow {
     pub fn recovery_tab(&self) -> Option<Entity<RecoveryTab>> {
         let slot = self.tabs[ServicePropsTab::Recovery.index()].as_ref()?;
         slot.view.clone().downcast::<RecoveryTab>().ok()
+    }
+
+    /// The Dependencies tab view, once built.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn dependencies_tab(&self) -> Option<Entity<DependenciesTab>> {
+        let slot = self.tabs[ServicePropsTab::Dependencies.index()].as_ref()?;
+        slot.view.clone().downcast::<DependenciesTab>().ok()
     }
 
     /// Puts `view` in the slot of `tab`, in place of a tab bead's view.

@@ -31,8 +31,9 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::hub::{GlobalHub, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::ServicePropsOk;
+use crate::pages::services::delegate::service_sys_status;
 use crate::pages::sys_status::{
-    DotStyle, LabelTone, StatusLook, cell_colors, service_sys_status, status_label, status_look,
+    DotStyle, LabelTone, StatusLook, cell_colors, status_label, status_look,
 };
 use crate::text::style::{label_style, t_base, t_xs};
 use crate::theme::{current, metrics};
@@ -392,7 +393,7 @@ impl DependenciesTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.select_item(ix, cx);
         let item = self.items[ix];
         match item {
@@ -422,11 +423,9 @@ impl DependenciesTab {
                     cx.stop_propagation();
                 }
             }
-            "space" => {
-                if self.selected == Some(Sel::Header) {
-                    self.toggle_ordering(cx);
-                    cx.stop_propagation();
-                }
+            "space" if self.selected == Some(Sel::Header) => {
+                self.toggle_ordering(cx);
+                cx.stop_propagation();
             }
             _ => {}
         }
@@ -449,7 +448,7 @@ impl DependenciesTab {
         let Item::Row(i) = self.items[ix] else {
             return;
         };
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.select_item(ix, cx);
         self.menu_value = Some(self.rows[i].id.clone());
         let label = tr(cx, "services-sys035-copy-value");
@@ -619,8 +618,8 @@ impl DependenciesTab {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        range
-            .filter(|&ix| ix < self.items.len())
+        let end = range.end.min(self.items.len());
+        (range.start..end)
             .map(|ix| self.item_element(ix, false, cx))
             .collect()
     }

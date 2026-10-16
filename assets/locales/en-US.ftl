@@ -2756,6 +2756,12 @@ services-sys033-give-up = { $burst } starts within { $secs } s
 services-sys033-none = None
 services-sys033-note = Editing recovery settings comes in a later version.
 services-sys033-copy-value = Copy value
+services-sys035-depends-on = Depends on:
+services-sys035-dependents = Dependents:
+services-sys035-ordering = Ordering ({ $n })
+services-sys035-none = (None)
+services-sys035-not-loaded = Not loaded
+services-sys035-copy-value = Copy value
 shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar
