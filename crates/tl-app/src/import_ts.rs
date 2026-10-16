@@ -13,6 +13,7 @@ use std::path::Path;
 
 use tl_model::settings::{Settings, UiState};
 use tl_ui::app::{ImportSummary, ImportedSettings};
+use tl_ui::theme::share_code::MAX_IMPORT_BYTES;
 use tracing::{debug, info};
 
 /// The largest `UserSettings.ini` accepted, 1 MiB.
@@ -413,6 +414,20 @@ pub fn import(text: &str, base: (&Settings, &UiState)) -> ImportResult {
         imported: applied.len(),
         skipped,
     }
+}
+
+/// The `AppEnv.read_ts_themes` callback: reads a picked `themes.json` as text, capped at
+/// `MAX_IMPORT_BYTES`. tl-ui parses it. The error text is shown to the user and holds no path.
+pub fn read_themes_file(path: &Path) -> Result<String, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_IMPORT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_IMPORT_BYTES {
+        return Err("The file is too large".to_owned());
+    }
+    String::from_utf8(bytes).map_err(|_| "The file is not valid UTF-8".to_owned())
 }
 
 /// The `AppEnv.import_taskslinger` callback: reads `path` and imports it onto copies of the

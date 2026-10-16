@@ -250,6 +250,7 @@ type PickValue = Rc<dyn Fn(&SettingValue, &mut App)>;
 /// A dropdown setter taking the index of the picked option.
 type PickSetter = Rc<dyn Fn(usize, &mut App)>;
 /// A checklist section as rendered: its heading and `(label, value, setter)` per checkbox.
+type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 type CheckRow = (SharedString, Vec<(SharedString, SharedString, BoolSetter)>);
 
 /// Builds one page: groups of items, each control bound to one setting. `keys` records every
@@ -299,6 +300,12 @@ pub struct PageBuilder {
     /// The button labels and actions.
     #[cfg(any(test, feature = "test-hooks"))]
     buttons: Vec<(SharedString, Rc<dyn Action>)>,
+    /// The keyless switches by label.
+    #[cfg(any(test, feature = "test-hooks"))]
+    locals: Vec<(SharedString, LocalSwitch)>,
+    /// The click handlers of the callback buttons by label.
+    #[cfg(any(test, feature = "test-hooks"))]
+    button_fns: Vec<(SharedString, ClickHandler)>,
     /// The custom item labels and their render closures.
     #[cfg(any(test, feature = "test-hooks"))]
     customs: Vec<(SharedString, CustomRender)>,
@@ -308,6 +315,17 @@ pub struct PageBuilder {
     /// The tooltip of each switch that has one.
     #[cfg(any(test, feature = "test-hooks"))]
     tooltips: Vec<(SettingKey, SharedString)>,
+}
+
+/// A switch bound to no setting (Open with Ctrl+Esc). The owner keeps its value; `set` does not
+/// write settings. The page redraws after `set` runs, so `get` and `description` show the
+/// new state.
+#[derive(Clone)]
+pub struct LocalSwitch {
+    pub get: Rc<dyn Fn() -> bool>,
+    pub description: Rc<dyn Fn() -> Option<SharedString>>,
+    pub set: BoolSetter,
+    pub disabled: bool,
 }
 
 /// One checklist section: a sub-heading (none when empty) and its `(label, value)` checkboxes.
@@ -348,6 +366,10 @@ impl PageBuilder {
             empty_texts: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             buttons: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            locals: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            button_fns: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             customs: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -875,6 +897,77 @@ impl PageBuilder {
         self
     }
 
+    /// A button that runs `on_click`. Binds no key.
+    pub fn button_fn(
+        &mut self,
+        group: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        style: TlButtonKind,
+        on_click: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> &mut Self {
+        let label: SharedString = label.into();
+        let text = label.clone();
+        let on_click: ClickHandler = Rc::new(on_click);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.button_fns.push((label.clone(), on_click.clone()));
+        let item = SettingItem::new(
+            label,
+            SettingField::render(move |_, _, _| {
+                let on_click = on_click.clone();
+                TlButton::new(SharedString::from(format!("SettingsButton-{text}")), style)
+                    .label(text.clone())
+                    .on_click(move |_, window, cx| on_click(window, cx))
+            }),
+        );
+        self.push_item(group, item);
+        self
+    }
+
+    /// A switch bound to no setting. Drawn as the kit row draws a switch, with the description
+    /// under the title when `local.description` returns one.
+    pub fn local_switch(
+        &mut self,
+        group: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        local: LocalSwitch,
+    ) -> &mut Self {
+        let label: SharedString = label.into();
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.locals.push((label.clone(), local.clone()));
+        let title = label.clone();
+        let disabled = local.disabled;
+        let item = SettingItem::render(move |options, _, cx| {
+            let muted = current(cx).text_secondary;
+            let set = local.set.clone();
+            let mut text = v_flex()
+                .flex_1()
+                .max_w_3_5()
+                .child(Label::new(title.clone()).text_sm());
+            if let Some(description) = (local.description)() {
+                text = text.child(div().text_sm().text_color(muted).child(description));
+            }
+            let switch = Switch::new("check")
+                .checked((local.get)())
+                .disabled(options.is_disabled())
+                .with_size(options.size())
+                .on_click(move |on: &bool, _, cx: &mut App| {
+                    set(*on, cx);
+                    cx.refresh_windows();
+                });
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .gap_3()
+                .child(text)
+                .child(div().id("field").child(switch))
+        })
+        .keywords([label])
+        .disabled(disabled);
+        self.push_item(group, item);
+        self
+    }
+
     /// The kit page with the page's groups, titled and with its icon.
     pub fn into_page(self, cx: &App) -> SettingPage {
         let groups = self.groups.into_iter().map(|(title, items)| {
@@ -956,9 +1049,46 @@ impl PageBuilder {
     /// Dispatches the action of the button labelled `label`, as a click on it would.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn press(&self, label: &str, window: &mut Window, cx: &mut App) {
-        if let Some((_, action)) = self.buttons.iter().find(|(l, _)| l.as_ref() == label) {
+        if let Some((_, on_click)) = self.button_fns.iter().find(|(l, _)| l.as_ref() == label) {
+            on_click(window, cx);
+        } else if let Some((_, action)) = self.buttons.iter().find(|(l, _)| l.as_ref() == label) {
             window.dispatch_action(action.boxed_clone(), cx);
         }
+    }
+
+    /// Whether the keyless switch labelled `label` is on. `false` when there is none.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn local_on(&self, label: &str) -> bool {
+        self.local(label).is_some_and(|l| (l.get)())
+    }
+
+    /// The description the keyless switch labelled `label` shows now, if any.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn local_description(&self, label: &str) -> Option<SharedString> {
+        self.local(label).and_then(|l| (l.description)())
+    }
+
+    /// True when the keyless switch labelled `label` is disabled.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn local_disabled(&self, label: &str) -> bool {
+        self.local(label).is_some_and(|l| l.disabled)
+    }
+
+    /// Runs the setter of the keyless switch labelled `label`, as a click on it would.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_local(&self, label: &str, on: bool, cx: &mut App) {
+        if let Some(local) = self.local(label) {
+            (local.set)(on, cx);
+            cx.refresh_windows();
+        }
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn local(&self, label: &str) -> Option<&LocalSwitch> {
+        self.locals
+            .iter()
+            .find(|(l, _)| l.as_ref() == label)
+            .map(|(_, local)| local)
     }
 
     /// The element of the custom item labelled `label`, as the page renders it.
@@ -1283,13 +1413,18 @@ fn dispatch_deferred(action: Box<dyn Action>, cx: &mut App) {
 /// Pushes `text` (such as "Takes effect after restart") as an Info toast in the active window.
 /// Deferred: a setter runs while the window handles the click, so the window is busy.
 fn info_toast(text: SharedString, cx: &mut App) {
+    kind_toast(ToastKind::Info, text, cx);
+}
+
+/// Pushes `text` as a toast of `kind` in the active window, deferred like [`info_toast`].
+fn kind_toast(kind: ToastKind, text: SharedString, cx: &mut App) {
     let Some(window) = cx.active_window() else {
         return;
     };
     cx.defer(move |cx| {
         let pushed = window.update(cx, |_, window, cx| {
             if let Some(queue) = ToastQueue::of_window(window, cx) {
-                queue.update(cx, |q, cx| q.push(ToastKind::Info, text, None, None, cx));
+                queue.update(cx, |q, cx| q.push(kind, text, None, None, cx));
             }
         });
         if pushed.is_err() {

@@ -1,6 +1,8 @@
 //! Settings window, Processes page, P2 rows (E21-022, UI-SHL-065, R-010, R-075, R-099,
 //! PROC-099): refresh, view, table display and Properties window options.
 //!
+//! P4 row (E21-041): "Show column separators" follows Resize Behavior in the Tables group.
+//!
 //! Group order when every phase is built: Refresh, View, Tables (every table), Properties
 //! windows, Dumps (E21-036), History (E30-027).
 
@@ -81,6 +83,12 @@ pub fn page(cx: &mut App) -> PageBuilder {
         SettingKey::TablesColumnResize,
         tr(cx, "shell-menu-columns-resize-behavior"),
         &resize,
+    )
+    .switch(
+        tables.clone(),
+        SettingKey::TablesColumnSeparators,
+        tr(cx, "shell-settings-column-separators"),
+        None,
     )
     .switch(
         tables,

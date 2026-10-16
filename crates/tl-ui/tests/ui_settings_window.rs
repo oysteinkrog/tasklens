@@ -628,6 +628,7 @@ fn processes_page_keys(cx: &mut TestAppContext) {
             SettingKey::ProcessesHideSystem,
             SettingKey::ProcessesSubtreeTotals,
             SettingKey::TablesColumnResize,
+            SettingKey::TablesColumnSeparators,
             SettingKey::TablesDimZeroValues,
             SettingKey::PropertiesHideUnnamedHandles,
             SettingKey::PropertiesSharedObjectsOnly,
@@ -2196,4 +2197,206 @@ fn fans_remove_entry(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("ctrl-a backspace enter");
     draw_probe(&mut vcx);
     assert!(fans(cx).is_empty());
+}
+
+// Settings window P4 rows: column separators, Ctrl+Esc, TaskSlinger import (E21-041).
+
+const CTRL_ESC_LABEL: &str = "Open with Ctrl+Esc";
+const IMPORT_LABEL: &str = "Import from TaskSlinger…";
+
+#[gpui_kit::test]
+fn column_separators_switch(cx: &mut TestAppContext) {
+    setup(cx);
+    let processes = page(cx, PageId::Processes);
+    assert!(!cx.update(|cx| TlSettings::settings(cx).tables.column_separators));
+    cx.update(|cx| processes.set_bool(SettingKey::TablesColumnSeparators, true, cx));
+    assert!(cx.update(|cx| TlSettings::settings(cx).tables.column_separators));
+}
+
+/// A fake KDE shortcut: `get` returns what `stored` holds, `set` returns `result` and stores
+/// the value only when `apply` is set. Returns the `set` calls too.
+fn fake_shortcut(
+    cx: &mut TestAppContext,
+    initial: Option<&str>,
+    result: Result<(), String>,
+    apply: bool,
+) -> Arc<std::sync::Mutex<Vec<Option<String>>>> {
+    let stored = Arc::new(std::sync::Mutex::new(initial.map(str::to_owned)));
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (read, write, log) = (stored.clone(), stored, calls.clone());
+    cx.update(|cx| {
+        cx.global_mut::<AppEnv>().global_shortcut = Some(tl_ui::app::GlobalShortcutApi {
+            get: Arc::new(move || read.lock().expect("lock").clone()),
+            set: Arc::new(move |value| {
+                log.lock().expect("lock").push(value.map(str::to_owned));
+                if result.is_ok() && apply {
+                    *write.lock().expect("lock") = value.map(str::to_owned);
+                }
+                result.clone()
+            }),
+        });
+    });
+    calls
+}
+
+#[gpui_kit::test]
+fn ctrl_esc_row_reads_shortcut(cx: &mut TestAppContext) {
+    setup(cx);
+    let calls = fake_shortcut(cx, Some("Ctrl+Esc"), Ok(()), true);
+    let startup = page(cx, PageId::StartupWindow);
+    assert!(startup.local_on(CTRL_ESC_LABEL));
+    assert!(!startup.local_disabled(CTRL_ESC_LABEL));
+    assert_eq!(startup.local_description(CTRL_ESC_LABEL), None);
+    cx.update(|cx| startup.set_local(CTRL_ESC_LABEL, false, cx));
+    assert!(!startup.local_on(CTRL_ESC_LABEL));
+    cx.update(|cx| startup.set_local(CTRL_ESC_LABEL, true, cx));
+    assert!(startup.local_on(CTRL_ESC_LABEL));
+    assert_eq!(
+        *calls.lock().expect("lock"),
+        [None, Some("Ctrl+Esc".to_owned())],
+        "off clears the shortcut, on sets Ctrl+Esc"
+    );
+    assert_eq!(startup.local_description(CTRL_ESC_LABEL), None);
+}
+
+#[gpui_kit::test]
+fn ctrl_esc_not_available_without_api(cx: &mut TestAppContext) {
+    setup(cx);
+    let startup = page(cx, PageId::StartupWindow);
+    assert!(startup.local_disabled(CTRL_ESC_LABEL));
+    assert!(!startup.local_on(CTRL_ESC_LABEL));
+    assert_eq!(
+        startup.local_description(CTRL_ESC_LABEL).as_deref(),
+        Some("Not available")
+    );
+}
+
+#[gpui_kit::test]
+fn ctrl_esc_relogin_description(cx: &mut TestAppContext) {
+    setup(cx);
+    fake_shortcut(cx, None, Ok(()), false);
+    let startup = page(cx, PageId::StartupWindow);
+    assert!(!startup.local_on(CTRL_ESC_LABEL));
+    cx.update(|cx| startup.set_local(CTRL_ESC_LABEL, true, cx));
+    assert!(startup.local_on(CTRL_ESC_LABEL));
+    assert_eq!(
+        startup.local_description(CTRL_ESC_LABEL).as_deref(),
+        Some("Log out and back in to apply")
+    );
+}
+
+#[gpui_kit::test]
+fn ctrl_esc_write_error_reverts(cx: &mut TestAppContext) {
+    setup(cx);
+    fake_shortcut(cx, None, Err("no kglobalaccel".to_owned()), false);
+    let (_, mut vcx) = open(cx, 1);
+    let startup = page(cx, PageId::StartupWindow);
+    vcx.update(|_, cx| startup.set_local(CTRL_ESC_LABEL, true, cx));
+    vcx.run_until_parked();
+    assert!(!startup.local_on(CTRL_ESC_LABEL));
+    assert_eq!(startup.local_description(CTRL_ESC_LABEL), None);
+    assert!(window_toasts(&mut vcx).is_empty(), "no toast");
+}
+
+/// Presses the import button, answers the file chooser with `picked` and lets the import run.
+fn press_import(vcx: &mut VisualTestContext, picked: &str) {
+    let advanced = vcx
+        .update(|_, cx| all_pages(cx))
+        .into_iter()
+        .find(|p| p.id() == PageId::Advanced)
+        .expect("Advanced page");
+    vcx.update(|window, cx| advanced.press(IMPORT_LABEL, window, cx));
+    vcx.run_until_parked();
+    assert!(vcx.did_prompt_for_paths(), "the file chooser opened");
+    let path = PathBuf::from(picked);
+    vcx.simulate_path_prompt_response(move |_| Some(vec![path]));
+    vcx.run_until_parked();
+}
+
+fn import_env(
+    cx: &mut TestAppContext,
+    ini: Result<(u32, u32), String>,
+    themes_text: Result<String, String>,
+) -> Arc<std::sync::Mutex<Vec<PathBuf>>> {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (ini_log, theme_log) = (seen.clone(), seen.clone());
+    cx.update(|cx| {
+        let env = cx.global_mut::<AppEnv>();
+        env.import_taskslinger = Arc::new(move |path, settings, state| {
+            ini_log.lock().expect("lock").push(path.to_owned());
+            let mut settings = settings.clone();
+            settings.debug.show_fps = true;
+            ini.clone().map(|(s, t)| tl_ui::app::ImportedSettings {
+                settings,
+                state: state.clone(),
+                summary: tl_ui::app::ImportSummary {
+                    settings: s,
+                    themes: t,
+                },
+            })
+        });
+        env.read_ts_themes = Arc::new(move |path| {
+            theme_log.lock().expect("lock").push(path.to_owned());
+            themes_text.clone()
+        });
+    });
+    seen
+}
+
+#[gpui_kit::test]
+fn ts_import_toast(cx: &mut TestAppContext) {
+    setup(cx);
+    let seen = import_env(cx, Ok((12, 2)), Ok(String::new()));
+    let (_, mut vcx) = open(cx, 1);
+    press_import(&mut vcx, "/home/u/UserSettings.ini");
+    assert_eq!(
+        *seen.lock().expect("lock"),
+        [PathBuf::from("/home/u/UserSettings.ini")]
+    );
+    assert_eq!(
+        window_toasts(&mut vcx),
+        ["Imported 12 settings and 2 themes"]
+    );
+    assert!(
+        cx.update(|cx| TlSettings::settings(cx).debug.show_fps),
+        "the imported settings are applied"
+    );
+}
+
+#[gpui_kit::test]
+fn ts_import_failure_toast(cx: &mut TestAppContext) {
+    setup(cx);
+    import_env(cx, Err("unreadable".to_owned()), Ok(String::new()));
+    let (_, mut vcx) = open(cx, 1);
+    press_import(&mut vcx, "/home/u/UserSettings.ini");
+    assert_eq!(
+        window_toasts(&mut vcx),
+        ["Could not import TaskSlinger settings"]
+    );
+    assert!(!cx.update(|cx| TlSettings::settings(cx).debug.show_fps));
+}
+
+#[gpui_kit::test]
+fn ts_import_themes_file(cx: &mut TestAppContext) {
+    setup(cx);
+    let seen = import_env(cx, Ok((9, 9)), Ok(r#"{"themes":[]}"#.to_owned()));
+    let (_, mut vcx) = open(cx, 1);
+    press_import(&mut vcx, "/home/u/themes.json");
+    assert_eq!(
+        *seen.lock().expect("lock"),
+        [PathBuf::from("/home/u/themes.json")]
+    );
+    assert_eq!(
+        window_toasts(&mut vcx),
+        ["Imported 0 settings and 0 themes"],
+        "a .json pick imports themes only"
+    );
+    assert!(!cx.update(|cx| TlSettings::settings(cx).debug.show_fps));
+
+    // A refused themes file is the failure toast.
+    let past = tl_ui::components::toast::COALESCE_WINDOW + std::time::Duration::from_millis(500);
+    vcx.executor().advance_clock(past);
+    import_env(cx, Ok((0, 0)), Err("too large".to_owned()));
+    press_import(&mut vcx, "/home/u/themes.json");
+    assert!(window_toasts(&mut vcx).contains(&"Could not import TaskSlinger settings".to_owned()));
 }

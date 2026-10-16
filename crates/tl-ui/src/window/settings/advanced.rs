@@ -7,18 +7,22 @@
 //! probe. A change shows "Takes effect after restart" and the toast "Restart tasklens to use the
 //! new GPU".
 
+use std::path::Path;
 use std::rc::Rc;
 
-use gpui_kit::{App, Global, SharedString};
+use gpui_kit::{App, Global, PathPromptOptions, SharedString, Window};
 use tracing::warn;
 
-use super::{PageBuilder, PageId, PickValue, SettingsWindow, info_toast, read, value_matches};
+use super::{
+    PageBuilder, PageId, PickValue, SettingsWindow, info_toast, kind_toast, read, value_matches,
+};
 use crate::action_tracker::ToastTexts;
 use crate::app::{AdapterInfo, AppEnv};
 use crate::components::button::TlButtonKind;
-use crate::components::toast::ToastQueue;
-use crate::i18n::tr;
+use crate::components::toast::{ToastKind, ToastQueue};
+use crate::i18n::{tr, tr_args};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
+use crate::theme::ThemeStore;
 use crate::window::about::{file_uri, send_open_uri};
 use crate::window::confirm::ResetSettings;
 use crate::window::menus_settings::{adapter_setting_value, probe_adapters};
@@ -112,6 +116,12 @@ pub fn page(cx: &mut App) -> PageBuilder {
         tr(cx, "shell-settings-show-fps"),
         None,
     )
+    .button_fn(
+        group,
+        tr(cx, "shell-settings-import-taskslinger"),
+        TlButtonKind::Secondary,
+        import_taskslinger,
+    )
     .button(
         group,
         tr(cx, "shell-settings-open-folder"),
@@ -125,6 +135,74 @@ pub fn page(cx: &mut App) -> PageBuilder {
         TlButtonKind::Danger,
     );
     page
+}
+
+/// "Import from TaskSlinger…" (APP-034): the portal file chooser, then the import of the picked
+/// file. Cancelling the chooser does nothing.
+fn import_taskslinger(_: &mut Window, cx: &mut App) {
+    let picked = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: None,
+    });
+    cx.spawn(async move |cx| {
+        let Ok(Ok(Some(paths))) = picked.await else {
+            return;
+        };
+        let Some(path) = paths.into_iter().next() else {
+            return;
+        };
+        cx.update(|cx| import_picked(&path, cx));
+    })
+    .detach();
+}
+
+/// Imports the picked file and toasts the result. A `.json` file is a `themes.json`: only its
+/// themes are imported. Any other file is a `UserSettings.ini`. Neither the path nor the file
+/// content is logged.
+fn import_picked(path: &Path, cx: &mut App) {
+    let Some((read_themes, import)) = cx
+        .try_global::<AppEnv>()
+        .map(|env| (env.read_ts_themes.clone(), env.import_taskslinger.clone()))
+    else {
+        warn!(target: "tasklens::ui", "no AppEnv; the TaskSlinger import did not run");
+        return;
+    };
+    let is_themes = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+    let counts = if is_themes {
+        read_themes(path)
+            .and_then(|text| {
+                ThemeStore::import_taskslinger(&text, cx).map_err(|e| format!("{e:?}"))
+            })
+            .map(|themes| (0, u32::try_from(themes).unwrap_or(u32::MAX)))
+    } else {
+        let settings = TlSettings::settings(cx).clone();
+        let state = TlSettings::state(cx).clone();
+        import(path, &settings, &state).map(|imported| {
+            TlSettings::update(cx, |d| {
+                d.settings = imported.settings;
+                d.state = imported.state;
+            });
+            (imported.summary.settings, imported.summary.themes)
+        })
+    };
+    match counts {
+        Ok((settings, themes)) => {
+            let args = [("settings", settings.into()), ("themes", themes.into())];
+            kind_toast(
+                ToastKind::Success,
+                tr_args(cx, "shell-toast-ts-import", &args),
+                cx,
+            );
+        }
+        Err(error) => {
+            warn!(target: "tasklens::ui", %error, "TaskSlinger import failed");
+            kind_toast(ToastKind::Error, tr(cx, "shell-toast-ts-import-failed"), cx);
+        }
+    }
 }
 
 /// "Auto", the probed adapters and "Software renderer", as `(label, rendering.gpu value)`.

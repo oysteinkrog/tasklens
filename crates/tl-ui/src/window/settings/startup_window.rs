@@ -5,9 +5,14 @@
 //! minimize to tray, always show tray icon) sits between Window and Login. The Memory group (E32-013,
 //! PROC-097, R-152: rescue window switch) is the last group, after Network.
 
-use gpui_kit::App;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
-use super::{PageBuilder, PageId};
+use gpui_kit::{App, SharedString};
+use tracing::warn;
+
+use super::{LocalSwitch, PageBuilder, PageId};
+use crate::app::AppEnv;
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, TlSettings};
@@ -17,6 +22,9 @@ use crate::window::menus_settings::{
 };
 use crate::window::registry::WindowKey;
 use crate::window::titlebar::keep_above_supported;
+
+/// The key combination "Open with Ctrl+Esc" reads and writes.
+const CTRL_ESC: &str = "Ctrl+Esc";
 
 /// "Start minimized" sits under "Start at login", indented by 16 before the UI scale.
 const START_MINIMIZED_INDENT: f32 = 16.;
@@ -82,10 +90,15 @@ pub fn page(cx: &mut App) -> PageBuilder {
     .indent_next(START_MINIMIZED_INDENT)
     .disable_next(!start_at_login)
     .action_switch(
-        login,
+        login.clone(),
         SettingKey::StartupStartMinimized,
         tr(cx, "shell-menu-settings-start-minimized"),
         || Box::new(ToggleStartMinimized),
+    )
+    .local_switch(
+        login,
+        tr(cx, "shell-settings-ctrl-esc"),
+        ctrl_esc_switch(cx),
     )
     // Turning it on asks through the public IP notice first (R-058).
     .action_switch(
@@ -102,4 +115,48 @@ pub fn page(cx: &mut App) -> PageBuilder {
         None,
     );
     page
+}
+
+/// The "Open with Ctrl+Esc" switch (UI-SHL-069, APP-051). It has no settings key: the value is
+/// the KDE global shortcut, read once when the page is built. With no `global_shortcut` it is
+/// off and disabled.
+fn ctrl_esc_switch(cx: &App) -> LocalSwitch {
+    let on = Rc::new(Cell::new(false));
+    let note: Rc<RefCell<Option<SharedString>>> = Rc::new(RefCell::new(None));
+    let Some(api) = cx
+        .try_global::<AppEnv>()
+        .and_then(|e| e.global_shortcut.as_ref())
+    else {
+        let unavailable = tr(cx, "shell-settings-not-available");
+        return LocalSwitch {
+            get: Rc::new(|| false),
+            description: Rc::new(move || Some(unavailable.clone())),
+            set: Rc::new(|_, _| {}),
+            disabled: true,
+        };
+    };
+    let (get, set) = (api.get.clone(), api.set.clone());
+    on.set(get().as_deref() == Some(CTRL_ESC));
+    let relogin = tr(cx, "shell-settings-ctrl-esc-relogin");
+    let (shown, shown_note) = (on.clone(), note.clone());
+    LocalSwitch {
+        get: Rc::new(move || shown.get()),
+        description: Rc::new(move || shown_note.borrow().clone()),
+        set: Rc::new(move |want, _| {
+            match set(want.then_some(CTRL_ESC)) {
+                Ok(()) => {
+                    on.set(want);
+                    // U-16: when the shortcut does not show the requested state, KDE applies
+                    // it at the next login. The switch keeps the requested state.
+                    let applied = get().as_deref() == Some(CTRL_ESC);
+                    *note.borrow_mut() = (applied != want).then(|| relogin.clone());
+                }
+                // The switch keeps its old state. No toast.
+                Err(error) => {
+                    warn!(target: "tasklens::ui", %error, "Ctrl+Esc shortcut write failed");
+                }
+            }
+        }),
+        disabled: false,
+    }
 }
