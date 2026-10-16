@@ -913,3 +913,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: dwy.7 open notice is its own command; a user DetailRefresh always rereads.
 - 2026-10-16 leader decision: dwy.7 closed. Known limit: after a worker restart, a close and reopen between polls resends the cached Environment (environ does not change in a running process).
 - 2026-10-16 leader decision: dwy.13 cgroup and unit stay Option; EACCES on the world-readable cgroup file (LSM only) shows Not reported.
+- 2026-10-16 leader decision (replaces the 11:31 one): dwy.13 cgroup and unit are Total<Option<..>>; EACCES gives Restricted. Closed.
