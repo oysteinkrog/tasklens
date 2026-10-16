@@ -9,8 +9,9 @@
 //!
 //! Tabs (E10-004): the demanded tab of each demanded process target (at most `DETAILS_MAX`) is
 //! read at `processes.interval_ms`: Threads, File descriptors, Memory maps and Security. Memory
-//! maps reads `smaps` for the RSS at most once per `SMAPS_MIN_PERIOD`, counted in samples, and
-//! keeps the last RSS in between. Environment is read when its tab is first demanded and again
+//! maps reads `smaps` for the RSS at most once per `SMAPS_MIN_PERIOD` of sampled time, and keeps
+//! the last RSS in between. Sampled time adds one period per sample. A period change restarts
+//! the sample grid with a sample at once, so that sample adds no time. Environment is read when its tab is first demanded and again
 //! only on `DetailRefresh`. A tab is sent only when the reader output changed, so an unchanged
 //! tab keeps its `Arc` in the reducer. EACCES gives an empty `Restricted` payload. A gone process
 //! resends the last payload as `Missing`, another read error resends it as `Failed`. Targets
@@ -196,8 +197,8 @@ struct TabState {
     last: Option<TabRead>,
     /// The last payload sent and its validity.
     published: Option<(Arc<TabPayload>, Validity)>,
-    /// Memory maps: the sample number of the last `smaps` read. Kept by `DetailRefresh`.
-    last_smaps: Option<u64>,
+    /// Memory maps: `sampled` at the last `smaps` read. Kept by `DetailRefresh`.
+    last_smaps: Option<Duration>,
     /// Environment: read once; later reads only on `DetailRefresh`.
     env_loaded: bool,
 }
@@ -228,12 +229,16 @@ pub struct ProcessDetailSource {
     pending: Vec<WorkerCommand>,
     /// Set by `period`: the first `DETAILS_MAX` entries of `Demand.details`.
     details: RefCell<Arc<[DetailDemand]>>,
-    /// Set by `period`: samples per PSS read, per tab read and between `smaps` reads.
+    /// Set by `period`: samples per PSS read and per tab read.
     pss_every: Cell<u32>,
     tabs_every: Cell<u32>,
-    smaps_every: Cell<u32>,
-    /// Samples run since the source was made. Times the `smaps` cap.
-    samples: u64,
+    /// The last value `period` returned, `None` before the first call.
+    last_period: Cell<Option<Option<Duration>>>,
+    /// Set by `period` when its value changed. The sample loop then starts a new grid and
+    /// samples at once, so the time since the last sample is not known.
+    grid_restarted: Cell<bool>,
+    /// Time sampled since the source was made, at least the real time. Times the `smaps` cap.
+    sampled: Duration,
     pss_stride: Stride,
     tabs_stride: Stride,
     /// True while the demand holds more than `DETAILS_MAX` targets, so the warning is logged
@@ -290,8 +295,9 @@ impl ProcessDetailSource {
             details: RefCell::new(Arc::from([])),
             pss_every: Cell::new(1),
             tabs_every: Cell::new(1),
-            smaps_every: Cell::new(1),
-            samples: 0,
+            last_period: Cell::new(None),
+            grid_restarted: Cell::new(false),
+            sampled: Duration::ZERO,
             pss_stride: Stride::default(),
             tabs_stride: Stride::default(),
             over_cap: Cell::new(false),
@@ -345,10 +351,16 @@ impl ProcessDetailSource {
                 "process detail command has no handler yet"
             );
         }
+        // A sample on an unchanged grid comes one period after the one before. The first
+        // sample of a new grid can come at once, so it adds nothing.
+        if !self.grid_restarted.replace(false)
+            && let Some(Some(period)) = self.last_period.get()
+        {
+            self.sampled += period;
+        }
         self.pss_stride.set(self.pss_every.get());
         self.tabs_stride.set(self.tabs_every.get());
         self.read_tabs();
-        self.samples += 1;
 
         let keys = self.keys.borrow().clone();
         // With no keys the reader still runs while fds are cached, so hidden columns close them.
@@ -493,17 +505,17 @@ impl ProcessDetailSource {
                 })
             }
             DetailTab::Maps => {
-                let (sample, every) = (self.samples, u64::from(self.smaps_every.get()));
+                let sampled = self.sampled;
                 let with_rss = state.tabs[tab.index()]
                     .last_smaps
-                    .is_none_or(|last| sample - last >= every);
+                    .is_none_or(|last| sampled - last >= SMAPS_MIN_PERIOD);
                 let mut regions = Vec::new();
                 let mut nodes = Vec::new();
                 let read = rd::read_maps(root, key, with_rss, bufs, &mut regions, &mut nodes);
                 detail_result(read, tab).map(|()| {
                     if with_rss {
                         self.smaps_reads += 1;
-                        state.tabs[tab.index()].last_smaps = Some(sample);
+                        state.tabs[tab.index()].last_smaps = Some(sampled);
                         state.rss = regions
                             .iter()
                             .filter_map(|r| r.rss.map(|rss| (r.start, rss)))
@@ -580,9 +592,9 @@ impl Source for ProcessDetailSource {
 
     /// PSS alone runs at 1 Hz and tabs alone at `processes.interval_ms`. With both, the period
     /// splits the interval into `shared_parts` equal parts of at most 1 s: tabs read exactly at
-    /// the interval and PSS every `ceil(1 s / period)` samples. `smaps` waits the same number of
-    /// samples, so it never reads under 1 s apart. The period depends only on the demand and the
-    /// settings, so it changes only when they do.
+    /// the interval and PSS every `ceil(1 s / period)` samples. `smaps` waits for 1 s of sampled
+    /// time, which is the same number of samples on a fixed grid. The period depends only on the
+    /// demand and the settings, so it changes only when they do.
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         // A forced `RefreshNow` samples even without a period, so hidden columns must leave
         // no keys behind.
@@ -616,7 +628,9 @@ impl Source for ProcessDetailSource {
         let grid = period.unwrap_or(PSS_PERIOD);
         self.pss_every.set(stride(PSS_PERIOD, grid));
         self.tabs_every.set(tabs_every);
-        self.smaps_every.set(stride(SMAPS_MIN_PERIOD, grid));
+        if self.last_period.replace(Some(period)) != Some(period) {
+            self.grid_restarted.set(true);
+        }
         period
     }
 
@@ -1589,6 +1603,30 @@ mod tests {
             .expect("library node");
         assert!(lib.shared_object);
         assert_eq!(lib.size_bytes, 0x20_0000);
+    }
+
+    /// A period change starts a new sample grid with a sample at once. The time sampled on the
+    /// old grid still counts, so `smaps` does not read again under 1 s after its last read.
+    #[test]
+    fn smaps_cap_holds_across_period_change() {
+        let (_tmp, cfg) = edge_root();
+        let d = tabs(&[(a(), DetailTab::Maps)]);
+        let mut src = ProcessDetailSource::new(cfg);
+        // 250 ms samples at 0, 250, 500 and 750 ms: `smaps` reads at 0 only.
+        let fast = every_ms(250);
+        for t in 0..4 {
+            let (next, _, _) = step(src, &d, &fast, t * 250);
+            src = next;
+        }
+        assert_eq!(src.smaps_reads(), 1);
+        // The interval goes to 1 s. The loop samples at once, still at 750 ms, then at 1750 ms.
+        let slow = every_ms(1000);
+        let (src, _, _) = step(src, &d, &slow, 750);
+        assert_eq!(src.tab_reads(DetailTab::Maps), 5);
+        assert_eq!(src.smaps_reads(), 1);
+        let (src, _, _) = step(src, &d, &slow, 1750);
+        assert_eq!(src.tab_reads(DetailTab::Maps), 6);
+        assert_eq!(src.smaps_reads(), 2);
     }
 
     /// Between `smaps` reads the RSS of the last read is kept, so the tab does not flicker.
