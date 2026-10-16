@@ -2780,9 +2780,13 @@ mod page {
             .collect()
     }
 
-    /// Group rows and unit rows for `units`; `children` adds child rows under unit indexes.
+    /// Group rows and unit rows for `units`; `children` adds child rows under unit indexes. No
+    /// units means no rows, as the engine sends when nothing matches the filter.
     fn rows(units: &[UnitRecord], children: &[(usize, ProcessKey)]) -> Vec<SysRow> {
         let mut rows = Vec::new();
+        if units.is_empty() {
+            return rows;
+        }
         for manager in [Manager::System, Manager::User] {
             rows.push(SysRow {
                 node: SysNodeId::ServiceGroup(manager),
@@ -3382,7 +3386,15 @@ mod page {
             "a mixed selection gets the unit menu"
         );
 
-        assert!(rig.menu_labels(&[0]).is_empty(), "group rows have no menu");
+        // The table still opens a popup for a group row; it holds no item.
+        let menu = rig.build_menu(&[0]);
+        let entries: Vec<MenuEntryInfo> = rig
+            .vcx
+            .update(|window, cx| menu.read(cx).entries_for_test(window));
+        assert!(
+            entries.iter().all(|e| e.action.is_none()),
+            "group rows have no menu items"
+        );
     }
 
     fn services_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
