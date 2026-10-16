@@ -2140,6 +2140,13 @@ shell-menu-columns-proportional = Proportional
 shell-menu-columns-last-column = Last Column
 shell-menu-columns-reset = Reset to default
 shell-menu-view-no-table = This tab has no table
+# Debug menu (tasklens-bj6.42, UI-SHL-042).
+shell-menu-debug-show-fps = Show FPS
+shell-menu-debug-continuous = Continuous rendering
+shell-menu-debug-all-columns = Enable all columns
+shell-menu-debug-random-minigraphs = Add random process minigraphs
+shell-menu-debug-collector-health = Collector health
+shell-toast-all-columns = All columns enabled
 # Shell confirmations: Reset settings (tasklens-bj6.3, UI-SHL-072).
 shell-confirm-title = tasklens
 shell-confirm-reset-text = Reset all settings to their defaults? Themes and history are kept.
@@ -2816,6 +2823,11 @@ setup-done = Done. No restart needed.
 setup-failed = Setup failed
 setup-button-copy-output = Copy output
 setup-button-retry = Retry
+setup-button-view-script = View script
+setup-button-copy-command = Copy command
+setup-button-copy = Copy
+setup-toast-command-copied = Command copied
+setup-script-title = tasklens-setup { $subcommand }
 
 # Settings > Privileges helper status (tasklens-qfx.29, UI-SHL-070).
 settings-privileges-helper-installed = Administrator helper: Installed

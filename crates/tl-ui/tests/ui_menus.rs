@@ -24,17 +24,18 @@ use tl_model::settings::{
 };
 use tl_model::table::TableMode;
 use tl_ui::actions::{
-    MenuId, OpenHandleSearch, OpenRunDialog, OpenSettings, Quit, SetViewMode, bind_keys_global,
-    register_global_handlers,
+    MenuId, OpenCollectorHealth, OpenHandleSearch, OpenRunDialog, OpenSettings, Quit, SetViewMode,
+    bind_keys_global, register_global_handlers,
 };
-use tl_ui::app::{BootSettings, EngineGlobal};
+use tl_ui::app::{AppEnv, BootSettings, EngineGlobal};
 use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::slider::TlSliderEvent;
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::actions::{
-    CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, TABLE_CONTEXT, bind_keys_table,
+    CollapseAll, EnableAllColumns, OpenColumnPicker, ResetColumns, ResizeColumnsToFit,
+    TABLE_CONTEXT, bind_keys_table,
 };
 use tl_ui::table::columns::TableId;
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -45,11 +46,12 @@ use tl_ui::window::main::ShellState;
 use tl_ui::window::menubar::{self, MenuBar, menu_bar_for};
 use tl_ui::window::menus_view::{CopyTheme, DeleteTheme, ImportTheme};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
-use tl_ui::window::{menus_settings, menus_view};
+use tl_ui::window::{menus_debug, menus_settings, menus_view};
 
 const FILE_BUTTON: &str = "TlMenuBarButton-shell-menubar-file";
 const VIEW_BUTTON: &str = "TlMenuBarButton-shell-menubar-view";
 const SETTINGS_BUTTON: &str = "TlMenuBarButton-shell-menubar-settings";
+const DEBUG_BUTTON: &str = "TlMenuBarButton-shell-menubar-debug";
 
 /// A main window stand-in: the title bar with the real menu bar, and a focusable table below.
 struct Host {
@@ -3068,4 +3070,125 @@ fn passwordless_off_no_confirm(cx: &mut TestAppContext) {
     publish_polkit(&r.engine, 1, false, SetupPhase::Succeeded);
     r.cx.run_until_parked();
     assert!(!settings(r.cx).privilege.passwordless);
+}
+
+// ---- Debug menu (tasklens-bj6.42) ----
+
+fn set_debug(cx: &mut VisualTestContext, debug: bool) {
+    cx.update(|_, cx| {
+        cx.set_global(AppEnv {
+            debug,
+            ..AppEnv::test()
+        })
+    });
+    draw(cx);
+}
+
+#[gpui_kit::test]
+fn debug_menu_hidden_without_flag(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    assert!(r.cx.debug_bounds(DEBUG_BUTTON).is_none(), "no AppEnv");
+    keys(r.cx, "alt-d");
+    assert_eq!(open_menu(r.cx), None);
+    set_debug(r.cx, false);
+    assert!(r.cx.debug_bounds(DEBUG_BUTTON).is_none(), "debug off");
+    keys(r.cx, "alt-d");
+    assert_eq!(open_menu(r.cx), None);
+}
+
+#[gpui_kit::test]
+fn debug_menu_alt_d(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    set_debug(r.cx, true);
+    let settings_right = bounds(r.cx, SETTINGS_BUTTON).right();
+    assert!(bounds(r.cx, DEBUG_BUTTON).left() >= settings_right);
+    keys(r.cx, "alt-d");
+    assert_eq!(open_menu(r.cx), Some(MenuId::Debug));
+    assert_eq!(
+        labels(r.cx),
+        [
+            "Show FPS",
+            "Continuous rendering",
+            "Enable all columns",
+            "Add random process minigraphs",
+            "Collector health",
+        ]
+    );
+    assert_eq!(entries(r.cx).len(), 6, "five rows and a separator");
+    assert_eq!(entries(r.cx)[0].selected(), Some(true), "Show FPS");
+}
+
+#[gpui_kit::test]
+fn continuous_rendering_requests_frames(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    set_debug(r.cx, true);
+    let requested =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| menus_debug::continuous_requested(cx));
+    let frames = |cx: &mut VisualTestContext| {
+        for _ in 0..10 {
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+        }
+    };
+    keys(r.cx, "alt-d down enter");
+    let start = requested(r.cx);
+    assert!(start >= 1, "the first request starts the chain");
+    frames(r.cx);
+    assert_eq!(requested(r.cx) - start, 10);
+    assert!(
+        r.cx.update(|_, cx| menus_debug::continuous_on(cx)),
+        "flag on"
+    );
+    keys(r.cx, "alt-d down enter");
+    let stopped = requested(r.cx);
+    frames(r.cx);
+    assert_eq!(requested(r.cx) - stopped, 0);
+}
+
+#[gpui_kit::test]
+fn enable_all_columns_dispatch_and_toast(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    r.cx.update(|_, cx| {
+        cx.on_action(move |a: &EnableAllColumns, _| sink.borrow_mut().push(a.table));
+    });
+    set_debug(r.cx, true);
+    set_tab(r.cx, Tab::Processes, false);
+    keys(r.cx, "alt-d down down enter");
+    r.cx.run_until_parked();
+    assert_eq!(*seen.borrow(), [TableId::Processes]);
+    assert!(toast_texts(&mut r).contains(&"All columns enabled".to_owned()));
+}
+
+#[gpui_kit::test]
+fn enable_all_columns_disabled_on_performance(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    set_debug(r.cx, true);
+    set_tab(r.cx, Tab::Performance, false);
+    keys(r.cx, "alt-d down down");
+    let drawn = entries(r.cx);
+    assert_eq!(drawn[2].label(), Some("Enable all columns"));
+    assert_ne!(drawn[2].selected(), Some(true), "never highlighted");
+    let row = drawn[2].bounds();
+    r.cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    r.cx.executor()
+        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+    draw(r.cx);
+    assert!(r.cx.debug_bounds("TlTooltip").is_some(), "tooltip shown");
+    let reason =
+        r.cx.update(|_, cx| tl_ui::i18n::tr(cx, "shell-menu-view-no-table"));
+    assert_eq!(reason.as_ref(), "This tab has no table");
+}
+
+#[gpui_kit::test]
+fn debug_collector_health_dispatch(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let count = Rc::new(Cell::new(0));
+    let sink = count.clone();
+    r.cx.update(|_, cx| {
+        cx.on_action(move |_: &OpenCollectorHealth, _| sink.set(sink.get() + 1));
+    });
+    set_debug(r.cx, true);
+    keys(r.cx, "alt-d end enter");
+    assert_eq!(count.get(), 1);
 }
