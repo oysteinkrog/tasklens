@@ -918,3 +918,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: hk6.2 skips PROCESSES-only snapshots while no unit is expanded; group-row popup fix stays in Services.
 - 2026-10-16 leader decision: dwy.8 while affinity is open, period = gcd(interval, 1 s), floor 250 ms; affinity exactly 1 Hz.
 - 2026-10-16 leader decision: dwy.14 checks the package db stamp every 5 s even with no pending paths (PackageIndex::check_stamp).
+- 2026-10-16 leader decision: o55.24 option A; model inputs in tasklens-hjn.43 (after hjn.42, proto 4); Power tooltip uses the limit range when the minimum is known, else the max form.
