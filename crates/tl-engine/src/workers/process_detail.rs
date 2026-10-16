@@ -1,10 +1,11 @@
 //! The `ProcessDetail` worker (ADR-008, ADR-016): PSS, USS and swap for `detail_keys`, and the
 //! Properties tab payloads of `Demand.details`.
 //!
-//! `/proc/<pid>/smaps_rollup` is read at 1 Hz (slower when tabs share the period), only while a PSS or USS column is shown and
-//! `detail_keys` (visible rows plus one viewport of overscan, at most 512) is not empty. The
-//! `tl-collect` `PssReader` keeps up to 128 fds open between samples (ADR-016), checks
-//! `start_ticks` when it opens a file and closes the fds of keys that left the demand.
+//! `/proc/<pid>/smaps_rollup` is read at 1 Hz (slower when tabs share the period), only while
+//! a PSS or USS column is shown and `detail_keys` (visible rows plus one viewport of overscan,
+//! at most 512) is not empty. The `tl-collect` `PssReader` keeps up to 128 fds open between
+//! samples (ADR-016), checks `start_ticks` when it opens a file and closes the fds of keys that
+//! left the demand.
 //!
 //! Tabs (E10-004): the demanded tab of each demanded process target (at most `DETAILS_MAX`) is
 //! read at `processes.interval_ms`: Threads, File descriptors, Memory maps and Security. Memory
