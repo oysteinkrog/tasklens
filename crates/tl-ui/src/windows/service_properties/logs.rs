@@ -641,7 +641,6 @@ impl LogsView {
             .child(
                 div()
                     .min_w_0()
-                    .flex_shrink()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
