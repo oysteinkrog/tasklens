@@ -10,12 +10,13 @@ use gpui_kit::{
     Styled as _, TestAppContext, VisualTestContext, Window, div, px,
 };
 use tl_model::client::EngineClient;
+use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
-use tl_model::snapshot::SystemSnapshot;
+use tl_model::snapshot::{PublicIpState, SystemSnapshot};
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -97,6 +98,7 @@ fn system(speed_mbps: i64) -> SystemSnapshot {
 }
 
 struct Rig<'a> {
+    engine: Arc<FakeEngine>,
     page: Entity<NetPage>,
     demand: Entity<DemandAggregator>,
     vcx: &'a mut VisualTestContext,
@@ -179,7 +181,12 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
     });
     vcx.simulate_scale_factor_change(1.0);
     draw(vcx);
-    Rig { page, demand, vcx }
+    Rig {
+        engine,
+        page,
+        demand,
+        vcx,
+    }
 }
 
 /// 60 one-second samples of `metric` ending now: `value` while valid, then `gaps` invalid ones.
@@ -588,7 +595,7 @@ mod details {
         let r = open(cx, with_unit(NetworkUnit::Bits), sys);
         let page = r.page.clone();
         let order = r.vcx.update(|_, cx| page.read(cx).focus_order());
-        assert_eq!(order.len(), 1, "one block control");
+        assert_eq!(order.len(), 2, "the Display unit link and the Fetch button");
         r.vcx.update(|window, cx| window.focus_next(cx));
         let first = r.vcx.update(|window, _| order[0].is_focused(window));
         assert!(first, "the first Tab stop is the Display unit link");
@@ -645,6 +652,177 @@ mod details {
         assert_eq!(
             read(r.vcx),
             ["0.1 MiB/s", "0 MiB/s", "12.40 GiB", "2.00 GiB", "MiB/s"]
+        );
+    }
+}
+
+/// The Public IP row (E25-022, UI-PRF-031; PERF-060, APP-056).
+mod public_ip {
+    use super::*;
+    use tl_ui::pages::performance::net::{local_hh_mm, public_ip_text};
+
+    const FETCH_BUTTON: &str = "TlButton-perf-net-public-ip-fetch";
+    /// Flat index of the Public IP row: Ethernet, all rows shown.
+    const ROW: usize = 15;
+
+    fn accepted(accepted: bool) -> Settings {
+        let mut s = Settings::default();
+        s.network.public_ip_notice_accepted = accepted;
+        s
+    }
+
+    /// Local 14:02 on a fixed day, in seconds since the epoch, so the text is the same in every
+    /// time zone.
+    fn at_1402() -> i64 {
+        jiff::civil::date(2026, 10, 16)
+            .at(14, 2, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .expect("local time")
+            .timestamp()
+            .as_second()
+    }
+
+    fn publish(r: &mut Rig<'_>, state: PublicIpState) {
+        r.engine.publish_with(|s| {
+            let inv = Arc::make_mut(&mut s.inventory);
+            inv.header.version += 1;
+            inv.public_ip = state;
+        });
+        draw(r.vcx);
+    }
+
+    fn fetched(v6: Option<&str>) -> PublicIpState {
+        PublicIpState::Fetched {
+            v4: Some(Arc::from("203.0.113.4")),
+            v6: v6.map(Arc::from),
+            fetched_at_s: at_1402(),
+        }
+    }
+
+    /// The shown value and tooltip of the Public IP row.
+    fn row(r: &mut Rig<'_>) -> (String, Option<String>) {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let found = page
+                .read(cx)
+                .details()
+                .to_kv_rows()
+                .find(|row| row.label.as_ref() == "Public IP")
+                .expect("Public IP row");
+            (
+                found.value.text.to_string(),
+                found.value.tooltip.map(|t| t.to_string()),
+            )
+        })
+    }
+
+    fn fetches(r: &Rig<'_>) -> usize {
+        r.engine
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, Command::Device(DeviceCommand::FetchPublicIp)))
+            .count()
+    }
+
+    fn click_fetch(r: &mut Rig<'_>) {
+        let button = r
+            .vcx
+            .debug_bounds(FETCH_BUTTON)
+            .expect("Fetch button drawn");
+        r.vcx.simulate_click(button.center(), Modifiers::none());
+        draw(r.vcx);
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_states(cx: &mut TestAppContext) {
+        let mut r = open(cx, accepted(true), system(1000));
+        assert_eq!(row(&mut r).0, "Not fetched");
+        let value = r
+            .vcx
+            .debug_bounds(&format!("TlKv-value-{ROW}"))
+            .expect("value drawn");
+        let button = r.vcx.debug_bounds(FETCH_BUTTON).expect("Fetch button");
+        assert!(button.left() > value.left(), "the button follows the text");
+        assert_eq!(button.size.height, px(24.));
+
+        publish(&mut r, PublicIpState::Fetching);
+        assert_eq!(row(&mut r).0, "Fetching…");
+        click_fetch(&mut r);
+        assert_eq!(fetches(&r), 0, "a loading button ignores clicks");
+
+        publish(&mut r, fetched(None));
+        assert_eq!(row(&mut r).0, "203.0.113.4 (fetched 14:02)");
+        assert!(
+            r.vcx.debug_bounds(FETCH_BUTTON).is_none(),
+            "no button after a result"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_first_fetch_opens_notice(cx: &mut TestAppContext) {
+        let mut r = open(cx, accepted(false), system(1000));
+        let before = r.vcx.update(|_, cx| cx.windows().len());
+        click_fetch(&mut r);
+        assert_eq!(fetches(&r), 0, "no command before Continue");
+        let after = r.vcx.update(|_, cx| cx.windows().len());
+        assert_eq!(after, before + 1, "the notice window opened");
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_accepted_sends_command(cx: &mut TestAppContext) {
+        let mut r = open(cx, accepted(true), system(1000));
+        click_fetch(&mut r);
+        assert_eq!(fetches(&r), 1, "the command went out at once");
+        publish(&mut r, PublicIpState::Fetching);
+        assert_eq!(row(&mut r).0, "Fetching…");
+        assert!(
+            r.vcx.debug_bounds(FETCH_BUTTON).is_some(),
+            "the button shows its spinner"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_two_lines_with_v6(cx: &mut TestAppContext) {
+        let mut r = open(cx, accepted(true), system(1000));
+        publish(&mut r, fetched(Some("2001:db8::4")));
+        assert_eq!(
+            row(&mut r).0,
+            "203.0.113.4 (fetched 14:02)\n2001:db8::4 (fetched 14:02)"
+        );
+        let pair = r
+            .vcx
+            .debug_bounds(&format!("TlKv-row-{ROW}"))
+            .expect("pair drawn");
+        let plain = r.vcx.debug_bounds("TlKv-row-0").expect("plain pair");
+        assert!(
+            pair.size.height > plain.size.height,
+            "the pair is taller for two lines"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn public_ip_failure_tooltip(cx: &mut TestAppContext) {
+        let mut r = open(cx, accepted(true), system(1000));
+        publish(&mut r, PublicIpState::Failed(Arc::from("timed out")));
+        let (text, tip) = row(&mut r);
+        assert_eq!(text, "Unavailable");
+        assert_eq!(
+            tip.as_deref(),
+            Some("Could not reach api.ipify.org: timed out")
+        );
+    }
+
+    #[test]
+    fn public_ip_formatter_is_shared() {
+        let at = at_1402();
+        assert_eq!(local_hh_mm(at), "14:02");
+        let template = tl_ui::pages::performance::details::Template::en(
+            "perf-net-ip-fetched",
+            &["ip", "time"],
+        );
+        assert_eq!(
+            public_ip_text(&template, Some("203.0.113.4"), None, at),
+            "203.0.113.4 (fetched 14:02)"
         );
     }
 }

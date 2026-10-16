@@ -1861,7 +1861,7 @@ mod net_p2 {
         let labels: Vec<&str> = r.iter().map(|(l, _)| l.as_str()).collect();
         let want: Vec<&str> = HEAD.iter().chain(TAIL.iter()).copied().collect();
         assert_eq!(labels, want);
-        assert_eq!(labels.len(), 15, "Public IP is hidden until E25-021");
+        assert_eq!(labels.len(), 15, "update_net_details_p2 leaves Public IP hidden");
         assert_eq!(
             value(&m, "Adapter name"),
             "Intel I350 Gigabit Network Connection"

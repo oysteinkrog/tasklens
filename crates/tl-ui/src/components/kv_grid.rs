@@ -132,6 +132,9 @@ type LinkHandler = Rc<dyn Fn(usize, Bounds<Pixels>, &mut Window, &mut App)>;
 /// Builds the element drawn before the text of a plain value, by flat row index, with its width.
 /// `None` draws no prefix for that row.
 pub type ValuePrefix = Rc<dyn Fn(usize, &mut Window, &mut App) -> Option<(Pixels, AnyElement)>>;
+/// Builds the element drawn after the text of a plain value, by flat row index, with its width.
+/// The grid adds an `sp3` left margin. `None` draws no suffix for that row.
+pub type ValueSuffix = ValuePrefix;
 type RowHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// Binds Ctrl+C inside the grid, so a text selection is copied before the page's Copy binding
@@ -615,6 +618,8 @@ pub struct TlKeyValueGrid {
     link_tab_stop: bool,
     link_focus: Rc<[(usize, FocusHandle)]>,
     value_prefix: Option<ValuePrefix>,
+    value_suffix: Option<ValueSuffix>,
+    value_lines: Rc<[usize]>,
     cursor: Option<usize>,
     filtered_empty: bool,
     loading: bool,
@@ -645,6 +650,8 @@ impl TlKeyValueGrid {
             link_tab_stop: true,
             link_focus: Rc::from(Vec::new()),
             value_prefix: None,
+            value_suffix: None,
+            value_lines: Rc::from(Vec::new()),
             cursor: None,
             filtered_empty: false,
             loading: false,
@@ -800,6 +807,24 @@ impl TlKeyValueGrid {
         self
     }
 
+    /// An element drawn after the text of a plain (non-link) value, built per flat row index. The
+    /// grid puts an `sp3` margin before it. It takes its width from the value's room, so the
+    /// text is cut earlier.
+    pub fn value_suffix(
+        mut self,
+        suffix: impl Fn(usize, &mut Window, &mut App) -> Option<(Pixels, AnyElement)> + 'static,
+    ) -> Self {
+        self.value_suffix = Some(Rc::new(suffix));
+        self
+    }
+
+    /// Flat row indices of stacked rows whose value draws `\n` as several lines. Such a pair is
+    /// (1 + lines) × row height high. Other rows, and every inline row, are unchanged.
+    pub fn value_lines(mut self, rows: Rc<[usize]>) -> Self {
+        self.value_lines = rows;
+        self
+    }
+
     /// Draws the keyboard cursor ring around flat row `row`: 1 px `accent`, inset 1 px, radius
     /// `r_sm`. The owner moves it; the grid has no key handling of its own.
     pub fn cursor(mut self, row: Option<usize>) -> Self {
@@ -872,7 +897,8 @@ impl TlKeyValueGrid {
     }
 
     /// The value element of row `n` in section `si` and its line count, or `None` when the row
-    /// is Missing. Only an inline row (`multiline`) draws a value with `\n` as several lines.
+    /// is Missing. Only an inline row, or a stacked row named in `value_lines` (`multiline`), draws a value with
+    /// `\n` as several lines.
     #[allow(clippy::too_many_arguments)]
     fn value(
         &self,
@@ -958,6 +984,13 @@ impl TlKeyValueGrid {
                     available = available.map(|a| (a - width).max(px(0.)));
                     cell = cell.child(element);
                 }
+                let suffix = self
+                    .value_suffix
+                    .clone()
+                    .and_then(|build| build(n, window, cx));
+                if let Some((width, _)) = &suffix {
+                    available = available.map(|a| (a - *width - m.sp[3]).max(px(0.)));
+                }
                 if let Some(available) = available {
                     let (width, cut) =
                         measure(&look.text, row.value.path, available, m, window, cx);
@@ -976,6 +1009,9 @@ impl TlKeyValueGrid {
                             .text_style(numeric_style(m, m.text.base)),
                     ),
                 );
+                if let Some((_, element)) = suffix {
+                    cell = cell.child(div().flex_none().ml(m.sp[3]).child(element));
+                }
             }
             if self.copy_on_click {
                 let on_copied = self.on_copied.clone();
@@ -1223,7 +1259,8 @@ impl TlKeyValueGrid {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let (value, _) = self.value(n, si, row, available, false, f, window, cx)?;
+        let multiline = self.value_lines.contains(&n);
+        let (value, lines) = self.value(n, si, row, available, multiline, f, window, cx)?;
         let mut label = div().min_w_0();
         *label.text_style() = t_sm(&f.m);
         let label = label
@@ -1241,7 +1278,7 @@ impl TlKeyValueGrid {
                 .flex_1()
                 .flex_basis(px(0.))
                 .min_w(min_width)
-                .h(f.row_height * 2.)
+                .h(f.row_height * (1 + lines) as f32)
                 .child(label)
                 .child(value)
                 .children(self.flash(n, f))
@@ -2121,6 +2158,53 @@ mod tests {
         assert!(prefix.left() >= value.left(), "inside the value cell");
         assert!(prefix.size.width == px(16.));
         assert!(bounds(cx, "TlKv-value-0").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn value_suffix_draws_after_text(cx: &mut TestAppContext) {
+        let (cx, _, _) = host(cx, || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline)
+                .sections(&[section(vec![
+                    row("PID:", TlValue::new("1")),
+                    row("IP:", TlValue::new("Not fetched")),
+                ])])
+                .value_suffix(|n, _, _| {
+                    (n == 1).then(|| {
+                        let button = div()
+                            .debug_selector(|| "TlKv-suffix".into())
+                            .w(px(40.))
+                            .h(px(24.))
+                            .into_any_element();
+                        (px(40.), button)
+                    })
+                })
+        });
+        let suffix = bounds(cx, "TlKv-suffix").expect("suffix drawn");
+        let value = bounds(cx, "TlKv-value-1").expect("value drawn");
+        assert!(suffix.right() <= value.right(), "inside the value cell");
+        assert!(suffix.size.width == px(40.));
+        assert!(suffix.left() > value.left(), "after the text, not on it");
+        assert!(bounds(cx, "TlKv-value-0").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn stacked_value_lines_size_the_pair(cx: &mut TestAppContext) {
+        let (cx, _, _) = host(cx, || {
+            TlKeyValueGrid::new("grid", KvLayout::Stacked)
+                .sections(&[section(vec![
+                    row("A", TlValue::new("1")),
+                    row("B", TlValue::new("203.0.113.4\n2001:db8::4")),
+                    row("C", TlValue::new("3\n4")),
+                ])])
+                .row_height(px(20.))
+                .value_lines(Rc::from([1]))
+        });
+        let plain = bounds(cx, "TlKv-row-0").expect("row 0");
+        let two = bounds(cx, "TlKv-row-1").expect("row 1");
+        let unlisted = bounds(cx, "TlKv-row-2").expect("row 2");
+        assert_eq!(plain.size.height, px(40.), "default unchanged");
+        assert_eq!(two.size.height, px(60.), "(1 + 2 lines) x row height");
+        assert_eq!(unlisted.size.height, px(40.), "not opted in");
     }
 
     /// The link clicks an owner handler saw: row index and value bounds.

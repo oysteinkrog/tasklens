@@ -190,6 +190,11 @@ pub trait DevicePage: 'static {
     fn details_value_prefix(&self) -> Option<DetailsValuePrefix> {
         None
     }
+    /// Builds the element drawn after a Details value, by flat row index
+    /// (`TlKeyValueGrid::value_suffix`). `None` by default.
+    fn details_value_suffix(&self) -> Option<DetailsValuePrefix> {
+        None
+    }
     /// Called with true when the page becomes the shown page and false when it stops being
     /// shown (R-229; E25-010 wires the calls).
     fn set_active(&mut self, active: bool, cx: &mut App) {
@@ -429,6 +434,9 @@ impl DevicePageFrame<'_> {
                 }
                 if let Some(prefix) = page.details_value_prefix() {
                     grid = grid.value_prefix(move |n, w, cx| prefix(n, w, cx));
+                }
+                if let Some(suffix) = page.details_value_suffix() {
+                    grid = grid.value_suffix(move |n, w, cx| suffix(n, w, cx));
                 }
                 match page.details_link_click() {
                     Some(click) => grid.on_link_click(move |n, b, w, cx| click(n, b, w, cx)),

@@ -827,6 +827,12 @@ pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyVa
     model.refresh_labels(cx);
     let rows: Vec<TlKvRow> = model.to_kv_rows().collect();
     let values: Rc<[SharedString]> = rows.iter().map(|r| r.value.text.clone()).collect();
+    let multiline: Rc<[usize]> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.value.text.contains('\n'))
+        .map(|(i, _)| i)
+        .collect();
     let section = TlKvSection {
         title: None,
         blocks: vec![TlKvBlock {
@@ -838,6 +844,7 @@ pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyVa
     // The grid's row height is half a stacked pair.
     TlKeyValueGrid::new(GRID_ID, KvLayout::Stacked)
         .sections(&[section])
+        .value_lines(multiline)
         .columns(3)
         .column_gap(m.sp[6])
         .row_height(px(KV_ROW_H / 2. * m.ui_scale))

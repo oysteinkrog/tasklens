@@ -28,19 +28,20 @@ use gpui_kit::{
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
+use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
-use tl_model::snapshot::{InvField, NetDetails, Snapshot, WifiInfo};
+use tl_model::snapshot::{InvField, NetDetails, PublicIpState, Snapshot, WifiInfo};
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
-use super::actions::{NoOp, PerfOpenNetworkSettings};
-use super::details::{Fallback, KeyValueModel};
+use super::actions::{NoOp, PerfFetchPublicIp, PerfOpenNetworkSettings};
+use super::details::{Fallback, KeyValueModel, Template};
 use super::page::{
     DetailsLinkClick, DetailsValuePrefix, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text,
     page_words,
@@ -48,10 +49,12 @@ use super::page::{
 use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
 use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::actions::SetSetting;
+use crate::app::EngineGlobal;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::link::TlLink;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::ToastQueue;
@@ -60,6 +63,7 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use crate::window::public_ip::request_public_ip_fetch;
 
 /// Debug selector of the chart box.
 pub const THROUGHPUT_ID: &str = "perf-net-throughput";
@@ -328,7 +332,7 @@ const TAIL_ROWS: [&str; 8] = [
 ];
 
 /// The rows [`update_net_details_p1`] fills. [`update_net_details_p2`] shows the rest except
-/// Public IP, which E25-021 fills.
+/// Public IP, which [`update_net_public_ip`] fills.
 const P1_ROWS: [&str; 5] = [
     ROW_DOWNLOAD,
     ROW_UPLOAD,
@@ -348,7 +352,7 @@ pub const KEY_UNIT_BYTES: &str = "perf-net-unit-bytes";
 
 /// The Network Details model: the PERF-056 rows in order, the Wi-Fi rows only when `wifi`. All
 /// but the P1 rows stay hidden until [`update_net_details_p2`] shows them; Public IP stays
-/// hidden until E25-021.
+/// hidden until [`update_net_public_ip`] shows it.
 pub fn net_details_model(wifi: bool) -> KeyValueModel {
     let mut labels: SmallVec<[&'static str; 22]> = SmallVec::new();
     labels.extend_from_slice(&HEAD_ROWS);
@@ -369,6 +373,10 @@ pub fn net_details_model(wifi: bool) -> KeyValueModel {
         (KEY_SIGNAL_PCT, &["pct"]),
         (KEY_FREQUENCY, &["mhz", "ch"]),
         (KEY_LINK_LOCAL, &["addrs"]),
+        (KEY_IP_NOT_FETCHED, &[]),
+        (KEY_IP_FETCHING, &[]),
+        (KEY_IP_FETCHED, &["ip", "time"]),
+        (KEY_IP_FAILED_TOOLTIP, &["error"]),
     ]);
     for (_, key) in TYPE_KEYS {
         model = model.with_texts(&[(key, &[])]);
@@ -391,6 +399,13 @@ const KEY_SIGNAL: &str = "perf-net-signal-value";
 const KEY_SIGNAL_PCT: &str = "perf-net-signal-pct";
 const KEY_FREQUENCY: &str = "perf-net-frequency-value";
 const KEY_LINK_LOCAL: &str = "perf-net-link-local";
+const KEY_IP_NOT_FETCHED: &str = "perf-net-ip-not-fetched";
+const KEY_IP_FETCH: &str = "perf-net-ip-fetch";
+const KEY_IP_FETCHING: &str = "perf-net-ip-fetching";
+const KEY_IP_FETCHED: &str = "perf-net-ip-fetched";
+const KEY_IP_FAILED_TOOLTIP: &str = "perf-net-ip-failed-tooltip";
+/// Width the grid reserves for the Fetch button at 100% scale.
+const FETCH_BUTTON_W: f32 = 64.;
 
 /// The PERF-054 connection type words by the engine's `type_label`.
 const TYPE_KEYS: [(&str, &str); 9] = [
@@ -916,6 +931,104 @@ fn net_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&NetTotals> {
         .map(|(_, t)| t)
 }
 
+/// The Public IP row's state: the engine's fetch state (PERF-060). Never saved to disk.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PublicIpRowState {
+    pub state: PublicIpState,
+}
+
+/// `secs` since the Unix epoch as local `HH:MM`; empty when it is out of range.
+pub fn local_hh_mm(secs: i64) -> String {
+    jiff::Timestamp::from_second(secs)
+        .ok()
+        .map(|t| t.to_zoned(jiff::tz::TimeZone::system()))
+        .map(|z| format!("{:02}:{:02}", z.hour(), z.minute()))
+        .unwrap_or_default()
+}
+
+/// The Fetched value: `203.0.113.4 (fetched 14:02)`, then the IPv6 address on a second line in
+/// the same form. `fetched` is the `perf-net-ip-fetched` text with the arguments `ip` and
+/// `time`. Empty when neither address came back.
+pub fn public_ip_text(
+    fetched: &Template,
+    v4: Option<&str>,
+    v6: Option<&str>,
+    fetched_at_s: i64,
+) -> String {
+    let time = local_hh_mm(fetched_at_s);
+    let mut out = String::new();
+    for ip in [v4, v6].into_iter().flatten() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let _ = fetched.write(&mut out, &[&ip, &time]);
+    }
+    out
+}
+
+/// Shows the Public IP row for `state`. Not fetched reads in `text_secondary`; Failed reads
+/// Unavailable with the reason in its tooltip. True when the row changed.
+pub fn update_net_public_ip(model: &mut KeyValueModel, state: &PublicIpState) -> bool {
+    let mut changed = set_hidden(model, ROW_PUBLIC_IP, false);
+    match state {
+        PublicIpState::NotFetched => {
+            let word = model.text(KEY_IP_NOT_FETCHED);
+            let same = model.rows.iter().any(|r| {
+                r.label == ROW_PUBLIC_IP
+                    && r.validity == Validity::Unsupported
+                    && r.value == **word.text()
+                    && r.tooltip.is_none()
+            });
+            if !same {
+                model.set_text(ROW_PUBLIC_IP, word.text());
+                if let Some(row) = model.rows.iter_mut().find(|r| r.label == ROW_PUBLIC_IP) {
+                    row.validity = Validity::Unsupported;
+                }
+                changed = true;
+            }
+        }
+        PublicIpState::Fetching => {
+            let word = model.text(KEY_IP_FETCHING);
+            changed |= model.set_text(ROW_PUBLIC_IP, word.text());
+        }
+        PublicIpState::Fetched {
+            v4,
+            v6,
+            fetched_at_s,
+        } => {
+            let text = public_ip_text(
+                &model.text(KEY_IP_FETCHED),
+                v4.as_deref(),
+                v6.as_deref(),
+                *fetched_at_s,
+            );
+            changed |= if text.is_empty() {
+                not_reported(model, ROW_PUBLIC_IP)
+            } else {
+                model.set_text(ROW_PUBLIC_IP, &text)
+            };
+        }
+        PublicIpState::Failed(reason) => {
+            let mut tip = String::new();
+            let _ = model
+                .text(KEY_IP_FAILED_TOOLTIP)
+                .write(&mut tip, &[&&**reason]);
+            let tip = SharedString::from(tip);
+            let same = model.rows.iter().any(|r| {
+                r.label == ROW_PUBLIC_IP
+                    && r.validity == Validity::Failed
+                    && r.tooltip.as_ref() == Some(&tip)
+            });
+            if !same {
+                model.set_fallback(ROW_PUBLIC_IP, Validity::Failed, Fallback::Unavailable, None);
+                model.set_tooltip(ROW_PUBLIC_IP, Some(tip));
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// One network interface's device page.
 pub struct NetPage {
     key: DeviceKey,
@@ -928,7 +1041,10 @@ pub struct NetPage {
     settings_versions: [u64; 4],
     /// Valid sysfs speed in bits per second.
     link_speed_bps: Option<f32>,
-    // E25-021: public_ip: PublicIpRowState (added by o55.22 as a chain edit, R-262)
+    /// The Public IP row's fetch state, from `Snapshot.inventory` (INVENTORY).
+    public_ip: PublicIpRowState,
+    /// The Fetch button's focus handle, after `unit_focus` in `focus_order`.
+    fetch_focus: FocusHandle,
     header: (SharedString, SharedString),
     /// `UiMetrics.style_version` the chart colours were built for.
     style_version: u64,
@@ -1023,6 +1139,8 @@ impl NetPage {
             focus: cx.focus_handle(),
             unit_focus: cx.focus_handle(),
             link_focus: Rc::from(Vec::new()),
+            public_ip: PublicIpRowState::default(),
+            fetch_focus: cx.focus_handle(),
             signal: None,
             settings_desktop,
             settings_focus: cx.focus_handle(),
@@ -1157,6 +1275,9 @@ impl NetPage {
         {
             cx.notify();
         }
+        if mask.contains(ComponentMask::INVENTORY) && self.sync_public_ip(snap, false) {
+            cx.notify();
+        }
         if mask.contains(ComponentMask::HEALTH) {
             let state = health_state(snap);
             self.throughput.update(cx, |v, cx| v.set_state(state, cx));
@@ -1171,6 +1292,66 @@ impl NetPage {
                 cx.notify();
             }
         }
+    }
+
+    /// Whether the Public IP row has a Fetch button, and if so whether it is loading. `None` once
+    /// a result is shown or while the row is hidden.
+    fn fetch_button(&self) -> Option<bool> {
+        let shown = self
+            .details
+            .rows
+            .iter()
+            .any(|r| r.label == ROW_PUBLIC_IP && !r.hidden);
+        if !shown {
+            return None;
+        }
+        match self.public_ip.state {
+            PublicIpState::NotFetched | PublicIpState::Failed(_) => Some(false),
+            PublicIpState::Fetching => Some(true),
+            PublicIpState::Fetched { .. } => None,
+        }
+    }
+
+    /// Brings the Public IP row up to date with `snap`. It formats again only when the state
+    /// changed or `force` (new strings). True when the row changed.
+    fn sync_public_ip(&mut self, snap: &Snapshot, force: bool) -> bool {
+        let state = &snap.inventory.public_ip;
+        let hidden = self
+            .details
+            .rows
+            .iter()
+            .any(|r| r.label == ROW_PUBLIC_IP && r.hidden);
+        if !hidden && !force && self.public_ip.state == *state {
+            return false;
+        }
+        self.public_ip.state = state.clone();
+        update_net_public_ip(&mut self.details, state)
+    }
+
+    /// Asks for the public IP fetch. The first request opens the notice (APP-056); the command
+    /// goes out at once when the notice was accepted. The row follows the engine's state.
+    fn on_fetch_public_ip(
+        &mut self,
+        a: &PerfFetchPublicIp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if a.key != self.key {
+            cx.propagate();
+            return;
+        }
+        request_public_ip_fetch(window, cx, |_, cx| {
+            let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+                return;
+            };
+            match engine.send(Command::Device(DeviceCommand::FetchPublicIp)) {
+                Ok(()) => {}
+                Err(CommandError::Busy) => {
+                    tracing::warn!(target: "tasklens::ui", "public IP fetch not queued: busy");
+                }
+                Err(_) => tracing::warn!(target: "tasklens::ui", "public IP fetch not queued"),
+            }
+        });
     }
 
     /// A link click on visible Details row `n`: the Display unit value opens its menu under
@@ -1321,6 +1502,7 @@ impl NetPage {
         // The Display unit text and tooltip come from the new strings.
         self.details.refresh_strings(cx);
         self.sync_details(&snap);
+        self.sync_public_ip(&snap, true);
         cx.notify();
     }
 }
@@ -1406,6 +1588,9 @@ impl DevicePage for NetPage {
     /// page's block controls.
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
         let mut out = smallvec![self.unit_focus.clone()];
+        if self.fetch_button().is_some_and(|loading| !loading) {
+            out.push(self.fetch_focus.clone());
+        }
         if self.settings_desktop.is_some() {
             out.push(self.settings_focus.clone());
         }
@@ -1442,6 +1627,32 @@ impl DevicePage for NetPage {
                 .child(signal_icon(pct, &theme, m.ui_scale))
                 .into_any_element();
             Some((width, icon))
+        }))
+    }
+
+    /// The Fetch button after the Public IP value, until a result is shown.
+    fn details_value_suffix(&self) -> Option<DetailsValuePrefix> {
+        let loading = self.fetch_button()?;
+        let at = self
+            .details
+            .rows
+            .iter()
+            .filter(|r| !r.hidden)
+            .position(|r| r.label == ROW_PUBLIC_IP)?;
+        let (key, focus) = (self.key.clone(), self.fetch_focus.clone());
+        Some(Rc::new(move |n, _, cx| {
+            if n != at {
+                return None;
+            }
+            let width = px(FETCH_BUTTON_W * metrics(cx).ui_scale);
+            let button = TlButton::new("perf-net-public-ip-fetch", TlButtonKind::Secondary)
+                .size(TlButtonSize::Sm)
+                .label(tr(cx, KEY_IP_FETCH))
+                .action(Box::new(PerfFetchPublicIp { key: key.clone() }))
+                .focus_handle(focus.clone())
+                .loading(loading)
+                .disabled(loading);
+            Some((width, button.into_any_element()))
         }))
     }
 
@@ -1482,6 +1693,7 @@ impl Render for NetPage {
             .size_full()
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_open_network_settings))
+            .on_action(cx.listener(Self::on_fetch_public_ip))
             .child(
                 DevicePageFrame {
                     page: self,
