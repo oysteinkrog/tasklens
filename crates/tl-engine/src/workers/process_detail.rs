@@ -263,8 +263,8 @@ struct GeneralRead {
     location: Total<ExeLocation>,
     cwd: Total<Arc<str>>,
     root: Total<Arc<str>>,
-    cgroup: Option<Arc<str>>,
-    unit: Option<UnitRef>,
+    cgroup: Total<Option<Arc<str>>>,
+    unit: Total<Option<UnitRef>>,
     /// The matched desktop id, set only when the process table would show it as an App.
     app_id: Option<Arc<str>>,
     cmdline: Total<Arc<str>>,
@@ -1753,13 +1753,14 @@ fn read_general(
         }
     };
 
-    // Cgroup and systemd unit from the `0::` line.
-    let (cgroup_path, cgroup_denied) =
+    // Cgroup and systemd unit from the `0::` line. A file over the limit is not parsed.
+    let (cgroup_path, cgroup_validity) =
         match read_at(dir, "cgroup", &mut bufs.small, SMALL_FILE_LIMIT) {
-            Ok((_, false)) => (parse_cgroup_file(&bufs.small), false),
-            Ok((_, true)) => (None, false),
-            Err(e) => (None, matches!(e, CollectError::PermissionDenied)),
+            Ok((_, false)) => (parse_cgroup_file(&bufs.small), Validity::Valid),
+            Ok((_, true)) => (None, Validity::Failed),
+            Err(e) => (None, optional_validity(&e)),
         };
+    let cgroup_denied = cgroup_validity == Validity::Restricted;
     let (cgroup, unit) = match &cgroup_path {
         Some(path) => {
             let unit = path.unit.as_deref().map(|name| {
@@ -1772,9 +1773,12 @@ fn read_general(
                     name: Arc::from(bufs.text.as_str()),
                 }
             });
-            (Some(Arc::from(format!("/{}", path.rel))), unit)
+            (
+                valid(Some(Arc::from(format!("/{}", path.rel)))),
+                valid(unit),
+            )
         }
-        None => (None, None),
+        None => (total(None, cgroup_validity), total(None, cgroup_validity)),
     };
 
     // App ID: the desktop match and App class of the process sweep's `AppResolver`. It needs
@@ -1962,8 +1966,8 @@ fn empty_general(validity: Validity) -> GeneralDetail {
         description: text(),
         cwd: text(),
         root: text(),
-        cgroup: None,
-        unit: None,
+        cgroup: total(None, validity),
+        unit: total(None, validity),
         app_id: None,
         cmdline: text(),
         hashes: HashState::Pending,
@@ -3186,18 +3190,19 @@ mod tests {
         assert_eq!(&*g.cwd.value, "/home/user1");
         assert_eq!(g.cwd.validity, Validity::Valid);
         assert_eq!(&*g.root.value, "/");
+        assert_eq!(g.cgroup.validity, Validity::Valid);
         assert_eq!(
-            g.cgroup.as_deref(),
+            g.cgroup.value.as_deref(),
             Some(
                 "/user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@3a1b.service"
             )
         );
         assert_eq!(
             g.unit,
-            Some(UnitRef {
+            valid(Some(UnitRef {
                 manager: Manager::User,
                 name: Arc::from("app-firefox@3a1b.service"),
-            })
+            }))
         );
         assert_eq!(g.app_id.as_deref(), Some("firefox"));
         assert_eq!(&*g.cmdline.value, "firefox -P default");
@@ -3280,7 +3285,7 @@ mod tests {
             return;
         }
         let (tmp, src) = general_src();
-        for file in ["io", "personality", "cmdline"] {
+        for file in ["io", "personality", "cmdline", "cgroup"] {
             let path = tmp.path().join("proc/4201").join(file);
             fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
         }
@@ -3292,6 +3297,8 @@ mod tests {
         assert_eq!(g.disk_read_bytes.validity, Validity::Restricted);
         assert_eq!(g.aslr_disabled_for_process.validity, Validity::Restricted);
         assert_eq!(g.cmdline.validity, Validity::Restricted);
+        assert_eq!(g.cgroup, total(None, Validity::Restricted));
+        assert_eq!(g.unit, total(None, Validity::Restricted));
         assert_eq!(g.uids.validity, Validity::Valid);
         assert_eq!(g.cpu_time_ms.validity, Validity::Valid);
     }
@@ -3340,11 +3347,13 @@ mod tests {
         assert_eq!(&*g.exe.value, "/usr/lib/firefox/firefox");
     }
 
-    /// A missing `autogroup` or `randomize_va_space` is "Not reported", not `Restricted`.
+    /// A missing `autogroup`, `randomize_va_space` or `cgroup` is "Not reported", not
+    /// `Restricted`.
     #[test]
     fn general_absent_autogroup_and_aslr() {
         let (tmp, src) = general_src();
         fs::remove_file(tmp.path().join("proc/4201/autogroup")).expect("remove autogroup");
+        fs::remove_file(tmp.path().join("proc/4201/cgroup")).expect("remove cgroup");
         fs::remove_file(tmp.path().join("proc/sys/kernel/randomize_va_space"))
             .expect("remove aslr");
         let d = tabs(&[(a(), DetailTab::General)]);
@@ -3352,6 +3361,8 @@ mod tests {
         let (g, _) = general(&out);
         assert_eq!(g.autogroup.validity, Validity::Unsupported);
         assert_eq!(g.aslr_system.validity, Validity::Unsupported);
+        assert_eq!(g.cgroup, total(None, Validity::Unsupported));
+        assert_eq!(g.unit, total(None, Validity::Unsupported));
     }
 
     /// The App ID is the desktop match of the process sweep: the unit app id, the launcher

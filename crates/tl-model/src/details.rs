@@ -236,8 +236,10 @@ pub struct GeneralDetail {
     pub description: Total<Arc<str>>,
     pub cwd: Total<Arc<str>>,
     pub root: Total<Arc<str>>,
-    pub cgroup: Option<Arc<str>>,
-    pub unit: Option<UnitRef>,
+    /// `Valid(None)` when there is no cgroup v2 path; `Restricted` on EACCES.
+    pub cgroup: Total<Option<Arc<str>>>,
+    /// `Valid(None)` when the cgroup path names no unit. It has the validity of `cgroup`.
+    pub unit: Total<Option<UnitRef>>,
     pub app_id: Option<Arc<str>>,
     /// Full command line, up to 32 KiB (R-008). Sanitized by tl-collect (ADR-015); never log it.
     pub cmdline: Total<Arc<str>>,
