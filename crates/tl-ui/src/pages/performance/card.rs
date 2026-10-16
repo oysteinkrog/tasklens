@@ -15,10 +15,10 @@ use std::time::Duration;
 use gpui_kit::canvas;
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    AnyElement, App, AsyncApp, Context, CursorStyle, ElementId, Entity, EntityId, Font,
-    FontWeight, Global, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Task, TextRun,
-    WeakEntity, Window, black, div, font, px,
+    AnyElement, App, AsyncApp, Context, CursorStyle, ElementId, Entity, EntityId, Font, FontWeight,
+    Global, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Task,
+    TextRun, WeakEntity, Window, black, div, font, px,
 };
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};

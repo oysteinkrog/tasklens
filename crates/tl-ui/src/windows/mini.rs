@@ -21,8 +21,8 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels, Render,
     ScrollHandle, Size, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowKind, WindowOptions, div, px, size,
+    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions, div, px, size,
 };
 use smallvec::SmallVec;
 use tl_model::demand::Demand;
@@ -165,13 +165,11 @@ impl MiniWindow {
         // when these do.
         let mut subs = SmallVec::new();
         subs.push(cx.observe(&sidebar, |this, _, cx| this.sync(cx)));
-        subs.push(
-            cx.subscribe(&hub, |this, _, ev: &SnapshotChanged, cx| {
-                if ev.mask.intersects(TEXT_MASK) {
-                    this.sync(cx);
-                }
-            }),
-        );
+        subs.push(cx.subscribe(&hub, |this, _, ev: &SnapshotChanged, cx| {
+            if ev.mask.intersects(TEXT_MASK) {
+                this.sync(cx);
+            }
+        }));
         subs.push(cx.observe_global::<TlSettings>(Self::sync));
         subs.push(cx.observe_global::<Strings>(Self::sync));
         subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
@@ -262,9 +260,7 @@ impl MiniWindow {
         let mut old = std::mem::take(&mut self.cards);
         let mut listed = old.len() != wanted.len();
         for (key, chart, lines) in wanted {
-            let found = old
-                .iter()
-                .position(|c| c.key == key && c.chart == chart);
+            let found = old.iter().position(|c| c.key == key && c.chart == chart);
             let card = match found {
                 Some(p) => {
                     listed |= p != 0;
@@ -313,8 +309,7 @@ impl MiniWindow {
 
     /// A new theme or UI scale: the cards take the new colours and width.
     fn sync_style(&mut self, cx: &mut Context<Self>) {
-        self.card_width
-            .set(px(MINI_CARD_W * metrics(cx).ui_scale));
+        self.card_width.set(px(MINI_CARD_W * metrics(cx).ui_scale));
         for card in &self.cards {
             card.view.update(cx, CardView::invalidate_style);
         }
