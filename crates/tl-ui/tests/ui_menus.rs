@@ -1105,8 +1105,8 @@ fn settings_menu_tab_switch_slider(cx: &mut TestAppContext) {
     assert!(shapes(r.cx).contains(&"item:Tab Switch 300 ms".to_owned()));
     assert_eq!(open_menu(r.cx), Some(MenuId::Settings));
 
-    // Refresh is highlighted; eight Downs reach Tab Switch, Right steps by 10.
-    keys(r.cx, "down down down down down down down down right");
+    // Refresh is highlighted; nine Downs reach Tab Switch, Right steps by 10.
+    keys(r.cx, "down down down down down down down down down right");
     assert_eq!(settings(r.cx).motion.tab_switch_ms, 310);
     assert_eq!(r.persists.get(), before + 2);
 }
@@ -1739,10 +1739,10 @@ fn start_minimized_disabled(cx: &mut TestAppContext) {
         "disabled and indented by 16 at 100%"
     );
     assert_ne!(row.selected(), Some(true));
-    // Fourteen Downs from Refresh pass "Start at login" and skip the disabled rows.
+    // Fifteen Downs from Refresh pass "Start at login" and skip the disabled rows.
     keys(
         r.cx,
-        "down down down down down down down down down down down down down down",
+        "down down down down down down down down down down down down down down down",
     );
     assert_eq!(
         entries(r.cx)
