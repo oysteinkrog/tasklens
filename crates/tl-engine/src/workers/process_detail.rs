@@ -41,7 +41,9 @@
 //! Affinity (UI-PWN-021): while `affinity_targets` is not empty, a sample at least
 //! `AFFINITY_PERIOD` after the last affinity read sends `DetailsUpdate::Affinity` with the
 //! `Cpus_allowed_list` mask and the cgroup's `cpuset.cpus.effective` of every target. A gone
-//! process is left out; an unread cpuset gives an empty limit, which means no limit.
+//! process is left out; an unread cpuset gives an empty limit, which means no limit. Beside tabs
+//! the period divides both the interval and 1 s when it can, so a 1500 ms interval samples every
+//! 500 ms and affinity still reads at 1 Hz.
 //!
 //! Per-key errors become `Validity`, never `WorkerError`. Hash failures are a `HashState`.
 //! Environment values, command lines and paths are never logged (ADR-015).
@@ -184,6 +186,28 @@ fn tab_interval(s: &EngineSettings) -> Duration {
 fn shared_parts(interval: Duration) -> u32 {
     let parts = interval.as_nanos().div_ceil(PSS_PERIOD.as_nanos()).max(1);
     u32::try_from(parts).unwrap_or(u32::MAX)
+}
+
+/// The period when affinity runs beside tabs: the largest one that divides both the interval and
+/// `AFFINITY_PERIOD`, with the samples per tab read. Tabs then read exactly at the interval and
+/// affinity exactly at 1 Hz. `None` when that period is under `MIN_INTERVAL_MS` (an interval of
+/// 1100 ms, say), so the worker never samples faster than tabs alone may.
+fn exact_shared_period(interval: Duration) -> Option<(Duration, u32)> {
+    let interval_ms = u64::try_from(interval.as_millis()).ok()?;
+    let (mut a, mut b) = (
+        interval_ms,
+        u64::try_from(AFFINITY_PERIOD.as_millis()).ok()?,
+    );
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    if a < u64::from(MIN_INTERVAL_MS) {
+        return None;
+    }
+    Some((
+        Duration::from_millis(a),
+        u32::try_from(interval_ms / a).ok()?,
+    ))
 }
 
 /// `d` in nanoseconds.
@@ -880,8 +904,9 @@ impl Source for ProcessDetailSource {
     /// PSS and affinity alone run at 1 Hz and tabs alone at `processes.interval_ms`. With both,
     /// the period splits the interval into `shared_parts` equal parts of at most 1 s: tabs read
     /// exactly at the interval, and PSS and affinity each at the first sample 1 s or more after
-    /// their last read. The period
-    /// depends only on the demand and the settings, so it changes only when they do.
+    /// their last read. With affinity on, `exact_shared_period` comes first, so affinity reads at
+    /// 1 Hz and not every two 750 ms parts of a 1500 ms interval. The period depends only on the
+    /// demand and the settings, so it changes only when they do.
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         // A forced `RefreshNow` samples even without a period, so hidden columns must leave
         // no keys behind.
@@ -942,8 +967,14 @@ impl Source for ProcessDetailSource {
         let interval = tab_interval(s);
         let (period, tabs_every) = match (fast, tabs) {
             (true, true) => {
-                let parts = shared_parts(interval);
-                (Some(interval / parts), parts)
+                let exact = (!affinity.is_empty())
+                    .then(|| exact_shared_period(interval))
+                    .flatten();
+                let (period, parts) = exact.unwrap_or_else(|| {
+                    let parts = shared_parts(interval);
+                    (interval / parts, parts)
+                });
+                (Some(period), parts)
             }
             (true, false) => (Some(PSS_PERIOD), 1),
             (false, true) => (Some(interval), 1),
@@ -3893,6 +3924,48 @@ mod tests {
             src.period(&both, &every_ms(2000)),
             Some(Duration::from_secs(1))
         );
+    }
+
+    /// E10-005 AC 3 with a Properties tab open: at a 1500 ms interval the worker samples every
+    /// 500 ms, tabs read every 1500 ms and affinity once a second. An interval with no shared
+    /// period of 250 ms or more keeps the split into parts of at most 1 s.
+    #[test]
+    fn affinity_1hz_beside_tabs() {
+        let (_tmp, cfg, b) = affinity_root();
+        let mut d = tabs(&[(a(), DetailTab::Threads)]);
+        d.affinity_targets = Arc::from([a(), b]);
+        let s = every_ms(1500);
+        let mut src = ProcessDetailSource::new(Arc::clone(&cfg));
+        assert_eq!(src.period(&d, &s), Some(Duration::from_millis(500)));
+        let mut updates = Vec::new();
+        let mut tab_at = Vec::new();
+        // Six samples cover 3 s.
+        for t in (0..6).map(|n| n * 500) {
+            let before = src.tab_reads(DetailTab::Threads);
+            let (next, out) = affinity_step(src, &d, &s, t);
+            src = next;
+            if src.tab_reads(DetailTab::Threads) > before {
+                tab_at.push(t);
+            }
+            updates.extend(out);
+        }
+        assert_eq!(updates.len(), 3);
+        assert!(updates.iter().all(|e| e.len() == 2));
+        assert_eq!(updates[0][1].1.cpuset_limit, cpus("16-23"));
+        assert_eq!(tab_at, vec![0, 1500]);
+        for (interval, period) in [(750, 250), (2500, 500), (250, 250), (1100, 550)] {
+            let src = ProcessDetailSource::new(Arc::clone(&cfg));
+            assert_eq!(
+                src.period(&d, &every_ms(interval)),
+                Some(Duration::from_millis(period)),
+                "{interval}"
+            );
+        }
+        // PSS beside tabs without a dialog keeps its two 750 ms parts.
+        let mut pss = tabs(&[(a(), DetailTab::Threads)]);
+        pss.process_columns.insert(ColumnId::Pss);
+        pss.detail_keys = Arc::from([a()]);
+        assert_eq!(src.period(&pss, &s), Some(Duration::from_millis(750)));
     }
 
     /// A gone process is left out; a cgroup without any cpuset file gives no limit.
