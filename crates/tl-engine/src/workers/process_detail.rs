@@ -10,17 +10,22 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
+use asupersync::Cx;
+use asupersync::supervision::ManagedGeneration;
 use tl_collect::proc::smaps::{PssReader, RollupRead};
 use tl_model::demand::Demand;
+use tl_model::details::ScanId;
 use tl_model::health::SourceId;
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::EngineSettings;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
-use crate::config::EngineConfig;
-use crate::source::Source;
+use crate::config::{EngineConfig, EngineMode};
+use crate::source::{self, Source, WorkerCommand, WorkerIo};
+use crate::supervise::WorkerFactory;
 use crate::update::{DetailsUpdate, PssEntry, SourceUpdate};
+use crate::workers::WorkerSpec;
 
 /// PSS and USS are read once a second (ADR-008).
 pub const PSS_PERIOD: Duration = Duration::from_secs(1);
@@ -38,6 +43,28 @@ pub struct ProcessDetailSource {
     /// Reused every sample.
     buf: Vec<u8>,
     reads: Vec<(ProcessKey, RollupRead)>,
+    /// Commands the worker owns, drained at the start of every sample. E10-004 to E10-006 and
+    /// E10-A3 add their handlers; until then they are logged by kind and dropped.
+    pending: Vec<WorkerCommand>,
+}
+
+/// Only in full mode: the low-memory build has no detail panels (ADR-004).
+pub fn spec() -> WorkerSpec {
+    WorkerSpec {
+        id: SourceId::ProcessDetail,
+        name: "process_detail",
+        modes: &[EngineMode::Full],
+        factory,
+    }
+}
+
+/// `ProcessDetailSource::new` does no I/O, so it is built in place.
+pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let io = io.clone();
+        let cfg = cfg.clone();
+        async move { source::run(cx, io, ProcessDetailSource::new(cfg)).await }
+    })
 }
 
 impl ProcessDetailSource {
@@ -48,7 +75,13 @@ impl ProcessDetailSource {
             keys: RefCell::new(Arc::from([])),
             buf: Vec::new(),
             reads: Vec::new(),
+            pending: Vec::new(),
         }
+    }
+
+    /// Commands waiting for the next sample.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 
     /// Number of cached `smaps_rollup` fds (at most 128).
@@ -74,7 +107,30 @@ impl Source for ProcessDetailSource {
         (shown && !d.detail_keys.is_empty()).then_some(PSS_PERIOD)
     }
 
+    fn command(&mut self, cmd: &WorkerCommand) -> bool {
+        match cmd {
+            WorkerCommand::DetailRefresh { .. }
+            | WorkerCommand::ComputeHashes(_)
+            | WorkerCommand::VerifyPackage(_)
+            | WorkerCommand::StringScan { .. }
+            | WorkerCommand::CancelStringScan(_)
+            | WorkerCommand::HandleSearch { .. }
+            | WorkerCommand::CancelHandleSearch(_) => {
+                self.pending.push(cmd.clone());
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn sample(mut self) -> (Self, SourceUpdate) {
+        for cmd in self.pending.drain(..) {
+            // Kind only: the arguments can hold search patterns.
+            tracing::debug!(
+                kind = cmd.kind(),
+                "process detail command has no handler yet"
+            );
+        }
         let keys = self.keys.borrow().clone();
         self.pss
             .read(&self.cfg.sys_root, &keys, &mut self.buf, &mut self.reads);
@@ -174,6 +230,23 @@ mod tests {
         src.period(d, &EngineSettings::default());
         let (src, update) = src.sample();
         (src, entries(update))
+    }
+
+    #[test]
+    fn command_routing() {
+        let (_tmp, cfg, keys) = fake_procs(1);
+        let mut src = ProcessDetailSource::new(cfg);
+        assert!(src.command(&WorkerCommand::ComputeHashes(keys[0])));
+        assert_eq!(src.pending_len(), 1);
+        assert!(src.command(&WorkerCommand::CancelStringScan(ScanId(1))));
+        assert!(src.command(&WorkerCommand::VerifyPackage(keys[0])));
+        assert_eq!(src.pending_len(), 3);
+        assert!(!src.command(&WorkerCommand::RefreshNow));
+        assert!(!src.command(&WorkerCommand::Reprobe));
+        assert!(!src.command(&WorkerCommand::SetupStatus));
+        assert_eq!(src.pending_len(), 3);
+        let (src, _) = src.sample();
+        assert_eq!(src.pending_len(), 0);
     }
 
     #[test]

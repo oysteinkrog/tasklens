@@ -56,6 +56,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         sensors::spec(),
         cpu::spec(),
         processes::spec(),
+        process_detail::spec(),
         gpu_nvidia::spec(),
         dbus_systemd::spec_system(),
         dbus_systemd::spec_user(),
