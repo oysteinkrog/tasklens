@@ -94,6 +94,7 @@ use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::pick::{self, PickWatch};
 use crate::pages::processes::toolbar::ProcessesToolbar;
+use crate::pages::services::ServicesPage;
 use crate::pages::startup::StartupPage;
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::table::actions::TABLE_CONTEXT;
@@ -282,6 +283,10 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
                 cx.notify();
             })
             .detach();
+            PageSlot::new(page, cx)
+        }),
+        Tab::Services => Some(|window, cx| {
+            let page = cx.new(|cx| ServicesPage::new(window, cx));
             PageSlot::new(page, cx)
         }),
         Tab::Startup => Some(|window, cx| {

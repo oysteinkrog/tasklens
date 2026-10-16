@@ -3910,3 +3910,105 @@ mod page {
         assert_eq!(page_n.get(), 0, "the page itself does not notify");
     }
 }
+
+/// The shell builds `ServicesPage` on its first visit and shows its toolbar and status text
+/// (tasklens-hk6.20).
+mod main_window {
+    use super::*;
+    use tl_model::command::Tab;
+    use tl_model::settings::{Settings, StartTab};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::pages::services::ServicesPage;
+    use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+
+    fn boot(cx: &mut TestAppContext) -> (VisualTestContext, Entity<MainWindow>) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let mut settings = Settings::default();
+        settings.general.start_tab = StartTab::Processes;
+        let init = UiInit {
+            settings,
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| TasklensUi::init(cx, client, init));
+        cx.run_until_parked();
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        (vcx, main)
+    }
+
+    fn select(vcx: &mut VisualTestContext, main: &Entity<MainWindow>, tab: Tab) {
+        main.update_in(vcx, |m, window, cx| m.select_tab(tab, window, cx));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn toolbar_shape(vcx: &mut VisualTestContext) -> (f32, bool, bool) {
+        let width = vcx
+            .debug_bounds("Toolbar")
+            .map(|b| f32::from(b.size.width))
+            .expect("the toolbar draws");
+        (
+            width,
+            vcx.debug_bounds("TlShield").is_some(),
+            vcx.debug_bounds("TlButton-picker").is_some(),
+        )
+    }
+
+    #[gpui_kit::test]
+    fn main_window_creates_services_page_lazily(cx: &mut TestAppContext) {
+        let (mut vcx, main) = boot(cx);
+        let page = |vcx: &mut VisualTestContext| {
+            vcx.read_entity(&main, |m, _| m.page_entity::<ServicesPage>(Tab::Services))
+        };
+        assert!(page(&mut vcx).is_none(), "no page before the first visit");
+        select(&mut vcx, &main, Tab::Services);
+        let first = page(&mut vcx).expect("the Services tab builds a page");
+        assert_eq!(vcx.read_entity(&main, |m, _| m.active_tab()), Tab::Services);
+        select(&mut vcx, &main, Tab::Processes);
+        select(&mut vcx, &main, Tab::Services);
+        let again = page(&mut vcx).expect("the page is kept");
+        assert_eq!(first.entity_id(), again.entity_id());
+    }
+
+    #[gpui_kit::test]
+    fn services_toolbar_slots(cx: &mut TestAppContext) {
+        let (mut vcx, main) = boot(cx);
+        select(&mut vcx, &main, Tab::Processes);
+        let processes = toolbar_shape(&mut vcx);
+        select(&mut vcx, &main, Tab::Information);
+        let information = toolbar_shape(&mut vcx);
+        select(&mut vcx, &main, Tab::Services);
+        let services = toolbar_shape(&mut vcx);
+        assert_eq!(services, information, "the default slots 1 and 4");
+        assert!(services.1 && services.2);
+        assert!(
+            services.0 < processes.0,
+            "no Processes page buttons on Services"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn services_status_text_in_chip(cx: &mut TestAppContext) {
+        let (mut vcx, main) = boot(cx);
+        select(&mut vcx, &main, Tab::Services);
+        let page = vcx
+            .read_entity(&main, |m, _| m.page_entity::<ServicesPage>(Tab::Services))
+            .expect("Services built");
+        let mut expected = String::new();
+        vcx.read_entity(&page, |p, _| p.status_text(&mut expected));
+        assert!(!expected.is_empty(), "the loading text shows at first");
+        let chip = vcx.read_entity(&main, |m, _| m.status_chip().clone());
+        let drawn = vcx.read_entity(&chip, |c, _| c.drawn_text());
+        assert_eq!(drawn, expected);
+    }
+}

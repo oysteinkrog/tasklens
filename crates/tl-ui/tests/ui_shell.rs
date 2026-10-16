@@ -2785,20 +2785,6 @@ mod main_window {
     }
 
     #[gpui_kit::test]
-    fn startup_tab_unbuilt_falls_back(cx: &mut TestAppContext) {
-        let mut vcx = rig(
-            cx,
-            Opts {
-                pages: &[Tab::Processes],
-                // Services has no page arm yet.
-                start_tab: StartTab::Services,
-                ..Opts::default()
-            },
-        );
-        assert_eq!(active(&mut vcx), Tab::Processes);
-    }
-
-    #[gpui_kit::test]
     fn tabstrip_keys(cx: &mut TestAppContext) {
         let mut vcx = rig(cx, Opts::default());
         vcx.simulate_keystrokes("ctrl-3");
@@ -2815,7 +2801,7 @@ mod main_window {
     }
 
     #[gpui_kit::test]
-    fn tab_wraps_and_skips_unbuilt(cx_a: &mut TestAppContext, cx_b: &mut TestAppContext) {
+    fn tab_wraps(cx_a: &mut TestAppContext, cx_b: &mut TestAppContext) {
         let mut vcx = rig(
             cx_a,
             Opts {
@@ -2840,19 +2826,15 @@ mod main_window {
             },
         );
         act(&mut vcx, NextTab);
-        assert_eq!(active(&mut vcx), Tab::Startup, "Services is skipped");
+        assert_eq!(active(&mut vcx), Tab::Services);
+        act(&mut vcx, NextTab);
+        assert_eq!(active(&mut vcx), Tab::Startup);
         act(&mut vcx, NextTab);
         assert_eq!(active(&mut vcx), Tab::Connections);
         act(&mut vcx, NextTab);
         assert_eq!(active(&mut vcx), Tab::Information);
         act(&mut vcx, NextTab);
         assert_eq!(active(&mut vcx), Tab::Processes);
-        act(&mut vcx, SelectTab(2));
-        assert_eq!(
-            active(&mut vcx),
-            Tab::Processes,
-            "an unbuilt tab is not selected"
-        );
         act(&mut vcx, SelectTab(9));
         assert_eq!(
             active(&mut vcx),
