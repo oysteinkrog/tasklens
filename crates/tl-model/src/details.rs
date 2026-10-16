@@ -664,7 +664,7 @@ pub enum AppKind {
 }
 
 /// The General tab of an app group.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppGeneralDetail {
     pub name: Arc<str>,
     pub kind: AppKind,

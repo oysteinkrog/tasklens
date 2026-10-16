@@ -8,6 +8,7 @@
 //! Privacy: never log record contents from here. Debug logs carry counts only (ADR-015).
 
 // Chain-edit lines added by later beads: apply (E09-007, 8q0.9); suspend (E09-008, 8q0.10).
+pub mod app_detail;
 pub mod apply;
 pub mod devices;
 pub mod health;

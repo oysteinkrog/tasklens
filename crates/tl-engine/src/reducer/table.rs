@@ -1456,7 +1456,7 @@ fn sort_items(input: &TableInput<'_>, groups: &[GroupRow], items: &mut [Item], s
 /// Production does not feed this yet: the processes and lowmem workers send empty
 /// `unit_stats`, so unit rows have no cgroup sample and `frozen` stays false. See
 /// tasklens-8q0.42.
-fn unit_stat<'a>(stats: &'a [CgroupStats], unit: &UnitRef) -> Option<&'a CgroupStats> {
+pub(crate) fn unit_stat<'a>(stats: &'a [CgroupStats], unit: &UnitRef) -> Option<&'a CgroupStats> {
     stats.iter().find(|s| {
         let path: &str = &s.cgroup.rel_path;
         path.rsplit('/').next() == Some(&*unit.name)

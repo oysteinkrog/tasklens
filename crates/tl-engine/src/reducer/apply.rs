@@ -14,11 +14,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::actions::{ActionEvent, ActionState, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
+use tl_model::details::{DetailTab, DetailTarget};
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::history::HistoryView;
-use tl_model::ids::{ColumnId, DeviceIdx, MetricId, ProcessKey, SeriesId};
+use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
@@ -783,6 +784,36 @@ impl Reducer {
         if let Some(demand) = self.demand_rx.as_ref().map(|rx| rx.borrow_and_clone()) {
             self.details.retain(&demand);
         }
+        self.refresh_app_details();
+    }
+
+    /// Builds the App General tab of each `DetailTarget::App` in `Demand.details` from the
+    /// process snapshot (tasklens-dwy.12).
+    fn refresh_app_details(&mut self) {
+        let Some(demand) = self.demand_rx.as_ref().map(|rx| rx.borrow_and_clone()) else {
+            return;
+        };
+        let mut groups: Vec<GroupKey> = demand
+            .details
+            .iter()
+            .filter(|d| d.tab == DetailTab::AppGeneral)
+            .filter_map(|d| match d.target {
+                DetailTarget::App(key) => Some(key),
+                DetailTarget::Process(_) => None,
+            })
+            .collect();
+        if groups.is_empty() {
+            return;
+        }
+        groups.sort_unstable();
+        groups.dedup();
+        super::app_detail::refresh(
+            &mut self.details,
+            &groups,
+            &self.components.processes,
+            self.processes.unit_stats(),
+            &self.unit_names,
+        );
     }
 
     /// Sets the header validity of the component that `id` alone feeds (R-155 item 4). Sources
@@ -1618,6 +1649,7 @@ impl Reducer {
         };
         self.components.table = Arc::new(view);
         self.mark(ComponentMask::TABLE);
+        self.refresh_app_details();
     }
 
     /// Merges one manager's update into `services`: the other manager's units and details stay,
