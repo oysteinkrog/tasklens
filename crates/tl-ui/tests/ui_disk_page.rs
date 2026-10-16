@@ -524,6 +524,7 @@ fn gap(start: u64, size: u64) -> PartitionRow {
 
 fn publish_partitions(r: &mut Rig, kind: &str, rows: Vec<PartitionRow>) {
     r.engine.publish_with(|s| {
+        Arc::make_mut(&mut s.device_details).header.version += 1;
         let disks = Arc::make_mut(&mut s.device_details).disks.to_vec();
         let disks: Vec<_> = disks
             .into_iter()
@@ -537,6 +538,7 @@ fn publish_partitions(r: &mut Rig, kind: &str, rows: Vec<PartitionRow>) {
             .collect();
         Arc::make_mut(&mut s.device_details).disks = Arc::from(disks);
     });
+    draw(r.vcx);
     draw(r.vcx);
 }
 
