@@ -23,9 +23,9 @@
 //! `DetailOpened` for every tab that opens. For a tab marked `open_pending` that notice only
 //! resends the payload, because the worker already read the tab for this open. For any other
 //! tab it drops the state and reads at once, which sends the tab again. A user `DetailRefresh`
-//! always drops the state and reads at once; `open_pending` never applies to it. Tab updates go out
-//! through `take_extra`. When PSS is not due the sample itself is the last tab update or
-//! `Health { Running }`, never an empty `Pss`.
+//! always drops the state and reads at once; `open_pending` never applies to it, and it keeps the
+//! flag for the notice still to come. Tab updates go out through `take_extra`. When PSS is not
+//! due the sample itself is the last tab update or `Health { Running }`, never an empty `Pss`.
 //!
 //! Per-key errors become `Validity`, never `WorkerError`. Environment values, command lines and
 //! paths are never logged (ADR-015).
@@ -447,10 +447,15 @@ impl ProcessDetailSource {
                     }
                 }
                 // A user refresh, or a tab that closed and opened again between two polls. The
-                // reducer may have dropped the payload, so the tab is read and sent again. This
-                // also drops `open_pending`, so a later notice for the same open reads again
-                // instead of resending.
-                Some(state) => *state = TabState::default(),
+                // reducer may have dropped the payload, so the tab is read and sent again. A user
+                // refresh keeps `open_pending`, so the notice for this open that comes after it
+                // only resends instead of reading a third time.
+                Some(state) => {
+                    *state = TabState {
+                        open_pending: !opened && state.open_pending,
+                        ..TabState::default()
+                    }
+                }
                 // The tab is not in the demand this worker saw yet. Its first read serves this
                 // command, so the state is made without `open_pending`.
                 None => *slot = Some(TabState::default()),
@@ -2044,6 +2049,36 @@ mod tests {
         let (src, out, _) = step(src, &d, &s, 500);
         assert_eq!(src.tab_reads(DetailTab::Environment), 2);
         assert_eq!(env_vars(&out[0].1), vec![("NEW".into(), "1".into())]);
+    }
+
+    /// A user refresh between the first read and the reducer's open notice reads once more. The
+    /// notice then only resends the payload: two `environ` reads in all, not three.
+    #[test]
+    fn user_refresh_before_open_notice_keeps_it_pending() {
+        let (tmp, cfg) = edge_root();
+        let d = tabs(&[(a(), DetailTab::Environment)]);
+        let s = every_ms(500);
+        let (mut src, _, _) = step(running(cfg), &d, &s, 0);
+        assert_eq!(src.tab_reads(DetailTab::Environment), 1);
+        fs::write(tmp.path().join("proc/4201/environ"), b"NEW=1\0").expect("rewrite environ");
+        user_refresh(&mut src, DetailTab::Environment);
+        let (mut src, refreshed, _) = step(src, &d, &s, 500);
+        assert_eq!(src.tab_reads(DetailTab::Environment), 2);
+        opened(&mut src, DetailTab::Environment);
+        let (src, out, _) = step(src, &d, &s, 1000);
+        assert_eq!(out.len(), 1);
+        assert!(Arc::ptr_eq(&refreshed[0].1, &out[0].1));
+        assert_eq!(src.tab_reads(DetailTab::Environment), 2);
+        let (src, _, _) = step(src, &d, &s, 1500);
+        assert_eq!(src.tab_reads(DetailTab::Environment), 2);
+
+        // The refresh and the notice in one sample: one read for both.
+        let (mut src, _, _) = step(running(src.cfg.clone()), &d, &s, 0);
+        user_refresh(&mut src, DetailTab::Environment);
+        opened(&mut src, DetailTab::Environment);
+        let (src, out, _) = step(src, &d, &s, 500);
+        assert_eq!(out.len(), 1);
+        assert_eq!(src.tab_reads(DetailTab::Environment), 2);
     }
 
     /// A gone process resends the last payload as `Missing`, once.
