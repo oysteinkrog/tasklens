@@ -3,6 +3,10 @@
 //! GPUI exposes no adapter list, so tl-app asks wgpu directly (R-142). The instance is built the
 //! same way gpui-pre-wgpu 0.3.7 builds it (`WgpuContext::instance`: Vulkan and GL, default flags,
 //! no display handle), so the list holds the adapters GPUI chooses from.
+//!
+//! GPUI picks an adapter only through `ZED_DEVICE_ID`, which `rendering_env` sets from a
+//! `pci:<bus id>` value. An adapter without a PCI bus id (GL adapters, lavapipe) cannot be
+//! picked that way, so the list leaves it out. "Software" covers the software adapters.
 
 use std::future::Future;
 use std::pin::pin;
@@ -27,7 +31,7 @@ pub fn list_adapters() -> async_channel::Receiver<Vec<AdapterInfo>> {
     rx
 }
 
-/// The adapters wgpu finds, in its order.
+/// The adapters wgpu finds that `rendering.gpu` can select, in wgpu's order.
 pub fn probe() -> Vec<AdapterInfo> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
@@ -37,7 +41,7 @@ pub fn probe() -> Vec<AdapterInfo> {
         display: None,
     });
     let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::all()));
-    let list: Vec<AdapterInfo> = adapters.iter().map(|a| to_info(&a.get_info())).collect();
+    let list = selectable(adapters.iter().map(|a| to_info(&a.get_info())));
     info!(target: "tasklens::ui", count = list.len(), "adapter probe done");
     list
 }
@@ -50,6 +54,11 @@ fn to_info(info: &wgpu::AdapterInfo) -> AdapterInfo {
         device_type: format!("{:?}", info.device_type),
         pci_bus_id: (!info.device_pci_bus_id.is_empty()).then(|| info.device_pci_bus_id.clone()),
     }
+}
+
+/// The adapters with a PCI bus id, the only ones a `pci:` value can select.
+fn selectable(adapters: impl Iterator<Item = AdapterInfo>) -> Vec<AdapterInfo> {
+    adapters.filter(|a| a.pci_bus_id.is_some()).collect()
 }
 
 /// Wakes the probe thread.
@@ -114,6 +123,17 @@ mod tests {
     }
 
     #[test]
+    fn adapters_without_bus_id_left_out() {
+        let gl = wgpu::AdapterInfo {
+            backend: wgpu::Backend::Gl,
+            ..wgpu_info("")
+        };
+        let list = selectable([to_info(&wgpu_info("0000:01:00.0")), to_info(&gl)].into_iter());
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].pci_bus_id.as_deref(), Some("0000:01:00.0"));
+    }
+
+    #[test]
     fn block_on_waits_for_wake() {
         let (tx, rx) = async_channel::bounded(1);
         let sender = thread::spawn(move || tx.send_blocking(7_u32));
@@ -129,5 +149,11 @@ mod tests {
         }
         let adapters = block_on(list_adapters().recv()).unwrap_or_default();
         assert!(!adapters.is_empty(), "no adapter found");
+        assert!(adapters.iter().all(|a| {
+            a.pci_bus_id
+                .as_deref()
+                .and_then(crate::rendering_env::pci_device_id)
+                .is_some()
+        }));
     }
 }
