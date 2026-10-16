@@ -246,6 +246,7 @@ impl Render for DragGhost {
             focused: false,
             edit_mode: true,
             hidden_in_edit: false,
+            pointer: false,
             width: self.width,
             prepared: None,
         })
@@ -740,6 +741,7 @@ impl DeviceSidebar {
                 focused: false,
                 edit_mode: true,
                 hidden_in_edit: !visible,
+                pointer: false,
                 width: px(0.),
                 prepared: None,
             }
@@ -1922,6 +1924,7 @@ impl Render for DeviceSidebar {
                             focused: self.focus.is_focused(window),
                             edit_mode: true,
                             hidden_in_edit: !checked && !dragging,
+                            pointer: false,
                             width: edit_card_w,
                             prepared: None,
                         };

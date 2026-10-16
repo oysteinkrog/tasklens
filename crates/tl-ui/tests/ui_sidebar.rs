@@ -69,6 +69,7 @@ impl Host {
             focused: self.focused,
             edit_mode: self.edit_mode,
             hidden_in_edit: false,
+            pointer: false,
             width: px(self.width),
             prepared: None,
         }

@@ -10,6 +10,7 @@ pub mod disk_in_use;
 pub mod frame;
 pub mod handle_search;
 pub mod low_memory;
+pub mod mini;
 pub mod notices;
 pub mod priority;
 pub mod props;

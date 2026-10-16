@@ -2478,6 +2478,10 @@ minigraph-col-vram = VRAM
 minigraph-col-gpu-shared = GPU shared
 minigraph-no-match = No match
 minigraph-ended = Ended
+# Performance mini window (tasklens-xdh.21, PERF-093, UI-PRF-045). Keep the title in English:
+# the KWin bridge finds the window by this caption (R-086).
+mini-window-title = tasklens Mini Window
+mini-window-toast-open-failed = Could not open the mini window
 # Settings window, Services page (tasklens-bj6.28, UI-SHL-068). The Graphs page uses the
 # shell-menu-graphs keys.
 shell-settings-services-unit-types = Unit types

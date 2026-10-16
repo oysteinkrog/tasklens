@@ -15,8 +15,8 @@ use std::time::Duration;
 use gpui_kit::canvas;
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    AnyElement, App, AsyncApp, Context, ElementId, Entity, EntityId, Font, FontWeight, Global,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, RenderOnce,
+    AnyElement, App, AsyncApp, Context, CursorStyle, ElementId, Entity, EntityId, Font,
+    FontWeight, Global, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, RenderOnce,
     SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Task, TextRun,
     WeakEntity, Window, black, div, font, px,
 };
@@ -1397,6 +1397,8 @@ pub struct CardView {
     focused: bool,
     edit_mode: bool,
     hidden_in_edit: bool,
+    /// The mini window's cards show the pointer cursor on hover (UI-PRF-045).
+    pointer: bool,
     width: Rc<Cell<Pixels>>,
     /// The height the sidebar lays this card out with. Render writes the measured height and
     /// notifies `sidebar` when it changed, so the cards below move on the next frame.
@@ -1430,6 +1432,7 @@ impl CardView {
             focused: false,
             edit_mode: false,
             hidden_in_edit: false,
+            pointer: false,
             width,
             height,
             sidebar,
@@ -1465,6 +1468,13 @@ impl CardView {
         }
     }
 
+    pub fn set_pointer(&mut self, pointer: bool, cx: &mut Context<Self>) {
+        if self.pointer != pointer {
+            self.pointer = pointer;
+            cx.notify();
+        }
+    }
+
     /// Invalidates theme-dependent text and surfaces without notifying the sidebar.
     pub fn invalidate_style(&mut self, cx: &mut Context<Self>) {
         cx.notify();
@@ -1483,6 +1493,7 @@ impl Render for CardView {
             focused: self.focused,
             edit_mode: self.edit_mode,
             hidden_in_edit: self.hidden_in_edit,
+            pointer: self.pointer,
             width: self.width.get(),
             prepared: None,
         };
@@ -1524,6 +1535,8 @@ pub struct DeviceCard {
     pub focused: bool,
     pub edit_mode: bool,
     pub hidden_in_edit: bool,
+    /// The pointer cursor on hover instead of the arrow (the mini window, UI-PRF-045).
+    pub pointer: bool,
     pub width: Pixels,
     /// Filled by [`DeviceCard::prepare`]. Owners pass `None`.
     pub prepared: Option<CardPrepared>,
@@ -1628,6 +1641,11 @@ impl RenderOnce for DeviceCard {
         } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
         let key = self.key;
+        let cursor = if self.pointer {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::Arrow
+        };
 
         let inline = value
             .as_ref()
@@ -1750,7 +1768,7 @@ impl RenderOnce for DeviceCard {
             .border(px(s))
             .border_color(theme.divider)
             .rounded(m.radius_card)
-            .cursor_default()
+            .cursor(cursor)
             .hover(move |st| st.bg(hover))
             .active(move |st| st.bg(pressed))
             .on_click(move |_, window, cx| {
