@@ -25,7 +25,6 @@ use tl_model::devices::{DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId};
 use tl_model::snapshot::{InvField, Snapshot};
 use tl_model::system::Metric;
-use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
@@ -343,7 +342,7 @@ fn header_of(
     kind: DeviceKind,
     idx: DeviceIdx,
     snap: &Snapshot,
-    cx: &App,
+    cx: &mut App,
 ) -> Option<(SharedString, SharedString)> {
     let entry = snap.devices.entries.iter().find(|e| e.idx == idx)?;
     Some(header_text(page_words(cx), kind, 0, entry, snap))
@@ -541,7 +540,7 @@ impl AggregateDiskPage {
     }
 
     /// The header from the catalog. True when it changed.
-    fn sync_header(&mut self, snap: &Snapshot, cx: &App) -> bool {
+    fn sync_header(&mut self, snap: &Snapshot, cx: &mut App) -> bool {
         let Some(header) = header_of(DeviceKind::AggregateDisk, self.row.idx, snap, cx) else {
             return false;
         };
@@ -908,7 +907,7 @@ impl AggregateGpuPage {
     }
 
     /// The header from the catalog. True when it changed.
-    fn sync_header(&mut self, snap: &Snapshot, cx: &App) -> bool {
+    fn sync_header(&mut self, snap: &Snapshot, cx: &mut App) -> bool {
         let Some(header) = header_of(DeviceKind::AggregateGpu, self.row.idx, snap, cx) else {
             return false;
         };
