@@ -503,6 +503,51 @@ mod mini {
         assert!(vcx.read_entity(&view, |v, _| v.demand_part().is_some_and(|p| !p.disks)));
     }
 
+    /// The private sidebar never saves its selection, so its fallback after a device goes
+    /// does not replace the device the main window selected.
+    #[gpui_kit::test]
+    fn mini_window_keeps_saved_selection(cx: &mut TestAppContext) {
+        let rig = setup(cx);
+        let (mut vcx, view) = open(cx);
+        let before = keys(&mut vcx, &view);
+        rig.engine
+            .publish_with(|s| s.devices = Arc::new(catalog(2, 1)));
+        draw(&mut vcx);
+        let added = keys(&mut vcx, &view)
+            .into_iter()
+            .find(|k| !before.contains(k))
+            .expect("the new disk has a card");
+        let saved = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| TlSettings::state(cx).performance.selected_device.clone())
+        };
+        let start = saved(&mut vcx);
+
+        // The private sidebar selects the new disk; the main window then selects another.
+        let sidebar = vcx.read_entity(&view, |v, _| v.sidebar().clone());
+        vcx.update(|_, cx| sidebar.update(cx, |s, cx| s.select(added.clone(), cx)));
+        assert_eq!(saved(&mut vcx), start, "the private selection is not saved");
+        let main_pick = before
+            .iter()
+            .find(|k| k.kind() == DeviceKind::Disk)
+            .expect("a disk")
+            .clone();
+        vcx.update(|_, cx| {
+            let key = main_pick.0.to_string();
+            TlSettings::update(cx, |d| d.state.performance.selected_device = key);
+        });
+
+        // The new disk goes: the private sidebar moves its selection, the saved one stays.
+        rig.engine
+            .publish_with(|s| s.devices = Arc::new(catalog(3, 0)));
+        draw(&mut vcx);
+        let moved = vcx.read_entity(&sidebar, |s, _| s.selected().cloned());
+        assert!(
+            moved.is_some_and(|k| k != added),
+            "the private sidebar fell back"
+        );
+        assert_eq!(*saved(&mut vcx), *main_pick.0);
+    }
+
     #[gpui_kit::test]
     fn mini_window_esc_closes(cx: &mut TestAppContext) {
         let _rig = setup(cx);

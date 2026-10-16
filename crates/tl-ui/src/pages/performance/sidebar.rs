@@ -539,6 +539,9 @@ pub struct DeviceSidebar {
     window: Option<AnyWindowHandle>,
     /// The Performance tab is the active tab. While false the demand part is withdrawn.
     active: bool,
+    /// A selection change is saved as `selected_device`. Off for the mini window's private
+    /// sidebar, whose selection is never shown.
+    saves_selection: bool,
     settings: SidebarSettings,
     settings_versions: [u64; 4],
     /// `UiMetrics.style_version` the chart colours were built for.
@@ -603,6 +606,7 @@ impl DeviceSidebar {
             id,
             window: None,
             active: true,
+            saves_selection: true,
             settings: SidebarSettings::read(cx),
             settings_versions: section_versions(cx),
             style_version: m.style_version,
@@ -644,7 +648,7 @@ impl DeviceSidebar {
         }
         self.scroll.scroll_to_item(ix);
         self.selected = Some(key.clone());
-        if *TlSettings::state(cx).performance.selected_device != *key.0 {
+        if self.saves_selection && *TlSettings::state(cx).performance.selected_device != *key.0 {
             let saved = key.0.to_string();
             TlSettings::update(cx, |d| d.state.performance.selected_device = saved);
         }
@@ -782,6 +786,13 @@ impl DeviceSidebar {
 
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// Off stops [`Self::select`] from saving the selection as `selected_device`. The mini
+    /// window's private sidebar turns it off, so its own fallback selection never replaces the
+    /// main window's.
+    pub fn set_saves_selection(&mut self, saves: bool) {
+        self.saves_selection = saves;
     }
 
     /// Sends the demand part while the tab is active.

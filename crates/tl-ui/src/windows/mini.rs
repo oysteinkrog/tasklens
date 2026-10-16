@@ -350,6 +350,7 @@ pub fn open_mini(cx: &mut App) -> OpenOutcome {
         let sidebar = cx.new(|cx| {
             let mut sidebar = DeviceSidebar::new(hub.clone(), demand.clone(), cx);
             sidebar.set_active(false, cx);
+            sidebar.set_saves_selection(false);
             sidebar
         });
         let s = metrics(cx).ui_scale;
