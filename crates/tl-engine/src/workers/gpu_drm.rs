@@ -875,6 +875,7 @@ mod tests {
             sample: IntelSample::default(),
             discrete: true,
             prev_energy: None,
+            seen: 0,
         }];
         // The fixture has no sysfs cards: mark the enumeration done to keep the hand-made list.
         assert!(src.enum_clock.due(SEC));
