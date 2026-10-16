@@ -1864,6 +1864,7 @@ pwn-props-window-more = And { $n } more
 pwn-general-link-parent = Go to parent process
 pwn-general-link-exe = Open file location
 pwn-general-link-affinity = Set affinity…
+pwn-general-link-unit = Go to service
 pwn-general-copy-value = Copy value
 pwn-general-copy-row = Copy row
 pwn-general-copy-section = Copy section

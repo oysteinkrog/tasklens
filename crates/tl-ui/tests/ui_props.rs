@@ -2807,6 +2807,180 @@ mod window {
         );
     }
 
+    use std::cell::RefCell;
+    use tl_model::details::{AppGeneralDetail, AppKind};
+    use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
+
+    fn app_detail_for_unit() -> AppGeneralDetail {
+        fn valid<T>(value: T) -> Total<T> {
+            Total {
+                value,
+                validity: Validity::Valid,
+            }
+        }
+        AppGeneralDetail {
+            name: text("Firefox"),
+            kind: AppKind::App,
+            icon_path: None,
+            app_id: Some(text("org.mozilla.firefox")),
+            desktop_file: None,
+            unit: None,
+            cgroup: Some(text("/user.slice/app-firefox.scope")),
+            processes: 34,
+            memory_anon_bytes: valid(1_310_720_000),
+            swap_bytes: valid(0),
+            disk_read_bps: valid(0.0),
+            disk_write_bps: valid(0.0),
+            primary_cmdline: valid(text("/usr/lib/firefox/firefox")),
+        }
+    }
+
+    /// The Unit row sits deep in column 0: make the window tall enough to click it.
+    fn grow_tall(rig: &mut GeneralRig) {
+        let width = rig.vcx.update(|window, _| window.viewport_size().width);
+        rig.vcx.simulate_resize(gpui_kit::size(width, px(2400.)));
+        draw(&mut rig.vcx);
+    }
+
+    fn firefox_unit() -> tl_model::table::UnitRef {
+        tl_model::table::UnitRef {
+            manager: tl_model::table::Manager::User,
+            name: "app-firefox@1.service".into(),
+        }
+    }
+
+    fn go_to_service_for(unit: &str) -> GoToService {
+        GoToService {
+            manager: ManagerArg::User,
+            name: unit.to_string().into(),
+            origin: JumpOrigin::Processes,
+        }
+    }
+
+    /// Records every `GoToService` that reaches the app level.
+    fn record_go_to_service(cx: &mut TestAppContext) -> Rc<RefCell<Vec<GoToService>>> {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            cx.on_action(move |a: &GoToService, _| sink.borrow_mut().push(a.clone()));
+        });
+        seen
+    }
+
+    fn main_is_active(cx: &mut TestAppContext, main: &mut VisualTestContext) -> bool {
+        let active = cx.update(|cx| cx.active_window().map(|w| w.window_id()));
+        let main_id = main.update(|window, _| window.window_handle().window_id());
+        active == Some(main_id)
+    }
+
+    #[gpui_kit::test]
+    fn general_unit_link_dispatches_go_to_service(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |d| {
+            d.unit = Total {
+                value: Some(firefox_unit()),
+                validity: Validity::Valid,
+            };
+        });
+        let seen = record_go_to_service(cx);
+        grow_tall(&mut rig);
+        let row = general_row(&mut rig, 0, "Unit:");
+        let value = rig
+            .vcx
+            .read(|cx| rig.general.read(cx).rows(0)[row].value.clone());
+        assert!(value.link.is_some(), "Unit is a link");
+        assert_eq!(value.tooltip.as_deref(), Some("Go to service"));
+        general_click(&mut rig, 0, row);
+        assert_eq!(*seen.borrow(), [go_to_service_for("app-firefox@1.service")]);
+        assert!(
+            main_is_active(cx, &mut rig.main),
+            "the main window is activated"
+        );
+        assert!(
+            clipboard(&mut rig.vcx).is_empty(),
+            "a link click copies nothing"
+        );
+
+        // Enter on the grid cursor runs the same link.
+        focus_fields(&mut rig);
+        rig.vcx
+            .update(|_, cx| rig.general.update(cx, |g, cx| g.set_cursor(0, row, cx)));
+        rig.vcx.simulate_keystrokes("enter");
+        rig.vcx.run_until_parked();
+        assert_eq!(seen.borrow().len(), 2);
+        assert_eq!(seen.borrow()[1], go_to_service_for("app-firefox@1.service"));
+    }
+
+    #[gpui_kit::test]
+    fn general_unit_hidden_without_unit(cx: &mut TestAppContext) {
+        let rig = general_rig(cx, |_| {});
+        let shown = (0..3).any(|col| {
+            rig.vcx
+                .read(|cx| rig.general.read(cx).rows(col))
+                .iter()
+                .any(|r| r.label.as_ref() == "Unit:")
+        });
+        assert!(!shown, "no Unit row without a unit");
+    }
+
+    #[gpui_kit::test]
+    fn general_exited_unit_plain_and_copies(cx: &mut TestAppContext) {
+        let mut rig = general_rig(cx, |d| {
+            d.unit = Total {
+                value: Some(firefox_unit()),
+                validity: Validity::Valid,
+            };
+        });
+        let seen = record_go_to_service(cx);
+        publish_records(cx, &rig.engine, vec![rec(1200, ProcFlags::default())]);
+        draw(&mut rig.vcx);
+        grow_tall(&mut rig);
+        let row = general_row(&mut rig, 0, "Unit:");
+        let value = rig
+            .vcx
+            .read(|cx| rig.general.read(cx).rows(0)[row].value.clone());
+        assert!(value.link.is_none(), "plain text");
+        assert_eq!(value.validity, Validity::Stale, "text_secondary");
+        general_click(&mut rig, 0, row);
+        assert_eq!(clipboard(&mut rig.vcx), "app-firefox@1.service");
+        assert!(seen.borrow().is_empty(), "no Go to service when exited");
+    }
+
+    #[gpui_kit::test]
+    fn app_props_unit_link_dispatches_go_to_service(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let app = app_group("Firefox", GroupRowKind::App, 34);
+        publish_groups(cx, &engine, vec![app.clone()]);
+        let seen = record_go_to_service(cx);
+        let handle = open_app(cx, app.key).expect("app window opened");
+        let general = app_props(cx, handle).read_with(cx, |w, _| w.general().clone());
+        let mut detail = app_detail_for_unit();
+        detail.unit = Some(firefox_unit());
+        let p = Arc::new(TabPayload::AppGeneral(Arc::new(detail)));
+        cx.update(|cx| general.update(cx, |t, cx| t.set_payload(Some(&p), cx)));
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        let row = vcx
+            .read(|cx| general.read(cx).rows(0).to_vec())
+            .iter()
+            .position(|r| r.label.as_ref() == "Unit:")
+            .expect("Unit row");
+        let value = vcx.read(|cx| general.read(cx).rows(0)[row].value.clone());
+        assert!(value.link.is_some(), "Unit is a link");
+        assert_eq!(value.tooltip.as_deref(), Some("Go to service"));
+        let focus = vcx.read(|cx| general.read(cx).grid_focus().clone());
+        vcx.update(|window, cx| focus.focus(window, cx));
+        vcx.update(|_, cx| general.update(cx, |g, cx| g.set_cursor(0, row, cx)));
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert_eq!(*seen.borrow(), [go_to_service_for("app-firefox@1.service")]);
+        assert!(
+            main_is_active(cx, &mut main),
+            "the main window is activated"
+        );
+    }
+
     #[gpui_kit::test]
     fn general_tab_order_and_click_moves_cursor(cx: &mut TestAppContext) {
         let mut rig = general_rig(cx, |_| {});

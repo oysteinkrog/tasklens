@@ -55,7 +55,7 @@ use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::settings::{NetworkUnit, UnitsSettings};
 use tl_model::snapshot::{FrameGeometry, WindowEntry, WindowsSnapshot};
 use tl_model::system::CpuSet;
-use tl_model::table::Total;
+use tl_model::table::{Manager, Total, UnitRef};
 use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
 use tracing::warn;
@@ -76,6 +76,7 @@ use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
+use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::settings_global::TlSettings;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, t_sm};
@@ -91,6 +92,7 @@ gpui_kit::actions!(
     tasklens_general,
     [
         GeneralGoToParent,
+        GeneralGoToService,
         GeneralOpenFileLocation,
         GeneralSetAffinity,
         GeneralCopyRow,
@@ -144,6 +146,7 @@ const TAB_VERIFY: isize = 2;
 const KEY_LINK_PARENT: &str = "pwn-general-link-parent";
 const KEY_LINK_EXE: &str = "pwn-general-link-exe";
 const KEY_LINK_AFFINITY: &str = "pwn-general-link-affinity";
+const KEY_LINK_UNIT: &str = "pwn-general-link-unit";
 const KEY_COPY_VALUE: &str = "pwn-general-copy-value";
 const KEY_COPY_ROW: &str = "pwn-general-copy-row";
 const KEY_COPY_SECTION: &str = "pwn-general-copy-section";
@@ -192,6 +195,7 @@ pub struct GeneralWords {
     pub link_parent: SharedString,
     pub link_exe: SharedString,
     pub link_affinity: SharedString,
+    pub link_unit: SharedString,
     /// Field menu items.
     pub copy_value: SharedString,
     pub copy_row: SharedString,
@@ -275,6 +279,7 @@ impl GeneralWords {
             link_parent: t(KEY_LINK_PARENT),
             link_exe: t(KEY_LINK_EXE),
             link_affinity: t(KEY_LINK_AFFINITY),
+            link_unit: t(KEY_LINK_UNIT),
             copy_value: t(KEY_COPY_VALUE),
             copy_row: t(KEY_COPY_ROW),
             copy_section: t(KEY_COPY_SECTION),
@@ -2104,7 +2109,21 @@ impl GeneralTab {
             Some(KvKind::Link(LinkTarget::Parent)) => self.go_to_parent(window, cx),
             Some(KvKind::Link(LinkTarget::Executable)) => self.open_file_location(window, cx),
             Some(KvKind::Link(LinkTarget::Affinity)) => self.set_affinity(window, cx),
+            Some(KvKind::Link(LinkTarget::Unit)) => self.go_to_unit(cx),
             _ => self.copy_value(window, cx),
+        }
+    }
+
+    /// The Unit link: the Services page selects the process's unit.
+    pub fn go_to_unit(&mut self, cx: &mut Context<Self>) {
+        let unit = self
+            .payload
+            .as_deref()
+            .map(|d| &d.unit)
+            .filter(|u| u.validity.is_valid())
+            .and_then(|u| u.value.clone());
+        if let Some(unit) = unit {
+            go_to_service(&unit, cx);
         }
     }
 
@@ -3208,8 +3227,29 @@ fn to_row(field: &KvField, exited: bool, words: &GeneralWords) -> TlKvRow {
     }
 }
 
-/// The action and tooltip of a link field. A deleted executable has no file location to open;
-/// the Unit link comes with E23-016.
+/// Go to service: dispatches the Services page's action on the main window and brings it to
+/// the front. The props windows have no handler for it.
+pub fn go_to_service(unit: &UnitRef, cx: &mut App) {
+    let manager = match unit.manager {
+        Manager::System => ManagerArg::System,
+        Manager::User => ManagerArg::User,
+    };
+    let action = GoToService {
+        manager,
+        name: SharedString::from(&*unit.name),
+        origin: JumpOrigin::Processes,
+    };
+    let Some(main) = cx.try_global::<ShellState>().and_then(|s| s.main_window) else {
+        warn!(target: "tasklens::ui", "no main window for Go to service");
+        return;
+    };
+    let _ = main.update(cx, |_, window, cx| {
+        window.activate_window();
+        window.dispatch_action(Box::new(action), cx);
+    });
+}
+
+/// The action and tooltip of a link field. A deleted executable has no file location to open.
 fn link_of(field: &KvField, words: &GeneralWords) -> Option<(Box<dyn Action>, SharedString)> {
     let KvKind::Link(target) = field.kind else {
         return None;
@@ -3220,7 +3260,8 @@ fn link_of(field: &KvField, words: &GeneralWords) -> Option<(Box<dyn Action>, Sh
             Some((Box::new(GeneralOpenFileLocation), words.link_exe.clone()))
         }
         LinkTarget::Affinity => Some((Box::new(GeneralSetAffinity), words.link_affinity.clone())),
-        LinkTarget::Executable | LinkTarget::Unit => None,
+        LinkTarget::Unit => Some((Box::new(GeneralGoToService), words.link_unit.clone())),
+        LinkTarget::Executable => None,
     }
 }
 
@@ -3418,6 +3459,9 @@ impl Render for GeneralTab {
             }))
             .on_action(cx.listener(|this, _: &GeneralGoToParent, window, cx| {
                 this.go_to_parent(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GeneralGoToService, _, cx| {
+                this.go_to_unit(cx);
             }))
             .on_action(
                 cx.listener(|this, _: &GeneralOpenFileLocation, window, cx| {

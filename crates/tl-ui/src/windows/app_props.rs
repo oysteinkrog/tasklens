@@ -47,7 +47,7 @@ use super::frame::{EscStep, PwnWindow, app_props_title, esc_step, open_pwn};
 use super::props::filter::{
     FilterChanged, NO_MATCH, PropsFilter, filter_bar, lowercase, matches, on_clear,
 };
-use super::props::general::escape_controls;
+use super::props::general::{escape_controls, go_to_service};
 use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -86,6 +86,7 @@ gpui_kit::actions!(
     tasklens,
     [
         AppGeneralOpenDesktop,
+        AppGeneralGoToService,
         AppGeneralCopyRow,
         AppGeneralCopyPanel
     ]
@@ -122,6 +123,7 @@ struct AppWords {
     exited: SharedString,
     app: SharedString,
     unit: SharedString,
+    go_to_service: SharedString,
     labels: [SharedString; 13],
     cmdline: SharedString,
     copy: SharedString,
@@ -146,6 +148,7 @@ impl AppWords {
             exited: t("pwn-app-props-exited-banner"),
             app: t("pwn-app-props-kind-app"),
             unit: t("pwn-app-props-kind-unit"),
+            go_to_service: t("pwn-general-link-unit"),
             labels: [
                 t("pwn-app-props-label-app-id"),
                 t("pwn-app-props-label-type"),
@@ -453,7 +456,11 @@ impl AppGeneralTab {
         self.side_by_side
     }
 
-    fn rows(&self, panel: usize) -> &[TlKvRow] {
+    pub fn grid_focus(&self) -> &FocusHandle {
+        &self.grid_focus
+    }
+
+    pub fn rows(&self, panel: usize) -> &[TlKvRow] {
         let sections = if panel == 0 {
             &self.identity
         } else {
@@ -465,7 +472,7 @@ impl AppGeneralTab {
             .map_or(&[], |block| block.rows.as_slice())
     }
 
-    fn set_cursor(&mut self, panel: usize, row: usize, cx: &mut Context<Self>) {
+    pub fn set_cursor(&mut self, panel: usize, row: usize, cx: &mut Context<Self>) {
         let len = self.rows(panel).len();
         if len == 0 {
             return;
@@ -590,13 +597,27 @@ impl AppGeneralTab {
     }
 
     fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let desktop = self
-            .cursor_row()
-            .is_some_and(|row| row.label == self.words.labels[2] && row.value.link.is_some());
-        if desktop {
+        let linked = |index: usize| {
+            self.cursor_row().is_some_and(|row| {
+                row.label == self.words.labels[index] && row.value.link.is_some()
+            })
+        };
+        if linked(2) {
             self.open_desktop(window, cx);
+        } else if linked(3) {
+            self.go_to_unit(cx);
         } else {
             self.copy_value(window, cx);
+        }
+    }
+
+    /// The Unit link: the Services page selects the app's unit.
+    fn go_to_unit(&mut self, cx: &mut Context<Self>) {
+        if self.exited {
+            return;
+        }
+        if let Some(unit) = self.payload.as_ref().and_then(|d| d.unit.clone()) {
+            go_to_service(&unit, cx);
         }
     }
 
@@ -643,6 +664,7 @@ impl AppGeneralTab {
     fn shown(&self, label: SharedString, mut value: TlValue) -> Option<TlKvRow> {
         if self.exited && value.link.is_some() {
             value.link = None;
+            value.tooltip = None;
             if value.validity == Validity::Valid {
                 value.validity = Validity::Stale;
             }
@@ -693,7 +715,10 @@ impl AppGeneralTab {
                 identity.push(self.not_reported(2, true));
             }
             if let Some(unit) = &detail.unit {
-                identity.push(self.plain(3, unit.name.clone()));
+                let mut link = TlValue::new(unit.name.clone());
+                link.link = Some(Box::new(AppGeneralGoToService));
+                link.tooltip = Some(self.words.go_to_service.clone());
+                identity.push(self.shown(self.words.labels[3].clone(), link));
             }
             identity.push(match &detail.cgroup {
                 Some(cgroup) => self.plain(4, cgroup.clone()),
@@ -1035,6 +1060,9 @@ impl Render for AppGeneralTab {
             .debug_selector(|| "AppGeneralTab".into())
             .on_action(cx.listener(|this, _: &AppGeneralOpenDesktop, window, cx| {
                 this.open_desktop(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AppGeneralGoToService, _, cx| {
+                this.go_to_unit(cx);
             }))
             .relative()
             .size_full()
