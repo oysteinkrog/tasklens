@@ -481,10 +481,17 @@ fn card_spec(
                 )
             }
         }
-        // P4 (E24-026) gives the aggregate cards their series.
-        DeviceKind::AggregateDisk | DeviceKind::AggregateGpu => {
-            (SmallVec::new(), percent, ValueFormat::Percent)
-        }
+        // The engine publishes the aggregate's busiest-disk and GPU utilisation on its own idx.
+        DeviceKind::AggregateDisk => (
+            smallvec![filled(MetricId::DISK_ACTIVE, g.disk_line, g.disk_fill)],
+            percent,
+            ValueFormat::Percent,
+        ),
+        DeviceKind::AggregateGpu => (
+            smallvec![filled(MetricId::GPU_UTIL, g.gpu_line, g.gpu_fill)],
+            percent,
+            ValueFormat::Percent,
+        ),
     };
     let spec = ChartSpec {
         series,

@@ -10,10 +10,12 @@ use gpui_kit::{
     IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Pixels,
     Render, SharedString, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
 };
+use std::collections::HashMap;
 use tl_model::client::EngineClient;
-use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
+
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::{AppearanceSettings, NetworkUnit, ThemeSettings};
+use tl_model::settings::{AppearanceSettings, DeviceVisibility, NetworkUnit, ThemeSettings};
 use tl_model::snapshot::{DeviceDetailsSnapshot, DiskDetails, Snapshot, SystemSnapshot};
 use tl_model::system::{DiskTotals, LinkState, Metric, NetTotals};
 use tl_model::table::Total;
@@ -27,7 +29,9 @@ use tl_ui::pages::performance::card::{
     CARD_CHART_BG, CardLines, CardPrepared, CardTextInput, CardWords, DeviceCard, card_chart_grid,
     card_chart_labels, card_lines, card_tooltip,
 };
-use tl_ui::pages::performance::{DeviceKey, DeviceKind};
+use tl_ui::pages::performance::{
+    DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, is_visible, sidebar_order,
+};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
 
@@ -460,6 +464,126 @@ fn card_selected_and_focus_outlines(cx: &mut TestAppContext) {
 
 /// The `DeviceSidebar` entity: cards, selection, keys, change-only text and demand (E24-004,
 /// UI-PRF-011, UI-PRF-012).
+/// The fixed catalog entries (CPU, the three aggregates) plus `devices` from idx 4.
+fn agg_catalog(devices: Vec<DeviceIdentity>) -> DeviceCatalog {
+    let mut entries = vec![
+        entry(0, DeviceIdentity::CpuPackage, None),
+        entry(1, DeviceIdentity::Aggregate(AggregateKind::Disks), None),
+        entry(2, DeviceIdentity::Aggregate(AggregateKind::Nets), None),
+        entry(3, DeviceIdentity::Aggregate(AggregateKind::Gpus), None),
+    ];
+    for (i, identity) in devices.into_iter().enumerate() {
+        entries.push(entry(4 + i as u16, identity, None));
+    }
+    DeviceCatalog {
+        version: 1,
+        entries: entries.into(),
+    }
+}
+
+fn agg_disk(n: u16) -> DeviceIdentity {
+    DeviceIdentity::Disk {
+        major: 8,
+        minor: n.into(),
+        name: Arc::from(format!("sd{n}")),
+        wwn_or_serial: None,
+    }
+}
+
+fn agg_gpu(n: u8) -> DeviceIdentity {
+    DeviceIdentity::Gpu {
+        uuid: [n; 16],
+        pci_bus_id: Arc::from(format!("0000:0{n}:00.0")),
+    }
+}
+
+fn settings_view(overrides: &HashMap<DeviceKey, DeviceVisibility>) -> PerformanceSettingsView<'_> {
+    PerformanceSettingsView {
+        order: &[],
+        overrides,
+        show_disks: true,
+        show_gpus: true,
+        show_fans: true,
+        show_disconnected_fans: false,
+        show_batteries: true,
+        show_network_wired: true,
+        show_network_wireless: true,
+        show_network_vpn: true,
+        show_network_virtual: true,
+        show_network_other: true,
+    }
+}
+
+fn order_keys(cat: &DeviceCatalog) -> Vec<String> {
+    let overrides = HashMap::new();
+    let mut rows: Vec<DeviceRow> = Vec::new();
+    sidebar_order(cat, &[], &settings_view(&overrides), &mut rows);
+    rows.iter().map(|r| r.key.0.to_string()).collect()
+}
+
+#[test]
+fn aggregate_rows_only_with_two_devices() {
+    let cat = agg_catalog(vec![agg_disk(1), agg_disk(2), agg_disk(3), agg_gpu(1)]);
+    let keys = order_keys(&cat);
+    assert!(keys.iter().any(|k| k == "aggregate:disk"), "{keys:?}");
+    assert!(!keys.iter().any(|k| k == "aggregate:gpu"), "{keys:?}");
+    assert!(!keys.iter().any(|k| k == "aggregate:net"), "{keys:?}");
+    let cat = agg_catalog(vec![agg_disk(1), agg_gpu(1), agg_gpu(2)]);
+    let keys = order_keys(&cat);
+    assert!(!keys.iter().any(|k| k == "aggregate:disk"), "{keys:?}");
+    assert!(keys.iter().any(|k| k == "aggregate:gpu"), "{keys:?}");
+}
+
+#[test]
+fn aggregate_hidden_without_override() {
+    let cat = agg_catalog(vec![agg_disk(1), agg_disk(2)]);
+    let mut overrides = HashMap::new();
+    let mut rows: Vec<DeviceRow> = Vec::new();
+    sidebar_order(&cat, &[], &settings_view(&overrides), &mut rows);
+    let row = rows
+        .iter()
+        .find(|r| r.kind == DeviceKind::AggregateDisk)
+        .expect("aggregate row")
+        .clone();
+    assert!(!is_visible(&row, &settings_view(&overrides)));
+    overrides.insert(row.key.clone(), DeviceVisibility::Show);
+    assert!(is_visible(&row, &settings_view(&overrides)));
+}
+
+#[test]
+fn aggregate_card_lines() {
+    let disk_details = |kinds: &[&str]| {
+        let disks: Vec<_> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                (
+                    DeviceIdx(4 + i as u16),
+                    DiskDetails {
+                        kind: Arc::from(*k),
+                        ..DiskDetails::default()
+                    },
+                )
+            })
+            .collect();
+        DeviceDetailsSnapshot {
+            disks: disks.into(),
+            ..DeviceDetailsSnapshot::default()
+        }
+    };
+    let aggregate_lines = |kinds: &[&str]| {
+        let cat = agg_catalog((1..=kinds.len() as u16).map(agg_disk).collect());
+        let mut s = snap(SystemSnapshot::default(), disk_details(kinds));
+        s.devices = Arc::new(cat);
+        let agg = s.devices.entries[1].clone();
+        lines_for(DeviceKind::AggregateDisk, &agg, &s)
+    };
+    let l = aggregate_lines(&["NVMe", "NVMe", "SSD"]);
+    assert_eq!((&*l.line1, &*l.line2), ("3 disks", "Multiple"));
+    let l = aggregate_lines(&["NVMe", "NVMe", "NVMe"]);
+    assert_eq!((&*l.line1, &*l.line2), ("3 disks", "NVMe"));
+}
+
 mod sidebar {
     use gpui_kit::Focusable as _;
     use tl_model::demand::{CpuDemand, Demand};

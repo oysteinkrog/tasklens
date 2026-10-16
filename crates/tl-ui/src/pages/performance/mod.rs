@@ -40,7 +40,7 @@ use gpui_kit::{
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity};
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::DeviceVisibility;
 use tl_model::system::{SensorKind, SensorReading};
@@ -219,6 +219,15 @@ pub fn sidebar_order(
             continue;
         };
         let kind = key.kind();
+        // An aggregate card needs two or more devices of its type (PERF-009).
+        let too_few = match kind {
+            DeviceKind::AggregateDisk => count_present(catalog, is_whole_disk) < 2,
+            DeviceKind::AggregateGpu => count_present(catalog, is_gpu) < 2,
+            _ => false,
+        };
+        if too_few {
+            continue;
+        }
         out.push(DeviceRow {
             kind,
             key,
@@ -247,6 +256,23 @@ pub fn sidebar_order(
         let saved = settings.order.iter().position(|k| *k == row.key);
         (saved.unwrap_or(usize::MAX), row.kind as u8)
     });
+}
+
+fn is_whole_disk(e: &DeviceEntry) -> bool {
+    e.parent.is_none() && matches!(e.identity, DeviceIdentity::Disk { .. })
+}
+
+fn is_gpu(e: &DeviceEntry) -> bool {
+    matches!(e.identity, DeviceIdentity::Gpu { .. })
+}
+
+/// The present entries of `catalog` that satisfy `pred`.
+fn count_present(catalog: &DeviceCatalog, pred: fn(&DeviceEntry) -> bool) -> usize {
+    catalog
+        .entries
+        .iter()
+        .filter(|e| e.present && pred(e))
+        .count()
 }
 
 /// A per-device override wins; otherwise the per-type setting decides. Overview, Cpu and Memory
