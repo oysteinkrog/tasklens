@@ -17,8 +17,8 @@ use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentit
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{
-    DiskDetails, InvField, InventorySnapshot, MemoryDetails, MemoryModule, SwapDevice,
-    SwapKindModel, ZramDetail, ZswapInfo,
+    DiskDetails, DisplayConnector, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot,
+    MemoryDetails, MemoryModule, SwapDevice, SwapKindModel, ZramDetail, ZswapInfo,
 };
 use tl_model::system::{MemoryTotals, ZramTotals};
 use tl_model::validity::Validity;
@@ -2793,4 +2793,69 @@ fn aggregate_gpu_adapters_row(cx: &mut TestAppContext) {
         assert_eq!(value_of(page.details(), AGG_ROW_TYPE), "Multiple");
         assert_eq!(page.header().1, "2 adapters");
     });
+}
+
+fn publish_displays(r: &mut Rig, displays: Vec<DisplayMode>) {
+    r.engine.publish_with(|s| {
+        let inv = Arc::make_mut(&mut s.inventory);
+        inv.header.version += 1;
+        inv.graphics = Arc::from(
+            [GraphicsAdapter {
+                device: Some(DeviceIdx(2)),
+                displays: Arc::from(displays),
+                ..GraphicsAdapter::default()
+            }]
+            .as_slice(),
+        );
+    });
+    draw(r.vcx);
+    draw(r.vcx);
+}
+
+/// No enabled display gives one block with the heading and `No display connected`; one display
+/// gives one formatted row.
+#[gpui_kit::test]
+fn gpu_displays_empty_text(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, GPU);
+    let gpu = view_of(&mut r, GPU)
+        .downcast::<GpuPage>()
+        .expect("a GpuPage");
+    publish_displays(&mut r, Vec::new());
+    r.vcx.update(|window, cx| {
+        gpu.update(cx, |page, cx| {
+            assert!(page.display_rows().is_empty());
+            assert_eq!(page.words().displays.as_ref(), "Displays");
+            assert_eq!(page.words().no_display.as_ref(), "No display connected");
+            assert_eq!(page.blocks(window, cx).len(), 1);
+        });
+    });
+    publish_displays(
+        &mut r,
+        vec![DisplayMode {
+            width: 1920,
+            height: 1200,
+            refresh_mhz: 59_950,
+            primary: true,
+            monitor_name: Some(Arc::from("DELL U2415")),
+            connector: DisplayConnector::DisplayPort,
+            max_bpc: Some(10),
+            rotation: Some(2),
+            scale: Some(1.1),
+        }],
+    );
+    r.vcx.update(|_, cx| {
+        let rows: Vec<&str> = gpu.read(cx).display_rows().iter().map(|s| &**s).collect();
+        assert_eq!(
+            rows,
+            ["DELL U2415 (primary) · DisplayPort · 1920x1200 @ 59.95 Hz · Max bit depth 10 · Portrait (left) · 110%"]
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn gpu_page_demands_inventory(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, GPU);
+    assert!(last_demand(&r).inventory);
 }

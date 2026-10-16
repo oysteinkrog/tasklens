@@ -13,19 +13,21 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use fluent_bundle::FluentValue;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
-    Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render,
-    SharedString, StyleRefinement, Styled as _, Subscription, WeakEntity, Window, canvas, div, px,
+    Context, Div, ElementId, Entity, EntityId, FocusHandle, Focusable, FontWeight,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Point, Render, SharedString, StyleRefinement, Styled as _, Subscription, WeakEntity, Window,
+    canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::{GraphicsAdapter, Snapshot};
+use tl_model::snapshot::{DisplayMode, GraphicsAdapter, Snapshot};
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
@@ -46,8 +48,9 @@ use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_en};
+use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::settings_global::{Section, TlSettings, animations_on};
+use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// `grid_cell_h`, × ui_scale.
@@ -296,6 +299,8 @@ pub struct Words {
     pub shared: SharedString,
     pub restarting: SharedString,
     pub missing: SharedString,
+    pub displays: SharedString,
+    pub no_display: SharedString,
 }
 
 impl Words {
@@ -315,6 +320,8 @@ impl Words {
         self.shared = t(KEY_SHARED);
         self.restarting = t(KEY_RESTARTING);
         self.missing = t(KEY_MISSING);
+        self.displays = t("perf-gpu-block-displays");
+        self.no_display = t("perf-gpu-no-display");
         true
     }
 
@@ -552,6 +559,8 @@ pub struct GpuPage {
     /// `UiMetrics.style_version` the chart colours and grid sizes were built for.
     style_version: u64,
     words: Words,
+    /// One formatted row per display of this GPU's adapter (PERF-073).
+    display_rows: Vec<SharedString>,
     /// The engine box width of the last paint; 0 before the first.
     width: Rc<Cell<Pixels>>,
     /// The engine box's top-left corner in the window at the last paint, for the cell under a
@@ -655,6 +664,7 @@ impl GpuPage {
             settings_versions: section_versions(cx),
             style_version: metrics(cx).style_version,
             words,
+            display_rows: Vec::new(),
             width: Rc::new(Cell::new(px(0.))),
             origin: Rc::new(Cell::new(Point::default())),
             shown_cells,
@@ -696,6 +706,11 @@ impl GpuPage {
 
     pub fn temperature(&self) -> &Entity<ChartView> {
         &self.temperature
+    }
+
+    /// The Displays block rows, one per display of this GPU's adapter.
+    pub fn display_rows(&self) -> &[SharedString] {
+        &self.display_rows
     }
 
     pub fn words(&self) -> &Words {
@@ -805,6 +820,20 @@ impl GpuPage {
             };
             changed |= update_gpu_details_p1(&mut self.details, &inputs);
             changed |= update_gpu_details_p2(&mut self.details, &inputs);
+        }
+        if inventory {
+            let rows: Vec<SharedString> = adapter(snap, self.row.idx)
+                .map(|a| {
+                    a.displays
+                        .iter()
+                        .map(|d| display_row_with(d, &|k, a| tr_args(cx, k, a)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if rows != self.display_rows {
+                self.display_rows = rows;
+                changed = true;
+            }
         }
         if (devices || inventory)
             && let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == self.row.idx)
@@ -2035,8 +2064,30 @@ impl DevicePage for GpuPage {
         &self.details
     }
 
-    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
-        SmallVec::new()
+    fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
+        let (m, theme) = (metrics(cx), current(cx));
+        let mut heading = div()
+            .text_color(theme.text_primary)
+            .child(self.words.displays.clone());
+        *heading.text_style() = label_style(m, m.text.md, FontWeight::MEDIUM);
+        let mut block = v_flex().gap(m.sp[4]).child(heading);
+        if self.display_rows.is_empty() {
+            let mut el = div()
+                .h(px(24.))
+                .text_color(theme.text_secondary)
+                .child(self.words.no_display.clone());
+            *el.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
+            block = block.child(el);
+        }
+        for row in &self.display_rows {
+            let mut el = div()
+                .h(px(24.))
+                .text_color(theme.text_primary)
+                .child(row.clone());
+            *el.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
+            block = block.child(el);
+        }
+        smallvec![block.into_any_element()]
     }
 
     /// "Select GPU engine graphs >": one check item per reported engine, then Power and Clocks
@@ -2160,9 +2211,114 @@ impl Render for GpuPage {
     }
 }
 
+/// The translator the Displays row formats with: a key and its Fluent arguments.
+type Translate<'a> = &'a dyn Fn(&str, &[(&str, FluentValue<'static>)]) -> SharedString;
+
+/// The Displays row of `d` in the en-US text (PERF-073):
+/// `<name> · <connector> · 1920x1200 @ 59.95 Hz · Max bit depth 10 · Portrait (left) · 110%`.
+pub fn display_row_text(d: &DisplayMode) -> SharedString {
+    display_row_with(d, &tr_en)
+}
+
+fn display_row_with(d: &DisplayMode, t: Translate<'_>) -> SharedString {
+    let text = |s: String| FluentValue::from(s);
+    let not_reported = || t("perf-fallback-not-reported", &[]);
+    let connector = d.connector.name();
+    let mut name = match d.monitor_name.as_deref().map(str::trim) {
+        Some(n) if !n.is_empty() => n.to_owned(),
+        _ => connector.to_owned(),
+    };
+    if d.primary {
+        name.push(' ');
+        name.push_str(&t("perf-gpu-display-primary", &[]));
+    }
+    let (w, h) = (text(d.width.to_string()), text(d.height.to_string()));
+    let mode = if d.refresh_mhz == 0 {
+        t("perf-gpu-display-mode-no-hz", &[("w", w), ("h", h)])
+    } else {
+        let hz = format!("{:.2}", f64::from(d.refresh_mhz) / 1000.0);
+        t(
+            "perf-gpu-display-mode",
+            &[("w", w), ("h", h), ("hz", text(hz))],
+        )
+    };
+    let bpc = d
+        .max_bpc
+        .map_or_else(not_reported, |b| SharedString::from(b.to_string()));
+    let orientation = match d.rotation {
+        Some(1) => t("perf-gpu-orientation-landscape", &[]),
+        Some(2) => t("perf-gpu-orientation-portrait-left", &[]),
+        Some(4) => t("perf-gpu-orientation-landscape-flipped", &[]),
+        Some(8) => t("perf-gpu-orientation-portrait-right", &[]),
+        _ => not_reported(),
+    };
+    let scale = d.scale.map_or_else(not_reported, |f| {
+        let pct = (f64::from(f) * 100.0).round() as i64;
+        t("perf-gpu-display-scale", &[("pct", text(pct.to_string()))])
+    });
+    t(
+        "perf-gpu-display-row",
+        &[
+            ("name", text(name)),
+            ("connector", text(connector.to_owned())),
+            ("mode", text(mode.to_string())),
+            ("bpc", text(bpc.to_string())),
+            ("orientation", text(orientation.to_string())),
+            ("scale", text(scale.to_string())),
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dp_display() -> DisplayMode {
+        DisplayMode {
+            width: 1920,
+            height: 1200,
+            refresh_mhz: 59_950,
+            primary: true,
+            monitor_name: Some(Arc::from("DELL U2415")),
+            connector: tl_model::snapshot::DisplayConnector::DisplayPort,
+            max_bpc: Some(10),
+            rotation: Some(2),
+            scale: Some(1.1),
+        }
+    }
+
+    #[test]
+    fn display_row_format() {
+        assert_eq!(
+            display_row_text(&dp_display()).as_ref(),
+            "DELL U2415 (primary) · DisplayPort · 1920x1200 @ 59.95 Hz · Max bit depth 10 · Portrait (left) · 110%"
+        );
+    }
+
+    #[test]
+    fn display_row_missing_fields() {
+        let d = DisplayMode {
+            max_bpc: None,
+            rotation: None,
+            scale: Some(1.0),
+            primary: false,
+            ..dp_display()
+        };
+        assert_eq!(
+            display_row_text(&d).as_ref(),
+            "DELL U2415 · DisplayPort · 1920x1200 @ 59.95 Hz · Max bit depth Not reported · Not reported · 100%"
+        );
+        let d = DisplayMode {
+            refresh_mhz: 0,
+            scale: None,
+            monitor_name: None,
+            ..d
+        };
+        assert_eq!(
+            display_row_text(&d).as_ref(),
+            "DisplayPort · DisplayPort · 1920x1200 · Max bit depth Not reported · Not reported · Not reported"
+        );
+    }
 
     fn keys(list: &[&str]) -> Vec<Arc<str>> {
         list.iter().map(|k| Arc::from(*k)).collect()
