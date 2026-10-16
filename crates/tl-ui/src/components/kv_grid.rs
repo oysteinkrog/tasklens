@@ -2194,7 +2194,7 @@ mod tests {
                 .sections(&[section(vec![
                     row("A", TlValue::new("1")),
                     row("B", TlValue::new("203.0.113.4\n2001:db8::4")),
-                    row("C", TlValue::new("3\n4")),
+                    row("C", TlValue::new("3")),
                 ])])
                 .row_height(px(20.))
                 .value_lines(Rc::from([1]))

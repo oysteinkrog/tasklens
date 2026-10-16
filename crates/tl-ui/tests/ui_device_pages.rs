@@ -1861,7 +1861,11 @@ mod net_p2 {
         let labels: Vec<&str> = r.iter().map(|(l, _)| l.as_str()).collect();
         let want: Vec<&str> = HEAD.iter().chain(TAIL.iter()).copied().collect();
         assert_eq!(labels, want);
-        assert_eq!(labels.len(), 15, "update_net_details_p2 leaves Public IP hidden");
+        assert_eq!(
+            labels.len(),
+            15,
+            "update_net_details_p2 leaves Public IP hidden"
+        );
         assert_eq!(
             value(&m, "Adapter name"),
             "Intel I350 Gigabit Network Connection"
@@ -2535,7 +2539,7 @@ mod net_settings {
         assert!(r.vcx.debug_bounds(SETTINGS_LINK_ID).is_some(), "link row");
         assert!(menu_labels(&mut r).contains(&"Network settings".to_owned()));
         let net = net_page(&mut r);
-        assert_eq!(r.vcx.update(|_, cx| net.read(cx).focus_order().len()), 2);
+        assert_eq!(r.vcx.update(|_, cx| net.read(cx).focus_order().len()), 3);
 
         let (engine, mut vcx, page, _queue) = open_root(cx, None);
         let mut r = Rig {
@@ -2550,7 +2554,7 @@ mod net_settings {
         );
         assert!(!menu_labels(&mut r).contains(&"Network settings".to_owned()));
         let net = net_page(&mut r);
-        assert_eq!(r.vcx.update(|_, cx| net.read(cx).focus_order().len()), 1);
+        assert_eq!(r.vcx.update(|_, cx| net.read(cx).focus_order().len()), 2);
     }
 
     #[gpui_kit::test]
