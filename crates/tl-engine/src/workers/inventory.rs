@@ -38,8 +38,8 @@ use tl_collect::gpu_drm::{
     self, AmdSample, DrmCard, VENDOR_AMD, VENDOR_INTEL, VENDOR_NVIDIA, amdgpu, main_temp, read_amd,
 };
 use tl_collect::inventory::{
-    self, CpuFlags, DmiInfo, Field, InventoryPaths, InventoryRaw, KernelInfo, ModulesInfo,
-    Virtualization, read_inventory,
+    self, ConnectorType, CpuFlags, DmiInfo, Field, InventoryPaths, InventoryRaw, KernelInfo,
+    ModulesInfo, Virtualization, read_inventory,
 };
 use tl_collect::net::addrs::{AddrDump, AddrFamily, AddrScope, IfAddr, format_cidr};
 use tl_collect::parse::block::{self, BlockDevice, DiskKind};
@@ -60,9 +60,9 @@ use tl_model::devices::NetKind;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    BoardInfo, DiskDrive, DisplayMode, FirmwareInfo, FirmwareType, GraphicsAdapter, InvField,
-    InventorySnapshot, MemoryInfo, MemoryModule, NetworkAdapter, OsInfo, ProcessorInfo,
-    PublicIpState, SystemInfo,
+    BoardInfo, DiskDrive, DisplayConnector, DisplayMode, FirmwareInfo, FirmwareType,
+    GraphicsAdapter, InvField, InventorySnapshot, MemoryInfo, MemoryModule, NetworkAdapter, OsInfo,
+    ProcessorInfo, PublicIpState, SystemInfo,
 };
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -588,9 +588,39 @@ fn displays(raw: &InventoryRaw, card: u32) -> Arc<[DisplayMode]> {
                 height,
                 refresh_mhz: 0,
                 primary: false,
+                monitor_name: c.monitor_name.clone(),
+                connector: display_connector(c.connector_type),
+                max_bpc: None,
+                rotation: None,
+                scale: None,
             })
         })
         .collect()
+}
+
+fn display_connector(kind: ConnectorType) -> DisplayConnector {
+    match kind {
+        ConnectorType::Unknown => DisplayConnector::Unknown,
+        ConnectorType::Vga => DisplayConnector::Vga,
+        ConnectorType::DviI => DisplayConnector::DviI,
+        ConnectorType::DviD => DisplayConnector::DviD,
+        ConnectorType::DviA => DisplayConnector::DviA,
+        ConnectorType::Composite => DisplayConnector::Composite,
+        ConnectorType::SVideo => DisplayConnector::SVideo,
+        ConnectorType::Lvds => DisplayConnector::Lvds,
+        ConnectorType::Component => DisplayConnector::Component,
+        ConnectorType::Din => DisplayConnector::Din,
+        ConnectorType::DisplayPort => DisplayConnector::DisplayPort,
+        ConnectorType::Hdmi => DisplayConnector::Hdmi,
+        ConnectorType::Tv => DisplayConnector::Tv,
+        ConnectorType::Edp => DisplayConnector::Edp,
+        ConnectorType::Virtual => DisplayConnector::Virtual,
+        ConnectorType::Dsi => DisplayConnector::Dsi,
+        ConnectorType::Dpi => DisplayConnector::Dpi,
+        ConnectorType::Writeback => DisplayConnector::Writeback,
+        ConnectorType::Spi => DisplayConnector::Spi,
+        ConnectorType::Usb => DisplayConnector::Usb,
+    }
 }
 
 /// One rtnetlink address dump into `out`. A failed open or dump leaves it empty.

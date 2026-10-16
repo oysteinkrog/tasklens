@@ -973,13 +973,77 @@ pub struct BoardInfo {
     pub serial: InvField<Arc<str>>,
 }
 
+/// Display connector type, with the PERF-073 names. Windows-only names are left out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DisplayConnector {
+    #[default]
+    Unknown,
+    Vga,
+    DviI,
+    DviD,
+    DviA,
+    Composite,
+    SVideo,
+    Lvds,
+    Component,
+    Din,
+    DisplayPort,
+    Hdmi,
+    Tv,
+    Edp,
+    Virtual,
+    Dsi,
+    Dpi,
+    Writeback,
+    Spi,
+    Usb,
+}
+
+impl DisplayConnector {
+    /// The PERF-073 name, as shown in the Displays row.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Vga => "VGA",
+            Self::DviI => "DVI-I",
+            Self::DviD => "DVI-D",
+            Self::DviA => "DVI-A",
+            Self::Composite => "Composite",
+            Self::SVideo => "S-Video",
+            Self::Lvds => "LVDS",
+            Self::Component => "Component",
+            Self::Din => "DIN",
+            Self::DisplayPort => "DisplayPort",
+            Self::Hdmi => "HDMI",
+            Self::Tv => "TV",
+            Self::Edp => "eDP (Embedded DisplayPort)",
+            Self::Virtual => "Virtual",
+            Self::Dsi => "DSI",
+            Self::Dpi => "DPI",
+            Self::Writeback => "Writeback",
+            Self::Spi => "SPI",
+            Self::Usb => "USB",
+        }
+    }
+}
+
 /// One display mode, shown as "3840x2160 @ 144 Hz (primary)".
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct DisplayMode {
     pub width: u32,
     pub height: u32,
+    /// 0 means unknown.
     pub refresh_mhz: u32,
     pub primary: bool,
+    /// EDID monitor name.
+    pub monitor_name: Option<Arc<str>>,
+    pub connector: DisplayConnector,
+    /// Maximum bits per colour channel (KMS `max bpc`).
+    pub max_bpc: Option<u8>,
+    /// KScreen rotation: 1, 2, 4 or 8 (PERF-073).
+    pub rotation: Option<u8>,
+    /// Scale factor, 1.0 is 100 %.
+    pub scale: Option<f32>,
 }
 
 /// One graphics adapter, static rows (PERF-103).

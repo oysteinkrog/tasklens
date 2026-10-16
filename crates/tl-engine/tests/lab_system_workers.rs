@@ -3002,7 +3002,7 @@ fn inventory_boot_time_close_to_uptime() {
 // ---- Inventory devices (E12-018) ----
 
 use tl_collect::gpu_drm::{self, AmdSample, amdgpu};
-use tl_model::snapshot::DisplayMode;
+use tl_model::snapshot::DisplayConnector;
 
 #[test]
 fn inventory_disk_drives() {
@@ -3096,15 +3096,16 @@ fn inventory_displays_connected_only() {
     let snap = inventory_scan(&dir);
     assert_eq!(snap.graphics.len(), 1);
     let gpu = &snap.graphics[0];
-    assert_eq!(
-        &*gpu.displays,
-        [DisplayMode {
-            width: 3840,
-            height: 2160,
-            refresh_mhz: 0,
-            primary: false,
-        }]
-    );
+    assert_eq!(gpu.displays.len(), 1);
+    let mode = &gpu.displays[0];
+    assert_eq!((mode.width, mode.height), (3840, 2160));
+    assert_eq!(mode.refresh_mhz, 0);
+    assert!(!mode.primary);
+    assert_eq!(mode.max_bpc, None);
+    assert_eq!(mode.rotation, None);
+    assert_eq!(mode.scale, None);
+    assert_ne!(mode.connector, DisplayConnector::Unknown);
+    assert!(mode.monitor_name.is_some());
     // No udev file for the card.
     assert_eq!(gpu.name.validity, Validity::Unsupported);
     assert_eq!(gpu.temperature_source, inv_text("Not reported"));

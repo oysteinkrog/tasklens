@@ -995,7 +995,7 @@ mod hardware_builders {
     use tl_model::devices::DeviceCatalog;
     use tl_model::ids::DeviceIdx;
     use tl_model::snapshot::{
-        DiskDrive, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot, MemoryModule,
+        DiskDrive, DisplayConnector, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot, MemoryModule,
         NetworkAdapter, SystemSnapshot,
     };
     use tl_model::system::{GpuTotals, Metric};
@@ -1075,12 +1075,22 @@ mod hardware_builders {
                     height: 1440,
                     refresh_mhz: 59_951,
                     primary: false,
+                    monitor_name: None,
+                    connector: DisplayConnector::default(),
+                    max_bpc: None,
+                    rotation: None,
+                    scale: None,
                 },
                 DisplayMode {
                     width: 3840,
                     height: 2160,
                     refresh_mhz: 144_000,
                     primary: true,
+                    monitor_name: None,
+                    connector: DisplayConnector::default(),
+                    max_bpc: None,
+                    rotation: None,
+                    scale: None,
                 },
             ]
             .into(),
