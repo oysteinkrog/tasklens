@@ -14,7 +14,6 @@ use asupersync::Cx;
 use asupersync::supervision::ManagedGeneration;
 use tl_collect::proc::smaps::{PssReader, RollupRead};
 use tl_model::demand::Demand;
-use tl_model::details::ScanId;
 use tl_model::health::SourceId;
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::EngineSettings;
@@ -169,6 +168,7 @@ mod tests {
 
     use tl_collect::SysRoot;
     use tl_model::demand::ColumnSet;
+    use tl_model::details::ScanId;
     use tl_model::time::BootId;
 
     use super::*;
