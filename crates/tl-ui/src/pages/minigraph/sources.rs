@@ -480,7 +480,7 @@ pub fn match_state(source: &MinigraphSource, column: GraphColumn, snap: &Snapsho
         MinigraphSource::Name(image) => procs
             .records
             .iter()
-            .filter(|r| *r.meta.name == **image)
+            .filter(|r| is_name_match(r, image))
             .for_each(check),
         MinigraphSource::App(id) => {
             let group = GroupKind::App {
@@ -507,6 +507,20 @@ pub fn match_state(source: &MinigraphSource, column: GraphColumn, snap: &Snapsho
     } else {
         CardState::Live
     }
+}
+
+/// A record that a name source `image` matches.
+fn is_name_match(r: &ProcessRecord, image: &str) -> bool {
+    *r.meta.name == *image
+}
+
+/// How many records a name source `image` matches in `snap`.
+pub fn name_match_count(image: &str, snap: &Snapshot) -> usize {
+    snap.processes
+        .records
+        .iter()
+        .filter(|r| is_name_match(r, image))
+        .count()
 }
 
 /// The record fields behind a graph column, as the engine reads them for its graph targets

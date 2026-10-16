@@ -7,15 +7,20 @@ use std::sync::Arc;
 use gpui_kit::{AppContext as _, TestAppContext};
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
-use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::ids::{
+    ColumnId, DeviceIdx, GraphTarget, GroupKey, MetricId, ProcessKey, ProcessSeriesId, SeriesId,
+};
+use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{
     AppearanceSettings, Settings, ThemeSettings, TrayGraphState as TrayGraphEntry, UiState,
 };
-use tl_model::snapshot::SeriesSet;
+use tl_model::snapshot::{ComponentHeader, ProcessSeriesSet, ProcessSnapshot, SeriesSet};
+use tl_model::time::BootId;
 use tl_model::tray::{
     TrayEvent, TrayGraphId, TrayGraphState, TrayModel, TrayServiceEnd, tray_channels,
 };
+use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
 use tl_ui::hub::SnapshotHub;
@@ -221,29 +226,318 @@ fn tray_tooltip_forms(cx: &mut TestAppContext) {
     assert_eq!(m.graphs[1].max, 1000.0);
 }
 
-/// Process, name and app graphs are wox.16: until then the frame is warming up, with no series.
+fn pkey(pid: u32, boot: u64) -> ProcessKey {
+    ProcessKey {
+        start_ticks: u64::from(pid) * 10,
+        boot_id: BootId(boot),
+        pid,
+    }
+}
+
+fn record(pid: u32, name: &str, app_id: Option<&str>) -> ProcessRecord {
+    let name: Arc<str> = Arc::from(name);
+    ProcessRecord {
+        key: pkey(pid, 7),
+        ppid: 1,
+        uid: 1000,
+        meta: Arc::new(ProcessMeta {
+            comm: Arc::clone(&name),
+            name: Arc::clone(&name),
+            exe: None,
+            cmdline: None,
+            user: Arc::from("user"),
+            cgroup: None,
+            app_id: app_id.map(Arc::from),
+            icon: None,
+            description: None,
+            desktop_path: None,
+            search_lower: Arc::clone(&name),
+        }),
+        group: GroupKey(0),
+        state: ProcState::Sleeping,
+        flags: ProcFlags::empty(),
+        nice: 0,
+        threads: 1,
+        cpu_pct: 0.0,
+        rss_anon_bytes: 0,
+        rss_bytes: 0,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.0,
+        io_write_bps: 0.0,
+        net_rx_bps: 0.0,
+        net_tx_bps: 0.0,
+        gpu_util_pct: 0.0,
+        gpu_mem_bytes: 0,
+        euid: None,
+        net_shared: false,
+        cancelled_write_bps: 0.0,
+        validity: FieldValidity::all(Validity::Valid),
+    }
+}
+
+fn proc_graph(source: &str, column: &str, range_s: u16) -> TrayGraphEntry {
+    TrayGraphEntry {
+        source: source.to_owned(),
+        column: column.to_owned(),
+        color: "accent".to_owned(),
+        range_s,
+    }
+}
+
+fn cpu_id(target: GraphTarget) -> ProcessSeriesId {
+    ProcessSeriesId {
+        target,
+        column: ColumnId::Cpu,
+    }
+}
+
+fn proc_view(value: f32) -> Arc<SeriesView> {
+    Arc::new(SeriesView {
+        id: SeriesId {
+            device: DeviceIdx(0),
+            metric: MetricId::CPU_TOTAL,
+        },
+        version: 1,
+        period_ns: 1_000_000_000,
+        samples: Arc::from([Sample::valid(SAMPLE_NS, value)]),
+    })
+}
+
+impl Rig {
+    /// Publishes `records` as the process list of boot 7, `Valid` or not (before the first sweep).
+    fn publish_processes(&self, mut records: Vec<ProcessRecord>, valid: bool) {
+        records.sort_by_key(|r| r.key);
+        self.engine.publish_with(|s| {
+            s.boot_id = BootId(7);
+            let version = s.processes.header.version + 1;
+            s.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version,
+                    validity: if valid {
+                        Validity::Valid
+                    } else {
+                        Validity::default()
+                    },
+                    ..ComponentHeader::default()
+                },
+                records: records.into(),
+                ..ProcessSnapshot::default()
+            });
+        });
+    }
+
+    fn publish_process_series(
+        &self,
+        mut fast: Vec<(ProcessSeriesId, Arc<SeriesView>)>,
+        mut slow: Vec<(ProcessSeriesId, Arc<SeriesView>)>,
+    ) {
+        fast.sort_by(|a, b| a.0.cmp(&b.0));
+        slow.sort_by(|a, b| a.0.cmp(&b.0));
+        self.engine.publish_with(|s| {
+            let version = s.process_series.header.version + 1;
+            s.process_series = Arc::new(ProcessSeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: fast.into(),
+                slow: slow.into(),
+            });
+        });
+    }
+}
+
+fn titles(m: &TrayModel) -> Vec<(String, String)> {
+    m.graphs
+        .iter()
+        .map(|g| {
+            (
+                g.tooltip_title.to_string(),
+                g.tooltip_description.to_string(),
+            )
+        })
+        .collect()
+}
+
+/// wox.9 criteria 3 and 4: the process, name and app tooltip forms.
+#[gpui_kit::test]
+fn tray_tooltip_process_forms(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![
+            proc_graph("process:0000000000000007:1234:12340", "cpu", 60),
+            proc_graph("name:firefox", "cpu", 60),
+            proc_graph("app:org.kde.kate", "cpu", 60),
+        ],
+        false,
+    );
+    r.publish_processes(
+        vec![
+            record(1234, "firefox", None),
+            record(1235, "firefox", None),
+            record(1236, "firefox", None),
+            ProcessRecord {
+                group: GroupKind::App {
+                    app_id: Arc::from("org.kde.kate"),
+                }
+                .key(),
+                ..record(2000, "kate", Some("org.kde.kate"))
+            },
+        ],
+        true,
+    );
+    r.publish_process_series(
+        vec![
+            (cpu_id(GraphTarget::Process(pkey(1234, 7))), proc_view(3.2)),
+            (
+                cpu_id(GraphTarget::App(Arc::from("org.kde.kate"))),
+                proc_view(3.2),
+            ),
+        ],
+        Vec::new(),
+    );
+    let m = r.one(cx);
+    let got = titles(&m);
+    assert_eq!(
+        got[0],
+        ("firefox (PID 1234)".to_owned(), "CPU 3.2%".to_owned())
+    );
+    assert_eq!(got[1], ("3 procs".to_owned(), "firefox".to_owned()));
+    assert_eq!(got[2], ("kate".to_owned(), "CPU 3.2%".to_owned()));
+    assert!(m.graphs.iter().all(|g| g.state == TrayGraphState::Live));
+    assert!(m.graphs[0].series.is_some() && m.graphs[2].series.is_some());
+    assert!(m.graphs[1].series.is_none());
+}
+
+#[gpui_kit::test]
+fn process_title_before_name_is_read(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![proc_graph("process:0000000000000007:1234:12340", "cpu", 60)],
+        false,
+    );
+    r.publish_processes(Vec::new(), false);
+    let m = r.one(cx);
+    assert_eq!(&*m.graphs[0].tooltip_title, "Process 1234");
+    assert_eq!(m.graphs[0].state, TrayGraphState::Live);
+}
+
+/// wox.9 criteria 5 and 6.
 #[gpui_kit::test]
 fn no_match_and_ended_descriptions(cx: &mut TestAppContext) {
     let r = rig(
         cx,
         vec![
-            graph("name:firefox", "accent"),
-            graph("app:org.kde.kate", "accent"),
+            proc_graph("name:firefox", "cpu", 60),
+            proc_graph("process:0000000000000008:1234:12340", "cpu", 60),
         ],
         false,
     );
+    r.publish_processes(vec![record(5, "other", None)], true);
     let m = r.one(cx);
+    assert_eq!(m.graphs[0].state, TrayGraphState::NoMatch);
+    assert_eq!(titles(&m)[0], ("firefox".to_owned(), "No match".to_owned()));
+    assert_eq!(m.graphs[1].state, TrayGraphState::Ended);
+    assert_eq!(&*m.graphs[1].tooltip_description, "Ended");
     assert!(m.graphs.iter().all(|g| g.series.is_none()));
-    assert!(m.graphs.iter().all(|g| g.state == TrayGraphState::Live));
-    assert_eq!(&*m.graphs[0].tooltip_title, "firefox");
-    assert_eq!(&*m.graphs[0].tooltip_description, "\u{2026}");
     let labels: Vec<String> = m
         .menu
         .process_graphs
         .iter()
         .map(|(_, l)| l.to_string())
         .collect();
-    assert_eq!(labels, ["firefox", "org.kde.kate"]);
+    let want: Vec<String> = m
+        .graphs
+        .iter()
+        .map(|g| g.tooltip_title.to_string())
+        .collect();
+    assert_eq!(labels, want);
+}
+
+#[gpui_kit::test]
+fn ended_latch_never_returns_live(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![proc_graph("process:0000000000000007:1234:12340", "cpu", 60)],
+        false,
+    );
+    r.publish_processes(vec![record(1234, "firefox", None)], true);
+    let m = r.one(cx);
+    assert_eq!(m.graphs[0].state, TrayGraphState::Live);
+    assert_eq!(&*m.graphs[0].tooltip_title, "firefox (PID 1234)");
+
+    r.publish_processes(Vec::new(), true);
+    let m = r.one(cx);
+    assert_eq!(m.graphs[0].state, TrayGraphState::Ended);
+    assert_eq!(&*m.graphs[0].tooltip_title, "firefox (PID 1234)");
+
+    r.publish_processes(vec![record(1234, "firefox", None)], true);
+    let m = r.one(cx);
+    assert_eq!(m.graphs[0].state, TrayGraphState::Ended);
+    assert_eq!(&*m.graphs[0].tooltip_title, "firefox (PID 1234)");
+}
+
+#[gpui_kit::test]
+fn process_graph_demand_targets(cx: &mut TestAppContext) {
+    let r = rig(
+        cx,
+        vec![
+            proc_graph("name:firefox", "cpu", 60),
+            proc_graph("name:kate", "rss", 60),
+            proc_graph("process:0000000000000007:1234:12340", "cpu", 60),
+        ],
+        false,
+    );
+    r.publish_processes(
+        vec![record(1234, "firefox", None), record(9, "kate", None)],
+        true,
+    );
+    r.one(cx);
+    cx.executor().advance_clock(DEMAND_COALESCE);
+    cx.run_until_parked();
+    let last = r.engine.demands().pop().expect("demand sent");
+    assert_eq!(
+        &last.graph_targets[..],
+        [
+            (GraphTarget::Name(Arc::from("firefox")), ColumnId::Cpu),
+            (GraphTarget::Process(pkey(1234, 7)), ColumnId::Cpu),
+        ]
+    );
+
+    // The process ends: its target goes, the name graph keeps its own.
+    r.publish_processes(
+        vec![record(9, "kate", None), record(10, "firefox", None)],
+        true,
+    );
+    r.one(cx);
+    cx.executor().advance_clock(DEMAND_COALESCE);
+    cx.run_until_parked();
+    let last = r.engine.demands().pop().expect("demand sent");
+    assert_eq!(
+        &last.graph_targets[..],
+        [(GraphTarget::Name(Arc::from("firefox")), ColumnId::Cpu)]
+    );
+}
+
+#[gpui_kit::test]
+fn process_graph_slow_tier_for_long_ranges(cx: &mut TestAppContext) {
+    let id = cpu_id(GraphTarget::Name(Arc::from("firefox")));
+    let fast = proc_view(1.0);
+    let slow = proc_view(2.0);
+    for (range_s, want_slow) in [(300u16, true), (60, false)] {
+        let r = rig(cx, vec![proc_graph("name:firefox", "cpu", range_s)], false);
+        r.publish_processes(vec![record(1, "firefox", None)], true);
+        r.publish_process_series(
+            vec![(id.clone(), fast.clone())],
+            vec![(id.clone(), slow.clone())],
+        );
+        let m = r.one(cx);
+        let got = m.graphs[0].series.as_ref().expect("series");
+        let want = if want_slow { &slow } else { &fast };
+        assert!(Arc::ptr_eq(got, want), "range {range_s}");
+    }
 }
 
 #[gpui_kit::test]

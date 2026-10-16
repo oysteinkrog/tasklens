@@ -3,8 +3,9 @@
 //! Once per second, while the tray is in use, [`TrayBridge`] builds a `TrayModel` from the latest
 //! snapshot and the `[[tray_graphs]]` of `state.toml` and sends it to the service (UI-PRF-050,
 //! UI-PRF-051, UI-SHL-113, ADR-008). Events coming back, and the add and remove actions, are
-//! E31-A2. Process, name and app graphs are E31 wox.16: until then their frame is in the
-//! warming-up state, with no series.
+//! E31-A2. Process, name and app graphs read the shared resolver of the minigraph cards
+//! ([`resolve_process_source`]). Each keeps its own `Ended` latch and adds its target to
+//! `Demand.graph_targets`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +20,7 @@ use serde::Deserialize;
 use tl_model::client::EngineClient;
 use tl_model::demand::{Demand, TrayDemand};
 use tl_model::health::{SourceId, SourceState};
+use tl_model::ids::{ColumnId, GraphTarget};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::{NetworkUnit, TrayGraphState as TrayGraphEntry};
 use tl_model::snapshot::Snapshot;
@@ -32,14 +34,17 @@ use tl_model::units;
 use crate::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
 use crate::app::EngineGlobal;
 use crate::chart::scale::{self, ScaleState};
-use crate::chart::view::find_tiered;
+use crate::chart::view::{find_process_tiered, find_tiered};
 use crate::chart::{ValueFormat, YScale, format_value};
 use crate::components::toast::ToastKind;
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::i18n::tr;
 use crate::pages::minigraph::GraphColor;
+use crate::pages::minigraph::card::CardState;
 use crate::pages::minigraph::card::{chart_spec_for, device_for, resolve_colors};
-use crate::pages::minigraph::sources::MinigraphSource;
+use crate::pages::minigraph::sources::{
+    GraphColumn, MinigraphSource, column_scale, name_match_count, resolve_process_source,
+};
 use crate::pages::performance::actions::PerfAddTrayGraph;
 use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::TlSettings;
@@ -95,6 +100,10 @@ pub struct TrayGraph {
     pub color: SharedString,
     pub range_s: u32,
     pub scale: ScaleState,
+    /// A process graph whose process is gone. It never reads again (PERF-086).
+    pub ended: bool,
+    /// The title of the last live frame, kept for the `Ended` frame.
+    pub last_title: Arc<str>,
 }
 
 /// The tray's one entity per app.
@@ -106,8 +115,8 @@ pub struct TrayBridge {
     main_window_hidden: bool,
     /// The last tick found the tray in use, so a model went out and a demand part is set.
     active: bool,
-    /// The tray part last given to the aggregator.
-    demand_sent: Option<TrayDemand>,
+    /// The demand last given to the aggregator.
+    demand_sent: Option<Demand>,
 }
 
 /// Loads the graphs, sets [`TrayStatus`] and starts the 1 Hz timer. Called once by tl-app after
@@ -275,6 +284,8 @@ impl TrayBridge {
                 color: e.color.clone().into(),
                 range_s: u32::from(e.range_s),
                 scale: ScaleState::default(),
+                ended: false,
+                last_title: Arc::from(""),
             })
             .collect();
         let next_id = graphs.len() as u32 + 1;
@@ -356,6 +367,8 @@ impl TrayBridge {
             color: GraphColor::Accent.as_str().into(),
             range_s: 60,
             scale: ScaleState::default(),
+            ended: false,
+            last_title: Arc::from(""),
         });
         self.save(cx);
         true
@@ -441,6 +454,7 @@ impl TrayBridge {
             icons_shown: true,
             ..TrayDemand::default()
         };
+        let mut targets: Vec<(GraphTarget, ColumnId)> = Vec::new();
         let mut frames = Vec::with_capacity(self.graphs.len());
         let mut process_graphs: Vec<(TrayGraphId, Arc<str>)> = Vec::new();
         let mut page_sources = [false; 7];
@@ -457,8 +471,9 @@ impl TrayBridge {
                 theme: &theme,
                 unit,
                 auto_scale,
+                app: &*cx,
             };
-            let frame = build_frame(graph, &ctx, &mut demand);
+            let frame = build_frame(graph, &ctx, &mut demand, &mut targets);
             if is_process_source(&graph.source) {
                 process_graphs.push((graph.id, Arc::from(&*frame.tooltip_title)));
             }
@@ -474,7 +489,14 @@ impl TrayBridge {
         } else {
             String::new()
         };
-        self.set_demand(Some(demand), cx);
+        self.set_demand(
+            Some(Demand {
+                tray: demand,
+                graph_targets: Arc::from(targets),
+                ..Demand::default()
+            }),
+            cx,
+        );
         self.send(TrayModel {
             show_main_icon,
             main_tooltip_title: Arc::from(MAIN_TITLE),
@@ -492,26 +514,18 @@ impl TrayBridge {
         let _ = self.end.models.try_send(model);
     }
 
-    /// Gives the aggregator this tray part, or removes it for `None`. Only a change is sent.
-    fn set_demand(&mut self, part: Option<TrayDemand>, cx: &mut Context<Self>) {
+    /// Gives the aggregator this tray demand, or removes it for `None`. Only a change is sent.
+    fn set_demand(&mut self, part: Option<Demand>, cx: &mut Context<Self>) {
         if self.demand_sent == part {
             return;
         }
-        self.demand_sent = part;
+        self.demand_sent = part.clone();
         let Some(agg) = cx.try_global::<GlobalDemand>().map(|g| g.0.clone()) else {
             return;
         };
         let id = cx.entity_id();
         agg.update(cx, |agg: &mut DemandAggregator, cx| match part {
-            Some(tray) => agg.set(
-                id,
-                None,
-                Demand {
-                    tray,
-                    ..Demand::default()
-                },
-                cx,
-            ),
+            Some(demand) => agg.set(id, None, demand, cx),
             None => agg.remove(id, cx),
         });
     }
@@ -540,6 +554,7 @@ struct Ctx<'a> {
     theme: &'a crate::theme::TlTheme,
     unit: NetworkUnit,
     auto_scale: bool,
+    app: &'a App,
 }
 
 /// The GPU keys of `performance.device_order`, for a source with no GPU key (R-085).
@@ -584,7 +599,7 @@ fn collector_failed(snap: &Snapshot, source: &MinigraphSource) -> bool {
             failed(SourceId::GpuNvidia) || failed(SourceId::GpuDrm)
         }
         MinigraphSource::Process { .. } | MinigraphSource::Name(_) | MinigraphSource::App(_) => {
-            false
+            failed(SourceId::Processes)
         }
     }
 }
@@ -725,7 +740,12 @@ fn scale_format(source: &MinigraphSource, total: u64) -> ValueFormat {
 }
 
 /// Builds the frame of one graph and adds what it needs to `demand`.
-fn build_frame(graph: &mut TrayGraph, ctx: &Ctx<'_>, demand: &mut TrayDemand) -> TrayGraphFrame {
+fn build_frame(
+    graph: &mut TrayGraph,
+    ctx: &Ctx<'_>,
+    demand: &mut TrayDemand,
+    targets: &mut Vec<(GraphTarget, ColumnId)>,
+) -> TrayGraphFrame {
     let snap = ctx.snap;
     let range_s = graph.range_s;
     let color = GraphColor::from_str(&graph.color).unwrap_or(GraphColor::Accent);
@@ -748,14 +768,7 @@ fn build_frame(graph: &mut TrayGraph, ctx: &Ctx<'_>, demand: &mut TrayDemand) ->
         return frame;
     };
     let Some(metric) = metric_of(&source) else {
-        // Process, name and app graphs are wox.16: warming-up frame, no series.
-        let title = match &source {
-            MinigraphSource::Process { key } => format!("Process {}", key.pid),
-            MinigraphSource::Name(image) => image.to_string(),
-            MinigraphSource::App(id) => id.to_string(),
-            _ => String::new(),
-        };
-        frame.tooltip_title = Arc::from(title.as_str());
+        process_frame(graph, &source, &mut frame, ctx, targets);
         return frame;
     };
     match source {
@@ -795,25 +808,137 @@ fn build_frame(graph: &mut TrayGraph, ctx: &Ctx<'_>, demand: &mut TrayDemand) ->
         false,
         ctx.theme,
     );
+    frame.max = scale_max(
+        &spec.y,
+        scale_format(&source, snap.system.memory.total),
+        &frame,
+        &mut graph.scale,
+        ctx.unit,
+    );
+    frame
+}
+
+/// The scale ceiling of `frame`: a fixed scale's own max, else the scale rule's result with this
+/// graph's own memory.
+fn scale_max(
+    y: &YScale,
+    fmt: ValueFormat,
+    frame: &TrayGraphFrame,
+    scale: &mut ScaleState,
+    unit: NetworkUnit,
+) -> f32 {
     let (vmin, vmax) = frame.series.as_deref().map_or((0.0, 0.0), |v| {
         visible_range(v, frame.now_ns, frame.range_ns)
     });
     let mut text = String::new();
-    let result = scale::compute(
-        &spec.y,
-        vmin,
-        vmax,
-        frame.now_ns,
-        &mut graph.scale,
-        scale_format(&source, snap.system.memory.total),
-        ctx.unit,
-        &mut text,
-    );
-    frame.max = match spec.y {
-        YScale::Fixed { max, .. } => max,
+    let result = scale::compute(y, vmin, vmax, frame.now_ns, scale, fmt, unit, &mut text);
+    match y {
+        YScale::Fixed { max, .. } => *max,
         _ => result.y_max,
+    }
+}
+
+/// Fills `frame` for a process, name or app graph. A process graph whose key is from another
+/// boot, or is missing from a `Valid` list, latches `Ended` and never reads again. Name and app
+/// graphs only show `No match`.
+fn process_frame(
+    graph: &mut TrayGraph,
+    source: &MinigraphSource,
+    frame: &mut TrayGraphFrame,
+    ctx: &Ctx<'_>,
+    targets: &mut Vec<(GraphTarget, ColumnId)>,
+) {
+    let snap = ctx.snap;
+    let color = GraphColor::from_str(&graph.color).unwrap_or(GraphColor::Accent);
+    let Some(column) = GraphColumn::parse(&graph.column) else {
+        frame.state = TrayGraphState::Failed;
+        frame.tooltip_title = Arc::from(&*graph.source);
+        return;
     };
-    frame
+    if graph.ended {
+        ended_frame(graph, frame, ctx);
+        return;
+    }
+    let Some(view) = resolve_process_source(source, column, color, snap, ctx.theme, ctx.app) else {
+        return;
+    };
+    let title: Arc<str> = match source {
+        MinigraphSource::Process { key } if snap.processes.get(*key).is_some() => {
+            Arc::from(format!("{} (PID {})", view.label_parts.name, key.pid))
+        }
+        MinigraphSource::Name(image) => {
+            let n = name_match_count(image, snap);
+            if n == 0 {
+                Arc::clone(image)
+            } else {
+                Arc::from(format!("{n} procs"))
+            }
+        }
+        _ => Arc::from(&*view.label_parts.name),
+    };
+    frame.tooltip_title = Arc::clone(&title);
+    frame.line_rgb = rgb_of(view.series.line);
+    if collector_failed(snap, source) {
+        frame.state = TrayGraphState::Failed;
+        return;
+    }
+    let other_boot = matches!(
+        source,
+        MinigraphSource::Process { key } if key.boot_id != snap.boot_id
+    );
+    if other_boot
+        || (view.state == CardState::NoMatch && matches!(source, MinigraphSource::Process { .. }))
+    {
+        graph.ended = true;
+        if graph.last_title.is_empty() {
+            graph.last_title = title;
+        }
+        ended_frame(graph, frame, ctx);
+        return;
+    }
+    graph.last_title = title;
+    if column.engine_sampled() {
+        if let Some(id) = view.series.process {
+            frame.series = find_process_tiered(&snap.process_series, &id, frame.range_ns)
+                .0
+                .cloned();
+        }
+        if view.state != CardState::NoMatch
+            && let Some(target) = source.graph_target()
+        {
+            targets.push((target, column.column_id()));
+        }
+    }
+    let description = match (view.state, source) {
+        (CardState::NoMatch, _) => view.value.to_string(),
+        (CardState::Restricted, _) => format!("{} Restricted", column.label()),
+        (_, MinigraphSource::Name(image)) => {
+            if name_match_count(image, snap) > 0 {
+                image.to_string()
+            } else {
+                WARMING_UP_TEXT.to_owned()
+            }
+        }
+        _ => format!("{} {}", column.label(), view.value),
+    };
+    frame.tooltip_description = Arc::from(description);
+    if view.state == CardState::NoMatch {
+        frame.state = TrayGraphState::NoMatch;
+    }
+    frame.max = scale_max(
+        &view.y,
+        column_scale(source, column).1,
+        frame,
+        &mut graph.scale,
+        ctx.unit,
+    );
+}
+
+/// The frame of an ended process graph: the last title, no series and no demand.
+fn ended_frame(graph: &TrayGraph, frame: &mut TrayGraphFrame, ctx: &Ctx<'_>) {
+    frame.state = TrayGraphState::Ended;
+    frame.tooltip_title = Arc::clone(&graph.last_title);
+    frame.tooltip_description = Arc::from(&*tr(ctx.app, "minigraph-ended"));
 }
 
 /// Min and max of the valid samples inside the window; (0, 0) when there are none.
