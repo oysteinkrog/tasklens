@@ -7,16 +7,18 @@
 //! probe. A change shows "Takes effect after restart" and the toast "Restart tasklens to use the
 //! new GPU".
 
+use std::rc::Rc;
+
 use gpui_kit::{App, Global, SharedString};
 use tracing::warn;
 
-use super::{PageBuilder, PageId, SettingsWindow};
+use super::{PageBuilder, PageId, PickValue, SettingsWindow, info_toast, read, value_matches};
 use crate::action_tracker::ToastTexts;
 use crate::app::{AdapterInfo, AppEnv};
 use crate::components::button::TlButtonKind;
 use crate::components::toast::ToastQueue;
 use crate::i18n::tr;
-use crate::settings_global::{SettingKey, SettingValue};
+use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::window::about::{file_uri, send_open_uri};
 use crate::window::confirm::ResetSettings;
 use crate::window::menus_settings::{adapter_setting_value, probe_adapters};
@@ -80,11 +82,23 @@ pub fn page(cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(PageId::Advanced);
     let group = "";
     let toast = tr(cx, "shell-toast-gpu-restart");
-    page.restart_note_toast(cx, toast).dropdown(
+    let key = SettingKey::RenderingGpu;
+    // Only a change of value toasts: picking the GPU already in use needs no restart.
+    let write: PickValue = Rc::new(move |value, cx| {
+        let changed = !value_matches(value, &read(cx, key));
+        TlSettings::set(cx, key, value.clone());
+        if changed {
+            info_toast(toast.clone(), cx);
+        }
+    });
+    let restart = page.restart_note(cx).take_restart();
+    page.dropdown_with(
         group,
-        SettingKey::RenderingGpu,
+        key,
         tr(cx, "shell-menu-settings-rendering-gpu"),
         &gpu_options(cx),
+        restart,
+        write,
     );
     page.switch(
         group,

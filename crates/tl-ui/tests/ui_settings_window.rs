@@ -1760,6 +1760,20 @@ fn advanced_rendering_gpu_row(cx: &mut TestAppContext) {
         cx.update(|cx| TlSettings::settings(cx).rendering.gpu.clone()),
         "pci:0000:01:00.0"
     );
+    let toasts = window_toasts(&mut vcx);
+    assert_eq!(toasts.len(), 2, "each change of GPU toasts once");
+
+    vcx.update(|_, cx| advanced.pick(SettingKey::RenderingGpu, "NVIDIA GeForce RTX 4070", cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).rendering.gpu.clone()),
+        "pci:0000:01:00.0"
+    );
+    assert_eq!(
+        window_toasts(&mut vcx),
+        toasts,
+        "picking the GPU already in use shows no restart toast"
+    );
 }
 
 #[gpui_kit::test]
