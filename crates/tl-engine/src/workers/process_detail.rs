@@ -4002,12 +4002,12 @@ mod tests {
         let (src, _, _) = step_all(src, &d, &s, 0);
         assert_eq!(index.run_batch().expect("batch"), 1);
         // The next read settles the package; the request then runs.
-        let (mut src, _, _) = step_all(src, &d, &s, 500);
+        let (mut src, out, _) = step_all(src, &d, &s, 500);
+        assert_eq!(general(&out).0.package, valid(None));
         assert!(src.command(&WorkerCommand::VerifyPackage(a())));
         let (src, out, _) = step_all(src, &d, &s, 1000);
         assert!(src.verify_requests.is_empty());
-        assert_eq!(general(&out).0.package, valid(None));
-        assert_eq!(general(&out).0.package_check, PackageCheck::NotVerified);
+        assert!(out.is_empty(), "General changed: {out:?}");
     }
 
     #[test]
