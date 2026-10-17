@@ -2153,6 +2153,36 @@ mod window {
         assert_eq!(demanded(cx), vec![general_demand(4321, DetailTab::Maps)]);
     }
 
+    /// tasklens-dwy.16: General shows GPU % and VRAM, so the window asks for per-process GPU
+    /// values while General is active, and only then.
+    #[gpui_kit::test]
+    fn props_general_demands_gpu_process(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let gpu_process = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                let demand = cx.global::<GlobalDemand>().0.clone();
+                demand.read(cx).merged().gpu_process
+            })
+        };
+        let handle = open(cx, 4321).expect("opened");
+        assert!(gpu_process(cx), "General asks for per-process GPU values");
+
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, cx| {
+            view.update(cx, |p, cx| p.select_tab(DetailTab::Threads, window, cx))
+        });
+        vcx.run_until_parked();
+        assert!(!gpu_process(cx), "Threads shows no GPU values");
+
+        cx.update(|cx| {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        });
+        cx.run_until_parked();
+        assert!(!gpu_process(cx), "a closed window asks for nothing");
+    }
+
     #[gpui_kit::test]
     fn props_alt_number_selects_tab(cx: &mut TestAppContext) {
         let (engine, _main) = setup(cx);

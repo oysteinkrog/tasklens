@@ -2,9 +2,10 @@
 //! the data path, keys, the exited state and the access block (UI-PWN-002, UI-PWN-003,
 //! UI-PWN-004, UI-PWN-018, PROC-077, PROC-071, R-119, ADR-003, ADR-008, D-008).
 //!
-//! The window registers `DetailDemand { Process(key), active tab }` while it is open and reads
-//! `Snapshot.processes`, `Snapshot.system` and `Snapshot.details`. A snapshot costs one record
-//! lookup and one `Arc` pointer compare per payload it shows. The window itself re-renders only
+//! The window registers `DetailDemand { Process(key), active tab }` while it is open, plus
+//! `gpu_process` while General is the active tab, and reads `Snapshot.processes`,
+//! `Snapshot.system` and `Snapshot.details`. A snapshot costs one record lookup and one `Arc`
+//! pointer compare per payload it shows. The window itself re-renders only
 //! when a tab label, the active tab or the exited state changes; the tab views are fed through
 //! their own setters and notify themselves.
 //!
@@ -851,6 +852,8 @@ impl PropsWindow {
                 target: DetailTarget::Process(self.key),
                 tab: self.active,
             }]),
+            // General shows GPU % and VRAM. The engine reads PSS and USS for a General target.
+            gpu_process: self.active == DetailTab::General,
             ..Demand::default()
         };
         let handle = window.window_handle();
