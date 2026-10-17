@@ -12,10 +12,11 @@ use crate::validity::Validity;
 /// Protocol version sent in both `Hello` messages. 2 added `mem_reserved` and `enc_sessions`
 /// to `GpuDeviceSample`. 3 added the PERF-066 to PERF-070 limits to `GpuDeviceInfo` and fan RPM,
 /// video clock, P-state, PCIe link and energy to `GpuDeviceSample`. 4 added the JPEG and OFA
-/// engine readings to `GpuDeviceSample`. A probe of another version
+/// engine readings to `GpuDeviceSample`. 5 added the minimum power limit to `GpuDeviceInfo` and
+/// the clock event reasons to `GpuDeviceSample`. A probe of another version
 /// answers `Hello` with an empty device list, so its reply decodes whatever the device layout,
 /// and it is refused there before any sample is decoded.
-pub const GPU_PROTO_VERSION: u16 = 4;
+pub const GPU_PROTO_VERSION: u16 = 5;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProbeRequest {
@@ -68,8 +69,10 @@ pub struct GpuDeviceInfo {
     /// `nvmlDeviceGetMaxClockInfo` graphics and memory, MHz (PERF-066).
     pub clock_gfx_max_mhz: Option<u32>,
     pub clock_mem_max_mhz: Option<u32>,
-    /// `nvmlDeviceGetPowerManagementLimitConstraints` `max_limit`, milliwatts (PERF-067).
+    /// `nvmlDeviceGetPowerManagementLimitConstraints` `max_limit` and `min_limit`, milliwatts
+    /// (PERF-067).
     pub power_max_limit_mw: Option<u32>,
+    pub power_min_limit_mw: Option<u32>,
     /// `nvmlDeviceGetTemperatureThreshold` slowdown and shutdown, °C (PERF-068).
     pub slowdown_temp_c: Option<u32>,
     pub shutdown_temp_c: Option<u32>,
@@ -130,6 +133,9 @@ pub struct GpuDeviceSample {
     pub clock_video_mhz: Reading<u32>,
     /// `nvmlDeviceGetPerformanceState`, 0 to 15 for P0 to P15 (PERF-066).
     pub pstate: Reading<u8>,
+    /// `nvmlDeviceGetCurrentClocksEventReasons`, the NVML `nvmlClocksEventReason*` bit mask as
+    /// NVML returns it (PERF-066). 0 means the clocks are not held down.
+    pub clock_event_reasons: Reading<u64>,
     pub fan_pct: Reading<u32>,
     /// `nvmlDeviceGetFanSpeedRPM` of fan 0 (PERF-068).
     pub fan_rpm: Reading<u32>,
@@ -195,6 +201,7 @@ mod tests {
             clock_mem_mhz: Reading::Ok(u32::MAX),
             clock_video_mhz: Reading::Ok(u32::MAX),
             pstate: Reading::Ok(u8::MAX),
+            clock_event_reasons: Reading::Ok(u64::MAX),
             fan_pct: Reading::Unsupported,
             fan_rpm: Reading::Ok(u32::MAX),
             pcie_rx_kbps: Reading::Ok(u32::MAX),
@@ -240,13 +247,13 @@ mod tests {
     }
 
     #[test]
-    fn proto_version_four() {
-        assert_eq!(GPU_PROTO_VERSION, 4);
+    fn proto_version_five() {
+        assert_eq!(GPU_PROTO_VERSION, 5);
     }
 
-    /// A version 4 `Hello` and a sample with and without the JPEG and OFA readings.
+    /// A `Hello` and a sample with and without the JPEG and OFA readings.
     #[test]
-    fn version_four_round_trips_jpeg_and_ofa() {
+    fn round_trips_jpeg_and_ofa() {
         let hello = ProbeResponse::Hello {
             proto: GPU_PROTO_VERSION,
             driver: "580.82.09".to_string(),
@@ -267,6 +274,61 @@ mod tests {
             seq: 1,
             t_ns: 2,
             devices: vec![with, without],
+            processes: None,
+        };
+        for msg in [hello, sample] {
+            let mut buf = Vec::new();
+            encode_frame(&msg, MAX_PROBE_FRAME, &mut buf).unwrap();
+            let back: ProbeResponse = read_frame(&mut buf.as_slice(), MAX_PROBE_FRAME).unwrap();
+            assert_eq!(back, msg);
+        }
+    }
+
+    /// A version 5 `Hello` with and without the minimum power limit, and a sample with and
+    /// without the clock event reasons.
+    #[test]
+    fn version_five_round_trips_min_limit_and_reasons() {
+        let info = |power_min_limit_mw| GpuDeviceInfo {
+            uuid: [7; 16],
+            name: "NVIDIA GeForce RTX 4080".to_string(),
+            pci_bus_id: "00000000:01:00.0".to_string(),
+            mem_total: 16 << 30,
+            power_limit_mw: Some(320_000),
+            cuda_version: None,
+            vbios: None,
+            architecture: None,
+            clock_gfx_max_mhz: None,
+            clock_mem_max_mhz: None,
+            power_max_limit_mw: Some(350_000),
+            power_min_limit_mw,
+            slowdown_temp_c: None,
+            shutdown_temp_c: None,
+            pcie_max_gen: None,
+            pcie_max_width: None,
+        };
+        let hello = ProbeResponse::Hello {
+            proto: GPU_PROTO_VERSION,
+            driver: "580.82.09".to_string(),
+            nvml: "12.580.82.09".to_string(),
+            devices: vec![info(Some(100_000)), info(None)],
+        };
+        let with = GpuDeviceSample {
+            // SwPowerCap and HwSlowdown.
+            clock_event_reasons: Reading::Ok(0x4 | 0x8),
+            ..device(1)
+        };
+        let none = GpuDeviceSample {
+            clock_event_reasons: Reading::Ok(0),
+            ..device(2)
+        };
+        let without = GpuDeviceSample {
+            clock_event_reasons: Reading::Unsupported,
+            ..device(3)
+        };
+        let sample = ProbeResponse::Sample {
+            seq: 1,
+            t_ns: 2,
+            devices: vec![with, none, without],
             processes: None,
         };
         for msg in [hello, sample] {

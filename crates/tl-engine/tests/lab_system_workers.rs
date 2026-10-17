@@ -3411,6 +3411,28 @@ fn gpu_drm_amd_details_fields() {
     assert!(Arc::ptr_eq(&t.info, &info));
 }
 
+/// tasklens-hjn.43: hwmon `power1_cap_min` gives the lowest power limit; a card without the
+/// file has none.
+#[test]
+fn gpu_drm_amd_power_min_limit() {
+    let dir = fixture_copy("drm-amd", None);
+    let (_, s) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    assert_eq!(s.devices[0].1.info.power_min_limit_w, None);
+
+    let dir = fixture_copy("drm-amd", None);
+    // 100 W in microwatts.
+    fs::write(
+        dir.join("sys/class/drm/card0/device/hwmon/hwmon3/power1_cap_min"),
+        "100000000\n",
+    )
+    .expect("write power1_cap_min");
+    let (_, s) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    let t = &s.devices[0].1;
+    assert_eq!(t.info.power_min_limit_w, Some(100.0));
+    // amdgpu has no clock event reasons.
+    assert_eq!(t.clock_event_reasons.validity, Validity::Unsupported);
+}
+
 #[test]
 fn gpu_drm_intel_details_fields() {
     let dir = fixture_copy("drm-intel", None);
@@ -3420,6 +3442,8 @@ fn gpu_drm_intel_details_fields() {
     assert_eq!(t.energy_since_boot, Metric::valid(123.456_789));
     assert_eq!(t.info.clock_gfx_max_mhz, Some(2200));
     assert_eq!(t.info.clock_mem_max_mhz, None);
+    assert_eq!(t.info.power_min_limit_w, None);
+    assert_eq!(t.clock_event_reasons.validity, Validity::Unsupported);
     // No link files in the fixture.
     assert_eq!(t.pcie_gen.validity, Validity::Unsupported);
     assert_eq!(t.info.pcie_max_gen, None);

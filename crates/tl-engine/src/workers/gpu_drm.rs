@@ -34,7 +34,7 @@ use tl_collect::gpu_drm::{
 };
 use tl_collect::parse::udev::{UdevProps, pci_entry, read_udev_props};
 use tl_collect::sanitize::sanitize_text;
-use tl_collect::sysroot::read_trimmed;
+use tl_collect::sysroot::{read_trimmed, read_u64};
 use tl_model::demand::Demand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::{SourceId, SourceState};
@@ -325,8 +325,11 @@ impl GpuDrmSource {
                 // No sysfs file gives the Intel VRAM total (R-164); the samples carry fdinfo's.
                 CardState::Intel { sample, .. } => ("Intel", 0, sample.power_max_uw),
             };
-            self.statics
-                .push(card_static(state, read_pcie_link(&self.root.sys, card)));
+            self.statics.push(card_static(
+                card,
+                state,
+                read_pcie_link(&self.root.sys, card),
+            ));
             let name = display_name(&self.root, card, vendor, &mut props);
             let key: Arc<str> = Arc::from(format!("gpu:{}", card.pci_slot));
             entries.push(DeviceDesc {
@@ -425,20 +428,33 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     })
 }
 
-/// The static values of one card (PERF-066, PERF-070). sysfs gives no CUDA version,
-/// architecture, power limit range or temperature thresholds for AMD and Intel.
-fn card_static(state: &CardState, link: PcieLink) -> Arc<DeviceStatic> {
-    let (clock_gfx_max_mhz, clock_mem_max_mhz) = match state {
-        CardState::Amd { sample, .. } => (sample.sclk_max_mhz, sample.mclk_max_mhz),
-        CardState::Intel { sample, .. } => (sample.max_freq_mhz, None),
+/// The static values of one card (PERF-066, PERF-067, PERF-070). sysfs gives no CUDA version,
+/// architecture or temperature thresholds for AMD and Intel. Only amdgpu gives the minimum power
+/// limit.
+fn card_static(card: &DrmCard, state: &CardState, link: PcieLink) -> Arc<DeviceStatic> {
+    let (clock_gfx_max_mhz, clock_mem_max_mhz, power_min_limit_w) = match state {
+        CardState::Amd { sample, .. } => (
+            sample.sclk_max_mhz,
+            sample.mclk_max_mhz,
+            amd_power_min_limit_w(card),
+        ),
+        CardState::Intel { sample, .. } => (sample.max_freq_mhz, None, None),
     };
     Arc::new(DeviceStatic {
         pcie_max_gen: link.max_gen,
         pcie_max_width: link.max_width,
         clock_gfx_max_mhz,
         clock_mem_max_mhz,
+        power_min_limit_w,
         ..DeviceStatic::default()
     })
+}
+
+/// amdgpu hwmon `power1_cap_min`, microwatts, in W (PERF-067).
+fn amd_power_min_limit_w(card: &DrmCard) -> Option<f32> {
+    let path = card.hwmon.as_ref()?.join("power1_cap_min");
+    let mut buf = Vec::new();
+    read_u64(&path, &mut buf).ok().map(|uw| uw as f32 / 1e6)
 }
 
 /// What one card adds to each sample: its current PCIe link and its static values.
@@ -555,6 +571,7 @@ fn totals(
         clock_mem_mhz: opt(s.mclk_mhz),
         clock_video_mhz: Metric::with(Validity::Unsupported),
         pstate: Metric::with(Validity::Unsupported),
+        clock_event_reasons: Metric::with(Validity::Unsupported),
         fan_pct: opt(s.fan_pwm.map(|pwm| f32::from(pwm) / 255.0 * 100.0)),
         fan_rpm: opt(s.fan_rpm),
         pcie_rx_bps: Metric::with(Validity::Unsupported),
@@ -681,6 +698,7 @@ fn intel(
         clock_mem_mhz: Metric::with(Validity::Unsupported),
         clock_video_mhz: Metric::with(Validity::Unsupported),
         pstate: Metric::with(Validity::Unsupported),
+        clock_event_reasons: Metric::with(Validity::Unsupported),
         fan_pct: Metric::with(Validity::Unsupported),
         fan_rpm: Metric::with(Validity::Unsupported),
         pcie_rx_bps: Metric::with(Validity::Unsupported),

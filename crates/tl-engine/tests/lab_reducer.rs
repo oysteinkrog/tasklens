@@ -1450,6 +1450,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
                     energy_since_boot: Metric::default(),
                     clock_video_mhz: Metric::default(),
                     pstate: Metric::default(),
+                    clock_event_reasons: Metric::default(),
                     fan_rpm: Metric::default(),
                     pcie_gen: Metric::default(),
                     pcie_width: Metric::default(),
@@ -2082,6 +2083,7 @@ fn gpu_power_msg(uuid: [u8; 16], watts: f32, sm: &[(u32, u32)]) -> EngineMsg {
                 energy_since_boot: Metric::default(),
                 clock_video_mhz: Metric::default(),
                 pstate: Metric::default(),
+                clock_event_reasons: Metric::default(),
                 fan_rpm: Metric::default(),
                 pcie_gen: Metric::default(),
                 pcie_width: Metric::default(),
@@ -3268,6 +3270,7 @@ fn gpu_sample(cards: &[(&DeviceIdentity, f32)]) -> EngineMsg {
                         energy_since_boot: Metric::default(),
                         clock_video_mhz: Metric::default(),
                         pstate: Metric::default(),
+                        clock_event_reasons: Metric::default(),
                         fan_rpm: Metric::default(),
                         pcie_gen: Metric::default(),
                         pcie_width: Metric::default(),
@@ -3354,6 +3357,41 @@ fn gpu_engine_series_per_reported_engine() {
         series(MetricId::GPU_UTIL).expect("util series").samples[0].value,
         10.0
     );
+    rig.passed();
+}
+
+/// tasklens-hjn.43: the memory clock gets its own series, next to the graphics clock.
+#[test]
+fn gpu_mem_clock_series_gets_samples() {
+    let mut rig = Rig::new();
+    let read = gpu_id([0; 16], "0000:03:00.0");
+    let failed = gpu_id([0; 16], "0000:04:00.0");
+    let mut msg = gpu_sample(&[(&read, 10.0), (&failed, 10.0)]);
+    if let EngineMsg::Source(SourceUpdate::Gpu(s)) = &mut msg {
+        s.devices[0].1.clock_gfx_mhz = Metric::valid(1_905);
+        s.devices[0].1.clock_mem_mhz = Metric::valid(7_001);
+        s.devices[1].1.clock_mem_mhz = Metric::with(Validity::Failed);
+    }
+    rig.run(vec![drm_list(&[&read, &failed]), msg])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    let series = |id: &DeviceIdentity, metric| {
+        snap.series
+            .get(SeriesId {
+                device: rig.idx(id),
+                metric,
+            })
+            .expect("series exists")
+    };
+    let mem = series(&read, MetricId::GPU_MEM_CLOCK);
+    assert_eq!(mem.samples.len(), 1);
+    assert_eq!(mem.samples[0].value, 7_001.0);
+    assert!(mem.samples[0].flags.contains(SampleFlags::VALID));
+    assert_eq!(series(&read, MetricId::GPU_CLOCK).samples[0].value, 1_905.0);
+    // A failed reading is a sample that is not valid, never a valid zero.
+    let mem = series(&failed, MetricId::GPU_MEM_CLOCK);
+    assert_eq!(mem.samples.len(), 1);
+    assert!(!mem.samples[0].flags.contains(SampleFlags::VALID));
     rig.passed();
 }
 

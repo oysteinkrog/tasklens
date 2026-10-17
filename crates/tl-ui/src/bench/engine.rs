@@ -872,6 +872,7 @@ impl OverviewSynth {
             energy_since_boot: Metric::with(Validity::Unsupported),
             clock_video_mhz: Metric::with(Validity::Unsupported),
             pstate: Metric::with(Validity::Unsupported),
+            clock_event_reasons: Metric::with(Validity::Unsupported),
             fan_rpm: Metric::with(Validity::Unsupported),
             pcie_gen: Metric::with(Validity::Unsupported),
             pcie_width: Metric::with(Validity::Unsupported),

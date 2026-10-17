@@ -132,6 +132,8 @@ impl FakeBackend {
             clock_mem_mhz: Reading::Ok(7001),
             clock_video_mhz: Reading::Ok(1_620),
             pstate: Reading::Ok(3),
+            // SwPowerCap.
+            clock_event_reasons: Reading::Ok(0x4),
             fan_pct: Reading::Unsupported,
             fan_rpm: Reading::Unsupported,
             pcie_rx_kbps: Reading::Ok(1000),
@@ -209,6 +211,7 @@ impl Backend for FakeBackend {
                 clock_gfx_max_mhz: Some(3_105),
                 clock_mem_max_mhz: Some(14_001),
                 power_max_limit_mw: Some(350_000),
+                power_min_limit_mw: Some(100_000),
                 slowdown_temp_c: Some(88),
                 shutdown_temp_c: Some(95),
                 pcie_max_gen: Some(5),

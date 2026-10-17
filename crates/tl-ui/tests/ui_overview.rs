@@ -1157,6 +1157,7 @@ mod bottom {
             energy_since_boot: Metric::default(),
             clock_video_mhz: Metric::default(),
             pstate: Metric::default(),
+            clock_event_reasons: Metric::default(),
             fan_rpm: Metric::default(),
             pcie_gen: Metric::default(),
             pcie_width: Metric::default(),

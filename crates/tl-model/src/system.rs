@@ -273,6 +273,9 @@ pub struct GpuStaticInfo {
     pub clock_mem_max_mhz: Option<u32>,
     /// The highest power limit the card accepts, W (PERF-067 "max 350 W").
     pub power_max_limit_w: Option<f32>,
+    /// The lowest power limit the card accepts, W (PERF-067 "Limit range 100 to 350 W"): NVML
+    /// `min_limit`, amdgpu hwmon `power1_cap_min`.
+    pub power_min_limit_w: Option<f32>,
     /// Temperatures where the card slows down and shuts down, °C (PERF-068).
     pub slowdown_temp_c: Option<f32>,
     pub shutdown_temp_c: Option<f32>,
@@ -314,6 +317,9 @@ pub struct GpuTotals {
     pub clock_video_mhz: Metric<u32>,
     /// Performance state, 0 for P0 to 15 for P15. NVIDIA only (PERF-066).
     pub pstate: Metric<u8>,
+    /// Why the clocks are held down, for the Clocks tooltip (PERF-066). An empty set means the
+    /// clocks are not held down. NVIDIA only.
+    pub clock_event_reasons: Metric<ClockEventReasons>,
     pub fan_pct: Metric<f32>,
     /// NVML fan 0 or amdgpu hwmon `fan1_input` (PERF-068).
     pub fan_rpm: Metric<u32>,
@@ -332,6 +338,32 @@ pub struct GpuTotals {
     pub fdinfo_partial: bool,
     /// The device's static values, shared by every sample until the next `Hello` or card scan.
     pub info: Arc<GpuStaticInfo>,
+}
+
+bitflags::bitflags! {
+    /// Reasons the GPU clocks are held down (PERF-066), from NVML
+    /// `nvmlDeviceGetCurrentClocksEventReasons`. Bit values are frozen.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    pub struct ClockEventReasons: u16 {
+        /// Nothing runs on the GPU.
+        const IDLE = 1 << 0;
+        /// The applications clocks setting limits the clocks.
+        const APP_CLOCKS = 1 << 1;
+        /// The software power cap.
+        const POWER_CAP = 1 << 2;
+        /// Hardware slowdown: high temperature, an external power brake or a power spike.
+        const HW_SLOWDOWN = 1 << 3;
+        /// Another GPU in the sync boost group holds this one down.
+        const SYNC_BOOST = 1 << 4;
+        /// Software thermal slowdown.
+        const SW_THERMAL = 1 << 5;
+        /// Hardware thermal slowdown.
+        const HW_THERMAL = 1 << 6;
+        /// Hardware power brake slowdown.
+        const HW_POWER_BRAKE = 1 << 7;
+        /// The display clock setting limits the clocks.
+        const DISPLAY_CLOCKS = 1 << 8;
+    }
 }
 
 /// One GPU engine (PERF-063). Each engine has a fixed key, stored in

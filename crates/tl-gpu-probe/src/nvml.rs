@@ -84,6 +84,7 @@ fn read_device(nvml: &Nvml, index: u32, cuda: Option<&str>) -> Option<GpuDeviceI
         Err(NvmlError::NotSupported) => None,
         Err(_) => return None,
     };
+    let limits = device.power_management_limit_constraints().ok();
     Some(GpuDeviceInfo {
         uuid,
         name: device.name().ok()?,
@@ -95,10 +96,8 @@ fn read_device(nvml: &Nvml, index: u32, cuda: Option<&str>) -> Option<GpuDeviceI
         architecture: device.architecture().ok().map(|a| a.to_string()),
         clock_gfx_max_mhz: device.max_clock_info(Clock::Graphics).ok(),
         clock_mem_max_mhz: device.max_clock_info(Clock::Memory).ok(),
-        power_max_limit_mw: device
-            .power_management_limit_constraints()
-            .ok()
-            .map(|c| c.max_limit),
+        power_max_limit_mw: limits.as_ref().map(|c| c.max_limit),
+        power_min_limit_mw: limits.map(|c| c.min_limit),
         slowdown_temp_c: device
             .temperature_threshold(TemperatureThreshold::Slowdown)
             .ok(),
@@ -189,6 +188,9 @@ pub fn device_sample(dev: &Device<'_>, uuid: [u8; 16]) -> GpuDeviceSample {
         clock_mem_mhz: reading(dev.clock_info(Clock::Memory)),
         clock_video_mhz: reading(dev.clock_info(Clock::Video)),
         pstate: pstate_reading(reading(dev.performance_state())),
+        // nvmlDeviceGetCurrentClocksThrottleReasons, the older name of
+        // nvmlDeviceGetCurrentClocksEventReasons. The wrapper drops bits it does not know.
+        clock_event_reasons: reading(dev.current_throttle_reasons().map(|r| r.bits())),
         fan_pct: reading(dev.fan_speed(0)),
         fan_rpm: reading(dev.fan_speed_rpm(0)),
         // NVML reports KB/s measured over a 20 ms window, and each call blocks for that window.

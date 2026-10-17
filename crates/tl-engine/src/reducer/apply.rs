@@ -65,7 +65,7 @@ const DISK_METRICS: [MetricId; 4] = [
     MetricId::DISK_LATENCY,
 ];
 const NET_METRICS: [MetricId; 2] = [MetricId::NET_RX, MetricId::NET_TX];
-const GPU_METRICS: [MetricId; 7] = [
+const GPU_METRICS: [MetricId; 8] = [
     MetricId::GPU_UTIL,
     MetricId::GPU_MEM,
     MetricId::GPU_ENC,
@@ -73,6 +73,7 @@ const GPU_METRICS: [MetricId; 7] = [
     MetricId::GPU_TEMP,
     MetricId::GPU_POWER,
     MetricId::GPU_CLOCK,
+    MetricId::GPU_MEM_CLOCK,
 ];
 /// The engines whose series are not in `GPU_METRICS` (PERF-063). Gpu, Enc and Dec are
 /// `GPU_UTIL`, `GPU_ENC` and `GPU_DEC`, pushed from the device totals.
@@ -1369,6 +1370,11 @@ impl Reducer {
                     MetricId::GPU_CLOCK,
                     g.clock_gfx_mhz.value as f32,
                     g.clock_gfx_mhz.validity,
+                ),
+                (
+                    MetricId::GPU_MEM_CLOCK,
+                    g.clock_mem_mhz.value as f32,
+                    g.clock_mem_mhz.validity,
                 ),
             ];
             for (metric, value, validity) in values {

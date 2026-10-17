@@ -38,7 +38,7 @@ use tl_model::gpu_proto::{
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::DeviceIdx;
 use tl_model::system::GpuStaticInfo as DeviceStatic;
-use tl_model::system::{GpuEngine, GpuEngines, GpuTotals, Metric};
+use tl_model::system::{ClockEventReasons, GpuEngine, GpuEngines, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
@@ -380,6 +380,7 @@ pub fn to_totals(
         clock_mem_mhz: metric(s.clock_mem_mhz, |v| v),
         clock_video_mhz: metric(s.clock_video_mhz, |v| v),
         pstate: metric(s.pstate, |v| v),
+        clock_event_reasons: metric(s.clock_event_reasons, clock_event_reasons),
         fan_pct: pct(s.fan_pct),
         fan_rpm: metric(s.fan_rpm, |v| v),
         // NVML reports KB/s.
@@ -407,6 +408,7 @@ pub fn device_static(info: &GpuDeviceInfo) -> Arc<DeviceStatic> {
         clock_gfx_max_mhz: info.clock_gfx_max_mhz,
         clock_mem_max_mhz: info.clock_mem_max_mhz,
         power_max_limit_w: info.power_max_limit_mw.map(milliwatts),
+        power_min_limit_w: info.power_min_limit_mw.map(milliwatts),
         slowdown_temp_c: info.slowdown_temp_c.map(|c| c as f32),
         shutdown_temp_c: info.shutdown_temp_c.map(|c| c as f32),
     })
@@ -479,6 +481,28 @@ fn metric<T, U: Copy + Default>(r: Reading<T>, f: impl FnOnce(T) -> U) -> Metric
         Reading::Ok(v) => Metric::valid(f(v)),
         Reading::Unsupported | Reading::Failed => Metric::with(validity),
     }
+}
+
+/// NVML `nvmlClocksEventReason*` bits (nvml.h, stable across drivers) and the model flag for
+/// each. Bits NVML adds later are dropped.
+const NVML_CLOCK_EVENT_REASONS: [(u64, ClockEventReasons); 9] = [
+    (0x1, ClockEventReasons::IDLE),
+    (0x2, ClockEventReasons::APP_CLOCKS),
+    (0x4, ClockEventReasons::POWER_CAP),
+    (0x8, ClockEventReasons::HW_SLOWDOWN),
+    (0x10, ClockEventReasons::SYNC_BOOST),
+    (0x20, ClockEventReasons::SW_THERMAL),
+    (0x40, ClockEventReasons::HW_THERMAL),
+    (0x80, ClockEventReasons::HW_POWER_BRAKE),
+    (0x100, ClockEventReasons::DISPLAY_CLOCKS),
+];
+
+/// The model set for an NVML clock event reason mask (PERF-066).
+pub fn clock_event_reasons(bits: u64) -> ClockEventReasons {
+    NVML_CLOCK_EVENT_REASONS
+        .iter()
+        .filter(|&&(bit, _)| bits & bit != 0)
+        .fold(ClockEventReasons::empty(), |acc, &(_, flag)| acc | flag)
 }
 
 fn milliwatts(mw: u32) -> f32 {
@@ -633,6 +657,7 @@ mod tests {
             clock_gfx_max_mhz: Some(3_105),
             clock_mem_max_mhz: Some(14_001),
             power_max_limit_mw: Some(350_000),
+            power_min_limit_mw: Some(100_000),
             slowdown_temp_c: Some(88),
             shutdown_temp_c: Some(95),
             pcie_max_gen: Some(5),
@@ -667,6 +692,8 @@ mod tests {
             clock_mem_mhz: Reading::Ok(10_501),
             clock_video_mhz: Reading::Ok(1_620),
             pstate: Reading::Ok(3),
+            // SwPowerCap and SwThermalSlowdown.
+            clock_event_reasons: Reading::Ok(0x4 | 0x20),
             fan_pct: Reading::Unsupported,
             fan_rpm: Reading::Ok(0),
             pcie_rx_kbps: Reading::Ok(1_000),
@@ -774,6 +801,57 @@ mod tests {
     }
 
     #[test]
+    fn to_totals_clock_event_reasons() {
+        let info = device_info();
+        let statics = device_static(&info);
+        let t = to_totals(&device_sample(), &info, &statics);
+        assert_eq!(
+            t.clock_event_reasons,
+            Metric::valid(ClockEventReasons::POWER_CAP | ClockEventReasons::SW_THERMAL)
+        );
+
+        // No reason: the clocks are not held down.
+        let none = GpuDeviceSample {
+            clock_event_reasons: Reading::Ok(0),
+            ..device_sample()
+        };
+        let t = to_totals(&none, &info, &statics);
+        assert_eq!(
+            t.clock_event_reasons,
+            Metric::valid(ClockEventReasons::empty())
+        );
+
+        for (r, validity) in [
+            (Reading::Unsupported, Validity::Unsupported),
+            (Reading::Failed, Validity::Failed),
+        ] {
+            let without = GpuDeviceSample {
+                clock_event_reasons: r,
+                ..device_sample()
+            };
+            let t = to_totals(&without, &info, &statics);
+            assert_eq!(t.clock_event_reasons.validity, validity);
+        }
+    }
+
+    #[test]
+    fn clock_event_reason_bits() {
+        assert_eq!(clock_event_reasons(0), ClockEventReasons::empty());
+        assert_eq!(clock_event_reasons(0x1), ClockEventReasons::IDLE);
+        assert_eq!(clock_event_reasons(0x2), ClockEventReasons::APP_CLOCKS);
+        assert_eq!(clock_event_reasons(0x8), ClockEventReasons::HW_SLOWDOWN);
+        assert_eq!(clock_event_reasons(0x10), ClockEventReasons::SYNC_BOOST);
+        assert_eq!(clock_event_reasons(0x40), ClockEventReasons::HW_THERMAL);
+        assert_eq!(clock_event_reasons(0x80), ClockEventReasons::HW_POWER_BRAKE);
+        assert_eq!(
+            clock_event_reasons(0x100),
+            ClockEventReasons::DISPLAY_CLOCKS
+        );
+        // Every known bit, plus bits NVML may add later, which are dropped.
+        assert_eq!(clock_event_reasons(u64::MAX), ClockEventReasons::all());
+    }
+
+    #[test]
     fn device_static_mapping() {
         let s = device_static(&GpuDeviceInfo {
             cuda_version: Some("13.2".into()),
@@ -787,6 +865,7 @@ mod tests {
         assert_eq!(s.clock_gfx_max_mhz, Some(3_105));
         assert_eq!(s.clock_mem_max_mhz, Some(14_001));
         assert_eq!(s.power_max_limit_w, Some(350.0));
+        assert_eq!(s.power_min_limit_w, Some(100.0));
         assert_eq!(s.slowdown_temp_c, Some(88.0));
         assert_eq!(s.shutdown_temp_c, Some(95.0));
         assert_eq!(s.pcie_max_gen, Some(5));
@@ -796,6 +875,7 @@ mod tests {
             clock_gfx_max_mhz: None,
             clock_mem_max_mhz: None,
             power_max_limit_mw: None,
+            power_min_limit_mw: None,
             slowdown_temp_c: None,
             shutdown_temp_c: None,
             pcie_max_gen: None,
