@@ -924,3 +924,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-17 leader decision: hk6.29 Q1 B (one journal handle per window, follow off while the tab is hidden); Q2 A in tasklens-y6k.30 (Load older takes the UI's oldest cursor).
 - 2026-10-17 leader decision: pdu.36 and pdu.40 use WindowEntry.stack_index from tasklens-y6k.31 for the app row's most recent window.
 - 2026-10-17 leader decision: gma.22 option B; Connections side in tasklens-9o0.38 (select by inode, toast when not in view, no filter clearing); unix rows stay enabled.
+- 2026-10-17 leader decision: pdu.37 option A; E18 chain edit in tree_table.rs (name_trailing delegate hook, called only for hovered or selected rows) allowed in this bead.
