@@ -686,9 +686,14 @@ fn string_scan_cancel() {
     write_memory(&root, 64 << 20, &data);
     let (mut fl, ui, handle) = begin_scan(&root, edge_key(), StringScanOpts::default());
 
-    let first = collect_scan(&mut fl, &ui, edge_key(), Duration::from_secs(2));
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0].1.phase, ScanPhase::Scanning);
+    // Cancel as soon as the first payload arrives.
+    let version = strings_slot(&ui, edge_key()).version;
+    while strings_slot(&ui, edge_key()).version == version {
+        assert!(fl.now_ms() < 10_000, "no Strings payload");
+        fl.advance(Duration::from_millis(10));
+    }
+    let first = scan_state(&strings_slot(&ui, edge_key())).expect("a Strings payload");
+    assert_eq!(first.phase, ScanPhase::Scanning);
     send(&ui, Command::CancelStringScan(ScanId(1)));
 
     let rest = collect_scan(&mut fl, &ui, edge_key(), Duration::from_secs(2));
