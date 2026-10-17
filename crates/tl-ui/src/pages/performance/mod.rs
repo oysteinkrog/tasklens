@@ -915,6 +915,8 @@ fn page_focus(view: &AnyView, cx: &App) -> Option<FocusHandle> {
         .or_else(|| of::<disk::DiskPage>(view, cx))
         .or_else(|| of::<net::NetPage>(view, cx))
         .or_else(|| of::<gpu::GpuPage>(view, cx))
+        .or_else(|| of::<sensors::FanPage>(view, cx))
+        .or_else(|| of::<sensors::BatteryPage>(view, cx))
         .or_else(|| of::<overview::OverviewPage>(view, cx))
 }
 
@@ -943,6 +945,10 @@ fn update_page(view: &AnyView, cx: &mut App, f: impl FnOnce(&mut dyn DevicePage,
         Err(view) => view,
     };
     let view = match view.downcast::<overview::OverviewPage>() {
+        Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
+        Err(view) => view,
+    };
+    let view = match view.downcast::<sensors::FanPage>() {
         Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
         Err(view) => view,
     };
@@ -978,6 +984,14 @@ fn page_focus_order(view: &AnyView, cx: &App) -> SmallVec<[FocusHandle; 4]> {
         Err(view) => view,
     };
     let view = match view.downcast::<overview::OverviewPage>() {
+        Ok(e) => return e.read(cx).focus_order(),
+        Err(view) => view,
+    };
+    let view = match view.downcast::<sensors::FanPage>() {
+        Ok(e) => return e.read(cx).focus_order(),
+        Err(view) => view,
+    };
+    let view = match view.downcast::<sensors::BatteryPage>() {
         Ok(e) => return e.read(cx).focus_order(),
         Err(view) => view,
     };

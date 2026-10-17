@@ -17,10 +17,13 @@ use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentit
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{
-    DiskDetails, DisplayConnector, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot,
-    MemoryDetails, MemoryModule, SwapDevice, SwapKindModel, ZramDetail, ZswapInfo,
+    BatteryDetails, DeviceDetailsSnapshot, DiskDetails, DisplayConnector, DisplayMode,
+    GraphicsAdapter, InvField, InventorySnapshot, MemoryDetails, MemoryModule, SwapDevice,
+    SwapKindModel, ZramDetail, ZswapInfo,
 };
-use tl_model::system::{MemoryTotals, ZramTotals};
+use tl_model::system::{
+    FanControlMode, MemoryTotals, Metric, SensorKind, SensorReading, ZramTotals,
+};
 use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::kv_grid;
@@ -51,7 +54,8 @@ use tl_ui::pages::performance::memory::{
 use tl_ui::pages::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
 };
-use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage, build_page};
+use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage};
+use tl_ui::pages::performance::sensors::{BatteryPage, FanPage};
 use tl_ui::pages::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformancePage, PerformanceSettingsView, sidebar_order,
 };
@@ -232,6 +236,8 @@ fn header_of(view: &AnyView, cx: &App) -> (SharedString, SharedString) {
         .or_else(|| read::<DiskPage>(view, cx))
         .or_else(|| read::<NetPage>(view, cx))
         .or_else(|| read::<GpuPage>(view, cx))
+        .or_else(|| read::<FanPage>(view, cx))
+        .or_else(|| read::<BatteryPage>(view, cx))
         .or_else(|| read::<PlaceholderPage>(view, cx))
         .expect("a known page type")
 }
@@ -475,23 +481,139 @@ fn pages_demand_reaches_engine(cx: &mut TestAppContext) {
     assert!(last_demand(&r).cpu_fast, "back on the CPU page");
 }
 
+const MOUSE: &str = "bat:hidpp_battery_0";
+
+fn valid<T>(value: T) -> InvField<T> {
+    InvField {
+        value,
+        validity: Validity::Valid,
+    }
+}
+
+fn text(s: &str) -> InvField<Arc<str>> {
+    valid(Arc::from(s))
+}
+
+fn mouse_record() -> BatteryDetails {
+    BatteryDetails {
+        kind: Arc::from("Mouse"),
+        vendor: text("Logitech"),
+        model: text("MX Master 3S"),
+        serial: text("SN-1"),
+        native_path: Arc::from("hidpp_battery_0"),
+        percentage: valid(85.0),
+        energy_wh: valid(0.0),
+        energy_rate_w: valid(0.0),
+        voltage_v: valid(3.9),
+        state: Arc::from("discharging"),
+        time_to_full_s: valid(0),
+        time_to_empty_s: valid(3600),
+        charge_cycles: valid(12),
+        technology: Arc::from("Lithium ion"),
+        capacity_pct: valid(92.0),
+        energy_empty_wh: valid(0.0),
+        energy_full_wh: valid(0.0),
+        energy_full_design_wh: valid(0.0),
+        voltage_min_design_v: valid(3.0),
+        voltage_max_design_v: valid(4.2),
+        power_supply: false,
+        charge_threshold: None,
+        temperature_c: valid(31.0),
+        history: None,
+    }
+}
+
+/// Adds seven connected fans on `nct6797` (idx 9 to 15) and a mouse battery (idx 16).
+fn publish_p2(r: &mut Rig) {
+    r.engine.publish_with(|s| {
+        let mut entries = catalog();
+        let mut sensors = Vec::new();
+        for n in 1..=7u16 {
+            entries.push(entry(
+                9 + (n - 1),
+                DeviceIdentity::Fan {
+                    chip: Arc::from("nct6797"),
+                    index: n,
+                },
+                None,
+            ));
+            sensors.push((
+                DeviceIdx(9 + (n - 1)),
+                SensorReading {
+                    device: DeviceIdx(9 + (n - 1)),
+                    kind: SensorKind::Fan,
+                    value: Metric::valid(1200.0),
+                    pwm_pct: Metric::valid(45.0),
+                    fan_control: Some(FanControlMode::Automatic),
+                    fan_connected: true,
+                    fan_max_rpm: Some(2000),
+                },
+            ));
+        }
+        entries.push(entry(
+            16,
+            DeviceIdentity::Battery {
+                native_path: Arc::from("hidpp_battery_0"),
+            },
+            None,
+        ));
+        s.devices = Arc::new(DeviceCatalog {
+            version: 2,
+            entries: Arc::from(entries),
+        });
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        sys.sensors = Arc::from(sensors);
+        let mut d = DeviceDetailsSnapshot::clone(&s.device_details);
+        d.header.version += 1;
+        d.batteries = Arc::from(vec![(DeviceIdx(16), mouse_record())]);
+        s.device_details = Arc::new(d);
+    });
+    draw(r.vcx);
+}
+
 #[gpui_kit::test]
-fn build_page_placeholder_for_fan_before_p2(cx: &mut TestAppContext) {
-    let engine = install(cx);
-    let client: Arc<dyn EngineClient> = engine;
-    let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-    let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-    let k = key("fan:nct6799:2");
-    let row = DeviceRow {
-        key: k.clone(),
-        kind: DeviceKind::Fan,
-        idx: DeviceIdx(9),
-        generation: 0,
-        net_class: None,
-        fan_connected: None,
-    };
-    let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
-    assert!(view.downcast::<PlaceholderPage>().is_ok());
+fn build_page_fan_and_battery(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    publish_p2(&mut r);
+    // Fans count from 0 in sidebar order, so "Fan 1" is the second fan.
+    select(&mut r, "fan:nct6797:2");
+    select(&mut r, MOUSE);
+    let fan = view_of(&mut r, "fan:nct6797:2");
+    assert!(fan.clone().downcast::<FanPage>().is_ok());
+    let header = r.vcx.update(|_, cx| header_of(&fan, cx));
+    assert_eq!((header.0.as_ref(), header.1.as_ref()), ("Fan 1", "nct6797"));
+    let mouse = view_of(&mut r, MOUSE);
+    assert!(mouse.clone().downcast::<BatteryPage>().is_ok());
+    let header = r.vcx.update(|_, cx| header_of(&mouse, cx));
+    assert_eq!(
+        (header.0.as_ref(), header.1.as_ref()),
+        ("Mouse", "Logitech MX Master 3S")
+    );
+}
+
+#[gpui_kit::test]
+fn sensor_pages_demand_switch(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    publish_p2(&mut r);
+    select(&mut r, "fan:nct6797:2");
+    let fan = view_of(&mut r, "fan:nct6797:2")
+        .downcast::<FanPage>()
+        .expect("a FanPage");
+    assert!(r.vcx.update(|_, cx| fan.read(cx).is_active()));
+    assert!(last_demand(&r).sensors);
+
+    select(&mut r, MOUSE);
+    let mouse = view_of(&mut r, MOUSE)
+        .downcast::<BatteryPage>()
+        .expect("a BatteryPage");
+    let (fan_on, mouse_part) = r
+        .vcx
+        .update(|_, cx| (fan.read(cx).is_active(), mouse.read(cx).demand_part()));
+    assert!(!fan_on, "the Fan page withdrew its part");
+    assert!(mouse_part.sensors);
+    let d = last_demand(&r);
+    assert!(d.sensors && d.any_surface_visible);
 }
 
 const GIB: u64 = 1 << 30;

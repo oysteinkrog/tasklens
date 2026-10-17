@@ -29,6 +29,7 @@ use super::disk::DiskPage;
 use super::gpu::GpuPage;
 use super::memory::MemoryPage;
 use super::net::NetPage;
+use super::sensors::{BatteryPage, FanPage};
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
@@ -570,7 +571,6 @@ pub fn build_page(
     demand: &Entity<DemandAggregator>,
     cx: &mut App,
 ) -> AnyView {
-    // E25 adds one arm per kind: Fan and Battery (E25-028), the aggregates (E25-035).
     match row.kind {
         DeviceKind::Cpu => cx
             .new(|cx| CpuPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
@@ -586,6 +586,12 @@ pub fn build_page(
             .into(),
         DeviceKind::Gpu => cx
             .new(|cx| GpuPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .into(),
+        DeviceKind::Fan => cx
+            .new(|cx| FanPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .into(),
+        DeviceKind::Battery => cx
+            .new(|cx| BatteryPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
             .into(),
         // An aggregate page needs two or more devices of its type (PERF-009).
         DeviceKind::AggregateDisk

@@ -664,6 +664,11 @@ impl FanPage {
         self.sensor.is_none().then_some(&self.words.choose)
     }
 
+    /// The page is the shown page (`set_active`).
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     /// This page's demand part while it is active: the sensors component.
     pub fn demand_part(&self) -> Demand {
         Demand {
