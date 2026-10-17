@@ -1227,7 +1227,7 @@ fn with_open(key: &DeviceKey, cx: &mut App, f: fn(&mut SmartWindow, &mut Context
         if let Some(frame) = TlSecondaryWindow::<SmartWindow>::find(handle, cx) {
             let content = frame.read(cx).content().clone();
             if content.read(cx).key == *key {
-                content.update(cx, |w, cx| f(w, cx));
+                content.update(cx, f);
             }
         }
     }
