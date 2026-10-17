@@ -2812,7 +2812,6 @@ mod window {
     use tl_model::details::{AppGeneralDetail, AppKind};
     use tl_model::snapshot::{ServiceStatus, ServicesSnapshot, StartupType, UnitRecord};
     use tl_model::table::{Manager, SysNodeId, SysTable, UnitRef, UnitType};
-    use tl_ui::settings_global::TlSettings;
 
     fn app_detail_for_unit() -> AppGeneralDetail {
         fn valid<T>(value: T) -> Total<T> {
