@@ -38,6 +38,7 @@ use super::details::{Fallback, KeyValueModel};
 use super::menu::ClickedEngine;
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
 use super::{DeviceKey, DeviceKind, DeviceRow};
+use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartGridSpec, ChartGridView, ChartLabels, ChartSeries, ChartSpec, ChartState,
     ChartView, GridCellSpec, GridStyle, LegendStyle, ValueAlign, ValueFormat, YScale, grid_height,
@@ -78,6 +79,9 @@ const KEY_RESTARTING: &str = "perf-gpu-probe-restarting";
 const KEY_MISSING: &str = "perf-gpu-probe-missing";
 
 const NS_PER_S: u64 = 1_000_000_000;
+
+/// The trigger over a hovered engine heading that has a tooltip.
+pub const ENGINE_TIP_ID: &str = "perf-gpu-engine-tooltip";
 
 /// Width used for the grid height before the first paint has measured the box.
 const UNMEASURED_W: f32 = 1.0e6;
@@ -164,8 +168,9 @@ pub(crate) struct Engine {
     bit: u8,
 }
 
-/// The engines in grid order (PERF-063): NVIDIA draws all four, other vendors skip the memory
-/// controller. E25-022 (o55.40) adds the AMD and Intel lists.
+/// The Overview box's engines in row order: NVIDIA has all four, other vendors skip the memory
+/// controller. The Overview draws only the three series of `GpuTotals`. The page's grid uses
+/// [`vendor_cells`].
 const ENGINES: [Engine; 4] = [
     Engine {
         key: "gpu",
@@ -193,15 +198,146 @@ const ENGINES: [Engine; 4] = [
     },
 ];
 
-/// The engines of the other vendors until o55.40 gives them their own lists.
+/// The Overview engines of the other vendors.
 const OTHER_ENGINES: [Engine; 3] = [ENGINES[0], ENGINES[2], ENGINES[3]];
 
-/// The engines of `vendor` in grid order.
+/// The Overview engines of `vendor` in row order.
 fn vendor_engines(vendor: GpuVendor) -> &'static [Engine] {
     match vendor {
         GpuVendor::Nvidia => &ENGINES,
         _ => &OTHER_ENGINES,
     }
+}
+
+/// One cell of the page's engine grid: the engine and its name's `en-US.ftl` key.
+#[derive(Clone, Copy, Debug)]
+struct EngineCell {
+    engine: GpuEngine,
+    name: &'static str,
+}
+
+const fn cell(engine: GpuEngine, name: &'static str) -> EngineCell {
+    EngineCell { engine, name }
+}
+
+const NAME_3D: &str = "perf-gpu-engine-3d";
+
+/// NVIDIA's engines in grid order (PERF-063). JPEG and optical flow show only when the engine
+/// list reports them.
+const NVIDIA_CELLS: [EngineCell; 6] = [
+    cell(GpuEngine::Gpu, NAME_3D),
+    cell(GpuEngine::MemCtl, "perf-gpu-engine-memctl"),
+    cell(GpuEngine::Enc, "perf-gpu-engine-enc"),
+    cell(GpuEngine::Dec, "perf-gpu-engine-dec"),
+    cell(GpuEngine::Jpeg, "perf-gpu-engine-jpeg"),
+    cell(GpuEngine::Ofa, "perf-gpu-engine-ofa"),
+];
+
+const AMD_CELLS: [EngineCell; 7] = [
+    cell(GpuEngine::Gpu, "perf-gpu-engine-graphics"),
+    cell(GpuEngine::Compute, "perf-gpu-engine-compute"),
+    cell(GpuEngine::MemCtl, "perf-gpu-engine-memctl"),
+    cell(GpuEngine::Enc, "perf-gpu-engine-enc"),
+    cell(GpuEngine::Dec, "perf-gpu-engine-dec"),
+    cell(GpuEngine::Jpeg, "perf-gpu-engine-jpeg"),
+    cell(GpuEngine::Dma, "perf-gpu-engine-dma"),
+];
+
+/// Intel's video engine both encodes and decodes, so it is one "Video" cell.
+const INTEL_CELLS: [EngineCell; 5] = [
+    cell(GpuEngine::Render, "perf-gpu-engine-render"),
+    cell(GpuEngine::Compute, "perf-gpu-engine-compute"),
+    cell(GpuEngine::Copy, "perf-gpu-engine-copy"),
+    cell(GpuEngine::Video, "perf-gpu-engine-video"),
+    cell(GpuEngine::VideoEnhance, "perf-gpu-engine-video-enhance"),
+];
+
+/// A GPU of unknown make: the three engines every `GpuTotals` carries.
+const UNKNOWN_CELLS: [EngineCell; 3] = [
+    cell(GpuEngine::Gpu, NAME_3D),
+    cell(GpuEngine::Enc, "perf-gpu-engine-enc"),
+    cell(GpuEngine::Dec, "perf-gpu-engine-dec"),
+];
+
+/// Every engine name key and the "Own processes only" tooltip key, for [`Words`].
+const WORD_KEYS: [&str; 14] = [
+    NAME_3D,
+    "perf-gpu-engine-memctl",
+    "perf-gpu-engine-enc",
+    "perf-gpu-engine-dec",
+    "perf-gpu-engine-graphics",
+    "perf-gpu-engine-compute",
+    "perf-gpu-engine-dma",
+    "perf-gpu-engine-jpeg",
+    "perf-gpu-engine-ofa",
+    "perf-gpu-engine-render",
+    "perf-gpu-engine-copy",
+    "perf-gpu-engine-video",
+    "perf-gpu-engine-video-enhance",
+    "perf-gpu-tip-own-processes",
+];
+
+/// The grid engines of `vendor` in grid order.
+fn vendor_cells(vendor: GpuVendor) -> &'static [EngineCell] {
+    match vendor {
+        GpuVendor::Nvidia => &NVIDIA_CELLS,
+        GpuVendor::Amd => &AMD_CELLS,
+        GpuVendor::Intel => &INTEL_CELLS,
+        GpuVendor::Unknown => &UNKNOWN_CELLS,
+    }
+}
+
+/// The bit of `engine` in an engine mask.
+const fn engine_bit(engine: GpuEngine) -> u16 {
+    1 << engine as u16
+}
+
+/// The engines a GPU of `vendor` reports, as a mask of [`engine_bit`]. Gpu, Enc and Dec count
+/// when their `GpuTotals` metric is not Unsupported; every other engine counts when the record's
+/// engine list reports it. A GPU without a record yet reports the engines every card of the
+/// vendor has, so the page keeps its shape.
+fn engine_mask(vendor: GpuVendor, totals: Option<&GpuTotals>) -> u16 {
+    vendor_cells(vendor)
+        .iter()
+        .filter(|c| match (totals, c.engine) {
+            (None, GpuEngine::Gpu | GpuEngine::Enc | GpuEngine::Dec) => true,
+            (None, GpuEngine::Render | GpuEngine::Copy | GpuEngine::Video) => true,
+            (None, _) => false,
+            (Some(t), GpuEngine::Gpu) => t.util_pct.validity != Validity::Unsupported,
+            (Some(t), GpuEngine::Enc) => t.enc_pct.validity != Validity::Unsupported,
+            (Some(t), GpuEngine::Dec) => t.dec_pct.validity != Validity::Unsupported,
+            (Some(t), e) => t.engines.is_reported(e),
+        })
+        .fold(0, |m, c| m | engine_bit(c.engine))
+}
+
+/// What the grid is built from besides the settings: which engines the GPU reports, and whether
+/// fdinfo-based values miss other users' processes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Reported {
+    mask: u16,
+    partial: bool,
+}
+
+impl Reported {
+    fn of(vendor: GpuVendor, totals: Option<&GpuTotals>) -> Self {
+        Self {
+            mask: engine_mask(vendor, totals),
+            partial: totals.is_some_and(|t| t.fdinfo_partial),
+        }
+    }
+
+    fn has(self, engine: GpuEngine) -> bool {
+        self.mask & engine_bit(engine) != 0
+    }
+}
+
+/// The engines that AMD reads only from fdinfo, so "Own processes only" applies to them.
+fn fdinfo_engine(engine: GpuEngine) -> bool {
+    matches!(
+        engine,
+        GpuEngine::Compute | GpuEngine::Dma | GpuEngine::Jpeg
+    )
 }
 
 /// The engine cells of a GPU, (key, name), in the vendor's order: every engine in `reported`
@@ -211,11 +347,11 @@ pub fn engine_cells(
     reported: &[Arc<str>],
     hidden: &[Arc<str>],
 ) -> Vec<(Arc<str>, SharedString)> {
-    vendor_engines(vendor)
+    vendor_cells(vendor)
         .iter()
-        .filter(|e| reported.iter().any(|k| &**k == e.key))
-        .filter(|e| !hidden.iter().any(|k| &**k == e.key))
-        .map(|e| (Arc::from(e.key), tr_en(e.name, &[])))
+        .filter(|c| reported.iter().any(|k| &**k == c.engine.key()))
+        .filter(|c| !c.engine.is_hidden(hidden))
+        .map(|c| (Arc::from(c.engine.key()), tr_en(c.name, &[])))
         .collect()
 }
 
@@ -239,11 +375,12 @@ pub(crate) fn shown_engines<'a, H: AsRef<str>>(
 /// Every engine `device` reports, (key, name), in the vendor's order, hidden ones included.
 /// The Settings window's hidden engine checklist lists these (E21-023). Names are en-US.
 pub fn device_engines(snap: &Snapshot, device: DeviceIdx) -> Vec<(Arc<str>, SharedString)> {
-    let reported = reported_bits(gpu_totals(snap, device));
-    vendor_engines(GpuVendor::of(snap, device))
+    let vendor = GpuVendor::of(snap, device);
+    let reported = Reported::of(vendor, gpu_totals(snap, device));
+    vendor_cells(vendor)
         .iter()
-        .filter(|e| reported & e.bit != 0)
-        .map(|e| (Arc::from(e.key), tr_en(e.name, &[])))
+        .filter(|c| reported.has(c.engine))
+        .map(|c| (Arc::from(c.engine.key()), tr_en(c.name, &[])))
         .collect()
 }
 
@@ -290,8 +427,8 @@ fn reported_bits(totals: Option<&GpuTotals>) -> u8 {
 pub struct Words {
     /// `None` before the first refresh; then the strings version, `None` without strings.
     version: Option<Option<u64>>,
-    /// In [`ENGINES`] order.
-    pub engines: [SharedString; 4],
+    /// The engine names and the tooltip, by `en-US.ftl` key ([`WORD_KEYS`]).
+    pub engines: Vec<(&'static str, SharedString)>,
     pub memory: SharedString,
     pub temperature: SharedString,
     pub memory_usage: SharedString,
@@ -312,7 +449,7 @@ impl Words {
         }
         self.version = version;
         let t = |key| tr(cx, key);
-        self.engines = ENGINES.map(|e| t(e.name));
+        self.engines = WORD_KEYS.iter().map(|k| (*k, t(k))).collect();
         self.memory = t(KEY_MEMORY);
         self.temperature = t(KEY_TEMPERATURE);
         self.memory_usage = t(KEY_MEMORY_USAGE);
@@ -325,11 +462,12 @@ impl Words {
         true
     }
 
-    fn engine(&self, key: &str) -> SharedString {
-        ENGINES
+    /// The word of the `en-US.ftl` key `name`; empty before the first refresh.
+    fn engine(&self, name: &str) -> SharedString {
+        self.engines
             .iter()
-            .position(|e| e.key == key)
-            .map(|i| self.engines[i].clone())
+            .find(|(k, _)| *k == name)
+            .map(|(_, w)| w.clone())
             .unwrap_or_default()
     }
 
@@ -493,7 +631,7 @@ fn temperature_labels(words: &Words) -> ChartLabels {
 /// reading `n/a`.
 fn placeholder_labels(words: &Words) -> ChartLabels {
     ChartLabels {
-        heading: Some(words.engines[0].clone()),
+        heading: Some(words.engine(NAME_3D)),
         value_fmt: ValueFormat::Percent,
         value_align: ValueAlign::Right,
         range_word: SharedString::default(),
@@ -527,8 +665,8 @@ pub struct GpuPage {
     engines: Entity<ChartGridView>,
     /// Engine keys in grid order, one per grid cell.
     engine_keys: Vec<Arc<str>>,
-    /// The reported engines of the last build, as a mask of [`Engine::bit`].
-    reported: u8,
+    /// The engines the last grid build drew from, and the "Own processes only" flag.
+    reported: Reported,
     /// The one-cell "3D / Compute" chart shown while the probe is missing. Created the first
     /// time the probe is missing.
     placeholder: Option<Entity<ChartView>>,
@@ -602,7 +740,7 @@ impl GpuPage {
         let mut words = Words::default();
         words.refresh(cx);
 
-        let reported = reported_bits(totals);
+        let reported = Reported::of(vendor, totals);
         let mut engine_keys = Vec::new();
         let spec = grid_spec(
             row.idx,
@@ -771,7 +909,7 @@ impl GpuPage {
 
         if mask.contains(ComponentMask::SYSTEM) {
             let totals = gpu_totals(snap, self.row.idx);
-            let reported = reported_bits(totals);
+            let reported = Reported::of(self.vendor, totals);
             if reported != self.reported {
                 self.reported = reported;
                 self.rebuild_grid(cx);
@@ -1104,11 +1242,34 @@ impl GpuPage {
                 root.child(cell)
             }
             _ => {
-                let grid = div().size_full().child(
+                let mut grid = div().relative().size_full().child(
                     self.engines
                         .clone()
                         .cached(StyleRefinement::default().size_full()),
                 );
+                let view = self.engines.read(cx);
+                if let Some((i, text)) = view.hovered_cell().zip(view.hovered_tooltip().cloned()) {
+                    let m = *metrics(cx);
+                    let pad = m.sp[3];
+                    let (col, row) = (i % layout.cols, i / layout.cols);
+                    let trigger = div()
+                        .debug_selector(|| ENGINE_TIP_ID.into())
+                        .absolute()
+                        .left((layout.cell_w + gap) * col as f32 + pad)
+                        .top((cell_h + gap) * row as f32 + pad)
+                        .w((layout.cell_w - pad * 2.).max(px(0.)))
+                        .h(px(LABEL_ROW * m.ui_scale));
+                    // One state per heading, so moving to another heading restarts the delay.
+                    let state = HoverTooltip::state((ENGINE_TIP_ID, i), window, cx);
+                    grid = grid.child(HoverTooltip::attach(
+                        &state,
+                        trigger,
+                        DELAY_CONTROL,
+                        TlTooltip::text(text).build(),
+                        window,
+                        cx,
+                    ));
+                }
                 root.child(self.with_probe_tip(grid, "perf-gpu-tip-engines", window, cx))
             }
         };
@@ -1989,7 +2150,7 @@ fn placeholder_spec(device: DeviceIdx, theme: &TlTheme) -> ChartSpec {
 fn grid_spec(
     device: DeviceIdx,
     vendor: GpuVendor,
-    reported: u8,
+    reported: Reported,
     s: &PageSettings,
     words: &Words,
     theme: &TlTheme,
@@ -1998,19 +2159,22 @@ fn grid_spec(
 ) -> ChartGridSpec {
     keys.clear();
     let mut cells = Vec::new();
-    for e in vendor_engines(vendor)
+    for c in vendor_cells(vendor)
         .iter()
-        .filter(|e| reported & e.bit != 0)
-        .filter(|e| !s.hidden.iter().any(|k| &**k == e.key))
+        .filter(|c| reported.has(c.engine))
+        .filter(|c| !c.engine.is_hidden(&s.hidden))
     {
-        keys.push(Arc::from(e.key));
+        keys.push(Arc::from(c.engine.key()));
+        // AMD reads these from fdinfo, so a denied read leaves other users' processes out
+        // (PERF-074).
+        let own_only = reported.partial && vendor == GpuVendor::Amd && fdinfo_engine(c.engine);
         cells.push(GridCellSpec {
-            heading: words.engine(e.key),
-            fill_series: series(device, e.metric),
+            heading: words.engine(c.name),
+            fill_series: series(device, c.engine.metric()),
             overlay_series: None,
             offline: false,
             mark: None,
-            tooltip: None,
+            tooltip: own_only.then(|| words.engine("perf-gpu-tip-own-processes")),
         });
     }
     ChartGridSpec {
@@ -2094,14 +2258,14 @@ impl DevicePage for GpuPage {
     /// until E25-023 lands (PERF-063, UI-PRF-032).
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
         let key = self.key.clone();
-        let items: Vec<(Arc<str>, SharedString, bool)> = vendor_engines(self.vendor)
+        let items: Vec<(Arc<str>, SharedString, bool)> = vendor_cells(self.vendor)
             .iter()
-            .filter(|e| self.reported & e.bit != 0)
-            .map(|e| {
+            .filter(|c| self.reported.has(c.engine))
+            .map(|c| {
                 (
-                    Arc::from(e.key),
-                    self.words.engine(e.key),
-                    !self.settings.hidden.iter().any(|k| &**k == e.key),
+                    Arc::from(c.engine.key()),
+                    self.words.engine(c.name),
+                    !c.engine.is_hidden(&self.settings.hidden),
                 )
             })
             .collect();

@@ -998,6 +998,158 @@ mod engines {
     }
 }
 
+mod vendor_grids {
+    use gpui_kit::TestAppContext;
+    use tl_model::system::GpuEngine;
+
+    use super::*;
+
+    fn with_engines(list: &[GpuEngine]) -> GpuTotals {
+        let mut t = totals(false);
+        for e in list {
+            t.engines.set(*e, Metric::valid(7.0));
+        }
+        t
+    }
+
+    fn headings(r: &mut Rig) -> (Vec<String>, Vec<String>) {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let keys = p.engine_keys().iter().map(|k| k.to_string()).collect();
+            let grid = p.engines().read(cx);
+            (
+                keys,
+                grid.spec
+                    .cells
+                    .iter()
+                    .map(|c| c.heading.to_string())
+                    .collect(),
+            )
+        })
+    }
+
+    fn tooltips(r: &mut Rig) -> Vec<Option<String>> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let grid = page.read(cx).engines().read(cx);
+            grid.spec
+                .cells
+                .iter()
+                .map(|c| c.tooltip.as_ref().map(|t| t.to_string()))
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn gpu_engine_names_amd(cx: &mut TestAppContext) {
+        let mut r = open(cx, "amdgpu", "hwmon amdgpu: junction", true);
+        publish_totals(
+            &mut r,
+            &with_engines(&[
+                GpuEngine::MemCtl,
+                GpuEngine::Compute,
+                GpuEngine::Jpeg,
+                GpuEngine::Dma,
+            ]),
+        );
+        let (keys, names) = headings(&mut r);
+        assert_eq!(
+            keys,
+            ["gpu", "compute", "memctl", "enc", "dec", "jpeg", "dma"]
+        );
+        assert_eq!(
+            names,
+            [
+                "Graphics",
+                "Compute",
+                "Memory controller",
+                "Video Encode",
+                "Video Decode",
+                "JPEG",
+                "DMA"
+            ]
+        );
+        // A card without JPEG does not list it.
+        publish_totals(&mut r, &with_engines(&[GpuEngine::Compute, GpuEngine::Dma]));
+        let (keys, _) = headings(&mut r);
+        assert_eq!(keys, ["gpu", "compute", "enc", "dec", "dma"]);
+    }
+
+    #[gpui_kit::test]
+    fn gpu_engine_names_intel(cx: &mut TestAppContext) {
+        let mut r = open(cx, "i915", "hwmon i915", true);
+        publish_totals(
+            &mut r,
+            &with_engines(&[
+                GpuEngine::Render,
+                GpuEngine::Compute,
+                GpuEngine::Copy,
+                GpuEngine::Video,
+                GpuEngine::VideoEnhance,
+            ]),
+        );
+        let (keys, names) = headings(&mut r);
+        assert_eq!(
+            keys,
+            ["render", "compute", "copy", "video", "video-enhance"]
+        );
+        assert_eq!(
+            names,
+            ["Render/3D", "Compute", "Copy", "Video", "Video Processing"]
+        );
+        // The legacy "gpu" key hides Render, and "enc" with "dec" hides Video.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.performance.hidden_gpu_engines =
+                    vec!["gpu".into(), "enc".into(), "dec".into()];
+            });
+        });
+        draw(r.vcx);
+        let (keys, _) = headings(&mut r);
+        assert_eq!(keys, ["compute", "copy", "video-enhance"]);
+    }
+
+    #[gpui_kit::test]
+    fn gpu_nvidia_jpeg_ofa_only_when_reported(cx: &mut TestAppContext) {
+        let mut r = nvidia(cx);
+        let (keys, _) = headings(&mut r);
+        assert_eq!(keys, ["gpu", "enc", "dec"]);
+        publish_totals(&mut r, &with_engines(&[GpuEngine::Jpeg, GpuEngine::Ofa]));
+        let (keys, names) = headings(&mut r);
+        assert_eq!(keys, ["gpu", "enc", "dec", "jpeg", "ofa"]);
+        assert_eq!(names[3..], ["JPEG", "Optical flow"]);
+    }
+
+    #[gpui_kit::test]
+    fn gpu_amd_own_processes_tooltip(cx: &mut TestAppContext) {
+        let mut r = open(cx, "amdgpu", "hwmon amdgpu: junction", true);
+        let mut t = with_engines(&[GpuEngine::Compute, GpuEngine::Jpeg, GpuEngine::Dma]);
+        publish_totals(&mut r, &t);
+        assert!(tooltips(&mut r).iter().all(Option::is_none));
+        t.fdinfo_partial = true;
+        publish_totals(&mut r, &t);
+        // gpu, compute, enc, dec, jpeg, dma: only the fdinfo engines carry the tooltip.
+        let own = Some("Own processes only".to_owned());
+        assert_eq!(
+            tooltips(&mut r),
+            [None, own.clone(), None, None, own.clone(), own]
+        );
+        t.fdinfo_partial = false;
+        publish_totals(&mut r, &t);
+        assert!(tooltips(&mut r).iter().all(Option::is_none));
+    }
+
+    #[gpui_kit::test]
+    fn gpu_intel_has_no_own_processes_tooltip(cx: &mut TestAppContext) {
+        let mut r = open(cx, "i915", "hwmon i915", true);
+        let mut t = with_engines(&[GpuEngine::Render, GpuEngine::Copy, GpuEngine::Video]);
+        t.fdinfo_partial = true;
+        publish_totals(&mut r, &t);
+        assert!(tooltips(&mut r).iter().all(Option::is_none));
+    }
+}
+
 // Details grid rows 9 to 28 (tasklens-o55.25, UI-PRF-033).
 
 #[gpui_kit::test]
