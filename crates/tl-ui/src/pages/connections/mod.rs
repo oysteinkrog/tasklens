@@ -361,6 +361,32 @@ impl ConnectionsPage {
         });
     }
 
+    /// Selects and centres the row whose socket has `inode`. A socket that is not in the
+    /// current view (gone, or hidden by the filter) gives the "not found" toast and leaves the
+    /// selection and the filters alone (UI-PWN-012).
+    pub fn select_inode(&mut self, inode: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let table = self.frame.table.clone();
+        let found = (inode != 0)
+            .then(|| {
+                let delegate = &table.read(cx).delegate;
+                (0..delegate.row_count())
+                    .find(|ix| delegate.record(*ix).is_some_and(|r| r.inode == inode))
+                    .map(|ix| delegate.row_id(ix))
+            })
+            .flatten();
+        if let Some(cookie) = found {
+            table.update(cx, |table, cx| table.jump_to(cookie, cx));
+            return;
+        }
+        // Deferred: the main window is mid-update when the route calls this.
+        let text = tr(cx, "connections-not-found");
+        window.defer(cx, move |window, cx| {
+            if let Some(queue) = ToastQueue::of_window(window, cx) {
+                queue.update(cx, |q, cx| q.push(ToastKind::Warning, text, None, None, cx));
+            }
+        });
+    }
+
     fn on_copy_cell(&mut self, _: &CopyCell, window: &mut Window, cx: &mut Context<Self>) {
         let targets = self.take_targets(cx);
         if let Some((cookie, column)) = targets.cell {

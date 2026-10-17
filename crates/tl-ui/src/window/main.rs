@@ -88,6 +88,7 @@ use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::connections::ConnectionsPage;
+use crate::pages::connections::actions::GoToConnection;
 use crate::pages::information::InformationPage;
 use crate::pages::information::section::InfoSectionId;
 use crate::pages::performance::details::Template;
@@ -502,6 +503,10 @@ pub fn init(cx: &mut App) {
     // Deferred: from a key in the main window, that window is mid-update and cannot be reached.
     cx.on_action(|_: &ShowMainWindow, cx| cx.defer(show_main_window));
     cx.on_action(|_: &ToggleMainWindow, cx| cx.defer(toggle_main_window));
+    cx.on_action(|a: &GoToConnection, cx| {
+        let inode = a.inode;
+        cx.defer(move |cx| go_to_connection(inode, cx));
+    });
     cx.on_action(|_: &ScaleUp, cx| step_ui_scale(cx, |pct| (pct + SCALE_STEP).min(SCALE_MAX)));
     cx.on_action(|_: &ScaleDown, cx| {
         step_ui_scale(cx, |pct| pct.saturating_sub(SCALE_STEP).max(SCALE_MIN))
@@ -762,6 +767,25 @@ fn show_main_window(cx: &mut App) {
     if !shown {
         reopen_main_window(cx);
     }
+}
+
+/// `GoToConnection`: activates the main window, switches to Connections and selects the row.
+fn go_to_connection(inode: u64, cx: &mut App) {
+    let Some(handle) = main_handle(cx) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        window.activate_window();
+        let Some(view) = main_window_view(cx) else {
+            return;
+        };
+        view.update(cx, |main, cx| {
+            main.select_tab(Tab::Connections, window, cx);
+            if let Some(page) = main.page_entity::<ConnectionsPage>(Tab::Connections) {
+                page.update(cx, |p, cx| p.select_inode(inode, window, cx));
+            }
+        });
+    });
 }
 
 /// `ToggleMainWindow`: an active main window is removed when the close decision says so and

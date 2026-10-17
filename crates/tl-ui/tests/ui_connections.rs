@@ -1412,7 +1412,9 @@ mod jump {
     use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::connections::ConnectionsPage;
-    use tl_ui::pages::connections::actions::{ConnectionGoToService, ConnectionJumpToProcess};
+    use tl_ui::pages::connections::actions::{
+        ConnectionGoToService, ConnectionJumpToProcess, GoToConnection,
+    };
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -1592,6 +1594,40 @@ mod jump {
             self.draw();
         }
 
+        /// Cookies selected in the Connections table.
+        fn selected_conns(&mut self) -> Vec<u64> {
+            let table = self.vcx.read_entity(&self.page, |p, _| p.table().clone());
+            self.vcx
+                .read_entity(&table, |t, _| t.selection.ids().collect())
+        }
+
+        /// Publishes the record with an empty view, as a filter that hides it would.
+        fn publish_hidden(&mut self, record: ConnRecord) {
+            let generation = self
+                .engine
+                .commands()
+                .into_iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::SetSysTableQuery(query) => Some(query.generation),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            self.engine.publish_with(|snapshot| {
+                snapshot.connections = Arc::new(ConnectionsSnapshot {
+                    header: ComponentHeader {
+                        version: 2,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    query_generation: generation,
+                    records: vec![record].into(),
+                    ..ConnectionsSnapshot::default()
+                });
+            });
+            self.draw();
+        }
+
         fn selected(&mut self) -> Vec<tl_ui::pages::processes::delegate::ProcRowId> {
             self.vcx.update(|_, cx| {
                 let view = main_window_view(cx).expect("main window");
@@ -1694,6 +1730,35 @@ mod jump {
         assert_eq!(rig.toasts(), ["No owning process for this connection"]);
         assert_eq!(rig.active_tab(), Tab::Connections);
         assert_eq!(rig.table_queries().len(), before, "no query is sent");
+    }
+
+    #[gpui_kit::test]
+    fn go_to_connection_selects_row(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
+        rig.vcx.dispatch_action(GoToConnection { inode: 1234567 });
+        rig.draw();
+        assert_eq!(rig.selected_conns(), [1]);
+        assert_eq!(rig.active_tab(), Tab::Connections);
+        assert!(rig.toasts().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn go_to_connection_unknown_inode_toasts(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
+        rig.vcx.dispatch_action(GoToConnection { inode: 99 });
+        rig.draw();
+        assert!(rig.selected_conns().is_empty());
+        assert_eq!(rig.toasts(), ["Connection not found in current view"]);
+    }
+
+    #[gpui_kit::test]
+    fn go_to_connection_filtered_out_toasts(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
+        rig.publish_hidden(owned(&[4321]));
+        rig.vcx.dispatch_action(GoToConnection { inode: 1234567 });
+        rig.draw();
+        assert!(rig.selected_conns().is_empty());
+        assert_eq!(rig.toasts(), ["Connection not found in current view"]);
     }
 
     #[gpui_kit::test]

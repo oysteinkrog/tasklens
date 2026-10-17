@@ -1899,6 +1899,7 @@ startup-props-close = Close
 connections-status-total = { $total } Total | { $tcp } TCP | { $udp } UDP | { $established } EST | { $listening } LISTEN
 connections-status-selected = { $selected } selected
 connections-refreshed = Connections refreshed.
+connections-not-found = Connection not found in current view
 
 # Connection Properties window (tasklens-9o0.19, UI-SYS-068).
 connections-props-title = Connection properties: { $proto } { $state }
