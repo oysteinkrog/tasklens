@@ -2244,7 +2244,7 @@ fn logs_not_found_no_button(cx: &mut TestAppContext) {
     let st = t.status(cx);
     assert_eq!(st.heading.as_deref(), Some("journalctl not found"));
     assert_eq!(st.button, None);
-    let vcx = t.vcx(cx);
+    let mut vcx = t.vcx(cx);
     assert!(
         vcx.debug_bounds("TlButton-TlEmptyState-clear-filter")
             .is_none()

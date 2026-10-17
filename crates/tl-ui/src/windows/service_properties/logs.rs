@@ -22,9 +22,10 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Role, ScrollStrategy,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, TextStyleRefinement, UniformListScrollHandle, Window, div, px, uniform_list,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Render, Role, ScrollStrategy, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, TextStyleRefinement, UniformListScrollHandle, Window, div, px,
+    uniform_list,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
