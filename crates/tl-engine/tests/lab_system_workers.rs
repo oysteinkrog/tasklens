@@ -3743,3 +3743,162 @@ fn p2_workers_demand_wakeup() {
     assert_eq!(count(P2::Gpu), 10, "{:?}", run.msgs);
     assert_eq!(run.gpu_samples, 10);
 }
+
+// ---- KScreen display reader (hjn.40) ----
+
+use std::time::SystemTime;
+
+use tl_collect::inventory::read_inventory;
+use tl_engine::workers::inventory::{add_devices, from_raw};
+use tl_engine::workers::kscreen::{self, KScreenOutput};
+use tl_model::snapshot::DisplayMode;
+
+const KSCREEN_JSON: &[u8] = include_bytes!("fixtures/kscreen/doctor-j.json");
+
+/// `dmi-desktop` with an AMD card1: DP-2 connected and enabled (3840x2160), HDMI-A-1 not.
+fn kscreen_fixture() -> PathBuf {
+    let dir = fixture_copy("dmi-desktop", None);
+    let device = dir.join("sys/class/drm/card1/device");
+    fs::create_dir_all(&device).expect("create card dir");
+    fs::write(device.join("vendor"), "0x1002\n").expect("write vendor");
+    fs::write(device.join("device"), "0x744c\n").expect("write device");
+    fs::write(device.join("uevent"), "PCI_SLOT_NAME=0000:03:00.0\n").expect("write uevent");
+    dir
+}
+
+/// The display rows of the fixture's one GPU, with `outputs` as the KScreen read.
+fn displays_with(dir: &Path, outputs: Option<&[KScreenOutput]>) -> Vec<DisplayMode> {
+    let root = SysRoot::at(dir);
+    let raw = read_inventory(&InventoryPaths::under(dir));
+    let mut snap = from_raw(&raw, &root);
+    add_devices(
+        &mut snap,
+        &raw,
+        &root,
+        &EngineSettings::default(),
+        false,
+        outputs,
+    );
+    assert_eq!(snap.graphics.len(), 1);
+    snap.graphics[0].displays.to_vec()
+}
+
+#[test]
+fn kscreen_fills_display_rows() {
+    let dir = kscreen_fixture();
+    let sysfs = displays_with(&dir, None);
+    let outputs = kscreen::parse(KSCREEN_JSON).expect("fixture parses");
+    let rows = displays_with(&dir, Some(&outputs));
+    assert_eq!(rows.len(), 1);
+    let d = &rows[0];
+    assert_eq!((d.width, d.height, d.refresh_mhz), (3840, 2160, 143_963));
+    assert!(d.primary);
+    assert_eq!(d.rotation, Some(1));
+    assert_eq!(d.scale, Some(1.5));
+    // Not in the KScreen JSON: KMS only (P4).
+    assert_eq!(d.max_bpc, None);
+    // From sysfs and EDID.
+    assert_eq!(d.monitor_name, sysfs[0].monitor_name);
+    assert_eq!(d.connector, sysfs[0].connector);
+}
+
+#[test]
+fn kscreen_enabled_state_wins() {
+    let dir = kscreen_fixture();
+    let mut outputs = kscreen::parse(KSCREEN_JSON).expect("fixture parses");
+    outputs[0].enabled = false;
+    assert!(displays_with(&dir, Some(&outputs)).is_empty());
+    // Sysfs says disabled, KScreen enabled.
+    fs::write(dir.join("sys/class/drm/card1-DP-2/enabled"), "disabled\n").expect("write");
+    assert!(displays_with(&dir, None).is_empty());
+    outputs[0].enabled = true;
+    assert_eq!(displays_with(&dir, Some(&outputs)).len(), 1);
+}
+
+#[test]
+fn kscreen_missing_leaves_sysfs_values() {
+    let dir = kscreen_fixture();
+    let sysfs = displays_with(&dir, None);
+    assert_eq!(sysfs, inventory_scan(&dir).graphics[0].displays.to_vec());
+    // KScreen ran but does not know the connector.
+    assert_eq!(displays_with(&dir, Some(&[])), sysfs);
+    let d = &sysfs[0];
+    assert_eq!((d.width, d.height, d.refresh_mhz), (3840, 2160, 0));
+    assert!(!d.primary);
+    assert_eq!((d.rotation, d.scale), (None, None));
+}
+
+/// Sets the modification time of `path` to `secs` after the epoch.
+fn set_mtime(path: &Path, secs: u64) {
+    let file = fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open config");
+    file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        .expect("set mtime");
+}
+
+/// PERF-072: a KScreen config change rescans while a display surface is open, and is not
+/// checked while it is hidden.
+#[test]
+fn kscreen_config_change_rescans() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let config = dir.join("kwinoutputconfig.json");
+    fs::write(&config, "{}").expect("write config");
+    set_mtime(&config, 1_000);
+
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    let shown = Demand {
+        inventory: true,
+        gpus: true,
+        any_surface_visible: true,
+        ..Demand::default()
+    };
+    demand_tx.send(shown.clone()).expect("watch has receivers");
+    let scans = Arc::new(AtomicU32::new(0));
+    let scan = {
+        let scans = Arc::clone(&scans);
+        let dir = dir.clone();
+        move || {
+            scans.fetch_add(1, Ordering::SeqCst);
+            inventory_scan(&dir)
+        }
+    };
+    let inv_io = io(&updates, &demand_tx, &settings, &control);
+    let watch = config.clone();
+    let inv = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let fetch_ip = || PublicIpState::NotFetched;
+        let _ = inventory::run_with_watch(cx, inv_io, watch, scan, fetch_ip).await;
+    });
+    let step = Duration::from_millis(10);
+    let count = || scans.load(Ordering::SeqCst);
+
+    fl.run_for(Duration::from_secs(2), step);
+    assert_eq!(count(), 1, "open");
+    set_mtime(&config, 2_000);
+    fl.run_for(Duration::from_secs(1), step);
+    assert_eq!(count(), 2, "config change");
+    fl.run_for(Duration::from_secs(2), step);
+    assert_eq!(count(), 2, "no change");
+
+    demand_tx
+        .send(Demand::default())
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(1), step);
+    set_mtime(&config, 3_000);
+    fl.run_for(Duration::from_secs(2), step);
+    assert_eq!(count(), 2, "hidden");
+
+    // The open scan covers the change made while hidden.
+    demand_tx.send(shown).expect("watch has receivers");
+    fl.run_for(Duration::from_secs(2), step);
+    assert_eq!(count(), 3, "reopen");
+
+    let kinds: Vec<_> = drain(&mut rx).iter().filter_map(p2_kind).collect();
+    let inventory_msgs = kinds.iter().filter(|k| **k == P2::Inventory).count();
+    assert_eq!(inventory_msgs, 3, "{kinds:?}");
+    inv.abort();
+    fl.finish();
+}

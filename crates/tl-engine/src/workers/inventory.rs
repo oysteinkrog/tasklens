@@ -19,6 +19,10 @@
 //! reducer merges the catalog device and the API versions (R-166). Disk serials, MACs and IP
 //! addresses are shown on screen only and never logged.
 //!
+//! On KDE each host scan also runs `kscreen-doctor -j` for the display rows (`kscreen.rs`). While
+//! the GPU page or the Information tab is open the loop checks the modification time of KWin's
+//! output config each turn and scans again when it changes.
+//!
 //! The Public IP row (PERF-060) is fetched only on `DeviceCommand::FetchPublicIp`, whatever the
 //! demand, never at start (R-139 item 5). The worker keeps the result across scans.
 
@@ -26,7 +30,7 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use asupersync::channel::mpsc;
 use asupersync::runtime::JoinError;
@@ -73,6 +77,7 @@ use crate::source::{IDLE_RECHECK, WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
+use crate::workers::kscreen::{self, KScreenOutput};
 use crate::workers::net::net_kind;
 use crate::workers::public_ip::{self, UreqFetcher};
 
@@ -149,12 +154,19 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome
     // The shell version, read at most once per generation.
     let shell: Arc<OnceLock<Option<Arc<str>>>> = Arc::new(OnceLock::new());
     let bus_env = host.then(|| Arc::clone(&env));
+    let watch = if host {
+        kscreen::config_file(&env)
+    } else {
+        None
+    };
     let settings = io.settings.clone();
     let proc_root = root.proc.clone();
     let scan = move |bus: SystemBus| {
         let raw = read_inventory(&paths);
         let mut snap = from_raw(&raw, &root);
-        add_devices(&mut snap, &raw, &root, &settings.borrow_and_clone(), host);
+        let outputs = if host { kscreen::read(&env) } else { None };
+        let settings = settings.borrow_and_clone();
+        add_devices(&mut snap, &raw, &root, &settings, host, outputs.as_deref());
         let version = shell.get_or_init(|| desktop_shell_version(&env)).clone();
         let user = user_name(&paths.etc.join("passwd"));
         snap.system = build_system(&env, &bus, &raw.kernel, user, version);
@@ -167,7 +179,7 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome
         let v6 = public_ip::has_global_v6_route(&proc_root);
         public_ip::fetch(&UreqFetcher::new(), v6, unix_now_s())
     };
-    run_loop(cx, io, bus_env, scan, fetch_ip).await
+    run_loop(cx, io, bus_env, watch, scan, fetch_ip).await
 }
 
 fn unix_now_s() -> i64 {
@@ -185,16 +197,35 @@ where
     F: Fn() -> InventorySnapshot + Clone + Send + Sync + 'static,
     G: Fn() -> PublicIpState + Clone + Send + Sync + 'static,
 {
-    run_loop(cx, io, None, move |_| scan(), fetch_ip).await
+    run_loop(cx, io, None, None, move |_| scan(), fetch_ip).await
+}
+
+/// [`run_with`] that also scans when the modification time of `config` changes while
+/// `demand.inventory` is set, as the KWin output config does.
+#[doc(hidden)]
+pub async fn run_with_watch<F, G>(
+    cx: Cx,
+    io: WorkerIo,
+    config: PathBuf,
+    scan: F,
+    fetch_ip: G,
+) -> Outcome<(), WorkerError>
+where
+    F: Fn() -> InventorySnapshot + Clone + Send + Sync + 'static,
+    G: Fn() -> PublicIpState + Clone + Send + Sync + 'static,
+{
+    run_loop(cx, io, None, Some(config), move |_| scan(), fetch_ip).await
 }
 
 /// The event loop. Each scan reads the system bus first when `bus_env` is `Some` (else the bus
 /// fields are `Failed`), then runs `scan` with the result as a blocking job. A `FetchPublicIp`
-/// command runs `fetch_ip` as a blocking job after this turn's scan.
+/// command runs `fetch_ip` as a blocking job after this turn's scan. While `demand.inventory` is
+/// set, a new modification time of `watch` (the KScreen config) also starts a scan.
 async fn run_loop<F, G>(
     cx: Cx,
     io: WorkerIo,
     bus_env: Option<Arc<SystemEnv>>,
+    watch: Option<PathBuf>,
     scan: F,
     fetch_ip: G,
 ) -> Outcome<(), WorkerError>
@@ -223,6 +254,8 @@ where
     // Kept across scans and copied into every snapshot.
     let mut public_ip = PublicIpState::NotFetched;
     let mut last_snap: Option<InventorySnapshot> = None;
+    // The modification time of `watch` at the last scan that checked it.
+    let mut config_mtime: Option<SystemTime> = None;
 
     loop {
         sleep(cx.now(), IDLE_RECHECK).await;
@@ -234,6 +267,10 @@ where
         let visible = demand.inventory || demand.cpu != CpuDemand::Off;
         let opened = visible && !was_visible;
         was_visible = visible;
+        // One `stat` per turn, only while a display surface is open (ADR-008).
+        let watched = watch.as_deref().filter(|_| demand.inventory);
+        let mtime = watched.and_then(kscreen::modified);
+        let config_changed = watched.is_some() && mtime != config_mtime;
 
         let control = io.control.borrow_and_clone();
         // The newest `RefreshNow` seen while visible or `FetchPublicIp`, done once this turn's
@@ -262,7 +299,10 @@ where
         }
         drop(control);
 
-        if opened || refresh {
+        if opened || refresh || config_changed {
+            if watched.is_some() {
+                config_mtime = mtime;
+            }
             let bus = match &bus_env {
                 Some(env) => read_system_bus(&cx, env).await,
                 None => SystemBus::failed(),
@@ -369,7 +409,14 @@ pub fn scan_with(
 ) -> InventorySnapshot {
     let raw = read_inventory(paths);
     let mut snap = from_raw(&raw, root);
-    add_devices(&mut snap, &raw, root, settings, *root == SysRoot::host());
+    add_devices(
+        &mut snap,
+        &raw,
+        root,
+        settings,
+        *root == SysRoot::host(),
+        None,
+    );
     snap
 }
 
@@ -391,6 +438,7 @@ pub fn from_raw(raw: &InventoryRaw, root: &SysRoot) -> InventorySnapshot {
 
 /// Fills the Disk drives, Graphics and Network adapters sections. `host` allows `statvfs` and
 /// the address dump; under a fixture root free space reads `Unsupported` and no address is listed.
+/// `kscreen` holds the `kscreen-doctor -j` outputs when it ran.
 #[doc(hidden)]
 pub fn add_devices(
     snap: &mut InventorySnapshot,
@@ -398,9 +446,10 @@ pub fn add_devices(
     root: &SysRoot,
     settings: &EngineSettings,
     host: bool,
+    kscreen: Option<&[KScreenOutput]>,
 ) {
     snap.disks = disk_drives(root, host);
-    snap.graphics = graphics(raw, root);
+    snap.graphics = graphics(raw, root, kscreen);
     let mut addrs = Vec::new();
     if host {
         host_addrs(&mut addrs);
@@ -516,7 +565,11 @@ fn udev_text(value: Option<&str>) -> InvField<Arc<str>> {
 }
 
 /// PERF-103: one adapter per DRM card, all vendors. No card list gives no rows.
-fn graphics(raw: &InventoryRaw, root: &SysRoot) -> Arc<[GraphicsAdapter]> {
+fn graphics(
+    raw: &InventoryRaw,
+    root: &SysRoot,
+    kscreen: Option<&[KScreenOutput]>,
+) -> Arc<[GraphicsAdapter]> {
     let mut props = UdevProps::default();
     let mut buf = Vec::new();
     gpu_drm::discover_cards(&root.sys)
@@ -558,7 +611,7 @@ fn graphics(raw: &InventoryRaw, root: &SysRoot) -> Arc<[GraphicsAdapter]> {
                 temperature_source: valid(Arc::from(temp_source(card, &amd))),
                 dedicated_bytes,
                 shared_bytes,
-                displays: displays(raw, card.card),
+                displays: displays(raw, card.card, kscreen),
             }
         })
         .collect()
@@ -575,15 +628,25 @@ fn temp_source(card: &DrmCard, amd: &AmdSample) -> &'static str {
     text.unwrap_or("Not reported")
 }
 
-/// The connected, not disabled connectors of `card` with their preferred mode (PERF-072). Sysfs
-/// has no refresh rate or primary flag.
-fn displays(raw: &InventoryRaw, card: u32) -> Arc<[DisplayMode]> {
+/// The enabled, connected connectors of `card` (PERF-072). Sysfs gives the preferred mode and
+/// no refresh rate or primary flag. A connector KScreen knows takes its enabled state, primary
+/// flag, rotation, scale and current mode from `kscreen` (R-057).
+fn displays(
+    raw: &InventoryRaw,
+    card: u32,
+    kscreen: Option<&[KScreenOutput]>,
+) -> Arc<[DisplayMode]> {
     raw.connectors
         .iter()
-        .filter(|c| c.card == card && c.connected && c.enabled != Some(false))
+        .filter(|c| c.card == card && c.connected)
         .filter_map(|c| {
-            let &(width, height) = c.modes.first()?;
-            Some(DisplayMode {
+            let out = kscreen.and_then(|k| kscreen::output_for(k, &raw.connectors, c));
+            if !out.map_or(c.enabled != Some(false), |o| o.enabled) {
+                return None;
+            }
+            let current = out.and_then(|o| o.mode).map(|m| (m.width, m.height));
+            let (width, height) = current.or_else(|| c.modes.first().copied())?;
+            let mut mode = DisplayMode {
                 width,
                 height,
                 refresh_mhz: 0,
@@ -593,7 +656,11 @@ fn displays(raw: &InventoryRaw, card: u32) -> Arc<[DisplayMode]> {
                 max_bpc: None,
                 rotation: None,
                 scale: None,
-            })
+            };
+            if let Some(out) = out {
+                kscreen::fill(&mut mode, out);
+            }
+            Some(mode)
         })
         .collect()
 }

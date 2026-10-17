@@ -1,0 +1,88 @@
+{
+    "features": 2047,
+    "outputs": [
+        {
+            "brightness": 1,
+            "clones": [],
+            "connected": true,
+            "currentModeId": "3",
+            "enabled": true,
+            "followPreferredMode": false,
+            "iccProfilePath": "",
+            "icon": "",
+            "id": 1,
+            "modes": [
+                { "id": "1", "name": "3840x2160@60", "refreshRate": 59.997, "size": { "height": 2160, "width": 3840 } },
+                { "id": "2", "name": "2560x1440@144", "refreshRate": 143.912, "size": { "height": 1440, "width": 2560 } },
+                { "id": "3", "name": "3840x2160@144", "refreshRate": 143.963, "size": { "height": 2160, "width": 3840 } }
+            ],
+            "name": "DP-2",
+            "pos": { "x": 0, "y": 0 },
+            "preferredModes": ["1"],
+            "priority": 1,
+            "replicationSource": 0,
+            "rotation": 1,
+            "scale": 1.5,
+            "size": { "height": 1440, "width": 2560 },
+            "sizeMM": { "height": 340, "width": 600 },
+            "type": 14
+        },
+        {
+            "brightness": 1,
+            "clones": [],
+            "connected": true,
+            "currentModeId": "7",
+            "enabled": true,
+            "followPreferredMode": true,
+            "iccProfilePath": "",
+            "icon": "",
+            "id": 2,
+            "modes": [
+                { "id": "7", "name": "1920x1200@60", "refreshRate": 59.95, "size": { "height": 1200, "width": 1920 } }
+            ],
+            "name": "DP-3",
+            "pos": { "x": 2560, "y": 0 },
+            "preferredModes": ["7"],
+            "priority": 2,
+            "replicationSource": 0,
+            "rotation": 2,
+            "scale": 1.1,
+            "size": { "height": 1920, "width": 1200 },
+            "sizeMM": { "height": 320, "width": 520 },
+            "type": 14
+        },
+        {
+            "brightness": 1,
+            "clones": [],
+            "connected": true,
+            "currentModeId": "",
+            "enabled": false,
+            "followPreferredMode": false,
+            "iccProfilePath": "",
+            "icon": "",
+            "id": 3,
+            "modes": [
+                { "id": "9", "name": "1920x1080@60", "refreshRate": 60.0, "size": { "height": 1080, "width": 1920 } }
+            ],
+            "name": "DP-1",
+            "pos": { "x": 0, "y": 0 },
+            "preferredModes": ["9"],
+            "priority": 0,
+            "replicationSource": 0,
+            "rotation": 1,
+            "scale": 1,
+            "size": { "height": -1, "width": -1 },
+            "sizeMM": { "height": 300, "width": 530 },
+            "type": 14
+        }
+    ],
+    "screen": {
+        "currentSize": { "height": 1920, "width": 3760 },
+        "id": 0,
+        "maxActiveOutputsCount": 0,
+        "maxSize": { "height": 64000, "width": 64000 },
+        "minSize": { "height": 0, "width": 0 }
+    },
+    "tabletModeAvailable": false,
+    "tabletModeEngaged": false
+}

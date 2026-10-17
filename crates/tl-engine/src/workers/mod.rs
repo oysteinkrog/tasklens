@@ -19,6 +19,7 @@ pub mod gpu_nvidia;
 pub mod history;
 pub mod inventory;
 pub mod journal;
+pub mod kscreen;
 pub mod logind;
 pub mod lowmem;
 pub mod memory;
