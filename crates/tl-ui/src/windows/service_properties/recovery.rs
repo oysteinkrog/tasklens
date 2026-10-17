@@ -954,7 +954,7 @@ impl RecoveryTab {
 
         if self.sync_input {
             self.sync_input = false;
-            if *self.on_failure.read(cx).text() != &*form.on_failure {
+            if *self.on_failure.read(cx).text() != *form.on_failure {
                 let text = form.on_failure.clone();
                 self.on_failure
                     .update(cx, |s, cx| s.set_value(text, window, cx));
