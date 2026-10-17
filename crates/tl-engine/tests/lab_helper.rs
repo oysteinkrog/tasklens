@@ -2555,16 +2555,14 @@ mod detail_helper {
             ProcFiles::SMAPS_ROLLUP => ROLLUP.as_bytes(),
             ProcFiles::STATUS => STATUS.as_bytes(),
             ProcFiles::FD_LIST => {
-                let fds: [(u32, &[u8]); 3] = HELPER_FDS;
-                return Some(postcard::to_allocvec(&fds).expect("encode fd list"));
+                // A slice, so postcard writes the length as the helper's `Vec` does.
+                return Some(postcard::to_allocvec(&HELPER_FDS[..]).expect("encode fd list"));
             }
             ProcFiles::FDINFO => {
-                let info: [(u32, &[u8]); 2] = HELPER_FDINFO;
-                return Some(postcard::to_allocvec(&info).expect("encode fdinfo"));
+                return Some(postcard::to_allocvec(&HELPER_FDINFO[..]).expect("encode fdinfo"));
             }
             ProcFiles::NS => {
-                let ns: [(&str, &[u8]); 3] = HELPER_NS;
-                return Some(postcard::to_allocvec(&ns).expect("encode ns"));
+                return Some(postcard::to_allocvec(&HELPER_NS[..]).expect("encode ns"));
             }
             _ => return None,
         };
