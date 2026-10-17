@@ -3838,6 +3838,77 @@ fn set_mtime(path: &Path, secs: u64) {
         .expect("set mtime");
 }
 
+/// The GPU page's demand part: GPU samples and the inventory.
+fn gpu_page() -> Demand {
+    Demand {
+        inventory: true,
+        gpus: true,
+        any_surface_visible: true,
+        ..Demand::default()
+    }
+}
+
+/// An inventory loop watching `watch` that counts its scans.
+struct WatchRig {
+    fl: FakeLab,
+    demand_tx: asupersync::channel::watch::Sender<Demand>,
+    rx: mpsc::Receiver<EngineMsg>,
+    scans: Arc<AtomicU32>,
+    task: asupersync::runtime::TaskHandle<()>,
+}
+
+impl WatchRig {
+    fn start(dir: &Path, watch: Vec<PathBuf>, first: Demand) -> Self {
+        let mut fl = FakeLab::new();
+        let (updates, rx, demand_tx, settings, control) = channels();
+        demand_tx.send(first).expect("watch has receivers");
+        let scans = Arc::new(AtomicU32::new(0));
+        let scan = {
+            let scans = Arc::clone(&scans);
+            let dir = dir.to_path_buf();
+            move || {
+                scans.fetch_add(1, Ordering::SeqCst);
+                inventory_scan(&dir)
+            }
+        };
+        let inv_io = io(&updates, &demand_tx, &settings, &control);
+        let task = fl.spawn(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let fetch_ip = || PublicIpState::NotFetched;
+            let _ = inventory::run_with_watch(cx, inv_io, watch, scan, fetch_ip).await;
+        });
+        Self {
+            fl,
+            demand_tx,
+            rx,
+            scans,
+            task,
+        }
+    }
+
+    /// Sends `demand`, runs `secs` seconds and returns the scan count.
+    fn show(&mut self, demand: Demand, secs: u64) -> u32 {
+        self.demand_tx.send(demand).expect("watch has receivers");
+        self.run(secs)
+    }
+
+    fn run(&mut self, secs: u64) -> u32 {
+        self.fl
+            .run_for(Duration::from_secs(secs), Duration::from_millis(10));
+        self.scans.load(Ordering::SeqCst)
+    }
+
+    /// Checks that every scan sent one inventory message, and stops the loop.
+    fn finish(mut self) {
+        let kinds: Vec<_> = drain(&mut self.rx).iter().filter_map(p2_kind).collect();
+        let inventory_msgs = kinds.iter().filter(|k| **k == P2::Inventory).count();
+        let scans = self.scans.load(Ordering::SeqCst);
+        assert_eq!(inventory_msgs, scans as usize, "{kinds:?}");
+        self.task.abort();
+        self.fl.finish();
+    }
+}
+
 /// PERF-072: a KScreen config change rescans while a display surface is open, and is not
 /// checked while it is hidden.
 #[test]
@@ -3847,58 +3918,90 @@ fn kscreen_config_change_rescans() {
     fs::write(&config, "{}").expect("write config");
     set_mtime(&config, 1_000);
 
-    let mut fl = FakeLab::new();
-    let (updates, mut rx, demand_tx, settings, control) = channels();
-    let shown = Demand {
-        inventory: true,
-        gpus: true,
-        any_surface_visible: true,
-        ..Demand::default()
-    };
-    demand_tx.send(shown.clone()).expect("watch has receivers");
-    let scans = Arc::new(AtomicU32::new(0));
-    let scan = {
-        let scans = Arc::clone(&scans);
-        let dir = dir.clone();
-        move || {
-            scans.fetch_add(1, Ordering::SeqCst);
-            inventory_scan(&dir)
-        }
-    };
-    let inv_io = io(&updates, &demand_tx, &settings, &control);
-    let watch = config.clone();
-    let inv = fl.spawn(async move {
-        let cx = Cx::current().expect("task has a Cx");
-        let fetch_ip = || PublicIpState::NotFetched;
-        let _ = inventory::run_with_watch(cx, inv_io, watch, scan, fetch_ip).await;
-    });
-    let step = Duration::from_millis(10);
-    let count = || scans.load(Ordering::SeqCst);
-
-    fl.run_for(Duration::from_secs(2), step);
-    assert_eq!(count(), 1, "open");
+    let mut rig = WatchRig::start(&dir, vec![config.clone()], gpu_page());
+    assert_eq!(rig.run(2), 1, "open");
     set_mtime(&config, 2_000);
-    fl.run_for(Duration::from_secs(1), step);
-    assert_eq!(count(), 2, "config change");
-    fl.run_for(Duration::from_secs(2), step);
-    assert_eq!(count(), 2, "no change");
+    assert_eq!(rig.run(1), 2, "config change");
+    assert_eq!(rig.run(2), 2, "no change");
 
-    demand_tx
-        .send(Demand::default())
-        .expect("watch has receivers");
-    fl.run_for(Duration::from_secs(1), step);
+    assert_eq!(rig.show(Demand::default(), 1), 2, "close");
     set_mtime(&config, 3_000);
-    fl.run_for(Duration::from_secs(2), step);
-    assert_eq!(count(), 2, "hidden");
+    assert_eq!(rig.run(2), 2, "hidden");
 
     // The open scan covers the change made while hidden.
-    demand_tx.send(shown).expect("watch has receivers");
-    fl.run_for(Duration::from_secs(2), step);
-    assert_eq!(count(), 3, "reopen");
+    assert_eq!(rig.show(gpu_page(), 2), 3, "reopen");
+    rig.finish();
+}
 
-    let kinds: Vec<_> = drain(&mut rx).iter().filter_map(p2_kind).collect();
-    let inventory_msgs = kinds.iter().filter(|k| **k == P2::Inventory).count();
-    assert_eq!(inventory_msgs, 3, "{kinds:?}");
-    inv.abort();
-    fl.finish();
+/// Plasma 5 has no `kwinoutputconfig.json`: a rewritten file in the KScreen config directory
+/// rescans.
+#[test]
+fn kscreen_data_dir_change_rescans() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let data = dir.join("kscreen");
+    fs::create_dir_all(data.join("outputs")).expect("create kscreen dir");
+    let config = data.join("0a1b2c");
+    fs::write(&config, "{}").expect("write config");
+    set_mtime(&config, 1_000);
+    let watch = vec![dir.join("kwinoutputconfig.json"), data.clone()];
+
+    let mut rig = WatchRig::start(&dir, watch, gpu_page());
+    assert_eq!(rig.run(2), 1, "open");
+    assert_eq!(rig.run(2), 1, "no change");
+    set_mtime(&config, 2_000);
+    assert_eq!(rig.run(1), 2, "config rewritten");
+    let output = data.join("outputs/3d4e5f");
+    fs::write(&output, "{}").expect("write output");
+    assert_eq!(rig.run(1), 3, "output file added");
+    assert_eq!(rig.run(2), 3, "no change");
+    rig.finish();
+}
+
+/// PERF-072: the GPU page opening runs KScreen even when the CPU page or the Memory page kept
+/// the inventory visible, and the config is only watched while a display surface is open.
+#[test]
+fn gpu_page_open_scans_while_inventory_visible() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let config = dir.join("kwinoutputconfig.json");
+    fs::write(&config, "{}").expect("write config");
+    set_mtime(&config, 1_000);
+    let cpu_page = Demand {
+        any_surface_visible: true,
+        cpu: CpuDemand::Total,
+        ..Demand::default()
+    };
+    let memory_page = Demand {
+        any_surface_visible: true,
+        memory: true,
+        inventory: true,
+        ..Demand::default()
+    };
+    let with_cpu = |d: Demand| Demand {
+        cpu: CpuDemand::Total,
+        ..d
+    };
+
+    let mut rig = WatchRig::start(&dir, vec![config.clone()], cpu_page.clone());
+    assert_eq!(rig.run(2), 1, "CPU page open");
+    // A sidebar keeps CPU demand on while the GPU page opens.
+    assert_eq!(
+        rig.show(with_cpu(gpu_page()), 2),
+        2,
+        "GPU page open over CPU"
+    );
+    assert_eq!(rig.show(cpu_page.clone(), 2), 2, "GPU page closed");
+    assert_eq!(
+        rig.show(with_cpu(gpu_page()), 2),
+        3,
+        "GPU page reopen over CPU"
+    );
+
+    assert_eq!(rig.show(memory_page.clone(), 2), 3, "Memory page");
+    // The Memory page alone does not watch the display config.
+    set_mtime(&config, 2_000);
+    assert_eq!(rig.run(2), 3, "config change, Memory page");
+    assert_eq!(rig.show(gpu_page(), 2), 4, "GPU page open over Memory");
+    set_mtime(&config, 3_000);
+    assert_eq!(rig.run(1), 5, "config change, GPU page");
+    rig.finish();
 }
