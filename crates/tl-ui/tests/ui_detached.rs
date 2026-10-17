@@ -9,7 +9,10 @@ use gpui_kit::{
     TestAppContext, VisualTestContext, Window, WindowDecorations, WindowKind, div, point, px, size,
 };
 use smallvec::smallvec;
+use std::time::Duration;
+
 use tl_model::client::EngineClient;
+use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
@@ -18,6 +21,7 @@ use tl_model::time::now_boot_ns;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::ChartState;
+use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::pages::minigraph::GraphColor;
 use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource};
@@ -73,7 +77,7 @@ fn cpu_entry() -> MinigraphEntry {
     }
 }
 
-fn setup(cx: &mut TestAppContext) {
+fn setup(cx: &mut TestAppContext) -> Arc<FakeEngine> {
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
@@ -98,6 +102,7 @@ fn setup(cx: &mut TestAppContext) {
         cx.set_global(GlobalHub(hub));
         GlobalRegistry::init(cx);
     });
+    engine
 }
 
 fn open(
@@ -239,7 +244,7 @@ mod detach {
     use tl_ui::pages::minigraph::actions::{
         MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphDetach,
     };
-    use tl_ui::pages::minigraph::panel::MinigraphPanel;
+    use tl_ui::pages::minigraph::panel::{MinigraphPanel, any_detached_open};
     use tl_ui::pages::minigraph::sources::{MinigraphId, MinigraphSource};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -815,6 +820,14 @@ mod detach {
     }
 
     #[gpui_kit::test]
+    fn any_detached_open_tracks_windows(cx: &mut TestAppContext) {
+        let mut r = rig(cx, two_card_state());
+        assert!(cx.read(any_detached_open));
+        r.dispatch(MinigraphCloseDetachedWindow { window: 1 });
+        assert!(!cx.read(any_detached_open));
+    }
+
+    #[gpui_kit::test]
     fn add_graph_to_window_grows_it(cx: &mut TestAppContext) {
         let mut r = rig(cx, two_card_state());
         r.dispatch(MinigraphAddToWindow {
@@ -1261,6 +1274,194 @@ mod mini {
         assert!(
             sent.memory && sent.disks && sent.nets && sent.gpus,
             "{sent:?}"
+        );
+    }
+}
+
+/// A stand-in main window that draws nothing.
+struct Blank;
+
+impl Render for Blank {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+#[gpui_kit::test]
+fn detached_demand_while_main_hidden(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    let hub = cx.read(|cx| cx.global::<GlobalHub>().0.clone());
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+    cx.update(|cx| cx.set_global(GlobalDemand(demand.clone())));
+    // A stand-in main window with a Processes part.
+    let main: gpui_kit::AnyWindowHandle = cx.add_window(|_, _| Blank).into();
+    demand.update(cx, |d, cx| {
+        d.set_main_window(main);
+        let part = Demand {
+            any_surface_visible: true,
+            process_table: true,
+            ..Demand::default()
+        };
+        d.set(gpui_kit::EntityId::from(1u64), Some(main), part, cx);
+    });
+    let (vcx, view) = open(cx, 1, vec![cpu_entry()]);
+
+    // Hidden: a change waits more than 1000 ms with no main window render.
+    engine.publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(1500));
+    cx.run_until_parked();
+    assert!(hub.read_with(cx, |h, _| h.is_hidden()));
+    cx.executor().advance_clock(DEMAND_COALESCE);
+    cx.run_until_parked();
+
+    let merged = demand.read_with(cx, |d, _| d.merged());
+    assert_eq!(merged.cpu, CpuDemand::Total);
+    assert!(merged.any_surface_visible, "from the detached surface");
+    assert!(!merged.process_table, "the main window's part is left out");
+    assert!(!merged.memory);
+
+    // Closing the window removes its part.
+    drop(view);
+    drop(vcx);
+    cx.update(|cx| {
+        let key = WindowKey::DetachedGraph(1);
+        let handle = cx.global::<GlobalRegistry>().0.read(cx).get(&key);
+        let handle = handle.expect("window open");
+        handle
+            .update(cx, |_, window, _| window.remove_window())
+            .ok();
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(DEMAND_COALESCE);
+    cx.run_until_parked();
+    assert_eq!(demand.read_with(cx, |d, _| d.merged()).cpu, CpuDemand::Off);
+}
+
+mod keep {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+        Render, Styled as _, TestAppContext, VisualTestContext, Window, div,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui::actions::CloseWindow;
+    use tl_ui::app::{BootSettings, EngineGlobal, UiExitSlot};
+    use tl_ui::components::toast;
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::pages::minigraph::panel::any_detached_open;
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{
+        self as shell, MainWindow, PageFactory, PageSlot, ShellPage, ShellState, open_main_window,
+        set_test_page,
+    };
+    use tl_ui::window::registry::GlobalRegistry;
+    use tl_ui::window::status::StatusChanged;
+    use tl_ui::windows::detached_graph::open_detached;
+
+    use super::cpu_entry;
+
+    struct FakePage {
+        tab: Tab,
+        focus: FocusHandle,
+    }
+
+    impl EventEmitter<StatusChanged> for FakePage {}
+
+    impl Render for FakePage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id(self.tab.as_str())
+                .track_focus(&self.focus)
+                .size_full()
+        }
+    }
+
+    impl ShellPage for FakePage {
+        fn status_text(&self, _: &mut String) {}
+
+        fn primary_focus(&self) -> FocusHandle {
+            self.focus.clone()
+        }
+
+        fn refresh(&mut self, _: &mut Context<Self>) {}
+    }
+
+    fn fake<const I: usize>(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+        let tab = Tab::ALL[I];
+        let page = cx.new(|cx| FakePage {
+            tab,
+            focus: cx.focus_handle().tab_stop(true),
+        });
+        PageSlot::new(page, cx)
+    }
+
+    const FAKES: [PageFactory; 6] = [
+        fake::<0>, fake::<1>, fake::<2>, fake::<3>, fake::<4>, fake::<5>,
+    ];
+
+    #[gpui_kit::test]
+    fn keep_detached_on_close_keeps_app(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| s.devices = Arc::new(super::catalog()));
+        let client: Arc<dyn EngineClient> = engine;
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let appearance = AppearanceSettings::default();
+            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            let mut settings = Settings::default();
+            settings.motion.tab_switch_ms = 0;
+            settings.graphs.keep_detached_on_close = true;
+            cx.set_global(BootSettings {
+                settings,
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            cx.set_global(EngineGlobal(client.clone()));
+            tl_ui::action_tracker::install(client.clone(), cx);
+            let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            cx.set_global(GlobalHub(hub));
+            cx.set_global(GlobalDemand(demand));
+            toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            for tab in Tab::ALL {
+                set_test_page(cx, tab, FAKES[tab as usize]);
+            }
+            shell::init(cx);
+            GlobalRegistry::init(cx);
+        });
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let graph = cx
+            .update(|cx| open_detached(1, vec![cpu_entry()], None, cx))
+            .expect("detached window opens");
+        cx.run_until_parked();
+        assert!(cx.read(any_detached_open));
+
+        vcx.dispatch_action(CloseWindow);
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<ShellState>().main_window.is_none()));
+        assert!(cx.read(|cx| {
+            cx.windows()
+                .iter()
+                .any(|w| w.window_id() == graph.window_id())
+        }));
+        assert_eq!(
+            cx.read(|cx| cx.try_global::<UiExitSlot>().and_then(|s| s.0.clone())),
+            None
         );
     }
 }

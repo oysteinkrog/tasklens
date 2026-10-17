@@ -1,7 +1,7 @@
 //! The detached graph window (E26, PERF-083, UI-PRF-044, R-086): a borderless floating window
 //! that holds one or more minigraph cards. The panel opens, fills and closes these windows
-//! (E26-015). A right-click opens the window menu (E26-018). The KWin bridge and the keep-open
-//! rule belong to later beads.
+//! (E26-015). A right-click opens the window menu (E26-018). Each window sends its own demand
+//! part, so the app keeps sampling for it while the main window is hidden (PERF-084, E26-020).
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use gpui_kit::{
     WindowBounds, WindowDecorations, WindowHandle, WindowKind, WindowOptions, canvas, div, px,
     size,
 };
+use tl_model::demand::Demand;
 use tl_model::settings::DetachedWindowState;
 
 use crate::actions::{Quit, ShowMainWindow};
@@ -21,6 +22,7 @@ use crate::components::menu::{
     TlMenu, context_menu_layer, context_menu_open, open_context_menu_at,
 };
 use crate::components::toast::ToastKind;
+use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{GlobalHub, SnapshotHub};
 use crate::i18n::tr;
 use crate::pages::minigraph::actions::{
@@ -28,9 +30,9 @@ use crate::pages::minigraph::actions::{
     MinigraphRemove,
 };
 use crate::pages::minigraph::bridge::OwnWindowBridge;
-use crate::pages::minigraph::card::{MINI_CARD_H, MINI_CARD_W, MinigraphCard};
+use crate::pages::minigraph::card::{CardEnded, MINI_CARD_H, MINI_CARD_W, MinigraphCard};
 use crate::pages::minigraph::menu::{color_submenu, range_submenu};
-use crate::pages::minigraph::panel::{MinigraphPanel, SYSTEM, gpu_order, same_kind};
+use crate::pages::minigraph::panel::{MinigraphPanel, SYSTEM, cards_demand, gpu_order, same_kind};
 use crate::pages::minigraph::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
@@ -91,6 +93,11 @@ pub struct DetachedGraphWindow {
     panel: WeakEntity<MinigraphPanel>,
     /// The window caption. Never translated: the KWin bridge matches it (R-086).
     title: SharedString,
+    /// The demand aggregator, when the app has one.
+    demand: Option<Entity<DemandAggregator>>,
+    window: AnyWindowHandle,
+    /// The part last sent, to send only a change.
+    part: Option<Demand>,
 }
 
 impl DetachedGraphWindow {
@@ -98,7 +105,7 @@ impl DetachedGraphWindow {
         window_id: u32,
         entries: Vec<MinigraphEntry>,
         window: &mut Window,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) -> Self {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
@@ -107,23 +114,59 @@ impl DetachedGraphWindow {
             .expect("open_detached checked the hub")
             .0
             .clone();
-        let cards = entries
+        let cards: Vec<_> = entries
             .into_iter()
-            .map(|entry| (entry.id, make_card(entry, &hub, cx)))
+            .map(|entry| {
+                let id = entry.id;
+                let card = make_card(entry, &hub, cx);
+                Self::watch_card(&card, cx);
+                (id, card)
+            })
             .collect();
         let panel = MinigraphPanel::global(cx)
             .map(|p| p.downgrade())
             .unwrap_or_else(WeakEntity::new_invalid);
         let title: SharedString = format!("tasklens Graph {window_id}").into();
         window.set_window_title(&title);
-        Self {
+        let demand = cx.try_global::<GlobalDemand>().map(|d| d.0.clone());
+        if let Some(demand) = demand.clone() {
+            let id = cx.entity_id();
+            cx.on_release(move |_, cx| demand.update(cx, |d, cx| d.remove(id, cx)))
+                .detach();
+        }
+        let mut this = Self {
             window_id,
             cards,
             driver,
             focus: cx.focus_handle(),
             panel,
             title,
+            demand,
+            window: window.window_handle(),
+            part: None,
+        };
+        this.send_demand(cx);
+        this
+    }
+
+    /// An ended card drops its graph target, so its owner resends demand (PERF-086).
+    fn watch_card(card: &Entity<MinigraphCard>, cx: &mut Context<Self>) {
+        cx.subscribe(card, |this, _, _: &CardEnded, cx| this.send_demand(cx))
+            .detach();
+    }
+
+    /// Sends this window's part: the sum of its cards. Sends only a change.
+    fn send_demand(&mut self, cx: &mut Context<Self>) {
+        let Some(demand) = self.demand.clone() else {
+            return;
+        };
+        let part = cards_demand(self.cards.iter().map(|(_, c)| c), cx);
+        if self.part.as_ref() == Some(&part) {
+            return;
         }
+        self.part = Some(part.clone());
+        let (id, window) = (cx.entity_id(), Some(self.window));
+        demand.update(cx, |d, cx| d.set(id, window, part, cx));
     }
 
     /// The content of a window opened by [`open_detached`], while it is open.
@@ -145,10 +188,15 @@ impl DetachedGraphWindow {
             let id = entry.id;
             let card = match old.iter().position(|(c, _)| *c == id) {
                 Some(i) => old.swap_remove(i).1,
-                None => make_card(entry, &hub, cx),
+                None => {
+                    let card = make_card(entry, &hub, cx);
+                    Self::watch_card(&card, cx);
+                    card
+                }
             };
             self.cards.push((id, card));
         }
+        self.send_demand(cx);
         cx.notify();
     }
 

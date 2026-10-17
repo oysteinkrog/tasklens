@@ -135,6 +135,43 @@ pub struct MinigraphPanel {
     pub toasts: Vec<(ToastKind, gpui_kit::SharedString)>,
 }
 
+/// True while any detached graph window is open (PERF-084, R-218). The main window's close path
+/// keeps the app running on this.
+pub fn any_detached_open(cx: &App) -> bool {
+    cx.try_global::<GlobalRegistry>().is_some_and(|r| {
+        r.0.read(cx)
+            .has_key(|k| matches!(k, WindowKey::DetachedGraph(_)))
+    })
+}
+
+/// The sum of the parts of `cards`. `cpu_fast` is never set (UI-PRF-040). `graph_targets` is the
+/// union of the cards' identities in order, at most `GRAPH_TARGETS_MAX` (PERF-085, R-154).
+pub fn cards_demand<'a>(
+    cards: impl Iterator<Item = &'a Entity<MinigraphCard>>,
+    cx: &App,
+) -> Demand {
+    let mut d = Demand::default();
+    let mut targets = Vec::new();
+    for card in cards {
+        let p = card.read(cx).demand_part();
+        for t in p.graph_targets.iter() {
+            if targets.len() < GRAPH_TARGETS_MAX && !targets.contains(t) {
+                targets.push(t.clone());
+            }
+        }
+        d.any_surface_visible |= p.any_surface_visible;
+        if p.cpu != CpuDemand::Off {
+            d.cpu = CpuDemand::Total;
+        }
+        d.memory |= p.memory;
+        d.disks |= p.disks;
+        d.nets |= p.nets;
+        d.gpus |= p.gpus;
+    }
+    d.graph_targets = targets.into();
+    d
+}
+
 impl MinigraphPanel {
     /// Loads `UiState.minigraphs` (the defaults when empty), drops the system cards whose
     /// setting is off, adds the ones whose setting is on and are missing, and creates the
@@ -781,26 +818,7 @@ impl MinigraphPanel {
     /// `graph_targets` is the union of the cards' identities in slot order, at most
     /// `GRAPH_TARGETS_MAX` (PERF-085, R-154).
     pub fn demand_part(&self, cx: &App) -> Demand {
-        let mut d = Demand::default();
-        let mut targets = Vec::new();
-        for (_, card) in &self.cards {
-            let p = card.read(cx).demand_part();
-            for t in p.graph_targets.iter() {
-                if targets.len() < GRAPH_TARGETS_MAX && !targets.contains(t) {
-                    targets.push(t.clone());
-                }
-            }
-            d.any_surface_visible |= p.any_surface_visible;
-            if p.cpu != CpuDemand::Off {
-                d.cpu = CpuDemand::Total;
-            }
-            d.memory |= p.memory;
-            d.disks |= p.disks;
-            d.nets |= p.nets;
-            d.gpus |= p.gpus;
-        }
-        d.graph_targets = targets.into();
-        d
+        cards_demand(self.cards.iter().map(|(_, c)| c), cx)
     }
 
     fn send_demand(&self, cx: &mut Context<Self>) {
