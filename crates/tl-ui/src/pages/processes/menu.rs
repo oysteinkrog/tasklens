@@ -249,9 +249,9 @@ pub fn ioprio_submenu(
         let args = [("name", FluentValue::from(name.to_string()))];
         menu = menu.header(tr_args(cx, "processes-menu-io-scheduler", &args));
     }
+    let session = caps.helper_session || helper == HelperState::Unlocked;
     for (class, key) in IO_CLASSES {
         let label = tr(cx, key);
-        let session = caps.helper_session || helper == HelperState::Unlocked;
         menu = if class == IoClass::Realtime && !session {
             let tip = match helper {
                 HelperState::Missing => "processes-menu-io-no-helper",

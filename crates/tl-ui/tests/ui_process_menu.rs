@@ -3329,10 +3329,12 @@ mod end {
 
     /// Publishes the helper state and one disk per (system disk, scheduler) pair.
     fn publish_ioprio_inputs(rig: &mut Rig, helper: HelperState, disks: &[(bool, &str)]) {
-        let valid = |value| Total {
-            value,
-            validity: Validity::Valid,
-        };
+        fn valid<T>(value: T) -> Total<T> {
+            Total {
+                value,
+                validity: Validity::Valid,
+            }
+        }
         let disks: Vec<(DeviceIdx, DiskDetails)> = disks
             .iter()
             .enumerate()
