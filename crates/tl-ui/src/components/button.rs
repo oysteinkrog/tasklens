@@ -83,6 +83,8 @@ impl TlButtonKind {
 /// Button height. Toggle and Segment are always 24 px.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TlButtonSize {
+    /// 20 px at 100% scale. Only for the Processes window button (UI-PRC-003).
+    Xs,
     /// 24 px at 100% scale.
     Sm,
     /// 28 px at 100% scale.
@@ -148,6 +150,7 @@ fn look(kind: TlButtonKind, theme: &TlTheme) -> Look {
 fn height(kind: TlButtonKind, size: TlButtonSize, m: &UiMetrics) -> f32 {
     let base = match (kind, size) {
         (TlButtonKind::Toggle { .. } | TlButtonKind::Segment { .. }, _) => 24.,
+        (_, TlButtonSize::Xs) => 20.,
         (_, TlButtonSize::Sm) => 24.,
         (_, TlButtonSize::Md) => 28.,
     };
@@ -850,6 +853,20 @@ mod tests {
             let h = f32::from(bounds(cx, selector).size.height);
             assert!((h - rem_height).abs() <= 0.5, "{selector}: {h}");
         }
+    }
+
+    /// UI-PRC-003: the Xs icon button is a 20 × 20 square.
+    #[gpui_kit::test]
+    fn xs_icon_button_is_20_square(cx: &mut TestAppContext) {
+        let (_, cx, _) = host(cx, None, || {
+            TlButton::new("xs", TlButtonKind::Icon)
+                .icon(TlIcon::ChevronDown)
+                .tooltip("Windows (2)")
+                .size(TlButtonSize::Xs)
+                .into_any_element()
+        });
+        let size = bounds(cx, "TlButton-xs").size;
+        assert_eq!((size.width, size.height), (px(20.), px(20.)));
     }
 
     #[gpui_kit::test]

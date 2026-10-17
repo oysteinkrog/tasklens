@@ -4327,7 +4327,11 @@ mod live {
             "not hovered"
         );
         hover_row(vcx, 0);
-        assert!(vcx.debug_bounds(window_button(with)).is_some());
+        let size = vcx
+            .debug_bounds(window_button(with))
+            .expect("hovered row has the button")
+            .size;
+        assert_eq!((size.width, size.height), (px(20.), px(20.)), "UI-PRC-003");
         if let Some(tree) = vcx.update(|window, _| window.debug_a11y_tree_json()) {
             assert!(
                 tree.contains("Windows (2)"),

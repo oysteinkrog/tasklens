@@ -65,7 +65,7 @@ pub const MENU_HEADER_H: f32 = 22.0;
 pub const MENU_MARK_W: f32 = 20.0;
 /// Default menu width at 100% scale. Owners raise it with [`TlMenu::min_w`].
 pub const MENU_MIN_W: f32 = 180.0;
-/// Widest menu at 100% scale. Longer labels end in an ellipsis.
+/// Widest menu at 100% scale. Longer labels end in an ellipsis. [`TlMenu::max_w`] changes it.
 pub const MENU_MAX_W: f32 = 360.0;
 /// How far a submenu overlaps its parent menu, at 100% scale.
 pub const SUBMENU_OVERLAP: f32 = 4.0;
@@ -203,6 +203,7 @@ pub struct TlMenu {
     /// Some item has a check or radio mark, so the menu reserves the mark column.
     has_mark_column: bool,
     min_w: Pixels,
+    max_w: Pixels,
     action_context: FocusHandle,
     ui_scale: f32,
     on_open: Option<OnOpen>,
@@ -255,6 +256,7 @@ impl TlMenu {
             entries: tl.entries,
             has_mark_column: tl.has_mark_column,
             min_w: tl.min_w,
+            max_w: tl.max_w,
             max_h,
             action_context,
             highlight: None,
@@ -288,6 +290,7 @@ impl TlMenu {
             entries: Vec::new(),
             has_mark_column: false,
             min_w: px(MENU_MIN_W * ui_scale),
+            max_w: px(MENU_MAX_W * ui_scale),
             action_context,
             ui_scale,
             on_open: None,
@@ -319,6 +322,13 @@ impl TlMenu {
     /// menus, 220 for the system table menus (R-112).
     pub fn min_w(mut self, w: Pixels) -> Self {
         self.min_w = w * self.ui_scale;
+        self
+    }
+
+    /// Maximum width before the UI scale: 360 by default, 480 for the process window popup
+    /// (UI-PRC-003). Longer labels end in an ellipsis.
+    pub fn max_w(mut self, w: Pixels) -> Self {
+        self.max_w = w * self.ui_scale;
         self
     }
 
@@ -652,6 +662,7 @@ pub struct TlMenuPopup {
     entries: Vec<Entry>,
     has_mark_column: bool,
     min_w: Pixels,
+    max_w: Pixels,
     max_h: Pixels,
     action_context: FocusHandle,
     /// The keyboard and hover highlight, always a selectable entry.
@@ -710,6 +721,7 @@ impl TlMenuPopup {
         self.entries = tl.entries;
         self.has_mark_column = tl.has_mark_column;
         self.min_w = tl.min_w;
+        self.max_w = tl.max_w;
         self.highlight = highlighted.and_then(|label| {
             self.entries
                 .iter()
@@ -1450,6 +1462,7 @@ impl TlMenuPopup {
                         *fg,
                         suffix,
                         highlighted.then_some(t.accent),
+                        self.max_w,
                         window,
                         cx,
                     ))
@@ -1620,7 +1633,7 @@ impl Render for TlMenuPopup {
             .flex()
             .flex_col()
             .min_w(self.min_w)
-            .max_w(px(MENU_MAX_W * m.ui_scale))
+            .max_w(self.max_w)
             .bg(t.menu_bg)
             .border(BORDER)
             .border_color(t.divider)
@@ -1693,10 +1706,11 @@ fn typed_letter(event: &KeyDownEvent) -> Option<char> {
     (chars.next().is_none() && ch.is_alphanumeric()).then_some(ch)
 }
 
-/// The width a label may take before it ends in an ellipsis: the widest menu less the menu
-/// padding (4 a side), the item padding (8 a side) and the painted row's own padding and icon.
-fn painted_label_max(m: &UiMetrics) -> Pixels {
-    px(MENU_MAX_W * m.ui_scale) - m.sp[2] * 2. - m.sp[4] * 4. - m.icon.sm - m.sp[2]
+/// The width a label may take before it ends in an ellipsis: the widest menu (`max_w`) less the
+/// menu padding (4 a side), the item padding (8 a side) and the painted row's own padding and
+/// icon.
+fn painted_label_max(max_w: Pixels, m: &UiMetrics) -> Pixels {
+    max_w - m.sp[2] * 2. - m.sp[4] * 4. - m.icon.sm - m.sp[2]
 }
 
 fn label_width(label: &SharedString, size: Pixels, window: &Window) -> Pixels {
@@ -1768,11 +1782,12 @@ fn painted_row(
     fg: Hsla,
     suffix: Option<AnyElement>,
     ring: Option<Hsla>,
+    max_w: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let m = *metrics(cx);
-    let truncated = label_width(&label, m.text.base, window) > painted_label_max(&m);
+    let truncated = label_width(&label, m.text.base, window) > painted_label_max(max_w, &m);
     let mut text = div()
         .flex_1()
         .min_w_0()
@@ -2336,6 +2351,27 @@ mod tests {
             menu.min_w(px(240.)).item("A", Box::new(RunA))
         });
         assert!(menus(cx)[0].size.width >= px(240.));
+    }
+
+    /// UI-PRC-003: a long caption stops at 360 px by default and grows to 480 with `max_w`.
+    #[gpui_kit::test]
+    fn max_width_is_raised(cx: &mut TestAppContext) {
+        const CAPTION: &str = "A very long window caption that runs on well past the widest \
+            default menu and keeps going until it is cut off";
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
+            menu.item(CAPTION, Box::new(RunA))
+        });
+        let narrow = menus(cx)[0].size.width;
+        assert!(narrow <= px(MENU_MAX_W), "{narrow:?}");
+        cx.update(close_context_menu);
+        draw(cx);
+
+        open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
+            menu.max_w(px(480.)).item(CAPTION, Box::new(RunA))
+        });
+        let wide = menus(cx)[0].size.width;
+        assert!(wide > px(MENU_MAX_W) && wide <= px(480.), "{wide:?}");
     }
 
     #[gpui_kit::test]

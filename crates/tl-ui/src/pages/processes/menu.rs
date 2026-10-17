@@ -39,6 +39,9 @@ use crate::windows::signal::signal_submenu;
 /// Minimum width of the row and group header menus before the UI scale (R-112).
 pub const ROW_MENU_MIN_W: f32 = 240.0;
 
+/// Maximum width of the window button's popup before the UI scale (UI-PRC-003).
+pub const WINDOW_POPUP_MAX_W: f32 = 480.0;
+
 /// What the desktop offers, for the items that need it. Every field is false until the bead
 /// that ships such an item fills it; no P1 item reads one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -149,13 +152,13 @@ pub fn group_header_menu(menu: TlMenu, expanded: bool, id: NodeId, cx: &App) -> 
 
 /// The Name-cell window button's popup (PROC-053, UI-PRC-003): one item per window in the order
 /// given, labelled with its caption or "Untitled window", no icon. Each item dispatches
-/// `ActivateWindow` with the window's KWin id. Captions are display only. The menu keeps its
-/// own maximum width (`MENU_MAX_W`) and ends a longer caption in an ellipsis.
+/// `ActivateWindow` with the window's KWin id. Captions are display only. The menu is 240 to
+/// 480 px wide and ends a longer caption in an ellipsis.
 pub fn window_popup(menu: TlMenu, windows: &[WindowEntry], cx: &App) -> TlMenu {
     let mut untitled: Option<SharedString> = None;
-    windows
-        .iter()
-        .fold(menu.min_w(px(ROW_MENU_MIN_W)), |menu, w| {
+    windows.iter().fold(
+        menu.min_w(px(ROW_MENU_MIN_W)).max_w(px(WINDOW_POPUP_MAX_W)),
+        |menu, w| {
             let label = if w.caption.trim().is_empty() {
                 untitled
                     .get_or_insert_with(|| tr(cx, "processes-name-untitled-window"))
@@ -167,7 +170,8 @@ pub fn window_popup(menu: TlMenu, windows: &[WindowEntry], cx: &App) -> TlMenu {
                 internal_id: SharedString::from(Arc::clone(&w.internal_id)),
             };
             menu.item(label, Box::new(action))
-        })
+        },
+    )
 }
 
 /// The Set Priority submenu (UI-PRC-020): the autogroup note, the five P1 classes, a separator

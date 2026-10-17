@@ -230,7 +230,7 @@ pub fn window_button(
     let at = Rc::clone(&bounds);
     let id = ElementId::NamedInteger(SharedString::new_static(WINDOW_BUTTON_ID), node_key);
     let button = TlButton::new(id, TlButtonKind::Icon)
-        .size(TlButtonSize::Sm)
+        .size(TlButtonSize::Xs)
         .icon(TlIcon::AppWindow)
         .icon_size(icon_size)
         .tooltip(tooltip)
