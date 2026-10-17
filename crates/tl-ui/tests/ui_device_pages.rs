@@ -2538,7 +2538,7 @@ mod net_settings {
 
     /// The Performance tab inside a kit `Root` with a toast queue and an action tracker, the
     /// Network settings desktop set to `desktop`.
-    fn open_root(
+    pub(super) fn open_root(
         cx: &mut TestAppContext,
         desktop: Option<SettingsDesktop>,
     ) -> (
@@ -2980,4 +2980,267 @@ fn gpu_page_demands_inventory(cx: &mut TestAppContext) {
     let mut r = open(cx);
     select(&mut r, GPU);
     assert!(last_demand(&r).inventory);
+}
+
+// ---- Copy text of the device pages (E25-030) ----
+
+/// The text `copy_text` writes for `page`.
+fn copied<T: DevicePage>(r: &mut Rig, page: &Entity<T>) -> String {
+    r.vcx.update(|_, cx| {
+        let mut out = String::new();
+        page.read(cx).copy_text(&mut out);
+        out
+    })
+}
+
+fn module_with_slot(slot: &str) -> MemoryModule {
+    MemoryModule {
+        slot: inv_ok(Arc::from(slot)),
+        ..full_dimm(3200, 3200)
+    }
+}
+
+#[gpui_kit::test]
+fn copy_text_memory_format(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let memory = memory_page(&mut r);
+    publish_swaps(
+        &mut r,
+        vec![swap_device("/dev/nvme0n1p3", SwapKindModel::Partition, -2)],
+        Validity::Valid,
+    );
+    publish_modules(
+        &mut r,
+        vec![
+            module_with_slot("P0 CHANNEL A (DIMM 0)"),
+            module_with_slot("P0 CHANNEL B (DIMM 0)"),
+        ],
+        inv_ok(4),
+    );
+    let text = copied(&mut r, &memory);
+    assert!(text.starts_with("Memory\n    "), "{text}");
+    assert!(
+        text.contains(
+            "\nSwap devices\n    Name: /dev/nvme0n1p3\n    Type: partition\n    Size: 8.00 GiB\n    Used: 1.00 GiB\n    Priority: -2\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nMemory modules\nMemory module 1\n    Slot: P0 CHANNEL A (DIMM 0)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nMemory module 2\n    Slot: P0 CHANNEL B"),
+        "{text}"
+    );
+    let modules = &text[text.find("\nMemory modules\n").expect(&text)..];
+    assert!(!modules.contains("Slots used"), "{text}");
+    assert!(text.ends_with('\n') && !text.ends_with("\n\n"), "{text}");
+}
+
+#[gpui_kit::test]
+fn copy_text_memory_compressed_block_comes_first(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let memory = memory_page(&mut r);
+    publish_swaps(
+        &mut r,
+        vec![swap_device("/dev/zram0", SwapKindModel::Zram, 100)],
+        Validity::Valid,
+    );
+    r.engine.publish_with(|s| {
+        let details = Arc::make_mut(&mut s.device_details);
+        details.header.version += 1;
+        details.memory = Arc::new(MemoryDetails {
+            swaps: InvField {
+                value: Arc::from(vec![swap_device("/dev/zram0", SwapKindModel::Zram, 100)]),
+                validity: Validity::Valid,
+            },
+            ..zram_details()
+        });
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        sys.memory = zram_mem(100 * GIB, 25 * GIB);
+    });
+    draw(r.vcx);
+    draw(r.vcx);
+    let text = copied(&mut r, &memory);
+    let compressed = text.find("\nCompressed memory\n");
+    let swap = text.find("\nSwap devices\n");
+    assert!(compressed.is_some() && swap.is_some(), "{text}");
+    assert!(compressed < swap, "{text}");
+    assert!(text.contains("\nzswap\n"), "{text}");
+}
+
+#[gpui_kit::test]
+fn no_serial_in_copy_text_whole_page(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let memory = memory_page(&mut r);
+    publish_modules(&mut r, vec![full_dimm(3200, 3200)], inv_ok(2));
+    let text = copied(&mut r, &memory);
+    assert!(text.contains("Memory module 1"), "{text}");
+    assert!(!text.to_lowercase().contains("serial"), "{text}");
+}
+
+#[gpui_kit::test]
+fn copy_text_disk_partitions(cx: &mut TestAppContext) {
+    use tl_model::snapshot::{PartitionRow, PartitionTable};
+    let part = |name: &str, start: u64| PartitionRow {
+        name: Arc::from(name),
+        start_bytes: start,
+        size_bytes: 8 * GIB,
+        holder: None,
+        mount: None,
+        extra_mounts: Arc::from([]),
+        label: None,
+        fs_type: Some(Arc::from("ext4")),
+        usage_pct: valid(42.0),
+        flags: Arc::from([]),
+        type_name: Arc::from("Linux filesystem"),
+        read_only: false,
+        unallocated: false,
+    };
+    let gap = PartitionRow {
+        name: Arc::from(""),
+        fs_type: None,
+        usage_pct: InvField {
+            value: 0.,
+            validity: Validity::Failed,
+        },
+        type_name: Arc::from(""),
+        unallocated: true,
+        ..part("", 24 * GIB)
+    };
+    let mut r = open(cx);
+    select(&mut r, "disk:sda");
+    r.engine.publish_with(|s| {
+        let details = Arc::make_mut(&mut s.device_details);
+        details.header.version += 1;
+        details.disks = Arc::from([(
+            DeviceIdx(3),
+            DiskDetails {
+                partitions: Some(Arc::new(PartitionTable {
+                    kind: Arc::from("GPT"),
+                    rows: Arc::from(vec![part("sda1", 0), part("sda2", 8 * GIB), gap.clone()]),
+                })),
+                ..DiskDetails::default()
+            },
+        )]);
+    });
+    draw(r.vcx);
+    draw(r.vcx);
+    let disk = view_of(&mut r, "disk:sda")
+        .downcast::<DiskPage>()
+        .expect("a DiskPage");
+    let text = copied(&mut r, &disk);
+    assert!(text.starts_with("Disk "), "{text}");
+    let at = text.find("\n2 partitions - GPT\n").expect(&text);
+    let paragraphs: Vec<&str> = text[at + 1..].trim_end().split("\n\n").collect();
+    assert_eq!(paragraphs.len(), 3, "{text}");
+    assert!(paragraphs[0].starts_with("2 partitions - GPT\n    Partition: sda1\n"));
+    assert!(paragraphs[1].starts_with("    Partition: sda2\n"));
+    assert!(paragraphs[2].starts_with("    Partition: -\n"));
+    assert!(paragraphs[2].contains("    Type: Unallocated"), "{text}");
+    assert!(!text.to_lowercase().contains("smart"), "{text}");
+}
+
+#[gpui_kit::test]
+fn copy_text_gpu_displays(cx: &mut TestAppContext) {
+    let mode = |name: &str, primary: bool| DisplayMode {
+        width: 1920,
+        height: 1200,
+        refresh_mhz: 59_950,
+        primary,
+        monitor_name: Some(Arc::from(name)),
+        connector: DisplayConnector::DisplayPort,
+        max_bpc: None,
+        rotation: None,
+        scale: None,
+    };
+    let mut r = open(cx);
+    select(&mut r, GPU);
+    let gpu = view_of(&mut r, GPU)
+        .downcast::<GpuPage>()
+        .expect("a GpuPage");
+    publish_displays(&mut r, Vec::new());
+    let text = copied(&mut r, &gpu);
+    assert!(
+        text.ends_with("\nDisplays\n    No display connected\n"),
+        "{text}"
+    );
+    publish_displays(&mut r, vec![mode("DELL A", true), mode("DELL B", false)]);
+    let (text, rows) = r.vcx.update(|_, cx| {
+        let page = gpu.read(cx);
+        let mut out = String::new();
+        page.copy_text(&mut out);
+        (out, page.display_rows().to_vec())
+    });
+    assert_eq!(rows.len(), 2);
+    assert!(
+        text.ends_with(&format!("\nDisplays\n    {}\n    {}\n", rows[0], rows[1])),
+        "{text}"
+    );
+}
+
+#[gpui_kit::test]
+fn copy_text_net_rows(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select(&mut r, "net:enp38s0");
+    let net = view_of(&mut r, "net:enp38s0")
+        .downcast::<NetPage>()
+        .expect("a NetPage");
+    let text = copied(&mut r, &net);
+    assert!(text.starts_with("enp38s0\nUnknown adapter\n"), "{text}");
+    assert!(text.contains("\n    Display unit: Mbps\n"), "{text}");
+    assert!(text.contains("\n    Public IP: Not fetched\n"), "{text}");
+    assert!(text.ends_with('\n'), "{text}");
+}
+
+#[gpui_kit::test]
+fn copy_text_fan_and_battery(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    publish_p2(&mut r);
+    select(&mut r, "fan:nct6797:2");
+    let fan = view_of(&mut r, "fan:nct6797:2")
+        .downcast::<FanPage>()
+        .expect("a FanPage");
+    let text = copied(&mut r, &fan);
+    assert!(text.starts_with("Fan 1\nnct6797\n    "), "{text}");
+    assert!(text.ends_with('\n'), "{text}");
+}
+
+mod copy_toast {
+    use super::*;
+    use tl_ui::components::toast::ToastQueue;
+    use tl_ui::pages::performance::actions::PerfCopyDeviceInfo;
+
+    /// Ctrl+C on a page copies its text and pushes the toast once.
+    #[gpui_kit::test]
+    fn copy_dispatches_toast_once_per_page(cx: &mut TestAppContext) {
+        let (_engine, mut vcx, page, _queue) = net_settings::open_root(cx, None);
+        for k in ["memory", "disk:sda", "net:enp38s0", GPU] {
+            let sidebar = page.read_with(&vcx, |p, _| p.sidebar().clone());
+            vcx.update(|_, cx| sidebar.update(cx, |s, cx| s.select(key(k), cx)));
+            draw(&mut vcx);
+            let focus = page.read_with(&vcx, |p, _| p.primary_focus());
+            vcx.update(|window, cx| focus.focus(window, cx));
+            vcx.dispatch_action(PerfCopyDeviceInfo);
+            vcx.run_until_parked();
+            let clip = vcx.read_from_clipboard().and_then(|i| i.text());
+            assert!(clip.is_some_and(|t| t.contains("\n    ")), "{k}");
+            let texts: Vec<String> = vcx.update(|window, cx| {
+                ToastQueue::of_window(window, cx)
+                    .expect("toast queue")
+                    .read(cx)
+                    .visible_texts()
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect()
+            });
+            let n = texts
+                .iter()
+                .filter(|t| t.as_str() == "Copied metrics to clipboard")
+                .count();
+            assert_eq!(n, 1, "{k}: {texts:?}");
+        }
+    }
 }

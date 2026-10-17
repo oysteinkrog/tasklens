@@ -2132,16 +2132,34 @@ impl DevicePage for GpuPage {
         )
     }
 
-    /// E25-029 replaces this with the full GPU copy text.
+    /// The GPU copy text (PERF-011, UI-PRF-022): the header lines, the Details rows, then the
+    /// Displays block with one indented line per display.
     fn copy_text(&self, out: &mut String) {
         let (word, model) = &self.header;
         out.push_str(word);
+        out.push('\n');
         if !model.is_empty() {
-            out.push(' ');
             out.push_str(model);
+            out.push('\n');
+        }
+        let rows_from = out.len();
+        self.details.copy_into(out);
+        if out.len() > rows_from {
+            out.push('\n');
         }
         out.push('\n');
-        self.details.copy_into(out);
+        out.push_str(&self.words.displays);
+        out.push('\n');
+        if self.display_rows.is_empty() {
+            out.push_str("    ");
+            out.push_str(&self.words.no_display);
+            out.push('\n');
+        }
+        for row in &self.display_rows {
+            out.push_str("    ");
+            out.push_str(row);
+            out.push('\n');
+        }
     }
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {

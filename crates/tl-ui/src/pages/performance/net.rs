@@ -1577,11 +1577,21 @@ impl DevicePage for NetPage {
         )
     }
 
-    /// E25-029 replaces this with the full Network copy text.
+    /// The Network copy text (PERF-011): the header lines, then the Details rows. The page has
+    /// no blocks.
     fn copy_text(&self, out: &mut String) {
-        out.push_str(&self.header.0);
+        let (word, model) = &self.header;
+        out.push_str(word);
         out.push('\n');
+        if !model.is_empty() {
+            out.push_str(model);
+            out.push('\n');
+        }
+        let rows_from = out.len();
         self.details.copy_into(out);
+        if out.len() > rows_from {
+            out.push('\n');
+        }
     }
 
     /// No header toggles; the Display unit link and the Network settings link (when shown) are the

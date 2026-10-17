@@ -1014,6 +1014,42 @@ impl PartitionsDelegate {
     }
 }
 
+/// The text of one partitions-table cell, shared by the table and the copy text.
+fn partition_cell_text(row: &PartitionRow, col: PartColumn, unallocated: &str, out: &mut String) {
+    let usage = match row.usage_pct.validity {
+        Validity::Valid | Validity::Stale => Some(row.usage_pct.value),
+        _ => None,
+    };
+    let dash = |out: &mut String, text: Option<&str>| out.push_str(text.unwrap_or("-"));
+    match col {
+        PartColumn::Partition => out.push_str(if row.unallocated { "-" } else { &row.name }),
+        PartColumn::Size => units::bytes(out, row.size_bytes),
+        PartColumn::Offset => units::bytes(out, row.start_bytes),
+        PartColumn::Type if row.unallocated => out.push_str(unallocated),
+        PartColumn::Type => out.push_str(&row.type_name),
+        _ if row.unallocated => out.push('-'),
+        PartColumn::Device => dash(out, row.holder.as_deref()),
+        PartColumn::Mount => dash(out, row.mount.as_deref()),
+        PartColumn::Label => dash(out, row.label.as_deref()),
+        PartColumn::FileSystem => dash(out, row.fs_type.as_deref()),
+        PartColumn::Usage => match usage {
+            Some(pct) => units::percent(out, pct),
+            None => out.push('-'),
+        },
+        PartColumn::Flags => {
+            if row.flags.is_empty() {
+                out.push('-');
+            }
+            for (i, flag) in row.flags.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(flag);
+            }
+        }
+    }
+}
+
 impl TreeTableDelegate for PartitionsDelegate {
     type RowId = u32;
     type Column = PartColumn;
@@ -1079,37 +1115,7 @@ impl TreeTableDelegate for PartitionsDelegate {
         if !out.want_text {
             return;
         }
-        let dash = |out: &mut CellOut, text: Option<&str>| out.text.push_str(text.unwrap_or("-"));
-        match col {
-            PartColumn::Partition => {
-                out.text
-                    .push_str(if row.unallocated { "-" } else { &row.name })
-            }
-            PartColumn::Size => units::bytes(&mut out.text, row.size_bytes),
-            PartColumn::Offset => units::bytes(&mut out.text, row.start_bytes),
-            PartColumn::Type if row.unallocated => out.text.push_str(&self.unallocated),
-            PartColumn::Type => out.text.push_str(&row.type_name),
-            _ if row.unallocated => out.text.push('-'),
-            PartColumn::Device => dash(out, row.holder.as_deref()),
-            PartColumn::Mount => dash(out, row.mount.as_deref()),
-            PartColumn::Label => dash(out, row.label.as_deref()),
-            PartColumn::FileSystem => dash(out, row.fs_type.as_deref()),
-            PartColumn::Usage => match usage {
-                Some(pct) => units::percent(&mut out.text, pct),
-                None => out.text.push('-'),
-            },
-            PartColumn::Flags => {
-                if row.flags.is_empty() {
-                    out.text.push('-');
-                }
-                for (i, flag) in row.flags.iter().enumerate() {
-                    if i > 0 {
-                        out.text.push_str(", ");
-                    }
-                    out.text.push_str(flag);
-                }
-            }
-        }
+        partition_cell_text(row, col, &self.unallocated, &mut out.text);
     }
     fn name_cell(&self, ix: usize) -> NameCell {
         let primary = self.rows.get(ix).map_or_else(SharedString::default, |r| {
@@ -1705,16 +1711,39 @@ impl DevicePage for DiskPage {
         menu
     }
 
-    /// E25-029 replaces this with the full Disk copy text.
+    /// The Disk copy text (PERF-011, UI-PRF-022): the header lines, the Details rows, then the
+    /// Partitions block with one paragraph per table row. The SMART window is not part of it.
     fn copy_text(&self, out: &mut String) {
         let (word, model) = &self.header;
         out.push_str(word);
-        if !model.is_empty() {
-            out.push(' ');
-            out.push_str(model);
-        }
         out.push('\n');
+        if !model.is_empty() {
+            out.push_str(model);
+            out.push('\n');
+        }
+        let rows_from = out.len();
         self.details.copy_into(out);
+        if out.len() > rows_from {
+            out.push('\n');
+        }
+        let Some(block) = &self.partitions else {
+            return;
+        };
+        out.push('\n');
+        out.push_str(&block.heading);
+        out.push('\n');
+        for (i, row) in block.rows.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            for col in PartColumn::ALL {
+                out.push_str("    ");
+                out.push_str(&self.words.part_cols[col.index()]);
+                out.push_str(": ");
+                partition_cell_text(row, col, &self.words.part_unallocated, out);
+                out.push('\n');
+            }
+        }
     }
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {

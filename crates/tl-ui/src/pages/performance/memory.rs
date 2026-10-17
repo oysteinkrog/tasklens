@@ -1067,7 +1067,11 @@ impl ModulesBlock {
         for (title, model) in &self.modules {
             out.push_str(title);
             out.push('\n');
+            let from = out.len();
             model.copy_into(out);
+            if out.len() > from {
+                out.push('\n');
+            }
         }
     }
 
@@ -1437,13 +1441,27 @@ impl SwapTableDelegate {
     pub fn scrolls(&self) -> bool {
         self.rows.len() > SWAP_TABLE_MAX_ROWS
     }
+}
 
-    fn type_word(&self, kind: SwapKindModel) -> &str {
-        match kind {
-            SwapKindModel::Partition => &self.words.types[0],
-            SwapKindModel::File => &self.words.types[1],
-            SwapKindModel::Zram => &self.words.types[2],
-            SwapKindModel::Other => "-",
+/// The type word of a swap device.
+fn swap_type_word(words: &SwapWords, kind: SwapKindModel) -> &str {
+    match kind {
+        SwapKindModel::Partition => &words.types[0],
+        SwapKindModel::File => &words.types[1],
+        SwapKindModel::Zram => &words.types[2],
+        SwapKindModel::Other => "-",
+    }
+}
+
+/// The text of one swap-table cell, shared by the table and the copy text.
+fn swap_cell_text(row: &SwapDevice, col: SwapColumn, words: &SwapWords, out: &mut String) {
+    match col {
+        SwapColumn::Name => out.push_str(&row.name),
+        SwapColumn::Type => out.push_str(swap_type_word(words, row.kind)),
+        SwapColumn::Size => units::bytes(out, row.size_bytes),
+        SwapColumn::Used => units::bytes(out, row.used_bytes),
+        SwapColumn::Priority => {
+            let _ = write!(out, "{}", row.priority);
         }
     }
 }
@@ -1491,15 +1509,7 @@ impl TreeTableDelegate for SwapTableDelegate {
         if !out.want_text {
             return;
         }
-        match col {
-            SwapColumn::Name => out.text.push_str(&row.name),
-            SwapColumn::Type => out.text.push_str(self.type_word(row.kind)),
-            SwapColumn::Size => units::bytes(&mut out.text, row.size_bytes),
-            SwapColumn::Used => units::bytes(&mut out.text, row.used_bytes),
-            SwapColumn::Priority => {
-                let _ = write!(out.text, "{}", row.priority);
-            }
-        }
+        swap_cell_text(row, col, &self.words, &mut out.text);
     }
     fn name_cell(&self, ix: usize) -> NameCell {
         NameCell {
@@ -2408,11 +2418,65 @@ impl DevicePage for MemoryPage {
         )
     }
 
-    /// E25-029 replaces this with the full Memory copy text.
+    /// The Memory copy text (PERF-011, UI-PRF-022): the header word, the Details rows, then the
+    /// blocks in screen order: Compressed memory, Swap devices, Memory modules. No module serial
+    /// is read (D-007).
     fn copy_text(&self, out: &mut String) {
         out.push_str(&self.header.0);
         out.push('\n');
+        let rows_from = out.len();
         self.details.copy_into(out);
+        if out.len() > rows_from {
+            out.push('\n');
+        }
+        let grid = |out: &mut String, model: &KeyValueModel| {
+            let from = out.len();
+            model.copy_into(out);
+            if out.len() > from {
+                out.push('\n');
+            }
+        };
+        if !self.compressed.is_hidden() {
+            out.push('\n');
+            out.push_str(&self.words.block_compressed);
+            out.push('\n');
+            for (name, model) in self.compressed.names.iter().zip(&self.compressed.zram) {
+                out.push_str(name);
+                out.push('\n');
+                grid(out, model);
+            }
+            out.push_str(&self.words.zswap);
+            out.push('\n');
+            grid(out, &self.compressed.zswap);
+        }
+        if !self.swap_rows.is_empty() {
+            out.push('\n');
+            out.push_str(&self.words.block_swap);
+            out.push('\n');
+            let words = &self.words.swap_table;
+            for (i, row) in self.swap_rows.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                for (col, label) in SwapColumn::ALL.into_iter().zip(&words.columns) {
+                    out.push_str("    ");
+                    out.push_str(label);
+                    out.push_str(": ");
+                    swap_cell_text(row, col, words, out);
+                    out.push('\n');
+                }
+            }
+        }
+        if !self.modules.is_hidden() {
+            out.push('\n');
+            out.push_str(&self.words.block_modules);
+            out.push('\n');
+            if self.modules.not_reported {
+                grid(out, self.modules.details_model());
+            } else {
+                self.modules.copy_into(out);
+            }
+        }
     }
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
