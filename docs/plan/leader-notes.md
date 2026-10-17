@@ -945,3 +945,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - o55.34: option A; new tasklens-o55.42 (smartctl locate gates NeedsFallback, pkexec 126 = Authentication cancelled per R-117) first; o55.34 uses SmartReadAdmin { disk }.
 - hk6.31: closed by the leader with known limits: RestartSec above 1 h cannot be set to exactly 1 h; validation text is in the input's name (kit Input has no description).
 - pdu.46: Windows cell value added in this bead (CellCtx.windows, record_value arm); app and unit rows Blank for now.
+- hk6.32: option A, banner.rs gets a .link() builder (owner-only note waived by the leader); link focuses the journal access card.
