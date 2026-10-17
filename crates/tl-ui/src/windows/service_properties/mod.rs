@@ -15,7 +15,7 @@ pub use dependencies::DependenciesTab;
 pub use general::GeneralTab;
 pub use logon::LogOnTab;
 #[cfg(any(test, feature = "test-hooks"))]
-pub use logs::LogRowForTest;
+pub use logs::{FollowStateForTest, LogRowForTest};
 pub use logs::{LogLine, LogsView};
 pub use recovery::RecoveryTab;
 
@@ -128,6 +128,10 @@ pub trait ServicePropsTabView {
         _cx: &mut App,
     ) {
     }
+
+    /// The tab became the shown one (`true`) or stopped being it (`false`). Not called when the
+    /// tab is built.
+    fn on_shown(&mut self, _shown: bool, _cx: &mut App) {}
 }
 
 /// The footer's view of a tab entity, without the tab's concrete type.
@@ -137,6 +141,7 @@ trait TabHandle {
     fn apply(&self, window: &mut Window, cx: &mut App) -> SmallVec<[ActionId; 2]>;
     fn reset(&self, cx: &mut App);
     fn set_details(&self, details: Option<&Arc<UnitDetails>>, not_loaded: bool, cx: &mut App);
+    fn on_shown(&self, shown: bool, cx: &mut App);
 }
 
 impl<T: Render + ServicePropsTabView> TabHandle for Entity<T> {
@@ -158,6 +163,10 @@ impl<T: Render + ServicePropsTabView> TabHandle for Entity<T> {
 
     fn set_details(&self, details: Option<&Arc<UnitDetails>>, not_loaded: bool, cx: &mut App) {
         self.update(cx, |tab, cx| tab.set_details(details, not_loaded, cx));
+    }
+
+    fn on_shown(&self, shown: bool, cx: &mut App) {
+        self.update(cx, |tab, cx| tab.on_shown(shown, cx));
     }
 }
 
@@ -456,8 +465,26 @@ impl ServicePropertiesWindow {
         if !self.visible_tabs().contains(&tab) {
             return;
         }
+        let previous = self.active;
+        let hidden = (previous != tab)
+            .then(|| {
+                self.tabs[previous.index()]
+                    .as_ref()
+                    .map(|s| s.handle.clone())
+            })
+            .flatten();
+        if let Some(handle) = hidden {
+            handle.on_shown(false, cx);
+        }
         self.active = tab;
-        if self.tabs[tab.index()].is_none() {
+        if self.tabs[tab.index()].is_some() {
+            if previous != tab {
+                let handle = self.tabs[tab.index()].as_ref().map(|s| s.handle.clone());
+                if let Some(handle) = handle {
+                    handle.on_shown(true, cx);
+                }
+            }
+        } else {
             let input = TabInput {
                 unit: self.unit.clone(),
                 actions: self.actions.clone(),

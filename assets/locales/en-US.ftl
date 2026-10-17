@@ -1861,6 +1861,32 @@ startup-open-location-opening = Opening file location
 startup-open-location-failed = Failed to open file location
 startup-open-location-unavailable = Startup file location unavailable.
 
+# Startup Properties window (tasklens-9o0.12, UI-SYS-050).
+startup-props-title = Startup properties: { $name }
+startup-props-title-removed = Startup properties: { $name } (removed)
+startup-props-too-many-windows = Too many startup properties windows are already open
+startup-props-label-name = Name
+startup-props-label-publisher = Publisher
+startup-props-label-status = Status / Enabled / State code
+startup-props-label-impact = Startup impact
+startup-props-label-type = Type / Source / Scope
+startup-props-label-location = Location
+startup-props-label-source-path = Source path
+startup-props-label-resolved-path = Resolved path
+startup-props-label-command = Command
+startup-props-label-flags = Can run / Can toggle / Can delete / File exists
+startup-props-label-only-show-in = OnlyShowIn
+startup-props-label-not-show-in = NotShowIn
+startup-props-label-try-exec = TryExec
+startup-props-label-phase = Autostart phase
+startup-props-label-generated-unit = Generated unit
+startup-props-label-overrides = Overrides
+startup-props-yes = Yes
+startup-props-no = No
+startup-props-copy = Copy { $label }
+startup-props-copied = Copied to clipboard
+startup-props-close = Close
+
 # Connections page status and refresh toast (tasklens-9o0.15, UI-SYS-067).
 connections-status-total = { $total } Total | { $tcp } TCP | { $udp } UDP | { $established } EST | { $listening } LISTEN
 connections-status-selected = { $selected } selected
@@ -2959,6 +2985,9 @@ services-sys036-terminal-tooltip = Open in terminal
 services-sys036-more-lines = {" "}(+{ $n } lines)
 services-sys036-pid = PID { $pid }
 services-sys036-no-terminal = Could not open a terminal
+services-sys037-new-lines = ↓ { $n } new lines
+services-sys037-loading = Loading…
+services-sys037-no-older = No older entries
 shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar

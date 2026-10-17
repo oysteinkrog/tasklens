@@ -21,9 +21,9 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextStyleRefinement,
-    UniformListScrollHandle, Window, div, px, uniform_list,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Role, ScrollStrategy,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Task, TextStyleRefinement, UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
@@ -43,7 +43,8 @@ use crate::components::tooltip::{DELAY_ROW_NAME, HoverTooltip, TlTooltip};
 use crate::hub::GlobalHub;
 use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::{
-    JOURNAL_LIST_CONTEXT, ServiceLogsCopySelected, ServiceLogsSelectAll,
+    JOURNAL_LIST_CONTEXT, ServiceLogsBottom, ServiceLogsCopySelected, ServiceLogsSelectAll,
+    ServiceLogsTop,
 };
 use crate::pages::sys_status::{LabelTone, tone_color};
 use crate::table::selection::{Selection, SelectionView};
@@ -58,6 +59,10 @@ const TOOLBAR_H: f32 = 32.;
 const FILTER_W: f32 = 220.;
 /// List line height, × ui_scale.
 const LINE_H: f32 = 18.;
+/// The list keeps at most this many lines (UI-SYS-037).
+pub const MAX_LINES: usize = 10_000;
+/// Gap between the new-lines pill and the list bottom, × ui_scale.
+const PILL_BOTTOM: f32 = 16.;
 /// Noto Sans Mono advance width as a fraction of the font size (600 of 1000 units).
 const MONO_ADVANCE: f32 = 0.6;
 /// Width of the time column in characters ("YYYY-MM-DD HH:MM:SS").
@@ -267,15 +272,22 @@ pub struct LogsView {
     filtered: Vec<u32>,
     /// The applied filter text.
     filter: SharedString,
-    /// Held so the engine keeps the stream open. Follow and paging use it (follow bead).
-    #[allow(dead_code)]
+    /// One handle for the window's life. Dropping the view drops it and the engine kills the
+    /// child. A hidden tab turns follow off instead (`on_shown`).
     handle: Option<JournalHandle>,
-    /// Default true. The behaviour is the follow bead's.
+    /// Default true.
     follow: bool,
-    #[allow(dead_code)]
+    /// True while the list is within one line of the bottom. Batches then scroll to the newest
+    /// line.
     stick_to_bottom: bool,
-    #[allow(dead_code)]
+    /// Lines shown since the list unstuck, for the pill.
     new_since_unstick: u32,
+    /// A Load older request is in flight.
+    loading_older: bool,
+    /// The last older page was short: nothing older remains.
+    exhausted: bool,
+    /// The user scrolled with the wheel since the last render: re-read the position.
+    scroll_dirty: bool,
     /// Line index selection.
     selection: Selection<u32>,
     scroll: UniformListScrollHandle,
@@ -338,6 +350,9 @@ impl LogsView {
             follow: true,
             stick_to_bottom: true,
             new_since_unstick: 0,
+            loading_older: false,
+            exhausted: false,
+            scroll_dirty: false,
             selection: Selection::new(),
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
@@ -351,15 +366,25 @@ impl LogsView {
 
     fn on_event(&mut self, ev: JournalEvent, cx: &mut Context<Self>) {
         // Access and Error are the states bead's.
-        if let JournalEvent::Batch { entries, older, .. } = ev {
-            self.take_batch(&entries, older);
+        if let JournalEvent::Batch {
+            entries,
+            older,
+            exhausted,
+        } = ev
+        {
+            if older {
+                self.loading_older = false;
+                self.exhausted = exhausted;
+            }
+            let line_h = px(LINE_H * metrics(cx).ui_scale);
+            self.take_batch(&entries, older, line_h);
             cx.notify();
         }
     }
 
     /// Formats `entries` once and appends them, or prepends them for an `older` page. Only the
-    /// new lines go through the filter.
-    fn take_batch(&mut self, entries: &[JournalEntry], older: bool) {
+    /// new lines go through the filter. `line_h` keeps the scroll position on the same line.
+    fn take_batch(&mut self, entries: &[JournalEntry], older: bool, line_h: Pixels) {
         if entries.is_empty() {
             return;
         }
@@ -372,20 +397,125 @@ impl LogsView {
             let mut filtered: Vec<u32> = (0..n)
                 .filter(|&i| self.lines[i as usize].matches(&needle))
                 .collect();
+            let inserted_shown = filtered.len();
             filtered.extend(self.filtered.iter().map(|&i| i + n));
             self.filtered = filtered;
             // Line indices moved.
             self.selection.clear();
+            self.shift_scroll(-(line_h * inserted_shown as f32));
+            // Past the cap the newest lines go: the user is reading history.
+            if self.lines.len() > MAX_LINES {
+                self.lines.truncate(MAX_LINES);
+                let keep = self.filtered.partition_point(|&i| (i as usize) < MAX_LINES);
+                self.filtered.truncate(keep);
+            }
         } else {
             let start = self.lines.len() as u32;
             self.lines.extend(entries.iter().map(LogLine::from_entry));
             let end = self.lines.len() as u32;
+            let mut shown_new = 0;
             for i in start..end {
                 if self.lines[i as usize].matches(&needle) {
                     self.filtered.push(i);
+                    shown_new += 1;
                 }
             }
+            let excess = self.lines.len().saturating_sub(MAX_LINES);
+            if excess > 0 {
+                self.drop_oldest(excess, line_h);
+            }
+            if self.stick_to_bottom {
+                self.scroll_to_bottom();
+            } else {
+                self.new_since_unstick = self.new_since_unstick.saturating_add(shown_new);
+            }
         }
+    }
+
+    /// Drops the `count` oldest lines from `lines`, `filtered` and the selection, and keeps an
+    /// unstuck list on the same line.
+    fn drop_oldest(&mut self, count: usize, line_h: Pixels) {
+        self.lines.drain(..count);
+        let gone = self.filtered.partition_point(|&i| (i as usize) < count);
+        self.filtered.drain(..gone);
+        for i in &mut self.filtered {
+            *i -= count as u32;
+        }
+        self.selection.clear();
+        self.shift_scroll(line_h * gone as f32);
+        // The engine can page back from the oldest kept line again (R-118).
+        self.exhausted = false;
+    }
+
+    /// Moves the scroll offset by `dy` (negative scrolls down) and never above the top.
+    fn shift_scroll(&self, dy: Pixels) {
+        let base = self.scroll.0.borrow().base_handle.clone();
+        let mut offset = base.offset();
+        offset.y = (offset.y + dy).min(px(0.));
+        base.set_offset(offset);
+    }
+
+    fn scroll_to_bottom(&self) {
+        if let Some(last) = self.filtered.len().checked_sub(1) {
+            self.scroll.scroll_to_item(last, ScrollStrategy::Bottom);
+        }
+    }
+
+    /// Re-reads the scroll position after a wheel scroll: within one line of the bottom sticks.
+    fn sync_stick(&mut self, line_h: Pixels) {
+        let at_bottom = {
+            let state = self.scroll.0.borrow();
+            let max = state.base_handle.max_offset().y;
+            max <= px(0.) || -state.base_handle.offset().y >= max - line_h
+        };
+        self.stick_to_bottom = at_bottom;
+        if at_bottom {
+            self.new_since_unstick = 0;
+        }
+    }
+
+    /// The pill, End and the pill click: scroll to the newest line and stick.
+    fn go_bottom(&mut self, cx: &mut Context<Self>) {
+        self.stick_to_bottom = true;
+        self.new_since_unstick = 0;
+        self.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn on_go_bottom(&mut self, _: &ServiceLogsBottom, _: &mut Window, cx: &mut Context<Self>) {
+        self.go_bottom(cx);
+    }
+
+    fn on_go_top(&mut self, _: &ServiceLogsTop, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        if self.scroll.is_scrollable() {
+            self.stick_to_bottom = false;
+        }
+        cx.notify();
+    }
+
+    fn toggle_follow(&mut self, cx: &mut Context<Self>) {
+        self.follow = !self.follow;
+        if let Some(handle) = &self.handle {
+            handle.set_follow(self.follow);
+        }
+        if !self.follow {
+            self.new_since_unstick = 0;
+        }
+        cx.notify();
+    }
+
+    /// Asks for the page before the oldest line held. One request at a time.
+    fn load_older(&mut self, cx: &mut Context<Self>) {
+        if self.loading_older || self.exhausted {
+            return;
+        }
+        let Some(handle) = &self.handle else {
+            return;
+        };
+        self.loading_older = true;
+        handle.load_older(self.lines.front().map(|l| l.cursor.clone()));
+        cx.notify();
     }
 
     /// Restarts the debounce. The filter applies after 100 ms without a change.
@@ -540,6 +670,52 @@ impl LogsView {
         }
     }
 
+    fn older_label_key(&self) -> &'static str {
+        if self.exhausted {
+            "services-sys037-no-older"
+        } else if self.loading_older {
+            "services-sys037-loading"
+        } else {
+            "services-sys036-load-older"
+        }
+    }
+
+    fn pill_text(&self, cx: &App) -> SharedString {
+        let mut n = String::new();
+        units::count(&mut n, u64::from(self.new_since_unstick));
+        tr_args(
+            cx,
+            "services-sys037-new-lines",
+            &[("n", FluentValue::from(n))],
+        )
+    }
+
+    /// "↓ N new lines" while the list is unstuck with news and Follow is on.
+    fn pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.follow || self.stick_to_bottom || self.new_since_unstick == 0 {
+            return None;
+        }
+        let s = metrics(cx).ui_scale;
+        let text = self.pill_text(cx);
+        let this = cx.weak_entity();
+        let button = TlButton::new("ServiceLogsNewLines", TlButtonKind::Primary)
+            .size(TlButtonSize::Sm)
+            .label(text)
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |this, cx| this.go_bottom(cx));
+            });
+        Some(
+            h_flex()
+                .absolute()
+                .bottom(px(PILL_BOTTOM * s))
+                .left_0()
+                .w_full()
+                .justify_center()
+                .child(button)
+                .into_any_element(),
+        )
+    }
+
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         let m = *metrics(cx);
@@ -557,10 +733,23 @@ impl LogsView {
         )
         .icon(TlIcon::ArrowDownToLine)
         .icon_size(m.icon.sm)
-        .label(tr(cx, "services-sys036-follow"));
+        .label(tr(cx, "services-sys036-follow"))
+        .on_click({
+            let this = cx.weak_entity();
+            move |_, _, cx| {
+                let _ = this.update(cx, |this, cx| this.toggle_follow(cx));
+            }
+        });
         let older = TlButton::new("ServiceLogsLoadOlder", TlButtonKind::Secondary)
             .size(TlButtonSize::Sm)
-            .label(tr(cx, "services-sys036-load-older"));
+            .label(tr(cx, self.older_label_key()))
+            .disabled(self.loading_older || self.exhausted)
+            .on_click({
+                let this = cx.weak_entity();
+                move |_, _, cx| {
+                    let _ = this.update(cx, |this, cx| this.load_older(cx));
+                }
+            });
         let this = cx.weak_entity();
         let copy = {
             let this = this.clone();
@@ -768,10 +957,43 @@ impl LogsView {
         self.filter_input.clone()
     }
 
+    /// The scroll and paging state, as the tab shows it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn follow_state_for_test(&self, cx: &App) -> FollowStateForTest {
+        let line_h = f32::from(px(LINE_H * metrics(cx).ui_scale));
+        let base = self.scroll.0.borrow().base_handle.clone();
+        FollowStateForTest {
+            first_visible: (-f32::from(base.offset().y) / line_h).floor().max(0.) as usize,
+            at_bottom: self.scroll.is_scrolled_to_end().unwrap_or(true),
+            stick_to_bottom: self.stick_to_bottom,
+            new_since_unstick: self.new_since_unstick,
+            follow: self.follow,
+            older_label: tr(cx, self.older_label_key()).to_string(),
+            older_enabled: !self.loading_older && !self.exhausted,
+            pill_text: self.pill_text(cx).to_string(),
+        }
+    }
+
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn focus_handle_for_test(&self) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+/// Scroll and paging state, for tests.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Debug)]
+pub struct FollowStateForTest {
+    /// Index into the shown lines of the first line in view.
+    pub first_visible: usize,
+    pub at_bottom: bool,
+    pub stick_to_bottom: bool,
+    pub new_since_unstick: u32,
+    pub follow: bool,
+    pub older_label: String,
+    pub older_enabled: bool,
+    /// The pill's text for `new_since_unstick`, whether or not the pill shows.
+    pub pill_text: String,
 }
 
 /// One shown line, for tests.
@@ -800,11 +1022,24 @@ impl ServicePropsTabView for LogsView {
     fn reset(&mut self, _cx: &mut App) {}
 
     fn set_details(&mut self, _: Option<&Arc<UnitDetails>>, _: bool, _cx: &mut App) {}
+
+    /// A hidden tab stops the `-f` child. Coming back resumes after the last cursor.
+    fn on_shown(&mut self, shown: bool, _cx: &mut App) {
+        if self.follow
+            && let Some(handle) = &self.handle
+        {
+            handle.set_follow(shown);
+        }
+    }
 }
 
 impl Render for LogsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
+        if std::mem::take(&mut self.scroll_dirty) {
+            self.sync_stick(px(LINE_H * metrics(cx).ui_scale));
+        }
+        let pill = self.pill(cx);
         let list = uniform_list(
             "svc-logs-list",
             self.filtered.len(),
@@ -826,11 +1061,19 @@ impl Render for LogsView {
                     .role(Role::List)
                     .on_action(cx.listener(Self::on_select_all))
                     .on_action(cx.listener(Self::on_copy_selected))
+                    .on_action(cx.listener(Self::on_go_top))
+                    .on_action(cx.listener(Self::on_go_bottom))
+                    .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+                        this.scroll_dirty = true;
+                        cx.notify();
+                    }))
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .bg(theme.list_bg)
-                    .child(list),
+                    .child(list)
+                    .children(pill),
             )
     }
 }

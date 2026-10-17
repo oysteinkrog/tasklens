@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, Modifiers, Render, TestAppContext,
-    VisualTestContext, Window, WindowHandle, div,
+    AppContext as _, Context, Entity, IntoElement, Modifiers, Render, ScrollDelta,
+    ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, Window, WindowHandle, div,
+    point, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{
@@ -21,7 +22,7 @@ use tl_model::actions::{
 };
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
-use tl_model::journal::{JournalEntry, JournalEvent};
+use tl_model::journal::{JournalControl, JournalEntry, JournalEvent};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{
     DepEntry, PidIds, RecoverySettings, Relation, ServiceBackend, ServiceStatus, StartupType,
@@ -39,8 +40,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::windows::service_properties::{
-    DependenciesTab, GeneralTab, LogOnTab, LogRowForTest, LogsView, RecoveryTab,
-    ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
+    DependenciesTab, FollowStateForTest, GeneralTab, LogOnTab, LogRowForTest, LogsView,
+    RecoveryTab, ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
 };
 
 use tl_ui::pages::services::actions::ServicePropsOk;
@@ -1918,4 +1919,201 @@ fn logs_open_terminal_fallback_to_konsole(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(launches(&t.engine).len(), 2);
     assert_eq!(t.toasts(cx), ["Could not open a terminal"]);
+}
+
+// Logs tab: follow, pill, Load older and the cap (UI-SYS-037).
+
+impl Logs {
+    /// Sends one older page through the first journal handle.
+    fn feed_older(&self, cx: &mut TestAppContext, entries: Vec<JournalEntry>, exhausted: bool) {
+        let (events, _) = self.engine.journal_end(0).expect("a journal was opened");
+        events
+            .try_send(JournalEvent::Batch {
+                entries: entries.into(),
+                older: true,
+                exhausted,
+            })
+            .expect("the event channel has room");
+        cx.run_until_parked();
+    }
+
+    fn state(&self, cx: &mut TestAppContext) -> FollowStateForTest {
+        cx.read(|cx| self.tab.read(cx).follow_state_for_test(cx))
+    }
+
+    /// The next control the engine received, if any.
+    fn control(&self) -> Option<JournalControl> {
+        let (_, control) = self.engine.journal_end(0).expect("a journal was opened");
+        control.try_recv().ok()
+    }
+
+    /// Scrolls the list up by `lines` lines of 18 px with the wheel.
+    fn scroll_up(&self, cx: &mut TestAppContext, lines: f32) {
+        let mut vcx = self.vcx(cx);
+        let at = vcx
+            .debug_bounds("ServiceLogsList")
+            .expect("the list is drawn")
+            .center();
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(18. * lines))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        vcx.run_until_parked();
+        draw(&mut vcx);
+    }
+
+    fn keys(&self, cx: &mut TestAppContext, keys: &str) {
+        let mut vcx = VisualTestContext::from_window(self.handle.into(), cx);
+        vcx.update(|window, cx| {
+            window.activate_window();
+            window.focus(&self.tab.read(cx).focus_handle_for_test(), cx);
+        });
+        draw(&mut vcx);
+        vcx.simulate_keystrokes(keys);
+        vcx.run_until_parked();
+    }
+
+    fn select(&self, cx: &mut TestAppContext, tab: ServicePropsTab) {
+        let win = view(cx, self.handle);
+        let mut vcx = VisualTestContext::from_window(self.handle.into(), cx);
+        vcx.update(|window, cx| win.update(cx, |w, cx| w.select_tab(tab, window, cx)));
+        draw(&mut vcx);
+    }
+
+    fn pill_shown(&self, cx: &mut TestAppContext) -> bool {
+        self.vcx(cx)
+            .debug_bounds("TlButton-ServiceLogsNewLines")
+            .is_some()
+    }
+}
+
+fn numbered(range: std::ops::Range<u64>) -> Vec<JournalEntry> {
+    range.map(|s| entry(s, 6, &format!("m{s}"))).collect()
+}
+
+#[gpui_kit::test]
+fn follow_sticks_to_bottom(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, numbered(0..100));
+    t.vcx(cx);
+    assert!(t.state(cx).at_bottom);
+    t.feed(cx, numbered(100..105));
+    t.vcx(cx);
+    let st = t.state(cx);
+    assert!(st.at_bottom && st.stick_to_bottom);
+    assert_eq!(st.new_since_unstick, 0);
+    assert!(!t.pill_shown(cx));
+}
+
+#[gpui_kit::test]
+fn follow_unstick_counts_new_lines(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, numbered(0..100));
+    t.vcx(cx);
+    let bottom = t.state(cx).first_visible;
+    t.scroll_up(cx, 10.);
+    let st = t.state(cx);
+    assert!(!st.stick_to_bottom);
+    assert_eq!(st.first_visible, bottom - 10);
+    t.feed(cx, numbered(100..112));
+    t.vcx(cx);
+    let st = t.state(cx);
+    assert_eq!(st.first_visible, bottom - 10, "the position is unchanged");
+    assert_eq!(st.new_since_unstick, 12);
+    assert_eq!(st.pill_text, "↓ 12 new lines");
+    assert!(t.pill_shown(cx));
+    t.keys(cx, "end");
+    t.vcx(cx);
+    let st = t.state(cx);
+    assert!(st.at_bottom && st.stick_to_bottom);
+    assert_eq!(st.new_since_unstick, 0);
+    assert!(!t.pill_shown(cx));
+}
+
+#[gpui_kit::test]
+fn follow_off_kills_child(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, numbered(0..10));
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "TlButton-ServiceLogsFollow", Modifiers::none());
+    assert_eq!(t.control(), Some(JournalControl::SetFollow(false)));
+    assert!(!t.state(cx).follow);
+    t.click(&mut vcx, "TlButton-ServiceLogsFollow", Modifiers::none());
+    assert_eq!(t.control(), Some(JournalControl::SetFollow(true)));
+    assert!(t.state(cx).follow);
+}
+
+#[gpui_kit::test]
+fn tab_leave_stops_follow_and_return_resumes(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, numbered(0..10));
+    t.select(cx, ServicePropsTab::General);
+    assert_eq!(t.control(), Some(JournalControl::SetFollow(false)));
+    t.select(cx, ServicePropsTab::Logs);
+    assert_eq!(t.control(), Some(JournalControl::SetFollow(true)));
+    assert_eq!(t.engine.journals().len(), 1, "one handle for the window");
+    assert_eq!(t.messages(cx).len(), 10, "the loaded lines stay");
+    // With Follow off, leaving and returning sends nothing.
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "TlButton-ServiceLogsFollow", Modifiers::none());
+    assert_eq!(t.control(), Some(JournalControl::SetFollow(false)));
+    drop(vcx);
+    t.select(cx, ServicePropsTab::General);
+    t.select(cx, ServicePropsTab::Logs);
+    assert_eq!(t.control(), None);
+}
+
+#[gpui_kit::test]
+fn load_older_keeps_anchor(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, numbered(1000..1300));
+    t.vcx(cx);
+    t.scroll_up(cx, 100.);
+    let before = t.state(cx);
+    let first_message = t.messages(cx)[before.first_visible].clone();
+    let mut vcx = t.vcx(cx);
+    t.click(&mut vcx, "TlButton-ServiceLogsLoadOlder", Modifiers::none());
+    assert_eq!(
+        t.control(),
+        Some(JournalControl::LoadOlder(Some(Arc::from("s=1;i=1000"))))
+    );
+    let st = t.state(cx);
+    assert_eq!(st.older_label, "Loading…");
+    assert!(!st.older_enabled);
+    drop(vcx);
+    t.feed_older(cx, numbered(800..1000), false);
+    t.vcx(cx);
+    let after = t.state(cx);
+    assert!(after.older_enabled);
+    assert_eq!(after.older_label, "Load older");
+    assert_eq!(t.messages(cx)[after.first_visible], first_message);
+    assert_eq!(after.first_visible, before.first_visible + 200);
+}
+
+#[gpui_kit::test]
+fn load_older_exhausted(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, numbered(1000..1300));
+    t.feed_older(cx, numbered(963..1000), true);
+    let st = t.state(cx);
+    assert_eq!(st.older_label, "No older entries");
+    assert!(!st.older_enabled);
+    assert_eq!(t.messages(cx).len(), 337);
+}
+
+#[gpui_kit::test]
+fn cap_10000_drops_oldest(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.feed(cx, numbered(1000..10_900));
+    t.feed_older(cx, numbered(900..1000), true);
+    assert_eq!(t.messages(cx).len(), 10_000);
+    assert!(!t.state(cx).older_enabled);
+    t.feed(cx, numbered(20_000..20_050));
+    let messages = t.messages(cx);
+    assert_eq!(messages.len(), 10_000);
+    assert_eq!(messages[0], "m950");
+    assert_eq!(messages[9_999], "m20049");
+    assert!(t.state(cx).older_enabled);
 }
