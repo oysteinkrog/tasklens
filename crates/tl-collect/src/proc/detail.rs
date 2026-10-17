@@ -419,6 +419,9 @@ pub enum FdType {
     /// A socket not yet resolved to TCP, UDP, unix or netlink. The engine refines it with the
     /// sock_diag inode map (E06).
     Socket,
+    /// A plain path whose kind needs a stat that could not run: the helper sends only the link
+    /// text, so file, directory, FIFO and device cannot be told apart.
+    Unknown,
 }
 
 impl FdType {
@@ -447,6 +450,7 @@ impl FdType {
             Self::AnonInode => "anon_inode",
             Self::Device => "device",
             Self::Socket => "socket",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -651,7 +655,7 @@ fn fd_row(fd: u32, raw: &[u8], stat: impl FnOnce() -> FdType, text: &mut String)
 /// decoded `FD_LIST`, (fd, raw link target), and `fdinfo` the decoded `FDINFO`, (fd,
 /// `fdinfo/<fd>` bytes). Both are sorted by fd, as the helper sends them. An fd without an
 /// `fdinfo` entry keeps `fdinfo_ok == false`. No stat can follow a link from bytes, so a plain
-/// path gives `File`, the type a failed stat gives.
+/// path gives `Unknown`.
 pub fn parse_helper_fds(
     links: &[(u32, &[u8])],
     fdinfo: &[(u32, &[u8])],
@@ -661,7 +665,7 @@ pub fn parse_helper_fds(
     out.clear();
     out.reserve(links.len());
     for &(fd, raw) in links {
-        let mut row = fd_row(fd, raw, || FdType::File, text);
+        let mut row = fd_row(fd, raw, || FdType::Unknown, text);
         if let Ok(at) = fdinfo.binary_search_by_key(&fd, |&(n, _)| n) {
             let info = fdinfo[at].1;
             parse_fdinfo(&info[..info.len().min(FDINFO_MAX)], &mut row);
@@ -2284,13 +2288,13 @@ mod tests {
         assert_eq!(
             rows,
             [
-                (0, FdType::File, Some(5), true),
+                (0, FdType::Unknown, Some(5), true),
                 (1, FdType::Socket, Some(4242), false),
                 (2, FdType::Pipe, Some(77), false),
                 (3, FdType::EventFd, Some(1057), true),
                 (4, FdType::MemFd, None, false),
-                (5, FdType::File, Some(9001), true),
-                (9, FdType::File, None, false),
+                (5, FdType::Unknown, Some(9001), true),
+                (9, FdType::Unknown, None, false),
             ]
         );
         assert_eq!(&*out[0].target, "/dev/null");
@@ -2300,6 +2304,32 @@ mod tests {
         assert_eq!(out[5].pos, Some(1234));
         assert!(out[6].target.ends_with('…'), "a long target is cut");
         assert!(out[6].target.chars().count() <= EXE_LINK_MAX + 1);
+    }
+
+    /// A plain path needs a stat, which bytes cannot give, so devices and directories are not
+    /// called files. `/dev/dri/` still reads as DRM from its text.
+    #[test]
+    fn helper_fds_plain_paths_are_unknown() {
+        let links: [(u32, &[u8]); 4] = [
+            (0, b"/dev/pts/0"),
+            (1, b"/home/user"),
+            (2, b"/run/fifo"),
+            (3, b"/dev/dri/renderD128"),
+        ];
+        let mut text = String::new();
+        let mut out = Vec::new();
+        parse_helper_fds(&links, &[], &mut text, &mut out);
+        let kinds: Vec<FdType> = out.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                FdType::Unknown,
+                FdType::Unknown,
+                FdType::Unknown,
+                FdType::Drm
+            ]
+        );
+        assert_eq!(FdType::Unknown.label(), "unknown");
     }
 
     #[test]

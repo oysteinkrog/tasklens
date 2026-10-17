@@ -3181,7 +3181,7 @@ mod detail_helper {
         assert_eq!(
             rows,
             [
-                (0, FdKind::File, "/dev/null", Some(5), Some(0o100002)),
+                (0, FdKind::AnonInode, "/dev/null", Some(5), Some(0o100002)),
                 (3, FdKind::Pipe, "pipe:[8812]", Some(8812), None),
                 (
                     7,
@@ -3193,6 +3193,9 @@ mod detail_helper {
             ]
         );
         assert_eq!(detail.rows[2].eventfd_count, Some(3));
+        // A path from helper bytes has no stat, so it shows as the other type, and stays
+        // visible under "Hide unnamed handles".
+        assert!(!detail.rows[0].unnamed);
         rig.finish();
     }
 

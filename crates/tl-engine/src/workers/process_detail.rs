@@ -3294,8 +3294,9 @@ fn thread_row(t: &ThreadInfo) -> ThreadRow {
     }
 }
 
-/// tl-model has no plain socket kind. A socket whose protocol could not be read shows as
-/// `anon_inode`, the "other" type (PROC-080); its name still reads `socket:[<inode>]`.
+/// tl-model has no plain socket kind and no unknown kind. A socket whose protocol could not be
+/// read, and a helper path whose kind needs a stat, show as `anon_inode`, the "other" type
+/// (PROC-080). The name still reads `socket:[<inode>]` or the path.
 fn fd_kind(kind: FdType) -> FdKind {
     match kind {
         FdType::File => FdKind::File,
@@ -3317,7 +3318,7 @@ fn fd_kind(kind: FdType) -> FdKind {
         FdType::Drm => FdKind::Drm,
         FdType::PidFd => FdKind::Pidfd,
         FdType::IoUring => FdKind::IoUring,
-        FdType::AnonInode | FdType::Socket => FdKind::AnonInode,
+        FdType::AnonInode | FdType::Socket | FdType::Unknown => FdKind::AnonInode,
         FdType::Device => FdKind::Device,
     }
 }
