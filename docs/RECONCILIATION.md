@@ -1951,10 +1951,11 @@ has). Every AMD and Intel card now needs the fdinfo walk each tick.
 
 - Basis: PERF-063, PERF-074, PERF-075; amdgpu `amdgpu_fdinfo.c` prints `drm-engine-<ip>` only when its
   usage is non-zero [inferred, not re-read here]; Fable consulted on the id list.
-- Open: the probe JPEG and OFA readings. nvml-wrapper 0.13.0 has no safe `jpg_utilization` or
-  `ofa_utilization`; the raw `nvmlDeviceGetJpgUtilization` and `nvmlDeviceGetOfaUtilization` need
-  `unsafe` in `crates/tl-gpu-probe/src/nvml.rs`, which ADR-001 rule 4 does not allow. Leader decision
-  needed. Until then the NVIDIA list is Gpu, MemCtl, Enc and Dec.
+- The probe JPEG and OFA readings: nvml-wrapper 0.13.0 has no safe `jpg_utilization` or
+  `ofa_utilization`, so the raw `nvmlDeviceGetJpgUtilization` and `nvmlDeviceGetOfaUtilization` live
+  in `crates/tl-gpu-probe/src/nvml_raw.rs`, which ADR-001 rule 4 now allows (leader decision
+  2026-10-16, bead hjn.42). They travel as `jpeg_pct` and `ofa_pct` in `GpuDeviceSample`
+  (`GPU_PROTO_VERSION` 4). NotSupported, or a driver without the symbol, leaves the engine out.
 - Edits: ADR-003 `MetricId` block and the R-170 totals line in ARCHITECTURE; bead hjn.37.
 
 ## Owner questions

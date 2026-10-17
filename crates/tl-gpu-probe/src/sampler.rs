@@ -191,6 +191,8 @@ mod tests {
             enc_pct: Reading::Unsupported,
             dec_pct: Reading::Unsupported,
             enc_sessions: Reading::Unsupported,
+            jpeg_pct: Reading::Unsupported,
+            ofa_pct: Reading::Unsupported,
             temp_c: Reading::Ok(55),
             power_mw: Reading::Failed,
             clock_gfx_mhz: Reading::Ok(1800),

@@ -11,10 +11,11 @@ use crate::validity::Validity;
 
 /// Protocol version sent in both `Hello` messages. 2 added `mem_reserved` and `enc_sessions`
 /// to `GpuDeviceSample`. 3 added the PERF-066 to PERF-070 limits to `GpuDeviceInfo` and fan RPM,
-/// video clock, P-state, PCIe link and energy to `GpuDeviceSample`. A probe of another version
+/// video clock, P-state, PCIe link and energy to `GpuDeviceSample`. 4 added the JPEG and OFA
+/// engine readings to `GpuDeviceSample`. A probe of another version
 /// answers `Hello` with an empty device list, so its reply decodes whatever the device layout,
 /// and it is refused there before any sample is decoded.
-pub const GPU_PROTO_VERSION: u16 = 3;
+pub const GPU_PROTO_VERSION: u16 = 4;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProbeRequest {
@@ -117,6 +118,10 @@ pub struct GpuDeviceSample {
     pub dec_pct: Reading<u32>,
     /// Active NVENC sessions, `nvmlDeviceGetEncoderSessions` (PERF-065).
     pub enc_sessions: Reading<u32>,
+    /// `nvmlDeviceGetJpgUtilization` and `nvmlDeviceGetOfaUtilization`, percent (PERF-063).
+    /// `Unsupported` on a card or driver without the engine.
+    pub jpeg_pct: Reading<u32>,
+    pub ofa_pct: Reading<u32>,
     pub temp_c: Reading<u32>,
     pub power_mw: Reading<u32>,
     pub clock_gfx_mhz: Reading<u32>,
@@ -182,6 +187,8 @@ mod tests {
             enc_pct: Reading::Ok(u32::MAX),
             dec_pct: Reading::Ok(u32::MAX),
             enc_sessions: Reading::Ok(u32::MAX),
+            jpeg_pct: Reading::Ok(u32::MAX),
+            ofa_pct: Reading::Ok(u32::MAX),
             temp_c: Reading::Ok(u32::MAX),
             power_mw: Reading::Ok(u32::MAX),
             clock_gfx_mhz: Reading::Ok(u32::MAX),
@@ -233,8 +240,41 @@ mod tests {
     }
 
     #[test]
-    fn proto_version_three() {
-        assert_eq!(GPU_PROTO_VERSION, 3);
+    fn proto_version_four() {
+        assert_eq!(GPU_PROTO_VERSION, 4);
+    }
+
+    /// A version 4 `Hello` and a sample with and without the JPEG and OFA readings.
+    #[test]
+    fn version_four_round_trips_jpeg_and_ofa() {
+        let hello = ProbeResponse::Hello {
+            proto: GPU_PROTO_VERSION,
+            driver: "580.82.09".to_string(),
+            nvml: "12.580.82.09".to_string(),
+            devices: Vec::new(),
+        };
+        let with = GpuDeviceSample {
+            jpeg_pct: Reading::Ok(17),
+            ofa_pct: Reading::Ok(3),
+            ..device(1)
+        };
+        let without = GpuDeviceSample {
+            jpeg_pct: Reading::Unsupported,
+            ofa_pct: Reading::Failed,
+            ..device(2)
+        };
+        let sample = ProbeResponse::Sample {
+            seq: 1,
+            t_ns: 2,
+            devices: vec![with, without],
+            processes: None,
+        };
+        for msg in [hello, sample] {
+            let mut buf = Vec::new();
+            encode_frame(&msg, MAX_PROBE_FRAME, &mut buf).unwrap();
+            let back: ProbeResponse = read_frame(&mut buf.as_slice(), MAX_PROBE_FRAME).unwrap();
+            assert_eq!(back, msg);
+        }
     }
 
     #[test]

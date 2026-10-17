@@ -347,6 +347,8 @@ pub fn to_totals(
     engines.set(GpuEngine::MemCtl, pct(s.mem_util_pct));
     engines.set(GpuEngine::Enc, pct(s.enc_pct));
     engines.set(GpuEngine::Dec, pct(s.dec_pct));
+    engines.set(GpuEngine::Jpeg, pct(s.jpeg_pct));
+    engines.set(GpuEngine::Ofa, pct(s.ofa_pct));
     GpuTotals {
         device: DEVICE_PLACEHOLDER,
         util_pct: pct(s.util_pct),
@@ -657,6 +659,8 @@ mod tests {
             enc_pct: Reading::Ok(0),
             dec_pct: Reading::Unsupported,
             enc_sessions: Reading::Ok(2),
+            jpeg_pct: Reading::Unsupported,
+            ofa_pct: Reading::Unsupported,
             temp_c: Reading::Failed,
             power_mw: Reading::Ok(31_900),
             clock_gfx_mhz: Reading::Ok(2_100),
@@ -843,7 +847,7 @@ mod tests {
             &device_static(&device_info()),
         );
         let engines: Vec<(GpuEngine, Metric<f32>)> = t.engines.reported().collect();
-        // Decode is NotSupported in the sample, so it is not listed.
+        // Decode, JPEG and OFA are NotSupported in the sample, so they are not listed.
         assert_eq!(
             engines,
             [
@@ -861,6 +865,45 @@ mod tests {
         let t = to_totals(&failed, &device_info(), &device_static(&device_info()));
         // A failed call keeps the engine listed.
         assert_eq!(t.engines.get(GpuEngine::Gpu).validity, Validity::Failed);
+    }
+
+    #[test]
+    fn to_totals_jpeg_and_ofa() {
+        let info = device_info();
+        let statics = device_static(&info);
+        let with = GpuDeviceSample {
+            jpeg_pct: Reading::Ok(17),
+            ofa_pct: Reading::Ok(0),
+            ..device_sample()
+        };
+        let t = to_totals(&with, &info, &statics);
+        let engines: Vec<GpuEngine> = t.engines.reported().map(|(e, _)| e).collect();
+        assert_eq!(
+            engines,
+            [
+                GpuEngine::Gpu,
+                GpuEngine::MemCtl,
+                GpuEngine::Enc,
+                GpuEngine::Jpeg,
+                GpuEngine::Ofa,
+            ]
+        );
+        assert_eq!(t.engines.get(GpuEngine::Jpeg), Metric::valid(17.0));
+        assert_eq!(t.engines.get(GpuEngine::Ofa), Metric::valid(0.0));
+
+        // Without the readings neither engine is listed.
+        let t = to_totals(&device_sample(), &info, &statics);
+        assert!(!t.engines.is_reported(GpuEngine::Jpeg));
+        assert!(!t.engines.is_reported(GpuEngine::Ofa));
+
+        // A failed call keeps the engine listed as failed.
+        let failed = GpuDeviceSample {
+            jpeg_pct: Reading::Failed,
+            ..device_sample()
+        };
+        let t = to_totals(&failed, &info, &statics);
+        assert_eq!(t.engines.get(GpuEngine::Jpeg).validity, Validity::Failed);
+        assert!(!t.engines.is_reported(GpuEngine::Ofa));
     }
 
     #[test]

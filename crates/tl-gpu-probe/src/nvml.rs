@@ -14,6 +14,7 @@ use nvml_wrapper::struct_wrappers::device::{MemoryInfo, ProcessInfo, ProcessUtil
 use nvml_wrapper::{Device, Nvml, cuda_driver_version_major, cuda_driver_version_minor};
 use tl_model::gpu_proto::{GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure, Reading};
 
+use crate::nvml_raw::{jpg_utilization, ofa_utilization};
 use crate::sampler::{Backend, HelloInfo, InitFailed, now_boottime_ns};
 
 /// One device that `hello` listed. NVML device handles borrow `Nvml`, so the slot keeps the index.
@@ -179,6 +180,9 @@ pub fn device_sample(dev: &Device<'_>, uuid: [u8; 16]) -> GpuDeviceSample {
         // The session count of nvmlDeviceGetEncoderStats, the same count
         // nvmlDeviceGetEncoderSessions returns, without the session list.
         enc_sessions: reading(dev.encoder_stats().map(|s| s.session_count)),
+        // Raw calls in `nvml_raw`: nvml-wrapper has no safe method for these two.
+        jpeg_pct: reading(jpg_utilization(dev)),
+        ofa_pct: reading(ofa_utilization(dev)),
         temp_c: reading(dev.temperature(TemperatureSensor::Gpu)),
         power_mw: reading(dev.power_usage()),
         clock_gfx_mhz: reading(dev.clock_info(Clock::Graphics)),
@@ -315,6 +319,8 @@ fn failed_sample(uuid: [u8; 16]) -> GpuDeviceSample {
         enc_pct: Reading::Failed,
         dec_pct: Reading::Failed,
         enc_sessions: Reading::Failed,
+        jpeg_pct: Reading::Failed,
+        ofa_pct: Reading::Failed,
         temp_c: Reading::Failed,
         power_mw: Reading::Failed,
         clock_gfx_mhz: Reading::Failed,
@@ -543,6 +549,8 @@ mod tests {
         let s = failed_sample([1; 16]);
         assert_eq!(s.mem_reserved, Reading::Failed);
         assert_eq!(s.enc_sessions, Reading::Failed);
+        assert_eq!(s.jpeg_pct, Reading::Failed);
+        assert_eq!(s.ofa_pct, Reading::Failed);
         assert_eq!(s.fan_rpm, Reading::Failed);
         assert_eq!(s.clock_video_mhz, Reading::Failed);
         assert_eq!(s.pstate, Reading::Failed);
@@ -627,6 +635,13 @@ mod tests {
         assert!(matches!(s.pcie_gen, Reading::Ok(1..=6)), "{:?}", s.pcie_gen);
         assert!(matches!(s.pcie_width, Reading::Ok(_)), "{:?}", s.pcie_width);
         assert!(matches!(s.energy_mj, Reading::Ok(_)), "{:?}", s.energy_mj);
+        // JPEG and OFA engines: a percentage where the card has them, else Unsupported.
+        for r in [s.jpeg_pct, s.ofa_pct] {
+            assert!(
+                matches!(r, Reading::Ok(0..=100) | Reading::Unsupported),
+                "{r:?}"
+            );
+        }
         // U-35: whether the owner card reports a fan speed.
         eprintln!("U-35 fan_pct = {:?}", s.fan_pct);
         assert!(

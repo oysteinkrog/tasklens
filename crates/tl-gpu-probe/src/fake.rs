@@ -124,6 +124,8 @@ impl FakeBackend {
             enc_pct: Reading::Ok(0),
             dec_pct: Reading::Ok(0),
             enc_sessions: Reading::Ok(0),
+            jpeg_pct: Reading::Unsupported,
+            ofa_pct: Reading::Unsupported,
             temp_c: Reading::Ok(45),
             power_mw: Reading::Ok(31_900),
             clock_gfx_mhz: Reading::Ok(1905),

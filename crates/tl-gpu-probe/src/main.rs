@@ -10,6 +10,7 @@ mod api_versions;
 #[cfg(feature = "fake")]
 mod fake;
 mod nvml;
+mod nvml_raw;
 mod sampler;
 
 const USAGE: &str = "usage: tl-gpu-probe --fd <n> | --api-versions | --fake <script> [--fd <n>]";

@@ -5,7 +5,7 @@
 //! `khronos-egl`, both loaded at run time, so a machine without them gets an empty list. This runs
 //! in its own short-lived process, so a driver crash costs only these rows.
 //!
-//! This is one of the four files allowed to hold `unsafe` (ADR-001 rule 4, R-143).
+//! This is one of the five files allowed to hold `unsafe` (ADR-001 rule 4, R-143).
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, c_char, c_void};

@@ -717,6 +717,8 @@ fn device_sample() -> GpuDeviceSample {
         enc_pct: Reading::Ok(0),
         dec_pct: Reading::Ok(0),
         enc_sessions: Reading::Unsupported,
+        jpeg_pct: Reading::Ok(0),
+        ofa_pct: Reading::Unsupported,
         temp_c: Reading::Ok(51),
         power_mw: Reading::Ok(31_900),
         clock_gfx_mhz: Reading::Ok(2_100),
