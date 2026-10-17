@@ -27,13 +27,14 @@ use tl_model::demand::Demand;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::settings::GpuOptionalGraph;
 use tl_model::snapshot::{DisplayMode, GraphicsAdapter, Snapshot};
-use tl_model::system::{GpuEngine, GpuTotals, Metric};
+use tl_model::system::{ClockEventReasons, GpuEngine, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
-use super::actions::PerfToggleGpuEngine;
+use super::actions::{PerfToggleGpuEngine, PerfToggleGpuOptionalGraph};
 use super::details::{Fallback, KeyValueModel};
 use super::menu::ClickedEngine;
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
@@ -65,6 +66,14 @@ pub const ENGINES_ID: &str = "perf-gpu-engines";
 pub const MEMORY_ID: &str = "perf-gpu-memory";
 /// Debug selector of the Temperature chart box.
 pub const TEMPERATURE_ID: &str = "perf-gpu-temperature";
+/// Debug selector of the Power chart box.
+pub const POWER_ID: &str = "perf-gpu-power";
+/// Debug selector of the Clocks chart box.
+pub const CLOCKS_ID: &str = "perf-gpu-clocks";
+/// The trigger over the Power heading.
+pub const POWER_TIP_ID: &str = "perf-gpu-power-tooltip";
+/// The trigger over the Clocks heading.
+pub const CLOCKS_TIP_ID: &str = "perf-gpu-clocks-tooltip";
 
 /// The `last_error` of the GPU source when the probe binary is missing. The engine's
 /// `gpu::NOT_INSTALLED` holds the same text.
@@ -75,6 +84,12 @@ const KEY_TEMPERATURE: &str = "perf-gpu-heading-temperature";
 const KEY_MEMORY_USAGE: &str = "perf-gpu-range-memory";
 const KEY_DEDICATED: &str = "perf-gpu-legend-dedicated";
 const KEY_SHARED: &str = "perf-gpu-legend-shared";
+const KEY_POWER: &str = "perf-gpu-heading-power";
+const KEY_CLOCKS: &str = "perf-gpu-heading-clocks";
+const KEY_POWER_DRAW: &str = "perf-gpu-row-power";
+const KEY_CLOCK_SPEED: &str = "perf-gpu-row-clock";
+const KEY_GPU_CLOCK: &str = "perf-gpu-legend-gpu-clock";
+const KEY_MEM_CLOCK: &str = "perf-gpu-legend-mem-clock";
 const KEY_RESTARTING: &str = "perf-gpu-probe-restarting";
 const KEY_MISSING: &str = "perf-gpu-probe-missing";
 
@@ -434,6 +449,12 @@ pub struct Words {
     pub memory_usage: SharedString,
     pub dedicated: SharedString,
     pub shared: SharedString,
+    pub power: SharedString,
+    pub clocks: SharedString,
+    pub power_draw: SharedString,
+    pub clock_speed: SharedString,
+    pub gpu_clock: SharedString,
+    pub mem_clock: SharedString,
     pub restarting: SharedString,
     pub missing: SharedString,
     pub displays: SharedString,
@@ -455,6 +476,12 @@ impl Words {
         self.memory_usage = t(KEY_MEMORY_USAGE);
         self.dedicated = t(KEY_DEDICATED);
         self.shared = t(KEY_SHARED);
+        self.power = t(KEY_POWER);
+        self.clocks = t(KEY_CLOCKS);
+        self.power_draw = t(KEY_POWER_DRAW);
+        self.clock_speed = t(KEY_CLOCK_SPEED);
+        self.gpu_clock = t(KEY_GPU_CLOCK);
+        self.mem_clock = t(KEY_MEM_CLOCK);
         self.restarting = t(KEY_RESTARTING);
         self.missing = t(KEY_MISSING);
         self.displays = t("perf-gpu-block-displays");
@@ -488,6 +515,8 @@ struct PageSettings {
     smooth: bool,
     rounded: bool,
     hidden: Vec<Arc<str>>,
+    /// `performance.gpu_optional_graphs`.
+    optional: Vec<GpuOptionalGraph>,
 }
 
 impl PageSettings {
@@ -503,6 +532,7 @@ impl PageSettings {
                 .iter()
                 .map(|k| Arc::from(k.as_str()))
                 .collect(),
+            optional: s.performance.gpu_optional_graphs.clone(),
         }
     }
 }
@@ -627,6 +657,114 @@ fn temperature_labels(words: &Words) -> ChartLabels {
     }
 }
 
+/// The device facts the Power and Clocks scales are built from.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct OptionalShape {
+    /// The enforced power limit in W, else the card's highest limit.
+    power_max: Option<f32>,
+    /// The maximum graphics clock in MHz.
+    clock_max: Option<u32>,
+}
+
+impl OptionalShape {
+    fn of(totals: Option<&GpuTotals>) -> Self {
+        let Some(t) = totals else {
+            return Self::default();
+        };
+        Self {
+            power_max: shown(t.power_limit_w).or(t.info.power_max_limit_w),
+            clock_max: t.info.clock_gfx_max_mhz,
+        }
+    }
+}
+
+/// The Power chart: the draw filled, 0 up to the power limit.
+pub fn power_spec(device: DeviceIdx, hw_max: Option<f32>, theme: &TlTheme) -> ChartSpec {
+    ChartSpec {
+        series: smallvec![ChartSeries {
+            id: series(device, MetricId::GPU_POWER),
+            fill: Some(theme.graph.gpu_fill),
+            line: theme.graph.gpu_line,
+            ..ChartSeries::default()
+        }],
+        y: YScale::StickyUp { hw_max },
+        background: ChartBg::Window,
+        ..ChartSpec::default()
+    }
+}
+
+pub fn power_labels(words: &Words) -> ChartLabels {
+    ChartLabels {
+        heading: Some(words.power.clone()),
+        value_fmt: ValueFormat::Watts,
+        value_align: ValueAlign::Right,
+        range_word: words.power_draw.clone(),
+        legend: SmallVec::new(),
+        show_axis_max: true,
+    }
+}
+
+/// The Clocks chart: the GPU clock filled, the memory clock as a dashed line, 0 up to the maximum
+/// graphics clock.
+pub fn clocks_spec(device: DeviceIdx, hw_max: Option<f32>, theme: &TlTheme) -> ChartSpec {
+    ChartSpec {
+        series: smallvec![
+            ChartSeries {
+                id: series(device, MetricId::GPU_CLOCK),
+                fill: Some(theme.graph.gpu_fill),
+                line: theme.graph.gpu_line,
+                ..ChartSeries::default()
+            },
+            ChartSeries {
+                id: series(device, MetricId::GPU_MEM_CLOCK),
+                fill: None,
+                line: theme.graph.gpu_line,
+                dashed: true,
+                ..ChartSeries::default()
+            },
+        ],
+        y: YScale::StickyUp { hw_max },
+        background: ChartBg::Window,
+        ..ChartSpec::default()
+    }
+}
+
+pub fn clocks_labels(words: &Words) -> ChartLabels {
+    ChartLabels {
+        heading: Some(words.clocks.clone()),
+        value_fmt: ValueFormat::Mhz,
+        value_align: ValueAlign::Right,
+        range_word: words.clock_speed.clone(),
+        legend: smallvec![
+            (words.gpu_clock.clone(), LegendStyle::Solid),
+            (words.mem_clock.clone(), LegendStyle::Dashed),
+        ],
+        show_axis_max: false,
+    }
+}
+
+/// The `en-US.ftl` keys of the reasons the clocks are held down, in bit order. Idle is not a
+/// throttle, so it has no word.
+const REASON_WORDS: [(ClockEventReasons, &str); 8] = [
+    (ClockEventReasons::APP_CLOCKS, "perf-gpu-reason-app-clocks"),
+    (ClockEventReasons::POWER_CAP, "perf-gpu-reason-power-cap"),
+    (
+        ClockEventReasons::HW_SLOWDOWN,
+        "perf-gpu-reason-hw-slowdown",
+    ),
+    (ClockEventReasons::SYNC_BOOST, "perf-gpu-reason-sync-boost"),
+    (ClockEventReasons::SW_THERMAL, "perf-gpu-reason-sw-thermal"),
+    (ClockEventReasons::HW_THERMAL, "perf-gpu-reason-hw-thermal"),
+    (
+        ClockEventReasons::HW_POWER_BRAKE,
+        "perf-gpu-reason-hw-power-brake",
+    ),
+    (
+        ClockEventReasons::DISPLAY_CLOCKS,
+        "perf-gpu-reason-display-clocks",
+    ),
+];
+
 /// The placeholder cell shown in place of the grid while the probe is missing: "3D / Compute"
 /// reading `n/a`.
 fn placeholder_labels(words: &Words) -> ChartLabels {
@@ -675,12 +813,15 @@ pub struct GpuPage {
     /// Reused buffer for the Memory value text.
     memory_text: String,
     temperature: Entity<ChartView>,
-    /// E25-023.
-    #[allow(dead_code, reason = "E25-023 creates it")]
+    /// The optional Power chart, present while `performance.gpu_optional_graphs` lists it.
     power: Option<Entity<ChartView>>,
-    /// E25-023.
-    #[allow(dead_code, reason = "E25-023 creates it")]
+    /// The optional Clocks chart.
     clocks: Option<Entity<ChartView>>,
+    optional_shape: OptionalShape,
+    /// The heading tooltips: "Limit range 100 to 350 W · 1.24 kWh since boot" and
+    /// "P3 · Throttled: power cap".
+    power_tip: Option<SharedString>,
+    clocks_tip: Option<SharedString>,
     details: KeyValueModel,
     probe: ProbeState,
     focus: FocusHandle,
@@ -789,6 +930,9 @@ impl GpuPage {
             temperature,
             power: None,
             clocks: None,
+            optional_shape: OptionalShape::default(),
+            power_tip: None,
+            clocks_tip: None,
             details: gpu_details_model(),
             probe: ProbeState::Ok,
             focus: cx.focus_handle(),
@@ -844,6 +988,24 @@ impl GpuPage {
 
     pub fn temperature(&self) -> &Entity<ChartView> {
         &self.temperature
+    }
+
+    /// The Power chart while it is enabled.
+    pub fn power(&self) -> Option<&Entity<ChartView>> {
+        self.power.as_ref()
+    }
+
+    /// The Clocks chart while it is enabled.
+    pub fn clocks(&self) -> Option<&Entity<ChartView>> {
+        self.clocks.as_ref()
+    }
+
+    pub fn power_tooltip(&self) -> Option<&SharedString> {
+        self.power_tip.as_ref()
+    }
+
+    pub fn clocks_tooltip(&self) -> Option<&SharedString> {
+        self.clocks_tip.as_ref()
     }
 
     /// The Displays block rows, one per display of this GPU's adapter.
@@ -958,6 +1120,7 @@ impl GpuPage {
             };
             changed |= update_gpu_details_p1(&mut self.details, &inputs);
             changed |= update_gpu_details_p2(&mut self.details, &inputs);
+            changed |= self.sync_optional(snap, false, cx);
         }
         if inventory {
             let rows: Vec<SharedString> = adapter(snap, self.row.idx)
@@ -1106,6 +1269,187 @@ impl GpuPage {
         self.sync_settings(cx);
     }
 
+    /// Creates or drops the Power and Clocks charts to match the setting, and brings their
+    /// scale, value text, state and heading tooltip up to date. `force` rebuilds the specs (a
+    /// new setting, theme or scale). True when something the page draws outside the charts
+    /// changed.
+    fn sync_optional(&mut self, snap: &Snapshot, force: bool, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        let totals = gpu_totals(snap, self.row.idx);
+        let shape = OptionalShape::of(totals);
+        let rescale = force || shape != self.optional_shape;
+        self.optional_shape = shape;
+        let theme = current(cx).clone();
+        let hub = self.hub.clone();
+        let idx = self.row.idx;
+        let want = |g| self.settings.optional.contains(&g);
+
+        if want(GpuOptionalGraph::Power) {
+            let spec = || with_settings(power_spec(idx, shape.power_max, &theme), &self.settings);
+            match &self.power {
+                Some(v) if rescale => {
+                    let spec = spec();
+                    v.update(cx, |v, cx| v.set_spec(spec, cx));
+                }
+                Some(_) => {}
+                None => {
+                    let (spec, labels) = (spec(), power_labels(&self.words));
+                    self.power = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                    changed = true;
+                }
+            }
+        } else if self.power.take().is_some() {
+            self.power_tip = None;
+            changed = true;
+        }
+        if want(GpuOptionalGraph::Clocks) {
+            let spec = || {
+                let max = shape.clock_max.map(|m| m as f32);
+                with_settings(clocks_spec(idx, max, &theme), &self.settings)
+            };
+            match &self.clocks {
+                Some(v) if rescale => {
+                    let spec = spec();
+                    v.update(cx, |v, cx| v.set_spec(spec, cx));
+                }
+                Some(_) => {}
+                None => {
+                    let (spec, labels) = (spec(), clocks_labels(&self.words));
+                    self.clocks = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                    changed = true;
+                }
+            }
+        } else if self.clocks.take().is_some() {
+            self.clocks_tip = None;
+            changed = true;
+        }
+
+        let probe_state = probe_chart_state(self.probe, &self.words);
+        let mut buf = String::new();
+        if let Some(view) = self.power.clone() {
+            let power = totals.map_or(missing(), |t| t.power_w);
+            let inputs = GpuDetailInputs {
+                now_boot_ns: 0,
+                observed_end_ns: 0,
+                totals,
+                adapter: adapter(snap, idx),
+                vendor: self.vendor,
+                probe: self.probe,
+                uuid: None,
+                pci_bus_id: None,
+            };
+            // An Intel iGPU reads the CPU package meter, which needs setup.
+            let state = if self.probe == ProbeState::Ok
+                && is_intel_igpu(&inputs)
+                && matches!(power.validity, Validity::Restricted | Validity::Unsupported)
+            {
+                ChartState::Unsupported
+            } else {
+                probe_state.clone()
+            };
+            let limit = totals.and_then(|t| shown(t.power_limit_w));
+            let text = shown(power).zip(limit).map(|(p, l)| {
+                units::watts_pair(&mut buf, p, l);
+                SharedString::from(buf.clone())
+            });
+            view.update(cx, |v, cx| {
+                v.set_state(state, cx);
+                v.set_value_text(text, cx);
+            });
+            let tip = self.power_tooltip_text(totals, cx);
+            if tip != self.power_tip {
+                self.power_tip = tip;
+                changed = true;
+            }
+        }
+        if let Some(view) = self.clocks.clone() {
+            let now = totals.and_then(|t| shown(t.clock_gfx_mhz));
+            let text = now.zip(shape.clock_max).map(|(c, m)| {
+                buf.clear();
+                units::mhz_pair(&mut buf, c as f32, m as f32);
+                SharedString::from(buf.clone())
+            });
+            view.update(cx, |v, cx| {
+                v.set_state(probe_state, cx);
+                v.set_value_text(text, cx);
+            });
+            let tip = self.clocks_tooltip_text(totals, cx);
+            if tip != self.clocks_tip {
+                self.clocks_tip = tip;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// "Limit range 100 to 350 W · 1.24 kWh since boot"; "max 350 W · 1.24 kWh since boot" while
+    /// the card's lowest limit is unknown. None without the highest limit or the energy.
+    fn power_tooltip_text(&self, totals: Option<&GpuTotals>, cx: &App) -> Option<SharedString> {
+        let t = totals?;
+        let max = t.info.power_max_limit_w?;
+        let joules = shown(t.energy_since_boot)?;
+        let arg = |v: String| FluentValue::from(v);
+        let kwh = ("kwh", arg(format!("{:.2}", joules / 3.6e6)));
+        let max = ("max", arg(format!("{max:.0}")));
+        Some(match t.info.power_min_limit_w {
+            Some(min) => tr_args(
+                cx,
+                "perf-gpu-power-tooltip",
+                &[("min", arg(format!("{min:.0}"))), max, kwh],
+            ),
+            None => tr_args(cx, "perf-gpu-power-row-tooltip", &[max, kwh]),
+        })
+    }
+
+    /// "P3 · Throttled: power cap", reasons joined by ", "; "P3" while none is set or the
+    /// reasons are not reported. None without a P-state.
+    fn clocks_tooltip_text(&self, totals: Option<&GpuTotals>, cx: &App) -> Option<SharedString> {
+        let t = totals?;
+        let pstate = ("pstate", FluentValue::from(shown(t.pstate)?.to_string()));
+        let reasons = shown(t.clock_event_reasons).unwrap_or_default();
+        let words: Vec<SharedString> = REASON_WORDS
+            .iter()
+            .filter(|(bit, _)| reasons.contains(*bit))
+            .map(|(_, key)| tr(cx, key))
+            .collect();
+        if words.is_empty() {
+            return Some(tr_args(cx, "perf-gpu-clocks-tooltip-plain", &[pstate]));
+        }
+        let joined = words
+            .iter()
+            .map(|w| w.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(tr_args(
+            cx,
+            "perf-gpu-clocks-tooltip",
+            &[pstate, ("reasons", FluentValue::from(joined))],
+        ))
+    }
+
+    /// `PerfToggleGpuOptionalGraph`: adds or removes Power or Clocks in
+    /// `performance.gpu_optional_graphs`. The page follows through its settings observer.
+    fn on_toggle_optional(
+        &mut self,
+        a: &PerfToggleGpuOptionalGraph,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if a.key != self.key {
+            return;
+        }
+        TlSettings::update(cx, |d| {
+            let list = &mut d.settings.performance.gpu_optional_graphs;
+            match list.iter().position(|g| *g == a.which) {
+                Some(i) => {
+                    list.remove(i);
+                }
+                None => list.push(a.which),
+            }
+        });
+        self.sync_settings(cx);
+    }
+
     fn rebuild_memory(&mut self, labels_too: bool, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
         let shape = self.memory_shape;
@@ -1131,6 +1475,8 @@ impl GpuPage {
             let spec = with_settings(placeholder_spec(self.row.idx, &theme), &self.settings);
             p.update(cx, |v, cx| v.set_spec(spec, cx));
         }
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.sync_optional(&snap, true, cx);
     }
 
     /// Applies the page's settings when one of their sections changed.
@@ -1299,21 +1645,42 @@ impl GpuPage {
         }
     }
 
-    /// A chart box of `(W − sp4) / 2 × GRAPH_H_STACKED`.
+    /// A chart box of `(W − sp4) / 2 × GRAPH_H_STACKED`. With `tip` (the trigger id and text), a
+    /// trigger over the heading row shows the text, unless the probe tooltip covers the box.
     fn chart_box(
         &self,
         view: &Entity<ChartView>,
         selector: &'static str,
+        tip: Option<(&'static str, &SharedString)>,
         m: &UiMetrics,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let chart = div()
+        let mut chart = div()
             .debug_selector(move || selector.into())
+            .relative()
             .flex_1()
             .min_w_0()
             .h(px(GRAPH_H_STACKED * m.ui_scale))
             .child(view.clone().cached(StyleRefinement::default().size_full()));
+        if let Some((id, text)) = tip.filter(|_| self.probe_tooltip().is_none()) {
+            let trigger = div()
+                .debug_selector(move || id.into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_1_2()
+                .h(px(LABEL_ROW * m.ui_scale) + m.sp[3]);
+            let state = HoverTooltip::state(id, window, cx);
+            chart = chart.child(HoverTooltip::attach(
+                &state,
+                trigger,
+                DELAY_CONTROL,
+                TlTooltip::text(text.clone()).build(),
+                window,
+                cx,
+            ));
+        }
         self.with_probe_tip(chart, selector, window, cx)
     }
 
@@ -2215,13 +2582,26 @@ impl DevicePage for GpuPage {
         let row2 = h_flex()
             .w_full()
             .gap(m.sp[4])
-            .child(self.chart_box(&self.memory, MEMORY_ID, &m, window, cx))
-            .child(self.chart_box(&self.temperature, TEMPERATURE_ID, &m, window, cx));
-        v_flex()
+            .child(self.chart_box(&self.memory, MEMORY_ID, None, &m, window, cx))
+            .child(self.chart_box(&self.temperature, TEMPERATURE_ID, None, &m, window, cx));
+        let mut page = v_flex()
             .w_full()
             .child(self.engines_element(window, cx))
-            .child(row2)
-            .into_any_element()
+            .child(row2);
+        // Row 3: one chart takes the full width, two split it; none leaves no row.
+        if self.power.is_some() || self.clocks.is_some() {
+            let mut row3 = h_flex().w_full().pt(m.sp[4]).gap(m.sp[4]);
+            if let Some(v) = &self.power {
+                let tip = self.power_tip.as_ref().map(|t| (POWER_TIP_ID, t));
+                row3 = row3.child(self.chart_box(v, POWER_ID, tip, &m, window, cx));
+            }
+            if let Some(v) = &self.clocks {
+                let tip = self.clocks_tip.as_ref().map(|t| (CLOCKS_TIP_ID, t));
+                row3 = row3.child(self.chart_box(v, CLOCKS_ID, tip, &m, window, cx));
+            }
+            page = page.child(row3);
+        }
+        page.into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
@@ -2254,8 +2634,8 @@ impl DevicePage for GpuPage {
         smallvec![block.into_any_element()]
     }
 
-    /// "Select GPU engine graphs >": one check item per reported engine, then Power and Clocks
-    /// until E25-023 lands (PERF-063, UI-PRF-032).
+    /// "Select GPU engine graphs >": one check item per reported engine, then the optional Power
+    /// and Clocks graphs (PERF-063, UI-PRF-032).
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
         let key = self.key.clone();
         let items: Vec<(Arc<str>, SharedString, bool)> = vendor_cells(self.vendor)
@@ -2273,7 +2653,7 @@ impl DevicePage for GpuPage {
             tr(cx, "perf-gpu-menu-power"),
             tr(cx, "perf-gpu-menu-clocks"),
         );
-        let later = tr(cx, "perf-later-version");
+        let (power_on, clocks_on) = (self.power.is_some(), self.clocks.is_some());
         menu.submenu(
             tr(cx, "perf-gpu-menu-select-engines"),
             window,
@@ -2289,9 +2669,19 @@ impl DevicePage for GpuPage {
                         }),
                     );
                 }
+                let optional = |which| {
+                    Box::new(PerfToggleGpuOptionalGraph {
+                        key: key.clone(),
+                        which,
+                    })
+                };
                 menu.separator()
-                    .item_disabled(power.clone(), Some(later.clone()))
-                    .item_disabled(clocks.clone(), Some(later.clone()))
+                    .check_item(power.clone(), power_on, optional(GpuOptionalGraph::Power))
+                    .check_item(
+                        clocks.clone(),
+                        clocks_on,
+                        optional(GpuOptionalGraph::Clocks),
+                    )
             },
         )
     }
@@ -2367,6 +2757,14 @@ impl Render for GpuPage {
             let labels = temperature_labels(&self.words);
             self.temperature
                 .update(cx, |v, cx| v.set_labels(labels, cx));
+            if let Some(v) = &self.power {
+                let labels = power_labels(&self.words);
+                v.update(cx, |v, cx| v.set_labels(labels, cx));
+            }
+            if let Some(v) = &self.clocks {
+                let labels = clocks_labels(&self.words);
+                v.update(cx, |v, cx| v.set_labels(labels, cx));
+            }
             if let Some(p) = &self.placeholder {
                 let labels = placeholder_labels(&self.words);
                 p.update(cx, |v, cx| v.set_labels(labels, cx));
@@ -2382,6 +2780,7 @@ impl Render for GpuPage {
             .size_full()
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle_engine))
+            .on_action(cx.listener(Self::on_toggle_optional))
             .child(
                 DevicePageFrame {
                     page: self,

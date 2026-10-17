@@ -994,9 +994,11 @@ mod engines {
         let checked: Vec<bool> = items[..4].iter().map(|e| e.2).collect();
         assert_eq!(checked, [true, true, false, true], "Video Encode is hidden");
         assert_eq!(items[4].0, MenuEntryKind::Separator);
+        // Power and Clocks are enabled check items, both off by default.
         for e in &items[5..] {
-            assert_eq!(e.0, MenuEntryKind::Disabled);
-            assert_eq!(e.3.as_deref(), Some("Available in a later version"));
+            assert_eq!(e.0, MenuEntryKind::Item);
+            assert!(!e.2, "{} is off", e.1);
+            assert_eq!(e.3, None);
         }
     }
 }
@@ -1247,4 +1249,155 @@ fn gpu_uuid_truncates_with_tooltip(cx: &mut TestAppContext) {
     assert_eq!(row.1, uuid);
     // The grid cuts the cell to the column width with "…"; the tooltip holds the whole UUID.
     assert_eq!(row.2.as_deref(), Some(uuid));
+}
+
+/// The optional Power and Clocks row (E25-023, UI-PRF-032 row 3).
+mod optional {
+    use gpui_kit::{Focusable as _, TestAppContext};
+    use tl_model::settings::GpuOptionalGraph;
+    use tl_model::system::ClockEventReasons;
+    use tl_ui::pages::performance::actions::PerfToggleGpuOptionalGraph;
+    use tl_ui::pages::performance::gpu::{CLOCKS_ID, ENGINES_ID, POWER_ID};
+
+    use super::*;
+
+    fn set_optional(r: &mut Rig, list: &[GpuOptionalGraph]) {
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.performance.gpu_optional_graphs = list.to_vec();
+            });
+        });
+        draw(r.vcx);
+    }
+
+    fn width(r: &mut Rig, id: &'static str) -> f32 {
+        f32::from(r.vcx.debug_bounds(id).expect("chart box").size.width)
+    }
+
+    #[gpui_kit::test]
+    fn gpu_optional_row_full_width_when_one(cx: &mut TestAppContext) {
+        let mut r = nvidia(cx);
+        set_optional(&mut r, &[GpuOptionalGraph::Power]);
+        let engines = width(&mut r, ENGINES_ID);
+        assert_eq!(width(&mut r, POWER_ID), engines, "one chart spans row 3");
+        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none());
+        let height = f32::from(r.vcx.debug_bounds(POWER_ID).expect("power").size.height);
+        assert_eq!(height, 150.);
+    }
+
+    #[gpui_kit::test]
+    fn gpu_optional_row_split(cx: &mut TestAppContext) {
+        let mut r = nvidia(cx);
+        set_optional(&mut r, &[GpuOptionalGraph::Power, GpuOptionalGraph::Clocks]);
+        let engines = width(&mut r, ENGINES_ID);
+        let half = (engines - 8.) / 2.;
+        assert_eq!(width(&mut r, POWER_ID), half);
+        assert_eq!(width(&mut r, CLOCKS_ID), half);
+    }
+
+    #[gpui_kit::test]
+    fn gpu_optional_row_absent(cx: &mut TestAppContext) {
+        let mut r = nvidia(cx);
+        assert!(r.vcx.debug_bounds(POWER_ID).is_none());
+        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none());
+        r.vcx.update(|_, cx| {
+            let page = r.page.read(cx);
+            assert!(page.power().is_none() && page.clocks().is_none());
+        });
+        set_optional(&mut r, &[GpuOptionalGraph::Power]);
+        set_optional(&mut r, &[]);
+        assert!(r.vcx.debug_bounds(POWER_ID).is_none(), "dropped again");
+        r.vcx
+            .update(|_, cx| assert!(r.page.read(cx).power().is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn gpu_power_value_and_tooltip(cx: &mut TestAppContext) {
+        let mut r = nvidia(cx);
+        set_optional(&mut r, &[GpuOptionalGraph::Power]);
+        r.vcx.update(|_, cx| {
+            let page = r.page.read(cx);
+            let view = page.power().expect("power chart").read(cx);
+            assert_eq!(view.value_text().map(|t| t.as_ref()), Some("31.9 / 300 W"));
+            assert_eq!(
+                page.power_tooltip().map(|t| t.as_ref()),
+                Some("Limit range 100 to 350 W · 1.24 kWh since boot")
+            );
+        });
+        // Without the lowest limit the PERF-067 form shows.
+        let mut t = full_totals();
+        let mut info = (*t.info).clone();
+        info.power_min_limit_w = None;
+        t.info = Arc::new(info);
+        publish_totals(&mut r, &t);
+        r.vcx.update(|_, cx| {
+            assert_eq!(
+                r.page.read(cx).power_tooltip().map(|t| t.as_ref()),
+                Some("max 350 W · 1.24 kWh since boot")
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn gpu_clocks_tooltip(cx: &mut TestAppContext) {
+        let mut r = nvidia(cx);
+        set_optional(&mut r, &[GpuOptionalGraph::Clocks]);
+        r.vcx.update(|_, cx| {
+            let page = r.page.read(cx);
+            let view = page.clocks().expect("clocks chart").read(cx);
+            assert_eq!(
+                view.value_text().map(|t| t.as_ref()),
+                Some("1905 / 3105 MHz")
+            );
+            assert_eq!(page.clocks_tooltip().map(|t| t.as_ref()), Some("P3"));
+        });
+        let mut t = full_totals();
+        t.clock_event_reasons = Metric::valid(ClockEventReasons::POWER_CAP);
+        publish_totals(&mut r, &t);
+        r.vcx.update(|_, cx| {
+            assert_eq!(
+                r.page.read(cx).clocks_tooltip().map(|t| t.as_ref()),
+                Some("P3 · Throttled: power cap")
+            );
+        });
+        t.clock_event_reasons =
+            Metric::valid(ClockEventReasons::POWER_CAP | ClockEventReasons::HW_THERMAL);
+        publish_totals(&mut r, &t);
+        r.vcx.update(|_, cx| {
+            assert_eq!(
+                r.page.read(cx).clocks_tooltip().map(|t| t.as_ref()),
+                Some("P3 · Throttled: power cap, hardware thermal")
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn gpu_toggle_optional_graph(cx: &mut TestAppContext) {
+        let r = nvidia(cx);
+        let page = r.page.clone();
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        r.vcx.dispatch_action(PerfToggleGpuOptionalGraph {
+            key: DeviceKey(Arc::from("gpu:GPU-0100")),
+            which: GpuOptionalGraph::Clocks,
+        });
+        draw(r.vcx);
+        r.vcx.update(|_, cx| {
+            let list = TlSettings::settings(cx)
+                .performance
+                .gpu_optional_graphs
+                .clone();
+            assert_eq!(list, [GpuOptionalGraph::Clocks]);
+            assert!(r.page.read(cx).clocks().is_some());
+        });
+        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_some());
+        r.vcx.dispatch_action(PerfToggleGpuOptionalGraph {
+            key: DeviceKey(Arc::from("gpu:GPU-0100")),
+            which: GpuOptionalGraph::Clocks,
+        });
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none());
+    }
 }
