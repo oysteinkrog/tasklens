@@ -1989,6 +1989,8 @@ mod end {
         out.extend(COPIES);
         out.extend([
             "-",
+            "Add Minigraph >",
+            "Add Process Name Graph >",
             TRAY_ITEM,
             "-",
             "Properties",
@@ -2061,6 +2063,8 @@ mod end {
         exited.extend(COPIES);
         exited.extend([
             "-",
+            "(Add Minigraph: Process exited)",
+            "(Add Process Name Graph: Process exited)",
             "(Add tray icon graph: Process exited)",
             "-",
             "(Properties: Process exited)",
@@ -2083,7 +2087,14 @@ mod end {
             "-",
         ];
         app.extend(COPIES);
-        app.extend(["-", TRAY_ITEM, "-", "Properties"]);
+        app.extend([
+            "-",
+            "Add Minigraph >",
+            "Add App Name Graph >",
+            TRAY_ITEM,
+            "-",
+            "Properties",
+        ]);
         assert_eq!(menu(&mut rig, &[7]), app, "an app row");
         let mut unit = app.clone();
         unit.extend(["-", "Go to service"]);
@@ -2249,10 +2260,9 @@ mod end {
         rig.publish_rows(records, extras, rows, vec![app_group(1)]);
         select_row(&mut rig, 0);
         let mut dialog = rig.dispatch(FreezeApp).expect("the Protected dialog");
-        assert_eq!(
-            dialog.text(),
-            "Ending Firefox will end your desktop session. End it anyway?"
-        );
+        // The dialog text is not asserted: confirm.rs ignores the action, so Freeze says "Ending".
+        // That is a reported defect (tasklens-pdu.38), not behaviour to lock in.
+        assert!(!dialog.text().is_empty());
         dialog.cancel();
         assert!(rig.sent_targets().is_empty(), "Cancel sends nothing");
     }
@@ -2538,15 +2548,10 @@ mod end {
         let mut rig = Rig::new(cx);
         publish_kinds(&mut rig);
         let unshipped = [
-            "Kill App",
-            "Freeze",
-            "Thaw",
             "Show Window",
             "I/O",
             "Restart",
             "File properties",
-            "Minigraph",
-            "Graph",
             "Realtime",
             "Idle",
         ];
@@ -3021,7 +3026,12 @@ mod end {
         ];
         rig.publish_rows(records.clone(), extras.clone(), rows, Vec::new());
         let menu = build_menu(&mut rig, &[0], ColumnId::Name);
-        let priority = submenu_shapes(&mut rig, &menu);
+        let priority_entry = entries(&mut rig, &menu)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Set Priority"))
+            .and_then(|e| e.submenu)
+            .expect("the Set Priority submenu");
+        let priority = shape(&mut rig, &priority_entry);
         assert_eq!(
             &priority[priority.len() - 2..],
             ["-", "Custom…"],
