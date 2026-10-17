@@ -117,6 +117,7 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
             SystemConnector,
             proc.clone(),
             smartctl::read_raw,
+            smartctl::locate,
         )
     })
 }
@@ -130,6 +131,7 @@ pub async fn run(cx: Cx, io: WorkerIo) -> Outcome<(), WorkerError> {
         SystemConnector,
         SysRoot::host().proc,
         smartctl::read_raw,
+        smartctl::locate,
     )
     .await
 }
@@ -149,6 +151,7 @@ async fn run_with<C: Connector>(
     connector: C,
     proc: PathBuf,
     admin_read: AdminRead,
+    admin_locate: AdminLocate,
 ) -> Outcome<(), WorkerError> {
     let mut st = State {
         last: None,
@@ -157,6 +160,8 @@ async fn run_with<C: Connector>(
         skip: BTreeSet::new(),
         proc,
         admin_read,
+        // Looked up once per generation: a smartctl installed later is seen after a restart.
+        fallback: admin_locate().is_ok(),
         queue: Queue::resume(&io),
     };
     loop {
@@ -194,11 +199,16 @@ struct State {
     proc: PathBuf,
     /// Runs `pkexec smartctl` for a disk: `smartctl::read_raw`, a fake in tests.
     admin_read: AdminRead,
+    /// `pkexec` and `smartctl` were found, so an NVMe disk without a UDisks2 NVMe interface
+    /// is `NeedsFallback` and not `None`.
+    fallback: bool,
     queue: Queue,
 }
 
 /// Blocking. The raw `smartctl --json=c -a` output for a kernel disk name.
 type AdminRead = fn(&str) -> Result<Vec<u8>, Arc<str>>;
+/// Finds `pkexec` and `smartctl`: `smartctl::locate`, a fake in tests.
+type AdminLocate = fn() -> Result<(PathBuf, PathBuf), Arc<str>>;
 
 /// Where this generation is in the forwarded command list (R-276).
 struct Queue {
@@ -389,7 +399,7 @@ async fn publish(
     objs: &ManagedObjects,
     st: &mut State,
 ) -> Option<Outcome<(), WorkerError>> {
-    let mut entries = drives_from_objects(objs);
+    let mut entries = drives_from_objects(objs, st.fallback);
     for (identity, details) in &mut entries {
         if let DeviceIdentity::Disk { name, .. } = identity {
             details.smart_data = st.smart.get(name).cloned();
@@ -541,7 +551,7 @@ async fn smart_read<B: UdisksBus>(
     disk: Arc<str>,
     update: bool,
 ) -> Option<Outcome<(), WorkerError>> {
-    let found = disk_records(objs)
+    let found = disk_records(objs, st.fallback)
         .into_iter()
         .find(|(_, identity, _)| matches!(identity, DeviceIdentity::Disk { name, .. } if *name == disk))
         .map(|(path, _, details)| (path.to_owned(), details.smart));
@@ -643,7 +653,7 @@ async fn smart_read_admin(
     disk: Arc<str>,
 ) -> Option<Outcome<(), WorkerError>> {
     let refused = if smartctl::valid_disk_name(&disk) {
-        let kind = disk_records(objs)
+        let kind = disk_records(objs, st.fallback)
             .into_iter()
             .find(|(_, identity, _)| matches!(identity, DeviceIdentity::Disk { name, .. } if *name == disk))
             .map(|(_, _, details)| details.smart);
@@ -751,7 +761,7 @@ async fn run_eject<B: UdisksBus>(
     if st.eject.get(&disk).is_some_and(|(last, _)| seq <= *last) {
         return None;
     }
-    let drive = disk_records(objs)
+    let drive = disk_records(objs, st.fallback)
         .into_iter()
         .find(|(_, identity, _)| matches!(identity, DeviceIdentity::Disk { name, .. } if *name == disk))
         .filter(|(_, _, d)| d.ejectable || d.can_power_off)
@@ -1175,15 +1185,20 @@ fn split_dev(dev: u64) -> (u32, u32) {
 
 /// Every whole-disk block device that has a drive, in object path order. A block is a whole
 /// disk when it has no `Partition` interface. Missing drive properties leave fields `None`.
-pub fn drives_from_objects(objs: &ManagedObjects) -> Vec<(DeviceIdentity, DiskDetails)> {
-    disk_records(objs)
+/// `fallback` is true when `pkexec smartctl` can run: only then is an NVMe disk without a
+/// UDisks2 NVMe interface `NeedsFallback`; otherwise it has no SMART source (`None`).
+pub fn drives_from_objects(
+    objs: &ManagedObjects,
+    fallback: bool,
+) -> Vec<(DeviceIdentity, DiskDetails)> {
+    disk_records(objs, fallback)
         .into_iter()
         .map(|(_, identity, details)| (identity, details))
         .collect()
 }
 
 /// `drives_from_objects` with each disk's drive object path.
-fn disk_records(objs: &ManagedObjects) -> Vec<(&str, DeviceIdentity, DiskDetails)> {
+fn disk_records(objs: &ManagedObjects, fallback: bool) -> Vec<(&str, DeviceIdentity, DiskDetails)> {
     let mut out = Vec::new();
     for ifaces in objs.0.values() {
         let Some(block) = ifaces.get(BLOCK_IFACE) else {
@@ -1210,7 +1225,7 @@ fn disk_records(objs: &ManagedObjects) -> Vec<(&str, DeviceIdentity, DiskDetails
             SmartKind::Ata
         } else if nvme {
             SmartKind::Nvme
-        } else if name.starts_with("nvme") {
+        } else if fallback && name.starts_with("nvme") {
             SmartKind::NeedsFallback
         } else {
             SmartKind::None
@@ -1662,7 +1677,7 @@ mod tests {
 
     #[test]
     fn sata_drive_fields() {
-        let got = drives_from_objects(&sata_objects());
+        let got = drives_from_objects(&sata_objects(), true);
         assert_eq!(got.len(), 1);
         let (identity, d) = &got[0];
         assert_eq!(
@@ -1704,7 +1719,7 @@ mod tests {
             ),
             (NVME_DRIVE.to_owned(), object(vec![(DRIVE_IFACE, drive)])),
         ]));
-        let got = drives_from_objects(&objs);
+        let got = drives_from_objects(&objs, true);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].1.smart, SmartKind::NeedsFallback);
         assert_eq!(got[0].1.rotation_rpm, None);
@@ -1715,7 +1730,7 @@ mod tests {
             .get_mut(NVME_DRIVE)
             .expect("drive")
             .insert(NVME_CONTROLLER_IFACE.to_owned(), Props::new());
-        assert_eq!(drives_from_objects(&objs)[0].1.smart, SmartKind::Nvme);
+        assert_eq!(drives_from_objects(&objs, true)[0].1.smart, SmartKind::Nvme);
     }
 
     #[test]
@@ -1733,14 +1748,14 @@ mod tests {
             "/org/freedesktop/UDisks2/block_devices/loop0".to_owned(),
             object(vec![(BLOCK_IFACE, block(makedev(7, 0), "/dev/loop0", "/"))]),
         );
-        let got = drives_from_objects(&objs);
+        let got = drives_from_objects(&objs, true);
         assert_eq!(got.len(), 1, "{got:?}");
         assert!(matches!(&got[0].0, DeviceIdentity::Disk { name, .. } if &**name == "sda"));
     }
 
     #[test]
     fn usb_stick_eject_flags() {
-        let got = drives_from_objects(&stick_objects());
+        let got = drives_from_objects(&stick_objects(), true);
         assert_eq!(got.len(), 1);
         let d = &got[0].1;
         assert!(d.ejectable);
@@ -1762,7 +1777,7 @@ mod tests {
             "Model".into(),
             OwnedValue::try_from(Value::from("WDC\nWD\u{202e}10")).expect("owned"),
         );
-        let got = drives_from_objects(&objs);
+        let got = drives_from_objects(&objs, true);
         assert_eq!(got[0].1.model, valid(Arc::from("WDC WD10")));
     }
 
@@ -1903,14 +1918,29 @@ mod tests {
 
     impl Rig {
         fn start(connector: FakeConnector, disks: bool) -> Self {
-            Self::start_at(
+            Self::start_with(connector, disks, fake_locate_present)
+        }
+
+        /// `start` with the given smartctl lookup.
+        fn start_with(connector: FakeConnector, disks: bool, locate: AdminLocate) -> Self {
+            Self::start_full(
                 connector,
                 disks,
                 PathBuf::from("/nonexistent/tasklens-proc"),
+                locate,
             )
         }
 
         fn start_at(connector: FakeConnector, disks: bool, proc: PathBuf) -> Self {
+            Self::start_full(connector, disks, proc, fake_locate_present)
+        }
+
+        fn start_full(
+            connector: FakeConnector,
+            disks: bool,
+            proc: PathBuf,
+            locate: AdminLocate,
+        ) -> Self {
             let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
             let (updates, rx) = mpsc::channel::<EngineMsg>(256);
             let demand = Demand {
@@ -1933,7 +1963,7 @@ mod tests {
                 .state
                 .create_task(root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("task has a Cx");
-                    let _ = run_with(cx, io, connector, proc, fake_admin_read).await;
+                    let _ = run_with(cx, io, connector, proc, fake_admin_read, locate).await;
                 })
                 .expect("task is created");
             lab.scheduler.lock().schedule(task, 0);
@@ -2505,6 +2535,19 @@ mod tests {
         Ok(smartctl::NVME_JSON.as_bytes().to_vec())
     }
 
+    /// `pkexec` and `smartctl` found. No file is checked.
+    fn fake_locate_present() -> Result<(PathBuf, PathBuf), Arc<str>> {
+        Ok((
+            PathBuf::from("/usr/bin/pkexec"),
+            PathBuf::from("/usr/sbin/smartctl"),
+        ))
+    }
+
+    /// smartctl not installed.
+    fn fake_locate_absent() -> Result<(PathBuf, PathBuf), Arc<str>> {
+        Err(Arc::from(smartctl::NOT_INSTALLED))
+    }
+
     fn admin_ran(disk: &str) -> bool {
         ADMIN_DISKS
             .lock()
@@ -2581,6 +2624,41 @@ mod tests {
         assert!(admin_ran("nvme0n1"));
         assert!(calls(&fake).is_empty(), "no D-Bus call");
         rig.finish();
+    }
+
+    /// An NVMe disk with no UDisks2 NVMe interface and the given smartctl lookup: its
+    /// `SmartKind` in the first list the worker sends.
+    fn bare_nvme_kind(locate: AdminLocate) -> SmartKind {
+        let drive = props(vec![("Model", Value::from("Samsung SSD 980"))]);
+        let objs = ManagedObjects(BTreeMap::from([
+            (
+                NVME.to_owned(),
+                object(vec![(
+                    BLOCK_IFACE,
+                    block(makedev(259, 0), "/dev/nvme0n1", NVME_DRIVE),
+                )]),
+            ),
+            (NVME_DRIVE.to_owned(), object(vec![(DRIVE_IFACE, drive)])),
+        ]));
+        let connector = FakeConnector::default();
+        connector.0.lock().expect("fake lock").objects = Some(objs);
+        let mut rig = Rig::start_with(connector, true, locate);
+        let got = rig.drain();
+        let kind = got
+            .iter()
+            .find_map(|u| entries(u)?.first().map(|(_, d)| d.smart))
+            .expect("a disk list");
+        rig.finish();
+        kind
+    }
+
+    #[test]
+    fn needs_fallback_only_with_smartctl() {
+        assert_eq!(bare_nvme_kind(fake_locate_absent), SmartKind::None);
+        assert_eq!(
+            bare_nvme_kind(fake_locate_present),
+            SmartKind::NeedsFallback
+        );
     }
 
     #[test]
@@ -2883,7 +2961,7 @@ mod tests {
             let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
             let mut bus = SystemUdisks::on(&cx, conn).await.expect("subscribed");
             let mut objs = bus.managed_objects(&cx).await.expect("GetManagedObjects");
-            let before = drives_from_objects(&objs);
+            let before = drives_from_objects(&objs, true);
 
             let iface = server
                 .object_server()
@@ -2906,7 +2984,7 @@ mod tests {
             }
             let event = event.expect("an event");
             let resync = apply_event(&mut objs, event.clone());
-            let after = drives_from_objects(&objs);
+            let after = drives_from_objects(&objs, true);
             drop(bus);
             drop(server);
             (before, event, resync, after)

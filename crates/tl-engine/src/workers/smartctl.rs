@@ -41,6 +41,7 @@ pub const NOT_INSTALLED: &str = "smartctl is not installed (package smartmontool
 pub const NO_PKEXEC: &str = "pkexec is not installed (package polkit)";
 pub const NOT_RUN: &str = "Could not run smartctl";
 pub const DENIED: &str = "Permission denied";
+pub const CANCELLED: &str = "Authentication cancelled";
 pub const NO_ANSWER: &str = "No answer from smartctl";
 pub const CANNOT_OPEN: &str = "smartctl could not open the disk";
 pub const TOO_LARGE: &str = "smartctl output too large";
@@ -128,8 +129,10 @@ fn run_for(
     let wait = deadline.saturating_duration_since(Instant::now()).max(POLL);
     let out = rx.recv_timeout(wait).map_err(|_| Arc::from(NO_ANSWER))?;
     match status.code() {
-        // pkexec: the prompt was dismissed or the user is not authorized.
-        Some(126 | 127) => return Err(Arc::from(DENIED)),
+        // pkexec (R-117): 126 is a dismissed prompt; 127 is not authorized, or pkexec could not
+        // authenticate.
+        Some(126) => return Err(Arc::from(CANCELLED)),
+        Some(127) => return Err(Arc::from(DENIED)),
         // smartctl's bit mask: bit 0 is a command line error, bit 1 a device open failure.
         // The other bits report disk state and still come with JSON.
         Some(code) if code & 0b11 != 0 => return Err(Arc::from(CANNOT_OPEN)),
@@ -609,8 +612,8 @@ mod tests {
     }
 
     #[test]
-    fn pkexec_denied() {
-        assert_eq!(run_fake("exit 126\n", TIMEOUT), Err(Arc::from(DENIED)));
+    fn pkexec_cancel_and_denial() {
+        assert_eq!(run_fake("exit 126\n", TIMEOUT), Err(Arc::from(CANCELLED)));
         assert_eq!(run_fake("exit 127\n", TIMEOUT), Err(Arc::from(DENIED)));
     }
 
