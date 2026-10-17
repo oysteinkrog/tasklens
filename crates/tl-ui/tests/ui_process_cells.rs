@@ -6,7 +6,8 @@ use tl_model::ids::ColumnId;
 use tl_model::settings::ColumnTables;
 use tl_ui::i18n::{init_strings, tr};
 use tl_ui::pages::processes::cells::{
-    DEFAULT_VISIBLE, HeatRef, PROCESS_COLUMNS, PickerGroup, ProcColumnKind, process_column,
+    DEFAULT_VISIBLE, HeatRef, NO_SOURCE, PROCESS_COLUMNS, PickerGroup, ProcColumnKind,
+    process_column,
 };
 use tl_ui::table::columns::ColumnAlign;
 
@@ -42,7 +43,11 @@ fn registry_groups_in_picker_order() {
         assert!(at >= last, "{} out of group order", col.id.as_str());
         last = at;
     }
-    assert!(PROCESS_COLUMNS.iter().all(|c| (1..=4).contains(&c.phase)));
+    assert!(
+        PROCESS_COLUMNS
+            .iter()
+            .all(|c| (1..=4).contains(&c.phase) || c.phase == NO_SOURCE)
+    );
 }
 
 #[gpui_kit::test]
@@ -735,6 +740,142 @@ mod values {
         assert_eq!(class(2.0), "processes-power-moderate");
         assert_eq!(class(8.0), "processes-power-high");
         assert_eq!(class(25.0), "processes-power-very-high");
+    }
+
+    /// The 25 phase-2 columns the picker offers with data (tasklens-pdu.45).
+    const OFFERED_P2: [ColumnId; 25] = [
+        ColumnId::Version,
+        ColumnId::Timestamp,
+        ColumnId::FileMtime,
+        ColumnId::FileSize,
+        ColumnId::Company,
+        ColumnId::Signer,
+        ColumnId::Signature,
+        ColumnId::Architecture,
+        ColumnId::Session,
+        ColumnId::SecurityLabel,
+        ColumnId::Sandbox,
+        ColumnId::CtxSwitches,
+        ColumnId::CtxSwitchesDelta,
+        ColumnId::MajorFaults,
+        ColumnId::Pss,
+        ColumnId::Uss,
+        ColumnId::Power,
+        ColumnId::PowerTrend,
+        ColumnId::SchedPolicy,
+        ColumnId::Cgroup,
+        ColumnId::AppId,
+        ColumnId::OomScore,
+        ColumnId::OomScoreAdj,
+        ColumnId::Tty,
+        ColumnId::Cwd,
+    ];
+
+    #[test]
+    fn phase_2_columns_format_or_glyph() {
+        let a = |t: &str| Some(Arc::<str>::from(t));
+        let mut f = p2_fixture(ProcessExtrasP2 {
+            exe_mtime_s: Some(1_700_000_000),
+            exe_size_bytes: Some(1_572_864),
+            elf_class: Some(64),
+            elf_machine: Some(62),
+            session_id: Some(3),
+            security_label: a("firefox (enforce)"),
+            sandbox: a("Flatpak"),
+            sched_policy_text: a("SCHED_OTHER"),
+            oom_score: Some(667),
+            oom_score_adj: Some(-100),
+            tty: a("pts/3"),
+            cwd: a("/home/oystein"),
+            ctx_switches_voluntary: Some(1_000),
+            ctx_switches_involuntary: Some(234),
+            ctx_switches_delta: Some(12),
+            power_w: Some(3.0),
+            power_trend_w: Some(30.0),
+            package: Some(Arc::new(PackageInfo {
+                name: Arc::from("firefox"),
+                version: Arc::from("130.0-1"),
+                description: None,
+                packager: a("Jane Doe <jane@example.org>"),
+                build_date_s: Some(1_700_000_000),
+                url: None,
+            })),
+            package_status: Some(PackageStatus::PackagedModified),
+            ..ProcessExtrasP2::default()
+        });
+        let mut m = meta();
+        m.cgroup = a("/user.slice/app.slice/app-firefox.service");
+        f.records[0].meta = Arc::new(m);
+        f.records[0].pss_bytes = 1_572_864;
+        f.records[0].uss_bytes = 1_048_576;
+        f.extras[0].major_faults = 1_234;
+        let f = f.refreshed();
+
+        let want: [(ColumnId, &str); 25] = [
+            (ColumnId::Version, "130.0-1"),
+            (ColumnId::FileSize, "1.50 MiB"),
+            (ColumnId::Company, "firefox"),
+            (ColumnId::Signer, "Jane Doe"),
+            (ColumnId::Signature, "processes-package-status-modified"),
+            (ColumnId::Architecture, "x86-64 (64-bit)"),
+            (ColumnId::Session, "3"),
+            (ColumnId::SecurityLabel, "firefox (enforce)"),
+            (ColumnId::Sandbox, "Flatpak"),
+            (ColumnId::CtxSwitchesDelta, "12"),
+            (ColumnId::Pss, "1.50 MiB"),
+            (ColumnId::Uss, "1.00 MiB"),
+            (ColumnId::Power, "processes-power-moderate"),
+            (ColumnId::PowerTrend, "processes-power-very-high"),
+            (ColumnId::SchedPolicy, "SCHED_OTHER"),
+            (
+                ColumnId::Cgroup,
+                "/user.slice/app.slice/app-firefox.service",
+            ),
+            (ColumnId::AppId, "firefox"),
+            (ColumnId::OomScore, "667"),
+            (ColumnId::OomScoreAdj, "-100"),
+            (ColumnId::Tty, "pts/3"),
+            (ColumnId::Cwd, "/home/oystein"),
+            (ColumnId::MajorFaults, "1\u{2009}234"),
+            (ColumnId::CtxSwitches, "1234"),
+            (ColumnId::Timestamp, "2023-11"),
+            (ColumnId::FileMtime, "2023-11"),
+        ];
+        for (id, text) in want {
+            let shown = f.text(id);
+            // Time cells are checked by prefix (local time zone); the rest exactly.
+            if matches!(id, ColumnId::Timestamp | ColumnId::FileMtime) {
+                assert!(shown.starts_with(text), "{id:?}: {shown:?}");
+            } else if id == ColumnId::CtxSwitches {
+                let out = f.record_cell(&table_row(false, false, 0), id);
+                assert_eq!(out.bits, 1_234, "{id:?}");
+            } else {
+                assert_eq!(shown, text, "{id:?}");
+            }
+        }
+        for id in OFFERED_P2 {
+            assert_eq!(glyph(&f, id), Validity::Valid, "{id:?}");
+        }
+
+        // No extras: the P2 sweep columns show the Unsupported glyph with no text, never 0.
+        let mut f = Fixture::new(record(), key_words());
+        f.extras_p2.clear();
+        for id in P2_COLUMNS {
+            let out = f.record_cell(&table_row(false, false, 0), id);
+            assert_eq!(out.validity, Validity::Unsupported, "{id:?}");
+            assert!(out.text.is_empty() && out.arc.is_none(), "{id:?}");
+        }
+
+        // Pss and Uss outside the sweep coverage show the glyph, not 0.
+        for (id, field) in [
+            (ColumnId::Pss, ProcessField::Pss),
+            (ColumnId::Uss, ProcessField::Uss),
+        ] {
+            let f = with(|r| r.validity.set(field, Validity::WarmingUp));
+            let out = f.record_cell(&table_row(false, false, 0), id);
+            assert_eq!(out.validity, Validity::WarmingUp, "{id:?}");
+            assert!(out.text.is_empty() && out.arc.is_none(), "{id:?}");
+        }
     }
 
     #[test]

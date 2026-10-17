@@ -279,7 +279,7 @@ mod delegate {
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::{init_strings, tr_calls};
-    use tl_ui::pages::processes::cells::process_column;
+    use tl_ui::pages::processes::cells::{NO_SOURCE, PROCESS_COLUMNS, process_column};
     use tl_ui::pages::processes::delegate::{ProcRowId, ProcessDelegate, SHIPPED_PHASE, UnitIds};
     use tl_ui::pages::processes::table::GroupHeader;
     use tl_ui::table::actions::OpenProperties;
@@ -754,16 +754,119 @@ mod delegate {
             Some("NVIDIA GeForce RTX 4070 (0000:01:00.0)")
         );
 
-        // A phase 2 column is not offered while SHIPPED_PHASE is 1.
-        assert_eq!(SHIPPED_PHASE, 1);
+        // Phase 2 is offered; a NO_SOURCE column is not.
+        assert_eq!(SHIPPED_PHASE, 2);
         assert_eq!(process_column(ColumnId::Version).phase, 2);
-        assert!(!offered.contains(&ColumnId::Version));
-        assert!(!d.columns().order.contains(&ColumnId::Version));
+        assert!(offered.contains(&ColumnId::Version));
+        assert!(!offered.contains(&ColumnId::PageTables));
+        assert!(!d.columns().order.contains(&ColumnId::PageTables));
         assert!(offered.contains(&ColumnId::Cpu));
 
         // No GPU: no slot.
         let d = new_delegate(vcx, snapshot(1, rows, groups, records));
         assert!(!d.offered_columns().contains(&ColumnId::Gpu0));
+    }
+
+    #[gpui_kit::test]
+    fn phase_2_columns_offered(cx: &mut TestAppContext) {
+        setup(cx);
+        let (rows, groups, records) = every_kind();
+        let vcx = cx.add_empty_window();
+        let d = new_delegate(vcx, snapshot(1, rows, groups, records));
+        let offered = d.offered_columns();
+        let listed = [
+            ColumnId::Version,
+            ColumnId::Timestamp,
+            ColumnId::FileMtime,
+            ColumnId::FileSize,
+            ColumnId::Company,
+            ColumnId::Signer,
+            ColumnId::Signature,
+            ColumnId::Architecture,
+            ColumnId::Session,
+            ColumnId::SecurityLabel,
+            ColumnId::Sandbox,
+            ColumnId::CtxSwitches,
+            ColumnId::CtxSwitchesDelta,
+            ColumnId::MajorFaults,
+            ColumnId::Pss,
+            ColumnId::Uss,
+            ColumnId::Power,
+            ColumnId::PowerTrend,
+            ColumnId::SchedPolicy,
+            ColumnId::Cgroup,
+            ColumnId::AppId,
+            ColumnId::OomScore,
+            ColumnId::OomScoreAdj,
+            ColumnId::Tty,
+            ColumnId::Cwd,
+        ];
+        for id in listed {
+            assert!(offered.contains(&id), "{id:?} not offered");
+        }
+        // Every phase 2 column that is not a GPU slot is in the list above.
+        for c in PROCESS_COLUMNS.iter().filter(|c| c.phase == 2) {
+            let slot =
+                (ColumnId::Gpu0 as usize..=ColumnId::Gpu15 as usize).contains(&(c.id as usize));
+            assert!(
+                slot || listed.contains(&c.id),
+                "{:?} missing from the list",
+                c.id
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn no_source_columns_not_offered(cx: &mut TestAppContext) {
+        setup(cx);
+        let parked = [
+            ColumnId::Elevation,
+            ColumnId::CommitPeak,
+            ColumnId::CommitDelta,
+            ColumnId::PageTables,
+            ColumnId::MajorFaultsDelta,
+            ColumnId::IoReadBytes,
+            ColumnId::IoWriteBytes,
+            ColumnId::IoReadDelta,
+            ColumnId::IoWriteDelta,
+            ColumnId::IoReadRate,
+            ColumnId::IoWriteRate,
+            ColumnId::IoReadOps,
+            ColumnId::IoWriteOps,
+            ColumnId::DiskReadBytes,
+            ColumnId::DiskWriteBytes,
+            ColumnId::DiskTotalBytes,
+            ColumnId::DiskReadDelta,
+            ColumnId::DiskWriteDelta,
+            ColumnId::DiskTotalDelta,
+            ColumnId::DiskReads,
+            ColumnId::DiskWrites,
+            ColumnId::DiskReadsDelta,
+            ColumnId::DiskWritesDelta,
+            ColumnId::GpuMemShared,
+            ColumnId::GpuEngine,
+            ColumnId::GpuEncode,
+            ColumnId::GpuDecode,
+            ColumnId::IoPriority,
+        ];
+        let mut found: Vec<ColumnId> = PROCESS_COLUMNS
+            .iter()
+            .filter(|c| c.phase == NO_SOURCE)
+            .map(|c| c.id)
+            .collect();
+        let mut want = parked.to_vec();
+        found.sort_by_key(|c| *c as usize);
+        want.sort_by_key(|c| *c as usize);
+        assert_eq!(found, want);
+
+        let (rows, groups, records) = every_kind();
+        let vcx = cx.add_empty_window();
+        let d = new_delegate(vcx, snapshot(1, rows, groups, records));
+        let offered = d.offered_columns();
+        for id in parked {
+            assert!(!offered.contains(&id), "{id:?} offered");
+            assert!(!d.columns().order.contains(&id), "{id:?} in the order");
+        }
     }
 
     struct Host {
