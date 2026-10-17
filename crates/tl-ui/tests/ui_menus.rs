@@ -24,8 +24,8 @@ use tl_model::settings::{
 };
 use tl_model::table::TableMode;
 use tl_ui::actions::{
-    MenuId, OpenCollectorHealth, OpenHandleSearch, OpenRunDialog, OpenSettings, Quit, SetViewMode,
-    bind_keys_global, register_global_handlers,
+    MenuId, OpenCollectorHealth, OpenHandleSearch, OpenRunDialog, OpenSettings, OpenShortcuts,
+    Quit, SetViewMode, ShowSystemInformation, bind_keys_global, register_global_handlers,
 };
 use tl_ui::app::{AppEnv, BootSettings, EngineGlobal};
 use tl_ui::components::dialog::{DialogButton, TlDialogView};
@@ -41,6 +41,7 @@ use tl_ui::table::columns::TableId;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
 use tl_ui::theme::user_store::{PersistTheme, ThemePersist};
+use tl_ui::window::about::OpenAbout;
 use tl_ui::window::confirm::ResetSettings;
 use tl_ui::window::main::ShellState;
 use tl_ui::window::menubar::{self, MenuBar, menu_bar_for};
@@ -51,6 +52,7 @@ use tl_ui::window::{menus_debug, menus_settings, menus_view};
 const FILE_BUTTON: &str = "TlMenuBarButton-shell-menubar-file";
 const VIEW_BUTTON: &str = "TlMenuBarButton-shell-menubar-view";
 const SETTINGS_BUTTON: &str = "TlMenuBarButton-shell-menubar-settings";
+const HELP_BUTTON: &str = "TlMenuBarButton-shell-menubar-help";
 const DEBUG_BUTTON: &str = "TlMenuBarButton-shell-menubar-debug";
 
 /// A main window stand-in: the title bar with the real menu bar, and a focusable table below.
@@ -328,26 +330,22 @@ fn hint_for(r: &mut Rig<'_>, action: &dyn gpui_kit::Action) -> Option<String> {
 #[gpui_kit::test]
 fn file_menu_p3_items(cx: &mut TestAppContext) {
     let mut r = rig(cx);
-    // File, View and Settings, each followed by a separator one physical pixel wide, and nothing
-    // for the absent menus.
+    // File, View, Settings and Help, each followed by a separator one physical pixel wide, and
+    // nothing for the absent Debug menu.
     let bar_w = bounds(r.cx, "TlMenuBar").size.width;
     let file = bounds(r.cx, FILE_BUTTON);
     let view = bounds(r.cx, VIEW_BUTTON);
     let settings = bounds(r.cx, SETTINGS_BUTTON);
+    let help = bounds(r.cx, HELP_BUTTON);
     let scale = r.cx.update(|window, _| window.scale_factor());
     assert_eq!(
         bar_w,
-        file.size.width + view.size.width + settings.size.width + px(3. / scale)
+        file.size.width + view.size.width + settings.size.width + help.size.width + px(4. / scale)
     );
-    for absent in [
-        "TlMenuBarButton-shell-menubar-help",
-        "TlMenuBarButton-shell-menubar-debug",
-    ] {
-        assert!(
-            r.cx.debug_bounds(absent).is_none(),
-            "{absent} has no button"
-        );
-    }
+    assert!(
+        r.cx.debug_bounds(DEBUG_BUTTON).is_none(),
+        "Debug has no button"
+    );
 
     click_file(r.cx);
     let entries = entries(r.cx);
@@ -470,9 +468,9 @@ fn menubar_left_right_wrap(cx: &mut TestAppContext) {
     // In View, Left at the top level opens File.
     keys(r.cx, "left");
     assert_eq!(open_menu(r.cx), Some(MenuId::File));
-    // In File, Left wraps to Settings, the last present menu.
+    // In File, Left wraps to Help, the last present menu.
     keys(r.cx, "left");
-    assert_eq!(open_menu(r.cx), Some(MenuId::Settings));
+    assert_eq!(open_menu(r.cx), Some(MenuId::Help));
     assert!(popup_bounds(r.cx).is_some());
 }
 
@@ -3191,4 +3189,70 @@ fn debug_collector_health_dispatch(cx: &mut TestAppContext) {
     set_debug(r.cx, true);
     keys(r.cx, "alt-d end enter");
     assert_eq!(count.get(), 1);
+}
+
+#[gpui_kit::test]
+fn help_button_present_p2(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let settings = bounds(r.cx, SETTINGS_BUTTON);
+    let help = bounds(r.cx, HELP_BUTTON);
+    assert!(
+        help.origin.x >= settings.origin.x + settings.size.width,
+        "Help comes after Settings"
+    );
+}
+
+#[gpui_kit::test]
+fn help_menu_p2_items(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    keys(r.cx, "alt-h");
+    assert_eq!(open_menu(r.cx), Some(MenuId::Help));
+    let entries = entries(r.cx);
+    assert_eq!(
+        entries.len(),
+        4,
+        "Keyboard Shortcuts, System Information, separator, About: {entries:?}"
+    );
+    assert_eq!(entries[0].role(), Some(Role::MenuItem));
+    assert_eq!(entries[0].label(), Some("Keyboard Shortcuts"));
+    assert_eq!(entries[0].selected(), Some(true));
+    assert_eq!(entries[1].role(), Some(Role::MenuItem));
+    assert_eq!(entries[1].label(), Some("System Information…"));
+    assert_eq!(entries[2].role(), None, "a separator");
+    assert!(entries[2].bounds().size.height < px(2.), "a one-pixel line");
+    assert_eq!(entries[3].role(), Some(Role::MenuItem));
+    assert_eq!(entries[3].label(), Some("About tasklens…"));
+    assert_eq!(
+        hint_for(&mut r, &OpenShortcuts).as_deref(),
+        Some("Ctrl+?"),
+        "the live hint"
+    );
+    assert_eq!(hint_for(&mut r, &ShowSystemInformation), None);
+    assert_eq!(hint_for(&mut r, &OpenAbout), None);
+}
+
+#[gpui_kit::test]
+fn help_sysinfo_dispatch(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let count = Rc::new(Cell::new(0));
+    let seen = Rc::clone(&count);
+    r.cx.update(|_, cx| {
+        cx.on_action(move |_: &ShowSystemInformation, _| seen.set(seen.get() + 1));
+    });
+    keys(r.cx, "alt-h down enter");
+    assert_eq!(count.get(), 1);
+    assert_eq!(open_menu(r.cx), None);
+}
+
+#[gpui_kit::test]
+fn help_about_dispatch(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let count = Rc::new(Cell::new(0));
+    let seen = Rc::clone(&count);
+    r.cx.update(|_, cx| {
+        cx.on_action(move |_: &OpenAbout, _| seen.set(seen.get() + 1));
+    });
+    keys(r.cx, "alt-h down down enter");
+    assert_eq!(count.get(), 1);
+    assert_eq!(open_menu(r.cx), None);
 }

@@ -2621,6 +2621,9 @@ shell-settings-page-services = Services
 shell-settings-page-startup-window = Startup and window
 shell-settings-page-privileges = Privileges
 # Settings window, Privileges page (tasklens-bj6.39). The Help menu item reuses this key.
+shell-menu-help-shortcuts = Keyboard Shortcuts
+shell-menu-help-sysinfo = System Information…
+shell-menu-help-about = About tasklens…
 shell-menu-help-setup = Additional setup…
 shell-settings-page-advanced = Advanced
 shell-settings-restart-note = Takes effect after restart

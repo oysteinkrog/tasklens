@@ -671,7 +671,7 @@ fn shortcuts_rows_from_keymap(cx: &mut TestAppContext) {
         .find(|r| r.1 == "Keyboard Shortcuts")
         .expect("Keyboard Shortcuts row");
     assert_eq!(row.0, Heading::Global);
-    assert_eq!(row.2, "Ctrl+? or Ctrl+Shift+/");
+    assert_eq!(row.2, "Ctrl+Shift+/ or Ctrl+?");
     let next = rows
         .iter()
         .find(|r| r.1 == "Next / previous tab" && r.0 == Heading::Global)

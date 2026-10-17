@@ -44,7 +44,7 @@ use tl_model::settings::Settings;
 
 use super::main::{UI_SCALE_TOAST, push_main_toast};
 use super::titlebar::{MenuBarFactory, MenuRowHeight, bar_height};
-use super::{menus_debug, menus_file, menus_settings, menus_view};
+use super::{menus_debug, menus_file, menus_help, menus_settings, menus_view};
 use crate::actions::{MenuId, OpenMenu};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::slider::{TlSliderEvent, set_from_elsewhere};
@@ -96,14 +96,12 @@ fn label_key(id: MenuId) -> &'static str {
 }
 
 /// Whether `id` has a button. True exactly when [`build_menu`] builds a menu with items for it
-/// (the "no dead items" rule): in P1 File, View, Settings and, in debug mode, Debug. Called on every frame, so an arm
+/// (the "no dead items" rule): in P2 File, View, Settings, Help and, in debug mode, Debug. Called on every frame, so an arm
 /// reads only settings or state, never builds anything.
 pub fn has_menu(id: MenuId, cx: &App) -> bool {
     match id {
         // View always has "Columns", disabled on a tab without a table.
-        MenuId::File | MenuId::View | MenuId::Settings => true,
-        // Help: E21-014.
-        MenuId::Help => false,
+        MenuId::File | MenuId::View | MenuId::Settings | MenuId::Help => true,
         MenuId::Debug => menus_debug::debug_enabled(cx),
     }
 }
@@ -121,7 +119,7 @@ fn build_menu(
         MenuId::File => Some(menus_file::build(window, cx, return_focus)),
         MenuId::View => Some(menus_view::build(window, cx, return_focus, sliders)),
         MenuId::Settings => Some(menus_settings::build(window, cx, return_focus, sliders)),
-        MenuId::Help => None,
+        MenuId::Help => Some(menus_help::build(window, cx, return_focus)),
         MenuId::Debug => menus_debug::build(window, cx, return_focus),
     }
 }

@@ -9,6 +9,7 @@ pub mod main;
 pub mod menubar;
 pub mod menus_debug;
 pub mod menus_file;
+pub mod menus_help;
 pub mod menus_settings;
 pub mod menus_view;
 pub mod public_ip;
