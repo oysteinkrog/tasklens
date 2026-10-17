@@ -2435,6 +2435,7 @@ mod props {
 #[cfg(feature = "test-hooks")]
 mod main_window {
     use super::*;
+    use gpui_kit::AppContext as _;
     use gpui_kit::{Entity, Modifiers, MouseButton, MouseDownEvent, VisualTestContext, point, px};
     use tl_model::actions::{
         ActionEvent as FlowEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
@@ -2818,7 +2819,7 @@ mod main_window {
                 .get(&key)
                 .expect("the Properties window is registered")
         });
-        let mut props = VisualTestContext::from_window(handle, rig.vcx.cx_mut());
+        let mut props = VisualTestContext::from_window(handle, cx);
         props.update(|window, _| window.activate_window());
         props.simulate_keystrokes("escape");
         props.run_until_parked();
