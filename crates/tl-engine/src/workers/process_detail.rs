@@ -934,7 +934,7 @@ struct GeneralPatch {
 /// The General fields that come from `status`, built from the helper's `STATUS` as
 /// `read_general` builds them. The thread affinity check and the App ID need more than the
 /// leader's `status` and stay as the direct read left them.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct StatusFields {
     uids: Total<[u32; 4]>,
     affinity: Total<CpuSet>,
@@ -971,13 +971,13 @@ impl StatusFields {
 
     /// Sets these fields on `read`, whose `status` the direct read could not read.
     fn apply(&self, read: &mut GeneralRead) {
-        read.uids = self.uids.clone();
-        read.affinity = self.affinity.clone();
-        read.shadow_stack = self.shadow_stack.clone();
-        read.no_new_privs = self.no_new_privs.clone();
-        read.seccomp = self.seccomp.clone();
-        read.rss_shared_bytes = self.rss_shared_bytes.clone();
-        read.commit_bytes = self.commit_bytes.clone();
+        read.uids = self.uids;
+        read.affinity = self.affinity;
+        read.shadow_stack = self.shadow_stack;
+        read.no_new_privs = self.no_new_privs;
+        read.seccomp = self.seccomp;
+        read.rss_shared_bytes = self.rss_shared_bytes;
+        read.commit_bytes = self.commit_bytes;
     }
 }
 
