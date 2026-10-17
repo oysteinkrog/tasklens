@@ -2907,12 +2907,17 @@ mod window {
             .unwrap_or_default()
     }
 
-    /// How many times the Services page found the unit and said so.
+    /// How many times the Services page found the unit and said so. The toast queue merges
+    /// repeats into one toast that ends in "(×n)".
     fn switched_toasts(main: &mut VisualTestContext) -> usize {
+        const TEXT: &str = "Switched to Services tab";
         main_toasts(main)
             .iter()
-            .filter(|t| t.as_str() == "Switched to Services tab")
-            .count()
+            .filter_map(|t| match t.strip_prefix(TEXT)? {
+                "" => Some(1),
+                rest => rest.strip_prefix(" (×")?.strip_suffix(')')?.parse().ok(),
+            })
+            .sum()
     }
 
     /// The main window's active tab. The main window now handles `GoToService` itself.
