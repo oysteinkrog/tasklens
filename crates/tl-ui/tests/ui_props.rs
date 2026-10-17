@@ -2895,7 +2895,11 @@ mod window {
             "a link click copies nothing"
         );
 
-        // Enter on the grid cursor runs the same link.
+        // Enter on the grid cursor runs the same link. Go back to Processes first, so the
+        // check fails when Enter does nothing.
+        rig.main.dispatch_action(tl_ui::actions::SelectTab(0));
+        rig.main.run_until_parked();
+        assert_eq!(main_tab(cx), Tab::Processes, "the tab was reset");
         focus_fields(&mut rig);
         rig.vcx
             .update(|_, cx| rig.general.update(cx, |g, cx| g.set_cursor(0, row, cx)));
