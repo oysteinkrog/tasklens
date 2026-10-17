@@ -848,6 +848,10 @@ mod delegate {
             ColumnId::GpuEncode,
             ColumnId::GpuDecode,
             ColumnId::IoPriority,
+            ColumnId::Cycles,
+            ColumnId::CyclesDelta,
+            ColumnId::X11Resources,
+            ColumnId::Container,
         ];
         let mut found: Vec<ColumnId> = PROCESS_COLUMNS
             .iter()
