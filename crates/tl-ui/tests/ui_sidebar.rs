@@ -3144,6 +3144,17 @@ mod sidebar {
     }
 
     #[gpui_kit::test]
+    fn hidden_fans_keep_sensors_demanded(cx: &mut TestAppContext) {
+        // A fan shows only after it spun, and only sensor readings tell. With every fan hidden
+        // (no reading yet) the sidebar must still ask for sensors, or no fan ever appears.
+        let mut r = open(cx, with_fan(), Settings::default(), UiState::default());
+        assert!(!keys(&mut r).iter().any(|k| k.starts_with("fan:")));
+        let sidebar = r.sidebar.clone();
+        let wanted = r.vcx.update(|_, cx| sidebar.read(cx).demand_part().sensors);
+        assert!(wanted, "sensors demanded while a fan row is hidden");
+    }
+
+    #[gpui_kit::test]
     fn fan_flip_keeps_card_when_shown(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
         settings.performance.show_disconnected_fans = true;
