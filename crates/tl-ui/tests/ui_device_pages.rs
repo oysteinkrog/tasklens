@@ -3738,3 +3738,229 @@ mod fan_menu {
         });
     }
 }
+
+/// The SMART window's smartctl fallback button (E25, PERF-051, UI-PRF-030, R-088).
+mod smartctl_fallback {
+    use super::*;
+
+    use gpui_kit::Modifiers;
+    use tl_model::snapshot::{SmartData, SmartKind};
+    use tl_model::table::Total;
+    use tl_ui::hub::GlobalHub;
+    use tl_ui::i18n::tr;
+    use tl_ui::pages::performance::actions::PerfShowSmart;
+    use tl_ui::windows::smart::{SmartWindow, find_smart};
+
+    const SDA: &str = "disk:sda";
+    const IDX: DeviceIdx = DeviceIdx(3);
+
+    /// The page rig plus what the SMART window needs: the global hub and its action handlers.
+    fn open_smart_rig(cx: &mut TestAppContext) -> Rig<'_> {
+        let engine = install(cx);
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        cx.update(|cx| {
+            cx.set_global(GlobalHub(hub.clone()));
+            tl_ui::windows::smart::init(cx);
+        });
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(hub, demand, cx));
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(1280.), px(800.)));
+        draw(vcx);
+        let mut r = Rig { page, engine, vcx };
+        select(&mut r, SDA);
+        r
+    }
+
+    fn empty() -> SmartData {
+        SmartData {
+            updated_s: 0,
+            health: Total {
+                value: Arc::from(""),
+                validity: Validity::Unavailable,
+            },
+            power_on_s: Total {
+                value: 0,
+                validity: Validity::Unavailable,
+            },
+            selftest: Total {
+                value: Arc::from(""),
+                validity: Validity::Unavailable,
+            },
+            ata: Arc::from([]),
+            nvme: Arc::from([]),
+        }
+    }
+
+    fn publish(r: &mut Rig, smart: SmartKind, data: Option<(Validity, SmartData)>) {
+        r.engine.publish_with(move |s| {
+            let details = Arc::make_mut(&mut s.device_details);
+            details.header.version += 1;
+            details.disks = Arc::from([(
+                IDX,
+                DiskDetails {
+                    smart,
+                    smart_data: data.map(|(validity, d)| Total {
+                        value: Arc::new(d),
+                        validity,
+                    }),
+                    ..DiskDetails::default()
+                },
+            )]);
+        });
+        draw(r.vcx);
+    }
+
+    fn smart_available(r: &mut Rig) -> bool {
+        let page = view_of(r, SDA).downcast::<DiskPage>().expect("a DiskPage");
+        r.vcx.update(|_, cx| page.read(cx).smart_available())
+    }
+
+    fn open_window(r: &mut Rig) -> (VisualTestContext, Entity<SmartWindow>) {
+        r.vcx.update(|window, cx| {
+            window.dispatch_action(Box::new(PerfShowSmart { key: key(SDA) }), cx)
+        });
+        r.vcx.run_until_parked();
+        let (handle, view) = r
+            .vcx
+            .update(|_, cx| find_smart(IDX, cx))
+            .expect("the SMART window is open");
+        let mut vcx = VisualTestContext::from_window(handle.into(), &r.vcx.cx);
+        redraw(&mut vcx);
+        (vcx, view)
+    }
+
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn click(vcx: &mut VisualTestContext, selector: &'static str) {
+        let at = vcx.debug_bounds(selector).expect(selector).center();
+        vcx.simulate_click(at, Modifiers::none());
+        redraw(vcx);
+    }
+
+    fn smart_commands(r: &Rig) -> Vec<DeviceCommand> {
+        r.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Device(
+                    d @ (DeviceCommand::SmartRead { .. } | DeviceCommand::SmartReadAdmin { .. }),
+                ) => Some(d),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn smartctl_button_shown_without_udisks_smart(cx: &mut TestAppContext) {
+        let mut r = open_smart_rig(cx);
+        publish(&mut r, SmartKind::NeedsFallback, None);
+        assert!(smart_available(&mut r), "the page button shows");
+        let (vcx, view) = open_window(&mut r);
+        assert!(vcx.debug_bounds("SmartReadSmartctl").is_some());
+        assert!(
+            vcx.debug_bounds("SmartRefresh").is_none(),
+            "replaces Refresh"
+        );
+        assert!(vcx.debug_bounds("SmartTable").is_none(), "no table yet");
+        assert!(vcx.debug_bounds("SmartFailure").is_none());
+        let (fallback, data) = vcx.update(|_, cx| {
+            let w = view.read(cx);
+            (w.fallback(), w.data().is_some())
+        });
+        assert!(fallback && !data);
+        // UDisks2 cannot read this disk, so opening sends nothing.
+        assert!(smart_commands(&r).is_empty());
+        let label = vcx.update(|_, cx| tr(cx, "perf-smart-smartctl"));
+        assert_eq!(label.as_ref(), "Read with smartctl (admin)");
+    }
+
+    #[gpui_kit::test]
+    fn smartctl_sends_command_once(cx: &mut TestAppContext) {
+        let mut r = open_smart_rig(cx);
+        publish(&mut r, SmartKind::NeedsFallback, None);
+        let (mut vcx, view) = open_window(&mut r);
+        click(&mut vcx, "SmartReadSmartctl");
+        assert!(vcx.update(|_, cx| view.read(cx).reading_admin()), "spins");
+        // Disabled while the read runs.
+        click(&mut vcx, "SmartReadSmartctl");
+        // Security: only the kernel name goes out; the engine builds the command line.
+        let sent = smart_commands(&r);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        match &sent[0] {
+            DeviceCommand::SmartReadAdmin { disk } => {
+                assert_eq!(&**disk, "sda");
+                assert!(!disk.contains('/'), "no path: {disk}");
+            }
+            other => panic!("expected SmartReadAdmin, got {other:?}"),
+        }
+        // The engine's WarmingUp step is not the answer.
+        publish(
+            &mut r,
+            SmartKind::NeedsFallback,
+            Some((Validity::WarmingUp, empty())),
+        );
+        redraw(&mut vcx);
+        assert!(vcx.update(|_, cx| view.read(cx).reading_admin()));
+        let mut read = empty();
+        read.updated_s = 1_000;
+        read.nvme = Arc::from([(Arc::<str>::from("Percent used"), Arc::<str>::from("3%"))]);
+        publish(
+            &mut r,
+            SmartKind::NeedsFallback,
+            Some((Validity::Valid, read)),
+        );
+        redraw(&mut vcx);
+        assert!(!vcx.update(|_, cx| view.read(cx).reading_admin()), "stops");
+        assert!(vcx.debug_bounds("SmartNvmeRow-0").is_some());
+        assert_eq!(smart_commands(&r).len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn smartctl_auth_cancelled_text(cx: &mut TestAppContext) {
+        let mut r = open_smart_rig(cx);
+        publish(&mut r, SmartKind::NeedsFallback, None);
+        let (mut vcx, view) = open_window(&mut r);
+        click(&mut vcx, "SmartReadSmartctl");
+        let mut failed = empty();
+        failed.health = Total {
+            value: Arc::from("Authentication cancelled"),
+            validity: Validity::Failed,
+        };
+        publish(
+            &mut r,
+            SmartKind::NeedsFallback,
+            Some((Validity::Failed, failed)),
+        );
+        redraw(&mut vcx);
+        assert!(vcx.debug_bounds("SmartFailure").is_some());
+        let (reason, spinning) = vcx.update(|_, cx| {
+            let w = view.read(cx);
+            (w.error().cloned(), w.reading_admin())
+        });
+        assert_eq!(reason.as_deref(), Some("Authentication cancelled"));
+        assert!(!spinning);
+        let title = vcx.update(|_, cx| tr(cx, "perf-smart-failed"));
+        assert_eq!(title.as_ref(), "Failed to get SMART data");
+        // The button stays for another try.
+        assert!(vcx.debug_bounds("SmartReadSmartctl").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn smartctl_missing_hides_buttons(cx: &mut TestAppContext) {
+        let mut r = open_smart_rig(cx);
+        // Without smartctl the engine reports no SMART at all, never NeedsFallback.
+        publish(&mut r, SmartKind::None, None);
+        assert!(!smart_available(&mut r));
+        assert!(
+            r.vcx.debug_bounds("perf-page-toggle-0").is_none(),
+            "no Show SMART data button"
+        );
+        let (vcx, _view) = open_window(&mut r);
+        assert!(vcx.debug_bounds("SmartReadSmartctl").is_none());
+    }
+}

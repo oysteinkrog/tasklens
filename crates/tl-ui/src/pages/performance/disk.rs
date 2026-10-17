@@ -1202,7 +1202,8 @@ pub struct DiskPage {
     partitions_table: Option<Entity<TlTreeTable<PartitionsDelegate>>>,
     /// The table body width of the last frame, for the flex columns.
     partitions_body: f32,
-    /// The `Show SMART data` button and menu item are present.
+    /// The `Show SMART data` button and menu item are present: UDisks2 reads SMART, or the
+    /// smartctl fallback applies (the engine sets `NeedsFallback` only when smartctl exists).
     smart_available: bool,
     /// The `Eject` button and menu item are present (ejectable or removable drive).
     ejectable: bool,
@@ -1385,7 +1386,12 @@ impl DiskPage {
             .find(|(i, _)| *i == self.row.idx)
             .map(|(_, d)| d);
         if details {
-            let smart = d.is_some_and(|d| d.smart != SmartKind::None);
+            let smart = d.is_some_and(|d| {
+                matches!(
+                    d.smart,
+                    SmartKind::Ata | SmartKind::Nvme | SmartKind::NeedsFallback
+                )
+            });
             let eject = d.is_some_and(|d| d.ejectable || d.removable);
             if (smart, eject) != (self.smart_available, self.ejectable) {
                 (self.smart_available, self.ejectable) = (smart, eject);

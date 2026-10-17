@@ -680,6 +680,7 @@ perf-smart-health = Drive health
 perf-smart-selftest = Self-test status
 perf-smart-refresh = Refresh
 perf-smart-refresh-busy = Could not refresh SMART data
+perf-smart-smartctl = Read with smartctl (admin)
 perf-smart-ok = OK
 perf-smart-failing = FAILING
 perf-smart-failed-past = Failed in the past

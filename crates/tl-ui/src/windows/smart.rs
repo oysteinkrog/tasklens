@@ -7,6 +7,11 @@
 //! window sends `SmartRead { update: false }`; Refresh sends `update: true` and stays disabled
 //! until the record's update time changes. A failed read puts the reason in `health.value`.
 //!
+//! A disk with `SmartKind::NeedsFallback` (no UDisks2 SMART, smartctl installed) skips the read
+//! on open and shows "Read with smartctl (admin)" in Refresh's place (P3, R-088). It sends
+//! `SmartReadAdmin` with the kernel name only; the engine builds the `pkexec smartctl` command
+//! line. The button spins until the disk record changes.
+//!
 //! ATA drives get a flat sortable table, NVMe drives a two-column list in the engine's PERF-051
 //! order. The table is rebuilt only when the `SmartData` pointer changes. A 1 s timer that lives
 //! with the window moves the "Last updated" age. Esc and Ctrl+W close the window through the
@@ -27,7 +32,7 @@ use smallvec::SmallVec;
 use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::DeviceIdx;
-use tl_model::snapshot::{DiskDetails, SmartAttr, SmartData, Snapshot};
+use tl_model::snapshot::{DiskDetails, SmartAttr, SmartData, SmartKind, Snapshot};
 use tl_model::units::{short_age, uptime};
 use tl_model::validity::Validity;
 
@@ -42,7 +47,7 @@ use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowS
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::DeviceKey;
-use crate::pages::performance::actions::{PerfShowSmart, PerfSmartRefresh};
+use crate::pages::performance::actions::{PerfShowSmart, PerfSmartReadSmartctl, PerfSmartRefresh};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -94,6 +99,10 @@ pub fn init(cx: &mut App) {
     cx.on_action(|a: &PerfSmartRefresh, cx| {
         let key = a.key.clone();
         cx.defer(move |cx| refresh_open(&key, cx));
+    });
+    cx.on_action(|a: &PerfSmartReadSmartctl, cx| {
+        let key = a.key.clone();
+        cx.defer(move |cx| read_admin_open(&key, cx));
     });
 }
 
@@ -251,6 +260,7 @@ struct Words {
     health: SharedString,
     selftest: SharedString,
     refresh: SharedString,
+    smartctl: SharedString,
     ok: SharedString,
     failing: SharedString,
     failed_past: SharedString,
@@ -275,6 +285,7 @@ impl Words {
             health: t("perf-smart-health"),
             selftest: t("perf-smart-selftest"),
             refresh: t("perf-smart-refresh"),
+            smartctl: t("perf-smart-smartctl"),
             ok: t("perf-smart-ok"),
             failing: t("perf-smart-failing"),
             failed_past: t("perf-smart-failed-past"),
@@ -705,6 +716,13 @@ pub struct SmartWindow {
     refreshing: bool,
     /// The update time Refresh was clicked at; the button re-enables when it changes.
     refresh_from: Option<i64>,
+    /// No UDisks2 SMART, smartctl installed: the smartctl button replaces Refresh.
+    fallback: bool,
+    reading_admin: bool,
+    /// The record `SmartReadAdmin` was sent at; the button stops spinning when it changes.
+    admin_from: Option<Arc<SmartData>>,
+    /// The last record seen, in any validity.
+    seen: Option<Arc<SmartData>>,
     table: Entity<TlTreeTable<SmartAtaDelegate>>,
     nvme: Vec<(SharedString, SharedString)>,
     words: Rc<Words>,
@@ -757,6 +775,10 @@ impl SmartWindow {
             error: None,
             refreshing: false,
             refresh_from: None,
+            fallback: false,
+            reading_admin: false,
+            admin_from: None,
+            seen: None,
             table,
             nvme: Vec::new(),
             words,
@@ -765,9 +787,19 @@ impl SmartWindow {
         };
         let snap = hub.read(cx).current().clone();
         this.sync(&snap, cx);
-        // `None` means never read.
-        if this.data.is_none() && this.error.is_none() && !this.record_exists(&snap) {
-            this.send(false, cx);
+        // `None` means never read. UDisks2 cannot read a fallback disk.
+        if !this.fallback
+            && this.data.is_none()
+            && this.error.is_none()
+            && !this.record_exists(&snap)
+        {
+            this.send(
+                DeviceCommand::SmartRead {
+                    disk: this.disk.clone(),
+                    update: false,
+                },
+                cx,
+            );
         }
         this
     }
@@ -786,6 +818,16 @@ impl SmartWindow {
 
     pub fn refreshing(&self) -> bool {
         self.refreshing
+    }
+
+    /// The disk needs the smartctl read.
+    pub fn fallback(&self) -> bool {
+        self.fallback
+    }
+
+    /// A `SmartReadAdmin` was sent and the record has not changed yet.
+    pub fn reading_admin(&self) -> bool {
+        self.reading_admin
     }
 
     pub fn error(&self) -> Option<&SharedString> {
@@ -807,9 +849,29 @@ impl SmartWindow {
 
     /// Takes the disk record's SMART state. True when something drawn changed.
     fn sync(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
-        let Some(field) = disk_details(snap, self.idx).and_then(|d| d.smart_data.as_ref()) else {
+        let Some(details) = disk_details(snap, self.idx) else {
             return false;
         };
+        let fallback = details.smart == SmartKind::NeedsFallback;
+        let mut changed = fallback != self.fallback;
+        self.fallback = fallback;
+        let Some(field) = details.smart_data.as_ref() else {
+            return changed;
+        };
+        self.seen = Some(field.value.clone());
+        if self.reading_admin {
+            // The read is still running, or the record is the one from before the click.
+            let old = self
+                .admin_from
+                .as_ref()
+                .is_some_and(|d| Arc::ptr_eq(d, &field.value));
+            if old || field.validity == Validity::WarmingUp {
+                return changed;
+            }
+            self.reading_admin = false;
+            self.admin_from = None;
+            changed = true;
+        }
         match field.validity {
             Validity::Failed => {
                 let reason = field.value.health.value.clone();
@@ -817,13 +879,13 @@ impl SmartWindow {
                 self.refreshing = false;
                 true
             }
-            Validity::WarmingUp => false,
+            Validity::WarmingUp => changed,
             _ => {
                 let new = &field.value;
-                let changed = self.error.take().is_some()
+                let new_data = self.error.take().is_some()
                     || self.data.as_ref().is_none_or(|d| !Arc::ptr_eq(d, new));
-                if !changed {
-                    return false;
+                if !new_data {
+                    return changed;
                 }
                 if self.refreshing && self.refresh_from != Some(new.updated_s) {
                     self.refreshing = false;
@@ -857,19 +919,17 @@ impl SmartWindow {
         });
     }
 
-    /// Sends `SmartRead`. Returns false when it was not accepted.
-    fn send(&mut self, update: bool, cx: &mut Context<Self>) -> bool {
+    /// Sends a SMART command. Returns false when it was not accepted. A full queue toasts for a
+    /// click, not for the read on open.
+    fn send(&mut self, cmd: DeviceCommand, cx: &mut Context<Self>) -> bool {
         let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
             return false;
         };
-        let cmd = Command::Device(DeviceCommand::SmartRead {
-            disk: self.disk.clone(),
-            update,
-        });
-        match engine.send(cmd) {
+        let clicked = !matches!(cmd, DeviceCommand::SmartRead { update: false, .. });
+        match engine.send(Command::Device(cmd)) {
             Ok(()) => true,
             Err(CommandError::Busy) => {
-                if update {
+                if clicked {
                     let text = tr(cx, "perf-smart-refresh-busy");
                     push_main_toast(cx, ToastKind::Warning, text, None, None);
                 }
@@ -885,9 +945,30 @@ impl SmartWindow {
         if self.refreshing {
             return;
         }
-        if self.send(true, cx) {
+        let cmd = DeviceCommand::SmartRead {
+            disk: self.disk.clone(),
+            update: true,
+        };
+        if self.send(cmd, cx) {
             self.refreshing = true;
             self.refresh_from = self.data.as_ref().map(|d| d.updated_s);
+            self.error = None;
+            cx.notify();
+        }
+    }
+
+    /// "Read with smartctl (admin)": one `SmartReadAdmin` that carries only the kernel name. The
+    /// button spins until the record changes.
+    pub fn read_admin(&mut self, cx: &mut Context<Self>) {
+        if self.reading_admin || !self.fallback {
+            return;
+        }
+        let cmd = DeviceCommand::SmartReadAdmin {
+            disk: self.disk.clone(),
+        };
+        if self.send(cmd, cx) {
+            self.reading_admin = true;
+            self.admin_from = self.seen.clone();
             self.error = None;
             cx.notify();
         }
@@ -976,16 +1057,31 @@ impl Render for SmartWindow {
         let m = *metrics(cx);
         let s = m.ui_scale;
         let this = cx.entity().downgrade();
-        let refresh = TlButton::new("SmartRefresh", TlButtonKind::Secondary)
-            .size(TlButtonSize::Sm)
-            .label(self.words.refresh.clone())
-            .loading(self.refreshing)
-            .disabled(self.refreshing)
-            .on_click(move |_, window, cx| {
-                if let Some(key) = this.upgrade().map(|w| w.read(cx).key.clone()) {
-                    window.dispatch_action(Box::new(PerfSmartRefresh { key }), cx);
-                }
-            });
+        let (button, selector) = if self.fallback {
+            let b = TlButton::new("SmartReadSmartctl", TlButtonKind::Secondary)
+                .size(TlButtonSize::Sm)
+                .label(self.words.smartctl.clone())
+                .loading(self.reading_admin)
+                .disabled(self.reading_admin)
+                .on_click(move |_, window, cx| {
+                    if let Some(key) = this.upgrade().map(|w| w.read(cx).key.clone()) {
+                        window.dispatch_action(Box::new(PerfSmartReadSmartctl { key }), cx);
+                    }
+                });
+            (b, "SmartReadSmartctl")
+        } else {
+            let b = TlButton::new("SmartRefresh", TlButtonKind::Secondary)
+                .size(TlButtonSize::Sm)
+                .label(self.words.refresh.clone())
+                .loading(self.refreshing)
+                .disabled(self.refreshing)
+                .on_click(move |_, window, cx| {
+                    if let Some(key) = this.upgrade().map(|w| w.read(cx).key.clone()) {
+                        window.dispatch_action(Box::new(PerfSmartRefresh { key }), cx);
+                    }
+                });
+            (b, "SmartRefresh")
+        };
         let header = div()
             .flex_none()
             .flex()
@@ -995,17 +1091,21 @@ impl Render for SmartWindow {
             .child(div().flex_1().min_w_0().child(self.header_grid(cx)))
             .child(
                 div()
-                    .debug_selector(|| "SmartRefresh".into())
+                    .debug_selector(move || selector.into())
                     .flex_none()
-                    .child(refresh),
+                    .child(button),
             );
         let body: AnyElement = if let Some(reason) = &self.error {
             self.render_failure(reason, &theme, &m)
         } else if self.data.as_ref().is_some_and(|d| !d.nvme.is_empty()) {
             self.render_nvme(&theme, &m, s)
+        } else if self.fallback && self.data.is_none() {
+            // Nothing read yet: no table until smartctl answers.
+            div().flex_1().into_any_element()
         } else {
             div()
                 .id("SmartTable")
+                .debug_selector(|| "SmartTable".into())
                 .flex_1()
                 .min_h_0()
                 .child(self.table.clone())
@@ -1108,6 +1208,16 @@ impl SmartWindow {
 
 /// Handles the page's `PerfSmartRefresh`: sends the read through the open window.
 pub fn refresh_open(key: &DeviceKey, cx: &mut App) {
+    with_open(key, cx, SmartWindow::refresh);
+}
+
+/// Handles `PerfSmartReadSmartctl`: sends the smartctl read through the open window.
+pub fn read_admin_open(key: &DeviceKey, cx: &mut App) {
+    with_open(key, cx, SmartWindow::read_admin);
+}
+
+/// Runs `f` on the open window of `key`.
+fn with_open(key: &DeviceKey, cx: &mut App, f: fn(&mut SmartWindow, &mut Context<SmartWindow>)) {
     let windows: Vec<_> = cx
         .windows()
         .into_iter()
@@ -1117,7 +1227,7 @@ pub fn refresh_open(key: &DeviceKey, cx: &mut App) {
         if let Some(frame) = TlSecondaryWindow::<SmartWindow>::find(handle, cx) {
             let content = frame.read(cx).content().clone();
             if content.read(cx).key == *key {
-                content.update(cx, |w, cx| w.refresh(cx));
+                content.update(cx, |w, cx| f(w, cx));
             }
         }
     }
