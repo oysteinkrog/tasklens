@@ -2948,6 +2948,45 @@ mod tests {
         assert_eq!(src.pending_len(), 0);
     }
 
+    /// tasklens-dwy.9: with more scans than `SCAN_STEPS_PER_SAMPLE` (10 scans, 8 reads), each
+    /// sample goes on where the last one stopped, so after two samples every scan has read.
+    #[test]
+    fn string_scans_take_turns() {
+        const LEN: u64 = 16 << 20;
+        let (tmp, cfg, keys) = fake_procs(10);
+        for k in &keys {
+            let dir = tmp.path().join(format!("proc/{}", k.pid));
+            let maps = format!("00001000-{:08x} rw-p 00000000 00:00 0\n", 0x1000 + LEN);
+            fs::write(dir.join("maps"), maps).expect("write maps");
+            let mem = fs::File::create(dir.join("mem")).expect("create mem");
+            mem.set_len(0x1000 + LEN).expect("size mem");
+        }
+        let d = tabs(
+            &keys
+                .iter()
+                .map(|&k| (k, DetailTab::Strings))
+                .collect::<Vec<_>>(),
+        );
+        let mut src = ProcessDetailSource::new(cfg);
+        for (n, &key) in (1..).zip(&keys) {
+            assert!(src.command(&WorkerCommand::StringScan {
+                scan: ScanId(n),
+                key,
+                opts: StringScanOpts::default(),
+            }));
+        }
+        let mut now = 1_000 * MS;
+        for _ in 0..2 {
+            src.period(&d, &every_ms(500));
+            (src, _) = src.sample_at(now);
+            while src.take_extra().is_some() {}
+            now += 50 * MS;
+        }
+        assert_eq!(src.scans.len(), 10);
+        let pcts: Vec<u8> = src.scans.iter().map(|s| s.scanner.progress_pct()).collect();
+        assert!(pcts.iter().all(|&p| p > 0), "{pcts:?}");
+    }
+
     /// At most `DETAILS_MAX` hash requests wait; the oldest goes first.
     #[test]
     fn hash_requests_capped() {
