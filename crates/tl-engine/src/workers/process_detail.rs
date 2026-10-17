@@ -398,11 +398,7 @@ impl HelperSide {
     /// a read of the slot waits, and within `HELPER_PERIOD - HELPER_SLACK` of the last one
     /// queued. `HelperDetailReads` holds the full `HELPER_PERIOD` between sent reads.
     fn request(&mut self, slot: HelperSlot, files: ProcFiles, now: TimeNs) -> bool {
-        let last = self.last.get(&slot).copied();
-        if !self.unlocked()
-            || self.pending.contains(&slot)
-            || !elapsed(last, now, HELPER_PERIOD - HELPER_SLACK)
-        {
+        if !self.unlocked() || self.pending.contains(&slot) || self.held(slot, now) {
             return false;
         }
         if self.jobs.try_send(HelperJob::Read { slot, files }).is_err() {
@@ -411,6 +407,13 @@ impl HelperSide {
         self.pending.insert(slot);
         self.last.insert(slot, now);
         true
+    }
+
+    /// True while `HELPER_PERIOD - HELPER_SLACK` has not passed since the last read of `slot`
+    /// was queued.
+    fn held(&self, slot: HelperSlot, now: TimeNs) -> bool {
+        let last = self.last.get(&slot).copied();
+        !elapsed(last, now, HELPER_PERIOD - HELPER_SLACK)
     }
 
     /// The answered reads since the last call.
@@ -1682,13 +1685,20 @@ impl ProcessDetailSource {
                 }
                 Err(Validity::Restricted) => match tab_helper_files(tab) {
                     Some(files) => {
-                        side.request(slot_id, files, now);
-                        let via_helper = state.tabs[tab.index()]
-                            .as_ref()
-                            .is_some_and(|s| s.via_helper);
-                        // A helper payload stays, and a tab that waits for the helper sends
-                        // nothing until the reply.
-                        if via_helper || side.pending.contains(&slot_id) {
+                        let sent = side.request(slot_id, files, now);
+                        let pending = side.pending.contains(&slot_id);
+                        let held = !pending && side.unlocked() && side.held(slot_id, now);
+                        let slot = state.tabs[tab.index()].get_or_insert_with(TabState::default);
+                        // Environment is read only on open and on refresh, so a read the
+                        // helper did not take, for example a refresh within `HELPER_PERIOD`
+                        // of the last read, is tried again at the next sample.
+                        if tab == DetailTab::Environment && !sent && !pending && side.unlocked() {
+                            slot.env_loaded = false;
+                        }
+                        // A helper payload stays, a tab that waits for the helper sends nothing
+                        // until the reply, and a tab whose read `HELPER_PERIOD` held back sends
+                        // nothing until it is read again.
+                        if slot.via_helper || pending || held {
                             return None;
                         }
                         Err(Validity::Restricted)

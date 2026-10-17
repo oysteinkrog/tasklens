@@ -3218,6 +3218,42 @@ mod detail_helper {
         rig.finish();
     }
 
+    /// qfx.18 review round 3: a refresh within `HELPER_PERIOD` of the last helper read is not
+    /// lost. The read is sent at the first sample after the period, and the tab sends no
+    /// Restricted payload while it waits.
+    #[test]
+    fn detail_refresh_within_period_reads_again() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("environ");
+        let mut rig = Rig::start(&root, demand(&[DetailTab::Environment]), 250, true);
+        rig.run(Duration::from_millis(400));
+        assert_eq!(rig.reads().len(), 1);
+        let before = rig.tab(DetailTab::Environment).len();
+
+        rig.command(WorkerCommand::DetailRefresh {
+            target: DetailTarget::Process(key()),
+            tab: DetailTab::Environment,
+        });
+        rig.run(Duration::from_millis(2_000));
+        let times: Vec<u64> = rig.reads().iter().map(|r| r.0).collect();
+        assert_eq!(times, [0, 1_000], "the refresh read waits for the period");
+        let env = rig.tab(DetailTab::Environment);
+        let after = &env[before..];
+        assert!(!after.is_empty(), "the refresh sent a payload");
+        assert!(
+            after.iter().all(|t| t.validity == Validity::Valid),
+            "no Restricted payload while the read waits"
+        );
+        assert_eq!(
+            env_vars(&after.last().expect("a payload").payload),
+            want_vars()
+        );
+        rig.finish();
+    }
+
     /// qfx.18 review round 2: a General read whose `status` is Restricted asks the helper for
     /// `STATUS`, and the status fields (here the uids and No new privileges) fill from it.
     #[test]
