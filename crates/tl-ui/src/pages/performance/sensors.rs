@@ -34,6 +34,7 @@ use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
+use super::actions::{PerfRenameFan, PerfSetFanTempSensor};
 use super::details::{Fallback, KeyValueModel};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
 use super::{
@@ -46,6 +47,7 @@ use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GapStyle, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
+use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
@@ -54,6 +56,7 @@ use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{label_style, t_xs};
 use crate::theme::palette::accent_color;
 use crate::theme::{TlTheme, current, metrics};
+use crate::window::settings::{set_fan_label, set_fan_temp};
 
 /// Debug selector of the Fan speed chart box.
 pub const SPEED_ID: &str = "perf-fan-speed";
@@ -993,6 +996,84 @@ fn fan_number(key: &DeviceKey, snap: &Snapshot, cx: &App) -> u16 {
     type_number(&visible, key)
 }
 
+/// One radio item of the "Temperature sensor" submenu.
+struct FanSensorOption {
+    /// The stored `temp` value: the sensor key without its `sensor:` prefix.
+    value: Arc<str>,
+    /// "<chip> <label>".
+    label: SharedString,
+    /// "48 °C", or `-` without a valid reading.
+    reading: SharedString,
+}
+
+/// Every present hwmon temperature sensor in catalog order.
+fn fan_sensor_options(snap: &Snapshot) -> Vec<FanSensorOption> {
+    snap.devices
+        .entries
+        .iter()
+        .filter(|e| e.present)
+        .filter_map(|e| {
+            let DeviceIdentity::Sensor { chip, label } = &e.identity else {
+                return None;
+            };
+            let reading = snap
+                .system
+                .sensors
+                .iter()
+                .find(|(idx, r)| *idx == e.idx && r.kind == SensorKind::Temperature)
+                .map(|(_, r)| r.value)
+                .filter(|m| m.validity == Validity::Valid);
+            let mut text = String::new();
+            match reading {
+                Some(m) => units::celsius(&mut text, m.value),
+                None => text.push_str(NO_VALUE),
+            }
+            let value = e
+                .persistent_key
+                .strip_prefix("sensor:")
+                .unwrap_or(&e.persistent_key);
+            Some(FanSensorOption {
+                value: Arc::from(value),
+                label: format!("{chip} {label}").into(),
+                reading: text.into(),
+            })
+        })
+        .collect()
+}
+
+impl FanPage {
+    /// `PerfRenameFan`: opens the Rename dialog with the shown name. Confirming writes
+    /// `fans[key].label`; an empty text removes it. The page follows through its settings
+    /// observer.
+    fn on_rename(&mut self, a: &PerfRenameFan, window: &mut Window, cx: &mut Context<Self>) {
+        if a.key != self.key {
+            return;
+        }
+        let key = self.key.0.clone();
+        let title = tr(cx, "perf-fan-rename-title");
+        let initial = self.header.0.clone();
+        let dialog = TlDialog::confirm(title.clone(), tr(cx, "perf-fan-rename-ok"))
+            .title(title)
+            .text_input(initial, tr(cx, "perf-fan-rename-placeholder"));
+        let opened = dialog.open(window, cx, move |result, _, cx| {
+            if let DialogResult::ConfirmedText(text) = result {
+                set_fan_label(&key, &text, cx);
+            }
+        });
+        if opened.is_err() {
+            tracing::debug!(target: "tasklens::ui", "fan rename dialog did not open");
+        }
+    }
+
+    /// `PerfSetFanTempSensor`: writes `fans[key].temp`, or removes it for `None`.
+    fn on_set_sensor(&mut self, a: &PerfSetFanTempSensor, _: &mut Window, cx: &mut Context<Self>) {
+        if a.key != self.key {
+            return;
+        }
+        set_fan_temp(&self.key.0, a.sensor.as_deref(), cx);
+    }
+}
+
 impl DevicePage for FanPage {
     fn key(&self) -> &DeviceKey {
         &self.key
@@ -1031,9 +1112,37 @@ impl DevicePage for FanPage {
         SmallVec::new()
     }
 
-    /// E25-032 adds "Rename fan…" and "Temperature sensor >".
-    fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
-        menu
+    /// "Rename fan…" and "Temperature sensor >" (PERF-077, UI-PRF-034). The sensor values are
+    /// read from the newest snapshot once, when the menu opens.
+    fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+        let key = self.key.clone();
+        let snap = Arc::clone(self.hub.read(cx).current());
+        let options = fan_sensor_options(&snap);
+        let current = self.sensor.clone();
+        let none = tr(cx, "perf-fan-sensor-none");
+        let rename = Box::new(PerfRenameFan { key: key.clone() });
+        menu.item(tr(cx, "perf-fan-menu-rename"), rename).submenu(
+            tr(cx, "perf-fan-menu-sensor"),
+            window,
+            cx,
+            move |mut menu, _, _| {
+                for o in &options {
+                    let selected = current.as_deref() == Some(&*o.value);
+                    let action = Box::new(PerfSetFanTempSensor {
+                        key: key.clone(),
+                        sensor: Some(o.value.clone()),
+                    });
+                    menu = menu
+                        .radio_item(o.label.clone(), selected, action)
+                        .value(o.reading.clone());
+                }
+                let action = Box::new(PerfSetFanTempSensor {
+                    key: key.clone(),
+                    sensor: None,
+                });
+                menu.radio_item(none.clone(), current.is_none(), action)
+            },
+        )
     }
 
     /// The Fan copy text (PERF-011): the header lines, then the Details rows. The page has no
@@ -1099,14 +1208,19 @@ impl Render for FanPage {
         }
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        div().size_full().track_focus(&self.focus).child(
-            DevicePageFrame {
-                page: self,
-                m: &m,
-                theme: &theme,
-            }
-            .render(window, cx),
-        )
+        div()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_rename))
+            .on_action(cx.listener(Self::on_set_sensor))
+            .child(
+                DevicePageFrame {
+                    page: self,
+                    m: &m,
+                    theme: &theme,
+                }
+                .render(window, cx),
+            )
     }
 }
 

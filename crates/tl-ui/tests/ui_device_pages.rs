@@ -3410,3 +3410,331 @@ mod copy_toast {
         }
     }
 }
+
+/// The Fan page menu: "Rename fan…" and "Temperature sensor >" with `[fans]` persistence
+/// (E25-032, PERF-077, UI-PRF-034).
+mod fan_menu {
+    use super::*;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point};
+    use tl_ui::components::dialog::TlDialogView;
+    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenuPopup, open_context_menu};
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::pages::performance::PAGE_PANEL_ID;
+    use tl_ui::pages::performance::actions::{PerfRenameFan, PerfSetFanTempSensor};
+
+    const FAN: &str = "fan:nct6797:2";
+    const FAN_IDX: u16 = 10;
+
+    fn sensor_key(n: u16) -> String {
+        format!("nct6797:/sys/devices/platform/nct6797.2592/hwmon/hwmon3:temp{n}")
+    }
+
+    fn temp(idx: u16, c: f32) -> (DeviceIdx, SensorReading) {
+        (
+            DeviceIdx(idx),
+            SensorReading {
+                device: DeviceIdx(idx),
+                kind: SensorKind::Temperature,
+                value: Metric::valid(c),
+                pwm_pct: Metric::with(Validity::Unsupported),
+                fan_control: None,
+                fan_connected: false,
+                fan_max_rpm: None,
+            },
+        )
+    }
+
+    /// Seven fans on `nct6797` and twelve hwmon temperature sensors (idx 20 to 31, 48 °C up).
+    fn publish_fan_and_sensors(r: &mut Rig) {
+        r.engine.publish_with(|s| {
+            let mut entries = catalog();
+            let mut sensors = Vec::new();
+            for n in 1..=7u16 {
+                entries.push(entry(
+                    9 + (n - 1),
+                    DeviceIdentity::Fan {
+                        chip: Arc::from("nct6797"),
+                        index: n,
+                    },
+                    None,
+                ));
+                sensors.push((
+                    DeviceIdx(9 + (n - 1)),
+                    SensorReading {
+                        device: DeviceIdx(9 + (n - 1)),
+                        kind: SensorKind::Fan,
+                        value: Metric::valid(1200.0),
+                        pwm_pct: Metric::valid(45.0),
+                        fan_control: Some(FanControlMode::Automatic),
+                        fan_connected: true,
+                        fan_max_rpm: Some(2000),
+                    },
+                ));
+            }
+            for n in 1..=12u16 {
+                let mut e = entry(
+                    19 + n,
+                    DeviceIdentity::Sensor {
+                        chip: Arc::from("nct6797"),
+                        label: Arc::from(format!("temp{n}")),
+                    },
+                    None,
+                );
+                e.persistent_key = Arc::from(format!("sensor:{}", sensor_key(n)));
+                entries.push(e);
+                sensors.push(temp(19 + n, 47.6 + f32::from(n)));
+            }
+            s.devices = Arc::new(DeviceCatalog {
+                version: 2,
+                entries: Arc::from(entries),
+            });
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.sensors = Arc::from(sensors);
+        });
+        draw(r.vcx);
+    }
+
+    fn fan_page(r: &mut Rig) -> Entity<FanPage> {
+        view_of(r, FAN).downcast::<FanPage>().expect("a FanPage")
+    }
+
+    fn right_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    /// The entries of the "Temperature sensor" submenu.
+    fn sensor_entries(r: &mut Rig) -> Vec<MenuEntryInfo> {
+        let at = r
+            .vcx
+            .debug_bounds(PAGE_PANEL_ID)
+            .expect("the page panel")
+            .center();
+        right_click(r.vcx, at);
+        let menu: Entity<TlMenuPopup> = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("a context menu is open");
+        r.vcx.update(|window, cx| {
+            let entries = menu.read(cx).entries_for_test(window);
+            let rename = entries
+                .iter()
+                .any(|e| e.label.as_deref() == Some("Rename fan…"));
+            assert!(rename, "Rename fan… item");
+            let sub = entries
+                .iter()
+                .find(|e| e.label.as_deref() == Some("Temperature sensor"))
+                .and_then(|e| e.submenu.clone())
+                .expect("the sensor submenu");
+            sub.read(cx).entries_for_test(window)
+        })
+    }
+
+    fn dispatch<A: gpui_kit::Action>(r: &mut Rig, action: A) {
+        let page = fan_page(r);
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle(cx);
+            focus.dispatch_action(&action, window, cx);
+        });
+        draw(r.vcx);
+    }
+
+    fn header(r: &mut Rig) -> String {
+        let view = view_of(r, FAN);
+        r.vcx.update(|_, cx| header_of(&view, cx).0.to_string())
+    }
+
+    fn label_of(r: &mut Rig) -> Option<String> {
+        r.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .fans
+                .get(FAN)
+                .and_then(|f| f.label.clone())
+        })
+    }
+
+    fn temp_of(r: &mut Rig) -> Option<String> {
+        r.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .fans
+                .get(FAN)
+                .and_then(|f| f.temp.clone())
+        })
+    }
+
+    /// The open Rename dialog, drawn.
+    fn dialog(r: &mut Rig) -> (VisualTestContext, Entity<TlDialogView>) {
+        let (any, frame) = r
+            .vcx
+            .update(|_, cx| {
+                cx.windows().into_iter().find_map(|w| {
+                    let handle = w.downcast::<Root>()?;
+                    let frame = TlSecondaryWindow::<TlDialogView>::find(handle, cx)?;
+                    Some((w, frame))
+                })
+            })
+            .expect("the Rename dialog is open");
+        let view = r.vcx.update(|_, cx| frame.read(cx).content().clone());
+        let mut vcx = VisualTestContext::from_window(any, &r.vcx.cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        (vcx, view)
+    }
+
+    macro_rules! rig {
+        ($cx:ident, $r:ident) => {
+            let (engine, mut vcx, page, _queue) = net_settings::open_root($cx, None);
+            let mut $r = Rig {
+                page,
+                engine,
+                vcx: &mut vcx,
+            };
+            publish_fan_and_sensors(&mut $r);
+            select(&mut $r, FAN);
+        };
+    }
+
+    fn rename(r: &mut Rig, text: &str) {
+        dispatch(r, PerfRenameFan { key: key(FAN) });
+        let (mut dvcx, _view) = dialog(r);
+        if text.is_empty() {
+            dvcx.simulate_keystrokes("backspace");
+        } else {
+            dvcx.simulate_input(text);
+        }
+        draw(&mut dvcx);
+        dvcx.simulate_keystrokes("enter");
+        dvcx.run_until_parked();
+        draw(r.vcx);
+    }
+
+    #[gpui_kit::test]
+    fn fan_rename_writes_label(cx: &mut TestAppContext) {
+        rig!(cx, r);
+        assert_eq!(header(&mut r), "Fan 1");
+        rename(&mut r, "Front intake");
+        assert_eq!(label_of(&mut r).as_deref(), Some("Front intake"));
+        assert_eq!(header(&mut r), "Front intake");
+    }
+
+    #[gpui_kit::test]
+    fn fan_rename_empty_restores_default(cx: &mut TestAppContext) {
+        rig!(cx, r);
+        rename(&mut r, "Front intake");
+        assert_eq!(header(&mut r), "Front intake");
+        rename(&mut r, "");
+        assert_eq!(label_of(&mut r), None);
+        r.vcx.update(|_, cx| {
+            assert!(
+                !TlSettings::settings(cx).fans.contains_key(FAN),
+                "the entry is removed"
+            );
+        });
+        assert_eq!(header(&mut r), "Fan 1");
+    }
+
+    #[gpui_kit::test]
+    fn fan_sensor_menu_items(cx: &mut TestAppContext) {
+        rig!(cx, r);
+        let page = fan_page(&mut r);
+        let chosen = sensor_key(3);
+        dispatch(
+            &mut r,
+            PerfSetFanTempSensor {
+                key: key(FAN),
+                sensor: Some(Arc::from(chosen.as_str())),
+            },
+        );
+        assert_eq!(
+            r.vcx
+                .update(|_, cx| page.read(cx).sensor().map(str::to_owned)),
+            Some(chosen)
+        );
+        let items = sensor_entries(&mut r);
+        let radios: Vec<_> = items
+            .iter()
+            .filter(|e| e.kind != MenuEntryKind::Separator)
+            .collect();
+        assert_eq!(radios.len(), 13, "12 sensors and None");
+        assert_eq!(radios[0].label.as_deref(), Some("nct6797 temp1"));
+        assert_eq!(radios[0].value.as_deref(), Some("49 °C"));
+        assert_eq!(radios[11].label.as_deref(), Some("nct6797 temp12"));
+        assert_eq!(radios[12].label.as_deref(), Some("None"));
+        let checked: Vec<_> = radios.iter().map(|e| e.checked).collect();
+        let mut expected = vec![false; 13];
+        expected[2] = true;
+        assert_eq!(checked, expected, "only temp3 is checked");
+    }
+
+    #[gpui_kit::test]
+    fn fan_sensor_choice_rebinds_chart(cx: &mut TestAppContext) {
+        rig!(cx, r);
+        let page = fan_page(&mut r);
+        let sensor = sensor_key(3);
+        dispatch(
+            &mut r,
+            PerfSetFanTempSensor {
+                key: key(FAN),
+                sensor: Some(Arc::from(sensor.as_str())),
+            },
+        );
+        assert_eq!(temp_of(&mut r).as_deref(), Some(sensor.as_str()));
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            assert_eq!(p.sensor(), Some(sensor.as_str()));
+            let t = p.temperature().read(cx);
+            assert_eq!(t.spec.series.len(), 1);
+            assert_eq!(t.spec.series[0].id.device, DeviceIdx(22));
+        });
+        assert_eq!(FAN_IDX, 10);
+    }
+
+    #[gpui_kit::test]
+    fn fan_sensor_none(cx: &mut TestAppContext) {
+        rig!(cx, r);
+        let page = fan_page(&mut r);
+        let sensor = sensor_key(3);
+        dispatch(
+            &mut r,
+            PerfSetFanTempSensor {
+                key: key(FAN),
+                sensor: Some(Arc::from(sensor.as_str())),
+            },
+        );
+        dispatch(
+            &mut r,
+            PerfSetFanTempSensor {
+                key: key(FAN),
+                sensor: None,
+            },
+        );
+        assert_eq!(temp_of(&mut r), None);
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            assert_eq!(
+                p.sensor(),
+                None,
+                "seven fans on one chip: no default pairing"
+            );
+            assert_eq!(
+                p.choose_sensor_text().map(|t| t.as_ref()),
+                Some("Choose a sensor")
+            );
+        });
+    }
+}

@@ -28,6 +28,8 @@ mod services;
 mod startup_window;
 mod units;
 
+pub(crate) use performance::{set_fan_label, set_fan_temp};
+
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::sync::Arc;
