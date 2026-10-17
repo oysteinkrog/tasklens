@@ -106,6 +106,12 @@ impl SysQuery {
         self.send(client);
     }
 
+    /// Sets the expanded nodes without sending. The next send carries them, so a page can open
+    /// with its saved groups expanded before its first query.
+    pub fn seed_expanded(&mut self, expanded: Arc<[SysNodeId]>) {
+        self.current.expanded = expanded;
+    }
+
     pub fn set_services_filter(&mut self, f: ServiceFilter, client: &dyn EngineClient) {
         self.current.services = Some(f);
         self.send(client);

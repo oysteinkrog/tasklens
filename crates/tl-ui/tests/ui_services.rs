@@ -3417,6 +3417,77 @@ mod page {
         assert_eq!(rig.count_toast("Loading service data..."), 0);
     }
 
+    /// tasklens-hk6.39, UI-SYS-004: the group rows open from the saved state, so the first query
+    /// carries them as expanded and the unit rows show on open with no input. The view is built
+    /// as the engine builds it: a group lists its units only when the query expands it.
+    #[gpui_kit::test]
+    fn services_unit_rows_show_on_open(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let query = rig.last_query().expect("the first visit sends the query");
+        for manager in [Manager::System, Manager::User] {
+            assert!(
+                query.expanded.contains(&SysNodeId::ServiceGroup(manager)),
+                "{manager:?} group expanded in the first query"
+            );
+        }
+
+        let units = fixture();
+        let view: Vec<SysRow> = rows(&units, &[])
+            .into_iter()
+            .filter_map(|mut row| {
+                let group = match &row.node {
+                    SysNodeId::ServiceGroup(m) => *m,
+                    SysNodeId::Unit(u) | SysNodeId::UnitProcess(u, _) => u.manager,
+                    _ => return Some(row),
+                };
+                let open = query.expanded.contains(&SysNodeId::ServiceGroup(group));
+                match row.node {
+                    SysNodeId::ServiceGroup(_) => {
+                        row.expanded = open;
+                        Some(row)
+                    }
+                    _ => open.then_some(row),
+                }
+            })
+            .collect();
+        let generation = query.generation;
+        rig.engine.publish_with(|snapshot| {
+            snapshot.services = Arc::new(ServicesSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                rows: view.into(),
+                query_generation: generation,
+                units: units.into(),
+                counts: ServiceCounts {
+                    total: 20,
+                    running: 15,
+                    stopped: 5,
+                },
+                managers: [ManagerState::Connected; 2],
+                manager_counts: [SYSTEM_UNITS as u32, 5],
+                ..ServicesSnapshot::default()
+            });
+        });
+        rig.vcx.run_until_parked();
+        rig.draw();
+
+        assert_eq!(
+            rig.vcx.read_entity(&rig.page, |p, _| p.body()),
+            SysBody::Rows
+        );
+        let table = rig.table();
+        let (count, visible) = rig.vcx.read_entity(&table, |t, _| {
+            (t.delegate.row_count(), t.visible_range().len())
+        });
+        // 20 unit rows and 2 group rows, all in the 800 px window.
+        assert_eq!(count, 22);
+        assert_eq!(visible, 22);
+    }
+
     #[gpui_kit::test]
     fn f5_refresh_toast_after_update(cx: &mut TestAppContext) {
         const DONE: &str = "Services refreshed.";

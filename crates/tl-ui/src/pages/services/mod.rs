@@ -157,7 +157,10 @@ impl ServicesPage {
         delegate.set_page(cx.weak_entity());
         delegate.set_window(Some(window.window_handle()));
         let sort = delegate.sort();
-        let frame = SysTableFrame::new(
+        // The group rows draw open from the saved state; the engine lists their units only for
+        // groups in the query's expanded set (UI-SYS-004).
+        let expanded: Arc<[SysNodeId]> = delegate.expanded().iter().cloned().collect();
+        let mut frame = SysTableFrame::new(
             Tab::Services,
             SERVICE_TABLE_CONTEXT,
             &[SourceId::SystemdSystem, SourceId::SystemdUser],
@@ -167,6 +170,7 @@ impl ServicesPage {
             window,
             cx,
         );
+        frame.query.seed_expanded(expanded);
         let focus = frame.table.read(cx).focus_handle().clone();
         let table = frame.table.clone();
         let mut subs = Vec::with_capacity(6);
