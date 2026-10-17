@@ -312,7 +312,12 @@ impl Source for ProcessesSource {
         if let Some(helper) = &mut self.helper {
             helper.after_sweep(&mut self.out, &mut extras_p2);
         }
-        fill_io_priority(&mut extras_p2, self.io_priority, self.ctx.boot_id);
+        fill_io_priority(
+            &mut extras_p2,
+            &detail_keys,
+            self.io_priority,
+            self.ctx.boot_id,
+        );
         let out = &mut self.out;
         let records = std::mem::take(&mut out.records);
         tracing::debug!(count = records.len(), "process sweep");
@@ -497,11 +502,21 @@ pub fn host_app_paths() -> AppPaths {
     }
 }
 
-/// Sets `io_priority` on every entry with a key, which are the detail keys and the rows the
-/// helper filled (R-144). A failed read leaves `None`, which the UI shows as unavailable.
-fn fill_io_priority(extras_p2: &mut [ProcessExtrasP2], read: IoPriorityRead, boot: BootId) {
+/// Sets `io_priority` on the entries whose key is a detail key, so only visible rows are read
+/// (R-144). Rows the helper filled for other keys stay `None`, as does a failed read, which the
+/// UI shows as unavailable.
+fn fill_io_priority(
+    extras_p2: &mut [ProcessExtrasP2],
+    detail_keys: &[ProcessKey],
+    read: IoPriorityRead,
+    boot: BootId,
+) {
+    if detail_keys.is_empty() {
+        return;
+    }
+    let visible: FxHashSet<ProcessKey> = detail_keys.iter().copied().collect();
     for p2 in extras_p2 {
-        if let Some(key) = p2.key {
+        if let Some(key) = p2.key.filter(|k| visible.contains(k)) {
             p2.io_priority = read(key, boot);
         }
     }
@@ -911,13 +926,16 @@ mod tests {
         }
     }
 
-    /// Only entries with a key get an I/O priority; a failed read stays `None` (R-144).
+    /// Only entries whose key is a detail key get an I/O priority; a keyed entry outside the
+    /// detail keys (a helper-filled row that left the screen) and a failed read stay `None`.
     #[test]
     fn fill_io_priority_only_detail_keys() {
         fn read(key: ProcessKey, _boot: BootId) -> Option<IoPriority> {
             match key.pid {
                 10 => Some(IoPriority::None),
                 20 => Some(IoPriority::BestEffort(7)),
+                // Readable, but not a detail key, so it must not be read.
+                21 => Some(IoPriority::Idle),
                 _ => None,
             }
         }
@@ -935,8 +953,10 @@ mod tests {
             entry(None),
             entry(Some(key(20))),
             entry(Some(key(30))),
+            entry(Some(key(20 + 1))),
         ];
-        fill_io_priority(&mut p2, read, BootId(1));
+        let detail = [key(10), key(20), key(30)];
+        fill_io_priority(&mut p2, &detail, read, BootId(1));
         let got: Vec<_> = p2.iter().map(|p| p.io_priority).collect();
         assert_eq!(
             got,
@@ -944,6 +964,7 @@ mod tests {
                 Some(IoPriority::None),
                 None,
                 Some(IoPriority::BestEffort(7)),
+                None,
                 None
             ]
         );
