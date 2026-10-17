@@ -34,6 +34,7 @@ use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::actions::CloseMiniWindow;
+use crate::pages::minigraph::bridge::OwnWindowBridge;
 use crate::pages::performance::DeviceKey;
 use crate::pages::performance::card::{CARD_H, CardLines, CardView};
 use crate::pages::performance::sidebar::DeviceSidebar;
@@ -333,6 +334,7 @@ fn work_area_h(window: Option<&Window>, cx: &App) -> f32 {
 /// Opens the mini window, or focuses it when it is open (UI-FND-021). Failure shows the toast
 /// "Could not open the mini window".
 pub fn open_mini(cx: &mut App) -> OpenOutcome {
+    OwnWindowBridge::ensure(cx);
     let toast_failed = |cx: &mut App| {
         let text = tr(cx, "mini-window-toast-open-failed");
         push_main_toast(cx, ToastKind::Error, text, None, None);

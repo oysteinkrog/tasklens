@@ -730,6 +730,25 @@ impl MinigraphPanel {
         self.toast(ToastKind::Success, "minigraph-toast-reset", cx);
     }
 
+    /// The `[[detached_windows]]` entries.
+    pub fn windows(&self) -> &[DetachedWindowState] {
+        &self.windows
+    }
+
+    /// Stores the position of detached window `id` (a move read back from KWin) and persists it.
+    /// False when the window is unknown or the position is unchanged.
+    pub fn set_window_position(&mut self, id: u32, x: i32, y: i32, cx: &mut Context<Self>) -> bool {
+        let Some(w) = self.windows.iter_mut().find(|w| w.id == id) else {
+            return false;
+        };
+        if (w.x, w.y) == (x, y) {
+            return false;
+        }
+        (w.x, w.y) = (x, y);
+        self.persist(cx);
+        true
+    }
+
     /// Writes `UiState.minigraphs`; tl-app debounces the file write by 500 ms (ADR-011).
     pub fn persist(&self, cx: &mut App) {
         if !cx.has_global::<TlSettings>() {

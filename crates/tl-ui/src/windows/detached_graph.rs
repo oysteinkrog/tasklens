@@ -27,6 +27,7 @@ use crate::pages::minigraph::actions::{
     MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphHide,
     MinigraphRemove,
 };
+use crate::pages::minigraph::bridge::OwnWindowBridge;
 use crate::pages::minigraph::card::{MINI_CARD_H, MINI_CARD_W, MinigraphCard};
 use crate::pages::minigraph::menu::{color_submenu, range_submenu};
 use crate::pages::minigraph::panel::{MinigraphPanel, SYSTEM, gpu_order, same_kind};
@@ -293,6 +294,7 @@ pub fn open_detached(
     saved: Option<&DetachedWindowState>,
     cx: &mut App,
 ) -> gpui_kit::Result<WindowHandle<Root>> {
+    OwnWindowBridge::ensure(cx);
     let toast_failed = |cx: &mut App| {
         let text = tr(cx, "minigraph-toast-detach-failed");
         push_main_toast(cx, ToastKind::Error, text, None, None);

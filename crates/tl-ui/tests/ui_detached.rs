@@ -247,6 +247,11 @@ mod detach {
     use tl_ui::windows::detached_graph::{DetachedGraphWindow, window_size};
 
     use super::catalog;
+    use std::time::Duration;
+    use tl_model::command::{Command, KWinCommand};
+    use tl_model::snapshot::{ComponentHeader, FrameGeometry, WindowEntry, WindowsSnapshot};
+    use tl_model::validity::Validity;
+    use tl_ui::pages::minigraph::bridge::OwnWindowBridge;
 
     /// Hosts the panel cached over a 1000 × 600 box, as the Processes page does.
     struct PanelHost {
@@ -268,6 +273,7 @@ mod detach {
         vcx: VisualTestContext,
         hub: Entity<SnapshotHub>,
         demand: Entity<DemandAggregator>,
+        engine: Arc<FakeEngine>,
     }
 
     fn draw(vcx: &mut VisualTestContext) {
@@ -324,6 +330,7 @@ mod detach {
             vcx,
             hub,
             demand,
+            engine,
         }
     }
 
@@ -572,6 +579,145 @@ mod detach {
             }],
             ..UiState::default()
         }
+    }
+
+    const GRAPH_1_ID: &str = "{11111111-2222-3333-4444-555555555555}";
+
+    /// Window 1 holds Memory and has the saved position (x, y).
+    fn placed_state(x: i32, y: i32) -> UiState {
+        let mut state = two_card_state();
+        state.detached_windows[0].x = x;
+        state.detached_windows[0].y = y;
+        state
+    }
+
+    fn publish_windows(r: &mut Rig, validity: Validity, x: i32, y: i32) {
+        let entry = WindowEntry {
+            internal_id: Arc::from(GRAPH_1_ID),
+            pid: std::process::id(),
+            caption: Arc::from("tasklens Graph 1"),
+            resource_class: Arc::from("tasklens"),
+            desktop_file_name: Arc::from("tasklens"),
+            minimized: false,
+            maximized: false,
+            keep_above: false,
+            frame_geometry: FrameGeometry {
+                x,
+                y,
+                width: 180,
+                height: 90,
+            },
+            window_type: 0,
+            stack_index: 0,
+        };
+        r.engine.publish_with(|s| {
+            let version = s.windows.header.version + 1;
+            s.windows = Arc::new(WindowsSnapshot {
+                header: ComponentHeader {
+                    version,
+                    validity,
+                    ..ComponentHeader::default()
+                },
+                windows: Arc::from(vec![entry]),
+                pick: None,
+            });
+        });
+        r.vcx.run_until_parked();
+    }
+
+    fn kwin_commands(r: &Rig) -> Vec<KWinCommand> {
+        r.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::KWin(k) => Some(k),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn saved_position(cx: &mut TestAppContext) -> (i32, i32) {
+        cx.read(|cx| {
+            let st = TlSettings::state(cx);
+            let w = st
+                .detached_windows
+                .iter()
+                .find(|w| w.id == 1)
+                .expect("entry");
+            (w.x, w.y)
+        })
+    }
+
+    fn bridge_writes(cx: &mut TestAppContext) -> u32 {
+        cx.read(|cx| OwnWindowBridge::global(cx).expect("bridge").read(cx).writes)
+    }
+
+    #[gpui_kit::test]
+    fn detached_bridge_commands_once(cx: &mut TestAppContext) {
+        let mut r = rig(cx, placed_state(100, 200));
+        assert!(registry_has(cx, 1));
+        publish_windows(&mut r, Validity::Valid, 0, 0);
+        let first = kwin_commands(&r);
+        let pid = std::process::id();
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert_eq!(
+            first[0],
+            KWinCommand::KeepAbove {
+                pid,
+                caption: Some(Arc::from("tasklens Graph 1")),
+                on: true,
+            }
+        );
+        assert_eq!(
+            first[1],
+            KWinCommand::SetFrameGeometry {
+                pid,
+                caption: Arc::from("tasklens Graph 1"),
+                geometry: FrameGeometry {
+                    x: 100,
+                    y: 200,
+                    width: 180,
+                    height: 90,
+                },
+            }
+        );
+        publish_windows(&mut r, Validity::Valid, 0, 0);
+        assert_eq!(kwin_commands(&r).len(), 2, "no new command");
+    }
+
+    #[gpui_kit::test]
+    fn detached_move_readback_persists(cx: &mut TestAppContext) {
+        let mut r = rig(cx, placed_state(100, 200));
+        publish_windows(&mut r, Validity::Valid, 100, 200);
+        let sent = kwin_commands(&r).len();
+        publish_windows(&mut r, Validity::Valid, 300, 400);
+        cx.executor().advance_clock(Duration::from_millis(600));
+        r.vcx.run_until_parked();
+        assert_eq!(saved_position(cx), (300, 400));
+        assert_eq!(kwin_commands(&r).len(), sent, "no further command");
+    }
+
+    #[gpui_kit::test]
+    fn no_bridge_no_commands(cx: &mut TestAppContext) {
+        let mut r = rig(cx, placed_state(0, 0));
+        publish_windows(&mut r, Validity::Unsupported, 0, 0);
+        publish_windows(&mut r, Validity::Unsupported, 300, 400);
+        cx.executor().advance_clock(Duration::from_millis(600));
+        r.vcx.run_until_parked();
+        assert!(kwin_commands(&r).is_empty());
+        assert_eq!(saved_position(cx), (0, 0));
+    }
+
+    #[gpui_kit::test]
+    fn unchanged_geometry_not_persisted(cx: &mut TestAppContext) {
+        let mut r = rig(cx, placed_state(100, 200));
+        publish_windows(&mut r, Validity::Valid, 100, 200);
+        publish_windows(&mut r, Validity::Valid, 100, 200);
+        publish_windows(&mut r, Validity::Valid, 100, 200);
+        cx.executor().advance_clock(Duration::from_millis(600));
+        r.vcx.run_until_parked();
+        assert_eq!(bridge_writes(cx), 0);
+        assert_eq!(saved_position(cx), (100, 200));
     }
 
     type MenuRows = Vec<(MenuEntryKind, String)>;

@@ -2,6 +2,7 @@
 //! model; the panel, card, menu and actions modules build on it.
 
 pub mod actions;
+pub mod bridge;
 pub mod card;
 pub mod menu;
 pub mod panel;
