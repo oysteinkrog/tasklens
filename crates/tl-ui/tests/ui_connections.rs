@@ -3107,3 +3107,190 @@ mod main_window {
         );
     }
 }
+
+/// The Remote host column (tasklens-9o0.30, UI-SYS-069).
+mod remote_host {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{AppContext as _, Entity};
+    use tl_model::client::EngineClient;
+    use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::table::columns::Availability;
+    use tl_ui::table::columns_window::PickerColumn;
+    use tl_ui::table::tree_table::{TlTreeTable, demand_window};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    fn foreign_record(cookie: u64, host: RemoteHost) -> ConnRecord {
+        let mut record = connection(cookie, SmallVec::new());
+        record.remote_host = host;
+        record
+    }
+
+    fn cookies(cx: &mut TestAppContext) -> Vec<u64> {
+        cx.executor().advance_clock(DEMAND_COALESCE * 2);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            cx.global::<GlobalDemand>()
+                .0
+                .read(cx)
+                .merged()
+                .remote_host_cookies
+                .to_vec()
+        })
+    }
+
+    /// A table over `count` rows with the page's demand wired and the tab active.
+    fn rig(cx: &mut TestAppContext, count: u64) -> Entity<TlTreeTable<ConnectionsDelegate>> {
+        let records = (1..=count)
+            .map(|cookie| foreign_record(cookie, RemoteHost::NotRequested))
+            .collect();
+        let delegate = delegate(cx, records, Vec::new());
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine;
+        cx.update(|cx| {
+            let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            cx.set_global(GlobalDemand(demand));
+        });
+        let slot = Rc::new(RefCell::new(None));
+        let keep = Rc::clone(&slot);
+        cx.add_window(move |window, cx| {
+            let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
+            *keep.borrow_mut() = Some(table.clone());
+            Root::new(table, window, cx)
+        });
+        let table = slot.borrow().clone().expect("table");
+        cx.update(|cx| {
+            let demand = cx.global::<GlobalDemand>().0.clone();
+            table.update(cx, |table, cx| {
+                let d = table.delegate_mut();
+                d.set_demand(demand);
+                d.set_active(true, cx);
+            });
+        });
+        table
+    }
+
+    fn show_column(
+        cx: &mut TestAppContext,
+        table: &Entity<TlTreeTable<ConnectionsDelegate>>,
+        on: bool,
+    ) {
+        cx.update(|cx| {
+            table.update(cx, |table, cx| {
+                let d = table.delegate_mut();
+                let mut layout = d.columns().clone();
+                layout
+                    .set_visible(id(ConnColumn::RemoteHost), on)
+                    .expect("visibility changes");
+                d.on_columns_changed(&layout, cx);
+            });
+        });
+    }
+
+    fn report(
+        cx: &mut TestAppContext,
+        table: &Entity<TlTreeTable<ConnectionsDelegate>>,
+        ids: &[u64],
+    ) {
+        cx.update(|cx| {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().on_visible_range(ids, cx)
+            })
+        });
+    }
+
+    #[gpui_kit::test]
+    fn remote_host_demand_only_when_visible(cx: &mut TestAppContext) {
+        let table = rig(cx, 5);
+        report(cx, &table, &[1, 2, 3]);
+        assert!(cookies(cx).is_empty(), "the column is hidden");
+        show_column(cx, &table, true);
+        assert_eq!(cookies(cx), [1, 2, 3]);
+        show_column(cx, &table, false);
+        assert!(
+            cookies(cx).is_empty(),
+            "hiding the column withdraws the demand"
+        );
+        show_column(cx, &table, true);
+        assert_eq!(cookies(cx), [1, 2, 3]);
+        cx.update(|cx| table.update(cx, |t, cx| t.delegate_mut().set_active(false, cx)));
+        assert!(cookies(cx).is_empty(), "an inactive tab demands nothing");
+    }
+
+    #[gpui_kit::test]
+    fn remote_host_visible_rows_plus_overscan(cx: &mut TestAppContext) {
+        let table = rig(cx, 100);
+        show_column(cx, &table, true);
+        // Rows 0 to 29 visible in a 30-row viewport: no rows above row 0.
+        let (ids, expected): (Vec<u64>, Vec<u64>) = {
+            let window = demand_window(0..30, 100);
+            assert_eq!(window, 0..60);
+            let ids: Vec<u64> = window.map(|ix| ix as u64 + 1).collect();
+            (ids.clone(), ids)
+        };
+        report(cx, &table, &ids);
+        assert_eq!(cookies(cx), expected);
+        assert_eq!(expected.len(), 60);
+    }
+
+    fn pending_cell(host: RemoteHost, cx: &mut TestAppContext) -> (CellOut, ConnectionsDelegate) {
+        let d = delegate(cx, vec![foreign_record(1, host)], Vec::new());
+        (cell(&d, ConnColumn::RemoteHost), d)
+    }
+
+    #[gpui_kit::test]
+    fn remote_host_pending_shows_address(cx: &mut TestAppContext) {
+        let (out, _) = pending_cell(RemoteHost::Pending, cx);
+        assert_eq!(text(&out), "10.0.0.1");
+        let secondary = cx.update(|cx| current(cx).text_secondary);
+        assert_eq!(out.text_color, Some(secondary));
+    }
+
+    #[gpui_kit::test]
+    fn remote_host_found_shows_name(cx: &mut TestAppContext) {
+        let (out, _) = pending_cell(RemoteHost::Name(Arc::from("example.org")), cx);
+        assert_eq!(text(&out), "example.org");
+        assert_eq!(out.text_color, None, "text_primary");
+        assert_eq!(out.tooltip.as_deref(), Some("10.0.0.1"));
+        let (out, _) = pending_cell(RemoteHost::NoName, cx);
+        assert_eq!(text(&out), "10.0.0.1");
+        assert_eq!(out.text_color, None, "text_primary");
+    }
+
+    #[gpui_kit::test]
+    fn remote_host_listener_empty(cx: &mut TestAppContext) {
+        let mut record = foreign_record(1, RemoteHost::Pending);
+        record.state = ConnState::Listening;
+        record.foreign = Arc::from("*:*");
+        let d = delegate(cx, vec![record], Vec::new());
+        let out = cell(&d, ConnColumn::RemoteHost);
+        assert_eq!(text(&out), "");
+        assert!(out.tooltip.is_none());
+    }
+
+    #[gpui_kit::test]
+    fn remote_host_picker_note(cx: &mut TestAppContext) {
+        let column = PickerColumn {
+            key: "remote_host",
+            label: "Remote host".into(),
+            full_name: "Remote host".into(),
+            group: "Remote host".into(),
+            availability: Availability::Available,
+            hideable: true,
+            visible: false,
+        };
+        let key = column.note_key().expect("a note");
+        assert_eq!(tl_ui::i18n::tr_en(key, &[]), "Sends DNS queries");
+        let other = PickerColumn {
+            key: "inode",
+            ..column
+        };
+        assert_eq!(other.note_key(), None);
+        let _ = cx;
+    }
+}

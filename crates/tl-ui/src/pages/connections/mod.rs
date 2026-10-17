@@ -81,13 +81,14 @@ impl EventEmitter<StatusChanged> for ConnectionsPage {}
 impl ConnectionsPage {
     pub fn new(
         hub: &Entity<SnapshotHub>,
-        _demand: &Entity<DemandAggregator>,
+        demand: &Entity<DemandAggregator>,
         _client: Arc<dyn EngineClient>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut delegate = ConnectionsDelegate::new(cx);
         delegate.set_page(cx.weak_entity());
+        delegate.set_demand(demand.clone());
         let frame = SysTableFrame::new(
             Tab::Connections,
             "ConnectionTable",
@@ -199,6 +200,9 @@ impl ConnectionsPage {
         } else {
             self.frame.on_deactivated(cx);
         }
+        self.frame
+            .table
+            .update(cx, |table, cx| table.delegate.set_active(active, cx));
     }
 
     /// Sends `RefreshNow(Connections)` and arms the one-shot completion toast.

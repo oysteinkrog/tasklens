@@ -1725,8 +1725,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   LAST-ACK, TIME-WAIT, CLOSED, UNKNOWN, UNCONNECTED, CONNECTED); PID sorts unknown ("?") and none
   ("-") after all numbers.
 - **Interaction**: header click sorts; shared header menu; the column picker shows the Remote host
-  entry with a second line "Sends reverse DNS queries for foreign addresses." (new) in
-  `text_secondary`.
+  entry with the note "Sends DNS queries" in the right-aligned note slot (string key
+  `connections-remote-host-picker-note`; leader decision, tasklens-9o0.30).
 - **Data binding**: `state.toml` `[sort.connections]`, `[columns.connections]`.
 - **Build**: `ConnectionsDelegate::columns()`.
 - **Tests**: `connections_default_sort`; `connections_address_sort_numeric`.

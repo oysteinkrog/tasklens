@@ -111,6 +111,8 @@ impl PickerColumn {
             Some("table-picker-always-on")
         } else if self.availability == Availability::NotOnThisSystem {
             Some("table-picker-na")
+        } else if self.key == "remote_host" {
+            Some("connections-remote-host-picker-note")
         } else {
             None
         }

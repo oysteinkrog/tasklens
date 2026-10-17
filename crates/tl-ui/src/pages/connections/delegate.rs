@@ -10,16 +10,17 @@ use std::time::Duration;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyView, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, WeakEntity, Window, div, px,
+    AnyView, App, AppContext as _, Context, Entity, EntityId, IntoElement, ParentElement as _,
+    Render, SharedString, WeakEntity, Window, div, px,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{Family, Proto};
+use tl_model::demand::Demand;
 use tl_model::process::ProcessRecord;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnRecord, ConnState, ConnectionsSnapshot, ProcessSnapshot,
-    Snapshot,
+    RemoteHost, Snapshot,
 };
 use tl_model::table::{ConnColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec};
 use tl_model::units;
@@ -27,6 +28,7 @@ use tl_model::validity::Validity;
 
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
+use crate::demand::DemandAggregator;
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::sys_status::{ConnStateClass, LabelTone, conn_state_tone};
 use crate::pages::sys_table::SysDelegate;
@@ -35,15 +37,16 @@ use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
 use crate::table::tree_table::{
-    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
+    DEMAND_MAX_IDS, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
+    TreeTableDelegate,
 };
 use crate::theme::{TlTheme, current};
 
 use super::ConnectionsPage;
 use super::menu::{ConnMenuTargets, ConnRecordRef, row_menu};
 
-/// The P2 columns in display order. Remote host and Namespace are added by their P4 beads.
-pub const CONNECTION_COLUMNS: [ConnColumn; 15] = [
+/// The columns in display order. Namespace is added by its P4 bead.
+pub const CONNECTION_COLUMNS: [ConnColumn; 16] = [
     ConnColumn::Proto,
     ConnColumn::Local,
     ConnColumn::Foreign,
@@ -59,6 +62,7 @@ pub const CONNECTION_COLUMNS: [ConnColumn; 15] = [
     ConnColumn::Interface,
     ConnColumn::Inode,
     ConnColumn::Service,
+    ConnColumn::RemoteHost,
 ];
 
 /// The six columns visible in the default layout.
@@ -104,7 +108,7 @@ pub const fn min_width(column: ConnColumn) -> f32 {
     }
 }
 
-const COLUMN_KEYS: [&str; 15] = [
+const COLUMN_KEYS: [&str; 16] = [
     "connections-column-proto",
     "connections-column-local",
     "connections-column-foreign",
@@ -120,6 +124,7 @@ const COLUMN_KEYS: [&str; 15] = [
     "connections-column-interface",
     "connections-column-inode",
     "connections-column-service",
+    "connections-column-remote-host",
 ];
 
 const STATE_KEYS: [&str; 14] = [
@@ -147,7 +152,7 @@ fn state_index(state: ConnState) -> usize {
 #[derive(Clone, Debug)]
 pub struct ConnectionWords {
     version: Option<u64>,
-    pub columns: [SharedString; 15],
+    pub columns: [SharedString; 16],
     pub states: [Arc<str>; 14],
     pub no_owner: Arc<str>,
     /// "Closing…", the State cell while a close is pending (UI-SYS-062).
@@ -376,6 +381,17 @@ pub struct ConnectionsDelegate {
     /// Cookies whose State cell shows "Closing…": a close is pending, or it succeeded and the
     /// row has not left the snapshot yet.
     closing: FxHashSet<u64>,
+    demand: Option<Entity<DemandAggregator>>,
+    active: bool,
+    /// The last ids of `on_visible_range`: visible rows plus one viewport above and below.
+    visible_ids: Arc<[u64]>,
+    sent_cookies: Arc<[u64]>,
+}
+
+/// The aggregator source of the Remote host cookies. It sits beside the page's own part.
+/// `EntityId` is a slotmap key, and an index this near `u32::MAX` is never a live entity.
+fn remote_host_source() -> EntityId {
+    EntityId::from(0xFFFF_FE00)
 }
 
 impl ConnectionsDelegate {
@@ -402,6 +418,82 @@ impl ConnectionsDelegate {
             tip_view: None,
             page: None,
             closing: FxHashSet::default(),
+            demand: None,
+            active: false,
+            visible_ids: Arc::from([]),
+            sent_cookies: Arc::from([]),
+        }
+    }
+
+    /// The page's aggregator, where the Remote host cookies go.
+    pub fn set_demand(&mut self, demand: Entity<DemandAggregator>) {
+        self.demand = Some(demand);
+    }
+
+    /// The tab became active or was left. Leaving withdraws the Remote host demand.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<TlTreeTable<Self>>) {
+        if self.active != active {
+            self.active = active;
+            self.send_remote_host_demand(cx);
+        }
+    }
+
+    /// The cookies to look up: the visible rows plus overscan while the Remote host column is
+    /// shown and the tab is active, else none.
+    pub fn remote_host_cookies(&self) -> Arc<[u64]> {
+        if self.active && self.layout.visible.contains(&id(ConnColumn::RemoteHost)) {
+            Arc::clone(&self.visible_ids)
+        } else {
+            Arc::from([])
+        }
+    }
+
+    /// Gives the aggregator the cookies when they changed since the last call.
+    fn send_remote_host_demand(&mut self, cx: &mut App) {
+        let cookies = self.remote_host_cookies();
+        if cookies == self.sent_cookies {
+            return;
+        }
+        let Some(demand) = self.demand.clone() else {
+            return;
+        };
+        self.sent_cookies = Arc::clone(&cookies);
+        demand.update(cx, |demand, cx| {
+            if cookies.is_empty() {
+                demand.remove(remote_host_source(), cx);
+            } else {
+                let part = Demand {
+                    any_surface_visible: true,
+                    remote_host_cookies: cookies,
+                    ..Demand::default()
+                };
+                let window = demand.main_window();
+                demand.set(remote_host_source(), window, part, cx);
+            }
+        });
+    }
+
+    /// UI-SYS-069: empty for a listener or a `*` foreign side, the address in `text_secondary`
+    /// while the lookup runs, the name with the address as tooltip when found, and the address
+    /// in `text_primary` when there is no name.
+    fn remote_host_cell(&self, record: &ConnRecord, out: &mut CellOut) {
+        if record.foreign.ends_with(":*") || record.state == ConnState::Listening {
+            return;
+        }
+        let address = record.four_tuple.remote.ip();
+        match &record.remote_host {
+            RemoteHost::NotRequested => {}
+            RemoteHost::Pending => {
+                out.arc = Some(Arc::from(address.to_string()));
+                out.text_color = Some(self.theme.text_secondary);
+            }
+            RemoteHost::Name(name) => {
+                out.arc = Some(name.clone());
+                if out.want_tooltip {
+                    out.tooltip = Some(address.to_string().into());
+                }
+            }
+            RemoteHost::NoName => out.arc = Some(Arc::from(address.to_string())),
         }
     }
 
@@ -727,7 +819,8 @@ impl TreeTableDelegate for ConnectionsDelegate {
             ConnColumn::Interface => out.arc = record.interface.clone(),
             ConnColumn::Inode => write_u64(out, record.inode, false),
             ConnColumn::Service => out.arc = record.unit.as_ref().map(|unit| unit.name.clone()),
-            ConnColumn::RemoteHost | ConnColumn::Netns => {}
+            ConnColumn::RemoteHost => self.remote_host_cell(record, out),
+            ConnColumn::Netns => {}
         }
         if self.stale() {
             out.text_color = Some(self.theme.text_secondary);
@@ -829,12 +922,16 @@ impl TreeTableDelegate for ConnectionsDelegate {
     fn on_columns_changed(
         &mut self,
         layout: &ColumnLayout<SysColumnId>,
-        _: &mut Context<TlTreeTable<Self>>,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) {
         self.layout = layout.clone();
+        self.send_remote_host_demand(cx);
     }
 
-    fn on_visible_range(&mut self, _: &[u64], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_visible_range(&mut self, ids: &[u64], cx: &mut Context<TlTreeTable<Self>>) {
+        self.visible_ids = ids.iter().copied().take(DEMAND_MAX_IDS).collect();
+        self.send_remote_host_demand(cx);
+    }
 
     /// Enter, Alt+Enter and Ctrl+I arrive here as `OpenProperties`, which continues to the
     /// owning Connections page. The page also converts a propagated row double-click into the
