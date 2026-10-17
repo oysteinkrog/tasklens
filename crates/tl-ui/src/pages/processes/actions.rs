@@ -92,6 +92,21 @@ impl IoClass {
             Self::Default => IoPriority::None,
         }
     }
+
+    /// The menu class an I/O priority is in (PROC-068). Realtime at any level is Realtime. Best
+    /// effort is in a class only at levels 0, 4 and 7, the levels the menu sets; levels 1 to 3,
+    /// 5 and 6 are in none.
+    pub fn from_model(prio: IoPriority) -> Option<Self> {
+        match prio {
+            IoPriority::Realtime(_) => Some(Self::Realtime),
+            IoPriority::BestEffort(0) => Some(Self::High),
+            IoPriority::BestEffort(4) => Some(Self::Normal),
+            IoPriority::BestEffort(7) => Some(Self::Low),
+            IoPriority::BestEffort(_) => None,
+            IoPriority::Idle => Some(Self::Idle),
+            IoPriority::None => Some(Self::Default),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
@@ -159,6 +174,9 @@ pub struct CapturedTarget {
     pub ppid: u32,
     /// The nice value, for the Set Priority check mark. `None` for app, unit and pseudo rows.
     pub nice: Option<i8>,
+    /// The I/O priority as set, for the Set I/O Priority check mark (R-144). `None` for app,
+    /// unit and pseudo rows, and when the engine has not read it.
+    pub io_priority: Option<IoPriority>,
     /// The executable was deleted (E22-020). False when the extras are not known.
     pub exe_deleted: bool,
     /// The unit this row is, or the unit whose MainPID this process is. `None` otherwise, and
@@ -328,6 +346,7 @@ mod tests {
             stopped: false,
             ppid: 1,
             nice: Some(0),
+            io_priority: None,
             exe_deleted: false,
             unit: None,
         }

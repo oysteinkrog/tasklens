@@ -14,6 +14,9 @@
 //! worker checks `PackageIndex::due` and runs `run_batch` as its own blocking job, beside the
 //! sweep job and never inside it. The index keeps the 2 s debounce. While no batch is due, a
 //! `check_stamp` job every `PKG_STAMP_CHECK` clears the cache after a package change.
+//!
+//! After each sweep the worker reads the I/O priority of the visible rows with
+//! `tl_ops::process::io_priority_set_of`, never in tl-collect (R-144).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
@@ -41,6 +44,7 @@ use tl_collect::proc::io::{PidIo, parse_io};
 use tl_collect::proc::meta::{PasswdUserNames, UserNames};
 use tl_collect::proc::sweep::{ProcessSampler, SweepCtx, SweepInputs, SweepOutput};
 use tl_collect::sanitize::sanitize_link;
+use tl_model::actions::IoPriority;
 use tl_model::demand::{ColumnSet, Demand};
 use tl_model::health::{HelperState, SourceId, SourceState};
 use tl_model::helper_proto::{HelperError, HelperReply, HelperReplyBody, HelperRequest, ProcFiles};
@@ -129,7 +133,12 @@ pub struct ProcessesSource {
     clock: fn() -> (TimeNs, u64),
     /// Set by `helper_reads`.
     helper: Option<HelperSide>,
+    /// Reads the I/O priority of one detail key (R-144).
+    io_priority: IoPriorityRead,
 }
+
+/// Reads the I/O priority of one process as set. `None` when the read fails.
+pub type IoPriorityRead = fn(ProcessKey, BootId) -> Option<IoPriority>;
 
 impl ProcessesSource {
     /// `cfg.app_paths`, or the paths from the environment when it is `None`, and the user names
@@ -158,6 +167,12 @@ impl ProcessesSource {
                 })
             })?;
         let sampler = ProcessSampler::new(root.clone(), paths, users)?;
+        // A fixture root has pids of no live process, so only the host root reads them.
+        let io_priority: IoPriorityRead = if root.proc == Path::new("/proc") {
+            host_io_priority
+        } else {
+            |_, _| None
+        };
         let ctx = SweepCtx {
             boot_id,
             self_uid: rustix::process::getuid().as_raw(),
@@ -187,12 +202,19 @@ impl ProcessesSource {
             detail_keys: RefCell::new(Arc::from([])),
             clock: real_clock,
             helper: None,
+            io_priority,
         })
     }
 
     /// The sweep reads packages from `index`, the session's shared index.
     pub fn with_package_index(mut self, index: PackageIndex) -> Self {
         *self.sampler.pkg_mut() = index;
+        self
+    }
+
+    /// The sweep reads I/O priorities with `read`, for tests.
+    pub fn with_io_priority(mut self, read: IoPriorityRead) -> Self {
+        self.io_priority = read;
         self
     }
 
@@ -290,6 +312,7 @@ impl Source for ProcessesSource {
         if let Some(helper) = &mut self.helper {
             helper.after_sweep(&mut self.out, &mut extras_p2);
         }
+        fill_io_priority(&mut extras_p2, self.io_priority, self.ctx.boot_id);
         let out = &mut self.out;
         let records = std::mem::take(&mut out.records);
         tracing::debug!(count = records.len(), "process sweep");
@@ -472,6 +495,20 @@ pub fn host_app_paths() -> AppPaths {
         icon_cache: cache.join("tasklens").join("icons.toml"),
         home,
     }
+}
+
+/// Sets `io_priority` on every entry with a key, which are the detail keys and the rows the
+/// helper filled (R-144). A failed read leaves `None`, which the UI shows as unavailable.
+fn fill_io_priority(extras_p2: &mut [ProcessExtrasP2], read: IoPriorityRead, boot: BootId) {
+    for p2 in extras_p2 {
+        if let Some(key) = p2.key {
+            p2.io_priority = read(key, boot);
+        }
+    }
+}
+
+fn host_io_priority(key: ProcessKey, boot: BootId) -> Option<IoPriority> {
+    tl_ops::process::io_priority_set_of(key, boot).ok()
 }
 
 fn real_clock() -> (TimeNs, u64) {
@@ -872,6 +909,44 @@ mod tests {
             interval_ms,
             ..EngineSettings::default()
         }
+    }
+
+    /// Only entries with a key get an I/O priority; a failed read stays `None` (R-144).
+    #[test]
+    fn fill_io_priority_only_detail_keys() {
+        fn read(key: ProcessKey, _boot: BootId) -> Option<IoPriority> {
+            match key.pid {
+                10 => Some(IoPriority::None),
+                20 => Some(IoPriority::BestEffort(7)),
+                _ => None,
+            }
+        }
+        let key = |pid| ProcessKey {
+            start_ticks: 1,
+            boot_id: BootId(1),
+            pid,
+        };
+        let entry = |k: Option<ProcessKey>| ProcessExtrasP2 {
+            key: k,
+            ..ProcessExtrasP2::default()
+        };
+        let mut p2 = vec![
+            entry(Some(key(10))),
+            entry(None),
+            entry(Some(key(20))),
+            entry(Some(key(30))),
+        ];
+        fill_io_priority(&mut p2, read, BootId(1));
+        let got: Vec<_> = p2.iter().map(|p| p.io_priority).collect();
+        assert_eq!(
+            got,
+            [
+                Some(IoPriority::None),
+                None,
+                Some(IoPriority::BestEffort(7)),
+                None
+            ]
+        );
     }
 
     #[test]

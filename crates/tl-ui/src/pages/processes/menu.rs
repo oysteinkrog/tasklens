@@ -258,12 +258,12 @@ fn target_class(t: &CapturedTarget, p: &ProcessSnapshot) -> Option<PriorityClass
 }
 
 /// The Set I/O Priority submenu (UI-PRC-020, PROC-068): the "Scheduler: <name>" note, the five
-/// classes, a separator and "Default (follows nice)". Realtime needs a helper session. Nothing
-/// is checked yet: the current class of each target comes with tasklens-pdu.62, which reads
-/// `_targets` for the check marks.
+/// classes, a separator and "Default (follows nice)". Realtime needs a helper session. The
+/// current class has a check mark; with several targets only when every one shares it
+/// (PROC-069).
 pub fn ioprio_submenu(
     menu: TlMenu,
-    _targets: &CapturedTargets,
+    targets: &CapturedTargets,
     caps: &MenuCaps,
     cx: &mut App,
 ) -> TlMenu {
@@ -271,6 +271,7 @@ pub fn ioprio_submenu(
     let helper = snapshot
         .as_ref()
         .map_or(HelperState::Missing, |s| s.health.helper);
+    let current = current_io_class(targets);
     let mut menu = menu;
     if let Some(name) = snapshot.as_deref().and_then(system_scheduler) {
         let args = [("name", FluentValue::from(name.to_string()))];
@@ -279,22 +280,39 @@ pub fn ioprio_submenu(
     let session = caps.helper_session || helper == HelperState::Unlocked;
     for (class, key) in IO_CLASSES {
         let label = tr(cx, key);
+        let checked = current == Some(class);
         menu = if class == IoClass::Realtime && !session {
             let tip = match helper {
                 HelperState::Missing => "processes-menu-io-no-helper",
                 _ => "processes-menu-io-needs-admin",
             };
-            menu.item_disabled(label, Some(tr(cx, tip)))
+            if checked {
+                menu.item_disabled_checked(label, Some(tr(cx, tip)))
+            } else {
+                menu.item_disabled(label, Some(tr(cx, tip)))
+            }
         } else {
-            menu.item(label, Box::new(SetIoPriorityClass { class }))
+            menu.check_item(label, checked, Box::new(SetIoPriorityClass { class }))
         };
     }
-    menu.separator().item(
+    menu.separator().check_item(
         tr(cx, "processes-menu-io-default"),
+        current == Some(IoClass::Default),
         Box::new(SetIoPriorityClass {
             class: IoClass::Default,
         }),
     )
+}
+
+/// The I/O class every target is in. `None` when a target has no I/O priority (app, unit and
+/// pseudo rows, or not read yet), when its level is in no class, or when they differ.
+fn current_io_class(t: &CapturedTargets) -> Option<IoClass> {
+    let mut classes = t
+        .items
+        .iter()
+        .map(|t| t.io_priority.and_then(IoClass::from_model));
+    let first = classes.next()??;
+    classes.all(|c| c == Some(first)).then_some(first)
 }
 
 /// The block scheduler of the system disk (R-207). When two disks are system disks (`/` and

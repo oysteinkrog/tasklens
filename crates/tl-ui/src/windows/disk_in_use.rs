@@ -197,6 +197,7 @@ pub(crate) fn record_target(r: &ProcessRecord) -> CapturedTarget {
         stopped: r.state == ProcState::Stopped,
         ppid: r.ppid,
         nice: Some(r.nice),
+        io_priority: None,
         exe_deleted: false,
         unit: None,
     }

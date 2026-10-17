@@ -395,27 +395,48 @@ pub(crate) fn ioprio_for(prio: IoPriority) -> OpsResult<u16> {
 /// level `(nice + 20) / 5`. The pidfd is polled after the reads, as in `for_each_tid`, so a
 /// process that exited in between gives `NoSuchProcess`, never another process's value.
 pub fn io_priority_of(key: ProcessKey, boot: BootId) -> OpsResult<IoPriority> {
-    let result = io_priority_of_inner(key, boot);
+    let result = io_priority_of_inner(key, boot, true);
     tracing::debug!(pid = key.pid, ok = result.is_ok(), error = ?result.as_ref().err(), "io_priority_of");
     result
 }
 
-fn io_priority_of_inner(key: ProcessKey, boot: BootId) -> OpsResult<IoPriority> {
-    let pidfd = open_verified(key, boot)?;
-    let value = sys::ioprio_get_tid(key.pid)?;
-    let class = value >> sys::IOPRIO_CLASS_SHIFT;
+/// `io_priority_of` without the nice fallback: a thread with no I/O class set reads as
+/// `IoPriority::None`, so the Set I/O Priority menu can check "Default (follows nice)".
+pub fn io_priority_set_of(key: ProcessKey, boot: BootId) -> OpsResult<IoPriority> {
+    let result = io_priority_of_inner(key, boot, false);
+    tracing::debug!(pid = key.pid, ok = result.is_ok(), error = ?result.as_ref().err(), "io_priority_set_of");
+    result
+}
+
+/// The I/O priority a raw `ioprio_get` value names: class in bits 13 to 15, level in bits 0
+/// to 2. `IOPRIO_CLASS_NONE` is `IoPriority::None`. `None` for a class the kernel does not
+/// define.
+pub fn decode_ioprio(value: u16) -> Option<IoPriority> {
     // The level is in bits 0 to 2, so it always fits in a u8.
     let level = (value & 0x7) as u8;
-    let prio = match class {
-        sys::IOPRIO_CLASS_NONE => {
+    match value >> sys::IOPRIO_CLASS_SHIFT {
+        sys::IOPRIO_CLASS_NONE => Some(IoPriority::None),
+        sys::IOPRIO_CLASS_RT => Some(IoPriority::Realtime(level)),
+        sys::IOPRIO_CLASS_BE => Some(IoPriority::BestEffort(level)),
+        sys::IOPRIO_CLASS_IDLE => Some(IoPriority::Idle),
+        _ => None,
+    }
+}
+
+fn io_priority_of_inner(
+    key: ProcessKey,
+    boot: BootId,
+    nice_default: bool,
+) -> OpsResult<IoPriority> {
+    let pidfd = open_verified(key, boot)?;
+    let value = sys::ioprio_get_tid(key.pid)?;
+    let prio = match decode_ioprio(value).ok_or(OpsError::Os(libc::EIO))? {
+        IoPriority::None if nice_default => {
             let nice = rustix::process::getpriority_process(Some(tid_pid(key.pid)?))?;
             let level = u8::try_from((nice.clamp(-20, 19) + 20) / 5).unwrap_or(4);
             IoPriority::BestEffort(level)
         }
-        sys::IOPRIO_CLASS_RT => IoPriority::Realtime(level),
-        sys::IOPRIO_CLASS_BE => IoPriority::BestEffort(level),
-        sys::IOPRIO_CLASS_IDLE => IoPriority::Idle,
-        _ => return Err(OpsError::Os(libc::EIO)),
+        prio => prio,
     };
     if has_exited(&pidfd)? {
         return Err(OpsError::NoSuchProcess);
@@ -1328,6 +1349,34 @@ mod tests {
     }
 
     #[test]
+    fn decode_ioprio_table() {
+        let table = [
+            (0x0000, Some(IoPriority::None)),
+            (0x4000, Some(IoPriority::BestEffort(0))),
+            (0x4004, Some(IoPriority::BestEffort(4))),
+            (0x4007, Some(IoPriority::BestEffort(7))),
+            (0x2000, Some(IoPriority::Realtime(0))),
+            (0x2007, Some(IoPriority::Realtime(7))),
+            (0x6000, Some(IoPriority::Idle)),
+            (0x8000, None),
+            (0xe004, None),
+        ];
+        for (value, prio) in table {
+            assert_eq!(decode_ioprio(value), prio, "{value:#x}");
+        }
+        // Every value `ioprio_for` makes decodes back to the same priority.
+        for prio in [
+            IoPriority::None,
+            IoPriority::BestEffort(3),
+            IoPriority::Realtime(5),
+            IoPriority::Idle,
+        ] {
+            let value = ioprio_for(prio).expect("ioprio_for");
+            assert_eq!(decode_ioprio(value), Some(prio));
+        }
+    }
+
+    #[test]
     fn ioprio_level_out_of_range_is_invalid() {
         let invalid = Some(OpsError::InvalidInput("I/O priority level out of range"));
         assert_eq!(ioprio_for(IoPriority::BestEffort(8)).err(), invalid);
@@ -1386,6 +1435,7 @@ mod tests {
             rustix::process::getpriority_process(Pid::from_raw(pid as i32)).expect("getpriority");
         let level = u8::try_from((nice + 20) / 5).expect("level fits u8");
         assert_eq!(io_priority_of(key, BOOT), Ok(IoPriority::BestEffort(level)));
+        assert_eq!(io_priority_set_of(key, BOOT), Ok(IoPriority::None));
         if nice == 0 {
             assert_eq!(level, 4);
         }
@@ -1395,8 +1445,10 @@ mod tests {
             Ok(())
         );
         assert_eq!(io_priority_of(key, BOOT), Ok(IoPriority::BestEffort(7)));
+        assert_eq!(io_priority_set_of(key, BOOT), Ok(IoPriority::BestEffort(7)));
         assert_eq!(set_io_priority(key, BOOT, IoPriority::Idle), Ok(()));
         assert_eq!(io_priority_of(key, BOOT), Ok(IoPriority::Idle));
+        assert_eq!(io_priority_set_of(key, BOOT), Ok(IoPriority::Idle));
     }
 
     #[test]
@@ -1416,6 +1468,10 @@ mod tests {
             Err(OpsError::IdentityChanged)
         );
         assert_eq!(io_priority_of(key, BOOT), Err(OpsError::IdentityChanged));
+        assert_eq!(
+            io_priority_set_of(key, BOOT),
+            Err(OpsError::IdentityChanged)
+        );
         assert_eq!(all_policies(pid), policies);
         assert_eq!(all_ioprio(pid), ioprio);
     }

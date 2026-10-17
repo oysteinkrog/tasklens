@@ -786,6 +786,7 @@ fn record_target(r: &ProcessRecord) -> CapturedTarget {
         stopped: r.state == ProcState::Stopped,
         ppid: r.ppid,
         nice: Some(r.nice),
+        io_priority: None,
         exe_deleted: false,
         unit: None,
     }
@@ -806,6 +807,7 @@ fn hit_target(h: &HandleHit) -> CapturedTarget {
         stopped: false,
         ppid: 0,
         nice: None,
+        io_priority: None,
         exe_deleted: false,
         unit: None,
     }

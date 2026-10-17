@@ -1799,6 +1799,7 @@ mod signal {
             stopped: false,
             ppid: 1,
             nice: Some(0),
+            io_priority: None,
             exe_deleted: false,
             unit: None,
         }
@@ -2038,6 +2039,7 @@ mod signal {
             stopped: false,
             ppid: 0,
             nice: None,
+            io_priority: None,
             exe_deleted: false,
             unit: None,
         };

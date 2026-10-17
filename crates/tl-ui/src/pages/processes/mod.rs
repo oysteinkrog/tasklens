@@ -1687,6 +1687,12 @@ pub(crate) fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<Capt
             kind,
             exe_deleted: exe_deleted(&r.meta) || p.extras.get(i).is_some_and(|e| e.exe_deleted),
             unit: main_pid_unit(&s.services, r.key.pid),
+            // Read by the engine for the visible rows only (R-144).
+            io_priority: p
+                .extras_p2
+                .get(i)
+                .filter(|x| x.key == Some(r.key))
+                .and_then(|x| x.io_priority),
             ..record_target(r)
         });
     }
@@ -1715,6 +1721,7 @@ pub(crate) fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<Capt
         stopped: false,
         ppid: 0,
         nice: None,
+        io_priority: None,
         exe_deleted: false,
         unit: match &row.node {
             NodeId::Unit(u) => Some(u.clone()),
@@ -1734,8 +1741,8 @@ fn main_pid_unit(s: &ServicesSnapshot, pid: u32) -> Option<UnitRef> {
         .map(|u| u.unit.clone())
 }
 
-/// The target of one process record, as a process row. `exe_deleted` is false: it is in the
-/// extras, which only the row menu reads.
+/// The target of one process record, as a process row. `exe_deleted` is false and
+/// `io_priority` is `None`: they are in the extras, which only the row menu reads.
 fn record_target(r: &ProcessRecord) -> CapturedTarget {
     CapturedTarget {
         node: NodeId::Process(r.key),
@@ -1749,6 +1756,7 @@ fn record_target(r: &ProcessRecord) -> CapturedTarget {
         stopped: r.state == ProcState::Stopped,
         ppid: r.ppid,
         nice: Some(r.nice),
+        io_priority: None,
         exe_deleted: false,
         unit: None,
     }

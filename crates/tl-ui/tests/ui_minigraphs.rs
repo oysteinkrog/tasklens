@@ -2436,6 +2436,7 @@ mod panel {
                 stopped: false,
                 ppid: 1,
                 nice: Some(0),
+                io_priority: None,
                 exe_deleted: false,
                 unit: None,
             }

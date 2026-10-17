@@ -484,6 +484,7 @@ mod toasts {
             stopped: false,
             ppid: 1,
             nice: Some(0),
+            io_priority: None,
             exe_deleted: false,
             unit: None,
         }
@@ -1102,11 +1103,11 @@ mod end {
     use tl_model::ids::DeviceIdx;
     use tl_model::ids::PseudoKind;
     use tl_model::ids::{GroupKey, NodeId, ProcessKey};
-    use tl_model::process::ProcessExtras;
     use tl_model::process::{
         AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta,
         ProcessRecord,
     };
+    use tl_model::process::{ProcessExtras, ProcessExtrasP2};
     use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, WindowEntry, WindowsSnapshot};
     use tl_model::snapshot::{DeviceDetailsSnapshot, DiskDetails};
@@ -3615,6 +3616,27 @@ mod end {
             .expect("Set I/O Priority submenu")
     }
 
+    /// Publishes, for each record, the I/O priority `prio` gives its pid, as the engine fills
+    /// `extras_p2` for visible rows. A pid `prio` gives `None` for has no entry key.
+    fn publish_io_priority(rig: &mut Rig, prio: impl Fn(u32) -> Option<Option<IoPriority>>) {
+        rig.engine.publish_with(|s| {
+            let p = Arc::make_mut(&mut s.processes);
+            p.extras_p2 = p
+                .records
+                .iter()
+                .map(|r| match prio(r.key.pid) {
+                    Some(io_priority) => ProcessExtrasP2 {
+                        key: Some(r.key),
+                        io_priority,
+                        ..ProcessExtrasP2::default()
+                    },
+                    None => ProcessExtrasP2::default(),
+                })
+                .collect();
+        });
+        rig.vcx.run_until_parked();
+    }
+
     /// The submenu shape with `realtime` as its Realtime entry and `scheduler` as its note.
     fn ioprio_shape(scheduler: Option<&str>, realtime: &str) -> Vec<String> {
         let mut out: Vec<String> = scheduler
@@ -3726,6 +3748,80 @@ mod end {
                 IoClass::Default
             ]
         );
+
+        // The current class has a check mark; with several targets only when all share it
+        // (PROC-068, PROC-069). Rows 0 and 1 are pids 300 and 301, row 2 the app.
+        let checked = |rig: &mut Rig, rows: &[usize]| {
+            let sub = ioprio_submenu(rig, rows);
+            shape(rig, &sub)
+        };
+        let marked = |class: Option<&str>| -> Vec<String> {
+            ioprio_shape(Some("bfq"), "Realtime")
+                .into_iter()
+                .map(|e| match class {
+                    Some(c) if c == e => format!("* {e}"),
+                    _ => e,
+                })
+                .collect()
+        };
+        let both = |a: IoPriority, b: IoPriority| {
+            move |pid: u32| match pid {
+                300 => Some(Some(a)),
+                301 => Some(Some(b)),
+                _ => Some(Some(IoPriority::BestEffort(4))),
+            }
+        };
+        let one_class = [
+            (IoPriority::Realtime(0), "Realtime"),
+            (IoPriority::Realtime(3), "Realtime"),
+            (IoPriority::BestEffort(0), "High"),
+            (IoPriority::BestEffort(4), "Normal"),
+            (IoPriority::BestEffort(7), "Low"),
+            (IoPriority::Idle, "Idle"),
+            (IoPriority::None, "Default (follows nice)"),
+        ];
+        for (prio, label) in one_class {
+            publish_io_priority(&mut rig, both(prio, prio));
+            assert_eq!(checked(&mut rig, &[0]), marked(Some(label)), "{prio:?}");
+            assert_eq!(checked(&mut rig, &[0, 1]), marked(Some(label)), "{prio:?}");
+        }
+        for level in [1, 2, 3, 5, 6] {
+            publish_io_priority(
+                &mut rig,
+                both(IoPriority::BestEffort(level), IoPriority::Idle),
+            );
+            assert_eq!(checked(&mut rig, &[0]), marked(None), "best effort {level}");
+        }
+        publish_io_priority(&mut rig, both(IoPriority::Idle, IoPriority::BestEffort(4)));
+        assert_eq!(checked(&mut rig, &[1]), marked(Some("Normal")));
+        assert_eq!(checked(&mut rig, &[0, 1]), marked(None), "classes differ");
+        publish_io_priority(&mut rig, both(IoPriority::None, IoPriority::BestEffort(4)));
+        assert_eq!(
+            checked(&mut rig, &[0, 1]),
+            marked(None),
+            "Default and Normal differ"
+        );
+        assert_eq!(checked(&mut rig, &[2]), marked(None), "an app row");
+        publish_io_priority(&mut rig, |pid| {
+            (pid != 301).then_some(Some(IoPriority::Idle))
+        });
+        assert_eq!(checked(&mut rig, &[0]), marked(Some("Idle")));
+        assert_eq!(checked(&mut rig, &[1]), marked(None), "not read");
+        assert_eq!(checked(&mut rig, &[0, 1]), marked(None), "one not read");
+        publish_io_priority(&mut rig, |_| Some(None));
+        assert_eq!(checked(&mut rig, &[0]), marked(None), "read failed");
+
+        // A disabled Realtime item still shows the check mark.
+        publish_io_priority(&mut rig, both(IoPriority::Realtime(0), IoPriority::Idle));
+        publish_ioprio_inputs(&mut rig, HelperState::Locked, &[(true, "bfq")]);
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        let realtime = entries(&mut rig, &sub)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Realtime"))
+            .expect("Realtime entry");
+        assert_eq!(realtime.kind, MenuEntryKind::Disabled);
+        assert!(realtime.checked);
+        publish_ioprio_inputs(&mut rig, HelperState::Unlocked, &[(true, "bfq")]);
 
         let map = [
             (IoClass::Realtime, IoPriority::Realtime(0)),

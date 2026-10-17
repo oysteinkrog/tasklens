@@ -12,7 +12,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use crate::actions::{CgroupRef, SchedPolicy};
+use crate::actions::{CgroupRef, IoPriority, SchedPolicy};
 use crate::ids::{GroupKey, NodeId, ProcessKey};
 use crate::system::CpuSet;
 use crate::table::{Manager, UnitRef};
@@ -404,6 +404,10 @@ pub struct ProcessExtrasP2 {
     /// from the per-process GPU samples. Empty for a process with no GPU memory; shorter than
     /// the GPU count when the last GPUs hold none of it.
     pub gpu_vram_bytes: GpuVram,
+    /// I/O priority of the main thread as set, read by the engine with `ioprio_get` (R-144).
+    /// `IoPriority::None` is a thread with no class set, which follows nice. `None` when the read
+    /// failed or the value was not read.
+    pub io_priority: Option<IoPriority>,
 }
 
 /// Owning package of an executable (R-163 item 1, PROC-027), from the E05-034 index.
@@ -608,6 +612,7 @@ mod tests {
         assert!(p2.oom_score_adj.is_none());
         assert!(p2.tty.is_none());
         assert!(p2.cwd.is_none());
+        assert!(p2.io_priority.is_none());
         assert!(p2.ctx_switches_voluntary.is_none());
         assert!(p2.ctx_switches_involuntary.is_none());
         assert!(p2.power_w.is_none());
