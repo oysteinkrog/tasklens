@@ -2744,8 +2744,8 @@ mod page {
     use tl_ui::demand::DEMAND_COALESCE;
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::services::actions::{
-        JumpOrigin, ServicesClearAllFilters, ServicesShowHidden, ServicesToggleStateFilter,
-        StateFilterArg,
+        GoToService, JumpOrigin, ManagerArg, ServicesClearAllFilters, ServicesShowHidden,
+        ServicesToggleStateFilter, StateFilterArg,
     };
     use tl_ui::pages::services::delegate::ServicesDelegate;
     use tl_ui::pages::services::{REFRESH_TOAST_AFTER, ServicesPage};
@@ -3619,6 +3619,90 @@ mod page {
     fn services_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
         let page = cx.new(|cx| ServicesPage::new(window, cx));
         PageSlot::new(page, cx)
+    }
+
+    /// A main window on Processes with a Services page and a published sshd.service.
+    fn go_to_service_rig(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
+        let engine = FakeEngine::new();
+        init(cx, engine.clone());
+        let handle = cx.update(|cx| {
+            set_test_page(cx, Tab::Services, services_page);
+            open_main_window_on(Tab::Processes, cx).expect("main window opens")
+        });
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let units = units_with_sshd();
+        publish_view(&engine, 1, &units, units.len(), 0);
+        vcx.run_until_parked();
+        (engine, vcx)
+    }
+
+    fn dispatch_go_to_sshd(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            window.dispatch_action(
+                Box::new(GoToService {
+                    manager: ManagerArg::System,
+                    name: "sshd.service".into(),
+                    origin: JumpOrigin::Processes,
+                }),
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn active_tab(vcx: &mut VisualTestContext) -> Tab {
+        vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .active_tab()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn go_to_service_action_switches_tab_and_selects(cx: &mut TestAppContext) {
+        let (engine, mut vcx) = go_to_service_rig(cx);
+        assert_eq!(active_tab(&mut vcx), Tab::Processes);
+
+        dispatch_go_to_sshd(&mut vcx);
+
+        assert_eq!(active_tab(&mut vcx), Tab::Services);
+        let toasts: Vec<String> = vcx.update(|_, cx| {
+            let view = main_window_view(cx).expect("main window");
+            let texts = view.read(cx).toasts().read(cx).visible_texts();
+            texts.iter().map(|t| t.to_string()).collect()
+        });
+        assert_eq!(
+            toasts
+                .iter()
+                .filter(|t| t.as_str() == "Switched to Services tab")
+                .count(),
+            1,
+            "select_unit ran once: {toasts:?}"
+        );
+        let query = last_services_query(&engine).expect("a query");
+        assert!(
+            query
+                .expanded
+                .contains(&SysNodeId::ServiceGroup(Manager::System)),
+            "System group expanded for the jump"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn go_to_service_activates_main_window(cx: &mut TestAppContext) {
+        let (_engine, mut vcx) = go_to_service_rig(cx);
+        vcx.deactivate_window();
+        assert!(!vcx.update(|window, _| window.is_window_active()));
+
+        dispatch_go_to_sshd(&mut vcx);
+
+        assert!(vcx.update(|window, _| window.is_window_active()));
+        assert_eq!(active_tab(&mut vcx), Tab::Services);
     }
 
     #[gpui_kit::test]

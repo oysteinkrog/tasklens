@@ -52,7 +52,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::command::{AppRequest, Command, CommandError, DeviceCommand, KWinCommand, Tab};
 use tl_model::settings::{Decorations, StartTab, WindowState};
-use tl_model::table::TableMode;
+use tl_model::table::{Manager, TableMode, UnitRef};
 use tl_model::time::now_boot_ns;
 use tracing::{debug, error, info, warn};
 
@@ -98,6 +98,7 @@ use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::pick::{self, PickWatch};
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::pages::services::ServicesPage;
+use crate::pages::services::actions::{GoToService, ManagerArg};
 use crate::pages::startup::StartupPage;
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::table::actions::TABLE_CONTEXT;
@@ -1597,6 +1598,27 @@ impl MainWindow {
         page.update(cx, |p, cx| p.show_system_information(window, cx));
     }
 
+    /// Go to service (UI-SYS-021, SYS-032): activates the main window, switches to Services and
+    /// selects the unit.
+    fn on_go_to_service(&mut self, a: &GoToService, window: &mut Window, cx: &mut Context<Self>) {
+        window.activate_window();
+        self.select_tab(Tab::Services, window, cx);
+        let Some(page) = self.page_entity::<ServicesPage>(Tab::Services) else {
+            return;
+        };
+        let manager = match a.manager {
+            ManagerArg::System => Manager::System,
+            ManagerArg::User => Manager::User,
+        };
+        let unit = UnitRef {
+            manager,
+            name: Arc::from(&*a.name),
+        };
+        page.update(cx, |p, cx| {
+            p.select_unit(unit, a.origin.clone(), window, cx)
+        });
+    }
+
     /// Type-to-filter (E20-A2, UI-SHL-124, PROC-044): a printable key that no binding and no
     /// focused element used, typed while a table has focus, moves focus to the filter box and
     /// goes in there. Space is left to the table (D-008). The cheap checks come first; only a
@@ -2566,6 +2588,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_clear_filter))
             .on_action(cx.listener(Self::on_show_system_information))
+            .on_action(cx.listener(Self::on_go_to_service))
             .on_action(cx.listener(Self::on_escape_chain))
             // Bubble phase: sees only keys that no binding and no focused element used.
             .on_key_down(cx.listener(Self::route_type_to_filter))
