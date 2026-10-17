@@ -186,6 +186,29 @@ pub fn services_columns() -> &'static [ColumnDef] {
     &SERVICES_COLUMNS
 }
 
+/// The columns OpenRC can fill (UI-SYS-024).
+const OPENRC_COLUMNS: [ServiceColumn; 6] = [
+    ServiceColumn::Name,
+    ServiceColumn::Status,
+    ServiceColumn::StartupType,
+    ServiceColumn::Pid,
+    ServiceColumn::User,
+    ServiceColumn::Path,
+];
+
+/// True when `backend` offers `column`.
+fn backend_offers(backend: ServiceBackend, column: ServiceColumn) -> bool {
+    backend != ServiceBackend::OpenRc || OPENRC_COLUMNS.contains(&column)
+}
+
+/// True when `id` is a Services column that `backend` offers.
+fn backend_offers_id(backend: ServiceBackend, id: SysColumnId) -> bool {
+    match id {
+        SysColumnId::Services(column) => backend_offers(backend, column),
+        _ => true,
+    }
+}
+
 /// True when showing the layout requires unit cgroup samples.
 pub fn cgroup_stats_wanted(layout: &ColumnLayout<SysColumnId>) -> bool {
     [
@@ -514,6 +537,8 @@ pub struct ServicesWords {
     overlays: [Arc<str>; 4],
     /// "System services ({ $n })" and the user form.
     group_count: [Template; 2],
+    /// "OpenRC services ({ $n })".
+    openrc_count: Template,
     /// "System services" and the user form.
     group_plain: [SharedString; 2],
     not_available: [SharedString; 2],
@@ -566,6 +591,7 @@ impl ServicesWords {
                 template("services-sys014-system-services-n", &["n"]),
                 template("services-sys014-user-services-n", &["n"]),
             ],
+            openrc_count: template("services-sys024-openrc-services", &["n"]),
             group_plain: [
                 text("services-sys014-system-services"),
                 text("services-sys014-user-services"),
@@ -842,6 +868,15 @@ impl ServicesDelegate {
     }
 
     fn build_group_labels(&mut self) {
+        if self.backend == ServiceBackend::OpenRc {
+            let mut text = String::new();
+            let _ = self
+                .words
+                .openrc_count
+                .write(&mut text, &[&CountText(self.snap.manager_counts[0])]);
+            self.group_labels[0] = text.into();
+            return;
+        }
         for manager in [Manager::System, Manager::User] {
             let m = manager_index(manager);
             let state = match self.snap.managers[m] {
@@ -1046,13 +1081,28 @@ impl ServicesDelegate {
     }
 
     pub fn default_layout(&self) -> ColumnLayout<SysColumnId> {
-        let order: Vec<_> = services_columns().iter().map(|column| column.id).collect();
+        let offered = |column: &&ColumnDef| backend_offers_id(self.backend, column.id);
+        let order: Vec<_> = services_columns()
+            .iter()
+            .filter(offered)
+            .map(|column| column.id)
+            .collect();
         let visible: Vec<_> = services_columns()
             .iter()
+            .filter(offered)
             .filter(|column| column.visible)
             .map(|column| column.id)
             .collect();
-        ColumnLayout::defaults(TableId::Services, &self.specs, &order, &visible)
+        ColumnLayout::defaults(TableId::Services, &self.offered_specs(), &order, &visible)
+    }
+
+    /// The specs of the columns the current backend offers.
+    fn offered_specs(&self) -> Vec<ColumnSpec<SysColumnId>> {
+        self.specs
+            .iter()
+            .filter(|spec| backend_offers_id(self.backend, spec.id))
+            .cloned()
+            .collect()
     }
 
     pub fn set_window(&mut self, window: Option<AnyWindowHandle>) {
@@ -1575,14 +1625,34 @@ impl SysDelegate for ServicesDelegate {
     fn install(&mut self, snap: &Arc<Snapshot>) {
         self.snap = Arc::clone(&snap.services);
         self.snapshot = Arc::clone(snap);
-        self.rows = Arc::clone(&self.snap.rows);
+        let backend = self.snap.backend;
+        // OpenRC has one manager: the engine's Unavailable user group row is not shown.
+        self.rows = if backend == ServiceBackend::OpenRc {
+            self.snap
+                .rows
+                .iter()
+                .filter(|row| row.node != SysNodeId::ServiceGroup(Manager::User))
+                .cloned()
+                .collect()
+        } else {
+            Arc::clone(&self.snap.rows)
+        };
         self.row_index = self
             .rows
             .iter()
             .enumerate()
             .map(|(ix, row)| (row_key(&row.node), ix))
             .collect();
-        self.backend = self.snap.backend;
+        if backend != self.backend {
+            self.backend = backend;
+            let scale = self.layout.ui_scale();
+            self.layout = ColumnLayout::from_state(
+                TableId::Services,
+                &self.layout.to_state(),
+                &self.offered_specs(),
+            );
+            self.layout.rebuild(scale);
+        }
         self.build_group_labels();
         self.version += 1;
         self.row_builds += 1;

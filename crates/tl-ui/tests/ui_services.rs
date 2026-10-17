@@ -18,7 +18,7 @@ use tl_model::command::Command;
 use tl_model::health::ManagerState;
 use tl_model::ids::ProcessKey;
 use tl_model::settings::{AppearanceSettings, ServicesSettings, ThemeSettings, UiState};
-use tl_model::snapshot::{ServicesSnapshot, Snapshot};
+use tl_model::snapshot::{ServiceBackend, ServicesSnapshot, Snapshot};
 use tl_model::table::{
     Manager, ServiceColumn, ServiceStateFilter, SysColumnId, SysNodeId, SysRow, SysTable, UnitRef,
     UnitType,
@@ -742,11 +742,12 @@ fn unit_types_menu_stays_open_on_toggle(cx: &mut TestAppContext) {
 
 struct FilterStripHost {
     state: ServiceFilterState,
+    openrc: bool,
 }
 
 impl Render for FilterStripHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        render_strip(&self.state, false, false, false, window, cx)
+        render_strip(&self.state, false, false, self.openrc, window, cx)
     }
 }
 
@@ -766,7 +767,14 @@ fn unit_types_count_suffix(cx: &mut TestAppContext) {
         let mut state = ServiceFilterState::default();
         state.toggle_unit_type(UnitTypeArg::Automount);
         state.toggle_unit_type(UnitTypeArg::Path);
-        Root::new(cx.new(|_| FilterStripHost { state }), window, cx)
+        Root::new(
+            cx.new(|_| FilterStripHost {
+                state,
+                openrc: false,
+            }),
+            window,
+            cx,
+        )
     });
     let mut vcx = VisualTestContext::from_window(handle.into(), cx);
     vcx.update(|window, cx| window.draw(cx).clear(cx));
@@ -780,6 +788,99 @@ fn unit_types_count_suffix(cx: &mut TestAppContext) {
         })
         .expect("Unit types button");
     assert_eq!(unit_types.label(), Some("Unit types (6)"));
+}
+
+#[gpui_kit::test]
+fn openrc_strip_hides_types_and_managers(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        tl_ui::i18n::init_strings(cx, "en-US");
+    });
+    let handle = cx.add_window(|window, cx| {
+        Root::new(
+            cx.new(|_| FilterStripHost {
+                state: ServiceFilterState::default(),
+                openrc: true,
+            }),
+            window,
+            cx,
+        )
+    });
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    let buttons = vcx.update(|window, _| snapshots(window));
+    let has = |id: &str| {
+        buttons.iter().any(|snapshot| {
+            snapshot
+                .path()
+                .last()
+                .is_some_and(|last| last == &gpui_kit::ElementId::Name(id.to_string().into()))
+        })
+    };
+    for id in [
+        "services-filter-running",
+        "services-filter-failed",
+        "services-filter-stopped",
+        "services-filter-disabled",
+        "services-filter-remove",
+    ] {
+        assert!(has(id), "{id} shows");
+    }
+    for id in [
+        "services-filter-unit-types",
+        "services-filter-system",
+        "services-filter-user",
+    ] {
+        assert!(!has(id), "{id} is hidden");
+    }
+}
+
+#[gpui_kit::test]
+fn openrc_group_row_label(cx: &mut TestAppContext) {
+    let d = delegate_for(
+        cx,
+        vec![record("sshd", UnitType::Service, ServiceStatus::Running)],
+        [ManagerState::Connected, ManagerState::Unavailable],
+        ServiceBackend::OpenRc,
+        [37, 0],
+    );
+    assert_eq!(d.name_cell(0).primary, "OpenRC services (37)");
+    assert_eq!(d.row_count(), 2);
+    assert!(
+        (0..d.row_count()).all(|ix| d.name_cell(ix).primary != "User services"),
+        "no User group row"
+    );
+}
+
+#[gpui_kit::test]
+fn openrc_columns_reduced(cx: &mut TestAppContext) {
+    let d = delegate_for(
+        cx,
+        Vec::new(),
+        [ManagerState::Connected, ManagerState::Unavailable],
+        ServiceBackend::OpenRc,
+        [0, 0],
+    );
+    let expected: Vec<_> = [
+        ServiceColumn::Name,
+        ServiceColumn::Status,
+        ServiceColumn::StartupType,
+        ServiceColumn::Pid,
+        ServiceColumn::User,
+        ServiceColumn::Path,
+    ]
+    .into_iter()
+    .map(service_id)
+    .collect();
+    assert_eq!(d.columns().order, expected);
+    let defaults = d.default_layout();
+    assert_eq!(defaults.order, expected);
 }
 
 /// Services copy block and copy source (tasklens-hk6.14).
@@ -1161,9 +1262,7 @@ mod menu_tests {
     use tl_model::actions::{ActionKind, ActionTarget};
     use tl_model::client::EngineClient;
     use tl_model::ids::ProcessKey;
-    use tl_model::snapshot::{
-        ServiceBackend, ServiceStatus, ServicesSnapshot, StartupType, UnitRecord,
-    };
+    use tl_model::snapshot::{ServiceStatus, ServicesSnapshot, StartupType, UnitRecord};
     use tl_model::table::{Manager, SysColumnId, SysNodeId, Total, UnitRef, UnitType};
     use tl_model::time::BootId;
     use tl_model::validity::Validity;
@@ -1281,11 +1380,19 @@ mod menu_tests {
         }
 
         fn entries(&mut self, t: &ServiceMenuTargets) -> Vec<MenuEntryInfo> {
+            self.entries_for(t, ServiceBackend::Systemd)
+        }
+
+        fn entries_for(
+            &mut self,
+            t: &ServiceMenuTargets,
+            backend: ServiceBackend,
+        ) -> Vec<MenuEntryInfo> {
             let t = t.clone();
             let menu = self.vcx.update(|window, cx| {
                 let focus = cx.focus_handle();
                 TlMenu::build(window, cx, focus, move |menu, window, cx| {
-                    service_menu(menu, &t, ServiceBackend::Systemd, window, cx)
+                    service_menu(menu, &t, backend, window, cx)
                 })
             });
             self.popup_entries(&menu)
@@ -1379,6 +1486,39 @@ mod menu_tests {
             find(&entries, "Startup type").unwrap().kind,
             MenuEntryKind::Submenu
         );
+    }
+
+    #[gpui_kit::test]
+    fn openrc_hides_systemd_only_items(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let mut rec = unit_record("sshd", ServiceStatus::Failed, StartupType::Enabled);
+        rec.can_reload = true;
+        rec.main_pid = 42;
+        let snap = snapshot(vec![rec]);
+        let col = Some(service_id(ServiceColumn::Name));
+        let t = r.capture(&snap, &[node("sshd")], col);
+        let entries = r.entries_for(&t, ServiceBackend::OpenRc);
+        assert_eq!(
+            labels(&entries),
+            [
+                "Start",
+                "Stop",
+                "Restart",
+                "Startup type",
+                "Properties",
+                "File properties",
+                "Open file location",
+                "Copy",
+                "Copy row",
+                "Copy rows as table",
+            ]
+        );
+        let sub = find(&entries, "Startup type")
+            .unwrap()
+            .submenu
+            .clone()
+            .expect("submenu");
+        assert_eq!(labels(&r.popup_entries(&sub)), ["Enabled", "Disabled"]);
     }
 
     #[gpui_kit::test]
@@ -2166,6 +2306,16 @@ fn delegate(
     records: Vec<UnitRecord>,
     managers: [ManagerState; 2],
 ) -> ServicesDelegate {
+    delegate_for(cx, records, managers, ServiceBackend::Systemd, [214, 3])
+}
+
+fn delegate_for(
+    cx: &mut TestAppContext,
+    records: Vec<UnitRecord>,
+    managers: [ManagerState; 2],
+    backend: ServiceBackend,
+    manager_counts: [u32; 2],
+) -> ServicesDelegate {
     cx.update(|cx| {
         gpui_kit::init(cx);
         tl_ui::theme::store::init(
@@ -2204,7 +2354,8 @@ fn delegate(
             rows: rows.into(),
             units: records.into(),
             managers,
-            manager_counts: [214, 3],
+            manager_counts,
+            backend,
             ..ServicesSnapshot::default()
         });
         d.install(&Arc::new(snap));

@@ -173,7 +173,8 @@ pub fn service_menu(
         Box::new(ServiceRestart),
         cx,
     );
-    if t.records.iter().any(|r| r.can_reload) {
+    let openrc = backend == ServiceBackend::OpenRc;
+    if !openrc && t.records.iter().any(|r| r.can_reload) {
         let enabled = t.records.iter().any(|r| r.can_reload && is_active(r));
         menu = item_enabled(
             menu,
@@ -184,23 +185,25 @@ pub fn service_menu(
             cx,
         );
     }
-    if t.records.iter().any(|r| r.status == ServiceStatus::Failed) {
+    if !openrc && t.records.iter().any(|r| r.status == ServiceStatus::Failed) {
         menu = menu.item(
             tr(cx, "services-sys017-reset-failed"),
             Box::new(ServiceResetFailed),
         );
     }
-    menu = startup_item(menu, t, window, cx);
+    menu = startup_item(menu, t, backend, window, cx);
     menu = menu.separator();
 
-    menu = item_enabled(
-        menu,
-        "services-sys017-view-logs",
-        t.is_one() && backend != ServiceBackend::OpenRc,
-        None,
-        Box::new(ServiceViewLogs),
-        cx,
-    );
+    if !openrc {
+        menu = item_enabled(
+            menu,
+            "services-sys017-view-logs",
+            t.is_one(),
+            None,
+            Box::new(ServiceViewLogs),
+            cx,
+        );
+    }
     menu = menu.item(
         tr(cx, "services-sys017-properties"),
         Box::new(OpenProperties),
@@ -223,14 +226,16 @@ pub fn service_menu(
         Box::new(ServiceOpenFileLocation),
         cx,
     );
-    menu = item_enabled(
-        menu,
-        "services-sys017-open-unit-file",
-        t.records.iter().any(has_unit_file),
-        None,
-        Box::new(ServiceOpenUnitFile),
-        cx,
-    );
+    if !openrc {
+        menu = item_enabled(
+            menu,
+            "services-sys017-open-unit-file",
+            t.records.iter().any(has_unit_file),
+            None,
+            Box::new(ServiceOpenUnitFile),
+            cx,
+        );
+    }
     menu = menu.separator();
 
     if let Some(SysColumnId::Services(col)) = t.clicked_col {
@@ -246,6 +251,9 @@ pub fn service_menu(
         tr(cx, "services-sys017-copy-rows-table"),
         Box::new(CopyRowsAsTable),
     );
+    if openrc {
+        return menu;
+    }
     let (jump_enabled, jump_tip) = match t.records.as_slice() {
         [r] if r.main_pid != 0 => (true, None),
         [_] => (false, Some(tr(cx, "services-sys017-not-running"))),
@@ -262,7 +270,14 @@ pub fn service_menu(
 }
 
 /// The "Startup type" parent: a submenu, or a disabled row that says why not (UI-SYS-019).
-fn startup_item(menu: TlMenu, t: &ServiceMenuTargets, window: &mut Window, cx: &mut App) -> TlMenu {
+fn startup_item(
+    menu: TlMenu,
+    t: &ServiceMenuTargets,
+    backend: ServiceBackend,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let openrc = backend == ServiceBackend::OpenRc;
     let label = tr(cx, "services-sys019-startup-type");
     let no_install = t.records.iter().any(|r| {
         matches!(
@@ -295,6 +310,9 @@ fn startup_item(menu: TlMenu, t: &ServiceMenuTargets, window: &mut Window, cx: &
             ("services-sys019-disabled", StartupChoice::Disabled),
             ("services-sys019-masked", StartupChoice::Masked),
         ] {
+            if openrc && choice == StartupChoice::Masked {
+                continue;
+            }
             let checked = current.as_ref() == Some(&choice);
             sub = sub.check_item(
                 tr(cx, key),
