@@ -2820,7 +2820,20 @@ fn info_needs_setup_link_opens_setup(cx: &mut TestAppContext) {
         Modifiers::none(),
     );
     assert_eq!(setups.get(), 1);
-    vcx.update(|window, cx| window.focus_next(cx));
-    vcx.simulate_keystrokes("enter");
-    assert_eq!(setups.get(), 2);
+    // Tab to the link: the copy button and the row menu come first in tab order.
+    for _ in 0..6 {
+        vcx.update(|window, cx| window.focus_next(cx));
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let keystroke = gpui_kit::Keystroke::parse("enter").unwrap();
+        vcx.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        vcx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+        if setups.get() == 2 {
+            break;
+        }
+    }
+    assert_eq!(setups.get(), 2, "Enter on the focused link opens setup");
 }
