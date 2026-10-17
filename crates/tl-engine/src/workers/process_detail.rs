@@ -58,11 +58,14 @@
 //! `ptrace_scope` does not let tasklens attach to (scope 1 allows only descendants of tasklens,
 //! 2 and 3 allow none) gets one `Restricted` payload, and its memory is never opened; the helper
 //! path is E29's. A running scan reads `/proc/<pid>/mem` one `strings::CHUNK` per step, at most
-//! `SCAN_STEPS_PER_SAMPLE` steps per sample over all scans in turn, and the period is
+//! `SCAN_STEPS_PER_SAMPLE` steps per sample over all scans in turn (each sample goes on where
+//! the last one stopped, so every scan gets reads), and the period is
 //! `SCAN_PERIOD` while any scan runs or waits. Tabs and affinity then read by the clock, so they
 //! keep their rates. A running scan is published at most every `SCAN_PUBLISH_PERIOD`, and its end
 //! at once. `CancelStringScan` drops the scan and publishes `Cancelled`, and no chunk is read
-//! after it. A scan whose process leaves the demand stops without a payload: its window closed.
+//! after it. A scan whose process exits or turns zombie stops with `StoppedExited` and keeps the
+//! rows found so far ("Scan stopped: the process exited", UI-PWN-017). A scan whose process
+//! leaves the demand stops without a payload: its window closed.
 //!
 //! Per-key errors become `Validity`, never `WorkerError`. Hash failures are a `HashState`.
 //! Environment values, command lines and paths are never logged (ADR-015), nor are scan
@@ -478,6 +481,9 @@ pub struct ProcessDetailSource {
     /// Running Strings scans, oldest first. With `scan_requests` at most `DETAILS_MAX`, and at
     /// most one per process.
     scans: Vec<ScanState>,
+    /// Index in `scans` of the scan that reads first in the next sample, so with more scans than
+    /// `SCAN_STEPS_PER_SAMPLE` each one still gets its turn.
+    scan_next: usize,
     /// The chunk buffer and hit list of the scans. Freed when no scan runs.
     scan_buf: Vec<u8>,
     scan_hits: Vec<StringHitInfo>,
@@ -568,6 +574,7 @@ impl ProcessDetailSource {
             pending: Vec::new(),
             scan_requests: Vec::new(),
             scans: Vec::new(),
+            scan_next: 0,
             scan_buf: Vec::new(),
             scan_hits: Vec::new(),
             scanning: Cell::new(false),
@@ -1132,29 +1139,44 @@ impl ProcessDetailSource {
 
         let mut ends: SmallVec<[Option<ScanEnd>; DETAILS_MAX]> =
             smallvec::smallvec![None; self.scans.len()];
+        let n = self.scans.len();
+        let mut i = self.scan_next % n;
         let mut budget = SCAN_STEPS_PER_SAMPLE;
         while budget > 0 && ends.iter().any(Option::is_none) {
-            for (state, end) in self.scans.iter_mut().zip(ends.iter_mut()) {
-                if budget == 0 {
-                    break;
-                }
-                if end.is_some() {
-                    continue;
-                }
+            if ends[i].is_none() {
                 budget -= 1;
+                let state = &mut self.scans[i];
                 self.scan_hits.clear();
-                *end = state
-                    .scanner
-                    .step(&mut state.mem, &mut self.scan_buf, &mut self.scan_hits);
+                ends[i] =
+                    state
+                        .scanner
+                        .step(&mut state.mem, &mut self.scan_buf, &mut self.scan_hits);
                 if !self.scan_hits.is_empty() {
                     state
                         .chunks
                         .push(self.scan_hits.drain(..).map(string_hit).collect());
                 }
             }
+            i = (i + 1) % n;
         }
 
-        for (state, end) in self.scans.iter_mut().zip(&ends) {
+        for (state, end) in self.scans.iter_mut().zip(ends.iter_mut()) {
+            // The memory of a process that exited reads as holes, so without this check its
+            // scan would end as Finished or Failed. A limit that was reached stays.
+            if *end != Some(ScanEnd::Stopped)
+                && scan_target_gone(
+                    &self.cfg.sys_root,
+                    state.key,
+                    &mut self.bufs.small,
+                    &mut self.general.stat,
+                )
+            {
+                self.extra
+                    .push_back(state.update(ScanPhase::StoppedExited, Validity::Valid));
+                // Any end drops the scan below.
+                *end = Some(ScanEnd::Cancelled);
+                continue;
+            }
             let (phase, validity) = match end {
                 None if elapsed(state.last_publish, now, SCAN_PUBLISH_PERIOD) => {
                     state.last_publish = Some(now);
@@ -1170,6 +1192,9 @@ impl ProcessDetailSource {
             };
             self.extra.push_back(state.update(phase, validity));
         }
+        // The next sample goes on after the last scan that read, counted among the scans left.
+        let ended_before = ends[..i].iter().filter(|e| e.is_some()).count();
+        self.scan_next = i - ended_before;
         let mut ends = ends.iter();
         self.scans
             .retain(|_| ends.next().is_some_and(Option::is_none));
@@ -1467,6 +1492,24 @@ fn start_scan(
         include_file_backed: opts.include_file_backed,
     };
     Ok((StringScanner::new(opts, ranges), mem))
+}
+
+/// True when the process of a running scan exited: its pid is gone or reused, or it is a
+/// zombie. A stat that cannot be read for another reason counts as running.
+fn scan_target_gone(
+    root: &SysRoot,
+    key: ProcessKey,
+    buf: &mut Vec<u8>,
+    stat: &mut PidStat,
+) -> bool {
+    match read_pid_stat(root, key.pid, buf, stat) {
+        Ok(()) => stat.start_ticks != key.start_ticks || matches!(stat.state, b'Z' | b'X'),
+        Err(CollectError::NotFound | CollectError::ProcessGone { .. }) => true,
+        Err(e) => {
+            tracing::debug!(error = %e, "strings scan: stat not read");
+            false
+        }
+    }
 }
 
 /// Reads and parses `<proc>/<pid>/stat`.

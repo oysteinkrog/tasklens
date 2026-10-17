@@ -457,15 +457,19 @@ const MEM_BASE: u64 = 0x1000;
 /// sparse `mem` file that holds each `(offset, bytes)` at that offset in the region. `ProcMem`
 /// reads `mem` with `pread` at the address, so this file is the memory the scan sees.
 fn write_memory(root: &FixtureRoot, len: u64, data: &[(u64, &[u8])]) {
+    write_memory_of(root, 4201, len, data);
+}
+
+fn write_memory_of(root: &FixtureRoot, pid: u32, len: u64, data: &[(u64, &[u8])]) {
     root.write(
-        4201,
+        pid,
         "maps",
         format!(
             "{MEM_BASE:08x}-{:08x} rw-p 00000000 00:00 0\n",
             MEM_BASE + len
         ),
     );
-    let mem = fs::File::create(root.pid_dir(4201).join("mem")).expect("create mem");
+    let mem = fs::File::create(root.pid_dir(pid).join("mem")).expect("create mem");
     mem.set_len(MEM_BASE + len).expect("size mem");
     for (offset, bytes) in data {
         mem.write_all_at(bytes, MEM_BASE + offset)
@@ -762,5 +766,113 @@ fn string_scan_kernel_thread() {
         state.phase,
         ScanPhase::Failed("Strings unavailable for this process.".into())
     );
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.9: a process that turns zombie during the scan stops it with `StoppedExited`
+/// ("Scan stopped: the process exited", UI-PWN-017) and keeps the rows found so far. Its memory
+/// would read as holes, which must not end as `Finished`.
+#[test]
+fn string_scan_process_exit() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    write_ptrace_scope(&root, 0);
+    // One string every 4 MiB. The fixture `mem` stays readable, so only the exit check stops it.
+    let data: Vec<(u64, &[u8])> = (0..16).map(|i| (i << 22, &b"some string"[..])).collect();
+    write_memory(&root, 64 << 20, &data);
+    let (mut fl, ui, handle) = begin_scan(&root, edge_key(), StringScanOpts::default());
+
+    let version = strings_slot(&ui, edge_key()).version;
+    while strings_slot(&ui, edge_key()).version == version {
+        assert!(fl.now_ms() < 10_000, "no Strings payload");
+        fl.advance(Duration::from_millis(10));
+    }
+    let first = scan_state(&strings_slot(&ui, edge_key())).expect("a Strings payload");
+    assert_eq!(first.phase, ScanPhase::Scanning);
+    let stat = fs::read_to_string(root.pid_dir(4201).join("stat")).expect("read stat");
+    root.write(4201, "stat", stat.replace(") S 4100", ") Z 4100"));
+
+    let rest = collect_scan(&mut fl, &ui, edge_key(), Duration::from_secs(2));
+    let (validity, last) = rest.last().expect("a final payload");
+    assert_eq!(*validity, Validity::Valid);
+    assert_eq!(last.phase, ScanPhase::StoppedExited);
+    assert_eq!(last.scan, ScanId(1));
+    assert!(last.progress_pct < 100, "{}", last.progress_pct);
+    assert!(
+        last.found >= first.found && last.found < 16,
+        "{}",
+        last.found
+    );
+    assert_eq!(
+        hits(last).len(),
+        last.found as usize,
+        "the rows so far stay"
+    );
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.9: with more scans than reads per sample (10 scans, 8 reads), every scan gets
+/// reads in turn. No scan may wait until others finish.
+#[test]
+fn string_scan_many_scans_take_turns() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    write_ptrace_scope(&root, 0);
+    let stat = fs::read_to_string(root.pid_dir(4201).join("stat")).expect("read stat");
+    let keys: Vec<ProcessKey> = (5001..=5010)
+        .map(|pid| {
+            overlay(&root.pid_dir(4201), &root.pid_dir(pid));
+            root.write(pid, "stat", stat.replace("4201 (", &format!("{pid} (")));
+            write_memory_of(&root, pid, 16 << 20, &[((16 << 20) - 32, b"last string")]);
+            ProcessKey { pid, ..edge_key() }
+        })
+        .collect();
+    let (mut fl, ui, handle) = start_detail_engine(&root, 500);
+    let details: Vec<DetailDemand> = keys
+        .iter()
+        .map(|&key| DetailDemand {
+            target: DetailTarget::Process(key),
+            tab: DetailTab::Strings,
+        })
+        .collect();
+    ui.demand_tx
+        .send(Demand {
+            any_surface_visible: true,
+            details: details.into(),
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(1), Duration::from_millis(10));
+    for (n, &key) in (1..).zip(&keys) {
+        send(
+            &ui,
+            Command::StringScan {
+                scan: ScanId(n),
+                key,
+                opts: StringScanOpts::default(),
+            },
+        );
+    }
+
+    // Each scan has 16 reads, so none ends before every scan has read once.
+    let mut started = vec![false; keys.len()];
+    let mut finished = vec![false; keys.len()];
+    let end = fl.now_ms() + 10_000;
+    while finished.iter().any(|f| !f) {
+        assert!(fl.now_ms() < end, "scans did not finish: {finished:?}");
+        fl.advance(Duration::from_millis(10));
+        for (i, &key) in keys.iter().enumerate() {
+            let Some(state) = scan_state(&strings_slot(&ui, key)) else {
+                continue;
+            };
+            if state.phase == ScanPhase::Finished {
+                assert!(
+                    started.iter().all(|&s| s),
+                    "scan {i} finished before every scan read: {started:?}"
+                );
+                assert_eq!(state.found, 1);
+                finished[i] = true;
+            }
+            started[i] |= state.progress_pct > 0;
+        }
+    }
     stop(fl, ui, handle);
 }
