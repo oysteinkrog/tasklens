@@ -42,7 +42,7 @@ use crate::demand::GlobalDemand;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::cells::{
-    CellCtx, CellWords, GroupMembers, PaintState, RowRef, copy_all_metrics,
+    CellCtx, CellWords, GroupMembers, PaintState, RowRef, boot_time_s, copy_all_metrics,
 };
 use crate::pages::processes::delegate::{ProcessRowCells, ValidityTips, live_tip};
 use crate::pages::processes::name_cell::{self, NameCellData, NameWords, StateGlyph};
@@ -944,7 +944,7 @@ impl ServicesDelegate {
             online: &system.cpu_topology.online,
             mem_total: system.memory.total,
             vram_total: system.gpus.iter().map(|(_, g)| g.mem_total.value).sum(),
-            boot_time_s: system.boot_time_s,
+            boot_time_s: boot_time_s(s),
             clk_tck: CLK_TCK,
             windows: &s.windows,
         }

@@ -4882,3 +4882,26 @@ mod live {
         );
     }
 }
+
+mod boot_time {
+    use tl_model::snapshot::Snapshot;
+    use tl_model::validity::Validity;
+    use tl_ui::pages::processes::cells::boot_time_s;
+
+    #[test]
+    fn start_time_base_comes_from_the_inventory() {
+        let mut s = Snapshot::default();
+        assert_eq!(boot_time_s(&s), 0);
+        std::sync::Arc::make_mut(&mut s.inventory)
+            .system
+            .boot_time_s
+            .value = 1_700_000_000;
+        // An invalid inventory value is ignored.
+        assert_eq!(boot_time_s(&s), 0);
+        std::sync::Arc::make_mut(&mut s.inventory)
+            .system
+            .boot_time_s
+            .validity = Validity::Valid;
+        assert_eq!(boot_time_s(&s), 1_700_000_000);
+    }
+}

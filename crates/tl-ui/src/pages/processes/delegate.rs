@@ -48,9 +48,9 @@ use tl_model::validity::{FieldValidity, Validity};
 use super::actions::CapturedTargets;
 use super::cells::{
     CellCtx, CellTipWords, CellWords, DEFAULT_VISIBLE, GroupMembers, PROCESS_COLUMNS, PaintState,
-    PowerSensor, ProcColumn, RowRef, SUBTREE_PREFIX, TipCtx, cell_suffix, cell_tooltip, dims_zero,
-    fill_cell, heat_background, process_column, row_tint, subtree_column, subtree_total,
-    tint_deadline,
+    PowerSensor, ProcColumn, RowRef, SUBTREE_PREFIX, TipCtx, boot_time_s, cell_suffix,
+    cell_tooltip, dims_zero, fill_cell, heat_background, process_column, row_tint, subtree_column,
+    subtree_total, tint_deadline,
 };
 use super::header_totals::header_total;
 use super::menu::{MenuCaps, group_header_menu, row_menu, window_popup};
@@ -840,7 +840,7 @@ impl ProcessDelegate {
             online: &system.cpu_topology.online,
             mem_total: system.memory.total,
             vram_total: system.gpus.iter().map(|(_, g)| g.mem_total.value).sum(),
-            boot_time_s: system.boot_time_s,
+            boot_time_s: boot_time_s(s),
             clk_tck: CLK_TCK,
             windows: &s.windows,
         }

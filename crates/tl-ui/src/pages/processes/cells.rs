@@ -18,7 +18,7 @@ use tl_model::process::{
     ProcessExtrasP2, ProcessRecord,
 };
 use tl_model::settings::{NetworkUnit, Settings};
-use tl_model::snapshot::WindowsSnapshot;
+use tl_model::snapshot::{Snapshot, WindowsSnapshot};
 use tl_model::system::{CpuSet, Metric, ZramTotals};
 use tl_model::table::{ProcessTableView, TableRow, UnitRef};
 use tl_model::time::TimeNs;
@@ -1020,6 +1020,17 @@ fn state_word<'a>(r: &ProcessRecord, x: Option<&ProcessExtras>, w: &'a CellWords
         ProcState::Idle => 5,
         ProcState::Other => 6,
     }]
+}
+
+/// Unix seconds at boot for `CellCtx.boot_time_s`. The engine fills `SystemSnapshot.boot_time_s`
+/// from no source, so it stays 0 and Start time shows 1970. The inventory holds the real value.
+pub fn boot_time_s(s: &Snapshot) -> i64 {
+    let inv = &s.inventory.system.boot_time_s;
+    if inv.validity.is_valid() && inv.value > 0 {
+        inv.value
+    } else {
+        s.system.boot_time_s
+    }
 }
 
 /// Unix seconds of a start time `start_boot_ns` after boot.
