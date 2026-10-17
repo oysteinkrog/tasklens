@@ -928,3 +928,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-17 leader decision: pdu.45 Q1 B (cell values in tasklens-pdu.59), Q2 B (registry phase NO_SOURCE for columns without data; engine plan in tasklens-pdu.60), Q3 elevation parked, gpu_N as today.
 - 2026-10-17 leader decision: pdu.37 adds TlButtonSize::Xs (20 px) and TlMenu::max_w (default 360) so the window button is 20 × 20 and its popup 480 px max, per UI-PRC-003.
 - 2026-10-17 leader decision: bj6.18 swaps the ctrl-? binding order so the Help menu hint reads Ctrl+?.
+- 2026-10-17 leader: shortcuts_cover_all_bindings fails on main since 10-15 (pages added bindings without SHORTCUT_DOCS). Partial fix 299d24c9; sweep in tasklens-bj6.51.
