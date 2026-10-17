@@ -253,7 +253,7 @@ fn write_cell(page: &ConnectionsPage, record: &ConnRecord, column: ConnColumn, o
             }
         }
         ConnColumn::RemoteHost => {
-            if let Some(host) = &record.remote_host {
+            if let Some(host) = record.remote_host.name() {
                 out.push_str(host);
             }
         }

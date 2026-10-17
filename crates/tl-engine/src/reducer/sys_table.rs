@@ -838,8 +838,8 @@ impl<'a> ConnView<'a> {
                 cmp_text,
             ),
             C::RemoteHost => absent_last(
-                a.remote_host.as_deref(),
-                b.remote_host.as_deref(),
+                a.remote_host.name(),
+                b.remote_host.name(),
                 ascending,
                 cmp_text,
             ),
@@ -874,7 +874,7 @@ mod tests {
     use smallvec::SmallVec;
     use tl_model::ids::GroupKey;
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-    use tl_model::snapshot::{StartupKind, StartupScope};
+    use tl_model::snapshot::{RemoteHost, StartupKind, StartupScope};
     use tl_model::table::{StartupRef, StartupSource};
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
@@ -1769,7 +1769,7 @@ mod tests {
             send_q: 0,
             unit: None,
             tcp: None,
-            remote_host: None,
+            remote_host: RemoteHost::NotRequested,
         }
     }
 

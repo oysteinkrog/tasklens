@@ -838,9 +838,33 @@ pub struct ConnRecord {
     pub send_q: u32,
     pub unit: Option<UnitRef>,
     pub tcp: Option<TcpInfoView>,
-    /// The reverse DNS name of the foreign address (SYS-035). `None` while the lookup is
-    /// pending, after a failed lookup, or when the Remote host column is hidden.
-    pub remote_host: Option<Arc<str>>,
+    /// The reverse DNS name of the foreign address (SYS-035) and how far the lookup is.
+    pub remote_host: RemoteHost,
+}
+
+/// The state of the reverse DNS lookup for one connection's foreign address.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum RemoteHost {
+    /// No lookup was asked for: the Remote host column is hidden, the row is not visible, or
+    /// the foreign address is unspecified.
+    #[default]
+    NotRequested,
+    /// The lookup is queued or running.
+    Pending,
+    /// The lookup found this name.
+    Name(Arc<str>),
+    /// The lookup found no name, or failed.
+    NoName,
+}
+
+impl RemoteHost {
+    /// The name when the lookup found one.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Name(name) => Some(name),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

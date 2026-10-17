@@ -2557,8 +2557,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use tl_model::actions::{Family, FourTuple, Proto};
 use tl_model::gpu_proto::GpuApiVersions;
 use tl_model::snapshot::{
-    ConnRecord, ConnState, GraphicsAdapter, InventorySnapshot, RecoverySettings, ServiceStatus,
-    StartupType, UnitDetails, UnitRecord,
+    ConnRecord, ConnState, GraphicsAdapter, InventorySnapshot, RecoverySettings, RemoteHost,
+    ServiceStatus, StartupType, UnitDetails, UnitRecord,
 };
 use tl_model::table::{UnitRef, UnitType};
 
@@ -2585,7 +2585,7 @@ fn conn(cookie: u64, proto: Proto, state: ConnState) -> ConnRecord {
         send_q: 0,
         unit: None,
         tcp: None,
-        remote_host: None,
+        remote_host: RemoteHost::NotRequested,
     }
 }
 

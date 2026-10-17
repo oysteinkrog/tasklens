@@ -43,7 +43,7 @@ use tl_model::health::{HelperState, SourceId, SourceState};
 use tl_model::helper_proto::{HelperReply, HelperReplyBody, HelperRequest};
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::EngineSettings;
-use tl_model::snapshot::{ConnRecord, ConnState, TcpInfoView};
+use tl_model::snapshot::{ConnRecord, ConnState, RemoteHost, TcpInfoView};
 use tl_model::time::BootId;
 use tl_model::validity::Validity;
 
@@ -182,7 +182,7 @@ pub struct ConnectionsSource<R: SocketReader> {
     pending: Option<SourceUpdate>,
     /// Set by `period()` from the latest demand: the cookies of the visible Remote host cells.
     host_cookies: RefCell<Arc<[u64]>>,
-    /// The link to the resolver task. `None` leaves every `remote_host` empty.
+    /// The link to the resolver task. `None` leaves every `remote_host` as `NotRequested`.
     rdns: Option<Rdns>,
     /// Set by `helper_owners`.
     helper: Option<HelperOwners>,
@@ -636,11 +636,13 @@ impl Rdns {
         self.cache.insert(ip, (name, expires));
     }
 
-    /// The cached name of `ip`. `None` while the lookup is pending and after a negative
-    /// answer. An address that is not cached, or whose entry expired, is sent to the resolver.
-    fn host(&mut self, ip: IpAddr, now_ns: u64) -> Option<Arc<str>> {
+    /// The state of the lookup for `ip`: `Name` or `NoName` from the cache, else `Pending`. An
+    /// address that is not cached, or whose entry expired, is sent to the resolver.
+    fn host(&mut self, ip: IpAddr, now_ns: u64) -> RemoteHost {
         match self.cache.get(&ip) {
-            Some((name, expires)) if *expires > now_ns => return name.clone(),
+            Some((name, expires)) if *expires > now_ns => {
+                return name.clone().map_or(RemoteHost::NoName, RemoteHost::Name);
+            }
             Some(_) => {
                 self.cache.remove(&ip);
             }
@@ -653,7 +655,7 @@ impl Rdns {
         if ask && self.requests.try_send(RdnsMsg::Lookup(ip)).is_ok() {
             self.pending.insert(ip, now_ns);
         }
-        None
+        RemoteHost::Pending
     }
 }
 
@@ -817,7 +819,7 @@ fn to_model(r: &RawRecord) -> ConnRecord {
             retransmits: t.total_retrans,
             last_data_recv_ms: t.last_data_recv_ms,
         }),
-        remote_host: None,
+        remote_host: RemoteHost::NotRequested,
     }
 }
 
@@ -1475,29 +1477,42 @@ mod tests {
 
         // Pending: the cell shows the address.
         let (src, update) = sample(src, &d, at(100, 100));
-        assert_eq!(update.records[0].remote_host, None);
+        assert_eq!(update.records[0].remote_host, RemoteHost::Pending);
         rig.lab.run_until_idle();
         assert_eq!(rig.calls(), 1);
 
         // Answered and cached at t=100 s.
         let (src, update) = sample(src, &d, at(100, 100));
         assert_eq!(
-            update.records[0].remote_host.as_deref(),
-            Some("host.example")
+            update.records[0].remote_host,
+            RemoteHost::Name(Arc::from("host.example"))
         );
 
         let (src, update) = sample(src, &d, at(100 + 9 * 60, 100 + 9 * 60));
         assert_eq!(
-            update.records[0].remote_host.as_deref(),
-            Some("host.example")
+            update.records[0].remote_host,
+            RemoteHost::Name(Arc::from("host.example"))
         );
         rig.lab.run_until_idle();
         assert_eq!(rig.calls(), 1, "no new lookup at 9 min");
 
         let (_, update) = sample(src, &d, at(100 + 11 * 60, 100 + 11 * 60));
-        assert_eq!(update.records[0].remote_host, None);
+        assert_eq!(update.records[0].remote_host, RemoteHost::Pending);
         rig.lab.run_until_idle();
         assert_eq!(rig.calls(), 2, "a new lookup at 11 min");
+    }
+
+    #[test]
+    fn rdns_not_requested_without_cookie() {
+        // The cookie is not in `remote_host_cookies`, so the record is never looked up.
+        let d = host_demand(&[8]);
+        let mut rig = RdnsRig::new(FakeResolver::default(), d.clone());
+        let src = host_source(&mut rig);
+
+        let (_, update) = sample(src, &d, at(100, 100));
+        assert_eq!(update.records[0].remote_host, RemoteHost::NotRequested);
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 0);
     }
 
     #[test]
@@ -1506,12 +1521,13 @@ mod tests {
         let mut rig = RdnsRig::new(FakeResolver::default(), d.clone());
         let src = host_source(&mut rig);
 
-        let (src, _) = sample(src, &d, at(100, 100));
+        let (src, update) = sample(src, &d, at(100, 100));
+        assert_eq!(update.records[0].remote_host, RemoteHost::Pending);
         rig.lab.run_until_idle();
         assert_eq!(rig.calls(), 1);
         // The negative answer is cached at t=100 s.
         let (src, update) = sample(src, &d, at(100, 100));
-        assert_eq!(update.records[0].remote_host, None);
+        assert_eq!(update.records[0].remote_host, RemoteHost::NoName);
 
         let (src, _) = sample(src, &d, at(130, 130));
         rig.lab.run_until_idle();

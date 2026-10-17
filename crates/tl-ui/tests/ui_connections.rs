@@ -11,7 +11,8 @@ use tl_model::ids::ProcessKey;
 use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::snapshot::{
-    ComponentHeader, ConnRecord, ConnState, ConnectionsSnapshot, ProcessSnapshot, Snapshot,
+    ComponentHeader, ConnRecord, ConnState, ConnectionsSnapshot, ProcessSnapshot, RemoteHost,
+    Snapshot,
 };
 use tl_model::table::{ConnColumn, SysNodeId, SysRow};
 use tl_model::time::BootId;
@@ -108,7 +109,7 @@ fn connection(cookie: u64, owners: SmallVec<[ProcessKey; 1]>) -> ConnRecord {
         send_q: 0,
         unit: None,
         tcp: None,
-        remote_host: None,
+        remote_host: RemoteHost::NotRequested,
     }
 }
 
