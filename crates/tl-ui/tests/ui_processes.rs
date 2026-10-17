@@ -1369,6 +1369,7 @@ mod shell {
             });
             TlSettings::init(cx);
             cx.set_global(EngineGlobal(client.clone()));
+            tl_ui::action_tracker::install(client.clone(), cx);
             let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub));

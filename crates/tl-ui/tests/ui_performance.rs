@@ -699,14 +699,15 @@ mod page_frame {
         }
 
         cx.update(setup);
+        // Fan and Battery have real pages now (o55.29), so use an aggregate with under two members.
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        let key = DeviceKey(Arc::from("fan:nct6799:2"));
+        let key = DeviceKey(Arc::from("aggregate:disk"));
         let row = DeviceRow {
             key: key.clone(),
-            kind: DeviceKind::Fan,
+            kind: DeviceKind::AggregateDisk,
             idx: DeviceIdx(1),
             generation: 0,
             net_class: None,

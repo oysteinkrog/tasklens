@@ -221,7 +221,7 @@ impl IconNamed for AppIcon {
 // icon (UI-SYS-011, UI-SYS-005). `Eject` is the Disk page Eject button (UI-PRF-029). `Trash` is the History
 // menu's Delete from history item (UI-PRC-037). `ScanSearch` is the Properties Strings tab Scan
 // button (UI-PWN-017). `Terminal` and `ArrowDownToLine` are the Service Properties Logs Open in
-// terminal and Follow buttons (UI-SYS-036).
+// terminal and Follow buttons (UI-SYS-036). `Pencil` is the sidebar edit mode button.
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
@@ -229,7 +229,7 @@ gpui_kit::assets::icon_assets!(
         Square,
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
         Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive, Cog, FileCode,
-        FunnelX, Eject, Trash, ScanSearch, Terminal, ArrowDownToLine
+        FunnelX, Eject, Trash, ScanSearch, Terminal, ArrowDownToLine, Pencil
     ]
 );
 

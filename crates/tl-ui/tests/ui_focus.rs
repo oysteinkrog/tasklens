@@ -60,7 +60,7 @@ fn esc_outcome_order() {
 /// `--features test-hooks`.
 #[cfg(feature = "test-hooks")]
 mod esc_chain {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::Duration;
 
@@ -72,7 +72,7 @@ mod esc_chain {
     use tl_model::command::Tab;
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::table::TableMode;
-    use tl_ui::actions::{CancelWindowPick, EscapeChain, RefreshCurrentTab};
+    use tl_ui::actions::{EscapeChain, RefreshCurrentTab};
     use tl_ui::app::{BootSettings, UiExit, UiExitSlot};
     use tl_ui::components::menu::{TlMenu, context_menu_open, open_context_menu_at};
     use tl_ui::components::toast;
@@ -317,18 +317,17 @@ mod esc_chain {
     #[gpui_kit::test]
     fn esc_cancels_pick(cx: &mut TestAppContext) {
         let mut r = rig(cx);
-        let cancels = Rc::new(Cell::new(0u32));
-        let seen = cancels.clone();
-        r.vcx.update(|_, cx| {
-            cx.on_action(move |_: &CancelWindowPick, _| seen.set(seen.get() + 1));
-        });
         let main = r.main();
         r.vcx
             .update(|_, cx| main.update(cx, |m, _| m.set_picking_for_test(true)));
 
         r.vcx.dispatch_action(EscapeChain);
         r.vcx.run_until_parked();
-        assert_eq!(cancels.get(), 1, "CancelWindowPick dispatched");
+        // The main window handles `CancelWindowPick` itself (jqk.29) and ends picking.
+        assert!(
+            !r.vcx.update(|_, cx| main.read(cx).is_picking()),
+            "CancelWindowPick ended picking"
+        );
         assert_eq!(r.exit(), None);
     }
 
