@@ -876,10 +876,16 @@ fn reply_files(files: ProcFiles, replies: &[HelperReply]) -> Vec<(ProcFiles, Vec
     out
 }
 
-/// The number of entries of an `FD_LIST` body: postcard `Vec<(u32, Vec<u8>)>` (E29-004).
+/// The number of entries of an `FD_LIST` body.
 fn fd_list_count(data: &[u8]) -> Option<u32> {
-    let fds = postcard::from_bytes::<Vec<(u32, &[u8])>>(data).ok()?;
+    let fds = fd_list(data)?;
     Some(u32::try_from(fds.len()).unwrap_or(u32::MAX))
+}
+
+/// The (fd number, raw link target) entries of an `FD_LIST` body: postcard
+/// `Vec<(u32, Vec<u8>)>` (E29-004). `None` when it does not decode.
+pub(crate) fn fd_list(data: &[u8]) -> Option<Vec<(u32, &[u8])>> {
+    postcard::from_bytes(data).ok()
 }
 
 /// Sanitized link text, `None` when empty.

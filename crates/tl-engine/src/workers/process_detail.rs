@@ -77,8 +77,17 @@
 //! `DetailsUpdate::HandleSearch`. The search is dropped after its `Done`, `Stopped` or `Failed`
 //! state. `CancelHandleSearch` with the running id stops the walk before its next pid, and the
 //! next sample publishes `Stopped`; a cancelled request that has not started publishes `Stopped`
-//! with nothing searched. `privileged` is passed to the search; without the helper
-//! (tasklens-qfx.19) the processes whose handles cannot be read count in `skipped`.
+//! with nothing searched. Without Search all (`privileged`) or without a helper in the session,
+//! the processes whose handles cannot be read count in `skipped`.
+//!
+//! Handle search helper reads (tasklens-qfx.19, PROC-096): `run` also puts `HelperSearchReads`
+//! beside the sample loop when the session has a helper. A privileged search hands each process
+//! it skips to it as one `ReadProcessFiles`, sent in order through `HelperHandle::read` with a
+//! 2 s deadline, so no polkit prompt comes from a search either. The search's cancel flag is
+//! checked before each read, so after `CancelHandleSearch` no further read is sent. The next
+//! sample matches each reply with the walk's matcher and counts the process as searched. A read
+//! that fails leaves the process in `skipped`; `NotRunning` (the helper is not `Unlocked`) stops
+//! the helper reads of that search and leaves the rest in `skipped`.
 //!
 //! Helper reads (E29-015, PROC-076, UI-PWN-018): `run` puts `HelperDetailReads` beside the
 //! sample loop when the session has a helper. While the helper is `Unlocked`, a direct read that
@@ -110,6 +119,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -135,6 +145,7 @@ use tl_collect::proc::detail::{
     MapNodeInfo, MapRegionInfo, SecurityInfo, ShadowStack, ThreadInfo, ThreadReader, WchanValue,
 };
 use tl_collect::proc::fdcount::{FdCount, fd_count};
+use tl_collect::proc::handles::PidFiles;
 use tl_collect::proc::io::{IoRead, PidIo, parse_io, read_io};
 use tl_collect::proc::meta::{PasswdUserNames, ReadBufs, UserNames};
 use tl_collect::proc::pid_stat::{PF_KTHREAD, PidStat, parse_pid_stat};
@@ -178,7 +189,7 @@ use crate::supervise::WorkerFactory;
 use crate::update::{DetailsUpdate, PssEntry, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
 use crate::workers::handle_search::HandleSearch;
-use crate::workers::processes::{HELPER_READS_MAX, MAX_INTERVAL_MS, MIN_INTERVAL_MS};
+use crate::workers::processes::{HELPER_READS_MAX, MAX_INTERVAL_MS, MIN_INTERVAL_MS, fd_list};
 
 /// PSS and USS are read once a second (ADR-008).
 pub const PSS_PERIOD: Duration = Duration::from_secs(1);
@@ -662,6 +673,120 @@ impl HelperDetailReads {
             }
         }
     }
+}
+
+/// One helper read of a handle search: a process the walk could not read.
+struct SearchJob {
+    search: SearchId,
+    key: ProcessKey,
+    files: ProcFiles,
+    /// The search's cancel flag, checked just before the read is sent.
+    cancel: Arc<AtomicBool>,
+}
+
+/// The answer to one `SearchJob`.
+struct SearchDone {
+    search: SearchId,
+    key: ProcessKey,
+    files: ProcFiles,
+    /// `None` when the read was not sent: the search was cancelled, or an earlier read of it
+    /// found the helper not running.
+    result: Option<HelperResult>,
+}
+
+/// The sample's side of the handle search helper reads.
+struct SearchSide {
+    jobs: async_channel::Sender<SearchJob>,
+    done: async_channel::Receiver<SearchDone>,
+}
+
+/// The helper side of a handle search: sends the queued reads one at a time and returns each
+/// answer for the next sample.
+pub struct HelperSearchReads {
+    handle: HelperHandle,
+    jobs: async_channel::Receiver<SearchJob>,
+    done: async_channel::Sender<SearchDone>,
+}
+
+impl HelperSearchReads {
+    /// Runs until `cx` is cancelled or the sample side is dropped.
+    pub async fn run(self, cx: &Cx) {
+        // The search whose read got `NotRunning`: its later reads are not sent.
+        let mut stopped = None;
+        while let Ok(job) = self.jobs.recv().await {
+            if cx.checkpoint().is_err() {
+                return;
+            }
+            let send = !job.cancel.load(Ordering::Relaxed) && stopped != Some(job.search);
+            let result = if send {
+                let req = HelperRequest::ReadProcessFiles {
+                    key: job.key,
+                    files: job.files,
+                };
+                // `read` never starts a session: a helper that is not running gives
+                // `NotRunning`, never a polkit prompt.
+                let result = self.handle.read(cx, req, HELPER_DEADLINE).await;
+                match result {
+                    Err(HelperReadError::Call(HelperCallError::Cancelled)) => return,
+                    Err(HelperReadError::NotRunning) => stopped = Some(job.search),
+                    _ => {}
+                }
+                Some(result)
+            } else {
+                None
+            };
+            let done = SearchDone {
+                search: job.search,
+                key: job.key,
+                files: job.files,
+                result,
+            };
+            if self.done.send(done).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Gives one helper answer to `search`: the files when the helper read `FD_LIST`, else the
+/// process stays skipped.
+fn apply_search_reply(search: &mut HandleSearch, done: SearchDone) {
+    let replies = match done.result {
+        Some(Ok(replies)) => replies,
+        Some(Err(HelperReadError::NotRunning)) => {
+            search.stop_helper();
+            return;
+        }
+        Some(Err(_)) | None => {
+            search.helper_skipped(done.key);
+            return;
+        }
+    };
+    let mut too_large = false;
+    let Ok(files) = helper_files(done.files, &replies, &mut too_large) else {
+        search.helper_skipped(done.key);
+        return;
+    };
+    let fds = match helper_file(&files, ProcFiles::FD_LIST) {
+        Some(Ok(data)) => fd_list(data),
+        _ => None,
+    };
+    let Some(fds) = fds else {
+        search.helper_skipped(done.key);
+        return;
+    };
+    let read = |file| match helper_file(&files, file) {
+        Some(Ok(data)) => Some(data.as_slice()),
+        _ => None,
+    };
+    let pid_files = PidFiles {
+        fds: &fds,
+        maps: read(ProcFiles::MAPS),
+        cwd: read(ProcFiles::CWD),
+        exe: read(ProcFiles::EXE),
+        root: read(ProcFiles::ROOT),
+    };
+    search.helper_files(done.key, &pid_files);
 }
 
 /// A found string from the helper. `length` counts the characters of the text as sent.
@@ -1186,6 +1311,8 @@ pub struct ProcessDetailSource {
     pkg: Option<PackageIndex>,
     /// Set by `helper_reads` when the session has a helper.
     helper: Option<HelperSide>,
+    /// Set by `search_reads` when the session has a helper.
+    search_helper: Option<SearchSide>,
     /// Strings scans that run through the helper, oldest first.
     helper_scans: Vec<HelperScan>,
     /// The sample clock, CLOCK_BOOTTIME ns. Tests set it.
@@ -1212,17 +1339,18 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     })
 }
 
-/// `source::run` for the detail reads, with `HelperDetailReads` beside it when the session has a
-/// helper.
+/// `source::run` for the detail reads, with `HelperDetailReads` and `HelperSearchReads` beside
+/// it when the session has a helper.
 pub async fn run(cx: Cx, io: WorkerIo, mut src: ProcessDetailSource) -> Outcome<(), WorkerError> {
     let Some(handle) = io.shared.helper.clone() else {
         return source::run(cx, io, src).await;
     };
-    let reads = src.helper_reads(handle);
+    let reads = src.helper_reads(handle.clone());
+    let search_reads = src.search_reads(handle);
     let side_cx = cx.clone();
     let samples = source::run(cx, io, src);
     let side = async move {
-        reads.run(&side_cx).await;
+        futures_lite::future::zip(reads.run(&side_cx), search_reads.run(&side_cx)).await;
         // Only a cancel ends the side; the sample loop returns for it.
         std::future::pending().await
     };
@@ -1278,6 +1406,7 @@ impl ProcessDetailSource {
             smaps_reads: 0,
             pkg: None,
             helper: None,
+            search_helper: None,
             helper_scans: Vec::new(),
             clock: now_boot_ns,
         }
@@ -1309,6 +1438,18 @@ impl ProcessDetailSource {
             store,
             returned: FxHashMap::default(),
         }
+    }
+
+    /// Connects the handle search to `handle`. Run the returned `HelperSearchReads` next to
+    /// `source::run`, as `run` does.
+    pub fn search_reads(&mut self, handle: HelperHandle) -> HelperSearchReads {
+        let (jobs_tx, jobs) = async_channel::unbounded();
+        let (done, done_rx) = async_channel::unbounded();
+        self.search_helper = Some(SearchSide {
+            jobs: jobs_tx,
+            done: done_rx,
+        });
+        HelperSearchReads { handle, jobs, done }
     }
 
     /// General reads look packages up in `index`, the session's shared index.
@@ -2145,10 +2286,15 @@ impl ProcessDetailSource {
     }
 
     /// Starts the requested handle search in place of the running one, which is dropped without
-    /// another payload. Then walks one budget of pids and queues the state, one per sample.
+    /// another payload. Then gives it the helper answers, walks one budget of pids, queues the
+    /// state (one per sample) and sends the helper reads of the processes it skipped.
     fn step_search(&mut self) {
         if let Some(req) = self.search_request.take() {
-            let search = HandleSearch::new(
+            if let Some(old) = &self.search {
+                // Its queued helper reads are not sent.
+                old.cancel();
+            }
+            let mut search = HandleSearch::new(
                 req.id,
                 &req.pattern,
                 req.include_maps,
@@ -2158,12 +2304,36 @@ impl ProcessDetailSource {
             if req.cancelled {
                 search.cancel();
             }
+            if self.search_helper.is_some() {
+                search.use_helper();
+            }
             self.search = Some(search);
         }
         let Some(search) = &mut self.search else {
             return;
         };
+        if let Some(side) = &self.search_helper {
+            while let Ok(done) = side.done.try_recv() {
+                // Answers for a search that was replaced are dropped.
+                if done.search == search.id {
+                    apply_search_reply(search, done);
+                }
+            }
+        }
         let state = search.step(&self.cfg.sys_root, HANDLE_SEARCH_BUDGET);
+        if let Some(side) = &self.search_helper {
+            for (key, files) in search.helper_reads() {
+                let job = SearchJob {
+                    search: search.id,
+                    key,
+                    files,
+                    cancel: search.cancel_flag(),
+                };
+                if side.jobs.try_send(job).is_err() {
+                    search.helper_skipped(key);
+                }
+            }
+        }
         if search.done() {
             self.search = None;
         }

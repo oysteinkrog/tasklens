@@ -10,7 +10,8 @@
 //! `Snapshot.health`.
 //!
 //! The `detail_helper` tests run the `ProcessDetail` worker with the helper task over a fake
-//! that answers `ReadProcessFiles` and `ScanStrings` (E29-015).
+//! that answers `ReadProcessFiles` and `ScanStrings` (E29-015). Its `handle_search_*` tests run
+//! a Search File Handles search whose skipped processes go through the helper (qfx.19).
 
 #[path = "fake_sources.rs"]
 mod fake_sources;
@@ -2314,7 +2315,8 @@ mod detail_helper {
     use tl_engine::workers::process_detail::{self, ProcessDetailSource};
     use tl_model::demand::{Demand, DetailDemand};
     use tl_model::details::{
-        DetailTab, DetailTarget, ScanId, ScanPhase, StringEncoding, StringScanOpts, TabPayload,
+        DetailTab, DetailTarget, HandleKind, HandlePhase, HandleSearchState, ScanId, ScanPhase,
+        SearchId, StringEncoding, StringScanOpts, TabPayload,
     };
     use tl_model::health::{HelperState, SourceId};
     use tl_model::helper_proto::{
@@ -2422,6 +2424,38 @@ mod detail_helper {
             fs::write(dir.join("ptrace_scope"), "2\n").expect("write ptrace_scope");
         }
 
+        /// A proc root with only `pids`, each with a `stat` and an `fd/` of mode 000: another
+        /// user's process, whose handles tasklens cannot read.
+        fn locked_pids(pids: &[u32]) -> Root {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("lab-helper-search-{}-{n}", std::process::id()));
+            if dir.exists() {
+                remove(&dir);
+            }
+            let random = dir.join("proc/sys/kernel/random");
+            fs::create_dir_all(&random).expect("create random dir");
+            fs::write(
+                random.join("boot_id"),
+                "00112233-4455-6677-8899-aabbccddeeff\n",
+            )
+            .expect("write boot_id");
+            for &pid in pids {
+                let pid_dir = dir.join(format!("proc/{pid}"));
+                fs::create_dir_all(pid_dir.join("fd")).expect("create fd dir");
+                let stat = format!(
+                    "{pid} (other{pid}) S 1 {pid} {pid} 0 -1 4194304 0 0 0 0 1 0 0 0 20 0 1 0 \
+                     {} 5513216 230 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n",
+                    1000 + pid
+                );
+                fs::write(pid_dir.join("stat"), stat).expect("write stat");
+                fs::set_permissions(pid_dir.join("fd"), fs::Permissions::from_mode(0o000))
+                    .expect("chmod fd");
+            }
+            Root { dir }
+        }
+
         fn config(&self) -> Arc<EngineConfig> {
             Arc::new(
                 EngineConfig::new(EngineMode::Full, self.dir.join("state"))
@@ -2436,6 +2470,15 @@ mod detail_helper {
             for entry in entries.flatten() {
                 if entry.file_type().is_ok_and(|t| t.is_file()) {
                     let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o644));
+                }
+            }
+        }
+        // The `fd/` dirs of `Root::locked_pids`.
+        if let Ok(entries) = fs::read_dir(dir.join("proc")) {
+            for entry in entries.flatten() {
+                let fd = entry.path().join("fd");
+                if fd.is_dir() {
+                    let _ = fs::set_permissions(fd, fs::Permissions::from_mode(0o755));
                 }
             }
         }
@@ -2471,6 +2514,11 @@ mod detail_helper {
         hold_scan: bool,
         held: Vec<HelperReply>,
         released: bool,
+        /// Holds the replies of the second `ReadProcessFiles` until `released`, like
+        /// `hold_scan`.
+        hold_reads: bool,
+        /// The lab clock, for reads on a pool thread. Set by `start_full`.
+        clock: Option<Arc<VirtualClock>>,
         /// Files answered with this errno instead of their data.
         errors: Vec<(ProcFiles, i32)>,
         pending: VecDeque<HelperReply>,
@@ -2511,6 +2559,32 @@ mod detail_helper {
         Some(data.to_vec())
     }
 
+    /// The pid whose fds hold `SEARCH_MARKER`, and the marker path.
+    const MARKER_PID: u32 = 2;
+    const SEARCH_MARKER: &[u8] = b"/tmp/tl-marker";
+
+    /// The files of the `Root::locked_pids` processes 1 to 3: fd 0 is `/dev/null`, and
+    /// `MARKER_PID` also holds `SEARCH_MARKER` as fd 3.
+    fn search_file(pid: u32, file: ProcFiles) -> Option<Vec<u8>> {
+        if !(1..=3).contains(&pid) {
+            return None;
+        }
+        let data: &[u8] = match file {
+            ProcFiles::FD_LIST => {
+                let mut fds: Vec<(u32, Vec<u8>)> = vec![(0, b"/dev/null".to_vec())];
+                if pid == MARKER_PID {
+                    fds.push((3, SEARCH_MARKER.to_vec()));
+                }
+                return Some(postcard::to_allocvec(&fds).expect("encode fd list"));
+            }
+            ProcFiles::MAPS => b"",
+            ProcFiles::CWD | ProcFiles::ROOT => b"/",
+            ProcFiles::EXE => b"/usr/bin/other",
+            _ => return None,
+        };
+        Some(data.to_vec())
+    }
+
     fn batch(address: u64, text: &str) -> HelperReplyBody {
         HelperReplyBody::Strings(vec![(address, StringEncoding::Ascii, text.into())])
     }
@@ -2524,10 +2598,16 @@ mod detail_helper {
                     proto: HELPER_PROTO_VERSION,
                 }),
                 HelperRequest::ReadProcessFiles { key, files } => {
-                    s.reads.push((now_ms(), *key, *files));
+                    // A pooled rig calls the link on a pool thread, which has no `CLOCK`.
+                    let ms = s
+                        .clock
+                        .as_ref()
+                        .map_or_else(now_ms, |c| c.now().as_nanos() / 1_000_000);
+                    s.reads.push((ms, *key, *files));
                     for file in files.iter() {
                         let errno = s.errors.iter().find(|e| e.0 == file).map(|e| e.1);
-                        bodies.push(match (errno, file_data(file)) {
+                        let data = search_file(key.pid, file).or_else(|| file_data(file));
+                        bodies.push(match (errno, data) {
                             (None, Some(data)) => HelperReplyBody::File { file, data },
                             (Some(errno), _) => HelperReplyBody::Err(HelperError::Os(errno)),
                             (None, None) => HelperReplyBody::Err(HelperError::Os(13)),
@@ -2560,13 +2640,21 @@ mod detail_helper {
                 }
                 _ => bodies.push(HelperReplyBody::Err(HelperError::NotAllowed)),
             }
+            let hold = s.hold_reads
+                && matches!(frame.request, HelperRequest::ReadProcessFiles { .. })
+                && s.reads.len() == 2;
             let count = bodies.len();
             for (i, body) in bodies.into_iter().enumerate() {
-                s.pending.push_back(HelperReply {
+                let reply = HelperReply {
                     seq: frame.seq,
                     last: i + 1 == count,
                     body,
-                });
+                };
+                if hold {
+                    s.held.push(reply);
+                } else {
+                    s.pending.push_back(reply);
+                }
             }
             Ok(())
         }
@@ -2647,6 +2735,8 @@ mod detail_helper {
         tabs: Vec<TabOut>,
         pss: Vec<(u64, PssEntry)>,
         errors: Vec<Arc<str>>,
+        /// Every handle search state, in order.
+        searches: Vec<Arc<HandleSearchState>>,
         /// Set by `start_pooled`: helper calls run on this pool's threads, not inline.
         _pool: Option<BlockingPool>,
     }
@@ -2701,6 +2791,7 @@ mod detail_helper {
             let fake = Shared::default();
             lock(&fake).errors = errors;
             lock(&fake).hold_scan = pool.is_some();
+            lock(&fake).clock = Some(Arc::clone(&fl.clock));
             let (helper, queue) = helper_queue();
             let io = WorkerIo::new(
                 updates.clone(),
@@ -2743,6 +2834,7 @@ mod detail_helper {
                 tabs: Vec::new(),
                 pss: Vec::new(),
                 errors: Vec::new(),
+                searches: Vec::new(),
                 _pool: pool,
             };
             if unlock {
@@ -2826,6 +2918,9 @@ mod detail_helper {
                         entries,
                         ..
                     })) => self.pss.extend(entries.into_iter().map(|e| (ms, e))),
+                    EngineMsg::Source(SourceUpdate::Details(DetailsUpdate::HandleSearch(
+                        state,
+                    ))) => self.searches.push(state),
                     EngineMsg::Source(SourceUpdate::Health {
                         last_error: Some(error),
                         ..
@@ -3347,6 +3442,202 @@ mod detail_helper {
                 (2_000, Validity::Valid, 300 * 1024, 100 * 1024),
             ]
         );
+        rig.finish();
+    }
+
+    fn search(include_maps: bool, privileged: bool) -> WorkerCommand {
+        WorkerCommand::HandleSearch {
+            search: SearchId(1),
+            pattern: Arc::from("tl-marker"),
+            include_maps,
+            privileged,
+        }
+    }
+
+    /// The hits of a search state as (pid, kind, fd, path).
+    fn search_hits(state: &HandleSearchState) -> Vec<(u32, HandleKind, Option<i32>, String)> {
+        state
+            .chunks
+            .iter()
+            .flat_map(|c| c.iter())
+            .map(|h| (h.key.pid, h.kind, h.fd, h.path.to_string()))
+            .collect()
+    }
+
+    fn search_ended(rig: &Rig) -> bool {
+        rig.searches
+            .last()
+            .is_some_and(|s| matches!(s.phase, HandlePhase::Done | HandlePhase::Stopped))
+    }
+
+    fn marker_hit() -> (u32, HandleKind, Option<i32>, String) {
+        (
+            MARKER_PID,
+            HandleKind::Fd,
+            Some(3),
+            String::from_utf8(SEARCH_MARKER.to_vec()).expect("utf-8"),
+        )
+    }
+
+    /// AC 1: Search all with the helper `Unlocked` reads each of the 3 unreadable processes
+    /// through the helper, finds the marker that pid 2 holds and ends with nothing skipped.
+    #[test]
+    fn handle_search_all_uses_helper() {
+        if is_root() {
+            return;
+        }
+        let root = Root::locked_pids(&[1, 2, 3]);
+        let mut rig = Rig::start(&root, demand(&[]), 1000, true);
+        rig.command(search(true, true));
+        rig.run(Duration::from_millis(3_000));
+
+        assert!(search_ended(&rig), "the search ends");
+        let last = rig.searches.last().expect("a search state");
+        assert_eq!(last.phase, HandlePhase::Done);
+        assert_eq!(search_hits(last), [marker_hit()]);
+        assert_eq!((last.searched, last.total, last.skipped), (3, 3, 0));
+        assert_eq!(last.progress_pct, 100);
+        // fd 0 of each process and fd 3 of pid 2.
+        assert_eq!(last.total_handles, 4);
+        let hit = last
+            .chunks
+            .iter()
+            .flat_map(|c| c.iter())
+            .next()
+            .expect("hit");
+        assert_eq!(&*hit.name, "other2");
+        assert_eq!(hit.key.start_ticks, 1002);
+        // No earlier state counted the processes that waited for the helper as skipped.
+        assert!(rig.searches.iter().all(|s| s.skipped == 0));
+
+        let all = ProcFiles::FD_LIST
+            | ProcFiles::MAPS
+            | ProcFiles::CWD
+            | ProcFiles::EXE
+            | ProcFiles::ROOT;
+        let reads: Vec<(u32, ProcFiles)> = rig.reads().iter().map(|r| (r.1.pid, r.2)).collect();
+        assert_eq!(reads, [(1, all), (2, all), (3, all)]);
+        assert_eq!(
+            lock(&rig.fake).spawns,
+            1,
+            "only the unlock started a session"
+        );
+        rig.finish();
+    }
+
+    /// AC 2, security regression: without Search all no helper request is sent, even with the
+    /// helper `Unlocked`, and the 3 processes stay skipped.
+    #[test]
+    fn handle_search_unprivileged_skips() {
+        if is_root() {
+            return;
+        }
+        let root = Root::locked_pids(&[1, 2, 3]);
+        let mut rig = Rig::start(&root, demand(&[]), 1000, true);
+        rig.command(search(true, false));
+        rig.run(Duration::from_millis(3_000));
+
+        assert!(search_ended(&rig), "the search ends");
+        let last = rig.searches.last().expect("a search state");
+        assert_eq!(last.phase, HandlePhase::Done);
+        assert!(search_hits(last).is_empty());
+        assert_eq!((last.searched, last.total, last.skipped), (0, 3, 3));
+        assert!(rig.reads().is_empty(), "{:?}", rig.reads());
+        rig.finish();
+    }
+
+    /// Security regression: Search all while the helper is `Locked` starts no session (no polkit
+    /// prompt from a search) and leaves the processes skipped.
+    #[test]
+    fn handle_search_locked_never_starts() {
+        if is_root() {
+            return;
+        }
+        let root = Root::locked_pids(&[1, 2, 3]);
+        let mut rig = Rig::start(&root, demand(&[]), 1000, false);
+        rig.command(search(true, true));
+        rig.run(Duration::from_millis(3_000));
+
+        assert!(search_ended(&rig), "the search ends");
+        let last = rig.searches.last().expect("a search state");
+        assert_eq!(last.phase, HandlePhase::Done);
+        assert_eq!((last.searched, last.total, last.skipped), (0, 3, 3));
+        assert_eq!(rig.helper.state(), HelperState::Locked);
+        let fake = lock(&rig.fake);
+        assert!(fake.reads.is_empty(), "{:?}", fake.reads);
+        assert_eq!(fake.spawns, 0, "no session was started");
+        drop(fake);
+        rig.finish();
+    }
+
+    /// AC 3: `CancelHandleSearch` after the first helper reply, while the second read waits in
+    /// the helper, ends the search `Stopped`, and the third read is never sent. The helper calls
+    /// run on a pool thread and the fake holds the second reply until the cancel is in.
+    #[test]
+    fn handle_search_cancel_stops_helper_calls() {
+        if is_root() {
+            return;
+        }
+        let root = Root::locked_pids(&[1, 2, 3]);
+        let mut rig = Rig::start_pooled(&root, demand(&[]));
+        lock(&rig.fake).hold_reads = true;
+        rig.command(search(true, true));
+        let second_held = |rig: &Rig| {
+            let fake = lock(&rig.fake);
+            fake.reads.len() == 2 && !fake.held.is_empty()
+        };
+        rig.run_until(second_held);
+        assert!(
+            second_held(&rig),
+            "the first reply came and the second read waits"
+        );
+
+        rig.command(WorkerCommand::CancelHandleSearch(SearchId(1)));
+        rig.run_until(search_ended);
+        let last = rig.searches.last().expect("a search state");
+        assert_eq!(last.phase, HandlePhase::Stopped);
+
+        release(&rig.fake);
+        rig.run_until(|rig| {
+            let fake = lock(&rig.fake);
+            fake.pending.is_empty() && fake.held.is_empty()
+        });
+        rig.run(Duration::from_millis(500));
+        rig.wait_real(200, |rig| rig.reads().len() > 2);
+        let pids: Vec<u32> = rig.reads().iter().map(|r| r.1.pid).collect();
+        assert_eq!(pids, [1, 2], "no read after the cancel");
+        let stopped = rig
+            .searches
+            .iter()
+            .position(|s| s.phase == HandlePhase::Stopped)
+            .expect("a Stopped state");
+        assert_eq!(stopped, rig.searches.len() - 1, "nothing after Stopped");
+        rig.finish();
+    }
+
+    /// AC 4: without `include_maps` the helper requests ask for `FD_LIST` only, never `MAPS`,
+    /// and the fd hit is still found.
+    #[test]
+    fn handle_search_maps_flag() {
+        if is_root() {
+            return;
+        }
+        let root = Root::locked_pids(&[1, 2, 3]);
+        let mut rig = Rig::start(&root, demand(&[]), 1000, true);
+        rig.command(search(false, true));
+        rig.run(Duration::from_millis(3_000));
+
+        let reads = rig.reads();
+        assert_eq!(reads.len(), 3, "{reads:?}");
+        assert!(
+            reads.iter().all(|r| !r.2.contains(ProcFiles::MAPS)),
+            "{reads:?}"
+        );
+        assert!(reads.iter().all(|r| r.2 == ProcFiles::FD_LIST), "{reads:?}");
+        let last = rig.searches.last().expect("a search state");
+        assert_eq!(last.phase, HandlePhase::Done);
+        assert_eq!(search_hits(last), [marker_hit()]);
+        assert_eq!(last.skipped, 0);
         rig.finish();
     }
 }

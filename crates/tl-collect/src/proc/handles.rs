@@ -4,6 +4,10 @@
 //! Every file is opened one path part at a time with `O_NOFOLLOW` and read up to a fixed limit.
 //! Link targets (`fd/*`, `cwd`, `exe`, `root`) are read as text and never opened. A file that
 //! cannot be read gives no hits; no error surfaces. Paths are never logged (ADR-015).
+//!
+//! A process whose `fd/` cannot be read, for example another user's, is kept as a `SkippedPid`.
+//! The caller may read its files through the helper and match them with `match_helper`, which
+//! uses the same pattern and rules as the walk (tasklens-qfx.19).
 
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
@@ -145,6 +149,28 @@ pub struct HandleHitInfo {
     pub path: Arc<str>,
 }
 
+/// A process whose `stat` was read but whose `fd/` was not, for example another user's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkippedPid {
+    pub key: ProcessKey,
+    /// Owner of `/proc/<pid>`, as in `HandleHitInfo`.
+    pub uid: u32,
+    /// Sanitized `comm` from `stat`.
+    pub comm: Arc<str>,
+}
+
+/// The files of one skipped process as the helper read them (`ReadProcessFiles`). Link targets
+/// and `maps` are raw bytes. `None` is a file that was not read.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PidFiles<'a> {
+    /// (fd number, raw link target) in the order the helper listed them.
+    pub fds: &'a [(u32, &'a [u8])],
+    pub maps: Option<&'a [u8]>,
+    pub cwd: Option<&'a [u8]>,
+    pub exe: Option<&'a [u8]>,
+    pub root: Option<&'a [u8]>,
+}
+
 /// Counts for the progress text and the footer note.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WalkProgress {
@@ -180,6 +206,8 @@ pub struct HandleWalk {
     lower: String,
     /// Most fds read per process: `FD_WALK_MAX`, lower in tests.
     fd_cap: usize,
+    /// Skipped processes not taken by `take_skipped` yet.
+    skipped_pids: Vec<SkippedPid>,
 }
 
 /// What happened to one pid.
@@ -208,6 +236,7 @@ impl HandleWalk {
             },
             lower: String::new(),
             fd_cap: FD_WALK_MAX,
+            skipped_pids: Vec::new(),
         }
     }
 
@@ -257,6 +286,82 @@ impl HandleWalk {
         self.progress
     }
 
+    /// The processes skipped since the last call whose `stat` could be read. Processes that
+    /// could not be read at all count in `skipped` but are not listed.
+    pub fn take_skipped(&mut self) -> Vec<SkippedPid> {
+        std::mem::take(&mut self.skipped_pids)
+    }
+
+    /// Matches the files the helper read for `pid`, a process this walk skipped, with the walk's
+    /// pattern and rules, and counts it as searched instead of skipped. `maps`, `cwd`, `exe` and
+    /// `root` are matched only with `include_maps`, as in the walk.
+    pub fn match_helper(
+        &mut self,
+        pid: &SkippedPid,
+        files: &PidFiles<'_>,
+        bufs: &mut ReadBufs,
+        hits: &mut Vec<HandleHitInfo>,
+    ) {
+        self.progress.skipped = self.progress.skipped.saturating_sub(1);
+        self.progress.searched += 1;
+        let mut hit = HitBase {
+            key: pid.key,
+            uid: pid.uid,
+            comm_raw: &[],
+            comm: Some(pid.comm.clone()),
+        };
+        if files.fds.len() > self.fd_cap {
+            self.progress.truncated_pids += 1;
+        }
+        for &(fd, raw) in files.fds.iter().take(self.fd_cap) {
+            link_text(raw, &mut bufs.text);
+            self.progress.handles += 1;
+            if self.pattern.matches(&bufs.text, &mut self.lower) {
+                hits.push(hit.hit(HitKind::Fd, Some(fd), &bufs.text));
+            }
+        }
+        if !self.include_maps {
+            return;
+        }
+        if let Some(maps) = files.maps {
+            // The same limits as `for_each_line`: at most `MAPS_READ_MAX` bytes, a line cut by
+            // the limit or longer than one chunk is dropped.
+            let maps = if maps.len() > MAPS_READ_MAX {
+                let cut = &maps[..MAPS_READ_MAX];
+                &cut[..memchr::memrchr(b'\n', cut).map_or(0, |i| i + 1)]
+            } else {
+                maps
+            };
+            let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
+            for line in maps.split(|&b| b == b'\n') {
+                if line.len() < MAPS_CHUNK {
+                    match_maps_line(
+                        &self.pattern,
+                        &mut self.lower,
+                        line,
+                        &mut hit,
+                        &mut bufs.text,
+                        &mut seen,
+                        hits,
+                    );
+                }
+            }
+        }
+        for (raw, kind) in [
+            (files.cwd, HitKind::Cwd),
+            (files.exe, HitKind::Exe),
+            (files.root, HitKind::Root),
+        ] {
+            let Some(raw) = raw else {
+                continue;
+            };
+            link_text(raw, &mut bufs.text);
+            if self.pattern.matches(&bufs.text, &mut self.lower) {
+                hits.push(hit.hit(kind, None, &bufs.text));
+            }
+        }
+    }
+
     fn walk_pid(
         &mut self,
         proc: BorrowedFd<'_>,
@@ -273,20 +378,29 @@ impl HandleWalk {
         if let Err(e) = read_stat(pid_dir.as_fd(), stat, &mut bufs.small) {
             return failure(e);
         }
+        let key = ProcessKey {
+            start_ticks: stat.start_ticks,
+            boot_id: ctx_boot,
+            pid,
+        };
+        let uid = rustix::fs::fstat(&pid_dir).map_or(u32::MAX, |st| st.st_uid);
         let fd_dir = match open_fd_dir(pid_dir.as_fd()) {
             Ok(dir) => dir,
             Err(e) => {
                 tracing::trace!(pid, errno = ?e, "fd dir not read");
-                return failure(e);
+                let outcome = failure(e);
+                if matches!(outcome, PidOutcome::Skipped) {
+                    self.skipped_pids.push(SkippedPid {
+                        key,
+                        uid,
+                        comm: comm_text(&stat.comm_raw),
+                    });
+                }
+                return outcome;
             }
         };
-        let uid = rustix::fs::fstat(&pid_dir).map_or(u32::MAX, |st| st.st_uid);
         let mut hit = HitBase {
-            key: ProcessKey {
-                start_ticks: stat.start_ticks,
-                boot_id: ctx_boot,
-                pid,
-            },
+            key,
             uid,
             comm_raw: &stat.comm_raw[..],
             comm: None,
@@ -345,25 +459,43 @@ impl HandleWalk {
         let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
         let text = &mut bufs.text;
         for_each_line(maps.as_fd(), &mut bufs.small, |line| {
-            let Some((_, at)) = parse_maps_line(line) else {
-                return;
-            };
-            let raw = &line[at..];
-            if raw.is_empty() {
-                return;
-            }
-            sanitize_link(raw, text);
-            if !is_file_backed(text)
-                || seen.contains(text.as_str())
-                || !self.pattern.matches(text, &mut self.lower)
-            {
-                return;
-            }
-            let found = hit.hit(HitKind::Mmap, None, text);
-            seen.insert(found.path.clone());
-            hits.push(found);
+            match_maps_line(
+                &self.pattern,
+                &mut self.lower,
+                line,
+                hit,
+                text,
+                &mut seen,
+                hits,
+            );
         });
     }
+}
+
+/// Pushes one `Mmap` hit for a `maps` line whose file path matches and is not in `seen` yet.
+fn match_maps_line(
+    pattern: &Pattern,
+    lower: &mut String,
+    line: &[u8],
+    hit: &mut HitBase<'_>,
+    text: &mut String,
+    seen: &mut FxHashSet<Arc<str>>,
+    hits: &mut Vec<HandleHitInfo>,
+) {
+    let Some((_, at)) = parse_maps_line(line) else {
+        return;
+    };
+    let raw = &line[at..];
+    if raw.is_empty() {
+        return;
+    }
+    sanitize_link(raw, text);
+    if !is_file_backed(text) || seen.contains(text.as_str()) || !pattern.matches(text, lower) {
+        return;
+    }
+    let found = hit.hit(HitKind::Mmap, None, text);
+    seen.insert(found.path.clone());
+    hits.push(found);
 }
 
 /// The parts of a hit shared by every handle of one process. `comm` is sanitized on the first
@@ -535,17 +667,21 @@ fn failure(e: rustix::io::Errno) -> PidOutcome {
 
 /// Reads the link `<dir>/<name>` into `bufs.text`, sanitized. False when it cannot be read.
 fn read_link(dir: BorrowedFd<'_>, name: &CStr, bufs: &mut ReadBufs) -> bool {
-    // One byte past the limit, so `sanitize_link` sees the cut and adds `…`.
     bufs.small.clear();
     bufs.small.resize(EXE_LINK_MAX + 1, 0);
     match rustix::fs::readlinkat_raw(dir, name, &mut bufs.small[..]) {
         Ok(n) => {
-            bufs.small.truncate(n);
-            sanitize_link(&bufs.small, &mut bufs.text);
+            link_text(&bufs.small[..n], &mut bufs.text);
             true
         }
         Err(_) => false,
     }
+}
+
+/// Writes the sanitized text of a raw link target into `text`. Only `EXE_LINK_MAX + 1` bytes are
+/// used: one byte past the limit, so `sanitize_link` sees the cut and adds `…`.
+fn link_text(raw: &[u8], text: &mut String) {
+    sanitize_link(&raw[..raw.len().min(EXE_LINK_MAX + 1)], text);
 }
 
 /// Calls `f` with each line of `fd` (without `\n`), reading at most `MAPS_READ_MAX` bytes in
@@ -654,6 +790,82 @@ mod tests {
         assert_eq!(
             (p.searched, p.truncated_pids, p.handles, hits),
             (2, 0, 5, 5)
+        );
+    }
+
+    /// tasklens-qfx.19: a pid whose `fd/` cannot be read is kept, and the helper's files for it
+    /// match with the walk's rules: fds always, `maps` (one hit per path), `cwd`, `exe` and
+    /// `root` only with `include_maps`.
+    #[test]
+    fn skipped_pid_matched_from_helper_files() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("proc/9");
+        std::fs::create_dir_all(dir.join("fd")).expect("mkdir");
+        std::fs::write(
+            dir.join("stat"),
+            "9 (other) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 700 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0\n",
+        )
+        .expect("stat");
+        let perms = |mode| std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(dir.join("fd"), perms(0o000)).expect("chmod");
+        let root = SysRoot::at(tmp.path());
+        let maps = b"00400000-00452000 r-xp 00000000 08:02 1 /opt/m/lib.so\n\
+                     00452000-00460000 r--p 00052000 08:02 1 /opt/m/lib.so\n\
+                     7ffd00000000-7ffd00021000 rw-p 00000000 00:00 0 [stack]\n";
+        let fds: [(u32, &[u8]); 2] = [(0, b"/dev/null"), (4, b"/opt/m/data")];
+        let files = PidFiles {
+            fds: &fds,
+            maps: Some(maps),
+            cwd: Some(b"/opt/m"),
+            exe: Some(b"/usr/bin/other"),
+            root: Some(b"/"),
+        };
+        let run = |include_maps: bool| {
+            let mut walk = HandleWalk::start(&root, "/opt/m", include_maps);
+            let mut bufs = ReadBufs::default();
+            let mut hits = Vec::new();
+            while walk.step(&root, BootId(1), 8, &mut bufs, &mut hits) == StepResult::More {}
+            assert!(hits.is_empty());
+            assert_eq!((walk.progress().searched, walk.progress().skipped), (0, 1));
+            let skipped = walk.take_skipped();
+            assert_eq!(skipped.len(), 1);
+            assert_eq!(skipped[0].key.pid, 9);
+            assert_eq!(skipped[0].key.start_ticks, 700);
+            assert_eq!(&*skipped[0].comm, "other");
+            assert!(walk.take_skipped().is_empty());
+            walk.match_helper(&skipped[0], &files, &mut bufs, &mut hits);
+            let p = walk.progress();
+            assert_eq!((p.searched, p.skipped, p.handles), (1, 0, 2));
+            hits.into_iter()
+                .map(|h| (h.kind, h.fd, h.path.to_string(), h.comm.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let without = run(false);
+        let with = run(true);
+        std::fs::set_permissions(dir.join("fd"), perms(0o755)).expect("chmod back");
+        let fd_hit = (
+            HitKind::Fd,
+            Some(4),
+            "/opt/m/data".to_owned(),
+            "other".to_owned(),
+        );
+        assert_eq!(without, std::slice::from_ref(&fd_hit));
+        assert_eq!(
+            with,
+            [
+                fd_hit,
+                (
+                    HitKind::Mmap,
+                    None,
+                    "/opt/m/lib.so".to_owned(),
+                    "other".to_owned()
+                ),
+                (HitKind::Cwd, None, "/opt/m".to_owned(), "other".to_owned()),
+            ]
         );
     }
 

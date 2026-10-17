@@ -12,25 +12,45 @@
 //! cannot be listed; an empty pid list ends `Done` with no hits.
 //!
 //! A process whose `fd/` cannot be read, for example another user's, counts in `skipped` and
-//! gives no hits. The helper path for those processes is tasklens-qfx.19's. Paths are never
-//! logged (ADR-015).
+//! gives no hits. Helper path (tasklens-qfx.19, PROC-096): after `use_helper` on a search the
+//! user started with Search all (`privileged`), `helper_reads` hands out one `ReadProcessFiles`
+//! per skipped process: `FD_LIST`, and with `include_maps` also `MAPS`, `CWD`, `EXE` and `ROOT`.
+//! `helper_files` matches the reply with the walk's matcher and moves the process from `skipped`
+//! to `searched`. A process the helper could not read stays in `skipped` (`helper_skipped`), and
+//! `stop_helper` leaves every process not read yet in `skipped`. The search is `Done` only when
+//! the walk is done and no helper read is left. While helper reads wait, `skipped` and the
+//! percent leave them out. Paths are never logged (ADR-015).
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rustc_hash::FxHashMap;
 use tl_collect::SysRoot;
-use tl_collect::proc::handles::{HandleHitInfo, HandleWalk, HitKind, StepResult};
+use tl_collect::proc::handles::{
+    HandleHitInfo, HandleWalk, HitKind, PidFiles, SkippedPid, StepResult,
+};
 use tl_collect::proc::meta::{PasswdUserNames, ReadBufs, UserNames};
 use tl_model::details::{HandleHit, HandleKind, HandlePhase, HandleSearchState, SearchId};
+use tl_model::helper_proto::ProcFiles;
+use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
 
 /// One handle search. `step` walks a budget of pids and returns the state to publish.
 pub struct HandleSearch {
     pub id: SearchId,
     walk: HandleWalk,
-    /// The user chose "Search all". Read by the helper path (tasklens-qfx.19).
+    /// The user chose "Search all".
     privileged: bool,
+    include_maps: bool,
+    /// Set by `use_helper` for a privileged search; cleared by `stop_helper`.
+    helper: bool,
+    /// True once the walk has listed its last pid.
+    walked: bool,
+    /// Skipped processes not handed out by `helper_reads` yet.
+    unsent: Vec<SkippedPid>,
+    /// Skipped processes handed out by `helper_reads`, waiting for their reply.
+    waiting: FxHashMap<ProcessKey, SkippedPid>,
     cancel: Arc<AtomicBool>,
     /// Folds into every hit's `ProcessKey`, as in the `Processes` worker.
     boot: BootId,
@@ -72,6 +92,11 @@ impl HandleSearch {
             id,
             walk,
             privileged,
+            include_maps,
+            helper: false,
+            walked: false,
+            unsent: Vec::new(),
+            waiting: FxHashMap::default(),
             cancel: Arc::new(AtomicBool::new(false)),
             boot,
             users: PasswdUserNames::load(&base.join("etc/passwd")),
@@ -95,14 +120,19 @@ impl HandleSearch {
     }
 
     /// Walks up to `budget` pids (at least 1), checking `cancel` before each, and returns the
-    /// state to publish. Once `done()` it returns the last state again and reads nothing.
+    /// state to publish, with the hits of the helper replies given since the last step. Once
+    /// `done()` it returns the last state again and reads nothing.
     pub fn step(&mut self, sys_root: &SysRoot, budget: usize) -> Arc<HandleSearchState> {
         if self.done() {
             return self.state.clone();
         }
-        self.found.clear();
-        let mut finished = false;
+        if self.cancel.load(Ordering::Relaxed) {
+            self.phase = HandlePhase::Stopped;
+        }
         for _ in 0..budget.max(1) {
+            if self.walked || self.phase == HandlePhase::Stopped {
+                break;
+            }
             if self.cancel.load(Ordering::Relaxed) {
                 self.phase = HandlePhase::Stopped;
                 break;
@@ -111,12 +141,19 @@ impl HandleSearch {
                 .walk
                 .step(sys_root, self.boot, 1, &mut self.bufs, &mut self.found);
             if step == StepResult::Done {
-                finished = true;
-                break;
+                self.walked = true;
             }
         }
-        if self.phase != HandlePhase::Stopped {
-            self.phase = if finished {
+        let skipped = self.walk.take_skipped();
+        if self.helper {
+            self.unsent.extend(skipped);
+        }
+        if self.phase == HandlePhase::Stopped {
+            // Processes not read by the helper stay in `skipped`.
+            self.unsent.clear();
+            self.waiting.clear();
+        } else {
+            self.phase = if self.walked && self.unsent.is_empty() && self.waiting.is_empty() {
                 HandlePhase::Done
             } else {
                 HandlePhase::Retrieving
@@ -163,10 +200,64 @@ impl HandleSearch {
         self.privileged
     }
 
+    /// Lets a privileged search read the processes it skips through the helper. Does nothing
+    /// for a search without Search all.
+    pub fn use_helper(&mut self) {
+        self.helper = self.privileged;
+    }
+
+    /// The helper reads to send: one `ReadProcessFiles` file set per process skipped since the
+    /// last call. Each answer goes to `helper_files` or `helper_skipped`.
+    pub fn helper_reads(&mut self) -> Vec<(ProcessKey, ProcFiles)> {
+        if self.done() || !self.helper {
+            self.unsent.clear();
+            return Vec::new();
+        }
+        let files = if self.include_maps {
+            ProcFiles::FD_LIST | ProcFiles::MAPS | ProcFiles::CWD | ProcFiles::EXE | ProcFiles::ROOT
+        } else {
+            ProcFiles::FD_LIST
+        };
+        let mut reads = Vec::with_capacity(self.unsent.len());
+        for pid in self.unsent.drain(..) {
+            reads.push((pid.key, files));
+            self.waiting.insert(pid.key, pid);
+        }
+        reads
+    }
+
+    /// The helper read the files of `key`: matches them and counts the process as searched.
+    /// The hits go out with the next `step`.
+    pub fn helper_files(&mut self, key: ProcessKey, files: &PidFiles<'_>) {
+        if self.done() {
+            return;
+        }
+        if let Some(pid) = self.waiting.remove(&key) {
+            self.walk
+                .match_helper(&pid, files, &mut self.bufs, &mut self.found);
+        }
+    }
+
+    /// The helper could not read `key`: it stays in `skipped`.
+    pub fn helper_skipped(&mut self, key: ProcessKey) {
+        self.waiting.remove(&key);
+    }
+
+    /// The helper is not running: no more helper reads, and every process not read yet stays
+    /// in `skipped`.
+    pub fn stop_helper(&mut self) {
+        self.helper = false;
+        self.unsent.clear();
+        self.waiting.clear();
+    }
+
     /// The state for the current counts. The chunk list is rebuilt only when a chunk was added.
+    /// Processes that wait for the helper count neither as searched nor as skipped.
     fn build_state(&self, new_chunk: bool) -> Arc<HandleSearchState> {
         let p = self.walk.progress();
-        let walked = u64::from(p.searched) + u64::from(p.skipped);
+        let pending = u32::try_from(self.unsent.len() + self.waiting.len()).unwrap_or(u32::MAX);
+        let skipped = p.skipped.saturating_sub(pending);
+        let walked = u64::from(p.searched) + u64::from(skipped);
         let progress_pct = match self.phase {
             HandlePhase::Done => 100,
             _ if p.total == 0 => 0,
@@ -186,7 +277,7 @@ impl HandleSearch {
             chunks,
             searched: p.searched,
             total: p.total,
-            skipped: p.skipped,
+            skipped,
         })
     }
 }
@@ -394,7 +485,7 @@ mod tests {
     #[test]
     fn skipped_without_helper_found_with_helper() {
         // Security regression: another user's process gives no hit and counts as skipped. The
-        // helper half of this case is tasklens-qfx.19's.
+        // search has no helper here; `lab_helper.rs` has the helper half.
         if rustix::process::geteuid().is_root() {
             return;
         }
