@@ -2339,6 +2339,9 @@ mod detail_helper {
                          Rss: 12 kB\nPss: 12 kB\nSwap: 0 kB\n";
     const ROLLUP: &str = "Rss: 400 kB\nPss: 300 kB\nPrivate_Clean: 40 kB\n\
                           Private_Dirty: 60 kB\nSwap: 8 kB\n";
+    /// A root-owned `status`, so the helper's uids differ from the fixture's 1000.
+    const STATUS: &str = "Name:\thelper-test\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n\
+                          NoNewPrivs:\t1\nSeccomp:\t0\nCpus_allowed_list:\t0-3\n";
 
     thread_local! {
         /// The clock of the current test's lab. The lab runs every task on the test thread.
@@ -2502,6 +2505,7 @@ mod detail_helper {
             ProcFiles::MAPS => MAPS.as_bytes(),
             ProcFiles::SMAPS => SMAPS.as_bytes(),
             ProcFiles::SMAPS_ROLLUP => ROLLUP.as_bytes(),
+            ProcFiles::STATUS => STATUS.as_bytes(),
             _ => return None,
         };
         Some(data.to_vec())
@@ -3211,6 +3215,42 @@ mod detail_helper {
         let last = env.last().expect("an Environment payload");
         assert_eq!(last.validity, Validity::Valid);
         assert_eq!(env_vars(&last.payload), want_vars());
+        rig.finish();
+    }
+
+    /// qfx.18 review round 2: a General read whose `status` is Restricted asks the helper for
+    /// `STATUS`, and the status fields (here the uids and No new privileges) fill from it.
+    #[test]
+    fn detail_general_status_through_helper() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("status");
+        let mut rig = Rig::start(&root, demand(&[DetailTab::General]), 1000, true);
+        rig.run(Duration::from_millis(2_050));
+
+        let reads = rig.reads();
+        assert!(!reads.is_empty());
+        assert!(
+            reads.iter().all(|r| r.2.contains(ProcFiles::STATUS)),
+            "{reads:?}"
+        );
+        let general = rig.tab(DetailTab::General);
+        let first = match &*general.first().expect("a General payload").payload {
+            TabPayload::General(g) => g.uids.validity,
+            other => panic!("expected General, got {other:?}"),
+        };
+        assert_eq!(first, Validity::Restricted, "the direct read");
+        let TabPayload::General(g) = &*general.last().expect("a General payload").payload else {
+            panic!("expected General");
+        };
+        assert_eq!(g.uids.validity, Validity::Valid);
+        assert_eq!(g.uids.value.real, 0);
+        assert_eq!(
+            (g.no_new_privs.value, g.no_new_privs.validity),
+            (true, Validity::Valid)
+        );
         rig.finish();
     }
 

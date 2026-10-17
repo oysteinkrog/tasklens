@@ -85,7 +85,7 @@
 //! gives `Restricted` queues one `ReadProcessFiles` through `HelperHandle::read`, which never
 //! starts a session, so no polkit prompt comes from this worker. Environment reads `ENVIRON`
 //! (only when the tab is read: on open and on `DetailRefresh`), Memory maps `MAPS | SMAPS`,
-//! General the `EXE`, `CWD`, `ROOT` and `IO` of its Restricted fields, and PSS and USS
+//! General the `EXE`, `CWD`, `ROOT`, `IO` and `STATUS` of its Restricted fields, and PSS and USS
 //! `SMAPS_ROLLUP` for at most `HELPER_READS_MAX` keys per second. File descriptors and Security
 //! stay Restricted (tasklens-qfx.39). Each (target, tab) and each PSS key gets at most one helper
 //! read per `HELPER_PERIOD`, and none while another one waits: `HelperDetailReads` sends a read
@@ -928,6 +928,57 @@ struct GeneralPatch {
     cwd: Option<Result<Arc<str>, Validity>>,
     root: Option<Result<Arc<str>, Validity>>,
     io: Option<Result<PidIo, Validity>>,
+    status: Option<Result<StatusFields, Validity>>,
+}
+
+/// The General fields that come from `status`, built from the helper's `STATUS` as
+/// `read_general` builds them. The thread affinity check and the App ID need more than the
+/// leader's `status` and stay as the direct read left them.
+#[derive(Clone)]
+struct StatusFields {
+    uids: Total<[u32; 4]>,
+    affinity: Total<CpuSet>,
+    shadow_stack: Total<bool>,
+    no_new_privs: Total<bool>,
+    seccomp: Total<Seccomp>,
+    rss_shared_bytes: Total<u64>,
+    commit_bytes: Total<u64>,
+}
+
+impl StatusFields {
+    fn new(status: &PidStatus, cpus: &mut SmallVec<[u16; 64]>) -> StatusFields {
+        let bytes = |value: Option<u64>| value.map_or(total(0, Validity::Unsupported), valid);
+        StatusFields {
+            uids: valid(status.uid),
+            affinity: match cpu_set(&status.cpus_allowed_list, cpus) {
+                Some(set) => valid(set),
+                None => total(CpuSet::empty(), Validity::Unsupported),
+            },
+            shadow_stack: match rd::shadow_stack(status.x86_thread_features.as_deref()) {
+                ShadowStack::Enabled => valid(true),
+                ShadowStack::Disabled => valid(false),
+                ShadowStack::NotSupported => total(false, Validity::Unsupported),
+            },
+            no_new_privs: match status.no_new_privs {
+                Some(on) => valid(on),
+                None => total(false, Validity::Unsupported),
+            },
+            seccomp: seccomp_total(status.seccomp, status.seccomp_filters),
+            rss_shared_bytes: bytes(ws_shared_bytes(status)),
+            commit_bytes: bytes(commit_bytes(status)),
+        }
+    }
+
+    /// Sets these fields on `read`, whose `status` the direct read could not read.
+    fn apply(&self, read: &mut GeneralRead) {
+        read.uids = self.uids.clone();
+        read.affinity = self.affinity.clone();
+        read.shadow_stack = self.shadow_stack.clone();
+        read.no_new_privs = self.no_new_privs.clone();
+        read.seccomp = self.seccomp.clone();
+        read.rss_shared_bytes = self.rss_shared_bytes.clone();
+        read.commit_bytes = self.commit_bytes.clone();
+    }
 }
 
 /// The executable from the helper: sanitized link text, deleted, location.
@@ -965,6 +1016,26 @@ impl GeneralPatch {
         patch_field(&mut read.cwd, &self.cwd);
         patch_field(&mut read.root, &self.root);
         patch_field(&mut read.io, &self.io);
+        // `uids` comes only from `status`, so it is Restricted exactly when `status` was.
+        if read.uids.validity == Validity::Restricted {
+            match &self.status {
+                Some(Ok(fields)) => fields.apply(read),
+                Some(Err(validity)) => {
+                    for v in [
+                        &mut read.uids.validity,
+                        &mut read.affinity.validity,
+                        &mut read.shadow_stack.validity,
+                        &mut read.no_new_privs.validity,
+                        &mut read.seccomp.validity,
+                        &mut read.rss_shared_bytes.validity,
+                        &mut read.commit_bytes.validity,
+                    ] {
+                        *v = *validity;
+                    }
+                }
+                None => {}
+            }
+        }
     }
 }
 
@@ -976,6 +1047,7 @@ fn general_helper_files(read: &GeneralRead) -> ProcFiles {
         (read.cwd.validity, ProcFiles::CWD),
         (read.root.validity, ProcFiles::ROOT),
         (read.io.validity, ProcFiles::IO),
+        (read.uids.validity, ProcFiles::STATUS),
     ] {
         if validity == Validity::Restricted {
             files |= file;
@@ -2679,8 +2751,9 @@ fn environ_from_helper(files: &[HelperFile], too_large: &mut bool) -> Result<Tab
 }
 
 /// The Memory maps tab from a helper `MAPS` and `SMAPS`, grouped as `read_maps` does. `exe` is
-/// the General executable path, for the primary node. An `smaps` the helper could not read
-/// leaves RSS unread, except EFBIG, which fails the tab.
+/// the General executable path, for the primary node. An `smaps` the helper could not read gives
+/// the tab its errno's validity, as for `maps`: Restricted, Missing (the target exited) or
+/// Failed (EFBIG also sets `too_large`). An `smaps` that does not parse leaves RSS unread.
 fn maps_from_helper(
     files: &[HelperFile],
     exe: Option<&str>,
@@ -2698,11 +2771,8 @@ fn maps_from_helper(
                 .ok()
                 .map(|()| rss_by_start(&regions))
         }
-        Some(Err(EFBIG)) => {
-            *too_large = true;
-            return Err(Validity::Failed);
-        }
-        _ => None,
+        Some(Err(errno)) => return Err(errno_validity(*errno, too_large)),
+        None => return Err(Validity::Failed),
     };
     let mut regions = Vec::new();
     if rd::parse_maps(data, &mut regions).is_err() {
@@ -2757,6 +2827,14 @@ fn general_patch(
                     let mut io = PidIo::default();
                     parse_io(data, &mut io).map_err(|_| Validity::Failed)?;
                     Ok(io)
+                }));
+            }
+            ProcFiles::STATUS => {
+                patch.status = Some(data.and_then(|data| {
+                    let mut status = PidStatus::default();
+                    parse_status(&data[..data.len().min(STATUS_READ_MAX)], &mut status)
+                        .map_err(|_| Validity::Failed)?;
+                    Ok(StatusFields::new(&status, &mut SmallVec::new()))
                 }));
             }
             _ => {}
@@ -6156,6 +6234,82 @@ mod tests {
         assert!(matches!(patch.exe, Some(Err(Validity::Restricted))));
         assert!(matches!(&patch.cwd, Some(Ok(cwd)) if &**cwd == "/srv"));
         assert!(patch.io.is_none() && patch.root.is_none(), "not requested");
+    }
+
+    /// qfx.18 review round 2: an `smaps` the helper could not read never gives a Valid Memory
+    /// maps tab. EACCES and EPERM are Restricted, ENOENT and ESRCH Missing (the target exited),
+    /// EFBIG Failed with "too large", any other errno Failed.
+    #[test]
+    fn maps_from_helper_smaps_errors() {
+        const MAPS: &[u8] = b"00400000-00452000 r-xp 00000000 08:02 173521 /usr/bin/x\n";
+        let requested = ProcFiles::MAPS | ProcFiles::SMAPS;
+        let maps = |smaps: HelperReply, too_large: &mut bool| {
+            let replies = [file(ProcFiles::MAPS, MAPS), smaps];
+            let files = helper_files(requested, &replies, too_large).expect("per-file errors");
+            maps_from_helper(&files, None, too_large)
+        };
+        for (errno, want) in [
+            (1, Validity::Restricted),
+            (13, Validity::Restricted),
+            (2, Validity::Missing),
+            (3, Validity::Missing),
+            (5, Validity::Failed),
+        ] {
+            let mut too_large = false;
+            assert!(
+                matches!(maps(os(errno), &mut too_large), Err(v) if v == want),
+                "errno {errno}"
+            );
+            assert!(!too_large, "errno {errno}");
+        }
+        let mut too_large = false;
+        assert!(matches!(
+            maps(os(27), &mut too_large),
+            Err(Validity::Failed)
+        ));
+        assert!(too_large, "EFBIG");
+
+        let mut too_large = false;
+        let smaps = file(
+            ProcFiles::SMAPS,
+            b"00400000-00452000 r-xp 00000000 08:02 173521 /usr/bin/x\nRss: 8 kB\nPss: 8 kB\nSwap: 0 kB\n",
+        );
+        let read = maps(smaps, &mut too_large);
+        assert!(
+            matches!(&read, Ok(TabRead::Maps { regions, .. }) if regions[0].rss == Some(8 * 1024))
+        );
+        let replies = [file(ProcFiles::MAPS, MAPS)];
+        let files = helper_files(requested, &replies, &mut too_large).expect("one file");
+        assert!(matches!(
+            maps_from_helper(&files, None, &mut too_large),
+            Err(Validity::Failed)
+        ));
+    }
+
+    /// qfx.18 review round 2: the helper's `STATUS` fills the status fields of a General read
+    /// whose `status` was Restricted, and a `status` error sets its validity on all of them.
+    #[test]
+    fn general_patch_status_fields() {
+        const STATUS: &[u8] =
+            include_bytes!("../../../tl-collect/tests/fixtures/process-edge/proc/4201/status");
+        let mut too_large = false;
+        let files = [(ProcFiles::STATUS, Ok(STATUS.to_vec()))];
+        let patch = general_patch(ProcFiles::STATUS, &files, None, &mut too_large);
+        let Some(Ok(fields)) = &patch.status else {
+            panic!("status parsed");
+        };
+        assert_eq!(fields.uids, valid([1000; 4]));
+        assert_eq!(fields.no_new_privs, valid(true));
+        assert_eq!(fields.seccomp, valid(Seccomp::Filter { filters: 3 }));
+        assert_eq!(fields.commit_bytes, valid(232 * 1024));
+
+        let files = [(ProcFiles::STATUS, Err(13))];
+        let patch = general_patch(ProcFiles::STATUS, &files, None, &mut too_large);
+        assert!(matches!(patch.status, Some(Err(Validity::Restricted))));
+        let files = [(ProcFiles::STATUS, Ok(b"no uid line\n".to_vec()))];
+        let patch = general_patch(ProcFiles::STATUS, &files, None, &mut too_large);
+        assert!(matches!(patch.status, Some(Err(Validity::Failed))));
+        assert!(!too_large);
     }
 
     /// qfx.18 review: a patch sets the helper's validity on a Restricted field and leaves a
