@@ -8,6 +8,9 @@
 //! The four `EngineRig` tests run a whole engine session with the fake as `EngineHooks.helper`
 //! (E29-020): commands go through the reducer and the helper state comes back in
 //! `Snapshot.health`.
+//!
+//! The `detail_helper` tests run the `ProcessDetail` worker with the helper task over a fake
+//! that answers `ReadProcessFiles` and `ScanStrings` (E29-015).
 
 #[path = "fake_sources.rs"]
 mod fake_sources;
@@ -44,6 +47,7 @@ use tl_model::actions::{
 use tl_model::command::{
     Command, RaplStatus, SetupPhase, SetupRun, SetupState, SetupStatus, SetupStep,
 };
+use tl_model::details::StringScanOpts;
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::{HelperStartOutcome, HelperState};
 use tl_model::helper_proto::{
@@ -629,6 +633,59 @@ fn read_on_unlocked_session_returns_replies() {
     });
     assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
     assert_eq!(lock(&fake.state).requests, [(signal_req(), false)]);
+}
+
+fn scan_req() -> HelperRequest {
+    HelperRequest::ScanStrings {
+        key: ProcessKey {
+            start_ticks: 4242,
+            boot_id: BootId(7),
+            pid: 1234,
+        },
+        opts: StringScanOpts::default(),
+    }
+}
+
+/// qfx.18: dropping a `read_stream` stops the scan with `CancelScan` for its frame `seq` (1,
+/// after the `Hello`). The lab runs the helper call inline, so the stream is dropped before the
+/// task takes it and the first reply finds no receiver.
+#[test]
+fn read_stream_drop_sends_cancel_scan() {
+    let (fake, env) = Fake::new(true);
+    // The scan's two replies, then the `Ok` of the cancel frame.
+    lock(&fake.state).answers = [Answer::Replies(2), Answer::Replies(1)].into();
+    run(lab(25), env, |cx, handle, _helper| async move {
+        handle.send(&cx, HelperMsg::Start).await.expect("queued");
+        wait_for(&cx, &handle, HelperState::Unlocked).await;
+        let stream = handle
+            .read_stream(&cx, scan_req(), Duration::from_secs(5))
+            .await
+            .expect("queued");
+        drop(stream);
+        time::sleep(cx.now(), Duration::from_millis(10)).await;
+        assert_eq!(handle.state(), HelperState::Unlocked, "the session stays");
+    });
+    assert_eq!(
+        requests(&fake),
+        [scan_req(), HelperRequest::CancelScan { seq: 1 }]
+    );
+}
+
+/// qfx.18: a `read_stream` while `Locked` starts nothing and ends with `NotRunning`.
+#[test]
+fn read_stream_locked_never_starts() {
+    let (fake, env) = Fake::new(true);
+    run(lab(26), env, |cx, handle, _helper| async move {
+        wait_for(&cx, &handle, HelperState::Locked).await;
+        let stream = handle
+            .read_stream(&cx, scan_req(), Duration::from_secs(5))
+            .await
+            .expect("queued");
+        assert!(stream.replies.recv().await.is_err(), "no reply");
+        assert_eq!(stream.result(&cx).await, Err(HelperReadError::NotRunning));
+    });
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 0);
+    assert!(requests(&fake).is_empty());
 }
 
 /// Mirrors `#[explore_seeds(seeds = 0..16, workers = 2, chaos)]`, which asupersync 0.5.0 does
@@ -2221,6 +2278,789 @@ mod connections_helper {
             inodes[RESOLVE_MAX..]
                 .iter()
                 .all(|i| requests[1].binary_search(i).is_ok())
+        );
+        rig.finish();
+    }
+}
+
+/// The `ProcessDetail` worker with the helper task on a fake link that answers
+/// `ReadProcessFiles` and `ScanStrings` (E29-015, qfx.18). No test runs the real helper or
+/// pkexec. A file is Restricted by mode 000, so those tests skip as root.
+mod detail_helper {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::fs;
+    use std::io;
+    use std::os::fd::BorrowedFd;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use asupersync::Cx;
+    use asupersync::channel::{mpsc, watch};
+    use asupersync::runtime::TaskHandle;
+    use asupersync::time::{TimeSource, VirtualClock};
+    use tl_collect::SysRoot;
+    use tl_engine::config::{EngineConfig, EngineMode};
+    use tl_engine::dbus::SharedHandles;
+    use tl_engine::helper::{
+        HelperHandle, HelperLink, HelperMsg, LinkEnv, LinkError, StartError, helper_queue,
+        helper_task_with,
+    };
+    use tl_engine::source::{QueuedCommand, WorkerCommand, WorkerControl, WorkerIo};
+    use tl_engine::update::{DetailsUpdate, EngineMsg, PssEntry, SourceUpdate};
+    use tl_engine::workers::process_detail::{self, ProcessDetailSource};
+    use tl_model::demand::{Demand, DetailDemand};
+    use tl_model::details::{
+        DetailTab, DetailTarget, ScanId, ScanPhase, StringEncoding, StringScanOpts, TabPayload,
+    };
+    use tl_model::health::{HelperState, SourceId};
+    use tl_model::helper_proto::{
+        HELPER_PROTO_VERSION, HelperError, HelperFrame, HelperReply, HelperReplyBody,
+        HelperRequest, ProcFiles,
+    };
+    use tl_model::ids::{ColumnId, ProcessKey};
+    use tl_model::settings::EngineSettings;
+    use tl_model::time::{BootId, TimeNs};
+    use tl_model::validity::Validity;
+
+    use super::PROBED;
+    use super::fake_sources::{FakeLab, drain};
+
+    const PID: u32 = 4201;
+    const ENVIRON: &[u8] = b"HOME=/root\0SHELL=/bin/sh\0";
+    const MAPS: &str = "00400000-00452000 r-xp 00000000 08:02 173521 /usr/bin/helper-test\n\
+                        7ffd00000000-7ffd00021000 rw-p 00000000 00:00 0 [stack]\n";
+    const SMAPS: &str = "00400000-00452000 r-xp 00000000 08:02 173521 /usr/bin/helper-test\n\
+                         Rss: 8 kB\nPss: 8 kB\nSwap: 0 kB\n\
+                         7ffd00000000-7ffd00021000 rw-p 00000000 00:00 0 [stack]\n\
+                         Rss: 12 kB\nPss: 12 kB\nSwap: 0 kB\n";
+    const ROLLUP: &str = "Rss: 400 kB\nPss: 300 kB\nPrivate_Clean: 40 kB\n\
+                          Private_Dirty: 60 kB\nSwap: 8 kB\n";
+
+    thread_local! {
+        /// The clock of the current test's lab. The lab runs every task on the test thread.
+        static CLOCK: RefCell<Option<Arc<VirtualClock>>> = const { RefCell::new(None) };
+    }
+
+    fn now_ms() -> u64 {
+        lab_clock() / 1_000_000
+    }
+
+    /// The sample clock: lab virtual time.
+    fn lab_clock() -> TimeNs {
+        CLOCK.with(|c| {
+            c.borrow()
+                .as_ref()
+                .expect("the rig set the clock")
+                .now()
+                .as_nanos()
+        })
+    }
+
+    fn key() -> ProcessKey {
+        ProcessKey {
+            start_ticks: 351_220,
+            boot_id: BootId(1),
+            pid: PID,
+        }
+    }
+
+    /// Copies `src` over `dst`, keeping symlinks as links.
+    fn copy_tree(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).expect("create fixture dir");
+        for entry in fs::read_dir(src).expect("list fixture dir") {
+            let entry = entry.expect("fixture dir entry");
+            let to = dst.join(entry.file_name());
+            let file_type = entry.file_type().expect("fixture file type");
+            if file_type.is_symlink() {
+                let target = fs::read_link(entry.path()).expect("read fixture symlink");
+                std::os::unix::fs::symlink(target, &to).expect("create fixture symlink");
+            } else if file_type.is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else {
+                fs::copy(entry.path(), &to).expect("copy fixture file");
+            }
+        }
+    }
+
+    /// A writable copy of `process-edge` under the target tmpdir, removed on drop.
+    struct Root {
+        dir: PathBuf,
+    }
+
+    impl Root {
+        fn new() -> Root {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("lab-helper-detail-{}-{n}", std::process::id()));
+            if dir.exists() {
+                remove(&dir);
+            }
+            let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tl-collect/tests/fixtures/process-edge");
+            copy_tree(&src, &dir);
+            Root { dir }
+        }
+
+        /// Makes `/proc/4201/<name>` unreadable: Restricted, as for another user's process.
+        fn restrict(&self, name: &str) {
+            let path = self.dir.join(format!("proc/{PID}/{name}"));
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        }
+
+        /// Yama scope 2: tasklens may attach to no process, so a Strings scan is Restricted.
+        fn ptrace_scope_2(&self) {
+            let dir = self.dir.join("proc/sys/kernel/yama");
+            fs::create_dir_all(&dir).expect("create yama dir");
+            fs::write(dir.join("ptrace_scope"), "2\n").expect("write ptrace_scope");
+        }
+
+        fn config(&self) -> Arc<EngineConfig> {
+            Arc::new(
+                EngineConfig::new(EngineMode::Full, self.dir.join("state"))
+                    .with_sys_root(SysRoot::at(&self.dir)),
+            )
+        }
+    }
+
+    /// Makes the copy readable again so it can be removed.
+    fn remove(dir: &Path) {
+        if let Ok(entries) = fs::read_dir(dir.join(format!("proc/{PID}"))) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_file()) {
+                    let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o644));
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            remove(&self.dir);
+        }
+    }
+
+    fn is_root() -> bool {
+        let root = rustix::process::geteuid().is_root();
+        if root {
+            eprintln!("skipped: running as root, so no file is Restricted");
+        }
+        root
+    }
+
+    /// What the fake helper saw and how it answers.
+    #[derive(Default)]
+    struct DetailState {
+        /// Every `ReadProcessFiles` with the lab time in ms.
+        reads: Vec<(u64, ProcessKey, ProcFiles)>,
+        /// Every `ScanStrings` and `CancelScan`, in order.
+        scans: Vec<HelperRequest>,
+        /// Files answered with this errno instead of their data.
+        errors: Vec<(ProcFiles, i32)>,
+        pending: VecDeque<HelperReply>,
+        spawns: u32,
+        closed: bool,
+    }
+
+    type Shared = Arc<Mutex<DetailState>>;
+
+    fn lock(state: &Shared) -> std::sync::MutexGuard<'_, DetailState> {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Answers like E29-004: one `File` body per requested file in bit order, or `Err(Os(_))`.
+    /// A scan sends two batches, the second one final.
+    struct DetailLink(Shared);
+
+    fn file_data(file: ProcFiles) -> Option<Vec<u8>> {
+        let data: &[u8] = match file {
+            ProcFiles::ENVIRON => ENVIRON,
+            ProcFiles::MAPS => MAPS.as_bytes(),
+            ProcFiles::SMAPS => SMAPS.as_bytes(),
+            ProcFiles::SMAPS_ROLLUP => ROLLUP.as_bytes(),
+            _ => return None,
+        };
+        Some(data.to_vec())
+    }
+
+    fn batch(address: u64, text: &str) -> HelperReplyBody {
+        HelperReplyBody::Strings(vec![(address, StringEncoding::Ascii, text.into())])
+    }
+
+    impl HelperLink for DetailLink {
+        fn send(&mut self, frame: &HelperFrame, _fd: Option<BorrowedFd<'_>>) -> io::Result<()> {
+            let mut s = lock(&self.0);
+            let mut bodies = Vec::new();
+            match &frame.request {
+                HelperRequest::Hello { .. } => bodies.push(HelperReplyBody::Hello {
+                    proto: HELPER_PROTO_VERSION,
+                }),
+                HelperRequest::ReadProcessFiles { key, files } => {
+                    s.reads.push((now_ms(), *key, *files));
+                    for file in files.iter() {
+                        let errno = s.errors.iter().find(|e| e.0 == file).map(|e| e.1);
+                        bodies.push(match (errno, file_data(file)) {
+                            (None, Some(data)) => HelperReplyBody::File { file, data },
+                            (Some(errno), _) => HelperReplyBody::Err(HelperError::Os(errno)),
+                            (None, None) => HelperReplyBody::Err(HelperError::Os(13)),
+                        });
+                    }
+                }
+                req @ HelperRequest::ScanStrings { .. } => {
+                    s.scans.push(req.clone());
+                    bodies.push(batch(0x1000, "first"));
+                    bodies.push(batch(0x2000, "second"));
+                }
+                req @ HelperRequest::CancelScan { .. } => {
+                    s.scans.push(req.clone());
+                    bodies.push(HelperReplyBody::Ok);
+                }
+                _ => bodies.push(HelperReplyBody::Err(HelperError::NotAllowed)),
+            }
+            let count = bodies.len();
+            for (i, body) in bodies.into_iter().enumerate() {
+                s.pending.push_back(HelperReply {
+                    seq: frame.seq,
+                    last: i + 1 == count,
+                    body,
+                });
+            }
+            Ok(())
+        }
+
+        fn recv(&mut self, _timeout: Duration) -> Result<HelperReply, LinkError> {
+            lock(&self.0).pending.pop_front().ok_or(LinkError::Timeout)
+        }
+
+        fn exit_status(&mut self, _wait: Duration) -> Option<i32> {
+            lock(&self.0).closed.then_some(0)
+        }
+
+        fn kill(&mut self) {
+            lock(&self.0).closed = true;
+        }
+
+        fn close(&mut self) {
+            lock(&self.0).closed = true;
+        }
+    }
+
+    fn env(state: &Shared) -> LinkEnv {
+        let state = Arc::clone(state);
+        LinkEnv {
+            installed: Arc::new(|| true),
+            spawn: Arc::new(move || {
+                lock(&state).spawns += 1;
+                let link: Box<dyn HelperLink> = Box::new(DetailLink(Arc::clone(&state)));
+                Ok::<_, StartError>(link)
+            }),
+            setup_probe: Arc::new(|| PROBED),
+            setup_runner: Arc::new(|_, _| tl_model::command::SetupPhase::Succeeded),
+        }
+    }
+
+    /// One tab update the worker sent.
+    struct TabOut {
+        ms: u64,
+        tab: DetailTab,
+        payload: Arc<TabPayload>,
+        validity: Validity,
+    }
+
+    /// The helper task and the `ProcessDetail` worker in one lab.
+    struct Rig {
+        fl: FakeLab,
+        rx: mpsc::Receiver<EngineMsg>,
+        _demand: watch::Sender<Demand>,
+        _settings: watch::Sender<EngineSettings>,
+        control: watch::Sender<WorkerControl>,
+        next_seq: u64,
+        helper: HelperHandle,
+        tasks: Vec<TaskHandle<()>>,
+        fake: Shared,
+        tabs: Vec<TabOut>,
+        pss: Vec<(u64, PssEntry)>,
+        errors: Vec<Arc<str>>,
+    }
+
+    impl Rig {
+        /// With `unlock`, the helper session starts before the first sample.
+        fn start(root: &Root, demand: Demand, interval_ms: u32, unlock: bool) -> Rig {
+            Rig::start_with(root, demand, interval_ms, unlock, Vec::new())
+        }
+
+        fn start_with(
+            root: &Root,
+            demand: Demand,
+            interval_ms: u32,
+            unlock: bool,
+            errors: Vec<(ProcFiles, i32)>,
+        ) -> Rig {
+            let mut fl = FakeLab::new();
+            CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&fl.clock)));
+            let (updates, rx) = mpsc::channel::<EngineMsg>(4096);
+            let (demand_tx, _) = watch::channel(demand);
+            let (settings_tx, _) = watch::channel(EngineSettings {
+                interval_ms,
+                ..EngineSettings::default()
+            });
+            let (control, _) = watch::channel(WorkerControl::default());
+            let fake = Shared::default();
+            lock(&fake).errors = errors;
+            let (helper, queue) = helper_queue();
+            let mut rig_tasks = Vec::new();
+            let (helper_updates, link_env) = (updates.clone(), env(&fake));
+            rig_tasks.push(fl.spawn(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                helper_task_with(cx, queue, helper_updates, link_env).await;
+            }));
+            let mut rig = Rig {
+                fl,
+                rx,
+                _demand: demand_tx,
+                _settings: settings_tx,
+                control,
+                next_seq: 1,
+                helper,
+                tasks: rig_tasks,
+                fake,
+                tabs: Vec::new(),
+                pss: Vec::new(),
+                errors: Vec::new(),
+            };
+            if unlock {
+                rig.unlock();
+            }
+            let io = WorkerIo::new(
+                updates,
+                rig._demand.subscribe(),
+                rig._settings.subscribe(),
+                rig.control.subscribe(),
+                SharedHandles {
+                    helper: Some(rig.helper.clone()),
+                    ..SharedHandles::default()
+                },
+            );
+            let src = ProcessDetailSource::new(root.config()).with_clock(lab_clock);
+            rig.tasks.push(rig.fl.spawn(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let _ = process_detail::run(cx, io, src).await;
+            }));
+            rig.collect();
+            rig
+        }
+
+        /// Starts the helper session, as the Grant access button does.
+        fn unlock(&mut self) {
+            let handle = self.helper.clone();
+            self.tasks.push(self.fl.spawn(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                handle.send(&cx, HelperMsg::Start).await.expect("queued");
+            }));
+            assert_eq!(self.helper.state(), HelperState::Unlocked);
+        }
+
+        /// Forwards `command` to the worker, as the reducer does. The worker takes the commands
+        /// newer than the last one it saw at its next sample.
+        fn command(&mut self, command: WorkerCommand) {
+            let mut control = WorkerControl::clone(&self.control.borrow());
+            let mut commands = control.commands.to_vec();
+            commands.push(QueuedCommand {
+                seq: self.next_seq,
+                target: SourceId::ProcessDetail,
+                command,
+            });
+            control.commands = Arc::from(commands);
+            self.next_seq += 1;
+            self.control.send(control).expect("watch has receivers");
+        }
+
+        fn collect(&mut self) {
+            let ms = self.fl.now_ms();
+            for msg in drain(&mut self.rx) {
+                match msg {
+                    EngineMsg::Source(SourceUpdate::Details(DetailsUpdate::Tab {
+                        tab,
+                        payload,
+                        validity,
+                        ..
+                    })) => self.tabs.push(TabOut {
+                        ms,
+                        tab,
+                        payload,
+                        validity,
+                    }),
+                    EngineMsg::Source(SourceUpdate::Details(DetailsUpdate::Pss {
+                        entries,
+                        ..
+                    })) => self.pss.extend(entries.into_iter().map(|e| (ms, e))),
+                    EngineMsg::Source(SourceUpdate::Health {
+                        last_error: Some(error),
+                        ..
+                    }) => self.errors.push(error),
+                    _ => {}
+                }
+            }
+        }
+
+        /// Runs `total` of virtual time in 50 ms steps.
+        fn run(&mut self, total: Duration) {
+            let end = self.fl.now_ms() + total.as_millis() as u64;
+            while self.fl.now_ms() < end {
+                self.fl.advance(Duration::from_millis(50));
+                self.collect();
+            }
+        }
+
+        fn reads(&self) -> Vec<(u64, ProcessKey, ProcFiles)> {
+            lock(&self.fake).reads.clone()
+        }
+
+        fn tab(&self, tab: DetailTab) -> Vec<&TabOut> {
+            self.tabs.iter().filter(|t| t.tab == tab).collect()
+        }
+
+        fn finish(mut self) {
+            for task in &self.tasks {
+                task.abort();
+            }
+            self.fl.advance(Duration::from_millis(10));
+            drop((self._demand, self._settings, self.control, self.helper));
+            drop(self.rx);
+            self.fl.finish();
+        }
+    }
+
+    fn demand(tabs: &[DetailTab]) -> Demand {
+        let details: Vec<DetailDemand> = tabs
+            .iter()
+            .map(|&tab| DetailDemand {
+                target: DetailTarget::Process(key()),
+                tab,
+            })
+            .collect();
+        Demand {
+            any_surface_visible: true,
+            details: details.into(),
+            ..Demand::default()
+        }
+    }
+
+    fn env_vars(p: &TabPayload) -> Vec<(String, String)> {
+        match p {
+            TabPayload::Environ(e) => e
+                .vars
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+            other => panic!("expected Environ, got {other:?}"),
+        }
+    }
+
+    fn want_vars() -> Vec<(String, String)> {
+        vec![
+            ("HOME".into(), "/root".into()),
+            ("SHELL".into(), "/bin/sh".into()),
+        ]
+    }
+
+    /// AC 1: one `ReadProcessFiles { ENVIRON }`, then the tab is Valid with the helper's
+    /// variables. No Restricted payload goes out while the read waits.
+    #[test]
+    fn detail_environment_through_helper() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("environ");
+        let mut rig = Rig::start(&root, demand(&[DetailTab::Environment]), 1000, true);
+        rig.run(Duration::from_millis(3_000));
+
+        let reads = rig.reads();
+        assert_eq!(reads.len(), 1, "{reads:?}");
+        assert_eq!((reads[0].1, reads[0].2), (key(), ProcFiles::ENVIRON));
+        let env = rig.tab(DetailTab::Environment);
+        assert_eq!(env.len(), 1, "one payload, from the helper");
+        assert_eq!(env[0].validity, Validity::Valid);
+        assert_eq!(env_vars(&env[0].payload), want_vars());
+        rig.finish();
+    }
+
+    /// AC 2, security regression: while `Locked` no helper read is sent, no session starts (no
+    /// polkit prompt) and the tab stays Restricted.
+    #[test]
+    fn detail_locked_stays_restricted() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("environ");
+        root.restrict("maps");
+        let mut demand = demand(&[DetailTab::Environment, DetailTab::Maps]);
+        demand.process_columns.insert(ColumnId::Pss);
+        demand.detail_keys = Arc::from([key()]);
+        root.restrict("smaps_rollup");
+        let mut rig = Rig::start(&root, demand, 1000, false);
+        rig.run(Duration::from_millis(3_000));
+
+        assert_eq!(rig.helper.state(), HelperState::Locked);
+        let fake = lock(&rig.fake);
+        assert!(fake.reads.is_empty(), "{:?}", fake.reads);
+        assert_eq!(fake.spawns, 0, "no session was started");
+        drop(fake);
+        for tab in [DetailTab::Environment, DetailTab::Maps] {
+            let outs = rig.tab(tab);
+            assert!(!outs.is_empty(), "{tab:?} sent");
+            assert!(
+                outs.iter().all(|t| t.validity == Validity::Restricted),
+                "{tab:?} stays Restricted"
+            );
+        }
+        assert!(!rig.pss.is_empty());
+        assert!(
+            rig.pss
+                .iter()
+                .all(|(_, e)| e.validity == Validity::Restricted)
+        );
+        rig.finish();
+    }
+
+    /// AC 3: Memory maps read every 250 ms for 5 s sends at most one helper read per second.
+    #[test]
+    fn detail_helper_reads_at_1hz() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("maps");
+        let mut rig = Rig::start(&root, demand(&[DetailTab::Maps]), 250, true);
+        rig.run(Duration::from_millis(4_950));
+
+        let reads = rig.reads();
+        assert!(
+            reads
+                .iter()
+                .all(|r| r.1 == key() && r.2 == ProcFiles::MAPS | ProcFiles::SMAPS),
+            "{reads:?}"
+        );
+        let times: Vec<u64> = reads.iter().map(|r| r.0).collect();
+        assert_eq!(times, [0, 1_000, 2_000, 3_000, 4_000]);
+        let maps = rig.tab(DetailTab::Maps);
+        assert!(
+            maps.iter().all(|t| t.validity == Validity::Valid),
+            "the helper payload stays between reads"
+        );
+        let TabPayload::Maps(detail) = &*maps[0].payload else {
+            panic!("expected Maps");
+        };
+        let starts: Vec<u64> = detail.regions.iter().map(|r| r.start).collect();
+        assert_eq!(starts, [0x0040_0000, 0x7ffd_0000_0000]);
+        let rss: Vec<u64> = detail.regions.iter().map(|r| r.rss_bytes.value).collect();
+        assert_eq!(rss, [8 * 1024, 12 * 1024]);
+        rig.finish();
+    }
+
+    /// AC 4: a target tasklens can read never goes through the helper.
+    #[test]
+    fn detail_own_process_no_helper() {
+        let root = Root::new();
+        let tabs = [
+            DetailTab::General,
+            DetailTab::Environment,
+            DetailTab::Maps,
+            DetailTab::Fds,
+            DetailTab::Security,
+            DetailTab::Threads,
+        ];
+        let mut demand = demand(&tabs);
+        demand.process_columns.insert(ColumnId::Pss);
+        demand.detail_keys = Arc::from([key()]);
+        let mut rig = Rig::start(&root, demand, 1000, true);
+        rig.run(Duration::from_millis(3_000));
+
+        assert!(rig.reads().is_empty(), "{:?}", rig.reads());
+        assert!(lock(&rig.fake).scans.is_empty());
+        for tab in tabs {
+            assert!(!rig.tab(tab).is_empty(), "{tab:?} sent");
+        }
+        rig.finish();
+    }
+
+    fn scan_state(out: &TabOut) -> (ScanId, ScanPhase, Vec<String>) {
+        let TabPayload::Strings(state) = &*out.payload else {
+            panic!("expected Strings");
+        };
+        let hits = state
+            .chunks
+            .iter()
+            .flat_map(|c| c.iter().map(|h| h.value.to_string()))
+            .collect();
+        (state.scan, state.phase.clone(), hits)
+    }
+
+    /// AC 5: a scan Yama refuses runs as a helper `ScanStrings`; `CancelStringScan` ends it
+    /// `Cancelled`. The lab runs the helper call inline, so the fake's stream has ended before
+    /// the cancel can reach it: `read_stream_drop_sends_cancel_scan` checks the `CancelScan`
+    /// that dropping the stream sends.
+    #[test]
+    fn strings_through_helper_cancel() {
+        let root = Root::new();
+        root.ptrace_scope_2();
+        let mut rig = Rig::start(&root, demand(&[DetailTab::Strings]), 1000, true);
+        let opts = StringScanOpts::default();
+
+        // A whole scan through the helper. Commands wait for the next sample, at 1000 ms.
+        rig.command(WorkerCommand::StringScan {
+            scan: ScanId(1),
+            key: key(),
+            opts,
+        });
+        rig.run(Duration::from_millis(1_500));
+        let strings = rig.tab(DetailTab::Strings);
+        let last = scan_state(strings.last().expect("a Strings payload"));
+        assert_eq!(
+            last,
+            (
+                ScanId(1),
+                ScanPhase::Finished,
+                vec!["first".to_string(), "second".to_string()]
+            )
+        );
+        assert!(strings.iter().all(|t| t.validity == Validity::Valid));
+
+        // A second scan, cancelled at the sample after its first payload, while the sample side
+        // has not seen its end yet.
+        rig.command(WorkerCommand::StringScan {
+            scan: ScanId(2),
+            key: key(),
+            opts,
+        });
+        let is_second = |t: &TabOut| t.tab == DetailTab::Strings && scan_state(t).0 == ScanId(2);
+        for _ in 0..40 {
+            if rig.tabs.iter().any(is_second) {
+                break;
+            }
+            rig.run(Duration::from_millis(50));
+        }
+        let first = rig
+            .tabs
+            .iter()
+            .find(|t| is_second(t))
+            .expect("scan 2 started");
+        assert_eq!(scan_state(first).1, ScanPhase::Scanning);
+        rig.command(WorkerCommand::CancelStringScan(ScanId(2)));
+        rig.run(Duration::from_millis(1_500));
+        let strings = rig.tab(DetailTab::Strings);
+        let last = strings.last().expect("a Strings payload");
+        assert_eq!(scan_state(last).0, ScanId(2));
+        assert_eq!(scan_state(last).1, ScanPhase::Cancelled);
+        let after = strings.iter().filter(|t| t.ms > last.ms).count();
+        assert_eq!(after, 0, "nothing after Cancelled");
+
+        let scans = lock(&rig.fake).scans.clone();
+        let want = HelperRequest::ScanStrings { key: key(), opts };
+        assert_eq!(scans, [want.clone(), want]);
+        assert!(rig.reads().is_empty());
+        rig.finish();
+    }
+
+    /// AC 6, R-170 item 13: after the Grant access button unlocks the helper, the UI's one
+    /// `DetailRefresh` reads the Restricted tab through the helper.
+    #[test]
+    fn detail_refresh_after_unlock_reads_through_helper() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("environ");
+        let mut rig = Rig::start(&root, demand(&[DetailTab::Environment]), 1000, false);
+        rig.run(Duration::from_millis(1_000));
+        let env = rig.tab(DetailTab::Environment);
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].validity, Validity::Restricted);
+
+        rig.unlock();
+        rig.run(Duration::from_millis(1_000));
+        assert!(rig.reads().is_empty(), "no read before the refresh");
+
+        rig.command(WorkerCommand::DetailRefresh {
+            target: DetailTarget::Process(key()),
+            tab: DetailTab::Environment,
+        });
+        rig.run(Duration::from_millis(2_000));
+        let reads = rig.reads();
+        assert_eq!(reads.len(), 1, "{reads:?}");
+        assert_eq!(reads[0].2, ProcFiles::ENVIRON);
+        let env = rig.tab(DetailTab::Environment);
+        let last = env.last().expect("an Environment payload");
+        assert_eq!(last.validity, Validity::Valid);
+        assert_eq!(env_vars(&last.payload), want_vars());
+        rig.finish();
+    }
+
+    /// AC 7: an `smaps` the helper cannot fit (EFBIG) fails the Memory maps tab with
+    /// "too large to read through the helper".
+    #[test]
+    fn detail_too_large_failed() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("maps");
+        let errors = vec![(ProcFiles::SMAPS, 27)];
+        let mut rig = Rig::start_with(&root, demand(&[DetailTab::Maps]), 1000, true, errors);
+        rig.run(Duration::from_millis(1_500));
+
+        let maps = rig.tab(DetailTab::Maps);
+        let last = maps.last().expect("a Maps payload");
+        assert_eq!(last.validity, Validity::Failed);
+        assert_eq!(
+            rig.errors,
+            [Arc::<str>::from("too large to read through the helper")]
+        );
+        rig.finish();
+    }
+
+    /// PSS and USS of a Restricted key come from the helper's `smaps_rollup`.
+    #[test]
+    fn detail_pss_through_helper() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("smaps_rollup");
+        let mut demand = demand(&[]);
+        demand.process_columns.insert(ColumnId::Pss);
+        demand.detail_keys = Arc::from([key()]);
+        let mut rig = Rig::start(&root, demand, 1000, true);
+        rig.run(Duration::from_millis(2_050));
+
+        let reads = rig.reads();
+        assert!(reads.iter().all(|r| r.2 == ProcFiles::SMAPS_ROLLUP));
+        assert_eq!(
+            reads.iter().map(|r| r.0).collect::<Vec<_>>(),
+            [0, 1_000, 2_000]
+        );
+        let seen: Vec<(u64, Validity, u64, u64)> = rig
+            .pss
+            .iter()
+            .map(|(ms, e)| (*ms, e.validity, e.pss_bytes, e.uss_bytes))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                // The first helper value comes with the next PSS round.
+                (0, Validity::Restricted, 0, 0),
+                (1_000, Validity::Valid, 300 * 1024, 100 * 1024),
+                (2_000, Validity::Valid, 300 * 1024, 100 * 1024),
+            ]
         );
         rig.finish();
     }

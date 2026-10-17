@@ -179,6 +179,31 @@ impl HelperHandle {
         }
     }
 
+    /// Streaming form of `read` for background readers, such as the Strings scan of a process
+    /// detail window (qfx.18). Like `read` it never starts a session. The final reply has
+    /// `last` set; once `replies` closes without it, `HelperStream::result` says why. Dropping
+    /// the stream stops the call (a scan gets `CancelScan`).
+    pub async fn read_stream(
+        &self,
+        cx: &Cx,
+        req: HelperRequest,
+        deadline: Duration,
+    ) -> Result<HelperStream, HelperReadError> {
+        let (replies, rx) = async_channel::bounded(STREAM_QUEUE);
+        let (done, done_rx) = oneshot::channel();
+        let msg = HelperMsg::Read {
+            req,
+            deadline,
+            replies,
+            done,
+        };
+        self.send(cx, msg).await.map_err(HelperReadError::Call)?;
+        Ok(HelperStream {
+            replies: rx,
+            done: done_rx,
+        })
+    }
+
     /// Streaming form for `ScanStrings` and `NetnsSockDiagDump`. The final reply has `last`
     /// set; a stream that closes without it failed. Dropping the receiver stops the call (a
     /// scan gets `CancelScan`).
@@ -211,6 +236,28 @@ impl HelperHandle {
     /// The last published state.
     pub fn state(&self) -> HelperState {
         state_from(self.state.load(Ordering::Acquire))
+    }
+}
+
+/// A running `HelperHandle::read_stream`.
+pub struct HelperStream {
+    /// Every reply in order. Closes after the final one, or early when the read failed.
+    pub replies: async_channel::Receiver<HelperReply>,
+    done: oneshot::Receiver<Result<(), HelperReadError>>,
+}
+
+impl HelperStream {
+    /// Why the stream ended, once `replies` has closed: `NotRunning` when the helper was not
+    /// `Unlocked`, `Call(_)` when the read failed.
+    pub async fn result(mut self, cx: &Cx) -> Result<(), HelperReadError> {
+        // The task sends `done` after the last reply.
+        match self.done.recv(cx).await {
+            Ok(result) => result,
+            Err(oneshot::RecvError::Cancelled) => {
+                Err(HelperReadError::Call(HelperCallError::Cancelled))
+            }
+            Err(_) => Err(HelperReadError::Call(HelperCallError::Exited)),
+        }
     }
 }
 
