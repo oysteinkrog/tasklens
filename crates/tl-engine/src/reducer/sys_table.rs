@@ -1770,6 +1770,7 @@ mod tests {
             unit: None,
             tcp: None,
             remote_host: RemoteHost::NotRequested,
+            netns: None,
         }
     }
 

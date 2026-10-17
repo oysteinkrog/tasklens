@@ -2586,6 +2586,7 @@ fn conn(cookie: u64, proto: Proto, state: ConnState) -> ConnRecord {
         unit: None,
         tcp: None,
         remote_host: RemoteHost::NotRequested,
+        netns: None,
     }
 }
 

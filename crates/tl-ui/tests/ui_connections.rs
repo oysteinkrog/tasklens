@@ -110,6 +110,7 @@ fn connection(cookie: u64, owners: SmallVec<[ProcessKey; 1]>) -> ConnRecord {
         unit: None,
         tcp: None,
         remote_host: RemoteHost::NotRequested,
+        netns: None,
     }
 }
 

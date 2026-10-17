@@ -1892,7 +1892,7 @@ mod connections_helper {
     use rustc_hash::FxHashMap;
     use tl_collect::CollectError;
     use tl_collect::net::sock_diag::{self, SockRecord, TcpInfoLite};
-    use tl_collect::net::{IfNames, SocketMap};
+    use tl_collect::net::{IfNames, NetnsInfo, SocketMap};
     use tl_engine::dbus::SharedHandles;
     use tl_engine::helper::{
         HelperHandle, HelperLink, HelperMsg, LinkEnv, LinkError, StartError, helper_queue,
@@ -1965,6 +1965,8 @@ mod connections_helper {
     /// Scripted dumps; the map has our own socket and `OTHER_PID` as restricted.
     struct Reader {
         tcp: Vec<SockRecord>,
+        /// What `list_netns` returns.
+        netns: Vec<NetnsInfo>,
     }
 
     impl SocketReader for Reader {
@@ -1990,6 +1992,10 @@ mod connections_helper {
         fn if_names(&mut self) -> IfNames {
             IfNames::default()
         }
+
+        fn list_netns(&mut self) -> Result<Vec<NetnsInfo>, CollectError> {
+            Ok(self.netns.clone())
+        }
     }
 
     /// What the fake helper saw, and the owners it knows.
@@ -1998,6 +2004,10 @@ mod connections_helper {
         /// The inodes of every `ResolveSocketInodes`.
         requests: Vec<Vec<u64>>,
         owners: FxHashMap<u64, Vec<ProcessKey>>,
+        /// The namespace inode of every `NetnsSockDiagDump`.
+        netns_requests: Vec<u64>,
+        /// The namespaces the fake helper can dump; any other gives `NoSuchProcess`.
+        netns_dumps: Vec<u64>,
         pending: VecDeque<HelperReply>,
         spawns: u32,
         closed: bool,
@@ -2036,6 +2046,22 @@ mod connections_helper {
                         .collect();
                     HelperReplyBody::SocketOwners(pairs)
                 }
+                HelperRequest::NetnsSockDiagDump { netns_ino } => {
+                    s.netns_requests.push(*netns_ino);
+                    if !s.netns_dumps.contains(netns_ino) {
+                        HelperReplyBody::Err(HelperError::NoSuchProcess)
+                    } else {
+                        // Like tl-helper: one `NetlinkDump` per dump, then an empty one.
+                        for name in ["tcp4.bin", "tcp6.bin", "udp4.bin", "udp6.bin"] {
+                            s.pending.push_back(HelperReply {
+                                seq: frame.seq,
+                                last: false,
+                                body: HelperReplyBody::NetlinkDump(netns_fixture(name)),
+                            });
+                        }
+                        HelperReplyBody::NetlinkDump(Vec::new())
+                    }
+                }
                 _ => HelperReplyBody::Err(HelperError::NotAllowed),
             };
             s.pending.push_back(HelperReply {
@@ -2061,6 +2087,14 @@ mod connections_helper {
         fn close(&mut self) {
             lock(&self.0).closed = true;
         }
+    }
+
+    /// One sock_diag dump of the tl-collect `sockets-basic` fixture: cookies 1 to 6.
+    fn netns_fixture(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tl-collect/tests/fixtures/sockets-basic/dump")
+            .join(name);
+        std::fs::read(path).expect("fixture dump")
     }
 
     fn env(state: &Shared) -> LinkEnv {
@@ -2093,10 +2127,24 @@ mod connections_helper {
     impl Rig {
         /// With `unlock`, the helper session starts before the first rebuild.
         fn start(tcp: Vec<SockRecord>, owners: &[(u64, &[u32])], unlock: bool) -> Rig {
+            Rig::start_with(tcp, owners, unlock, false, Vec::new(), &[])
+        }
+
+        /// `all_netns` is the "Namespaces: All" demand; `netns` is what `list_netns` returns
+        /// and `dumps` the namespaces the fake helper can dump.
+        fn start_with(
+            tcp: Vec<SockRecord>,
+            owners: &[(u64, &[u32])],
+            unlock: bool,
+            all_netns: bool,
+            netns: Vec<NetnsInfo>,
+            dumps: &[u64],
+        ) -> Rig {
             let mut fl = FakeLab::new();
             let (updates, rx) = mpsc::channel::<EngineMsg>(4096);
             let (demand_tx, _) = watch::channel(Demand {
                 connections: true,
+                connections_all_netns: all_netns,
                 ..Demand::default()
             });
             let (settings_tx, _) = watch::channel(EngineSettings::default());
@@ -2106,6 +2154,7 @@ mod connections_helper {
                 .iter()
                 .map(|&(inode, pids)| (inode, pids.iter().map(|&p| key(p)).collect()))
                 .collect();
+            lock(&fake).netns_dumps = dumps.to_vec();
             let (helper, queue) = helper_queue();
             let mut tasks = Vec::new();
             let (helper_updates, link_env) = (updates.clone(), env(&fake));
@@ -2131,7 +2180,7 @@ mod connections_helper {
                     ..SharedHandles::default()
                 },
             );
-            let src = ConnectionsSource::new(Reader { tcp });
+            let src = ConnectionsSource::new(Reader { tcp, netns });
             tasks.push(fl.spawn(async move {
                 let cx = Cx::current().expect("task has a Cx");
                 let _ = connections::run(cx, io, src).await;
@@ -2280,6 +2329,111 @@ mod connections_helper {
                 .iter()
                 .all(|i| requests[1].binary_search(i).is_ok())
         );
+        rig.finish();
+    }
+
+    /// Namespace 1 can be dumped; namespace 2 is gone by the time the helper looks.
+    const NETNS_BLUE: u64 = 4_026_532_001;
+    const NETNS_GONE: u64 = 4_026_532_002;
+
+    fn namespaces() -> Vec<NetnsInfo> {
+        [(NETNS_BLUE, "blue"), (NETNS_GONE, "net:[4026532002]")]
+            .into_iter()
+            .map(|(ino, name)| NetnsInfo {
+                ino,
+                name: Arc::from(name),
+                member_pid: 700,
+                member_count: 1,
+            })
+            .collect()
+    }
+
+    /// Host sockets: cookie 100, and cookie 3, which the fixture namespace also has.
+    fn host_dump() -> Vec<SockRecord> {
+        vec![tcp(100, OWN_INODE, 1000, 1), tcp(3, 0, OTHER_UID, 6)]
+    }
+
+    #[test]
+    fn connections_netns_rows() {
+        let mut rig = Rig::start_with(host_dump(), &[], true, true, namespaces(), &[NETNS_BLUE]);
+        rig.run(Duration::from_millis(4_050));
+
+        let requests = lock(&rig.fake).netns_requests.clone();
+        assert!(requests.contains(&NETNS_BLUE) && requests.contains(&NETNS_GONE));
+        // At most one round per rebuild: a rebuild every 2 s, two namespaces per round.
+        assert!(requests.len() <= 2 * rig.updates.len(), "{requests:?}");
+
+        let last = rig.last();
+        // The fixture cookies 1, 2, 4, 5 and 6 come from namespace "blue".
+        for cookie in [1, 2, 4, 5, 6] {
+            let r = last
+                .records
+                .iter()
+                .find(|r| r.cookie == cookie)
+                .unwrap_or_else(|| panic!("no row for cookie {cookie}"));
+            let netns = r.netns.as_ref().expect("netns set");
+            assert_eq!(netns.ino, NETNS_BLUE);
+            assert_eq!(&*netns.name, "blue");
+            assert_eq!(r.interface, None);
+        }
+        // Host rows keep `None`; a cookie the host already has stays the host row, once.
+        for cookie in [3, 100] {
+            let rows: Vec<_> = last.records.iter().filter(|r| r.cookie == cookie).collect();
+            assert_eq!(rows.len(), 1, "cookie {cookie}");
+            assert_eq!(rows[0].netns, None);
+        }
+        // The failed namespace adds nothing: 2 host rows and 5 from "blue".
+        assert_eq!(last.records.len(), 7);
+        // Other namespaces do not count in the per-process attribution.
+        assert!(last.attribution.keys().all(|k| k.pid == 100));
+        rig.finish();
+    }
+
+    #[test]
+    fn connections_netns_off_host_only() {
+        let mut rig = Rig::start_with(host_dump(), &[], true, false, namespaces(), &[NETNS_BLUE]);
+        rig.run(Duration::from_millis(4_050));
+
+        assert!(lock(&rig.fake).netns_requests.is_empty());
+        assert!(rig.updates.len() >= 2);
+        for update in &rig.updates {
+            assert_eq!(update.records.len(), 2);
+            assert!(update.records.iter().all(|r| r.netns.is_none()));
+        }
+
+        // Turning "All" off again drops the namespace rows on the next rebuild.
+        rig.demand
+            .send_modify(|d| d.connections_all_netns = true)
+            .expect("demand sent");
+        rig.run(Duration::from_millis(4_000));
+        assert!(rig.last().records.iter().any(|r| r.netns.is_some()));
+        rig.demand
+            .send_modify(|d| d.connections_all_netns = false)
+            .expect("demand sent");
+        rig.run(Duration::from_millis(2_000));
+        assert_eq!(rig.last().records.len(), 2);
+        assert!(rig.last().records.iter().all(|r| r.netns.is_none()));
+        rig.finish();
+    }
+
+    /// Security regression: with the helper locked, "All" never starts a session (no polkit
+    /// prompt) and lists host sockets only.
+    #[test]
+    fn connections_netns_locked_no_session() {
+        let mut rig = Rig::start_with(host_dump(), &[], false, true, namespaces(), &[NETNS_BLUE]);
+        assert_eq!(rig.helper.state(), HelperState::Locked);
+        rig.run(Duration::from_millis(6_050));
+
+        assert!(rig.updates.len() >= 3, "{} rebuilds", rig.updates.len());
+        for update in &rig.updates {
+            assert_eq!(update.records.len(), 2);
+            assert!(update.records.iter().all(|r| r.netns.is_none()));
+        }
+        let fake = lock(&rig.fake);
+        assert!(fake.netns_requests.is_empty(), "{:?}", fake.netns_requests);
+        assert_eq!(fake.spawns, 0, "no session was started");
+        drop(fake);
+        assert_eq!(rig.helper.state(), HelperState::Locked);
         rig.finish();
     }
 }

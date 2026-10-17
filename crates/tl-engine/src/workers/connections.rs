@@ -16,11 +16,18 @@
 //! process could not be read (`ResolveSocketInodes`, SYS-030, PROC-032), at most one request
 //! per rebuild and outside it. The next rebuild merges the owners into the socket map, so the
 //! Connections rows and the process network columns show them.
+//!
+//! While the Connections tab shows "Namespaces: All" and the helper is `Unlocked`, each rebuild
+//! lists the other network namespaces and `NetnsDump` asks the helper for their sockets
+//! (`NetnsSockDiagDump`, SYS-037), one namespace after the other and at most one round per
+//! rebuild. The next rebuild adds those sockets to the table with `netns` set. They do not
+//! count in the per-process attribution. A namespace whose dump fails is left out.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -34,16 +41,16 @@ use smallvec::SmallVec;
 use tl_collect::counters::{Clock, resumed_between};
 use tl_collect::net::sock_diag::{self, SockDiag, SockRecord};
 use tl_collect::net::{
-    ConnRecord as RawRecord, ConnectionTable, IfNames, NetRate, Owner, SocketMap,
+    ConnRecord as RawRecord, ConnectionTable, IfNames, NetRate, NetnsInfo, Owner, SocketMap,
 };
 use tl_collect::{CollectError, SysRoot};
 use tl_model::actions::{Family, FourTuple, Proto};
 use tl_model::demand::Demand;
 use tl_model::health::{HelperState, SourceId, SourceState};
-use tl_model::helper_proto::{HelperReply, HelperReplyBody, HelperRequest};
+use tl_model::helper_proto::{HelperError, HelperReply, HelperReplyBody, HelperRequest};
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::EngineSettings;
-use tl_model::snapshot::{ConnRecord, ConnState, RemoteHost, TcpInfoView};
+use tl_model::snapshot::{ConnRecord, ConnState, NetnsRef, RemoteHost, TcpInfoView};
 use tl_model::time::BootId;
 use tl_model::validity::Validity;
 
@@ -109,6 +116,10 @@ pub trait SocketReader: Send + 'static {
     fn rebuild_map(&mut self, map: &mut SocketMap) -> Result<(), CollectError>;
     /// Interface names for link-local scopes and the Interface column.
     fn if_names(&mut self) -> IfNames;
+    /// The network namespaces other than tasklens's own, for "Namespaces: All" (SYS-037).
+    fn list_netns(&mut self) -> Result<Vec<NetnsInfo>, CollectError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The real system: one `NETLINK_SOCK_DIAG` socket, opened on first use and again after an
@@ -163,6 +174,10 @@ impl SocketReader for HostReader {
     fn if_names(&mut self) -> IfNames {
         IfNames::read(&self.root).unwrap_or_default()
     }
+
+    fn list_netns(&mut self) -> Result<Vec<NetnsInfo>, CollectError> {
+        tl_collect::net::list_netns(&self.root, Path::new(RUN_NETNS))
+    }
 }
 
 pub struct ConnectionsSource<R: SocketReader> {
@@ -186,6 +201,12 @@ pub struct ConnectionsSource<R: SocketReader> {
     rdns: Option<Rdns>,
     /// Set by `helper_owners`.
     helper: Option<HelperOwners>,
+    /// Set by `period()` from the latest demand: "Namespaces: All" is chosen.
+    all_netns: Cell<bool>,
+    /// Set by `helper_netns`.
+    netns: Option<NetnsLink>,
+    /// Scratch: the namespace of each socket added from another namespace, by cookie.
+    netns_of: FxHashMap<u64, NetnsRef>,
 }
 
 impl<R: SocketReader> ConnectionsSource<R> {
@@ -203,6 +224,9 @@ impl<R: SocketReader> ConnectionsSource<R> {
             host_cookies: RefCell::new(Arc::from([])),
             rdns: None,
             helper: None,
+            all_netns: Cell::new(false),
+            netns: None,
+            netns_of: FxHashMap::default(),
         }
     }
 
@@ -227,6 +251,25 @@ impl<R: SocketReader> ConnectionsSource<R> {
         }
     }
 
+    /// Connects the rebuild to `handle` for the sockets of other network namespaces. Run the
+    /// returned `NetnsDump` next to `source::run`, as `run` does.
+    pub fn helper_netns(&mut self, handle: HelperHandle) -> NetnsDump {
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let (wanted_tx, wanted) = watch::channel(Arc::from([]));
+        self.netns = Some(NetnsLink {
+            handle: handle.clone(),
+            wanted: wanted_tx,
+            wanted_sent: false,
+            store: Arc::clone(&store),
+            cookies: FxHashSet::default(),
+        });
+        NetnsDump {
+            handle,
+            wanted,
+            store,
+        }
+    }
+
     /// Fills `remote_host` through the resolver task behind `rdns`.
     pub fn with_rdns(mut self, rdns: Rdns) -> Self {
         self.rdns = Some(rdns);
@@ -238,6 +281,13 @@ impl<R: SocketReader> ConnectionsSource<R> {
         let tab_shown = self.tab_shown.get();
         if let Err(e) = self.read(tab_shown) {
             return self.failure(clock, &e);
+        }
+        // Sockets of other namespaces go after the host ones and only into the table.
+        let host_len = self.socks.len();
+        self.netns_of.clear();
+        if let Some(link) = &mut self.netns {
+            link.after_rebuild(&mut self.reader, tab_shown && self.all_netns.get());
+            link.merge(&mut self.socks, &mut self.netns_of);
         }
         tracing::debug!(
             elapsed_ms = self.map.elapsed_ns as f64 / 1e6,
@@ -260,16 +310,22 @@ impl<R: SocketReader> ConnectionsSource<R> {
 
         // The TCP records come first in `socks`; UDP records have no tcp_info and are skipped.
         self.attribution
-            .update(&self.socks, &self.map, clock.boot_ns);
-        let attribution = self.attribution_map();
+            .update(&self.socks[..host_len], &self.map, clock.boot_ns);
+        let attribution = self.attribution_map(host_len);
 
         let mut records = if tab_shown {
             let ifnames = self.reader.if_names();
             self.table.update(&self.socks, &self.map, &ifnames);
-            self.table.records.iter().map(to_model).collect()
+            let netns_of = &self.netns_of;
+            self.table
+                .records
+                .iter()
+                .map(|r| to_model(r, netns_of.get(&r.cookie)))
+                .collect()
         } else {
             Vec::new()
         };
+        self.socks.truncate(host_len);
         self.fill_hosts(&mut records, clock.boot_ns);
 
         if std::mem::take(&mut self.failed) {
@@ -317,14 +373,15 @@ impl<R: SocketReader> ConnectionsSource<R> {
         self.reader.rebuild_map(&mut self.map)
     }
 
-    /// The attribution's per-process rates. On a warming-up pass every owner of a TCP socket
-    /// gets a `WarmingUp` entry, so the column shows no value rather than 0 (R-162).
-    fn attribution_map(&self) -> FxHashMap<ProcessKey, NetRate> {
+    /// The attribution's per-process rates, from the first `host_len` sockets. On a warming-up
+    /// pass every owner of a TCP socket gets a `WarmingUp` entry, so the column shows no value
+    /// rather than 0 (R-162).
+    fn attribution_map(&self, host_len: usize) -> FxHashMap<ProcessKey, NetRate> {
         if self.attribution.validity != Validity::WarmingUp {
             return self.attribution.per_process.clone();
         }
         let mut out = FxHashMap::default();
-        for sock in &self.socks {
+        for sock in &self.socks[..host_len] {
             if sock.proto != sock_diag::Proto::Tcp || sock.tcp_info.is_none() || sock.inode == 0 {
                 continue;
             }
@@ -371,6 +428,7 @@ impl<R: SocketReader> Source for ConnectionsSource<R> {
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.tab_shown.set(d.connections);
+        self.all_netns.set(d.connections_all_netns);
         if !Arc::ptr_eq(&self.host_cookies.borrow(), &d.remote_host_cookies) {
             *self.host_cookies.borrow_mut() = Arc::clone(&d.remote_host_cookies);
         }
@@ -400,15 +458,20 @@ pub async fn run<R: SocketReader>(
     let Some(handle) = io.shared.helper.clone() else {
         return source::run(cx, io, src).await;
     };
-    let resolve = src.helper_owners(handle);
-    let helper_cx = cx.clone();
+    let resolve = src.helper_owners(handle.clone());
+    let dumps = src.helper_netns(handle);
+    let (helper_cx, netns_cx) = (cx.clone(), cx.clone());
     let rebuilds = source::run(cx, io, src);
     let helper = async move {
         resolve.run(&helper_cx).await;
         // Only a cancel ends the requests; the rebuild loop returns for it.
         std::future::pending().await
     };
-    futures_lite::future::or(rebuilds, helper).await
+    let netns = async move {
+        dumps.run(&netns_cx).await;
+        std::future::pending().await
+    };
+    futures_lite::future::or(rebuilds, futures_lite::future::or(helper, netns)).await
 }
 
 // ---- Helper socket owners (E29-018, SYS-030, PROC-032) ----
@@ -572,6 +635,183 @@ impl SocketResolve {
             keys.dedup();
         }
     }
+}
+
+// ---- Other network namespaces (SYS-037, R-004) ----
+
+/// Where `ip netns add` names namespaces.
+const RUN_NETNS: &str = "/run/netns";
+/// The deadline of one `NetnsSockDiagDump` call. The helper waits at most 2 s for each of its
+/// four dumps, and a call past its deadline ends the session, so this leaves room.
+const NETNS_DEADLINE: Duration = Duration::from_secs(10);
+/// The four dumps of one `NetnsSockDiagDump` reply, in the order tl-helper sends them.
+const NETNS_DUMPS: [(sock_diag::Family, sock_diag::Proto); 4] = [
+    (sock_diag::Family::V4, sock_diag::Proto::Tcp),
+    (sock_diag::Family::V6, sock_diag::Proto::Tcp),
+    (sock_diag::Family::V4, sock_diag::Proto::Udp),
+    (sock_diag::Family::V6, sock_diag::Proto::Udp),
+];
+/// ENOENT and EINVAL: the diag module of one protocol is missing, as in `SockDiag::dump`.
+const DIAG_UNSUPPORTED: [i32; 2] = [2, 22];
+
+/// The sockets of the last round, per namespace.
+type NetnsStore = Arc<Mutex<Vec<(NetnsRef, Vec<SockRecord>)>>>;
+
+fn lock_netns(store: &NetnsStore) -> std::sync::MutexGuard<'_, Vec<(NetnsRef, Vec<SockRecord>)>> {
+    store.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The rebuild's side of the namespace dumps.
+struct NetnsLink {
+    handle: HelperHandle,
+    /// The namespaces of the last rebuild; empty while the dumps are off.
+    wanted: watch::Sender<Arc<[NetnsInfo]>>,
+    /// The last value sent on `wanted` was not empty.
+    wanted_sent: bool,
+    store: NetnsStore,
+    /// Scratch: the cookies already in the table.
+    cookies: FxHashSet<u64>,
+}
+
+impl NetnsLink {
+    /// With `on` and the helper `Unlocked`, lists the namespaces and sends them to `NetnsDump`.
+    /// Otherwise nothing is listed or sent, and the stored sockets are dropped.
+    fn after_rebuild<R: SocketReader>(&mut self, reader: &mut R, on: bool) {
+        let list = if on && self.handle.state() == HelperState::Unlocked {
+            reader.list_netns().unwrap_or_else(|e| {
+                tracing::debug!(error = %e, "listing network namespaces failed");
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
+        if list.is_empty() {
+            if self.wanted_sent {
+                let _ = self.wanted.send(Arc::from([]));
+                self.wanted_sent = false;
+            }
+            lock_netns(&self.store).clear();
+            return;
+        }
+        self.wanted_sent = true;
+        // `send` fails only when `NetnsDump` is gone.
+        let _ = self.wanted.send(Arc::from(list));
+    }
+
+    /// Appends the stored sockets to `socks` and notes their namespace in `netns_of`. A socket
+    /// whose cookie is already in `socks` is left out.
+    fn merge(&mut self, socks: &mut Vec<SockRecord>, netns_of: &mut FxHashMap<u64, NetnsRef>) {
+        let store = lock_netns(&self.store);
+        if store.is_empty() {
+            return;
+        }
+        self.cookies.clear();
+        self.cookies.extend(socks.iter().map(|s| s.cookie));
+        for (netns, dumped) in store.iter() {
+            for sock in dumped {
+                if self.cookies.insert(sock.cookie) {
+                    socks.push(sock.clone());
+                    netns_of.insert(sock.cookie, netns.clone());
+                }
+            }
+        }
+    }
+}
+
+/// The helper side: after a rebuild, one `NetnsSockDiagDump` per namespace it listed, through
+/// `HelperHandle::read`, so it never starts a session. A round still running when the next
+/// rebuild ends delays it, so namespaces are never dumped faster than the host list.
+pub struct NetnsDump {
+    handle: HelperHandle,
+    wanted: watch::Receiver<Arc<[NetnsInfo]>>,
+    store: NetnsStore,
+}
+
+impl NetnsDump {
+    /// Runs until `cx` is cancelled or the rebuild side is dropped.
+    pub async fn run(mut self, cx: &Cx) {
+        while self.wanted.changed(cx).await.is_ok() {
+            if cx.checkpoint().is_err() {
+                return;
+            }
+            let list = self.wanted.borrow_and_clone();
+            if list.is_empty() || self.handle.state() != HelperState::Unlocked {
+                continue;
+            }
+            let mut found = Vec::with_capacity(list.len());
+            for ns in list.iter() {
+                let req = HelperRequest::NetnsSockDiagDump { netns_ino: ns.ino };
+                match self.handle.read(cx, req, NETNS_DEADLINE).await {
+                    Ok(replies) => match parse_netns_dump(&replies) {
+                        Ok(socks) => found.push((
+                            NetnsRef {
+                                ino: ns.ino,
+                                name: Arc::clone(&ns.name),
+                            },
+                            socks,
+                        )),
+                        Err(e) => tracing::debug!(ino = ns.ino, ?e, "namespace dump skipped"),
+                    },
+                    Err(HelperReadError::Call(HelperCallError::Cancelled)) => return,
+                    // The session ended: the rebuild drops the store.
+                    Err(HelperReadError::NotRunning) => break,
+                    Err(e) => tracing::debug!(ino = ns.ino, ?e, "namespace dump skipped"),
+                }
+            }
+            // The dumps may have been turned off while the round ran.
+            if !self.wanted.borrow().is_empty() {
+                *lock_netns(&self.store) = found;
+            }
+        }
+    }
+}
+
+/// Why the sockets of one namespace were left out.
+#[derive(Debug)]
+pub enum NetnsSkip {
+    /// The helper answered with this error.
+    Helper(HelperError),
+    /// A reply that is not `NetlinkDump`.
+    Unexpected,
+    /// The netlink bytes did not parse.
+    Parse(CollectError),
+    /// Fewer or more than the four dumps.
+    Dumps(usize),
+}
+
+/// The sockets of one `NetnsSockDiagDump` reply. Each `NetlinkDump` body holds whole netlink
+/// messages; each of the four dumps ends with its own `NLMSG_DONE`, and the final body is
+/// empty. A protocol whose diag module is missing gives no sockets, as on the host.
+pub fn parse_netns_dump(replies: &[HelperReply]) -> Result<Vec<SockRecord>, NetnsSkip> {
+    let mut out = Vec::new();
+    let (mut dump, mut start) = (0, 0);
+    for reply in replies {
+        let bytes = match &reply.body {
+            HelperReplyBody::NetlinkDump(bytes) => bytes,
+            HelperReplyBody::Err(e) => return Err(NetnsSkip::Helper(*e)),
+            _ => return Err(NetnsSkip::Unexpected),
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        let Some(&(family, proto)) = NETNS_DUMPS.get(dump) else {
+            return Err(NetnsSkip::Dumps(dump + 1));
+        };
+        match sock_diag::parse_dump(bytes, family, proto, &mut out) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(CollectError::SockDiagErrno(errno)) if DIAG_UNSUPPORTED.contains(&errno) => {
+                out.truncate(start);
+            }
+            Err(e) => return Err(NetnsSkip::Parse(e)),
+        }
+        dump += 1;
+        start = out.len();
+    }
+    if dump != NETNS_DUMPS.len() {
+        return Err(NetnsSkip::Dumps(dump));
+    }
+    Ok(out)
 }
 
 /// A message to the resolver task.
@@ -765,8 +1005,9 @@ fn health(state: SourceState, last_error: Option<Arc<str>>, clock: Clock) -> Sou
     }
 }
 
-/// The tl-model record the Connections table shows (UI-SYS-062).
-fn to_model(r: &RawRecord) -> ConnRecord {
+/// The tl-model record the Connections table shows (UI-SYS-062). `netns` is set for a socket of
+/// another network namespace, whose interface index does not name a host interface.
+fn to_model(r: &RawRecord, netns: Option<&NetnsRef>) -> ConnRecord {
     let s = &r.sock;
     let (owners, owner_validity) = match &r.owner {
         Owner::Kernel => (Default::default(), Validity::Valid),
@@ -805,7 +1046,11 @@ fn to_model(r: &RawRecord) -> ConnRecord {
         uid: s.uid,
         inode: s.inode,
         ifindex: s.ifindex,
-        interface: r.interface.clone(),
+        interface: if netns.is_some() {
+            None
+        } else {
+            r.interface.clone()
+        },
         recv_q: s.rqueue,
         send_q: s.wqueue,
         // Unit resolution for a socket owner is not part of this worker.
@@ -820,6 +1065,7 @@ fn to_model(r: &RawRecord) -> ConnRecord {
             last_data_recv_ms: t.last_data_recv_ms,
         }),
         remote_host: RemoteHost::NotRequested,
+        netns: netns.cloned(),
     }
 }
 
@@ -1195,6 +1441,84 @@ mod tests {
         assert_eq!(second.records[0].owner_validity, Validity::Valid);
     }
 
+    /// The four fixture dumps as tl-helper streams them, then the empty final reply.
+    fn netns_replies() -> Vec<HelperReply> {
+        let mut replies: Vec<HelperReply> = ["tcp4.bin", "tcp6.bin", "udp4.bin", "udp6.bin"]
+            .iter()
+            .map(|name| HelperReply {
+                seq: 1,
+                last: false,
+                body: HelperReplyBody::NetlinkDump(
+                    std::fs::read(fixture_root().join("dump").join(name)).expect("fixture dump"),
+                ),
+            })
+            .collect();
+        replies.push(HelperReply {
+            seq: 1,
+            last: true,
+            body: HelperReplyBody::NetlinkDump(Vec::new()),
+        });
+        replies
+    }
+
+    #[test]
+    fn netns_dump_parses_four_dumps() {
+        let socks = parse_netns_dump(&netns_replies()).expect("parses");
+        let mut want = fixture_dump("tcp4.bin", sock_diag::Family::V4, sock_diag::Proto::Tcp);
+        want.extend(fixture_dump(
+            "tcp6.bin",
+            sock_diag::Family::V6,
+            sock_diag::Proto::Tcp,
+        ));
+        want.extend(fixture_dump(
+            "udp4.bin",
+            sock_diag::Family::V4,
+            sock_diag::Proto::Udp,
+        ));
+        want.extend(fixture_dump(
+            "udp6.bin",
+            sock_diag::Family::V6,
+            sock_diag::Proto::Udp,
+        ));
+        assert_eq!(socks, want);
+    }
+
+    #[test]
+    fn netns_dump_error_or_short_is_skipped() {
+        let mut replies = netns_replies();
+        let last = replies.pop().expect("final reply");
+        replies[3] = HelperReply {
+            body: HelperReplyBody::Err(HelperError::NoSuchProcess),
+            ..last
+        };
+        assert!(matches!(
+            parse_netns_dump(&replies),
+            Err(NetnsSkip::Helper(HelperError::NoSuchProcess))
+        ));
+
+        let mut short = netns_replies();
+        short.remove(2);
+        assert!(matches!(parse_netns_dump(&short), Err(NetnsSkip::Dumps(3))));
+    }
+
+    #[test]
+    fn netns_socket_has_no_host_interface() {
+        let mut sock = tcp(1, 10, 0, 0);
+        sock.ifindex = 2;
+        let mut ifnames = IfNames::default();
+        ifnames.0.insert(2, Arc::from("eth0"));
+        let mut table = ConnectionTable::new();
+        table.update(&[sock], &SocketMap::new(), &ifnames);
+        let netns = NetnsRef {
+            ino: 4026532000,
+            name: Arc::from("blue"),
+        };
+        let r = to_model(&table.records[0], Some(&netns));
+        assert_eq!(r.netns, Some(netns));
+        assert_eq!(r.interface, None);
+        assert_eq!(to_model(&table.records[0], None).netns, None);
+    }
+
     #[test]
     fn interface_name_is_resolved_before_model_publish() {
         let mut host = tcp(7, 55, 0, 0);
@@ -1213,7 +1537,7 @@ mod tests {
         // A table built for another network namespace does not receive the host name map.
         let mut table = ConnectionTable::new();
         table.update(&[host], &SocketMap::new(), &IfNames::default());
-        assert_eq!(to_model(&table.records[0]).interface, None);
+        assert_eq!(to_model(&table.records[0], None).interface, None);
     }
 
     #[test]

@@ -840,6 +840,19 @@ pub struct ConnRecord {
     pub tcp: Option<TcpInfoView>,
     /// The reverse DNS name of the foreign address (SYS-035) and how far the lookup is.
     pub remote_host: RemoteHost,
+    /// The network namespace of a socket listed through the helper while the Connections tab
+    /// shows "Namespaces: All" (SYS-037). `None` for a socket in tasklens's own namespace.
+    pub netns: Option<NetnsRef>,
+}
+
+/// A network namespace other than tasklens's own (SYS-037).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetnsRef {
+    /// The inode of the namespace.
+    pub ino: u64,
+    /// The name to show: the `/run/netns` file name, else the cgroup leaf of a member process,
+    /// else the inode as `net:[<ino>]`.
+    pub name: Arc<str>,
 }
 
 /// The state of the reverse DNS lookup for one connection's foreign address.
