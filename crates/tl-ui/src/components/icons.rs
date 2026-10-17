@@ -52,10 +52,11 @@ pub enum TlIcon {
     ScanSearch,
     Terminal,
     ArrowDownToLine,
+    AppWindow,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 40] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -95,6 +96,7 @@ impl TlIcon {
         Self::ScanSearch,
         Self::Terminal,
         Self::ArrowDownToLine,
+        Self::AppWindow,
     ];
 
     /// The kit name for this icon.
@@ -139,6 +141,7 @@ impl TlIcon {
             Self::ScanSearch => IconName::ScanSearch,
             Self::Terminal => IconName::Terminal,
             Self::ArrowDownToLine => IconName::ArrowDownToLine,
+            Self::AppWindow => IconName::AppWindow,
         }
     }
 }

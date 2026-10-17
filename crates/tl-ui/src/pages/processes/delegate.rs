@@ -16,19 +16,23 @@
 //!
 //! The row tooltip (PROC-039) is built only for the hovered row, when the table asks for it.
 //! So are the cell tooltips (UI-PRC-004): each is formatted once per hovered row and snapshot.
+//! The Name-cell window button (PROC-053) is built only for hovered and selected rows, from the
+//! window lists kept per table version.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::hash::BuildHasher as _;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyView, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Hsla, SharedString, Task,
-    WeakEntity, Window, px,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Hsla,
+    SharedString, Task, WeakEntity, Window, px,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
 use tl_model::demand::{ColumnSet, Demand};
 use tl_model::devices::{DeviceIdentity, DeviceKind};
@@ -36,7 +40,7 @@ use tl_model::health::{EngineCaps, SourceId};
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{GroupRow, GroupRowKind, ProcFlags, ProcState};
 use tl_model::settings::{NetworkUnit, Settings, UiState};
-use tl_model::snapshot::Snapshot;
+use tl_model::snapshot::{Snapshot, WindowEntry};
 use tl_model::table::{SortSpec, TableRow, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::{FieldValidity, Validity};
@@ -49,19 +53,21 @@ use super::cells::{
     tint_deadline,
 };
 use super::header_totals::header_total;
-use super::menu::{MenuCaps, group_header_menu, row_menu};
-use super::name_cell::{NameCellData, NameIcon, NameWords, StateGlyph, name_cell, pseudo_icon};
+use super::menu::{MenuCaps, group_header_menu, row_menu, window_popup};
+use super::name_cell::{
+    NameCellData, NameIcon, NameWords, StateGlyph, name_cell, pseudo_icon, window_button,
+};
 use super::table::{GroupHeader, ProcessQuery};
 use super::tooltip::{RowTipState, RowTipWords, RowTooltip};
 use super::{ProcessesPage, capture_row};
 use crate::anim::AnimationDriver;
 use crate::app::EngineGlobal;
-use crate::components::menu::TlMenu;
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_PROCESS_CELL, TlTooltip};
 use crate::components::validity::{GlyphCtx, tooltip_text};
 use crate::demand::GlobalDemand;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -285,6 +291,11 @@ pub struct ProcessDelegate {
     /// `DeviceCatalog::version` the GPU slots were built for.
     devices_version: Option<u64>,
     name_cache: FxHashMap<ProcRowId, NameEntry>,
+    /// Each app group's windows from its member processes: indices into
+    /// `snapshot.windows.windows`, topmost first. Rebuilt with the rows (PROC-053).
+    app_windows: FxHashMap<GroupKey, SmallVec<[u32; 4]>>,
+    /// "Windows (N)" per window count N, formatted on first use.
+    windows_tips: SmallVec<[(usize, SharedString); 4]>,
     members: GroupMembers,
     cell_words: CellWords,
     name_words: NameWords,
@@ -354,6 +365,8 @@ impl ProcessDelegate {
             offered: Vec::new(),
             devices_version: None,
             name_cache: FxHashMap::default(),
+            app_windows: FxHashMap::default(),
+            windows_tips: SmallVec::new(),
             members: GroupMembers::default(),
             cell_words: CellWords::new(cx),
             name_words: NameWords::new(cx),
@@ -493,6 +506,7 @@ impl ProcessDelegate {
         self.tip.borrow_mut().clear();
         self.cell_tip_words = CellTipWords::new(cx);
         self.cell_tips.borrow_mut().built_for = None;
+        self.windows_tips.clear();
         for spec in self.specs.values_mut() {
             let col = process_column(spec.id);
             spec.label = tr(cx, col.label);
@@ -577,7 +591,7 @@ impl ProcessDelegate {
             .first()
             .is_some_and(|r| matches!(r.node, NodeId::Group(_)));
 
-        let titles = self.window_titles(&snapshot);
+        group_windows(&snapshot, &mut self.app_windows);
 
         for (ix, row) in rows.iter().enumerate() {
             let (name, count) = match (row.group, self.kind_of(row)) {
@@ -594,10 +608,14 @@ impl ProcessDelegate {
                 _ => continue,
             };
             let id = self.ids[ix];
-            let title = match (self.kind_of(row), row.group) {
-                (RowKind::App, Some(g)) => titles.get(&view.groups[g as usize].key),
+            let top = match (self.kind_of(row), row.group) {
+                (RowKind::App, Some(g)) => self
+                    .app_windows
+                    .get(&view.groups[g as usize].key)
+                    .and_then(|w| w.first().copied()),
                 _ => None,
             };
+            let title = top.map(|w| &snapshot.windows.windows[w as usize].caption);
             let fresh = self.name_cache.get(&id).is_some_and(|e| {
                 Arc::ptr_eq(&e.name, name)
                     && e.count == count
@@ -626,31 +644,75 @@ impl ProcessDelegate {
         self.name_cache.retain(|id, _| index.contains_key(id));
     }
 
-    /// The caption of the topmost window (lowest `stack_index`) of each app group's member
-    /// processes (PROC-008). Empty when the KWin bridge is not there (`Unsupported`).
-    fn window_titles(&self, snapshot: &Snapshot) -> FxHashMap<GroupKey, Arc<str>> {
-        let windows = &snapshot.windows;
-        let mut titles = FxHashMap::default();
-        if windows.header.validity == Validity::Unsupported || windows.windows.is_empty() {
-            return titles;
-        }
-        let pids: FxHashMap<u32, GroupKey> = snapshot
-            .processes
-            .records
-            .iter()
-            .map(|r| (r.key.pid, r.group))
-            .collect();
-        let mut best: FxHashMap<GroupKey, u32> = FxHashMap::default();
-        for w in windows.windows.iter() {
-            let Some(&group) = pids.get(&w.pid) else {
-                continue;
-            };
-            if best.get(&group).is_none_or(|&s| w.stack_index < s) {
-                best.insert(group, w.stack_index);
-                titles.insert(group, Arc::clone(&w.caption));
+    /// The KWin bridge is up: the windows snapshot is Valid or Stale. Without it no window
+    /// button is drawn (PROC-053).
+    fn bridge_up(&self) -> bool {
+        matches!(
+            self.snapshot.windows.header.validity,
+            Validity::Valid | Validity::Stale
+        )
+    }
+
+    /// The top-level windows row `ix` owns, as indices into `snapshot.windows.windows`, topmost
+    /// first: a process row's own PID, an app row's member PIDs. Empty for every other row.
+    fn row_windows(&self, ix: usize) -> SmallVec<[u32; 4]> {
+        let row = self.row(ix);
+        match self.kind_of(row) {
+            RowKind::App => self
+                .group(row)
+                .and_then(|g| self.app_windows.get(&g.key))
+                .cloned()
+                .unwrap_or_default(),
+            RowKind::Process => {
+                let Some(r) = row
+                    .record
+                    .and_then(|i| self.snapshot.processes.records.get(i as usize))
+                else {
+                    return SmallVec::new();
+                };
+                let all = &self.snapshot.windows.windows;
+                let start = all.partition_point(|w| w.pid < r.key.pid);
+                let end = all.partition_point(|w| w.pid <= r.key.pid);
+                let mut out: SmallVec<[u32; 4]> = (start as u32..end as u32).collect();
+                out.sort_by_key(|&w| all[w as usize].stack_index);
+                out
             }
+            _ => SmallVec::new(),
         }
-        titles
+    }
+
+    /// The windows behind row `ix`'s window button, or `None` when the row draws no button: no
+    /// KWin bridge, or no window of its own.
+    fn button_windows(&self, ix: usize) -> Option<SmallVec<[u32; 4]>> {
+        if !self.bridge_up() {
+            return None;
+        }
+        let windows = self.row_windows(ix);
+        (!windows.is_empty()).then_some(windows)
+    }
+
+    /// The tooltip of row `ix`'s window button, "Windows (N)", or `None` when the row draws no
+    /// button (PROC-053). The table draws the button on hovered and selected rows only.
+    pub fn window_button_tip(&mut self, ix: usize, cx: &App) -> Option<SharedString> {
+        let n = self.button_windows(ix)?.len();
+        Some(self.windows_tip(n, cx))
+    }
+
+    /// "Windows (N)", formatted once per N.
+    fn windows_tip(&mut self, n: usize, cx: &App) -> SharedString {
+        if let Some((_, tip)) = self.windows_tips.iter().find(|(c, _)| *c == n) {
+            return tip.clone();
+        }
+        let tip = tr_args(
+            cx,
+            "processes-name-windows",
+            &[("count", FluentValue::from(n))],
+        );
+        if self.windows_tips.len() == self.windows_tips.inline_size() {
+            self.windows_tips.clear();
+        }
+        self.windows_tips.push((n, tip.clone()));
+        tip
     }
 
     /// Rebuilds the GPU N slots when the device catalog changed (PROC-033). True when the
@@ -973,6 +1035,31 @@ pub fn sibling_pass(
     }
 }
 
+/// Each app group's windows from its member processes, topmost (lowest `stack_index`) first,
+/// as indices into `snapshot.windows.windows` (PROC-008, PROC-053). Empty when the KWin bridge
+/// is not there (`Unsupported`).
+fn group_windows(snapshot: &Snapshot, out: &mut FxHashMap<GroupKey, SmallVec<[u32; 4]>>) {
+    out.clear();
+    let windows = &snapshot.windows;
+    if windows.header.validity == Validity::Unsupported || windows.windows.is_empty() {
+        return;
+    }
+    let pids: FxHashMap<u32, GroupKey> = snapshot
+        .processes
+        .records
+        .iter()
+        .map(|r| (r.key.pid, r.group))
+        .collect();
+    for (i, w) in windows.windows.iter().enumerate() {
+        if let Some(&group) = pids.get(&w.pid) {
+            out.entry(group).or_default().push(i as u32);
+        }
+    }
+    for list in out.values_mut() {
+        list.sort_by_key(|&i| windows.windows[i as usize].stack_index);
+    }
+}
+
 fn restricted(v: &FieldValidity) -> bool {
     v.0.contains(&Validity::Restricted)
 }
@@ -1210,6 +1297,41 @@ impl TreeTableDelegate for ProcessDelegate {
             d.secondary = e.title.as_ref().map(|(_, s)| s.clone());
         }
         name_cell(d, &self.name_words)
+    }
+
+    /// The window button (PROC-053, UI-PRC-003) on a hovered or selected row that owns a
+    /// top-level window, while the KWin bridge is up. A click lists the row's windows of this
+    /// snapshot in a popup below the button. Its items dispatch `ActivateWindow` in the table's
+    /// context, and Esc returns focus to the table.
+    fn name_trailing(
+        &mut self,
+        ix: usize,
+        _hovered: bool,
+        _selected: bool,
+        focused: bool,
+        _window: &mut Window,
+        cx: &mut Context<TlTreeTable<Self>>,
+    ) -> Option<AnyElement> {
+        let windows = self.button_windows(ix)?;
+        let tip = self.windows_tip(windows.len(), cx);
+        let snapshot = Arc::clone(&self.snapshot);
+        let table = cx.weak_entity();
+        let open = move |at, window: &mut Window, cx: &mut App| {
+            let Some(focus) = table.upgrade().map(|t| t.read(cx).focus_handle().clone()) else {
+                return;
+            };
+            let all = &snapshot.windows.windows;
+            let list: Vec<WindowEntry> = windows
+                .iter()
+                .filter_map(|&w| all.get(w as usize).cloned())
+                .collect();
+            let menu = TlMenu::build(window, cx, focus, move |menu, _, cx| {
+                window_popup(menu, &list, cx)
+            });
+            open_context_menu_at(at, window, cx, menu);
+        };
+        let key = FxBuildHasher.hash_one(self.ids[ix]);
+        Some(window_button(key, tip, focused, open, cx))
     }
 
     fn header_total(&self, col: ColumnId, out: &mut CellOut) -> bool {

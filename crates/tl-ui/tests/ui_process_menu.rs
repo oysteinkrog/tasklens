@@ -1091,6 +1091,7 @@ mod end {
     use tl_model::actions::ActionError;
     use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
+    use tl_model::command::KWinCommand;
     use tl_model::command::{Command, Tab};
     use tl_model::ids::ColumnId;
     use tl_model::ids::PseudoKind;
@@ -1100,7 +1101,7 @@ mod end {
         GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
     };
     use tl_model::settings::Settings;
-    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, WindowEntry, WindowsSnapshot};
     use tl_model::snapshot::{ServiceStatus, ServicesSnapshot, StartupType, UnitRecord};
     use tl_model::system::CpuSet;
     use tl_model::table::{Manager, Total, UnitRef, UnitType};
@@ -1115,15 +1116,16 @@ mod end {
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
-        CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree, EndTask, GoToParent,
-        OpenFileLocation, OpenVirusTotal, PriorityClass, ProcessesShowHidden, ResumeProcess,
-        SetPriority, SuspendProcess,
+        ActivateWindow, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree,
+        EndTask, GoToParent, OpenFileLocation, OpenVirusTotal, PriorityClass, ProcessesShowHidden,
+        ResumeProcess, SetPriority, SuspendProcess,
     };
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
         process_column,
     };
     use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::pages::processes::menu::window_popup;
     use tl_ui::pages::processes::{ProcessesPage, SuspendLabel, suspend_or_resume};
     use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
     use tl_ui::table::actions::{CopyCell, CopyRowsAsTable};
@@ -3337,5 +3339,172 @@ mod end {
             "Process details copied."
         );
         assert!(clipboard(&mut rig).starts_with("Name: gone\nPID: 4300\n"));
+    }
+
+    fn kwin_window(id: &str, pid: u32, stack_index: u32, caption: &str) -> WindowEntry {
+        WindowEntry {
+            internal_id: Arc::from(id),
+            pid,
+            caption: Arc::from(caption),
+            resource_class: Arc::from("mail"),
+            desktop_file_name: Arc::from("mail"),
+            minimized: false,
+            maximized: false,
+            keep_above: false,
+            frame_geometry: Default::default(),
+            window_type: 0,
+            stack_index,
+        }
+    }
+
+    fn publish_windows(rig: &mut Rig, windows: Vec<WindowEntry>) {
+        rig.engine.publish_with(|s| {
+            s.windows = Arc::new(WindowsSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                windows: windows.into(),
+                pick: None,
+            });
+        });
+        rig.vcx.run_until_parked();
+    }
+
+    /// Builds the window popup over `windows` in the table's context, as the window button does.
+    fn window_menu(rig: &mut Rig, windows: Vec<WindowEntry>) -> Entity<TlMenuPopup> {
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        rig.vcx.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            TlMenu::build(window, cx, focus, move |menu, _, cx| {
+                window_popup(menu, &windows, cx)
+            })
+        })
+    }
+
+    fn kwin_sent(rig: &Rig) -> Vec<KWinCommand> {
+        rig.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::KWin(k) => Some(k),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// PROC-053, UI-PRC-003: one item per window in the given order, labelled with the caption,
+    /// an empty caption as "Untitled window", no icon, each dispatching `ActivateWindow`.
+    #[gpui_kit::test]
+    fn window_popup_items_and_untitled(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let windows = vec![
+            kwin_window("{a}", 300, 0, "Inbox - Mail"),
+            kwin_window("{b}", 300, 1, ""),
+        ];
+        let menu = window_menu(&mut rig, windows);
+        let entries = entries(&mut rig, &menu);
+        let shown: Vec<(MenuEntryKind, Option<String>, bool)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.kind,
+                    e.label.as_ref().map(|l| l.to_string()),
+                    e.icon.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (MenuEntryKind::Item, Some("Inbox - Mail".to_owned()), false),
+                (
+                    MenuEntryKind::Item,
+                    Some("Untitled window".to_owned()),
+                    false
+                ),
+            ]
+        );
+        let ids: Vec<Option<String>> = entries
+            .iter()
+            .map(|e| {
+                e.action
+                    .as_ref()
+                    .and_then(|a| a.as_any().downcast_ref::<ActivateWindow>())
+                    .map(|a| a.internal_id.to_string())
+            })
+            .collect();
+        assert_eq!(ids, [Some("{a}".to_owned()), Some("{b}".to_owned())]);
+    }
+
+    /// PROC-053, PROC-054: Enter on a popup item sends one `KWin(Activate)` for its window and
+    /// shows "Process window shown." A window gone from the snapshot sends nothing and shows
+    /// "No window found". Esc closes the popup and gives the focus back to the table.
+    #[gpui_kit::test]
+    fn activate_window_sends_kwin_command(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300]), &[300], Vec::new());
+        let windows = vec![kwin_window("{a}", 300, 0, "Inbox")];
+        publish_windows(&mut rig, windows.clone());
+
+        let menu = window_menu(&mut rig, windows.clone());
+        rig.vcx.update(|window, cx| {
+            open_context_menu_at(point(px(20.), px(80.)), window, cx, menu.clone());
+            menu.update(cx, |m, cx| m.highlight_first(window, cx));
+        });
+        rig.vcx.run_until_parked();
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        rig.vcx.simulate_keystrokes("enter");
+        rig.vcx.run_until_parked();
+        assert_eq!(
+            kwin_sent(&rig),
+            [KWinCommand::Activate {
+                internal_id: Arc::from("{a}"),
+            }]
+        );
+        assert_eq!(
+            visible(&mut rig.vcx).last().map(String::as_str),
+            Some("Process window shown.")
+        );
+
+        // The window closed before the click.
+        publish_windows(&mut rig, Vec::new());
+        assert!(
+            rig.dispatch(ActivateWindow {
+                internal_id: "{a}".into(),
+            })
+            .is_none()
+        );
+        assert_eq!(
+            kwin_sent(&rig).len(),
+            1,
+            "nothing sent for a vanished window"
+        );
+        assert_eq!(
+            visible(&mut rig.vcx).last().map(String::as_str),
+            Some("No window found")
+        );
+
+        // Esc closes the popup and returns focus to the table.
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        let menu = window_menu(&mut rig, windows);
+        rig.vcx.update(|window, cx| {
+            open_context_menu_at(point(px(20.), px(80.)), window, cx, menu.clone());
+        });
+        rig.vcx.run_until_parked();
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        rig.vcx.simulate_keystrokes("escape");
+        rig.vcx.run_until_parked();
+        let (open, focused) = rig.vcx.update(|window, cx| {
+            (
+                open_context_menu(window, cx).is_some(),
+                table.read(cx).focus_handle().is_focused(window),
+            )
+        });
+        assert!(!open, "Esc closes the popup");
+        assert!(focused, "focus is back on the table");
+        assert_eq!(kwin_sent(&rig).len(), 1);
     }
 }

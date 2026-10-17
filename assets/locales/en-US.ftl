@@ -976,6 +976,9 @@ processes-state-dead = Dead
 processes-state-frozen = Frozen
 processes-name-suspended = Suspended
 processes-name-frozen = Frozen
+# Name-cell window button and popup (tasklens-pdu.37, PROC-053, UI-PRC-003).
+processes-name-windows = Windows ({ $count })
+processes-name-untitled-window = Untitled window
 processes-priority-realtime = Realtime
 processes-priority-idle = Idle
 processes-priority-high = High
@@ -1600,6 +1603,7 @@ processes-toast-io-priority-partial = I/O priority updated for { $done } of { $t
 processes-toast-refuse-self = Refusing to end tasklens itself.
 processes-toast-refuse-pid1 = PID 1 (systemd) cannot be ended.
 processes-toast-exited = Process exited
+processes-toast-window-shown = Process window shown.
 processes-toast-including-children = Including filtered process children.
 processes-toast-hiding-children = Hiding unmatched filtered process children.
 processes-empty-no-match = No processes match the filter
@@ -1787,6 +1791,10 @@ information-net-ip-address = IP address
 information-net-mac-address = MAC address
 information-net-unknown-adapter = Unknown adapter
 information-net-ip-none = None
+information-public-ip = Public IP
+information-public-ip-not-fetched = Not fetched
+information-public-ip-fetching = Fetching…
+information-public-ip-fetch = Fetch
 
 # Information page: refresh toast and load error (E28-033)
 information-refreshed = Information refreshed.

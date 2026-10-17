@@ -35,6 +35,7 @@ use tl_model::actions::{
     ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, SchedPolicy, Signal,
 };
 use tl_model::client::EngineClient;
+use tl_model::command::{Command, KWinCommand};
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
@@ -43,8 +44,8 @@ use tl_model::table::UnitRef;
 use tracing::warn;
 
 use self::actions::{
-    CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump, EndProcess,
-    EndProcessTree, EndTask, GoToParent, MAX_TARGETS, OpenFileLocation, OpenVirusTotal,
+    ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
+    EndProcess, EndProcessTree, EndTask, GoToParent, MAX_TARGETS, OpenFileLocation, OpenVirusTotal,
     ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
 };
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
@@ -986,6 +987,38 @@ impl ProcessesPage {
         crate::windows::notices::start_dump(key, window, cx);
     }
 
+    /// A window popup item (PROC-053, PROC-054): sends `KWin(Activate)` for the window and shows
+    /// "Process window shown." The bridge does not answer an activation (ADR-005), so the toast
+    /// follows the send. A window gone from the live windows snapshot gets "No window found".
+    fn on_activate_window(&mut self, a: &ActivateWindow, _: &mut Window, cx: &mut Context<Self>) {
+        let internal_id = cx.try_global::<GlobalHub>().and_then(|hub| {
+            hub.0
+                .read(cx)
+                .current()
+                .windows
+                .windows
+                .iter()
+                .find(|w| *w.internal_id == *a.internal_id)
+                .map(|w| Arc::clone(&w.internal_id))
+        });
+        let Some(internal_id) = internal_id else {
+            warning_toast(tr(cx, "prc-055-no-window-found"), cx);
+            return;
+        };
+        if let Err(err) = self
+            .client
+            .send(Command::KWin(KWinCommand::Activate { internal_id }))
+        {
+            warn!(target: "tasklens::ui", ?err, "KWin activate not sent");
+            return;
+        }
+        toast(
+            ToastKind::Success,
+            tr(cx, "processes-toast-window-shown"),
+            cx,
+        );
+    }
+
     /// Copy, Copy details and Copy all metrics (PROC-070, ADR-015): the captured targets in
     /// view order, exited rows too, onto the clipboard, then a Success toast (UI-PRC-015).
     /// Command lines leave only through Copy all metrics and Copy on the Command line cell.
@@ -1709,6 +1742,7 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_open_file_location))
             .on_action(cx.listener(Self::on_open_virustotal))
             .on_action(cx.listener(Self::on_create_dump))
+            .on_action(cx.listener(Self::on_activate_window))
             .child(
                 div()
                     .relative()

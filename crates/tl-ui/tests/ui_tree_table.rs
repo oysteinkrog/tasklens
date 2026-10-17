@@ -423,6 +423,9 @@ struct TDelegate {
     bars: Vec<(u32, ColumnId, f32)>,
     /// `selected_text_color` overrides: (row id, column, colour).
     selected_colors: Vec<(u32, ColumnId, Hsla)>,
+    /// `name_trailing` returns an element. Every call: (row, hovered, selected, focused).
+    trailing: bool,
+    trailing_calls: Vec<(usize, bool, bool, bool)>,
 }
 
 impl TDelegate {
@@ -459,6 +462,8 @@ impl TDelegate {
             dots: Vec::new(),
             bars: Vec::new(),
             selected_colors: Vec::new(),
+            trailing: false,
+            trailing_calls: Vec::new(),
         }
     }
 
@@ -584,6 +589,26 @@ impl TreeTableDelegate for TDelegate {
             highlight_fffd: true,
             trailing: None,
         }
+    }
+    fn name_trailing(
+        &mut self,
+        ix: usize,
+        hovered: bool,
+        selected: bool,
+        focused: bool,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> Option<gpui_kit::AnyElement> {
+        if !self.trailing {
+            return None;
+        }
+        self.trailing_calls.push((ix, hovered, selected, focused));
+        Some(
+            div()
+                .debug_selector(|| "test-trailing".into())
+                .size(px(10.))
+                .into_any_element(),
+        )
     }
     fn header_total(&self, _: ColumnId, _: &mut CellOut) -> bool {
         false
@@ -790,6 +815,36 @@ fn selected_wins_over_hover() {
         fill, theme.row_hover,
         "hover shows on a row that is not selected"
     );
+}
+
+/// UI-PRC-003: the table asks for a Name-cell trailing element only on hovered and selected
+/// rows, says which row has the keyboard focus, and draws what the delegate returns.
+#[test]
+fn name_trailing_only_for_hovered_or_selected_rows() {
+    let mut cx = cosmic_cx();
+    let mut d = TDelegate::new((0..4).map(plain).collect());
+    d.trailing = true;
+    let (table, vcx) = open_table(&mut cx, d, 600., 200.);
+    let calls = |vcx: &mut VisualTestContext| {
+        let calls = vcx.update(|_, cx| table.read(cx).delegate.trailing_calls.clone());
+        calls.into_iter().collect::<std::collections::BTreeSet<_>>()
+    };
+    assert!(calls(vcx).is_empty(), "no hover, no selection, no call");
+    assert!(vcx.debug_bounds("test-trailing").is_none());
+
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| {
+            t.selection.click(2);
+            cx.notify();
+        })
+    });
+    // Row 1 spans y 28 + 28 ..= 28 + 56.
+    hover_at(vcx, 100., HEADER_H + 28. + 14.);
+    assert_eq!(
+        calls(vcx),
+        [(1, true, false, false), (2, false, true, true)].into()
+    );
+    assert!(vcx.debug_bounds("test-trailing").is_some());
 }
 
 fn hover_at(cx: &mut VisualTestContext, x: f32, y: f32) {

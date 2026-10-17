@@ -3643,8 +3643,8 @@ mod live {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled,
-        TestAppContext, VisualTestContext, Window, div, px,
+        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseMoveEvent, ParentElement,
+        Render, Styled, TestAppContext, VisualTestContext, Window, div, point, px,
     };
     use tl_model::ids::{ColumnId, NodeId, ProcessKey};
     use tl_model::process::GroupRowKind;
@@ -3655,7 +3655,7 @@ mod live {
     use tl_model::validity::Validity;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::processes::cells::{DELETED_SUFFIX, SUBTREE_PREFIX};
-    use tl_ui::pages::processes::delegate::ProcessDelegate;
+    use tl_ui::pages::processes::delegate::{ProcRowId, ProcessDelegate};
     use tl_ui::table::cells::{CellCtx, CellOut, CellSuffix, DIM_OPACITY, cell_text_color};
     use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
     use tl_ui::theme::{current, metrics};
@@ -4209,5 +4209,174 @@ mod live {
         assert!(!flags.has(RowFlags::FROZEN));
         assert!(glyphs.is_empty());
         assert!(shown(&cell(vcx, &table, 0, ColumnId::State)).is_empty());
+    }
+
+    /// Process 100 owns two windows, "Inbox" and one with an empty caption. Process 200 owns
+    /// none.
+    fn process_windows(validity: Validity) -> Arc<Snapshot> {
+        use tl_model::process::ProcessRecord;
+        use tl_model::snapshot::{WindowEntry, WindowsSnapshot};
+
+        let rec = |pid| ProcessRecord {
+            key: key(pid),
+            ..record()
+        };
+        let row = |pid, record| TableRow {
+            node: NodeId::Process(key(pid)),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(record),
+            group: None,
+            descendants: 0,
+            subtree: None,
+        };
+        let window = |id: &str, stack_index, caption: &str| WindowEntry {
+            internal_id: Arc::from(id),
+            pid: 100,
+            caption: Arc::from(caption),
+            resource_class: Arc::from("mail"),
+            desktop_file_name: Arc::from("mail"),
+            minimized: false,
+            maximized: false,
+            keep_above: false,
+            frame_geometry: Default::default(),
+            window_type: 0,
+            stack_index,
+        };
+        let mut s = Snapshot::empty(BootId(0), 0);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: Arc::from([row(100, 0), row(200, 1)]),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot {
+            records: Arc::from([rec(100), rec(200)]),
+            ..ProcessSnapshot::default()
+        });
+        s.windows = Arc::new(WindowsSnapshot {
+            header: ComponentHeader {
+                version: 1,
+                validity,
+                ..ComponentHeader::default()
+            },
+            windows: Arc::from([window("{a}", 0, "Inbox"), window("{b}", 2, "")]),
+            pick: None,
+        });
+        Arc::new(s)
+    }
+
+    /// The debug selector of the window button on the row of `id` (`("winbtn", node_key)`).
+    fn window_button(id: ProcRowId) -> &'static str {
+        use std::hash::BuildHasher as _;
+        let key = rustc_hash::FxBuildHasher.hash_one(id);
+        Box::leak(format!("TlButton-winbtn-{key}").into_boxed_str())
+    }
+
+    /// Moves the pointer over row `ix` (two-line header of 44 px, rows of 28 px) and draws.
+    fn hover_row(vcx: &mut VisualTestContext, ix: usize) {
+        vcx.simulate_event(MouseMoveEvent {
+            position: point(px(100.), px(44. + 28. * ix as f32 + 14.)),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn select(
+        vcx: &mut VisualTestContext,
+        table: &Entity<TlTreeTable<ProcessDelegate>>,
+        id: ProcRowId,
+    ) {
+        vcx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                t.selection.click(id);
+                cx.notify();
+            })
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    /// PROC-053, UI-PRC-003: a hovered process row that owns two windows shows the window
+    /// button with the tooltip "Windows (2)". A row without a window shows none, and the button
+    /// leaves a row that is neither hovered nor selected.
+    #[gpui_kit::test]
+    fn window_button_tooltip_count(cx: &mut TestAppContext) {
+        let (table, vcx) = open(cx, Settings::default(), process_windows(Validity::Valid));
+        let (with, without) = (ProcRowId::Process(key(100)), ProcRowId::Process(key(200)));
+        let tips = vcx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                (
+                    t.delegate.window_button_tip(0, cx),
+                    t.delegate.window_button_tip(1, cx),
+                )
+            })
+        });
+        assert_eq!(tips.0.as_deref(), Some("Windows (2)"));
+        assert_eq!(tips.1, None, "process 200 owns no window");
+
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            vcx.debug_bounds(window_button(with)).is_none(),
+            "not hovered"
+        );
+        hover_row(vcx, 0);
+        assert!(vcx.debug_bounds(window_button(with)).is_some());
+        if let Some(tree) = vcx.update(|window, _| window.debug_a11y_tree_json()) {
+            assert!(
+                tree.contains("Windows (2)"),
+                "the button is named by its tooltip"
+            );
+        }
+
+        hover_row(vcx, 1);
+        assert!(vcx.debug_bounds(window_button(without)).is_none());
+        assert!(vcx.debug_bounds(window_button(with)).is_none());
+
+        // A selected row keeps its button while another row is hovered.
+        select(vcx, &table, with);
+        hover_row(vcx, 1);
+        assert!(vcx.debug_bounds(window_button(with)).is_some());
+    }
+
+    /// PROC-053: without the KWin bridge no row draws the window button, hovered or selected.
+    #[gpui_kit::test]
+    fn window_button_hidden_without_bridge(cx: &mut TestAppContext) {
+        let (table, vcx) = open(
+            cx,
+            Settings::default(),
+            process_windows(Validity::Unsupported),
+        );
+        let id = ProcRowId::Process(key(100));
+        select(vcx, &table, id);
+        hover_row(vcx, 0);
+        assert!(vcx.debug_bounds(window_button(id)).is_none());
+        let tip = vcx.update(|_, cx| table.update(cx, |t, cx| t.delegate.window_button_tip(0, cx)));
+        assert_eq!(tip, None);
+
+        let (table, vcx) = open(
+            cx,
+            Settings::default(),
+            app_with_windows(Validity::Unsupported),
+        );
+        let tip = vcx.update(|_, cx| table.update(cx, |t, cx| t.delegate.window_button_tip(0, cx)));
+        assert_eq!(
+            tip, None,
+            "an app row has no button without the bridge either"
+        );
+
+        let (table, vcx) = open(cx, Settings::default(), app_with_windows(Validity::Valid));
+        let tip = vcx.update(|_, cx| table.update(cx, |t, cx| t.delegate.window_button_tip(0, cx)));
+        assert_eq!(
+            tip.as_deref(),
+            Some("Windows (2)"),
+            "an app row counts its members' windows"
+        );
     }
 }

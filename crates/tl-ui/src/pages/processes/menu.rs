@@ -8,16 +8,18 @@
 //! Later epics add their items by chain edit: one `add_<item>` helper each, called in item
 //! order from [`row_menu`]. Items of a phase that has not shipped are not built.
 
+use std::sync::Arc;
+
 use gpui_kit::{App, SharedString, Window, px};
 use tl_model::ids::NodeId;
 use tl_model::process::{GroupKind, GroupRowKind};
-use tl_model::snapshot::Snapshot;
+use tl_model::snapshot::{Snapshot, WindowEntry};
 use tl_model::table::Manager;
 
 use super::actions::{
-    CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump, EndProcess,
-    EndProcessTree, EndTask, GoToParent, OpenFileLocation, OpenVirusTotal, PriorityClass,
-    ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
+    ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
+    EndProcess, EndProcessTree, EndTask, GoToParent, OpenFileLocation, OpenVirusTotal,
+    PriorityClass, ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
 };
 use super::{SuspendLabel, suspend_or_resume};
 use crate::app::EngineGlobal;
@@ -143,6 +145,29 @@ pub fn group_header_menu(menu: TlMenu, expanded: bool, id: NodeId, cx: &App) -> 
     };
     menu.min_w(px(ROW_MENU_MIN_W))
         .item(tr(cx, key), Box::new(ToggleGroupRow { node: id }))
+}
+
+/// The Name-cell window button's popup (PROC-053, UI-PRC-003): one item per window in the order
+/// given, labelled with its caption or "Untitled window", no icon. Each item dispatches
+/// `ActivateWindow` with the window's KWin id. Captions are display only. The menu keeps its
+/// own maximum width (`MENU_MAX_W`) and ends a longer caption in an ellipsis.
+pub fn window_popup(menu: TlMenu, windows: &[WindowEntry], cx: &App) -> TlMenu {
+    let mut untitled: Option<SharedString> = None;
+    windows
+        .iter()
+        .fold(menu.min_w(px(ROW_MENU_MIN_W)), |menu, w| {
+            let label = if w.caption.trim().is_empty() {
+                untitled
+                    .get_or_insert_with(|| tr(cx, "processes-name-untitled-window"))
+                    .clone()
+            } else {
+                SharedString::from(Arc::clone(&w.caption))
+            };
+            let action = ActivateWindow {
+                internal_id: SharedString::from(Arc::clone(&w.internal_id)),
+            };
+            menu.item(label, Box::new(action))
+        })
 }
 
 /// The Set Priority submenu (UI-PRC-020): the autogroup note, the five P1 classes, a separator

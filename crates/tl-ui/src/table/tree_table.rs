@@ -116,6 +116,20 @@ pub trait TreeTableDelegate: 'static + Sized {
     fn column_spec(&self, id: Self::Column) -> &ColumnSpec<Self::Column>;
     fn cell(&self, ix: usize, col: Self::Column, out: &mut CellOut);
     fn name_cell(&self, ix: usize) -> NameCell;
+    /// The element at the right edge of row `ix`'s Name cell, such as the process window
+    /// button (UI-PRC-003). The table asks only for a hovered or selected row. `focused`: the
+    /// row holds the keyboard focus. The default is none.
+    fn name_trailing(
+        &mut self,
+        _ix: usize,
+        _hovered: bool,
+        _selected: bool,
+        _focused: bool,
+        _window: &mut Window,
+        _cx: &mut Context<TlTreeTable<Self>>,
+    ) -> Option<AnyElement> {
+        None
+    }
     /// Fills the header totals line for `col`. False: no line 2 for this column.
     fn header_total(&self, col: Self::Column, out: &mut CellOut) -> bool;
     fn sort(&self) -> Self::Sort;
@@ -791,7 +805,19 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 width,
             };
             if Some(col) == name_col {
-                let name = self.delegate.name_cell(ix);
+                let mut name = self.delegate.name_cell(ix);
+                if (hovered || selected)
+                    && let Some(trailing) = self.delegate.name_trailing(
+                        ix,
+                        hovered,
+                        selected,
+                        self.selection.focus() == Some(id),
+                        window,
+                        cx,
+                    )
+                {
+                    name.trailing = Some(trailing);
+                }
                 let depth = self.delegate.row_depth(ix);
                 let expandable = self.delegate.row_expandable(ix);
                 if f.guide_lines && (depth > 0 || flags.ancestor_continues != 0) {
