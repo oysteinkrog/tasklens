@@ -1775,7 +1775,8 @@ fn menu_label(
 }
 
 /// A theme row filling its menu row. `ring` outlines it while highlighted, since its own
-/// colours hide the hover fill.
+/// colours hide the hover fill. `max_w` is the menu's maximum width, for the label cutoff.
+#[allow(clippy::too_many_arguments)]
 fn painted_row(
     label: SharedString,
     bg: Hsla,
