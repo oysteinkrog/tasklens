@@ -940,3 +940,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.62: closed by the leader after a1be2c4f (I/O priority read limited to detail keys).
 - hjn.40: GPU open from Memory keeps no extra scan (config watch covers freshness); Plasma 5 KScreen dir watch dropped, Plasma 5 refreshes on page open and manual refresh only.
 - hk6.31: option A, new tasklens-hk6.38 reads the drop-in's Recovery keys into UnitDetails; hk6.31 waits for it; engine write rule unchanged.
+- o55.32: new tasklens-o55.41 (menu trailing value, dialog text-input mode, opus) first; o55.32 then on sonnet with a pub(crate) re-export of the fan settings writers.
