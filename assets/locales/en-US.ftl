@@ -3313,3 +3313,9 @@ setup-script-title = tasklens-setup { $subcommand }
 # Settings > Privileges helper status (tasklens-qfx.29, UI-SHL-070).
 settings-privileges-helper-installed = Administrator helper: Installed
 settings-privileges-helper-not-installed = Administrator helper: Not installed
+
+# File and Help menus, P4 items (tasklens-bj6.43, UI-SHL-032, UI-SHL-041).
+shell-menu-file-system-monitor = Open System Monitor
+shell-toast-system-monitor-failed = Failed to launch System Monitor
+shell-menu-help-docs = Documentation
+shell-toast-docs-failed = Could not open the documentation

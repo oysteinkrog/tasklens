@@ -17,6 +17,7 @@ use gpui_kit::{
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Role, Styled,
     TestAppContext, VisualTestContext, Window, WindowHandle, div, px, size,
 };
+use tl_model::actions::{ActionError, ActionEvent, ActionKind, ActionState, LaunchWhat};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, SetupPhase, SetupRun, SetupState, SetupStep, Tab};
 use tl_model::settings::{
@@ -46,9 +47,10 @@ use tl_ui::window::about::OpenAbout;
 use tl_ui::window::confirm::ResetSettings;
 use tl_ui::window::main::ShellState;
 use tl_ui::window::menubar::{self, MenuBar, menu_bar_for};
+use tl_ui::window::menus_file::SystemMonitor;
 use tl_ui::window::menus_view::{CopyTheme, DeleteTheme, ImportTheme};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
-use tl_ui::window::{menus_debug, menus_settings, menus_view};
+use tl_ui::window::{menus_debug, menus_file, menus_help, menus_settings, menus_view};
 
 const FILE_BUTTON: &str = "TlMenuBarButton-shell-menubar-file";
 const VIEW_BUTTON: &str = "TlMenuBarButton-shell-menubar-view";
@@ -3211,8 +3213,8 @@ fn help_menu_p2_items(cx: &mut TestAppContext) {
     let entries = entries(r.cx);
     assert_eq!(
         entries.len(),
-        5,
-        "Keyboard Shortcuts, System Information, Additional setup, separator, About: {entries:?}"
+        6,
+        "Keyboard Shortcuts, System Information, Additional setup, Documentation, separator, About: {entries:?}"
     );
     assert_eq!(entries[0].role(), Some(Role::MenuItem));
     assert_eq!(entries[0].label(), Some("Keyboard Shortcuts"));
@@ -3221,10 +3223,12 @@ fn help_menu_p2_items(cx: &mut TestAppContext) {
     assert_eq!(entries[1].label(), Some("System Information…"));
     assert_eq!(entries[2].role(), Some(Role::MenuItem));
     assert_eq!(entries[2].label(), Some("Additional setup…"));
-    assert_eq!(entries[3].role(), None, "a separator");
-    assert!(entries[3].bounds().size.height < px(2.), "a one-pixel line");
-    assert_eq!(entries[4].role(), Some(Role::MenuItem));
-    assert_eq!(entries[4].label(), Some("About tasklens…"));
+    assert_eq!(entries[3].role(), Some(Role::MenuItem));
+    assert_eq!(entries[3].label(), Some("Documentation"));
+    assert_eq!(entries[4].role(), None, "a separator");
+    assert!(entries[4].bounds().size.height < px(2.), "a one-pixel line");
+    assert_eq!(entries[5].role(), Some(Role::MenuItem));
+    assert_eq!(entries[5].label(), Some("About tasklens…"));
     assert_eq!(
         hint_for(&mut r, &OpenShortcuts).as_deref(),
         Some("Ctrl+?"),
@@ -3279,7 +3283,8 @@ fn help_additional_setup_position_and_dispatch(cx: &mut TestAppContext) {
     let entries = entries(r.cx);
     assert_eq!(entries[1].label(), Some("System Information…"));
     assert_eq!(entries[2].label(), Some("Additional setup…"));
-    assert_eq!(entries[3].role(), None, "a separator follows");
+    assert_eq!(entries[3].label(), Some("Documentation"));
+    assert_eq!(entries[4].role(), None, "a separator follows");
     keys(r.cx, "down down enter");
     assert_eq!(count.get(), 1);
     assert_eq!(open_menu(r.cx), None);
@@ -3385,4 +3390,113 @@ fn keep_detached_toggle(cx: &mut TestAppContext) {
     );
     keys(r.cx, "enter");
     assert!(keep(r.cx), "the setting flipped");
+}
+
+// File > Open System Monitor and Help > Documentation (E21-039).
+
+/// Sets the probe result, registers the handlers and installs the action tracker.
+fn set_up_launchers(r: &mut Rig<'_>, monitor: Option<&'static str>) {
+    let engine: Arc<dyn EngineClient> = r.engine.clone();
+    r.cx.update(|_, cx| {
+        cx.set_global(SystemMonitor(monitor));
+        menus_file::init(cx);
+        menus_help::init(cx);
+        tl_ui::action_tracker::install(engine, cx);
+    });
+}
+
+/// The `Action` requests of the given kind that the fake engine received.
+fn action_requests(r: &Rig<'_>) -> Vec<tl_model::actions::ActionRequest> {
+    r.engine
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::Action(req) => Some(req),
+            _ => None,
+        })
+        .collect()
+}
+
+fn fail_action(r: &mut Rig<'_>, id: tl_model::actions::ActionId) {
+    r.engine.emit(ActionEvent {
+        id,
+        target: None,
+        state: ActionState::Failed(ActionError::Os(2)),
+    });
+    r.cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn system_monitor_hidden_when_absent(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_up_launchers(&mut r, None);
+    click_file(r.cx);
+    assert_eq!(entries(r.cx).len(), 4, "no Open System Monitor item");
+    keys(r.cx, "escape");
+
+    set_up_launchers(&mut r, Some("plasma-systemmonitor"));
+    click_file(r.cx);
+    let entries = entries(r.cx);
+    assert_eq!(entries.len(), 5, "{entries:?}");
+    assert_eq!(entries[1].label(), Some("Search File Handles..."));
+    assert_eq!(entries[2].role(), Some(Role::MenuItem));
+    assert_eq!(entries[2].label(), Some("Open System Monitor"));
+    assert_eq!(entries[3].role(), None, "a separator");
+    assert_eq!(entries[4].role(), Some(Role::MenuItem));
+}
+
+#[gpui_kit::test]
+fn system_monitor_launch(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    set_up_launchers(&mut r, Some("plasma-systemmonitor"));
+    keys(r.cx, "f10 down down enter");
+    r.cx.run_until_parked();
+    let sent = action_requests(&r);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let ActionKind::Launch(spec) = &sent[0].kind else {
+        panic!("not a Launch: {:?}", sent[0].kind)
+    };
+    assert!(matches!(&spec.what, LaunchWhat::Command(c) if &**c == "plasma-systemmonitor"));
+    assert!(!spec.as_admin);
+    assert!(sent[0].targets.is_empty());
+}
+
+#[gpui_kit::test]
+fn system_monitor_failure_toast(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    set_up_launchers(&mut r, Some("plasma-systemmonitor"));
+    keys(r.cx, "f10 down down enter");
+    r.cx.run_until_parked();
+    let sent = action_requests(&r);
+    assert_eq!(sent.len(), 1);
+    fail_action(&mut r, sent[0].id);
+    let toasts = toast_texts(&mut r);
+    assert_eq!(toasts.len(), 1, "{toasts:?}");
+    assert!(
+        toasts[0].starts_with("Failed to launch System Monitor"),
+        "{toasts:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn documentation_open_uri_and_failure(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    set_up_launchers(&mut r, None);
+    keys(r.cx, "alt-h down down down enter");
+    r.cx.run_until_parked();
+    let sent = action_requests(&r);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(
+        matches!(&sent[0].kind, ActionKind::OpenUri(u) if &**u == "file:///usr/share/doc/tasklens/README.md"),
+        "{:?}",
+        sent[0].kind
+    );
+    assert!(sent[0].targets.is_empty());
+    fail_action(&mut r, sent[0].id);
+    let toasts = toast_texts(&mut r);
+    assert_eq!(toasts.len(), 1, "{toasts:?}");
+    assert!(
+        toasts[0].starts_with("Could not open the documentation"),
+        "{toasts:?}"
+    );
 }
