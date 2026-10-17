@@ -13,7 +13,7 @@ use gpui_kit::{
     AnyView, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     SharedString, WeakEntity, Window, div, px,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{Family, Proto};
 use tl_model::process::ProcessRecord;
@@ -150,6 +150,8 @@ pub struct ConnectionWords {
     pub columns: [SharedString; 15],
     pub states: [Arc<str>; 14],
     pub no_owner: Arc<str>,
+    /// "Closing…", the State cell while a close is pending (UI-SYS-062).
+    pub closing: Arc<str>,
     pub restricted_glyph_tip: SharedString,
     restricted_owner_tip: SharedString,
     owner_line: SharedString,
@@ -230,6 +232,7 @@ impl ConnectionWords {
             columns: COLUMN_KEYS.map(&text),
             states: STATE_KEYS.map(|key| Arc::from(&*text(key))),
             no_owner: Arc::from(&*text("connections-owner-kernel")),
+            closing: Arc::from(&*text("connections-close-closing")),
             restricted_glyph_tip: text("connections-owner-restricted-glyph-tip"),
             restricted_owner_tip: restricted_owner_tip(),
             owner_line: owner_line(),
@@ -370,6 +373,9 @@ pub struct ConnectionsDelegate {
     tip: Rc<RefCell<TipState>>,
     tip_view: Option<AnyView>,
     page: Option<WeakEntity<ConnectionsPage>>,
+    /// Cookies whose State cell shows "Closing…": a close is pending, or it succeeded and the
+    /// row has not left the snapshot yet.
+    closing: FxHashSet<u64>,
 }
 
 impl ConnectionsDelegate {
@@ -395,6 +401,7 @@ impl ConnectionsDelegate {
             tip: Rc::default(),
             tip_view: None,
             page: None,
+            closing: FxHashSet::default(),
         }
     }
 
@@ -427,6 +434,22 @@ impl ConnectionsDelegate {
             records,
             cell,
         }
+    }
+
+    /// Shows or drops "Closing…" in the State cell of `cookie`.
+    pub fn set_closing(&mut self, cookie: u64, closing: bool) {
+        let changed = if closing {
+            self.closing.insert(cookie)
+        } else {
+            self.closing.remove(&cookie)
+        };
+        if changed {
+            self.version += 1;
+        }
+    }
+
+    pub fn is_closing(&self, cookie: u64) -> bool {
+        self.closing.contains(&cookie)
     }
 
     pub fn record(&self, ix: usize) -> Option<&ConnRecord> {
@@ -634,6 +657,10 @@ impl TreeTableDelegate for ConnectionsDelegate {
             ConnColumn::Proto => out.arc = Some(Arc::from(proto(record.proto))),
             ConnColumn::Local => out.arc = Some(record.local.clone()),
             ConnColumn::Foreign => out.arc = Some(record.foreign.clone()),
+            ConnColumn::State if self.closing.contains(&record.cookie) => {
+                out.arc = Some(self.words.closing.clone());
+                out.text_color = Some(self.theme.status.info);
+            }
             ConnColumn::State => {
                 out.arc = Some(self.words.state(record.state).clone());
                 out.text_color = match conn_state_tone(state_class(record.state)) {
@@ -783,7 +810,7 @@ impl TreeTableDelegate for ConnectionsDelegate {
             let stored = captured.clone();
             page.update(cx, |page, _| page.set_menu_targets(stored));
         }
-        row_menu(menu, &captured, window, cx)
+        row_menu(menu, &captured, &self.closing, window, cx)
     }
 
     fn on_toggle_expand(&mut self, _: u64, _: &mut Context<TlTreeTable<Self>>) {}
@@ -900,6 +927,11 @@ impl SysDelegate for ConnectionsDelegate {
             .collect();
         self.query_generation = conns.query_generation;
         self.header = conns.header;
+        // A closed socket leaves the snapshot; its "Closing…" mark goes with it.
+        if !self.closing.is_empty() {
+            self.closing
+                .retain(|cookie| conns.records.iter().any(|r| r.cookie == *cookie));
+        }
         self.conns = Some(conns);
         self.procs = Some(Arc::clone(&snap.processes));
         self.tip.borrow_mut().key = None;

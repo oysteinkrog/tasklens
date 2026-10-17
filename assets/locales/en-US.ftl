@@ -1177,6 +1177,25 @@ connections-copy-foreign-ok = Foreign address copied
 connections-jump-switched = Switched to owning process.
 connections-jump-not-visible = Owning process not visible in the current process view.
 connections-jump-no-owner = No owning process for this connection
+connections-close-menu = Close TCP connection
+connections-close-needs-helper = Needs the tasklens helper
+connections-close-no-kernel-support = Kernel lacks CONFIG_INET_DIAG_DESTROY
+connections-close-closing = Closing…
+connections-close-listen-heading-one = Close listening socket?
+connections-close-listen-text-one = The program will stop accepting new connections on { $addr }.
+connections-close-listen-heading-many = Close { $n } listening sockets?
+connections-close-listen-text-many = The programs will stop accepting new connections on these addresses:
+connections-close-listen-more = and { $m } more
+connections-close-listen-confirm = Close socket
+connections-close-listen-cancel = Cancel
+connections-close-requested = TCP connection close requested
+connections-close-requested-n = Closing { $n } TCP connections...
+connections-close-done = TCP connection closed
+connections-close-done-n = { $n } TCP connections closed
+connections-close-partial = { $ok } of { $n } TCP connections closed. { $failed } failed.
+connections-close-failed = Failed to close TCP connection
+connections-close-unknown = Outcome unknown
+connections-close-busy = A connection action is already in progress.
 
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.

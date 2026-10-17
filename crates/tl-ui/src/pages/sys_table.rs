@@ -912,6 +912,12 @@ fn final_toast(
     let toast = match state {
         ActionState::Succeeded if texts.done_one.is_empty() => return None,
         ActionState::Succeeded => (ToastKind::Success, texts.done_one.clone(), None),
+        // A dismissed helper prompt is a choice, not a failure (UI-SYS-064 step 3).
+        ActionState::Failed(ActionError::AuthCancelled) => (
+            ToastKind::Warning,
+            tr(cx, "fnd-shield-auth-cancelled"),
+            None,
+        ),
         ActionState::Failed(err) => {
             let text = if texts.failed_suffix {
                 failure_text(&texts.failed_prefix, err)

@@ -10,6 +10,8 @@ pub mod delegate;
 mod flows;
 mod menu;
 
+pub use self::flows::{ListenConfirmTexts, listen_confirm_texts};
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +20,9 @@ use gpui_kit::{
     AnyWindowHandle, App, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
 };
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use tl_model::actions::{ActionId, ActionState, ActionTarget};
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::SourceId;
@@ -27,6 +31,7 @@ use tl_model::units;
 
 use self::delegate::{ConnectionsDelegate, DEFAULT_SORT};
 use self::menu::ConnMenuTargets;
+use crate::action_tracker::GlobalActionTracker;
 use crate::actions::ClearFilter;
 use crate::app::EngineGlobal;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
@@ -35,7 +40,7 @@ use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
 use crate::pages::processes::actions::CopyDetails;
 use crate::pages::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
-use crate::pages::sys_table::{SysBody, SysTableFrame, loading_status_text};
+use crate::pages::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::TreeTableEvent;
@@ -66,6 +71,8 @@ pub struct ConnectionsPage {
     copy_prepared: copy::PreparedCopy,
     copy_connections: Arc<ConnectionsSnapshot>,
     copy_processes: Arc<ProcessSnapshot>,
+    /// Close requests by socket cookie: the request id and the target's index in it.
+    close_requests: FxHashMap<u64, (ActionId, u16)>,
     _subs: SmallVec<[Subscription; 3]>,
 }
 
@@ -136,6 +143,11 @@ impl ConnectionsPage {
             }));
         }
         subs.push(cx.observe(&table, |this, _, cx| this.on_table_changed(cx)));
+        let actions = frame.actions.clone();
+        subs.push(cx.subscribe(&actions, |this, _, ev: &SysActionsEvent, cx| {
+            let SysActionsEvent::PendingChanged { target } = ev;
+            this.on_pending_changed(target, cx);
+        }));
         subs.push(cx.subscribe(&table, |this, _, event: &TreeTableEvent, cx| {
             match event {
                 TreeTableEvent::CopiedRows { .. } => {
@@ -170,6 +182,7 @@ impl ConnectionsPage {
             copy_prepared: copy::PreparedCopy::default(),
             copy_connections: Arc::new(ConnectionsSnapshot::default()),
             copy_processes: Arc::new(ProcessSnapshot::default()),
+            close_requests: FxHashMap::default(),
             _subs: subs,
         }
     }
@@ -244,11 +257,57 @@ impl ConnectionsPage {
             .unwrap_or_else(|| self.capture_targets(cx))
     }
 
+    /// The page's action layer, for the close toast tests.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn actions_for_test(&self) -> &Entity<crate::pages::sys_table::SysActions> {
+        &self.frame.actions
+    }
+
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn menu_target_cookies_for_test(&self) -> &[u64] {
         self.menu_targets
             .as_ref()
             .map_or(&[], |targets| targets.cookies.as_slice())
+    }
+
+    /// A close started or finished on `target`. Its State cell shows "Closing…" while pending,
+    /// and after a success until the row leaves the snapshot (UI-SYS-064 step 5). Any other
+    /// result drops the mark.
+    fn on_pending_changed(&mut self, target: &ActionTarget, cx: &mut Context<Self>) {
+        let ActionTarget::Socket { cookie, .. } = *target else {
+            return;
+        };
+        let closing = if self.frame.actions.read(cx).pending_tag(target).is_some() {
+            Some(true)
+        } else if self.close_succeeded(cookie, cx) {
+            None
+        } else {
+            Some(false)
+        };
+        if let Some(closing) = closing {
+            self.frame.table.update(cx, |table, cx| {
+                table.delegate.set_closing(cookie, closing);
+                cx.notify();
+            });
+            cx.notify();
+        }
+    }
+
+    /// Whether the finished close on `cookie` succeeded. Forgets the request.
+    fn close_succeeded(&mut self, cookie: u64, cx: &App) -> bool {
+        let Some((id, index)) = self.close_requests.remove(&cookie) else {
+            return false;
+        };
+        let Some(tracker) = cx.try_global::<GlobalActionTracker>() else {
+            return false;
+        };
+        tracker.0.read(cx).results(id).is_some_and(|results| {
+            results
+                .iter()
+                .rev()
+                .find(|(i, _)| *i == index)
+                .is_some_and(|(_, state)| *state == ActionState::Succeeded)
+        })
     }
 
     fn on_table_changed(&mut self, cx: &mut Context<Self>) {
@@ -559,6 +618,7 @@ impl Render for ConnectionsPage {
             .on_action(cx.listener(Self::on_copy_foreign))
             .on_action(cx.listener(Self::on_jump_to_process))
             .on_action(cx.listener(Self::on_go_to_service))
+            .on_action(cx.listener(Self::on_close_tcp))
             .on_action(cx.listener(Self::on_open_properties))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }

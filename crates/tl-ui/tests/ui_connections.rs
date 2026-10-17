@@ -878,6 +878,9 @@ mod page {
                 (MenuEntryKind::Item, "Copy local address".into()),
                 (MenuEntryKind::Item, "Copy foreign address".into()),
                 (MenuEntryKind::Separator, "separator".into()),
+                // Shown for a TCP row; disabled here because the rig has no tl-helper.
+                (MenuEntryKind::Disabled, "Close TCP connection".into()),
+                (MenuEntryKind::Separator, "separator".into()),
                 (MenuEntryKind::Item, "Jump to process".into()),
                 (MenuEntryKind::Item, "Go to service".into()),
                 (MenuEntryKind::Item, "Properties".into()),
@@ -985,14 +988,27 @@ mod page {
         );
     }
 
+    /// tl-ui has no P3 build flag, so the item's hidden case is a UDP row: one separator
+    /// between the copy items and Jump to process (UI-SYS-063).
     #[gpui_kit::test]
-    fn conn_menu_close_hidden_before_p3(cx: &mut TestAppContext) {
-        let mut rig = menu_rig(cx, vec![super::connection(1, SmallVec::new())]);
+    fn conn_menu_close_hidden_for_udp(cx: &mut TestAppContext) {
+        let mut record = super::connection(1, SmallVec::new());
+        record.proto = Proto::Udp;
+        record.state = ConnState::Unconnected;
+        let mut rig = menu_rig(cx, vec![record]);
         let menu = rig.build_menu(&[1], None);
+        let shape = menu_shape(&rig.menu_entries(&menu));
         assert!(
-            rig.menu_entries(&menu)
+            shape
                 .iter()
-                .all(|entry| { entry.label.as_deref() != Some("Close TCP connection") })
+                .all(|(_, label)| label != "Close TCP connection")
+        );
+        assert_eq!(
+            shape
+                .iter()
+                .filter(|(kind, _)| *kind == MenuEntryKind::Separator)
+                .count(),
+            1
         );
     }
 
@@ -1349,6 +1365,400 @@ mod page {
             .expect("connections filter query sent");
         assert_eq!(query.filter.as_ref(), "443");
         assert!(query.generation > before);
+    }
+
+    /// Close TCP connection (tasklens-9o0.28, UI-SYS-064).
+    mod close {
+        use super::*;
+        use tl_model::actions::{
+            ActionError, ActionEvent as FlowEvent, ActionId, ActionKind, ActionRequest,
+            ActionState, ActionTarget, RejectReason,
+        };
+        use tl_model::health::HelperState;
+        use tl_ui::action_tracker::PushedToast;
+        use tl_ui::components::dialog::{DialogButton, TlDialogView};
+        use tl_ui::components::toast::ToastKind;
+        use tl_ui::components::window_frame::TlSecondaryWindow;
+        use tl_ui::pages::connections::actions::ConnectionCloseTcp;
+        use tl_ui::pages::connections::listen_confirm_texts;
+
+        const CLOSE: &str = "Close TCP connection";
+
+        struct Dialog {
+            window: gpui_kit::WindowHandle<Root>,
+            view: Entity<TlDialogView>,
+        }
+
+        fn listening(cookie: u64, addr: &str) -> ConnRecord {
+            let mut record = super::super::connection(cookie, SmallVec::new());
+            record.state = ConnState::Listening;
+            record.four_tuple = FourTuple {
+                local: addr.parse().unwrap(),
+                remote: "0.0.0.0:0".parse().unwrap(),
+            };
+            record.local = Arc::from(addr);
+            record.foreign = Arc::from("*:*");
+            record
+        }
+
+        fn established(cookie: u64, local: &str) -> ConnRecord {
+            let mut record = super::super::connection(cookie, SmallVec::new());
+            record.four_tuple.local = local.parse().unwrap();
+            record.local = Arc::from(local);
+            record
+        }
+
+        impl Rig {
+            fn set_helper(&mut self, helper: HelperState) {
+                self.engine.publish_with(|s| s.health.helper = helper);
+                self.vcx.run_until_parked();
+                self.draw();
+            }
+
+            fn set_destroy_supported(&mut self, supported: Option<bool>) {
+                self.engine.publish_with(|s| {
+                    let mut conns = ConnectionsSnapshot::clone(&s.connections);
+                    conns.destroy_supported = supported;
+                    s.connections = Arc::new(conns);
+                });
+                self.vcx.run_until_parked();
+                self.draw();
+            }
+
+            fn close_entry(&mut self, targets: &[u64]) -> Option<MenuEntryInfo> {
+                let menu = self.build_menu(targets, None);
+                self.menu_entries(&menu)
+                    .into_iter()
+                    .find(|entry| entry.label.as_deref() == Some(CLOSE))
+            }
+
+            /// Opens the row menu on `targets` and chooses Close TCP connection.
+            fn choose_close(&mut self, targets: &[u64]) {
+                let _menu = self.build_menu(targets, None);
+                self.dispatch(ConnectionCloseTcp);
+            }
+
+            fn requests(&self) -> Vec<ActionRequest> {
+                self.engine
+                    .commands()
+                    .into_iter()
+                    .filter_map(|c| match c {
+                        Command::Action(r) => Some(r),
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            fn emit(&mut self, id: ActionId, target: Option<u16>, state: ActionState) {
+                self.engine.emit(FlowEvent { id, target, state });
+                self.vcx.run_until_parked();
+            }
+
+            fn finish(&mut self, id: ActionId, states: &[ActionState]) {
+                self.emit(id, None, ActionState::Started);
+                for (i, state) in states.iter().enumerate() {
+                    self.emit(id, Some(i as u16), state.clone());
+                }
+                self.emit(id, None, ActionState::summarize(states));
+                self.draw();
+            }
+
+            fn pushed(&mut self) -> Vec<PushedToast> {
+                let actions = self
+                    .vcx
+                    .read_entity(&self.page, |page, _| page.actions_for_test().clone());
+                self.vcx.read_entity(&actions, |a, _| a.pushed().to_vec())
+            }
+
+            fn state_cell(&mut self, ix: usize) -> String {
+                let table = self.table();
+                self.vcx.read_entity(&table, |table, _| {
+                    let mut out = CellOut::default();
+                    table
+                        .delegate
+                        .cell(ix, SysColumnId::Connections(ConnColumn::State), &mut out);
+                    super::super::text(&out).to_owned()
+                })
+            }
+
+            fn page_window_id(&mut self) -> gpui_kit::WindowId {
+                gpui_kit::VisualContext::window_handle(&self.vcx).window_id()
+            }
+
+            fn dialog(&mut self) -> Option<Dialog> {
+                let parent = self.page_window_id();
+                let window = self
+                    .vcx
+                    .update(|_, cx| cx.windows().into_iter().find(|w| w.window_id() != parent))?
+                    .downcast::<Root>()?;
+                let frame = self
+                    .vcx
+                    .update(|_, cx| TlSecondaryWindow::<TlDialogView>::find(window, cx))?;
+                let view = self.vcx.read(|cx| frame.read(cx).content().clone());
+                Some(Dialog { window, view })
+            }
+
+            fn is_open(&mut self, d: &Dialog) -> bool {
+                let id = d.window.window_id();
+                self.vcx
+                    .update(|_, cx| cx.windows().iter().any(|w| w.window_id() == id))
+            }
+        }
+
+        fn close_rig(cx: &mut TestAppContext, records: Vec<ConnRecord>) -> Rig {
+            let mut rig = menu_rig(cx, records);
+            rig.set_helper(HelperState::Unlocked);
+            rig
+        }
+
+        fn socket(record: &ConnRecord) -> ActionTarget {
+            ActionTarget::Socket {
+                cookie: record.cookie,
+                family: record.family,
+                proto: record.proto,
+                four_tuple: record.four_tuple,
+            }
+        }
+
+        fn press(cx: &mut TestAppContext, dialog: &Dialog, keys: &str) {
+            let mut vcx = VisualTestContext::from_window(dialog.window.into(), cx);
+            vcx.update(|window, _| window.activate_window());
+            vcx.simulate_keystrokes(keys);
+            vcx.run_until_parked();
+        }
+
+        /// All five rows of the UI-SYS-064 item table, first match wins.
+        #[gpui_kit::test]
+        fn conn_close_menu_states(cx: &mut TestAppContext) {
+            let mut udp = super::super::connection(2, SmallVec::new());
+            udp.proto = Proto::Udp;
+            udp.state = ConnState::Unconnected;
+            let mut time_wait = super::super::connection(3, SmallVec::new());
+            time_wait.state = ConnState::TimeWait;
+            let tcp = super::super::connection(1, SmallVec::new());
+            let mut rig = menu_rig(cx, vec![tcp, udp, time_wait]);
+
+            // Every target UDP or TIME-WAIT: hidden.
+            assert!(rig.close_entry(&[2]).is_none());
+            assert!(rig.close_entry(&[3]).is_none());
+            assert!(rig.close_entry(&[2, 3]).is_none());
+
+            // No tl-helper: disabled. A mixed selection still shows the item.
+            let entry = rig.close_entry(&[1, 2]).expect("shown for a TCP target");
+            assert_eq!(entry.kind, MenuEntryKind::Disabled);
+            assert_eq!(entry.tooltip.as_deref(), Some("Needs the tasklens helper"));
+
+            // The kernel lacks destroy: disabled, even with the helper installed.
+            rig.set_helper(HelperState::Locked);
+            rig.set_destroy_supported(Some(false));
+            let entry = rig.close_entry(&[1]).unwrap();
+            assert_eq!(entry.kind, MenuEntryKind::Disabled);
+            assert_eq!(
+                entry.tooltip.as_deref(),
+                Some("Kernel lacks CONFIG_INET_DIAG_DESTROY")
+            );
+
+            // Enabled.
+            rig.set_destroy_supported(None);
+            let entry = rig.close_entry(&[1]).unwrap();
+            assert_eq!(entry.kind, MenuEntryKind::Item);
+
+            // A close pending on every closable target: disabled with "Closing…".
+            rig.choose_close(&[1]);
+            assert_eq!(rig.requests().len(), 1);
+            let entry = rig.close_entry(&[1, 3]).unwrap();
+            assert_eq!(entry.kind, MenuEntryKind::Disabled);
+            assert_eq!(entry.tooltip.as_deref(), Some("Closing…"));
+        }
+
+        #[gpui_kit::test]
+        fn close_listening_requires_confirm(cx: &mut TestAppContext) {
+            let mut rig = close_rig(cx, vec![listening(1, "0.0.0.0:22")]);
+            rig.choose_close(&[1]);
+            let dialog = rig.dialog().expect("the confirmation opens");
+            assert!(
+                rig.requests().is_empty(),
+                "nothing is sent before confirming"
+            );
+            let (title, text, destructive, cancel) = rig.vcx.read(|cx| {
+                let d = dialog.view.read(cx).dialog();
+                (
+                    d.window_title().to_string(),
+                    d.text().to_string(),
+                    d.is_destructive(),
+                    d.cancel_text().to_string(),
+                )
+            });
+            assert_eq!(title, "tasklens");
+            assert_eq!(
+                text,
+                "The program will stop accepting new connections on 0.0.0.0:22."
+            );
+            assert!(destructive, "\"Close socket\" is a Danger button");
+            assert_eq!(cancel, "Cancel");
+            let addresses = [SharedString::from("0.0.0.0:22")];
+            let texts = rig.vcx.read(|cx| listen_confirm_texts(&addresses, cx));
+            assert_eq!(texts.heading, "Close listening socket?");
+
+            let view = dialog.view.clone();
+            let focused = {
+                let mut vcx = VisualTestContext::from_window(dialog.window.into(), cx);
+                vcx.update(|window, cx| view.read(cx).focused_button(window))
+            };
+            assert_eq!(focused, Some(DialogButton::Cancel));
+            // A stray Enter cancels and sends nothing.
+            press(cx, &dialog, "enter");
+            assert!(!rig.is_open(&dialog));
+            assert!(rig.requests().is_empty());
+
+            // Tab then Enter closes the socket.
+            rig.choose_close(&[1]);
+            let dialog = rig.dialog().expect("the confirmation opens again");
+            press(cx, &dialog, "tab enter");
+            assert!(!rig.is_open(&dialog));
+            let sent = rig.requests();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].kind, ActionKind::SockDestroy);
+            assert_eq!(
+                sent[0].targets.as_slice(),
+                [socket(&listening(1, "0.0.0.0:22"))]
+            );
+        }
+
+        #[gpui_kit::test]
+        fn close_listening_plural_heading(cx: &mut TestAppContext) {
+            let addresses: Vec<SharedString> = (0..7)
+                .map(|i| SharedString::from(format!("0.0.0.0:{}", 8000 + i)))
+                .collect();
+            let mut rig = close_rig(cx, vec![listening(1, "0.0.0.0:22")]);
+            let texts = rig.vcx.read(|cx| listen_confirm_texts(&addresses, cx));
+            assert_eq!(texts.heading, "Close 7 listening sockets?");
+            assert_eq!(texts.addresses, addresses[..5]);
+            assert_eq!(texts.more.as_deref(), Some("and 2 more"));
+
+            let two = &addresses[..2];
+            let texts = rig.vcx.read(|cx| listen_confirm_texts(two, cx));
+            assert_eq!(texts.heading, "Close 2 listening sockets?");
+            assert_eq!(texts.addresses, two);
+            assert!(texts.more.is_none());
+
+            // Through the page: two listeners and one established socket, one confirmation.
+            let records = vec![
+                listening(1, "0.0.0.0:22"),
+                listening(2, "[::]:80"),
+                established(3, "127.0.0.1:5000"),
+            ];
+            rig.publish_records(records, ConnCounts::default());
+            rig.choose_close(&[1, 2, 3]);
+            let dialog = rig.dialog().expect("the confirmation opens");
+            press(cx, &dialog, "tab enter");
+            let sent = rig.requests();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].targets.len(), 3);
+        }
+
+        #[gpui_kit::test]
+        fn close_toast_sequence(cx: &mut TestAppContext) {
+            let mut rig = close_rig(cx, vec![super::super::connection(1, SmallVec::new())]);
+            assert_eq!(rig.state_cell(0), "ESTABLISHED");
+            rig.choose_close(&[1]);
+            assert!(
+                rig.dialog().is_none(),
+                "no confirmation for an established socket"
+            );
+            let sent = rig.requests();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].kind, ActionKind::SockDestroy);
+            assert_eq!(rig.pushed().len(), 1);
+            let pending = rig.pushed()[0].clone();
+            assert_eq!(pending.kind, ToastKind::Progress);
+            assert_eq!(pending.text, "TCP connection close requested");
+            assert_eq!(rig.state_cell(0), "Closing…");
+
+            rig.finish(sent[0].id, &[ActionState::Succeeded]);
+            let done = rig.pushed().last().cloned().unwrap();
+            assert_eq!(done.kind, ToastKind::Success);
+            assert_eq!(done.text, "TCP connection closed");
+            assert_eq!(
+                done.key, pending.key,
+                "the result replaces the pending toast"
+            );
+            let shown = rig.copy_toasts();
+            assert!(shown.iter().any(|t| t == "TCP connection closed"));
+            assert!(!shown.iter().any(|t| t == "TCP connection close requested"));
+            // The row keeps "Closing…" until it leaves the snapshot.
+            assert_eq!(rig.state_cell(0), "Closing…");
+            rig.publish(&[2], ConnCounts::default());
+            rig.publish(&[1], ConnCounts::default());
+            assert_eq!(rig.state_cell(0), "ESTABLISHED");
+        }
+
+        #[gpui_kit::test]
+        fn close_eopnotsupp_disables_item(cx: &mut TestAppContext) {
+            let mut rig = close_rig(cx, vec![super::super::connection(1, SmallVec::new())]);
+            rig.choose_close(&[1]);
+            let sent = rig.requests();
+            // The engine answers EOPNOTSUPP from the helper with Rejected(Unsupported).
+            rig.finish(
+                sent[0].id,
+                &[ActionState::Rejected(RejectReason::Unsupported)],
+            );
+            let toast = rig.pushed().last().cloned().unwrap();
+            assert_eq!(toast.kind, ToastKind::Error);
+            assert!(
+                toast.text.starts_with("Failed to close TCP connection: "),
+                "{}",
+                toast.text
+            );
+            // A failure drops "Closing…".
+            assert_eq!(rig.state_cell(0), "ESTABLISHED");
+            rig.set_destroy_supported(Some(false));
+            let entry = rig.close_entry(&[1]).unwrap();
+            assert_eq!(entry.kind, MenuEntryKind::Disabled);
+            assert_eq!(
+                entry.tooltip.as_deref(),
+                Some("Kernel lacks CONFIG_INET_DIAG_DESTROY")
+            );
+        }
+
+        /// Security regression: the request carries the cookie and four-tuple captured at menu
+        /// open. A newer snapshot with the same four-tuple and a new cookie changes nothing.
+        #[gpui_kit::test]
+        fn close_targets_exact_cookie_and_tuple(cx: &mut TestAppContext) {
+            let old = established(77, "192.168.1.10:51234");
+            let mut rig = close_rig(cx, vec![old.clone()]);
+            let _menu = rig.build_menu(&[77], None);
+            let reused = established(88, "192.168.1.10:51234");
+            rig.publish_records(vec![reused], ConnCounts::default());
+            rig.dispatch(ConnectionCloseTcp);
+            let sent = rig.requests();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].kind, ActionKind::SockDestroy);
+            assert_eq!(sent[0].targets.as_slice(), [socket(&old)]);
+        }
+
+        #[gpui_kit::test]
+        fn close_auth_cancelled_toast(cx: &mut TestAppContext) {
+            let mut rig = close_rig(cx, vec![super::super::connection(1, SmallVec::new())]);
+            rig.set_helper(HelperState::Locked);
+            rig.choose_close(&[1]);
+            let sent = rig.requests();
+            assert_eq!(sent.len(), 1);
+            // The polkit prompt is up: the toast stays pending.
+            rig.emit(sent[0].id, None, ActionState::Started);
+            let pending = rig.pushed().last().cloned().unwrap();
+            assert_eq!(pending.kind, ToastKind::Progress);
+            assert_eq!(pending.text, "TCP connection close requested");
+            rig.finish(
+                sent[0].id,
+                &[ActionState::Failed(ActionError::AuthCancelled)],
+            );
+            let toast = rig.pushed().last().cloned().unwrap();
+            assert_eq!(toast.kind, ToastKind::Warning);
+            assert_eq!(toast.text, "Authentication cancelled");
+            assert_eq!(toast.key, pending.key);
+            assert_eq!(rig.state_cell(0), "ESTABLISHED");
+        }
     }
 }
 
