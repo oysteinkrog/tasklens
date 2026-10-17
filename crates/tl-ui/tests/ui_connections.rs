@@ -1763,6 +1763,156 @@ mod page {
             assert_eq!(rig.state_cell(0), "ESTABLISHED");
         }
     }
+
+    /// The Namespaces control (tasklens-9o0.31, UI-SYS-070).
+    mod netns {
+        use super::*;
+        use tl_model::health::{HelperStartOutcome, HelperState};
+        use tl_ui::pages::connections::actions::{ConnectionNetnsAll, ConnectionNetnsHost};
+        use tl_ui::window::main::HelperInstalled;
+
+        fn installed_rig(cx: &mut TestAppContext, installed: bool) -> Rig {
+            let mut rig = menu_rig(cx, vec![super::super::connection(1, SmallVec::new())]);
+            rig.vcx
+                .update(|_, cx| cx.set_global(HelperInstalled(installed)));
+            rig
+        }
+
+        fn set_helper(rig: &mut Rig, helper: HelperState) {
+            rig.engine
+                .publish_with(|s| Arc::make_mut(&mut s.health).helper = helper);
+            rig.vcx.run_until_parked();
+            rig.draw();
+        }
+
+        fn label(rig: &mut Rig) -> String {
+            rig.vcx
+                .update(|_, cx| rig.page.read(cx).netns_label(cx).to_string())
+        }
+
+        fn visible(rig: &mut Rig) -> Vec<ConnColumn> {
+            let table = rig.table();
+            rig.vcx.read_entity(&table, |table, _| {
+                table
+                    .delegate
+                    .columns()
+                    .visible_columns()
+                    .iter()
+                    .filter_map(|c| match c {
+                        SysColumnId::Connections(column) => Some(*column),
+                        _ => None,
+                    })
+                    .collect()
+            })
+        }
+
+        fn netns_demand(rig: &mut Rig) -> bool {
+            rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+            rig.vcx.run_until_parked();
+            rig.engine
+                .demands()
+                .last()
+                .is_some_and(|d| d.connections_all_netns)
+        }
+
+        fn starts(rig: &Rig) -> usize {
+            rig.engine
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, Command::StartHelperSession))
+                .count()
+        }
+
+        fn netns_menu(rig: &mut Rig) -> Vec<MenuEntryInfo> {
+            let page = rig.page.clone();
+            let menu = rig
+                .vcx
+                .update(|window, cx| ConnectionsPage::build_netns_menu(&page, window, cx));
+            rig.menu_entries(&menu)
+        }
+
+        #[gpui_kit::test]
+        fn netns_all_disabled_without_helper(cx: &mut TestAppContext) {
+            let mut rig = installed_rig(cx, false);
+            let entries = netns_menu(&mut rig);
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].label.as_deref(), Some("Host only"));
+            assert!(entries[0].checked);
+            assert_eq!(entries[1].label.as_deref(), Some("All"));
+            assert_eq!(entries[1].kind, MenuEntryKind::Disabled);
+            assert_eq!(
+                entries[1].tooltip.as_deref(),
+                Some("Needs the tasklens helper")
+            );
+            rig.dispatch(ConnectionNetnsAll);
+            assert_eq!(label(&mut rig), "Namespaces: Host only");
+            assert!(!netns_demand(&mut rig));
+        }
+
+        #[gpui_kit::test]
+        fn netns_all_adds_column(cx: &mut TestAppContext) {
+            let mut rig = installed_rig(cx, true);
+            set_helper(&mut rig, HelperState::Unlocked);
+            assert_eq!(label(&mut rig), "Namespaces: Host only");
+            assert!(!visible(&mut rig).contains(&ConnColumn::Netns));
+            rig.dispatch(ConnectionNetnsAll);
+            assert_eq!(label(&mut rig), "Namespaces: All");
+            assert!(netns_demand(&mut rig));
+            let columns = visible(&mut rig);
+            assert_eq!(columns[0], ConnColumn::Proto);
+            assert_eq!(columns[1], ConnColumn::Netns, "right after Proto");
+            assert_eq!(starts(&rig), 0, "an unlocked helper needs no new session");
+            let entries = netns_menu(&mut rig);
+            assert!(!entries[0].checked);
+            assert_eq!(entries[1].kind, MenuEntryKind::Item);
+            assert!(entries[1].checked);
+        }
+
+        #[gpui_kit::test]
+        fn netns_host_only_hides_column(cx: &mut TestAppContext) {
+            let mut rig = installed_rig(cx, true);
+            set_helper(&mut rig, HelperState::Unlocked);
+            rig.dispatch(ConnectionNetnsAll);
+            assert!(netns_demand(&mut rig));
+            rig.dispatch(ConnectionNetnsHost);
+            assert_eq!(label(&mut rig), "Namespaces: Host only");
+            assert!(!visible(&mut rig).contains(&ConnColumn::Netns));
+            assert!(!netns_demand(&mut rig));
+        }
+
+        #[gpui_kit::test]
+        fn netns_auth_cancelled_keeps_host_only(cx: &mut TestAppContext) {
+            let mut rig = installed_rig(cx, true);
+            set_helper(&mut rig, HelperState::Locked);
+            rig.dispatch(ConnectionNetnsAll);
+            assert_eq!(starts(&rig), 1, "a locked helper starts a session");
+            assert_eq!(label(&mut rig), "Namespaces: All", "while the prompt is up");
+            rig.engine.publish_with(|s| {
+                let health = Arc::make_mut(&mut s.health);
+                health.helper_start = Some((1, HelperStartOutcome::Cancelled));
+                health.version += 1;
+            });
+            rig.vcx.run_until_parked();
+            rig.draw();
+            assert_eq!(label(&mut rig), "Namespaces: Host only");
+            assert!(!visible(&mut rig).contains(&ConnColumn::Netns));
+            assert!(!netns_demand(&mut rig));
+            // The page pushes no toast of its own: the helper flow owns "Authentication cancelled".
+            assert_eq!(rig.refresh_toasts(), 0);
+        }
+
+        #[gpui_kit::test]
+        fn netns_session_only(cx: &mut TestAppContext) {
+            let mut rig = installed_rig(cx, true);
+            set_helper(&mut rig, HelperState::Unlocked);
+            rig.dispatch(ConnectionNetnsAll);
+            assert!(rig.vcx.read_entity(&rig.page, |p, _| p.netns_all()));
+            // A restart builds a new page: no settings key carries the choice over.
+            let mut again = installed_rig(cx, true);
+            assert_eq!(label(&mut again), "Namespaces: Host only");
+            assert!(!visible(&mut again).contains(&ConnColumn::Netns));
+        }
+    }
 }
 
 /// `TasklensUi::init` binds the Connections keys and the shell builds `ConnectionsPage` for its
@@ -3294,4 +3444,18 @@ mod remote_host {
         assert_eq!(other.note_key(), None);
         let _ = cx;
     }
+}
+
+/// The Namespace cell: empty for a host socket, the namespace name for another one.
+#[gpui_kit::test]
+fn netns_cell_shows_name(cx: &mut TestAppContext) {
+    let host = connection(1, SmallVec::new());
+    let mut other = connection(2, SmallVec::new());
+    other.netns = Some(tl_model::snapshot::NetnsRef {
+        ino: 4026532000,
+        name: Arc::from("blue"),
+    });
+    let delegate = delegate(cx, vec![host, other], Vec::new());
+    assert_eq!(text(&cell_at(&delegate, 0, ConnColumn::Netns)), "");
+    assert_eq!(text(&cell_at(&delegate, 1, ConnColumn::Netns)), "blue");
 }

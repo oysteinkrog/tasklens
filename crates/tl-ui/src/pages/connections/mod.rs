@@ -12,20 +12,24 @@ mod menu;
 
 pub use self::flows::{ListenConfirmTexts, listen_confirm_texts};
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyWindowHandle, App, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
+    AnyWindowHandle, App, Bounds, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
+    Styled as _, Subscription, Task, Window, canvas, div, px,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionState, ActionTarget};
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
-use tl_model::health::SourceId;
+use tl_model::demand::Demand;
+use tl_model::health::{HelperState, SourceId};
 use tl_model::snapshot::{ConnCounts, ConnRecord, ConnectionsSnapshot, ProcessSnapshot};
 use tl_model::units;
 
@@ -34,9 +38,13 @@ use self::menu::ConnMenuTargets;
 use crate::action_tracker::GlobalActionTracker;
 use crate::actions::ClearFilter;
 use crate::app::EngineGlobal;
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::icons::TlIcon;
+use crate::components::menu::{TlMenu, TlMenuPopup, open_context_menu_at};
+use crate::components::shield::StartHelperSession;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
-use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
+use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
 use crate::pages::processes::actions::CopyDetails;
 use crate::pages::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
@@ -44,8 +52,11 @@ use crate::pages::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_s
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::TreeTableEvent;
+use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{FilterChanged, GlobalShellEvents, PauseChanged, ShellPage, ShellState};
+use crate::window::main::{
+    FilterChanged, GlobalShellEvents, HelperInstalled, PauseChanged, ShellPage, ShellState,
+};
 use crate::window::status::StatusChanged;
 use crate::windows::connection_properties::open_connection_properties;
 
@@ -54,6 +65,15 @@ const MAX_PROPERTIES_WINDOWS: usize = 10;
 
 /// The latest a manual refresh waits for a new Connections component version.
 pub const REFRESH_TOAST_AFTER: Duration = Duration::from_secs(2);
+
+/// Element id of the Namespaces control.
+const NETNS_BUTTON_ID: &str = "ConnectionsNamespaces";
+
+/// The aggregator source of the page's all-namespaces flag. It sits beside the Remote host
+/// source; no live entity has an index this near `u32::MAX`.
+fn netns_source() -> EntityId {
+    EntityId::from(0xFFFF_FE01)
+}
 
 const STATUS_UNSET: (u32, u32, u32, u32, u32, usize) =
     (u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, usize::MAX);
@@ -73,6 +93,15 @@ pub struct ConnectionsPage {
     copy_processes: Arc<ProcessSnapshot>,
     /// Close requests by socket cookie: the request id and the target's index in it.
     close_requests: FxHashMap<u64, (ActionId, u16)>,
+    demand: Entity<DemandAggregator>,
+    active: bool,
+    /// "Namespaces: All" is chosen. Session only: a new page starts on "Host only".
+    netns_all: bool,
+    /// Set while a helper start this page asked for has no answer: the `helper_start` seq seen
+    /// when it was sent. A newer seq means the start failed or was cancelled.
+    netns_start_after: Option<u64>,
+    netns_focus: FocusHandle,
+    netns_bounds: Rc<Cell<Bounds<Pixels>>>,
     _subs: SmallVec<[Subscription; 3]>,
 }
 
@@ -104,6 +133,9 @@ impl ConnectionsPage {
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
             let snap = Arc::clone(hub.read(cx).current());
+            if ev.mask.contains(ComponentMask::HEALTH) {
+                this.on_health(&snap.health, cx);
+            }
             let changed = this.frame.on_snapshot(&snap, ev.mask, cx);
             let accepted = this.frame.query.accepts(snap.connections.query_generation);
             if ev
@@ -184,6 +216,12 @@ impl ConnectionsPage {
             copy_connections: Arc::new(ConnectionsSnapshot::default()),
             copy_processes: Arc::new(ProcessSnapshot::default()),
             close_requests: FxHashMap::default(),
+            demand: demand.clone(),
+            active: false,
+            netns_all: false,
+            netns_start_after: None,
+            netns_focus: cx.focus_handle(),
+            netns_bounds: Rc::default(),
             _subs: subs,
         }
     }
@@ -203,6 +241,177 @@ impl ConnectionsPage {
         self.frame
             .table
             .update(cx, |table, cx| table.delegate.set_active(active, cx));
+        self.active = active;
+        self.send_netns_demand(cx);
+    }
+
+    /// Whether "Namespaces: All" is chosen.
+    pub fn netns_all(&self) -> bool {
+        self.netns_all
+    }
+
+    /// Gives the aggregator `connections_all_netns` while the tab is active and "All" is chosen.
+    fn send_netns_demand(&self, cx: &mut Context<Self>) {
+        let on = self.active && self.netns_all;
+        self.demand.update(cx, |demand, cx| {
+            if on {
+                let part = Demand {
+                    any_surface_visible: true,
+                    connections_all_netns: true,
+                    ..Demand::default()
+                };
+                let window = demand.main_window();
+                demand.set(netns_source(), window, part, cx);
+            } else {
+                demand.remove(netns_source(), cx);
+            }
+        });
+    }
+
+    /// Applies the Namespaces choice: demand, the Namespace column and the control label.
+    fn set_netns_all(&mut self, all: bool, cx: &mut Context<Self>) {
+        if self.netns_all == all {
+            return;
+        }
+        self.netns_all = all;
+        if !all {
+            self.netns_start_after = None;
+        }
+        self.frame
+            .table
+            .update(cx, |table, cx| table.delegate.set_netns_shown(all, cx));
+        self.send_netns_demand(cx);
+        cx.notify();
+    }
+
+    /// A helper start this page asked for ended without a session: back to "Host only". The
+    /// toast belongs to the helper flow (R-148), so the page shows none.
+    fn on_health(&mut self, health: &tl_model::health::HealthSnapshot, cx: &mut Context<Self>) {
+        let Some(after) = self.netns_start_after else {
+            return;
+        };
+        if health
+            .helper_start
+            .as_ref()
+            .is_some_and(|(seq, _)| *seq > after)
+        {
+            self.set_netns_all(false, cx);
+        } else if health.helper == HelperState::Unlocked {
+            self.netns_start_after = None;
+        }
+    }
+
+    fn on_netns_host(
+        &mut self,
+        _: &actions::ConnectionNetnsHost,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_netns_all(false, cx);
+    }
+
+    /// "All": sets the demand and, while the helper session is locked, starts one (polkit).
+    fn on_netns_all(
+        &mut self,
+        _: &actions::ConnectionNetnsAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !cx.try_global::<HelperInstalled>().is_some_and(|h| h.0) {
+            return;
+        }
+        self.set_netns_all(true, cx);
+        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+            return;
+        };
+        let snap = Arc::clone(hub.read(cx).current());
+        if snap.health.helper == HelperState::Locked {
+            self.netns_start_after = Some(snap.health.helper_start.as_ref().map_or(0, |(s, _)| *s));
+            crate::helper_flow::note_start(window.window_handle(), cx);
+            window.dispatch_action(Box::new(StartHelperSession), cx);
+        }
+    }
+
+    /// The Namespaces menu: check items "Host only" and "All". Without the helper "All" is
+    /// disabled.
+    pub fn build_netns_menu(
+        page: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<TlMenuPopup> {
+        let (all, focus) = {
+            let page = page.read(cx);
+            (page.netns_all, page.netns_focus.clone())
+        };
+        let installed = cx.try_global::<HelperInstalled>().is_some_and(|h| h.0);
+        let host_text = tr(cx, "connections-netns-host-only");
+        let all_text = tr(cx, "connections-netns-all");
+        let needs_helper = tr(cx, "connections-netns-needs-helper");
+        TlMenu::build(window, cx, focus, move |menu, _, _| {
+            let menu = menu.check_item(host_text, !all, Box::new(actions::ConnectionNetnsHost));
+            if installed {
+                menu.check_item(all_text, all, Box::new(actions::ConnectionNetnsAll))
+            } else {
+                menu.item_disabled(all_text, Some(needs_helper))
+            }
+        })
+    }
+
+    /// The label of the Namespaces control.
+    pub fn netns_label(&self, cx: &App) -> SharedString {
+        tr(
+            cx,
+            if self.netns_all {
+                "connections-netns-label-all"
+            } else {
+                "connections-netns-label-host"
+            },
+        )
+    }
+
+    /// The floating control at the bottom right of the table body (R-116): `sp4` from the right
+    /// and bottom edges, above the status chip.
+    fn netns_control(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        let page = cx.weak_entity();
+        let bounds = Rc::clone(&self.netns_bounds);
+        let measure = Rc::clone(&self.netns_bounds);
+        let button = TlButton::new(NETNS_BUTTON_ID, TlButtonKind::Ghost)
+            .size(TlButtonSize::Sm)
+            .label(self.netns_label(cx))
+            .trailing_icon(TlIcon::ChevronDown)
+            .icon_size(m.icon.xs)
+            .focus_handle(self.netns_focus.clone())
+            .on_click(move |ev, window, cx| {
+                let b = bounds.get();
+                let at = if b.size.width > px(0.) {
+                    b.bottom_left()
+                } else {
+                    ev.position()
+                };
+                let Some(page) = page.upgrade() else {
+                    return;
+                };
+                let menu = Self::build_netns_menu(&page, window, cx);
+                open_context_menu_at(at, window, cx, menu);
+            });
+        div()
+            .debug_selector(|| "ConnectionsNamespaces-control".into())
+            .absolute()
+            .right(m.sp[4])
+            .bottom(m.sp[4] + px(crate::window::status::CHIP_H * m.ui_scale))
+            .bg(theme.menu_bg)
+            .border_1()
+            .border_color(theme.divider)
+            .rounded(m.radius_card)
+            .child(button)
+            .child(
+                canvas(move |b, _, _| measure.set(b), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0(),
+            )
+            .into_any_element()
     }
 
     /// Sends `RefreshNow(Connections)` and arms the one-shot completion toast.
@@ -612,8 +821,12 @@ pub fn jump_to_owner(record: &ConnRecord, cx: &mut App) {
 
 impl Render for ConnectionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let netns_control = self.netns_control(cx);
         div()
             .size_full()
+            .relative()
+            .on_action(cx.listener(Self::on_netns_host))
+            .on_action(cx.listener(Self::on_netns_all))
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_details))
             .on_action(cx.listener(Self::on_copy_row))
@@ -625,6 +838,7 @@ impl Render for ConnectionsPage {
             .on_action(cx.listener(Self::on_close_tcp))
             .on_action(cx.listener(Self::on_open_properties))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
+            .child(netns_control)
     }
 }
 

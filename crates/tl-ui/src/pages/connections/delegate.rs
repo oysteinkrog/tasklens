@@ -45,7 +45,8 @@ use crate::theme::{TlTheme, current};
 use super::ConnectionsPage;
 use super::menu::{ConnMenuTargets, ConnRecordRef, row_menu};
 
-/// The columns in display order. Namespace is added by its P4 bead.
+/// The columns in display order. Namespace is not in this list: it is inserted after Proto
+/// while "Namespaces: All" is chosen and removed again for "Host only".
 pub const CONNECTION_COLUMNS: [ConnColumn; 16] = [
     ConnColumn::Proto,
     ConnColumn::Local,
@@ -153,6 +154,8 @@ fn state_index(state: ConnState) -> usize {
 pub struct ConnectionWords {
     version: Option<u64>,
     pub columns: [SharedString; 16],
+    /// The Namespace column header.
+    netns_column: SharedString,
     pub states: [Arc<str>; 14],
     pub no_owner: Arc<str>,
     /// "Closing…", the State cell while a close is pending (UI-SYS-062).
@@ -235,6 +238,7 @@ impl ConnectionWords {
         Self {
             version,
             columns: COLUMN_KEYS.map(&text),
+            netns_column: text("connections-column-netns"),
             states: STATE_KEYS.map(|key| Arc::from(&*text(key))),
             no_owner: Arc::from(&*text("connections-owner-kernel")),
             closing: Arc::from(&*text("connections-close-closing")),
@@ -292,32 +296,44 @@ fn numeric(column: ConnColumn) -> bool {
 }
 
 pub fn connection_specs(words: &ConnectionWords) -> Vec<ColumnSpec<SysColumnId>> {
-    CONNECTION_COLUMNS
+    let mut specs: Vec<ColumnSpec<SysColumnId>> = CONNECTION_COLUMNS
         .iter()
         .zip(&words.columns)
-        .map(|(&column, label)| ColumnSpec {
-            id: id(column),
-            label: label.clone(),
-            full_name: label.clone(),
-            group: label.clone(),
-            align: if numeric(column) {
-                ColumnAlign::Right
-            } else {
-                ColumnAlign::Left
-            },
-            kind: if numeric(column) {
-                ColumnKind::Numeric
-            } else {
-                ColumnKind::Text
-            },
-            sortable: true,
-            template: template(column),
-            default_width: px(default_width(column)),
-            tooltip: None,
-            availability: Availability::Available,
-            hideable: true,
-        })
-        .collect()
+        .map(|(&column, label)| conn_spec(column, label))
+        .collect();
+    // Not hideable and not sortable: the choice in the Namespaces control owns the column, and
+    // the engine has no namespace order yet.
+    specs.push(ColumnSpec {
+        sortable: false,
+        hideable: false,
+        ..conn_spec(ConnColumn::Netns, &words.netns_column)
+    });
+    specs
+}
+
+fn conn_spec(column: ConnColumn, label: &SharedString) -> ColumnSpec<SysColumnId> {
+    ColumnSpec {
+        id: id(column),
+        label: label.clone(),
+        full_name: label.clone(),
+        group: label.clone(),
+        align: if numeric(column) {
+            ColumnAlign::Right
+        } else {
+            ColumnAlign::Left
+        },
+        kind: if numeric(column) {
+            ColumnKind::Numeric
+        } else {
+            ColumnKind::Text
+        },
+        sortable: true,
+        template: template(column),
+        default_width: px(default_width(column)),
+        tooltip: None,
+        availability: Availability::Available,
+        hideable: true,
+    }
 }
 
 pub const fn state_class(state: ConnState) -> ConnStateClass {
@@ -400,6 +416,12 @@ impl ConnectionsDelegate {
         let specs = connection_specs(&words);
         let order = CONNECTION_COLUMNS.map(id);
         let visible = DEFAULT_COLUMNS.map(id);
+        // The layout starts without the Namespace spec: that column joins it on demand.
+        let layout_specs: Vec<_> = specs
+            .iter()
+            .filter(|spec| spec.id != id(ConnColumn::Netns))
+            .cloned()
+            .collect();
         Self {
             conns: None,
             procs: None,
@@ -407,7 +429,7 @@ impl ConnectionsDelegate {
             index: FxHashMap::default(),
             query_generation: 0,
             header: ComponentHeader::default(),
-            layout: ColumnLayout::defaults(TableId::Connections, &specs, &order, &visible),
+            layout: ColumnLayout::defaults(TableId::Connections, &layout_specs, &order, &visible),
             specs,
             sort: DEFAULT_SORT,
             sort_request: None,
@@ -423,6 +445,34 @@ impl ConnectionsDelegate {
             visible_ids: Arc::from([]),
             sent_cookies: Arc::from([]),
         }
+    }
+
+    /// Shows the Namespace column right after Proto, or removes it from the layout. Session
+    /// only: the column is never in the column picker's remembered state.
+    pub fn set_netns_shown(&mut self, shown: bool, cx: &mut Context<TlTreeTable<Self>>) {
+        let netns = id(ConnColumn::Netns);
+        if self.layout.visible.contains(&netns) == shown {
+            return;
+        }
+        if shown {
+            let at = self
+                .layout
+                .order
+                .iter()
+                .position(|c| *c == id(ConnColumn::Proto))
+                .map_or(0, |ix| ix + 1);
+            self.layout.order.insert(at, netns);
+            self.layout.visible.insert(netns);
+            self.layout
+                .widths
+                .entry(netns)
+                .or_insert(px(default_width(ConnColumn::Netns)));
+        } else {
+            self.layout.order.retain(|c| *c != netns);
+            self.layout.visible.remove(&netns);
+        }
+        self.layout.rebuild(self.layout.ui_scale());
+        cx.notify();
     }
 
     /// The page's aggregator, where the Remote host cookies go.
@@ -820,7 +870,7 @@ impl TreeTableDelegate for ConnectionsDelegate {
             ConnColumn::Inode => write_u64(out, record.inode, false),
             ConnColumn::Service => out.arc = record.unit.as_ref().map(|unit| unit.name.clone()),
             ConnColumn::RemoteHost => self.remote_host_cell(record, out),
-            ConnColumn::Netns => {}
+            ConnColumn::Netns => out.arc = record.netns.as_ref().map(|netns| netns.name.clone()),
         }
         if self.stale() {
             out.text_color = Some(self.theme.text_secondary);

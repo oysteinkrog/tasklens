@@ -257,7 +257,11 @@ fn write_cell(page: &ConnectionsPage, record: &ConnRecord, column: ConnColumn, o
                 out.push_str(host);
             }
         }
-        ConnColumn::Netns => {}
+        ConnColumn::Netns => {
+            if let Some(netns) = &record.netns {
+                out.push_str(&netns.name);
+            }
+        }
     }
 }
 

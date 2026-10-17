@@ -12,6 +12,10 @@ gpui_kit::actions!(
         ConnectionCloseTcp,
         ConnectionJumpToProcess,
         ConnectionGoToService,
+        /// The Namespaces control: list sockets of this namespace only.
+        ConnectionNetnsHost,
+        /// The Namespaces control: list sockets of every namespace through the helper.
+        ConnectionNetnsAll,
     ]
 );
 

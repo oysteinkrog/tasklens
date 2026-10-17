@@ -1189,6 +1189,7 @@ connections-column-interface = Interface
 connections-column-inode = Inode
 connections-column-service = Service
 connections-column-remote-host = Remote host
+connections-column-netns = Namespace
 connections-remote-host-picker-note = Sends DNS queries
 connections-state-listening = LISTENING
 connections-state-syn-sent = SYN-SENT
@@ -2003,6 +2004,11 @@ connections-status-total = { $total } Total | { $tcp } TCP | { $udp } UDP | { $e
 connections-status-selected = { $selected } selected
 connections-refreshed = Connections refreshed.
 connections-not-found = Connection not found in current view
+connections-netns-label-host = Namespaces: Host only
+connections-netns-label-all = Namespaces: All
+connections-netns-host-only = Host only
+connections-netns-all = All
+connections-netns-needs-helper = Needs the tasklens helper
 
 # Connection Properties window (tasklens-9o0.19, UI-SYS-068).
 connections-props-title = Connection properties: { $proto } { $state }
