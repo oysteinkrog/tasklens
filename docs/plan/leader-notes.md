@@ -936,3 +936,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.38: protected confirm text for Freeze follows spec proc.md:1076; keep the test. Wording fix filed as tasklens-bj6.53 (P3).
 - pdu.39: ship Realtime, Idle and the I/O submenu now with no I/O check marks; the I/O priority field and check marks go to tasklens-pdu.62. Scheduler line hidden when two system disks disagree.
 - dwy.11: phases Init, Retrieving, Done (no Searching); no helper path here, it moves to qfx.19 with its test; Failed only when the pid list cannot be read.
+- pdu.62: I/O priority read in the engine per R-144 (io_priority_of, visible rows only), stored in ProcessExtrasP2; raw-class read in tl-ops so Default can be checked; levels 1-3, 5, 6 check nothing.
