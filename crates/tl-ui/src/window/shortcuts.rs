@@ -401,6 +401,13 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         Heading::Information,
         "shortcuts-information-copy",
     ),
+    // Startup apps
+    doc(
+        &["tasklens::StartupDelete"],
+        "StartupTable",
+        Heading::StartupApps,
+        "shortcuts-startup-delete",
+    ),
     // Performance
     doc(
         &["tasklens::PerfCopyDeviceInfo"],
@@ -581,6 +588,12 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         "PropsWindow > KvGrid",
         Heading::DialogsAndWindows,
         "shortcuts-props-field-menu",
+    ),
+    doc(
+        &["tasklens::PropsStartStringScan"],
+        "PropsWindow > StringsOptions",
+        Heading::DialogsAndWindows,
+        "shortcuts-props-string-scan",
     ),
     doc(
         &["tasklens::AffinityToggleGroup"],

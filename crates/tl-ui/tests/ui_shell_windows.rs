@@ -700,9 +700,9 @@ fn shortcuts_unbound_rows_absent(cx: &mut TestAppContext) {
             .bindings()
             .any(|b| b.action().name() == "tasklens::EndTask")
     });
-    assert!(!bound, "End Task has no binding in this phase");
+    assert!(bound, "End Task is bound on the Processes page");
     let rows = shortcut_rows(&frame, &mut vcx);
-    assert!(rows.iter().all(|r| r.1 != "End Task (SIGTERM)"));
+    assert!(rows.iter().any(|r| r.1 == "End Task (SIGTERM)"));
     assert!(
         rows.iter().all(|r| r.1 != "Open Debug menu"),
         "the Debug menu row needs --debug"
