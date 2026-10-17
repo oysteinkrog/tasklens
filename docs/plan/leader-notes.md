@@ -925,3 +925,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-17 leader decision: pdu.36 and pdu.40 use WindowEntry.stack_index from tasklens-y6k.31 for the app row's most recent window.
 - 2026-10-17 leader decision: gma.22 option B; Connections side in tasklens-9o0.38 (select by inode, toast when not in view, no filter clearing); unix rows stay enabled.
 - 2026-10-17 leader decision: pdu.37 option A; E18 chain edit in tree_table.rs (name_trailing delegate hook, called only for hovered or selected rows) allowed in this bead.
+- 2026-10-17 leader decision: pdu.45 Q1 B (cell values in tasklens-pdu.59), Q2 B (registry phase NO_SOURCE for columns without data; engine plan in tasklens-pdu.60), Q3 elevation parked, gpu_N as today.
