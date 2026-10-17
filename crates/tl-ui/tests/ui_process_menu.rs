@@ -3617,9 +3617,13 @@ mod end {
     }
 
     /// Publishes, for each record, the I/O priority `prio` gives its pid, as the engine fills
-    /// `extras_p2` for visible rows. A pid `prio` gives `None` for has no entry key.
+    /// `extras_p2` for visible rows. A pid `prio` gives `None` for has no entry key. The table
+    /// version goes up, as with every sweep, so the page takes the new snapshot.
     fn publish_io_priority(rig: &mut Rig, prio: impl Fn(u32) -> Option<Option<IoPriority>>) {
+        rig.version += 1;
+        let version = rig.version;
         rig.engine.publish_with(|s| {
+            Arc::make_mut(&mut s.table).header.version = version;
             let p = Arc::make_mut(&mut s.processes);
             p.extras_p2 = p
                 .records
