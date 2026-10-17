@@ -662,8 +662,6 @@ mod public_ip {
     use tl_ui::pages::performance::net::{local_hh_mm, public_ip_text};
 
     const FETCH_BUTTON: &str = "TlButton-perf-net-public-ip-fetch";
-    /// Flat index of the Public IP row: Ethernet, all rows shown.
-    const ROW: usize = 15;
 
     fn accepted(accepted: bool) -> Settings {
         let mut s = Settings::default();
@@ -737,10 +735,7 @@ mod public_ip {
     fn public_ip_states(cx: &mut TestAppContext) {
         let mut r = open(cx, accepted(true), system(1000));
         assert_eq!(row(&mut r).0, "Not fetched");
-        let value = r
-            .vcx
-            .debug_bounds(&format!("TlKv-value-{ROW}"))
-            .expect("value drawn");
+        let value = r.vcx.debug_bounds("TlKv-value-15").expect("value drawn");
         let button = r.vcx.debug_bounds(FETCH_BUTTON).expect("Fetch button");
         assert!(button.left() > value.left(), "the button follows the text");
         assert_eq!(button.size.height, px(24.));
@@ -789,10 +784,7 @@ mod public_ip {
             row(&mut r).0,
             "203.0.113.4 (fetched 14:02)\n2001:db8::4 (fetched 14:02)"
         );
-        let pair = r
-            .vcx
-            .debug_bounds(&format!("TlKv-row-{ROW}"))
-            .expect("pair drawn");
+        let pair = r.vcx.debug_bounds("TlKv-row-15").expect("pair drawn");
         let plain = r.vcx.debug_bounds("TlKv-row-0").expect("plain pair");
         assert!(
             pair.size.height > plain.size.height,
