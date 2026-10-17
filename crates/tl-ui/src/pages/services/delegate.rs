@@ -899,6 +899,7 @@ impl ServicesDelegate {
             view: &s.table,
             records: &s.processes.records,
             extras: &s.processes.extras,
+            extras_p2: &s.processes.extras_p2,
             settings: &self.settings,
             words: &self.cell_words,
             members: &self.members,

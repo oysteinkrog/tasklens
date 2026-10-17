@@ -116,6 +116,7 @@ fn write_process_block(delegate: &ServicesDelegate, record: u32, out: &mut Strin
         view: &view,
         records: &processes.records,
         extras: &processes.extras,
+        extras_p2: &processes.extras_p2,
         settings: &settings,
         words: &words,
         members: &members,

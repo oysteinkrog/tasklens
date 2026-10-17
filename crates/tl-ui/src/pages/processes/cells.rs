@@ -14,8 +14,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 use tl_model::actions::SchedPolicy;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
-    GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2,
-    ProcessRecord,
+    GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcFlags, ProcState, ProcessExtras,
+    ProcessExtrasP2, ProcessRecord,
 };
 use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::system::{CpuSet, Metric, ZramTotals};
@@ -441,6 +441,10 @@ pub struct CellWords {
     pub priority_low: Arc<str>,
     pub priority_batch: Arc<str>,
     pub affinity_all: Arc<str>,
+    /// Power usage classes (PROC-034), lowest first.
+    pub power: [Arc<str>; 5],
+    /// Package status words (PROC-027), in `PackageStatus` declaration order.
+    pub package_status: [Arc<str>; 8],
     /// Column labels, index aligned with [`PROCESS_COLUMNS`], for the copy commands.
     pub labels: Arc<[Arc<str>]>,
     /// Copy details labels that are not column labels: "Private bytes", "Working set".
@@ -485,6 +489,23 @@ impl CellWords {
             priority_low: text("processes-priority-low"),
             priority_batch: text("processes-priority-batch"),
             affinity_all: text("processes-affinity-all"),
+            power: [
+                text("processes-power-very-low"),
+                text("processes-power-low"),
+                text("processes-power-moderate"),
+                text("processes-power-high"),
+                text("processes-power-very-high"),
+            ],
+            package_status: [
+                text("processes-package-status-packaged"),
+                text("processes-package-status-modified"),
+                text("processes-package-status-not-packaged"),
+                text("processes-package-status-deleted"),
+                text("processes-package-status-flatpak"),
+                text("processes-package-status-snap"),
+                text("processes-package-status-appimage"),
+                text("processes-package-status-wine"),
+            ],
             labels: PROCESS_COLUMNS.iter().map(|c| text(c.label)).collect(),
             copy_private_bytes: text("processes-copy-private-bytes"),
             copy_working_set: text("processes-copy-working-set"),
@@ -589,6 +610,9 @@ pub struct CellCtx<'a> {
     pub records: &'a [ProcessRecord],
     /// `ProcessSnapshot.extras`, index aligned with `records`. Empty gives WarmingUp cells.
     pub extras: &'a [ProcessExtras],
+    /// `ProcessSnapshot.extras_p2`, index aligned with `records`. Empty gives Unsupported cells
+    /// in the phase-2 columns.
+    pub extras_p2: &'a [ProcessExtrasP2],
     /// `units.network`, `units.network_auto_scale`.
     pub settings: &'a Settings,
     pub words: &'a CellWords,
@@ -644,6 +668,12 @@ enum Value<'a> {
     Time(i64),
     Priority(SchedPolicy, u8, i8),
     Affinity(&'a CpuSet),
+    /// The text before the " <email>" of a packager.
+    Packager(&'a Arc<str>),
+    /// ELF class (32 or 64) and `e_machine`.
+    Architecture(u8, u16),
+    /// Estimated watts, shown as a class.
+    Power(f32),
 }
 
 /// Fills `out` for one cell. Sets `bits` and `validity` always; writes `text` only when
@@ -791,6 +821,12 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
             FxBuildHasher.hash_one((set.0, ctx.online.0)),
             Validity::Valid,
         ),
+        Value::Packager(a) => (arc_bits(a), Validity::Valid),
+        Value::Architecture(class, machine) => (
+            u64::from(*class) << 16 | u64::from(*machine),
+            Validity::Valid,
+        ),
+        Value::Power(w) => (u64::from(w.to_bits()), Validity::Valid),
     };
     out.bits = bits;
     out.validity = validity;
@@ -844,7 +880,34 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
         Value::Time(unix_s) => write_start_time(s, unix_s),
         Value::Priority(policy, rt, nice) => write_priority(s, ctx.words, policy, rt, nice),
         Value::Affinity(set) => write_affinity(s, ctx.words, set, ctx.online),
+        Value::Packager(a) => s.push_str(a.split(" <").next().unwrap_or(a).trim_end()),
+        Value::Architecture(class, machine) => write_architecture(s, class, machine),
+        Value::Power(w) => s.push_str(&ctx.words.power[power_class(w)]),
     }
+}
+
+/// Index into `CellWords::power` (PROC-034): below 0.5, 2, 8 and 25 W, then from 25 W.
+fn power_class(watts: f32) -> usize {
+    [0.5, 2.0, 8.0, 25.0]
+        .iter()
+        .position(|&limit| watts < limit)
+        .unwrap_or(4)
+}
+
+/// PROC-027 Architecture: "x86-64 (64-bit)", "i386 (32-bit)", "AArch64 (64-bit)". Machines
+/// without a name show "machine N".
+fn write_architecture(out: &mut String, class: u8, machine: u16) {
+    match machine {
+        3 => out.push_str("i386"),
+        40 => out.push_str("ARM"),
+        62 => out.push_str("x86-64"),
+        183 => out.push_str("AArch64"),
+        243 => out.push_str("RISC-V"),
+        n => {
+            let _ = write!(out, "machine {n}");
+        }
+    }
+    let _ = write!(out, " ({class}-bit)");
 }
 
 /// Today "HH:MM:SS", else "YYYY-MM-DD HH:MM", in the system time zone (PROC-027).
@@ -975,6 +1038,14 @@ fn record_value<'a>(
     // A column read from `ProcessExtras`; WarmingUp until the extras arrive.
     let extra =
         |f: &dyn Fn(&'a ProcessExtras) -> Value<'a>| x.map_or(Value::Glyph(Validity::WarmingUp), f);
+    // A column read from `ProcessExtrasP2`; Unsupported when the row has no entry or the value
+    // was not read.
+    let p2_row = t.record.and_then(|i| ctx.extras_p2.get(i as usize));
+    let p2 = |f: &dyn Fn(&'a ProcessExtrasP2) -> Option<Value<'a>>| {
+        p2_row
+            .and_then(f)
+            .unwrap_or(Value::Glyph(Validity::Unsupported))
+    };
     let cpu_time = |ticks: fn(&ProcessExtras) -> u64| {
         if ctx.clk_tck == 0 {
             return Value::Glyph(Validity::Unsupported);
@@ -1074,7 +1145,62 @@ fn record_value<'a>(
         }),
         C::Cgroup => text(r.meta.cgroup.as_ref()),
         C::AppId => text(r.meta.app_id.as_ref()),
-        // No phase-1 source: P2 to P4 columns read `ProcessExtrasP2` and later collectors.
+        // PROC-027, PROC-028, PROC-029, PROC-034, PROC-036 phase-2 columns.
+        C::FileMtime => p2(&|x| x.exe_mtime_s.map(Value::Time)),
+        C::FileSize => p2(&|x| x.exe_size_bytes.map(|n| Value::Bytes(n, Validity::Valid))),
+        C::Architecture => p2(&|x| Some(Value::Architecture(x.elf_class?, x.elf_machine?))),
+        C::Session => p2(&|x| {
+            x.session_id.map(|id| {
+                if id == u32::MAX {
+                    Value::Blank
+                } else {
+                    Value::Id(id.into())
+                }
+            })
+        }),
+        C::SecurityLabel => p2(&|x| x.security_label.as_ref().map(Value::Arc)),
+        C::Sandbox => p2(&|x| x.sandbox.as_ref().map(Value::Arc)),
+        C::SchedPolicy => p2(&|x| x.sched_policy_text.as_ref().map(Value::Arc)),
+        C::OomScore => p2(&|x| x.oom_score.map(|n| Value::Id(n.into()))),
+        C::OomScoreAdj => p2(&|x| x.oom_score_adj.map(|n| Value::Id(n.into()))),
+        C::Tty => p2(&|x| x.tty.as_ref().map(Value::Arc)),
+        C::Cwd => p2(&|x| x.cwd.as_ref().map(Value::Arc)),
+        C::CtxSwitches => p2(
+            &|x| match (x.ctx_switches_voluntary, x.ctx_switches_involuntary) {
+                (None, None) => None,
+                (a, b) => Some(Value::Count(
+                    a.unwrap_or(0).saturating_add(b.unwrap_or(0)),
+                    Validity::Valid,
+                )),
+            },
+        ),
+        C::CtxSwitchesDelta => p2(&|x| {
+            x.ctx_switches_delta
+                .map(|n| Value::Count(n, Validity::Valid))
+        }),
+        C::Power => p2(&|x| x.power_w.map(Value::Power)),
+        C::PowerTrend => p2(&|x| x.power_trend_w.map(Value::Power)),
+        C::Version => p2(&|x| x.package.as_ref().map(|p| Value::Arc(&p.version))),
+        C::Timestamp => p2(&|x| x.package.as_ref()?.build_date_s.map(Value::Time)),
+        C::Company => p2(&|x| x.package.as_ref().map(|p| Value::Arc(&p.name))),
+        C::Signer => p2(&|x| x.package.as_ref()?.packager.as_ref().map(Value::Packager)),
+        C::Signature => p2(&|x| {
+            x.package_status.map(|s| {
+                Value::Arc(
+                    &ctx.words.package_status[match s {
+                        PackageStatus::Packaged => 0,
+                        PackageStatus::PackagedModified => 1,
+                        PackageStatus::NotPackaged => 2,
+                        PackageStatus::DeletedUpgraded => 3,
+                        PackageStatus::Flatpak => 4,
+                        PackageStatus::Snap => 5,
+                        PackageStatus::AppImage => 6,
+                        PackageStatus::Wine => 7,
+                    }],
+                )
+            })
+        }),
+        // No source yet: Cycles, GPU columns and the later phases.
         _ => Value::Glyph(Validity::Unsupported),
     }
 }
@@ -1806,11 +1932,11 @@ pub fn heat_background(
         return None;
     }
     let value = match col.kind {
-        ProcColumnKind::Percent | ProcColumnKind::DiskRate | ProcColumnKind::NetRate => {
-            f64::from(f32::from_bits(out.bits as u32))
-        }
+        ProcColumnKind::Percent
+        | ProcColumnKind::DiskRate
+        | ProcColumnKind::NetRate
+        | ProcColumnKind::PowerClass => f64::from(f32::from_bits(out.bits as u32)),
         ProcColumnKind::MemorySize => out.bits as f64,
-        // The Power columns have no phase-1 value; their bead defines the bits.
         _ => return None,
     };
     let alpha = heat_alpha(col, value, ctx, st.heat_intensity_pct);

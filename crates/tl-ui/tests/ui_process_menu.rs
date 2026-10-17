@@ -3142,6 +3142,7 @@ mod end {
                 view: &self.view,
                 records: &self.records,
                 extras: &self.extras,
+                extras_p2: &[],
                 settings: &self.settings,
                 words: &self.words,
                 members: &self.members,

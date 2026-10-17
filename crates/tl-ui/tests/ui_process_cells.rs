@@ -239,8 +239,8 @@ mod values {
     use tl_model::actions::SchedPolicy;
     use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey};
     use tl_model::process::{
-        GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta,
-        ProcessRecord,
+        GroupKind, GroupRow, GroupRowKind, PackageInfo, PackageStatus, ProcFlags, ProcState,
+        ProcessExtras, ProcessExtrasP2, ProcessMeta, ProcessRecord,
     };
     use tl_model::settings::Settings;
     use tl_model::system::CpuSet;
@@ -419,6 +419,7 @@ mod values {
         view: ProcessTableView,
         records: Vec<ProcessRecord>,
         extras: Vec<ProcessExtras>,
+        extras_p2: Vec<ProcessExtrasP2>,
         settings: Settings,
         words: CellWords,
         online: CpuSet,
@@ -431,6 +432,7 @@ mod values {
                 view: ProcessTableView::default(),
                 records: vec![r],
                 extras: vec![extras()],
+                extras_p2: Vec::new(),
                 settings: Settings::default(),
                 words,
                 online: CpuSet::empty(),
@@ -450,6 +452,7 @@ mod values {
                 view: &self.view,
                 records: &self.records,
                 extras: &self.extras,
+                extras_p2: &self.extras_p2,
                 settings: &self.settings,
                 words: &self.words,
                 members: &self.members,
@@ -573,6 +576,176 @@ mod values {
             start.len() == "2023-11-14 22:13".len() || start.len() == "22:13:20".len(),
             "{start}"
         );
+    }
+
+    fn p2_fixture(x: ProcessExtrasP2) -> Fixture {
+        let mut f = Fixture::new(record(), key_words());
+        f.extras_p2 = vec![x];
+        f
+    }
+
+    fn glyph(f: &Fixture, id: ColumnId) -> Validity {
+        f.record_cell(&table_row(false, false, 0), id).validity
+    }
+
+    /// The columns the P2 sweep fills. Pss, Uss and Major faults read other sources.
+    const P2_COLUMNS: [ColumnId; 20] = [
+        ColumnId::FileMtime,
+        ColumnId::FileSize,
+        ColumnId::Architecture,
+        ColumnId::Session,
+        ColumnId::SecurityLabel,
+        ColumnId::Sandbox,
+        ColumnId::SchedPolicy,
+        ColumnId::OomScore,
+        ColumnId::OomScoreAdj,
+        ColumnId::Tty,
+        ColumnId::Cwd,
+        ColumnId::CtxSwitches,
+        ColumnId::CtxSwitchesDelta,
+        ColumnId::Power,
+        ColumnId::PowerTrend,
+        ColumnId::Version,
+        ColumnId::Timestamp,
+        ColumnId::Company,
+        ColumnId::Signer,
+        ColumnId::Signature,
+    ];
+
+    #[test]
+    fn p2_columns_unsupported_without_extras_p2() {
+        let f = Fixture::new(record(), key_words());
+        for id in P2_COLUMNS {
+            assert_eq!(glyph(&f, id), Validity::Unsupported, "{id:?}");
+        }
+        // An entry that read nothing is Unsupported too.
+        let f = p2_fixture(ProcessExtrasP2::default());
+        for id in P2_COLUMNS {
+            assert_eq!(glyph(&f, id), Validity::Unsupported, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn p2_file_and_identity_columns() {
+        let a = |t: &str| Some(Arc::<str>::from(t));
+        let f = p2_fixture(ProcessExtrasP2 {
+            exe_mtime_s: Some(1_700_000_000),
+            exe_size_bytes: Some(1_572_864),
+            elf_class: Some(64),
+            elf_machine: Some(62),
+            session_id: Some(3),
+            security_label: a("firefox (enforce)"),
+            sandbox: a("Flatpak"),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(f.text(ColumnId::FileSize), "1.50 MiB");
+        assert!(f.text(ColumnId::FileMtime).starts_with("2023-11-1"));
+        assert_eq!(f.text(ColumnId::Architecture), "x86-64 (64-bit)");
+        assert_eq!(f.text(ColumnId::Session), "3");
+        assert_eq!(f.text(ColumnId::SecurityLabel), "firefox (enforce)");
+        assert_eq!(f.text(ColumnId::Sandbox), "Flatpak");
+        let f = p2_fixture(ProcessExtrasP2 {
+            elf_class: Some(32),
+            elf_machine: Some(3),
+            session_id: Some(u32::MAX),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(f.text(ColumnId::Architecture), "i386 (32-bit)");
+        let out = f.record_cell(&table_row(false, false, 0), ColumnId::Session);
+        assert_eq!(out.validity, Validity::Valid);
+        assert_eq!(shown(&out), "");
+    }
+
+    #[test]
+    fn p2_linux_columns() {
+        let a = |t: &str| Some(Arc::<str>::from(t));
+        let f = p2_fixture(ProcessExtrasP2 {
+            sched_policy_text: a("SCHED_OTHER"),
+            oom_score: Some(667),
+            oom_score_adj: Some(-100),
+            tty: a("pts/3"),
+            cwd: a("/home/oystein"),
+            ctx_switches_voluntary: Some(1_000),
+            ctx_switches_involuntary: Some(234),
+            ctx_switches_delta: Some(12),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(f.text(ColumnId::SchedPolicy), "SCHED_OTHER");
+        assert_eq!(f.text(ColumnId::OomScore), "667");
+        assert_eq!(f.text(ColumnId::OomScoreAdj), "-100");
+        assert_eq!(f.text(ColumnId::Tty), "pts/3");
+        assert_eq!(f.text(ColumnId::Cwd), "/home/oystein");
+        let sum = f.record_cell(&table_row(false, false, 0), ColumnId::CtxSwitches);
+        assert_eq!(sum.bits, 1_234);
+        assert_eq!(f.text(ColumnId::CtxSwitchesDelta), "12");
+    }
+
+    #[test]
+    fn p2_package_columns() {
+        let a = |t: &str| Some(Arc::<str>::from(t));
+        let pkg = |packager, build_date_s| {
+            Some(Arc::new(PackageInfo {
+                name: Arc::from("firefox"),
+                version: Arc::from("130.0-1"),
+                description: None,
+                packager,
+                build_date_s,
+                url: None,
+            }))
+        };
+        let f = p2_fixture(ProcessExtrasP2 {
+            package: pkg(a("Jane Doe <jane@example.org>"), Some(1_700_000_000)),
+            package_status: Some(PackageStatus::PackagedModified),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(f.text(ColumnId::Version), "130.0-1");
+        assert_eq!(f.text(ColumnId::Company), "firefox");
+        assert_eq!(f.text(ColumnId::Signer), "Jane Doe");
+        assert!(f.text(ColumnId::Timestamp).starts_with("2023-11-1"));
+        assert_eq!(
+            f.text(ColumnId::Signature),
+            "processes-package-status-modified"
+        );
+        // A package with no packager or build date, and no status, reads as not available.
+        let f = p2_fixture(ProcessExtrasP2 {
+            package: pkg(None, None),
+            ..ProcessExtrasP2::default()
+        });
+        assert_eq!(glyph(&f, ColumnId::Signer), Validity::Unsupported);
+        assert_eq!(glyph(&f, ColumnId::Timestamp), Validity::Unsupported);
+        assert_eq!(glyph(&f, ColumnId::Signature), Validity::Unsupported);
+    }
+
+    #[test]
+    fn p2_power_classes_and_bits() {
+        let class = |w: f32| {
+            let f = p2_fixture(ProcessExtrasP2 {
+                power_w: Some(w),
+                power_trend_w: Some(w),
+                ..ProcessExtrasP2::default()
+            });
+            let out = f.record_cell(&table_row(false, false, 0), ColumnId::Power);
+            assert_eq!(out.bits, u64::from(w.to_bits()));
+            assert_eq!(f.text(ColumnId::PowerTrend), shown(&out));
+            shown(&out)
+        };
+        assert_eq!(class(0.49), "processes-power-very-low");
+        assert_eq!(class(0.5), "processes-power-low");
+        assert_eq!(class(1.99), "processes-power-low");
+        assert_eq!(class(2.0), "processes-power-moderate");
+        assert_eq!(class(8.0), "processes-power-high");
+        assert_eq!(class(25.0), "processes-power-very-high");
+    }
+
+    #[test]
+    fn p2_group_rows_stay_blank() {
+        let f = p2_fixture(ProcessExtrasP2::default());
+        let g = group(GroupRowKind::App);
+        for id in P2_COLUMNS {
+            let out = f.group_cell(&g, RowKind::Process, id);
+            assert_eq!(out.validity, Validity::Valid, "{id:?}");
+            assert_eq!(shown(&out), "", "{id:?}");
+        }
     }
 
     #[test]
@@ -991,6 +1164,7 @@ mod paint {
                 view: &self.view,
                 records: &[],
                 extras: &[],
+                extras_p2: &[],
                 settings: &self.settings,
                 words: &self.words,
                 members: &self.members,
@@ -2278,6 +2452,7 @@ mod group_fields {
                 view: &self.view,
                 records: &[],
                 extras: &extras,
+                extras_p2: &[],
                 settings: &self.settings,
                 words: &self.words,
                 members: &self.members,
