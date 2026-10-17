@@ -931,3 +931,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-17 leader: shortcuts_cover_all_bindings fails on main since 10-15 (pages added bindings without SHORTCUT_DOCS). Partial fix 299d24c9; sweep in tasklens-bj6.51.
 - 2026-10-17 leader decision: pdu.38 option A (app rows act on the app.slice samples for their key, disabled when none; unit rows use the unit); shared-scope case in tasklens-pdu.61.
 - 2026-10-17 leader decision: 8q0.42 closed; Python cost estimate accepted, tl-ui test-hooks clippy run by the leader.
+- 2026-10-17 leader decision: 9o0.28 keeps the "TCP connection close requested" Progress toast; R-203's no-Progress rule narrowed to Startup Apps.
