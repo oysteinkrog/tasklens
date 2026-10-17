@@ -2,6 +2,20 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-17
+
+### D-023: Overview layout editing
+
+Oystein wants the Overview page layout and box sizes to be customizable (2026-10-17). He chose
+direct dragging over an edit-only mode or settings presets. The spec is UI-PRF-018.
+
+- **Normal use.** The gaps between boxes and between rows are always splitters. Dragging one
+  moves size between the two neighbours only.
+- **Edit Layout mode.** Entered from the page menu. Boxes move by dragging their title, can be
+  hidden and added back, and "Reset Layout" restores the default. Done or Esc leaves.
+- **Saved per profile** as `[performance.overview]`. It replaces `overview_top_processes`, which
+  migrates once.
+
 ## 2026-10-07
 
 ### D-022: Performance Overview page
