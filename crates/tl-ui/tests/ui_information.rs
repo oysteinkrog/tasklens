@@ -105,6 +105,7 @@ fn row(label: &str, text: &str) -> InfoRow {
         block: 0,
         label_tooltip: None,
         label_lines: 1,
+        fetch: None,
     }
 }
 
@@ -996,7 +997,7 @@ mod hardware_builders {
     use tl_model::ids::DeviceIdx;
     use tl_model::snapshot::{
         DiskDrive, DisplayConnector, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot,
-        MemoryModule, NetworkAdapter, SystemSnapshot,
+        MemoryModule, NetworkAdapter, PublicIpState, SystemSnapshot,
     };
     use tl_model::system::{GpuTotals, Metric};
     use tl_model::table::Total;
@@ -1392,12 +1393,101 @@ mod hardware_builders {
             ),
             ("IP address", "192.168.1.10/24\nfe80::1c2:3ff:fe4a:5b6c/64"),
             ("MAC address", "a8:a1:59:12:34:56"),
+            ("Public IP", "Not fetched"),
         ];
         let got: Vec<_> = shown(&got).into_iter().map(|(_, l, v)| (l, v)).collect();
         assert_eq!(
             got,
             want.map(|(l, v)| (l.to_owned(), v.to_owned())).to_vec()
         );
+    }
+
+    fn public_ip_rows(state: PublicIpState) -> Vec<InfoRow> {
+        let mut inv = inventory();
+        inv.public_ip = state;
+        rows(&inv, &system(), build_network)
+    }
+
+    fn fetched(v4: Option<&str>, v6: Option<&str>) -> PublicIpState {
+        PublicIpState::Fetched {
+            v4: v4.map(Arc::from),
+            v6: v6.map(Arc::from),
+            fetched_at_s: 1_792_000_000,
+        }
+    }
+
+    #[test]
+    fn info_public_ip_states() {
+        let last = |state| public_ip_rows(state).pop().expect("a Public IP row");
+
+        let r = last(PublicIpState::NotFetched);
+        assert_eq!((r.label.as_ref(), r.block), ("Public IP", 0));
+        assert_eq!(r.value.text.as_ref(), "Not fetched");
+        assert_eq!(r.value.validity, Validity::Stale);
+        assert_eq!(r.fetch, Some(false));
+
+        let r = last(PublicIpState::Fetching);
+        assert_eq!(r.value.text.as_ref(), "Fetching…");
+        assert_eq!(r.fetch, Some(true));
+
+        let r = last(fetched(Some("203.0.113.4"), None));
+        let time = tl_ui::pages::performance::net::local_hh_mm(1_792_000_000);
+        assert_eq!(
+            r.value.text.as_ref(),
+            format!("203.0.113.4 (fetched {time})")
+        );
+        assert_eq!(r.fetch, Some(false));
+
+        let r = last(PublicIpState::Failed(Arc::from("timed out")));
+        assert_eq!(r.value.validity, Validity::Failed);
+        assert_eq!(
+            r.value.tooltip.as_deref(),
+            Some("Could not reach api.ipify.org: timed out")
+        );
+        assert_eq!(r.fetch, Some(false));
+        assert_eq!(
+            shown(std::slice::from_ref(&r))[0].2,
+            "Unavailable",
+            "the grid shows the Failed word"
+        );
+
+        // Only the Public IP row carries a button.
+        let all = public_ip_rows(PublicIpState::NotFetched);
+        assert_eq!(all.iter().filter(|r| r.fetch.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn info_public_ip_shared_with_network_page() {
+        use tl_ui::pages::performance::details::Template;
+        use tl_ui::pages::performance::net::public_ip_text;
+        let template = Template::en("perf-net-ip-fetched", &["ip", "time"]);
+        for (v4, v6) in [
+            (Some("203.0.113.4"), None),
+            (Some("203.0.113.4"), Some("2001:db8::1")),
+        ] {
+            let got = public_ip_rows(fetched(v4, v6)).pop().unwrap();
+            assert_eq!(
+                got.value.text.as_ref(),
+                public_ip_text(&template, v4, v6, 1_792_000_000)
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn info_public_ip_button_drawn(cx: &mut TestAppContext) {
+        for (state, lines) in [
+            (PublicIpState::Fetching, 1),
+            (fetched(Some("203.0.113.4"), Some("2001:db8::1")), 2),
+        ] {
+            let got = public_ip_rows(state);
+            let at = got.len() - 1;
+            let (_, _, cx) = host(cx, InfoSectionId::NetworkAdapters, 100, got);
+            let value = bounds(cx, &format!("TlKv-row-{at}")).expect("row drawn");
+            assert_eq!(value.size.height, px(28. * lines as f32));
+            let button = bounds(cx, "TlButton-info-public-ip-fetch").expect("button drawn");
+            assert_eq!(button.size.height, px(24.));
+            assert!(button.origin.x > value.origin.x + px(232.));
+        }
     }
 
     #[gpui_kit::test]
@@ -2219,7 +2309,9 @@ mod copy_text {
              Connection: wlan0 (Wi-Fi)\n\
              Details: Intel Ethernet Controller I225-V, igc, 2500 Mbps\n\
              IP address: 10.0.0.5/24\n\
-             MAC address: a8:a1:59:12:34:56"
+             MAC address: a8:a1:59:12:34:56\n\
+             \n\
+             Public IP: Not fetched"
         );
     }
 
@@ -2316,7 +2408,7 @@ fn information_keymap_registered(cx: &mut TestAppContext) {
 mod main_window {
     use super::*;
     use tl_model::client::EngineClient;
-    use tl_model::command::{Command, Tab};
+    use tl_model::command::{Command, DeviceCommand, Tab};
     use tl_model::health::SourceId;
     use tl_model::settings::{Settings, StartTab, UiState};
     use tl_model::snapshot::{InventorySnapshot, SystemSnapshot};
@@ -2441,6 +2533,34 @@ mod main_window {
                 q.visible_texts().iter().map(|t| t.to_string()).collect()
             })
         }
+    }
+
+    #[gpui_kit::test]
+    fn info_public_ip_notice_first(cx: &mut TestAppContext) {
+        let mut r = boot(cx);
+        r.publish_inventory(1);
+        r.visit();
+        let page = r.page().expect("the Information page exists");
+        r.vcx.update(|window, cx| {
+            let focus = page.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+        });
+        let button = r
+            .bounds("TlButton-info-public-ip-fetch")
+            .expect("the Fetch button is drawn");
+        let before = r.vcx.update(|_, cx| cx.windows().len());
+        r.vcx.simulate_click(button.center(), Modifiers::none());
+        r.draw();
+        r.vcx.run_until_parked();
+        let after = r.vcx.update(|_, cx| cx.windows().len());
+        assert_eq!(after, before + 1, "the notice window opened");
+        assert!(
+            !r.engine
+                .commands()
+                .iter()
+                .any(|c| matches!(c, Command::Device(DeviceCommand::FetchPublicIp))),
+            "no fetch before Continue"
+        );
     }
 
     #[gpui_kit::test]

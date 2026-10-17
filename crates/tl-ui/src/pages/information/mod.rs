@@ -54,9 +54,9 @@ use tl_model::validity::Validity;
 use tracing::debug;
 
 use self::actions::{
-    CopyInformationAll, CopyInformationSection, INFORMATION_CONTEXT, InformationScrollBottom,
-    InformationScrollLineDown, InformationScrollLineUp, InformationScrollPageDown,
-    InformationScrollPageUp, InformationScrollTop,
+    CopyInformationAll, CopyInformationSection, FetchInformationPublicIp, INFORMATION_CONTEXT,
+    InformationScrollBottom, InformationScrollLineDown, InformationScrollLineUp,
+    InformationScrollPageDown, InformationScrollPageUp, InformationScrollTop,
 };
 use self::filter::filter_section;
 use self::section::{InfoRow, InfoSection, InfoSectionId};
@@ -680,6 +680,9 @@ impl Render for InformationPage {
                     .on_action(cx.listener(Self::on_bottom))
                     .on_action(cx.listener(Self::on_copy_section))
                     .on_action(cx.listener(Self::on_copy_all))
+                    .on_action(|_: &FetchInformationPublicIp, window, cx| {
+                        section::fetch_public_ip(window, cx);
+                    })
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)

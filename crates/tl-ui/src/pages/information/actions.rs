@@ -23,6 +23,8 @@ gpui_kit::actions!(
         InformationScrollBottom,
         /// Copies every section (the tab copy icon and Ctrl+C without a text selection).
         CopyInformationAll,
+        /// The Public IP row's Fetch button.
+        FetchInformationPublicIp,
     ]
 );
 

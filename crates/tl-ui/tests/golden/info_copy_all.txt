@@ -108,3 +108,5 @@ Connection: enp6s0 (Ethernet)
 Details: Intel Ethernet Controller I225-V, igc, 2500 Mbps
 IP address: 192.168.1.10/24, fe80::1c2:3ff:fe4a:5b6c/64
 MAC address: a8:a1:59:12:34:56
+
+Public IP: Not fetched

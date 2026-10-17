@@ -18,7 +18,8 @@ use smallvec::SmallVec;
 use tl_model::devices::DeviceCatalog;
 use tl_model::ids::DeviceIdx;
 use tl_model::snapshot::{
-    DisplayMode, FirmwareType, InvField, InventorySnapshot, NetworkAdapter, SystemSnapshot,
+    DisplayMode, FirmwareType, InvField, InventorySnapshot, NetworkAdapter, PublicIpState,
+    SystemSnapshot,
 };
 use tl_model::system::Metric;
 use tl_model::units;
@@ -28,6 +29,7 @@ use super::section::InfoRow;
 use crate::components::kv_grid::{TlValue, UnsupportedWord};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
+use crate::pages::performance::net::public_ip_text;
 
 /// What the builders read.
 pub struct InfoInputs<'a> {
@@ -150,9 +152,12 @@ enum W {
     NetMac,
     NetUnknown,
     NetIpNone,
+    PublicIp,
+    PublicIpNotFetched,
+    PublicIpFetching,
 }
 
-const KEYS: [&str; 109] = [
+const KEYS: [&str; 112] = [
     "information-os-name",
     "information-os-version",
     "information-os-build",
@@ -262,6 +267,9 @@ const KEYS: [&str; 109] = [
     "information-net-mac-address",
     "information-net-unknown-adapter",
     "information-net-ip-none",
+    "information-public-ip",
+    "information-public-ip-not-fetched",
+    "information-public-ip-fetching",
 ];
 
 /// The first label of each sub-block, in Memory modules, Disk drives, Graphics and Network
@@ -284,6 +292,9 @@ const KEY_RESOLUTION: &str = "information-gpu-resolution-value";
 const KEY_RESOLUTION_SIZE: &str = "information-gpu-resolution-size";
 const KEY_PRIMARY: &str = "information-gpu-resolution-primary";
 const KEY_LINK_SPEED: &str = "information-net-link-speed";
+/// The Network page's texts, so both pages show the same Public IP.
+const KEY_IP_FETCHED: &str = "perf-net-ip-fetched";
+const KEY_IP_FAILED_TIP: &str = "perf-net-ip-failed-tooltip";
 /// Icon sizes tried for a PNG distro logo, largest first.
 const LOGO_PNG_SIZES: [&str; 7] = [
     "256x256", "128x128", "64x64", "48x48", "32x32", "24x24", "16x16",
@@ -327,6 +338,10 @@ pub struct InfoWords {
     primary: Template,
     /// "{speed} Mbps".
     link_speed: Template,
+    /// "{ip} (fetched {time})", the Network page's text.
+    ip_fetched: Template,
+    /// "Could not reach api.ipify.org: {error}".
+    ip_failed_tip: Template,
 }
 
 impl Default for InfoWords {
@@ -363,6 +378,8 @@ impl InfoWords {
             resolution_size: template(KEY_RESOLUTION_SIZE, &["width", "height"]),
             primary: template(KEY_PRIMARY, &["mode"]),
             link_speed: template(KEY_LINK_SPEED, &["speed"]),
+            ip_fetched: template(KEY_IP_FETCHED, &["ip", "time"]),
+            ip_failed_tip: template(KEY_IP_FAILED_TIP, &["error"]),
         }
     }
 
@@ -965,9 +982,9 @@ pub fn build_graphics(i: &InfoInputs, out: &mut Vec<InfoRow>) {
     }
 }
 
-/// Network adapters rows (UI-SYS-095) without the Public IP row: one block per interface the
-/// worker kept by the Performance sidebar rules (PERF-004). IP address has one line per address,
-/// in snapshot order.
+/// Network adapters rows (UI-SYS-095): one block per interface the worker kept by the Performance
+/// sidebar rules (PERF-004), then the unindented Public IP row with its Fetch button. IP address
+/// has one line per address, in snapshot order.
 pub fn build_network(i: &InfoInputs, out: &mut Vec<InfoRow>) {
     let w = i.words;
     for (n, a) in i.inv.network.iter().enumerate() {
@@ -987,6 +1004,46 @@ pub fn build_network(i: &InfoInputs, out: &mut Vec<InfoRow>) {
         push_in(out, block, w.get(W::NetIp), ips, false);
         push_in(out, block, w.get(W::NetMac), text_value(&a.mac), false);
     }
+    push_public_ip(w, &i.inv.public_ip, out);
+}
+
+/// The Public IP row after the adapter blocks. It carries the shared PERF-060 state; the Fetch
+/// button is drawn by the section. The address is never logged.
+fn push_public_ip(w: &InfoWords, state: &PublicIpState, out: &mut Vec<InfoRow>) {
+    let not_fetched = || {
+        let text = w.get(W::PublicIpNotFetched).clone();
+        (formatted(text, Validity::Stale), false)
+    };
+    let (value, loading) = match state {
+        PublicIpState::NotFetched => not_fetched(),
+        PublicIpState::Fetching => (TlValue::new(w.get(W::PublicIpFetching).clone()), true),
+        PublicIpState::Fetched {
+            v4,
+            v6,
+            fetched_at_s,
+        } => {
+            let text = public_ip_text(&w.ip_fetched, v4.as_deref(), v6.as_deref(), *fetched_at_s);
+            if text.is_empty() {
+                not_fetched()
+            } else {
+                (TlValue::new(text), false)
+            }
+        }
+        PublicIpState::Failed(reason) => {
+            let mut tip = String::new();
+            let _ = w.ip_failed_tip.write(&mut tip, &[&&**reason]);
+            let value = TlValue {
+                validity: Validity::Failed,
+                tooltip: Some(tip.into()),
+                ..TlValue::new(SharedString::default())
+            };
+            (value, false)
+        }
+    };
+    out.push(InfoRow {
+        fetch: Some(loading),
+        ..row(w.get(W::PublicIp), value, false)
+    });
 }
 
 /// "<adapter name>, <driver>, <speed> Mbps" from the parts that show; "Not reported" when none
@@ -1123,6 +1180,7 @@ fn row(label: &SharedString, value: TlValue, live: bool) -> InfoRow {
         block: 0,
         label_tooltip: None,
         label_lines: 1,
+        fetch: None,
     }
 }
 

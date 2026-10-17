@@ -29,8 +29,10 @@ use gpui_kit::{
     px,
 };
 use serde::Deserialize;
+use tl_model::command::{Command, CommandError, DeviceCommand};
 
-use super::actions::CopyInformationSection;
+use super::actions::{CopyInformationSection, FetchInformationPublicIp};
+use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
@@ -41,6 +43,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::text::style::t_md;
 use crate::theme::{current, metrics};
+use crate::window::public_ip::request_public_ip_fetch;
 
 /// Width of the accent bar at the band's left edge, × ui_scale.
 const BAR_WIDTH: f32 = 3.;
@@ -51,6 +54,9 @@ const LABEL_WIDTH: f32 = 232.;
 const KEY_COPY_SECTION: &str = "information-copy-section";
 const KEY_COPY_NAME: &str = "information-copy-section-name";
 const KEY_COPIED: &str = "information-toast-copied";
+const KEY_FETCH: &str = "information-public-ip-fetch";
+/// Fetch button width, × ui_scale (the Network page's).
+const FETCH_BUTTON_W: f32 = 64.;
 
 /// The ten sections.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize, JsonSchema)]
@@ -124,6 +130,8 @@ pub struct InfoRow {
     pub label_tooltip: Option<SharedString>,
     /// Lines the label wraps to; 1 cuts it with "…". Only Peak committed has 2 (UI-SYS-089).
     pub label_lines: u8,
+    /// `Some(loading)` marks the Public IP row, which draws the Fetch button after its value.
+    pub fetch: Option<bool>,
 }
 
 impl PartialEq for InfoRow {
@@ -139,6 +147,7 @@ impl PartialEq for InfoRow {
             && self.block == other.block
             && self.label_tooltip == other.label_tooltip
             && self.label_lines == other.label_lines
+            && self.fetch == other.fetch
             && a.text == b.text
             && a.validity == b.validity
             && a.word == b.word
@@ -171,6 +180,8 @@ struct SectionWords {
     copy_name: SharedString,
     /// The toast after a row menu copy.
     copied: SharedString,
+    /// The Public IP row's button label.
+    fetch: SharedString,
 }
 
 impl SectionWords {
@@ -182,6 +193,7 @@ impl SectionWords {
             title,
             copy_section: tr_en(KEY_COPY_SECTION, &[]),
             copied: tr_en(KEY_COPIED, &[]),
+            fetch: tr_en(KEY_FETCH, &[]),
         }
     }
 
@@ -202,6 +214,7 @@ impl SectionWords {
         );
         self.copy_section = tr(cx, KEY_COPY_SECTION);
         self.copied = tr(cx, KEY_COPIED);
+        self.fetch = tr(cx, KEY_FETCH);
     }
 }
 
@@ -245,6 +258,9 @@ pub struct InfoSection {
     label_tips: Rc<[(usize, SharedString)]>,
     /// The wrapped labels by row index, built in `set_rows`.
     label_lines: Rc<[(usize, u8)]>,
+    /// The index of the row with the Fetch button and whether a fetch is running, set in
+    /// `set_rows`.
+    fetch_row: Option<(usize, bool)>,
     /// Draws an 8-line skeleton block instead of the rows, until the first data (UI-SYS-085).
     loading: bool,
     /// The drawn height, measured each paint. A cached view needs its size from its owner, so the
@@ -266,6 +282,7 @@ impl InfoSection {
             grid: Rc::from(Vec::new()),
             label_tips: Rc::from(Vec::new()),
             label_lines: Rc::from(Vec::new()),
+            fetch_row: None,
             loading: false,
             height: Rc::new(Cell::new(Pixels::ZERO)),
             owner: None,
@@ -299,6 +316,10 @@ impl InfoSection {
             .filter(|(_, row)| row.label_lines > 1)
             .map(|(n, row)| (n, row.label_lines))
             .collect();
+        self.fetch_row = rows
+            .iter()
+            .enumerate()
+            .find_map(|(n, row)| row.fetch.map(|loading| (n, loading)));
         self.rows = rows;
         cx.notify();
     }
@@ -424,7 +445,9 @@ impl Render for InfoSection {
         let n = self.id as usize;
         let id = self.id;
         let copied = self.words.copied.clone();
-        let grid = TlKeyValueGrid::new(("info-rows", n), KvLayout::Inline)
+        let fetch_row = self.fetch_row;
+        let fetch_word = self.words.fetch.clone();
+        let mut grid = TlKeyValueGrid::new(("info-rows", n), KvLayout::Inline)
             .sections(&self.grid)
             .row_height(m.row_height)
             .label_width(px(LABEL_WIDTH * m.ui_scale))
@@ -444,6 +467,21 @@ impl Render for InfoSection {
                     queue.update(cx, |q, cx| q.push(ToastKind::Success, text, None, None, cx));
                 }
             });
+        if let Some((at, loading)) = fetch_row {
+            grid = grid.value_suffix(move |row, _, cx| {
+                if row != at {
+                    return None;
+                }
+                let width = px(FETCH_BUTTON_W * metrics(cx).ui_scale);
+                let button = TlButton::new("info-public-ip-fetch", TlButtonKind::Secondary)
+                    .size(TlButtonSize::Sm)
+                    .label(fetch_word.clone())
+                    .action(Box::new(FetchInformationPublicIp))
+                    .loading(loading)
+                    .disabled(loading);
+                Some((width, button.into_any_element()))
+            });
+        }
         let (measured, owner) = (Rc::clone(&self.height), self.owner);
         let measure = canvas(
             move |bounds, _, cx| {
@@ -465,5 +503,26 @@ impl Render for InfoSection {
             .child(measure)
             .child(self.band(cx))
             .child(div().mt(m.sp[4]).child(grid))
+    }
+}
+
+/// The Fetch button's action, handled by the page (a click leaves focus in the page, so the
+/// action reaches the page and not the section). The notice comes first (PERF-060); the
+/// Inventory worker runs the fetch and the page reads `snapshot.inventory.public_ip`. This page
+/// makes no request of its own.
+pub fn fetch_public_ip(window: &mut Window, cx: &mut App) {
+    request_public_ip_fetch(window, cx, send_public_ip_fetch);
+}
+
+fn send_public_ip_fetch(_: &mut Window, cx: &mut App) {
+    let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+        return;
+    };
+    match engine.send(Command::Device(DeviceCommand::FetchPublicIp)) {
+        Ok(()) => {}
+        Err(CommandError::Busy) => {
+            tracing::warn!(target: "tasklens::ui", "public IP fetch not queued: busy");
+        }
+        Err(_) => tracing::warn!(target: "tasklens::ui", "public IP fetch not queued"),
     }
 }

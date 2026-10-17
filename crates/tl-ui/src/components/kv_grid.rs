@@ -950,6 +950,14 @@ impl TlKeyValueGrid {
         } else {
             if let Some(lines) = multiline.then(|| f.lines_of(&look.text)).flatten() {
                 line_count = lines.len();
+                let suffix = self
+                    .value_suffix
+                    .clone()
+                    .and_then(|build| build(n, window, cx));
+                let available = match &suffix {
+                    Some((width, _)) => available.map(|a| (a - *width - m.sp[3]).max(px(0.))),
+                    None => available,
+                };
                 let mut cut = false;
                 let mut column = div().flex().flex_col().min_w_0().max_w_full();
                 for (i, line) in lines.iter().enumerate() {
@@ -972,6 +980,10 @@ impl TlKeyValueGrid {
                     full_lines = Some(lines);
                 }
                 cell = cell.child(column);
+                // The suffix sits beside the first line.
+                if let Some((_, element)) = suffix {
+                    cell = cell.child(div().flex_none().self_start().ml(m.sp[3]).child(element));
+                }
             } else {
                 debug_assert_clean(&look.text);
                 let mut shown = look.text.clone();
