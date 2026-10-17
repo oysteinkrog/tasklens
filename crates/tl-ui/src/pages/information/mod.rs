@@ -284,6 +284,12 @@ impl InformationPage {
 
     /// Ctrl+C and the tab copy icon: a text selection when there is one, else every section.
     fn on_copy_all(&mut self, _: &CopyInformationAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_all(window, cx);
+    }
+
+    /// The copy behind Ctrl+C and the tab strip's icon. The main window calls it when the icon
+    /// is clicked while focus is outside the page.
+    pub fn copy_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = TextSelection::selected_text(window, cx);
         let selected = selected.trim();
         let text = if selected.is_empty() {

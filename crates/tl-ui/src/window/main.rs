@@ -90,6 +90,7 @@ use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::connections::ConnectionsPage;
 use crate::pages::connections::actions::GoToConnection;
 use crate::pages::information::InformationPage;
+use crate::pages::information::actions::CopyInformationAll;
 use crate::pages::information::section::InfoSectionId;
 use crate::pages::performance::details::Template;
 use crate::pages::performance::{PerformancePage, SummaryToggled};
@@ -1598,6 +1599,21 @@ impl MainWindow {
         page.update(cx, |p, cx| p.show_system_information(window, cx));
     }
 
+    /// The tab strip's Copy all icon (E20-023): the page copies when focus is outside it.
+    fn on_copy_information_all(
+        &mut self,
+        _: &CopyInformationAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active != Tab::Information {
+            return;
+        }
+        if let Some(page) = self.page_entity::<InformationPage>(Tab::Information) {
+            page.update(cx, |p, cx| p.copy_all(window, cx));
+        }
+    }
+
     /// Go to service (UI-SYS-021, SYS-032): activates the main window, switches to Services and
     /// selects the unit.
     fn on_go_to_service(&mut self, a: &GoToService, window: &mut Window, cx: &mut Context<Self>) {
@@ -2588,6 +2604,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_clear_filter))
             .on_action(cx.listener(Self::on_show_system_information))
+            .on_action(cx.listener(Self::on_copy_information_all))
             .on_action(cx.listener(Self::on_go_to_service))
             .on_action(cx.listener(Self::on_escape_chain))
             // Bubble phase: sees only keys that no binding and no focused element used.

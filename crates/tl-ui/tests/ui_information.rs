@@ -2687,6 +2687,26 @@ mod main_window {
     }
 
     #[gpui_kit::test]
+    fn copy_icon_with_filter_focused_copies_all(cx: &mut TestAppContext) {
+        let mut r = boot(cx);
+        r.publish_inventory(1);
+        r.visit();
+        let page = r.page().expect("page");
+        let filter = r.vcx.read_entity(&r.main, |m, _| m.filter_box().clone());
+        r.vcx.update(|window, cx| {
+            let input = filter.read(cx).input().clone();
+            input.update(cx, |s, cx| s.focus(window, cx));
+        });
+        r.draw();
+        let icon = r.bounds("TabStrip-copy").expect("copy icon");
+        r.vcx.simulate_click(icon.center(), Modifiers::none());
+        r.draw();
+        let expected = r.vcx.read_entity(&page, |p, _| p.copy_all_text());
+        let copied = r.vcx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some(expected.as_str()));
+    }
+
+    #[gpui_kit::test]
     fn information_status_chip_empty(cx: &mut TestAppContext) {
         let mut r = boot(cx);
         r.visit();

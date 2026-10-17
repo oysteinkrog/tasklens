@@ -1146,6 +1146,7 @@ mod tabstrip {
     use tl_ui::actions::SelectTab;
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::components::menu::context_menu_layer;
+    use tl_ui::pages::information::actions::CopyInformationAll;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::current;
@@ -1301,6 +1302,89 @@ mod tabstrip {
         rule.vertices
             .iter()
             .any(|v| (v.x - at.x).abs() < px(0.01) && (v.y - at.y).abs() < px(0.01))
+    }
+
+    fn drawn_copy(r: &mut Rig) -> Option<tl_ui::window::tabstrip::DrawnCopy> {
+        let strip = r.strip.clone();
+        r.cx.update(|_, cx| strip.read(cx).drawn_copy().cloned())
+    }
+
+    #[gpui_kit::test]
+    fn copy_icon_only_on_active_information(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Information, false);
+        let tab = bounds(r.cx, "TabStrip-information");
+        let icon = bounds(r.cx, "TabStrip-copy");
+        assert!(icon.left() > tab.left() + px(22.), "after the label");
+        assert!(icon.right() <= tab.right());
+        assert!(drawn_copy(&mut r).is_some());
+
+        let strip = r.strip.clone();
+        strip.update(r.cx, |s, cx| s.set_active(Tab::Processes, cx));
+        draw(r.cx);
+        assert!(r.cx.debug_bounds("TabStrip-copy").is_none());
+        assert!(drawn_copy(&mut r).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn copy_icon_dispatches(cx: &mut TestAppContext) {
+        let count = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&count);
+        cx.update(|cx| {
+            cx.on_action(move |_: &CopyInformationAll, _| seen.set(seen.get() + 1));
+        });
+        let mut r = rig(cx, 100, all(), Tab::Information, false);
+        let at = bounds(r.cx, "TabStrip-copy").center();
+        r.cx.simulate_click(at, Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!(count.get(), 1);
+        assert!(r.selects.borrow().is_empty(), "the tab click does not fire");
+        assert_eq!(r.downs.get(), 0, "the press stops at the icon");
+    }
+
+    #[gpui_kit::test]
+    fn copy_icon_hover_look(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Information, false);
+        let (secondary, primary, hover) = r.cx.update(|_, cx| {
+            let t = tl_ui::theme::current(cx);
+            (t.text_secondary, t.text_primary, t.tab_hover)
+        });
+        let drawn = drawn_copy(&mut r).expect("copy icon drawn");
+        assert_eq!(drawn.color, secondary);
+        assert_eq!(drawn.hover_color, primary);
+        assert_eq!(drawn.tooltip.as_ref(), "Copy all");
+
+        let icon = bounds(r.cx, "TabStrip-copy");
+        r.cx.simulate_mouse_move(icon.center(), None, Modifiers::none());
+        let square = r.cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let scale = window.scale_factor();
+            window.painted_quads().iter().any(|q| {
+                q.background == gpui_kit::Background::from(hover) && q.bounds == icon.scale(scale)
+            })
+        });
+        assert!(square, "hover draws the tab_hover square");
+    }
+
+    #[gpui_kit::test]
+    fn copy_icon_counts_in_tab_width(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 150, all(), Tab::Information, false);
+        let strip = r.strip.clone();
+        let label = r.cx.update(|_, cx| {
+            strip
+                .read(cx)
+                .label_widths()
+                .iter()
+                .find(|(t, _)| *t == Tab::Information)
+                .map(|(_, w)| *w)
+                .expect("label shaped")
+        });
+        let width = |r: &mut Rig| {
+            r.cx.update(|_, cx| strip.read(cx).tab_width(Tab::Information))
+        };
+        assert_eq!(width(&mut r), label + px((2. * 22. + 6. + 22.) * 1.5));
+        strip.update(r.cx, |s, cx| s.set_active(Tab::Processes, cx));
+        draw(r.cx);
+        assert_eq!(width(&mut r), label + px(2. * 22. * 1.5));
     }
 
     #[gpui_kit::test]

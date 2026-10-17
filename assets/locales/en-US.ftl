@@ -1503,6 +1503,7 @@ shell-menu-file-exit = Exit tasklens
 shell-tab-more = More tabs
 shell-tab-show-history = Show history
 shell-tab-show-live = Show live processes
+shell-tab-copy-all = Copy all
 
 # Set Affinity dialog (UI-PWN-021, E23-002). Numbers and CPU lists are formatted by the caller.
 pwn-affinity-title = tasklens Set Affinity

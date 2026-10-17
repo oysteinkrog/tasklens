@@ -15,7 +15,9 @@
 //! the strip asks for one more frame.
 //!
 //! The Processes tab carries the History toggle icon after its label (E20-025, UI-SHL-023). It
-//! dispatches `ToggleHistoryMode`, which the main window handles.
+//! dispatches `ToggleHistoryMode`, which the main window handles. The Information tab carries a
+//! Copy all icon while it is the active tab (E20-023, UI-SHL-023). It dispatches
+//! `CopyInformationAll`.
 //!
 //! A tab switch can slide the outline from the old tab to the new one over
 //! `motion.tab_switch_ms` with `ease_out_cubic` (E20-021, UI-SHL-021). The progress comes from
@@ -46,6 +48,7 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{Strings, tr};
+use crate::pages::information::actions::CopyInformationAll;
 use crate::settings_global::TlSettings;
 use crate::theme::{UiMetrics, current, metrics};
 
@@ -92,6 +95,20 @@ pub const HISTORY_GAP: f32 = 6.0;
 /// The History icon's square hit area, × ui_scale.
 pub const HISTORY_HIT: f32 = 22.0;
 
+/// Gap between the Information label and the Copy all icon, × ui_scale.
+pub const COPY_GAP: f32 = 6.0;
+/// The Copy all icon's square hit area, × ui_scale.
+pub const COPY_HIT: f32 = 22.0;
+
+/// The Copy all icon as last drawn. Tests read it through `TabStrip::drawn_copy`.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawnCopy {
+    pub color: Hsla,
+    pub hover_color: Hsla,
+    pub tooltip: SharedString,
+}
+
 /// The History icon as last drawn. Tests read it through `TabStrip::drawn_history`.
 #[cfg(any(test, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq)]
@@ -133,6 +150,8 @@ struct TabWords {
     /// The History icon's tooltip: "Show history" off, "Show live processes" on.
     show_history: SharedString,
     show_live: SharedString,
+    /// The Copy all icon's tooltip and accessible name.
+    copy_all: SharedString,
 }
 
 impl TabWords {
@@ -142,6 +161,7 @@ impl TabWords {
             more: tr(cx, "shell-tab-more"),
             show_history: tr(cx, "shell-tab-show-history"),
             show_live: tr(cx, "shell-tab-show-live"),
+            copy_all: tr(cx, "shell-tab-copy-all"),
         }
     }
 }
@@ -211,6 +231,8 @@ pub struct TabStrip {
     drawn: SmallVec<[SharedString; 6]>,
     #[cfg(any(test, feature = "test-hooks"))]
     drawn_history: Option<DrawnHistory>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    drawn_copy: Option<DrawnCopy>,
     #[cfg(any(test, feature = "test-hooks"))]
     rule_builds: u32,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -294,6 +316,8 @@ impl TabStrip {
             drawn: SmallVec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             drawn_history: None,
+            #[cfg(any(test, feature = "test-hooks"))]
+            drawn_copy: None,
             #[cfg(any(test, feature = "test-hooks"))]
             rule_builds: 0,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -402,7 +426,8 @@ impl TabStrip {
     }
 
     /// The drawn width of `tab`: its label plus the padding on both sides. 0 before the labels
-    /// are shaped or for a tab that is not built. Icons (E20-023, E20-025) add their width here.
+    /// are shaped or for a tab that is not built. Icons (E20-023, E20-025) add their width here: the Copy all icon only while Information is
+    /// the active tab.
     pub fn tab_width(&self, tab: Tab) -> Pixels {
         self.label_widths
             .iter()
@@ -410,6 +435,8 @@ impl TabStrip {
             .map_or(px(0.), |(_, label)| {
                 let icon = if tab == Tab::Processes {
                     HISTORY_GAP + HISTORY_HIT
+                } else if tab == Tab::Information && tab == self.active {
+                    COPY_GAP + COPY_HIT
                 } else {
                     0.
                 };
@@ -421,6 +448,64 @@ impl TabStrip {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn drawn_history(&self) -> Option<&DrawnHistory> {
         self.drawn_history.as_ref()
+    }
+
+    /// The Copy all icon as last drawn; `None` when it was not shown.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn drawn_copy(&self) -> Option<&DrawnCopy> {
+        self.drawn_copy.as_ref()
+    }
+
+    /// The Copy all icon after the active Information label (UI-SHL-023): `copy` at the small
+    /// icon size in a 22 px square, `text_secondary`; hover and press show `text_primary` on
+    /// `tab_hover`. A click dispatches `CopyInformationAll` and never reaches the tab.
+    fn copy_icon(&mut self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let theme = current(cx).clone();
+        let m = *metrics(cx);
+        let s = m.ui_scale;
+        let tooltip = self.words.copy_all.clone();
+        let (hover, primary) = (theme.tab_hover, theme.text_primary);
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.drawn_copy = Some(DrawnCopy {
+                color: theme.text_secondary,
+                hover_color: primary,
+                tooltip: tooltip.clone(),
+            });
+        }
+        let icon = div()
+            .id("TabStrip-copy")
+            .debug_selector(|| "TabStrip-copy".into())
+            .role(Role::Button)
+            .aria_label(tooltip.clone())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .ml(px(COPY_GAP * s))
+            .size(px(COPY_HIT * s))
+            .rounded(m.radius_small)
+            .text_color(theme.text_secondary)
+            .hover(move |st| st.bg(hover).text_color(primary))
+            .active(move |st| st.bg(hover).text_color(primary))
+            .on_mouse_down(MouseButton::Left, stop)
+            .on_mouse_down(MouseButton::Right, stop)
+            .on_mouse_down(MouseButton::Middle, stop)
+            .on_click(|_, window, cx| {
+                cx.stop_propagation();
+                window.dispatch_action(Box::new(CopyInformationAll), cx);
+            })
+            .child(Icon::new(TlIcon::Copy).size(m.icon.sm));
+        let tip = HoverTooltip::state("TabStrip-copy-tooltip", window, cx);
+        HoverTooltip::attach(
+            &tip,
+            icon,
+            DELAY_CONTROL,
+            TlTooltip::text(tooltip).build(),
+            window,
+            cx,
+        )
+        .into_any_element()
     }
 
     /// The History toggle after the Processes label (UI-SHL-023): `rotate-ccw-clock` at the
@@ -643,10 +728,13 @@ impl Render for TabStrip {
         #[cfg(any(test, feature = "test-hooks"))]
         {
             self.drawn_history = None;
+            self.drawn_copy = None;
         }
         let mut history = visible
             .contains(&Tab::Processes)
             .then(|| self.history_icon(window, cx));
+        let mut copy = (visible.contains(&Tab::Information) && self.active == Tab::Information)
+            .then(|| self.copy_icon(window, cx));
         let tabs = visible.iter().map(|tab| {
             let tab = *tab;
             let index = tab as usize;
@@ -686,6 +774,7 @@ impl Render for TabStrip {
                 })
                 .child(label)
                 .children((tab == Tab::Processes).then(|| history.take()).flatten())
+                .children((tab == Tab::Information).then(|| copy.take()).flatten())
         });
 
         let overflow = (!self.hidden.is_empty()).then(|| {
