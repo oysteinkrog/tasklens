@@ -29,6 +29,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::GraphColor;
 use super::menu::{CardMenuCtx, card_menu};
+use super::panel::MinigraphPanel;
 use super::sources::{
     MinigraphEntry, MinigraphId, MinigraphSource, ProcessLabel, ProcessSourceView,
     resolve_process_source,
@@ -294,10 +295,18 @@ impl MinigraphCard {
             MouseButton::Left,
             cx.listener(|this, ev: &MouseDownEvent, _, _| this.press = Some(ev.position)),
         )
-        .on_drag(DraggedMinigraph { id: self.id }, move |_, _, _, cx| {
+        .on_drag(DraggedMinigraph { id: self.id }, move |d, _, window, cx| {
             if let Some(c) = card.upgrade() {
                 c.update(cx, |c, _| c.gpui_drag = true);
             }
+            // GPUI starts the drag after the panel's drag-move listener ran for this move, so
+            // the move that starts it would show no preview until the next one.
+            let (id, pos) = (d.id, window.mouse_position());
+            cx.defer(move |cx| {
+                if let Some(panel) = MinigraphPanel::global(cx) {
+                    panel.update(cx, |p, cx| p.drag_to(id, pos, cx));
+                }
+            });
             MinigraphDragGhost::new(&card, cx)
         })
     }

@@ -2155,6 +2155,27 @@ mod panel {
     }
 
     #[gpui_kit::test]
+    fn drag_one_move_previews(cx: &mut TestAppContext) {
+        let mut r = four_cards(cx);
+        let before = r.attached();
+        let home = slot_bounds(&mut r, 0);
+        let target = slot_bounds(&mut r, 2).center();
+        press_cpu(&mut r);
+        // One move past 4 px: GPUI starts its drag on this move, and the preview starts with it.
+        r.vcx
+            .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
+        draw(&mut r.vcx);
+        assert!(
+            cpu_dragging(&mut r),
+            "the CPU card is dragging before release"
+        );
+        assert_eq!(preview(&mut r), reordered());
+        assert_eq!(r.attached(), before);
+        assert!(r.vcx.debug_bounds("MinigraphDragGhost").is_some());
+        assert_eq!(r.vcx.debug_bounds("MinigraphCard-home"), Some(home));
+    }
+
+    #[gpui_kit::test]
     fn drop_reorders_and_persists(cx: &mut TestAppContext) {
         let mut r = four_cards(cx);
         let target = slot_bounds(&mut r, 2).center();

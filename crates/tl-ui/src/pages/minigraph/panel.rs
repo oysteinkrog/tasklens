@@ -311,14 +311,15 @@ impl MinigraphPanel {
         true
     }
 
-    /// A drag move of a card: starts the preview past 4 px and follows the slot under the
-    /// pointer. Re-renders only when that slot changes.
-    fn on_drag_move(&mut self, ev: &DragMoveEvent<DraggedMinigraph>, cx: &mut Context<Self>) {
-        let pos = ev.event.position;
-        if self.drag.is_none() && !self.start_drag(ev.drag(cx).id, pos, cx) {
+    /// The pointer at `pos` in a drag of `id`: starts the preview past 4 px and follows the slot
+    /// under the pointer. Re-renders when the preview starts and when that slot changes. The
+    /// card calls it when GPUI starts the drag, the drag-move listener on every later move.
+    pub fn drag_to(&mut self, id: MinigraphId, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let started = self.drag.is_none();
+        if started && !self.start_drag(id, pos, cx) {
             return;
         }
-        let over = self.slot_at(pos, ev.bounds);
+        let over = self.slot_at(pos, self.bounds.get());
         let Some(drag) = self.drag.as_mut() else {
             return;
         };
@@ -327,7 +328,13 @@ impl MinigraphPanel {
             drag.over = over;
             drag.epoch = drag.epoch.wrapping_add(1);
             cx.notify();
+        } else if started {
+            cx.notify();
         }
+    }
+
+    fn on_drag_move(&mut self, ev: &DragMoveEvent<DraggedMinigraph>, cx: &mut Context<Self>) {
+        self.drag_to(ev.drag(cx).id, ev.event.position, cx);
     }
 
     /// A left release. After a drag, a release at `at` over a slot moves the card there;
