@@ -15,6 +15,7 @@ pub mod eject;
 pub mod enumerate;
 pub mod gpu_drm;
 pub mod gpu_nvidia;
+pub mod handle_search;
 #[doc(hidden)]
 pub mod history;
 pub mod inventory;
