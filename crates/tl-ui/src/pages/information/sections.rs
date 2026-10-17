@@ -8,7 +8,8 @@
 //!
 //! A value whose field is not Valid or Stale carries that validity and no text; the grid shows
 //! the word (UI-SYS-082). Unsupported inventory fields read "Not reported" (R-050), and so does
-//! a Valid field with empty text. Values are local machine data and are never logged.
+//! a Valid field with empty text. [`apply_hints`] then adds the Restricted tooltips and the
+//! "Needs setup" link. Values are local machine data and are never logged.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::section::InfoRow;
+use crate::actions::OpenAdditionalSetup;
 use crate::components::kv_grid::{TlValue, UnsupportedWord};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
@@ -155,9 +157,11 @@ enum W {
     PublicIp,
     PublicIpNotFetched,
     PublicIpFetching,
+    RestrictedTip,
+    RestrictedShieldTip,
 }
 
-const KEYS: [&str; 112] = [
+const KEYS: [&str; 114] = [
     "information-os-name",
     "information-os-version",
     "information-os-build",
@@ -270,6 +274,8 @@ const KEYS: [&str; 112] = [
     "information-public-ip",
     "information-public-ip-not-fetched",
     "information-public-ip-fetching",
+    "fnd-validity-restricted",
+    "information-restricted-shield",
 ];
 
 /// The first label of each sub-block, in Memory modules, Disk drives, Graphics and Network
@@ -725,6 +731,32 @@ pub fn build_motherboard(i: &InfoInputs, out: &mut Vec<InfoRow>) {
         serial.tooltip = Some(w.get(W::BoardSerialRestrictedTip).clone());
     }
     push(out, w.get(W::BoardSerial), serial, false);
+}
+
+/// Adds the hints that depend on the helper (UI-SYS-082, UI-SHL-011) to built rows. A Restricted
+/// value without a tooltip gets the shield hint when `shield` is set (the helper is installed),
+/// else the plain one; the board serial keeps its own tooltip because the helper cannot read it
+/// (PERF-102). An Unsupported value with the "Needs setup" word links to Additional Setup.
+pub fn apply_hints(rows: &mut [InfoRow], words: &InfoWords, shield: bool) {
+    let restricted = if shield {
+        W::RestrictedShieldTip
+    } else {
+        W::RestrictedTip
+    };
+    for row in rows {
+        let v = &mut row.value;
+        match v.validity {
+            Validity::Restricted if v.tooltip.is_none() => {
+                v.tooltip = Some(words.get(restricted).clone());
+            }
+            Validity::Unsupported
+                if v.word == Some(UnsupportedWord::NeedsSetup) && v.link.is_none() =>
+            {
+                v.link = Some(Box::new(OpenAdditionalSetup { focus_row: None }));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Memory rows (UI-SYS-089). Available physical, Memory usage, Committed and Peak committed are

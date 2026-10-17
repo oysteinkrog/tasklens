@@ -1825,6 +1825,7 @@ information-public-ip = Public IP
 information-public-ip-not-fetched = Not fetched
 information-public-ip-fetching = Fetching…
 information-public-ip-fetch = Fetch
+information-restricted-shield = Needs administrator access. Click the shield to grant it.
 
 # Information page: refresh toast and load error (E28-033)
 information-refreshed = Information refreshed.

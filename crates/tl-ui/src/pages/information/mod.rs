@@ -8,7 +8,8 @@
 //! disks, with `any_surface_visible`) and withdraws it on leave (ADR-008). The first activation of
 //! the session also sends `RefreshNow(Inventory)`. An INVENTORY change rebuilds every section's
 //! rows; a SYSTEM or DEVICES change rebuilds only System, Memory, Disk drives and Graphics, the
-//! sections with live rows. A section whose rows did not change does not re-render (UI-SYS-085).
+//! sections with live rows. A change of the helper state (HEALTH) rebuilds every section, so the
+//! Restricted tooltips follow the shield. A section whose rows did not change does not re-render (UI-SYS-085).
 //!
 //! The shell filter's text for this tab narrows the rows by the [`filter`] rules; a section left
 //! with no rows is hidden, and with every section hidden the page shows "No information matches
@@ -48,7 +49,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::command::{Command, Tab};
 use tl_model::demand::{CpuDemand, Demand};
-use tl_model::health::SourceId;
+use tl_model::health::{HelperState, SourceId};
 use tl_model::snapshot::ComponentMask;
 use tl_model::validity::Validity;
 use tracing::debug;
@@ -163,6 +164,8 @@ pub struct InformationPage {
     /// The content width at the last paint, measured each frame.
     width: Rc<Cell<Pixels>>,
     words: InfoWords,
+    /// The helper is installed, so Restricted tooltips point to the shield.
+    shield: bool,
     page_words: PageWords,
     _subs: SmallVec<[Subscription; 4]>,
 }
@@ -198,6 +201,7 @@ impl InformationPage {
         }
         let mut words = InfoWords::default();
         words.refresh(cx);
+        let shield = hub.read(cx).current().health.helper != HelperState::Missing;
         let mut page = Self {
             sections,
             heights,
@@ -216,6 +220,7 @@ impl InformationPage {
             refresh_pending: None,
             width: Rc::new(Cell::new(Pixels::ZERO)),
             words,
+            shield,
             page_words: PageWords::new(cx),
             _subs: subs,
         };
@@ -380,6 +385,9 @@ impl InformationPage {
     }
 
     fn on_snapshot(&mut self, mask: ComponentMask, cx: &mut Context<Self>) {
+        let shield = self.hub.read(cx).current().health.helper != HelperState::Missing;
+        let shield_changed = self.shield != shield;
+        self.shield = shield;
         if mask.contains(ComponentMask::INVENTORY) {
             self.rebuild(&InfoSectionId::ALL, cx);
             self.note_inventory(cx);
@@ -394,6 +402,9 @@ impl InformationPage {
             }
         } else if mask.contains(ComponentMask::SYSTEM) || mask.contains(ComponentMask::DEVICES) {
             self.rebuild(&LIVE, cx);
+        }
+        if shield_changed && !mask.contains(ComponentMask::INVENTORY) {
+            self.rebuild(&InfoSectionId::ALL, cx);
         }
     }
 
@@ -421,6 +432,7 @@ impl InformationPage {
         for &id in ids {
             let mut rows: Vec<InfoRow> = Vec::new();
             builder(id)(&inputs, &mut rows);
+            sections::apply_hints(&mut rows, &self.words, self.shield);
             self.full_rows[id as usize] = Arc::from(rows);
         }
         let logo = ids

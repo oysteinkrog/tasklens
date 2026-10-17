@@ -1,7 +1,7 @@
 //! Information section entity (E28-030, UI-SYS-081, UI-SYS-082, UI-FND-025) and the page
 //! (E28-033). The page tests need `--features test-hooks`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -381,8 +381,8 @@ mod row_builders {
     use tl_model::system::Metric;
     use tl_model::table::Total;
     use tl_ui::pages::information::sections::{
-        InfoInputs, InfoWords, build_bios, build_motherboard, build_os, build_processor,
-        build_system, find_logo,
+        InfoInputs, InfoWords, apply_hints, build_bios, build_motherboard, build_os,
+        build_processor, build_system, find_logo,
     };
 
     fn ok<T>(value: T) -> InvField<T> {
@@ -855,6 +855,44 @@ mod row_builders {
         inv.board.serial = s("230912345678");
         let rows = super::row_builders::rows(&inv, &system(0), build_motherboard);
         assert!(rows.last().unwrap().value.tooltip.is_none());
+    }
+
+    #[test]
+    fn info_restricted_tooltip_with_helper() {
+        let mut inv = inventory();
+        inv.os.machine_id = with(Validity::Restricted);
+        let mut rows = rows(&inv, &system(0), build_os);
+        apply_hints(&mut rows, &InfoWords::default(), true);
+        let id = rows.iter().find(|r| r.label.as_ref() == "Machine ID");
+        assert_eq!(
+            id.expect("machine id row").value.tooltip.as_deref(),
+            Some("Needs administrator access. Click the shield to grant it.")
+        );
+    }
+
+    #[test]
+    fn info_restricted_tooltip_without_helper() {
+        let mut inv = inventory();
+        inv.os.machine_id = with(Validity::Restricted);
+        let mut rows = rows(&inv, &system(0), build_os);
+        apply_hints(&mut rows, &InfoWords::default(), false);
+        let id = rows.iter().find(|r| r.label.as_ref() == "Machine ID");
+        assert_eq!(
+            id.expect("machine id row").value.tooltip.as_deref(),
+            Some("Needs administrator access.")
+        );
+    }
+
+    #[test]
+    fn info_board_serial_tooltip_never_shield() {
+        let mut rows = rows(&inventory(), &system(0), build_motherboard);
+        apply_hints(&mut rows, &InfoWords::default(), true);
+        let serial = rows.last().expect("serial row");
+        assert_eq!(serial.value.validity, Validity::Restricted);
+        assert_eq!(
+            serial.value.tooltip.as_deref(),
+            Some("Needs administrator access.")
+        );
     }
 
     #[test]
@@ -2713,4 +2751,76 @@ mod main_window {
         let chip = r.vcx.read_entity(&r.main, |m, _| m.status_chip().clone());
         assert_eq!(r.vcx.read_entity(&chip, |c, _| c.drawn_text()), "");
     }
+}
+
+/// Holds one section and counts `OpenAdditionalSetup` dispatches.
+struct SetupHost {
+    section: Entity<InfoSection>,
+    setups: Rc<Cell<usize>>,
+    focus: FocusHandle,
+}
+
+impl Render for SetupHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let setups = self.setups.clone();
+        div()
+            .id("root")
+            .track_focus(&self.focus)
+            .w(px(600.))
+            .h(px(400.))
+            .on_action(move |_: &tl_ui::actions::OpenAdditionalSetup, _, _| {
+                setups.set(setups.get() + 1)
+            })
+            .child(self.section.clone().cached(StyleRefinement::default()))
+    }
+}
+
+#[gpui_kit::test]
+fn info_needs_setup_link_opens_setup(cx: &mut TestAppContext) {
+    use tl_ui::pages::information::sections::{InfoWords, apply_hints};
+    cx.update(|cx| setup(cx, 100));
+    let mut rows = vec![InfoRow {
+        value: TlValue {
+            validity: Validity::Unsupported,
+            word: Some(UnsupportedWord::NeedsSetup),
+            tooltip: Some("reason".into()),
+            ..TlValue::new(SharedString::default())
+        },
+        ..row("Machine ID", "")
+    }];
+    apply_hints(&mut rows, &InfoWords::default(), true);
+    assert_eq!(rows[0].value.tooltip.as_deref(), Some("reason"));
+    assert!(rows[0].value.link.is_some());
+    let (theme, words) = cx.update(|cx| (current(cx).clone(), kv_words(cx)));
+    let look = value_look_in(&rows[0].value, &words, &theme).expect("drawn");
+    assert_eq!(look.text.as_ref(), "Needs setup");
+    assert!(look.link);
+
+    let setups = Rc::new(Cell::new(0));
+    let section = cx.new(|cx| {
+        let mut s = InfoSection::new(InfoSectionId::OperatingSystem, cx);
+        s.set_rows(Arc::from(rows), cx);
+        s
+    });
+    let (_, vcx) = cx.add_window_view({
+        let (section, setups) = (section.clone(), setups.clone());
+        move |window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            SetupHost {
+                section,
+                setups,
+                focus,
+            }
+        }
+    });
+    let value = bounds(vcx, "TlKv-value-0").expect("value drawn");
+    vcx.simulate_click(
+        gpui_kit::point(value.left() + px(4.), value.center().y),
+        Modifiers::none(),
+    );
+    assert_eq!(setups.get(), 1);
+    vcx.update(|window, cx| window.focus_next(cx));
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(setups.get(), 2);
 }
