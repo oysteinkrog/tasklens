@@ -61,6 +61,8 @@ pub struct ScanInput {
     pub home: Option<PathBuf>,
     /// `$XDG_DATA_HOME` when set and absolute. User units there are user scope.
     pub data_home: Option<PathBuf>,
+    /// `$XDG_RUNTIME_DIR` when set and absolute. User units there are user scope.
+    pub runtime_dir: Option<PathBuf>,
     /// The user manager's unit files as (path, state), from `ListUnitFilesByPatterns`. Empty
     /// without a session bus.
     pub units: Vec<(String, String)>,
@@ -76,6 +78,9 @@ impl ScanInput {
             data_home: std::env::var_os("XDG_DATA_HOME")
                 .map(PathBuf::from)
                 .filter(|p| p.is_absolute()),
+            runtime_dir: std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute()),
             units: Vec::new(),
         }
     }
@@ -84,12 +89,14 @@ impl ScanInput {
 /// Runs on the blocking pool. Tests replace it with a scripted fake.
 pub type Scanner = Arc<dyn Fn(&ScanInput) -> Result<Vec<StartupRaw>, CollectError> + Send + Sync>;
 
-/// `$HOME`, `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME`. A file under any is a user file.
+/// `$HOME`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_RUNTIME_DIR`. A file under any is a
+/// user file.
 #[derive(Clone, Copy, Default)]
 struct UserDirs<'a> {
     home: Option<&'a Path>,
     config_home: Option<&'a Path>,
     data_home: Option<&'a Path>,
+    runtime_dir: Option<&'a Path>,
 }
 
 impl<'a> UserDirs<'a> {
@@ -99,13 +106,15 @@ impl<'a> UserDirs<'a> {
             home,
             config_home: Some(config_home).filter(|p| p.is_absolute()),
             data_home: None,
+            runtime_dir: None,
         }
     }
 
-    /// A relative `data_home` matches nothing.
-    fn with_data_home(self, data_home: Option<&'a Path>) -> Self {
+    /// A relative `data_home` and a relative `runtime_dir` match nothing.
+    fn with_data_home(self, data_home: Option<&'a Path>, runtime_dir: Option<&'a Path>) -> Self {
         Self {
             data_home: data_home.filter(|p| p.is_absolute()),
+            runtime_dir: runtime_dir.filter(|p| p.is_absolute()),
             ..self
         }
     }
@@ -192,6 +201,7 @@ async fn run<H: Host>(cx: Cx, io: WorkerIo, scanner: Scanner, host: H) -> Outcom
         let home = input.home.clone();
         let config_home = input.env.config_home.clone();
         let data_home = input.data_home.clone();
+        let runtime_dir = input.runtime_dir.clone();
         let mut systemd = Systemd::default();
         // Kept for the timing reads after the scan, then dropped with the scan.
         let mut manager = match host.manager(&cx).await {
@@ -247,7 +257,7 @@ async fn run<H: Host>(cx: Cx, io: WorkerIo, scanner: Scanner, host: H) -> Outcom
                 }
                 drop(manager);
                 let dirs = UserDirs::new(home.as_deref(), &config_home)
-                    .with_data_home(data_home.as_deref());
+                    .with_data_home(data_home.as_deref(), runtime_dir.as_deref());
                 let entries = cache.merge(raws, &systemd, dirs);
                 let update = SourceUpdate::Startup(StartupUpdate {
                     entries,
@@ -805,7 +815,7 @@ fn startup_ref(raw: &StartupRaw) -> StartupRef {
 /// One model entry. The publisher is "User" for files under `$HOME` and blank otherwise;
 /// package lookup is not done here. Only an absolute `Icon=` is an icon path. Scope is user
 /// for user autostart entries and Plasma scripts, system for system autostart entries, and
-/// for user units it follows whether the unit file is under `$HOME`, `$XDG_CONFIG_HOME` or `$XDG_DATA_HOME`.
+/// for user units it follows whether the unit file is under `$HOME`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` or `$XDG_RUNTIME_DIR`.
 fn to_entry(
     id: StartupRef,
     raw: &StartupRaw,
@@ -814,7 +824,7 @@ fn to_entry(
 ) -> StartupEntry {
     let source = Path::new(&*raw.source_path);
     let under_home = dirs.home.is_some_and(|home| source.starts_with(home));
-    let under_user_dir = [dirs.config_home, dirs.data_home]
+    let under_user_dir = [dirs.config_home, dirs.data_home, dirs.runtime_dir]
         .into_iter()
         .flatten()
         .any(|dir| source.starts_with(dir));
@@ -1414,6 +1424,7 @@ mod tests {
                 },
                 home: Some(tmp.path().join("home")),
                 data_home: None,
+                runtime_dir: None,
                 units: Vec::new(),
             },
         };
@@ -1510,6 +1521,7 @@ mod tests {
             },
             home: Some(root.join("home")),
             data_home: None,
+            runtime_dir: None,
             units: vec![(
                 unit.to_str().expect("utf-8").to_owned(),
                 "enabled".to_owned(),
@@ -1612,7 +1624,9 @@ mod tests {
         );
         let external = root.join("xdg-config/systemd/user/external.service");
         let data_unit = root.join("xdg-data/systemd/user/data.service");
+        let runtime_unit = root.join("run/user/1000/systemd/transient/run.service");
         let packaged = root.join("usr/lib/systemd/user/packaged.service");
+        write(&runtime_unit, &unit);
         write(&data_unit, &unit);
         write(&external, &unit);
         write(&packaged, &unit);
@@ -1626,7 +1640,8 @@ mod tests {
             },
             home: Some(root.join("home")),
             data_home: Some(root.join("xdg-data")),
-            units: [&gone, &external, &data_unit, &packaged]
+            runtime_dir: Some(root.join("run/user/1000")),
+            units: [&gone, &external, &data_unit, &runtime_unit, &packaged]
                 .iter()
                 .map(|p| (p.to_str().expect("utf-8").to_owned(), "enabled".to_owned()))
                 .collect(),
@@ -1636,7 +1651,7 @@ mod tests {
             raws,
             &Systemd::default(),
             UserDirs::new(input.home.as_deref(), &input.env.config_home)
-                .with_data_home(input.data_home.as_deref()),
+                .with_data_home(input.data_home.as_deref(), input.runtime_dir.as_deref()),
         );
 
         let by_id = |id: &str| {
@@ -1691,6 +1706,10 @@ mod tests {
         let data_row = by_id("data.service");
         assert!(data_row.file_exists);
         assert_eq!(data_row.scope, StartupScope::User);
+        // `$XDG_RUNTIME_DIR` holds transient and generated user units.
+        let runtime_row = by_id("run.service");
+        assert!(runtime_row.file_exists);
+        assert_eq!(runtime_row.scope, StartupScope::User);
         let packaged_row = by_id("packaged.service");
         assert!(packaged_row.file_exists);
         assert_eq!(packaged_row.scope, StartupScope::System);
@@ -1850,6 +1869,7 @@ mod tests {
             },
             home: Some(tmp.path().join("home")),
             data_home: None,
+            runtime_dir: None,
             units: listing.files.clone(),
         };
         let raws = host_scan(&input).expect("scan");
@@ -1887,6 +1907,7 @@ mod tests {
             },
             home: Some(root.join("home")),
             data_home: None,
+            runtime_dir: None,
             units: vec![(
                 unit.to_str().expect("utf-8").to_owned(),
                 "masked".to_owned(),
