@@ -1399,8 +1399,6 @@ fn connections_page_registered(cx: &mut TestAppContext) {
 
 /// Jump to process and Go to service from the Connections tab (tasklens-9o0.18).
 mod jump {
-    use std::cell::RefCell;
-    use std::rc::Rc;
 
     use super::*;
     use gpui_kit::{AppContext as _, VisualTestContext};
@@ -1416,7 +1414,6 @@ mod jump {
         ConnectionGoToService, ConnectionJumpToProcess, GoToConnection,
     };
     use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
 
@@ -1769,20 +1766,10 @@ mod jump {
             name: Arc::from("sshd.service"),
         });
         let mut rig = rig(cx, record, procs(&[4321]));
-        let seen = Rc::new(RefCell::new(Vec::new()));
-        let sink = seen.clone();
-        cx.update(|cx| {
-            cx.on_action(move |a: &GoToService, _| sink.borrow_mut().push(a.clone()));
-        });
+        // The main window handles GoToService itself: it switches to Services.
+        assert_eq!(rig.active_tab(), Tab::Connections);
         rig.dispatch(true, ConnectionGoToService);
-        assert_eq!(
-            *seen.borrow(),
-            [GoToService {
-                manager: ManagerArg::System,
-                name: "sshd.service".into(),
-                origin: JumpOrigin::Connections,
-            }]
-        );
+        assert_eq!(rig.active_tab(), Tab::Services);
     }
 }
 

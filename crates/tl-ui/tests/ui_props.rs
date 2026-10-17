@@ -2810,7 +2810,6 @@ mod window {
 
     use std::cell::RefCell;
     use tl_model::details::{AppGeneralDetail, AppKind};
-    use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 
     fn app_detail_for_unit() -> AppGeneralDetail {
         fn valid<T>(value: T) -> Total<T> {
@@ -2850,22 +2849,14 @@ mod window {
         }
     }
 
-    fn go_to_service_for(unit: &str) -> GoToService {
-        GoToService {
-            manager: ManagerArg::User,
-            name: unit.to_string().into(),
-            origin: JumpOrigin::Processes,
-        }
-    }
-
-    /// Records every `GoToService` that reaches the app level.
-    fn record_go_to_service(cx: &mut TestAppContext) -> Rc<RefCell<Vec<GoToService>>> {
-        let seen = Rc::new(RefCell::new(Vec::new()));
-        let sink = seen.clone();
+    /// The main window's active tab. The main window now handles `GoToService` itself.
+    fn main_tab(cx: &mut TestAppContext) -> Tab {
         cx.update(|cx| {
-            cx.on_action(move |a: &GoToService, _| sink.borrow_mut().push(a.clone()));
-        });
-        seen
+            main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .active_tab()
+        })
     }
 
     fn main_is_active(cx: &mut TestAppContext, main: &mut VisualTestContext) -> bool {
@@ -2882,7 +2873,6 @@ mod window {
                 validity: Validity::Valid,
             };
         });
-        let seen = record_go_to_service(cx);
         grow_tall(&mut rig);
         let row = general_row(&mut rig, 0, "Unit:");
         let value = rig
@@ -2891,7 +2881,11 @@ mod window {
         assert!(value.link.is_some(), "Unit is a link");
         assert_eq!(value.tooltip.as_deref(), Some("Go to service"));
         general_click(&mut rig, 0, row);
-        assert_eq!(*seen.borrow(), [go_to_service_for("app-firefox@1.service")]);
+        assert_eq!(
+            main_tab(cx),
+            Tab::Services,
+            "the main window shows Services"
+        );
         assert!(
             main_is_active(cx, &mut rig.main),
             "the main window is activated"
@@ -2907,8 +2901,7 @@ mod window {
             .update(|_, cx| rig.general.update(cx, |g, cx| g.set_cursor(0, row, cx)));
         rig.vcx.simulate_keystrokes("enter");
         rig.vcx.run_until_parked();
-        assert_eq!(seen.borrow().len(), 2);
-        assert_eq!(seen.borrow()[1], go_to_service_for("app-firefox@1.service"));
+        assert_eq!(main_tab(cx), Tab::Services);
     }
 
     #[gpui_kit::test]
@@ -2931,7 +2924,6 @@ mod window {
                 validity: Validity::Valid,
             };
         });
-        let seen = record_go_to_service(cx);
         publish_records(cx, &rig.engine, vec![rec(1200, ProcFlags::default())]);
         draw(&mut rig.vcx);
         grow_tall(&mut rig);
@@ -2943,7 +2935,7 @@ mod window {
         assert_eq!(value.validity, Validity::Stale, "text_secondary");
         general_click(&mut rig, 0, row);
         assert_eq!(clipboard(&mut rig.vcx), "app-firefox@1.service");
-        assert!(seen.borrow().is_empty(), "no Go to service when exited");
+        assert_ne!(main_tab(cx), Tab::Services, "no Go to service when exited");
     }
 
     #[gpui_kit::test]
@@ -2951,7 +2943,6 @@ mod window {
         let (engine, mut main) = setup(cx);
         let app = app_group("Firefox", GroupRowKind::App, 34);
         publish_groups(cx, &engine, vec![app.clone()]);
-        let seen = record_go_to_service(cx);
         let handle = open_app(cx, app.key).expect("app window opened");
         let general = app_props(cx, handle).read_with(cx, |w, _| w.general().clone());
         let mut detail = app_detail_for_unit();
@@ -2975,7 +2966,11 @@ mod window {
         draw(&mut vcx);
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
-        assert_eq!(*seen.borrow(), [go_to_service_for("app-firefox@1.service")]);
+        assert_eq!(
+            main_tab(cx),
+            Tab::Services,
+            "the main window shows Services"
+        );
         assert!(
             main_is_active(cx, &mut main),
             "the main window is activated"
