@@ -751,8 +751,7 @@ impl RecoveryTab {
         id: &'static str,
         state: &Entity<InputState>,
         value: u32,
-        max: u32,
-        step: i64,
+        (max, step): (u32, i64),
         set: impl Fn(&mut RecoveryForm, u32) + 'static,
         cx: &mut Context<Self>,
     ) -> TlStepper {
@@ -862,8 +861,7 @@ impl RecoveryTab {
                 "ServiceRecoveryRestartMs",
                 &self.restart_ms.clone(),
                 form.restart_ms,
-                RESTART_MS_MAX,
-                RESTART_MS_STEP,
+                (RESTART_MS_MAX, RESTART_MS_STEP),
                 |f, v| f.restart_ms = v,
                 cx,
             )
@@ -883,8 +881,7 @@ impl RecoveryTab {
             "ServiceRecoveryBurst",
             &self.burst.clone(),
             form.burst,
-            BURST_MAX,
-            1,
+            (BURST_MAX, 1),
             |f, v| f.burst = v,
             cx,
         );
@@ -892,8 +889,7 @@ impl RecoveryTab {
             "ServiceRecoveryInterval",
             &self.interval.clone(),
             form.interval_s,
-            INTERVAL_S_MAX,
-            1,
+            (INTERVAL_S_MAX, 1),
             |f, v| f.interval_s = v,
             cx,
         );
@@ -958,7 +954,7 @@ impl RecoveryTab {
 
         if self.sync_input {
             self.sync_input = false;
-            if self.on_failure.read(cx).text().to_string() != *form.on_failure {
+            if *self.on_failure.read(cx).text() != &*form.on_failure {
                 let text = form.on_failure.clone();
                 self.on_failure
                     .update(cx, |s, cx| s.set_value(text, window, cx));
