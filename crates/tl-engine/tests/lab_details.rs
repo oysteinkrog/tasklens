@@ -992,8 +992,8 @@ fn handle_search_replace_and_cancel() {
 
 // ---- Properties General: PSS, USS and GPU (tasklens-dwy.16) ----
 
-/// Starts `specs` on `root`, a copy of process-edge, and returns the key the process sweep gives
-/// 4201.
+/// Starts `specs` on `root`, a copy of owner-desktop, and returns the key of its lowest pid,
+/// which gets the `smaps_rollup` of process-edge 4201 (owner-desktop has none).
 fn start_props_engine(
     root: &FixtureRoot,
     specs: Vec<tl_engine::workers::WorkerSpec>,
@@ -1003,6 +1003,15 @@ fn start_props_engine(
     asupersync::runtime::TaskHandle<()>,
     ProcessKey,
 ) {
+    fs::create_dir_all(root.root().join("sys/fs/cgroup")).expect("create cgroup dir");
+    let pid = fs::read_dir(root.root().join("proc"))
+        .expect("list fixture proc")
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()))
+        .min()
+        .expect("a fixture pid");
+    root.write(pid, "smaps_rollup", ROLLUP);
+
     let mut fl = FakeLab::new();
     let (ep, ui) = fake_sources::root_endpoints(root.config(), specs);
     let handle = fl.spawn(async move {
@@ -1019,9 +1028,9 @@ fn start_props_engine(
         .processes
         .records
         .iter()
-        .find(|r| r.key.pid == 4201)
+        .find(|r| r.key.pid == pid)
         .map(|r| r.key)
-        .expect("the sweep lists 4201");
+        .expect("the sweep lists the fixture pid");
     (fl, ui, handle, key)
 }
 
@@ -1042,7 +1051,7 @@ fn general_window_demand(key: ProcessKey) -> Demand {
 /// PSS period, with no PSS or USS column shown and no `detail_keys`. On another tab it does not.
 #[test]
 fn engine_reads_pss_for_properties_general_target() {
-    let root = FixtureRoot::new(&["process-edge"]);
+    let root = FixtureRoot::new(&["owner-desktop"]);
     let (mut fl, ui, handle, key) =
         start_props_engine(&root, vec![processes::spec(), process_detail::spec()]);
 
@@ -1056,7 +1065,7 @@ fn engine_reads_pss_for_properties_general_target() {
         .records
         .iter()
         .find(|r| r.key == key)
-        .expect("record of 4201");
+        .expect("record of the target");
     assert_eq!(r.validity.get(ProcessField::Pss), Validity::Valid);
     assert_eq!(r.validity.get(ProcessField::Uss), Validity::Valid);
     assert_eq!(r.pss_bytes, 2_097_152);
@@ -1077,7 +1086,7 @@ fn engine_reads_pss_for_properties_general_target() {
         .records
         .iter()
         .find(|r| r.key == key)
-        .expect("record of 4201");
+        .expect("record of the target");
     assert_eq!(r.validity.get(ProcessField::Pss), Validity::WarmingUp);
     assert!(snap.processes.coverage.pss_uss.is_empty());
     stop(fl, ui, handle);
@@ -1087,7 +1096,7 @@ fn engine_reads_pss_for_properties_general_target() {
 /// VRAM a valid 0, and GPU % `Unsupported`, as AMD has no per-process utilisation.
 #[test]
 fn engine_gpu_final_for_properties_target_without_gpu_use() {
-    let root = FixtureRoot::new(&["process-edge", "drm-amd"]);
+    let root = FixtureRoot::new(&["owner-desktop", "drm-amd"]);
     let (mut fl, ui, handle, key) = start_props_engine(
         &root,
         vec![
@@ -1107,7 +1116,7 @@ fn engine_gpu_final_for_properties_target_without_gpu_use() {
         .records
         .iter()
         .find(|r| r.key == key)
-        .expect("record of 4201");
+        .expect("record of the target");
     assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
     assert_eq!(r.gpu_mem_bytes, 0);
     assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
