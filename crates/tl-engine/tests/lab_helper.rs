@@ -3187,7 +3187,7 @@ mod detail_helper {
                 (3, FdKind::Pipe, "pipe:[8812]", Some(8812), None),
                 (
                     7,
-                    FdKind::EventFd,
+                    FdKind::Eventfd,
                     "anon_inode:[eventfd]",
                     Some(1057),
                     Some(0o2)
