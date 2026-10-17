@@ -569,9 +569,9 @@ fn unit_row_frozen_from_sweep() {
     fl.finish();
 }
 
-/// tasklens-8q0.42 review: two users' `pipewire.service`, one process each, fold into one unit
-/// row. The row is frozen when both cgroups are, and `wireplumber.service`, frozen for one user
-/// only, is not.
+/// tasklens-8q0.42 review: two other users' `pipewire.service`, one process each, are both
+/// System and fold into one unit row. The row is frozen when both cgroups are, and
+/// `wireplumber.service`, frozen for one user only, is not.
 #[test]
 fn unit_row_frozen_across_users() {
     let root = FixtureRoot::merged();
@@ -579,10 +579,10 @@ fn unit_row_frozen_across_users() {
         format!("user.slice/user-{uid}.slice/user@{uid}.service/session.slice/{name}")
     };
     let units = [
-        (4330, unit(1000, "pipewire.service"), true),
-        (4331, unit(1001, "pipewire.service"), true),
-        (4340, unit(1000, "wireplumber.service"), false),
-        (4341, unit(1001, "wireplumber.service"), true),
+        (4330, unit(1001, "pipewire.service"), true),
+        (4331, unit(1002, "pipewire.service"), true),
+        (4340, unit(1001, "wireplumber.service"), false),
+        (4341, unit(1002, "wireplumber.service"), true),
     ];
     for (pid, cgroup, frozen) in &units {
         root.clone_pid(TOKENPROC, *pid);

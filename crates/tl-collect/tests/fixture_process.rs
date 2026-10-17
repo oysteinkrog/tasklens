@@ -2381,23 +2381,23 @@ fn sweep_frozen_unit_members() {
 
 sweep_clock!(frozen_unit_users_clock);
 
-/// tasklens-8q0.42 review: the reducer folds one process each in two users' `pipewire.service`
-/// into one unit row, so the sweep reads both cgroups even though each holds one process. Each
-/// process takes the state of its own cgroup.
+/// tasklens-8q0.42 review: the reducer folds one process each in two other users'
+/// `pipewire.service` into one unit row, so the sweep reads both cgroups even though each holds
+/// one process. Each process takes the state of its own cgroup.
 #[test]
 fn sweep_frozen_unit_across_users() {
     let (tmp, root) = merged_root();
     let unit = |uid: u32, name: &str| {
         format!("user.slice/user-{uid}.slice/user@{uid}.service/session.slice/{name}")
     };
-    clone_pid_into(tmp.path(), 4209, 4330, &unit(1000, "pipewire.service"));
-    clone_pid_into(tmp.path(), 4209, 4331, &unit(1001, "pipewire.service"));
-    clone_pid_into(tmp.path(), 4209, 4340, &unit(1000, "wireplumber.service"));
-    clone_pid_into(tmp.path(), 4209, 4341, &unit(1001, "wireplumber.service"));
-    write_events(tmp.path(), &unit(1000, "pipewire.service"), true);
+    clone_pid_into(tmp.path(), 4209, 4330, &unit(1001, "pipewire.service"));
+    clone_pid_into(tmp.path(), 4209, 4331, &unit(1002, "pipewire.service"));
+    clone_pid_into(tmp.path(), 4209, 4340, &unit(1001, "wireplumber.service"));
+    clone_pid_into(tmp.path(), 4209, 4341, &unit(1002, "wireplumber.service"));
     write_events(tmp.path(), &unit(1001, "pipewire.service"), true);
-    write_events(tmp.path(), &unit(1000, "wireplumber.service"), false);
-    write_events(tmp.path(), &unit(1001, "wireplumber.service"), true);
+    write_events(tmp.path(), &unit(1002, "pipewire.service"), true);
+    write_events(tmp.path(), &unit(1001, "wireplumber.service"), false);
+    write_events(tmp.path(), &unit(1002, "wireplumber.service"), true);
     let cache = tempfile::tempdir().expect("tempdir");
     let mut s = sampler(root, cache.path()).with_clock(frozen_unit_users_clock::now);
     let out = sweep_n(&mut s, frozen_unit_users_clock::set, 1);
