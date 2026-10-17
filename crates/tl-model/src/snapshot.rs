@@ -381,6 +381,42 @@ pub struct UnitRecord {
     pub tasks: Total<u64>,
 }
 
+/// Which of the 7 Recovery keys the tasklens drop-in sets (UI-SYS-034). The engine replaces
+/// the whole file, so Apply sends these keys along with the changed ones.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct RecoveryKeySet {
+    pub restart: bool,
+    pub restart_sec: bool,
+    pub start_limit_burst: bool,
+    pub start_limit_interval_sec: bool,
+    pub start_limit_action: bool,
+    pub failure_action: bool,
+    pub on_failure: bool,
+}
+
+impl RecoveryKeySet {
+    /// Marks `key` (a drop-in key name, case-sensitive as systemd reads it). False for a key
+    /// that is not one of the 7.
+    pub fn set_key(&mut self, key: &str) -> bool {
+        let slot = match key {
+            "Restart" => &mut self.restart,
+            "RestartSec" => &mut self.restart_sec,
+            "StartLimitBurst" => &mut self.start_limit_burst,
+            "StartLimitIntervalSec" => &mut self.start_limit_interval_sec,
+            "StartLimitAction" => &mut self.start_limit_action,
+            "FailureAction" => &mut self.failure_action,
+            "OnFailure" => &mut self.on_failure,
+            _ => return false,
+        };
+        *slot = true;
+        true
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Recovery tab values (SYS-013), all from unit properties. `None` shows "Not reported".
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct RecoverySettings {
@@ -472,6 +508,8 @@ pub struct UnitDetails {
     // Recovery (SYS-013, UI-SYS-033)
     pub recovery: RecoverySettings,
     pub recovery_dropin_exists: bool,
+    /// The Recovery keys the tasklens drop-in sets; empty without a drop-in (UI-SYS-034).
+    pub recovery_dropin_keys: RecoveryKeySet,
     // Dependencies (SYS-014, UI-SYS-034)
     /// Sorted by unit name, one row per relation.
     pub deps: Arc<[DepEntry]>,

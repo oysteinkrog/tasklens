@@ -2664,6 +2664,7 @@ fn unit_details(unit: &UnitRef) -> Arc<UnitDetails> {
         graphical_session: false,
         recovery: RecoverySettings::default(),
         recovery_dropin_exists: false,
+        recovery_dropin_keys: Default::default(),
         deps: Arc::from([]),
     })
 }

@@ -66,8 +66,8 @@ use tl_model::demand::{Demand, UNIT_DETAILS_MAX};
 use tl_model::health::{ManagerState, SourceId};
 use tl_model::ids::ProcessKey;
 use tl_model::snapshot::{
-    DepEntry, PidIds, RecoverySettings, Relation, ServiceBackend, ServiceStatus, StartupType,
-    UnitDetails, UnitRecord,
+    DepEntry, PidIds, RecoveryKeySet, RecoverySettings, Relation, ServiceBackend, ServiceStatus,
+    StartupType, UnitDetails, UnitRecord,
 };
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::time::BootId;
@@ -2205,7 +2205,12 @@ fn non_empty(s: &Arc<str>) -> Option<Arc<str>> {
 
 /// The details of one unit. `ids` is the real uid and gid of MainPID, `dropin` whether the
 /// recovery drop-in exists.
-fn details_of(manager: Manager, raw: &DetailRaw, ids: Option<PidIds>, dropin: bool) -> UnitDetails {
+fn details_of(
+    manager: Manager,
+    raw: &DetailRaw,
+    ids: Option<PidIds>,
+    dropin: Option<RecoveryKeySet>,
+) -> UnitDetails {
     let list = |r: Relation| {
         let i = RELATIONS.iter().position(|(_, x)| *x == r).unwrap_or(0);
         &raw.deps[i]
@@ -2252,7 +2257,8 @@ fn details_of(manager: Manager, raw: &DetailRaw, ids: Option<PidIds>, dropin: bo
         main_pid_ids: if raw.main_pid == 0 { None } else { ids },
         graphical_session,
         recovery: raw.recovery.clone(),
-        recovery_dropin_exists: dropin,
+        recovery_dropin_exists: dropin.is_some(),
+        recovery_dropin_keys: dropin.unwrap_or_default(),
         deps,
     }
 }
@@ -2264,7 +2270,8 @@ struct DetailEntry {
     /// `None` until the first `GetAll` pair succeeds.
     raw: Option<DetailRaw>,
     ids: Option<PidIds>,
-    dropin: bool,
+    /// `None` without a drop-in, else the Recovery keys it sets.
+    dropin: Option<RecoveryKeySet>,
     /// What the last update published; `None` while `raw` is.
     built: Option<Arc<UnitDetails>>,
     /// Read the unit with `GetAll` again: it is new, its last read failed, or a signal
@@ -2280,7 +2287,7 @@ impl DetailEntry {
             name,
             raw: None,
             ids: None,
-            dropin: false,
+            dropin: None,
             built: None,
             refetch: true,
             reread_host: false,
@@ -2375,7 +2382,12 @@ impl ServicesState {
     }
 
     /// Applies host reads. True when published details changed.
-    fn set_detail_host(&mut self, name: &str, ids: Option<PidIds>, dropin: bool) -> bool {
+    fn set_detail_host(
+        &mut self,
+        name: &str,
+        ids: Option<PidIds>,
+        dropin: Option<RecoveryKeySet>,
+    ) -> bool {
         let manager = self.manager;
         let Some(d) = self.details.iter_mut().find(|d| *d.name == *name) else {
             return false;
@@ -2456,14 +2468,52 @@ fn user_dropin_base(
 }
 
 /// Whether `<base>/<unit>.d/50-tasklens-recovery.conf` exists, checked with `stat`.
+#[cfg(test)]
 fn dropin_exists(base: Option<&std::path::Path>, unit: &str) -> bool {
-    let Some(base) = base else {
-        return false;
-    };
+    dropin_path(base, unit).is_some_and(|p| std::fs::metadata(p).is_ok())
+}
+
+/// `<base>/<unit>.d/50-tasklens-recovery.conf`, `None` without a base or for a unit name that
+/// is not a plain file name.
+fn dropin_path(base: Option<&std::path::Path>, unit: &str) -> Option<std::path::PathBuf> {
+    let base = base?;
     if unit.is_empty() || unit.contains('/') || unit.starts_with('.') {
-        return false;
+        return None;
     }
-    std::fs::metadata(base.join(format!("{unit}.d")).join(RECOVERY_DROPIN)).is_ok()
+    Some(base.join(format!("{unit}.d")).join(RECOVERY_DROPIN))
+}
+
+/// The Recovery keys set under `[Unit]` and `[Service]` in drop-in text. Only `Key=value`
+/// lines count; comments and unknown keys are ignored.
+fn parse_dropin_keys(text: &str) -> RecoveryKeySet {
+    let mut keys = RecoveryKeySet::default();
+    let mut in_section = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_section = line == "[Unit]" || line == "[Service]";
+        } else if in_section && let Some((key, _)) = line.split_once('=') {
+            keys.set_key(key.trim_end());
+        }
+    }
+    keys
+}
+
+/// The drop-in of `unit`: `None` when the file does not exist, else the Recovery keys in it.
+/// A read error leaves the key set empty.
+fn read_dropin(base: Option<&std::path::Path>, unit: &str) -> Option<RecoveryKeySet> {
+    let path = dropin_path(base, unit)?;
+    std::fs::metadata(&path).ok()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Some(parse_dropin_keys(&text)),
+        Err(e) => {
+            tracing::debug!(unit, error = %e, "systemd: recovery drop-in read failed");
+            Some(RecoveryKeySet::default())
+        }
+    }
 }
 
 /// The real uid and gid in `<proc>/<pid>/status`, or `None` when the process is gone or
@@ -2479,12 +2529,12 @@ fn pid_ids(sys_root: &SysRoot, pid: u32, buf: &mut Vec<u8>, st: &mut PidStatus) 
 }
 
 /// The host reads of `units` (`(name, MainPID)`): MainPID's ids, `None` for pid 0, and whether
-/// the recovery drop-in exists.
+/// the recovery drop-in exists and which Recovery keys it sets.
 fn read_details_host(
     sys_root: &SysRoot,
     dropins: Option<&std::path::Path>,
     units: &[(Arc<str>, u32)],
-) -> Vec<(Option<PidIds>, bool)> {
+) -> Vec<(Option<PidIds>, Option<RecoveryKeySet>)> {
     let mut buf = Vec::new();
     let mut st = PidStatus::default();
     units
@@ -2493,7 +2543,7 @@ fn read_details_host(
             let ids = (*pid != 0)
                 .then(|| pid_ids(sys_root, *pid, &mut buf, &mut st))
                 .flatten();
-            (ids, dropin_exists(dropins, name))
+            (ids, read_dropin(dropins, name))
         })
         .collect()
 }
@@ -4972,14 +5022,14 @@ mod tests {
             ("MemoryCurrent", Value::U64(u64::MAX)),
             ("TasksCurrent", Value::U64(5)),
         ]);
-        let d = details_of(Manager::System, &raw, None, false);
+        let d = details_of(Manager::System, &raw, None, None);
         assert_eq!(d.memory_current, None, "u64::MAX is not 0");
         assert_eq!(d.tasks_current, Some(5));
         assert_eq!(d.cpu_usage_nsec, None, "absent");
 
         // A timer has no `Service` properties: they stay empty.
         let timer = detail_raw(vec![("Id", Value::from("fstrim.timer"))]);
-        let d = details_of(Manager::System, &timer, None, false);
+        let d = details_of(Manager::System, &timer, None, None);
         assert!(d.exec_start_argv.is_empty());
         assert_eq!(d.recovery.restart, None);
         assert_eq!(d.recovery.n_restarts, None);
@@ -5006,7 +5056,7 @@ mod tests {
                 ("Restart", Value::from("on-failure")),
             ]),
         );
-        let d = details_of(Manager::System, &raw, None, false);
+        let d = details_of(Manager::System, &raw, None, None);
         let argv: Vec<&str> = d.exec_start_argv.iter().map(|a| &**a).collect();
         assert_eq!(argv, ["foo", "--x"]);
         assert_eq!(d.recovery.restart.as_deref(), Some("on-failure"));
@@ -5019,7 +5069,7 @@ mod tests {
             ("After", Value::from(vec!["b.target", "a.target"])),
             ("Wants", Value::from(vec!["b.target"])),
         ]);
-        let d = details_of(Manager::User, &part_of, None, false);
+        let d = details_of(Manager::User, &part_of, None, None);
         assert!(d.graphical_session);
         let deps: Vec<(&str, Relation)> =
             d.deps.iter().map(|e| (&*e.unit.name, e.relation)).collect();
@@ -5038,12 +5088,12 @@ mod tests {
             "BindsTo",
             Value::from(vec!["graphical-session.target"]),
         )]);
-        assert!(details_of(Manager::User, &binds, None, false).graphical_session);
+        assert!(details_of(Manager::User, &binds, None, None).graphical_session);
         let wants = detail_raw(vec![(
             "Wants",
             Value::from(vec!["graphical-session.target"]),
         )]);
-        assert!(!details_of(Manager::User, &wants, None, false).graphical_session);
+        assert!(!details_of(Manager::User, &wants, None, None).graphical_session);
     }
 
     #[test]
@@ -5104,9 +5154,15 @@ mod tests {
         assert_eq!(
             reads,
             [
-                (Some(PidIds { uid: 977, gid: 978 }), true),
-                (None, false),
-                (None, false),
+                (
+                    Some(PidIds { uid: 977, gid: 978 }),
+                    Some(RecoveryKeySet {
+                        restart: true,
+                        ..Default::default()
+                    })
+                ),
+                (None, None),
+                (None, None),
             ]
         );
 
@@ -5121,8 +5177,45 @@ mod tests {
         assert!(state.set_detail_host("foo.service", ids, dropin));
         let d = &published(&state)[0].1;
         assert!(d.recovery_dropin_exists);
+        assert!(d.recovery_dropin_keys.restart);
         assert_eq!(d.main_pid_ids, Some(PidIds { uid: 977, gid: 978 }));
         assert!(state.details_host_due(false).is_empty());
+    }
+
+    #[test]
+    fn dropin_keys_parse_and_read() {
+        let text = "# c\n[Unit]\nOnFailure=a.service\nBogus=1\n[Service]\nRestart=always\n; Restart\n#FailureAction=exit\nRestartSec\n[Install]\nStartLimitBurst=3\n";
+        assert_eq!(
+            parse_dropin_keys(text),
+            RecoveryKeySet {
+                restart: true,
+                on_failure: true,
+                ..Default::default()
+            }
+        );
+        assert!(parse_dropin_keys("").is_empty());
+
+        let tmp_base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        std::fs::create_dir_all(&tmp_base).expect("tmp base");
+        let tmp = tempfile::TempDir::new_in(&tmp_base).expect("temp dir");
+        let dir = tmp.path().join("foo.service.d");
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(
+            dir.join(RECOVERY_DROPIN),
+            "[Service]\nRestart=on-failure\n[Unit]\nOnFailure=x.service\n",
+        )
+        .expect("file");
+        let keys = read_dropin(Some(tmp.path()), "foo.service").expect("exists");
+        assert_eq!(
+            keys,
+            RecoveryKeySet {
+                restart: true,
+                on_failure: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(read_dropin(Some(tmp.path()), "bar.service"), None);
     }
 
     #[test]
