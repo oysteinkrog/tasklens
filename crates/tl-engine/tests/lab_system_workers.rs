@@ -1852,9 +1852,9 @@ fn memory_details_first_sample() {
             disksize: 67_331_162_112,
             algorithm: Some(Arc::from("zstd")),
             stats: Some(ZramTotals {
-                orig_data: 1_048_576,
-                compr_data: 262_144,
-                mem_used: 300_000,
+                orig_data: 29_526_052_864,
+                compr_data: 6_871_065_127,
+                mem_used: 7_058_923_520,
             }),
         }]
     );
