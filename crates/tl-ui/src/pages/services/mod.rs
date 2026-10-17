@@ -6,9 +6,9 @@
 //! Menu items act on the targets captured when the menu opened; keyboard commands read the
 //! selection when they run.
 //!
-//! Child process rows get the process row menu. End Task, End Process and Properties run on this
-//! tab; End Task and End Process follow the "Disk is in use" window's end path, and Properties
-//! opens Process Properties. The other process items do nothing here until tasklens-pdu.58.
+//! Child process rows get the process row menu (UI-SYS-016). Its process commands, and Ctrl+E on
+//! child rows, run through the shared entry point `run_process_action`, so they get the Processes
+//! tab's refusals, confirmations and toasts. Properties opens Process Properties.
 
 pub mod actions;
 pub mod copy;
@@ -24,24 +24,22 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    Action as _, AnyElement, AnyWindowHandle, App, Bounds, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div, point,
+    Action, AnyElement, AnyWindowHandle, App, Bounds, Context, DismissEvent, Entity, EventEmitter,
+    FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div, point,
 };
 use smallvec::SmallVec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
+use tl_model::actions::ActionTarget;
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::{EngineCaps, SourceId};
-use tl_model::ids::{ColumnId, NodeId, ProcessKey};
-use tl_model::process::ProcFlags;
+use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::UiState;
 use tl_model::snapshot::{
     ComponentMask, ProcessSnapshot, ServiceBackend, ServiceCounts, Snapshot, StartupType,
 };
 use tl_model::table::{SysColumnId, SysNodeId, UnitRef};
 use tl_model::units;
-use tracing::warn;
 
 use self::actions::{
     JumpOrigin, SERVICE_TABLE_CONTEXT, ServiceFileProperties, ServiceJumpToProcess,
@@ -58,7 +56,6 @@ use self::filter_strip::{
 };
 use self::flows::UnitVerb;
 use self::menu::{MenuChoice, ServiceMenuTargets, menu_choice, service_menu};
-use crate::action_tracker::{GlobalActionTracker, ToastTexts, action_words};
 use crate::actions::ClearFilter;
 use crate::app::EngineGlobal;
 use crate::components::menu::{TlMenu, close_context_menu, open_context_menu_at};
@@ -67,10 +64,14 @@ use crate::components::toast::{
 };
 use crate::hub::{GlobalHub, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
-use crate::pages::processes::actions::{CapturedTargets, CopyDetails, EndProcess, EndTask};
-use crate::pages::processes::confirm::{ConfirmResult, confirm};
+use crate::pages::processes::actions::{
+    CapturedTargets, CopyDetails, CreateDump, EndProcess, EndProcessTree, EndTask, FileProperties,
+    GoToParent, OpenFileLocation, OpenVirusTotal, ResumeProcess, SetIoPriorityClass, SetPriority,
+    ShowWindow, SuspendProcess,
+};
 use crate::pages::processes::menu::{MenuCaps, row_menu as process_row_menu};
-use crate::pages::processes::toasts::{refuse, toast_words};
+use crate::pages::processes::record_target;
+use crate::pages::processes::run::run_process_action;
 use crate::pages::sys_copy::{CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table};
 use crate::pages::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
 use crate::settings_global::TlSettings;
@@ -81,7 +82,7 @@ use crate::theme::metrics;
 use crate::window::main::{FilterChanged, GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::window::status::StatusChanged;
-use crate::windows::disk_in_use::{confirm_kind, record_target};
+use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
 use crate::windows::props::open_process_properties;
 use crate::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
 
@@ -587,18 +588,13 @@ impl ServicesPage {
         ServiceMenuTargets::capture(&services, &nodes, None, self.frame.actions.read(cx))
     }
 
-    /// The menu-open child process keys, or the child rows of the current selection.
-    fn take_process_keys(&mut self, cx: &App) -> SmallVec<[ProcessKey; 1]> {
+    /// The menu-open child process targets, or the child rows of the current selection.
+    fn take_process_targets(&mut self, cx: &App) -> CapturedTargets {
         if let Some(MenuTargets::Process(targets)) = self.menu_targets.take() {
-            return targets.process_keys();
+            return targets;
         }
-        self.selected_nodes(cx)
-            .iter()
-            .filter_map(|node| match node {
-                SysNodeId::UnitProcess(_, key) => Some(*key),
-                _ => None,
-            })
-            .collect()
+        let nodes = self.selected_nodes(cx);
+        child_targets(self.frame.table.read(cx).delegate.processes(), &nodes)
     }
 
     // ---- Unit commands ----
@@ -633,8 +629,8 @@ impl ServicesPage {
         {
             return;
         }
-        let keys = self.take_process_keys(cx);
-        self.end(&keys, false, window, cx);
+        let targets = self.take_process_targets(cx);
+        run_process_action(&EndTask, targets, window, cx);
     }
 
     fn on_restart(&mut self, _: &ServiceRestart, window: &mut Window, cx: &mut Context<Self>) {
@@ -783,87 +779,10 @@ impl ServicesPage {
 
     // ---- Child process rows ----
 
-    fn on_end_task(&mut self, _: &EndTask, window: &mut Window, cx: &mut Context<Self>) {
-        let keys = self.take_process_keys(cx);
-        self.end(&keys, false, window, cx);
-    }
-
-    fn on_end_process(&mut self, _: &EndProcess, window: &mut Window, cx: &mut Context<Self>) {
-        let keys = self.take_process_keys(cx);
-        self.end(&keys, true, window, cx);
-    }
-
-    /// Ends `keys`: SIGKILL with `kill`, else SIGTERM. Follows `DiskInUseWindow::end`: exited
-    /// processes are dropped, refused ones stop the action with a toast, and the R-036
-    /// confirmation runs first when one applies.
-    fn end(
-        &mut self,
-        keys: &[ProcessKey],
-        kill: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if keys.is_empty() {
-            return;
-        }
-        let Some(snap) = cx
-            .try_global::<GlobalHub>()
-            .map(|h| Arc::clone(h.0.read(cx).current()))
-        else {
-            return;
-        };
-        let live: Vec<_> = keys
-            .iter()
-            .filter_map(|k| snap.processes.get(*k))
-            .filter(|r| !r.flags.contains(ProcFlags::EXITED))
-            .map(record_target)
-            .collect();
-        if live.is_empty() {
-            let text = toast_words(cx).exited.clone();
-            if let Some(queue) = ToastQueue::of_window(window, cx) {
-                queue.update(cx, |q, cx| q.push(ToastKind::Warning, text, None, None, cx));
-            }
-            return;
-        }
-        let ask = confirm_kind(&live, kill, cx);
-        let targets: SmallVec<[ActionTarget; 4]> = live
-            .iter()
-            .filter_map(|t| match t.node {
-                NodeId::Process(key) => Some(ActionTarget::Process(key)),
-                _ => None,
-            })
-            .collect();
-        let captured = CapturedTargets::new(live, None);
-        if refuse(&captured, cx) {
-            return;
-        }
-        let kind = ActionKind::Signal(if kill { Signal::Kill } else { Signal::Term });
-        let Some(texts) = toast_words(cx).texts_for(&kind, &captured) else {
-            return;
-        };
-        let texts = texts.into_toast_texts(action_words(cx));
-        let request = ActionRequest {
-            // The tracker gives id 0 its next ActionId.
-            id: ActionId(0),
-            kind,
-            targets: targets.into_iter().collect(),
-            privileged: false,
-        };
-        let Some(ask) = ask else {
-            submit_end(request, texts, window, cx);
-            return;
-        };
-        let parent = window.window_handle();
-        // The dialog opens modal to this window, which is being updated now.
-        cx.defer(move |cx| {
-            confirm(ask, parent, cx, move |result, cx| {
-                if result == ConfirmResult::Confirmed {
-                    let _ = parent.update(cx, |_, window, cx| {
-                        submit_end(request, texts, window, cx);
-                    });
-                }
-            });
-        });
+    /// A process row command on child rows: the menu-open targets, else the selected child rows.
+    fn on_process_action<A: Action>(&mut self, a: &A, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_process_targets(cx);
+        run_process_action(a, targets, window, cx);
     }
 
     // ---- Copy and expansion ----
@@ -1122,22 +1041,6 @@ fn write_status(counts: ServiceCounts, selected: usize, out: &mut String, cx: &A
     }
 }
 
-/// Sends an end request through the app's `ActionTracker`; its toasts go to `window`.
-fn submit_end(request: ActionRequest, texts: ToastTexts, window: &mut Window, cx: &mut App) {
-    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
-        warn!(target: "tasklens::ui", "no action tracker; the end action was not sent");
-        return;
-    };
-    let Some(queue) = ToastQueue::of_window(window, cx) else {
-        warn!(target: "tasklens::ui", "no toast stack; the end action was not sent");
-        return;
-    };
-    let queue = queue.downgrade();
-    tracker.update(cx, |t, cx| {
-        let _ = t.track_or_toast(request, queue, texts, cx);
-    });
-}
-
 /// The child process targets of `nodes` that `processes` still lists, in order.
 fn child_targets(processes: &ProcessSnapshot, nodes: &[SysNodeId]) -> CapturedTargets {
     let targets = nodes.iter().filter_map(|node| match node {
@@ -1277,8 +1180,23 @@ impl Render for ServicesPage {
             .on_action(cx.listener(Self::on_jump_to_process))
             .on_action(cx.listener(Self::on_view_logs))
             .on_action(cx.listener(Self::on_open_properties))
-            .on_action(cx.listener(Self::on_end_task))
-            .on_action(cx.listener(Self::on_end_process))
+            .on_action(cx.listener(Self::on_process_action::<EndTask>))
+            .on_action(cx.listener(Self::on_process_action::<EndProcess>))
+            .on_action(cx.listener(Self::on_process_action::<EndProcessTree>))
+            .on_action(cx.listener(Self::on_process_action::<SuspendProcess>))
+            .on_action(cx.listener(Self::on_process_action::<ResumeProcess>))
+            .on_action(cx.listener(Self::on_process_action::<SetPriority>))
+            .on_action(cx.listener(Self::on_process_action::<SetIoPriorityClass>))
+            .on_action(cx.listener(Self::on_process_action::<OpenCustomPriority>))
+            .on_action(cx.listener(Self::on_process_action::<SetAffinity>))
+            .on_action(cx.listener(Self::on_process_action::<SendSignal>))
+            .on_action(cx.listener(Self::on_process_action::<SignalOpenRealtime>))
+            .on_action(cx.listener(Self::on_process_action::<GoToParent>))
+            .on_action(cx.listener(Self::on_process_action::<ShowWindow>))
+            .on_action(cx.listener(Self::on_process_action::<OpenFileLocation>))
+            .on_action(cx.listener(Self::on_process_action::<FileProperties>))
+            .on_action(cx.listener(Self::on_process_action::<OpenVirusTotal>))
+            .on_action(cx.listener(Self::on_process_action::<CreateDump>))
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_row))
             .on_action(cx.listener(Self::on_copy_details))

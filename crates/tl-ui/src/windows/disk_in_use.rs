@@ -7,13 +7,15 @@
 //! leaves the catalog after `Done` and its page goes with it.
 //!
 //! The window lists the blocking processes grouped by app. End Task sends SIGTERM and End Process
-//! (Shift held) SIGKILL, both through the app's `ActionTracker`; the window never sends a signal
+//! (Shift held) SIGKILL through the shared process action entry point, `run_process_action`, so
+//! the refusals, confirmations and toasts are the Processes tab's; the window never sends a signal
 //! itself (ADR-006). End All with more than one process, and any action on a protected process or
 //! another user's process, asks first (R-036, D-009). 500 ms after an end action finishes, the
 //! eject is sent again, once per action. While an eject is in flight nothing new is sent and
 //! Retry is disabled, because the worker drops an `Eject` that arrives while one runs.
 
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -23,18 +25,17 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::Root;
 use gpui_kit::component::Icon;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, FontWeight, Global,
-    ImageSource, InteractiveElement as _, IntoElement, ModifiersChangedEvent, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
-    Subscription, WeakEntity, Window, WindowHandle, div, img, px, size,
+    Action, AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, FontWeight,
+    Global, ImageSource, InteractiveElement as _, IntoElement, ModifiersChangedEvent,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, WeakEntity, Window, WindowHandle, div, img, px, size,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
+use tl_model::actions::ActionId;
 use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::devices::DeviceIdentity;
-use tl_model::ids::{DeviceIdx, NodeId, ProcessKey};
-use tl_model::process::{ProcFlags, ProcState, ProcessRecord};
+use tl_model::ids::{DeviceIdx, ProcessKey};
 use tl_model::snapshot::{Blocker, DiskDetails, EjectState, Snapshot};
 use tl_model::validity::Validity;
 use tracing::warn;
@@ -42,16 +43,16 @@ use tracing::warn;
 use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker, action_words};
 use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::toast::{ToastKind, ToastQueue};
+use crate::components::toast::ToastKind;
 use crate::components::tooltip::TlTooltip;
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::DeviceKey;
-use crate::pages::processes::actions::{CapturedTarget, CapturedTargets};
-use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
-use crate::pages::processes::toasts::{refuse, toast_words};
-use crate::table::tree_table::RowKind;
+use crate::pages::processes::actions::{CapturedTargets, EndProcess, EndTask};
+use crate::pages::processes::record_target;
+use crate::pages::processes::run::{OnSent, RunOptions, run_process_action_with};
+use crate::pages::processes::toasts::toast_words;
 use crate::text::style::{label_style, t_base, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::window::main::push_main_toast;
@@ -181,70 +182,6 @@ fn model_text(snap: &Snapshot, idx: DeviceIdx) -> SharedString {
         Some(model) => model.trim().to_owned().into(),
         None => kernel_name(snap, idx).map_or_else(SharedString::default, SharedString::from),
     }
-}
-
-/// The target of one live process record. A copy of the Processes page's `record_target`.
-pub(crate) fn record_target(r: &ProcessRecord) -> CapturedTarget {
-    CapturedTarget {
-        node: NodeId::Process(r.key),
-        kind: RowKind::Process,
-        name: SharedString::from(&r.meta.name),
-        pid: Some(r.key.pid),
-        uid: r.uid,
-        user: SharedString::from(&r.meta.user),
-        flags: r.flags,
-        member_count: 1,
-        stopped: r.state == ProcState::Stopped,
-        ppid: r.ppid,
-        nice: Some(r.nice),
-        io_priority: None,
-        exe_deleted: false,
-        unit: None,
-    }
-}
-
-/// The confirmation an end action on `targets` needs first, if any (R-036, D-009): a protected
-/// target, then two or more targets, then another user's target.
-pub(crate) fn confirm_kind(
-    targets: &[CapturedTarget],
-    kill: bool,
-    cx: &App,
-) -> Option<ConfirmKind> {
-    if let Some(t) = targets
-        .iter()
-        .find(|t| t.flags.contains(ProcFlags::PROTECTED))
-    {
-        return Some(ConfirmKind::Protected {
-            action: if kill {
-                ProtectedAction::Kill
-            } else {
-                ProtectedAction::End
-            },
-            name: t.name.clone(),
-            tree_count: None,
-        });
-    }
-    if targets.len() >= 2 {
-        return Some(ConfirmKind::EndMany {
-            count: targets.len() as u32,
-            kill,
-        });
-    }
-    let t = targets
-        .iter()
-        .find(|t| t.flags.contains(ProcFlags::OTHER_USER))?;
-    let action = if kill {
-        "processes-confirm-action-end-process"
-    } else {
-        "processes-confirm-action-end-task"
-    };
-    Some(ConfirmKind::OtherUser {
-        action: tr(cx, action),
-        name: t.name.clone(),
-        pid: t.pid.unwrap_or_default(),
-        user: t.user.clone(),
-        destructive: true,
-    })
 }
 
 /// The eject toasts, recorded for tests: they go to the main window, which tests do not have.
@@ -477,11 +414,6 @@ pub fn open_disk_in_use(
             cx.new(|cx| DiskInUseWindow::new(key, idx, hub, disk_label, window, cx))
         })?;
         if let Some(frame) = TlSecondaryWindow::<DiskInUseWindow>::find(handle, cx) {
-            let (content, queue) = {
-                let f = frame.read(cx);
-                (f.content().clone(), f.toasts().downgrade())
-            };
-            content.update(cx, |c, _| c.own_toasts = queue);
             // The title follows a language change.
             handle.update(cx, |_, window, cx| {
                 frame.update(cx, |_, cx| {
@@ -555,8 +487,6 @@ pub struct DiskInUseWindow {
     retry_pending: bool,
     words: Words,
     close_focus: FocusHandle,
-    /// This window's toast queue, for action toasts when there is no main window.
-    own_toasts: WeakEntity<ToastQueue>,
     _subs: SmallVec<[Subscription; 3]>,
 }
 
@@ -609,7 +539,6 @@ impl DiskInUseWindow {
             retry_pending: false,
             words: Words::new(cx),
             close_focus,
-            own_toasts: WeakEntity::new_invalid(),
             _subs: subs,
         };
         let snap = hub.read(cx).current().clone();
@@ -692,9 +621,8 @@ impl DiskInUseWindow {
             .collect()
     }
 
-    /// Ends `keys`: SIGKILL with `kill`, else SIGTERM. Exited processes are dropped, refused ones
-    /// (tasklens itself, PID 1, kernel threads) stop the action with a toast, and the R-036
-    /// confirmation runs first when one applies.
+    /// Ends `keys`: End Process (SIGKILL) with `kill`, else End Task (SIGTERM), through the
+    /// shared entry point. Each request it sends retries the eject once when it finishes.
     fn end(
         &mut self,
         keys: Vec<ProcessKey>,
@@ -703,74 +631,27 @@ impl DiskInUseWindow {
         cx: &mut Context<Self>,
     ) {
         let snap = self.hub.read(cx).current().clone();
-        let live: Vec<CapturedTarget> = keys
-            .iter()
-            .filter_map(|k| snap.processes.get(*k))
-            .filter(|r| !r.flags.contains(ProcFlags::EXITED))
-            .map(record_target)
-            .collect();
-        if live.is_empty() {
+        let targets = CapturedTargets::new(
+            keys.iter()
+                .filter_map(|k| snap.processes.get(*k))
+                .map(record_target),
+            None,
+        );
+        if targets.items.is_empty() {
             let text = toast_words(cx).exited.clone();
             toast(ToastKind::Warning, text, cx);
             return;
         }
-        let ask = confirm_kind(&live, kill, cx);
-        let targets: SmallVec<[ActionTarget; 4]> = live
-            .iter()
-            .filter_map(|t| match t.node {
-                NodeId::Process(key) => Some(ActionTarget::Process(key)),
-                _ => None,
-            })
-            .collect();
-        let captured = CapturedTargets::new(live, None);
-        if refuse(&captured, cx) {
-            return;
-        }
-        let kind = ActionKind::Signal(if kill { Signal::Kill } else { Signal::Term });
-        let Some(texts) = toast_words(cx).texts_for(&kind, &captured) else {
-            return;
-        };
-        let texts = texts.into_toast_texts(action_words(cx));
-        let request = ActionRequest {
-            // The tracker gives id 0 its next ActionId.
-            id: ActionId(0),
-            kind,
-            targets: targets.into_iter().collect(),
-            privileged: false,
-        };
-        let Some(ask) = ask else {
-            self.submit(request, texts, cx);
-            return;
-        };
         let this = cx.entity().downgrade();
-        let parent = window.window_handle();
-        // The dialog opens modal to this window, which is being updated now.
-        cx.defer(move |cx| {
-            confirm(ask, parent, cx, move |result, cx| {
-                if result == ConfirmResult::Confirmed {
-                    let _ = this.update(cx, |w, cx| w.submit(request, texts, cx));
-                }
-            });
+        let on_sent: OnSent = Rc::new(move |id, cx| {
+            let _ = this.update(cx, |w, _| w.ending.push(id));
         });
-    }
-
-    fn submit(
-        &mut self,
-        request: ActionRequest,
-        texts: crate::action_tracker::ToastTexts,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
-            warn!(target: "tasklens::ui", "no action tracker; the end action was not sent");
-            return;
+        let options = RunOptions {
+            snapshot: Some(snap),
+            on_sent: Some(on_sent),
         };
-        let queue = crate::window::main::main_window_view(cx)
-            .map(|main| main.read(cx).toasts().downgrade())
-            .unwrap_or_else(|| self.own_toasts.clone());
-        let sent = tracker.update(cx, |t, cx| t.track_or_toast(request, queue, texts, cx));
-        if let Some(id) = sent {
-            self.ending.push(id);
-        }
+        let action: &dyn Action = if kill { &EndProcess } else { &EndTask };
+        run_process_action_with(action, targets, options, window, cx);
     }
 
     /// An end action finished: retry the eject 500 ms later, once.

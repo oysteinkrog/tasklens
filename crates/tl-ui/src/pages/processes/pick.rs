@@ -18,10 +18,10 @@ use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::{PickOutcome, PickResult, WindowsSnapshot};
 use tracing::debug;
 
-use super::actions::{CapturedTarget, CapturedTargets};
+use super::actions::{CapturedTarget, CapturedTargets, EndTask};
 use super::confirm::{ConfirmKind, ConfirmResult, confirm};
 use super::jump::JumpTexts;
-use super::{End, ProcessesPage, record_target};
+use super::{ProcessesPage, record_target};
 use crate::components::toast::ToastKind;
 use crate::hub::GlobalHub;
 use crate::i18n::tr;
@@ -196,7 +196,6 @@ impl ProcessesPage {
             flags: picked.flags | ProcFlags::EXITED,
             ..picked
         });
-        self.set_menu_targets(CapturedTargets::new([target], None));
-        self.end(End::Task, window, cx);
+        self.run_action(&EndTask, CapturedTargets::new([target], None), window, cx);
     }
 }

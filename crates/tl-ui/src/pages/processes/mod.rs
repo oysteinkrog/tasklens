@@ -16,6 +16,7 @@ pub mod jump;
 pub mod menu;
 pub mod name_cell;
 pub mod pick;
+pub mod run;
 pub mod status;
 pub mod table;
 pub mod toasts;
@@ -25,15 +26,13 @@ pub mod tooltip;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Render, SharedString, StyleRefinement,
-    Styled as _, Subscription, UniformListScrollHandle, Window, div,
+    Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, UniformListScrollHandle, Window, div,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tl_model::actions::{
-    ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, SchedPolicy, Signal,
-};
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, KWinCommand};
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
@@ -47,17 +46,17 @@ use tracing::warn;
 use self::actions::{
     ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
     EndProcess, EndProcessTree, EndTask, FileProperties, FreezeApp, GoToParent, KillApp,
-    MAX_TARGETS, OpenFileLocation, OpenVirusTotal, PriorityClass, RestartUnit, ResumeProcess,
-    SetIoPriorityClass, SetPriority, ShowWindow, SuspendProcess, ThawApp, ToggleGroupRow,
+    MAX_TARGETS, OpenFileLocation, OpenVirusTotal, RestartUnit, ResumeProcess, SetIoPriorityClass,
+    SetPriority, ShowWindow, SuspendProcess, ThawApp, ToggleGroupRow,
 };
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
-use self::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
+use self::confirm::{ConfirmKind, ProtectedAction};
 use self::delegate::ProcessDelegate;
 use self::filter::FilterBinding;
 use self::history::HistoryPage;
-use self::jump::JumpTexts;
 use self::menu::{GraphKind, graph_source};
-use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
+use self::run::{RunOptions, run_process_action_with};
+use self::toasts::{ActionToastTexts, submit};
 use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
 use crate::components::toast::ToastKind;
 use crate::demand::GlobalDemand;
@@ -75,9 +74,7 @@ use crate::window::main::{GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::window::status::{StatusAction, StatusChanged};
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
-use crate::windows::signal::{
-    OtherUserTarget, SignalRefusal, TargetNames, open_rt_signal, send_signal,
-};
+use crate::windows::signal::{OtherUserTarget, SignalRefusal, TargetNames};
 use status::{StatusCounts, write_actions, write_status};
 
 /// Key context of the page div. The table inside it has `Table`.
@@ -135,7 +132,6 @@ pub struct ProcessesPage {
     /// The targets the row menu captured when it opened (E22-A2). An End handler takes them,
     /// else it captures the selection itself.
     menu_targets: Option<CapturedTargets>,
-    confirm_words: ConfirmWords,
     /// The jump target's pending jump (E22-A3).
     jump: jump::JumpState,
     /// The shell filter box's events for this tab (UI-PRC-016).
@@ -264,7 +260,6 @@ impl ProcessesPage {
             style_version: cx.try_global::<UiMetrics>().map_or(0, |m| m.style_version),
             strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
             menu_targets: None,
-            confirm_words: ConfirmWords::new(cx),
             jump: jump::JumpState::default(),
             filter: FilterBinding::new(cx),
             paused: None,
@@ -493,7 +488,6 @@ impl ProcessesPage {
             return;
         }
         self.strings_version = version;
-        self.confirm_words = ConfirmWords::new(cx);
         self.refresh_status(true, cx);
         self.table.update(cx, |t, cx| {
             t.delegate.refresh_strings(cx);
@@ -610,254 +604,26 @@ impl ProcessesPage {
         }
     }
 
-    fn on_end_task(&mut self, _: &EndTask, window: &mut Window, cx: &mut Context<Self>) {
-        self.end(End::Task, window, cx);
+    /// A process command (E22-017): the shared entry point runs it on the menu-open targets,
+    /// else on the selection, with the snapshot the table shows.
+    fn on_process_action<A: Action>(&mut self, a: &A, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        self.run_action(a, targets, window, cx);
     }
 
-    /// End Process, and Shift+Delete. On one app or unit row it is Kill App (UI-PRC-013 item 2).
-    fn on_end_process(&mut self, _: &EndProcess, window: &mut Window, cx: &mut Context<Self>) {
-        let captured = self.take_targets(cx);
-        let group = matches!(
-            captured.items.as_slice(),
-            [t] if matches!(t.kind, RowKind::App | RowKind::Unit)
-        );
-        self.menu_targets = Some(captured);
-        if group {
-            self.group_action(GroupOp::Kill, window, cx);
-        } else {
-            self.end(End::Process, window, cx);
-        }
-    }
-
-    fn on_kill_app(&mut self, _: &KillApp, window: &mut Window, cx: &mut Context<Self>) {
-        self.group_action(GroupOp::Kill, window, cx);
-    }
-
-    fn on_freeze_app(&mut self, _: &FreezeApp, window: &mut Window, cx: &mut Context<Self>) {
-        self.group_action(GroupOp::Freeze, window, cx);
-    }
-
-    fn on_thaw_app(&mut self, _: &ThawApp, window: &mut Window, cx: &mut Context<Self>) {
-        self.group_action(GroupOp::Thaw, window, cx);
-    }
-
-    /// Kill App, Freeze App and Thaw App (UI-PRC-013 items 2 and 4, PROC-059, PROC-064): one
-    /// `KillGroup`, `FreezeGroup` or `ThawGroup` request on the one app or unit row, with the
-    /// targets of [`group_targets`]. Kill App always asks. Freeze asks first when the row
-    /// holds a protected process. A row with no target sends nothing (the menu disables it).
-    fn group_action(&mut self, op: GroupOp, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((rows, clicked_col)) = self.prune(refusal_reason, cx) else {
-            return;
-        };
-        let [t] = rows.as_slice() else {
-            return;
-        };
-        if !matches!(t.kind, RowKind::App | RowKind::Unit) {
-            return;
-        }
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let targets = group_targets(&snapshot, t);
-        if targets.is_empty() {
-            return;
-        }
-        let ask = match op {
-            GroupOp::Kill => Some(ConfirmKind::KillApp {
-                app: t.name.clone(),
-                count: t.member_count,
-            }),
-            GroupOp::Freeze if t.flags.contains(ProcFlags::PROTECTED) => {
-                Some(ConfirmKind::Protected {
-                    action: ProtectedAction::Freeze,
-                    name: t.name.clone(),
-                    tree_count: None,
-                })
-            }
-            GroupOp::Freeze | GroupOp::Thaw => None,
-        };
-        let kind = match op {
-            GroupOp::Kill => ActionKind::KillGroup,
-            GroupOp::Freeze => ActionKind::FreezeGroup,
-            GroupOp::Thaw => ActionKind::ThawGroup,
-        };
-        let used = CapturedTargets::new([t.clone()], clicked_col);
-        self.send_targets(kind, targets, used, ask, window, cx);
-    }
-
-    fn on_end_process_tree(
+    /// Runs `action` through [`run::run_process_action_with`] on `targets`.
+    fn run_action(
         &mut self,
-        _: &EndProcessTree,
+        action: &dyn Action,
+        targets: CapturedTargets,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.end(End::Tree, window, cx);
-    }
-
-    /// End Task, End Process and End Process Tree (UI-PRC-013 items 1 to 3): drops pseudo and
-    /// exited targets, refuses tasklens, PID 1 and kernel threads with a toast (End Process Tree
-    /// also a subtree that holds tasklens or PID 1), asks for confirmation where UI-PRC-014
-    /// says so (R-198, D-009) and sends one request by key.
-    fn end(&mut self, end: End, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((rows, clicked_col)) = self.prune(refusal_reason, cx) else {
-            return;
+        let options = RunOptions {
+            snapshot: Some(Arc::clone(self.table.read(cx).delegate.snapshot())),
+            on_sent: None,
         };
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let Some(plan) = EndPlan::new(end, rows, &snapshot.processes, &self.confirm_words) else {
-            return;
-        };
-        if let Some(t) = &plan.refused {
-            if let Some(text) = toast_words(cx).refusal_text(RejectReason::Protected, t) {
-                warning_toast(text, cx);
-            }
-            return;
-        }
-        let used = CapturedTargets::new(plan.rows, clicked_col);
-        self.send(end.kind(), plan.keys, used, plan.confirm, window, cx);
-    }
-
-    fn on_suspend(&mut self, _: &SuspendProcess, window: &mut Window, cx: &mut Context<Self>) {
-        self.suspend_or_resume_targets(false, window, cx);
-    }
-
-    fn on_resume(&mut self, _: &ResumeProcess, window: &mut Window, cx: &mut Context<Self>) {
-        self.suspend_or_resume_targets(true, window, cx);
-    }
-
-    /// Suspend Process and Resume Process (UI-PRC-013 item 4, PROC-063): one `Suspend` or
-    /// `Resume` request with one target per process row. Suspend refuses tasklens, PID 1 and
-    /// kernel threads, Resume only kernel threads. Suspend asks first for a protected target,
-    /// both ask for another user's process; own processes never ask, even several. App and
-    /// unit rows are skipped (Freeze App is E22-035).
-    fn suspend_or_resume_targets(
-        &mut self,
-        resume: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let refuse = |t: &CapturedTarget| {
-            refusal_reason(t).filter(|r| !resume || *r == RejectReason::KernelThread)
-        };
-        let Some((rows, clicked_col)) = self.prune(refuse, cx) else {
-            return;
-        };
-        let mut seen = FxHashSet::default();
-        let rows: Vec<CapturedTarget> = rows
-            .into_iter()
-            .filter(|t| {
-                t.kind == RowKind::Process
-                    && matches!(t.node, NodeId::Process(key) if seen.insert(key))
-            })
-            .collect();
-        let keys = process_keys(&rows);
-        if keys.is_empty() {
-            return;
-        }
-        let w = &self.confirm_words;
-        let protected = rows
-            .iter()
-            .find(|t| !resume && t.flags.contains(ProcFlags::PROTECTED));
-        let ask = match protected {
-            Some(t) => Some(ConfirmKind::Protected {
-                action: ProtectedAction::Suspend,
-                name: t.name.clone(),
-                tree_count: None,
-            }),
-            None => other_user(&rows, if resume { &w.resume } else { &w.suspend }),
-        };
-        let kind = if resume {
-            ActionKind::Resume
-        } else {
-            ActionKind::Suspend
-        };
-        let used = CapturedTargets::new(rows, clicked_col);
-        self.send(kind, keys, used, ask, window, cx);
-    }
-
-    /// Set Priority (UI-PRC-013 item 6, PROC-066, PROC-069): High to Low send one `SetNice`
-    /// request; Idle sends `SetSched { Idle, 0 }`. Realtime always asks first, because it can
-    /// freeze the desktop, then sends `SetSched { Rr, 1 }`; the kernel sets reset on fork. App
-    /// and unit rows apply to every current member process. Otherwise only another user's
-    /// process asks first.
-    fn on_set_priority(&mut self, a: &SetPriority, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((used, clicked_col)) = self.setting_targets(cx) else {
-            return;
-        };
-        let keys = process_keys(&used);
-        let other = other_user(&used, &self.confirm_words.set_priority);
-        let (kind, ask) = match a.class {
-            PriorityClass::Realtime => (
-                ActionKind::SetSched {
-                    policy: SchedPolicy::Rr,
-                    rt_prio: 1,
-                },
-                Some(ConfirmKind::Realtime),
-            ),
-            PriorityClass::Idle => (
-                ActionKind::SetSched {
-                    policy: SchedPolicy::Idle,
-                    rt_prio: 0,
-                },
-                other,
-            ),
-            class => {
-                let Some(nice) = class.nice() else {
-                    return;
-                };
-                (ActionKind::SetNice(nice), other)
-            }
-        };
-        let used = CapturedTargets::new(used, clicked_col);
-        self.send(kind, keys, used, ask, window, cx);
-    }
-
-    /// Set I/O Priority (UI-PRC-013 item 8, PROC-068, PROC-069): one `SetIoPriority` request,
-    /// with the same targets and confirmation rule as Set Priority.
-    fn on_set_io_priority(
-        &mut self,
-        a: &SetIoPriorityClass,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((used, clicked_col)) = self.setting_targets(cx) else {
-            return;
-        };
-        let keys = process_keys(&used);
-        let ask = other_user(&used, &self.confirm_words.set_io_priority);
-        let used = CapturedTargets::new(used, clicked_col);
-        let kind = ActionKind::SetIoPriority(a.class.to_model());
-        self.send(kind, keys, used, ask, window, cx);
-    }
-
-    /// The process targets of Set Priority and Set I/O Priority: each process row once, and
-    /// every current member process of an app or unit row, at most [`MAX_TARGETS`]. `None`
-    /// when there is no process to act on.
-    fn setting_targets(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<(Vec<CapturedTarget>, Option<ColumnId>)> {
-        let (rows, clicked_col) = self.prune(|_| None, cx)?;
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let p = &snapshot.processes;
-        let mut seen = FxHashSet::default();
-        let mut used: Vec<CapturedTarget> = Vec::new();
-        for t in rows {
-            match (t.kind, &t.node) {
-                (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => {
-                    if seen.insert(*key) {
-                        used.push(t);
-                    }
-                }
-                (RowKind::App | RowKind::Unit, node) => used.extend(
-                    members(p, node)
-                        .into_iter()
-                        .map(|i| &p.records[i])
-                        .filter(|r| seen.insert(r.key))
-                        .map(record_target),
-                ),
-                _ => {}
-            }
-        }
-        used.truncate(MAX_TARGETS);
-        (!used.is_empty()).then_some((used, clicked_col))
+        run_process_action_with(action, targets, options, window, cx);
     }
 
     fn on_copy_cell(&mut self, a: &CopyCell, _: &mut Window, cx: &mut Context<Self>) {
@@ -870,103 +636,6 @@ impl ProcessesPage {
 
     fn on_copy_all_metrics(&mut self, _: &CopyAllMetrics, _: &mut Window, cx: &mut Context<Self>) {
         self.copy(CopyKind::AllMetrics, cx);
-    }
-
-    /// Set Affinity… (UI-PRC-021): opens the dialog for the one captured row. An app or unit
-    /// row gives its current member processes, at most [`MAX_TARGETS`].
-    fn on_set_affinity(&mut self, _: &SetAffinity, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::windows::affinity::subtitle;
-        let Some((rows, _)) = self.prune(|_| None, cx) else {
-            return;
-        };
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let p = &snapshot.processes;
-        let Some((keys, subject)) = dialog_targets(&rows, p) else {
-            return;
-        };
-        let subtitle = subtitle(&subject, cx);
-        let targets = keys.into_iter().map(ActionTarget::Process).collect();
-        if let Err(err) =
-            crate::windows::affinity::open(targets, subtitle, window.window_handle(), cx)
-        {
-            warn!(target: "tasklens::ui", %err, "the Set Affinity dialog did not open");
-        }
-    }
-
-    /// Set Priority > Custom… (UI-PRC-020, UI-PWN-023): opens the Custom priority dialog for the
-    /// captured rows. It starts from the policy, nice and realtime priority of the first
-    /// captured process, the values its Priority cell shows.
-    fn on_open_custom_priority(
-        &mut self,
-        _: &OpenCustomPriority,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::windows::affinity::{AffinitySubject, subtitle};
-        let Some((rows, _)) = self.prune(|_| None, cx) else {
-            return;
-        };
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let p = &snapshot.processes;
-        let Some((keys, subject)) = dialog_targets(&rows, p) else {
-            return;
-        };
-        let initial = p.records.iter().position(|r| r.key == keys[0]).map_or(
-            (SchedPolicy::Other, 0, 0),
-            |i| {
-                let nice = p.records[i].nice;
-                match p.extras.get(i) {
-                    Some(x) => (x.policy, nice, x.rt_prio),
-                    None => (SchedPolicy::Other, nice, 0),
-                }
-            },
-        );
-        let app = matches!(subject, AffinitySubject::App { .. });
-        let subtitle = subtitle(&subject, cx);
-        let targets = keys.into_iter().map(ActionTarget::Process).collect();
-        if let Err(err) = crate::windows::priority::open_with(
-            targets,
-            subtitle,
-            initial,
-            app,
-            window.window_handle(),
-            cx,
-        ) {
-            warn!(target: "tasklens::ui", %err, "the Custom priority dialog did not open");
-        }
-    }
-
-    /// Send Signal (UI-PRC-013 item 5): process rows map directly to process targets. App and
-    /// unit rows use the same primary-process and bwrap resolution as End Task (PROC-065).
-    fn on_send_signal(&mut self, action: &SendSignal, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((rows, _)) = self.prune(|_| None, cx) else {
-            return;
-        };
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let Some((targets, names)) = signal_targets(&rows, &snapshot.processes) else {
-            return;
-        };
-        send_signal(action.signo, targets, names, window, cx);
-    }
-
-    /// Real-time signal… uses the same captured targets and subtitle subject as Send Signal,
-    /// then opens UI-PWN-027 modal to the main window.
-    fn on_signal_open_realtime(
-        &mut self,
-        _: &SignalOpenRealtime,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((rows, _)) = self.prune(|_| None, cx) else {
-            return;
-        };
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let Some((targets, names)) = signal_targets(&rows, &snapshot.processes) else {
-            return;
-        };
-        if let Err(err) = open_rt_signal(targets, names, window.window_handle(), cx) {
-            warn!(target: "tasklens::ui", %err, "the real-time signal dialog did not open");
-        }
     }
 
     fn on_add_minigraph(&mut self, a: &AddMinigraph, _: &mut Window, cx: &mut Context<Self>) {
@@ -996,172 +665,6 @@ impl ProcessesPage {
         let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
         let source = graph_source(kind, target, &snapshot);
         let _ = panel.update(cx, |p, cx| p.add_process(source, column, cx));
-    }
-
-    /// Go to parent process (PROC-071): selects the live record whose PID is the target's
-    /// parent PID through the jump target. Nothing for a parent PID of 0 or several targets.
-    fn on_go_to_parent(&mut self, _: &GoToParent, window: &mut Window, cx: &mut Context<Self>) {
-        let targets = self.take_targets(cx);
-        let [t] = &targets.items[..] else {
-            return;
-        };
-        if !matches!(t.kind, RowKind::Process | RowKind::KernelThread) || t.ppid == 0 {
-            return;
-        }
-        let not_found = tr(cx, "processes-toast-parent-not-found");
-        let hub = cx.global::<GlobalHub>().0.clone();
-        let parent = hub
-            .read(cx)
-            .current()
-            .processes
-            .records
-            .iter()
-            .find(|r| r.key.pid == t.ppid && !r.flags.contains(ProcFlags::EXITED))
-            .map(|r| r.key);
-        let Some(parent) = parent else {
-            warning_toast(not_found, cx);
-            return;
-        };
-        let texts = JumpTexts {
-            success: Some(tr(cx, "processes-toast-switched-to-parent")),
-            not_found: not_found.clone(),
-            hidden: Some(not_found),
-            switched_tab: None,
-        };
-        self.select_by_key(parent, texts, window, cx);
-    }
-
-    /// Open file location (PROC-073): the file manager shows the executable. A restricted path
-    /// toasts "Process image unavailable"; a deleted one sends nothing (the item is disabled).
-    fn on_open_file_location(
-        &mut self,
-        _: &OpenFileLocation,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let targets = self.take_targets(cx);
-        let [t] = &targets.items[..] else {
-            return;
-        };
-        let NodeId::Process(key) = t.node else {
-            return;
-        };
-        if t.exe_deleted {
-            return;
-        }
-        let exe = {
-            let d = &self.table.read(cx).delegate;
-            let records = &d.snapshot().processes.records;
-            let Some(r) = records.iter().find(|r| r.key == key) else {
-                return;
-            };
-            if exe_deleted(&r.meta) {
-                return;
-            }
-            r.meta.exe.clone()
-        };
-        let Some(path) = exe else {
-            warning_toast(tr(cx, "processes-toast-image-unavailable"), cx);
-            return;
-        };
-        let req = ActionRequest {
-            // The tracker gives id 0 its next ActionId.
-            id: ActionId(0),
-            kind: ActionKind::ShowInFileManager {
-                path,
-                properties: false,
-            },
-            targets: SmallVec::new(),
-            privileged: false,
-        };
-        // No success text: the Info toast stays as the result. A failure shows the reason only.
-        let texts = ActionToastTexts {
-            requested: Some((
-                ToastKind::Info,
-                tr(cx, "processes-toast-opening-file-location"),
-            )),
-            success: (ToastKind::Success, SharedString::default()),
-            failure: (ToastKind::Error, SharedString::default()),
-            partial: None,
-        };
-        submit(self, req, texts, cx);
-    }
-
-    /// File properties (PROC-052): the file manager shows the properties of the executable.
-    /// A restricted path toasts "Process image unavailable"; a deleted one sends nothing (the
-    /// item is disabled).
-    fn on_file_properties(&mut self, _: &FileProperties, _: &mut Window, cx: &mut Context<Self>) {
-        let targets = self.take_targets(cx);
-        let [t] = &targets.items[..] else {
-            return;
-        };
-        let NodeId::Process(key) = t.node else {
-            return;
-        };
-        if t.exe_deleted {
-            return;
-        }
-        let exe = {
-            let d = &self.table.read(cx).delegate;
-            let records = &d.snapshot().processes.records;
-            let Some(r) = records.iter().find(|r| r.key == key) else {
-                return;
-            };
-            if exe_deleted(&r.meta) {
-                return;
-            }
-            r.meta.exe.clone()
-        };
-        let Some(path) = exe else {
-            warning_toast(tr(cx, "processes-toast-image-unavailable"), cx);
-            return;
-        };
-        let req = ActionRequest {
-            id: ActionId(0),
-            kind: ActionKind::ShowInFileManager {
-                path,
-                properties: true,
-            },
-            targets: SmallVec::new(),
-            privileged: false,
-        };
-        // No success text: the file manager window is the result. A failure shows the reason.
-        let texts = ActionToastTexts {
-            requested: None,
-            success: (ToastKind::Success, SharedString::default()),
-            failure: (ToastKind::Error, SharedString::default()),
-            partial: None,
-        };
-        submit(self, req, texts, cx);
-    }
-
-    /// Show Window (PROC-054): brings the topmost window of the captured process, or of any
-    /// member of an app or unit row, to the front. The bridge does not answer an activation
-    /// (ADR-005), so the toast follows the send.
-    fn on_show_window(&mut self, _: &ShowWindow, _: &mut Window, cx: &mut Context<Self>) {
-        let targets = self.take_targets(cx);
-        let [t] = &targets.items[..] else {
-            return;
-        };
-        let internal_id = cx.try_global::<GlobalHub>().and_then(|hub| {
-            topmost_window(hub.0.read(cx).current(), t).map(|w| Arc::clone(&w.internal_id))
-        });
-        let Some(internal_id) = internal_id else {
-            warning_toast(tr(cx, "prc-055-no-window-found"), cx);
-            return;
-        };
-        if let Err(err) = self
-            .client
-            .send(Command::KWin(KWinCommand::Activate { internal_id }))
-        {
-            warn!(target: "tasklens::ui", ?err, "KWin activate not sent");
-            return;
-        }
-        toast(
-            ToastKind::Success,
-            tr(cx, "processes-toast-window-shown"),
-            cx,
-        );
     }
 
     /// Restart Plasma Shell and Restart unit (PROC-072): `UnitRestart` on the captured
@@ -1206,36 +709,6 @@ impl ProcessesPage {
         if plasma {
             self.plasma_restart = id;
         }
-    }
-
-    /// Open in VirusTotal (PROC-074, UI-PWN-036): the notice and hashing flow for the one
-    /// captured process row.
-    fn on_open_virustotal(
-        &mut self,
-        _: &OpenVirusTotal,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let targets = self.take_targets(cx);
-        let [t] = &targets.items[..] else {
-            return;
-        };
-        let NodeId::Process(key) = t.node else {
-            return;
-        };
-        crate::windows::notices::open_virustotal(key, window, cx);
-    }
-
-    /// Create dump file (PROC-075, UI-PWN-034): the dump flow for the one captured process row.
-    fn on_create_dump(&mut self, _: &CreateDump, window: &mut Window, cx: &mut Context<Self>) {
-        let targets = self.take_targets(cx);
-        let [t] = &targets.items[..] else {
-            return;
-        };
-        let NodeId::Process(key) = t.node else {
-            return;
-        };
-        crate::windows::notices::start_dump(key, window, cx);
     }
 
     /// A window popup item (PROC-053, PROC-054): sends `KWin(Activate)` for the window and shows
@@ -1302,103 +775,6 @@ impl ProcessesPage {
             (CopyKind::AllMetrics, true) => "processes-toast-many-metrics-copied",
         };
         toast(ToastKind::Success, tr(cx, key), cx);
-    }
-
-    /// Steps 1 and 2 of every process action (E22-017): takes the targets, drops pseudo and
-    /// exited rows ("Process exited" when only exited rows were left) and drops the rows
-    /// `refuse` names, with one Warning toast per distinct text. `None` when no row is left.
-    fn prune(
-        &mut self,
-        refuse: impl Fn(&CapturedTarget) -> Option<RejectReason>,
-        cx: &mut Context<Self>,
-    ) -> Option<(Vec<CapturedTarget>, Option<ColumnId>)> {
-        let captured = self.take_targets(cx);
-        let clicked_col = captured.clicked_col;
-        let mut rows: Vec<CapturedTarget> = captured
-            .items
-            .into_iter()
-            .filter(|t| t.kind != RowKind::Pseudo)
-            .collect();
-        if rows.is_empty() {
-            return None;
-        }
-        let words = toast_words(cx);
-        rows.retain(|t| !t.flags.contains(ProcFlags::EXITED));
-        if rows.is_empty() {
-            warning_toast(words.exited.clone(), cx);
-            return None;
-        }
-        let mut refused: SmallVec<[SharedString; 3]> = SmallVec::new();
-        rows.retain(|t| {
-            let Some(reason) = refuse(t) else {
-                return true;
-            };
-            if let Some(text) = words.refusal_text(reason, t)
-                && !refused.contains(&text)
-            {
-                refused.push(text);
-            }
-            false
-        });
-        for text in refused {
-            warning_toast(text, cx);
-        }
-        (!rows.is_empty()).then_some((rows, clicked_col))
-    }
-
-    /// Sends one `kind` request to `keys` with the toast texts for `used`, after the
-    /// confirmation `ask` when there is one (R-198, D-009).
-    fn send(
-        &mut self,
-        kind: ActionKind,
-        keys: Vec<ProcessKey>,
-        used: CapturedTargets,
-        ask: Option<ConfirmKind>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let targets = keys.into_iter().map(ActionTarget::Process).collect();
-        self.send_targets(kind, targets, used, ask, window, cx);
-    }
-
-    /// As [`Self::send`], for targets that are not all processes (Kill App, Freeze App and
-    /// Thaw App send cgroup and unit targets).
-    fn send_targets(
-        &mut self,
-        kind: ActionKind,
-        targets: SmallVec<[ActionTarget; 1]>,
-        used: CapturedTargets,
-        ask: Option<ConfirmKind>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(texts) = toast_words(cx).texts_for(&kind, &used) else {
-            return;
-        };
-        let req = ActionRequest {
-            // The tracker gives id 0 its next ActionId.
-            id: ActionId(0),
-            kind,
-            targets,
-            privileged: false,
-        };
-        let Some(ask) = ask else {
-            submit(self, req, texts, cx);
-            return;
-        };
-        let page = cx.entity().downgrade();
-        let parent = window.window_handle();
-        // The dialog opens modal to this window, which is being updated now.
-        cx.defer(move |cx| {
-            confirm(ask, parent, cx, move |result, cx| {
-                if result != ConfirmResult::Confirmed {
-                    return;
-                }
-                if page.update(cx, |p, cx| submit(p, req, texts, cx)).is_err() {
-                    warn!(target: "tasklens::ui", "the Processes page closed before the request");
-                }
-            });
-        });
     }
 }
 
@@ -1743,7 +1119,7 @@ fn main_pid_unit(s: &ServicesSnapshot, pid: u32) -> Option<UnitRef> {
 
 /// The target of one process record, as a process row. `exe_deleted` is false and
 /// `io_priority` is `None`: they are in the extras, which only the row menu reads.
-fn record_target(r: &ProcessRecord) -> CapturedTarget {
+pub(crate) fn record_target(r: &ProcessRecord) -> CapturedTarget {
     CapturedTarget {
         node: NodeId::Process(r.key),
         kind: RowKind::Process,
@@ -2084,34 +1460,34 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_collapse_all))
             .on_action(cx.listener(Self::on_open_properties))
             .on_action(cx.listener(Self::on_toggle_group_row))
-            .on_action(cx.listener(Self::on_end_task))
-            .on_action(cx.listener(Self::on_end_process))
-            .on_action(cx.listener(Self::on_end_process_tree))
-            .on_action(cx.listener(Self::on_kill_app))
-            .on_action(cx.listener(Self::on_freeze_app))
-            .on_action(cx.listener(Self::on_thaw_app))
-            .on_action(cx.listener(Self::on_suspend))
-            .on_action(cx.listener(Self::on_resume))
-            .on_action(cx.listener(Self::on_set_priority))
-            .on_action(cx.listener(Self::on_set_io_priority))
-            .on_action(cx.listener(Self::on_open_custom_priority))
+            .on_action(cx.listener(Self::on_process_action::<EndTask>))
+            .on_action(cx.listener(Self::on_process_action::<EndProcess>))
+            .on_action(cx.listener(Self::on_process_action::<EndProcessTree>))
+            .on_action(cx.listener(Self::on_process_action::<KillApp>))
+            .on_action(cx.listener(Self::on_process_action::<FreezeApp>))
+            .on_action(cx.listener(Self::on_process_action::<ThawApp>))
+            .on_action(cx.listener(Self::on_process_action::<SuspendProcess>))
+            .on_action(cx.listener(Self::on_process_action::<ResumeProcess>))
+            .on_action(cx.listener(Self::on_process_action::<SetPriority>))
+            .on_action(cx.listener(Self::on_process_action::<SetIoPriorityClass>))
+            .on_action(cx.listener(Self::on_process_action::<OpenCustomPriority>))
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_details))
             .on_action(cx.listener(Self::on_copy_all_metrics))
-            .on_action(cx.listener(Self::on_set_affinity))
-            .on_action(cx.listener(Self::on_send_signal))
-            .on_action(cx.listener(Self::on_signal_open_realtime))
-            .on_action(cx.listener(Self::on_go_to_parent))
+            .on_action(cx.listener(Self::on_process_action::<SetAffinity>))
+            .on_action(cx.listener(Self::on_process_action::<SendSignal>))
+            .on_action(cx.listener(Self::on_process_action::<SignalOpenRealtime>))
+            .on_action(cx.listener(Self::on_process_action::<GoToParent>))
             .on_action(cx.listener(Self::on_add_minigraph))
             .on_action(cx.listener(Self::on_add_name_graph))
             .on_action(cx.listener(Self::on_add_app_graph))
-            .on_action(cx.listener(Self::on_open_file_location))
-            .on_action(cx.listener(Self::on_open_virustotal))
-            .on_action(cx.listener(Self::on_create_dump))
+            .on_action(cx.listener(Self::on_process_action::<OpenFileLocation>))
+            .on_action(cx.listener(Self::on_process_action::<OpenVirusTotal>))
+            .on_action(cx.listener(Self::on_process_action::<CreateDump>))
             .on_action(cx.listener(Self::on_activate_window))
-            .on_action(cx.listener(Self::on_show_window))
+            .on_action(cx.listener(Self::on_process_action::<ShowWindow>))
             .on_action(cx.listener(Self::on_restart_unit))
-            .on_action(cx.listener(Self::on_file_properties))
+            .on_action(cx.listener(Self::on_process_action::<FileProperties>))
             .child(
                 div()
                     .relative()

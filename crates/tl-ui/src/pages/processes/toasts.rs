@@ -2,7 +2,7 @@
 //! ADR-005, UI-FND-020).
 //!
 //! The page builds an [`ActionToastTexts`] with [`texts_for`] when it submits an
-//! `ActionRequest`, and [`submit`] hands both to the app's `ActionTracker`. Every state of one
+//! `ActionRequest`, and [`submit`] or [`submit_to`] hands both to the app's `ActionTracker`. Every state of one
 //! request replaces one toast, keyed `ToastKey(id.0)`. Two or more targets get one summary toast
 //! that counts the results and names the reasons, such as "Ended 4 of 5 processes (1 permission
 //! denied)". Identity, permission and "Outcome unknown" texts are the tracker's own.
@@ -148,12 +148,23 @@ pub fn submit(
     texts: ActionToastTexts,
     cx: &mut Context<ProcessesPage>,
 ) -> Option<ActionId> {
+    let queue = main_queue(cx);
+    submit_to(req, texts, queue, cx)
+}
+
+/// As [`submit`], with the toasts on `queue`. `None` when there is no tracker or no queue.
+pub fn submit_to(
+    req: ActionRequest,
+    texts: ActionToastTexts,
+    queue: Option<WeakEntity<ToastQueue>>,
+    cx: &mut App,
+) -> Option<ActionId> {
     let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
         warn!(target: "tasklens::ui", "no action tracker; the action was not sent");
         return None;
     };
-    let Some(queue) = main_queue(cx) else {
-        warn!(target: "tasklens::ui", "no main window; the action was not sent");
+    let Some(queue) = queue else {
+        warn!(target: "tasklens::ui", "no toast stack; the action was not sent");
         return None;
     };
     let mut texts = texts.into_toast_texts(action_words(cx));
