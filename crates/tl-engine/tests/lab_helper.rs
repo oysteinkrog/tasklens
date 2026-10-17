@@ -2664,7 +2664,8 @@ mod detail_helper {
         }
 
         /// Helper calls run on a blocking pool thread, so a held scan waits there while the
-        /// worker goes on, and the fake holds every scan after its first batch.
+        /// worker goes on, and the fake holds every scan after its first batch. The worker's first
+        /// sample comes before the unlock.
         fn start_pooled(root: &Root, demand: Demand) -> Rig {
             Rig::start_full(
                 root,
@@ -2685,10 +2686,6 @@ mod detail_helper {
             pool: Option<BlockingPool>,
         ) -> Rig {
             let mut fl = FakeLab::new();
-            if let Some(pool) = &pool {
-                // Before any task exists: each `Cx` keeps the pool it was made with.
-                fl.lab.state.set_blocking_pool(pool.handle());
-            }
             CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&fl.clock)));
             let (updates, rx) = mpsc::channel::<EngineMsg>(4096);
             let (demand_tx, _) = watch::channel(demand);
@@ -2701,8 +2698,30 @@ mod detail_helper {
             lock(&fake).errors = errors;
             lock(&fake).hold_scan = pool.is_some();
             let (helper, queue) = helper_queue();
+            let io = WorkerIo::new(
+                updates.clone(),
+                demand_tx.subscribe(),
+                settings_tx.subscribe(),
+                control.subscribe(),
+                SharedHandles {
+                    helper: Some(helper.clone()),
+                    ..SharedHandles::default()
+                },
+            );
+            let src = ProcessDetailSource::new(root.config()).with_clock(lab_clock);
+            let mut worker = Some(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let _ = process_detail::run(cx, io, src).await;
+            });
             let mut rig_tasks = Vec::new();
-            let (helper_updates, link_env) = (updates.clone(), env(&fake));
+            if let Some(pool) = &pool {
+                // Each `Cx` keeps the pool it was made with. The worker starts first, so its
+                // samples stay inline on the lab thread and read the lab clock; only the helper
+                // task's calls run on the pool.
+                rig_tasks.push(fl.spawn(worker.take().expect("not started")));
+                fl.lab.state.set_blocking_pool(pool.handle());
+            }
+            let (helper_updates, link_env) = (updates, env(&fake));
             rig_tasks.push(fl.spawn(async move {
                 let cx = Cx::current().expect("task has a Cx");
                 helper_task_with(cx, queue, helper_updates, link_env).await;
@@ -2725,21 +2744,9 @@ mod detail_helper {
             if unlock {
                 rig.unlock();
             }
-            let io = WorkerIo::new(
-                updates,
-                rig._demand.subscribe(),
-                rig._settings.subscribe(),
-                rig.control.subscribe(),
-                SharedHandles {
-                    helper: Some(rig.helper.clone()),
-                    ..SharedHandles::default()
-                },
-            );
-            let src = ProcessDetailSource::new(root.config()).with_clock(lab_clock);
-            rig.tasks.push(rig.fl.spawn(async move {
-                let cx = Cx::current().expect("task has a Cx");
-                let _ = process_detail::run(cx, io, src).await;
-            }));
+            if let Some(worker) = worker {
+                rig.tasks.push(rig.fl.spawn(worker));
+            }
             rig.collect();
             rig
         }
@@ -3109,6 +3116,11 @@ mod detail_helper {
         let strings = rig.tab(DetailTab::Strings);
         let last = strings.last().expect("a Strings payload");
         assert_eq!(scan_state(last).1, ScanPhase::Cancelled);
+        let cancel_ms = strings
+            .iter()
+            .find(|t| scan_state(t).1 == ScanPhase::Cancelled)
+            .map(|t| t.ms);
+        assert_eq!(cancel_ms, Some(last.ms), "nothing after Cancelled");
         assert!(
             strings
                 .iter()

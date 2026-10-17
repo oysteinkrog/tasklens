@@ -924,12 +924,14 @@ struct TargetState {
 /// (ENOENT, ESRCH) or Failed.
 #[derive(Clone, Default)]
 struct GeneralPatch {
-    /// Sanitized link text, deleted, location.
-    exe: Option<Result<(Arc<str>, bool, ExeLocation), Validity>>,
+    exe: Option<Result<HelperExe, Validity>>,
     cwd: Option<Result<Arc<str>, Validity>>,
     root: Option<Result<Arc<str>, Validity>>,
     io: Option<Result<PidIo, Validity>>,
 }
+
+/// The executable from the helper: sanitized link text, deleted, location.
+type HelperExe = (Arc<str>, bool, ExeLocation);
 
 /// Sets `value` or its validity on `field` when the direct read left it Restricted.
 fn patch_field<T: Clone>(field: &mut Total<T>, value: &Option<Result<T, Validity>>) {
@@ -1732,11 +1734,8 @@ impl ProcessDetailSource {
                         general
                     });
                     target.general_patch = Some(patch);
-                    match applied {
-                        Some(general) => Some(Ok(TabRead::General(general))),
-                        // No direct read to patch yet: the next one gets the patch.
-                        None => None,
-                    }
+                    // With no direct read to patch yet, the next one gets the patch.
+                    applied.map(|general| Ok(TabRead::General(general)))
                 }
                 // `IdentityChanged` or `NoSuchProcess`: the target exited, the existing exited
                 // path.
