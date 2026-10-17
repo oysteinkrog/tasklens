@@ -5041,6 +5041,7 @@ mod startup_items {
                 keep_above: false,
                 frame_geometry: FrameGeometry::default(),
                 window_type: 0,
+                stack_index: 0,
             };
             self.engine.publish_with(|s| {
                 let version = s.windows.header.version + 1;

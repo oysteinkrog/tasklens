@@ -1312,7 +1312,11 @@ fn check_update(
         return Err(Reject::Size);
     }
     let values: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|_| Reject::Json)?;
-    Ok(values.into_iter().filter_map(window_entry).collect())
+    let mut windows: Vec<WindowEntry> = values.into_iter().filter_map(window_entry).collect();
+    for (i, w) in windows.iter_mut().enumerate() {
+        w.stack_index = i as u32;
+    }
+    Ok(windows)
 }
 
 /// The `Picked` checks: only the owner of `org.kde.KWin` may call (R-167 item 5). The pid text
@@ -1377,6 +1381,8 @@ fn window_entry(value: serde_json::Value) -> Option<WindowEntry> {
             height: g.height,
         },
         window_type: raw.window_type,
+        // Set by `check_update`, which knows the list position.
+        stack_index: 0,
     })
 }
 
@@ -1671,6 +1677,38 @@ mod tests {
     }
 
     #[test]
+    fn stack_index_follows_bridge_order_across_pids() {
+        let json = payload(&[
+            window(ID_C, 42, "top"),
+            window(ID_B, 7, "other"),
+            window(ID_A, 42, "below"),
+        ]);
+        let windows = check_update(Some(KWIN), Some(KWIN), &json).expect("accepted");
+        let snap = snapshot(windows, Validity::Valid);
+        let rows: Vec<(&str, u32, u32)> = snap
+            .windows
+            .iter()
+            .map(|w| (&*w.caption, w.pid, w.stack_index))
+            .collect();
+        assert_eq!(rows, [("other", 7, 1), ("top", 42, 0), ("below", 42, 2)]);
+
+        // A resend after activating "other": it moves to the top.
+        let json = payload(&[
+            window(ID_B, 7, "other"),
+            window(ID_C, 42, "top"),
+            window(ID_A, 42, "below"),
+        ]);
+        let windows = check_update(Some(KWIN), Some(KWIN), &json).expect("accepted");
+        let snap = snapshot(windows, Validity::Valid);
+        let rows: Vec<(&str, u32, u32)> = snap
+            .windows
+            .iter()
+            .map(|w| (&*w.caption, w.pid, w.stack_index))
+            .collect();
+        assert_eq!(rows, [("other", 7, 0), ("top", 42, 1), ("below", 42, 2)]);
+    }
+
+    #[test]
     fn bridge_script_placeholder_replaced() {
         let name = ":1.4242";
         let script = bridge_script(name);
@@ -1724,6 +1762,7 @@ mod tests {
             keep_above: false,
             frame_geometry: FrameGeometry::default(),
             window_type: 0,
+            stack_index: 0,
         }
     }
 

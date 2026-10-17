@@ -219,13 +219,17 @@ pub struct WindowEntry {
     pub frame_geometry: FrameGeometry,
     /// KWin windowType value as reported.
     pub window_type: i32,
+    /// Stacking position: 0 is topmost. It is the window's place in the bridge list before the
+    /// pid sort (entries the engine drops do not count), so it orders windows across pids.
+    pub stack_index: u32,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct WindowsSnapshot {
     /// Validity is `Unsupported` when the KWin bridge is not available.
     pub header: ComponentHeader,
-    /// Stable-sorted by `pid`; windows with the same pid keep KWin's order.
+    /// Stable-sorted by `pid`; windows with the same pid keep KWin's order. `stack_index` keeps
+    /// the stacking order across pids.
     pub windows: Arc<[WindowEntry]>,
     /// Latest window-pick answer (R-149 item 3).
     pub pick: Option<PickResult>,
@@ -1748,6 +1752,7 @@ mod tests {
             keep_above: false,
             frame_geometry: FrameGeometry::default(),
             window_type: 0,
+            stack_index: 0,
         }
     }
 

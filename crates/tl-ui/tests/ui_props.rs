@@ -496,6 +496,7 @@ fn window_entry(n: u32, caption: &str, g: (i32, i32, i32, i32)) -> WindowEntry {
             height: g.3,
         },
         window_type: 0,
+        stack_index: 0,
     }
 }
 
