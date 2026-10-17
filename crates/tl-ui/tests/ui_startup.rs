@@ -2429,3 +2429,498 @@ mod props {
         assert!(renders(&mut win) > before, "its own entry changed");
     }
 }
+
+/// The Startup Apps tab inside `MainWindow`, end to end through the fake engine
+/// (tasklens-9o0.1, UI-SYS-040 to UI-SYS-050, table (b)).
+#[cfg(feature = "test-hooks")]
+mod main_window {
+    use super::*;
+    use gpui_kit::{Entity, Modifiers, MouseButton, MouseDownEvent, VisualTestContext, point, px};
+    use tl_model::actions::{
+        ActionEvent as FlowEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::settings::{Settings, StartTab, UiState};
+    use tl_model::snapshot::StartupCounts;
+    use tl_model::table::SysTable;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::menu::{MenuEntryInfo, TlMenuPopup, open_context_menu};
+    use tl_ui::demand::DEMAND_COALESCE;
+    use tl_ui::pages::startup::StartupPage;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+    use tl_ui::window::registry::{CapClass, GlobalRegistry};
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        main: Entity<MainWindow>,
+        version: u64,
+    }
+
+    fn boot(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let mut settings = Settings::default();
+        settings.general.start_tab = StartTab::Processes;
+        let init = UiInit {
+            settings,
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        Rig {
+            engine,
+            vcx,
+            main,
+            version: 0,
+        }
+    }
+
+    fn fixture() -> Vec<StartupEntry> {
+        let discord = super::entry("Discord", StartupKind::AutostartUser);
+        let mut kde = super::entry("KDE Connect", StartupKind::AutostartSystem);
+        kde.id.source = StartupSource::AutostartSystem;
+        kde.scope = StartupScope::System;
+        kde.can_delete = false;
+        let mut syncthing = super::entry("syncthing", StartupKind::UserUnit);
+        syncthing.id.source = StartupSource::UserUnit;
+        let mut ssh = super::entry("ssh-agent.sh", StartupKind::PlasmaPreStartup);
+        ssh.id.source = StartupSource::PlasmaEnv;
+        ssh.status = StartupStatus::Disabled;
+        vec![discord, kde, syncthing, ssh]
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        fn select(&mut self, tab: Tab) {
+            self.main
+                .update_in(&mut self.vcx, |m, window, cx| m.select_tab(tab, window, cx));
+            self.draw();
+        }
+
+        fn page(&mut self) -> Option<Entity<StartupPage>> {
+            self.vcx.read_entity(&self.main, |m, _| {
+                m.page_entity::<StartupPage>(Tab::Startup)
+            })
+        }
+
+        fn table(&mut self) -> Entity<tl_ui::table::tree_table::TlTreeTable<StartupDelegate>> {
+            let page = self.page().expect("the Startup page exists");
+            self.vcx.read_entity(&page, |page, _| page.table().clone())
+        }
+
+        /// Publishes `entries` for the last Startup query the page sent.
+        fn publish(&mut self, entries: Vec<StartupEntry>) {
+            self.version += 1;
+            let version = self.version;
+            let generation = self
+                .engine
+                .commands()
+                .into_iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::SetSysTableQuery(query) if query.table == SysTable::Startup => {
+                        Some(query.generation)
+                    }
+                    _ => None,
+                })
+                .expect("the page sent a Startup query");
+            let rows: Vec<SysRow> = entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| SysRow {
+                    node: SysNodeId::Startup(entry.id.clone()),
+                    depth: 0,
+                    expanded: false,
+                    has_children: false,
+                    record: Some(index as u32),
+                })
+                .collect();
+            let enabled = entries
+                .iter()
+                .filter(|e| e.status == StartupStatus::Enabled)
+                .count() as u32;
+            let counts = StartupCounts {
+                total: entries.len() as u32,
+                enabled,
+                disabled: entries.len() as u32 - enabled,
+            };
+            self.engine.publish_with(|snapshot| {
+                snapshot.startup = Arc::new(StartupSnapshot {
+                    header: ComponentHeader {
+                        version,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    rows: rows.into(),
+                    query_generation: generation,
+                    entries: entries.into(),
+                    counts,
+                });
+            });
+            self.draw();
+        }
+
+        /// Visits the Startup tab and publishes the fixture.
+        fn visit_with_fixture(&mut self) {
+            self.select(Tab::Startup);
+            self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+            self.publish(fixture());
+        }
+
+        fn select_row(&mut self, ix: usize) {
+            let table = self.table();
+            table.update(&mut self.vcx, |table, cx| {
+                let id = table.delegate.row_id(ix);
+                table.selection.click(id);
+                cx.notify();
+            });
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+            });
+            self.draw();
+        }
+
+        fn selected_names(&mut self) -> Vec<String> {
+            let table = self.table();
+            self.vcx.read_entity(&table, |table, _| {
+                table
+                    .selection
+                    .ids()
+                    .filter_map(|id| table.delegate.row_index(id))
+                    .filter_map(|index| table.delegate.entry(index))
+                    .map(|entry| entry.name.to_string())
+                    .collect()
+            })
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.vcx.update(|_, cx| {
+                let view = main_window_view(cx).expect("main window");
+                let texts = view.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(ToString::to_string).collect()
+            })
+        }
+
+        fn chip(&mut self) -> String {
+            let chip = self
+                .vcx
+                .read_entity(&self.main, |m, _| m.status_chip().clone());
+            self.vcx.read_entity(&chip, |c, _| c.drawn_text())
+        }
+
+        fn page_status(&mut self) -> String {
+            let page = self.page().expect("the Startup page exists");
+            self.vcx.read_entity(&page, |p, _| {
+                let mut out = String::new();
+                p.status_text(&mut out);
+                out
+            })
+        }
+
+        fn properties_count(&mut self) -> usize {
+            self.vcx.update(|_, cx| {
+                cx.global::<GlobalRegistry>()
+                    .0
+                    .read(cx)
+                    .count(CapClass::StartupProps)
+            })
+        }
+
+        fn window_count(&mut self) -> usize {
+            self.vcx.update(|_, cx| cx.windows().len())
+        }
+
+        fn clipboard(&mut self) -> String {
+            self.vcx
+                .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .unwrap_or_default()
+        }
+
+        fn requests(&self) -> Vec<ActionRequest> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Action(r) => Some(r),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn emit(&mut self, id: ActionId, target: Option<u16>, state: ActionState) {
+            self.engine.emit(FlowEvent { id, target, state });
+            self.vcx.run_until_parked();
+        }
+
+        fn status_cell(&mut self, ix: usize) -> String {
+            let table = self.table();
+            self.vcx.read_entity(&table, |table, _| {
+                let mut out = CellOut::default();
+                table.delegate.cell(ix, id(StartupColumn::Status), &mut out);
+                text(&out).to_owned()
+            })
+        }
+
+        /// Right-clicks the Name cell of row `ix`; returns the menu that opened, if any.
+        fn right_click(&mut self, ix: usize) -> Option<Entity<TlMenuPopup>> {
+            self.draw();
+            let body = self
+                .vcx
+                .debug_bounds("TlTreeTable-body")
+                .expect("the table body");
+            let row_h = self
+                .vcx
+                .update(|_, cx| tl_ui::theme::metrics(cx).row_height);
+            let at = point(
+                body.origin.x + px(40.),
+                body.origin.y + row_h * (ix as f32 + 0.5),
+            );
+            self.vcx.simulate_event(MouseDownEvent {
+                position: at,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Right,
+                click_count: 1,
+                first_mouse: false,
+            });
+            self.vcx.run_until_parked();
+            self.draw();
+            self.vcx.update(|window, cx| open_context_menu(window, cx))
+        }
+
+        /// Runs the item labelled `label` as a click does: in the table's context.
+        fn run_item(&mut self, menu: &Entity<TlMenuPopup>, label: &str) {
+            let entries: Vec<MenuEntryInfo> = self
+                .vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window));
+            let action = entries
+                .into_iter()
+                .find(|e| e.label.as_deref() == Some(label))
+                .and_then(|e| e.action)
+                .unwrap_or_else(|| panic!("a {label} item"));
+            let table = self.table();
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                window.dispatch_action(action, cx);
+            });
+            self.vcx.run_until_parked();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn startup_tab_mounted_and_kept(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        assert!(rig.page().is_none(), "no page before the first visit");
+        rig.vcx.simulate_keystrokes("ctrl-4");
+        rig.draw();
+        assert_eq!(
+            rig.vcx.read_entity(&rig.main, |m, _| m.active_tab()),
+            Tab::Startup
+        );
+        let first = rig.page().expect("Ctrl+4 builds the Startup page");
+        let expected = rig.page_status();
+        assert!(!expected.is_empty(), "the page has status text");
+        assert_eq!(rig.chip(), expected, "the chip shows the page text");
+        rig.select(Tab::Processes);
+        rig.select(Tab::Startup);
+        let again = rig.page().expect("the page is kept");
+        assert_eq!(first.entity_id(), again.entity_id());
+    }
+
+    #[gpui_kit::test]
+    fn startup_page_layout_golden(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.visit_with_fixture();
+        let header = rig
+            .vcx
+            .debug_bounds("TlTreeTableHeader")
+            .expect("header drawn");
+        let mut last_x = px(-1.);
+        for key in [
+            "name",
+            "publisher",
+            "status",
+            "impact",
+            "type",
+            "location",
+            "command",
+        ] {
+            let b = rig
+                .vcx
+                .debug_bounds(format!("TlTreeTableHeader-label-{key}").leak())
+                .unwrap_or_else(|| panic!("{key} label drawn"));
+            assert!(b.origin.x > last_x, "{key} is right of the one before");
+            assert!(
+                b.origin.y >= header.origin.y && b.bottom() <= header.bottom(),
+                "{key} sits in the header"
+            );
+            last_x = b.origin.x;
+        }
+        let table = rig.table();
+        assert_eq!(
+            rig.vcx.read_entity(&table, |t, _| t.delegate.row_count()),
+            4
+        );
+        let body = rig
+            .vcx
+            .debug_bounds("TlTreeTable-body")
+            .expect("body drawn");
+        assert!(
+            body.origin.y >= header.bottom(),
+            "rows are below the header"
+        );
+        assert_eq!(rig.chip(), "4 Total | 3 Enabled | 1 Disabled");
+    }
+
+    #[gpui_kit::test]
+    fn startup_keymap(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.visit_with_fixture();
+        rig.select_row(0);
+
+        rig.vcx.simulate_keystrokes("down");
+        rig.vcx.run_until_parked();
+        assert_eq!(rig.selected_names(), ["KDE Connect"], "Down moves");
+
+        rig.vcx.simulate_keystrokes("enter");
+        rig.vcx.run_until_parked();
+        assert_eq!(rig.properties_count(), 1, "Enter opens Properties");
+        let handle = rig.vcx.update(|_, cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            let key =
+                tl_ui::window::registry::WindowKey::StartupProperties(fixture()[1].id.clone());
+            registry
+                .read(cx)
+                .get(&key)
+                .expect("the Properties window is registered")
+        });
+        let mut props = VisualTestContext::from_window(handle, rig.vcx.cx_mut());
+        props.update(|window, _| window.activate_window());
+        props.simulate_keystrokes("escape");
+        props.run_until_parked();
+        assert_eq!(rig.properties_count(), 0, "Esc closes Properties");
+
+        rig.vcx.update(|window, _| window.activate_window());
+        rig.select_row(1);
+        let windows = rig.window_count();
+        rig.vcx.simulate_keystrokes("delete");
+        rig.vcx.run_until_parked();
+        assert!(
+            rig.toasts()
+                .iter()
+                .any(|t| t == "This startup entry cannot be deleted"),
+            "{:?}",
+            rig.toasts()
+        );
+        assert_eq!(rig.window_count(), windows, "no dialog for a system entry");
+
+        rig.vcx.simulate_keystrokes("ctrl-c");
+        rig.vcx.run_until_parked();
+        let row = rig.clipboard();
+        assert!(!row.is_empty(), "Ctrl+C copies the row");
+        rig.vcx.simulate_keystrokes("ctrl-shift-c");
+        rig.vcx.run_until_parked();
+        let table_text = rig.clipboard();
+        assert!(!table_text.is_empty(), "Ctrl+Shift+C copies a table");
+        assert_ne!(row, table_text);
+
+        rig.vcx.simulate_keystrokes("space");
+        rig.vcx.run_until_parked();
+        assert_eq!(rig.selected_names(), ["KDE Connect"], "Space does nothing");
+        assert_eq!(rig.window_count(), windows);
+
+        rig.vcx.simulate_keystrokes("shift-f10");
+        rig.vcx.run_until_parked();
+        assert!(
+            rig.vcx
+                .update(|window, cx| open_context_menu(window, cx))
+                .is_some(),
+            "Shift+F10 opens the menu"
+        );
+        rig.vcx.simulate_keystrokes("escape");
+        rig.vcx.run_until_parked();
+
+        rig.select_row(0);
+        rig.vcx.simulate_keystrokes("delete");
+        rig.vcx.run_until_parked();
+        assert_eq!(
+            rig.window_count(),
+            windows + 1,
+            "Delete on a user entry opens the confirm dialog"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_end_to_end_enable(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.visit_with_fixture();
+        let ssh = fixture()[3].clone();
+        let menu = rig.right_click(3).expect("the context menu opens");
+        rig.run_item(&menu, "Enable");
+        let sent = rig.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].kind, ActionKind::StartupEnable);
+        assert_eq!(
+            sent[0].targets.as_slice(),
+            [ActionTarget::Startup(ssh.id.clone())]
+        );
+        assert_eq!(rig.status_cell(3), "Updating\u{2026}");
+        let action = sent[0].id;
+        rig.emit(action, None, ActionState::Started);
+        rig.emit(action, Some(0), ActionState::Succeeded);
+        rig.emit(
+            action,
+            None,
+            ActionState::summarize(&[ActionState::Succeeded]),
+        );
+        rig.draw();
+        assert!(
+            rig.toasts().iter().any(|t| t == "Startup entry enabled."),
+            "{:?}",
+            rig.toasts()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_demand_cleared_on_tab_switch(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.visit_with_fixture();
+        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+        rig.vcx.run_until_parked();
+        assert!(
+            rig.engine.demands().last().is_some_and(|d| d.startup),
+            "the Startup tab asks for startup data"
+        );
+        rig.select(Tab::Processes);
+        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+        rig.vcx.run_until_parked();
+        assert!(
+            rig.engine.demands().last().is_some_and(|d| !d.startup),
+            "leaving the tab clears the demand"
+        );
+    }
+}
