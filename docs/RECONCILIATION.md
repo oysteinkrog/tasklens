@@ -1454,7 +1454,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ### R-230 Device page items (OI-U60)
 - Question: raised by E25-OI-1, OI-4 to OI-8.
-- Resolution: `request_public_ip_fetch` lives in E21-017 and shows the notice window first; E25-021 and E28-036 call it (edges on bj6.20). PWM is pre-scaled into the RPM axis through a derived `SeriesView` kept by the page; if E19 gains a per-series `YScale` the derived series goes. The UPower `Type` and `State` word mapping lives in `pages/perf/battery.rs`. `GridStyle.vertical_at: Option<Arc<[f32]>>` and `ChartSeries.gap_style: GapStyle::{Break, Dashed}` are added to E19-001's types by E25-032 as a same-batch chain edit. The device commands are R-139 and `LaunchWhat::DbusActivate` is R-170.
+- Resolution: `request_public_ip_fetch` lives in E21-017 and shows the notice window first; E25-021 and E28-036 call it (edges on bj6.20). PWM is pre-scaled into the RPM axis through a derived `SeriesView` kept by the page; if E19 gains a per-series `YScale` the derived series goes. The UPower `Type` and `State` word mapping lives in `pages/perf/battery.rs`. `GridStyle.vertical_at: Option<Arc<[f32]>>` (each f32 is an x position as a fraction of the plot width, 0.0 at the left edge to 1.0 at the right) and `ChartSeries.gap_style: GapStyle::{Break, Dashed}` are added to E19-001's types by E25-032 as a same-batch chain edit. The device commands are R-139 and `LaunchWhat::DbusActivate` is R-170.
 - Basis: UI-PRF-034, PERF-060, UI-SYS-095 [verified].
 - Edits: bead yrf.3 (note on the E25-032 extension); edges o55.22 and 9o0.32 on bj6.20.
 

@@ -1160,9 +1160,9 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 
 ### PERF-079 Battery charge history
 - Was: v2 PERF-071
-- Source: MC "Battery Charge over past week" (`GetHistory("charge", 604800)`)
-- Behaviour: A 7-day charge graph with day gridlines and dashed lines across gaps. Shown for system batteries with at least 2 history points.
-- Linux data/mechanism: UPower `Device.GetHistory("charge", 604800, 500)` and `GetHistory("rate", …)`. Refreshed every 10 minutes and when `UpdateTime` changes.
+- Source: MC "Battery Charge over past week" (`GetHistory("charge", 604800)`); 24 h here (R-166)
+- Behaviour: A 24-hour charge graph with a gridline and day label at local midnight and dashed lines across gaps (more than 3600 s between two points). Shown for system batteries with at least 2 history points.
+- Linux data/mechanism: UPower `Device.GetHistory("charge", 86400, 288)` and `GetHistory("rate", …)`. The page asks when it opens and every 10 minutes while it is visible.
 - Verdict: BUILD
 - Phase: P3
 - Privilege: none

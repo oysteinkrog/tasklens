@@ -11,7 +11,7 @@ use gpui_kit::{Bounds, Hsla, Path, PathVertex, Pixels, Point, point, px, size};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 
-use super::{ChartCache, ChartSeries, PathSet};
+use super::{ChartCache, ChartSeries, GapStyle, PathSet};
 
 /// Stale floor from R-051: 1.5 s.
 const STALE_FLOOR_NS: u64 = 1_500_000_000;
@@ -1124,7 +1124,24 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         split_runs(samples, from, runs);
 
         if si == 0 {
-            push_gaps(samples, runs, map, period, &mut cache.gaps);
+            if spec.gap_style == GapStyle::Dashed {
+                let dashed = ChartSeries {
+                    fill: None,
+                    dashed: true,
+                    ..spec.clone()
+                };
+                for w in runs.windows(2) {
+                    let (a, b) = (samples[w[0].end - 1], samples[w[1].start]);
+                    pts.clear();
+                    pts.extend([a, b].map(|s| Pt {
+                        t_ns: s.t_ns,
+                        value: s.value,
+                    }));
+                    live.emit(&dashed, pts, None, input, line);
+                }
+            } else {
+                push_gaps(samples, runs, map, period, &mut cache.gaps);
+            }
         }
 
         for run in runs.iter() {

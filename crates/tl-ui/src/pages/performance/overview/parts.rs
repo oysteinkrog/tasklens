@@ -977,6 +977,7 @@ pub const SPARK_GRID: GridStyle = GridStyle {
     baseline: false,
     outline: false,
     rounded: false,
+    vertical_at: None,
 };
 
 /// A sparkline chart for a spark row: no heading, no value, no range word, no scale label.

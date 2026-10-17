@@ -92,6 +92,7 @@ mod grid {
             baseline: true,
             outline: true,
             rounded: false,
+            vertical_at: None,
         }
     }
 
@@ -906,6 +907,7 @@ mod anchor {
             baseline: true,
             outline: true,
             rounded: false,
+            vertical_at: None,
         }
     }
 

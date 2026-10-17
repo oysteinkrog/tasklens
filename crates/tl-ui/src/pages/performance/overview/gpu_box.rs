@@ -192,6 +192,7 @@ fn chart_spec(gpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
             baseline: false,
             outline: true,
             rounded: s.rounded,
+            vertical_at: None,
         },
         smooth: s.smooth,
         background: ChartBg::List,

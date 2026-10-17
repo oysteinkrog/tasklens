@@ -983,6 +983,7 @@ pub fn chart_spec_for(
             baseline: true,
             outline: true,
             rounded: true,
+            vertical_at: None,
         },
         smooth,
         // The hover readout on every card from P2 (UI-PRF-041, PERF-023).
@@ -1004,6 +1005,7 @@ pub fn process_chart_spec(view: &ProcessSourceView, range_s: u16, smooth: bool) 
             baseline: true,
             outline: true,
             rounded: true,
+            vertical_at: None,
         },
         smooth,
         hover: true,

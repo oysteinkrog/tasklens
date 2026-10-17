@@ -90,6 +90,19 @@ pub struct ChartSeries {
     pub line: Hsla,
     pub line_width: Pixels,
     pub dashed: bool,
+    /// How the gaps of the first series are drawn (PERF-022, PERF-079).
+    pub gap_style: GapStyle,
+}
+
+/// How a gap between two runs of samples is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GapStyle {
+    /// A dotted baseline across the gap and no line between the runs (PERF-022).
+    #[default]
+    Break,
+    /// A dashed line (5/5) from the last sample before the gap to the first sample after it, and
+    /// no dotted baseline (PERF-079).
+    Dashed,
 }
 
 impl Default for ChartSeries {
@@ -104,16 +117,22 @@ impl Default for ChartSeries {
             line: Hsla::default(),
             line_width: px(1.0),
             dashed: false,
+            gap_style: GapStyle::Break,
         }
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GridStyle {
     pub lines: bool,
     pub baseline: bool,
     pub outline: bool,
     pub rounded: bool,
+    /// Vertical grid lines at these x positions, each a fraction of the plot width: 0.0 at the
+    /// left edge, 1.0 at the right edge. Positions outside 0..1 are skipped. When set, they
+    /// replace the lines every tenth of the range; `Some` of an empty list draws none. `None`
+    /// keeps the tenths. Only drawn while `lines` is on.
+    pub vertical_at: Option<std::sync::Arc<[f32]>>,
 }
 
 /// `Window` is `TlTheme.window_bg` (pages, summary tiles); `List` is `TlTheme.list_bg` (sidebar

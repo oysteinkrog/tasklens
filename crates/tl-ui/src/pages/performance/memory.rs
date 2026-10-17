@@ -237,6 +237,7 @@ fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettings) -> Char
             baseline: false,
             outline: true,
             rounded: s.rounded,
+            vertical_at: None,
         },
         smooth: s.smooth,
         background: ChartBg::Window,

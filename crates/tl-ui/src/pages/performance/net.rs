@@ -237,6 +237,7 @@ fn throughput_spec(device: DeviceIdx, y: YScale, s: &PageSettings, theme: &TlThe
             baseline: false,
             outline: true,
             rounded: s.rounded,
+            vertical_at: None,
         },
         smooth: s.smooth,
         background: ChartBg::Window,

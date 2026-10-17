@@ -578,6 +578,7 @@ fn plot_grid(s: &PageSettings) -> GridStyle {
         baseline: false,
         outline: true,
         rounded: s.rounded,
+        vertical_at: None,
     }
 }
 

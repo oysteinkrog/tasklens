@@ -13,18 +13,21 @@
 use std::cell::Cell;
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::component::v_flex;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
     Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    SharedString, StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    relative,
 };
 use smallvec::{SmallVec, smallvec};
+use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::series::{Sample, SeriesView};
+use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::snapshot::{BatteryDetails, InvField, Snapshot};
 use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading};
 use tl_model::time::now_boot_ns;
@@ -37,17 +40,18 @@ use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
     visible_rows,
 };
+use crate::app::EngineGlobal;
 use crate::chart::view::find_tiered;
 use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
-    ValueFormat, YScale,
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GapStyle, GridStyle, LegendStyle,
+    ValueAlign, ValueFormat, YScale,
 };
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
 use crate::settings_global::{Section, TlSettings};
-use crate::text::style::label_style;
+use crate::text::style::{label_style, t_xs};
 use crate::theme::palette::accent_color;
 use crate::theme::{TlTheme, current, metrics};
 
@@ -57,6 +61,10 @@ pub const SPEED_ID: &str = "perf-fan-speed";
 pub const TEMPERATURE_ID: &str = "perf-fan-temperature";
 /// Debug selector of the Battery chart box.
 pub const BATTERY_CHART_ID: &str = "perf-battery-chart";
+/// Debug selector of the Battery charge history chart box.
+pub const BATTERY_HISTORY_ID: &str = "perf-battery-history";
+/// Debug selector of the first day label under the history chart.
+pub const BATTERY_DAY_LABEL_ID: &str = "perf-battery-day-label";
 
 /// `<hwmon name>:<device path>:temp<n>`, the persistent key of a temperature sensor without its
 /// `sensor:` prefix (table (a) `[fans]`).
@@ -89,6 +97,32 @@ const BAT_COLOR: &str = "mint";
 const BAT_KEY_POWER: &str = "perf-bat-heading-power";
 const BAT_KEY_PERCENTAGE: &str = "perf-bat-heading-percentage";
 const BAT_KEY_RANGE_POWER: &str = "perf-bat-range-power";
+const BAT_KEY_HEADING_DAY: &str = "perf-bat-heading-day";
+/// Monday first, the order of `Weekday::to_monday_zero_offset`.
+const DAY_KEYS: [&str; 7] = [
+    "perf-day-mon",
+    "perf-day-tue",
+    "perf-day-wed",
+    "perf-day-thu",
+    "perf-day-fri",
+    "perf-day-sat",
+    "perf-day-sun",
+];
+
+/// The history chart covers the past 24 hours (R-166, PERF-079).
+const HISTORY_RANGE_S: i64 = 86_400;
+const HISTORY_RANGE_NS: u64 = HISTORY_RANGE_S as u64 * NS_PER_S;
+/// Two points more than this far apart have a gap between them. UPower stores a point only when
+/// the charge changes, so a shorter limit would mark most stretches on mains power.
+const HISTORY_GAP_S: i64 = 3600;
+/// Nominal spacing of the history points, for the chart's overscan.
+const HISTORY_PERIOD_NS: u64 = 300 * NS_PER_S;
+/// The chart never draws more than this many points (PERF-079).
+const HISTORY_MAX_POINTS: usize = 500;
+/// How often an open page asks for the history again.
+const HISTORY_REFRESH: Duration = Duration::from_secs(600);
+/// Height of the history chart in logical px.
+const HISTORY_H: f32 = 150.0;
 
 pub const BAT_ROW_PERCENTAGE: &str = "perf-bat-row-percentage";
 pub const BAT_ROW_ENERGY: &str = "perf-bat-row-energy";
@@ -305,6 +339,7 @@ fn plot_grid(s: &PageSettings) -> GridStyle {
         baseline: false,
         outline: true,
         rounded: s.rounded,
+        vertical_at: None,
     }
 }
 
@@ -1118,6 +1153,115 @@ pub fn battery_spec(
     }
 }
 
+/// The history series of a system battery. Sample times are unix nanoseconds, so the chart
+/// (frozen, right edge at its newest sample) needs no boot-time offset. Only the past 24 hours up
+/// to `now_s` are kept, at most 500 points. A point more than an hour after the one before it
+/// starts a new run (`GAP_BEFORE`). A last sample at `now_s` carries the newest charge to the
+/// right edge, so the axis ends at the present.
+pub fn history_series(id: SeriesId, points: &[(i64, f32)], now_s: i64, version: u64) -> SeriesView {
+    let from = now_s - HISTORY_RANGE_S;
+    let mut samples: Vec<Sample> = Vec::with_capacity(points.len().min(HISTORY_MAX_POINTS) + 1);
+    let mut last_s = None;
+    let mut push = |t_s: i64, pct: f32, samples: &mut Vec<Sample>| {
+        let mut sample = Sample::valid(t_s as u64 * NS_PER_S, pct);
+        if last_s.is_some_and(|prev| t_s - prev > HISTORY_GAP_S) {
+            sample.flags |= SampleFlags::GAP_BEFORE;
+        }
+        last_s = Some(t_s);
+        samples.push(sample);
+    };
+    let kept = points.iter().filter(|(t, _)| (from..=now_s).contains(t));
+    let skip = kept.clone().count().saturating_sub(HISTORY_MAX_POINTS);
+    for &(t_s, pct) in kept.skip(skip) {
+        push(t_s, pct, &mut samples);
+    }
+    if let Some(&(newest_s, pct)) = points
+        .iter()
+        .filter(|(t, _)| *t <= now_s)
+        .max_by_key(|p| p.0)
+        && newest_s >= from
+        && newest_s < now_s
+    {
+        push(now_s, pct, &mut samples);
+    }
+    SeriesView {
+        id,
+        version,
+        period_ns: HISTORY_PERIOD_NS,
+        samples: samples.into(),
+    }
+}
+
+/// The local midnights inside the 24 hours before `now_s`: unix seconds and the weekday that
+/// starts (0 = Monday). Usually one; a 25-hour day can have none.
+pub fn local_midnights(now_s: i64) -> SmallVec<[(i64, u8); 2]> {
+    let mut out = SmallVec::new();
+    let Ok(ts) = jiff::Timestamp::from_second(now_s) else {
+        return out;
+    };
+    let tz = jiff::tz::TimeZone::system();
+    let today = ts.to_zoned(tz.clone()).date();
+    let days = [today.yesterday().ok(), Some(today)];
+    for date in days.into_iter().flatten() {
+        let Ok(start) = date.to_zoned(tz.clone()) else {
+            continue;
+        };
+        let at = start.timestamp().as_second();
+        if at > now_s - HISTORY_RANGE_S && at <= now_s {
+            out.push((at, date.weekday().to_monday_zero_offset() as u8));
+        }
+    }
+    out
+}
+
+fn unix_now_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The charge history chart (UI-PRF-035): the past 24 hours, no fill, 0 to 100 %, dashed across
+/// gaps, vertical grid lines at `midnights` (fractions of the plot width).
+fn history_spec(
+    device: DeviceIdx,
+    midnights: Arc<[f32]>,
+    s: &PageSettingsView,
+    theme: &TlTheme,
+) -> ChartSpec {
+    let line = battery_line(theme);
+    let mut grid = s.grid.clone();
+    grid.vertical_at = Some(midnights);
+    ChartSpec {
+        series: smallvec![ChartSeries {
+            id: series(device, MetricId::BATTERY_PCT),
+            fill: None,
+            line,
+            gap_style: GapStyle::Dashed,
+            ..ChartSeries::default()
+        }],
+        y: YScale::Fixed {
+            min: 0.0,
+            max: 100.0,
+        },
+        range_ns: HISTORY_RANGE_NS,
+        smooth: false,
+        grid,
+        background: ChartBg::Window,
+        ..ChartSpec::default()
+    }
+}
+
+fn history_labels(words: &BatWords) -> ChartLabels {
+    ChartLabels {
+        heading: Some(words.heading_day.clone()),
+        value_fmt: ValueFormat::Percent,
+        value_align: ValueAlign::Hidden,
+        range_word: SharedString::default(),
+        legend: SmallVec::new(),
+        show_axis_max: false,
+    }
+}
+
 /// The battery page's words, translated once per strings version.
 #[derive(Clone, Debug, Default)]
 struct BatWords {
@@ -1125,6 +1269,8 @@ struct BatWords {
     power: SharedString,
     percentage: SharedString,
     range_power: SharedString,
+    heading_day: SharedString,
+    days: [SharedString; 7],
 }
 
 impl BatWords {
@@ -1141,6 +1287,8 @@ impl BatWords {
         self.power = tr(cx, BAT_KEY_POWER);
         self.percentage = tr(cx, BAT_KEY_PERCENTAGE);
         self.range_power = tr(cx, BAT_KEY_RANGE_POWER);
+        self.heading_day = tr(cx, BAT_KEY_HEADING_DAY);
+        self.days = DAY_KEYS.map(|k| tr(cx, k));
         true
     }
 }
@@ -1454,6 +1602,19 @@ pub struct BatteryPage {
     key: DeviceKey,
     row: DeviceRow,
     chart: Entity<ChartView>,
+    /// The 24-hour charge history of a system battery with at least 2 points (PERF-079).
+    history: Option<Entity<ChartView>>,
+    /// The history record the chart was built from, to tell a new one by `Arc::ptr_eq`.
+    history_raw: Option<Arc<[(i64, f32)]>>,
+    history_version: u64,
+    /// The record had a history at the last snapshot.
+    history_seen: bool,
+    /// Vertical grid positions (fractions of the plot width) and the weekday of each midnight.
+    midnights: SmallVec<[(f32, u8); 2]>,
+    native_path: Option<Arc<str>>,
+    /// Asks for the history again every 10 minutes while the page is active.
+    refresh: Option<Task<()>>,
+    this: WeakEntity<Self>,
     details: KeyValueModel,
     /// The device powers the system (`PowerSupply`), so the chart shows power.
     is_system: bool,
@@ -1505,6 +1666,14 @@ impl BatteryPage {
             key,
             row,
             chart,
+            history: None,
+            history_raw: None,
+            history_version: 0,
+            history_seen: false,
+            midnights: SmallVec::new(),
+            native_path: None,
+            refresh: None,
+            this: cx.weak_entity(),
             details: battery_details_model(),
             is_system,
             focus: cx.focus_handle(),
@@ -1528,6 +1697,16 @@ impl BatteryPage {
 
     pub fn chart(&self) -> &Entity<ChartView> {
         &self.chart
+    }
+
+    /// The 24-hour charge history chart, present for a system battery with at least 2 points.
+    pub fn history_chart(&self) -> Option<&Entity<ChartView>> {
+        self.history.as_ref()
+    }
+
+    /// Where the history chart's vertical grid lines are: fractions of the plot width.
+    pub fn history_midnights(&self) -> Vec<f32> {
+        self.midnights.iter().map(|(x, _)| *x).collect()
     }
 
     /// True when the chart shows power (the battery powers the system).
@@ -1576,6 +1755,14 @@ impl BatteryPage {
                 self.rebuild_chart(cx);
                 changed = true;
             }
+            self.native_path = record.map(|b| Arc::clone(&b.native_path));
+            let history = record.and_then(|b| b.history.clone());
+            // The worker drops the history when it reconnects: ask again.
+            if self.active && self.history_seen && history.is_none() {
+                self.request_history(cx);
+            }
+            self.history_seen = history.is_some();
+            changed |= self.sync_history(history, cx);
             let kind = record.map_or("", |b| &*b.kind);
             let word = page_words(cx).battery_kind(kind).clone();
             let age_ns = now_boot_ns().saturating_sub(snap.device_details.header.observed_end);
@@ -1587,6 +1774,87 @@ impl BatteryPage {
         if changed {
             cx.notify();
         }
+    }
+
+    /// Sends the history fetch for this battery. Only a system battery shows the history.
+    fn request_history(&self, cx: &mut App) {
+        let (true, Some(native_path)) = (self.is_system, self.native_path.clone()) else {
+            return;
+        };
+        let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+            return;
+        };
+        match engine.send(Command::Device(DeviceCommand::BatteryHistory {
+            native_path,
+        })) {
+            Ok(()) => {}
+            Err(CommandError::Busy) => {
+                tracing::warn!(target: "tasklens::ui", "battery history not queued: busy");
+            }
+            Err(_) => tracing::warn!(target: "tasklens::ui", "battery history not queued"),
+        }
+    }
+
+    /// Creates, updates or drops the history chart for the record's history. Returns true when
+    /// the page changed. A new `Arc` rebuilds the series (the chart's geometry once); the same
+    /// `Arc` changes nothing.
+    fn sync_history(&mut self, history: Option<Arc<[(i64, f32)]>>, cx: &mut Context<Self>) -> bool {
+        let history = history.filter(|h| self.is_system && h.len() >= 2);
+        let Some(history) = history else {
+            self.history_raw = None;
+            self.midnights.clear();
+            return self.history.take().is_some();
+        };
+        if self.history.is_some()
+            && self
+                .history_raw
+                .as_ref()
+                .is_some_and(|r| Arc::ptr_eq(r, &history))
+        {
+            return false;
+        }
+        self.history_version += 1;
+        let now_s = unix_now_s();
+        let id = series(self.row.idx, MetricId::BATTERY_PCT);
+        let view = Arc::new(history_series(id, &history, now_s, self.history_version));
+        let right_ns = view.samples.last().map_or(0, |s| s.t_ns);
+        self.midnights = local_midnights(now_s)
+            .into_iter()
+            .map(|(at, day)| {
+                let left_ns = right_ns.saturating_sub(HISTORY_RANGE_NS);
+                let x = (at as u64 * NS_PER_S).saturating_sub(left_ns) as f64;
+                ((x / HISTORY_RANGE_NS as f64) as f32, day)
+            })
+            .collect();
+        self.history_raw = Some(history);
+        let spec = self.history_spec(cx);
+        match &self.history {
+            Some(chart) => chart.update(cx, |v, cx| {
+                v.set_spec(spec, cx);
+                v.series.clear();
+                v.series.push(Some(view));
+                cx.notify();
+            }),
+            None => {
+                let labels = history_labels(&self.words);
+                let hub = self.hub.clone();
+                self.history = Some(cx.new(|cx| {
+                    let mut v = ChartView::new(spec, labels, &hub, cx);
+                    v.series.clear();
+                    v.series.push(Some(view));
+                    v.freeze(cx);
+                    v
+                }));
+            }
+        }
+        true
+    }
+
+    fn history_spec(&self, cx: &App) -> ChartSpec {
+        let theme = current(cx).clone();
+        let view = PageSettingsView::of(&self.settings);
+        let at: Arc<[f32]> = self.midnights.iter().map(|(x, _)| *x).collect();
+        history_spec(self.row.idx, at, &view, &theme)
     }
 
     fn sync_header(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
@@ -1610,6 +1878,14 @@ impl BatteryPage {
             v.set_spec(spec, cx);
             v.set_labels(labels, cx);
         });
+        if let Some(history) = self.history.clone() {
+            let spec = self.history_spec(cx);
+            let labels = history_labels(&self.words);
+            history.update(cx, |v, cx| {
+                v.set_spec(spec, cx);
+                v.set_labels(labels, cx);
+            });
+        }
     }
 
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
@@ -1653,20 +1929,54 @@ impl DevicePage for BatteryPage {
 
     fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
         let m = *metrics(cx);
-        v_flex()
-            .w_full()
-            .child(
-                div()
-                    .debug_selector(|| BATTERY_CHART_ID.into())
-                    .w_full()
-                    .h(px(GRAPH_H_STACKED * m.ui_scale))
-                    .child(
-                        self.chart
-                            .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    ),
-            )
-            .into_any_element()
+        let theme = current(cx).clone();
+        let mut out = v_flex().w_full().child(
+            div()
+                .debug_selector(|| BATTERY_CHART_ID.into())
+                .w_full()
+                .h(px(GRAPH_H_STACKED * m.ui_scale))
+                .child(
+                    self.chart
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                ),
+        );
+        if let Some(history) = &self.history {
+            // The labels sit under the 1 px inset of the plot, at the grid line of each midnight.
+            let mut days = div()
+                .relative()
+                .w_full()
+                .h(m.text.xs * m.line_height)
+                .mx(px(1.0))
+                .text_color(theme.text_secondary);
+            *days.text_style() = t_xs(&m);
+            for (n, (x, day)) in self.midnights.iter().enumerate() {
+                let label = div()
+                    .absolute()
+                    .left(relative(*x))
+                    .child(self.words.days[usize::from(*day).min(6)].clone());
+                days = days.child(if n == 0 {
+                    label.debug_selector(|| BATTERY_DAY_LABEL_ID.into())
+                } else {
+                    label
+                });
+            }
+            out = out
+                .child(div().h(m.sp[4]))
+                .child(
+                    div()
+                        .debug_selector(|| BATTERY_HISTORY_ID.into())
+                        .w_full()
+                        .h(px(HISTORY_H * m.ui_scale))
+                        .child(
+                            history
+                                .clone()
+                                .cached(StyleRefinement::default().size_full()),
+                        ),
+                )
+                .child(days);
+        }
+        out.into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
@@ -1709,7 +2019,21 @@ impl DevicePage for BatteryPage {
         self.active = active;
         if active {
             self.send_demand(cx);
+            self.request_history(cx);
+            let this = self.this.clone();
+            self.refresh = Some(cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor().timer(HISTORY_REFRESH).await;
+                    if this
+                        .update(cx, |page, cx| page.request_history(cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
         } else {
+            self.refresh = None;
             let id = self.id;
             self.demand.update(cx, |d, cx| d.remove(id, cx));
         }
@@ -1735,6 +2059,10 @@ impl Render for BatteryPage {
         if self.words.refresh(cx) {
             let labels = battery_labels(self.is_system, &self.words);
             self.chart.update(cx, |v, cx| v.set_labels(labels, cx));
+            if let Some(history) = self.history.clone() {
+                let labels = history_labels(&self.words);
+                history.update(cx, |v, cx| v.set_labels(labels, cx));
+            }
             let snap = Arc::clone(self.hub.read(cx).current());
             self.apply_snapshot(&snap, ComponentMask::ALL, cx);
         }
@@ -1792,6 +2120,41 @@ mod tests {
             pwm_scaled(&r, 1800.0).version,
             pwm_scaled(&r, 1800.0).version
         );
+    }
+
+    #[test]
+    fn history_series_marks_gaps_over_an_hour() {
+        let id = series(DeviceIdx(1), MetricId::BATTERY_PCT);
+        let now = 1_000_000;
+        let points = [
+            (now - 7200, 80.0),
+            (now - 6000, 79.0),
+            (now - 600, 70.0),
+            (now - 100_000, 50.0),
+        ];
+        let view = history_series(id, &points, now, 3);
+        let flags: Vec<bool> = view
+            .samples
+            .iter()
+            .map(|s| s.flags.contains(SampleFlags::GAP_BEFORE))
+            .collect();
+        // The point from 28 h ago is out of range. 6000 s to 600 s is a gap; 600 s to now is not.
+        assert_eq!(flags, [false, false, true, false]);
+        assert_eq!(view.samples.last().map(|s| s.value), Some(70.0));
+        assert_eq!(
+            view.samples.last().map(|s| s.t_ns),
+            Some(now as u64 * NS_PER_S)
+        );
+        assert_eq!(view.version, 3);
+    }
+
+    #[test]
+    fn at_most_one_midnight_in_24_hours() {
+        for now in [1_700_000_000, 1_711_846_800, 1_730_000_000] {
+            let found = local_midnights(now);
+            assert!(found.len() <= 1, "{now}: {found:?}");
+            assert!(found.iter().all(|(at, day)| *at <= now && *day < 7));
+        }
     }
 
     #[test]

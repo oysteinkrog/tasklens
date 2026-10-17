@@ -1006,17 +1006,17 @@ peripheral:      ┌ Percentage                                  85.0% ┐  W ×
                  │ Percentage over 60 seconds                        │
 sp4
 system battery with ≥ 2 history points (P3):
-┌ Battery charge over the past week                               ┐  W × 150; x axis = 7 days, vertical grid at local midnight,
-│ day labels "Mon" … under the plot in t_xs text_secondary (chosen) │  line Mint, dashed across gaps (dash 5/5), no fill, Fixed 0..100
+┌ Battery charge over the past 24 hours                           ┐  W × 150; x axis = 24 h, vertical grid at local midnight,
+│ day label "Mon" … under the plot in t_xs text_secondary (chosen) │  line Mint, dashed across gaps (dash 5/5), no fill, Fixed 0..100
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 - **Details rows** (grid order): Percentage (`85.0%`), Energy (`42.10 Wh`), Voltage (`11.80 V`), Power (`12.4 W`), State (`Discharging`), Time to empty or Time to full (`2h 14m`, short age form; label changes with state; `Unknown` when UPower reports 0), Charge cycles (`312`), Serial, Type (`Lithium ion`), Powering system (`Yes`/`No`), Technology, Capacity (`92.0%`), Energy empty, Energy full, Energy full (design), Voltage min (design), Voltage max (design), Charge threshold (`Enabled`/`Disabled`), Charge start threshold (`75%`), Charge end threshold (`80%`), Temperature. Threshold rows hidden when unsupported.
-- **Data binding**: UPower properties through `Snapshot.system.batteries[idx]` (`SYSTEM`) and series `bat.power` / `bat.percent`; the week history is a separate `Arc<[Sample]>` on the battery record refreshed every 10 min. Demand `sensors` (batteries ride on the sensors demand bit, chosen; the engine's UPower worker is event-driven anyway).
-- **Build**: `pages/performance/sensors.rs` `BatteryPage`. The week chart is a `ChartView` with `range_ns = 7 days` and `smooth = false` (it never slides).
-- **Tests**: `battery_graph_kind_by_type`, `battery_time_label_follows_state`, `week_chart_hidden_under_2_points`.
+- **Data binding**: UPower properties through `Snapshot.system.batteries[idx]` (`SYSTEM`) and series `bat.power` / `bat.percent`; the 24 h history is `BatteryDetails.history`, `(unix seconds, percent)` pairs the page fetches with `DeviceCommand::BatteryHistory` when it opens and every 10 min while it is visible (R-166). A gap is two points more than 3600 s apart. The grid line and the day label sit only at a local midnight inside the range, so usually one. Demand `sensors` (batteries ride on the sensors demand bit, chosen; the engine's UPower worker is event-driven anyway).
+- **Build**: `pages/performance/sensors.rs` `BatteryPage`. The history chart is a `ChartView` with `range_ns = 24 h` and `smooth = false` (it never slides).
+- **Tests**: `battery_graph_kind_by_type`, `battery_time_label_follows_state`, `week_chart_hidden_under_2_points` (the name is kept; the range is 24 h).
 - **Phase**: P2 (P3 history).
-- **Decided here**: symmetric chart fill rule, week chart labels, demand bit.
+- **Decided here**: symmetric chart fill rule, history chart labels, demand bit.
 
 ### UI-PRF-036 Aggregate pages (P4)
 
@@ -1473,7 +1473,7 @@ Sidebar: card inset `sp5`, text line heights 18/16/16, selected border 2 px draw
 
 Summary mode: tile grid `cols = ceil(sqrt(n))` with 200 × 120 minimum, heading composition, accent marker under the selected tile, click selects and exits, window title suffix " · Graph Summary".
 
-Pages: header text styles, toggle size 24 × ≥ 122, selectable-value fallback (click selects, Ctrl+C copies it), cross-fade on CPU mode change, core-mark icons (`zap`, `leaf`, `star`), disabled-mode tooltip before P2, `cpu_fast` kept on with smooth off, CPU tooltip texts (Up time, Load average, BogoMIPS), secondary graph fallback tooltip and the "Set up CPU power draw…" menu item, commit heading tooltip, composition bar geometry, colours, caption, hatch and tooltip sentences, memory block visibility rules, swap table widths, module block header, Huge pages format, disk Transfer rate value = read + write, partition table widths, usage bar, "No partitions", SMART and Disk-in-use window sizes and button variants, 500 ms retry delay, Shift relabel, network Throughput value = sum, IPv6 second line, Wi-Fi signal icon, Fetch button size and failure tooltip, GPU row 2 split and placeholder cell when the probe is missing, GPU tooltip texts, CUDA row hidden off NVIDIA, display row height and empty text, fan PWM second axis, rename dialog, sensor item format, battery symmetric fill rule, week chart day labels, batteries on the `sensors` demand bit, aggregate Details rows.
+Pages: header text styles, toggle size 24 × ≥ 122, selectable-value fallback (click selects, Ctrl+C copies it), cross-fade on CPU mode change, core-mark icons (`zap`, `leaf`, `star`), disabled-mode tooltip before P2, `cpu_fast` kept on with smooth off, CPU tooltip texts (Up time, Load average, BogoMIPS), secondary graph fallback tooltip and the "Set up CPU power draw…" menu item, commit heading tooltip, composition bar geometry, colours, caption, hatch and tooltip sentences, memory block visibility rules, swap table widths, module block header, Huge pages format, disk Transfer rate value = read + write, partition table widths, usage bar, "No partitions", SMART and Disk-in-use window sizes and button variants, 500 ms retry delay, Shift relabel, network Throughput value = sum, IPv6 second line, Wi-Fi signal icon, Fetch button size and failure tooltip, GPU row 2 split and placeholder cell when the probe is missing, GPU tooltip texts, CUDA row hidden off NVIDIA, display row height and empty text, fan PWM second axis, rename dialog, sensor item format, battery symmetric fill rule, history chart day label, batteries on the `sensors` demand bit, aggregate Details rows.
 
 Minigraphs: panel margins 16, slot order bottom right first, reset restores defaults and removes process cards, cards keep sliding under Ctrl-pause, shadow `(0, 4, 12)` at 0.35 × intensity, hover border accent 0.5, Disk card value = aggregate rate with active-time graph, middle-ellipsis label truncation, "Accent" means the type palette on system cards, card menu separators and colour dots, Hide hidden on process cards, drag threshold 4 px, ghost 0.85, 24 px detach margin, no-holes rule, detached window padding `sp2`, not resizable, "Close graph" re-attaches, per-card range and colour items in the detached menu, mini window card width 244, height cap 90% of the work area, Esc closes it, it stays open on card click.
 

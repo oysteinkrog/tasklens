@@ -79,6 +79,7 @@ const CELL_GRID: GridStyle = GridStyle {
     baseline: true,
     outline: true,
     rounded: false,
+    vertical_at: None,
 };
 
 /// A cell's resolved (fill, overlay) series.

@@ -150,6 +150,7 @@ fn chart_spec(
             baseline: false,
             outline: true,
             rounded: s.rounded,
+            vertical_at: None,
         },
         smooth: s.smooth,
         background: ChartBg::List,

@@ -93,7 +93,7 @@ pub fn grid_k_range(map: &TimeMap) -> (u64, u64) {
     (left.div_ceil(step), map.right_edge_ns / step)
 }
 
-/// Vertical hairlines every tenth of the range and horizontal hairlines at 25 %, 50 % and 75 % of
+/// Vertical hairlines every tenth of the range (or at `style.vertical_at`) and horizontal hairlines at 25 %, 50 % and 75 % of
 /// the plot height, colour `theme.graph.grid`. Nothing when `style.lines` is off or the plot is
 /// under 40 logical px high.
 pub fn paint_grid(window: &mut impl QuadSink, p: &GridPaint) {
@@ -104,18 +104,32 @@ pub fn paint_grid(window: &mut impl QuadSink, p: &GridPaint) {
     let hairline = p.hairline();
     let color = p.theme.graph.grid;
 
-    let step = (p.map.range_ns / 10).max(1);
-    let dx = f32::from(p.dx);
-    let (first, last) = grid_k_range(p.map);
-    for k in first..=last {
-        let x = p.to_logical_x(p.map.x_local(k * step) + dx);
-        if x < plot.left() || x >= plot.right() {
-            continue;
+    match &p.style.vertical_at {
+        Some(at) => {
+            let width = plot.size.width;
+            for frac in at.iter().copied().filter(|f| (0.0..1.0).contains(f)) {
+                let x = plot.left() + width * frac;
+                window.quad(fill(
+                    Bounds::new(point(x, plot.top()), size(hairline, plot.size.height)),
+                    color,
+                ));
+            }
         }
-        window.quad(fill(
-            Bounds::new(point(x, plot.top()), size(hairline, plot.size.height)),
-            color,
-        ));
+        None => {
+            let step = (p.map.range_ns / 10).max(1);
+            let dx = f32::from(p.dx);
+            let (first, last) = grid_k_range(p.map);
+            for k in first..=last {
+                let x = p.to_logical_x(p.map.x_local(k * step) + dx);
+                if x < plot.left() || x >= plot.right() {
+                    continue;
+                }
+                window.quad(fill(
+                    Bounds::new(point(x, plot.top()), size(hairline, plot.size.height)),
+                    color,
+                ));
+            }
+        }
     }
 
     for quarter in [0.25, 0.5, 0.75] {

@@ -12,6 +12,7 @@ use gpui_kit::{
     VisualTestContext, px, size,
 };
 use tl_model::client::EngineClient;
+use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
@@ -55,7 +56,7 @@ use tl_ui::pages::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
 };
 use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage, build_page};
-use tl_ui::pages::performance::sensors::{BatteryPage, FanPage};
+use tl_ui::pages::performance::sensors::{BatteryPage, FanPage, local_midnights};
 use tl_ui::pages::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformancePage, PerformanceSettingsView, sidebar_order,
 };
@@ -614,6 +615,171 @@ fn sensor_pages_demand_switch(cx: &mut TestAppContext) {
     assert!(mouse_part.sensors);
     let d = last_demand(&r);
     assert!(d.sensors && d.any_surface_visible);
+}
+
+/// Battery charge history chart (E25, PERF-079, UI-PRF-035).
+mod battery_history {
+    use super::*;
+
+    fn now_s() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    }
+
+    /// Replaces the battery record with one that has `system` and `history`.
+    fn publish_battery(r: &mut Rig, system: bool, history: Option<Arc<[(i64, f32)]>>) {
+        r.engine.publish_with(|s| {
+            let mut d = DeviceDetailsSnapshot::clone(&s.device_details);
+            d.header.version += 1;
+            let mut record = mouse_record();
+            record.power_supply = system;
+            record.history = history;
+            d.batteries = Arc::from(vec![(DeviceIdx(16), record)]);
+            s.device_details = Arc::new(d);
+        });
+        draw(r.vcx);
+    }
+
+    fn page(r: &mut Rig) -> Entity<BatteryPage> {
+        view_of(r, MOUSE)
+            .downcast::<BatteryPage>()
+            .expect("a BatteryPage")
+    }
+
+    fn has_chart(r: &mut Rig) -> bool {
+        let p = page(r);
+        r.vcx.update(|_, cx| p.read(cx).history_chart().is_some())
+    }
+
+    /// `n` points every 30 minutes, newest 10 minutes ago.
+    fn recent(n: i64) -> Arc<[(i64, f32)]> {
+        let now = now_s();
+        (0..n)
+            .map(|i| (now - 600 - 1800 * (n - 1 - i), 50.0 + i as f32))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    fn fetches(r: &Rig) -> usize {
+        r.engine
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, Command::Device(DeviceCommand::BatteryHistory { .. })))
+            .count()
+    }
+
+    #[gpui_kit::test]
+    fn week_chart_hidden_under_2_points(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        publish_battery(&mut r, true, Some(recent(1)));
+        select(&mut r, MOUSE);
+        assert!(!has_chart(&mut r), "1 point");
+        assert!(r.vcx.debug_bounds("perf-battery-history").is_none());
+        publish_battery(&mut r, true, None);
+        assert!(!has_chart(&mut r), "no history yet");
+        publish_battery(&mut r, true, Some(recent(2)));
+        assert!(has_chart(&mut r), "2 points");
+        assert!(r.vcx.debug_bounds("perf-battery-history").is_some());
+        publish_battery(&mut r, true, Some(recent(1)));
+        assert!(!has_chart(&mut r), "back to 1 point");
+    }
+
+    #[gpui_kit::test]
+    fn week_chart_only_for_system_battery(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        publish_battery(&mut r, false, Some(recent(10)));
+        select(&mut r, MOUSE);
+        assert!(!has_chart(&mut r), "a mouse has no history chart");
+        assert_eq!(fetches(&r), 0, "and asks for none");
+        publish_battery(&mut r, true, Some(recent(10)));
+        assert!(has_chart(&mut r), "a system battery has one");
+    }
+
+    #[gpui_kit::test]
+    fn history_requested_on_open_and_every_10_minutes(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        publish_battery(&mut r, true, None);
+        select(&mut r, MOUSE);
+        assert_eq!(fetches(&r), 1, "on open");
+        r.vcx.executor().advance_clock(Duration::from_secs(601));
+        draw(r.vcx);
+        assert_eq!(fetches(&r), 2, "after 10 minutes");
+        // The worker reconnects and drops the history: the page asks again.
+        publish_battery(&mut r, true, Some(recent(5)));
+        assert_eq!(fetches(&r), 2);
+        publish_battery(&mut r, true, None);
+        assert_eq!(fetches(&r), 3, "history went back to None");
+        select(&mut r, "cpu");
+        r.vcx.executor().advance_clock(Duration::from_secs(1300));
+        draw(r.vcx);
+        assert_eq!(fetches(&r), 3, "none while hidden");
+    }
+
+    #[gpui_kit::test]
+    fn week_chart_gaps_dashed_and_midnight_grid(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        // 24 hours every 30 minutes, with a 2 hour hole.
+        let now = now_s();
+        let points: Vec<(i64, f32)> = (1..=48)
+            .filter(|i| !(21..=23).contains(i))
+            .map(|i| (now - 86_400 + 1800 * i, 90.0 - i as f32))
+            .collect();
+        publish_battery(&mut r, true, Some(points.into()));
+        select(&mut r, MOUSE);
+        let p = page(&mut r);
+        let (chart, fractions) = r.vcx.update(|_, cx| {
+            let p = p.read(cx);
+            (
+                p.history_chart().cloned().expect("a chart"),
+                p.history_midnights(),
+            )
+        });
+        let midnights = local_midnights(now).len();
+        assert_eq!(fractions.len(), midnights);
+        assert!(
+            fractions.iter().all(|f| (0.0..1.0).contains(f)),
+            "{fractions:?}"
+        );
+        r.vcx.update(|_, cx| {
+            let v = chart.read(cx);
+            // One vertical line per midnight and the 3 horizontal ones.
+            assert_eq!(v.last_grid_quads.get() as usize, midnights + 3);
+            // The gap is a dashed stroke between its neighbours: no dotted baseline, and a
+            // solid and a dashed stroke set.
+            assert!(v.last_gap_spans.borrow().is_empty());
+            assert_eq!(v.cached_fill_stroke_counts(), (0, 2));
+        });
+        if midnights == 1 {
+            assert!(r.vcx.debug_bounds("perf-battery-day-label").is_some());
+        }
+    }
+
+    #[gpui_kit::test]
+    fn week_chart_rebuilds_on_history_version(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        let first = recent(6);
+        publish_battery(&mut r, true, Some(first.clone()));
+        select(&mut r, MOUSE);
+        let p = page(&mut r);
+        let chart = r
+            .vcx
+            .update(|_, cx| p.read(cx).history_chart().cloned().expect("a chart"));
+        let builds = |r: &mut Rig| r.vcx.update(|_, cx| chart.read(cx).build_count.get());
+        let base = builds(&mut r);
+        assert!(base >= 1);
+        // The same record again: nothing rebuilds.
+        publish_battery(&mut r, true, Some(first));
+        assert_eq!(builds(&mut r), base);
+        // A new record: one rebuild.
+        publish_battery(&mut r, true, Some(recent(7)));
+        assert_eq!(builds(&mut r), base + 1);
+    }
 }
 
 const GIB: u64 = 1 << 30;

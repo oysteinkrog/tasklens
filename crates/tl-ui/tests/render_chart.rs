@@ -196,6 +196,7 @@ fn chart_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
             baseline: true,
             outline: true,
             rounded: false,
+            vertical_at: None,
         },
         smooth: false,
         ..ChartSpec::default()

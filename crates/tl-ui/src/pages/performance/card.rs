@@ -801,6 +801,7 @@ pub fn card_chart_grid() -> GridStyle {
         baseline: false,
         outline: true,
         rounded: false,
+        vertical_at: None,
     }
 }
 

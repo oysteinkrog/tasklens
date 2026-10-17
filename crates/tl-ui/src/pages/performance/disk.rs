@@ -200,6 +200,7 @@ pub(super) fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettin
             baseline: false,
             outline: true,
             rounded: s.rounded,
+            vertical_at: None,
         },
         smooth: s.smooth,
         background: ChartBg::Window,
