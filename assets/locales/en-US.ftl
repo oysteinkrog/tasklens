@@ -1400,6 +1400,19 @@ shortcuts-column-picker = Move, toggle, jump
 shortcuts-handle-search = Start search; stop a running search, else close when idle
 shortcuts-handle-search-table = End Task, End Process, Go to process, copy paths, copy rows as TSV
 shortcuts-low-memory = Clear filter then close; close; start filtering
+shortcuts-history-step = Step back / forward one sample
+shortcuts-history-step-minute = Step back / forward one minute
+shortcuts-history-ends = Go to the oldest sample / back to live
+shortcuts-history-metric = Show CPU, Memory, Disk, Network or GPU
+shortcuts-service-start = Start the service
+shortcuts-service-stop = Stop the service
+shortcuts-service-restart = Restart the service
+shortcuts-service-props-select-tab = Select tab 1 to 5
+shortcuts-service-props-next-tab = Next / previous tab
+shortcuts-service-props-ok = Close the Service Properties window (OK)
+shortcuts-service-logs-select-all = Select all log lines
+shortcuts-service-logs-copy = Copy the selected log lines
+shortcuts-service-logs-ends = Go to the first / last log line
 
 # Status chip health items (E20-016)
 shell-health-stale = { $source } data stale

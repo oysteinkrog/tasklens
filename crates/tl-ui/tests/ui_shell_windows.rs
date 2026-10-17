@@ -709,7 +709,7 @@ fn shortcuts_unbound_rows_absent(cx: &mut TestAppContext) {
     );
     let headings = vcx.read(|cx| frame.read(cx).content().read(cx).visible_headings());
     assert!(
-        !headings.contains(&Heading::Services),
+        !headings.contains(&Heading::Connections),
         "a heading with no bindings is not drawn"
     );
 }
@@ -807,6 +807,7 @@ fn shortcuts_cover_all_bindings(cx: &mut TestAppContext) {
         let keymap = cx.key_bindings();
         let keymap = keymap.borrow();
         let mut checked = 0;
+        let mut missing = Vec::new();
         for (ix, b) in keymap.bindings().enumerate() {
             let Some(predicate) = b.predicate().map(|p| p.to_string()) else {
                 continue;
@@ -825,12 +826,15 @@ fn shortcuts_cover_all_bindings(cx: &mut TestAppContext) {
                 assert_eq!(shown, 0, "{predicate} {stroke} {name}");
                 continue;
             }
-            assert_eq!(
-                shown, 1,
-                "{predicate} {stroke} {name}: add a SHORTCUT_DOCS entry"
-            );
+            if shown != 1 {
+                missing.push(format!(
+                    "{predicate} {stroke} {name}: shown {shown} times, need a SHORTCUT_DOCS entry"
+                ));
+                continue;
+            }
             checked += 1;
         }
+        assert!(missing.is_empty(), "{}", missing.join("\n"));
         assert!(checked > 60, "{checked} bindings checked");
     });
 }

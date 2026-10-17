@@ -377,9 +377,62 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
     ),
     doc(
         &["tasklens::CopyDetails"],
-        "ProcessTable",
+        "ProcessTable > Table",
         Heading::Processes,
         "shortcuts-copy-details",
+    ),
+    // History
+    doc(
+        &["tasklens::HistoryStepBack", "tasklens::HistoryStepForward"],
+        "History",
+        Heading::History,
+        "shortcuts-history-step",
+    ),
+    doc(
+        &[
+            "tasklens::HistoryStepBackMinute",
+            "tasklens::HistoryStepForwardMinute",
+        ],
+        "History",
+        Heading::History,
+        "shortcuts-history-step-minute",
+    ),
+    doc(
+        &["tasklens::HistoryOldest", "tasklens::HistoryLive"],
+        "History",
+        Heading::History,
+        "shortcuts-history-ends",
+    ),
+    doc(
+        &[
+            "tasklens::HistoryMetricCpu",
+            "tasklens::HistoryMetricMemory",
+            "tasklens::HistoryMetricDisk",
+            "tasklens::HistoryMetricNetwork",
+            "tasklens::HistoryMetricGpu",
+        ],
+        "History",
+        Heading::History,
+        "shortcuts-history-metric",
+    ),
+    // Services
+    doc(
+        &["tasklens::ServiceStart"],
+        "ServiceTable",
+        Heading::Services,
+        "shortcuts-service-start",
+    ),
+    doc(
+        &["tasklens::ServiceStop"],
+        "ServiceTable",
+        Heading::Services,
+        "shortcuts-service-stop",
+    ),
+    doc(
+        &["tasklens::ServiceRestart"],
+        "ServiceTable",
+        Heading::Services,
+        "shortcuts-service-restart",
     ),
     // Information
     doc(
@@ -407,6 +460,18 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         "StartupTable",
         Heading::StartupApps,
         "shortcuts-startup-delete",
+    ),
+    doc(
+        &["tasklens::CopyDetails"],
+        "StartupTable > Table",
+        Heading::StartupApps,
+        "shortcuts-copy-details",
+    ),
+    doc(
+        &["tasklens::OpenProperties"],
+        "StartupTable > Table",
+        Heading::StartupApps,
+        "shortcuts-open-properties",
     ),
     // Performance
     doc(
@@ -522,6 +587,27 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         Heading::PropertiesWindows,
         "shortcuts-signal",
     ),
+    doc(
+        &["tasklens::ServicePropsSelectTab"],
+        "ServiceProps",
+        Heading::PropertiesWindows,
+        "shortcuts-service-props-select-tab",
+    ),
+    doc(
+        &[
+            "tasklens::ServicePropsNextTab",
+            "tasklens::ServicePropsPrevTab",
+        ],
+        "ServiceProps",
+        Heading::PropertiesWindows,
+        "shortcuts-service-props-next-tab",
+    ),
+    doc(
+        &["tasklens::ServicePropsOk"],
+        "ServiceProps",
+        Heading::PropertiesWindows,
+        "shortcuts-service-props-ok",
+    ),
     // Dialogs
     doc(
         &[
@@ -575,6 +661,24 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         "LowMemory",
         Heading::Dialogs,
         "shortcuts-low-memory",
+    ),
+    doc(
+        &["tasklens::ServiceLogsSelectAll"],
+        "JournalList",
+        Heading::Dialogs,
+        "shortcuts-service-logs-select-all",
+    ),
+    doc(
+        &["tasklens::ServiceLogsCopySelected"],
+        "JournalList",
+        Heading::Dialogs,
+        "shortcuts-service-logs-copy",
+    ),
+    doc(
+        &["tasklens::ServiceLogsTop", "tasklens::ServiceLogsBottom"],
+        "JournalList",
+        Heading::Dialogs,
+        "shortcuts-service-logs-ends",
     ),
     // Dialogs and windows
     doc(
