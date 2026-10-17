@@ -40,4 +40,7 @@ Handles: 412
 Threads: 97
 State: Sleeping
 Nice: 0
+Process group: 0
+SID: 0
+Last CPU: 0
 Command line: /usr/lib/firefox/firefox -P default
