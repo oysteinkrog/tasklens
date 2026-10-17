@@ -944,3 +944,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - o55.33: battery chart 24 h ('past 24 hours', midnight lines only inside the range), gap > 3600 s, R-230 types with vertical_at as plot-width fraction, refresh on open and every 10 min while visible.
 - o55.34: option A; new tasklens-o55.42 (smartctl locate gates NeedsFallback, pkexec 126 = Authentication cancelled per R-117) first; o55.34 uses SmartReadAdmin { disk }.
 - hk6.31: closed by the leader with known limits: RestartSec above 1 h cannot be set to exactly 1 h; validation text is in the input's name (kit Input has no description).
+- pdu.46: Windows cell value added in this bead (CellCtx.windows, record_value arm); app and unit rows Blank for now.
