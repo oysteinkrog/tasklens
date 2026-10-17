@@ -1873,6 +1873,58 @@ mod disk_in_use {
         assert_eq!(sent[0].targets.to_vec(), targets);
     }
 
+    /// End All runs through the shared process action entry point (tasklens-pdu.58): tasklens
+    /// itself is dropped with the Processes tab's refusal toast, and the rest are ended after the
+    /// same "End 2 selected processes?" confirmation.
+    #[gpui_kit::test]
+    fn disk_in_use_end_all_refuses_self_like_processes_tab(cx: &mut TestAppContext) {
+        let mut r = setup(cx);
+        let (_, mut vcx, _) = open_blocked(&mut r, false);
+        r.engine.publish_with(|s| {
+            let p = Arc::make_mut(&mut s.processes);
+            p.header.version += 1;
+            let mut records = records().to_vec();
+            records[1].flags = ProcFlags::IS_SELF | ProcFlags::PROTECTED;
+            p.records = records.into();
+        });
+        draw(r.vcx);
+        click(&mut vcx, "DiskInUseEndAll");
+        r.vcx.run_until_parked();
+        redraw(&mut vcx);
+        let toasts: Vec<String> = vcx.update(|window, cx| {
+            tl_ui::components::toast::ToastQueue::of_window(window, cx)
+                .map(|q| {
+                    let texts = q.read(cx).visible_texts();
+                    texts.iter().map(ToString::to_string).collect()
+                })
+                .unwrap_or_default()
+        });
+        assert!(
+            toasts
+                .iter()
+                .any(|t| t == "Refusing to end tasklens itself."),
+            "{toasts:?}"
+        );
+        assert!(sent(&r).is_empty(), "nothing before the confirmation");
+        let (mut dvcx, view) = dialog(&mut r).expect("a confirmation");
+        let text = dvcx.update(|_, cx| view.read(cx).dialog().text().to_string());
+        assert_eq!(text, "End 2 selected processes?");
+        if dvcx.update(|_, cx| view.read(cx).dialog().is_destructive()) {
+            dvcx.simulate_keystrokes("tab");
+        }
+        dvcx.simulate_keystrokes("enter");
+        dvcx.run_until_parked();
+        r.vcx.run_until_parked();
+        let sent = sent(&r);
+        assert_eq!(sent.len(), 1, "one request");
+        assert_eq!(sent[0].kind, ActionKind::Signal(Signal::Term));
+        let targets: Vec<_> = [101, 103]
+            .iter()
+            .map(|p| ActionTarget::Process(pkey(*p)))
+            .collect();
+        assert_eq!(sent[0].targets.to_vec(), targets);
+    }
+
     #[gpui_kit::test]
     fn disk_in_use_auto_retry(cx: &mut TestAppContext) {
         let mut r = setup(cx);

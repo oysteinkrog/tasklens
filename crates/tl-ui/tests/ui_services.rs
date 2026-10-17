@@ -4117,6 +4117,260 @@ mod page {
         assert!(table_n.get() > 0, "the table redraws");
         assert_eq!(page_n.get(), 0, "the page itself does not notify");
     }
+
+    /// Child process rows run the process row commands through the shared entry point
+    /// (tasklens-pdu.58): the requests, confirmations and toasts match the Processes tab's.
+    mod child_actions {
+        use gpui_kit::Action;
+        use tl_model::actions::{
+            ActionEvent, ActionRequest, ActionState, IoPriority, RejectReason,
+        };
+        use tl_model::ids::NodeId;
+        use tl_ui::components::dialog::TlDialogView;
+        use tl_ui::components::window_frame::TlSecondaryWindow;
+        use tl_ui::pages::processes::actions::{
+            CapturedTarget, GoToParent, IoClass, PriorityClass, SetIoPriorityClass, SetPriority,
+        };
+        use tl_ui::pages::processes::toasts::refusal_text;
+        use tl_ui::table::tree_table::RowKind;
+        use tl_ui::windows::actions::{SendSignal, SetAffinity};
+
+        use super::*;
+
+        fn requests(rig: &Rig) -> Vec<ActionRequest> {
+            rig.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Action(request) => Some(request),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Dispatches `action` from the focused table, as a key or a menu item does.
+        fn dispatch(rig: &mut Rig, action: Box<dyn Action>) {
+            let table = rig.table();
+            rig.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                window.dispatch_action(action, cx);
+            });
+            rig.vcx.run_until_parked();
+            rig.draw();
+        }
+
+        /// The open confirmation dialog, drawn, and its text.
+        fn dialog(vcx: &mut VisualTestContext) -> Option<(VisualTestContext, String)> {
+            let (any, frame) = vcx.update(|_, cx| {
+                cx.windows().into_iter().find_map(|w| {
+                    let handle = w.downcast::<Root>()?;
+                    let frame = TlSecondaryWindow::<TlDialogView>::find(handle, cx)?;
+                    Some((w, frame))
+                })
+            })?;
+            let view = vcx.update(|_, cx| frame.read(cx).content().clone());
+            let mut dvcx = VisualTestContext::from_window(any, &vcx.cx);
+            dvcx.update(|window, _| window.activate_window());
+            dvcx.run_until_parked();
+            dvcx.update(|window, cx| window.draw(cx).clear(cx));
+            let text = dvcx.update(|_, cx| view.read(cx).dialog().text().to_string());
+            Some((dvcx, text))
+        }
+
+        fn publish_one(rig: &mut Rig, record: ProcessRecord) {
+            let key = record.key;
+            rig.publish(
+                fixture(),
+                &[(0, key)],
+                vec![record],
+                ServiceCounts::default(),
+            );
+        }
+
+        #[gpui_kit::test]
+        fn child_menu_runs_process_commands(cx: &mut TestAppContext) {
+            let mut rig = rig(cx);
+            rig.activate();
+            publish_one(&mut rig, child_process(812, ProcFlags::empty()));
+            let target = ActionTarget::Process(child_key(812));
+            // Row 0 is the System group, row 1 unit00.service, row 2 its child.
+            let menu = rig.right_click(2).expect("a child row menu");
+            rig.run_item(&menu, "Suspend Process");
+            rig.vcx.update(close_context_menu);
+            rig.draw();
+            let sent = requests(&rig);
+            assert_eq!(sent.len(), 1, "{sent:?}");
+            assert_eq!(sent[0].kind, ActionKind::Suspend);
+            assert_eq!(&*sent[0].targets, std::slice::from_ref(&target));
+            rig.engine.emit(ActionEvent {
+                id: sent[0].id,
+                target: None,
+                state: ActionState::Succeeded,
+            });
+            rig.vcx.run_until_parked();
+            rig.draw();
+            assert_eq!(
+                rig.count_toast("Process suspended."),
+                1,
+                "{:?}",
+                rig.toasts()
+            );
+
+            // Keyboard-style commands read the selected child rows.
+            rig.select(&[2]);
+            dispatch(
+                &mut rig,
+                Box::new(SetPriority {
+                    class: PriorityClass::High,
+                }),
+            );
+            dispatch(
+                &mut rig,
+                Box::new(SetIoPriorityClass {
+                    class: IoClass::Low,
+                }),
+            );
+            dispatch(&mut rig, Box::new(SendSignal { signo: 19 }));
+            let sent = requests(&rig);
+            assert_eq!(sent.len(), 4, "{sent:?}");
+            assert_eq!(sent[1].kind, ActionKind::SetNice(-10));
+            assert_eq!(
+                sent[2].kind,
+                ActionKind::SetIoPriority(IoPriority::BestEffort(7))
+            );
+            assert!(matches!(sent[3].kind, ActionKind::Signal(_)), "{sent:?}");
+            for request in &sent[1..] {
+                assert_eq!(&*request.targets, std::slice::from_ref(&target));
+            }
+
+            let windows = rig.window_count();
+            dispatch(&mut rig, Box::new(SetAffinity));
+            assert_eq!(
+                rig.window_count(),
+                windows + 1,
+                "the Set Affinity dialog opens"
+            );
+        }
+
+        #[gpui_kit::test]
+        fn child_end_task_other_user_asks_like_processes_tab(cx: &mut TestAppContext) {
+            let mut rig = rig(cx);
+            rig.activate();
+            publish_one(&mut rig, child_process(812, ProcFlags::OTHER_USER));
+            rig.select(&[2]);
+            rig.keys("ctrl-e");
+            assert!(requests(&rig).is_empty(), "nothing before the confirmation");
+            let (mut dvcx, text) = dialog(&mut rig.vcx).expect("the OtherUser dialog");
+            // The Processes tab asks the same (ui_process_menu other_user_target_confirms).
+            assert_eq!(text, "End task on sshd (PID 812), owned by root. Continue?");
+            // Destructive: focus starts on Cancel.
+            dvcx.simulate_keystrokes("tab");
+            dvcx.simulate_keystrokes("enter");
+            dvcx.run_until_parked();
+            rig.vcx.run_until_parked();
+            let sent = requests(&rig);
+            assert_eq!(sent.len(), 1, "{sent:?}");
+            assert_eq!(sent[0].kind, ActionKind::Signal(Signal::Term));
+            assert_eq!(&*sent[0].targets, &[ActionTarget::Process(child_key(812))]);
+        }
+
+        #[gpui_kit::test]
+        fn child_end_task_refuses_pid1_like_processes_tab(cx: &mut TestAppContext) {
+            let mut rig = rig(cx);
+            rig.activate();
+            let mut systemd = child_process(1, ProcFlags::PROTECTED);
+            systemd.ppid = 0;
+            publish_one(&mut rig, systemd);
+            let menu = rig.right_click(2).expect("a child row menu");
+            rig.run_item(&menu, "End Task");
+            rig.draw();
+            assert!(requests(&rig).is_empty(), "nothing is sent");
+            // The text the Processes tab's refusal gives for PID 1.
+            let pid1 = CapturedTarget {
+                node: NodeId::Process(child_key(1)),
+                kind: RowKind::Process,
+                name: "sshd".into(),
+                pid: Some(1),
+                uid: 0,
+                user: "root".into(),
+                flags: ProcFlags::PROTECTED,
+                member_count: 1,
+                stopped: false,
+                ppid: 0,
+                nice: Some(0),
+                io_priority: None,
+                exe_deleted: false,
+                unit: None,
+            };
+            let want = refusal_text(RejectReason::Protected, &pid1).expect("a refusal text");
+            assert_eq!(want.as_ref(), "PID 1 (systemd) cannot be ended.");
+            assert_eq!(rig.count_toast(&want), 1, "{:?}", rig.toasts());
+        }
+
+        #[gpui_kit::test]
+        fn child_go_to_parent_not_found_toast(cx: &mut TestAppContext) {
+            let mut rig = rig(cx);
+            rig.activate();
+            // The child's parent PID 1 has no record.
+            publish_one(&mut rig, child_process(812, ProcFlags::empty()));
+            rig.select(&[2]);
+            dispatch(&mut rig, Box::new(GoToParent));
+            assert_eq!(
+                rig.count_toast("Parent process not found in current view"),
+                1,
+                "{:?}",
+                rig.toasts()
+            );
+        }
+
+        #[gpui_kit::test]
+        fn child_go_to_parent_switches_to_processes_tab(cx: &mut TestAppContext) {
+            let engine = FakeEngine::new();
+            init(cx, engine.clone());
+            let handle = cx.update(|cx| {
+                set_test_page(cx, Tab::Services, services_page);
+                open_main_window_on(Tab::Services, cx).expect("main window opens")
+            });
+            let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+            vcx.update(|window, _| window.activate_window());
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            let page = vcx.update(|_, cx| {
+                main_window_view(cx)
+                    .expect("main window view")
+                    .read(cx)
+                    .page_entity::<ServicesPage>(Tab::Services)
+                    .expect("services page")
+            });
+            let mut systemd = child_process(1, ProcFlags::PROTECTED);
+            systemd.ppid = 0;
+            publish_services(
+                &engine,
+                1,
+                fixture(),
+                &[(0, child_key(812))],
+                vec![systemd, child_process(812, ProcFlags::empty())],
+                ServiceCounts::default(),
+            );
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            let table = vcx.read_entity(&page, |p, _| p.table().clone());
+            let id = vcx.read_entity(&table, |t, _| t.delegate.row_id(2));
+            table.update(&mut vcx, |table, cx| {
+                table.selection.click(id);
+                cx.notify();
+            });
+            vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                window.dispatch_action(Box::new(GoToParent), cx);
+            });
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(active_tab(&mut vcx), Tab::Processes);
+        }
+    }
 }
 
 /// The shell builds `ServicesPage` on its first visit and shows its toolbar and status text
