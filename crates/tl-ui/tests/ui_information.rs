@@ -2309,3 +2309,268 @@ fn information_keymap_registered(cx: &mut TestAppContext) {
         "the Information tab builds an InformationPage"
     );
 }
+
+/// The Information tab inside `MainWindow`, end to end through the fake engine
+/// (tasklens-9o0.3, UI-SYS-080, UI-SYS-096, R-023).
+#[cfg(feature = "test-hooks")]
+mod main_window {
+    use super::*;
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::health::SourceId;
+    use tl_model::settings::{Settings, StartTab, UiState};
+    use tl_model::snapshot::{InventorySnapshot, SystemSnapshot};
+    use tl_ui::actions::ShowSystemInformation;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::demand::DEMAND_COALESCE;
+    use tl_ui::pages::information::InformationPage;
+    use tl_ui::pages::information::actions::CopyInformationAll;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::filter::FILTER_DEBOUNCE;
+    use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        main: Entity<MainWindow>,
+    }
+
+    fn boot(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let mut settings = Settings::default();
+        settings.general.start_tab = StartTab::Processes;
+        let init = UiInit {
+            settings,
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.simulate_resize(gpui_kit::size(px(1280.), px(800.)));
+        vcx.run_until_parked();
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        Rig { engine, vcx, main }
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            for _ in 0..3 {
+                draw(&mut self.vcx);
+            }
+        }
+
+        fn select(&mut self, tab: Tab) {
+            self.main
+                .update_in(&mut self.vcx, |m, window, cx| m.select_tab(tab, window, cx));
+            self.draw();
+        }
+
+        fn active_tab(&mut self) -> Tab {
+            self.vcx.read_entity(&self.main, |m, _| m.active_tab())
+        }
+
+        fn page(&mut self) -> Option<Entity<InformationPage>> {
+            self.vcx.read_entity(&self.main, |m, _| {
+                m.page_entity::<InformationPage>(Tab::Information)
+            })
+        }
+
+        fn bounds(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
+            bounds(&mut self.vcx, selector)
+        }
+
+        fn publish_inventory(&mut self, version: u64) {
+            self.engine.publish_with(|s| {
+                let mut inv = InventorySnapshot::default();
+                inv.header.version = version;
+                inv.header.validity = Validity::Valid;
+                inv.os.name = tl_model::table::Total {
+                    value: Arc::from("CachyOS Linux"),
+                    validity: Validity::Valid,
+                };
+                s.inventory = Arc::new(inv);
+            });
+            self.draw();
+        }
+
+        fn publish_system(&mut self, version: u64) {
+            self.engine.publish_with(|s| {
+                let mut sys = SystemSnapshot::default();
+                sys.header.version = version;
+                sys.header.validity = Validity::Valid;
+                s.system = Arc::new(sys);
+            });
+            self.draw();
+        }
+
+        /// Visits the tab and lets the demand reach the engine.
+        fn visit(&mut self) {
+            self.select(Tab::Information);
+            self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+            self.draw();
+        }
+
+        fn offset_y(&mut self) -> Pixels {
+            let page = self.page().expect("the Information page exists");
+            self.vcx
+                .read_entity(&page, |p, _| p.scroll_handle().offset().y)
+        }
+
+        fn is_shown(&mut self, id: InfoSectionId) -> bool {
+            let page = self.page().expect("the Information page exists");
+            self.vcx.read_entity(&page, |p, _| p.is_shown(id))
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            let queue = self.vcx.read_entity(&self.main, |m, _| m.toasts().clone());
+            self.vcx.read_entity(&queue, |q, _| {
+                q.visible_texts().iter().map(|t| t.to_string()).collect()
+            })
+        }
+    }
+
+    #[gpui_kit::test]
+    fn help_system_information_scrolls_to_os(cx: &mut TestAppContext) {
+        let mut r = boot(cx);
+        r.publish_inventory(1);
+        r.visit();
+        let page = r.page().expect("the Information page exists");
+        r.vcx.read_entity(&page, |p, _| {
+            p.scroll_handle()
+                .set_offset(gpui_kit::point(px(0.), px(-120.)))
+        });
+        r.select(Tab::Processes);
+
+        r.vcx.dispatch_action(ShowSystemInformation);
+        r.draw();
+
+        assert_eq!(r.active_tab(), Tab::Information);
+        assert_eq!(r.offset_y(), px(0.));
+        let os = r.bounds("InfoSection-0").expect("OS section drawn");
+        let page_bounds = r.bounds("InformationPage").expect("page drawn");
+        assert_eq!(os.origin.y, page_bounds.origin.y + px(16.));
+        let focused = r
+            .vcx
+            .update(|window, cx| page.read(cx).focus_handle().is_focused(window));
+        assert!(focused, "the scroll region has focus");
+        assert!(r.toasts().is_empty(), "no toast: {:?}", r.toasts());
+    }
+
+    #[gpui_kit::test]
+    fn help_system_information_clears_hiding_filter(cx: &mut TestAppContext) {
+        let mut r = boot(cx);
+        r.publish_inventory(1);
+        r.visit();
+        let filter = r.vcx.read_entity(&r.main, |m, _| m.filter_box().clone());
+        r.vcx.update(|window, cx| {
+            let input = filter.read(cx).input().clone();
+            input.update(cx, |s, cx| s.focus(window, cx));
+        });
+        r.vcx.simulate_input("graphics");
+        r.vcx.executor().advance_clock(FILTER_DEBOUNCE * 2);
+        r.draw();
+        assert!(!r.is_shown(InfoSectionId::OperatingSystem));
+
+        r.vcx.dispatch_action(ShowSystemInformation);
+        r.draw();
+
+        assert_eq!(
+            r.vcx
+                .read_entity(&filter, |f, _| f.text(Tab::Information).to_string()),
+            ""
+        );
+        assert!(r.is_shown(InfoSectionId::OperatingSystem));
+        assert_eq!(r.offset_y(), px(0.));
+    }
+
+    #[gpui_kit::test]
+    fn information_tab_mounted_and_kept(cx: &mut TestAppContext) {
+        let mut r = boot(cx);
+        assert!(r.page().is_none(), "built on first visit");
+        r.vcx.simulate_keystrokes("ctrl-6");
+        r.draw();
+        assert_eq!(r.active_tab(), Tab::Information);
+        let first = r.page().expect("the Information page exists");
+        let page_bounds = r.bounds("InformationPage").expect("page drawn");
+        let window = r.bounds("MainWindowPage").expect("page slot drawn");
+        assert!(page_bounds.origin.x >= window.origin.x);
+        assert!(page_bounds.origin.y >= window.origin.y);
+        assert!(page_bounds.bottom() <= window.bottom());
+        assert!(page_bounds.right() <= window.right());
+
+        r.select(Tab::Processes);
+        r.vcx.simulate_keystrokes("ctrl-6");
+        r.draw();
+        assert_eq!(r.active_tab(), Tab::Information);
+        let second = r.page().expect("the Information page is kept");
+        assert_eq!(first.entity_id(), second.entity_id());
+    }
+
+    #[gpui_kit::test]
+    fn information_end_to_end_fake_engine(cx: &mut TestAppContext) {
+        let mut r = boot(cx);
+        r.visit();
+        let page = r.page().expect("the Information page exists");
+        let loading = |r: &mut Rig| -> Vec<bool> {
+            r.vcx.read_entity(&page, |p, cx| {
+                InfoSectionId::ALL
+                    .iter()
+                    .map(|id| p.section(*id).read(cx).is_loading())
+                    .collect()
+            })
+        };
+        assert!(loading(&mut r).iter().all(|l| *l), "skeleton first");
+
+        r.publish_inventory(1);
+        r.publish_system(1);
+        assert!(loading(&mut r).iter().all(|l| !*l), "then data");
+
+        let refreshes = |r: &Rig| {
+            r.engine
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, Command::RefreshNow(SourceId::Inventory)))
+                .count()
+        };
+        let before = refreshes(&r);
+        r.vcx.simulate_keystrokes("f5");
+        r.draw();
+        assert_eq!(refreshes(&r), before + 1);
+        r.publish_inventory(2);
+        assert!(
+            r.toasts().iter().any(|t| t == "Information refreshed."),
+            "{:?}",
+            r.toasts()
+        );
+
+        let focus = r.vcx.read_entity(&page, |p, _| p.focus_handle().clone());
+        r.vcx.update(|window, cx| window.focus(&focus, cx));
+        r.vcx.dispatch_action(CopyInformationAll);
+        r.draw();
+        let expected = r.vcx.read_entity(&page, |p, _| p.copy_all_text());
+        let copied = r.vcx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some(expected.as_str()));
+    }
+
+    #[gpui_kit::test]
+    fn information_status_chip_empty(cx: &mut TestAppContext) {
+        let mut r = boot(cx);
+        r.visit();
+        let chip = r.vcx.read_entity(&r.main, |m, _| m.status_chip().clone());
+        assert_eq!(r.vcx.read_entity(&chip, |c, _| c.drawn_text()), "");
+    }
+}
