@@ -2051,3 +2051,458 @@ mod props {
         assert_eq!(tab, Tab::Processes);
     }
 }
+
+/// The Connections tab inside `MainWindow`, end to end through the fake engine
+/// (tasklens-9o0.2, UI-SYS-060 to UI-SYS-068, table (b)).
+#[cfg(feature = "test-hooks")]
+mod main_window {
+    use super::*;
+    use gpui_kit::AppContext as _;
+    use gpui_kit::{Entity, Modifiers, MouseButton, MouseDownEvent, VisualTestContext, point};
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::ids::NodeId;
+    use tl_model::settings::{Settings, StartTab, UiState};
+    use tl_model::snapshot::ConnCounts;
+    use tl_model::table::{ProcessTableView, SysTable, TableRow};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::menu::{MenuEntryInfo, TlMenuPopup, open_context_menu};
+    use tl_ui::demand::DEMAND_COALESCE;
+    use tl_ui::pages::connections::ConnectionsPage;
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+
+    const FIREFOX_COOKIE: u64 = 2;
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        main: Entity<MainWindow>,
+        version: u64,
+    }
+
+    fn boot(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let mut settings = Settings::default();
+        settings.general.start_tab = StartTab::Processes;
+        let init = UiInit {
+            settings,
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.simulate_resize(gpui_kit::size(px(1280.), px(800.)));
+        vcx.run_until_parked();
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        Rig {
+            engine,
+            vcx,
+            main,
+            version: 0,
+        }
+    }
+
+    fn fixture() -> (Vec<ConnRecord>, Vec<ProcessRecord>, ConnCounts) {
+        let owner = |pid: u32| -> SmallVec<[ProcessKey; 1]> { SmallVec::from_slice(&[key(pid)]) };
+        let mut sshd = super::connection(1, owner(812));
+        sshd.uid = 0;
+        sshd.state = ConnState::Listening;
+        sshd.local = Arc::from("0.0.0.0:22");
+        sshd.foreign = Arc::from("0.0.0.0:0");
+        let firefox = super::connection(FIREFOX_COOKIE, owner(4321));
+        let mut cupsd = super::connection(3, owner(900));
+        cupsd.uid = 0;
+        cupsd.family = Family::Inet6;
+        cupsd.state = ConnState::Listening;
+        cupsd.local = Arc::from("[::1]:631");
+        cupsd.foreign = Arc::from("[::]:0");
+        let mut kernel = super::connection(4, SmallVec::new());
+        kernel.state = ConnState::TimeWait;
+        kernel.inode = 0;
+        let mut avahi = super::connection(5, owner(700));
+        avahi.proto = Proto::Udp;
+        avahi.state = ConnState::Unconnected;
+        avahi.local = Arc::from("0.0.0.0:5353");
+        avahi.foreign = Arc::from("0.0.0.0:0");
+        let processes = vec![
+            super::process(812, "sshd", "root", 0),
+            super::process(4321, "firefox", "user", 1000),
+            super::process(900, "cupsd", "root", 0),
+            super::process(700, "avahi-daemon", "avahi", 970),
+        ];
+        let counts = ConnCounts {
+            total: 5,
+            tcp: 4,
+            udp: 1,
+            established: 1,
+            listening: 2,
+        };
+        (vec![sshd, firefox, cupsd, kernel, avahi], processes, counts)
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        fn select(&mut self, tab: Tab) {
+            self.main
+                .update_in(&mut self.vcx, |m, window, cx| m.select_tab(tab, window, cx));
+            self.draw();
+        }
+
+        fn active_tab(&mut self) -> Tab {
+            self.vcx.read_entity(&self.main, |m, _| m.active_tab())
+        }
+
+        fn page(&mut self) -> Option<Entity<ConnectionsPage>> {
+            self.vcx.read_entity(&self.main, |m, _| {
+                m.page_entity::<ConnectionsPage>(Tab::Connections)
+            })
+        }
+
+        fn table(&mut self) -> Entity<tl_ui::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
+            let page = self.page().expect("the Connections page exists");
+            self.vcx.read_entity(&page, |page, _| page.table().clone())
+        }
+
+        /// Publishes the fixture for the last Connections query the page sent.
+        fn publish(&mut self) {
+            self.version += 1;
+            let version = self.version;
+            let generation = self
+                .engine
+                .commands()
+                .into_iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::SetSysTableQuery(query) if query.table == SysTable::Connections => {
+                        Some(query.generation)
+                    }
+                    _ => None,
+                })
+                .expect("the page sent a Connections query");
+            let (records, mut processes, counts) = fixture();
+            processes.sort_unstable_by_key(|process| process.key);
+            let rows: Vec<SysRow> = records
+                .iter()
+                .enumerate()
+                .map(|(index, record)| SysRow {
+                    node: SysNodeId::Conn(record.cookie),
+                    depth: 0,
+                    expanded: false,
+                    has_children: false,
+                    record: Some(index as u32),
+                })
+                .collect();
+            self.engine.publish_with(|snapshot| {
+                snapshot.connections = Arc::new(ConnectionsSnapshot {
+                    header: ComponentHeader {
+                        version,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    rows: rows.into(),
+                    query_generation: generation,
+                    records: records.into(),
+                    counts,
+                    ..ConnectionsSnapshot::default()
+                });
+                snapshot.processes = Arc::new(ProcessSnapshot {
+                    records: processes.into(),
+                    ..ProcessSnapshot::default()
+                });
+            });
+            self.draw();
+        }
+
+        /// Visits the Connections tab and publishes the fixture.
+        fn visit_with_fixture(&mut self) {
+            self.select(Tab::Connections);
+            self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+            self.publish();
+        }
+
+        fn select_row(&mut self, cookie: u64) {
+            let table = self.table();
+            table.update(&mut self.vcx, |table, cx| {
+                table.selection.click(cookie);
+                cx.notify();
+            });
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+            });
+            self.draw();
+        }
+
+        fn selected(&mut self) -> Vec<u64> {
+            let table = self.table();
+            self.vcx
+                .read_entity(&table, |table, _| table.selection.ids().collect())
+        }
+
+        fn chip(&mut self) -> String {
+            let chip = self
+                .vcx
+                .read_entity(&self.main, |m, _| m.status_chip().clone());
+            self.vcx.read_entity(&chip, |c, _| c.drawn_text())
+        }
+
+        fn page_status(&mut self) -> String {
+            let page = self.page().expect("the Connections page exists");
+            self.vcx.read_entity(&page, |p, _| {
+                let mut out = String::new();
+                p.status_text(&mut out);
+                out
+            })
+        }
+
+        /// Right-clicks the first cell of the row for `cookie`.
+        fn right_click(&mut self, cookie: u64) -> Option<Entity<TlMenuPopup>> {
+            self.draw();
+            let table = self.table();
+            let ix = self
+                .vcx
+                .read_entity(&table, |t, _| t.delegate.row_index(cookie))
+                .expect("the row exists");
+            let body = self
+                .vcx
+                .debug_bounds("TlTreeTable-body")
+                .expect("the table body");
+            let row_h = self
+                .vcx
+                .update(|_, cx| tl_ui::theme::metrics(cx).row_height);
+            let at = point(
+                body.origin.x + px(40.),
+                body.origin.y + row_h * (ix as f32 + 0.5),
+            );
+            self.vcx.simulate_event(MouseDownEvent {
+                position: at,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Right,
+                click_count: 1,
+                first_mouse: false,
+            });
+            self.vcx.run_until_parked();
+            self.draw();
+            self.vcx.update(|window, cx| open_context_menu(window, cx))
+        }
+
+        /// Runs the item labelled `label` as a click does: in the table's context.
+        fn run_item(&mut self, menu: &Entity<TlMenuPopup>, label: &str) {
+            let entries: Vec<MenuEntryInfo> = self
+                .vcx
+                .update(|window, cx| menu.read(cx).entries_for_test(window));
+            let action = entries
+                .into_iter()
+                .find(|e| e.label.as_deref() == Some(label))
+                .and_then(|e| e.action)
+                .unwrap_or_else(|| panic!("a {label} item"));
+            let table = self.table();
+            self.vcx.update(|window, cx| {
+                let focus = table.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                window.dispatch_action(action, cx);
+            });
+            self.vcx.run_until_parked();
+        }
+
+        /// Answers the latest Processes query with `keys` as the view.
+        fn answer(&mut self, keys: &[ProcessKey]) {
+            let generation = self
+                .engine
+                .commands()
+                .into_iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::SetTableQuery(query) => Some(query.generation),
+                    _ => None,
+                })
+                .expect("a Processes query was sent");
+            let rows: Vec<TableRow> = keys
+                .iter()
+                .map(|key| TableRow {
+                    node: NodeId::Process(*key),
+                    depth: 0,
+                    expanded: false,
+                    has_children: false,
+                    record: Some(0),
+                    group: None,
+                    descendants: 0,
+                    subtree: None,
+                })
+                .collect();
+            self.engine.publish_with(|s| {
+                let header = ComponentHeader {
+                    version: s.sequence,
+                    ..ComponentHeader::default()
+                };
+                s.table = Arc::new(ProcessTableView {
+                    header,
+                    query_generation: generation,
+                    rows: rows.into(),
+                    ..ProcessTableView::default()
+                });
+            });
+            self.draw();
+        }
+
+        fn processes_selected(&mut self) -> Vec<ProcRowId> {
+            self.vcx.update(|_, cx| {
+                let page = main_window_view(cx)
+                    .expect("main window")
+                    .read(cx)
+                    .page_entity::<ProcessesPage>(Tab::Processes)
+                    .expect("Processes page");
+                page.read(cx).table().read(cx).selection.ids().collect()
+            })
+        }
+
+        fn last_demand_connections(&self) -> Option<bool> {
+            self.engine.demands().last().map(|d| d.connections)
+        }
+    }
+
+    #[gpui_kit::test]
+    fn connections_tab_mounted_and_kept(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        assert!(rig.page().is_none(), "no page before the first visit");
+        rig.vcx.simulate_keystrokes("ctrl-5");
+        rig.draw();
+        assert_eq!(rig.active_tab(), Tab::Connections);
+        let first = rig.page().expect("Ctrl+5 builds the Connections page");
+        let expected = rig.page_status();
+        assert!(!expected.is_empty(), "the page has status text");
+        assert_eq!(rig.chip(), expected, "the chip shows the page text");
+        rig.select(Tab::Processes);
+        rig.select(Tab::Connections);
+        let again = rig.page().expect("the page is kept");
+        assert_eq!(first.entity_id(), again.entity_id());
+    }
+
+    #[gpui_kit::test]
+    fn connections_page_layout_golden(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.visit_with_fixture();
+        let header = rig
+            .vcx
+            .debug_bounds("TlTreeTableHeader")
+            .expect("header drawn");
+        let mut last_x = px(-1.);
+        for key in ["proto", "local", "foreign", "state", "pid", "process"] {
+            let b = rig
+                .vcx
+                .debug_bounds(format!("TlTreeTableHeader-label-{key}").leak())
+                .unwrap_or_else(|| panic!("{key} label drawn"));
+            assert!(b.origin.x > last_x, "{key} is right of the one before");
+            assert!(
+                b.origin.y >= header.origin.y && b.bottom() <= header.bottom(),
+                "{key} sits in the header"
+            );
+            last_x = b.origin.x;
+        }
+        let table = rig.table();
+        assert_eq!(
+            rig.vcx.read_entity(&table, |t, _| t.delegate.row_count()),
+            5
+        );
+        let body = rig
+            .vcx
+            .debug_bounds("TlTreeTable-body")
+            .expect("body drawn");
+        assert!(
+            body.origin.y >= header.bottom(),
+            "rows are below the header"
+        );
+        assert_eq!(rig.chip(), "5 Total | 4 TCP | 1 UDP | 1 EST | 2 LISTEN");
+    }
+
+    #[gpui_kit::test]
+    fn connections_end_to_end_refresh_keeps_selection(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.visit_with_fixture();
+        rig.select_row(FIREFOX_COOKIE);
+        assert_eq!(rig.selected(), [FIREFOX_COOKIE]);
+        for _ in 0..3 {
+            rig.vcx
+                .executor()
+                .advance_clock(std::time::Duration::from_secs(2));
+            rig.publish();
+            assert_eq!(rig.selected(), [FIREFOX_COOKIE], "the selection stays");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn connections_end_to_end_jump(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+        rig.answer(&[key(4321)]);
+        rig.visit_with_fixture();
+        let menu = rig.right_click(FIREFOX_COOKIE).expect("the menu opens");
+        rig.run_item(&menu, "Jump to process");
+        rig.answer(&[key(4321)]);
+        assert_eq!(rig.active_tab(), Tab::Processes);
+        assert_eq!(rig.processes_selected(), [ProcRowId::Process(key(4321))]);
+    }
+
+    #[gpui_kit::test]
+    fn connections_enter_opens_properties(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.visit_with_fixture();
+        rig.select_row(FIREFOX_COOKIE);
+        rig.vcx.simulate_keystrokes("enter");
+        rig.vcx.run_until_parked();
+        let (opened, count) = rig.vcx.update(|_, cx| {
+            let registry = cx.global::<GlobalRegistry>().0.read(cx);
+            (
+                registry
+                    .get(&WindowKey::ConnectionProperties(FIREFOX_COOKIE))
+                    .is_some(),
+                registry.count(CapClass::ConnectionProps),
+            )
+        });
+        assert!(opened, "the Properties window is registered for the cookie");
+        assert_eq!(count, 1);
+    }
+
+    #[gpui_kit::test]
+    fn connections_demand_cleared_on_tab_switch(cx: &mut TestAppContext) {
+        let mut rig = boot(cx);
+        rig.visit_with_fixture();
+        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+        rig.vcx.run_until_parked();
+        assert_eq!(
+            rig.last_demand_connections(),
+            Some(true),
+            "the Connections tab asks for connection data"
+        );
+        rig.select(Tab::Information);
+        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+        rig.vcx.run_until_parked();
+        assert_eq!(
+            rig.last_demand_connections(),
+            Some(false),
+            "leaving the tab clears the demand"
+        );
+    }
+}
