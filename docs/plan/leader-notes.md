@@ -951,3 +951,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 9o0.30: new tasklens-9o0.39 adds a RemoteHost state so pending and no-name differ; picker note 'Sends DNS queries' in the existing note slot, UI-SYS-061 updated.
 - 9o0.31: new tasklens-9o0.40 (ConnRecord.netns plus engine use of the helper netns dump) first; no page toast on cancel (helper_flow shows it); host rows show an empty Namespace cell.
 - pdu.47: option C; new tasklens-pdu.63 copies pgrp, sid, last_cpu; cycles, cycles_delta, x11_resources, container parked at NO_SOURCE and added to pdu.60's planning scope.
+- 2026-10-17 leader: v1.0.0 tagged (4f17a945) and installed as a pacman package. Smoke test of the installed build (6 Sonnet agents, hidden nested KWin, harness /var/tmp/claude/tl-smoke/harness.sh) found about 90 issues; filed as 26 beads labelled smoke-1_0_1 (10 P1, 12 P2, 4 P3), each under its area epic. Notes: /var/tmp/claude/tl-smoke/findings/. Target: 1.0.1.
