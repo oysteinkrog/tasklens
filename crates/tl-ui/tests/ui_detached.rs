@@ -443,6 +443,58 @@ mod detach {
         })
     }
 
+    /// The E26-A2 anchor: detach Memory, then open and close the mini window next to it.
+    /// No E26 test is `#[ignore]`d any more.
+    #[gpui_kit::test]
+    fn detached_and_mini_smoke(cx: &mut TestAppContext) {
+        use tl_ui::actions::ToggleMiniWindow;
+        use tl_ui::demand::GlobalDemand;
+        use tl_ui::pages::performance::actions::PerfShowMiniWindow;
+        use tl_ui::window::menus_view::mini_window_open;
+        use tl_ui::windows::mini::is_mini_open;
+
+        let mut r = rig(cx, UiState::default());
+        let memory = r.id_of(&MinigraphSource::Memory);
+        r.dispatch(MinigraphDetach { id: memory });
+        assert!(registry_has(cx, 1));
+        let (title, cards) = window_cards(cx, 1);
+        assert_eq!(title, "tasklens Graph 1");
+        assert_eq!(cards, [MinigraphSource::Memory]);
+
+        cx.update(|cx| {
+            cx.set_global(GlobalDemand(r.demand.clone()));
+            tl_ui::windows::mini::init(cx);
+        });
+        let mini = |cx: &mut TestAppContext| {
+            cx.read(|cx| {
+                cx.global::<GlobalRegistry>()
+                    .0
+                    .read(cx)
+                    .get(&WindowKey::Mini)
+            })
+        };
+
+        // Ctrl+Shift+M opens the mini window next to the detached one.
+        cx.update(|cx| cx.dispatch_action(&ToggleMiniWindow));
+        cx.run_until_parked();
+        assert!(cx.read(is_mini_open));
+        assert!(cx.read(mini_window_open));
+        assert!(registry_has(cx, 1));
+        let handle = mini(cx).expect("the registry holds Mini");
+
+        // The page double-click shows it again: one instance.
+        cx.update(|cx| cx.dispatch_action(&PerfShowMiniWindow));
+        cx.run_until_parked();
+        assert_eq!(mini(cx), Some(handle));
+
+        // The next toggle closes it; the detached window stays.
+        cx.update(|cx| cx.dispatch_action(&ToggleMiniWindow));
+        cx.run_until_parked();
+        assert!(!cx.read(is_mini_open));
+        assert!(registry_has(cx, 1));
+        assert!(cx.read(any_detached_open));
+    }
+
     #[gpui_kit::test]
     fn detached_state_round_trip(cx: &mut TestAppContext) {
         let mut r = rig(cx, UiState::default());
