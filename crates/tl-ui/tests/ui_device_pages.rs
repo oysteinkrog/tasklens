@@ -1662,8 +1662,10 @@ mod disk_in_use {
         ])
     }
 
-    /// The Disk page of sda with an action tracker installed.
+    /// The Disk page of sda with an action tracker installed. The toast layer is registered as
+    /// the app does, so the window's own toast stack takes the action toasts.
     fn setup(cx: &mut TestAppContext) -> Rig<'_> {
+        cx.update(tl_ui::components::toast::init);
         let mut r = open(cx);
         select(&mut r, SDA);
         let client: Arc<dyn EngineClient> = r.engine.clone();

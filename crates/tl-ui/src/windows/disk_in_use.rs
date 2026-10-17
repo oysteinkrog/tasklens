@@ -643,7 +643,7 @@ impl DiskInUseWindow {
             return;
         }
         let this = cx.entity().downgrade();
-        let on_sent: OnSent = Rc::new(move |id, cx| {
+        let on_sent: OnSent = Rc::new(move |id: ActionId, cx: &mut App| {
             let _ = this.update(cx, |w, _| w.ending.push(id));
         });
         let options = RunOptions {
