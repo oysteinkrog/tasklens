@@ -1345,7 +1345,11 @@ mod dialog_enter {
         assert!(in_field, "focus starts in the field");
         assert_eq!(selected, "Fan 1", "the initial text is selected");
         assert_eq!(field_name(&mut o).as_deref(), Some("Rename fan"));
+    }
 
+    #[gpui_kit::test]
+    fn text_input_label_names_the_field(cx: &mut TestAppContext) {
+        // `open` finds the dialog as the one window besides its parent, so one dialog per test.
         let mut o = open(cx, rename_fan().input_label("Fan name"));
         assert_eq!(field_name(&mut o).as_deref(), Some("Fan name"));
     }
