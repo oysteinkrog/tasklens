@@ -1851,6 +1851,11 @@ fn memory_details_first_sample() {
             name: Arc::from("zram0"),
             disksize: 67_331_162_112,
             algorithm: Some(Arc::from("zstd")),
+            stats: Some(ZramTotals {
+                orig_data: 1_048_576,
+                compr_data: 262_144,
+                mem_used: 300_000,
+            }),
         }]
     );
     assert_eq!(src.details_reads(), 1);

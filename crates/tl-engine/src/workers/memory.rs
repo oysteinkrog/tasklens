@@ -246,6 +246,11 @@ fn zram_detail(z: &ZramReading) -> ZramDetail {
         name: Arc::clone(&z.name),
         disksize: z.disksize_bytes,
         algorithm: z.algorithm.clone(),
+        stats: (z.mm.validity == Validity::Valid).then(|| ZramTotals {
+            orig_data: z.mm.value.orig_data_size,
+            compr_data: z.mm.value.compr_data_size,
+            mem_used: z.mm.value.mem_used_total,
+        }),
     }
 }
 

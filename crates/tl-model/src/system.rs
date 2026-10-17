@@ -193,7 +193,7 @@ pub struct MemoryTotals {
 }
 
 /// zram `mm_stat` fields 1, 2 and 3.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ZramTotals {
     pub orig_data: u64,
     pub compr_data: u64,

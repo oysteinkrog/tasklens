@@ -791,8 +791,7 @@ fn text_bits(s: &str) -> u64 {
     })
 }
 
-/// Fills one zram grid. The `mm_stat` totals are summed over all devices, so they belong to a
-/// device only when it is the only one. With more devices, or when its `mm_stat` read failed
+/// Fills one zram grid from the device's own `mm_stat` fields. When its `mm_stat` read failed
 /// (`stats` is `None`), those rows read Unavailable.
 fn update_zram_grid(
     model: &mut KeyValueModel,
@@ -874,12 +873,13 @@ pub fn update_compressed_block(block: &mut CompressedBlock, inp: &CompressedInpu
         block.zram = devices.iter().map(|_| zram_model()).collect();
         changed = true;
     }
-    let stats = match inp.mem.zram.validity {
+    // A lone device without its own stats falls back to the summed totals, which are its own.
+    let lone = match inp.mem.zram.validity {
         Validity::Valid | Validity::Stale if devices.len() == 1 => Some(inp.mem.zram.value),
         _ => None,
     };
     for (model, dev) in block.zram.iter_mut().zip(devices.iter()) {
-        changed |= update_zram_grid(model, dev, stats);
+        changed |= update_zram_grid(model, dev, dev.stats.or(lone));
     }
 
     let z = &mut block.zswap;

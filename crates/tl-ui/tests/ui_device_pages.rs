@@ -816,6 +816,7 @@ fn zram_details() -> MemoryDetails {
             name: Arc::from("zram0"),
             disksize: 8 * GIB,
             algorithm: Some(Arc::from("zstd")),
+            stats: None,
         }]),
         ..MemoryDetails::default()
     }
@@ -963,6 +964,7 @@ fn compressed_grids_have_own_ids(cx: &mut TestAppContext) {
         name: Arc::from(name),
         disksize: 8 * GIB,
         algorithm: Some(Arc::from("zstd")),
+        stats: None,
     };
     r.engine.publish_with(|s| {
         let system = Arc::make_mut(&mut s.system);
@@ -1026,6 +1028,32 @@ fn zram_ratio_key_has_no_collisions() {
         },
     );
     assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "12.0 : 1");
+}
+
+/// With two zram devices each grid shows its own `mm_stat` values, not Unavailable.
+#[test]
+fn zram_two_devices_show_own_stats() {
+    let dev = |name: &str, orig: u64, compr: u64| ZramDetail {
+        name: Arc::from(name),
+        disksize: 8 * GIB,
+        algorithm: Some(Arc::from("zstd")),
+        stats: Some(ZramTotals {
+            orig_data: orig,
+            compr_data: compr,
+            mem_used: compr + GIB / 10,
+        }),
+    };
+    let details = MemoryDetails {
+        zram: Arc::from([dev("zram0", 4 * GIB, GIB), dev("zram1", 2 * GIB, GIB)]),
+        ..MemoryDetails::default()
+    };
+    let block = build(&zram_mem(6 * GIB, 2 * GIB), &details);
+    assert_eq!(value_of(&block.zram[0], ROW_ZRAM_STORED), "4.00 GiB");
+    assert_eq!(value_of(&block.zram[0], ROW_ZRAM_COMPRESSED), "1.00 GiB");
+    assert_eq!(value_of(&block.zram[0], ROW_ZRAM_MEM_USED), "1.10 GiB");
+    assert_eq!(value_of(&block.zram[0], ROW_ZRAM_RATIO), "4.0 : 1");
+    assert_eq!(value_of(&block.zram[1], ROW_ZRAM_STORED), "2.00 GiB");
+    assert_eq!(value_of(&block.zram[1], ROW_ZRAM_RATIO), "2.0 : 1");
 }
 
 fn swap_device(name: &str, kind: SwapKindModel, priority: i32) -> SwapDevice {
