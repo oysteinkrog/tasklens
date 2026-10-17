@@ -3778,15 +3778,15 @@ mod smartctl_fallback {
             updated_s: 0,
             health: Total {
                 value: Arc::from(""),
-                validity: Validity::Unavailable,
+                validity: Validity::Unsupported,
             },
             power_on_s: Total {
                 value: 0,
-                validity: Validity::Unavailable,
+                validity: Validity::Unsupported,
             },
             selftest: Total {
                 value: Arc::from(""),
-                validity: Validity::Unavailable,
+                validity: Validity::Unsupported,
             },
             ata: Arc::from([]),
             nvme: Arc::from([]),
@@ -3860,7 +3860,7 @@ mod smartctl_fallback {
         let mut r = open_smart_rig(cx);
         publish(&mut r, SmartKind::NeedsFallback, None);
         assert!(smart_available(&mut r), "the page button shows");
-        let (vcx, view) = open_window(&mut r);
+        let (mut vcx, view) = open_window(&mut r);
         assert!(vcx.debug_bounds("SmartReadSmartctl").is_some());
         assert!(
             vcx.debug_bounds("SmartRefresh").is_none(),
@@ -3960,7 +3960,7 @@ mod smartctl_fallback {
             r.vcx.debug_bounds("perf-page-toggle-0").is_none(),
             "no Show SMART data button"
         );
-        let (vcx, _view) = open_window(&mut r);
+        let (mut vcx, _view) = open_window(&mut r);
         assert!(vcx.debug_bounds("SmartReadSmartctl").is_none());
     }
 }
