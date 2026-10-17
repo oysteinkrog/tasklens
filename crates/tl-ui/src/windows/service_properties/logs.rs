@@ -39,6 +39,7 @@ use tracing::warn;
 
 use super::ServicePropsTabView;
 use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker, ToastTexts};
+use crate::actions::OpenAdditionalSetup;
 use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::empty::{TlEmptyState, TlEmptyTone};
@@ -56,6 +57,7 @@ use crate::pages::sys_status::{LabelTone, tone_color};
 use crate::table::selection::{Selection, SelectionView};
 use crate::text::fonts::MONO_FAMILY;
 use crate::theme::{TlTheme, current, metrics};
+use crate::window::setup::SetupRow;
 
 /// Quiet time after the last keystroke before the filter applies.
 pub const FILTER_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -1210,10 +1212,17 @@ impl Render for LogsView {
         };
         let banner = self.own_only.then(|| {
             div().flex_none().w_full().child(
-                TlBanner::new(TlBannerKind::Info, tr(cx, "services-sys038-own-only")).button(
-                    tr(cx, "services-sys038-copy-command"),
-                    Box::new(ServiceLogsCopyCommand),
-                ),
+                TlBanner::new(TlBannerKind::Info, tr(cx, "services-sys038-own-only"))
+                    .button(
+                        tr(cx, "services-sys038-copy-command"),
+                        Box::new(ServiceLogsCopyCommand),
+                    )
+                    .link(
+                        tr(cx, "services-sys034-additional-setup"),
+                        Box::new(OpenAdditionalSetup {
+                            focus_row: Some(SetupRow::JournalAccess),
+                        }),
+                    ),
             )
         });
         v_flex()

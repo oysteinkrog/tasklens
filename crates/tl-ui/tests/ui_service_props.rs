@@ -31,6 +31,7 @@ use tl_model::snapshot::{
 };
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::validity::Validity;
+use tl_ui::actions::OpenAdditionalSetup;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::toast::ToastQueue;
@@ -41,6 +42,7 @@ use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+use tl_ui::window::setup::SetupRow;
 use tl_ui::windows::service_properties::{
     DependenciesTab, FollowStateForTest, GeneralTab, LimitAction, LogOnTab, LogRowForTest,
     LogsStatusForTest, LogsView, RecoveryForm, RecoveryTab, RestartPolicy, ServicePropertiesWindow,
@@ -2752,6 +2754,32 @@ fn logs_access_banner_shown(cx: &mut TestAppContext) {
     assert_eq!(t.toasts(cx), ["Copied to clipboard"]);
     t.send(cx, 0, JournalEvent::Access(JournalAccess::All));
     assert_eq!(t.status(cx).banner, None);
+}
+
+#[gpui_kit::test]
+fn logs_banner_additional_setup_link(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    let opened = Rc::new(Cell::new(0));
+    let count = opened.clone();
+    cx.update(|cx| {
+        cx.on_action(move |a: &OpenAdditionalSetup, _| {
+            if a.focus_row == Some(SetupRow::JournalAccess) {
+                count.set(count.get() + 1)
+            }
+        });
+    });
+    t.send(cx, 0, JournalEvent::Access(JournalAccess::OwnOnly));
+    t.feed(cx, vec![entry(0, 6, "started")]);
+    let mut vcx = t.vcx(cx);
+    let copy = vcx
+        .debug_bounds("TlButton-TlBanner-Copy command")
+        .expect("Copy command drawn");
+    let link = vcx.debug_bounds("TlBanner-link").expect("link drawn");
+    assert!(copy.right() <= link.left(), "the link follows Copy command");
+    // Enter on the link is covered by `banner::tests::link_after_buttons`: the tab calls the same
+    // `TlBanner::link`.
+    t.click(&mut vcx, "TlBanner-link", Modifiers::none());
+    assert_eq!(opened.get(), 1, "click dispatches OpenAdditionalSetup once");
 }
 
 #[gpui_kit::test]

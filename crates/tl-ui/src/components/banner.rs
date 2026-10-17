@@ -8,7 +8,7 @@
 //!
 //! A banner has no close button: it states a fact about the data below it. The owner removes it,
 //! or adds a "Hide" button. The buttons are ordinary `TlButton`s, so Tab visits them in reading
-//! order.
+//! order. An optional `TlLink` comes after the buttons and is the last Tab stop.
 
 use std::sync::Arc;
 
@@ -20,6 +20,7 @@ use gpui_kit::{
 
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
 use super::icons::{TlIcon, icon};
+use super::link::TlLink;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::text::style::t_sm;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -64,6 +65,7 @@ pub struct TlBanner {
     kind: TlBannerKind,
     text: SharedString,
     buttons: Vec<(SharedString, Box<dyn Action>)>,
+    link: Option<(SharedString, Box<dyn Action>)>,
 }
 
 impl TlBanner {
@@ -72,6 +74,7 @@ impl TlBanner {
             kind,
             text,
             buttons: Vec::new(),
+            link: None,
         }
     }
 
@@ -79,6 +82,12 @@ impl TlBanner {
     /// they are added.
     pub fn button(mut self, label: SharedString, action: Box<dyn Action>) -> Self {
         self.buttons.push((label, action));
+        self
+    }
+
+    /// Adds a trailing `TlLink` with `label` that dispatches `action`, after the buttons.
+    pub fn link(mut self, label: SharedString, action: Box<dyn Action>) -> Self {
+        self.link = Some((label, action));
         self
     }
 }
@@ -126,6 +135,20 @@ impl RenderOnce for TlBanner {
                 }))
         });
 
+        let link = self.link.map(|(label, action)| {
+            div()
+                .debug_selector(|| "TlBanner-link".into())
+                .flex_none()
+                .child(
+                    TlLink::new(
+                        ElementId::Name(format!("TlBanner-link-{label}").into()),
+                        label,
+                        action,
+                    )
+                    .text_size(m.text.sm),
+                )
+        });
+
         h_flex()
             .debug_selector(|| "TlBanner".into())
             .w_full()
@@ -142,6 +165,7 @@ impl RenderOnce for TlBanner {
             )
             .child(text)
             .children(buttons)
+            .children(link)
     }
 }
 
@@ -397,6 +421,27 @@ mod tests {
             .expect("second button drawn");
         assert!(first.right() <= second.left(), "buttons in reading order");
         assert_eq!(first.size.height, px(24.), "sm buttons");
+
+        focus_next(cx);
+        press(cx, "enter");
+        focus_next(cx);
+        press(cx, "enter");
+        assert_eq!(*hits.borrow(), ["first", "second"]);
+    }
+
+    #[gpui_kit::test]
+    fn link_after_buttons(cx: &mut TestAppContext) {
+        cx.update(setup);
+        let (cx, hits) = open(cx, || {
+            TlBanner::new(TlBannerKind::Info, "Only your own entries.".into())
+                .button("Copy".into(), Box::new(First))
+                .link("Additional setup…".into(), Box::new(Second))
+        });
+        let button = cx
+            .debug_bounds("TlButton-TlBanner-Copy")
+            .expect("button drawn");
+        let link = cx.debug_bounds("TlBanner-link").expect("link drawn");
+        assert!(button.right() <= link.left(), "the link follows the button");
 
         focus_next(cx);
         press(cx, "enter");
