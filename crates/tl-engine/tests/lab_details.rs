@@ -6,7 +6,7 @@
 mod fake_sources;
 
 use std::fs;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -23,8 +23,8 @@ use tl_engine::workers::{process_detail, processes};
 use tl_model::command::Command;
 use tl_model::demand::{ColumnSet, Demand, DetailDemand};
 use tl_model::details::{
-    DetailTab, DetailTarget, ScanId, ScanPhase, StringEncoding, StringScanOpts, StringScanState,
-    TabPayload, TabSlot,
+    DetailTab, DetailTarget, HandleKind, HandlePhase, HandleSearchState, ScanId, ScanPhase,
+    SearchId, StringEncoding, StringScanOpts, StringScanState, TabPayload, TabSlot,
 };
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::EngineSettings;
@@ -803,5 +803,189 @@ fn string_scan_process_exit() {
         last.found as usize,
         "the rows so far stay"
     );
+    stop(fl, ui, handle);
+}
+
+// Handle search (tasklens-dwy.3) --------------------------------------------------------------
+
+fn search_cmd(id: u64) -> Command {
+    Command::HandleSearch {
+        search: SearchId(id),
+        pattern: "*.log".into(),
+        include_maps: true,
+        privileged: false,
+    }
+}
+
+/// Starts the engine on `root` with only the main window shown: no Properties window, no PSS.
+fn begin_search_engine(
+    root: &FixtureRoot,
+) -> (
+    FakeLab,
+    fake_sources::UiSide,
+    asupersync::runtime::TaskHandle<()>,
+) {
+    let (mut fl, ui, handle) = start_detail_engine(root, 500);
+    ui.demand_tx
+        .send(Demand {
+            any_surface_visible: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_millis(500), Duration::from_millis(10));
+    (fl, ui, handle)
+}
+
+fn search_state(ui: &fake_sources::UiSide) -> Option<Arc<HandleSearchState>> {
+    ui.latest.load_full().details.handle_search.clone()
+}
+
+/// Runs the lab in 10 ms steps for at most `limit` and pushes every new published state to
+/// `seen`. Returns true at the first new state for which `stop` is true.
+fn watch_search(
+    fl: &mut FakeLab,
+    ui: &fake_sources::UiSide,
+    seen: &mut Vec<Arc<HandleSearchState>>,
+    limit: Duration,
+    stop: impl Fn(&HandleSearchState) -> bool,
+) -> bool {
+    let end = fl.now_ms() + u64::try_from(limit.as_millis()).expect("short limit");
+    while fl.now_ms() < end {
+        fl.advance(Duration::from_millis(10));
+        let Some(state) = search_state(ui) else {
+            continue;
+        };
+        if seen.last().is_some_and(|last| Arc::ptr_eq(last, &state)) {
+            continue;
+        }
+        seen.push(Arc::clone(&state));
+        if stop(&state) {
+            return true;
+        }
+    }
+    false
+}
+
+fn ended(state: &HandleSearchState) -> bool {
+    matches!(
+        state.phase,
+        HandlePhase::Done | HandlePhase::Stopped | HandlePhase::Failed
+    )
+}
+
+/// Pid, kind, fd and path of every hit, sorted by pid.
+fn handle_hits(state: &HandleSearchState) -> Vec<(u32, HandleKind, Option<i32>, String)> {
+    let mut out: Vec<_> = state
+        .chunks
+        .iter()
+        .flat_map(|chunk| chunk.iter())
+        .map(|h| (h.key.pid, h.kind, h.fd, h.path.to_string()))
+        .collect();
+    out.sort_by_key(|h| h.0);
+    out
+}
+
+/// tasklens-dwy.3: on process-edge with the E10-008 links, a search reaches `Done` within 2 s
+/// with the fd and cwd hits. Another user's process, whose `fd/` cannot be read, counts in
+/// `skipped` (security: it gives no hits without the helper).
+#[test]
+fn handle_search_end_to_end() {
+    if rustix::process::geteuid().is_root() {
+        // Root reads a mode 000 dir, so the skipped process could not be made.
+        return;
+    }
+    let root = FixtureRoot::new(&["process-edge"]);
+    symlink("/var/log/x.log", root.pid_dir(4201).join("fd/9")).expect("link fd 9");
+    fs::remove_file(root.pid_dir(4214).join("cwd")).expect("remove cwd");
+    symlink("/srv/old.log", root.pid_dir(4214).join("cwd")).expect("link cwd");
+    let restricted = root.pid_dir(4202).join("fd");
+    fs::create_dir(&restricted).expect("create fd dir");
+    fs::set_permissions(&restricted, fs::Permissions::from_mode(0o000)).expect("chmod fd");
+
+    let (mut fl, ui, handle) = begin_search_engine(&root);
+    assert!(search_state(&ui).is_none());
+    send(&ui, search_cmd(1));
+    let mut seen = Vec::new();
+    let done = watch_search(&mut fl, &ui, &mut seen, Duration::from_secs(2), ended);
+    // Before any assert, so the copy can be removed.
+    fs::set_permissions(&restricted, fs::Permissions::from_mode(0o755)).expect("restore fd");
+
+    assert!(done, "no end state within 2 s: {seen:?}");
+    let last = seen.last().expect("a state");
+    assert!(seen.iter().all(|s| s.search == SearchId(1)));
+    assert_eq!(last.phase, HandlePhase::Done);
+    assert_eq!(
+        handle_hits(last),
+        [
+            (4201, HandleKind::Fd, Some(9), "/var/log/x.log".to_owned()),
+            (4214, HandleKind::Cwd, None, "/srv/old.log".to_owned()),
+        ]
+    );
+    assert_eq!((last.searched, last.skipped), (2, 1));
+    assert_eq!(last.progress_pct, 100);
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.3: a second search replaces the first, whose id is never published after the
+/// first state of the second. `CancelHandleSearch` mid-way ends it as `Stopped`, and no state
+/// is published after that.
+#[test]
+fn handle_search_replace_and_cancel() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    // 400 more processes with an empty `fd/`, so a search takes 9 samples of 50 pids.
+    for pid in 20_000..20_400 {
+        let dir = root.pid_dir(pid);
+        fs::create_dir_all(dir.join("fd")).expect("create fd dir");
+        let stat = format!(
+            "{pid} (p) S 1 {pid} {pid} 0 -1 4194304 120 0 0 0 1 0 0 0 20 0 1 0 \
+             {} 5513216 230 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 2 0 0 0 0 0\n",
+            1000 + pid
+        );
+        fs::write(dir.join("stat"), stat).expect("write stat");
+    }
+
+    let (mut fl, ui, handle) = begin_search_engine(&root);
+    send(&ui, search_cmd(1));
+    let retrieving = |id: u64| {
+        move |s: &HandleSearchState| s.search == SearchId(id) && s.phase == HandlePhase::Retrieving
+    };
+    let mut seen = Vec::new();
+    let limit = Duration::from_secs(2);
+    assert!(
+        watch_search(&mut fl, &ui, &mut seen, limit, retrieving(1)),
+        "search 1 never retrieving: {seen:?}"
+    );
+    send(&ui, search_cmd(2));
+    assert!(
+        watch_search(&mut fl, &ui, &mut seen, limit, retrieving(2)),
+        "search 2 never retrieving: {seen:?}"
+    );
+    send(&ui, Command::CancelHandleSearch(SearchId(2)));
+    assert!(
+        watch_search(&mut fl, &ui, &mut seen, limit, ended),
+        "search 2 never ended: {seen:?}"
+    );
+
+    let first_new = seen
+        .iter()
+        .position(|s| s.search == SearchId(2))
+        .expect("a state of search 2");
+    assert!(
+        seen[first_new..].iter().all(|s| s.search == SearchId(2)),
+        "search 1 published after search 2 started: {seen:?}"
+    );
+    let last = seen.last().expect("a state");
+    assert_eq!(last.phase, HandlePhase::Stopped);
+    assert!(last.progress_pct < 100, "{}", last.progress_pct);
+    assert!(
+        last.searched < last.total,
+        "{} of {}",
+        last.searched,
+        last.total
+    );
+
+    fl.run_for(Duration::from_secs(1), Duration::from_millis(10));
+    let later = search_state(&ui).expect("a state");
+    assert!(Arc::ptr_eq(&later, last), "a state after the cancel");
     stop(fl, ui, handle);
 }

@@ -67,9 +67,21 @@
 //! rows found so far ("Scan stopped: the process exited", UI-PWN-017). A scan whose process
 //! leaves the demand stops without a payload: its window closed.
 //!
+//! Handle search (PROC-096, tasklens-dwy.3): `HandleSearch` queues one search over the open
+//! handles of every process, and the next sample starts it with `HandleSearch::new`, so the proc
+//! root and the passwd file are never read on the async loop. A newer request replaces the one
+//! that waits, and when it starts, the running search is dropped without another payload, so the
+//! old search id is never published again. While a search runs or waits the period is
+//! `SCAN_PERIOD`, and each sample walks `HANDLE_SEARCH_BUDGET` pids and publishes one
+//! `DetailsUpdate::HandleSearch`. The search is dropped after its `Done`, `Stopped` or `Failed`
+//! state. `CancelHandleSearch` with the running id stops the walk before its next pid, and the
+//! next sample publishes `Stopped`; a cancelled request that has not started publishes `Stopped`
+//! with nothing searched. `privileged` is passed to the search; without the helper
+//! (tasklens-qfx.19) the processes whose handles cannot be read count in `skipped`.
+//!
 //! Per-key errors become `Validity`, never `WorkerError`. Hash failures are a `HashState`.
 //! Environment values, command lines and paths are never logged (ADR-015), nor are scan
-//! options, found strings or their addresses.
+//! options, found strings or their addresses, nor are search patterns or the paths found.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -119,8 +131,8 @@ use tl_model::details::{
     AffinityInfo, CapRow, DetailTab, DetailTarget, Elevated, ElfArch, EnvDetail, ExeLocation,
     FdDetail, FdKind, FdRow, GeneralDetail, GroupMembershipRow, HashError, HashState, IdTriple,
     MapNode, MapRegion, MapsDetail, NsKind, NsRow, NsState, PackageCheck, PackageInfo, Relro,
-    ScanId, ScanPhase, Seccomp, SecurityDetail, StringEncoding, StringHit, StringScanOpts,
-    StringScanState, TabPayload, ThreadRow,
+    ScanId, ScanPhase, SearchId, Seccomp, SecurityDetail, StringEncoding, StringHit,
+    StringScanOpts, StringScanState, TabPayload, ThreadRow,
 };
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, ProcessKey};
@@ -136,6 +148,7 @@ use crate::source::{self, Source, WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{DetailsUpdate, PssEntry, SourceUpdate};
 use crate::workers::WorkerSpec;
+use crate::workers::handle_search::HandleSearch;
 use crate::workers::processes::{MAX_INTERVAL_MS, MIN_INTERVAL_MS};
 
 /// PSS and USS are read once a second (ADR-008).
@@ -154,6 +167,9 @@ const SCAN_PERIOD: Duration = Duration::from_millis(50);
 /// `strings::CHUNK` reads per sample over all scans, 8 MiB, so the other detail reads keep
 /// running between them.
 const SCAN_STEPS_PER_SAMPLE: u32 = 8;
+
+/// Pids walked per sample by a handle search: 530 pids take 11 samples, about 0.6 s.
+const HANDLE_SEARCH_BUDGET: usize = 50;
 
 /// A running scan is published at most 4 times a second (docs/ui/process-windows.md).
 const SCAN_PUBLISH_PERIOD: Duration = Duration::from_millis(250);
@@ -465,6 +481,16 @@ impl ScanState {
     }
 }
 
+/// A `HandleSearch` command the next sample starts.
+struct SearchRequest {
+    id: SearchId,
+    pattern: Arc<str>,
+    include_maps: bool,
+    privileged: bool,
+    /// Set by a `CancelHandleSearch` that came before the start.
+    cancelled: bool,
+}
+
 pub struct ProcessDetailSource {
     cfg: Arc<EngineConfig>,
     pss: PssReader,
@@ -473,9 +499,11 @@ pub struct ProcessDetailSource {
     /// Reused every sample.
     buf: Vec<u8>,
     reads: Vec<(ProcessKey, RollupRead)>,
-    /// `HandleSearch` and `CancelHandleSearch`, drained at the start of every sample. Until
-    /// their handler lands they are logged by kind and dropped.
-    pending: Vec<WorkerCommand>,
+    /// The newest `HandleSearch` not started yet. The next sample starts it in place of
+    /// `search`.
+    search_request: Option<SearchRequest>,
+    /// The running handle search, dropped after its last state is queued.
+    search: Option<HandleSearch>,
     /// `StringScan` commands not started yet, oldest first. The next sample starts them.
     scan_requests: Vec<(ScanId, ProcessKey, StringScanOpts)>,
     /// Running Strings scans, oldest first. With `scan_requests` at most `DETAILS_MAX`, and at
@@ -487,7 +515,8 @@ pub struct ProcessDetailSource {
     /// The chunk buffer and hit list of the scans. Freed when no scan runs.
     scan_buf: Vec<u8>,
     scan_hits: Vec<StringHitInfo>,
-    /// Set by `period`: true while a scan runs or waits, so tabs and affinity read by the clock.
+    /// Set by `period`: true while a Strings scan or a handle search runs or waits, so tabs and
+    /// affinity read by the clock.
     scanning: Cell<bool>,
     /// Set by `period`: `processes.interval_ms`.
     interval: Cell<Duration>,
@@ -571,7 +600,8 @@ impl ProcessDetailSource {
             keys: RefCell::new(Arc::from([])),
             buf: Vec::new(),
             reads: Vec::new(),
-            pending: Vec::new(),
+            search_request: None,
+            search: None,
             scan_requests: Vec::new(),
             scans: Vec::new(),
             scan_next: 0,
@@ -619,11 +649,6 @@ impl ProcessDetailSource {
         self
     }
 
-    /// Commands waiting for the next sample.
-    pub fn pending_len(&self) -> usize {
-        self.pending.len()
-    }
-
     /// Number of cached `smaps_rollup` fds (at most 128).
     pub fn cached_fds(&self) -> usize {
         self.pss.cached()
@@ -646,19 +671,13 @@ impl ProcessDetailSource {
     /// `sample()` is `self.sample_at(now_boot_ns())`; tests call this with an injected clock.
     /// `now` stamps the PSS and health updates and times the PSS and `smaps` limits.
     pub fn sample_at(mut self, now: TimeNs) -> (Self, SourceUpdate) {
-        for cmd in self.pending.drain(..) {
-            // Kind only: the arguments can hold search patterns.
-            tracing::debug!(
-                kind = cmd.kind(),
-                "process detail command has no handler yet"
-            );
-        }
         self.tabs_stride.set(self.tabs_every.get());
         self.smaps_at
             .retain(|_, &mut at| !elapsed(Some(at), now, SMAPS_MIN_PERIOD));
         self.read_tabs(now);
         self.read_affinity(now);
         self.step_scans(now);
+        self.step_search();
 
         let keys = self.keys.borrow().clone();
         // With no keys the reader still runs while fds are cached, so hidden columns close them.
@@ -1200,6 +1219,49 @@ impl ProcessDetailSource {
             .retain(|_| ends.next().is_some_and(Option::is_none));
     }
 
+    /// Starts the requested handle search in place of the running one, which is dropped without
+    /// another payload. Then walks one budget of pids and queues the state, one per sample.
+    fn step_search(&mut self) {
+        if let Some(req) = self.search_request.take() {
+            let search = HandleSearch::new(
+                req.id,
+                &req.pattern,
+                req.include_maps,
+                req.privileged,
+                &self.cfg.sys_root,
+            );
+            if req.cancelled {
+                search.cancel();
+            }
+            self.search = Some(search);
+        }
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        let state = search.step(&self.cfg.sys_root, HANDLE_SEARCH_BUDGET);
+        if search.done() {
+            self.search = None;
+        }
+        self.extra
+            .push_back(SourceUpdate::Details(DetailsUpdate::HandleSearch(state)));
+    }
+
+    /// Stops handle search `id`: the next sample publishes `Stopped`. False when no such search
+    /// waits or runs.
+    fn cancel_search(&mut self, id: SearchId) -> bool {
+        if let Some(req) = self.search_request.as_mut().filter(|r| r.id == id) {
+            req.cancelled = true;
+            return true;
+        }
+        match &self.search {
+            Some(search) if search.id == id => {
+                search.cancel();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Stops scan `id` without another read and queues its `Cancelled` payload. False when no
     /// such scan waits or runs.
     fn cancel_scan(&mut self, id: ScanId) -> bool {
@@ -1236,8 +1298,8 @@ impl Source for ProcessDetailSource {
     /// at the interval, and PSS at the first sample 1 s or more after its last read. Affinity
     /// beside tabs uses `affinity_shared_period` instead, with or without PSS, so affinity reads
     /// every 1 s worth of samples. The period depends only on the demand and the settings, so it
-    /// changes only when they do, or when a Strings scan starts or ends: while one runs or waits
-    /// the period is `SCAN_PERIOD`, and tabs and affinity read by the clock.
+    /// changes only when they do, or when a Strings scan or a handle search starts or ends: while
+    /// one runs or waits the period is `SCAN_PERIOD`, and tabs and affinity read by the clock.
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         // A forced `RefreshNow` samples even without a period, so hidden columns must leave
         // no keys behind.
@@ -1312,7 +1374,10 @@ impl Source for ProcessDetailSource {
         self.tabs_every.set(tabs_every);
         self.affinity_every.set(affinity_every);
         self.interval.set(interval);
-        let scanning = !self.scans.is_empty() || !self.scan_requests.is_empty();
+        let scanning = !self.scans.is_empty()
+            || !self.scan_requests.is_empty()
+            || self.search.is_some()
+            || self.search_request.is_some();
         self.scanning.set(scanning);
         if scanning {
             return Some(SCAN_PERIOD);
@@ -1370,10 +1435,23 @@ impl Source for ProcessDetailSource {
                 true
             }
             WorkerCommand::CancelStringScan(scan) => self.cancel_scan(*scan),
-            WorkerCommand::HandleSearch { .. } | WorkerCommand::CancelHandleSearch(_) => {
-                self.pending.push(cmd.clone());
+            WorkerCommand::HandleSearch {
+                search,
+                pattern,
+                include_maps,
+                privileged,
+            } => {
+                // A newer request replaces one that has not started.
+                self.search_request = Some(SearchRequest {
+                    id: *search,
+                    pattern: pattern.clone(),
+                    include_maps: *include_maps,
+                    privileged: *privileged,
+                    cancelled: false,
+                });
                 true
             }
+            WorkerCommand::CancelHandleSearch(search) => self.cancel_search(*search),
             _ => false,
         }
     }
@@ -2847,7 +2925,7 @@ mod tests {
 
     use tl_collect::SysRoot;
     use tl_model::demand::ColumnSet;
-    use tl_model::details::SearchId;
+    use tl_model::details::HandlePhase;
     use tl_model::time::BootId;
 
     use super::*;
@@ -2920,7 +2998,6 @@ mod tests {
         // ComputeHashes is handled, and the same key is held once.
         assert!(src.command(&WorkerCommand::ComputeHashes(keys[0])));
         assert!(src.command(&WorkerCommand::ComputeHashes(keys[0])));
-        assert_eq!(src.pending_len(), 0);
         assert_eq!(src.hash_requests, vec![keys[0]]);
         // A scan is queued for the next sample; a cancel of no scan has nothing to do.
         assert!(src.command(&WorkerCommand::StringScan {
@@ -2930,22 +3007,72 @@ mod tests {
         }));
         assert_eq!(src.scan_requests.len(), 1);
         assert!(!src.command(&WorkerCommand::CancelStringScan(ScanId(2))));
-        assert!(src.command(&WorkerCommand::CancelHandleSearch(SearchId(1))));
+        // The same for a handle search.
+        assert!(!src.command(&WorkerCommand::CancelHandleSearch(SearchId(1))));
+        assert!(src.command(&WorkerCommand::HandleSearch {
+            search: SearchId(1),
+            pattern: "x".into(),
+            include_maps: false,
+            privileged: false,
+        }));
+        assert!(src.search_request.is_some());
+        assert!(!src.command(&WorkerCommand::CancelHandleSearch(SearchId(2))));
         assert!(src.command(&WorkerCommand::VerifyPackage(keys[0])));
         assert_eq!(src.verify_requests, vec![keys[0]]);
-        assert_eq!(src.pending_len(), 1);
         assert!(!src.command(&WorkerCommand::RefreshNow));
         assert!(!src.command(&WorkerCommand::Reprobe));
         assert!(!src.command(&WorkerCommand::SetupStatus));
-        assert_eq!(src.pending_len(), 1);
         // DetailRefresh is handled, not queued.
         assert!(src.command(&WorkerCommand::DetailRefresh {
             target: DetailTarget::Process(keys[0]),
             tab: DetailTab::Environment,
         }));
-        assert_eq!(src.pending_len(), 1);
+        assert_eq!(src.refresh.len(), 1);
+        // The sample starts the search. Its pids have no `fd` dir, so it ends in one step.
         let (src, _) = src.sample();
-        assert_eq!(src.pending_len(), 0);
+        assert!(src.search_request.is_none());
+        assert!(src.search.is_none());
+    }
+
+    /// tasklens-dwy.3: no search and no other demand gives no period. A search sets
+    /// `SCAN_PERIOD` until the sample that publishes its `Done` state.
+    #[test]
+    fn handle_search_period() {
+        let (_tmp, cfg, _keys) = fake_procs(1);
+        let mut src = ProcessDetailSource::new(cfg);
+        let d = Demand::default();
+        let s = EngineSettings::default();
+        assert_eq!(src.period(&d, &s), None);
+
+        assert!(src.command(&WorkerCommand::HandleSearch {
+            search: SearchId(7),
+            pattern: "*.log".into(),
+            include_maps: true,
+            privileged: false,
+        }));
+        assert_eq!(src.period(&d, &s), Some(SCAN_PERIOD));
+
+        let mut phases = Vec::new();
+        for i in 1..=10 {
+            let (next, update) = src.sample_at(i * 50 * MS);
+            src = next;
+            let SourceUpdate::Details(DetailsUpdate::HandleSearch(state)) = update else {
+                panic!("expected a HandleSearch update, got {update:?}");
+            };
+            assert_eq!(state.search, SearchId(7));
+            assert!(src.take_extra().is_none(), "one update per sample");
+            phases.push(state.phase);
+            if state.phase == HandlePhase::Done {
+                break;
+            }
+            assert_eq!(src.period(&d, &s), Some(SCAN_PERIOD));
+        }
+        assert_eq!(phases.last(), Some(&HandlePhase::Done));
+        assert_eq!(src.period(&d, &s), None);
+        // No search: a sample queues no state.
+        let (mut src, update) = src.sample_at(11 * 50 * MS);
+        assert!(matches!(update, SourceUpdate::Health { .. }), "{update:?}");
+        assert!(src.take_extra().is_none());
     }
 
     /// tasklens-dwy.9: with more scans than `SCAN_STEPS_PER_SAMPLE` (10 scans, 8 reads), each
