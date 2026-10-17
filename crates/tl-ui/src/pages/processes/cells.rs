@@ -328,8 +328,8 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::CpuTime, "processes-column-cpu-time", Group::Cpu, Kind::Duration, Heat::None, 1),
     col(Id::CpuTimeKernel, "processes-column-cpu-time-kernel", Group::Cpu, Kind::Duration, Heat::None, 1),
     col(Id::CpuTimeUser, "processes-column-cpu-time-user", Group::Cpu, Kind::Duration, Heat::None, 1),
-    col(Id::Cycles, "processes-column-cycles", Group::Cpu, Kind::Count, Heat::None, 4),
-    col(Id::CyclesDelta, "processes-column-cycles-delta", Group::Cpu, Kind::Count, Heat::None, 4),
+    col(Id::Cycles, "processes-column-cycles", Group::Cpu, Kind::Count, Heat::None, NO_SOURCE),
+    col(Id::CyclesDelta, "processes-column-cycles-delta", Group::Cpu, Kind::Count, Heat::None, NO_SOURCE),
     col(Id::CtxSwitches, "processes-column-ctx-switches", Group::Cpu, Kind::Count, Heat::None, 2),
     col(Id::CtxSwitchesDelta, "processes-column-ctx-switches-delta", Group::Cpu, Kind::Count, Heat::None, 2),
     col(Id::Memory, "processes-column-memory", Group::Memory, Kind::MemorySize, Heat::Memory, 1),
@@ -401,7 +401,7 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::Handles, "processes-column-handles", Group::Objects, Kind::Count, Heat::None, 1),
     col(Id::Threads, "processes-column-threads", Group::Objects, Kind::Count, Heat::None, 1),
     col(Id::Windows, "processes-column-windows", Group::Objects, Kind::Count, Heat::None, 3),
-    col(Id::X11Resources, "processes-column-x11-resources", Group::Objects, Kind::Count, Heat::None, 4),
+    col(Id::X11Resources, "processes-column-x11-resources", Group::Objects, Kind::Count, Heat::None, NO_SOURCE),
     col(Id::State, "processes-column-state", Group::Linux, Kind::Text, Heat::None, 1),
     col(Id::Nice, "processes-column-nice", Group::Linux, Kind::IntegerId, Heat::None, 1),
     col(Id::SchedPolicy, "processes-column-sched-policy", Group::Linux, Kind::Text, Heat::None, 2),
@@ -416,7 +416,7 @@ pub static PROCESS_COLUMNS: &[ProcColumn] = &[
     col(Id::Pgrp, "processes-column-pgrp", Group::Linux, Kind::IntegerId, Heat::None, 4),
     col(Id::Sid, "processes-column-sid", Group::Linux, Kind::IntegerId, Heat::None, 4),
     col(Id::LastCpu, "processes-column-last-cpu", Group::Linux, Kind::IntegerId, Heat::None, 4),
-    col(Id::Container, "processes-column-container", Group::Linux, Kind::Text, Heat::None, 4),
+    col(Id::Container, "processes-column-container", Group::Linux, Kind::Text, Heat::None, NO_SOURCE),
 ];
 
 // ---- Cell values (E22-004) ----
@@ -1144,6 +1144,10 @@ fn record_value<'a>(
         // PROC-036 Linux extras
         C::State => Value::Arc(state_word(r, x, ctx.words)),
         C::Nice => Value::Id(r.nice.into()),
+        // PROC-036 phase-4 columns read from /proc stat (tasklens-pdu.63).
+        C::Pgrp => extra(&|x| Value::Id(x.pgrp.into())),
+        C::Sid => extra(&|x| Value::Id(x.sid.into())),
+        C::LastCpu => extra(&|x| Value::Id(x.last_cpu.into())),
         C::Unit => extra(&|x| {
             x.unit
                 .as_ref()

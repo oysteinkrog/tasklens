@@ -755,7 +755,7 @@ mod delegate {
         );
 
         // Phase 2 is offered; a NO_SOURCE column is not.
-        assert_eq!(SHIPPED_PHASE, 3);
+        assert_eq!(SHIPPED_PHASE, 4);
         assert_eq!(process_column(ColumnId::Version).phase, 2);
         assert!(offered.contains(&ColumnId::Version));
         assert!(!offered.contains(&ColumnId::PageTables));

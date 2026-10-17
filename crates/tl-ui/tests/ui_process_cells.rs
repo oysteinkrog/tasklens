@@ -969,6 +969,78 @@ mod values {
         assert_eq!(shown(&out), "");
     }
 
+    const PARKED_P4: [ColumnId; 4] = [
+        ColumnId::Cycles,
+        ColumnId::CyclesDelta,
+        ColumnId::X11Resources,
+        ColumnId::Container,
+    ];
+    const STAT_P4: [ColumnId; 3] = [ColumnId::Pgrp, ColumnId::Sid, ColumnId::LastCpu];
+
+    /// pgrp, sid and last_cpu are offered; the four columns without an engine source are not
+    /// (tasklens-pdu.47).
+    #[test]
+    fn phase_4_columns_offered() {
+        use tl_ui::pages::processes::cells::{NO_SOURCE, PROCESS_COLUMNS};
+        use tl_ui::pages::processes::delegate::SHIPPED_PHASE;
+
+        const { assert!(SHIPPED_PHASE >= 4) };
+        let offered: Vec<ColumnId> = PROCESS_COLUMNS
+            .iter()
+            .filter(|c| c.phase <= SHIPPED_PHASE)
+            .map(|c| c.id)
+            .collect();
+        for id in STAT_P4 {
+            assert!(offered.contains(&id), "{id:?}");
+        }
+        for id in PARKED_P4 {
+            assert!(!offered.contains(&id), "{id:?}");
+            let col = PROCESS_COLUMNS.iter().find(|c| c.id == id).unwrap();
+            assert_eq!(col.phase, NO_SOURCE, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn phase_4_columns_format_or_glyph() {
+        let row = table_row(false, false, 0);
+        let mut f = Fixture::new(record(), key_words());
+        f.extras[0].pgrp = 4321;
+        f.extras[0].sid = 1200;
+        f.extras[0].last_cpu = 7;
+        for (id, want) in [
+            (ColumnId::Pgrp, "4321"),
+            (ColumnId::Sid, "1200"),
+            (ColumnId::LastCpu, "7"),
+        ] {
+            let out = f.record_cell(&row, id);
+            assert_eq!(out.validity, Validity::Valid, "{id:?}");
+            assert_eq!(shown(&out), want, "{id:?}");
+        }
+
+        // Extras not arrived yet: WarmingUp glyph, never 0.
+        f.extras.clear();
+        for id in STAT_P4 {
+            let out = f.record_cell(&row, id);
+            assert_eq!(out.validity, Validity::WarmingUp, "{id:?}");
+            assert!(out.text.is_empty() && out.arc.is_none(), "{id:?}");
+        }
+
+        // No source: the Unsupported glyph, never 0.
+        for id in PARKED_P4 {
+            let out = f.record_cell(&row, id);
+            assert_eq!(out.validity, Validity::Unsupported, "{id:?}");
+            assert!(out.text.is_empty() && out.arc.is_none(), "{id:?}");
+        }
+
+        // App and unit rows stay blank for all seven.
+        let f = Fixture::new(record(), key_words());
+        let g = group(GroupRowKind::App);
+        for id in STAT_P4.into_iter().chain(PARKED_P4) {
+            let out = f.group_cell(&g, RowKind::Process, id);
+            assert_eq!(shown(&out), "", "{id:?}");
+        }
+    }
+
     #[test]
     fn p2_group_rows_stay_blank() {
         let f = p2_fixture(ProcessExtrasP2::default());
