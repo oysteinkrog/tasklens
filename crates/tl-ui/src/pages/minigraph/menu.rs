@@ -59,44 +59,10 @@ pub fn card_menu(menu: TlMenu, ctx: &CardMenuCtx, window: &mut Window, cx: &mut 
         )
     };
     // 3
-    let (range_s, long) = (ctx.range_s, ctx.long_ranges);
-    let later = tr(cx, "perf-later-version");
-    let words: Vec<SharedString> = RANGES.iter().map(|(_, k)| tr(cx, k)).collect();
-    menu = menu.submenu(
-        tr(cx, "minigraph-menu-range"),
-        window,
-        cx,
-        move |mut menu, _, _| {
-            for (&(secs, _), word) in RANGES.iter().zip(&words) {
-                menu = if secs > 60 && !long {
-                    menu.item_disabled(word.clone(), Some(later.clone()))
-                } else {
-                    menu.radio_item(
-                        word.clone(),
-                        secs == range_s,
-                        Box::new(MinigraphSetRange { id, secs }),
-                    )
-                };
-            }
-            menu
-        },
-    );
+    menu = range_submenu(menu, id, ctx.range_s, ctx.long_ranges, window, cx);
     // 4: Graph color, the shell's shared builder (E21-032).
     if ctx.colors {
-        let color = ctx.color;
-        menu = menu.submenu(
-            tr(cx, "minigraph-menu-color"),
-            window,
-            cx,
-            move |menu, _, cx| {
-                crate::window::menubar::graph_color_menu(
-                    menu,
-                    color,
-                    move |c| Box::new(MinigraphSetColor { id, color: c }),
-                    cx,
-                )
-            },
-        );
+        menu = color_submenu(menu, id, ctx.color, window, cx);
     }
     // 5
     menu = menu.separator();
@@ -141,5 +107,60 @@ pub fn card_menu(menu: TlMenu, ctx: &CardMenuCtx, window: &mut Window, cx: &mut 
     menu.item(
         tr(cx, "minigraph-menu-reset"),
         Box::new(ResetMinigraphLayout),
+    )
+}
+
+/// Item 3: the Time range submenu. The 5 and 10 minute radios are disabled while `long` is false.
+pub(crate) fn range_submenu(
+    menu: TlMenu,
+    id: MinigraphId,
+    range_s: u16,
+    long: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let later = tr(cx, "perf-later-version");
+    let words: Vec<SharedString> = RANGES.iter().map(|(_, k)| tr(cx, k)).collect();
+    menu.submenu(
+        tr(cx, "minigraph-menu-range"),
+        window,
+        cx,
+        move |mut menu, _, _| {
+            for (&(secs, _), word) in RANGES.iter().zip(&words) {
+                menu = if secs > 60 && !long {
+                    menu.item_disabled(word.clone(), Some(later.clone()))
+                } else {
+                    menu.radio_item(
+                        word.clone(),
+                        secs == range_s,
+                        Box::new(MinigraphSetRange { id, secs }),
+                    )
+                };
+            }
+            menu
+        },
+    )
+}
+
+/// Item 4: the Graph color submenu, the shell's shared builder (E21-032).
+pub(crate) fn color_submenu(
+    menu: TlMenu,
+    id: MinigraphId,
+    color: GraphColor,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    menu.submenu(
+        tr(cx, "minigraph-menu-color"),
+        window,
+        cx,
+        move |menu, _, cx| {
+            crate::window::menubar::graph_color_menu(
+                menu,
+                color,
+                move |c| Box::new(MinigraphSetColor { id, color: c }),
+                cx,
+            )
+        },
     )
 }

@@ -1,6 +1,7 @@
 //! The detached graph window (E26, PERF-083, UI-PRF-044, R-086): a borderless floating window
 //! that holds one or more minigraph cards. The panel opens, fills and closes these windows
-//! (E26-015); the window menu, the KWin bridge and the keep-open rule belong to later beads.
+//! (E26-015). A right-click opens the window menu (E26-018). The KWin bridge and the keep-open
+//! rule belong to later beads.
 
 use std::sync::Arc;
 
@@ -8,19 +9,28 @@ use gpui_kit::base::Root;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Render, SharedString, Size, Styled as _, WeakEntity, Window, WindowBackgroundAppearance,
+    Point, Render, SharedString, Size, Styled as _, WeakEntity, Window, WindowBackgroundAppearance,
     WindowBounds, WindowDecorations, WindowHandle, WindowKind, WindowOptions, canvas, div, px,
     size,
 };
 use tl_model::settings::DetachedWindowState;
 
+use crate::actions::{Quit, ShowMainWindow};
 use crate::anim::AnimationDriver;
+use crate::components::menu::{
+    TlMenu, context_menu_layer, context_menu_open, open_context_menu_at,
+};
 use crate::components::toast::ToastKind;
 use crate::hub::{GlobalHub, SnapshotHub};
 use crate::i18n::tr;
+use crate::pages::minigraph::actions::{
+    MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphHide,
+    MinigraphRemove,
+};
 use crate::pages::minigraph::card::{MINI_CARD_H, MINI_CARD_W, MinigraphCard};
-use crate::pages::minigraph::panel::{MinigraphPanel, gpu_order};
-use crate::pages::minigraph::sources::{MinigraphEntry, MinigraphId};
+use crate::pages::minigraph::menu::{color_submenu, range_submenu};
+use crate::pages::minigraph::panel::{MinigraphPanel, SYSTEM, gpu_order, same_kind};
+use crate::pages::minigraph::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
@@ -36,6 +46,24 @@ pub fn window_size(n_cards: usize, ui_scale: f32) -> Size<Pixels> {
         px((MINI_CARD_W + 2. * SP2) * ui_scale),
         px((n * MINI_CARD_H + (n + 1.) * SP2) * ui_scale),
     )
+}
+
+/// The card at `pos` (window coordinates) in a window of `n_cards` stacked cards at `ui_scale`,
+/// or `None` on the padding or in a gap. Card `i` covers x `4..184` and y `4 + 94 i .. 94 + 94 i`
+/// at scale 1.
+pub fn card_at(pos: Point<Pixels>, n_cards: usize, ui_scale: f32) -> Option<usize> {
+    let x = f32::from(pos.x) / ui_scale;
+    let y = f32::from(pos.y) / ui_scale;
+    if !(SP2..SP2 + MINI_CARD_W).contains(&x) {
+        return None;
+    }
+    let step = MINI_CARD_H + SP2;
+    let i = ((y - SP2) / step).floor();
+    if i < 0. || (y - SP2) - i * step >= MINI_CARD_H {
+        return None;
+    }
+    let i = i as usize;
+    (i < n_cards).then_some(i)
 }
 
 /// The options of a detached graph window of `size`. No position: KDE places it through the
@@ -139,6 +167,111 @@ impl DetachedGraphWindow {
     pub fn panel(&self) -> &WeakEntity<MinigraphPanel> {
         &self.panel
     }
+
+    /// Opens the window menu at `at`: for card `card` (an index into the cards), or for the
+    /// body between cards when `None` (PERF-083, UI-PRF-044).
+    pub fn open_menu(
+        &self,
+        at: Point<Pixels>,
+        card: Option<usize>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let target = card
+            .and_then(|i| self.cards.get(i))
+            .map(|(_, c)| c.read(cx).entry.clone());
+        let shown: Vec<MinigraphSource> = self
+            .cards
+            .iter()
+            .map(|(_, c)| c.read(cx).entry.source.clone())
+            .collect();
+        let window_id = self.window_id;
+        let context = window.focused(cx).unwrap_or_else(|| self.focus.clone());
+        let menu = TlMenu::build(window, cx, context, move |menu, window, cx| {
+            detached_menu(menu, window_id, target.as_ref(), &shown, window, cx)
+        });
+        open_context_menu_at(at, window, cx, menu);
+    }
+}
+
+/// The label of a system source in the Add graph submenu.
+fn source_label(source: &MinigraphSource, cx: &App) -> SharedString {
+    let key = match source {
+        MinigraphSource::Cpu => "minigraph-label-cpu",
+        MinigraphSource::Memory => "minigraph-label-memory",
+        MinigraphSource::Disk => "minigraph-label-disk",
+        MinigraphSource::Network => "minigraph-label-network",
+        MinigraphSource::Gpu(_) => "minigraph-label-gpu",
+        MinigraphSource::Vram(_) => "minigraph-label-vram",
+        MinigraphSource::GpuTemp(_) => "minigraph-label-gpu-temp",
+        _ => return SharedString::default(),
+    };
+    tr(cx, key)
+}
+
+/// The detached window menu in UI-PRF-044 order. `target` is the clicked card; the per-card
+/// items are left out without one. `shown` lists the sources in this window.
+fn detached_menu(
+    menu: TlMenu,
+    window_id: u32,
+    target: Option<&MinigraphEntry>,
+    shown: &[MinigraphSource],
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let mut menu = menu
+        .item(tr(cx, "minigraph-menu-show-main"), Box::new(ShowMainWindow))
+        .item(
+            tr(cx, "minigraph-menu-close-graph"),
+            Box::new(MinigraphCloseDetachedWindow { window: window_id }),
+        );
+    if let Some(entry) = target {
+        let id = entry.id;
+        menu = menu.item(
+            tr(cx, "minigraph-menu-attach"),
+            Box::new(MinigraphAttach { id }),
+        );
+        menu = range_submenu(menu, id, entry.range_s, true, window, cx);
+        menu = color_submenu(menu, id, entry.color, window, cx);
+    }
+    let missing: Vec<(MinigraphSource, SharedString)> = SYSTEM
+        .iter()
+        .filter(|(s, _)| !shown.iter().any(|o| same_kind(o, s)))
+        .map(|(s, _)| (s.clone(), source_label(s, cx)))
+        .collect();
+    let label = tr(cx, "minigraph-menu-add-graph");
+    menu = if missing.is_empty() {
+        menu.item_disabled(label, None)
+    } else {
+        menu.submenu(label, window, cx, move |mut menu, _, _| {
+            for (source, name) in &missing {
+                menu = menu.item(
+                    name.clone(),
+                    Box::new(MinigraphAddToWindow {
+                        window: window_id,
+                        source: source.clone(),
+                    }),
+                );
+            }
+            menu
+        })
+    };
+    if let Some(entry) = target {
+        let id = entry.id;
+        // A system card is hidden, so its View > Graphs setting turns off.
+        menu = if entry.source.is_system() {
+            menu.item(
+                tr(cx, "minigraph-menu-remove"),
+                Box::new(MinigraphHide { id }),
+            )
+        } else {
+            menu.item(
+                tr(cx, "minigraph-menu-remove"),
+                Box::new(MinigraphRemove { id }),
+            )
+        };
+    }
+    menu.item(tr(cx, "minigraph-menu-exit"), Box::new(Quit))
 }
 
 fn make_card(
@@ -225,18 +358,35 @@ fn start_move(window: &Window, cx: &mut App) {
 }
 
 impl Render for DetachedGraphWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = current(cx).clone();
         let m = *metrics(cx);
+        let this = cx.weak_entity();
+        let n_cards = self.cards.len();
+        let ui_scale = m.ui_scale;
         // Capture phase: a card's label row occludes and stops bubbling, and stopping here also
         // keeps the card's own drag from starting.
         let mover = canvas(
             |_, _, _| (),
-            |_, _, window, _| {
-                window.on_mouse_event(|ev: &MouseDownEvent, phase, window, cx| {
-                    if phase.capture() && ev.button == MouseButton::Left {
-                        start_move(window, cx);
-                        cx.stop_propagation();
+            move |_, _, window, _| {
+                let this = this.clone();
+                window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+                    // An open menu takes its own clicks.
+                    if !phase.capture() || context_menu_open(window, cx) {
+                        return;
+                    }
+                    match ev.button {
+                        MouseButton::Left => {
+                            start_move(window, cx);
+                            cx.stop_propagation();
+                        }
+                        MouseButton::Right => {
+                            let card = card_at(ev.position, n_cards, ui_scale);
+                            let at = ev.position;
+                            let _ = this.update(cx, |v, cx| v.open_menu(at, card, window, cx));
+                            cx.stop_propagation();
+                        }
+                        _ => {}
                     }
                 });
             },
@@ -261,6 +411,7 @@ impl Render for DetachedGraphWindow {
             .child(mover)
             .children(self.cards.iter().map(|(_, card)| card.clone()))
             .child(border)
+            .children(context_menu_layer(window, cx))
     }
 }
 

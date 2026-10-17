@@ -33,9 +33,9 @@ use tl_model::settings::{DetachedWindowState, GraphsSettings};
 
 use super::GraphColor;
 use super::actions::{
-    AddRandomMinigraphs, MinigraphAddToWindow, MinigraphAttach, MinigraphDetach, MinigraphHide,
-    MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor, MinigraphSetRange,
-    ResetMinigraphLayout,
+    AddRandomMinigraphs, MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow,
+    MinigraphDetach, MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor,
+    MinigraphSetRange, ResetMinigraphLayout,
 };
 use super::card::{
     CardEnded, DraggedMinigraph, MINI_CARD_H, MINI_CARD_W, MinigraphCard, past_threshold,
@@ -81,7 +81,7 @@ pub enum AddError {
 }
 
 /// The seven system kinds in default slot order, each with its column.
-const SYSTEM: [(MinigraphSource, GraphColumn); 7] = [
+pub(crate) const SYSTEM: [(MinigraphSource, GraphColumn); 7] = [
     (MinigraphSource::Cpu, GraphColumn::Cpu),
     (MinigraphSource::Memory, GraphColumn::Memory),
     (MinigraphSource::Disk, GraphColumn::Disk),
@@ -407,6 +407,33 @@ impl MinigraphPanel {
             return;
         }
         self.changed(cx);
+    }
+
+    /// `MinigraphCloseDetachedWindow`: attaches every card of window `window` to the panel, as
+    /// many as there are free slots. A card that finds no slot stays in the window and the
+    /// `minigraph-toast-full` toast shows. The empty window then closes in `sync_windows`.
+    pub fn close_detached_window(&mut self, window: u32, cx: &mut Context<Self>) {
+        let ids: Vec<MinigraphId> = self
+            .entries
+            .iter()
+            .filter(|e| e.detached && e.window == window)
+            .map(|e| e.id)
+            .collect();
+        let mut any = false;
+        let mut failed = false;
+        for id in ids {
+            if self.attach_quietly(id) {
+                any = true;
+            } else {
+                failed = true;
+            }
+        }
+        if failed {
+            self.toast(ToastKind::Warning, "minigraph-toast-full", cx);
+        }
+        if any {
+            self.changed(cx);
+        }
     }
 
     /// Attaches a detached card at the next free slot; false when none is free.
@@ -993,6 +1020,10 @@ fn register_actions(cx: &mut Context<MinigraphPanel>) {
         let _ = panel.update(cx, |p, cx| p.add_to_window(a.window, a.source.clone(), cx));
     });
     let panel = weak.clone();
+    app.on_action(move |a: &MinigraphCloseDetachedWindow, cx| {
+        let _ = panel.update(cx, |p, cx| p.close_detached_window(a.window, cx));
+    });
+    let panel = weak.clone();
     app.on_action(move |a: &MinigraphMoveToSlot, cx| {
         let _ = panel.update(cx, |p, cx| p.move_to_slot(a.id, a.slot, cx));
     });
@@ -1025,7 +1056,7 @@ fn move_within<T>(v: &mut Vec<T>, from: usize, to: u16) {
 }
 
 /// Same system kind; a GPU key does not count.
-fn same_kind(a: &MinigraphSource, b: &MinigraphSource) -> bool {
+pub(crate) fn same_kind(a: &MinigraphSource, b: &MinigraphSource) -> bool {
     a.is_system() && std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
@@ -1091,6 +1122,11 @@ impl Render for MinigraphPanel {
             }))
             .on_action(cx.listener(|this, a: &MinigraphDetach, _, cx| this.detach(a.id, cx)))
             .on_action(cx.listener(|this, a: &MinigraphAttach, _, cx| this.attach(a.id, cx)))
+            .on_action(
+                cx.listener(|this, a: &MinigraphCloseDetachedWindow, _, cx| {
+                    this.close_detached_window(a.window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, a: &MinigraphAddToWindow, _, cx| {
                 this.add_to_window(a.window, a.source.clone(), cx)
             }))

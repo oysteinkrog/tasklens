@@ -232,16 +232,19 @@ mod detach {
         AppearanceSettings, DetachedWindowState, MinigraphState, Settings, ThemeSettings, UiState,
     };
     use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
     use tl_ui::components::toast::ToastKind;
     use tl_ui::demand::DemandAggregator;
     use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::pages::minigraph::actions::{MinigraphAttach, MinigraphDetach};
+    use tl_ui::pages::minigraph::actions::{
+        MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphDetach,
+    };
     use tl_ui::pages::minigraph::panel::MinigraphPanel;
     use tl_ui::pages::minigraph::sources::{MinigraphId, MinigraphSource};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-    use tl_ui::windows::detached_graph::DetachedGraphWindow;
+    use tl_ui::windows::detached_graph::{DetachedGraphWindow, window_size};
 
     use super::catalog;
 
@@ -341,6 +344,13 @@ mod detach {
         fn dispatch(&mut self, action: impl gpui_kit::Action) {
             self.vcx.update(|window, cx| {
                 window.dispatch_action(action.boxed_clone(), cx);
+            });
+            draw(&mut self.vcx);
+        }
+
+        fn dispatch_boxed(&mut self, action: Box<dyn gpui_kit::Action>) {
+            self.vcx.update(|window, cx| {
+                window.dispatch_action(action, cx);
             });
             draw(&mut self.vcx);
         }
@@ -542,6 +552,176 @@ mod detach {
         );
         assert!(r.state_of(&MinigraphSource::Memory).0);
         assert!(registry_has(cx, 1));
+    }
+
+    /// State with CPU and Memory detached into window 1.
+    fn two_card_state() -> UiState {
+        let card = |source: &str, column: &str, slot: u16| MinigraphState {
+            source: source.to_owned(),
+            column: column.to_owned(),
+            slot,
+            detached: true,
+            window: 1,
+            ..MinigraphState::default()
+        };
+        UiState {
+            minigraphs: vec![card("cpu", "cpu", 0), card("memory", "memory", 1)],
+            detached_windows: vec![DetachedWindowState {
+                id: 1,
+                ..DetachedWindowState::default()
+            }],
+            ..UiState::default()
+        }
+    }
+
+    type MenuRows = Vec<(MenuEntryKind, String)>;
+
+    /// Right-clicks `at` in detached window 1; returns the menu rows and the Add graph labels.
+    fn right_click_window(cx: &mut TestAppContext, at: Point<Pixels>) -> (MenuRows, Vec<String>) {
+        let handle = cx
+            .read(|cx| {
+                cx.global::<GlobalRegistry>()
+                    .0
+                    .read(cx)
+                    .get(&WindowKey::DetachedGraph(1))
+            })
+            .expect("window open");
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        draw(&mut vcx);
+        vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the window menu is open");
+            let rows = menu.read(cx).entries_for_test(window);
+            let add: Vec<String> = rows
+                .iter()
+                .find(|e| e.label.as_deref() == Some("Add graph"))
+                .and_then(|e| e.submenu.clone())
+                .map(|sub| {
+                    sub.read(cx)
+                        .entries_for_test(window)
+                        .into_iter()
+                        .filter_map(|e| e.label.map(|l| l.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let rows = rows
+                .into_iter()
+                .map(|e| (e.kind, e.label.map(|l| l.to_string()).unwrap_or_default()))
+                .collect();
+            (rows, add)
+        })
+    }
+
+    fn labels(rows: &MenuRows) -> Vec<&str> {
+        rows.iter().map(|(_, l)| l.as_str()).collect()
+    }
+
+    #[gpui_kit::test]
+    fn detached_menu_order(cx: &mut TestAppContext) {
+        let _r = rig(cx, two_card_state());
+        let (rows, add) = right_click_window(cx, point(px(94.), px(49.)));
+        assert_eq!(
+            labels(&rows),
+            [
+                "Show Main Window",
+                "Close graph",
+                "Attach to main window",
+                "Time range",
+                "Graph color",
+                "Add graph",
+                "Remove graph",
+                "Exit tasklens"
+            ]
+        );
+        for (kind, label) in &rows {
+            let submenu = ["Time range", "Graph color", "Add graph"].contains(&label.as_str());
+            assert_eq!(*kind == MenuEntryKind::Submenu, submenu, "{label}");
+        }
+        assert_eq!(add, ["Disk", "Network", "GPU", "VRAM", "GPU temp"]);
+    }
+
+    #[gpui_kit::test]
+    fn detached_menu_body_click_subset(cx: &mut TestAppContext) {
+        let _r = rig(cx, two_card_state());
+        let (rows, _) = right_click_window(cx, point(px(94.), px(96.)));
+        assert_eq!(
+            labels(&rows),
+            [
+                "Show Main Window",
+                "Close graph",
+                "Add graph",
+                "Exit tasklens"
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn close_graph_reattaches(cx: &mut TestAppContext) {
+        let mut r = rig(cx, two_card_state());
+        assert!(registry_has(cx, 1));
+        r.dispatch(MinigraphCloseDetachedWindow { window: 1 });
+        assert!(!r.state_of(&MinigraphSource::Cpu).0);
+        assert!(!r.state_of(&MinigraphSource::Memory).0);
+        assert!(!registry_has(cx, 1), "the empty window closed");
+        assert!(r.toasts().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn add_graph_to_window_grows_it(cx: &mut TestAppContext) {
+        let mut r = rig(cx, two_card_state());
+        r.dispatch(MinigraphAddToWindow {
+            window: 1,
+            source: MinigraphSource::Disk,
+        });
+        assert_eq!(
+            window_cards(cx, 1).1,
+            [
+                MinigraphSource::Cpu,
+                MinigraphSource::Memory,
+                MinigraphSource::Disk
+            ]
+        );
+        let height = cx.read(|cx| TlSettings::state(cx).detached_windows[0].height);
+        assert_eq!(height as f32, f32::from(window_size(3, 1.).height));
+    }
+
+    #[gpui_kit::test]
+    fn remove_graph_from_window(cx: &mut TestAppContext) {
+        let mut r = rig(cx, two_card_state());
+        let handle = cx
+            .read(|cx| {
+                cx.global::<GlobalRegistry>()
+                    .0
+                    .read(cx)
+                    .get(&WindowKey::DetachedGraph(1))
+            })
+            .expect("window open");
+        let _ = right_click_window(cx, point(px(94.), px(143.)));
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        let action = vcx.update(|window, cx| {
+            open_context_menu(window, cx)
+                .expect("menu open")
+                .read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .find(|e| e.label.as_deref() == Some("Remove graph"))
+                .and_then(|e| e.action)
+                .expect("Remove graph action")
+        });
+        r.dispatch_boxed(action);
+        assert_eq!(window_cards(cx, 1).1, [MinigraphSource::Cpu]);
+        let memory_on = cx.read(|cx| TlSettings::settings(cx).graphs.minigraph_memory);
+        assert!(!memory_on);
+        let gone = r.vcx.update(|_, cx| {
+            r.panel
+                .read(cx)
+                .entries()
+                .iter()
+                .all(|e| e.source != MinigraphSource::Memory)
+        });
+        assert!(gone);
     }
 }
 
