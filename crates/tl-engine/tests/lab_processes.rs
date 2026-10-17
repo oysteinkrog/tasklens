@@ -569,6 +569,61 @@ fn unit_row_frozen_from_sweep() {
     fl.finish();
 }
 
+/// tasklens-8q0.42 review: two users' `pipewire.service`, one process each, fold into one unit
+/// row. The row is frozen when both cgroups are, and `wireplumber.service`, frozen for one user
+/// only, is not.
+#[test]
+fn unit_row_frozen_across_users() {
+    let root = FixtureRoot::merged();
+    let unit = |uid: u32, name: &str| {
+        format!("user.slice/user-{uid}.slice/user@{uid}.service/session.slice/{name}")
+    };
+    let units = [
+        (4330, unit(1000, "pipewire.service"), true),
+        (4331, unit(1001, "pipewire.service"), true),
+        (4340, unit(1000, "wireplumber.service"), false),
+        (4341, unit(1001, "wireplumber.service"), true),
+    ];
+    for (pid, cgroup, frozen) in &units {
+        root.clone_pid(TOKENPROC, *pid);
+        root.write(*pid, "cgroup", format!("0::/{cgroup}\n"));
+        let dir = root.root().join("sys/fs/cgroup").join(cgroup);
+        fs::create_dir_all(&dir).expect("create cgroup dir");
+        let events = format!("populated 1\nfrozen {}\n", u8::from(*frozen));
+        fs::write(dir.join("cgroup.events"), events).expect("write events");
+    }
+    let mut fl = FakeLab::new();
+    let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![processes::spec()]);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+    ui.demand_tx
+        .send(table_demand())
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+
+    let snap = ui.latest.load_full();
+    let row = |name: &str| {
+        snap.table
+            .groups
+            .iter()
+            .find(|g| g.kind == GroupRowKind::Unit && &*g.name == name)
+            .unwrap_or_else(|| panic!("{name} unit row"))
+    };
+    let pipewire = row("pipewire.service");
+    assert_eq!(pipewire.members, 2);
+    assert!(pipewire.frozen);
+    let wireplumber = row("wireplumber.service");
+    assert_eq!(wireplumber.members, 2);
+    assert!(!wireplumber.frozen);
+
+    handle.abort();
+    fl.advance(Duration::from_millis(10));
+    drop(ui);
+    fl.finish();
+}
+
 #[test]
 fn low_memory_mode_runs_processes_and_kwin() {
     // KWin runs for keep above only (R-152).

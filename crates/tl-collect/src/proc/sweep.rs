@@ -730,8 +730,8 @@ struct Scratch {
     rollup_buf: Vec<u8>,
     coverage: CoverageBuilder,
     stat_buf: Vec<u8>,
-    /// (cgroup path, length of its unit prefix, record index) of each unit member.
-    unit_members: Vec<(Arc<str>, usize, usize)>,
+    /// (unit, cgroup path, length of its unit prefix, record index) of each unit member.
+    unit_members: Vec<(UnitRef, Arc<str>, usize, usize)>,
 }
 
 /// Wanted cgroup files of an app unit. `memory.current` is never read here (R-137).
@@ -1060,8 +1060,10 @@ impl ProcessSampler {
     }
 
     /// After step 7: the Frozen state of each unit cgroup that holds a unit row, from its
-    /// `cgroup.events`, set on its members (tasklens-8q0.42). A unit row folds two or more
-    /// processes that are not app members, so a unit cgroup with one such process is not read.
+    /// `cgroup.events`, set on its members (tasklens-8q0.42). The reducer folds two or more
+    /// processes outside app units with the same `UnitRef` into one unit row, and that row can
+    /// span several cgroups: `pipewire.service` of two users is one row. So every unit cgroup of
+    /// a `UnitRef` with two or more such processes is read, and a `UnitRef` with one is not.
     /// App members are left out: `sample_apps` already read their cgroup.
     fn sample_units(&mut self, out: &mut SweepOutput) {
         let Scratch {
@@ -1071,32 +1073,45 @@ impl ProcessSampler {
             ..
         } = &mut self.scratch;
         members.clear();
-        for (i, (r, side)) in out.records.iter().zip(&out.side).enumerate() {
+        for (i, ((r, side), x)) in out
+            .records
+            .iter()
+            .zip(&out.side)
+            .zip(&out.extras)
+            .enumerate()
+        {
             if side.class == ProcClass::App || app_pids.contains(&r.key.pid) {
                 continue;
             }
+            let Some(unit) = &x.unit else {
+                continue;
+            };
             let Some(cg) = self.metas.get(&r.key).and_then(|s| s.cgroup.as_ref()) else {
                 continue;
             };
             if let Some(len) = unit_rel_len(cg) {
-                members.push((cg.rel.clone(), len, i));
+                members.push((unit.clone(), cg.rel.clone(), len, i));
             }
         }
-        members.sort_unstable_by(|a, b| a.0[..a.1].cmp(&b.0[..b.1]));
+        members.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1[..a.2].cmp(&b.1[..b.2])));
         let mut stats = CgroupStats::default();
-        for run in members.chunk_by(|a, b| a.0[..a.1] == b.0[..b.1]) {
-            let (rel, len, _) = &run[0];
-            if run.len() < 2
-                || self
+        for row in members.chunk_by(|a, b| a.0 == b.0) {
+            if row.len() < 2 {
+                continue;
+            }
+            for run in row.chunk_by(|a, b| a.1[..a.2] == b.1[..b.2]) {
+                let (_, rel, len, _) = &run[0];
+                if self
                     .cg
                     .read_stats(&rel[..*len], UNIT_WANT, stat_buf, &mut stats)
                     .is_err()
-                || stats.frozen != Some(true)
-            {
-                continue;
-            }
-            for &(_, _, i) in run {
-                out.extras[i].frozen = true;
+                    || stats.frozen != Some(true)
+                {
+                    continue;
+                }
+                for &(_, _, _, i) in run {
+                    out.extras[i].frozen = true;
+                }
             }
         }
     }

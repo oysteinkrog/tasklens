@@ -2379,6 +2379,48 @@ fn sweep_frozen_unit_members() {
     assert_ne!(out.side[index_of(&out, 4320)].class, ProcClass::App);
 }
 
+sweep_clock!(frozen_unit_users_clock);
+
+/// tasklens-8q0.42 review: the reducer folds one process each in two users' `pipewire.service`
+/// into one unit row, so the sweep reads both cgroups even though each holds one process. Each
+/// process takes the state of its own cgroup.
+#[test]
+fn sweep_frozen_unit_across_users() {
+    let (tmp, root) = merged_root();
+    let unit = |uid: u32, name: &str| {
+        format!("user.slice/user-{uid}.slice/user@{uid}.service/session.slice/{name}")
+    };
+    clone_pid_into(tmp.path(), 4209, 4330, &unit(1000, "pipewire.service"));
+    clone_pid_into(tmp.path(), 4209, 4331, &unit(1001, "pipewire.service"));
+    clone_pid_into(tmp.path(), 4209, 4340, &unit(1000, "wireplumber.service"));
+    clone_pid_into(tmp.path(), 4209, 4341, &unit(1001, "wireplumber.service"));
+    write_events(tmp.path(), &unit(1000, "pipewire.service"), true);
+    write_events(tmp.path(), &unit(1001, "pipewire.service"), true);
+    write_events(tmp.path(), &unit(1000, "wireplumber.service"), false);
+    write_events(tmp.path(), &unit(1001, "wireplumber.service"), true);
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(frozen_unit_users_clock::now);
+    let out = sweep_n(&mut s, frozen_unit_users_clock::set, 1);
+
+    let frozen: Vec<u32> = out
+        .records
+        .iter()
+        .zip(&out.extras)
+        .filter(|(r, x)| x.frozen && r.key.pid >= 4330)
+        .map(|(r, _)| r.key.pid)
+        .collect();
+    assert_eq!(frozen, [4330, 4331, 4341]);
+    for pid in [4330, 4331] {
+        let unit = out.extras[index_of(&out, pid)].unit.as_ref();
+        assert_eq!(unit.map(|u| &*u.name), Some("pipewire.service"));
+    }
+    assert_eq!(
+        out.extras[index_of(&out, 4330)].unit,
+        out.extras[index_of(&out, 4331)].unit,
+        "one UnitRef, so one unit row"
+    );
+}
+
 sweep_clock!(deadline_clock);
 
 #[test]
