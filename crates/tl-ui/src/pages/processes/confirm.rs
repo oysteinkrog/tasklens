@@ -15,15 +15,44 @@ use tl_model::units;
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::i18n::{tr, tr_args};
 
+/// The action a protected-target confirmation names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtectedAction {
+    /// End Task, End Process Tree.
+    End,
+    /// End Process (SIGKILL).
+    Kill,
+    /// Freeze App.
+    Freeze,
+    /// Suspend.
+    Suspend,
+    /// Send Signal.
+    Signal,
+}
+
+impl ProtectedAction {
+    /// The Fluent key stem: `processes-confirm-protected-<stem>-title` and so on. End keeps
+    /// the unprefixed keys.
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::End => "processes-confirm-protected",
+            Self::Kill => "processes-confirm-protected-kill",
+            Self::Freeze => "processes-confirm-protected-freeze",
+            Self::Suspend => "processes-confirm-protected-suspend",
+            Self::Signal => "processes-confirm-protected-signal",
+        }
+    }
+}
+
 /// What the confirmation is about. Names, counts and owners come from the targets captured
 /// when the action started.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfirmKind {
-    /// A signal, freeze or kill on a protected target. `action` is the action that asked
-    /// ("End"); the texts are the same for every action. `tree_count` is set for End Process
+    /// A signal, freeze or kill on a protected target. `action` picks the title, text and
+    /// button, so Freeze says "Freeze" and not "End". `tree_count` is set for End Process
     /// Tree, and the protected text then keeps the tree size.
     Protected {
-        action: SharedString,
+        action: ProtectedAction,
         name: SharedString,
         tree_count: Option<u32>,
     },
@@ -113,26 +142,21 @@ pub fn texts(kind: &ConfirmKind, cx: &App) -> ConfirmTexts {
     };
     match kind {
         ConfirmKind::Protected {
-            name, tree_count, ..
+            action,
+            name,
+            tree_count,
         } => {
-            let title = tr_args(
-                cx,
-                "processes-confirm-protected-title",
-                &[("name", text(name))],
-            );
+            let prefix = action.prefix();
+            let title = tr_args(cx, &format!("{prefix}-title"), &[("name", text(name))]);
             let description = match tree_count {
-                Some(n) => tr_args(
+                Some(n) if *action == ProtectedAction::End => tr_args(
                     cx,
                     "processes-confirm-protected-tree-text",
                     &[("name", text(name)), ("count", count(*n))],
                 ),
-                None => tr_args(
-                    cx,
-                    "processes-confirm-protected-text",
-                    &[("name", text(name))],
-                ),
+                _ => tr_args(cx, &format!("{prefix}-text"), &[("name", text(name))]),
             };
-            danger(title, description, "processes-confirm-protected-button")
+            danger(title, description, &format!("{prefix}-button"))
         }
         ConfirmKind::EndTree { count: n } => danger(
             tr(cx, "processes-confirm-end-tree-title"),

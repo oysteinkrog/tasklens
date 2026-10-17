@@ -2984,7 +2984,7 @@ mod prc014 {
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
+    use tl_ui::pages::processes::confirm::{ConfirmKind, ProtectedAction, texts as confirm_texts};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::open_main_window_on;
     use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
@@ -3322,14 +3322,14 @@ mod prc014 {
                 1,
                 TargetNames::process("plasmashell", 10_000).with_protected("plasmashell"),
                 ConfirmKind::Protected {
-                    action: "Send signal".into(),
+                    action: ProtectedAction::Signal,
                     name: "plasmashell".into(),
                     tree_count: None,
                 },
                 Expect {
-                    heading: "End plasmashell?",
-                    text: "Ending plasmashell will end your desktop session. End it anyway?",
-                    button: "End anyway",
+                    heading: "Send a signal to plasmashell?",
+                    text: "A signal sent to plasmashell can end your desktop session. Send it anyway?",
+                    button: "Send anyway",
                     danger: true,
                     focus: DialogButton::Cancel,
                 },

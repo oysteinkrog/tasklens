@@ -37,7 +37,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::hub::GlobalHub;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
-use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
+use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -1412,7 +1412,7 @@ fn signal_confirmation(signo: i32, count: usize, key: ProcessKey, cx: &App) -> O
             .contains(tl_model::process::ProcFlags::PROTECTED)
         {
             return Some(ConfirmKind::Protected {
-                action,
+                action: ProtectedAction::Signal,
                 name: SharedString::from(record.meta.name.clone()),
                 tree_count: None,
             });

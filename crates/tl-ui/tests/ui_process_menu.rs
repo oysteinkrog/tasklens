@@ -18,7 +18,9 @@ use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::toast;
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use tl_ui::i18n::init_strings;
-use tl_ui::pages::processes::confirm::{ConfirmKind, ConfirmResult, ConfirmTexts, confirm, texts};
+use tl_ui::pages::processes::confirm::{
+    ConfirmKind, ConfirmResult, ConfirmTexts, ProtectedAction, confirm, texts,
+};
 use tl_ui::testing::fake_engine::FakeEngine;
 
 struct Body;
@@ -150,7 +152,7 @@ fn confirm_text_per_trigger(cx: &mut TestAppContext) {
     let cases = [
         (
             ConfirmKind::Protected {
-                action: s("End"),
+                action: ProtectedAction::End,
                 name: s("plasmashell"),
                 tree_count: None,
             },
@@ -329,7 +331,7 @@ fn confirm_text_per_trigger(cx: &mut TestAppContext) {
 fn protected_wins_over_tree_text(cx: &mut TestAppContext) {
     setup(cx);
     let kind = ConfirmKind::Protected {
-        action: s("End process tree"),
+        action: ProtectedAction::End,
         name: s("plasmashell"),
         tree_count: Some(7),
     };
@@ -2269,9 +2271,10 @@ mod end {
         rig.publish_rows(records, extras, rows, vec![app_group(1)]);
         select_row(&mut rig, 0);
         let mut dialog = rig.dispatch(FreezeApp).expect("the Protected dialog");
-        // The dialog text is not asserted: confirm.rs ignores the action, so Freeze says "Ending".
-        // That is a reported defect (tasklens-pdu.38), not behaviour to lock in.
-        assert!(!dialog.text().is_empty());
+        assert_eq!(
+            dialog.text(),
+            "Freezing Firefox will freeze your desktop session. Freeze it anyway?"
+        );
         dialog.cancel();
         assert!(rig.sent_targets().is_empty(), "Cancel sends nothing");
     }

@@ -63,7 +63,7 @@ use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::actions::{CapturedTarget, CapturedTargets};
-use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
+use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toasts::{refusal_reason, toast_words};
 use crate::table::cells::CellOut;
@@ -819,7 +819,11 @@ fn confirm_kind(targets: &[CapturedTarget], kill: bool, cx: &App) -> Option<Conf
         .find(|t| t.flags.contains(ProcFlags::PROTECTED))
     {
         return Some(ConfirmKind::Protected {
-            action: tr(cx, "processes-confirm-action-end"),
+            action: if kill {
+                ProtectedAction::Kill
+            } else {
+                ProtectedAction::End
+            },
             name: t.name.clone(),
             tree_count: None,
         });

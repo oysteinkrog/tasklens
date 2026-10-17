@@ -1073,7 +1073,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
     - PID 1: "PID 1 (systemd) cannot be ended."
     - kernel threads: "Kernel threads cannot be signalled."
   - A confirmation dialog opens for:
-    - any signal, freeze or kill on a protected target: "Ending <name> will end your desktop session. End it anyway?";
+    - any signal, freeze or kill on a protected target, with text that names the action: "Ending <name> will end your desktop session. End it anyway?" for End, "Killing <name> ... Kill it anyway?" for Kill, "Freezing <name> will freeze your desktop session. Freeze it anyway?" for Freeze (Suspend likewise), and "A signal sent to <name> can end your desktop session. Send it anyway?" for Send Signal; the title and button name the action too ("Freeze <name>?", "Freeze anyway");
     - End Process Tree: "End N processes in this tree?", buttons "End tree" and "Cancel";
     - Kill App: "Kill all N processes of <App>?";
     - End Task or End Process with more than one target;

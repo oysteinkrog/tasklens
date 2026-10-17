@@ -49,7 +49,7 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::DeviceKey;
 use crate::pages::processes::actions::{CapturedTarget, CapturedTargets};
-use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
+use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use crate::pages::processes::toasts::{refuse, toast_words};
 use crate::table::tree_table::RowKind;
 use crate::text::style::{label_style, t_base, t_sm, t_xs};
@@ -214,7 +214,11 @@ pub(crate) fn confirm_kind(
         .find(|t| t.flags.contains(ProcFlags::PROTECTED))
     {
         return Some(ConfirmKind::Protected {
-            action: tr(cx, "processes-confirm-action-end"),
+            action: if kill {
+                ProtectedAction::Kill
+            } else {
+                ProtectedAction::End
+            },
             name: t.name.clone(),
             tree_count: None,
         });

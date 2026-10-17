@@ -50,7 +50,7 @@ use self::actions::{
     SetPriority, SuspendProcess, ThawApp, ToggleGroupRow,
 };
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
-use self::confirm::{ConfirmKind, ConfirmResult, confirm};
+use self::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use self::delegate::ProcessDelegate;
 use self::filter::FilterBinding;
 use self::history::HistoryPage;
@@ -650,7 +650,7 @@ impl ProcessesPage {
             }),
             GroupOp::Freeze if t.flags.contains(ProcFlags::PROTECTED) => {
                 Some(ConfirmKind::Protected {
-                    action: self.confirm_words.freeze.clone(),
+                    action: ProtectedAction::Freeze,
                     name: t.name.clone(),
                     tree_count: None,
                 })
@@ -740,7 +740,7 @@ impl ProcessesPage {
             .find(|t| !resume && t.flags.contains(ProcFlags::PROTECTED));
         let ask = match protected {
             Some(t) => Some(ConfirmKind::Protected {
-                action: w.suspend.clone(),
+                action: ProtectedAction::Suspend,
                 name: t.name.clone(),
                 tree_count: None,
             }),
@@ -1292,13 +1292,10 @@ pub fn suspend_or_resume(t: &CapturedTargets) -> SuspendLabel {
 
 /// The confirmation action names, translated once per strings version (R-132).
 struct ConfirmWords {
-    /// "End", for the protected confirmation.
-    end: SharedString,
     end_task: SharedString,
     end_process: SharedString,
     suspend: SharedString,
     resume: SharedString,
-    freeze: SharedString,
     set_priority: SharedString,
     set_io_priority: SharedString,
 }
@@ -1306,12 +1303,10 @@ struct ConfirmWords {
 impl ConfirmWords {
     fn new(cx: &App) -> Self {
         Self {
-            end: tr(cx, "processes-confirm-action-end"),
             end_task: tr(cx, "processes-confirm-action-end-task"),
             end_process: tr(cx, "processes-confirm-action-end-process"),
             suspend: tr(cx, "processes-confirm-action-suspend"),
             resume: tr(cx, "processes-confirm-action-resume"),
-            freeze: tr(cx, "processes-confirm-action-freeze"),
             set_priority: tr(cx, "processes-confirm-action-set-priority"),
             set_io_priority: tr(cx, "processes-confirm-action-set-io-priority"),
         }
@@ -1492,7 +1487,11 @@ impl EndPlan {
             });
         let confirm = if let Some(name) = protected {
             Some(ConfirmKind::Protected {
-                action: words.end.clone(),
+                action: if end == End::Process {
+                    ProtectedAction::Kill
+                } else {
+                    ProtectedAction::End
+                },
                 name,
                 tree_count: (end == End::Tree).then_some(count),
             })

@@ -25,7 +25,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::TlSecondaryWindow;
 use crate::i18n::tr;
 use crate::pages::performance::details::Template;
-use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
+use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{SIGNAL_DIALOG_CONTEXT, SendSignal, SignalSendRealtime};
@@ -624,7 +624,7 @@ pub fn send_signal(
     let action = tr(cx, "pwn-signal-send");
     let ask = if let Some(name) = &names.protected {
         Some(ConfirmKind::Protected {
-            action,
+            action: ProtectedAction::Signal,
             name: name.clone(),
             tree_count: None,
         })
