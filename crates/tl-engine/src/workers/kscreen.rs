@@ -4,19 +4,20 @@
 //! page or the Information tab opens, on `RefreshNow`, and when KWin's output config file
 //! `kwinoutputconfig.json` changes while one of them is open (the KScreen config change). The
 //! JSON supplies the enabled state, primary output (`priority == 1`), rotation, scale and the
-//! current mode with its refresh rate. Max bpc stays `None` until KMS (P4). Plasma 5 has no
-//! `kwinoutputconfig.json`; there the KScreen daemon's files in `$XDG_DATA_HOME/kscreen` change
-//! instead, so both are watched.
+//! current mode with its refresh rate. Max bpc stays `None` until KMS (P4).
+//!
+//! Only `kwinoutputconfig.json` is watched, with one `stat` per turn. Plasma 5 has no such file,
+//! so there the values refresh when the GPU page or the Information tab opens and on a manual
+//! refresh, not on a config change.
 //!
 //! Without KDE or `kscreen-doctor`, or when it fails, times out or prints unexpected JSON, the
 //! sysfs values stay as they are. The text output (`kscreen-doctor -o`) is never parsed.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 use tl_collect::inventory::ConnectorInfo;
@@ -26,16 +27,8 @@ use crate::workers::inventory::SystemEnv;
 
 /// The program, looked up in `$PATH`.
 pub const PROGRAM: &str = "kscreen-doctor";
-/// KWin's output config, below `$XDG_CONFIG_HOME`. KWin on Plasma 6 rewrites it on every output
-/// change.
+/// KWin's output config, below `$XDG_CONFIG_HOME`. KWin rewrites it on every output change.
 pub const CONFIG_FILE: &str = "kwinoutputconfig.json";
-/// The KScreen daemon's config directory, below `$XDG_DATA_HOME`. On Plasma 5, where there is no
-/// `kwinoutputconfig.json`, the daemon writes a file here on every output change.
-pub const DATA_DIR: &str = "kscreen";
-/// Most directory entries one [`fingerprint`] reads.
-const WATCH_ENTRIES_MAX: usize = 256;
-/// Deepest level one [`fingerprint`] reads below a watched directory.
-const WATCH_DEPTH_MAX: usize = 3;
 /// How long one run may take.
 pub const TIMEOUT: Duration = Duration::from_secs(3);
 /// Most stdout bytes kept. Past that the run counts as failed.
@@ -273,81 +266,35 @@ pub fn fill(mode: &mut DisplayMode, out: &KScreenOutput) {
     }
 }
 
-/// The paths whose change is a KScreen config change, on KDE: `<config_home>/kwinoutputconfig.json`
-/// (KWin, Plasma 6) and the `<data_home>/kscreen` directory (the KScreen daemon, Plasma 5 and
-/// X11 sessions). `config_home` is `$XDG_CONFIG_HOME` or `$HOME/.config`, `data_home` is
-/// `$XDG_DATA_HOME` or `$HOME/.local/share`. Relative values are ignored. Empty off KDE.
-pub fn config_paths(
+/// `<config_home>/kwinoutputconfig.json` on KDE, with `config_home` from `$XDG_CONFIG_HOME` or
+/// `$HOME/.config`. Relative values are ignored.
+pub fn config_path(
     env: &SystemEnv,
     xdg_config_home: Option<PathBuf>,
-    xdg_data_home: Option<PathBuf>,
     home: Option<PathBuf>,
-) -> Vec<PathBuf> {
+) -> Option<PathBuf> {
     if !is_kde(env) {
-        return Vec::new();
+        return None;
     }
-    let home = home.filter(|p| p.is_absolute());
-    let under = |xdg: Option<PathBuf>, fallback: &str| {
-        xdg.filter(|p| p.is_absolute())
-            .or_else(|| home.as_ref().map(|h| h.join(fallback)))
-    };
-    let config = under(xdg_config_home, ".config").map(|d| d.join(CONFIG_FILE));
-    let data = under(xdg_data_home, ".local/share").map(|d| d.join(DATA_DIR));
-    config.into_iter().chain(data).collect()
+    let config_home = xdg_config_home
+        .filter(|p| p.is_absolute())
+        .or_else(|| home.filter(|p| p.is_absolute()).map(|h| h.join(".config")))?;
+    Some(config_home.join(CONFIG_FILE))
 }
 
-/// [`config_paths`] with this process's environment.
-pub fn config_files(env: &SystemEnv) -> Vec<PathBuf> {
+/// [`config_path`] with this process's environment.
+pub fn config_file(env: &SystemEnv) -> Option<PathBuf> {
     let var = |name: &str| {
         std::env::var_os(name)
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     };
-    config_paths(
-        env,
-        var("XDG_CONFIG_HOME"),
-        var("XDG_DATA_HOME"),
-        var("HOME"),
-    )
+    config_path(env, var("XDG_CONFIG_HOME"), var("HOME"))
 }
 
-/// A hash of the names, sizes and modification times of `paths` and, for a directory, of the
-/// entries below it (at most `WATCH_DEPTH_MAX` levels and `WATCH_ENTRIES_MAX` entries). Equal
-/// values mean no change was seen. A missing path hashes as missing.
-pub fn fingerprint(paths: &[PathBuf]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    let mut budget = WATCH_ENTRIES_MAX;
-    for path in paths {
-        path.hash(&mut hasher);
-        hash_entry(path, 0, &mut budget, &mut hasher);
-    }
-    hasher.finish()
-}
-
-fn hash_entry(path: &Path, depth: usize, budget: &mut usize, hasher: &mut DefaultHasher) {
-    let Ok(meta) = std::fs::metadata(path) else {
-        0u8.hash(hasher);
-        return;
-    };
-    1u8.hash(hasher);
-    meta.len().hash(hasher);
-    meta.modified().ok().hash(hasher);
-    if !meta.is_dir() || depth >= WATCH_DEPTH_MAX {
-        return;
-    }
-    let Ok(dir) = std::fs::read_dir(path) else {
-        return;
-    };
-    let mut names: Vec<_> = dir.filter_map(|e| e.ok().map(|e| e.file_name())).collect();
-    names.sort_unstable();
-    for name in names {
-        if *budget == 0 {
-            return;
-        }
-        *budget -= 1;
-        name.hash(hasher);
-        hash_entry(&path.join(&name), depth + 1, budget, hasher);
-    }
+/// The modification time of `path`, `None` when it is missing or unreadable.
+pub fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 #[cfg(test)]
@@ -549,67 +496,21 @@ mod tests {
     }
 
     #[test]
-    fn config_paths_rules() {
+    fn config_path_rules() {
         let abs = |p: &str| Some(PathBuf::from(p));
-        let paths = |c: &str, d: &str| vec![PathBuf::from(c), PathBuf::from(d)];
+        let want = PathBuf::from("/x/kwinoutputconfig.json");
+        assert_eq!(config_path(&kde(), abs("/x"), abs("/h")), Some(want));
         assert_eq!(
-            config_paths(&kde(), abs("/x"), abs("/d"), abs("/h")),
-            paths("/x/kwinoutputconfig.json", "/d/kscreen")
+            config_path(&kde(), abs("rel"), abs("/h")),
+            Some(PathBuf::from("/h/.config/kwinoutputconfig.json"))
         );
-        assert_eq!(
-            config_paths(&kde(), abs("rel"), abs("rel"), abs("/h")),
-            paths(
-                "/h/.config/kwinoutputconfig.json",
-                "/h/.local/share/kscreen"
-            )
-        );
-        assert_eq!(
-            config_paths(&kde(), None, None, abs("rel")),
-            Vec::<PathBuf>::new()
-        );
-        assert_eq!(
-            config_paths(&kde(), None, abs("/d"), None),
-            vec![PathBuf::from("/d/kscreen")]
-        );
+        assert_eq!(config_path(&kde(), None, abs("rel")), None);
         let gnome = SystemEnv {
             xdg_current_desktop: Some("GNOME".into()),
             ..SystemEnv::default()
         };
-        assert!(config_paths(&gnome, abs("/x"), abs("/d"), abs("/h")).is_empty());
-        assert!(config_paths(&SystemEnv::default(), abs("/x"), None, None).is_empty());
-    }
-
-    /// Plasma 5: a file rewritten or added below `kscreen/` changes the fingerprint, a missing
-    /// path does not break it.
-    #[test]
-    fn fingerprint_sees_directory_changes() {
-        let dir = scratch();
-        let watched = dir.path().join(DATA_DIR);
-        let paths = vec![dir.path().join(CONFIG_FILE), watched.clone()];
-        let missing = fingerprint(&paths);
-        assert_eq!(fingerprint(&paths), missing);
-        std::fs::create_dir_all(watched.join("outputs")).expect("create kscreen dir");
-        let config = watched.join("outputs/abc");
-        std::fs::write(&config, "{}").expect("write config");
-        set_mtime(&config, 1_000);
-        let first = fingerprint(&paths);
-        assert_ne!(first, missing);
-        assert_eq!(fingerprint(&paths), first);
-        set_mtime(&config, 2_000);
-        let rewritten = fingerprint(&paths);
-        assert_ne!(rewritten, first);
-        std::fs::write(watched.join("def"), "{}").expect("write config");
-        assert_ne!(fingerprint(&paths), rewritten);
-    }
-
-    /// Sets the modification time of `path` to `secs` after the epoch.
-    fn set_mtime(path: &Path, secs: u64) {
-        let file = std::fs::File::options()
-            .write(true)
-            .open(path)
-            .expect("open config");
-        file.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-            .expect("set mtime");
+        assert_eq!(config_path(&gnome, abs("/x"), abs("/h")), None);
+        assert_eq!(config_path(&SystemEnv::default(), abs("/x"), None), None);
     }
 
     #[test]

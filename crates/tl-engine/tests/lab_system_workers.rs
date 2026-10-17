@@ -3882,7 +3882,7 @@ struct WatchRig {
 }
 
 impl WatchRig {
-    fn start(dir: &Path, watch: Vec<PathBuf>, first: Demand) -> Self {
+    fn start(dir: &Path, watch: PathBuf, first: Demand) -> Self {
         let mut fl = FakeLab::new();
         let (updates, rx, demand_tx, settings, control) = channels();
         demand_tx.send(first).expect("watch has receivers");
@@ -3942,7 +3942,7 @@ fn kscreen_config_change_rescans() {
     fs::write(&config, "{}").expect("write config");
     set_mtime(&config, 1_000);
 
-    let mut rig = WatchRig::start(&dir, vec![config.clone()], gpu_page());
+    let mut rig = WatchRig::start(&dir, config.clone(), gpu_page());
     assert_eq!(rig.run(2), 1, "open");
     set_mtime(&config, 2_000);
     assert_eq!(rig.run(1), 2, "config change");
@@ -3954,30 +3954,6 @@ fn kscreen_config_change_rescans() {
 
     // The open scan covers the change made while hidden.
     assert_eq!(rig.show(gpu_page(), 2), 3, "reopen");
-    rig.finish();
-}
-
-/// Plasma 5 has no `kwinoutputconfig.json`: a rewritten file in the KScreen config directory
-/// rescans.
-#[test]
-fn kscreen_data_dir_change_rescans() {
-    let dir = fixture_copy("dmi-desktop", None);
-    let data = dir.join("kscreen");
-    fs::create_dir_all(data.join("outputs")).expect("create kscreen dir");
-    let config = data.join("0a1b2c");
-    fs::write(&config, "{}").expect("write config");
-    set_mtime(&config, 1_000);
-    let watch = vec![dir.join("kwinoutputconfig.json"), data.clone()];
-
-    let mut rig = WatchRig::start(&dir, watch, gpu_page());
-    assert_eq!(rig.run(2), 1, "open");
-    assert_eq!(rig.run(2), 1, "no change");
-    set_mtime(&config, 2_000);
-    assert_eq!(rig.run(1), 2, "config rewritten");
-    let output = data.join("outputs/3d4e5f");
-    fs::write(&output, "{}").expect("write output");
-    assert_eq!(rig.run(1), 3, "output file added");
-    assert_eq!(rig.run(2), 3, "no change");
     rig.finish();
 }
 
@@ -4005,7 +3981,7 @@ fn gpu_page_open_scans_while_inventory_visible() {
         ..d
     };
 
-    let mut rig = WatchRig::start(&dir, vec![config.clone()], cpu_page.clone());
+    let mut rig = WatchRig::start(&dir, config.clone(), cpu_page.clone());
     assert_eq!(rig.run(2), 1, "CPU page open");
     // A sidebar keeps CPU demand on while the GPU page opens.
     assert_eq!(
