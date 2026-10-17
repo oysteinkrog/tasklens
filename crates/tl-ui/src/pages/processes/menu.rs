@@ -22,11 +22,14 @@ use tl_model::validity::Validity;
 
 use super::actions::{
     ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
-    EndProcess, EndProcessTree, EndTask, FreezeApp, GoToParent, IoClass, KillApp, OpenFileLocation,
-    OpenVirusTotal, PriorityClass, ResumeProcess, SetIoPriorityClass, SetPriority, SuspendProcess,
-    ThawApp, ToggleGroupRow,
+    EndProcess, EndProcessTree, EndTask, FileProperties, FreezeApp, GoToParent, IoClass, KillApp,
+    OpenFileLocation, OpenVirusTotal, PriorityClass, RestartUnit, ResumeProcess,
+    SetIoPriorityClass, SetPriority, ShowWindow, SuspendProcess, ThawApp, ToggleGroupRow,
 };
-use super::{SuspendLabel, group_frozen, group_targets, suspend_or_resume};
+use super::{
+    SuspendLabel, group_frozen, group_targets, plasma_restart_unit, suspend_or_resume,
+    topmost_window,
+};
 use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
 use crate::i18n::{tr, tr_args};
@@ -140,6 +143,9 @@ pub fn row_menu(
     menu = add_set_affinity(menu, shape, cx);
     menu = add_set_io_priority(menu, targets, caps, shape, window, cx);
     menu = menu.separator();
+    menu = add_show_window(menu, targets, caps, shape, cx);
+    menu = add_restart_unit(menu, targets, shape, cx);
+    menu = menu.separator();
     menu = add_copy(menu, targets, cx);
     menu = add_copy_details(menu, cx);
     menu = add_copy_all_metrics(menu, cx);
@@ -149,6 +155,7 @@ pub fn row_menu(
     menu = add_tray_graph(menu, targets, shape, window, cx);
     menu = menu.separator();
     menu = add_properties(menu, shape, cx);
+    menu = add_file_properties(menu, targets, caps, shape, cx);
     menu = add_open_file_location(menu, targets, shape, cx);
     menu = add_open_virustotal(menu, shape, cx);
     menu = add_create_dump(menu, caps, shape, cx);
@@ -762,6 +769,88 @@ fn add_copy_rows_as_table(menu: TlMenu, cx: &App) -> TlMenu {
         tr(cx, "processes-menu-copy-rows-as-table"),
         Box::new(CopyRowsAsTable),
     )
+}
+
+/// Item 9: Show Window, on one process, kernel-thread, app or unit row (PROC-054). Hidden
+/// without the KWin bridge. Disabled with "No window" when the row owns no window.
+fn add_show_window(
+    menu: TlMenu,
+    targets: &CapturedTargets,
+    caps: &MenuCaps,
+    shape: Shape,
+    cx: &App,
+) -> TlMenu {
+    let [target] = targets.items.as_slice() else {
+        return menu;
+    };
+    if !(shape.process || shape.group) || !caps.kwin_bridge {
+        return menu;
+    }
+    let label = tr(cx, "processes-menu-show-window");
+    if !shape.exited {
+        let has_window = cx
+            .try_global::<EngineGlobal>()
+            .is_some_and(|g| topmost_window(&g.0.latest(), target).is_some());
+        if !has_window {
+            return menu.item_disabled(label, Some(tr(cx, "processes-menu-no-window")));
+        }
+    }
+    exitable(menu, shape, label, Box::new(ShowWindow), cx)
+}
+
+/// Item 10: Restart Plasma Shell on the plasmashell row, else Restart unit on a unit row or a
+/// unit's MainPID row (PROC-072). Never offered for the compositor.
+fn add_restart_unit(menu: TlMenu, targets: &CapturedTargets, shape: Shape, cx: &App) -> TlMenu {
+    let [target] = targets.items.as_slice() else {
+        return menu;
+    };
+    if !(shape.process || (shape.group && target.kind == RowKind::Unit)) {
+        return menu;
+    }
+    if let Some(unit) = plasma_restart_unit(target) {
+        let action = RestartUnit { unit };
+        let label = tr(cx, "processes-menu-restart-plasma");
+        return exitable(menu, shape, label, Box::new(action), cx);
+    }
+    let Some(unit) = &target.unit else {
+        return menu;
+    };
+    if is_compositor(&target.name, &unit.name) {
+        return menu;
+    }
+    let label = tr_args(
+        cx,
+        "processes-menu-restart-unit",
+        &[("unit", unit.name.as_ref().into())],
+    );
+    let action = RestartUnit { unit: unit.clone() };
+    exitable(menu, shape, label, Box::new(action), cx)
+}
+
+/// The compositor must never be restarted from here (PROC-072).
+fn is_compositor(name: &str, unit: &str) -> bool {
+    matches!(name, "kwin_wayland" | "gnome-shell")
+        || unit.starts_with("plasma-kwin_wayland")
+        || unit.starts_with("org.gnome.Shell@")
+}
+
+/// Item 20: File properties, on one process row. Hidden without a FileManager1 owner.
+/// Disabled when the executable was deleted.
+fn add_file_properties(
+    menu: TlMenu,
+    targets: &CapturedTargets,
+    caps: &MenuCaps,
+    shape: Shape,
+    cx: &App,
+) -> TlMenu {
+    if !shape.process || !caps.file_manager1 {
+        return menu;
+    }
+    let label = tr(cx, "processes-menu-file-properties");
+    if !shape.exited && targets.items.iter().any(|t| t.exe_deleted) {
+        return menu.item_disabled(label, Some(tr(cx, "processes-menu-executable-deleted")));
+    }
+    exitable(menu, shape, label, Box::new(FileProperties), cx)
 }
 
 /// Item 21: Open file location, on one process row. Disabled when the executable was deleted

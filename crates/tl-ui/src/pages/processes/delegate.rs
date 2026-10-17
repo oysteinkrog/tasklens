@@ -1387,6 +1387,7 @@ impl TreeTableDelegate for ProcessDelegate {
         }
         let engine_caps = self.snapshot.health.caps;
         let caps = MenuCaps {
+            kwin_bridge: self.bridge_up(),
             gdb: engine_caps.contains(EngineCaps::GDB),
             file_manager1: engine_caps.contains(EngineCaps::FILE_MANAGER1),
             ..MenuCaps::default()

@@ -39,15 +39,16 @@ use tl_model::command::{Command, KWinCommand};
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
-use tl_model::snapshot::{ProcessSnapshot, ServicesSnapshot, Snapshot};
-use tl_model::table::UnitRef;
+use tl_model::snapshot::{ProcessSnapshot, ServicesSnapshot, Snapshot, WindowEntry};
+use tl_model::table::{Manager, UnitRef};
+use tl_model::validity::Validity;
 use tracing::warn;
 
 use self::actions::{
     ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
-    EndProcess, EndProcessTree, EndTask, FreezeApp, GoToParent, KillApp, MAX_TARGETS,
-    OpenFileLocation, OpenVirusTotal, PriorityClass, ResumeProcess, SetIoPriorityClass,
-    SetPriority, SuspendProcess, ThawApp, ToggleGroupRow,
+    EndProcess, EndProcessTree, EndTask, FileProperties, FreezeApp, GoToParent, KillApp,
+    MAX_TARGETS, OpenFileLocation, OpenVirusTotal, PriorityClass, RestartUnit, ResumeProcess,
+    SetIoPriorityClass, SetPriority, ShowWindow, SuspendProcess, ThawApp, ToggleGroupRow,
 };
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
@@ -57,6 +58,7 @@ use self::history::HistoryPage;
 use self::jump::JumpTexts;
 use self::menu::{GraphKind, graph_source};
 use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
+use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
 use crate::components::toast::ToastKind;
 use crate::demand::GlobalDemand;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
@@ -125,7 +127,7 @@ pub struct ProcessesPage {
     client: Arc<dyn EngineClient>,
     /// Settings, metrics and strings observers, the table's copy events, Ctrl-pause and the
     /// table observer for the status chip.
-    _subs: SmallVec<[Subscription; 7]>,
+    _subs: SmallVec<[Subscription; 8]>,
     /// `TlSettings` versions of [`SECTIONS`] last applied.
     section_versions: [u64; 4],
     style_version: u64,
@@ -158,6 +160,9 @@ pub struct ProcessesPage {
     active: bool,
     /// `TlSettings::state_version` last applied to the mode.
     state_version: u64,
+    /// The pending Plasma Shell restart (PROC-072). A second request while it is set only
+    /// toasts a warning.
+    plasma_restart: Option<ActionId>,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -213,6 +218,17 @@ impl ProcessesPage {
         }));
         // Snapshot installs and selection changes both notify the table.
         subs.push(cx.observe(&table, |this, _, cx| this.refresh_status(false, cx)));
+        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+            subs.push(
+                cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, _| {
+                    if let ActionTrackerEvent::Finished { id, .. } = ev
+                        && this.plasma_restart == Some(*id)
+                    {
+                        this.plasma_restart = None;
+                    }
+                }),
+            );
+        }
         // The shell owns the Ctrl rule and the chip's paused tag (E20-012).
         if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
             subs.push(cx.subscribe(&events, |this, _, ev: &PauseChanged, cx| {
@@ -260,6 +276,7 @@ impl ProcessesPage {
             history_focus,
             active: false,
             state_version,
+            plasma_restart: None,
         }
     }
 
@@ -1070,6 +1087,127 @@ impl ProcessesPage {
         submit(self, req, texts, cx);
     }
 
+    /// File properties (PROC-052): the file manager shows the properties of the executable.
+    /// A restricted path toasts "Process image unavailable"; a deleted one sends nothing (the
+    /// item is disabled).
+    fn on_file_properties(&mut self, _: &FileProperties, _: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        let [t] = &targets.items[..] else {
+            return;
+        };
+        let NodeId::Process(key) = t.node else {
+            return;
+        };
+        if t.exe_deleted {
+            return;
+        }
+        let exe = {
+            let d = &self.table.read(cx).delegate;
+            let records = &d.snapshot().processes.records;
+            let Some(r) = records.iter().find(|r| r.key == key) else {
+                return;
+            };
+            if exe_deleted(&r.meta) {
+                return;
+            }
+            r.meta.exe.clone()
+        };
+        let Some(path) = exe else {
+            warning_toast(tr(cx, "processes-toast-image-unavailable"), cx);
+            return;
+        };
+        let req = ActionRequest {
+            id: ActionId(0),
+            kind: ActionKind::ShowInFileManager {
+                path,
+                properties: true,
+            },
+            targets: SmallVec::new(),
+            privileged: false,
+        };
+        // No success text: the file manager window is the result. A failure shows the reason.
+        let texts = ActionToastTexts {
+            requested: None,
+            success: (ToastKind::Success, SharedString::default()),
+            failure: (ToastKind::Error, SharedString::default()),
+            partial: None,
+        };
+        submit(self, req, texts, cx);
+    }
+
+    /// Show Window (PROC-054): brings the topmost window of the captured process, or of any
+    /// member of an app or unit row, to the front. The bridge does not answer an activation
+    /// (ADR-005), so the toast follows the send.
+    fn on_show_window(&mut self, _: &ShowWindow, _: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.take_targets(cx);
+        let [t] = &targets.items[..] else {
+            return;
+        };
+        let internal_id = cx.try_global::<GlobalHub>().and_then(|hub| {
+            topmost_window(hub.0.read(cx).current(), t).map(|w| Arc::clone(&w.internal_id))
+        });
+        let Some(internal_id) = internal_id else {
+            warning_toast(tr(cx, "prc-055-no-window-found"), cx);
+            return;
+        };
+        if let Err(err) = self
+            .client
+            .send(Command::KWin(KWinCommand::Activate { internal_id }))
+        {
+            warn!(target: "tasklens::ui", ?err, "KWin activate not sent");
+            return;
+        }
+        toast(
+            ToastKind::Success,
+            tr(cx, "processes-toast-window-shown"),
+            cx,
+        );
+    }
+
+    /// Restart Plasma Shell and Restart unit (PROC-072): `UnitRestart` on the captured
+    /// `UnitRef`. One Plasma Shell restart runs at a time.
+    fn on_restart_unit(&mut self, a: &RestartUnit, _: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.take_targets(cx);
+        let plasma = is_plasma_unit(&a.unit);
+        if plasma && self.plasma_restart.is_some() {
+            warning_toast(tr(cx, "processes-toast-plasma-in-progress"), cx);
+            return;
+        }
+        let req = ActionRequest {
+            id: ActionId(0),
+            kind: ActionKind::UnitRestart,
+            targets: SmallVec::from_buf([ActionTarget::Unit(a.unit.clone())]),
+            privileged: false,
+        };
+        let (requested, success) = if plasma {
+            (
+                (ToastKind::Info, tr(cx, "processes-toast-plasma-restarting")),
+                tr(cx, "processes-toast-plasma-restarted"),
+            )
+        } else {
+            (
+                (
+                    ToastKind::Progress,
+                    tr(cx, "services-sys018-restarting-service"),
+                ),
+                tr(cx, "services-sys018-service-restarted"),
+            )
+        };
+        let texts = ActionToastTexts {
+            requested: Some(requested),
+            success: (ToastKind::Success, success),
+            failure: (
+                ToastKind::Error,
+                tr(cx, "services-sys018-failed-to-restart-service"),
+            ),
+            partial: None,
+        };
+        let id = submit(self, req, texts, cx);
+        if plasma {
+            self.plasma_restart = id;
+        }
+    }
+
     /// Open in VirusTotal (PROC-074, UI-PWN-036): the notice and hashing flow for the one
     /// captured process row.
     fn on_open_virustotal(
@@ -1616,6 +1754,50 @@ fn record_target(r: &ProcessRecord) -> CapturedTarget {
     }
 }
 
+/// The user unit a `plasmashell` process row restarts (PROC-072). `None` for every other row
+/// and for a plasmashell of another user.
+pub(crate) fn plasma_restart_unit(t: &CapturedTarget) -> Option<UnitRef> {
+    (t.kind == RowKind::Process
+        && &*t.name == "plasmashell"
+        && !t.flags.contains(ProcFlags::OTHER_USER))
+    .then(|| UnitRef {
+        manager: Manager::User,
+        name: Arc::from(PLASMA_UNIT),
+    })
+}
+
+const PLASMA_UNIT: &str = "plasma-plasmashell.service";
+
+fn is_plasma_unit(u: &UnitRef) -> bool {
+    u.manager == Manager::User && &*u.name == PLASMA_UNIT
+}
+
+/// The topmost window (lowest `stack_index`) of the captured row: a process row's own PID, an
+/// app or unit row's members. `None` without a live windows snapshot.
+pub(crate) fn topmost_window<'a>(s: &'a Snapshot, t: &CapturedTarget) -> Option<&'a WindowEntry> {
+    if !matches!(s.windows.header.validity, Validity::Valid | Validity::Stale) {
+        return None;
+    }
+    let owns: Box<dyn Fn(u32) -> bool> = match (&t.node, t.pid) {
+        (NodeId::Process(key), _) => {
+            let pid = key.pid;
+            Box::new(move |p| p == pid)
+        }
+        (node, _) => {
+            let pids: Vec<u32> = members(&s.processes, node)
+                .into_iter()
+                .map(|i| s.processes.records[i].key.pid)
+                .collect();
+            Box::new(move |p| pids.contains(&p))
+        }
+    };
+    s.windows
+        .windows
+        .iter()
+        .filter(|w| owns(w.pid))
+        .min_by_key(|w| w.stack_index)
+}
+
 /// The live member records of an app or unit row, in record order. Empty for every other
 /// node.
 fn members(p: &ProcessSnapshot, node: &NodeId) -> Vec<usize> {
@@ -1919,6 +2101,9 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_open_virustotal))
             .on_action(cx.listener(Self::on_create_dump))
             .on_action(cx.listener(Self::on_activate_window))
+            .on_action(cx.listener(Self::on_show_window))
+            .on_action(cx.listener(Self::on_restart_unit))
+            .on_action(cx.listener(Self::on_file_properties))
             .child(
                 div()
                     .relative()

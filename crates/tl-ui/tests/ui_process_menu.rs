@@ -1097,7 +1097,7 @@ mod end {
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
     use tl_model::command::KWinCommand;
     use tl_model::command::{Command, Tab};
-    use tl_model::health::HelperState;
+    use tl_model::health::{EngineCaps, HelperState};
     use tl_model::ids::ColumnId;
     use tl_model::ids::DeviceIdx;
     use tl_model::ids::PseudoKind;
@@ -1125,9 +1125,9 @@ mod end {
     use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
         ActivateWindow, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree,
-        EndTask, FreezeApp, GoToParent, IoClass, KillApp, OpenFileLocation, OpenVirusTotal,
-        PriorityClass, ProcessesShowHidden, ResumeProcess, SetIoPriorityClass, SetPriority,
-        SuspendProcess, ThawApp,
+        EndTask, FileProperties, FreezeApp, GoToParent, IoClass, KillApp, OpenFileLocation,
+        OpenVirusTotal, PriorityClass, ProcessesShowHidden, RestartUnit, ResumeProcess,
+        SetIoPriorityClass, SetPriority, ShowWindow, SuspendProcess, ThawApp,
     };
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
@@ -2108,6 +2108,7 @@ mod end {
         ]);
         assert_eq!(menu(&mut rig, &[7]), app, "an app row");
         let mut unit = app.clone();
+        unit.splice(9..9, ["Restart unit \"foo.service\"", "-"]);
         unit.extend(["-", "Go to service"]);
         assert_eq!(menu(&mut rig, &[8]), unit, "a unit row");
 
@@ -2559,7 +2560,7 @@ mod end {
     fn row_menu_hides_unshipped_phases(cx: &mut TestAppContext) {
         let mut rig = Rig::new(cx);
         publish_kinds(&mut rig);
-        let unshipped = ["Show Window", "Restart", "File properties"];
+        let unshipped = ["Show Window", "File properties"];
         for rows in [&[1][..], &[1, 2], &[4], &[5], &[7], &[8], &[9]] {
             let menu = build_menu(&mut rig, rows, ColumnId::Name);
             let mut labels = shape(&mut rig, &menu);
@@ -2571,6 +2572,203 @@ mod end {
                 }
             }
         }
+    }
+
+    /// Publishes `windows` (a Valid windows snapshot, the KWin bridge up) and `caps` together.
+    fn publish_windows_caps(rig: &mut Rig, windows: Vec<WindowEntry>, caps: EngineCaps) {
+        rig.engine.publish_with(|s| {
+            Arc::make_mut(&mut s.health).caps = caps;
+            s.windows = Arc::new(WindowsSnapshot {
+                header: ComponentHeader {
+                    version: 2,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                windows: windows.into(),
+                pick: None,
+            });
+        });
+        rig.vcx.run_until_parked();
+    }
+
+    fn menu_labels(rig: &mut Rig, ix: usize) -> Vec<String> {
+        let m = build_menu(rig, &[ix], ColumnId::Name);
+        shape(rig, &m)
+    }
+
+    #[gpui_kit::test]
+    fn show_window_hidden_without_bridge_disabled_without_window(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        assert!(
+            !menu_labels(&mut rig, 1)
+                .iter()
+                .any(|l| l.contains("Show Window")),
+            "no bridge"
+        );
+        let windows = vec![
+            kwin_window("{late}", 300, 1, "Back"),
+            kwin_window("{top}", 300, 0, "Front"),
+        ];
+        publish_windows(&mut rig, windows);
+        let with = menu_labels(&mut rig, 1);
+        assert!(with.contains(&"Show Window".to_owned()), "{with:?}");
+        let without = menu_labels(&mut rig, 2);
+        assert!(
+            without.contains(&"(Show Window: No window)".to_owned()),
+            "{without:?}"
+        );
+        let exited = menu_labels(&mut rig, 4);
+        assert!(
+            !exited.iter().any(|l| l.contains("Show Window"))
+                || exited.contains(&"(Show Window: Process exited)".to_owned())
+        );
+
+        // The built menu holds the captured targets the handler acts on.
+        menu_labels(&mut rig, 1);
+        assert!(rig.dispatch(ShowWindow).is_none());
+        let sent = kwin_sent(&rig);
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(
+            &sent[0],
+            KWinCommand::Activate { internal_id } if &**internal_id == "{top}"
+        ));
+        assert_eq!(visible(&mut rig.vcx), ["Process window shown."]);
+    }
+
+    #[gpui_kit::test]
+    fn restart_plasma_shell_toasts_and_in_progress(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(
+            vec![record(700, 1, "plasmashell", ProcFlags::empty())],
+            &[700],
+            Vec::new(),
+        );
+        let labels = menu_labels(&mut rig, 0);
+        assert!(
+            labels.contains(&"Restart Plasma Shell".to_owned()),
+            "{labels:?}"
+        );
+        let unit = UnitRef {
+            manager: Manager::User,
+            name: Arc::from("plasma-plasmashell.service"),
+        };
+        let restarts = |rig: &Rig| {
+            actions_sent(&rig.engine)
+                .into_iter()
+                .filter(|r| r.kind == ActionKind::UnitRestart)
+                .collect::<Vec<_>>()
+        };
+        rig.select_pids(&[700]);
+        assert!(rig.dispatch(RestartUnit { unit: unit.clone() }).is_none());
+        let sent = restarts(&rig);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].targets.as_slice(),
+            [ActionTarget::Unit(unit.clone())]
+        );
+        let id = sent[0].id;
+
+        rig.select_pids(&[700]);
+        assert!(rig.dispatch(RestartUnit { unit: unit.clone() }).is_none());
+        assert_eq!(restarts(&rig).len(), 1, "nothing sent while pending");
+        assert_eq!(
+            visible(&mut rig.vcx),
+            ["Plasma Shell restart is already in progress."]
+        );
+
+        emit(&rig.engine, &mut rig.vcx, id, None, ActionState::Started);
+        assert!(visible(&mut rig.vcx).contains(&"Restarting Plasma Shell...".to_owned()));
+        emit(
+            &rig.engine,
+            &mut rig.vcx,
+            id,
+            Some(0),
+            ActionState::Succeeded,
+        );
+        emit(&rig.engine, &mut rig.vcx, id, None, ActionState::Succeeded);
+        assert!(visible(&mut rig.vcx).contains(&"Plasma Shell restarted".to_owned()));
+
+        rig.select_pids(&[700]);
+        assert!(rig.dispatch(RestartUnit { unit }).is_none());
+        assert_eq!(restarts(&rig).len(), 2, "sends again once done");
+    }
+
+    #[gpui_kit::test]
+    fn restart_unit_label_for_mainpid(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_units(&mut rig, pid_units());
+        let has = |labels: &[String], want: &str| labels.iter().any(|l| l == want);
+        assert!(has(
+            &menu_labels(&mut rig, 2),
+            "Restart unit \"pipewire.service\""
+        ));
+        assert!(has(
+            &menu_labels(&mut rig, 8),
+            "Restart unit \"foo.service\""
+        ));
+        assert!(
+            !menu_labels(&mut rig, 7)
+                .iter()
+                .any(|l| l.contains("Restart"))
+        );
+        assert!(
+            !menu_labels(&mut rig, 1)
+                .iter()
+                .any(|l| l.contains("Restart"))
+        );
+        publish_units(
+            &mut rig,
+            vec![service_unit(
+                Manager::System,
+                "plasma-kwin_wayland.service",
+                301,
+            )],
+        );
+        assert!(
+            !menu_labels(&mut rig, 2)
+                .iter()
+                .any(|l| l.contains("Restart"))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn file_properties_hidden_without_filemanager1(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        assert!(
+            !menu_labels(&mut rig, 1)
+                .iter()
+                .any(|l| l.contains("File properties")),
+            "no FileManager1 owner"
+        );
+        publish_windows_caps(&mut rig, Vec::new(), EngineCaps::FILE_MANAGER1);
+        let labels = menu_labels(&mut rig, 1);
+        let at = |l: &[String], want: &str| l.iter().position(|x| x == want);
+        assert_eq!(
+            at(&labels, "File properties"),
+            at(&labels, "Properties").map(|i| i + 1)
+        );
+        assert!(
+            menu_labels(&mut rig, 6).contains(&"(File properties: Executable deleted)".to_owned())
+        );
+        assert!(
+            !menu_labels(&mut rig, 7)
+                .iter()
+                .any(|l| l.contains("File properties"))
+        );
+
+        menu_labels(&mut rig, 1);
+        assert!(rig.dispatch(FileProperties).is_none());
+        let sent = actions_sent(&rig.engine);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::ShowInFileManager {
+                path: Arc::from("/usr/bin/proc"),
+                properties: true,
+            }
+        );
     }
 
     #[gpui_kit::test]
