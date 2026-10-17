@@ -939,3 +939,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.62: I/O priority read in the engine per R-144 (io_priority_of, visible rows only), stored in ProcessExtrasP2; raw-class read in tl-ops so Default can be checked; levels 1-3, 5, 6 check nothing.
 - pdu.62: closed by the leader after a1be2c4f (I/O priority read limited to detail keys).
 - hjn.40: GPU open from Memory keeps no extra scan (config watch covers freshness); Plasma 5 KScreen dir watch dropped, Plasma 5 refreshes on page open and manual refresh only.
+- hk6.31: option A, new tasklens-hk6.38 reads the drop-in's Recovery keys into UnitDetails; hk6.31 waits for it; engine write rule unchanged.
