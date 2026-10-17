@@ -2426,6 +2426,7 @@ shell-menu-view-columns = Columns
 shell-menu-view-process-view = Process View
 shell-menu-view-window = Window
 shell-menu-window-always-on-top = Always On Top
+shell-menu-window-mini = Performance mini window
 shell-menu-view-appearance = Appearance
 shell-menu-view-theme = Theme
 shell-menu-view-graphs = Graphs

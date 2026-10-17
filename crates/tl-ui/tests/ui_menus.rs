@@ -24,8 +24,9 @@ use tl_model::settings::{
 };
 use tl_model::table::TableMode;
 use tl_ui::actions::{
-    MenuId, OpenCollectorHealth, OpenHandleSearch, OpenRunDialog, OpenSettings, OpenShortcuts,
-    Quit, SetViewMode, ShowSystemInformation, bind_keys_global, register_global_handlers,
+    MenuId, OpenAdditionalSetup, OpenCollectorHealth, OpenHandleSearch, OpenRunDialog,
+    OpenSettings, OpenShortcuts, Quit, SetViewMode, ShowSystemInformation, bind_keys_global,
+    register_global_handlers,
 };
 use tl_ui::app::{AppEnv, BootSettings, EngineGlobal};
 use tl_ui::components::dialog::{DialogButton, TlDialogView};
@@ -1231,7 +1232,10 @@ fn window_menu_always_on_top_dispatch(cx: &mut TestAppContext) {
         labels(r.cx)
     );
     keys(r.cx, "down down right");
-    assert_eq!(sub_labels(r.cx), ["Always On Top"]);
+    assert_eq!(
+        sub_labels(r.cx),
+        ["Always On Top", "Performance mini window"]
+    );
     keys(r.cx, "enter");
     let got = toggles.borrow().clone();
     assert_eq!(got.len(), 1, "{got:?}");
@@ -1552,6 +1556,7 @@ fn graphs_menu_p1_items(cx: &mut TestAppContext) {
     open_graphs(r.cx);
     let mut expected: Vec<String> = GRAPH_LABELS.iter().map(|l| format!("item:{l}")).collect();
     expected.push("separator".to_owned());
+    expected.push("item:Keep detached graphs open when closing main window".to_owned());
     expected.push("item:Reset Minigraph Layout".to_owned());
     let drawn: Vec<String> = shapes(r.cx)
         .into_iter()
@@ -1561,10 +1566,6 @@ fn graphs_menu_p1_items(cx: &mut TestAppContext) {
         })
         .collect();
     assert_eq!(drawn, expected);
-    assert!(
-        !drawn.iter().any(|s| s.contains("Keep detached")),
-        "the P3 item comes with E21-034"
-    );
     assert_eq!(sub_highlighted(r.cx), ["CPU Graph"]);
 }
 
@@ -1634,8 +1635,8 @@ fn gpu_items_disabled_without_gpu(cx: &mut TestAppContext) {
             assert_eq!(*kind, MenuEntryKind::Item, "{label:?}");
         }
     }
-    // Up from CPU wraps to Reset, then the last enabled check is Network Graph.
-    keys(r.cx, "up up");
+    // Up from CPU wraps to Reset, then Keep detached, then the last enabled check.
+    keys(r.cx, "up up up");
     assert_eq!(sub_highlighted(r.cx), ["Network Graph"]);
 
     // The tooltip opens on hover and gives the reason.
@@ -3210,18 +3211,20 @@ fn help_menu_p2_items(cx: &mut TestAppContext) {
     let entries = entries(r.cx);
     assert_eq!(
         entries.len(),
-        4,
-        "Keyboard Shortcuts, System Information, separator, About: {entries:?}"
+        5,
+        "Keyboard Shortcuts, System Information, Additional setup, separator, About: {entries:?}"
     );
     assert_eq!(entries[0].role(), Some(Role::MenuItem));
     assert_eq!(entries[0].label(), Some("Keyboard Shortcuts"));
     assert_eq!(entries[0].selected(), Some(true));
     assert_eq!(entries[1].role(), Some(Role::MenuItem));
     assert_eq!(entries[1].label(), Some("System Information…"));
-    assert_eq!(entries[2].role(), None, "a separator");
-    assert!(entries[2].bounds().size.height < px(2.), "a one-pixel line");
-    assert_eq!(entries[3].role(), Some(Role::MenuItem));
-    assert_eq!(entries[3].label(), Some("About tasklens…"));
+    assert_eq!(entries[2].role(), Some(Role::MenuItem));
+    assert_eq!(entries[2].label(), Some("Additional setup…"));
+    assert_eq!(entries[3].role(), None, "a separator");
+    assert!(entries[3].bounds().size.height < px(2.), "a one-pixel line");
+    assert_eq!(entries[4].role(), Some(Role::MenuItem));
+    assert_eq!(entries[4].label(), Some("About tasklens…"));
     assert_eq!(
         hint_for(&mut r, &OpenShortcuts).as_deref(),
         Some("Ctrl+?"),
@@ -3229,6 +3232,10 @@ fn help_menu_p2_items(cx: &mut TestAppContext) {
     );
     assert_eq!(hint_for(&mut r, &ShowSystemInformation), None);
     assert_eq!(hint_for(&mut r, &OpenAbout), None);
+    assert_eq!(
+        hint_for(&mut r, &OpenAdditionalSetup { focus_row: None }),
+        None
+    );
 }
 
 #[gpui_kit::test]
@@ -3252,7 +3259,130 @@ fn help_about_dispatch(cx: &mut TestAppContext) {
     r.cx.update(|_, cx| {
         cx.on_action(move |_: &OpenAbout, _| seen.set(seen.get() + 1));
     });
-    keys(r.cx, "alt-h down down enter");
+    keys(r.cx, "alt-h end enter");
     assert_eq!(count.get(), 1);
     assert_eq!(open_menu(r.cx), None);
+}
+
+#[gpui_kit::test]
+fn help_additional_setup_position_and_dispatch(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    let count = Rc::new(Cell::new(0));
+    let seen = Rc::clone(&count);
+    r.cx.update(|_, cx| {
+        cx.on_action(move |a: &OpenAdditionalSetup, _| {
+            assert_eq!(a.focus_row, None);
+            seen.set(seen.get() + 1)
+        });
+    });
+    keys(r.cx, "alt-h");
+    let entries = entries(r.cx);
+    assert_eq!(entries[1].label(), Some("System Information…"));
+    assert_eq!(entries[2].label(), Some("Additional setup…"));
+    assert_eq!(entries[3].role(), None, "a separator follows");
+    keys(r.cx, "down down enter");
+    assert_eq!(count.get(), 1);
+    assert_eq!(open_menu(r.cx), None);
+}
+
+// View > Window: Performance mini window and View > Graphs: keep detached (E21-034).
+
+/// The built entries of the open View > Window submenu (root index 2).
+fn window_entries(cx: &mut VisualTestContext) -> Vec<tl_ui::components::menu::MenuEntryInfo> {
+    let bar = bar(cx);
+    cx.update(|window, cx| {
+        let popup = bar.read(cx).popup().expect("menu open").clone();
+        let root = popup.read(cx).entries_for_test(window);
+        assert_eq!(root[2].label.as_deref(), Some("Window"));
+        let sub = root[2].submenu.clone().expect("Window submenu");
+        sub.read(cx).entries_for_test(window)
+    })
+}
+
+struct MiniStub;
+
+impl Render for MiniStub {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+#[gpui_kit::test]
+fn mini_window_item_check_follows_registry(cx: &mut TestAppContext) {
+    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    let mut r = rig(cx);
+    set_kwin(&mut r, tl_model::validity::Validity::Valid);
+    assert!(
+        !r.cx.update(|_, cx| menus_view::mini_window_open(cx)),
+        "no registry means closed"
+    );
+    r.cx.update(|_, cx| GlobalRegistry::init(cx));
+    assert!(!r.cx.update(|_, cx| menus_view::mini_window_open(cx)));
+    keys(r.cx, "alt-v down down right");
+    let item = |cx: &mut VisualTestContext| {
+        window_entries(cx)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Performance mini window"))
+            .expect("mini window item")
+    };
+    let e = item(r.cx);
+    assert!(!e.checked, "unchecked while closed");
+    assert_eq!(e.hint.as_deref(), Some("Ctrl+Shift+M"));
+    keys(r.cx, "escape escape");
+    assert_eq!(open_menu(r.cx), None);
+
+    r.cx.update(|_, cx| {
+        let reg = cx.global::<GlobalRegistry>().0.clone();
+        reg.update(cx, |reg, cx| {
+            reg.open_or_focus(WindowKey::Mini, cx, |cx| {
+                cx.open_window(Default::default(), |_, cx| cx.new(|_| MiniStub))
+                    .map(Into::into)
+            })
+        });
+    });
+    r.cx.run_until_parked();
+    assert!(r.cx.update(|_, cx| menus_view::mini_window_open(cx)));
+    keys(r.cx, "alt-v down down right");
+    assert!(item(r.cx).checked, "checked while open");
+    keys(r.cx, "escape escape");
+
+    r.cx.update(|_, cx| {
+        let reg = cx.global::<GlobalRegistry>().0.clone();
+        reg.update(cx, |reg, cx| reg.close(&WindowKey::Mini, cx));
+    });
+    r.cx.run_until_parked();
+    keys(r.cx, "alt-v down down right");
+    assert!(!item(r.cx).checked, "unchecked after the window closes");
+}
+
+#[gpui_kit::test]
+fn mini_window_item_dispatch(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_kwin(&mut r, tl_model::validity::Validity::Valid);
+    let count = Rc::new(Cell::new(0));
+    let seen = Rc::clone(&count);
+    r.cx.update(|_, cx| {
+        cx.on_action(move |_: &tl_ui::actions::ToggleMiniWindow, _| seen.set(seen.get() + 1));
+    });
+    keys(r.cx, "alt-v down down right down enter");
+    assert_eq!(count.get(), 1);
+    assert_eq!(open_menu(r.cx), None);
+}
+
+#[gpui_kit::test]
+fn keep_detached_toggle(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_gpus(&mut r, 1);
+    let keep = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| TlSettings::settings(cx).graphs.keep_detached_on_close)
+    };
+    assert!(!keep(r.cx), "off by default");
+    open_graphs(r.cx);
+    keys(r.cx, "up up");
+    assert_eq!(
+        sub_highlighted(r.cx),
+        ["Keep detached graphs open when closing main window"]
+    );
+    keys(r.cx, "enter");
+    assert!(keep(r.cx), "the setting flipped");
 }

@@ -1,15 +1,16 @@
 //! The Help menu of the menu bar (E21-014, UI-SHL-041, APP-024, APP-030, APP-041, APP-053,
 //! UI-SYS-096).
 //!
-//! In P2 the menu reads "Keyboard Shortcuts", "System Information...", a separator, "About
-//! tasklens...". "Keyboard Shortcuts" dispatches `OpenShortcuts` and shows the live hint
+//! The menu reads "Keyboard Shortcuts", "System Information...", "Additional setup..." (E21-034),
+//! a separator, "About tasklens...". "Keyboard Shortcuts" dispatches `OpenShortcuts` and shows the live hint
 //! "Ctrl+?". "System Information..." dispatches `ShowSystemInformation`, which the main window
 //! handles by selecting the Information tab. "About tasklens..." dispatches `OpenAbout`.
-//! "Additional setup..." (P3) and "Documentation" (P4) go between them, added by their own beads.
+//! "Additional setup..." dispatches `OpenAdditionalSetup`. "Documentation" (P4) is added by its
+//! own bead.
 
 use gpui_kit::{App, Entity, FocusHandle, Window};
 
-use crate::actions::{OpenShortcuts, ShowSystemInformation};
+use crate::actions::{OpenAdditionalSetup, OpenShortcuts, ShowSystemInformation};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::i18n::tr;
 use crate::window::about::OpenAbout;
@@ -21,6 +22,10 @@ pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> E
             .item(
                 tr(cx, "shell-menu-help-sysinfo"),
                 Box::new(ShowSystemInformation),
+            )
+            .item(
+                tr(cx, "shell-menu-help-setup"),
+                Box::new(OpenAdditionalSetup { focus_row: None }),
             )
             .separator()
             .item(tr(cx, "shell-menu-help-about"), Box::new(OpenAbout))

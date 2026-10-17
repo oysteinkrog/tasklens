@@ -6,8 +6,8 @@
 //! "Columns" is disabled there with the reason as tooltip. View > Process View (E21-002,
 //! UI-SHL-035) holds the view mode radios, two process display checks and "Collapse all"; the
 //! view mode Actions and their toasts are the Processes page's. View > Window (E21-008,
-//! UI-SHL-036) holds "Always On Top", the menu path to the main window pin; the pin's owner
-//! handles the Action. View > Appearance (E21-009, UI-SHL-037) holds the UI Scale, Row Height
+//! UI-SHL-036) holds "Always On Top", the menu path to the main window pin, and "Performance mini
+//! window" (E21-034), a check that follows the registry; the owners handle the Actions. View > Appearance (E21-009, UI-SHL-037) holds the UI Scale, Row Height
 //! and intensity slider rows and two checks that keep the menu open; the menu bar owns the
 //! slider states and saves their values. View > Graphs (E21-003, UI-SHL-039, R-089) holds the
 //! seven minigraph checks and "Reset Minigraph Layout"; the GPU checks are disabled when the
@@ -31,9 +31,9 @@ use tl_model::table::TableMode;
 
 use super::main::{ShellState, WINDOW_TITLE};
 use super::menubar::{HEAT_INTENSITY, MenuSliders, ROW_HEIGHT, SHADOW_INTENSITY, UI_SCALE};
-use super::registry::WindowKey;
+use super::registry::{GlobalRegistry, WindowKey};
 use super::titlebar::keep_above_supported;
-use crate::actions::{SetSetting, SetViewMode, ToggleSetting};
+use crate::actions::{SetSetting, SetViewMode, ToggleMiniWindow, ToggleSetting};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{MenuSuffixAction, TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
@@ -424,9 +424,16 @@ pub fn always_on_top_marks(cx: &App) -> (bool, bool) {
     )
 }
 
+/// Whether the window registry holds the performance mini window. False when no registry is
+/// installed.
+pub fn mini_window_open(cx: &App) -> bool {
+    cx.try_global::<GlobalRegistry>()
+        .is_some_and(|r| r.0.read(cx).get(&WindowKey::Mini).is_some())
+}
+
 fn window_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
     let label = tr(cx, "shell-menu-window-always-on-top");
-    match always_on_top_marks(cx) {
+    let menu = match always_on_top_marks(cx) {
         (true, checked) => menu.check_item(
             label,
             checked,
@@ -436,7 +443,12 @@ fn window_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
             }),
         ),
         (false, _) => menu.item_disabled(label, Some(tr(cx, "fnd-pin-unsupported"))),
-    }
+    };
+    menu.check_item(
+        tr(cx, "shell-menu-window-mini"),
+        mini_window_open(cx),
+        Box::new(ToggleMiniWindow),
+    )
 }
 
 /// A slider value as a whole percent, "120%".
@@ -552,8 +564,9 @@ pub fn has_gpu(cx: &App) -> bool {
 }
 
 /// The seven minigraph checks, a separator and "Reset Minigraph Layout". The GPU, VRAM and GPU
-/// Temperature checks are disabled with "No GPU found" when [`has_gpu`] is false. E21-034 adds
-/// its P3 item between the separator and Reset.
+/// Temperature checks are disabled with "No GPU found" when [`has_gpu`] is false. The
+/// separator is followed by "Keep detached graphs open when closing main window" (E21-034) and
+/// Reset.
 fn graphs_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
     let gpu = has_gpu(cx);
     let marks = graphs_marks(cx);
@@ -564,10 +577,17 @@ fn graphs_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
             menu.check_item(tr(cx, label), checked, Box::new(ToggleSetting(key)))
         };
     }
-    menu.separator().item(
-        tr(cx, "shell-menu-graphs-reset"),
-        Box::new(ResetMinigraphLayout),
-    )
+    let keep = TlSettings::settings(cx).graphs.keep_detached_on_close;
+    menu.separator()
+        .check_item(
+            tr(cx, "shell-menu-graphs-keep-detached"),
+            keep,
+            Box::new(ToggleSetting(SettingKey::GraphsKeepDetachedOnClose)),
+        )
+        .item(
+            tr(cx, "shell-menu-graphs-reset"),
+            Box::new(ResetMinigraphLayout),
+        )
 }
 
 /// One theme row: its name as stored, its menu label, row colours and whether it carries the
