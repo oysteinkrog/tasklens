@@ -94,9 +94,12 @@
 //! gives `Restricted` queues one `ReadProcessFiles` through `HelperHandle::read`, which never
 //! starts a session, so no polkit prompt comes from this worker. Environment reads `ENVIRON`
 //! (only when the tab is read: on open and on `DetailRefresh`), Memory maps `MAPS | SMAPS`,
-//! General the `EXE`, `CWD`, `ROOT`, `IO` and `STATUS` of its Restricted fields, and PSS and USS
-//! `SMAPS_ROLLUP` for at most `HELPER_READS_MAX` keys per second. File descriptors and Security
-//! stay Restricted (tasklens-qfx.39). Each (target, tab) and each PSS key gets at most one helper
+//! File descriptors `FD_LIST | FDINFO`, Security `NS | STATUS`, General the `EXE`, `CWD`,
+//! `ROOT`, `IO` and `STATUS` of its Restricted fields, and PSS and USS `SMAPS_ROLLUP` for at
+//! most `HELPER_READS_MAX` keys per second (tasklens-qfx.39 added File descriptors and
+//! Security). A helper fd whose link is a plain path shows as a file, since no stat can follow
+//! it. A helper Security tab has no login uid, session id, LSM label or dumpable value: the
+//! helper does not read those files. Each (target, tab) and each PSS key gets at most one helper
 //! read per `HELPER_PERIOD`, and none while another one waits: `HelperDetailReads` sends a read
 //! no sooner than `HELPER_PERIOD` after the last read of the same slot returned, and drops a
 //! queued read whose tab or column left the demand while it waited. The next sample parses the
@@ -1184,12 +1187,13 @@ fn general_helper_files(read: &GeneralRead) -> ProcFiles {
     files
 }
 
-/// The helper files of a tab whose direct read gave `Restricted`. File descriptors and Security
-/// have no byte parsers yet (tasklens-qfx.39) and Threads has no helper file.
+/// The helper files of a tab whose direct read gave `Restricted`. Threads has no helper file.
 fn tab_helper_files(tab: DetailTab) -> Option<ProcFiles> {
     match tab {
         DetailTab::Environment => Some(ProcFiles::ENVIRON),
         DetailTab::Maps => Some(ProcFiles::MAPS | ProcFiles::SMAPS),
+        DetailTab::Fds => Some(ProcFiles::FD_LIST | ProcFiles::FDINFO),
+        DetailTab::Security => Some(ProcFiles::NS | ProcFiles::STATUS),
         _ => None,
     }
 }
@@ -1986,6 +1990,15 @@ impl ProcessDetailSource {
                     files
                         .and_then(|files| maps_from_helper(&files, exe.as_deref(), &mut too_large)),
                 )
+            }
+            DetailTab::Fds => Some(files.and_then(|files| {
+                let mut rows = fds_from_helper(&files, &mut too_large)?;
+                resolve_sockets(&self.cfg.sys_root, key.pid, &mut target.sockets, &mut rows);
+                Ok(TabRead::Fds(rows))
+            })),
+            DetailTab::Security => {
+                let refs = rd::read_ns_refs(&self.cfg.sys_root);
+                Some(files.and_then(|files| security_from_helper(&files, &refs, &mut too_large)))
             }
             _ => None,
         };
@@ -2962,6 +2975,65 @@ fn maps_from_helper(
     let mut nodes = Vec::new();
     rd::group_maps(&mut regions, exe, rss.as_ref(), &mut nodes);
     Ok(TabRead::Maps { regions, nodes })
+}
+
+/// The File descriptors rows from a helper `FD_LIST` and `FDINFO`, parsed as `read_fds` does.
+/// An `FDINFO` the helper could not read leaves every row without fdinfo, as a denied
+/// `fdinfo/` does (EFBIG also sets `too_large`).
+fn fds_from_helper(files: &[HelperFile], too_large: &mut bool) -> Result<Vec<FdInfo>, Validity> {
+    let data = match helper_file(files, ProcFiles::FD_LIST) {
+        Some(Ok(data)) => data,
+        Some(Err(errno)) => return Err(errno_validity(*errno, too_large)),
+        None => return Err(Validity::Failed),
+    };
+    let Some(links) = fd_list(data) else {
+        tracing::debug!("helper fd list not decoded");
+        return Err(Validity::Failed);
+    };
+    let fdinfo: Vec<(u32, &[u8])> = match helper_file(files, ProcFiles::FDINFO) {
+        Some(Ok(data)) => postcard::from_bytes(data).unwrap_or_else(|_| {
+            tracing::debug!("helper fdinfo not decoded");
+            Vec::new()
+        }),
+        Some(Err(errno)) => {
+            errno_validity(*errno, too_large);
+            Vec::new()
+        }
+        None => Vec::new(),
+    };
+    let mut rows = Vec::new();
+    rd::parse_helper_fds(&links, &fdinfo, &mut String::new(), &mut rows);
+    Ok(rows)
+}
+
+/// The Security tab from a helper `STATUS` and `NS`, parsed as `read_security` does. An `NS`
+/// the helper could not read leaves every namespace Restricted (EFBIG also sets `too_large`).
+fn security_from_helper(
+    files: &[HelperFile],
+    refs: &rd::NsRefs,
+    too_large: &mut bool,
+) -> Result<TabRead, Validity> {
+    let status = match helper_file(files, ProcFiles::STATUS) {
+        Some(Ok(data)) => data,
+        Some(Err(errno)) => return Err(errno_validity(*errno, too_large)),
+        None => return Err(Validity::Failed),
+    };
+    let ns: Option<Vec<(&str, &[u8])>> = match helper_file(files, ProcFiles::NS) {
+        Some(Ok(data)) => postcard::from_bytes(data).ok(),
+        Some(Err(errno)) => {
+            errno_validity(*errno, too_large);
+            None
+        }
+        None => None,
+    };
+    let mut info = SecurityInfo::default();
+    if rd::parse_helper_security(status, ns.as_deref(), refs, &mut String::new(), &mut info)
+        .is_err()
+    {
+        tracing::debug!("helper status not parsed");
+        return Err(Validity::Failed);
+    }
+    Ok(TabRead::Security(Box::new(info)))
 }
 
 /// The General values of a helper reply for the `requested` files. A file the helper could not

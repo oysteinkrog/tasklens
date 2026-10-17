@@ -2315,8 +2315,8 @@ mod detail_helper {
     use tl_engine::workers::process_detail::{self, ProcessDetailSource};
     use tl_model::demand::{Demand, DetailDemand};
     use tl_model::details::{
-        DetailTab, DetailTarget, HandleKind, HandlePhase, HandleSearchState, ScanId, ScanPhase,
-        SearchId, StringEncoding, StringScanOpts, TabPayload,
+        DetailTab, DetailTarget, FdKind, HandleKind, HandlePhase, HandleSearchState, NsKind,
+        NsState, ScanId, ScanPhase, SearchId, StringEncoding, StringScanOpts, TabPayload,
     };
     use tl_model::health::{HelperState, SourceId};
     use tl_model::helper_proto::{
@@ -2554,10 +2554,43 @@ mod detail_helper {
             ProcFiles::SMAPS => SMAPS.as_bytes(),
             ProcFiles::SMAPS_ROLLUP => ROLLUP.as_bytes(),
             ProcFiles::STATUS => STATUS.as_bytes(),
+            ProcFiles::FD_LIST => {
+                let fds: [(u32, &[u8]); 3] = HELPER_FDS;
+                return Some(postcard::to_allocvec(&fds).expect("encode fd list"));
+            }
+            ProcFiles::FDINFO => {
+                let info: [(u32, &[u8]); 2] = HELPER_FDINFO;
+                return Some(postcard::to_allocvec(&info).expect("encode fdinfo"));
+            }
+            ProcFiles::NS => {
+                let ns: [(&str, &[u8]); 3] = HELPER_NS;
+                return Some(postcard::to_allocvec(&ns).expect("encode ns"));
+            }
             _ => return None,
         };
         Some(data.to_vec())
     }
+
+    /// The helper's `FD_LIST` of `PID`: (fd, link target).
+    const HELPER_FDS: [(u32, &[u8]); 3] = [
+        (0, b"/dev/null"),
+        (3, b"pipe:[8812]"),
+        (7, b"anon_inode:[eventfd]"),
+    ];
+    /// The helper's `FDINFO` of `PID`. Fd 3 has none.
+    const HELPER_FDINFO: [(u32, &[u8]); 2] = [
+        (0, b"pos:\t0\nflags:\t0100002\nmnt_id:\t25\nino:\t5\n"),
+        (
+            7,
+            b"pos:\t0\nflags:\t02\nmnt_id:\t15\nino:\t1057\neventfd-count:\t3\n",
+        ),
+    ];
+    /// The helper's `NS` of `PID`. The fixture's PID 1 has net 4026531840 and pid 4026531836.
+    const HELPER_NS: [(&str, &[u8]); 3] = [
+        ("net", b"net:[4026531840]"),
+        ("pid", b"pid:[4026532999]"),
+        ("pid_for_children", b"pid_for_children:[4026532999]"),
+    ];
 
     /// The pid whose fds hold `SEARCH_MARKER`, and the marker path.
     const MARKER_PID: u32 = 2;
@@ -3110,6 +3143,114 @@ mod detail_helper {
         for tab in tabs {
             assert!(!rig.tab(tab).is_empty(), "{tab:?} sent");
         }
+        rig.finish();
+    }
+
+    /// tasklens-qfx.39: a Restricted File descriptors tab sends one `FD_LIST | FDINFO` read and
+    /// fills from the helper's rows. No Restricted payload goes out while the read waits.
+    #[test]
+    fn detail_fds_through_helper() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("fd");
+        let mut rig = Rig::start(&root, demand(&[DetailTab::Fds]), 1000, true);
+        rig.run(Duration::from_millis(2_950));
+
+        let reads = rig.reads();
+        assert!(!reads.is_empty());
+        assert!(
+            reads
+                .iter()
+                .all(|r| r.1 == key() && r.2 == ProcFiles::FD_LIST | ProcFiles::FDINFO),
+            "{reads:?}"
+        );
+        let fds = rig.tab(DetailTab::Fds);
+        assert!(!fds.is_empty(), "the tab was sent");
+        assert!(
+            fds.iter().all(|t| t.validity == Validity::Valid),
+            "only helper payloads go out"
+        );
+        let TabPayload::Fds(detail) = &*fds[0].payload else {
+            panic!("expected Fds");
+        };
+        let rows: Vec<(i32, FdKind, &str, Option<u64>, Option<u32>)> = detail
+            .rows
+            .iter()
+            .map(|r| (r.fd, r.kind, &*r.name, r.inode, r.flags))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (0, FdKind::File, "/dev/null", Some(5), Some(0o100002)),
+                (3, FdKind::Pipe, "pipe:[8812]", Some(8812), None),
+                (
+                    7,
+                    FdKind::EventFd,
+                    "anon_inode:[eventfd]",
+                    Some(1057),
+                    Some(0o2)
+                ),
+            ]
+        );
+        assert_eq!(detail.rows[2].eventfd_count, Some(3));
+        rig.finish();
+    }
+
+    /// tasklens-qfx.39: a Restricted Security tab sends one `NS | STATUS` read and fills from
+    /// the helper's `status` and `ns` links, compared with the fixture's PID 1.
+    #[test]
+    fn detail_security_through_helper() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict("status");
+        let mut rig = Rig::start(&root, demand(&[DetailTab::Security]), 1000, true);
+        rig.run(Duration::from_millis(2_950));
+
+        let reads: Vec<_> = rig
+            .reads()
+            .into_iter()
+            .filter(|r| r.2 != ProcFiles::STATUS)
+            .collect();
+        assert!(!reads.is_empty(), "General asks for STATUS on its own");
+        assert!(
+            reads
+                .iter()
+                .all(|r| r.1 == key() && r.2 == ProcFiles::NS | ProcFiles::STATUS),
+            "{reads:?}"
+        );
+        let security = rig.tab(DetailTab::Security);
+        assert!(!security.is_empty(), "the tab was sent");
+        assert!(
+            security.iter().all(|t| t.validity == Validity::Valid),
+            "only helper payloads go out"
+        );
+        let TabPayload::Security(detail) = &*security[0].payload else {
+            panic!("expected Security");
+        };
+        assert_eq!(detail.uids.validity, Validity::Valid);
+        assert_eq!(
+            (detail.uids.value.real, detail.uids.value.effective),
+            (0, 0),
+            "the helper's status, not the fixture's uid 1000"
+        );
+        let ns = |kind: NsKind| {
+            let row = detail
+                .namespaces
+                .iter()
+                .find(|r| r.kind == kind)
+                .expect("row");
+            (row.validity, row.state)
+        };
+        assert_eq!(ns(NsKind::Net), (Validity::Valid, NsState::SharedWithInit));
+        assert_eq!(
+            ns(NsKind::Pid),
+            (Validity::Valid, NsState::Isolated { inode: 4026532999 })
+        );
+        assert_eq!(ns(NsKind::Mnt).0, Validity::Restricted);
         rig.finish();
     }
 

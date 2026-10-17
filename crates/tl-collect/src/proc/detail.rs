@@ -630,10 +630,45 @@ fn read_fd_link(
             return Some(FdInfo::new(fd, FdType::File, Arc::from(""), None));
         }
     }
-    let (kind, inode) =
-        classify_link(&bufs.small).unwrap_or_else(|| (stat_kind(fd_dir, name), None));
-    sanitize_link(&bufs.small, &mut bufs.text);
-    Some(FdInfo::new(fd, kind, Arc::from(bufs.text.as_str()), inode))
+    Some(fd_row(
+        fd,
+        &bufs.small,
+        || stat_kind(fd_dir, name),
+        &mut bufs.text,
+    ))
+}
+
+/// One row from the raw link target of fd `fd`, with the link fields set. `stat` gives the kind
+/// of a plain path. A target longer than `EXE_LINK_MAX` is cut and ends in `…`.
+fn fd_row(fd: u32, raw: &[u8], stat: impl FnOnce() -> FdType, text: &mut String) -> FdInfo {
+    let raw = &raw[..raw.len().min(EXE_LINK_MAX + 1)];
+    let (kind, inode) = classify_link(raw).unwrap_or_else(|| (stat(), None));
+    sanitize_link(raw, text);
+    FdInfo::new(fd, kind, Arc::from(text.as_str()), inode)
+}
+
+/// Fills `out` (cleared first) from the helper's bytes, as [`read_fds`] does. `links` is the
+/// decoded `FD_LIST`, (fd, raw link target), and `fdinfo` the decoded `FDINFO`, (fd,
+/// `fdinfo/<fd>` bytes). Both are sorted by fd, as the helper sends them. An fd without an
+/// `fdinfo` entry keeps `fdinfo_ok == false`. No stat can follow a link from bytes, so a plain
+/// path gives `File`, the type a failed stat gives.
+pub fn parse_helper_fds(
+    links: &[(u32, &[u8])],
+    fdinfo: &[(u32, &[u8])],
+    text: &mut String,
+    out: &mut Vec<FdInfo>,
+) {
+    out.clear();
+    out.reserve(links.len());
+    for &(fd, raw) in links {
+        let mut row = fd_row(fd, raw, || FdType::File, text);
+        if let Ok(at) = fdinfo.binary_search_by_key(&fd, |&(n, _)| n) {
+            let info = fdinfo[at].1;
+            parse_fdinfo(&info[..info.len().min(FDINFO_MAX)], &mut row);
+        }
+        out.push(row);
+    }
+    out.sort_by_key(|row| row.fd);
 }
 
 /// Classifies a link target by its text. `None` for a plain path, which needs a stat.
@@ -1314,31 +1349,7 @@ pub fn read_security(
             file: "status",
         });
     }
-
-    out.uid = status.uid;
-    out.gid = status.gid;
-    out.groups = status.groups;
-    out.cap_inh = status.cap_inh;
-    out.cap_prm = status.cap_prm;
-    out.cap_eff = status.cap_eff;
-    out.cap_bnd = status.cap_bnd;
-    out.cap_amb = status.cap_amb;
-    out.no_new_privs = status.no_new_privs;
-    out.seccomp = status.seccomp;
-    out.seccomp_filters = status.seccomp_filters;
-    sanitize_text(
-        &status.speculation_store_bypass,
-        SPECULATION_MAX,
-        &mut bufs.text,
-    );
-    out.speculation_store_bypass = Arc::from(bufs.text.as_str());
-    sanitize_text(
-        &status.speculation_indirect_branch,
-        SPECULATION_MAX,
-        &mut bufs.text,
-    );
-    out.speculation_indirect_branch = Arc::from(bufs.text.as_str());
-    out.elevated = elevated(&out.uid, out.cap_eff);
+    apply_status(status, &mut bufs.text, out);
 
     // R-163: only a root-owned directory of a non-root process is reported.
     out.dumpable = rustix::fs::fstat(pid_dir)
@@ -1350,6 +1361,92 @@ pub fn read_security(
     out.lsm_label = read_label(root, pid_dir, bufs);
     out.namespaces = read_namespaces(root, pid_dir);
     Ok(DetailRead::Ok)
+}
+
+/// Fills the `status` fields of `out` and the Elevated row.
+fn apply_status(status: PidStatus, text: &mut String, out: &mut SecurityInfo) {
+    out.uid = status.uid;
+    out.gid = status.gid;
+    out.groups = status.groups;
+    out.cap_inh = status.cap_inh;
+    out.cap_prm = status.cap_prm;
+    out.cap_eff = status.cap_eff;
+    out.cap_bnd = status.cap_bnd;
+    out.cap_amb = status.cap_amb;
+    out.no_new_privs = status.no_new_privs;
+    out.seccomp = status.seccomp;
+    out.seccomp_filters = status.seccomp_filters;
+    sanitize_text(&status.speculation_store_bypass, SPECULATION_MAX, text);
+    out.speculation_store_bypass = Arc::from(text.as_str());
+    sanitize_text(&status.speculation_indirect_branch, SPECULATION_MAX, text);
+    out.speculation_indirect_branch = Arc::from(text.as_str());
+    out.elevated = elevated(&out.uid, out.cap_eff);
+}
+
+/// The inodes the namespaces of a process are compared with, in the order of
+/// [`SecurityInfo::namespaces`]: PID 1's, and tasklens's for when PID 1's cannot be read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NsRefs {
+    pub init: [Option<u64>; 8],
+    pub tasklens: [Option<u64>; 8],
+}
+
+/// Reads the `ns/*` inodes of PID 1 and of `/proc/self` below the proc root. A link that
+/// cannot be read gives `None`.
+pub fn read_ns_refs(root: &SysRoot) -> NsRefs {
+    let mut refs = NsRefs::default();
+    let Ok(proc) = rustix::fs::open(
+        &root.proc,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return refs;
+    };
+    let init = open_beneath(proc.as_fd(), &["1", "ns"], OFlags::PATH | OFlags::DIRECTORY).ok();
+    let own_self = open_self_ns(proc.as_fd());
+    for (i, name) in NS_NAMES.iter().enumerate() {
+        refs.init[i] = init.as_ref().and_then(|d| ns_inode(d.as_fd(), name));
+        refs.tasklens[i] = own_self.as_ref().and_then(|d| ns_inode(d.as_fd(), name));
+    }
+    refs
+}
+
+/// Fills `out` (reset first) from the helper's bytes, as [`read_security`] does from the same
+/// files. `status` is the helper's `STATUS`. `ns` is its decoded `NS`, (name, link target), or
+/// `None` when the helper could not read it, which leaves every namespace `Restricted`. `refs`
+/// comes from [`read_ns_refs`]. The helper reads no `loginuid`, `sessionid` or `attr/current`
+/// and no directory owner, so those give `None` and `LsmLabel::Restricted`.
+pub fn parse_helper_security(
+    status: &[u8],
+    ns: Option<&[(&str, &[u8])]>,
+    refs: &NsRefs,
+    text: &mut String,
+    out: &mut SecurityInfo,
+) -> Result<(), CollectError> {
+    *out = SecurityInfo::default();
+    let mut parsed = PidStatus::default();
+    if parse_status(&status[..status.len().min(STATUS_READ_MAX)], &mut parsed).is_err() {
+        return Err(CollectError::ProcParse {
+            pid: 0,
+            file: "status",
+        });
+    }
+    apply_status(parsed, text, out);
+    out.lsm_label = LsmLabel::Restricted;
+    let Some(ns) = ns else {
+        return Ok(());
+    };
+    for (i, (state, name)) in out.namespaces.iter_mut().zip(NS_NAMES).enumerate() {
+        let Some(ino) = ns
+            .iter()
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, link)| ns_link_inode(name, link))
+        else {
+            continue;
+        };
+        *state = ns_state(ino, refs.init[i], || refs.tasklens[i]);
+    }
+    Ok(())
 }
 
 /// Flags for opening a file to read. `O_NONBLOCK` keeps a FIFO in a fixture tree from blocking
@@ -1500,25 +1597,32 @@ fn read_namespaces(root: &SysRoot, pid_dir: BorrowedFd<'_>) -> [NsState; 8] {
         let Some(ino) = ns_inode(own.as_fd(), name) else {
             continue;
         };
-        if let Some(init_ino) = init.as_ref().and_then(|d| ns_inode(d.as_fd(), name)) {
-            *state = if ino == init_ino {
-                NsState::SharedWithInit
-            } else {
-                NsState::Isolated(ino)
-            };
-            continue;
-        }
-        let self_ns =
-            own_self.get_or_insert_with(|| proc.as_ref().and_then(|p| open_self_ns(p.as_fd())));
-        let self_ino = self_ns.as_ref().and_then(|d| ns_inode(d.as_fd(), name));
-        // With neither reference readable there is nothing to compare against.
-        *state = match self_ino {
-            Some(s) if s == ino => NsState::SameAsTasklens,
-            Some(_) => NsState::Isolated(ino),
-            None => NsState::Restricted,
-        };
+        let init_ino = init.as_ref().and_then(|d| ns_inode(d.as_fd(), name));
+        *state = ns_state(ino, init_ino, || {
+            let self_ns =
+                own_self.get_or_insert_with(|| proc.as_ref().and_then(|p| open_self_ns(p.as_fd())));
+            self_ns.as_ref().and_then(|d| ns_inode(d.as_fd(), name))
+        });
     }
     out
+}
+
+/// The state of a namespace with inode `ino`: compared with PID 1's inode, or with tasklens's
+/// when PID 1's cannot be read. `tasklens` is called only then.
+fn ns_state(ino: u64, init: Option<u64>, tasklens: impl FnOnce() -> Option<u64>) -> NsState {
+    if let Some(init) = init {
+        return if ino == init {
+            NsState::SharedWithInit
+        } else {
+            NsState::Isolated(ino)
+        };
+    }
+    // With neither reference readable there is nothing to compare against.
+    match tasklens() {
+        Some(s) if s == ino => NsState::SameAsTasklens,
+        Some(_) => NsState::Isolated(ino),
+        None => NsState::Restricted,
+    }
 }
 
 /// `self/ns` below the proc root. On the host `self` is a symlink to `<pid>`, which is followed
@@ -1547,7 +1651,12 @@ fn ns_inode(ns_dir: BorrowedFd<'_>, name: &str) -> Option<u64> {
     if n >= link.len() {
         return None;
     }
-    let rest = link[..n].strip_prefix(name.as_bytes())?;
+    ns_link_inode(name, &link[..n])
+}
+
+/// The inode in the `ns/<name>` link target `link`, which must read `<name>:[<ino>]`.
+fn ns_link_inode(name: &str, link: &[u8]) -> Option<u64> {
+    let rest = link.strip_prefix(name.as_bytes())?;
     bracket_inode(rest.strip_prefix(b":")?)
 }
 
@@ -2142,5 +2251,148 @@ mod tests {
         assert_eq!(ticks_to_ms(300, 100), 3000);
         assert_eq!(ticks_to_ms(1, 3), 333);
         assert_eq!(ticks_to_ms(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn helper_fds_from_bytes() {
+        let long = [b'a'; EXE_LINK_MAX + 40];
+        let links: [(u32, &[u8]); 7] = [
+            (0, b"/dev/null"),
+            (1, b"socket:[4242]"),
+            (2, b"pipe:[77]"),
+            (3, b"anon_inode:[eventfd]"),
+            (4, b"/memfd:wayland (deleted)"),
+            (5, b"/home/user/notes.txt"),
+            (9, &long),
+        ];
+        let fdinfo: [(u32, &[u8]); 3] = [
+            (0, b"pos:\t0\nflags:\t02100002\nmnt_id:\t25\nino:\t5\n"),
+            (
+                3,
+                b"pos:\t0\nflags:\t02\nmnt_id:\t15\nino:\t1057\neventfd-count:\t1f\n",
+            ),
+            (5, b"pos:\t1234\nflags:\t0100000\nmnt_id:\t31\nino:\t9001\n"),
+        ];
+        let mut text = String::new();
+        let mut out = vec![FdInfo::new(99, FdType::Pipe, Arc::from("stale"), None)];
+        parse_helper_fds(&links, &fdinfo, &mut text, &mut out);
+
+        let rows: Vec<(u32, FdType, Option<u64>, bool)> = out
+            .iter()
+            .map(|r| (r.fd, r.kind, r.inode, r.fdinfo_ok))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (0, FdType::File, Some(5), true),
+                (1, FdType::Socket, Some(4242), false),
+                (2, FdType::Pipe, Some(77), false),
+                (3, FdType::EventFd, Some(1057), true),
+                (4, FdType::MemFd, None, false),
+                (5, FdType::File, Some(9001), true),
+                (9, FdType::File, None, false),
+            ]
+        );
+        assert_eq!(&*out[0].target, "/dev/null");
+        assert_eq!(out[0].flags, Some(0o2100002));
+        assert_eq!(out[0].mnt_id, Some(25));
+        assert_eq!(out[3].eventfd_count, Some(0x1f));
+        assert_eq!(out[5].pos, Some(1234));
+        assert!(out[6].target.ends_with('…'), "a long target is cut");
+        assert!(out[6].target.chars().count() <= EXE_LINK_MAX + 1);
+    }
+
+    #[test]
+    fn helper_fds_empty_and_no_fdinfo() {
+        let mut text = String::new();
+        let mut out = Vec::new();
+        parse_helper_fds(&[], &[], &mut text, &mut out);
+        assert!(out.is_empty());
+        let links: [(u32, &[u8]); 1] = [(7, b"anon_inode:[pidfd]")];
+        parse_helper_fds(&links, &[], &mut text, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].kind, out[0].fdinfo_ok), (FdType::PidFd, false));
+    }
+
+    const HELPER_STATUS: &[u8] =
+        b"Name:\tsshd\nUid:\t1000\t0\t0\t0\nGid:\t1000\t1000\t1000\t1000\n\
+        Groups:\t4 27\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n\
+        CapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\n\
+        NoNewPrivs:\t1\nSeccomp:\t2\nSeccomp_filters:\t3\n\
+        Speculation_Store_Bypass:\tthread vulnerable\n";
+
+    #[test]
+    fn helper_security_from_bytes() {
+        let ns: [(&str, &[u8]); 5] = [
+            ("cgroup", b"cgroup:[4026531835]"),
+            ("net", b"net:[4026532999]"),
+            ("pid", b"pid:[4026531836]"),
+            ("pid_for_children", b"pid_for_children:[4026531836]"),
+            ("user", b"user:[garbage]"),
+        ];
+        let mut refs = NsRefs::default();
+        // PID 1's net link could not be read: net compares with tasklens's.
+        refs.init[NS_NAMES.iter().position(|n| *n == "pid").unwrap()] = Some(4026531836);
+        refs.init[NS_NAMES.iter().position(|n| *n == "cgroup").unwrap()] = Some(4026531835);
+        refs.tasklens[NS_NAMES.iter().position(|n| *n == "net").unwrap()] = Some(4026532999);
+        let mut text = String::new();
+        let mut out = SecurityInfo::default();
+        out.loginuid = Some(5);
+        parse_helper_security(HELPER_STATUS, Some(&ns), &refs, &mut text, &mut out)
+            .expect("parses");
+
+        assert_eq!(out.uid, [1000, 0, 0, 0]);
+        assert_eq!(out.gid, [1000; 4]);
+        assert_eq!(out.groups.as_slice(), [4, 27]);
+        assert_eq!(out.cap_bnd, 0x1ff_ffff_ffff);
+        assert_eq!(out.no_new_privs, Some(true));
+        assert_eq!((out.seccomp, out.seccomp_filters), (Some(2), Some(3)));
+        assert_eq!(&*out.speculation_store_bypass, "thread vulnerable");
+        assert_eq!(out.elevated, Elevated::Root);
+        assert_eq!(out.lsm_label, LsmLabel::Restricted);
+        assert_eq!(
+            (out.loginuid, out.sessionid, out.dumpable),
+            (None, None, None)
+        );
+        // user, pid, net, mnt, ipc, uts, cgroup, time.
+        assert_eq!(
+            out.namespaces,
+            [
+                NsState::Restricted,
+                NsState::SharedWithInit,
+                NsState::SameAsTasklens,
+                NsState::Restricted,
+                NsState::Restricted,
+                NsState::Restricted,
+                NsState::SharedWithInit,
+                NsState::Restricted,
+            ]
+        );
+    }
+
+    #[test]
+    fn helper_security_isolated_and_no_ns() {
+        let ns: [(&str, &[u8]); 2] = [("mnt", b"mnt:[11]"), ("uts", b"uts:[12]")];
+        let mut refs = NsRefs::default();
+        refs.init = [Some(1); 8];
+        let mut text = String::new();
+        let mut out = SecurityInfo::default();
+        parse_helper_security(HELPER_STATUS, Some(&ns), &refs, &mut text, &mut out)
+            .expect("parses");
+        assert_eq!(out.namespaces[3], NsState::Isolated(11));
+        assert_eq!(out.namespaces[5], NsState::Isolated(12));
+
+        parse_helper_security(HELPER_STATUS, None, &refs, &mut text, &mut out).expect("parses");
+        assert_eq!(out.namespaces, [NsState::Restricted; 8]);
+        assert_eq!(out.uid, [1000, 0, 0, 0]);
+    }
+
+    #[test]
+    fn helper_security_bad_status() {
+        let mut text = String::new();
+        let mut out = SecurityInfo::default();
+        let refs = NsRefs::default();
+        assert!(parse_helper_security(b"no uid line\n", None, &refs, &mut text, &mut out).is_err());
+        assert_eq!(out, SecurityInfo::default());
     }
 }
