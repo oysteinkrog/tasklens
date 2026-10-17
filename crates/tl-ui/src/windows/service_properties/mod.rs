@@ -17,7 +17,9 @@ pub use logon::LogOnTab;
 #[cfg(any(test, feature = "test-hooks"))]
 pub use logs::{FollowStateForTest, LogRowForTest, LogsStatusForTest};
 pub use logs::{LogLine, LogsView};
-pub use recovery::RecoveryTab;
+pub use recovery::{
+    LimitAction, RecoveryForm, RecoveryTab, RestartPolicy, changed_keys, validate_on_failure,
+};
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -214,7 +216,8 @@ fn create_tab(
             Some(TabSlot::new(view))
         }
         ServicePropsTab::Recovery => {
-            let view = cx.new(RecoveryTab::new);
+            let view =
+                cx.new(|cx| RecoveryTab::new(input.unit, input.actions, input.parent, window, cx));
             Some(TabSlot::new(view))
         }
         ServicePropsTab::Dependencies => {

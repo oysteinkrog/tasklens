@@ -18,19 +18,21 @@ use gpui_kit::{
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
-    LaunchWhat,
+    LaunchWhat, RecoveryEdit,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
+use tl_model::health::HelperState;
 use tl_model::journal::{JournalAccess, JournalControl, JournalEntry, JournalError, JournalEvent};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{
-    DepEntry, PidIds, RecoverySettings, Relation, ServiceBackend, ServiceStatus, StartupType,
-    UnitDetails, UnitRecord,
+    DepEntry, PidIds, RecoveryKeySet, RecoverySettings, Relation, ServiceBackend, ServiceStatus,
+    StartupType, UnitDetails, UnitRecord,
 };
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::GlobalDemand;
@@ -40,8 +42,9 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::windows::service_properties::{
-    DependenciesTab, FollowStateForTest, GeneralTab, LogOnTab, LogRowForTest, LogsStatusForTest,
-    LogsView, RecoveryTab, ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
+    DependenciesTab, FollowStateForTest, GeneralTab, LimitAction, LogOnTab, LogRowForTest,
+    LogsStatusForTest, LogsView, RecoveryForm, RecoveryTab, RestartPolicy, ServicePropertiesWindow,
+    ServicePropsTab, ServicePropsTabView, changed_keys, validate_on_failure,
 };
 
 use tl_ui::pages::services::actions::ServicePropsOk;
@@ -1205,12 +1208,28 @@ struct Recovery {
     engine: Arc<FakeEngine>,
     _main: VisualTestContext,
     handle: WindowHandle<Root>,
+    win: Entity<ServicePropertiesWindow>,
     tab: Entity<RecoveryTab>,
 }
 
-/// Opens sshd.service on Recovery with `d` published, or with no details.
-fn open_recovery(cx: &mut TestAppContext, d: Option<Arc<UnitDetails>>) -> Recovery {
+fn publish_helper(cx: &mut TestAppContext, engine: &FakeEngine, helper: HelperState) {
+    engine.publish_with(|s| {
+        let health = Arc::make_mut(&mut s.health);
+        health.helper = helper;
+        health.version += 1;
+    });
+    cx.run_until_parked();
+}
+
+/// Opens sshd.service on Recovery with `d` published, or with no details, and the helper in
+/// `helper`.
+fn open_recovery_helper(
+    cx: &mut TestAppContext,
+    d: Option<Arc<UnitDetails>>,
+    helper: HelperState,
+) -> Recovery {
     let (engine, main) = setup(cx);
+    publish_helper(cx, &engine, helper);
     let mut map = HashMap::new();
     if let Some(d) = d {
         map.insert(unit("sshd.service"), d);
@@ -1231,8 +1250,28 @@ fn open_recovery(cx: &mut TestAppContext, d: Option<Arc<UnitDetails>>) -> Recove
         engine,
         _main: main,
         handle,
+        win,
         tab,
     }
+}
+
+/// Opens sshd.service on Recovery with the helper installed but locked.
+fn open_recovery(cx: &mut TestAppContext, d: Option<Arc<UnitDetails>>) -> Recovery {
+    open_recovery_helper(cx, d, HelperState::Locked)
+}
+
+/// sshd.service with the Recovery values systemd reports for a typical service.
+fn recovery_details(f: impl FnOnce(&mut UnitDetails)) -> Arc<UnitDetails> {
+    details_with("sshd.service", |d| {
+        d.recovery.restart = Some(a("on-failure"));
+        d.recovery.restart_usec = Some(100_000);
+        d.recovery.start_limit_burst = Some(5);
+        d.recovery.start_limit_interval_usec = Some(10_000_000);
+        d.recovery.start_limit_action = Some(a("none"));
+        d.recovery.failure_action = Some(a("none"));
+        d.recovery.n_restarts = Some(3);
+        f(d);
+    })
 }
 
 impl Recovery {
@@ -1265,72 +1304,145 @@ impl Recovery {
         );
     }
 
-    fn click(&self, cx: &mut TestAppContext, selector: &'static str) {
+    fn form(&self, cx: &mut TestAppContext) -> RecoveryForm {
+        cx.read(|cx| self.tab.read(cx).form_for_test())
+            .expect("the form is built")
+    }
+
+    fn edit(&self, cx: &mut TestAppContext, f: impl FnOnce(&mut RecoveryForm)) {
+        self.tab.update(cx, |t, cx| t.edit_for_test(f, cx));
+        cx.run_until_parked();
+    }
+
+    fn vcx(&self, cx: &mut TestAppContext) -> VisualTestContext {
         let mut vcx = VisualTestContext::from_window(self.handle.into(), cx);
         vcx.update(|window, _| window.activate_window());
         draw(&mut vcx);
+        vcx
+    }
+
+    fn drawn(&self, cx: &mut TestAppContext, selector: &'static str) -> bool {
+        self.vcx(cx).debug_bounds(selector).is_some()
+    }
+
+    fn click(&self, cx: &mut TestAppContext, selector: &'static str) {
+        let mut vcx = self.vcx(cx);
         let bounds = vcx
             .debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} drawn"));
         vcx.simulate_click(bounds.center(), Modifiers::none());
         vcx.run_until_parked();
     }
+
+    fn apply_enabled(&self, cx: &mut TestAppContext) -> bool {
+        cx.read(|cx| self.win.read(cx).apply_enabled(cx))
+    }
+
+    fn sent(&self) -> Vec<ActionRequest> {
+        self.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `Started`, `state` for the one target, then the summary.
+    fn finish(&self, cx: &mut TestAppContext, id: ActionId, state: ActionState) {
+        for (target, state) in [
+            (None, ActionState::Started),
+            (Some(0), state.clone()),
+            (None, state),
+        ] {
+            self.engine.emit(ActionEvent { id, target, state });
+            cx.run_until_parked();
+        }
+    }
+
+    /// Every toast this window's action layer pushed, oldest first.
+    fn toasts(&self, cx: &mut TestAppContext) -> Vec<String> {
+        cx.read(|cx| {
+            let actions = self.win.read(cx).actions().clone();
+            let pushed = actions.read(cx).pushed();
+            pushed.iter().map(|t| t.text.to_string()).collect()
+        })
+    }
+
+    /// Clicks Apply and returns the one request it sent.
+    fn apply(&self, cx: &mut TestAppContext) -> ActionRequest {
+        let before = self.sent().len();
+        self.click(cx, "TlButton-ServicePropsApply");
+        let sent = self.sent();
+        assert_eq!(sent.len(), before + 1, "Apply sends one request");
+        sent.last().cloned().expect("a request")
+    }
 }
 
 #[gpui_kit::test]
 fn recovery_view_formats(cx: &mut TestAppContext) {
-    let set = |steps: u32| {
-        details_with("sshd.service", move |d| {
-            d.recovery.restart = Some(a("on-failure"));
-            d.recovery.restart_usec = Some(100_000);
-            d.recovery.restart_steps = Some(steps);
+    let t = open_recovery(
+        cx,
+        Some(recovery_details(|d| {
+            d.recovery.restart_steps = Some(5);
             d.recovery.restart_max_delay_usec = Some(5_000_000);
-            d.recovery.start_limit_burst = Some(5);
-            d.recovery.start_limit_interval_usec = Some(10_000_000);
-            d.recovery.start_limit_action = Some(a("none"));
-            d.recovery.failure_action = Some(a("none"));
             d.recovery.n_restarts = Some(12345);
-        })
-    };
-    let t = open_recovery(cx, Some(set(5)));
-    assert_eq!(t.value(cx, "On failure"), "on-failure");
-    assert_eq!(
-        t.value(cx, "Restart service after"),
-        "100 ms, rising to 5000 ms in 5 steps"
+        })),
     );
-    assert_eq!(t.value(cx, "Give up after"), "5 starts within 10 s");
-    assert_eq!(t.value(cx, "When giving up"), "none");
-    assert_eq!(t.value(cx, "Failure action"), "none");
+    assert_eq!(
+        t.form(cx),
+        RecoveryForm {
+            restart: RestartPolicy::OnFailure,
+            restart_ms: 100,
+            burst: 5,
+            interval_s: 10,
+            start_limit_action: LimitAction::None,
+            failure_action: LimitAction::None,
+            on_failure: "".into(),
+        }
+    );
     assert_eq!(t.value(cx, "Restarts so far"), "12\u{2009}345");
     assert_eq!(
-        cx.read(|cx| t.tab.read(cx).note_for_test().to_string()),
-        "Editing recovery settings comes in a later version."
+        cx.read(|cx| t.tab.read(cx).saved_as_for_test().to_string()),
+        "/etc/systemd/system/sshd.service.d/50-tasklens-recovery.conf"
     );
-    t.publish(cx, set(0));
-    assert_eq!(t.value(cx, "Restart service after"), "100 ms");
+    assert!(t.drawn(cx, "ServiceRecoverySavedAs"));
+    assert!(!t.drawn(cx, "ServiceRecoveryNote"), "the P2 note is gone");
+    assert!(
+        !t.drawn(cx, "TlButton-ServiceRecoveryRemove"),
+        "no drop-in yet"
+    );
+    assert!(!t.apply_enabled(cx), "clean at first");
+
+    // A clean form follows the unit.
+    t.publish(
+        cx,
+        recovery_details(|d| d.recovery.restart_usec = Some(200_000)),
+    );
+    assert_eq!(t.form(cx).restart_ms, 200);
+    assert!(!t.apply_enabled(cx));
 }
 
 #[gpui_kit::test]
-fn recovery_view_run_on_failure_link(cx: &mut TestAppContext) {
+fn recovery_run_on_failure_text_kept_while_dirty(cx: &mut TestAppContext) {
     let t = open_recovery(
         cx,
-        Some(details_with("sshd.service", |d| {
-            d.recovery.on_failure = Arc::from([a("failure-notify@sshd.service")]);
+        Some(recovery_details(|d| {
+            d.recovery.on_failure = Arc::from([a("failure-notify@sshd.service"), a("a.service")]);
         })),
     );
-    assert_eq!(count(cx), 1);
-    t.click(cx, "ServiceRecovery-link-0");
-    let opened = cx.update(|cx| {
-        let registry = cx.global::<GlobalRegistry>().0.clone();
-        registry
-            .read(cx)
-            .get(&WindowKey::Service(unit("failure-notify@sshd.service")))
-            .is_some()
-    });
-    assert!(opened, "the OnFailure unit's window is open");
-    assert_eq!(count(cx), 2);
-    t.click(cx, "ServiceRecovery-link-0");
-    assert_eq!(count(cx), 2, "a second click focuses the same window");
+    assert_eq!(
+        t.value(cx, "Run on failure"),
+        "failure-notify@sshd.service a.service"
+    );
+    t.edit(cx, |f| f.burst = 7);
+    assert!(t.apply_enabled(cx));
+    // New details do not undo an edit in progress.
+    t.publish(cx, recovery_details(|d| d.recovery.n_restarts = Some(4)));
+    assert_eq!(t.form(cx).burst, 7);
+    assert_eq!(t.value(cx, "Restarts so far"), "4");
+    assert!(t.apply_enabled(cx));
 }
 
 #[gpui_kit::test]
@@ -1340,17 +1452,345 @@ fn recovery_view_missing_not_reported(cx: &mut TestAppContext) {
         assert_eq!(value, "Collecting\u{2026}", "{label}");
     }
     t.publish(cx, details("sshd.service"));
-    assert_eq!(t.value(cx, "Run on failure"), "None");
-    for label in [
-        "On failure",
-        "Restart service after",
-        "Give up after",
-        "When giving up",
-        "Failure action",
-        "Restarts so far",
+    assert_eq!(t.value(cx, "Restarts so far"), "Not reported");
+    assert_eq!(t.form(cx), RecoveryForm::default());
+    assert!(!t.apply_enabled(cx));
+}
+
+#[test]
+fn recovery_validate_on_failure_pattern() {
+    let name_255 = format!("{}.service", "a".repeat(255));
+    let name_256 = format!("{}.service", "a".repeat(256));
+    for ok in [
+        "",
+        "notify@%n.service",
+        "failure-notify@%n.service",
+        "a.service b.target",
+        "a.service  c.timer",
+        "x\\x2dy.mount",
+        "user-1000.slice",
+        "foo:bar_baz.socket",
+        "sys-fs.path",
+        "session-2.scope",
+        name_255.as_str(),
     ] {
-        assert_eq!(t.value(cx, label), "Not reported", "{label}");
+        assert!(validate_on_failure(ok), "{ok:?} is valid");
     }
+    for bad in [
+        "rm -rf /",
+        "a.service b;c.service",
+        "a.service\nb.service",
+        "a.service\rb.service",
+        "a.service\tb.service",
+        "a/b.service",
+        "/etc/x.service",
+        "$(reboot).service",
+        "a`id`.service",
+        "a|b.service",
+        "a&b.service",
+        "a>b.service",
+        "'a'.service",
+        "\"a\".service",
+        "a\0.service",
+        "a*.service",
+        ".service",
+        "a",
+        "a.exe",
+        "a.service.",
+        "a.Service",
+        "\u{e4}.service",
+        name_256.as_str(),
+    ] {
+        assert!(!validate_on_failure(bad), "{bad:?} is invalid");
+    }
+}
+
+#[gpui_kit::test]
+fn recovery_invalid_unit_blocks_apply(cx: &mut TestAppContext) {
+    let t = open_recovery(cx, Some(recovery_details(|_| {})));
+    let long = format!("{}.service", "a".repeat(256));
+    for bad in [
+        "rm -rf /",
+        "a.service b;c.service",
+        "a.service\nb.service",
+        long.as_str(),
+    ] {
+        let text = bad.to_string();
+        t.edit(cx, move |f| f.on_failure = text.into());
+        cx.read(|cx| {
+            let tab = t.tab.read(cx);
+            assert!(tab.is_dirty(cx), "{bad:?}");
+            assert!(!tab.is_valid(cx), "{bad:?}");
+        });
+        assert!(!t.apply_enabled(cx), "{bad:?} disables Apply");
+        assert!(
+            t.drawn(cx, "ServiceRecoveryOnFailureError"),
+            "{bad:?} shows the danger line"
+        );
+    }
+    // OK does nothing while the form is invalid.
+    let mut vcx = t.vcx(cx);
+    vcx.dispatch_action(ServicePropsOk);
+    vcx.run_until_parked();
+    drop(vcx);
+    assert!(t.sent().is_empty(), "nothing was sent");
+    assert_eq!(count(cx), 1, "the window stays open");
+
+    t.edit(cx, |f| f.on_failure = "notify@%n.service".into());
+    cx.read(|cx| assert!(t.tab.read(cx).is_valid(cx)));
+    assert!(t.apply_enabled(cx));
+    assert!(!t.drawn(cx, "ServiceRecoveryOnFailureError"));
+}
+
+#[gpui_kit::test]
+fn recovery_helper_missing_disables(cx: &mut TestAppContext) {
+    let t = open_recovery_helper(
+        cx,
+        Some(recovery_details(|d| d.recovery_dropin_exists = true)),
+        HelperState::Missing,
+    );
+    let (enabled, tip) = cx.read(|cx| t.tab.read(cx).controls_for_test());
+    assert!(!enabled, "every control is disabled");
+    assert_eq!(tip.as_deref(), Some("Needs the tasklens helper"));
+    assert!(t.drawn(cx, "ServiceRecoverySetupLink"));
+    assert!(t.drawn(cx, "TlButton-ServiceRecoveryRemove"));
+    t.click(cx, "TlButton-ServiceRecoveryRemove");
+    let dialog = cx.update(|cx| {
+        cx.windows().into_iter().any(|w| {
+            w.downcast::<Root>()
+                .and_then(|h| TlSecondaryWindow::<TlDialogView>::find(h, cx))
+                .is_some()
+        })
+    });
+    assert!(!dialog, "a disabled Remove opens nothing");
+    // The controls refuse edits.
+    let before = t.form(cx);
+    t.edit(cx, |f| f.burst = 9);
+    assert_eq!(t.form(cx), before);
+    assert!(!t.apply_enabled(cx));
+
+    // Once the helper is installed the tab is editable and the link goes away.
+    publish_helper(cx, &t.engine, HelperState::Locked);
+    let (enabled, tip) = cx.read(|cx| t.tab.read(cx).controls_for_test());
+    assert!(enabled);
+    assert_eq!(tip, None);
+    assert!(!t.drawn(cx, "ServiceRecoverySetupLink"));
+}
+
+#[gpui_kit::test]
+fn recovery_remove_confirm(cx: &mut TestAppContext) {
+    let t = open_recovery(
+        cx,
+        Some(recovery_details(|d| {
+            d.recovery_dropin_exists = true;
+            d.recovery_dropin_keys.restart = true;
+        })),
+    );
+    t.click(cx, "TlButton-ServiceRecoveryRemove");
+    assert!(t.sent().is_empty(), "nothing before the confirmation");
+    let (any, frame) = cx
+        .update(|cx| {
+            cx.windows().into_iter().find_map(|w| {
+                let handle = w.downcast::<Root>()?;
+                let frame = TlSecondaryWindow::<TlDialogView>::find(handle, cx)?;
+                Some((w, frame))
+            })
+        })
+        .expect("a confirmation");
+    let dialog = cx.read(|cx| frame.read(cx).content().clone());
+    let mut dvcx = VisualTestContext::from_window(any, cx);
+    dvcx.update(|window, _| window.activate_window());
+    draw(&mut dvcx);
+    dvcx.update(|window, cx| {
+        let view = dialog.read(cx);
+        let d = view.dialog();
+        assert_eq!(d.window_title().as_ref(), "tasklens");
+        assert_eq!(
+            d.text().as_ref(),
+            "The unit goes back to the settings in its unit file."
+        );
+        assert_eq!(d.cancel_text().as_ref(), "Cancel");
+        assert!(d.is_destructive(), "Remove is a Danger button");
+        assert_eq!(view.focused_button(window), Some(DialogButton::Cancel));
+    });
+    assert!(dvcx.debug_bounds("TlDialogHeading").is_some());
+    dvcx.simulate_keystrokes("tab");
+    dvcx.simulate_keystrokes("enter");
+    dvcx.run_until_parked();
+    drop(dvcx);
+    cx.run_until_parked();
+    let sent = t.sent();
+    assert_eq!(sent.len(), 1, "one request");
+    assert_eq!(sent[0].kind, ActionKind::UnitRemoveRecovery);
+    assert_eq!(
+        sent[0].targets.to_vec(),
+        vec![ActionTarget::Unit(unit("sshd.service"))]
+    );
+}
+
+#[test]
+fn recovery_changed_keys_pure() {
+    let current = RecoverySettings {
+        restart: Some(a("on-failure")),
+        restart_usec: Some(100_000),
+        start_limit_burst: Some(5),
+        start_limit_interval_usec: Some(10_000_000),
+        start_limit_action: Some(a("none")),
+        failure_action: Some(a("none")),
+        ..RecoverySettings::default()
+    };
+    let mut form = RecoveryForm::from_settings(&current);
+    assert_eq!(
+        changed_keys(&form, &current, &RecoveryKeySet::default()),
+        RecoveryEdit::default(),
+        "an unchanged form sends nothing"
+    );
+    form.restart_ms = 500;
+    assert_eq!(
+        changed_keys(&form, &current, &RecoveryKeySet::default()),
+        RecoveryEdit {
+            restart_usec: Some(500_000),
+            ..RecoveryEdit::default()
+        }
+    );
+    let in_dropin = RecoveryKeySet {
+        restart: true,
+        on_failure: true,
+        ..RecoveryKeySet::default()
+    };
+    assert_eq!(
+        changed_keys(&form, &current, &in_dropin),
+        RecoveryEdit {
+            restart: Some(a("on-failure")),
+            restart_usec: Some(500_000),
+            on_failure: Some(Arc::from([])),
+            ..RecoveryEdit::default()
+        }
+    );
+    // An unchanged key in the drop-in keeps the exact reported value and word.
+    let odd = RecoverySettings {
+        restart_usec: Some(100_500),
+        start_limit_action: Some(a("soft-reboot")),
+        ..current.clone()
+    };
+    let form = RecoveryForm::from_settings(&odd);
+    let in_dropin = RecoveryKeySet {
+        restart_sec: true,
+        start_limit_action: true,
+        ..RecoveryKeySet::default()
+    };
+    assert_eq!(
+        changed_keys(&form, &odd, &in_dropin),
+        RecoveryEdit {
+            restart_usec: Some(100_500),
+            start_limit_action: Some(a("soft-reboot")),
+            ..RecoveryEdit::default()
+        }
+    );
+}
+
+#[gpui_kit::test]
+fn recovery_changed_keys_only(cx: &mut TestAppContext) {
+    let t = open_recovery(cx, Some(recovery_details(|_| {})));
+    t.edit(cx, |f| f.restart_ms = 500);
+    assert!(t.apply_enabled(cx));
+    let req = t.apply(cx);
+    assert_eq!(
+        req.kind,
+        ActionKind::UnitWriteRecovery(RecoveryEdit {
+            restart_usec: Some(500_000),
+            ..RecoveryEdit::default()
+        })
+    );
+    assert_eq!(
+        req.targets.to_vec(),
+        vec![ActionTarget::Unit(unit("sshd.service"))]
+    );
+    t.finish(cx, req.id, ActionState::Succeeded);
+    let toasts = t.toasts(cx);
+    assert!(
+        toasts.iter().any(|s| s == "Saving recovery settings..."),
+        "{toasts:?}"
+    );
+    assert!(
+        toasts.iter().any(|s| s == "Recovery settings saved"),
+        "{toasts:?}"
+    );
+    assert!(!t.apply_enabled(cx), "clean after the save");
+    assert_eq!(t.form(cx).restart_ms, 500, "shows the saved value");
+
+    // A second edit before new details keeps the key the first save wrote.
+    t.edit(cx, |f| f.burst = 6);
+    let req = t.apply(cx);
+    assert_eq!(
+        req.kind,
+        ActionKind::UnitWriteRecovery(RecoveryEdit {
+            restart_usec: Some(500_000),
+            start_limit_burst: Some(6),
+            ..RecoveryEdit::default()
+        })
+    );
+    t.finish(cx, req.id, ActionState::Succeeded);
+
+    // Keys the drop-in reports are sent along with the changed one.
+    t.publish(
+        cx,
+        recovery_details(|d| {
+            d.recovery.restart_usec = Some(500_000);
+            d.recovery.start_limit_burst = Some(6);
+            d.recovery_dropin_exists = true;
+            d.recovery_dropin_keys.restart_sec = true;
+            d.recovery_dropin_keys.start_limit_burst = true;
+        }),
+    );
+    t.edit(cx, |f| f.failure_action = LimitAction::Exit);
+    let req = t.apply(cx);
+    assert_eq!(
+        req.kind,
+        ActionKind::UnitWriteRecovery(RecoveryEdit {
+            restart_usec: Some(500_000),
+            start_limit_burst: Some(6),
+            failure_action: Some(a("exit")),
+            ..RecoveryEdit::default()
+        })
+    );
+    t.finish(cx, req.id, ActionState::Failed(ActionError::AuthCancelled));
+    let toasts = t.toasts(cx);
+    assert_eq!(
+        toasts.last().map(String::as_str),
+        Some("Authentication cancelled")
+    );
+    assert!(t.apply_enabled(cx), "a cancelled save keeps the edit");
+}
+
+#[gpui_kit::test]
+fn recovery_reboot_warning(cx: &mut TestAppContext) {
+    let power = [
+        LimitAction::Reboot,
+        LimitAction::RebootForce,
+        LimitAction::RebootImmediate,
+        LimitAction::Poweroff,
+        LimitAction::PoweroffForce,
+        LimitAction::PoweroffImmediate,
+    ];
+    for action in LimitAction::ALL {
+        assert_eq!(
+            action.restarts_computer(),
+            power.contains(&action),
+            "{action:?}"
+        );
+    }
+    let t = open_recovery(cx, Some(recovery_details(|_| {})));
+    assert!(!t.drawn(cx, "ServiceRecoveryWarning-3"));
+    assert!(!t.drawn(cx, "ServiceRecoveryWarning-4"));
+    t.edit(cx, |f| f.start_limit_action = LimitAction::Reboot);
+    assert!(t.drawn(cx, "ServiceRecoveryWarning-3"));
+    assert!(!t.drawn(cx, "ServiceRecoveryWarning-4"));
+    t.edit(cx, |f| f.failure_action = LimitAction::PoweroffImmediate);
+    assert!(t.drawn(cx, "ServiceRecoveryWarning-4"));
+    t.edit(cx, |f| f.start_limit_action = LimitAction::Exit);
+    assert!(!t.drawn(cx, "ServiceRecoveryWarning-3"));
+    assert!(t.drawn(cx, "ServiceRecoveryWarning-4"));
 }
 
 // Dependencies tab (UI-SYS-035).
