@@ -1235,6 +1235,17 @@ fn add_extras_sums(
     g.handles = handles;
 }
 
+/// True when every member is frozen. The sweep marks each process of a frozen unit cgroup from
+/// its `cgroup.events`, so this is the unit row's frozen state when it has no unit sample.
+/// False when `extras` is not index aligned with the `records_len` records yet.
+fn members_frozen(extras: &[ProcessExtras], records_len: usize, members: &[u32]) -> bool {
+    extras.len() == records_len
+        && !members.is_empty()
+        && members
+            .iter()
+            .all(|&i| extras.get(i as usize).is_some_and(|x| x.frozen))
+}
+
 /// Adds the sums of `from` into `into`. Each field's validity becomes the worse of the two.
 fn add_sums(into: &mut GroupRow, from: &GroupRow) {
     into.members = into.members.saturating_add(from.members);
@@ -1454,8 +1465,8 @@ fn sort_items(input: &TableInput<'_>, groups: &[GroupRow], items: &mut [Item], s
 /// user-manager unit and outside it for a system unit.
 ///
 /// Production does not feed this yet: the processes and lowmem workers send empty
-/// `unit_stats`, so unit rows have no cgroup sample and `frozen` stays false. See
-/// tasklens-8q0.42.
+/// `unit_stats`. A unit row without a sample takes `frozen` from its members, which the sweep
+/// marks from the unit cgroup's `cgroup.events` (tasklens-8q0.42).
 pub(crate) fn unit_stat<'a>(stats: &'a [CgroupStats], unit: &UnitRef) -> Option<&'a CgroupStats> {
     stats.iter().find(|s| {
         let path: &str = &s.cgroup.rel_path;
@@ -1800,8 +1811,12 @@ fn grouped_rows(
         groups.push(g);
     }
     for (c, unit, members) in &units {
-        let mut g = aggregate(records, members, None, unit_stat(input.unit_stats, unit));
+        let stat = unit_stat(input.unit_stats, unit);
+        let mut g = aggregate(records, members, None, stat);
         add_extras_sums(&mut g, input.extras, n, members);
+        if stat.is_none() {
+            g.frozen = members_frozen(input.extras, n, members);
+        }
         g.node = NodeId::Unit((*unit).clone());
         // Its own key, not the class key, so App Properties shows this unit only.
         g.key = unit.key();

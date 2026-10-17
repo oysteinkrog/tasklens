@@ -31,7 +31,7 @@ use tl_engine::workers::workers_for;
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, ProcessKey};
-use tl_model::process::ProcessRecord;
+use tl_model::process::{GroupRowKind, ProcessRecord};
 use tl_model::settings::EngineSettings;
 use tl_model::time::TimeNs;
 use tl_model::validity::{ProcessField, Validity};
@@ -510,6 +510,61 @@ fn engine_publishes_table_from_fixture() {
     handle.abort();
     fl.advance(Duration::from_millis(10));
     assert!(handle.is_finished(), "engine_root returned after cancel");
+    drop(ui);
+    fl.finish();
+}
+
+/// tasklens-8q0.42: through the real sweep, a unit row whose unit cgroup's `cgroup.events` says
+/// `frozen 1` is frozen, and so are its processes. No unit sample is involved.
+#[test]
+fn unit_row_frozen_from_sweep() {
+    const SESSION: &str = "user.slice/user-1000.slice/session-2.scope";
+    let root = FixtureRoot::merged();
+    // TOKENPROC is in session-2.scope; a second process makes the unit fold into a row.
+    root.clone_pid(TOKENPROC, 4300);
+    let cgroup = root.root().join("sys/fs/cgroup").join(SESSION);
+    fs::create_dir_all(&cgroup).expect("create cgroup dir");
+    fs::write(cgroup.join("cgroup.events"), "populated 1\nfrozen 1\n").expect("write events");
+    let mut fl = FakeLab::new();
+    let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![processes::spec()]);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+    ui.demand_tx
+        .send(table_demand())
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+
+    let snap = ui.latest.load_full();
+    let unit = snap
+        .table
+        .groups
+        .iter()
+        .find(|g| g.kind == GroupRowKind::Unit && &*g.name == "session-2.scope")
+        .expect("session-2.scope unit row");
+    assert!(unit.frozen);
+    assert_eq!(unit.members, 2);
+    let procs = &snap.processes;
+    for pid in [TOKENPROC, 4300] {
+        let i = procs
+            .records
+            .iter()
+            .position(|r| r.key.pid == pid)
+            .unwrap_or_else(|| panic!("pid {pid} swept"));
+        assert!(procs.extras[i].frozen, "pid {pid} frozen");
+    }
+    assert!(
+        snap.table
+            .groups
+            .iter()
+            .filter(|g| &*g.name != "session-2.scope")
+            .all(|g| !g.frozen),
+        "no other row is frozen"
+    );
+
+    handle.abort();
+    fl.advance(Duration::from_millis(10));
     drop(ui);
     fl.finish();
 }

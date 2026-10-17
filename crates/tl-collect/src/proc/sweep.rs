@@ -7,8 +7,8 @@
 //! demanded), `io` only when demanded. Rates follow the ADR-008 counter rules: no rate on the first sample,
 //! after a counter reset or across a suspend. Nothing here logs above `trace` per process.
 //!
-//! `ProcessSampler` (E05-A1) adds metadata, app groups, flags, the P1 extra columns and the app
-//! unit samples on top of `SweepCore`. Command lines, paths and user names are never logged
+//! `ProcessSampler` (E05-A1) adds metadata, app groups, flags, the P1 extra columns, the app
+//! unit samples and the Frozen state of unit cgroups on top of `SweepCore`. Command lines, paths and user names are never logged
 //! (ADR-015).
 
 use std::cell::Cell;
@@ -730,6 +730,8 @@ struct Scratch {
     rollup_buf: Vec<u8>,
     coverage: CoverageBuilder,
     stat_buf: Vec<u8>,
+    /// (cgroup path, length of its unit prefix, record index) of each unit member.
+    unit_members: Vec<(Arc<str>, usize, usize)>,
 }
 
 /// Wanted cgroup files of an app unit. `memory.current` is never read here (R-137).
@@ -740,6 +742,17 @@ const APP_WANT: CgroupWant = CgroupWant {
     cpu_stat: true,
     io_stat: true,
     pids: true,
+    events: true,
+};
+
+/// Wanted cgroup files of a unit cgroup in the sweep: `cgroup.events` only (tasklens-8q0.42).
+const UNIT_WANT: CgroupWant = CgroupWant {
+    memory_stat: false,
+    swap: false,
+    memory_current: false,
+    cpu_stat: false,
+    io_stat: false,
+    pids: false,
     events: true,
 };
 
@@ -890,6 +903,7 @@ impl ProcessSampler {
 
         self.set_flags(ctx, inp, out);
         self.sample_apps(out);
+        self.sample_units(out);
         if inp.want_pss {
             let s = &mut self.scratch;
             self.pss.read(
@@ -1045,6 +1059,48 @@ impl ProcessSampler {
             .retain(|id, _| units.iter().any(|u| u.cgroup_id == *id));
     }
 
+    /// After step 7: the Frozen state of each unit cgroup that holds a unit row, from its
+    /// `cgroup.events`, set on its members (tasklens-8q0.42). A unit row folds two or more
+    /// processes that are not app members, so a unit cgroup with one such process is not read.
+    /// App members are left out: `sample_apps` already read their cgroup.
+    fn sample_units(&mut self, out: &mut SweepOutput) {
+        let Scratch {
+            app_pids,
+            unit_members: members,
+            stat_buf,
+            ..
+        } = &mut self.scratch;
+        members.clear();
+        for (i, (r, side)) in out.records.iter().zip(&out.side).enumerate() {
+            if side.class == ProcClass::App || app_pids.contains(&r.key.pid) {
+                continue;
+            }
+            let Some(cg) = self.metas.get(&r.key).and_then(|s| s.cgroup.as_ref()) else {
+                continue;
+            };
+            if let Some(len) = unit_rel_len(cg) {
+                members.push((cg.rel.clone(), len, i));
+            }
+        }
+        members.sort_unstable_by(|a, b| a.0[..a.1].cmp(&b.0[..b.1]));
+        let mut stats = CgroupStats::default();
+        for run in members.chunk_by(|a, b| a.0[..a.1] == b.0[..b.1]) {
+            let (rel, len, _) = &run[0];
+            if run.len() < 2
+                || self
+                    .cg
+                    .read_stats(&rel[..*len], UNIT_WANT, stat_buf, &mut stats)
+                    .is_err()
+                || stats.frozen != Some(true)
+            {
+                continue;
+            }
+            for &(_, _, i) in run {
+                out.extras[i].frozen = true;
+            }
+        }
+    }
+
     /// Step 10: sorts `records`, `extras`, `side` and a non-empty `extras_p2` together by
     /// `ProcessKey`.
     fn sort(&mut self, out: &mut SweepOutput) {
@@ -1088,6 +1144,21 @@ impl std::fmt::Debug for ProcessSampler {
             .field("app_units", &self.app_prev.len())
             .finish_non_exhaustive()
     }
+}
+
+/// The length of the unit part of `cg.rel`: the path up to and including its innermost
+/// `.service` or `.scope` component. `None` when the path has no unit.
+fn unit_rel_len(cg: &CgroupPath) -> Option<usize> {
+    let unit = cg.unit.as_deref()?;
+    let mut end = None;
+    let mut start = 0;
+    for comp in cg.rel.split('/') {
+        if comp == unit {
+            end = Some(start + comp.len());
+        }
+        start += comp.len() + 1;
+    }
+    end
 }
 
 /// Read and write bytes per second of an app unit, or `None` when ADR-008 gives no rate: time
@@ -1405,5 +1476,26 @@ mod tests {
         assert_eq!(parse_pid(b""), None);
         assert_eq!(parse_pid(b"12a"), None);
         assert_eq!(parse_pid(b"99999999999"), None);
+    }
+
+    #[test]
+    fn unit_rel_len_cuts_at_innermost_unit() {
+        let unit_rel = |path: &str| {
+            let cg = crate::proc::cgroup::parse_cgroup_file(path.as_bytes()).expect("parse");
+            unit_rel_len(&cg).map(|len| cg.rel[..len].to_string())
+        };
+        assert_eq!(
+            unit_rel("0::/system.slice/docker.service/payload\n").as_deref(),
+            Some("system.slice/docker.service")
+        );
+        assert_eq!(
+            unit_rel(
+                "0::/user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service\n"
+            )
+            .as_deref(),
+            Some("user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service")
+        );
+        assert_eq!(unit_rel("0::/user.slice\n"), None);
+        assert_eq!(unit_rel("0::/\n"), None);
     }
 }

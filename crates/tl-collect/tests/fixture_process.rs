@@ -2314,6 +2314,71 @@ fn sweep_frozen_app_members() {
     assert!(unit.to_model().frozen);
 }
 
+/// Copies pid `from` of the fixture copy at `root` to pid `to`, rewrites the pid in `stat` and
+/// puts the copy in cgroup `cgroup`.
+fn clone_pid_into(root: &Path, from: u32, to: u32, cgroup: &str) {
+    let (src, dst) = (
+        root.join(format!("proc/{from}")),
+        root.join(format!("proc/{to}")),
+    );
+    fs::create_dir_all(&dst).expect("create pid dir");
+    overlay(&src, &dst);
+    let stat = fs::read_to_string(src.join("stat")).expect("read stat");
+    let rest = stat
+        .strip_prefix(&format!("{from} "))
+        .expect("stat starts with the pid");
+    fs::write(dst.join("stat"), format!("{to} {rest}")).expect("write stat");
+    fs::write(dst.join("cgroup"), format!("0::/{cgroup}\n")).expect("write cgroup");
+}
+
+/// Writes `cgroup.events` of cgroup `rel` in the fixture copy at `root`.
+fn write_events(root: &Path, rel: &str, frozen: bool) {
+    let dir = root.join("sys/fs/cgroup").join(rel);
+    fs::create_dir_all(&dir).expect("create cgroup dir");
+    let events = format!("populated 1\nfrozen {}\n", u8::from(frozen));
+    fs::write(dir.join("cgroup.events"), events).expect("write cgroup.events");
+}
+
+sweep_clock!(frozen_unit_clock);
+
+/// tasklens-8q0.42: the sweep reads `cgroup.events` of each unit cgroup that holds a unit row
+/// (two or more processes outside app units) and marks its processes frozen. A unit cgroup with
+/// one such process is not read, so it stays not frozen.
+#[test]
+fn sweep_frozen_unit_members() {
+    let (tmp, root) = merged_root();
+    const SESSION: &str = "user.slice/user-1000.slice/session-2.scope";
+    const KDED: &str =
+        "user.slice/user-1000.slice/user@1000.service/session.slice/plasma-kded6.service";
+    const SSHD: &str = "system.slice/sshd.service";
+    // 4209 is already in session-2.scope.
+    clone_pid_into(tmp.path(), 4209, 4300, SESSION);
+    clone_pid_into(tmp.path(), 4209, 4310, KDED);
+    // A process in a child cgroup of the unit belongs to the unit.
+    clone_pid_into(tmp.path(), 4209, 4311, &format!("{KDED}/worker"));
+    clone_pid_into(tmp.path(), 4209, 4320, SSHD);
+    write_events(tmp.path(), SESSION, true);
+    write_events(tmp.path(), KDED, true);
+    write_events(tmp.path(), SSHD, true);
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(frozen_unit_clock::now);
+    let out = sweep_n(&mut s, frozen_unit_clock::set, 1);
+
+    let frozen: Vec<u32> = out
+        .records
+        .iter()
+        .zip(&out.extras)
+        .filter(|(_, x)| x.frozen)
+        .map(|(r, _)| r.key.pid)
+        .collect();
+    assert_eq!(
+        frozen,
+        [4209, 4300, 4310, 4311],
+        "not the lone sshd.service process"
+    );
+    assert_ne!(out.side[index_of(&out, 4320)].class, ProcClass::App);
+}
+
 sweep_clock!(deadline_clock);
 
 #[test]

@@ -311,7 +311,8 @@ pub struct CgroupStats {
     pub io_wbytes: u64,
     pub pids_current: u32,
     /// `cgroup.events` has `frozen 1`. False when the file was not read. No production sender
-    /// fills unit samples yet (tasklens-8q0.42).
+    /// fills unit samples yet; unit rows take frozen from the members the sweep marks
+    /// (tasklens-8q0.42).
     pub frozen: bool,
     pub validity: Validity,
 }
