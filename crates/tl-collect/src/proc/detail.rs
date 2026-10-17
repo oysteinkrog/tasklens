@@ -2336,8 +2336,10 @@ mod tests {
         refs.init[NS_NAMES.iter().position(|n| *n == "cgroup").unwrap()] = Some(4026531835);
         refs.tasklens[NS_NAMES.iter().position(|n| *n == "net").unwrap()] = Some(4026532999);
         let mut text = String::new();
-        let mut out = SecurityInfo::default();
-        out.loginuid = Some(5);
+        let mut out = SecurityInfo {
+            loginuid: Some(5),
+            ..SecurityInfo::default()
+        };
         parse_helper_security(HELPER_STATUS, Some(&ns), &refs, &mut text, &mut out)
             .expect("parses");
 
@@ -2373,8 +2375,10 @@ mod tests {
     #[test]
     fn helper_security_isolated_and_no_ns() {
         let ns: [(&str, &[u8]); 2] = [("mnt", b"mnt:[11]"), ("uts", b"uts:[12]")];
-        let mut refs = NsRefs::default();
-        refs.init = [Some(1); 8];
+        let refs = NsRefs {
+            init: [Some(1); 8],
+            ..NsRefs::default()
+        };
         let mut text = String::new();
         let mut out = SecurityInfo::default();
         parse_helper_security(HELPER_STATUS, Some(&ns), &refs, &mut text, &mut out)
