@@ -1497,7 +1497,7 @@ mod tests {
         ));
 
         let mut short = netns_replies();
-        short.remove(2);
+        short.remove(3);
         assert!(matches!(parse_netns_dump(&short), Err(NetnsSkip::Dumps(3))));
     }
 

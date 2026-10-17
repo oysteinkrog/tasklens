@@ -2401,16 +2401,18 @@ mod connections_helper {
             assert!(update.records.iter().all(|r| r.netns.is_none()));
         }
 
-        // Turning "All" off again drops the namespace rows on the next rebuild.
+        // `source::run` reads the demand before it waits, so a change reaches the second
+        // rebuild after it. With "All", that rebuild lists the namespaces and the next one
+        // shows their rows; without it, that rebuild drops them.
         rig.demand
             .send_modify(|d| d.connections_all_netns = true)
             .expect("demand sent");
-        rig.run(Duration::from_millis(4_000));
+        rig.run(Duration::from_millis(6_000));
         assert!(rig.last().records.iter().any(|r| r.netns.is_some()));
         rig.demand
             .send_modify(|d| d.connections_all_netns = false)
             .expect("demand sent");
-        rig.run(Duration::from_millis(2_000));
+        rig.run(Duration::from_millis(4_000));
         assert_eq!(rig.last().records.len(), 2);
         assert!(rig.last().records.iter().all(|r| r.netns.is_none()));
         rig.finish();
