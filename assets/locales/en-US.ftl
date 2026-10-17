@@ -2988,6 +2988,15 @@ services-sys036-no-terminal = Could not open a terminal
 services-sys037-new-lines = ↓ { $n } new lines
 services-sys037-loading = Loading…
 services-sys037-no-older = No older entries
+services-sys038-loading = Loading logs…
+services-sys038-no-entries = No log entries for this unit in the current boot.
+services-sys038-no-match = No log entries match the filter.
+services-sys038-not-found = journalctl not found
+services-sys038-timeout = Reading the journal took too long.
+services-sys038-read-failed = Could not read the journal
+services-sys038-retry = Retry
+services-sys038-own-only = Only your own log messages are visible. Add your user to the systemd-journal group to see all.
+services-sys038-copy-command = Copy command
 shell-toast-unit-type-required = At least one unit type must stay selected
 # Settings window, Performance page: device order list (tasklens-bj6.27, UI-SHL-066).
 shell-settings-sidebar = Sidebar

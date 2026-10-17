@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fluent_bundle::FluentValue;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
@@ -27,7 +28,9 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
-use tl_model::journal::{JournalEntry, JournalEvent, JournalHandle, JournalQuery};
+use tl_model::journal::{
+    JournalAccess, JournalEntry, JournalError, JournalEvent, JournalHandle, JournalQuery,
+};
 use tl_model::snapshot::UnitDetails;
 use tl_model::table::{Manager, UnitRef};
 use tl_model::units::{self, LocalDateTime};
@@ -35,7 +38,9 @@ use tracing::warn;
 
 use super::ServicePropsTabView;
 use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker, ToastTexts};
+use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::empty::{TlEmptyState, TlEmptyTone};
 use crate::components::icons::TlIcon;
 use crate::components::input::{TlInputSize, TlTextInput};
 use crate::components::toast::{ToastKind, ToastQueue};
@@ -71,6 +76,18 @@ const TIME_CHARS: f32 = 19.;
 const PRIO_CHARS: f32 = 7.;
 /// The message tooltip shows at most this many characters.
 const TOOLTIP_CHARS: usize = 2000;
+
+gpui_kit::actions!(tasklens, [ServiceLogsRetry, ServiceLogsCopyCommand]);
+
+/// What the list area shows (UI-SYS-038).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ListState {
+    Error(JournalError),
+    Loading,
+    NoEntries,
+    NoMatch,
+    List,
+}
 
 /// The first and the fallback terminal launcher.
 const TERMINALS: [&str; 2] = ["xdg-terminal-exec", "konsole -e"];
@@ -282,6 +299,12 @@ pub struct LogsView {
     stick_to_bottom: bool,
     /// Lines shown since the list unstuck, for the pill.
     new_since_unstick: u32,
+    /// The first batch of this handle has arrived.
+    first_batch: bool,
+    /// The last journal error. It replaces the list until Retry.
+    error: Option<JournalError>,
+    /// The engine says only the user's own entries are readable.
+    own_only: bool,
     /// A Load older request is in flight.
     loading_older: bool,
     /// The last older page was short: nothing older remains.
@@ -322,34 +345,18 @@ impl LogsView {
                 },
             ));
         }
-        let client = cx
-            .try_global::<GlobalHub>()
-            .map(|hub| hub.0.read(cx).client().clone());
-        let handle = client.map(|client| {
-            client.journal(JournalQuery {
-                unit: unit.clone(),
-                follow: true,
-            })
-        });
-        let reader = handle.as_ref().map(|handle| {
-            let events = handle.events();
-            cx.spawn(async move |this, cx| {
-                while let Ok(ev) = events.recv().await {
-                    if this.update(cx, |this, cx| this.on_event(ev, cx)).is_err() {
-                        break;
-                    }
-                }
-            })
-        });
-        Self {
+        let mut this = Self {
             unit,
             lines: VecDeque::new(),
             filtered: Vec::new(),
             filter: SharedString::default(),
-            handle,
+            handle: None,
             follow: true,
             stick_to_bottom: true,
             new_since_unstick: 0,
+            first_batch: false,
+            error: None,
+            own_only: false,
             loading_older: false,
             exhausted: false,
             scroll_dirty: false,
@@ -358,28 +365,93 @@ impl LogsView {
             focus: cx.focus_handle(),
             filter_input,
             debounce: None,
-            _reader: reader,
+            _reader: None,
             launches: SmallVec::new(),
             _subs: subs,
+        };
+        this.open_journal(true, cx);
+        this
+    }
+
+    /// Opens a journal handle and starts reading its events. The engine sends the last 200
+    /// entries first.
+    fn open_journal(&mut self, follow: bool, cx: &mut Context<Self>) {
+        let Some(client) = cx
+            .try_global::<GlobalHub>()
+            .map(|hub| hub.0.read(cx).client().clone())
+        else {
+            return;
+        };
+        let handle = client.journal(JournalQuery {
+            unit: self.unit.clone(),
+            follow,
+        });
+        let events = handle.events();
+        self._reader = Some(cx.spawn(async move |this, cx| {
+            while let Ok(ev) = events.recv().await {
+                if this.update(cx, |this, cx| this.on_event(ev, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+        self.handle = Some(handle);
+    }
+
+    /// Retry: drops the handle and its reader, clears the list and opens a new handle.
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        self._reader = None;
+        self.handle = None;
+        self.lines.clear();
+        self.filtered.clear();
+        self.selection = Selection::new();
+        self.error = None;
+        self.own_only = false;
+        self.first_batch = false;
+        self.loading_older = false;
+        self.exhausted = false;
+        self.new_since_unstick = 0;
+        self.stick_to_bottom = true;
+        self.open_journal(self.follow, cx);
+        cx.notify();
+    }
+
+    fn list_state(&self) -> ListState {
+        if let Some(e) = &self.error {
+            ListState::Error(e.clone())
+        } else if !self.first_batch {
+            ListState::Loading
+        } else if self.lines.is_empty() {
+            ListState::NoEntries
+        } else if self.filtered.is_empty() {
+            ListState::NoMatch
+        } else {
+            ListState::List
         }
     }
 
     fn on_event(&mut self, ev: JournalEvent, cx: &mut Context<Self>) {
-        // Access and Error are the states bead's.
-        if let JournalEvent::Batch {
-            entries,
-            older,
-            exhausted,
-        } = ev
-        {
-            if older {
-                self.loading_older = false;
-                self.exhausted = exhausted;
+        match ev {
+            JournalEvent::Batch {
+                entries,
+                older,
+                exhausted,
+            } => {
+                if older {
+                    self.loading_older = false;
+                    self.exhausted = exhausted;
+                } else {
+                    self.first_batch = true;
+                }
+                let line_h = px(LINE_H * metrics(cx).ui_scale);
+                self.take_batch(&entries, older, line_h);
             }
-            let line_h = px(LINE_H * metrics(cx).ui_scale);
-            self.take_batch(&entries, older, line_h);
-            cx.notify();
+            JournalEvent::Access(access) => self.own_only = access == JournalAccess::OwnOnly,
+            JournalEvent::Error(e) => {
+                self.error = Some(e);
+                self.loading_older = false;
+            }
         }
+        cx.notify();
     }
 
     /// Formats `entries` once and appends them, or prepends them for an `older` page. Only the
@@ -1033,25 +1105,134 @@ impl ServicePropsTabView for LogsView {
     }
 }
 
+impl LogsView {
+    /// The centred text or error block for a state other than the list.
+    fn state_element(state: &ListState, cx: &App) -> AnyElement {
+        let retry = |s: TlEmptyState| {
+            s.clear_filter(Box::new(ServiceLogsRetry))
+                .button_label(tr(cx, "services-sys038-retry"))
+        };
+        match state {
+            ListState::Error(JournalError::NotFound) => TlEmptyState::new("")
+                .kit_icon(IconName::CircleAlert)
+                .tone(TlEmptyTone::Warning)
+                .heading(tr(cx, "services-sys038-not-found"))
+                .into_any_element(),
+            ListState::Error(JournalError::Timeout) => {
+                retry(TlEmptyState::new("").heading(tr(cx, "services-sys038-timeout")))
+                    .into_any_element()
+            }
+            ListState::Error(JournalError::Exit {
+                stderr_first_line, ..
+            }) => retry(
+                TlEmptyState::new(SharedString::from(stderr_first_line.to_string()))
+                    .heading(tr(cx, "services-sys038-read-failed"))
+                    .one_line(),
+            )
+            .into_any_element(),
+            ListState::Loading => {
+                TlEmptyState::new(tr(cx, "services-sys038-loading")).into_any_element()
+            }
+            ListState::NoEntries => {
+                TlEmptyState::new(tr(cx, "services-sys038-no-entries")).into_any_element()
+            }
+            ListState::NoMatch => {
+                TlEmptyState::new(tr(cx, "services-sys038-no-match")).into_any_element()
+            }
+            ListState::List => div().into_any_element(),
+        }
+    }
+
+    /// The list area's state, as the tab shows it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn status_for_test(&self, cx: &App) -> LogsStatusForTest {
+        let (heading, text, button) = match self.list_state() {
+            ListState::Error(JournalError::NotFound) => {
+                (Some(tr(cx, "services-sys038-not-found")), None, None)
+            }
+            ListState::Error(JournalError::Timeout) => (
+                Some(tr(cx, "services-sys038-timeout")),
+                None,
+                Some(tr(cx, "services-sys038-retry")),
+            ),
+            ListState::Error(JournalError::Exit {
+                stderr_first_line, ..
+            }) => (
+                Some(tr(cx, "services-sys038-read-failed")),
+                Some(SharedString::from(stderr_first_line.to_string())),
+                Some(tr(cx, "services-sys038-retry")),
+            ),
+            ListState::Loading => (None, Some(tr(cx, "services-sys038-loading")), None),
+            ListState::NoEntries => (None, Some(tr(cx, "services-sys038-no-entries")), None),
+            ListState::NoMatch => (None, Some(tr(cx, "services-sys038-no-match")), None),
+            ListState::List => (None, None, None),
+        };
+        LogsStatusForTest {
+            banner: self
+                .own_only
+                .then(|| tr(cx, "services-sys038-own-only").to_string()),
+            heading: heading.map(|s| s.to_string()),
+            text: text.map(|s| s.to_string()),
+            button: button.map(|s| s.to_string()),
+        }
+    }
+}
+
+/// The list area's state, for tests.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogsStatusForTest {
+    pub banner: Option<String>,
+    pub heading: Option<String>,
+    pub text: Option<String>,
+    pub button: Option<String>,
+}
+
 impl Render for LogsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         if std::mem::take(&mut self.scroll_dirty) {
             self.sync_stick(px(LINE_H * metrics(cx).ui_scale));
         }
-        let pill = self.pill(cx);
-        let list = uniform_list(
-            "svc-logs-list",
-            self.filtered.len(),
-            cx.processor(Self::build_rows),
-        )
-        .track_scroll(&self.scroll)
-        .size_full();
+        let state = self.list_state();
+        let (body, pill) = if state == ListState::List {
+            let list = uniform_list(
+                "svc-logs-list",
+                self.filtered.len(),
+                cx.processor(Self::build_rows),
+            )
+            .track_scroll(&self.scroll)
+            .size_full();
+            (list.into_any_element(), self.pill(cx))
+        } else {
+            (Self::state_element(&state, cx), None)
+        };
+        let banner = self.own_only.then(|| {
+            div().flex_none().w_full().child(
+                TlBanner::new(TlBannerKind::Info, tr(cx, "services-sys038-own-only")).button(
+                    tr(cx, "services-sys038-copy-command"),
+                    Box::new(ServiceLogsCopyCommand),
+                ),
+            )
+        });
         v_flex()
             .id("ServiceLogsTab")
             .debug_selector(|| "ServiceLogsTab".into())
             .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    // A button click does not move focus, so its action would miss this tab.
+                    this.focus.focus(window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ServiceLogsRetry, _, cx| this.retry(cx)))
+            .on_action(cx.listener(|this, _: &ServiceLogsCopyCommand, window, cx| {
+                let command = tr(cx, "setup-row-journal-command").to_string();
+                this.copy(command, window, cx);
+            }))
             .child(self.toolbar(cx))
+            .children(banner)
             .child(
                 div()
                     .id("ServiceLogsList")
@@ -1072,7 +1253,7 @@ impl Render for LogsView {
                     .min_h_0()
                     .w_full()
                     .bg(theme.list_bg)
-                    .child(list)
+                    .child(body)
                     .children(pill),
             )
     }

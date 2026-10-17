@@ -15,7 +15,7 @@ pub use dependencies::DependenciesTab;
 pub use general::GeneralTab;
 pub use logon::LogOnTab;
 #[cfg(any(test, feature = "test-hooks"))]
-pub use logs::{FollowStateForTest, LogRowForTest};
+pub use logs::{FollowStateForTest, LogRowForTest, LogsStatusForTest};
 pub use logs::{LogLine, LogsView};
 pub use recovery::RecoveryTab;
 

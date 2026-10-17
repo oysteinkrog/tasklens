@@ -22,7 +22,7 @@ use tl_model::actions::{
 };
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
-use tl_model::journal::{JournalControl, JournalEntry, JournalEvent};
+use tl_model::journal::{JournalAccess, JournalControl, JournalEntry, JournalError, JournalEvent};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{
     DepEntry, PidIds, RecoverySettings, Relation, ServiceBackend, ServiceStatus, StartupType,
@@ -40,8 +40,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::windows::service_properties::{
-    DependenciesTab, FollowStateForTest, GeneralTab, LogOnTab, LogRowForTest, LogsView,
-    RecoveryTab, ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
+    DependenciesTab, FollowStateForTest, GeneralTab, LogOnTab, LogRowForTest, LogsStatusForTest,
+    LogsView, RecoveryTab, ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView,
 };
 
 use tl_ui::pages::services::actions::ServicePropsOk;
@@ -2116,4 +2116,137 @@ fn cap_10000_drops_oldest(cx: &mut TestAppContext) {
     assert_eq!(messages[0], "m950");
     assert_eq!(messages[9_999], "m20049");
     assert!(t.state(cx).older_enabled);
+}
+
+impl Logs {
+    /// Sends one event through the journal handle `i`.
+    fn send(&self, cx: &mut TestAppContext, i: usize, ev: JournalEvent) {
+        let (events, _) = self.engine.journal_end(i).expect("a journal was opened");
+        events.try_send(ev).expect("the event channel has room");
+        cx.run_until_parked();
+    }
+
+    fn status(&self, cx: &mut TestAppContext) -> LogsStatusForTest {
+        cx.read(|cx| self.tab.read(cx).status_for_test(cx))
+    }
+}
+
+#[gpui_kit::test]
+fn logs_loading_and_empty_states(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    assert_eq!(t.status(cx).text.as_deref(), Some("Loading logs…"));
+    t.feed(cx, vec![]);
+    assert_eq!(
+        t.status(cx).text.as_deref(),
+        Some("No log entries for this unit in the current boot.")
+    );
+
+    let t = open_logs(cx);
+    t.feed(cx, vec![entry(0, 6, "started"), entry(1, 6, "stopped")]);
+    assert_eq!(t.status(cx).text, None);
+    let input = cx.read(|cx| t.tab.read(cx).filter_input_for_test());
+    let mut vcx = t.vcx(cx);
+    vcx.update(|window, cx| input.update(cx, |s, cx| s.focus(window, cx)));
+    vcx.simulate_input("zzz");
+    vcx.executor().advance_clock(Duration::from_millis(100));
+    vcx.run_until_parked();
+    drop(vcx);
+    assert_eq!(
+        t.status(cx).text.as_deref(),
+        Some("No log entries match the filter.")
+    );
+}
+
+#[gpui_kit::test]
+fn logs_timeout_retry(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.send(cx, 0, JournalEvent::Error(JournalError::Timeout));
+    let st = t.status(cx);
+    assert_eq!(
+        st.heading.as_deref(),
+        Some("Reading the journal took too long.")
+    );
+    assert_eq!(st.button.as_deref(), Some("Retry"));
+    let mut vcx = t.vcx(cx);
+    t.click(
+        &mut vcx,
+        "TlButton-TlEmptyState-clear-filter",
+        Modifiers::none(),
+    );
+    drop(vcx);
+    let journals = t.engine.journals();
+    assert_eq!(journals.len(), 2);
+    assert_eq!(journals[1].unit, journals[0].unit);
+    assert!(t.engine.journal_end(0).expect("first").1.is_closed());
+    assert_eq!(t.status(cx).text.as_deref(), Some("Loading logs…"));
+    t.send(
+        cx,
+        1,
+        JournalEvent::Batch {
+            entries: vec![entry(0, 6, "again")].into(),
+            older: false,
+            exhausted: false,
+        },
+    );
+    assert_eq!(t.messages(cx), ["again"]);
+}
+
+#[gpui_kit::test]
+fn logs_exit_error_text(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.send(
+        cx,
+        0,
+        JournalEvent::Error(JournalError::Exit {
+            code: 1,
+            stderr_first_line: a("Failed to open journal"),
+        }),
+    );
+    let st = t.status(cx);
+    assert_eq!(st.heading.as_deref(), Some("Could not read the journal"));
+    assert_eq!(st.text.as_deref(), Some("Failed to open journal"));
+    assert_eq!(st.button.as_deref(), Some("Retry"));
+}
+
+#[gpui_kit::test]
+fn logs_access_banner_shown(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.send(cx, 0, JournalEvent::Access(JournalAccess::OwnOnly));
+    t.feed(cx, vec![entry(0, 6, "started")]);
+    assert_eq!(
+        t.status(cx).banner.as_deref(),
+        Some(
+            "Only your own log messages are visible. Add your user to the systemd-journal group to see all."
+        )
+    );
+    assert_eq!(t.messages(cx), ["started"]);
+    let mut vcx = t.vcx(cx);
+    t.click(
+        &mut vcx,
+        "TlButton-TlBanner-Copy command",
+        Modifiers::none(),
+    );
+    let copied = vcx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(
+        copied.as_deref(),
+        Some("sudo usermod -aG systemd-journal $USER")
+    );
+    drop(vcx);
+    assert_eq!(t.toasts(cx), ["Copied to clipboard"]);
+    t.send(cx, 0, JournalEvent::Access(JournalAccess::All));
+    assert_eq!(t.status(cx).banner, None);
+}
+
+#[gpui_kit::test]
+fn logs_not_found_no_button(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.send(cx, 0, JournalEvent::Error(JournalError::NotFound));
+    let st = t.status(cx);
+    assert_eq!(st.heading.as_deref(), Some("journalctl not found"));
+    assert_eq!(st.button, None);
+    let vcx = t.vcx(cx);
+    assert!(
+        vcx.debug_bounds("TlButton-TlEmptyState-clear-filter")
+            .is_none()
+    );
 }
