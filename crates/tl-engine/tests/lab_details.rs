@@ -989,3 +989,127 @@ fn handle_search_replace_and_cancel() {
     assert!(Arc::ptr_eq(&later, last), "a state after the cancel");
     stop(fl, ui, handle);
 }
+
+// ---- Properties General: PSS, USS and GPU (tasklens-dwy.16) ----
+
+/// Starts `specs` on `root`, a copy of process-edge, and returns the key the process sweep gives
+/// 4201.
+fn start_props_engine(
+    root: &FixtureRoot,
+    specs: Vec<tl_engine::workers::WorkerSpec>,
+) -> (
+    FakeLab,
+    fake_sources::UiSide,
+    asupersync::runtime::TaskHandle<()>,
+    ProcessKey,
+) {
+    let mut fl = FakeLab::new();
+    let (ep, ui) = fake_sources::root_endpoints(root.config(), specs);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+    ui.demand_tx
+        .send(demand(&[], &[]))
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+    let key = ui
+        .latest
+        .load_full()
+        .processes
+        .records
+        .iter()
+        .find(|r| r.key.pid == 4201)
+        .map(|r| r.key)
+        .expect("the sweep lists 4201");
+    (fl, ui, handle, key)
+}
+
+/// An open Properties window on General: its target and tab, and per-process GPU values.
+fn general_window_demand(key: ProcessKey) -> Demand {
+    Demand {
+        any_surface_visible: true,
+        gpu_process: true,
+        details: Arc::from([DetailDemand {
+            target: DetailTarget::Process(key),
+            tab: DetailTab::General,
+        }]),
+        ..Demand::default()
+    }
+}
+
+/// tasklens-dwy.16: a Properties window on General gets PSS and USS for its process within one
+/// PSS period, with no PSS or USS column shown and no `detail_keys`. On another tab it does not.
+#[test]
+fn engine_reads_pss_for_properties_general_target() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    let (mut fl, ui, handle, key) =
+        start_props_engine(&root, vec![processes::spec(), process_detail::spec()]);
+
+    ui.demand_tx
+        .send(general_window_demand(key))
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_millis(1500), Duration::from_millis(10));
+    let snap = ui.latest.load_full();
+    let r = snap
+        .processes
+        .records
+        .iter()
+        .find(|r| r.key == key)
+        .expect("record of 4201");
+    assert_eq!(r.validity.get(ProcessField::Pss), Validity::Valid);
+    assert_eq!(r.validity.get(ProcessField::Uss), Validity::Valid);
+    assert_eq!(r.pss_bytes, 2_097_152);
+    assert_eq!(r.uss_bytes, 1_572_864);
+    assert_eq!(&*snap.processes.coverage.pss_uss, &[key]);
+
+    // Threads shows no PSS: the value leaves coverage.
+    let mut threads = general_window_demand(key);
+    threads.details = Arc::from([DetailDemand {
+        target: DetailTarget::Process(key),
+        tab: DetailTab::Threads,
+    }]);
+    ui.demand_tx.send(threads).expect("watch has receivers");
+    fl.run_for(Duration::from_millis(1500), Duration::from_millis(10));
+    let snap = ui.latest.load_full();
+    let r = snap
+        .processes
+        .records
+        .iter()
+        .find(|r| r.key == key)
+        .expect("record of 4201");
+    assert_eq!(r.validity.get(ProcessField::Pss), Validity::WarmingUp);
+    assert!(snap.processes.coverage.pss_uss.is_empty());
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.16: with an AMD card, a Properties target that uses no GPU gets final GPU values:
+/// VRAM a valid 0, and GPU % `Unsupported`, as AMD has no per-process utilisation.
+#[test]
+fn engine_gpu_final_for_properties_target_without_gpu_use() {
+    let root = FixtureRoot::new(&["process-edge", "drm-amd"]);
+    let (mut fl, ui, handle, key) = start_props_engine(
+        &root,
+        vec![
+            processes::spec(),
+            process_detail::spec(),
+            tl_engine::workers::gpu_drm::spec(),
+        ],
+    );
+
+    ui.demand_tx
+        .send(general_window_demand(key))
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_millis(2500), Duration::from_millis(10));
+    let snap = ui.latest.load_full();
+    let r = snap
+        .processes
+        .records
+        .iter()
+        .find(|r| r.key == key)
+        .expect("record of 4201");
+    assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
+    assert_eq!(r.gpu_mem_bytes, 0);
+    assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+    stop(fl, ui, handle);
+}

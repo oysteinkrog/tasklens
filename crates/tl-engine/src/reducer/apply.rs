@@ -19,7 +19,7 @@ use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::history::HistoryView;
-use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
+use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
@@ -45,6 +45,7 @@ use crate::update::{
     SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
 };
 use crate::workers::history::HistoryMsg;
+use crate::workers::process_detail::pss_keys;
 
 /// Valid CPU samples whose irq share stays 0 before the Interrupts row shows `n/a` (U-21).
 const IRQ_ZERO_SAMPLES: u32 = 10;
@@ -114,8 +115,7 @@ pub struct ApplyState {
     /// `supports_process_util` per GPU UUID from the last `GpuInfo` of each GPU worker
     /// (E09-006). AMD cards share the key `[0; 16]` and are always `false`.
     gpu_caps: FxHashMap<[u8; 16], bool>,
-    /// Keys whose PSS the last demand asked for: `detail_keys` while a PSS or USS column is
-    /// shown, else none (E09-006).
+    /// Keys whose PSS the last demand asked for: `process_detail::pss_keys` (E09-006).
     pss_keys: Arc<[ProcessKey]>,
     /// The last health state per source was `Running` or `Late`.
     running: [bool; SourceId::COUNT],
@@ -1649,15 +1649,9 @@ impl Reducer {
     }
 
     /// Applies the demand of this batch: PSS of keys no longer demanded becomes `WarmingUp`
-    /// and leaves coverage. A hidden PSS and USS column demands no keys.
+    /// and leaves coverage. The demanded keys are the worker's `pss_keys`.
     pub fn apply_demand(&mut self, demand: &Demand, settings: &EngineSettings) {
-        let shown = demand.process_columns.contains(ColumnId::Pss)
-            || demand.process_columns.contains(ColumnId::Uss);
-        let keys: Arc<[ProcessKey]> = if shown {
-            Arc::clone(&demand.detail_keys)
-        } else {
-            Arc::from([])
-        };
+        let keys = pss_keys(demand);
         self.retain_unit_details(&demand.unit_details);
         self.apply_state
             .process_series

@@ -1,11 +1,11 @@
 //! The `ProcessDetail` worker (ADR-008, ADR-016): PSS, USS and swap for `detail_keys`, and the
 //! Properties tab payloads of `Demand.details`.
 //!
-//! `/proc/<pid>/smaps_rollup` is read at most once per `PSS_PERIOD` of clock time, only while a
-//! PSS or USS column is shown and `detail_keys` (visible rows plus one viewport of overscan,
-//! at most 512) is not empty. The `tl-collect` `PssReader` keeps up to 128 fds open between
-//! samples (ADR-016), checks `start_ticks` when it opens a file and closes the fds of keys that
-//! left the demand.
+//! `/proc/<pid>/smaps_rollup` is read at most once per `PSS_PERIOD` of clock time for the keys of
+//! `pss_keys`: `detail_keys` (visible rows plus one viewport of overscan, at most 512) while a PSS
+//! or USS column is shown, and every process target whose General tab is demanded. The
+//! `tl-collect` `PssReader` keeps up to 128 fds open between samples (ADR-016), checks
+//! `start_ticks` when it opens a file and closes the fds of keys that left the demand.
 //!
 //! Tabs (E10-004): the demanded tab of each demanded process target (at most `DETAILS_MAX`) is
 //! read at `processes.interval_ms`: Threads, File descriptors, Memory maps and Security. General
@@ -342,7 +342,7 @@ struct HelperDone {
 #[derive(Default)]
 struct Wanted {
     details: Arc<[DetailDemand]>,
-    /// PSS keys, empty while no PSS or USS column is shown.
+    /// The `pss_keys` of the demand.
     pss: Arc<[ProcessKey]>,
 }
 
@@ -805,6 +805,41 @@ fn helper_hit((address, encoding, value): (u64, StringEncoding, String)) -> Stri
 /// True while a PSS or USS column is shown.
 pub fn wants_pss(d: &Demand) -> bool {
     d.process_columns.contains(ColumnId::Pss) || d.process_columns.contains(ColumnId::Uss)
+}
+
+/// The keys whose PSS is read: `detail_keys` while a PSS or USS column is shown, then every
+/// process target of the first `DETAILS_MAX` details whose General tab is demanded, as its
+/// window shows PSS and USS (tasklens-dwy.16). Each key is listed once. The reducer keeps the
+/// PSS of these keys and no others.
+pub fn pss_keys(d: &Demand) -> Arc<[ProcessKey]> {
+    let shown = wants_pss(d);
+    let mut general = d
+        .details
+        .iter()
+        .take(DETAILS_MAX)
+        .filter_map(|demand| match demand.target {
+            DetailTarget::Process(key) if demand.tab == DetailTab::General => Some(key),
+            _ => None,
+        })
+        .peekable();
+    if general.peek().is_none() {
+        return if shown {
+            Arc::clone(&d.detail_keys)
+        } else {
+            Arc::from([])
+        };
+    }
+    let mut keys: Vec<ProcessKey> = if shown {
+        d.detail_keys.to_vec()
+    } else {
+        Vec::new()
+    };
+    for key in general {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys.into()
 }
 
 /// The tabs read from demand. General is also read for every process target whatever its tab.
@@ -2421,12 +2456,9 @@ impl Source for ProcessDetailSource {
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         // A forced `RefreshNow` samples even without a period, so hidden columns must leave
         // no keys behind.
-        let shown = wants_pss(d);
-        *self.keys.borrow_mut() = if shown {
-            d.detail_keys.clone()
-        } else {
-            Arc::from([])
-        };
+        let keys = pss_keys(d);
+        let pss = !keys.is_empty();
+        *self.keys.borrow_mut() = keys;
         let details = self.cap_details(d);
         // Done here, not in `sample`: with no demand left no sample runs, and a window that
         // opens again must get its tabs, not "unchanged" from the old state. A tab that appears
@@ -2472,7 +2504,7 @@ impl Source for ProcessDetailSource {
         let affinity = &d.affinity_targets[..d.affinity_targets.len().min(AFFINITY_TARGETS_MAX)];
         *self.affinity_keys.borrow_mut() = Arc::from(affinity);
         // PSS and affinity both run at 1 Hz.
-        let fast = (shown && !d.detail_keys.is_empty()) || !affinity.is_empty();
+        let fast = pss || !affinity.is_empty();
         let tabs = wants_tabs(&details);
         if let Some(side) = &self.helper {
             lock(&side.store).wanted = Wanted {
@@ -4601,6 +4633,39 @@ mod tests {
             Some(Duration::from_secs(1))
         );
         assert_eq!(src.period(&demand(&[ColumnId::Pss], &[]), &s), None);
+    }
+
+    /// tasklens-dwy.16: a General target gets PSS without a column, once, after the shown
+    /// `detail_keys`. A target on another tab or an app target adds nothing.
+    #[test]
+    fn pss_keys_add_general_targets() {
+        let (_tmp, cfg, keys) = fake_procs(3);
+        let target = |key, tab| DetailDemand {
+            target: DetailTarget::Process(key),
+            tab,
+        };
+        let mut d = demand(&[], &keys[..2]);
+        assert!(pss_keys(&d).is_empty());
+        d.details = Arc::from([
+            target(keys[2], DetailTab::General),
+            target(keys[0], DetailTab::Threads),
+        ]);
+        assert_eq!(&*pss_keys(&d), &[keys[2]]);
+        d.process_columns.insert(ColumnId::Pss);
+        assert_eq!(&*pss_keys(&d), &keys[..]);
+        d.details = Arc::from([target(keys[1], DetailTab::General)]);
+        assert_eq!(&*pss_keys(&d), &keys[..2]);
+
+        let src = ProcessDetailSource::new(cfg);
+        let general = Demand {
+            details: Arc::from([target(keys[2], DetailTab::General)]),
+            ..Demand::default()
+        };
+        let (_src, out) = run(src, &general);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].key, keys[2]);
+        assert_eq!(out[0].validity, Validity::Valid);
+        assert_eq!(out[0].pss_bytes, 2_097_152);
     }
 
     #[test]
