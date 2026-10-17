@@ -329,6 +329,7 @@ fn failed_sample(uuid: [u8; 16]) -> GpuDeviceSample {
         clock_mem_mhz: Reading::Failed,
         clock_video_mhz: Reading::Failed,
         pstate: Reading::Failed,
+        clock_event_reasons: Reading::Failed,
         fan_pct: Reading::Failed,
         fan_rpm: Reading::Failed,
         pcie_rx_kbps: Reading::Failed,
