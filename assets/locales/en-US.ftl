@@ -2879,6 +2879,9 @@ minigraph-ended = Ended
 # the KWin bridge finds the window by this caption (R-086).
 mini-window-title = tasklens Mini Window
 mini-window-toast-open-failed = Could not open the mini window
+mini-menu-always-on-top = Always on top
+mini-menu-show-main = Show Main Window
+mini-menu-close = Close
 # Settings window, Services page (tasklens-bj6.28, UI-SHL-068). The Graphs page uses the
 # shell-menu-graphs keys.
 shell-settings-services-unit-types = Unit types

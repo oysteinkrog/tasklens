@@ -381,6 +381,7 @@ impl TasklensUi {
         crate::windows::run::init(cx);
         crate::windows::smart::init(cx);
         crate::windows::handle_search::init(cx);
+        crate::windows::mini::init(cx);
         crate::window::confirm::init(cx);
         crate::window::settings::init(cx);
         #[cfg(feature = "bench")]

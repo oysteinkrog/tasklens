@@ -8,40 +8,51 @@
 //! handle, so sampling goes on while the main window is hidden.
 //!
 //! Each card is a cached `CardView` over the private sidebar's chart. It differs from the sidebar
-//! card: never selected, the pointer cursor on hover, no edit mode. Card clicks, the context
-//! menu, "Always on top" through the KWin bridge and the View menu check belong to xdh.22.
+//! card: never selected, the pointer cursor on hover, no edit mode.
+//!
+//! Interaction (PERF-093, UI-PRF-045, R-058, R-073): `ToggleMiniWindow` opens or closes the
+//! window, `PerfShowMiniWindow` opens or focuses it. A card click shows the main window on that
+//! card's page; a double-click shows the main window. The context menu holds "Always on top"
+//! (KWin bridge only, on at every open, never saved), "Show Main Window" and "Close".
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::base::Root;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels, Render,
-    ScrollHandle, Size, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions, div, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, ClickEvent, Context, Entity, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Render, ScrollHandle, Size, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, Subscription, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions, div, px, size,
 };
 use smallvec::SmallVec;
+use tl_model::command::{Command, KWinCommand, Tab};
 use tl_model::demand::Demand;
 
+use crate::actions::{ShowMainWindow, ToggleMiniWindow};
 use crate::anim::AnimationDriver;
+use crate::app::EngineGlobal;
 use crate::chart::ChartView;
+use crate::components::menu::{TlMenu, context_menu_layer, open_context_menu_at};
 use crate::components::toast::ToastKind;
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
-use crate::pages::minigraph::actions::CloseMiniWindow;
+use crate::pages::minigraph::actions::{CloseMiniWindow, ToggleMiniAlwaysOnTop};
 use crate::pages::minigraph::bridge::OwnWindowBridge;
-use crate::pages::performance::DeviceKey;
+use crate::pages::performance::actions::{PerfSelectDevice, PerfShowMiniWindow};
 use crate::pages::performance::card::{CARD_H, CardLines, CardView};
 use crate::pages::performance::sidebar::DeviceSidebar;
+use crate::pages::performance::{DeviceKey, PerformancePage};
 use crate::settings_global::TlSettings;
 use crate::theme::{UiMetrics, current, metrics};
-use crate::window::main::push_main_toast;
+use crate::window::main::{ShellState, main_window_view, push_main_toast};
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use crate::window::titlebar::keep_above_supported;
 
 /// The window width at ui_scale 1 (PERF-093).
 pub const MINI_W: f32 = 260.;
@@ -115,6 +126,70 @@ struct MiniKeysBound;
 
 impl gpui_kit::Global for MiniKeysBound {}
 
+/// Registers the `ToggleMiniWindow` and `PerfShowMiniWindow` handlers. `TasklensUi::init` calls
+/// it.
+pub fn init(cx: &mut App) {
+    // Deferred: from a key, a menu or a graph the dispatching window is mid-update.
+    cx.on_action(|_: &ToggleMiniWindow, cx| cx.defer(toggle_mini));
+    cx.on_action(|_: &PerfShowMiniWindow, cx| {
+        cx.defer(|cx| {
+            open_mini(cx);
+        })
+    });
+}
+
+/// Whether the mini window is open: the window registry holds it. The View > Window check item
+/// reads this. False when no registry is installed.
+pub fn is_mini_open(cx: &App) -> bool {
+    cx.try_global::<GlobalRegistry>()
+        .is_some_and(|r| r.0.read(cx).get(&WindowKey::Mini).is_some())
+}
+
+/// `ToggleMiniWindow`: closes the open mini window, or opens one.
+fn toggle_mini(cx: &mut App) {
+    if !is_mini_open(cx) {
+        open_mini(cx);
+        return;
+    }
+    if let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
+        registry.update(cx, |r, cx| r.close(&WindowKey::Mini, cx));
+    }
+}
+
+/// Switches the main window to Performance and selects the card of `key`. Called directly
+/// rather than dispatched: a page just built has no rendered frame, so a dispatched action would
+/// find no listener. Without a main window nothing happens.
+fn show_main_on(key: DeviceKey, cx: &mut App) {
+    let Some(handle) = cx.try_global::<ShellState>().and_then(|s| s.main_window) else {
+        return;
+    };
+    let Some(view) = main_window_view(cx) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        view.update(cx, |main, cx| {
+            main.select_tab(Tab::Performance, window, cx);
+            if let Some(page) = main.page_entity::<PerformancePage>(Tab::Performance) {
+                let sidebar = page.read(cx).sidebar().clone();
+                sidebar.update(cx, |s, cx| s.select(key, cx));
+            }
+        });
+    });
+}
+
+/// The window menu (UI-PRF-045). "Always on top" needs the KWin bridge; without it the item is
+/// disabled and says why.
+fn mini_menu(menu: TlMenu, always_on_top: bool, cx: &mut App) -> TlMenu {
+    let label = tr(cx, "mini-menu-always-on-top");
+    let menu = if keep_above_supported(cx) {
+        menu.check_item(label, always_on_top, Box::new(ToggleMiniAlwaysOnTop))
+    } else {
+        menu.item_disabled(label, Some(tr(cx, "fnd-pin-unsupported")))
+    };
+    menu.item(tr(cx, "mini-menu-show-main"), Box::new(ShowMainWindow))
+        .item(tr(cx, "mini-menu-close"), Box::new(CloseMiniWindow))
+}
+
 /// One card of the mini window.
 pub struct MiniCard {
     pub key: DeviceKey,
@@ -131,7 +206,8 @@ pub struct MiniWindow {
     /// The visible sidebar cards, in sidebar order.
     cards: Vec<MiniCard>,
     driver: Entity<AnimationDriver>,
-    /// On by default when the window opens; not persisted (PERF-093). xdh.22 applies it.
+    /// On by default when the window opens; not persisted (PERF-093). The KWin bridge sends it
+    /// on open; `ToggleMiniAlwaysOnTop` flips it.
     always_on_top: bool,
     scroll: ScrollHandle,
     hub: Entity<SnapshotHub>,
@@ -321,6 +397,61 @@ impl MiniWindow {
         // The registry drops `Mini` when the window closes.
         window.remove_window();
     }
+
+    /// A card click: shows the main window on that card's page. The mini window stays open.
+    fn on_select_device(
+        &mut self,
+        a: &PerfSelectDevice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.dispatch_action(Box::new(ShowMainWindow), cx);
+        // Two defers: the dispatch above runs in a deferred effect and its handler defers
+        // showing or reopening the main window once more. The page select must come after.
+        let key = a.key.clone();
+        cx.defer(move |cx| cx.defer(move |cx| show_main_on(key, cx)));
+    }
+
+    /// Flips "Always on top" and sends `KeepAbove` for this window's caption. Nothing is saved
+    /// (PERF-093). Without the KWin bridge it does nothing.
+    fn on_toggle_on_top(
+        &mut self,
+        _: &ToggleMiniAlwaysOnTop,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !keep_above_supported(cx) {
+            return;
+        }
+        self.always_on_top = !self.always_on_top;
+        if let Some(engine) = cx.try_global::<EngineGlobal>() {
+            let cmd = Command::KWin(KWinCommand::KeepAbove {
+                pid: std::process::id(),
+                caption: Some(Arc::from(MINI_WINDOW_TITLE)),
+                on: self.always_on_top,
+            });
+            if engine.0.send(cmd).is_err() {
+                tracing::warn!(target: "tasklens::ui", "keep above not sent");
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let on_top = self.always_on_top;
+        let context = window.focused(cx).unwrap_or_else(|| self.focus.clone());
+        let menu = TlMenu::build(window, cx, context, move |menu, _, cx| {
+            mini_menu(menu, on_top, cx)
+        });
+        open_context_menu_at(ev.position, window, cx, menu);
+    }
+}
+
+/// A double-click on the background or a card shows the main window.
+fn on_root_click(ev: &ClickEvent, window: &mut Window, cx: &mut App) {
+    if ev.click_count() == 2 {
+        window.dispatch_action(Box::new(ShowMainWindow), cx);
+    }
 }
 
 /// The work area height of `window`'s output, or of the primary output.
@@ -437,12 +568,17 @@ impl Render for MiniWindow {
             .key_context(MINI_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_close))
+            .on_action(cx.listener(Self::on_select_device))
+            .on_action(cx.listener(Self::on_toggle_on_top))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_click(on_root_click)
             .relative()
             .size_full()
             .bg(t.window_bg)
             .child(list)
             .child(border)
             .vertical_scrollbar(&self.scroll)
+            .children(context_menu_layer(window, cx))
     }
 }
 

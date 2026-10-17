@@ -890,26 +890,42 @@ mod mini {
     use std::time::Duration;
 
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, size,
+        AnyWindowHandle, AppContext as _, Entity, Modifiers, MouseButton, TestAppContext,
+        VisualTestContext, size,
     };
     use tl_model::client::EngineClient;
+    use tl_model::command::{Command, KWinCommand, Tab};
     use tl_model::demand::{CpuDemand, Demand};
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::DeviceIdx;
     use tl_model::settings::{
         AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
     };
+    use tl_model::snapshot::{ComponentHeader, FrameGeometry, WindowEntry, WindowsSnapshot};
+    use tl_model::validity::Validity;
+    use tl_ui::actions::ToggleMiniWindow;
     use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
+    use tl_ui::components::toast;
     use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::i18n::tr;
+    use tl_ui::pages::minigraph::actions::ToggleMiniAlwaysOnTop;
+    use tl_ui::pages::performance::PerformancePage;
+    use tl_ui::pages::performance::actions::PerfShowMiniWindow;
     use tl_ui::pages::performance::overview::OVERVIEW_KEY;
     use tl_ui::pages::performance::sidebar::DeviceSidebar;
     use tl_ui::pages::performance::{DeviceKey, DeviceKind};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{
+        self as shell, ShellState, main_window_view, open_main_window, set_test_page,
+    };
+    use tl_ui::window::menus_view::mini_window_open;
     use tl_ui::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-    use tl_ui::windows::mini::{MINI_WINDOW_TITLE, MiniWindow, mini_height, open_mini};
+    use tl_ui::windows::mini::{
+        MINI_WINDOW_TITLE, MiniWindow, is_mini_open, mini_height, open_mini,
+    };
 
     struct Empty;
 
@@ -989,11 +1005,18 @@ mod mini {
     }
 
     fn setup(cx: &mut TestAppContext) -> Rig {
+        setup_with(cx, false)
+    }
+
+    /// With `main`, the shell is installed and a main window opens: the real Performance page,
+    /// fake pages for the other tabs, no tab switch animation.
+    fn setup_with(cx: &mut TestAppContext, main: bool) -> Rig {
         let mut settings = Settings::default();
         settings
             .performance
             .device_overrides
             .insert(OVERVIEW_KEY.to_owned(), DeviceVisibility::Hide);
+        settings.motion.tab_switch_ms = 0;
         let engine = FakeEngine::new();
         engine.publish_with(|s| s.devices = Arc::new(catalog(1, 0)));
         let client: Arc<dyn EngineClient> = engine.clone();
@@ -1012,12 +1035,30 @@ mod mini {
             });
             TlSettings::init(cx);
             let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
             cx.set_global(GlobalHub(hub.clone()));
             cx.set_global(GlobalDemand(demand.clone()));
+            if main {
+                tl_ui::action_tracker::install(Arc::clone(&client), cx);
+                toast::init(cx);
+                tl_ui::actions::bind_keys_global(cx);
+                for tab in Tab::ALL {
+                    if tab != Tab::Performance {
+                        set_test_page(cx, tab, super::keep::FAKES[tab as usize]);
+                    }
+                }
+                shell::init(cx);
+            }
             GlobalRegistry::init(cx);
+            tl_ui::windows::mini::init(cx);
             (hub, demand)
         });
+        if main {
+            let handle = cx.update(open_main_window).expect("the main window opens");
+            let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+            vcx.update(|window, _| window.activate_window());
+            draw(&mut vcx);
+        }
         cx.run_until_parked();
         Rig {
             engine,
@@ -1276,6 +1317,186 @@ mod mini {
             "{sent:?}"
         );
     }
+
+    fn dispatch(cx: &mut TestAppContext, action: impl gpui_kit::Action) {
+        cx.update(|cx| cx.dispatch_action(&action));
+        cx.run_until_parked();
+    }
+
+    fn open_flags(cx: &mut TestAppContext) -> (bool, bool) {
+        cx.read(|cx| (is_mini_open(cx), mini_window_open(cx)))
+    }
+
+    #[gpui_kit::test]
+    fn mini_window_close_unchecks_menu(cx: &mut TestAppContext) {
+        let _rig = setup(cx);
+        assert_eq!(open_flags(cx), (false, false));
+        dispatch(cx, ToggleMiniWindow);
+        let handle = mini_handle(cx).expect("the toggle opened the window");
+        assert_eq!(open_flags(cx), (true, true));
+
+        dispatch(cx, ToggleMiniWindow);
+        assert_eq!(open_flags(cx), (false, false), "the View item unchecks");
+        assert!(
+            !cx.update(|cx| cx
+                .windows()
+                .iter()
+                .any(|w| w.window_id() == handle.window_id())),
+            "the window closed"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn mini_show_never_closes(cx: &mut TestAppContext) {
+        let _rig = setup(cx);
+        dispatch(cx, PerfShowMiniWindow);
+        let handle = mini_handle(cx).expect("the action opened the window");
+        let windows = cx.update(|cx| cx.windows().len());
+        for _ in 0..2 {
+            dispatch(cx, PerfShowMiniWindow);
+            assert_eq!(mini_handle(cx), Some(handle), "the same window stays open");
+            assert_eq!(cx.update(|cx| cx.windows().len()), windows);
+        }
+        let active = cx.update(|cx| cx.active_window());
+        assert_eq!(active, Some(handle), "the window is focused");
+    }
+
+    #[gpui_kit::test]
+    fn mini_window_card_click_opens_main_on_page(cx: &mut TestAppContext) {
+        let _rig = setup_with(cx, true);
+        assert_ne!(
+            cx.read(|cx| cx.global::<ShellState>().active_tab),
+            Tab::Performance
+        );
+        let (mut vcx, view) = open(cx);
+        let memory = keys(&mut vcx, &view)
+            .into_iter()
+            .find(|k| k.kind() == DeviceKind::Memory)
+            .expect("a Memory card");
+        let id = format!("perf-card-text:{}", memory.0);
+        let bounds = vcx
+            .debug_bounds(Box::leak(id.into_boxed_str()))
+            .expect("the Memory card is drawn");
+        vcx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read(|cx| cx.global::<ShellState>().active_tab),
+            Tab::Performance
+        );
+        let selected = cx.read(|cx| {
+            let main = main_window_view(cx).expect("the main window");
+            let page = main
+                .read(cx)
+                .page_entity::<PerformancePage>(Tab::Performance)
+                .expect("the Performance page was built");
+            page.read(cx).selected().cloned()
+        });
+        assert_eq!(selected, Some(memory));
+        assert!(mini_handle(cx).is_some(), "the mini window stays open");
+    }
+
+    /// Lists the mini window for this process with `validity`.
+    fn publish_windows(rig: &Rig, cx: &mut TestAppContext, validity: Validity) {
+        let entry = WindowEntry {
+            internal_id: Arc::from("{99999999-2222-3333-4444-555555555555}"),
+            pid: std::process::id(),
+            caption: Arc::from(MINI_WINDOW_TITLE),
+            resource_class: Arc::from("tasklens"),
+            desktop_file_name: Arc::from("tasklens"),
+            minimized: false,
+            maximized: false,
+            keep_above: false,
+            frame_geometry: FrameGeometry {
+                x: 0,
+                y: 0,
+                width: 260,
+                height: 800,
+            },
+            window_type: 0,
+            stack_index: 0,
+        };
+        rig.engine.publish_with(|s| {
+            let version = s.windows.header.version + 1;
+            s.windows = Arc::new(WindowsSnapshot {
+                header: ComponentHeader {
+                    version,
+                    validity,
+                    ..ComponentHeader::default()
+                },
+                windows: Arc::from(vec![entry]),
+                pick: None,
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn keep_above(rig: &Rig) -> Vec<(Option<Arc<str>>, bool)> {
+        rig.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::KWin(KWinCommand::KeepAbove { caption, on, .. }) => Some((caption, on)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn mini_keep_above_through_bridge(cx: &mut TestAppContext) {
+        let rig = setup(cx);
+        let (mut vcx, view) = open(cx);
+        publish_windows(&rig, cx, Validity::Valid);
+        let caption = Some(Arc::from(MINI_WINDOW_TITLE));
+        assert_eq!(keep_above(&rig), vec![(caption.clone(), true)]);
+
+        vcx.dispatch_action(ToggleMiniAlwaysOnTop);
+        vcx.run_until_parked();
+        assert_eq!(keep_above(&rig).last(), Some(&(caption, false)));
+        assert!(!vcx.read_entity(&view, |v, _| v.always_on_top()));
+    }
+
+    #[gpui_kit::test]
+    fn mini_always_on_top_disabled_without_bridge(cx: &mut TestAppContext) {
+        let _rig = setup(cx);
+        let (mut vcx, view) = open(cx);
+        // On the first card: a card has no right-click handler of its own.
+        let at = gpui_kit::point(gpui_kit::px(130.), gpui_kit::px(40.));
+        vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        draw(&mut vcx);
+        let rows = vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the window menu is open");
+            menu.read(cx).entries_for_test(window)
+        });
+        let labels: Vec<String> = rows
+            .iter()
+            .map(|e| e.label.as_ref().map(|l| l.to_string()).unwrap_or_default())
+            .collect();
+        assert_eq!(labels, ["Always on top", "Show Main Window", "Close"]);
+        assert_eq!(rows[0].kind, MenuEntryKind::Disabled);
+        assert_eq!(
+            rows[0].tooltip.as_deref(),
+            Some("Not supported by this desktop")
+        );
+
+        // The action does nothing without the bridge.
+        vcx.dispatch_action(ToggleMiniAlwaysOnTop);
+        vcx.run_until_parked();
+        assert!(vcx.read_entity(&view, |v, _| v.always_on_top()));
+    }
+
+    #[gpui_kit::test]
+    fn mini_compositor_close_clears_flag(cx: &mut TestAppContext) {
+        let _rig = setup(cx);
+        let (_vcx, _view) = open(cx);
+        let handle = mini_handle(cx).expect("open");
+        assert!(cx.read(is_mini_open));
+        cx.update(|cx| handle.update(cx, |_, window, _| window.remove_window()))
+            .expect("the window is open");
+        cx.run_until_parked();
+        assert!(!cx.read(is_mini_open));
+        assert!(!cx.read(mini_window_open));
+    }
 }
 
 /// A stand-in main window that draws nothing.
@@ -1402,7 +1623,7 @@ mod keep {
         PageSlot::new(page, cx)
     }
 
-    const FAKES: [PageFactory; 6] = [
+    pub(super) const FAKES: [PageFactory; 6] = [
         fake::<0>, fake::<1>, fake::<2>, fake::<3>, fake::<4>, fake::<5>,
     ];
 
