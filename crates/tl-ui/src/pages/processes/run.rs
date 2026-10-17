@@ -4,7 +4,8 @@
 //! [`run_process_action`] runs a process row command on captured targets: End Task, End
 //! Process, End Process Tree, Kill, Freeze and Thaw App, Suspend and Resume, Set Priority, Set
 //! I/O Priority, Custom priority, Set Affinity, Send Signal, Real-time signal, Go to parent,
-//! Open file location, File properties, Show Window, Open in VirusTotal and Create dump file.
+//! Open file location, File properties, Show Window, Open in VirusTotal, Create dump file,
+//! Restart unit, Restart Plasma Shell and the three Add graph items.
 //! The Processes tab, the Services tab's child process rows and the "Disk is in use" window all
 //! call it, so each surface gets the same refusals, confirmations and toasts.
 //!
@@ -14,7 +15,9 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::{Action, AnyWindowHandle, App, Global, SharedString, WeakEntity, Window};
+use gpui_kit::{
+    Action, AnyWindowHandle, App, Global, SharedString, Subscription, WeakEntity, Window,
+};
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use tl_model::actions::{
@@ -24,24 +27,31 @@ use tl_model::command::{Command, KWinCommand, Tab};
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::ProcFlags;
 use tl_model::snapshot::Snapshot;
+use tl_model::table::UnitRef;
 use tracing::warn;
 
 use super::actions::{
     CapturedTarget, CapturedTargets, CreateDump, EndProcess, EndProcessTree, EndTask,
     FileProperties, FreezeApp, GoToParent, KillApp, MAX_TARGETS, OpenFileLocation, OpenVirusTotal,
-    PriorityClass, ResumeProcess, SetIoPriorityClass, SetPriority, ShowWindow, SuspendProcess,
-    ThawApp,
+    PriorityClass, RestartUnit, ResumeProcess, SetIoPriorityClass, SetPriority, ShowWindow,
+    SuspendProcess, ThawApp,
 };
 use super::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use super::jump::JumpTexts;
+use super::menu::{GraphKind, graph_source};
 use super::toasts::{ActionToastTexts, refusal_reason, submit_to, toast_words};
 use super::{
     ConfirmWords, End, EndPlan, GroupOp, ProcessesPage, dialog_targets, exe_deleted, group_targets,
-    members, other_user, process_keys, record_target, signal_targets, topmost_window,
+    is_plasma_unit, members, other_user, process_keys, record_target, signal_targets,
+    topmost_window,
 };
+use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::hub::GlobalHub;
 use crate::i18n::{Strings, tr};
+use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
+use crate::pages::minigraph::panel::MinigraphPanel;
+use crate::pages::minigraph::sources::GraphColumn;
 use crate::table::tree_table::RowKind;
 use crate::window::main::main_window_view;
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
@@ -99,7 +109,11 @@ pub fn run_process_action_with(
         || a.is::<FileProperties>()
         || a.is::<ShowWindow>()
         || a.is::<OpenVirusTotal>()
-        || a.is::<CreateDump>();
+        || a.is::<CreateDump>()
+        || a.is::<RestartUnit>()
+        || a.is::<AddMinigraph>()
+        || a.is::<AddNameGraph>()
+        || a.is::<AddAppGraph>();
     if !handled {
         return false;
     }
@@ -157,10 +171,18 @@ pub fn run_process_action_with(
         if let Some(key) = one_process(&targets) {
             crate::windows::notices::open_virustotal(key, window, cx);
         }
-    } else if a.is::<CreateDump>()
-        && let Some(key) = one_process(&targets)
-    {
-        crate::windows::notices::start_dump(key, window, cx);
+    } else if a.is::<CreateDump>() {
+        if let Some(key) = one_process(&targets) {
+            crate::windows::notices::start_dump(key, window, cx);
+        }
+    } else if let Some(r) = a.downcast_ref::<RestartUnit>() {
+        run.restart_unit(r.unit.clone(), cx);
+    } else if let Some(g) = a.downcast_ref::<AddMinigraph>() {
+        run.add_graph(GraphKind::Minigraph, g.column, &targets, cx);
+    } else if let Some(g) = a.downcast_ref::<AddNameGraph>() {
+        run.add_graph(GraphKind::Name, g.column, &targets, cx);
+    } else if let Some(g) = a.downcast_ref::<AddAppGraph>() {
+        run.add_graph(GraphKind::App, g.column, &targets, cx);
     }
     true
 }
@@ -198,6 +220,76 @@ impl Run {
             Some(queue) => queue.update(cx, |q, cx| q.push(kind, text, None, None, cx)),
             None => warn!(target: "tasklens::ui", "no toast stack for the process action toast"),
         }
+    }
+
+    /// Restart Plasma Shell and Restart unit (PROC-072): `UnitRestart` on the captured
+    /// `UnitRef`. One Plasma Shell restart runs at a time, whichever surface started it.
+    fn restart_unit(&self, unit: UnitRef, cx: &mut App) {
+        let plasma = is_plasma_unit(&unit);
+        if plasma && plasma_restart_running(cx) {
+            let text = tr(cx, "processes-toast-plasma-in-progress");
+            self.toast(ToastKind::Warning, text, cx);
+            return;
+        }
+        let req = ActionRequest {
+            id: ActionId(0),
+            kind: ActionKind::UnitRestart,
+            targets: SmallVec::from_buf([ActionTarget::Unit(unit)]),
+            privileged: false,
+        };
+        let (requested, success) = if plasma {
+            (
+                (ToastKind::Info, tr(cx, "processes-toast-plasma-restarting")),
+                tr(cx, "processes-toast-plasma-restarted"),
+            )
+        } else {
+            (
+                (
+                    ToastKind::Progress,
+                    tr(cx, "services-sys018-restarting-service"),
+                ),
+                tr(cx, "services-sys018-service-restarted"),
+            )
+        };
+        let texts = ActionToastTexts {
+            requested: Some(requested),
+            success: (ToastKind::Success, success),
+            failure: (
+                ToastKind::Error,
+                tr(cx, "services-sys018-failed-to-restart-service"),
+            ),
+            partial: None,
+        };
+        let Some(id) = submit_to(req, texts, self.queue.clone(), cx) else {
+            return;
+        };
+        if plasma {
+            plasma_restart_started(id, cx);
+        }
+        if let Some(on_sent) = self.on_sent.clone() {
+            cx.defer(move |cx| on_sent(id, cx));
+        }
+    }
+
+    /// Items 15 to 17: resolves the one captured row to a card source and adds the card. The
+    /// panel shows the toast. An identity that is not in the snapshot gives `Unable to add
+    /// minigraph`.
+    fn add_graph(
+        &self,
+        kind: GraphKind,
+        column: GraphColumn,
+        targets: &CapturedTargets,
+        cx: &mut App,
+    ) {
+        let [target] = targets.items.as_slice() else {
+            return;
+        };
+        let Some(panel) = MinigraphPanel::global(cx) else {
+            warn!(target: "tasklens::ui", "no minigraph panel for an Add graph action");
+            return;
+        };
+        let source = graph_source(kind, target, &self.snapshot);
+        let _ = panel.update(cx, |p, cx| p.add_process(source, column, cx));
     }
 
     /// End Process, and Shift+Delete. On one app or unit row it is Kill App (UI-PRC-013 item 2).
@@ -728,6 +820,42 @@ fn submit(
     {
         cx.defer(move |cx| on_sent(id, cx));
     }
+}
+
+/// The Plasma Shell restart in flight (PROC-072). The tracker subscription clears it when that
+/// request finishes.
+struct PlasmaRestart {
+    id: Option<ActionId>,
+    _finished: Option<Subscription>,
+}
+
+impl Global for PlasmaRestart {}
+
+fn plasma_restart_running(cx: &App) -> bool {
+    cx.try_global::<PlasmaRestart>()
+        .is_some_and(|p| p.id.is_some())
+}
+
+/// Records `id` as the Plasma Shell restart in flight. The first call subscribes to the tracker.
+fn plasma_restart_started(id: ActionId, cx: &mut App) {
+    if !cx.has_global::<PlasmaRestart>() {
+        let tracker = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone());
+        let finished = tracker.map(|tracker| {
+            cx.subscribe(&tracker, |_, ev: &ActionTrackerEvent, cx| {
+                if let ActionTrackerEvent::Finished { id, .. } = ev {
+                    let p = cx.global_mut::<PlasmaRestart>();
+                    if p.id == Some(*id) {
+                        p.id = None;
+                    }
+                }
+            })
+        });
+        cx.set_global(PlasmaRestart {
+            id: None,
+            _finished: finished,
+        });
+    }
+    cx.global_mut::<PlasmaRestart>().id = Some(id);
 }
 
 /// The confirmation action names, translated once per strings version (R-132).

@@ -33,7 +33,7 @@ use tl_model::actions::ActionTarget;
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::{EngineCaps, SourceId};
-use tl_model::ids::{ColumnId, ProcessKey};
+use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::settings::UiState;
 use tl_model::snapshot::{
     ComponentMask, ProcessSnapshot, ServiceBackend, ServiceCounts, Snapshot, StartupType,
@@ -64,10 +64,11 @@ use crate::components::toast::{
 };
 use crate::hub::{GlobalHub, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
+use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::processes::actions::{
-    CapturedTargets, CopyDetails, CreateDump, EndProcess, EndProcessTree, EndTask, FileProperties,
-    GoToParent, OpenFileLocation, OpenVirusTotal, ResumeProcess, SetIoPriorityClass, SetPriority,
-    ShowWindow, SuspendProcess,
+    CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree, EndTask,
+    FileProperties, GoToParent, OpenFileLocation, OpenVirusTotal, RestartUnit, ResumeProcess,
+    SetIoPriorityClass, SetPriority, ShowWindow, SuspendProcess,
 };
 use crate::pages::processes::menu::{MenuCaps, row_menu as process_row_menu};
 use crate::pages::processes::record_target;
@@ -79,6 +80,7 @@ use crate::table::TreeTableDelegate as _;
 use crate::table::actions::{CollapseAll, CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::{TlTreeTable, TreeTableEvent};
 use crate::theme::metrics;
+use crate::util::clipboard_write;
 use crate::window::main::{FilterChanged, GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::window::status::StatusChanged;
@@ -815,6 +817,39 @@ impl ServicesPage {
         self.copy_blocks(window, cx);
     }
 
+    /// The process menu's "Copy all metrics" on child rows (PROC-070): the Processes tab's text
+    /// and toasts, for the menu-open targets, else the selected child rows.
+    fn on_copy_all_metrics(
+        &mut self,
+        _: &CopyAllMetrics,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_rows = None;
+        let keys: Vec<ProcessKey> = self
+            .take_process_targets(cx)
+            .items
+            .iter()
+            .filter_map(|t| match t.node {
+                NodeId::Process(key) => Some(key),
+                _ => None,
+            })
+            .collect();
+        let (text, rows) = self.frame.table.read(cx).delegate.copy_all_metrics(&keys);
+        if rows == 0 || clipboard_write(cx, text).is_err() {
+            return;
+        }
+        let key = if rows > 1 {
+            "processes-toast-many-metrics-copied"
+        } else {
+            "processes-toast-metrics-copied"
+        };
+        let text = tr(cx, key);
+        if let Some(queue) = ToastQueue::of_window(window, cx) {
+            queue.update(cx, |q, cx| q.push(ToastKind::Success, text, None, None, cx));
+        }
+    }
+
     /// One block per row: the rows captured when the menu opened, else the selection.
     fn copy_blocks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_targets = None;
@@ -1197,6 +1232,11 @@ impl Render for ServicesPage {
             .on_action(cx.listener(Self::on_process_action::<FileProperties>))
             .on_action(cx.listener(Self::on_process_action::<OpenVirusTotal>))
             .on_action(cx.listener(Self::on_process_action::<CreateDump>))
+            .on_action(cx.listener(Self::on_process_action::<RestartUnit>))
+            .on_action(cx.listener(Self::on_process_action::<AddMinigraph>))
+            .on_action(cx.listener(Self::on_process_action::<AddNameGraph>))
+            .on_action(cx.listener(Self::on_process_action::<AddAppGraph>))
+            .on_action(cx.listener(Self::on_copy_all_metrics))
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_row))
             .on_action(cx.listener(Self::on_copy_details))

@@ -41,7 +41,9 @@ use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::demand::GlobalDemand;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
-use crate::pages::processes::cells::{CellCtx, CellWords, GroupMembers, PaintState, RowRef};
+use crate::pages::processes::cells::{
+    CellCtx, CellWords, GroupMembers, PaintState, RowRef, copy_all_metrics,
+};
 use crate::pages::processes::delegate::{ProcessRowCells, ValidityTips, live_tip};
 use crate::pages::processes::name_cell::{self, NameCellData, NameWords, StateGlyph};
 use crate::pages::processes::tooltip::{RowTipState as ProcTipState, RowTipWords, RowTooltip};
@@ -1145,6 +1147,23 @@ impl ServicesDelegate {
 
     pub fn processes(&self) -> &Arc<ProcessSnapshot> {
         &self.snapshot.processes
+    }
+
+    /// The process table's "Copy all metrics" text of the child rows' processes `keys` (PROC-070,
+    /// PROC-057), in the order given, and the number of rows written. Processes that left the
+    /// installed snapshot are skipped.
+    pub fn copy_all_metrics(&self, keys: &[ProcessKey]) -> (String, usize) {
+        let records = &self.snapshot.processes.records;
+        let found: Vec<(&ProcessRecord, TableRow)> = keys
+            .iter()
+            .filter_map(|key| records.binary_search_by_key(key, |r| r.key).ok())
+            .map(|i| self.child_record(i))
+            .collect();
+        let rows: Vec<RowRef<'_>> = found
+            .iter()
+            .map(|(r, row)| RowRef::Record(r, row, RowKind::Process))
+            .collect();
+        (copy_all_metrics(&rows, &self.cell_ctx()), rows.len())
     }
 
     fn requested_expanded(&self) -> Arc<[SysNodeId]> {

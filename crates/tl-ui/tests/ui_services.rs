@@ -4370,6 +4370,140 @@ mod page {
             vcx.update(|window, cx| window.draw(cx).clear(cx));
             assert_eq!(active_tab(&mut vcx), Tab::Processes);
         }
+
+        #[gpui_kit::test]
+        fn child_copy_all_metrics_matches_processes_tab(cx: &mut TestAppContext) {
+            let mut rig = rig(cx);
+            rig.activate();
+            publish_one(&mut rig, child_process(812, ProcFlags::empty()));
+            let menu = rig.right_click(2).expect("a child row menu");
+            rig.run_item(&menu, "Copy all metrics");
+            rig.vcx.update(close_context_menu);
+            rig.draw();
+            let text = rig.clipboard();
+            let lines: Vec<&str> = text.lines().collect();
+            assert!(lines.contains(&"Name: sshd"), "{text}");
+            assert!(lines.contains(&"PID: 812"), "{text}");
+            assert!(
+                lines
+                    .last()
+                    .is_some_and(|l| l.starts_with("Command line: ")),
+                "the command line comes last, as on the Processes tab: {text}"
+            );
+            assert_eq!(
+                rig.count_toast("Copied metrics to clipboard"),
+                1,
+                "{:?}",
+                rig.toasts()
+            );
+        }
+
+        #[gpui_kit::test]
+        fn child_add_minigraph_adds_process_card(cx: &mut TestAppContext) {
+            use tl_ui::demand::GlobalDemand;
+            use tl_ui::pages::minigraph::actions::AddMinigraph;
+            use tl_ui::pages::minigraph::panel::MinigraphPanel;
+            use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphSource};
+
+            let mut rig = rig(cx);
+            let panel = rig.vcx.update(|_, cx| {
+                let hub = cx.global::<GlobalHub>().0.clone();
+                let demand = cx.global::<GlobalDemand>().0.clone();
+                cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx))
+            });
+            rig.activate();
+            publish_one(&mut rig, child_process(812, ProcFlags::empty()));
+            let labels = rig.menu_labels(&[2]);
+            assert!(labels.contains(&"Add Minigraph".to_owned()), "{labels:?}");
+            rig.select(&[2]);
+            dispatch(
+                &mut rig,
+                Box::new(AddMinigraph {
+                    column: GraphColumn::Cpu,
+                }),
+            );
+            let want = MinigraphSource::Process {
+                key: child_key(812),
+            };
+            let added = rig.vcx.update(|_, cx| {
+                panel
+                    .read(cx)
+                    .entries()
+                    .iter()
+                    .any(|e| e.source == want && e.column == GraphColumn::Cpu)
+            });
+            assert!(added, "the child's process card is added");
+        }
+
+        #[gpui_kit::test]
+        fn child_restart_plasma_shell_like_processes_tab(cx: &mut TestAppContext) {
+            use tl_model::actions::ActionState;
+            use tl_ui::pages::processes::actions::RestartUnit;
+
+            let mut rig = rig(cx);
+            rig.activate();
+            let mut plasma = child_process(700, ProcFlags::empty());
+            Arc::make_mut(&mut plasma.meta).name = Arc::from("plasmashell");
+            let key = plasma.key;
+            let mut units = fixture();
+            units[SYSTEM_UNITS].unit.name = Arc::from("plasma-plasmashell.service");
+            // Row 0 is the System group, rows 1 to 15 its units, row 16 the User group, row 17
+            // plasma-plasmashell.service and row 18 its child.
+            rig.publish(
+                units,
+                &[(SYSTEM_UNITS, key)],
+                vec![plasma],
+                ServiceCounts::default(),
+            );
+            let labels = rig.menu_labels(&[18]);
+            assert!(
+                labels.contains(&"Restart Plasma Shell".to_owned()),
+                "{labels:?}"
+            );
+            let unit = UnitRef {
+                manager: Manager::User,
+                name: Arc::from("plasma-plasmashell.service"),
+            };
+            let restarts = |rig: &Rig| {
+                requests(rig)
+                    .into_iter()
+                    .filter(|r| r.kind == ActionKind::UnitRestart)
+                    .collect::<Vec<_>>()
+            };
+            rig.select(&[18]);
+            dispatch(&mut rig, Box::new(RestartUnit { unit: unit.clone() }));
+            let sent = restarts(&rig);
+            assert_eq!(sent.len(), 1, "{sent:?}");
+            assert_eq!(&*sent[0].targets, &[ActionTarget::Unit(unit.clone())]);
+            let id = sent[0].id;
+
+            dispatch(&mut rig, Box::new(RestartUnit { unit: unit.clone() }));
+            assert_eq!(restarts(&rig).len(), 1, "nothing sent while pending");
+            assert_eq!(
+                rig.count_toast("Plasma Shell restart is already in progress."),
+                1,
+                "{:?}",
+                rig.toasts()
+            );
+
+            for (target, state) in [
+                (None, ActionState::Started),
+                (Some(0), ActionState::Succeeded),
+                (None, ActionState::Succeeded),
+            ] {
+                rig.engine.emit(ActionEvent { id, target, state });
+                rig.vcx.run_until_parked();
+                rig.draw();
+            }
+            assert_eq!(
+                rig.count_toast("Plasma Shell restarted"),
+                1,
+                "{:?}",
+                rig.toasts()
+            );
+            dispatch(&mut rig, Box::new(RestartUnit { unit }));
+            assert_eq!(restarts(&rig).len(), 2, "sends again once done");
+        }
     }
 }
 

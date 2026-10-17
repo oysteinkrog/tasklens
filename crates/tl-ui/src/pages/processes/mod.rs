@@ -32,7 +32,7 @@ use gpui_kit::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
+use tl_model::actions::{ActionKind, ActionTarget, Signal};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, KWinCommand};
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
@@ -54,17 +54,13 @@ use self::confirm::{ConfirmKind, ProtectedAction};
 use self::delegate::ProcessDelegate;
 use self::filter::FilterBinding;
 use self::history::HistoryPage;
-use self::menu::{GraphKind, graph_source};
 use self::run::{RunOptions, run_process_action_with};
-use self::toasts::{ActionToastTexts, submit};
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
 use crate::components::toast::ToastKind;
 use crate::demand::GlobalDemand;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
-use crate::pages::minigraph::sources::GraphColumn;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::{CollapseAll, CopyCell, OpenProperties};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
@@ -156,9 +152,6 @@ pub struct ProcessesPage {
     active: bool,
     /// `TlSettings::state_version` last applied to the mode.
     state_version: u64,
-    /// The pending Plasma Shell restart (PROC-072). A second request while it is set only
-    /// toasts a warning.
-    plasma_restart: Option<ActionId>,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -214,17 +207,6 @@ impl ProcessesPage {
         }));
         // Snapshot installs and selection changes both notify the table.
         subs.push(cx.observe(&table, |this, _, cx| this.refresh_status(false, cx)));
-        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
-            subs.push(
-                cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, _| {
-                    if let ActionTrackerEvent::Finished { id, .. } = ev
-                        && this.plasma_restart == Some(*id)
-                    {
-                        this.plasma_restart = None;
-                    }
-                }),
-            );
-        }
         // The shell owns the Ctrl rule and the chip's paused tag (E20-012).
         if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
             subs.push(cx.subscribe(&events, |this, _, ev: &PauseChanged, cx| {
@@ -271,7 +253,6 @@ impl ProcessesPage {
             history_focus,
             active: false,
             state_version,
-            plasma_restart: None,
         }
     }
 
@@ -636,79 +617,6 @@ impl ProcessesPage {
 
     fn on_copy_all_metrics(&mut self, _: &CopyAllMetrics, _: &mut Window, cx: &mut Context<Self>) {
         self.copy(CopyKind::AllMetrics, cx);
-    }
-
-    fn on_add_minigraph(&mut self, a: &AddMinigraph, _: &mut Window, cx: &mut Context<Self>) {
-        self.add_graph(GraphKind::Minigraph, a.column, cx);
-    }
-
-    fn on_add_name_graph(&mut self, a: &AddNameGraph, _: &mut Window, cx: &mut Context<Self>) {
-        self.add_graph(GraphKind::Name, a.column, cx);
-    }
-
-    fn on_add_app_graph(&mut self, a: &AddAppGraph, _: &mut Window, cx: &mut Context<Self>) {
-        self.add_graph(GraphKind::App, a.column, cx);
-    }
-
-    /// Items 15 to 17: resolves the one captured row to a card source and adds the card. The
-    /// panel shows the toast. An identity that is not in the snapshot gives `Unable to add
-    /// minigraph`.
-    fn add_graph(&mut self, kind: GraphKind, column: GraphColumn, cx: &mut Context<Self>) {
-        let targets = self.take_targets(cx);
-        let [target] = &targets.items[..] else {
-            return;
-        };
-        let Some(panel) = MinigraphPanel::global(cx) else {
-            warn!(target: "tasklens::ui", "no minigraph panel for an Add graph action");
-            return;
-        };
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let source = graph_source(kind, target, &snapshot);
-        let _ = panel.update(cx, |p, cx| p.add_process(source, column, cx));
-    }
-
-    /// Restart Plasma Shell and Restart unit (PROC-072): `UnitRestart` on the captured
-    /// `UnitRef`. One Plasma Shell restart runs at a time.
-    fn on_restart_unit(&mut self, a: &RestartUnit, _: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.take_targets(cx);
-        let plasma = is_plasma_unit(&a.unit);
-        if plasma && self.plasma_restart.is_some() {
-            warning_toast(tr(cx, "processes-toast-plasma-in-progress"), cx);
-            return;
-        }
-        let req = ActionRequest {
-            id: ActionId(0),
-            kind: ActionKind::UnitRestart,
-            targets: SmallVec::from_buf([ActionTarget::Unit(a.unit.clone())]),
-            privileged: false,
-        };
-        let (requested, success) = if plasma {
-            (
-                (ToastKind::Info, tr(cx, "processes-toast-plasma-restarting")),
-                tr(cx, "processes-toast-plasma-restarted"),
-            )
-        } else {
-            (
-                (
-                    ToastKind::Progress,
-                    tr(cx, "services-sys018-restarting-service"),
-                ),
-                tr(cx, "services-sys018-service-restarted"),
-            )
-        };
-        let texts = ActionToastTexts {
-            requested: Some(requested),
-            success: (ToastKind::Success, success),
-            failure: (
-                ToastKind::Error,
-                tr(cx, "services-sys018-failed-to-restart-service"),
-            ),
-            partial: None,
-        };
-        let id = submit(self, req, texts, cx);
-        if plasma {
-            self.plasma_restart = id;
-        }
     }
 
     /// A window popup item (PROC-053, PROC-054): sends `KWin(Activate)` for the window and shows
@@ -1478,15 +1386,15 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_process_action::<SendSignal>))
             .on_action(cx.listener(Self::on_process_action::<SignalOpenRealtime>))
             .on_action(cx.listener(Self::on_process_action::<GoToParent>))
-            .on_action(cx.listener(Self::on_add_minigraph))
-            .on_action(cx.listener(Self::on_add_name_graph))
-            .on_action(cx.listener(Self::on_add_app_graph))
+            .on_action(cx.listener(Self::on_process_action::<AddMinigraph>))
+            .on_action(cx.listener(Self::on_process_action::<AddNameGraph>))
+            .on_action(cx.listener(Self::on_process_action::<AddAppGraph>))
             .on_action(cx.listener(Self::on_process_action::<OpenFileLocation>))
             .on_action(cx.listener(Self::on_process_action::<OpenVirusTotal>))
             .on_action(cx.listener(Self::on_process_action::<CreateDump>))
             .on_action(cx.listener(Self::on_activate_window))
             .on_action(cx.listener(Self::on_process_action::<ShowWindow>))
-            .on_action(cx.listener(Self::on_restart_unit))
+            .on_action(cx.listener(Self::on_process_action::<RestartUnit>))
             .on_action(cx.listener(Self::on_process_action::<FileProperties>))
             .child(
                 div()
