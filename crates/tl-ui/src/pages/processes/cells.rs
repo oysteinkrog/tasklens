@@ -18,6 +18,7 @@ use tl_model::process::{
     ProcessExtrasP2, ProcessRecord,
 };
 use tl_model::settings::{NetworkUnit, Settings};
+use tl_model::snapshot::WindowsSnapshot;
 use tl_model::system::{CpuSet, Metric, ZramTotals};
 use tl_model::table::{ProcessTableView, TableRow, UnitRef};
 use tl_model::time::TimeNs;
@@ -633,6 +634,8 @@ pub struct CellCtx<'a> {
     pub boot_time_s: i64,
     /// `sysconf(_SC_CLK_TCK)`, for the CPU time columns. 0 shows them as Unsupported.
     pub clk_tck: u32,
+    /// `Snapshot.windows`, for the Windows column (PROC-035). Unsupported header gives n/a cells.
+    pub windows: &'a WindowsSnapshot,
 }
 
 /// The row a cell belongs to. A process row carries its `TableRow` for "PID +N" (PROC-018) and
@@ -1203,6 +1206,12 @@ fn record_value<'a>(
                 )
             })
         }),
+        C::Windows => match ctx.windows.header.validity {
+            Validity::Valid | Validity::Stale => {
+                Value::Count(ctx.windows.for_pid(r.key.pid).len() as u64, Validity::Valid)
+            }
+            other => Value::Glyph(other),
+        },
         // No source yet: Cycles, GPU columns and the later phases.
         _ => Value::Glyph(Validity::Unsupported),
     }

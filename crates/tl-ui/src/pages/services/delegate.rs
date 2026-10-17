@@ -909,6 +909,7 @@ impl ServicesDelegate {
             vram_total: system.gpus.iter().map(|(_, g)| g.mem_total.value).sum(),
             boot_time_s: system.boot_time_s,
             clk_tck: CLK_TCK,
+            windows: &s.windows,
         }
     }
 

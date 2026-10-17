@@ -112,6 +112,7 @@ fn write_process_block(delegate: &ServicesDelegate, record: u32, out: &mut Strin
     let settings = Settings::default();
     let members = GroupMembers::default();
     let online = CpuSet::default();
+    let windows = tl_model::snapshot::WindowsSnapshot::default();
     let ctx = CellCtx {
         view: &view,
         records: &processes.records,
@@ -126,6 +127,7 @@ fn write_process_block(delegate: &ServicesDelegate, record: u32, out: &mut Strin
         vram_total: 0,
         boot_time_s: 0,
         clk_tck: 0,
+        windows: &windows,
     };
     out.push_str(&copy_details(
         &[RowRef::Record(rec, &row, RowKind::Process)],

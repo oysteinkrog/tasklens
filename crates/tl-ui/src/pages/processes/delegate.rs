@@ -80,7 +80,7 @@ use crate::text::metrics::TextMetricsCache;
 use crate::theme::{TlTheme, current, metrics};
 
 /// The highest column phase this build offers. Later beads raise it.
-pub const SHIPPED_PHASE: u8 = 2;
+pub const SHIPPED_PHASE: u8 = 3;
 
 /// `sysconf(_SC_CLK_TCK)`. Linux fixes USER_HZ for `/proc` at 100 on every architecture
 /// tasklens builds for, and tl-ui has no libc binding to ask.
@@ -842,6 +842,7 @@ impl ProcessDelegate {
             vram_total: system.gpus.iter().map(|(_, g)| g.mem_total.value).sum(),
             boot_time_s: system.boot_time_s,
             clk_tck: CLK_TCK,
+            windows: &s.windows,
         }
     }
 

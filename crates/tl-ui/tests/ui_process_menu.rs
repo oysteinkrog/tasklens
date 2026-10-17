@@ -4082,6 +4082,11 @@ mod end {
                 vram_total: 0,
                 boot_time_s: 1_700_000_000,
                 clk_tck: 100,
+                windows: {
+                    static NONE: std::sync::OnceLock<tl_model::snapshot::WindowsSnapshot> =
+                        std::sync::OnceLock::new();
+                    NONE.get_or_init(Default::default)
+                },
             }
         }
 

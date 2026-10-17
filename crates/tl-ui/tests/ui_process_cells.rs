@@ -248,6 +248,7 @@ mod values {
         ProcessExtras, ProcessExtrasP2, ProcessMeta, ProcessRecord,
     };
     use tl_model::settings::Settings;
+    use tl_model::snapshot::{ComponentHeader, WindowEntry, WindowsSnapshot};
     use tl_model::system::CpuSet;
     use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
     use tl_model::time::BootId;
@@ -429,6 +430,7 @@ mod values {
         words: CellWords,
         online: CpuSet,
         members: GroupMembers,
+        windows: WindowsSnapshot,
     }
 
     impl Fixture {
@@ -442,6 +444,7 @@ mod values {
                 words,
                 online: CpuSet::empty(),
                 members: GroupMembers::default(),
+                windows: WindowsSnapshot::default(),
             }
             .refreshed()
         }
@@ -467,6 +470,7 @@ mod values {
                 vram_total: 0,
                 boot_time_s: 1_700_000_000,
                 clk_tck: 100,
+                windows: &self.windows,
             }
         }
 
@@ -876,6 +880,90 @@ mod values {
             assert_eq!(out.validity, Validity::WarmingUp, "{id:?}");
             assert!(out.text.is_empty() && out.arc.is_none(), "{id:?}");
         }
+    }
+
+    fn win_entry(pid: u32, stack_index: u32) -> WindowEntry {
+        WindowEntry {
+            internal_id: Arc::from(format!("{{{pid}-{stack_index}}}")),
+            pid,
+            caption: Arc::from("w"),
+            resource_class: Arc::from("firefox"),
+            desktop_file_name: Arc::from("firefox"),
+            minimized: false,
+            maximized: false,
+            keep_above: false,
+            frame_geometry: Default::default(),
+            window_type: 0,
+            stack_index,
+        }
+    }
+
+    fn windows_snapshot(validity: Validity, windows: Vec<WindowEntry>) -> WindowsSnapshot {
+        WindowsSnapshot {
+            header: ComponentHeader {
+                version: 1,
+                validity,
+                ..ComponentHeader::default()
+            },
+            windows: Arc::from(windows),
+            pick: None,
+        }
+    }
+
+    /// The Windows column is the only phase-3 column and the build offers it (tasklens-pdu.46).
+    #[test]
+    fn phase_3_columns_offered() {
+        use tl_ui::pages::processes::cells::PROCESS_COLUMNS;
+        use tl_ui::pages::processes::delegate::SHIPPED_PHASE;
+
+        let phase3: Vec<ColumnId> = PROCESS_COLUMNS
+            .iter()
+            .filter(|c| c.phase == 3)
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(phase3, [ColumnId::Windows]);
+        assert!(SHIPPED_PHASE >= 3);
+    }
+
+    #[test]
+    fn phase_3_columns_format_or_glyph() {
+        let pid = record().key.pid;
+        let row = table_row(false, false, 0);
+        let cell = |f: &Fixture| f.record_cell(&row, ColumnId::Windows);
+
+        // Two windows of this process and one of another: shows 2.
+        let mut f = Fixture::new(record(), key_words());
+        f.windows = windows_snapshot(
+            Validity::Valid,
+            vec![win_entry(pid - 1, 0), win_entry(pid, 1), win_entry(pid, 2)],
+        );
+        let out = cell(&f);
+        assert_eq!(out.validity, Validity::Valid);
+        assert_eq!(shown(&out), "2");
+
+        // The bridge runs and the process has no window: zero, not a glyph.
+        f.windows = windows_snapshot(Validity::Valid, vec![win_entry(pid + 1, 0)]);
+        let out = cell(&f);
+        assert_eq!(out.validity, Validity::Valid);
+        assert_eq!(shown(&out), "0");
+
+        // No bridge: the Unsupported glyph with no text, never 0.
+        f.windows = windows_snapshot(Validity::Unsupported, Vec::new());
+        let out = cell(&f);
+        assert_eq!(out.validity, Validity::Unsupported);
+        assert!(out.text.is_empty() && out.arc.is_none());
+
+        // Bridge not yet answered: the WarmingUp glyph.
+        f.windows = WindowsSnapshot::default();
+        let out = cell(&f);
+        assert_eq!(out.validity, Validity::WarmingUp);
+        assert!(out.text.is_empty() && out.arc.is_none());
+
+        // App and unit rows stay blank for now.
+        let g = group(GroupRowKind::App);
+        let out = f.group_cell(&g, RowKind::Process, ColumnId::Windows);
+        assert_eq!(out.validity, Validity::Valid);
+        assert_eq!(shown(&out), "");
     }
 
     #[test]
@@ -1315,6 +1403,11 @@ mod paint {
                 vram_total: self.vram_total,
                 boot_time_s: 0,
                 clk_tck: 100,
+                windows: {
+                    static NONE: std::sync::OnceLock<tl_model::snapshot::WindowsSnapshot> =
+                        std::sync::OnceLock::new();
+                    NONE.get_or_init(Default::default)
+                },
             }
         }
     }
@@ -2603,6 +2696,11 @@ mod group_fields {
                 vram_total: 0,
                 boot_time_s: 0,
                 clk_tck: 100,
+                windows: {
+                    static NONE: std::sync::OnceLock<tl_model::snapshot::WindowsSnapshot> =
+                        std::sync::OnceLock::new();
+                    NONE.get_or_init(Default::default)
+                },
             };
             let mut out = CellOut {
                 want_text: true,
