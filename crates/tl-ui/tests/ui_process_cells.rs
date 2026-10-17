@@ -922,7 +922,7 @@ mod values {
             .map(|c| c.id)
             .collect();
         assert_eq!(phase3, [ColumnId::Windows]);
-        assert!(SHIPPED_PHASE >= 3);
+        const { assert!(SHIPPED_PHASE >= 3) };
     }
 
     #[test]
