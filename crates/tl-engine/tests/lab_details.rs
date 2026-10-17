@@ -1058,7 +1058,7 @@ fn engine_reads_pss_for_properties_general_target() {
     ui.demand_tx
         .send(general_window_demand(key))
         .expect("watch has receivers");
-    fl.run_for(Duration::from_millis(1500), Duration::from_millis(10));
+    fl.run_for(process_detail::PSS_PERIOD, Duration::from_millis(10));
     let snap = ui.latest.load_full();
     let r = snap
         .processes
