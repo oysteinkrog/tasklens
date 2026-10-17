@@ -1406,14 +1406,19 @@ mod jump {
     use tl_model::command::{Command, Tab};
     use tl_model::ids::NodeId;
     use tl_model::settings::{Settings, UiState};
-    use tl_model::snapshot::ConnCounts;
-    use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
+    use tl_model::snapshot::{
+        ConnCounts, ServiceStatus, ServicesSnapshot, StartupType, UnitRecord,
+    };
+    use tl_model::table::{
+        Manager, ProcessTableView, SysTable, TableRow, Total, UnitRef, UnitType,
+    };
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::connections::ConnectionsPage;
     use tl_ui::pages::connections::actions::{
         ConnectionGoToService, ConnectionJumpToProcess, GoToConnection,
     };
     use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
 
@@ -1421,6 +1426,32 @@ mod jump {
         engine: Arc<FakeEngine>,
         vcx: VisualTestContext,
         page: gpui_kit::Entity<ConnectionsPage>,
+    }
+
+    fn unit_record(unit: UnitRef) -> UnitRecord {
+        UnitRecord {
+            unit,
+            kind: UnitType::Service,
+            description: Arc::from("OpenSSH Daemon"),
+            status: ServiceStatus::Running,
+            sub_state: Arc::from("running"),
+            load_state: Arc::from("loaded"),
+            startup: StartupType::Enabled,
+            main_pid: 4321,
+            user: Arc::from("root"),
+            path: Arc::from("/usr/bin/sshd"),
+            unit_file: None,
+            active_since_us: None,
+            triggered_by: Arc::from([]),
+            control_group: None,
+            can_reload: false,
+            has_cgroup_procs: false,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: Total::default(),
+            memory_bytes: Total::default(),
+            disk_bps: Total::default(),
+            tasks: Total::default(),
+        }
     }
 
     fn rig(cx: &mut TestAppContext, record: ConnRecord, processes: Vec<ProcessRecord>) -> Rig {
@@ -1534,6 +1565,39 @@ mod jump {
                 let texts = view.read(cx).toasts().read(cx).visible_texts();
                 texts.iter().map(ToString::to_string).collect()
             })
+        }
+
+        /// Publishes `unit` as the only service and collapses both Services groups, so the
+        /// query the jump sends shows which manager group it expanded.
+        fn publish_unit(&mut self, unit: UnitRef) {
+            self.vcx.update(|_, cx| {
+                TlSettings::update(cx, |data| {
+                    data.state.services.group_expanded.system = false;
+                    data.state.services.group_expanded.user = false;
+                });
+            });
+            self.engine.publish_with(|snapshot| {
+                snapshot.services = Arc::new(ServicesSnapshot {
+                    units: vec![unit_record(unit)].into(),
+                    ..ServicesSnapshot::default()
+                });
+            });
+            self.draw();
+        }
+
+        /// The expanded rows of the last Services query the page sent.
+        fn services_expanded(&self) -> Vec<SysNodeId> {
+            self.engine
+                .commands()
+                .into_iter()
+                .rev()
+                .find_map(|command| match command {
+                    Command::SetSysTableQuery(query) if query.table == SysTable::Services => {
+                        Some(query.expanded.to_vec())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default()
         }
 
         fn active_tab(&mut self) -> Tab {
@@ -1766,10 +1830,25 @@ mod jump {
             name: Arc::from("sshd.service"),
         });
         let mut rig = rig(cx, record, procs(&[4321]));
-        // The main window handles GoToService itself: it switches to Services.
+        rig.publish_unit(UnitRef {
+            manager: Manager::System,
+            name: Arc::from("sshd.service"),
+        });
+        // The main window handles GoToService itself: it switches to Services and the page
+        // looks the unit up by manager and name.
         assert_eq!(rig.active_tab(), Tab::Connections);
         rig.dispatch(true, ConnectionGoToService);
         assert_eq!(rig.active_tab(), Tab::Services);
+        assert!(
+            rig.toasts().iter().any(|t| t == "Switched to Services tab"),
+            "the page found System sshd.service: {:?}",
+            rig.toasts()
+        );
+        assert_eq!(
+            rig.services_expanded(),
+            [SysNodeId::ServiceGroup(Manager::System)],
+            "the jump expanded only the System group"
+        );
     }
 }
 

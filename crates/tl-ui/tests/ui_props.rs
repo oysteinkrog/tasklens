@@ -2810,6 +2810,9 @@ mod window {
 
     use std::cell::RefCell;
     use tl_model::details::{AppGeneralDetail, AppKind};
+    use tl_model::snapshot::{ServiceStatus, ServicesSnapshot, StartupType, UnitRecord};
+    use tl_model::table::{Manager, SysNodeId, SysTable, UnitRef, UnitType};
+    use tl_ui::settings_global::TlSettings;
 
     fn app_detail_for_unit() -> AppGeneralDetail {
         fn valid<T>(value: T) -> Total<T> {
@@ -2842,11 +2845,75 @@ mod window {
         draw(&mut rig.vcx);
     }
 
-    fn firefox_unit() -> tl_model::table::UnitRef {
-        tl_model::table::UnitRef {
-            manager: tl_model::table::Manager::User,
+    fn firefox_unit() -> UnitRef {
+        UnitRef {
+            manager: Manager::User,
             name: "app-firefox@1.service".into(),
         }
+    }
+
+    /// Publishes the Firefox unit as the only service and collapses both Services groups, so
+    /// the query a jump sends shows which manager group it expanded.
+    fn publish_firefox_unit(cx: &mut TestAppContext, engine: &FakeEngine) {
+        cx.update(|cx| {
+            TlSettings::update(cx, |data| {
+                data.state.services.group_expanded.system = false;
+                data.state.services.group_expanded.user = false;
+            });
+        });
+        let record = UnitRecord {
+            unit: firefox_unit(),
+            kind: UnitType::Service,
+            description: Arc::from("Firefox"),
+            status: ServiceStatus::Running,
+            sub_state: Arc::from("running"),
+            load_state: Arc::from("loaded"),
+            startup: StartupType::Static,
+            main_pid: 4321,
+            user: Arc::from("user"),
+            path: Arc::from("/usr/lib/firefox/firefox"),
+            unit_file: None,
+            active_since_us: None,
+            triggered_by: Arc::from([]),
+            control_group: None,
+            can_reload: false,
+            has_cgroup_procs: false,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: Total::default(),
+            memory_bytes: Total::default(),
+            disk_bps: Total::default(),
+            tasks: Total::default(),
+        };
+        engine.publish_with(|snapshot| {
+            snapshot.services = Arc::new(ServicesSnapshot {
+                units: vec![record].into(),
+                ..ServicesSnapshot::default()
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    /// The expanded rows of the last Services query the page sent.
+    fn services_expanded(engine: &FakeEngine) -> Vec<SysNodeId> {
+        engine
+            .commands()
+            .into_iter()
+            .rev()
+            .find_map(|command| match command {
+                Command::SetSysTableQuery(query) if query.table == SysTable::Services => {
+                    Some(query.expanded.to_vec())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// How many times the Services page found the unit and said so.
+    fn switched_toasts(main: &mut VisualTestContext) -> usize {
+        main_toasts(main)
+            .iter()
+            .filter(|t| t.as_str() == "Switched to Services tab")
+            .count()
     }
 
     /// The main window's active tab. The main window now handles `GoToService` itself.
@@ -2873,6 +2940,7 @@ mod window {
                 validity: Validity::Valid,
             };
         });
+        publish_firefox_unit(cx, &rig.engine);
         grow_tall(&mut rig);
         let row = general_row(&mut rig, 0, "Unit:");
         let value = rig
@@ -2885,6 +2953,17 @@ mod window {
             main_tab(cx),
             Tab::Services,
             "the main window shows Services"
+        );
+        assert_eq!(
+            switched_toasts(&mut rig.main),
+            1,
+            "the page found User app-firefox@1.service: {:?}",
+            main_toasts(&mut rig.main)
+        );
+        assert_eq!(
+            services_expanded(&rig.engine),
+            [SysNodeId::ServiceGroup(Manager::User)],
+            "the jump expanded only the User group"
         );
         assert!(
             main_is_active(cx, &mut rig.main),
@@ -2906,6 +2985,12 @@ mod window {
         rig.vcx.simulate_keystrokes("enter");
         rig.vcx.run_until_parked();
         assert_eq!(main_tab(cx), Tab::Services);
+        assert_eq!(
+            switched_toasts(&mut rig.main),
+            2,
+            "Enter found the same unit: {:?}",
+            main_toasts(&mut rig.main)
+        );
     }
 
     #[gpui_kit::test]
@@ -2947,6 +3032,7 @@ mod window {
         let (engine, mut main) = setup(cx);
         let app = app_group("Firefox", GroupRowKind::App, 34);
         publish_groups(cx, &engine, vec![app.clone()]);
+        publish_firefox_unit(cx, &engine);
         let handle = open_app(cx, app.key).expect("app window opened");
         let general = app_props(cx, handle).read_with(cx, |w, _| w.general().clone());
         let mut detail = app_detail_for_unit();
@@ -2978,6 +3064,17 @@ mod window {
         assert!(
             main_is_active(cx, &mut main),
             "the main window is activated"
+        );
+        assert_eq!(
+            switched_toasts(&mut main),
+            1,
+            "the page found User app-firefox@1.service: {:?}",
+            main_toasts(&mut main)
+        );
+        assert_eq!(
+            services_expanded(&engine),
+            [SysNodeId::ServiceGroup(Manager::User)],
+            "the jump expanded only the User group"
         );
     }
 
