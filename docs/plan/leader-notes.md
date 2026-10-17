@@ -934,3 +934,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-17 leader decision: 9o0.28 keeps the "TCP connection close requested" Progress toast; R-203's no-Progress rule narrowed to Startup Apps.
 - 2026-10-17 leader: full tl-ui test run found 11 failures on main; 4 in ui_process_menu go to pdu.38, the rest to tasklens-hk6.37 and tasklens-bj6.52.
 - pdu.38: protected confirm text for Freeze follows spec proc.md:1076; keep the test. Wording fix filed as tasklens-bj6.53 (P3).
+- pdu.39: ship Realtime, Idle and the I/O submenu now with no I/O check marks; the I/O priority field and check marks go to tasklens-pdu.62. Scheduler line hidden when two system disks disagree.
