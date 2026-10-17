@@ -12,10 +12,11 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{App, SharedString, Window, px};
+use tl_model::actions::SchedPolicy;
 use tl_model::health::HelperState;
 use tl_model::ids::NodeId;
 use tl_model::process::{GroupKind, GroupRowKind};
-use tl_model::snapshot::{Snapshot, WindowEntry};
+use tl_model::snapshot::{ProcessSnapshot, Snapshot, WindowEntry};
 use tl_model::table::Manager;
 use tl_model::validity::Validity;
 
@@ -193,15 +194,19 @@ pub fn window_popup(menu: TlMenu, windows: &[WindowEntry], cx: &App) -> TlMenu {
 }
 
 /// The Set Priority submenu (UI-PRC-020): the autogroup note, Realtime, the five nice classes,
-/// Idle, a separator and Custom…. The current nice class has a check mark; with several targets
-/// only when every one shares it. Realtime and Idle are policies, so they are never checked.
+/// Idle, a separator and Custom…. The current class has a check mark; with several targets only
+/// when every one shares it (PROC-066, PROC-069). The scheduler policy comes from the latest
+/// snapshot's extras, as in the Priority column.
 pub fn priority_submenu(
     menu: TlMenu,
     targets: &CapturedTargets,
     _window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
-    let current = current_class(targets);
+    let snapshot = cx.try_global::<EngineGlobal>().map(|e| e.0.latest());
+    let current = snapshot
+        .as_deref()
+        .and_then(|s| current_class(targets, &s.processes));
     let mut menu = menu.header(tr(cx, "processes-menu-autogroup-note"));
     for (class, key) in PRIORITY_CLASSES {
         menu = menu.check_item(
@@ -216,18 +221,33 @@ pub fn priority_submenu(
     )
 }
 
-/// The class whose nice value every target has. `None` when a target has no nice value (app,
-/// unit and pseudo rows), when they differ, or when the value is not one of the nice classes.
-fn current_class(t: &CapturedTargets) -> Option<PriorityClass> {
-    let mut nices = t.items.iter().map(|t| t.nice);
-    let first = nices.next()??;
-    if !nices.all(|n| n == Some(first)) {
+/// The class every target is in. `None` when a target has no nice value (app, unit and pseudo
+/// rows), when its policy is not known, when they differ, or when a target is in no class.
+fn current_class(t: &CapturedTargets, p: &ProcessSnapshot) -> Option<PriorityClass> {
+    let mut classes = t.items.iter().map(|t| target_class(t, p));
+    let first = classes.next()??;
+    classes.all(|c| c == Some(first)).then_some(first)
+}
+
+/// The class of one process target, read the way the Priority column reads it (PROC-029):
+/// FIFO and RR are Realtime, IDLE is Idle, OTHER and BATCH take the class of their nice value.
+/// `None` for DEADLINE, for a nice value that is no class, and when the record or its extras
+/// are not in `p`.
+fn target_class(t: &CapturedTarget, p: &ProcessSnapshot) -> Option<PriorityClass> {
+    let nice = t.nice?;
+    let NodeId::Process(key) = &t.node else {
         return None;
+    };
+    let i = p.records.binary_search_by(|r| r.key.cmp(key)).ok()?;
+    match p.extras.get(i)?.policy {
+        SchedPolicy::Fifo | SchedPolicy::Rr => Some(PriorityClass::Realtime),
+        SchedPolicy::Idle => Some(PriorityClass::Idle),
+        SchedPolicy::Deadline => None,
+        SchedPolicy::Other | SchedPolicy::Batch => PRIORITY_CLASSES
+            .iter()
+            .map(|(class, _)| *class)
+            .find(|class| class.nice() == Some(nice)),
     }
-    PRIORITY_CLASSES
-        .iter()
-        .map(|(class, _)| *class)
-        .find(|class| class.nice() == Some(first))
 }
 
 /// The Set I/O Priority submenu (UI-PRC-020, PROC-068): the "Scheduler: <name>" note, the five

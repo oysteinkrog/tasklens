@@ -2580,12 +2580,33 @@ mod end {
             nice,
             ..record(pid, 1, "proc", ProcFlags::empty())
         };
-        let mut records = vec![nice(300, 0), nice(301, 5), nice(302, 5), nice(303, 3)];
-        records.push(ProcessRecord {
+        // Sorted by key, as the engine sends them. Rows 0 to 7 are pids 300 to 307, row 8 the
+        // app. 304 and 306 are SCHED_IDLE, 305 SCHED_RR, 307 SCHED_DEADLINE, all at nice 0.
+        let mut records = vec![ProcessRecord {
             group: app_key(),
             ..nice(200, 0)
-        });
-        rig.publish(records, &[300, 301, 302, 303], vec![app_group(1)]);
+        }];
+        records.extend([(300, 0), (301, 5), (302, 5), (303, 3)].map(|(p, n)| nice(p, n)));
+        records.extend((304..=307).map(|p| nice(p, 0)));
+        let policy = |pid: u32| match pid {
+            304 | 306 => SchedPolicy::Idle,
+            305 => SchedPolicy::Rr,
+            307 => SchedPolicy::Deadline,
+            _ => SchedPolicy::Other,
+        };
+        let extras: Vec<ProcessExtras> = records
+            .iter()
+            .map(|r| ProcessExtras {
+                policy: policy(r.key.pid),
+                rt_prio: u8::from(r.key.pid == 305),
+                ..firefox_extras()
+            })
+            .collect();
+        let mut rows: Vec<TableRow> = (300..=307)
+            .map(|pid| row(NodeId::Process(key(pid)), Some(pid - 299), None))
+            .collect();
+        rows.push(row(NodeId::Group(app_key()), None, Some(0)));
+        rig.publish_rows(records.clone(), extras, rows.clone(), vec![app_group(1)]);
         let priority = |rig: &mut Rig, rows: &[usize]| {
             let menu = build_menu(rig, rows, ColumnId::Name);
             let sub = entries(rig, &menu)
@@ -2626,7 +2647,31 @@ mod end {
             classes(None),
             "nice 3 is no class"
         );
-        assert_eq!(priority(&mut rig, &[4]), classes(None), "an app row");
+        assert_eq!(priority(&mut rig, &[8]), classes(None), "an app row");
+        assert_eq!(
+            priority(&mut rig, &[4]),
+            classes(Some("Idle")),
+            "SCHED_IDLE at nice 0 is Idle, not Normal"
+        );
+        assert_eq!(
+            priority(&mut rig, &[5]),
+            classes(Some("Realtime")),
+            "SCHED_RR at nice 0 is Realtime, not Normal"
+        );
+        assert_eq!(priority(&mut rig, &[4, 6]), classes(Some("Idle")));
+        assert_eq!(
+            priority(&mut rig, &[0, 4]),
+            classes(None),
+            "Normal and Idle"
+        );
+        assert_eq!(priority(&mut rig, &[7]), classes(None), "SCHED_DEADLINE");
+
+        rig.publish_rows(records, Vec::new(), rows, vec![app_group(1)]);
+        assert_eq!(
+            priority(&mut rig, &[0]),
+            classes(None),
+            "no extras, so the policy is not known"
+        );
     }
 
     #[gpui_kit::test]
