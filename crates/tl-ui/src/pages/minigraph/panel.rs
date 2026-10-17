@@ -11,9 +11,12 @@
 //! preview changes; each card is a cached view that re-renders on its own.
 //!
 //! Dragging a card (UI-PRF-043, PERF-082) previews the new order while the pointer is over a slot
-//! and moves the card there on drop, with no holes.
+//! and moves the card there on drop, with no holes. A release more than 24 px outside the main
+//! window detaches the card instead. Detaching and attaching (E26-015, R-084) keep the detached
+//! graph windows and the `[[detached_windows]]` list in step with the detached entries.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,24 +24,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext as _, Bounds, Context, DragMoveEvent, ElementId,
     Entity, Global, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
-    ParentElement as _, Pixels, Point, Render, SharedString, StyleRefinement, Styled as _,
+    ParentElement as _, Pixels, Point, Render, SharedString, Size, StyleRefinement, Styled as _,
     Subscription, WeakEntity, Window, canvas, div, px,
 };
 use tl_model::demand::{CpuDemand, Demand, GRAPH_TARGETS_MAX};
 use tl_model::process::ProcFlags;
-use tl_model::settings::GraphsSettings;
+use tl_model::settings::{DetachedWindowState, GraphsSettings};
 
 use super::GraphColor;
 use super::actions::{
-    AddRandomMinigraphs, MinigraphHide, MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor,
-    MinigraphSetRange, ResetMinigraphLayout,
+    AddRandomMinigraphs, MinigraphAddToWindow, MinigraphAttach, MinigraphDetach, MinigraphHide,
+    MinigraphMoveToSlot, MinigraphRemove, MinigraphSetColor, MinigraphSetRange,
+    ResetMinigraphLayout,
 };
 use super::card::{
     CardEnded, DraggedMinigraph, MINI_CARD_H, MINI_CARD_W, MinigraphCard, past_threshold,
 };
 use super::sources::{
     COLS, GraphColumn, MAX_SLOTS, MinigraphEntry, MinigraphId, MinigraphSource, ROWS,
-    default_entries, from_state, slot_cell, to_state,
+    compact_slots, default_entries, from_state, slot_cell, to_state,
 };
 use crate::components::motion::{M_FAST, ease_out_cubic};
 use crate::components::toast::ToastKind;
@@ -49,6 +53,8 @@ use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::{SettingValue, TlSettings, animations_on};
 use crate::theme::metrics;
 use crate::window::main::push_main_toast;
+use crate::window::registry::{GlobalRegistry, WindowKey};
+use crate::windows::detached_graph::{DetachedGraphWindow, open_detached, window_size};
 
 /// Space between the grid and the table's bottom and right edges, before `ui_scale`.
 const MARGIN: f32 = 16.;
@@ -56,6 +62,8 @@ const MARGIN: f32 = 16.;
 const GAP: f32 = 8.;
 /// The range of a card added from View > Graphs (PERF-081).
 const NEW_RANGE_S: u16 = 60;
+/// A release this far outside the main window detaches the dragged card (UI-PRF-043).
+const DETACH_EDGE: f32 = 24.;
 
 /// All 12 slots hold an attached card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,8 +111,10 @@ impl Global for GlobalMinigraphPanel {}
 pub struct MinigraphPanel {
     /// Attached cards, sorted by slot.
     cards: Vec<(MinigraphId, Entity<MinigraphCard>)>,
-    /// Every entry, attached and detached (E26-015 uses the detached ones).
+    /// Every entry, attached and detached.
     entries: Vec<MinigraphEntry>,
+    /// The `[[detached_windows]]` entries: one per window that holds cards.
+    windows: Vec<DetachedWindowState>,
     next_id: u32,
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
@@ -135,13 +145,14 @@ impl MinigraphPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let has_settings = cx.has_global::<TlSettings>();
-        let (state, graphs) = if has_settings {
+        let (state, windows, graphs) = if has_settings {
             (
                 TlSettings::state(cx).minigraphs.clone(),
+                TlSettings::state(cx).detached_windows.clone(),
                 TlSettings::settings(cx).graphs.clone(),
             )
         } else {
-            (Vec::new(), GraphsSettings::default())
+            (Vec::new(), Vec::new(), GraphsSettings::default())
         };
         let mut next_id = 0;
         let entries = if state.is_empty() {
@@ -159,6 +170,7 @@ impl MinigraphPanel {
         let mut this = Self {
             cards: Vec::new(),
             entries,
+            windows,
             next_id,
             hub: hub.clone(),
             demand: demand.clone(),
@@ -182,6 +194,7 @@ impl MinigraphPanel {
             }
         }
         this.rebuild_cards(cx);
+        this.sync_windows(cx);
         this.send_graph_targets(cx);
         let source = cx.entity_id();
         cx.on_release(move |this, cx| {
@@ -339,7 +352,7 @@ impl MinigraphPanel {
 
     /// A left release. After a drag, a release at `at` over a slot moves the card there;
     /// anywhere else the cards go back to their slots.
-    fn end_drag(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+    fn end_drag(&mut self, at: Point<Pixels>, window_size: Size<Pixels>, cx: &mut Context<Self>) {
         // GPUI starts its drag on a move after the panel's drag-move listener ran, so a release
         // right after one move past 4 px finds no preview yet.
         if self.drag.is_none() {
@@ -359,10 +372,172 @@ impl MinigraphPanel {
         let Some(drag) = drag else {
             return;
         };
-        if let Some(slot) = self.slot_at(at, self.bounds.get()) {
+        if outside_window(at, window_size) {
+            // The compositor places the new window; KDE placement is the KWin bridge's (E26-017).
+            self.detach(drag.id, cx);
+        } else if let Some(slot) = self.slot_at(at, self.bounds.get()) {
             self.move_to_slot(drag.id, slot, cx);
         }
         cx.notify();
+    }
+
+    /// `MinigraphDetach` (R-084): the attached card moves to the lowest unused window id from 1
+    /// and the others close the gap.
+    pub fn detach(&mut self, id: MinigraphId, cx: &mut Context<Self>) {
+        let window = (1u32..)
+            .find(|n| !self.entries.iter().any(|e| e.detached && e.window == *n))
+            .unwrap_or(1);
+        let Some(entry) = self.entries.iter_mut().find(|e| e.id == id && !e.detached) else {
+            return;
+        };
+        entry.detached = true;
+        entry.window = window;
+        compact_slots(&mut self.entries);
+        self.changed(cx);
+    }
+
+    /// `MinigraphAttach`: the detached card takes the next free slot. With 12 attached cards the
+    /// `minigraph-toast-full` toast shows and nothing changes.
+    pub fn attach(&mut self, id: MinigraphId, cx: &mut Context<Self>) {
+        if !self.entries.iter().any(|e| e.id == id && e.detached) {
+            return;
+        }
+        if !self.attach_quietly(id) {
+            self.toast(ToastKind::Warning, "minigraph-toast-full", cx);
+            return;
+        }
+        self.changed(cx);
+    }
+
+    /// Attaches a detached card at the next free slot; false when none is free.
+    fn attach_quietly(&mut self, id: MinigraphId) -> bool {
+        let Some(slot) = (0..MAX_SLOTS).find(|s| !self.attached().any(|e| e.slot == *s)) else {
+            return false;
+        };
+        let Some(entry) = self.entries.iter_mut().find(|e| e.id == id && e.detached) else {
+            return false;
+        };
+        entry.detached = false;
+        entry.window = 0;
+        entry.slot = slot;
+        true
+    }
+
+    /// `MinigraphAddToWindow`: adds a system card for `source` to detached window `window`, unless
+    /// that window already has one of that kind.
+    pub fn add_to_window(&mut self, window: u32, source: MinigraphSource, cx: &mut Context<Self>) {
+        if !source.is_system()
+            || self
+                .entries
+                .iter()
+                .any(|e| e.detached && e.window == window && same_kind(&e.source, &source))
+        {
+            return;
+        }
+        let column = SYSTEM
+            .iter()
+            .find(|(s, _)| same_kind(s, &source))
+            .map_or(GraphColumn::Cpu, |(_, c)| *c);
+        // The card shows only while its View > Graphs setting is on, as at startup.
+        let key = source.settings_key();
+        if let Some(flag) = flag_mut(&mut self.graphs, &source) {
+            *flag = true;
+        }
+        let id = self.take_id();
+        self.entries.push(MinigraphEntry {
+            id,
+            source,
+            column,
+            range_s: NEW_RANGE_S,
+            color: GraphColor::Accent,
+            slot: 0,
+            detached: true,
+            window,
+        });
+        self.changed(cx);
+        if let Some(key) = key
+            && cx.has_global::<TlSettings>()
+        {
+            TlSettings::set(cx, key, SettingValue::Bool(true));
+        }
+    }
+
+    /// Brings the detached windows in line with the detached entries: opens a window for a group
+    /// with none, refills and resizes an open one, closes one with no cards left, and keeps the
+    /// `[[detached_windows]]` list to match. The windows change in a deferred step, because
+    /// opening or closing one inside this update, or inside an action sent from that window,
+    /// fails.
+    fn sync_windows(&mut self, cx: &mut Context<Self>) {
+        let mut groups: BTreeMap<u32, Vec<MinigraphEntry>> = BTreeMap::new();
+        for e in self.entries.iter().filter(|e| e.detached) {
+            groups.entry(e.window).or_default().push(e.clone());
+        }
+        let scale = metrics(cx).ui_scale;
+        let gone: Vec<u32> = self
+            .windows
+            .iter()
+            .map(|w| w.id)
+            .filter(|id| !groups.contains_key(id))
+            .collect();
+        self.windows.retain(|w| groups.contains_key(&w.id));
+        let mut work = Vec::with_capacity(groups.len());
+        for (id, cards) in groups {
+            let size = window_size(cards.len(), scale);
+            let saved = self.windows.iter().find(|w| w.id == id).cloned();
+            let (width, height) = (f32::from(size.width) as u32, f32::from(size.height) as u32);
+            match self.windows.iter_mut().find(|w| w.id == id) {
+                Some(w) => {
+                    w.width = width;
+                    w.height = height;
+                }
+                None => self.windows.push(DetachedWindowState {
+                    id,
+                    width,
+                    height,
+                    ..DetachedWindowState::default()
+                }),
+            }
+            work.push((id, cards, saved, size));
+        }
+        if work.is_empty() && gone.is_empty() {
+            return;
+        }
+        let panel = cx.weak_entity();
+        cx.defer(move |cx| {
+            let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) else {
+                return;
+            };
+            let key = |id: u32| u8::try_from(id).ok().map(WindowKey::DetachedGraph);
+            for id in gone {
+                if let Some(key) = key(id) {
+                    registry.update(cx, |r, cx| r.close(&key, cx));
+                }
+            }
+            for (id, cards, saved, size) in work {
+                let open = key(id).and_then(|k| registry.read(cx).get(&k));
+                if let Some(handle) = open {
+                    if let Some(view) = DetachedGraphWindow::find(handle, cx) {
+                        view.update(cx, |v, cx| v.set_cards(cards, cx));
+                    }
+                    let _ = handle.update(cx, |_, window, _| window.resize(size));
+                } else if open_detached(id, cards.clone(), saved.as_ref(), cx).is_err() {
+                    // open_detached toasted. Put the cards back so none is lost.
+                    let ids: Vec<MinigraphId> = cards.iter().map(|e| e.id).collect();
+                    let _ = panel.update(cx, |p, cx| p.reattach_all(&ids, cx));
+                }
+            }
+        });
+    }
+
+    /// Attaches `ids` after their window failed to open, as many as there are free slots.
+    fn reattach_all(&mut self, ids: &[MinigraphId], cx: &mut Context<Self>) {
+        let mut any = false;
+        for id in ids {
+            any |= self.attach_quietly(*id);
+        }
+        if any {
+            self.changed(cx);
+        }
     }
 
     /// Adds a system card at the next free slot. `Err` when 12 cards are attached; the caller
@@ -534,7 +709,11 @@ impl MinigraphPanel {
             return;
         }
         let state = to_state(&self.entries);
-        TlSettings::update(cx, |d| d.state.minigraphs = state);
+        let windows = self.windows.clone();
+        TlSettings::update(cx, |d| {
+            d.state.minigraphs = state;
+            d.state.detached_windows = windows;
+        });
     }
 
     /// Called by the Processes page on tab activation. Active sends the demand part; inactive
@@ -601,6 +780,7 @@ impl MinigraphPanel {
     /// The card set changed: rebuild the cards, resend demand, persist, redraw.
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.rebuild_cards(cx);
+        self.sync_windows(cx);
         self.send_graph_targets(cx);
         self.send_demand(cx);
         self.persist(cx);
@@ -801,6 +981,18 @@ fn register_actions(cx: &mut Context<MinigraphPanel>) {
         let _ = panel.update(cx, |p, cx| p.remove(a.id, cx));
     });
     let panel = weak.clone();
+    app.on_action(move |a: &MinigraphDetach, cx| {
+        let _ = panel.update(cx, |p, cx| p.detach(a.id, cx));
+    });
+    let panel = weak.clone();
+    app.on_action(move |a: &MinigraphAttach, cx| {
+        let _ = panel.update(cx, |p, cx| p.attach(a.id, cx));
+    });
+    let panel = weak.clone();
+    app.on_action(move |a: &MinigraphAddToWindow, cx| {
+        let _ = panel.update(cx, |p, cx| p.add_to_window(a.window, a.source.clone(), cx));
+    });
+    let panel = weak.clone();
     app.on_action(move |a: &MinigraphMoveToSlot, cx| {
         let _ = panel.update(cx, |p, cx| p.move_to_slot(a.id, a.slot, cx));
     });
@@ -814,6 +1006,15 @@ fn register_actions(cx: &mut Context<MinigraphPanel>) {
     app.on_action(move |a: &MinigraphSetRange, cx| {
         let _ = weak.update(cx, |p, cx| p.set_range(a.id, a.secs, cx));
     });
+}
+
+/// True when `at` is more than `DETACH_EDGE` px outside a window of `size`.
+fn outside_window(at: Point<Pixels>, size: Size<Pixels>) -> bool {
+    let (x, y) = (f32::from(at.x), f32::from(at.y));
+    x < -DETACH_EDGE
+        || y < -DETACH_EDGE
+        || x > f32::from(size.width) + DETACH_EDGE
+        || y > f32::from(size.height) + DETACH_EDGE
 }
 
 /// Moves `v[from]` to index `to`, or to the end when `to` is past it.
@@ -888,19 +1089,26 @@ impl Render for MinigraphPanel {
             .on_action(cx.listener(|this, a: &MinigraphMoveToSlot, _, cx| {
                 this.move_to_slot(a.id, a.slot, cx)
             }))
+            .on_action(cx.listener(|this, a: &MinigraphDetach, _, cx| this.detach(a.id, cx)))
+            .on_action(cx.listener(|this, a: &MinigraphAttach, _, cx| this.attach(a.id, cx)))
+            .on_action(cx.listener(|this, a: &MinigraphAddToWindow, _, cx| {
+                this.add_to_window(a.window, a.source.clone(), cx)
+            }))
             .on_drag_move(
                 cx.listener(|this, ev: &DragMoveEvent<DraggedMinigraph>, _, cx| {
                     this.on_drag_move(ev, cx)
                 }),
             )
             .on_drop(cx.listener(|this, _: &DraggedMinigraph, window, cx| {
-                this.end_drag(window.mouse_position(), cx)
+                this.end_drag(window.mouse_position(), window.bounds().size, cx)
             }))
             // GPUI drops the drag on a release off the panel and fires no drop. A card's blocking
             // label row also hides the panel from the pointer, so the slot still decides.
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, ev: &MouseUpEvent, _, cx| this.end_drag(ev.position, cx)),
+                cx.listener(|this, ev: &MouseUpEvent, window, cx| {
+                    this.end_drag(ev.position, window.bounds().size, cx)
+                }),
             );
         let bounds = Rc::clone(&self.bounds);
         root = root.child(

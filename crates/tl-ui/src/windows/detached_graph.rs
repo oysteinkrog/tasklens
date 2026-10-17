@@ -1,6 +1,6 @@
 //! The detached graph window (E26, PERF-083, UI-PRF-044, R-086): a borderless floating window
-//! that holds one or more minigraph cards. Detaching, the menu, the KWin bridge and the
-//! keep-open rule belong to later beads.
+//! that holds one or more minigraph cards. The panel opens, fills and closes these windows
+//! (E26-015); the window menu, the KWin bridge and the keep-open rule belong to later beads.
 
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use tl_model::settings::DetachedWindowState;
 
 use crate::anim::AnimationDriver;
 use crate::components::toast::ToastKind;
-use crate::hub::GlobalHub;
+use crate::hub::{GlobalHub, SnapshotHub};
 use crate::i18n::tr;
 use crate::pages::minigraph::card::{MINI_CARD_H, MINI_CARD_W, MinigraphCard};
 use crate::pages::minigraph::panel::{MinigraphPanel, gpu_order};
@@ -78,16 +78,9 @@ impl DetachedGraphWindow {
             .expect("open_detached checked the hub")
             .0
             .clone();
-        let catalog = Arc::clone(&hub.read(cx).current().devices);
-        let order = gpu_order(cx);
         let cards = entries
             .into_iter()
-            .map(|entry| {
-                let id = entry.id;
-                let hub = hub.clone();
-                let card = cx.new(|cx| MinigraphCard::new(entry, &catalog, &order, &hub, cx));
-                (id, card)
-            })
+            .map(|entry| (entry.id, make_card(entry, &hub, cx)))
             .collect();
         let panel = MinigraphPanel::global(cx)
             .map(|p| p.downgrade())
@@ -110,6 +103,26 @@ impl DetachedGraphWindow {
         root.read(cx).ok()?.view().clone().downcast::<Self>().ok()
     }
 
+    /// Shows `entries`, in this order: a card that is already here stays, a missing one is
+    /// created, the others are dropped.
+    pub fn set_cards(&mut self, entries: Vec<MinigraphEntry>, cx: &mut Context<Self>) {
+        let hub = cx
+            .try_global::<GlobalHub>()
+            .expect("open_detached checked the hub")
+            .0
+            .clone();
+        let mut old = std::mem::take(&mut self.cards);
+        for entry in entries {
+            let id = entry.id;
+            let card = match old.iter().position(|(c, _)| *c == id) {
+                Some(i) => old.swap_remove(i).1,
+                None => make_card(entry, &hub, cx),
+            };
+            self.cards.push((id, card));
+        }
+        cx.notify();
+    }
+
     /// This window's own animation driver (one per window, ADR-009).
     pub fn driver(&self) -> &Entity<AnimationDriver> {
         &self.driver
@@ -126,6 +139,16 @@ impl DetachedGraphWindow {
     pub fn panel(&self) -> &WeakEntity<MinigraphPanel> {
         &self.panel
     }
+}
+
+fn make_card(
+    entry: MinigraphEntry,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut App,
+) -> Entity<MinigraphCard> {
+    let catalog = Arc::clone(&hub.read(cx).current().devices);
+    let order = gpu_order(cx);
+    cx.new(|cx| MinigraphCard::new(entry, &catalog, &order, hub, cx))
 }
 
 /// Opens detached window `window_id` with `cards`, or focuses it when it is open. `saved` gives

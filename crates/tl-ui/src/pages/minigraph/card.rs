@@ -358,7 +358,7 @@ impl MinigraphCard {
             detached: self.entry.detached,
             long_ranges: true,
             colors: true,
-            detach: false,
+            detach: true,
         };
         let context = window
             .focused(cx)

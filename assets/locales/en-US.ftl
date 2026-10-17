@@ -2852,6 +2852,8 @@ minigraph-menu-remove = Remove graph
 minigraph-menu-range = Time range
 minigraph-menu-color = Graph color
 minigraph-menu-reset = Reset minigraph layout
+minigraph-menu-detach = Detach
+minigraph-menu-attach = Attach to main window
 # Process, name and app minigraph cards (tasklens-xdh.13, PERF-085, PERF-087).
 minigraph-label-process = {$name} ({$pid}) · {$col}
 minigraph-label-name = {$name} by name · {$col}

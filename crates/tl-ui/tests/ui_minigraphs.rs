@@ -1520,6 +1520,7 @@ mod panel {
                     false
                 ),
                 (MenuEntryKind::Separator, None, None, false),
+                item("Detach"),
                 (
                     MenuEntryKind::Disabled,
                     Some("Add tray icon graph".to_owned()),
@@ -1564,7 +1565,7 @@ mod panel {
     fn card_menu_order_process(cx: &mut TestAppContext) {
         let mut r = rig_with(cx, process_state());
         let (menu, _) = right_click(&mut r, 0);
-        // Detach (E26-015) is not built yet. The rig has no tray, so item 7 is disabled.
+        // The rig has no tray, so item 7 is disabled.
         assert_eq!(
             menu,
             [
@@ -1582,6 +1583,7 @@ mod panel {
                     false
                 ),
                 (MenuEntryKind::Separator, None, None, false),
+                item("Detach"),
                 (
                     MenuEntryKind::Disabled,
                     Some("Add tray icon graph".to_owned()),
@@ -1993,6 +1995,7 @@ mod panel {
                 "Remove graph",
                 "Time range",
                 "Graph color",
+                "Detach",
                 "Add tray icon graph",
                 "Reset minigraph layout"
             ]

@@ -218,6 +218,333 @@ fn detached_window_own_driver(cx: &mut TestAppContext) {
     assert_ne!(own, host_driver);
 }
 
+/// Detach and attach through the panel (tasklens-xdh.17, R-084, UI-PRF-043).
+mod detach {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, Pixels, Point,
+        Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div,
+        point, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::settings::{
+        AppearanceSettings, DetachedWindowState, MinigraphState, Settings, ThemeSettings, UiState,
+    };
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::components::toast::ToastKind;
+    use tl_ui::demand::DemandAggregator;
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::pages::minigraph::actions::{MinigraphAttach, MinigraphDetach};
+    use tl_ui::pages::minigraph::panel::MinigraphPanel;
+    use tl_ui::pages::minigraph::sources::{MinigraphId, MinigraphSource};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui::windows::detached_graph::DetachedGraphWindow;
+
+    use super::catalog;
+
+    /// Hosts the panel cached over a 1000 × 600 box, as the Processes page does.
+    struct PanelHost {
+        panel: Entity<MinigraphPanel>,
+    }
+
+    impl Render for PanelHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().relative().w(px(1000.)).h(px(600.)).child(
+                self.panel
+                    .clone()
+                    .cached(StyleRefinement::default().absolute().inset_0()),
+            )
+        }
+    }
+
+    struct Rig {
+        panel: Entity<MinigraphPanel>,
+        vcx: VisualTestContext,
+        hub: Entity<SnapshotHub>,
+        demand: Entity<DemandAggregator>,
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn open_panel(
+        cx: &mut TestAppContext,
+        hub: &Entity<SnapshotHub>,
+        demand: &Entity<DemandAggregator>,
+    ) -> (Entity<MinigraphPanel>, VisualTestContext) {
+        let (hub, demand) = (hub.clone(), demand.clone());
+        let (host, vcx) = cx.add_window_view(move |_, cx| PanelHost {
+            panel: cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx)),
+        });
+        let mut vcx = vcx.clone();
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(1000.), px(600.)));
+        let panel = vcx.read_entity(&host, |h, _| h.panel.clone());
+        draw(&mut vcx);
+        (panel, vcx)
+    }
+
+    fn rig(cx: &mut TestAppContext, state: UiState) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let appearance = AppearanceSettings::default();
+            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui::theme::metrics::init_metrics(&appearance, cx);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state,
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        engine.publish_with(|s| s.devices = Arc::new(catalog()));
+        cx.run_until_parked();
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        cx.update(|cx| {
+            cx.set_global(GlobalHub(hub.clone()));
+            GlobalRegistry::init(cx);
+        });
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        let (panel, vcx) = open_panel(cx, &hub, &demand);
+        Rig {
+            panel,
+            vcx,
+            hub,
+            demand,
+        }
+    }
+
+    impl Rig {
+        fn id_of(&mut self, source: &MinigraphSource) -> MinigraphId {
+            let panel = self.panel.clone();
+            self.vcx.update(|_, cx| {
+                panel
+                    .read(cx)
+                    .entries()
+                    .iter()
+                    .find(|e| &e.source == source)
+                    .map(|e| e.id)
+                    .expect("card present")
+            })
+        }
+
+        fn dispatch(&mut self, action: impl gpui_kit::Action) {
+            self.vcx.update(|window, cx| {
+                window.dispatch_action(action.boxed_clone(), cx);
+            });
+            draw(&mut self.vcx);
+        }
+
+        fn attached_count(&mut self) -> usize {
+            let panel = self.panel.clone();
+            self.vcx.update(|_, cx| panel.read(cx).attached().count())
+        }
+
+        /// `(detached, window, slot)` of the card for `source`.
+        fn state_of(&mut self, source: &MinigraphSource) -> (bool, u32, u16) {
+            let panel = self.panel.clone();
+            self.vcx.update(|_, cx| {
+                let p = panel.read(cx);
+                let e = p
+                    .entries()
+                    .iter()
+                    .find(|e| &e.source == source)
+                    .expect("entry");
+                (e.detached, e.window, e.slot)
+            })
+        }
+
+        fn toasts(&mut self) -> Vec<(ToastKind, String)> {
+            let panel = self.panel.clone();
+            self.vcx.update(|_, cx| {
+                panel
+                    .read(cx)
+                    .toasts
+                    .iter()
+                    .map(|(k, t)| (*k, t.to_string()))
+                    .collect()
+            })
+        }
+    }
+
+    fn registry_has(cx: &mut TestAppContext, window: u8) -> bool {
+        cx.read(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::DetachedGraph(window))
+                .is_some()
+        })
+    }
+
+    /// The title and card sources of detached window `window`.
+    fn window_cards(cx: &mut TestAppContext, window: u8) -> (String, Vec<MinigraphSource>) {
+        cx.read(|cx| {
+            let handle = cx
+                .global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::DetachedGraph(window))
+                .expect("window open");
+            let view = DetachedGraphWindow::find(handle, cx).expect("detached view");
+            let v = view.read(cx);
+            (
+                v.title().to_string(),
+                v.cards()
+                    .iter()
+                    .map(|(_, c)| c.read(cx).entry.source.clone())
+                    .collect(),
+            )
+        })
+    }
+
+    fn saved_state(cx: &mut TestAppContext) -> (Vec<(String, bool, u32)>, Vec<u32>) {
+        cx.read(|cx| {
+            let st = TlSettings::state(cx);
+            (
+                st.minigraphs
+                    .iter()
+                    .map(|m| (m.source.clone(), m.detached, m.window))
+                    .collect(),
+                st.detached_windows.iter().map(|w| w.id).collect(),
+            )
+        })
+    }
+
+    #[gpui_kit::test]
+    fn detached_state_round_trip(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        let memory = r.id_of(&MinigraphSource::Memory);
+        r.dispatch(MinigraphDetach { id: memory });
+        assert_eq!(r.attached_count(), 5);
+        assert!(registry_has(cx, 1));
+        let (title, cards) = window_cards(cx, 1);
+        assert_eq!(title, "tasklens Graph 1");
+        assert_eq!(cards, [MinigraphSource::Memory]);
+        let (minigraphs, windows) = saved_state(cx);
+        assert!(minigraphs.contains(&("memory".to_owned(), true, 1)));
+        assert_eq!(windows, [1]);
+
+        // Part 2: the window and the panel go; a new panel reads the saved state.
+        cx.update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.update(cx, |r, cx| r.close(&WindowKey::DetachedGraph(1), cx));
+        });
+        r.vcx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        assert!(!registry_has(cx, 1));
+        let (panel, mut vcx) = open_panel(cx, &r.hub, &r.demand);
+        draw(&mut vcx);
+        assert!(registry_has(cx, 1), "the window reopens");
+        assert_eq!(window_cards(cx, 1).1, [MinigraphSource::Memory]);
+        let attached = vcx.update(|_, cx| panel.read(cx).attached().count());
+        assert_eq!(attached, 5);
+    }
+
+    #[gpui_kit::test]
+    fn attach_returns_card_and_closes_empty_window(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        let memory = r.id_of(&MinigraphSource::Memory);
+        r.dispatch(MinigraphDetach { id: memory });
+        assert!(registry_has(cx, 1));
+        r.dispatch(MinigraphAttach { id: memory });
+        assert_eq!(r.state_of(&MinigraphSource::Memory), (false, 0, 5));
+        assert_eq!(r.attached_count(), 6);
+        assert!(!registry_has(cx, 1), "the empty window closed");
+        let (minigraphs, windows) = saved_state(cx);
+        assert!(minigraphs.iter().all(|(_, detached, _)| !detached));
+        assert!(windows.is_empty());
+    }
+
+    fn slot_center(r: &mut Rig, slot: u16) -> Point<Pixels> {
+        let selector: &'static str = Box::leak(format!("MinigraphSlot-{slot}").into_boxed_str());
+        r.vcx.debug_bounds(selector).expect("slot drawn").center()
+    }
+
+    /// Presses the CPU card, drags it to `to` and releases there.
+    fn drag_cpu_to(r: &mut Rig, to: Point<Pixels>) {
+        let from = slot_center(r, 0);
+        r.vcx
+            .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        draw(&mut r.vcx);
+        for i in 1..=4 {
+            let t = i as f32 / 4.;
+            let p = point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            r.vcx
+                .simulate_mouse_move(p, MouseButton::Left, Modifiers::none());
+            draw(&mut r.vcx);
+        }
+        r.vcx
+            .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        draw(&mut r.vcx);
+    }
+
+    #[gpui_kit::test]
+    fn drag_past_edge_detaches(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        // 20 px past the right edge of the 1000 px window: not far enough.
+        drag_cpu_to(&mut r, point(px(1020.), px(300.)));
+        assert!(!r.state_of(&MinigraphSource::Cpu).0);
+        assert!(!registry_has(cx, 1));
+        // 30 px past it.
+        drag_cpu_to(&mut r, point(px(1030.), px(300.)));
+        assert_eq!(r.state_of(&MinigraphSource::Cpu).0, true);
+        assert_eq!(r.state_of(&MinigraphSource::Cpu).1, 1);
+        assert!(registry_has(cx, 1));
+        assert_eq!(window_cards(cx, 1).1, [MinigraphSource::Cpu]);
+    }
+
+    #[gpui_kit::test]
+    fn attach_into_full_panel_toasts(cx: &mut TestAppContext) {
+        let mut minigraphs: Vec<MinigraphState> = (0..12u16)
+            .map(|i| MinigraphState {
+                source: format!("name:p{i}"),
+                column: "cpu".to_owned(),
+                slot: i,
+                ..MinigraphState::default()
+            })
+            .collect();
+        minigraphs.push(MinigraphState {
+            source: "memory".to_owned(),
+            column: "memory".to_owned(),
+            detached: true,
+            window: 1,
+            ..MinigraphState::default()
+        });
+        let state = UiState {
+            minigraphs,
+            detached_windows: vec![DetachedWindowState {
+                id: 1,
+                ..DetachedWindowState::default()
+            }],
+            ..UiState::default()
+        };
+        let mut r = rig(cx, state);
+        assert!(registry_has(cx, 1), "the saved window opens at startup");
+        let memory = r.id_of(&MinigraphSource::Memory);
+        r.dispatch(MinigraphAttach { id: memory });
+        assert_eq!(
+            r.toasts(),
+            [(
+                ToastKind::Warning,
+                "No space for more minigraphs".to_owned()
+            )]
+        );
+        assert_eq!(r.state_of(&MinigraphSource::Memory).0, true);
+        assert!(registry_has(cx, 1));
+    }
+}
+
 /// The Performance mini window (tasklens-xdh.21, PERF-093, UI-PRF-045).
 mod mini {
     use std::sync::Arc;

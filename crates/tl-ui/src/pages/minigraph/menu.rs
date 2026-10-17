@@ -1,11 +1,12 @@
-//! The minigraph card menu (UI-PRF-042, PERF-081, R-016). P1 has Hide graph, Time range and
-//! Reset minigraph layout; the items of later beads are left out while their flag is false.
+//! The minigraph card menu (UI-PRF-042, PERF-081, R-016). The items of later beads are left out
+//! while their flag is false.
 
 use gpui_kit::{App, SharedString, Window};
 
 use super::GraphColor;
 use super::actions::{
-    MinigraphHide, MinigraphRemove, MinigraphSetColor, MinigraphSetRange, ResetMinigraphLayout,
+    MinigraphAttach, MinigraphDetach, MinigraphHide, MinigraphRemove, MinigraphSetColor,
+    MinigraphSetRange, ResetMinigraphLayout,
 };
 use super::sources::{GraphColumn, MinigraphId};
 use crate::components::menu::TlMenu;
@@ -29,7 +30,7 @@ pub struct CardMenuCtx {
     pub long_ranges: bool,
     /// The Graph color submenu; false before E26-010.
     pub colors: bool,
-    /// Detach and Attach to main window; false before E26-015.
+    /// Detach and Attach to main window.
     pub detach: bool,
 }
 
@@ -99,7 +100,20 @@ pub fn card_menu(menu: TlMenu, ctx: &CardMenuCtx, window: &mut Window, cx: &mut 
     }
     // 5
     menu = menu.separator();
-    // 6: Detach or Attach to main window, E26-015 adds it while `detach`.
+    // 6: Detach or Attach to main window.
+    if ctx.detach {
+        menu = if ctx.detached {
+            menu.item(
+                tr(cx, "minigraph-menu-attach"),
+                Box::new(MinigraphAttach { id }),
+            )
+        } else {
+            menu.item(
+                tr(cx, "minigraph-menu-detach"),
+                Box::new(MinigraphDetach { id }),
+            )
+        };
+    }
     // 7: Add tray icon graph; the bridge toasts when the graph already exists.
     menu = if tray_available(cx) {
         let column: SharedString = if ctx.is_process {
