@@ -949,3 +949,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - qfx.18: option C (Fds and Security moved to tasklens-qfx.39 with new tl-collect byte parsers); read_stream added in helper/mod.rs here so a scan never starts a polkit prompt.
 - qfx.19: helper task in process_detail.rs, skipped keys recorded in handles.rs, HelperHandle::read only; order qfx.18, qfx.19, qfx.39.
 - 9o0.30: new tasklens-9o0.39 adds a RemoteHost state so pending and no-name differ; picker note 'Sends DNS queries' in the existing note slot, UI-SYS-061 updated.
+- 9o0.31: new tasklens-9o0.40 (ConnRecord.netns plus engine use of the helper netns dump) first; no page toast on cancel (helper_flow shows it); host rows show an empty Namespace cell.
