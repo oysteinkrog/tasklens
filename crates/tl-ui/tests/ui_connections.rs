@@ -2272,6 +2272,7 @@ mod props {
     use gpui_kit::{VisualTestContext, WindowHandle};
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
+    use tl_model::health::HelperState;
     use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{ConnCounts, ProcessSnapshot, TcpInfoView};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -2348,6 +2349,25 @@ mod props {
                     records: processes.into(),
                     ..ProcessSnapshot::default()
                 });
+            });
+            self.main.run_until_parked();
+        }
+
+        fn set_helper(&mut self, helper: HelperState) {
+            self.engine.publish_with(|s| {
+                let health = Arc::make_mut(&mut s.health);
+                health.helper = helper;
+                health.version += 1;
+            });
+            self.main.run_until_parked();
+        }
+
+        fn set_destroy_supported(&mut self, supported: Option<bool>) {
+            self.engine.publish_with(|s| {
+                let mut conns = ConnectionsSnapshot::clone(&s.connections);
+                conns.destroy_supported = supported;
+                conns.header.version += 1;
+                s.connections = Arc::new(conns);
             });
             self.main.run_until_parked();
         }
@@ -2438,6 +2458,42 @@ mod props {
         assert_eq!(title(cx, handle), "Connection properties: TCP ESTABLISHED");
         let text = lines(cx, handle).join("\n") + "\n";
         golden("conn_props_lines.txt", &text);
+    }
+
+    fn closable(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> String {
+        lines(cx, handle)
+            .into_iter()
+            .find(|l| l.starts_with("Closable here"))
+            .expect("a Closable here line")
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_closable_reasons(cx: &mut TestAppContext) {
+        let mut udp = tcp_record(1);
+        udp.proto = Proto::Udp;
+        udp.state = ConnState::Unconnected;
+        udp.tcp = None;
+        let mut time_wait = tcp_record(2);
+        time_wait.state = ConnState::TimeWait;
+        let mut rig = rig(cx, vec![udp, time_wait, tcp_record(3)], procs());
+        // No helper: the UDP and TIME-WAIT reasons still win.
+        let handle = open(cx, 1).expect("opened");
+        assert_eq!(closable(cx, handle), "Closable here: No (UDP)");
+        let handle = open(cx, 2).expect("opened");
+        assert_eq!(closable(cx, handle), "Closable here: No (TIME-WAIT)");
+        let handle = open(cx, 3).expect("opened");
+        assert_eq!(
+            closable(cx, handle),
+            "Closable here: No (needs the tasklens helper)"
+        );
+        rig.set_helper(HelperState::Unlocked);
+        rig.set_destroy_supported(Some(false));
+        assert_eq!(
+            closable(cx, handle),
+            "Closable here: No (kernel lacks CONFIG_INET_DIAG_DESTROY)"
+        );
+        rig.set_destroy_supported(None);
+        assert_eq!(closable(cx, handle), "Closable here: Yes");
     }
 
     #[gpui_kit::test]

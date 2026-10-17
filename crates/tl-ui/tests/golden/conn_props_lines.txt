@@ -11,4 +11,4 @@ Congestion window: 10 segments
 Bytes sent / received: 1.22 MiB / 34.68 MiB
 Retransmits: 3
 Last data received: 1 240 ms ago
-Closable here: No (not supported in this version)
+Closable here: No (needs the tasklens helper)

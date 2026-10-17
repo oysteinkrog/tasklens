@@ -18,7 +18,8 @@ use gpui_kit::{
 };
 use tl_model::actions::{Family, Proto};
 use tl_model::demand::Demand;
-use tl_model::snapshot::{ComponentMask, ConnRecord, ProcessSnapshot};
+use tl_model::health::HelperState;
+use tl_model::snapshot::{ComponentMask, ConnRecord, ConnState, ProcessSnapshot, Snapshot};
 use tl_model::units;
 use tl_model::validity::Validity;
 use tracing::warn;
@@ -144,11 +145,32 @@ fn owner_of<'a>(
         .min_by_key(|process| process.key.pid)
 }
 
+/// The locale key for the "Closable here" value. First match wins.
+fn closable_key(
+    record: &ConnRecord,
+    helper: HelperState,
+    destroy_supported: Option<bool>,
+) -> &'static str {
+    if record.proto == Proto::Udp {
+        "connections-props-closable-udp"
+    } else if record.state == ConnState::TimeWait {
+        "connections-props-closable-time-wait"
+    } else if helper == HelperState::Missing {
+        "connections-props-closable-needs-helper"
+    } else if destroy_supported == Some(false) {
+        "connections-props-closable-no-kernel"
+    } else {
+        "connections-props-closable-yes"
+    }
+}
+
 /// Builds the lines in UI-SYS-068 order. TCP lines only for TCP sockets. `closed` marks every
 /// value Stale, which the grid draws in `text_secondary`.
 pub fn build_lines(
     record: &ConnRecord,
     processes: &ProcessSnapshot,
+    helper: HelperState,
+    destroy_supported: Option<bool>,
     closed: bool,
     cx: &App,
 ) -> Vec<PropLine> {
@@ -308,7 +330,7 @@ pub fn build_lines(
     }
     lines.push(line(
         "connections-props-label-closable",
-        TlValue::new(tr(cx, "connections-props-closable-no")),
+        TlValue::new(tr(cx, closable_key(record, helper, destroy_supported))),
     ));
     if closed {
         for line in &mut lines {
@@ -408,23 +430,24 @@ impl ConnectionPropertiesView {
     fn new(record: ConnRecord, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut subs = Vec::new();
         let mut processes = Arc::new(ProcessSnapshot::default());
+        let mut helper = HelperState::Missing;
+        let mut destroy_supported = None;
         if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
-            processes = Arc::clone(&hub.read(cx).current().processes);
+            let current = hub.read(cx).current();
+            processes = Arc::clone(&current.processes);
+            helper = current.health.helper;
+            destroy_supported = current.connections.destroy_supported;
             subs.push(cx.subscribe_in(
                 &hub,
                 window,
                 |this, hub, event: &SnapshotChanged, window, cx| {
-                    if event
-                        .mask
-                        .intersects(ComponentMask::CONNECTIONS | ComponentMask::PROCESSES)
-                    {
+                    if event.mask.intersects(
+                        ComponentMask::CONNECTIONS
+                            | ComponentMask::PROCESSES
+                            | ComponentMask::HEALTH,
+                    ) {
                         let snapshot = Arc::clone(hub.read(cx).current());
-                        this.take_snapshot(
-                            &snapshot.connections.records,
-                            &snapshot.processes,
-                            window,
-                            cx,
-                        );
+                        this.take_snapshot(&snapshot, window, cx);
                     }
                 },
             ));
@@ -442,7 +465,7 @@ impl ConnectionPropertiesView {
             cx.on_release(move |_, cx| demand.update(cx, |d, cx| d.remove(id, cx)))
                 .detach();
         }
-        let lines = build_lines(&record, &processes, false, cx);
+        let lines = build_lines(&record, &processes, helper, destroy_supported, false, cx);
         let sig = signature(&lines);
         let copy_focus = (0..MAX_LINES).map(|_| cx.focus_handle()).collect();
         let focus = cx.focus_handle();
@@ -460,19 +483,21 @@ impl ConnectionPropertiesView {
         }
     }
 
-    fn take_snapshot(
-        &mut self,
-        records: &[ConnRecord],
-        processes: &ProcessSnapshot,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn take_snapshot(&mut self, snapshot: &Snapshot, window: &mut Window, cx: &mut Context<Self>) {
         if self.closed {
             return;
         }
-        match records.iter().find(|r| r.cookie == self.cookie) {
+        let processes = &snapshot.processes;
+        let helper = snapshot.health.helper;
+        let destroy_supported = snapshot.connections.destroy_supported;
+        match snapshot
+            .connections
+            .records
+            .iter()
+            .find(|r| r.cookie == self.cookie)
+        {
             Some(record) => {
-                let lines = build_lines(record, processes, false, cx);
+                let lines = build_lines(record, processes, helper, destroy_supported, false, cx);
                 let sig = signature(&lines);
                 self.record = record.clone();
                 if sig != self.sig {
@@ -484,7 +509,8 @@ impl ConnectionPropertiesView {
             }
             None => {
                 self.closed = true;
-                self.lines = build_lines(&self.record, processes, true, cx);
+                self.lines =
+                    build_lines(&self.record, processes, helper, destroy_supported, true, cx);
                 self.sig = signature(&self.lines);
                 self.set_title(window, cx);
                 cx.notify();
