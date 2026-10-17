@@ -189,6 +189,9 @@ pub struct ConnectionsSource<R: SocketReader> {
     map: SocketMap,
     /// Keeps the address strings per cookie between samples.
     table: ConnectionTable,
+    /// The same for the sockets of other namespaces. It gets no interface names: the host's
+    /// names do not apply there, so a link-local scope shows the decimal ifindex.
+    netns_table: ConnectionTable,
     attribution: tl_collect::net::TcpAttribution,
     /// The clocks of the previous sample, for the ADR-008 suspend check.
     last_clock: Option<Clock>,
@@ -217,6 +220,7 @@ impl<R: SocketReader> ConnectionsSource<R> {
             socks: Vec::new(),
             map: SocketMap::new(),
             table: ConnectionTable::new(),
+            netns_table: ConnectionTable::new(),
             attribution: tl_collect::net::TcpAttribution::new(),
             last_clock: None,
             failed: false,
@@ -315,13 +319,7 @@ impl<R: SocketReader> ConnectionsSource<R> {
 
         let mut records = if tab_shown {
             let ifnames = self.reader.if_names();
-            self.table.update(&self.socks, &self.map, &ifnames);
-            let netns_of = &self.netns_of;
-            self.table
-                .records
-                .iter()
-                .map(|r| to_model(r, netns_of.get(&r.cookie)))
-                .collect()
+            self.records(host_len, &ifnames)
         } else {
             Vec::new()
         };
@@ -338,6 +336,33 @@ impl<R: SocketReader> ConnectionsSource<R> {
             attribution,
         };
         (self, SourceUpdate::Connections(update))
+    }
+
+    /// The model records of `socks`, sorted by cookie. The first `host_len` are host sockets
+    /// and get the interface names in `ifnames`; the rest come from other namespaces and get
+    /// none.
+    fn records(&mut self, host_len: usize, ifnames: &IfNames) -> Vec<ConnRecord> {
+        let (host, other) = self.socks.split_at(host_len);
+        self.table.update(host, &self.map, ifnames);
+        self.netns_table
+            .update(other, &self.map, &IfNames::default());
+        let netns_of = &self.netns_of;
+        let mut records: Vec<ConnRecord> = self
+            .table
+            .records
+            .iter()
+            .map(|r| to_model(r, None))
+            .chain(
+                self.netns_table
+                    .records
+                    .iter()
+                    .map(|r| to_model(r, netns_of.get(&r.cookie))),
+            )
+            .collect();
+        if !self.netns_table.records.is_empty() {
+            records.sort_unstable_by_key(|r| r.cookie);
+        }
+        records
     }
 
     /// Takes the resolver's answers, then sets `remote_host` on the visible Remote host cells
@@ -1046,11 +1071,7 @@ fn to_model(r: &RawRecord, netns: Option<&NetnsRef>) -> ConnRecord {
         uid: s.uid,
         inode: s.inode,
         ifindex: s.ifindex,
-        interface: if netns.is_some() {
-            None
-        } else {
-            r.interface.clone()
-        },
+        interface: r.interface.clone(),
         recv_q: s.rqueue,
         send_q: s.wqueue,
         // Unit resolution for a socket owner is not part of this worker.
@@ -1501,22 +1522,41 @@ mod tests {
         assert!(matches!(parse_netns_dump(&short), Err(NetnsSkip::Dumps(3))));
     }
 
+    /// The host's interface names do not apply in another namespace: a link-local address
+    /// there shows the decimal ifindex as its scope, and the row has no interface name.
     #[test]
     fn netns_socket_has_no_host_interface() {
-        let mut sock = tcp(1, 10, 0, 0);
-        sock.ifindex = 2;
-        let mut ifnames = IfNames::default();
-        ifnames.0.insert(2, Arc::from("eth0"));
-        let mut table = ConnectionTable::new();
-        table.update(&[sock], &SocketMap::new(), &ifnames);
+        let link_local = |cookie| {
+            let mut sock = tcp(cookie, 10 + cookie, 0, 0);
+            sock.family = sock_diag::Family::V6;
+            sock.src = IpAddr::V6("fe80::1".parse().expect("address"));
+            sock.dst = IpAddr::V6("fe80::9".parse().expect("address"));
+            sock.ifindex = 2;
+            sock
+        };
         let netns = NetnsRef {
             ino: 4026532000,
             name: Arc::from("blue"),
         };
-        let r = to_model(&table.records[0], Some(&netns));
-        assert_eq!(r.netns, Some(netns));
-        assert_eq!(r.interface, None);
-        assert_eq!(to_model(&table.records[0], None).netns, None);
+        let ifnames = IfNames([(2, Arc::from("eth0"))].into_iter().collect());
+        let mut src = ConnectionsSource::new(Fake::default());
+        // Host cookie 5, then cookie 3 from "blue": the records come out sorted by cookie.
+        src.socks = vec![link_local(5), link_local(3)];
+        src.netns_of.insert(3, netns.clone());
+        let records = src.records(1, &ifnames);
+
+        assert_eq!(records.len(), 2);
+        let (other, host) = (&records[0], &records[1]);
+        assert_eq!(other.cookie, 3);
+        assert_eq!(other.netns, Some(netns));
+        assert_eq!(&*other.local, "[fe80::1%2]:40000");
+        assert_eq!(&*other.foreign, "[fe80::9%2]:443");
+        assert_eq!(other.interface, None);
+        assert_eq!(host.cookie, 5);
+        assert_eq!(host.netns, None);
+        assert_eq!(&*host.local, "[fe80::1%eth0]:40000");
+        assert_eq!(&*host.foreign, "[fe80::9%eth0]:443");
+        assert_eq!(host.interface.as_deref(), Some("eth0"));
     }
 
     #[test]
