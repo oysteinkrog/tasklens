@@ -1332,7 +1332,7 @@ mod tabstrip {
         cx.update(|cx| {
             cx.on_action(move |_: &CopyInformationAll, _| seen.set(seen.get() + 1));
         });
-        let mut r = rig(cx, 100, all(), Tab::Information, false);
+        let r = rig(cx, 100, all(), Tab::Information, false);
         let at = bounds(r.cx, "TabStrip-copy").center();
         r.cx.simulate_click(at, Modifiers::none());
         r.cx.run_until_parked();
