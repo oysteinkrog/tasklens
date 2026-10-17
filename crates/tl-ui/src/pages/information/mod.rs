@@ -348,6 +348,15 @@ impl InformationPage {
         &self.focus
     }
 
+    /// Help > System Information: Operating System is the first section in both layouts, so
+    /// offset 0 puts its band at the top. Focus goes to the scroll region so arrows scroll.
+    pub fn show_system_information(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.scroll
+            .set_offset(point(self.scroll.offset().x, Pixels::ZERO));
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
     /// F5: asks for a new scan and shows "Information refreshed." on the next inventory version,
     /// or after 2 s.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {

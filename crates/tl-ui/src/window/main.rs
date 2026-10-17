@@ -70,7 +70,8 @@ use crate::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, EscapeChain, FocusFilter,
     GLOBAL_CONTEXT, MinimizeWindow, NextTab, PICKER_CONTEXT, PrevTab, Quit, RefreshCurrentTab,
     SHELL_FILTER_CONTEXT, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetViewMode, ShowMainWindow,
-    StartWindowPick, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow, ZoomWindow,
+    ShowSystemInformation, StartWindowPick, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow,
+    ZoomWindow,
 };
 use crate::anim::{AnimationDriver, FrameStats};
 use crate::app::{
@@ -88,6 +89,7 @@ use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::connections::ConnectionsPage;
 use crate::pages::information::InformationPage;
+use crate::pages::information::section::InfoSectionId;
 use crate::pages::performance::details::Template;
 use crate::pages::performance::{PerformancePage, SummaryToggled};
 use crate::pages::processes::ProcessesPage;
@@ -1553,6 +1555,24 @@ impl MainWindow {
         self.filter.update(cx, |f, cx| f.clear(window, cx));
     }
 
+    /// Help > System Information (UI-SYS-096): opens the Information tab, clears a filter that
+    /// hides Operating System, and scrolls that section to the top.
+    fn on_show_system_information(
+        &mut self,
+        _: &ShowSystemInformation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_tab(Tab::Information, window, cx);
+        let Some(page) = self.page_entity::<InformationPage>(Tab::Information) else {
+            return;
+        };
+        if !page.read(cx).is_shown(InfoSectionId::OperatingSystem) {
+            self.filter.update(cx, |f, cx| f.clear(window, cx));
+        }
+        page.update(cx, |p, cx| p.show_system_information(window, cx));
+    }
+
     /// Type-to-filter (E20-A2, UI-SHL-124, PROC-044): a printable key that no binding and no
     /// focused element used, typed while a table has focus, moves focus to the filter box and
     /// goes in there. Space is left to the table (D-008). The cheap checks come first; only a
@@ -2521,6 +2541,7 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::on_cancel_pick))
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_clear_filter))
+            .on_action(cx.listener(Self::on_show_system_information))
             .on_action(cx.listener(Self::on_escape_chain))
             // Bubble phase: sees only keys that no binding and no focused element used.
             .on_key_down(cx.listener(Self::route_type_to_filter))
