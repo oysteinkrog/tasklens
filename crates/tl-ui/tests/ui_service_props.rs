@@ -1793,6 +1793,82 @@ fn recovery_reboot_warning(cx: &mut TestAppContext) {
     assert!(t.drawn(cx, "ServiceRecoveryWarning-4"));
 }
 
+/// A value the selects do not offer, such as `soft-reboot`, shows as itself, so choosing
+/// "none" is a change and Apply writes it.
+#[gpui_kit::test]
+fn recovery_other_action_can_be_disabled(cx: &mut TestAppContext) {
+    for action in LimitAction::OTHER {
+        assert_eq!(LimitAction::from_word(action.word()), Some(action));
+        assert!(action.restarts_computer(), "{action:?}");
+    }
+    let t = open_recovery(
+        cx,
+        Some(recovery_details(|d| {
+            d.recovery.failure_action = Some(a("soft-reboot"));
+        })),
+    );
+    assert_eq!(t.form(cx).failure_action, LimitAction::SoftReboot);
+    let shown = cx.read(|cx| t.tab.read(cx).action_selects_for_test(cx));
+    assert_eq!(
+        shown[1].as_deref(),
+        Some("soft-reboot"),
+        "the select shows it"
+    );
+    assert!(!t.apply_enabled(cx), "the unit's own value is not a change");
+    assert!(t.drawn(cx, "ServiceRecoveryWarning-4"));
+
+    t.edit(cx, |f| f.failure_action = LimitAction::None);
+    assert!(t.apply_enabled(cx), "none differs from soft-reboot");
+    assert!(!t.drawn(cx, "ServiceRecoveryWarning-4"));
+    let req = t.apply(cx);
+    assert_eq!(
+        req.kind,
+        ActionKind::UnitWriteRecovery(RecoveryEdit {
+            failure_action: Some(a("none")),
+            ..RecoveryEdit::default()
+        })
+    );
+}
+
+fn recovery_control_names(t: &Recovery, cx: &mut TestAppContext) -> Vec<String> {
+    cx.read(|cx| t.tab.read(cx).control_names_for_test())
+        .into_iter()
+        .map(|n| n.to_string())
+        .collect()
+}
+
+/// Each focusable control carries its row label as its accessible name, and an invalid "Run on
+/// failure" adds the validation line to the field's own name.
+#[gpui_kit::test]
+fn recovery_controls_named(cx: &mut TestAppContext) {
+    let t = open_recovery(cx, Some(recovery_details(|_| {})));
+    assert_eq!(
+        recovery_control_names(&t, cx),
+        [
+            "On failure",
+            "When giving up",
+            "Failure action",
+            "Restart service after",
+            "Give up after, starts",
+            "Give up after, seconds",
+            "Run on failure",
+        ]
+    );
+    t.edit(cx, |f| f.on_failure = "a.service b;c.service".into());
+    assert_eq!(
+        recovery_control_names(&t, cx).last().map(String::as_str),
+        Some(
+            "Run on failure, Enter unit names separated by spaces, for example \
+             failure-notify@%n.service"
+        )
+    );
+    t.edit(cx, |f| f.on_failure = "notify@%n.service".into());
+    assert_eq!(
+        recovery_control_names(&t, cx).last().map(String::as_str),
+        Some("Run on failure")
+    );
+}
+
 // Dependencies tab (UI-SYS-035).
 
 struct Deps {

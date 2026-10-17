@@ -154,6 +154,7 @@ pub struct TlStepper {
     suffix: Option<SharedString>,
     disabled: bool,
     on_change: Option<ChangeHandler>,
+    aria_label: Option<SharedString>,
 }
 
 impl TlStepper {
@@ -168,7 +169,14 @@ impl TlStepper {
             suffix: None,
             disabled: false,
             on_change: None,
+            aria_label: None,
         }
+    }
+
+    /// The accessible name of the number field, usually the field's label.
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
+        self
     }
 
     /// The allowed values `min..=max` and the amount one step moves. A `step` below 1 counts
@@ -335,6 +343,7 @@ impl RenderOnce for TlStepper {
                     .align_right(true)
                     .square_corners(true)
                     .when_some(self.suffix, |i, suffix| i.suffix_text(suffix))
+                    .when_some(self.aria_label, |i, label| i.aria_label(label))
                     .width(px(FIELD_WIDTH * m.ui_scale)),
             );
         *field.text_style() = TextStyleRefinement {
@@ -670,5 +679,21 @@ mod tests {
         cx.simulate_keystrokes("down");
         draw(cx);
         assert_eq!(changes(&view, cx), vec![1250, 3750, 1250, 1000]);
+    }
+
+    /// The test window has no accessibility adapter, so the tree is never built. This checks
+    /// that the builder keeps the name for the field's `TlTextInput::aria_label` call.
+    #[gpui_kit::test]
+    fn aria_label_names_the_field(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx, (0, 10, 1), 5);
+        let stepper = cx.update(|_, cx| TlStepper::new("s", &view.read(cx).state));
+        assert_eq!(stepper.aria_label, None, "off by default");
+        assert_eq!(
+            stepper
+                .aria_label("Restart service after")
+                .aria_label
+                .as_deref(),
+            Some("Restart service after")
+        );
     }
 }

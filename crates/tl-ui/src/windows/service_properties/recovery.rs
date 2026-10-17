@@ -138,7 +138,9 @@ impl RestartPolicy {
     }
 }
 
-/// `StartLimitAction=` and `FailureAction=` (SYS-013).
+/// `StartLimitAction=` and `FailureAction=` (SYS-013). The selects offer the 9 values of
+/// [`Self::ALL`]. The other values systemd 262 accepts are in [`Self::OTHER`]: a unit that
+/// already uses one shows it, so choosing an offered value is a change.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LimitAction {
     #[default]
@@ -151,6 +153,13 @@ pub enum LimitAction {
     PoweroffImmediate,
     Exit,
     ExitForce,
+    SoftReboot,
+    SoftRebootForce,
+    Kexec,
+    KexecForce,
+    Halt,
+    HaltForce,
+    HaltImmediate,
 }
 
 impl LimitAction {
@@ -166,6 +175,17 @@ impl LimitAction {
         Self::ExitForce,
     ];
 
+    /// The values the selects show only when the unit already uses them.
+    pub const OTHER: [Self; 7] = [
+        Self::SoftReboot,
+        Self::SoftRebootForce,
+        Self::Kexec,
+        Self::KexecForce,
+        Self::Halt,
+        Self::HaltForce,
+        Self::HaltImmediate,
+    ];
+
     /// The systemd word.
     pub fn word(self) -> &'static str {
         match self {
@@ -178,24 +198,37 @@ impl LimitAction {
             Self::PoweroffImmediate => "poweroff-immediate",
             Self::Exit => "exit",
             Self::ExitForce => "exit-force",
+            Self::SoftReboot => "soft-reboot",
+            Self::SoftRebootForce => "soft-reboot-force",
+            Self::Kexec => "kexec",
+            Self::KexecForce => "kexec-force",
+            Self::Halt => "halt",
+            Self::HaltForce => "halt-force",
+            Self::HaltImmediate => "halt-immediate",
         }
     }
 
     pub fn from_word(word: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|a| a.word() == word)
+        Self::ALL
+            .into_iter()
+            .chain(Self::OTHER)
+            .find(|a| a.word() == word)
     }
 
-    /// True for a value that restarts or powers off the computer: the warning line shows.
+    /// True for a value that restarts, halts or powers off the computer: the warning line
+    /// shows.
     pub fn restarts_computer(self) -> bool {
-        matches!(
-            self,
-            Self::Reboot
-                | Self::RebootForce
-                | Self::RebootImmediate
-                | Self::Poweroff
-                | Self::PoweroffForce
-                | Self::PoweroffImmediate
-        )
+        !matches!(self, Self::None | Self::Exit | Self::ExitForce)
+    }
+
+    /// The select items: the 9 offered values, then `self` when it is one of [`Self::OTHER`].
+    fn items(self) -> Vec<TlSelectItem> {
+        let shown = (!Self::ALL.contains(&self)).then_some(self);
+        Self::ALL
+            .into_iter()
+            .chain(shown)
+            .map(|a| TlSelectItem::new(a.word(), a.word()))
+            .collect()
     }
 }
 
@@ -400,6 +433,8 @@ struct Words {
     starts_within: SharedString,
     suffix_s: SharedString,
     invalid_units: SharedString,
+    name_burst: SharedString,
+    name_interval: SharedString,
     power_warning: SharedString,
     needs_helper: SharedString,
     additional_setup: SharedString,
@@ -417,6 +452,8 @@ impl Words {
             starts_within: tr(cx, "services-sys034-starts-within"),
             suffix_s: tr(cx, "services-sys034-suffix-s"),
             invalid_units: tr(cx, "services-sys034-invalid-units"),
+            name_burst: tr(cx, "services-sys034-name-burst"),
+            name_interval: tr(cx, "services-sys034-name-interval"),
             power_warning: tr(cx, "services-sys034-power-warning"),
             needs_helper: tr(cx, "services-sys034-needs-helper"),
             additional_setup: tr(cx, "services-sys034-additional-setup"),
@@ -586,6 +623,17 @@ impl RecoveryTab {
         let Some(form) = &self.form else {
             return;
         };
+        // A value only systemd offers gets its own item, so the select can show it.
+        let actions = [
+            (&self.limit_action, form.start_limit_action),
+            (&self.failure_action, form.failure_action),
+        ];
+        for (state, value) in actions {
+            let items = value.items();
+            if state.read(cx).items() != items.as_slice() {
+                state.update(cx, |s, cx| s.set_items(items, cx));
+            }
+        }
         let values = [
             (&self.restart, form.restart.word()),
             (&self.limit_action, form.start_limit_action.word()),
@@ -729,6 +777,7 @@ impl RecoveryTab {
         let view = cx.weak_entity();
         let select = TlSelect::new(id, state)
             .width(px(SELECT_WIDTH * s))
+            .aria_label(self.words.name(row))
             .disabled(!self.controls_enabled())
             .on_change(move |value, _, cx| {
                 let value = value.clone();
@@ -739,8 +788,6 @@ impl RecoveryTab {
         let control = div()
             .id(id)
             .debug_selector(move || id.into())
-            .role(Role::ComboBox)
-            .aria_label(self.words.name(row))
             .flex_none()
             .child(select);
         self.with_helper_tip(id, control, window, cx)
@@ -749,6 +796,7 @@ impl RecoveryTab {
     fn stepper(
         &self,
         id: &'static str,
+        name: SharedString,
         state: &Entity<InputState>,
         value: u32,
         (max, step): (u32, i64),
@@ -757,6 +805,7 @@ impl RecoveryTab {
     ) -> TlStepper {
         let view = cx.weak_entity();
         TlStepper::new(id, state)
+            .aria_label(name)
             .range(0, i64::from(max), step)
             .value(i64::from(value))
             .disabled(!self.controls_enabled())
@@ -859,6 +908,7 @@ impl RecoveryTab {
         let restart_ms = self
             .stepper(
                 "ServiceRecoveryRestartMs",
+                self.words.name(ROW_RESTART_MS),
                 &self.restart_ms.clone(),
                 form.restart_ms,
                 (RESTART_MS_MAX, RESTART_MS_STEP),
@@ -868,8 +918,6 @@ impl RecoveryTab {
             .suffix(self.words.suffix_ms.clone());
         let restart_ms = div()
             .id("ServiceRecoveryRestartMsBox")
-            .role(Role::Group)
-            .aria_label(self.words.name(ROW_RESTART_MS))
             .flex_none()
             .min_w(px(RESTART_WIDTH * s))
             .child(restart_ms);
@@ -879,6 +927,7 @@ impl RecoveryTab {
 
         let burst = self.stepper(
             "ServiceRecoveryBurst",
+            self.words.name_burst.clone(),
             &self.burst.clone(),
             form.burst,
             (BURST_MAX, 1),
@@ -887,6 +936,7 @@ impl RecoveryTab {
         );
         let interval = self.stepper(
             "ServiceRecoveryInterval",
+            self.words.name_interval.clone(),
             &self.interval.clone(),
             form.interval_s,
             (INTERVAL_S_MAX, 1),
@@ -962,17 +1012,14 @@ impl RecoveryTab {
         }
         let valid = validate_on_failure(&form.on_failure);
         let input = TlTextInput::new("ServiceRecoveryOnFailure", &self.on_failure)
-            .aria_label(self.words.name(ROW_ON_FAILURE))
+            .aria_label(self.on_failure_name(valid))
             .invalid(!valid)
             .disabled(!enabled);
-        let mut field = div()
+        let field = div()
             .id("ServiceRecoveryOnFailureBox")
             .debug_selector(|| "ServiceRecoveryOnFailure".into())
             .w_full()
             .child(input);
-        if !valid {
-            field = field.aria_description(self.words.invalid_units.clone());
-        }
         let field = self.with_helper_tip("ServiceRecoveryOnFailureBox", field, window, cx);
         let mut cell = v_flex().w_full().child(field);
         if !valid {
@@ -991,6 +1038,18 @@ impl RecoveryTab {
             .into_any_element();
         rows.push(self.row(ROW_RESTARTS, restarts, cx));
         rows
+    }
+
+    /// The accessible name of "Run on failure". The kit `Input` (gpui-component 0.7.0) takes no
+    /// accessible description, so while the text is invalid the validation line follows the
+    /// label in the field's name and a screen reader reads it with the field.
+    fn on_failure_name(&self, valid: bool) -> SharedString {
+        let name = self.words.name(ROW_ON_FAILURE);
+        if valid {
+            name
+        } else {
+            format!("{name}, {}", self.words.invalid_units).into()
+        }
     }
 
     /// The "Restarts so far" value.
@@ -1102,6 +1161,32 @@ impl RecoveryTab {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn saved_as_for_test(&self) -> SharedString {
         saved_as(&self.unit)
+    }
+
+    /// The values the "When giving up" and "Failure action" selects show.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn action_selects_for_test(&self, cx: &App) -> [Option<SharedString>; 2] {
+        [&self.limit_action, &self.failure_action]
+            .map(|state| state.read(cx).selected_value().cloned())
+    }
+
+    /// The accessible names of the focusable controls, in row order: the 3 selects, the 3
+    /// number fields, then "Run on failure" with the current form text.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn control_names_for_test(&self) -> Vec<SharedString> {
+        let valid = self
+            .form
+            .as_ref()
+            .is_none_or(|f| validate_on_failure(&f.on_failure));
+        vec![
+            self.words.name(ROW_RESTART),
+            self.words.name(ROW_LIMIT_ACTION),
+            self.words.name(ROW_FAILURE_ACTION),
+            self.words.name(ROW_RESTART_MS),
+            self.words.name_burst.clone(),
+            self.words.name_interval.clone(),
+            self.on_failure_name(valid),
+        ]
     }
 }
 

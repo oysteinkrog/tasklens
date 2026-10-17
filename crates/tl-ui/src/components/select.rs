@@ -325,6 +325,7 @@ pub struct TlSelect {
     disabled: bool,
     on_change: Option<ChangeHandler>,
     combo: bool,
+    aria_label: Option<SharedString>,
 }
 
 impl TlSelect {
@@ -336,6 +337,7 @@ impl TlSelect {
             disabled: false,
             on_change: None,
             combo: false,
+            aria_label: None,
         }
     }
 
@@ -354,6 +356,13 @@ impl TlSelect {
     /// Called with the item's value when the user confirms an item.
     pub fn on_change(mut self, f: impl Fn(&SharedString, &mut Window, &mut App) + 'static) -> Self {
         self.on_change = Some(Rc::new(f));
+        self
+    }
+
+    /// The accessible name of the combobox, usually the field's label. A `TlCombo` has none:
+    /// the kit `Combobox` root takes no label.
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
         self
     }
 }
@@ -524,12 +533,16 @@ impl RenderOnce for TlSelect {
                 .children(children.into_iter().flatten())
                 .into_any_element()
         } else {
-            Select::new(self.id.clone())
+            let mut select = Select::new(self.id.clone())
                 .open(open)
                 .disabled(disabled)
                 .focus_handle(&trigger_focus)
                 .content_focus_handle(&content_focus)
-                .accessibility_value(label)
+                .accessibility_value(label);
+            if let Some(name) = self.aria_label {
+                select = select.accessibility_label(name);
+            }
+            select
                 .on_open_change(on_open_change)
                 .children(children.into_iter().flatten())
                 .into_any_element()
@@ -1082,5 +1095,19 @@ mod tests {
 
         cx.update(|_, cx| state.update(cx, |st, cx| st.set_selected_value("none", cx)));
         assert_eq!(read(&view, cx, |s| s.selected_index()), None);
+    }
+
+    /// The test window has no accessibility adapter, so the tree is never built. This checks
+    /// that the builder keeps the name for the kit `Select::accessibility_label` call.
+    #[gpui_kit::test]
+    fn aria_label_names_the_combobox(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx, items(&["One", "Two"]), Some("one"), false);
+        let state = state(&view, cx);
+        let select = TlSelect::new("select", &state);
+        assert_eq!(select.aria_label, None, "off by default");
+        assert_eq!(
+            select.aria_label("On failure").aria_label.as_deref(),
+            Some("On failure")
+        );
     }
 }
