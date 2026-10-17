@@ -947,3 +947,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.46: Windows cell value added in this bead (CellCtx.windows, record_value arm); app and unit rows Blank for now.
 - hk6.32: option A, banner.rs gets a .link() builder (owner-only note waived by the leader); link focuses the journal access card.
 - qfx.18: option C (Fds and Security moved to tasklens-qfx.39 with new tl-collect byte parsers); read_stream added in helper/mod.rs here so a scan never starts a polkit prompt.
+- qfx.19: helper task in process_detail.rs, skipped keys recorded in handles.rs, HelperHandle::read only; order qfx.18, qfx.19, qfx.39.
