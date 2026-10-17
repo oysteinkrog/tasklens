@@ -349,6 +349,9 @@ mod values {
             disk_read_bps: 0.0,
             disk_write_raw_bps: 0.0,
             flag_since_ns: 0,
+            pgrp: 0,
+            sid: 0,
+            last_cpu: 0,
         }
     }
 
@@ -2651,6 +2654,9 @@ mod group_fields {
             disk_read_bps: 0.0,
             disk_write_raw_bps: 0.0,
             flag_since_ns: 0,
+            pgrp: 0,
+            sid: 0,
+            last_cpu: 0,
         }
     }
 
@@ -3204,6 +3210,9 @@ mod highlight {
             disk_read_bps: 0.0,
             disk_write_raw_bps: 0.0,
             flag_since_ns,
+            pgrp: 0,
+            sid: 0,
+            last_cpu: 0,
         }
     }
 
@@ -3728,6 +3737,9 @@ mod row_tooltip {
             disk_read_bps: 0.0,
             disk_write_raw_bps: 0.0,
             flag_since_ns: 0,
+            pgrp: 0,
+            sid: 0,
+            last_cpu: 0,
         }
     }
 

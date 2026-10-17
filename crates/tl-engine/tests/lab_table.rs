@@ -197,6 +197,9 @@ fn extras(r: &ProcessRecord) -> ProcessExtras {
         disk_read_bps: 0.0,
         disk_write_raw_bps: 0.0,
         flag_since_ns: 0,
+        pgrp: 0,
+        sid: 0,
+        last_cpu: 0,
     }
 }
 

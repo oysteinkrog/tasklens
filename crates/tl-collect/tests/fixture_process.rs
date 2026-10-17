@@ -2442,6 +2442,17 @@ fn sweep_policy_deadline() {
     );
 }
 
+#[test]
+fn sweep_copies_pgrp_session_and_last_cpu() {
+    let (_tmp, root) = merged_root();
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(deadline_clock::now);
+    let out = sweep_n(&mut s, deadline_clock::set, 1);
+
+    let x = &out.extras[index_of(&out, 4201)];
+    assert_eq!((x.pgrp, x.sid, x.last_cpu), (4100, 4100, 3));
+}
+
 /// A `MakeWriter` that keeps every formatted line.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);

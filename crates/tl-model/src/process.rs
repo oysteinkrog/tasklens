@@ -336,6 +336,12 @@ pub struct ProcessExtras {
     pub disk_read_bps: f32,
     pub disk_write_raw_bps: f32,
     pub flag_since_ns: TimeNs,
+    /// /proc stat field 5: process group id. 0 when the kernel gave a negative value.
+    pub pgrp: u32,
+    /// /proc stat field 6: session id. 0 when the kernel gave a negative value.
+    pub sid: u32,
+    /// /proc stat field 39: the CPU the process last ran on. 0 when the kernel gave a negative value.
+    pub last_cpu: u32,
 }
 
 /// One app cgroup sample (R-141 item 2). Filled by the tl-collect sweep (E05-A1).

@@ -1359,6 +1359,9 @@ impl Build<'_, '_> {
             disk_read_bps: p.disk_read_bps,
             disk_write_raw_bps: p.disk_write_raw_bps,
             flag_since_ns: 0,
+            pgrp: u32::try_from(p.stat.pgrp).unwrap_or(0),
+            sid: u32::try_from(p.stat.session).unwrap_or(0),
+            last_cpu: u32::try_from(p.stat.processor).unwrap_or(0),
         });
         self.out.side.push(SweepSide {
             class: app.class,
