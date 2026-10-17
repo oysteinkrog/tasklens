@@ -178,6 +178,8 @@ fn confirm_text_per_trigger(cx: &mut TestAppContext) {
             ConfirmKind::KillApp {
                 app: s("Firefox"),
                 count: 12,
+                skipped: 0,
+                groups: 1,
             },
             expect(
                 "Kill Firefox?",
@@ -2302,6 +2304,102 @@ mod end {
                 vec![ActionTarget::Cgroup(app_cgroup())]
             )]
         );
+    }
+
+    /// A firefox row with two app.slice samples: its own scope, and a terminal scope that
+    /// also holds a process of another program.
+    fn publish_shared_scope(rig: &mut Rig, keep_own_scope: bool) {
+        let shared_path = "user.slice/user-1000.slice/user@1000.service/app.slice/app-term-1.scope";
+        let in_cgroup = |r: ProcessRecord, path: &str| ProcessRecord {
+            meta: Arc::new(ProcessMeta {
+                cgroup: Some(Arc::from(path)),
+                ..(*r.meta).clone()
+            }),
+            ..r
+        };
+        let own = in_cgroup(
+            ProcessRecord {
+                group: app_key(),
+                ..record(200, 1, "firefox", ProcFlags::empty())
+            },
+            &app_cgroup().rel_path,
+        );
+        let helper = in_cgroup(
+            ProcessRecord {
+                group: app_key(),
+                ..record(201, 1, "firefox-helper", ProcFlags::empty())
+            },
+            shared_path,
+        );
+        let terminal = in_cgroup(record(700, 1, "konsole", ProcFlags::empty()), shared_path);
+        rig.apps = vec![AppCgroupSample {
+            cgroup: CgroupRef {
+                rel_path: Arc::from(shared_path),
+                cgroup_id: 78,
+            },
+            ..firefox_sample(false)
+        }];
+        if keep_own_scope {
+            rig.apps.insert(0, firefox_sample(false));
+        }
+        let rows = vec![row(NodeId::Group(app_key()), None, Some(0))];
+        rig.publish_rows(
+            vec![own, helper, terminal],
+            vec![firefox_extras(); 3],
+            rows,
+            vec![app_group(2)],
+        );
+    }
+
+    #[gpui_kit::test]
+    fn kill_app_skips_scope_that_holds_other_programs(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        publish_shared_scope(&mut rig, true);
+        select_row(&mut rig, 0);
+        let mut dialog = rig.dispatch(KillApp).expect("the Kill App dialog");
+        assert_eq!(
+            dialog.text(),
+            "Kill all 2 processes of Firefox? 1 of 2 groups skipped: it holds other programs."
+        );
+        dialog.confirm();
+        assert_eq!(
+            rig.sent_targets(),
+            [(
+                ActionKind::KillGroup,
+                vec![ActionTarget::Cgroup(app_cgroup())]
+            )]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn freeze_skips_scope_that_holds_other_programs(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        publish_shared_scope(&mut rig, true);
+        select_row(&mut rig, 0);
+        assert!(rig.dispatch(FreezeApp).is_none(), "no dialog");
+        assert_eq!(
+            rig.sent_targets(),
+            [(
+                ActionKind::FreezeGroup,
+                vec![ActionTarget::Cgroup(app_cgroup())]
+            )]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn app_row_with_only_shared_scopes_is_disabled(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        publish_shared_scope(&mut rig, false);
+        let tip = "This app has no app scope of its own";
+        let shape = menu_of(&mut rig, 0);
+        assert_eq!(shape[1], format!("(Kill App (all processes): {tip})"));
+        assert_eq!(shape[3], format!("(Freeze App: {tip})"));
+        select_row(&mut rig, 0);
+        assert!(rig.dispatch(KillApp).is_none());
+        assert!(rig.sent_targets().is_empty());
     }
 
     #[gpui_kit::test]

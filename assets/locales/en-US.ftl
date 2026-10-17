@@ -837,6 +837,12 @@ processes-confirm-end-tree-button = End tree
 processes-confirm-kill-app-title = Kill {$app}?
 processes-confirm-kill-app-text = Kill all {$count} processes of {$app}?
 processes-confirm-kill-app-button = Kill app
+# tasklens-pdu.61: app scopes that hold other programs are left out.
+processes-confirm-kill-app-skipped =
+    { $skipped ->
+        [one] { $skipped } of { $groups } groups skipped: it holds other programs.
+       *[other] { $skipped } of { $groups } groups skipped: they hold other programs.
+    }
 processes-confirm-end-many-title = End {$count} processes?
 processes-confirm-end-many-text = End {$count} selected processes?
 processes-confirm-end-many-kill-text = End {$count} selected processes immediately?

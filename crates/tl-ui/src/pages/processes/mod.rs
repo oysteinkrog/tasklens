@@ -771,23 +771,66 @@ enum GroupOp {
 /// An app row gives the cgroup of every app.slice sample with the row's key, and nothing when
 /// there is none: a member's unit is never the fallback, so no unit action reaches a session
 /// scope. A unit row gives its unit.
+///
+/// An app.slice scope that also holds a live process outside the row's members (a terminal
+/// scope that launched the app, say) is left out: freezing or killing it would hit other
+/// programs (tasklens-pdu.61).
 pub(crate) fn group_targets(s: &Snapshot, t: &CapturedTarget) -> SmallVec<[ActionTarget; 1]> {
+    group_plan(s, t).targets
+}
+
+/// The targets of one app or unit row command and how many app.slice scopes were left out.
+pub(crate) struct GroupPlan {
+    pub(crate) targets: SmallVec<[ActionTarget; 1]>,
+    /// App.slice samples with the row's key that hold other programs.
+    pub(crate) skipped: u32,
+    /// All app.slice samples with the row's key.
+    pub(crate) total: u32,
+}
+
+/// [`group_targets`] with the skipped count, for the Kill App confirmation text.
+pub(crate) fn group_plan(s: &Snapshot, t: &CapturedTarget) -> GroupPlan {
+    let none = GroupPlan {
+        targets: SmallVec::new(),
+        skipped: 0,
+        total: 0,
+    };
     match (&t.node, t.kind) {
-        (NodeId::Unit(unit), RowKind::Unit) => {
-            SmallVec::from_buf([ActionTarget::Unit(unit.clone())])
-        }
+        (NodeId::Unit(unit), RowKind::Unit) => GroupPlan {
+            targets: SmallVec::from_buf([ActionTarget::Unit(unit.clone())]),
+            ..none
+        },
         (node, RowKind::App) => {
             let Some(group) = s.table.groups.iter().find(|g| &g.node == node) else {
-                return SmallVec::new();
+                return none;
             };
-            s.processes
-                .apps
-                .iter()
-                .filter(|a| a.group == group.key)
-                .map(|a| ActionTarget::Cgroup(a.cgroup.clone()))
-                .collect()
+            let p = &s.processes;
+            let own: FxHashSet<usize> = members(p, node).into_iter().collect();
+            // The cgroups of live processes that are not members of the row.
+            let others: Vec<&str> = (0..p.records.len())
+                .filter(|i| !own.contains(i) && !p.records[*i].flags.contains(ProcFlags::EXITED))
+                .filter_map(|i| p.records[i].meta.cgroup.as_deref())
+                .collect();
+            let shared = |scope: &str| {
+                others.iter().any(|c| {
+                    *c == scope
+                        || c.strip_prefix(scope)
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+            };
+            let samples = p.apps.iter().filter(|a| a.group == group.key);
+            let mut plan = none;
+            for a in samples {
+                plan.total += 1;
+                if shared(&a.cgroup.rel_path) {
+                    plan.skipped += 1;
+                } else {
+                    plan.targets.push(ActionTarget::Cgroup(a.cgroup.clone()));
+                }
+            }
+            plan
         }
-        _ => SmallVec::new(),
+        _ => none,
     }
 }
 

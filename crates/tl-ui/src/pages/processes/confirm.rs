@@ -58,8 +58,14 @@ pub enum ConfirmKind {
     },
     /// End Process Tree with `count` processes.
     EndTree { count: u32 },
-    /// Kill App on `count` processes of `app`.
-    KillApp { app: SharedString, count: u32 },
+    /// Kill App on `count` processes of `app`. `skipped` of `groups` app scopes hold other
+    /// programs and are left out; the text says so when `skipped` is not 0.
+    KillApp {
+        app: SharedString,
+        count: u32,
+        skipped: u32,
+        groups: u32,
+    },
     /// End Task (`kill: false`, SIGTERM) or End Process (`kill: true`, SIGKILL) on several
     /// targets.
     EndMany { count: u32, kill: bool },
@@ -167,19 +173,41 @@ pub fn texts(kind: &ConfirmKind, cx: &App) -> ConfirmTexts {
             ),
             "processes-confirm-end-tree-button",
         ),
-        ConfirmKind::KillApp { app, count: n } => danger(
-            tr_args(
-                cx,
-                "processes-confirm-kill-app-title",
-                &[("app", text(app))],
-            ),
-            tr_args(
+        ConfirmKind::KillApp {
+            app,
+            count: n,
+            skipped,
+            groups,
+        } => {
+            let mut description = tr_args(
                 cx,
                 "processes-confirm-kill-app-text",
                 &[("count", count(*n)), ("app", text(app))],
-            ),
-            "processes-confirm-kill-app-button",
-        ),
+            );
+            if *skipped > 0 {
+                description = format!(
+                    "{description} {}",
+                    tr_args(
+                        cx,
+                        "processes-confirm-kill-app-skipped",
+                        &[
+                            ("skipped", FluentValue::from(i64::from(*skipped))),
+                            ("groups", FluentValue::from(i64::from(*groups))),
+                        ],
+                    )
+                )
+                .into();
+            }
+            danger(
+                tr_args(
+                    cx,
+                    "processes-confirm-kill-app-title",
+                    &[("app", text(app))],
+                ),
+                description,
+                "processes-confirm-kill-app-button",
+            )
+        }
         ConfirmKind::EndMany { count: n, kill } => {
             let (description, label) = if *kill {
                 (

@@ -41,8 +41,8 @@ use super::jump::JumpTexts;
 use super::menu::{GraphKind, graph_source};
 use super::toasts::{ActionToastTexts, refusal_reason, submit_to, toast_words};
 use super::{
-    ConfirmWords, End, EndPlan, GroupOp, ProcessesPage, dialog_targets, exe_deleted, group_targets,
-    is_plasma_unit, members, other_user, process_keys, record_target, signal_targets,
+    ConfirmWords, End, EndPlan, GroupOp, GroupPlan, ProcessesPage, dialog_targets, exe_deleted,
+    group_plan, is_plasma_unit, members, other_user, process_keys, record_target, signal_targets,
     topmost_window,
 };
 use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
@@ -341,7 +341,11 @@ impl Run {
         if !matches!(t.kind, RowKind::App | RowKind::Unit) {
             return;
         }
-        let targets = group_targets(&self.snapshot, t);
+        let GroupPlan {
+            targets,
+            skipped,
+            total,
+        } = group_plan(&self.snapshot, t);
         if targets.is_empty() {
             return;
         }
@@ -349,6 +353,8 @@ impl Run {
             GroupOp::Kill => Some(ConfirmKind::KillApp {
                 app: t.name.clone(),
                 count: t.member_count,
+                skipped,
+                groups: total,
             }),
             GroupOp::Freeze if t.flags.contains(ProcFlags::PROTECTED) => {
                 Some(ConfirmKind::Protected {
