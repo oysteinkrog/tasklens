@@ -3175,7 +3175,7 @@ mod detail_helper {
         let TabPayload::Fds(detail) = &*fds[0].payload else {
             panic!("expected Fds");
         };
-        let rows: Vec<(i32, FdKind, &str, Option<u64>, Option<u32>)> = detail
+        let rows: Vec<_> = detail
             .rows
             .iter()
             .map(|r| (r.fd, r.kind, &*r.name, r.inode, r.flags))
