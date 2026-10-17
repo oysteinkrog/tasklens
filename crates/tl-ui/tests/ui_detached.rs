@@ -223,9 +223,9 @@ mod detach {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, Pixels, Point,
-        Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div,
-        point, px, size,
+        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement as _,
+        Pixels, Point, Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext,
+        Window, div, point, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::settings::{
@@ -498,7 +498,7 @@ mod detach {
         assert!(!registry_has(cx, 1));
         // 30 px past it.
         drag_cpu_to(&mut r, point(px(1030.), px(300.)));
-        assert_eq!(r.state_of(&MinigraphSource::Cpu).0, true);
+        assert!(r.state_of(&MinigraphSource::Cpu).0);
         assert_eq!(r.state_of(&MinigraphSource::Cpu).1, 1);
         assert!(registry_has(cx, 1));
         assert_eq!(window_cards(cx, 1).1, [MinigraphSource::Cpu]);
@@ -540,7 +540,7 @@ mod detach {
                 "No space for more minigraphs".to_owned()
             )]
         );
-        assert_eq!(r.state_of(&MinigraphSource::Memory).0, true);
+        assert!(r.state_of(&MinigraphSource::Memory).0);
         assert!(registry_has(cx, 1));
     }
 }
