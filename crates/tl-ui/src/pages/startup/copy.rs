@@ -156,6 +156,13 @@ impl StartupPage {
         copy_rows_as_table(self, window, cx);
     }
 
+    /// Runs the page's own "Copy rows as table". On the keyboard the table handles
+    /// Ctrl+Shift+C first, so tests reach this path directly.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn copy_rows_as_table_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_copy_rows_as_table(&CopyRowsAsTable, window, cx);
+    }
+
     /// "Copy command": the Command value of the one captured entry.
     pub(super) fn on_startup_copy_command(
         &mut self,

@@ -1044,7 +1044,6 @@ mod page {
     use tl_ui::pages::startup::actions::{
         StartupCopyCommand, StartupDisable, StartupEnable, StartupOpenFileLocation, StartupRunNow,
     };
-    use tl_ui::table::actions::CopyRowsAsTable;
 
     fn with_status(name: &str, status: StartupStatus) -> StartupEntry {
         let mut e = super::entry(name, StartupKind::AutostartUser);
@@ -1940,7 +1939,10 @@ mod page {
             block.contains(&format!("\nLocation: {home}/.config/autostart\n")),
             "{block}"
         );
-        rig.dispatch(Box::new(CopyRowsAsTable));
+        let page = rig.page.clone();
+        rig.vcx.update(|window, cx| {
+            page.update(cx, |page, cx| page.copy_rows_as_table_for_test(window, cx));
+        });
         let table = rig.clipboard().expect("copied");
         let mut lines = table.lines();
         let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
