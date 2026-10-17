@@ -5,8 +5,8 @@
 //! and asks the engine for the status once per dispatch. The statuses come from
 //! `HealthSnapshot.setup.status`; the window reads no system file (ADR-001 rule 1). The buttons
 //! row of each card holds Enable and Revert for CPU power draw (E29-025), then View script and
-//! Copy command (E29-026); the Journal access card has one Copy button. The Fan sensors card is
-//! E29-031.
+//! Copy command (E29-026); the Journal access card has one Copy button. The Fan sensors card
+//! has Run sensor detection or Revert (E29-031), then the same two script buttons.
 //!
 //! Enable and Revert open a confirmation, then send `Command::RunSetup` with a closed
 //! `SetupStep`. The result comes back as `HealthSnapshot.setup.run`. The window shows the
@@ -64,7 +64,7 @@ const OUTPUT_MAX_HEIGHT: f32 = 160.;
 
 const TITLE: &str = "setup-title";
 
-/// The cards of the window. `FanSensors` has no card until E29-031.
+/// The cards of the window.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SetupRow {
     CpuPower,
@@ -75,10 +75,11 @@ pub enum SetupRow {
 }
 
 /// The shown cards, top to bottom.
-const CARDS: [SetupRow; 4] = [
+const CARDS: [SetupRow; 5] = [
     SetupRow::CpuPower,
     SetupRow::JournalAccess,
     SetupRow::AdminHelper,
+    SetupRow::FanSensors,
     SetupRow::ProcessNetwork,
 ];
 
@@ -121,6 +122,13 @@ pub struct OpenAdditionalSetup {
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = tasklens, no_json)]
 pub struct SetupConfirmStep {
+    pub step: SetupStep,
+}
+
+/// Sends a step with no confirmation, from a card button.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct SetupRunStep {
     pub step: SetupStep,
 }
 
@@ -203,9 +211,15 @@ pub fn row_status(row: SetupRow, st: Option<&SetupStatus>) -> Option<RowStatus> 
             "setup-status-not-installed",
             Some("setup-tooltip-helper-missing"),
         ),
-        SetupRow::FanSensors | SetupRow::ProcessNetwork => {
+        SetupRow::FanSensors if st.hwmon_fan => {
             status(TlBadgeKind::Neutral, "setup-status-not-needed", None)
         }
+        SetupRow::FanSensors if !st.lm_sensors => {
+            status(TlBadgeKind::Neutral, "setup-status-not-available", None)
+        }
+        SetupRow::FanSensors if st.sensors_conf => status(ok, "setup-status-enabled", None),
+        SetupRow::FanSensors => status(warn, "setup-status-not-enabled", None),
+        SetupRow::ProcessNetwork => status(TlBadgeKind::Neutral, "setup-status-not-needed", None),
     })
 }
 
@@ -340,12 +354,12 @@ pub fn send_step(step: SetupStep, cx: &App) {
     }
 }
 
-fn send_reprobe(cx: &App) {
+fn send_reprobe(source: SourceId, cx: &App) {
     let Some(engine) = cx.try_global::<EngineGlobal>() else {
         return;
     };
-    if let Err(err) = engine.0.send(Command::ReprobeSource(SourceId::Cpu)) {
-        warn!(target: "tasklens::ui", ?err, "cpu reprobe not sent");
+    if let Err(err) = engine.0.send(Command::ReprobeSource(source)) {
+        warn!(target: "tasklens::ui", ?err, ?source, "reprobe not sent");
     }
 }
 
@@ -353,6 +367,7 @@ fn send_reprobe(cx: &App) {
 fn step_row(step: SetupStep) -> Option<SetupRow> {
     match step {
         SetupStep::RaplEnable | SetupStep::RaplRevert => Some(SetupRow::CpuPower),
+        SetupStep::SensorsDetect | SetupStep::SensorsRevert => Some(SetupRow::FanSensors),
         _ => None,
     }
 }
@@ -360,7 +375,7 @@ fn step_row(step: SetupStep) -> Option<SetupRow> {
 /// The last result of a step that this window shows under the buttons.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Outcome {
-    Done,
+    Done { step: SetupStep },
     Failed { step: SetupStep, text: Arc<str> },
 }
 
@@ -369,6 +384,8 @@ enum Outcome {
 enum ButtonAction {
     /// Enable or Revert: opens the confirmation.
     Confirm(SetupStep),
+    /// Sends the step with no confirmation.
+    Run(SetupStep),
     ViewScript(SetupStep),
     CopyCommand(SetupStep),
     CopyJournal,
@@ -405,7 +422,7 @@ pub fn setup_command_line(step: SetupStep) -> String {
 }
 
 /// The buttons of `row`. None before the engine answered, and none for a status without a
-/// change to make or a script to show. Later beads add the Fan row here.
+/// change to make or a script to show.
 fn row_buttons(
     row: SetupRow,
     st: Option<&SetupStatus>,
@@ -447,6 +464,24 @@ fn row_buttons(
                 ));
             }
             buttons
+        }
+        SetupRow::FanSensors => {
+            if st.hwmon_fan || !st.lm_sensors {
+                return Vec::new();
+            }
+            let (label_key, step) = if st.sensors_conf {
+                ("setup-button-revert", SetupStep::SensorsRevert)
+            } else {
+                ("setup-button-run-detection", SetupStep::SensorsDetect)
+            };
+            vec![
+                ButtonSpec {
+                    disabled: running.is_some_and(|r| step_row(r) == Some(row)),
+                    ..spec(label_key, ButtonAction::Run(step))
+                },
+                spec("setup-button-view-script", ButtonAction::ViewScript(step)),
+                spec("setup-button-copy-command", ButtonAction::CopyCommand(step)),
+            ]
         }
         SetupRow::JournalAccess => vec![spec("setup-button-copy", ButtonAction::CopyJournal)],
         _ => Vec::new(),
@@ -566,8 +601,10 @@ impl gpui_kit::Render for ScriptWindow {
 
 /// The window's own text, translated once per strings version (R-132).
 struct SetupWords {
-    titles: [SharedString; 4],
-    descriptions: [SharedString; 4],
+    titles: [SharedString; 5],
+    descriptions: [SharedString; 5],
+    /// The Fan sensors description while lm_sensors is not installed.
+    fan_missing: SharedString,
 }
 
 impl SetupWords {
@@ -575,6 +612,7 @@ impl SetupWords {
         Self {
             titles: CARDS.map(|r| tr(cx, r.title_key())),
             descriptions: CARDS.map(|r| tr(cx, r.description_key())),
+            fan_missing: tr(cx, "setup-row-fan-description-no-lm-sensors"),
         }
     }
 }
@@ -588,6 +626,7 @@ fn strings_version(cx: &App) -> u64 {
 pub struct CardView {
     pub row: SetupRow,
     pub title: String,
+    pub description: String,
     /// The badge text; `None` while the spinner shows.
     pub status: Option<String>,
     pub tooltip: Option<String>,
@@ -691,10 +730,12 @@ impl SetupWindow {
                     changed = true;
                     self.outcome = match phase {
                         SetupPhase::Succeeded => {
-                            if step_row(run.step) == Some(SetupRow::CpuPower) {
-                                send_reprobe(cx);
+                            match step_row(run.step) {
+                                Some(SetupRow::CpuPower) => send_reprobe(SourceId::Cpu, cx),
+                                Some(SetupRow::FanSensors) => send_reprobe(SourceId::Sensors, cx),
+                                _ => {}
                             }
-                            Some(Outcome::Done)
+                            Some(Outcome::Done { step: run.step })
                         }
                         SetupPhase::Failed(text) => Some(Outcome::Failed {
                             step: run.step,
@@ -723,6 +764,11 @@ impl SetupWindow {
     /// The Revert button of the CPU card.
     pub fn press_revert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         confirm_step(SetupStep::RaplRevert, window, cx);
+    }
+
+    /// The Run sensor detection and Revert buttons of the Fan sensors card. No confirmation.
+    pub fn press_run(&mut self, step: SetupStep, cx: &mut Context<Self>) {
+        send_step(step, cx);
     }
 
     /// The Retry button of a failure block.
@@ -760,7 +806,7 @@ impl SetupWindow {
     }
 
     /// Scrolls the card of `row` into view and flashes its border for `M_SLOW`. With reduced
-    /// motion the border does not flash. `FanSensors` has no card yet.
+    /// motion the border does not flash.
     pub fn focus(&mut self, row: SetupRow, cx: &mut Context<Self>) {
         let Some(ix) = row.card_index() else {
             return;
@@ -796,6 +842,7 @@ impl SetupWindow {
                 CardView {
                     row,
                     title: self.words.titles[ix].to_string(),
+                    description: self.description_of(row, ix).to_string(),
                     status: if self.running.is_some_and(|r| step_row(r) == Some(row)) {
                         Some(tr(cx, "setup-status-running").to_string())
                     } else {
@@ -817,10 +864,25 @@ impl SetupWindow {
 }
 
 impl SetupWindow {
+    /// The description of the card at `ix`. Fan sensors names the missing package when
+    /// lm_sensors is not installed.
+    fn description_of(&self, row: SetupRow, ix: usize) -> SharedString {
+        let fan_missing = row == SetupRow::FanSensors
+            && self
+                .status
+                .as_ref()
+                .is_some_and(|st| !st.hwmon_fan && !st.lm_sensors);
+        if fan_missing {
+            self.words.fan_missing.clone()
+        } else {
+            self.words.descriptions[ix].clone()
+        }
+    }
+
     /// Whether the success line shows on `row`, and the output of a failure there.
     fn outcome_of(&self, row: SetupRow) -> (bool, Option<Arc<str>>) {
         match &self.outcome {
-            Some(Outcome::Done) if row == SetupRow::CpuPower => (true, None),
+            Some(Outcome::Done { step }) if step_row(*step) == Some(row) => (true, None),
             Some(Outcome::Failed { step, text }) if step_row(*step) == Some(row) => {
                 (false, Some(Arc::clone(text)))
             }
@@ -872,12 +934,12 @@ impl gpui_kit::Render for SetupWindow {
                 .zip(self.outcome.as_ref())
                 .and_then(|(text, o)| match o {
                     Outcome::Failed { step, .. } => Some((*step, text)),
-                    Outcome::Done => None,
+                    Outcome::Done { .. } => None,
                 });
             cards = cards.child(SetupRowCard {
                 row,
                 title: self.words.titles[ix].clone(),
-                description: self.words.descriptions[ix].clone(),
+                description: self.description_of(row, ix),
                 code,
                 badge,
                 tooltip,
@@ -903,6 +965,9 @@ impl gpui_kit::Render for SetupWindow {
             }))
             .on_action(cx.listener(|this, _: &SetupCopyJournal, window, cx| {
                 this.copy_journal(window, cx);
+            }))
+            .on_action(cx.listener(|this, a: &SetupRunStep, _, cx| {
+                this.press_run(a.step, cx);
             }))
             .on_action(cx.listener(|_, a: &SetupRetryStep, _, cx| send_step(a.step, cx)))
             .on_action(cx.listener(|this, _: &SetupCopyOutput, window, cx| {
@@ -1021,7 +1086,7 @@ impl RenderOnce for SetupRowCard {
                     .child(code),
             );
         }
-        // The buttons row, `sp4` below. E29-026 and E29-031 add their buttons to `row_buttons`.
+        // The buttons row, `sp4` below. `row_buttons` lists them.
         if !self.buttons.is_empty() {
             let mut row = div().mt(m.sp[4]).flex().flex_row().gap(m.sp[3]);
             for (b, label) in self.buttons {
@@ -1029,6 +1094,10 @@ impl RenderOnce for SetupRowCard {
                     ButtonAction::Confirm(step) => {
                         TlButton::new(("AdditionalSetup-button", ix), TlButtonKind::Primary)
                             .action(Box::new(SetupConfirmStep { step }))
+                    }
+                    ButtonAction::Run(step) => {
+                        TlButton::new(("AdditionalSetup-button", ix), TlButtonKind::Primary)
+                            .action(Box::new(SetupRunStep { step }))
                     }
                     ButtonAction::ViewScript(step) => {
                         TlButton::new(("AdditionalSetup-view", ix), TlButtonKind::Secondary)

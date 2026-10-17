@@ -161,6 +161,7 @@ fn setup_rows_order_and_statuses(cx: &mut TestAppContext) {
             pair("CPU power draw", Some("Enabled (existing rule)")),
             pair("Journal access", Some("Not enabled")),
             pair("Administrator helper", Some("Installed")),
+            pair("Fan sensors", Some("Not available")),
             pair("Per-process network", Some("Not needed")),
         ]
     );
@@ -243,12 +244,13 @@ fn setup_status_spinner_before_answer(cx: &mut TestAppContext) {
     let mut pcx = parent(cx);
     dispatch(&mut pcx, None);
     let all = cards(cx);
-    assert_eq!(all.len(), 4);
+    assert_eq!(all.len(), 5);
     assert!(all.iter().all(|c| c.status.is_none()), "{all:?}");
     for row in [
         SetupRow::CpuPower,
         SetupRow::JournalAccess,
         SetupRow::AdminHelper,
+        SetupRow::FanSensors,
         SetupRow::ProcessNetwork,
     ] {
         assert!(row_status(row, None).is_none());
@@ -298,11 +300,28 @@ fn tasklens_rule() -> SetupStatus {
     )
 }
 
+fn fan(hwmon_fan: bool, lm_sensors: bool, sensors_conf: bool) -> SetupStatus {
+    SetupStatus {
+        hwmon_fan,
+        lm_sensors,
+        sensors_conf,
+        ..status(RaplStatus::NoZone, true, true)
+    }
+}
+
 fn run_setup_count(engine: &FakeEngine, step: SetupStep) -> usize {
     engine
         .commands()
         .iter()
         .filter(|c| matches!(c, Command::RunSetup { step: s } if *s == step))
+        .count()
+}
+
+fn sensors_reprobe_count(engine: &FakeEngine) -> usize {
+    engine
+        .commands()
+        .iter()
+        .filter(|c| matches!(c, Command::ReprobeSource(SourceId::Sensors)))
         .count()
 }
 
@@ -691,4 +710,103 @@ fn setup_not_needed_no_buttons(cx: &mut TestAppContext) {
     let card = cards(cx).remove(0);
     assert_eq!(card.status.as_deref(), Some("Not needed"));
     assert!(card.buttons.is_empty());
+}
+
+fn press_run(cx: &mut TestAppContext, vcx: &mut VisualTestContext, step: SetupStep) {
+    let w = content(cx);
+    vcx.update(|_, cx| w.update(cx, |w, cx| w.press_run(step, cx)));
+    vcx.run_until_parked();
+}
+
+fn window_count(cx: &mut TestAppContext) -> usize {
+    cx.update(|cx| cx.windows().len())
+}
+
+#[gpui_kit::test]
+fn fan_not_needed_with_hwmon_fan(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let _vcx = open_with(cx, &engine, fan(true, true, false), None);
+    let card = cards(cx).remove(3);
+    assert_eq!(card.status.as_deref(), Some("Not needed"));
+    assert!(card.buttons.is_empty());
+}
+
+#[gpui_kit::test]
+fn fan_lm_sensors_missing(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let _vcx = open_with(cx, &engine, fan(false, false, false), None);
+    let card = cards(cx).remove(3);
+    assert_eq!(card.status.as_deref(), Some("Not available"));
+    assert_eq!(card.description, "Install lm_sensors to detect fan sensors");
+    assert!(card.buttons.is_empty());
+}
+
+#[gpui_kit::test]
+fn fan_run_detection_sends_step(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, fan(false, true, false), None);
+    let card = cards(cx).remove(3);
+    assert_eq!(card.status.as_deref(), Some("Not enabled"));
+    assert_eq!(
+        card.description,
+        "Finds motherboard sensor chips and loads their drivers."
+    );
+    assert_eq!(
+        card.buttons,
+        vec![
+            ("Run sensor detection".to_owned(), false),
+            ("View script".to_owned(), false),
+            ("Copy command".to_owned(), false)
+        ]
+    );
+    let windows = window_count(cx);
+    press_run(cx, &mut vcx, SetupStep::SensorsDetect);
+    assert_eq!(run_setup_count(&engine, SetupStep::SensorsDetect), 1);
+    assert_eq!(window_count(cx), windows);
+    publish_run(
+        &engine,
+        fan(false, true, false),
+        Some(run(1, SetupStep::SensorsDetect, SetupPhase::Succeeded)),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        cards(cx)[3].done.as_deref(),
+        Some("Done. No restart needed.")
+    );
+    assert_eq!(cards(cx)[0].done, None);
+    assert_eq!(sensors_reprobe_count(&engine), 1);
+    assert_eq!(reprobe_count(&engine), 0);
+}
+
+#[gpui_kit::test]
+fn fan_revert_sends_step(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let mut vcx = open_with(cx, &engine, fan(false, true, true), None);
+    let card = cards(cx).remove(3);
+    assert_eq!(card.status.as_deref(), Some("Enabled"));
+    assert_eq!(card.buttons[0], ("Revert".to_owned(), false));
+    press_run(cx, &mut vcx, SetupStep::SensorsRevert);
+    assert_eq!(run_setup_count(&engine, SetupStep::SensorsRevert), 1);
+    copy_command(cx, &mut vcx, SetupStep::SensorsRevert);
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("pkexec /usr/lib/tasklens/tasklens-setup sensors-revert")
+    );
+}
+
+#[gpui_kit::test]
+fn rows_order_p4(cx: &mut TestAppContext) {
+    let engine = setup(cx, true);
+    let _vcx = open_with(cx, &engine, fan(false, true, false), None);
+    let titles: Vec<String> = cards(cx).into_iter().map(|c| c.title).collect();
+    assert_eq!(
+        titles,
+        [
+            "CPU power draw",
+            "Journal access",
+            "Administrator helper",
+            "Fan sensors",
+            "Per-process network"
+        ]
+    );
 }
