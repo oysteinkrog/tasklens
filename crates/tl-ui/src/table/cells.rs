@@ -1048,19 +1048,19 @@ pub fn paint_name_cell(
         }
         None => StyledText::new(shaped),
     };
-    content = content.child(
-        div()
-            .debug_selector(|| "TlNameCell-primary".into())
-            .ml(gap)
-            .min_w_0()
-            .flex_shrink(1.)
-            .overflow_hidden()
-            .text_ellipsis()
-            .text_color(primary_color)
-            .font_weight(weight)
-            .child(text),
-    );
+    let primary_el = div()
+        .debug_selector(|| "TlNameCell-primary".into())
+        .ml(gap)
+        .min_w_0()
+        .flex_shrink(1.)
+        .overflow_hidden()
+        .text_ellipsis()
+        .text_color(primary_color)
+        .font_weight(weight)
+        .child(text);
 
+    let mut primary_el = primary_el;
+    let mut secondary_el = None;
     if let Some(secondary) = cell.secondary {
         let font_size = m.text.base;
         let run = TextRun {
@@ -1082,7 +1082,9 @@ pub fn paint_name_cell(
         let text_x = indent + px(CHEVRON * s) + gap + icon_room;
         let room = ctx.width - text_x - m.sp[4];
         if room >= primary_w + px((NAME_SECONDARY_GAP + NAME_SECONDARY_MIN) * s) {
-            content = content.child(
+            // The caption gives way first: the primary text stays whole while it is drawn.
+            primary_el = primary_el.flex_shrink(0.);
+            secondary_el = Some(
                 div()
                     .debug_selector(|| "TlNameCell-secondary".into())
                     .ml(px(NAME_SECONDARY_GAP * s))
@@ -1095,6 +1097,7 @@ pub fn paint_name_cell(
             );
         }
     }
+    content = content.child(primary_el).children(secondary_el);
 
     for (i, (name, tip)) in cell.glyphs.into_iter().enumerate() {
         let mut glyph = div().flex_none().ml(px(NAME_GLYPH_GAP * s)).child(

@@ -91,6 +91,9 @@ pub struct NameCellData {
     pub count_run: Option<Range<usize>>,
     pub state_glyph: Option<StateGlyph>,
     pub exited: bool,
+    /// Dimmed text after the primary text: an app row's window caption (PROC-008). Display
+    /// only, never logged.
+    pub secondary: Option<SharedString>,
 }
 
 /// 24 px for app rows, 16 px for every other row (PROC-006).
@@ -132,7 +135,7 @@ pub fn name_cell(d: NameCellData, words: &NameWords) -> NameCell {
         icon: row_icon(d.kind, d.icon),
         primary: d.primary,
         count_run: d.count_run,
-        secondary: None,
+        secondary: d.secondary,
         glyphs,
         highlight_fffd: true,
         trailing: None,

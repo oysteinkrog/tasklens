@@ -1684,6 +1684,7 @@ mod name_cell {
             count_run: None,
             state_glyph: None,
             exited: false,
+            secondary: None,
         }
     }
 
@@ -1699,6 +1700,7 @@ mod name_cell {
     struct Host {
         cell: Cell,
         icons: IconSourceCache,
+        width: Pixels,
     }
 
     impl Render for Host {
@@ -1709,7 +1711,7 @@ mod name_cell {
                 m: &m,
                 theme: &theme,
                 selected: false,
-                width: px(400.),
+                width: self.width,
             };
             let cell = match &self.cell {
                 Cell::Name(make) => render_name_cell(
@@ -1726,11 +1728,15 @@ mod name_cell {
                     render_group_header(SharedString::new_static(label), *expanded, &ctx)
                 }
             };
-            div().w(px(400.)).h(m.row_height).child(cell)
+            div().w(self.width).h(m.row_height).child(cell)
         }
     }
 
     fn open(cx: &mut TestAppContext, cell: Cell) -> &mut VisualTestContext {
+        open_at(cx, cell, px(400.))
+    }
+
+    fn open_at(cx: &mut TestAppContext, cell: Cell, width: Pixels) -> &mut VisualTestContext {
         cx.update(|cx| {
             gpui_kit::init(cx);
             tl_ui::theme::store::init(
@@ -1743,6 +1749,7 @@ mod name_cell {
         let (_, vcx) = cx.add_window_view(|_, _| Host {
             cell,
             icons: IconSourceCache::new(),
+            width,
         });
         vcx.run_until_parked();
         vcx
@@ -1785,6 +1792,67 @@ mod name_cell {
             ..data(RowKind::App, 0, Some(false))
         });
         assert_eq!(x, px(78.));
+    }
+
+    fn firefox() -> NameCellData {
+        NameCellData {
+            primary: "Firefox (14)".into(),
+            secondary: Some("Mozilla Firefox - Inbox".into()),
+            ..data(RowKind::Process, 0, None)
+        }
+    }
+
+    /// PROC-008: the Name cell reads the primary text, then the window caption.
+    #[gpui_kit::test]
+    fn secondary_text_after_primary(cx: &mut TestAppContext) {
+        let vcx = open(cx, Cell::Name(firefox));
+        let (primary, secondary) = (
+            bounds(vcx, "TlNameCell-primary"),
+            bounds(vcx, "TlNameCell-secondary"),
+        );
+        assert_eq!(secondary.left() - primary.right(), px(8.));
+        assert_eq!(secondary.size.height, primary.size.height);
+        assert_eq!(
+            name_cell(firefox(), &words()).secondary.as_deref(),
+            Some("Mozilla Firefox - Inbox")
+        );
+        assert!(
+            name_cell(data(RowKind::Process, 0, None), &words())
+                .secondary
+                .is_none()
+        );
+    }
+
+    /// UI-PRC-003: below primary + 8 + 40 px the secondary text is not drawn at all.
+    #[gpui_kit::test]
+    fn secondary_hidden_below_threshold(cx: &mut TestAppContext) {
+        let wide = open(cx, Cell::Name(firefox));
+        let primary_w = bounds(wide, "TlNameCell-primary").size.width;
+        let text_x = bounds(wide, "TlNameCell-primary").left() - bounds(wide, "TlNameCell").left();
+        // Room is `width - text_x - 4`. Just below the threshold: hidden. At it: drawn.
+        let threshold = text_x + px(4.) + primary_w + px(48.);
+        let narrow = open_at(cx, Cell::Name(firefox), threshold - px(2.));
+        assert!(narrow.debug_bounds("TlNameCell-secondary").is_none());
+        assert!(narrow.debug_bounds("TlNameCell-primary").is_some());
+    }
+
+    /// A cell that fits primary + 48 px but not the whole caption: the caption is cut and the
+    /// primary text stays whole.
+    #[gpui_kit::test]
+    fn secondary_truncates_before_primary(cx: &mut TestAppContext) {
+        let wide = open_at(cx, Cell::Name(firefox), px(600.));
+        let full = bounds(wide, "TlNameCell-secondary").size.width;
+        let primary_w = bounds(wide, "TlNameCell-primary").size.width;
+        let text_x = bounds(wide, "TlNameCell-primary").left() - bounds(wide, "TlNameCell").left();
+        let width = text_x + px(4.) + primary_w + px(48.) + px(10.);
+        let narrow = open_at(cx, Cell::Name(firefox), width);
+        let secondary = bounds(narrow, "TlNameCell-secondary");
+        assert!(secondary.size.width < full, "the caption is cut");
+        assert_eq!(
+            bounds(narrow, "TlNameCell-primary").size.width,
+            primary_w,
+            "the primary text is whole"
+        );
     }
 
     #[gpui_kit::test]
@@ -4014,6 +4082,94 @@ mod live {
         });
         s.processes = Arc::new(ProcessSnapshot::default());
         Arc::new(s)
+    }
+
+    /// An app row over processes 100 and 200 and a window of each: the older one (stack_index 3)
+    /// in 100, the topmost (stack_index 1) in 200.
+    fn app_with_windows(validity: Validity) -> Arc<Snapshot> {
+        use tl_model::process::{GroupRow, ProcessRecord};
+        use tl_model::snapshot::{WindowEntry, WindowsSnapshot};
+
+        let rec = |pid| ProcessRecord {
+            key: key(pid),
+            ..record()
+        };
+        let g = GroupRow {
+            node: NodeId::Group(rec(100).group),
+            key: rec(100).group,
+            members: 2,
+            pids: 2,
+            ..group(GroupRowKind::App)
+        };
+        let window = |pid, stack_index, caption: &str| WindowEntry {
+            internal_id: Arc::from(format!("{{{pid}}}")),
+            pid,
+            caption: Arc::from(caption),
+            resource_class: Arc::from("firefox"),
+            desktop_file_name: Arc::from("firefox"),
+            minimized: false,
+            maximized: false,
+            keep_above: false,
+            frame_geometry: Default::default(),
+            window_type: 0,
+            stack_index,
+        };
+        let mut s = Snapshot::empty(BootId(0), 0);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: Arc::from([TableRow {
+                node: g.node.clone(),
+                depth: 0,
+                expanded: false,
+                has_children: false,
+                record: None,
+                group: Some(0),
+                descendants: 0,
+                subtree: None,
+            }]),
+            groups: Arc::from([g]),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot {
+            records: Arc::from([rec(100), rec(200)]),
+            ..ProcessSnapshot::default()
+        });
+        s.windows = Arc::new(WindowsSnapshot {
+            header: ComponentHeader {
+                version: 1,
+                validity,
+                ..ComponentHeader::default()
+            },
+            windows: Arc::from([
+                window(100, 3, "Old window"),
+                window(200, 1, "Mozilla Firefox - Inbox"),
+            ]),
+            pick: None,
+        });
+        Arc::new(s)
+    }
+
+    /// PROC-008: an app row's secondary text is the caption of the member window with the lowest
+    /// stack_index, whichever process owns it. Without the bridge there is none.
+    #[gpui_kit::test]
+    fn app_window_title_secondary_text(cx: &mut TestAppContext) {
+        let (table, vcx) = open(cx, Settings::default(), app_with_windows(Validity::Valid));
+        let secondary = vcx.update(|_, cx| table.read(cx).delegate.name_cell(0).secondary);
+        assert_eq!(secondary.as_deref(), Some("Mozilla Firefox - Inbox"));
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(vcx.debug_bounds("TlNameCell-secondary").is_some());
+
+        let (table, vcx) = open(
+            cx,
+            Settings::default(),
+            app_with_windows(Validity::Unsupported),
+        );
+        let secondary = vcx.update(|_, cx| table.read(cx).delegate.name_cell(0).secondary);
+        assert!(secondary.is_none(), "no bridge, no secondary text");
     }
 
     /// PROC-009: a unit row reads "<Description> (N)", else "<unit name> (N)".

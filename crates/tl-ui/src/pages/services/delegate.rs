@@ -1332,6 +1332,7 @@ impl TreeTableDelegate for ServicesDelegate {
                 count_run: None,
                 state_glyph: None,
                 exited: true,
+                secondary: None,
             };
             if let Some(i) = record {
                 let r = &self.snapshot.processes.records[i];

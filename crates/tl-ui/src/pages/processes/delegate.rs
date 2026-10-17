@@ -253,6 +253,10 @@ struct NameEntry {
     count: u32,
     primary: SharedString,
     count_run: Range<usize>,
+    /// App rows: the caption of the member window with the lowest `stack_index`, and the
+    /// shared string the cell draws. Compared by pointer, so an unchanged caption is not
+    /// shaped again.
+    title: Option<(Arc<str>, SharedString)>,
 }
 
 /// The process table delegate. The page installs each snapshot with [`Self::install`] and calls
@@ -261,8 +265,8 @@ pub struct ProcessDelegate {
     query: ProcessQuery,
     /// The snapshot the rows came from (or the paused one, E22-024).
     snapshot: Arc<Snapshot>,
-    /// `(view.header.version, rows pointer)` of the last rebuild.
-    built_for: Option<(u64, usize)>,
+    /// `(view.header.version, rows pointer, windows.header.version)` of the last rebuild.
+    built_for: Option<(u64, usize, u64)>,
     /// Bumps on every rebuild.
     version: u64,
     row_index: FxHashMap<ProcRowId, u32>,
@@ -518,7 +522,11 @@ impl ProcessDelegate {
         self.members
             .refresh(&self.snapshot.table, &p.records, &p.extras);
         let view = &self.snapshot.table;
-        let key = (view.header.version, view.rows.as_ptr() as usize);
+        let key = (
+            view.header.version,
+            view.rows.as_ptr() as usize,
+            self.snapshot.windows.header.version,
+        );
         if self.built_for == Some(key) {
             return changed_columns;
         }
@@ -569,6 +577,8 @@ impl ProcessDelegate {
             .first()
             .is_some_and(|r| matches!(r.node, NodeId::Group(_)));
 
+        let titles = self.window_titles(&snapshot);
+
         for (ix, row) in rows.iter().enumerate() {
             let (name, count) = match (row.group, self.kind_of(row)) {
                 (_, RowKind::GroupHeader) => {
@@ -584,10 +594,19 @@ impl ProcessDelegate {
                 _ => continue,
             };
             let id = self.ids[ix];
-            let fresh = self
-                .name_cache
-                .get(&id)
-                .is_some_and(|e| Arc::ptr_eq(&e.name, name) && e.count == count);
+            let title = match (self.kind_of(row), row.group) {
+                (RowKind::App, Some(g)) => titles.get(&view.groups[g as usize].key),
+                _ => None,
+            };
+            let fresh = self.name_cache.get(&id).is_some_and(|e| {
+                Arc::ptr_eq(&e.name, name)
+                    && e.count == count
+                    && match (&e.title, title) {
+                        (None, None) => true,
+                        (Some((a, _)), Some(b)) => Arc::ptr_eq(a, b),
+                        _ => false,
+                    }
+            });
             if !fresh {
                 let mut primary = String::with_capacity(name.len() + 8);
                 primary.push_str(name);
@@ -598,12 +617,40 @@ impl ProcessDelegate {
                     count,
                     count_run: start..primary.len(),
                     primary: primary.into(),
+                    title: title.map(|t| (Arc::clone(t), SharedString::from(t.as_ref()))),
                 };
                 self.name_cache.insert(id, entry);
             }
         }
         let index = &self.row_index;
         self.name_cache.retain(|id, _| index.contains_key(id));
+    }
+
+    /// The caption of the topmost window (lowest `stack_index`) of each app group's member
+    /// processes (PROC-008). Empty when the KWin bridge is not there (`Unsupported`).
+    fn window_titles(&self, snapshot: &Snapshot) -> FxHashMap<GroupKey, Arc<str>> {
+        let windows = &snapshot.windows;
+        let mut titles = FxHashMap::default();
+        if windows.header.validity == Validity::Unsupported || windows.windows.is_empty() {
+            return titles;
+        }
+        let pids: FxHashMap<u32, GroupKey> = snapshot
+            .processes
+            .records
+            .iter()
+            .map(|r| (r.key.pid, r.group))
+            .collect();
+        let mut best: FxHashMap<GroupKey, u32> = FxHashMap::default();
+        for w in windows.windows.iter() {
+            let Some(&group) = pids.get(&w.pid) else {
+                continue;
+            };
+            if best.get(&group).is_none_or(|&s| w.stack_index < s) {
+                best.insert(group, w.stack_index);
+                titles.insert(group, Arc::clone(&w.caption));
+            }
+        }
+        titles
     }
 
     /// Rebuilds the GPU N slots when the device catalog changed (PROC-033). True when the
@@ -1128,6 +1175,7 @@ impl TreeTableDelegate for ProcessDelegate {
             count_run: None,
             state_glyph: None,
             exited: false,
+            secondary: None,
         };
         if let Some(g) = self.group(row) {
             d.icon = match &g.node {
@@ -1159,6 +1207,7 @@ impl TreeTableDelegate for ProcessDelegate {
         if let Some(e) = cached {
             d.primary = e.primary.clone();
             d.count_run = Some(e.count_run.clone());
+            d.secondary = e.title.as_ref().map(|(_, s)| s.clone());
         }
         name_cell(d, &self.name_words)
     }
