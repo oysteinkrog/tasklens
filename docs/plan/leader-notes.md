@@ -941,3 +941,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - hjn.40: GPU open from Memory keeps no extra scan (config watch covers freshness); Plasma 5 KScreen dir watch dropped, Plasma 5 refreshes on page open and manual refresh only.
 - hk6.31: option A, new tasklens-hk6.38 reads the drop-in's Recovery keys into UnitDetails; hk6.31 waits for it; engine write rule unchanged.
 - o55.32: new tasklens-o55.41 (menu trailing value, dialog text-input mode, opus) first; o55.32 then on sonnet with a pub(crate) re-export of the fan settings writers.
+- o55.33: battery chart 24 h ('past 24 hours', midnight lines only inside the range), gap > 3600 s, R-230 types with vertical_at as plot-width fraction, refresh on open and every 10 min while visible.
