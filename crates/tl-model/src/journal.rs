@@ -68,9 +68,11 @@ pub enum JournalEvent {
 }
 
 /// Control messages from the handle to the engine's journal task.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum JournalControl {
-    LoadOlder,
+    /// `Some(cursor)` pages back from that entry; `None` pages back from the oldest entry the
+    /// engine has sent.
+    LoadOlder(Option<Arc<str>>),
     SetFollow(bool),
 }
 
@@ -97,9 +99,11 @@ impl JournalHandle {
         self.events.clone()
     }
 
-    /// Asks for the previous `JOURNAL_PAGE` entries. A full or closed channel is ignored.
-    pub fn load_older(&self) {
-        let _ = self.control.try_send(JournalControl::LoadOlder);
+    /// Asks for the `JOURNAL_PAGE` entries before `from`, the `__CURSOR` of the oldest entry the
+    /// UI still holds. `None` pages back from the oldest entry the engine has sent. A full or
+    /// closed channel is ignored.
+    pub fn load_older(&self, from: Option<Arc<str>>) {
+        let _ = self.control.try_send(JournalControl::LoadOlder(from));
     }
 
     /// Turns follow on or off. Off kills the `-f` child; on resumes with `--after-cursor`.
@@ -130,11 +134,11 @@ mod tests {
     #[test]
     fn handle_control_order() {
         let (handle, _event_tx, control_rx) = pair();
-        handle.load_older();
+        handle.load_older(Some(Arc::from("s=abc;i=1")));
         handle.set_follow(false);
         assert_eq!(
             control_rx.recv_blocking().unwrap(),
-            JournalControl::LoadOlder
+            JournalControl::LoadOlder(Some(Arc::from("s=abc;i=1")))
         );
         assert_eq!(
             control_rx.recv_blocking().unwrap(),
@@ -153,7 +157,7 @@ mod tests {
     fn handle_closed_control_no_panic() {
         let (handle, _event_tx, control_rx) = pair();
         control_rx.close();
-        handle.load_older();
+        handle.load_older(None);
         handle.set_follow(true);
     }
 

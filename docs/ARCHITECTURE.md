@@ -1019,7 +1019,7 @@ pub struct JournalQuery { pub unit: UnitRef, pub follow: bool }           // las
 pub struct JournalHandle { /* async_channel receiver plus a control sender */ }
 impl JournalHandle {
     pub fn events(&self) -> async_channel::Receiver<JournalEvent>;
-    pub fn load_older(&self);          // 200 entries before the oldest loaded one
+    pub fn load_older(&self, from: Option<Arc<str>>); // 200 entries before cursor `from` (the UI's oldest line); None: before the oldest the engine sent
     pub fn set_follow(&self, on: bool); // off kills the `-f` child; on resumes with `--after-cursor`
 }
 pub enum JournalEvent { Batch { entries: Arc<[JournalEntry]>, older: bool, exhausted: bool },

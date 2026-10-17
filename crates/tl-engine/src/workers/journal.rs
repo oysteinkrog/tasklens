@@ -11,7 +11,8 @@
 //!   in batches at most every 100 ms (UI-SYS-037). Turning follow off kills and reaps the
 //!   child; turning it on again resumes after the newest cursor, so no entry is lost or
 //!   repeated (U-49).
-//! - Load older runs one 5 s fetch of the `JOURNAL_PAGE` entries before the oldest one loaded.
+//! - Load older runs one 5 s fetch of the `JOURNAL_PAGE` entries before the cursor the UI
+//!   passes, or before the oldest entry sent when it passes none.
 //!
 //! Journal messages can hold secrets. Nothing here logs message text; logs carry only counts,
 //! exit codes and durations (ADR-015).
@@ -161,7 +162,7 @@ impl Session {
     }
 
     /// Starts a Load older fetch. Ignored while one is running.
-    async fn load_older(&mut self, cx: &Cx) {
+    async fn load_older(&mut self, cx: &Cx, from: Option<Arc<str>>) {
         if let Some(running) = &mut self.older {
             if !running.done.load(Ordering::Acquire) {
                 return;
@@ -178,7 +179,7 @@ impl Session {
         let events = self.events.clone();
         let cursors = self.cursors.clone();
         match cx.spawn_blocking(move |job_cx| {
-            let event = load_older(&job_cx, &query, &env, &events, &cursors);
+            let event = load_older(&job_cx, &query, &env, &events, &cursors, from.as_ref());
             job_done.store(true, Ordering::Release);
             if let Some(event) = event {
                 let _ = events.send_blocking(event);
@@ -316,7 +317,7 @@ async fn run(
         match msg {
             Ok(Ok(JournalControl::SetFollow(true))) => session.start_follow(&cx).await,
             Ok(Ok(JournalControl::SetFollow(false))) => session.stop_follow(&cx).await,
-            Ok(Ok(JournalControl::LoadOlder)) => session.load_older(&cx).await,
+            Ok(Ok(JournalControl::LoadOlder(from))) => session.load_older(&cx, from).await,
             Ok(Err(_closed)) => break,
             Err(_elapsed) => {}
         }
@@ -359,16 +360,18 @@ fn fetch(
     run_fetch(cx, query, &args, env, events)
 }
 
-/// Load older. Blocking: fetches the `JOURNAL_PAGE` entries before the oldest one loaded.
-/// Returns the event to send: the batch in chronological order, or the error.
+/// Load older. Blocking: fetches the `JOURNAL_PAGE` entries before `from`, or before the oldest
+/// entry sent when `from` is `None`. Returns the event to send: the batch in chronological
+/// order, or the error.
 fn load_older(
     cx: &Cx,
     query: &JournalQuery,
     env: &FetchEnv,
     events: &async_channel::Sender<JournalEvent>,
     cursors: &Mutex<Cursors>,
+    from: Option<&Arc<str>>,
 ) -> Option<JournalEvent> {
-    let oldest = lock(cursors).oldest.clone();
+    let oldest = from.cloned().or_else(|| lock(cursors).oldest.clone());
     let Some(oldest) = oldest else {
         return Some(JournalEvent::Batch {
             entries: Arc::from(Vec::new()),
@@ -376,7 +379,7 @@ fn load_older(
             exhausted: true,
         });
     };
-    // `--cursor` includes the oldest entry itself, so one more than a page is asked for and
+    // `--cursor` includes the anchor entry itself, so one more than a page is asked for and
     // that entry is dropped (R-167 item 8).
     let args = [
         "-b".to_owned(),
@@ -1687,16 +1690,43 @@ done"#;
         let handle = open_with(&rt.handle(), user_query(false), env_with(&dir, None));
         let events = handle.events();
         skip_initial(&events);
-        handle.load_older();
+        handle.load_older(None);
         assert_eq!(older_batch(&events), (numbered("c", 0..10), true));
         assert_eq!(
             calls(&dir)[1],
             "--user-unit demo.service -b -o json --no-pager --reverse --cursor=c10 -n 201"
         );
         // The next page starts at the new oldest entry.
-        handle.load_older();
+        handle.load_older(None);
         let _ = older_batch(&events);
         assert!(calls(&dir)[2].contains("--cursor=c0 "), "{:?}", calls(&dir));
+    }
+
+    #[test]
+    fn load_older_from_ui_cursor() {
+        // The engine sent c10..c12, but the UI dropped its oldest lines and holds c350 and up.
+        let initial = emit(numbered("c", 10..13));
+        let reverse = emit(numbered("c", (150..351).rev()));
+        let dir = modes("olderfrom", &initial, "exit 0", &reverse);
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let handle = open_with(&rt.handle(), user_query(false), env_with(&dir, None));
+        let events = handle.events();
+        skip_initial(&events);
+        handle.load_older(Some(Arc::from("c350")));
+        // The 200 entries before c350: the anchor and anything after it are absent.
+        assert_eq!(older_batch(&events), (numbered("c", 150..350), false));
+        assert_eq!(
+            calls(&dir)[1],
+            "--user-unit demo.service -b -o json --no-pager --reverse --cursor=c350 -n 201"
+        );
+        // None pages back from the oldest entry sent, which is now the oldest of that batch.
+        handle.load_older(None);
+        let _ = older_batch(&events);
+        assert!(
+            calls(&dir)[2].contains("--cursor=c150 "),
+            "{:?}",
+            calls(&dir)
+        );
     }
 
     #[test]
@@ -1708,7 +1738,7 @@ done"#;
         let handle = open_with(&rt.handle(), user_query(false), env_with(&dir, None));
         let events = handle.events();
         skip_initial(&events);
-        handle.load_older();
+        handle.load_older(None);
         assert_eq!(older_batch(&events), (numbered("c", 800..1000), false));
     }
 
@@ -1719,7 +1749,7 @@ done"#;
         let handle = open_with(&rt.handle(), user_query(false), env_with(&dir, None));
         let events = handle.events();
         skip_initial(&events);
-        handle.load_older();
+        handle.load_older(None);
         assert_eq!(older_batch(&events), (Vec::new(), true));
         assert_eq!(calls(&dir).len(), 1);
     }
@@ -1733,8 +1763,8 @@ done"#;
         let handle = open_with(&rt.handle(), user_query(false), env_with(&dir, None));
         let events = handle.events();
         skip_initial(&events);
-        handle.load_older();
-        handle.load_older();
+        handle.load_older(None);
+        handle.load_older(None);
         assert_eq!(older_batch(&events), (numbered("c", 0..5), true));
         assert!(events_for(&events, Duration::from_millis(500)).is_empty());
         assert_eq!(calls(&dir).len(), 2);

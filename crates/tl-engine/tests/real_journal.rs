@@ -257,7 +257,7 @@ fn load_older_pages_back() {
             calls < MAX_LOAD_OLDER,
             "no exhausted batch after {MAX_LOAD_OLDER} load_older calls"
         );
-        handle.load_older();
+        handle.load_older(None);
         calls += 1;
         let (page, got) = collect(&handle, Instant::now() + WAIT, |e| {
             matches!(e, JournalEvent::Batch { older: true, .. })
