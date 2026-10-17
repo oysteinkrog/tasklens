@@ -4438,6 +4438,7 @@ mod page {
         #[gpui_kit::test]
         fn child_restart_plasma_shell_like_processes_tab(cx: &mut TestAppContext) {
             use tl_model::actions::ActionState;
+            use tl_model::table::UnitRef;
             use tl_ui::pages::processes::actions::RestartUnit;
 
             let mut rig = rig(cx);
