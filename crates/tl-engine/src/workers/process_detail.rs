@@ -57,15 +57,16 @@
 //! A kernel thread gets "Strings unavailable for this process.". A target that Yama
 //! `ptrace_scope` does not let tasklens attach to (scope 1 allows only descendants of tasklens,
 //! 2 and 3 allow none) gets one `Restricted` payload, and its memory is never opened (see
-//! Helper reads below for the scan through the helper). A running scan reads `/proc/<pid>/mem` one `strings::CHUNK` per step, at most
-//! `SCAN_STEPS_PER_SAMPLE` steps per sample over all scans in turn (each sample goes on where
-//! the last one stopped, so every scan gets reads), and the period is
-//! `SCAN_PERIOD` while any scan runs or waits. Tabs and affinity then read by the clock, so they
-//! keep their rates. A running scan is published at most every `SCAN_PUBLISH_PERIOD`, and its end
-//! at once. `CancelStringScan` drops the scan and publishes `Cancelled`, and no chunk is read
-//! after it. A scan whose process exits or turns zombie stops with `StoppedExited` and keeps the
-//! rows found so far ("Scan stopped: the process exited", UI-PWN-017). A scan whose process
-//! leaves the demand stops without a payload: its window closed.
+//! Helper reads below for the scan through the helper). A running scan reads `/proc/<pid>/mem`
+//! one `strings::CHUNK` per step, at most `SCAN_STEPS_PER_SAMPLE` steps per sample over all
+//! scans in turn (each sample goes on where the last one stopped, so every scan gets reads), and
+//! the period is `SCAN_PERIOD` while any scan runs or waits. Tabs and affinity then read by the
+//! clock, so they keep their rates. A running scan is published at most every
+//! `SCAN_PUBLISH_PERIOD`, and its end at once. `CancelStringScan` drops the scan and publishes
+//! `Cancelled`, and no chunk is read after it. A scan whose process exits or turns zombie stops
+//! with `StoppedExited` and keeps the rows found so far ("Scan stopped: the process exited",
+//! UI-PWN-017). A scan whose process leaves the demand stops without a payload: its window
+//! closed.
 //!
 //! Handle search (PROC-096, tasklens-dwy.3): `HandleSearch` queues one search over the open
 //! handles of every process, and the next sample starts it with `HandleSearch::new`, so the proc
@@ -87,16 +88,19 @@
 //! General the `EXE`, `CWD`, `ROOT` and `IO` of its Restricted fields, and PSS and USS
 //! `SMAPS_ROLLUP` for at most `HELPER_READS_MAX` keys per second. File descriptors and Security
 //! stay Restricted (tasklens-qfx.39). Each (target, tab) and each PSS key gets at most one helper
-//! read per `HELPER_PERIOD`, and none while another one waits. The next sample parses the reply
-//! with the same tl-collect parsers as the direct path and sends the tab. While a helper payload
-//! is shown, a Restricted direct read keeps it. While the helper is `Locked` or `Missing` no
-//! helper read is queued and Restricted stays. After the Grant access button the UI sends
+//! read per `HELPER_PERIOD`, and none while another one waits: `HelperDetailReads` sends a read
+//! no sooner than `HELPER_PERIOD` after the last read of the same slot returned, and drops a
+//! queued read whose tab or column left the demand while it waited. The next sample parses the
+//! reply with the same tl-collect parsers as the direct path and sends the tab. While a helper
+//! payload is shown, a Restricted direct read keeps it. While the helper is `Locked` or `Missing`
+//! no helper read is queued and Restricted stays. After the Grant access button the UI sends
 //! `DetailRefresh` once, and that read goes through the helper (R-170 item 13). A file the
-//! helper could not read gives Restricted (EACCES, EPERM), Missing (ENOENT, ESRCH) or Failed;
-//! EFBIG also sends `last_error` "too large to read through the helper". A helper
-//! `IdentityChanged` or `NoSuchProcess` marks the target exited. A Strings scan whose direct
-//! start gives Restricted runs as a helper `ScanStrings` stream (`HelperHandle::read_stream`);
-//! `CancelStringScan` drops the stream, which sends `CancelScan`.
+//! helper could not read gives Restricted (EACCES, EPERM), Missing (ENOENT, ESRCH) or Failed,
+//! per General field too; EFBIG also sends `last_error` "too large to read through the helper".
+//! A helper `IdentityChanged` or `NoSuchProcess` marks the target exited: the tab goes Missing
+//! with its last data, and the PSS entry is dropped as for a gone process. A Strings scan whose
+//! direct start gives Restricted runs as a helper `ScanStrings` stream
+//! (`HelperHandle::read_stream`); `CancelStringScan` drops the stream, which sends `CancelScan`.
 //!
 //! Per-key errors become `Validity`, never `WorkerError`. Hash failures are a `HashState`.
 //! Environment values, command lines and paths are never logged (ADR-015), nor are scan
@@ -104,12 +108,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use asupersync::supervision::ManagedGeneration;
-use asupersync::{Cx, Outcome};
+use asupersync::time;
+use asupersync::{Cx, Outcome, Time};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::fd::{AsFd, BorrowedFd};
 use rustix::fs::{AtFlags, Dir, Mode, OFlags, StatxFlags};
@@ -238,8 +244,9 @@ const NAMESPACES: [(NsKind, &str); 8] = [
 /// Each (target, tab) and each PSS key gets at most one helper read this often (PROC-076).
 const HELPER_PERIOD: Duration = Duration::from_secs(1);
 
-/// A sample up to this much early still counts as a full `HELPER_PERIOD`, so sample jitter does
-/// not halve the rate.
+/// The sample side queues a read of a slot up to this much early, so sample jitter does not
+/// halve the rate. It only paces the queue: `HelperDetailReads` sends a read no sooner than
+/// `HELPER_PERIOD` after the last read of the same slot returned.
 const HELPER_SLACK: Duration = Duration::from_millis(50);
 
 /// Deadline of one helper `ReadProcessFiles`.
@@ -309,12 +316,48 @@ struct ScanFeed {
     end: Option<HelperScanEnd>,
 }
 
+/// One queued helper read after `HelperDetailReads` took it.
+struct HelperDone {
+    slot: HelperSlot,
+    files: ProcFiles,
+    /// `None` when the read was not sent because its slot left the demand while it waited.
+    result: Option<HelperResult>,
+}
+
+/// The slots the demand shows now. `period` sets it on every demand change.
+#[derive(Default)]
+struct Wanted {
+    details: Arc<[DetailDemand]>,
+    /// PSS keys, empty while no PSS or USS column is shown.
+    pss: Arc<[ProcessKey]>,
+}
+
+impl Wanted {
+    /// True while `slot` is demanded: General while any tab of its target is, as in `period`.
+    fn contains(&self, slot: HelperSlot) -> bool {
+        match slot {
+            HelperSlot::Pss(key) => self.pss.contains(&key),
+            HelperSlot::Tab(key, DetailTab::General) => self
+                .details
+                .iter()
+                .any(|d| d.target == DetailTarget::Process(key)),
+            HelperSlot::Tab(key, tab) => self.details.contains(&DetailDemand {
+                target: DetailTarget::Process(key),
+                tab,
+            }),
+        }
+    }
+}
+
 /// Written by `HelperDetailReads`, read by the sample.
 #[derive(Default)]
 struct HelperStore {
-    reads: Vec<(HelperSlot, ProcFiles, HelperResult)>,
+    reads: Vec<HelperDone>,
     /// One entry per helper scan the sample side runs. A scan without an entry was dropped.
     scans: FxHashMap<ScanId, ScanFeed>,
+    /// Checked just before each read is sent, so a read queued for a tab that closed since,
+    /// for example while it waited behind a scan, is never sent.
+    wanted: Wanted,
 }
 
 fn lock(store: &Mutex<HelperStore>) -> std::sync::MutexGuard<'_, HelperStore> {
@@ -333,7 +376,17 @@ struct HelperSide {
     /// The last PSS key read: the next round starts after it, so keys past the cap get a turn.
     pss_cursor: Option<ProcessKey>,
     /// PSS, USS and swap from the helper, by key.
-    pss: FxHashMap<ProcessKey, Rollup>,
+    pss: FxHashMap<ProcessKey, HelperPss>,
+}
+
+/// The PSS of a key from a helper `SMAPS_ROLLUP`.
+enum HelperPss {
+    Ok(Rollup),
+    /// The process exited or its pid was reused (`IdentityChanged`, `NoSuchProcess`): the
+    /// entry is dropped, as for `RollupRead::Gone`.
+    Gone,
+    /// The file could not be read or parsed: Missing or Failed.
+    Invalid(Validity),
 }
 
 impl HelperSide {
@@ -342,7 +395,8 @@ impl HelperSide {
     }
 
     /// Queues one read of `files` for `slot`. Refused while the helper is not `Unlocked`, while
-    /// a read of the slot waits, and within `HELPER_PERIOD` of the last one.
+    /// a read of the slot waits, and within `HELPER_PERIOD - HELPER_SLACK` of the last one
+    /// queued. `HelperDetailReads` holds the full `HELPER_PERIOD` between sent reads.
     fn request(&mut self, slot: HelperSlot, files: ProcFiles, now: TimeNs) -> bool {
         let last = self.last.get(&slot).copied();
         if !self.unlocked()
@@ -360,10 +414,10 @@ impl HelperSide {
     }
 
     /// The answered reads since the last call.
-    fn take_reads(&mut self, now: TimeNs) -> Vec<(HelperSlot, ProcFiles, HelperResult)> {
+    fn take_reads(&mut self, now: TimeNs) -> Vec<HelperDone> {
         let reads = std::mem::take(&mut lock(&self.store).reads);
-        for (slot, ..) in &reads {
-            self.pending.remove(slot);
+        for done in &reads {
+            self.pending.remove(&done.slot);
         }
         self.last
             .retain(|_, at| !elapsed(Some(*at), now, HELPER_PERIOD));
@@ -471,31 +525,22 @@ pub struct HelperDetailReads {
     handle: HelperHandle,
     jobs: async_channel::Receiver<HelperJob>,
     store: Arc<Mutex<HelperStore>>,
+    /// When the last read of each slot returned, for `HELPER_PERIOD`.
+    returned: FxHashMap<HelperSlot, Time>,
 }
 
 impl HelperDetailReads {
     /// Runs until `cx` is cancelled or the sample side is dropped.
-    pub async fn run(self, cx: &Cx) {
+    pub async fn run(mut self, cx: &Cx) {
         while let Ok(job) = self.jobs.recv().await {
             if cx.checkpoint().is_err() {
                 return;
             }
             match job {
                 HelperJob::Read { slot, files } => {
-                    let req = HelperRequest::ReadProcessFiles {
-                        key: slot.key(),
-                        files,
-                    };
-                    // `read` never starts a session: a helper that exited gives `NotRunning`,
-                    // never a polkit prompt.
-                    let result = self.handle.read(cx, req, HELPER_DEADLINE).await;
-                    if matches!(
-                        result,
-                        Err(HelperReadError::Call(HelperCallError::Cancelled))
-                    ) {
+                    if self.read(cx, slot, files).await.is_break() {
                         return;
                     }
-                    lock(&self.store).reads.push((slot, files, result));
                 }
                 HelperJob::Scan {
                     scan,
@@ -503,6 +548,10 @@ impl HelperDetailReads {
                     opts,
                     stop,
                 } => {
+                    // A scan cancelled or replaced while it waited is never sent.
+                    if !lock(&self.store).scans.contains_key(&scan) {
+                        continue;
+                    }
                     let req = HelperRequest::ScanStrings { key, opts };
                     let end = match self.handle.read_stream(cx, req, HELPER_SCAN_DEADLINE).await {
                         Ok(stream) => self.feed(cx, scan, stream, &stop).await,
@@ -517,6 +566,46 @@ impl HelperDetailReads {
                 }
             }
         }
+    }
+
+    /// Sends one queued read, at least `HELPER_PERIOD` after the last read of `slot` returned, and
+    /// only while `slot` is still demanded. `Break` when `cx` was cancelled.
+    async fn read(&mut self, cx: &Cx, slot: HelperSlot, files: ProcFiles) -> ControlFlow<()> {
+        let now = cx.now();
+        self.returned
+            .retain(|_, at| now.as_nanos().saturating_sub(at.as_nanos()) < nanos(HELPER_PERIOD));
+        if let Some(at) = self.returned.get(&slot) {
+            let wait = nanos(HELPER_PERIOD) - now.as_nanos().saturating_sub(at.as_nanos());
+            time::sleep(now, Duration::from_nanos(wait)).await;
+            if cx.checkpoint().is_err() {
+                return ControlFlow::Break(());
+            }
+        }
+        let result = if lock(&self.store).wanted.contains(slot) {
+            let req = HelperRequest::ReadProcessFiles {
+                key: slot.key(),
+                files,
+            };
+            // `read` never starts a session: a helper that exited gives `NotRunning`, never a
+            // polkit prompt.
+            let result = self.handle.read(cx, req, HELPER_DEADLINE).await;
+            if matches!(
+                result,
+                Err(HelperReadError::Call(HelperCallError::Cancelled))
+            ) {
+                return ControlFlow::Break(());
+            }
+            self.returned.insert(slot, cx.now());
+            Some(result)
+        } else {
+            None
+        };
+        lock(&self.store).reads.push(HelperDone {
+            slot,
+            files,
+            result,
+        });
+        ControlFlow::Continue(())
     }
 
     /// Moves the batches of `stream` into the feed of `scan` until its end. `None` when `stop`
@@ -830,40 +919,50 @@ struct TargetState {
     general_patch: Option<GeneralPatch>,
 }
 
-/// General values read through the helper (PROC-078).
+/// General values read through the helper (PROC-078). Each field is `None` when it was not
+/// read, or the value or the validity of the helper's file: Restricted (EACCES, EPERM), Missing
+/// (ENOENT, ESRCH) or Failed.
 #[derive(Clone, Default)]
 struct GeneralPatch {
     /// Sanitized link text, deleted, location.
-    exe: Option<(Arc<str>, bool, ExeLocation)>,
-    cwd: Option<Arc<str>>,
-    root: Option<Arc<str>>,
-    io: Option<PidIo>,
+    exe: Option<Result<(Arc<str>, bool, ExeLocation), Validity>>,
+    cwd: Option<Result<Arc<str>, Validity>>,
+    root: Option<Result<Arc<str>, Validity>>,
+    io: Option<Result<PidIo, Validity>>,
+}
+
+/// Sets `value` or its validity on `field` when the direct read left it Restricted.
+fn patch_field<T: Clone>(field: &mut Total<T>, value: &Option<Result<T, Validity>>) {
+    if field.validity != Validity::Restricted {
+        return;
+    }
+    match value {
+        Some(Ok(value)) => *field = valid(value.clone()),
+        Some(Err(validity)) => field.validity = *validity,
+        None => {}
+    }
 }
 
 impl GeneralPatch {
-    /// Sets the values on the fields of `read` that are Restricted.
+    /// Sets the values, or the helper's validity, on the fields of `read` that are Restricted.
     fn apply(&self, read: &mut GeneralRead) {
-        if let Some((exe, deleted, location)) = &self.exe
-            && read.exe.validity == Validity::Restricted
-        {
-            read.exe = valid(Arc::clone(exe));
-            read.exe_deleted = *deleted;
-            read.location = valid(*location);
-        }
-        let link = |field: &mut Total<Arc<str>>, value: &Option<Arc<str>>| {
-            if let Some(value) = value
-                && field.validity == Validity::Restricted
-            {
-                *field = valid(Arc::clone(value));
+        if read.exe.validity == Validity::Restricted {
+            match &self.exe {
+                Some(Ok((exe, deleted, location))) => {
+                    read.exe = valid(Arc::clone(exe));
+                    read.exe_deleted = *deleted;
+                    read.location = valid(*location);
+                }
+                Some(Err(validity)) => {
+                    read.exe.validity = *validity;
+                    read.location.validity = *validity;
+                }
+                None => {}
             }
-        };
-        link(&mut read.cwd, &self.cwd);
-        link(&mut read.root, &self.root);
-        if let Some(io) = self.io
-            && read.io.validity == Validity::Restricted
-        {
-            read.io = valid(io);
         }
+        patch_field(&mut read.cwd, &self.cwd);
+        patch_field(&mut read.root, &self.root);
+        patch_field(&mut read.io, &self.io);
     }
 }
 
@@ -1131,6 +1230,7 @@ impl ProcessDetailSource {
             handle,
             jobs,
             store,
+            returned: FxHashMap::default(),
         }
     }
 
@@ -1204,7 +1304,9 @@ impl ProcessDetailSource {
                 let (pss, uss, swap, validity) = match read {
                     RollupRead::Ok(r) => (r.pss, r.uss, r.swap, Validity::Valid),
                     RollupRead::Restricted => match helper_pss.and_then(|pss| pss.get(&key)) {
-                        Some(r) => (r.pss, r.uss, r.swap, Validity::Valid),
+                        Some(HelperPss::Ok(r)) => (r.pss, r.uss, r.swap, Validity::Valid),
+                        Some(HelperPss::Gone) => return None,
+                        Some(HelperPss::Invalid(validity)) => (0, 0, 0, *validity),
                         None => (0, 0, 0, Validity::Restricted),
                     },
                     RollupRead::Failed => (0, 0, 0, Validity::Failed),
@@ -1546,20 +1648,44 @@ impl ProcessDetailSource {
             return;
         };
         let reads = side.take_reads(now);
-        for (slot, files, result) in reads {
+        for HelperDone {
+            slot,
+            files,
+            result,
+        } in reads
+        {
+            // A read not sent because its slot left the demand.
+            let Some(result) = result else {
+                continue;
+            };
             match slot {
                 HelperSlot::Pss(key) => {
+                    let mut too_large = false;
+                    let pss = pss_from_helper(files, result, &mut too_large);
                     let Some(side) = &mut self.helper else {
                         return;
                     };
-                    match pss_from_helper(files, result) {
-                        Some(rollup) => side.pss.insert(key, rollup),
+                    match pss {
+                        Some(pss) => side.pss.insert(key, pss),
                         None => side.pss.remove(&key),
                     };
+                    if too_large {
+                        self.helper_too_large(now);
+                    }
                 }
                 HelperSlot::Tab(key, tab) => self.apply_helper_tab(key, tab, files, result, now),
             }
         }
+    }
+
+    /// Sends `last_error` "too large to read through the helper".
+    fn helper_too_large(&mut self, now: TimeNs) {
+        self.extra.push_back(SourceUpdate::Health {
+            id: SourceId::ProcessDetail,
+            state: SourceState::Running,
+            last_error: Some(HELPER_TOO_LARGE.into()),
+            t_ns: now,
+        });
     }
 
     /// Sends one tab from a helper reply, parsed with the direct path's parsers. A tab that left
@@ -1578,8 +1704,10 @@ impl ProcessDetailSource {
         if target.tabs[tab.index()].is_none() {
             return;
         }
+        let mut too_large = false;
+        let requested = files;
         let files = match result {
-            Ok(replies) => helper_files(files, &replies),
+            Ok(replies) => helper_files(requested, &replies, &mut too_large),
             Err(e) => {
                 if let HelperReadError::Call(error) = e {
                     tracing::debug!(?tab, ?error, "helper detail read failed");
@@ -1587,11 +1715,11 @@ impl ProcessDetailSource {
                 Err(Validity::Restricted)
             }
         };
-        let mut too_large = false;
         let read = match tab {
             DetailTab::General => match files {
                 Ok(files) => {
-                    let patch = general_patch(&files, self.general.location.as_ref());
+                    let ctx = self.general.location.as_ref();
+                    let patch = general_patch(requested, &files, ctx, &mut too_large);
                     let last = match target.tabs[tab.index()]
                         .as_ref()
                         .and_then(|s| s.last.as_ref())
@@ -1604,21 +1732,23 @@ impl ProcessDetailSource {
                         general
                     });
                     target.general_patch = Some(patch);
-                    let Some(general) = applied else {
-                        return;
-                    };
-                    Ok(TabRead::General(general))
+                    match applied {
+                        Some(general) => Some(Ok(TabRead::General(general))),
+                        // No direct read to patch yet: the next one gets the patch.
+                        None => None,
+                    }
                 }
-                // The target exited: the existing exited path.
-                Err(Validity::Missing) => Err(Validity::Missing),
+                // `IdentityChanged` or `NoSuchProcess`: the target exited, the existing exited
+                // path.
+                Err(Validity::Missing) => Some(Err(Validity::Missing)),
                 // The fields stay Restricted.
                 Err(_) => {
                     target.general_patch = None;
-                    return;
+                    None
                 }
             },
             DetailTab::Environment => {
-                files.and_then(|files| environ_from_helper(&files, &mut too_large))
+                Some(files.and_then(|files| environ_from_helper(&files, &mut too_large)))
             }
             DetailTab::Maps => {
                 let exe = match target.tabs[DetailTab::General.index()]
@@ -1630,33 +1760,32 @@ impl ProcessDetailSource {
                     }
                     _ => None,
                 };
-                files.and_then(|files| maps_from_helper(&files, exe.as_deref(), &mut too_large))
+                Some(
+                    files
+                        .and_then(|files| maps_from_helper(&files, exe.as_deref(), &mut too_large)),
+                )
             }
-            _ => return,
+            _ => None,
         };
-        let Some(slot) = target.tabs[tab.index()].as_mut() else {
-            return;
-        };
-        slot.via_helper = read.is_ok();
-        let update = publish_tab(
-            slot,
-            key,
-            tab,
-            read,
-            &mut self.users,
-            &self.group_file,
-            &self.cfg.sys_root,
-        );
-        if let Some(update) = update {
-            self.extra.push_back(SourceUpdate::Details(update));
+        if let Some(read) = read
+            && let Some(slot) = target.tabs[tab.index()].as_mut()
+        {
+            slot.via_helper = read.is_ok();
+            let update = publish_tab(
+                slot,
+                key,
+                tab,
+                read,
+                &mut self.users,
+                &self.group_file,
+                &self.cfg.sys_root,
+            );
+            if let Some(update) = update {
+                self.extra.push_back(SourceUpdate::Details(update));
+            }
         }
         if too_large {
-            self.extra.push_back(SourceUpdate::Health {
-                id: SourceId::ProcessDetail,
-                state: SourceState::Running,
-                last_error: Some(HELPER_TOO_LARGE.into()),
-                t_ns: now,
-            });
+            self.helper_too_large(now);
         }
     }
 
@@ -2081,6 +2210,12 @@ impl Source for ProcessDetailSource {
         // PSS and affinity both run at 1 Hz.
         let fast = (shown && !d.detail_keys.is_empty()) || !affinity.is_empty();
         let tabs = wants_tabs(&details);
+        if let Some(side) = &self.helper {
+            lock(&side.store).wanted = Wanted {
+                details: Arc::clone(&details),
+                pss: Arc::clone(&self.keys.borrow()),
+            };
+        }
         *self.details.borrow_mut() = details;
         let interval = tab_interval(s);
         let (period, tabs_every, affinity_every) = match (fast, tabs) {
@@ -2446,7 +2581,11 @@ fn publish_tab(
 /// each file in ascending bit order as one or more `File` bodies or one `Err(Os(_))` body
 /// (E29-004). Any other `Err` body is an error of the whole read and gives its validity: an
 /// exited or replaced process is Missing.
-fn helper_files(files: ProcFiles, replies: &[HelperReply]) -> Result<Vec<HelperFile>, Validity> {
+fn helper_files(
+    files: ProcFiles,
+    replies: &[HelperReply],
+    too_large: &mut bool,
+) -> Result<Vec<HelperFile>, Validity> {
     let order: SmallVec<[ProcFiles; 4]> = files.iter().collect();
     let mut next = 0;
     let mut out: Vec<HelperFile> = Vec::new();
@@ -2480,6 +2619,11 @@ fn helper_files(files: ProcFiles, replies: &[HelperReply]) -> Result<Vec<HelperF
                 return Err(match e {
                     HelperError::IdentityChanged | HelperError::NoSuchProcess => Validity::Missing,
                     HelperError::PermissionDenied | HelperError::NotAllowed => Validity::Restricted,
+                    // The files together passed the 4 MiB reply cap (R-157).
+                    HelperError::TooLarge => {
+                        *too_large = true;
+                        Validity::Failed
+                    }
                     _ => Validity::Failed,
                 });
             }
@@ -2571,37 +2715,50 @@ fn maps_from_helper(
     Ok(TabRead::Maps { regions, nodes })
 }
 
-/// The General values of a helper reply. A file that failed or does not parse is left out.
-fn general_patch(files: &[HelperFile], ctx: Option<&LocationCtx>) -> GeneralPatch {
+/// The General values of a helper reply for the `requested` files. A file the helper could not
+/// read gets its errno's validity (EFBIG also sets `too_large`); a file missing from the reply
+/// or that does not parse is Failed.
+fn general_patch(
+    requested: ProcFiles,
+    files: &[HelperFile],
+    ctx: Option<&LocationCtx>,
+    too_large: &mut bool,
+) -> GeneralPatch {
     let mut patch = GeneralPatch::default();
     let mut text = String::new();
     // At most one byte past the limit, so `sanitize_link` sees the cut and adds `…`, as the
     // direct read does.
-    let link = |data: &[u8], text: &mut String| -> Option<Arc<str>> {
+    let link = |data: &[u8], text: &mut String| -> Result<Arc<str>, Validity> {
         sanitize_link(&data[..data.len().min(EXE_LINK_MAX + 1)], text);
-        (!text.is_empty()).then(|| Arc::from(text.as_str()))
+        if text.is_empty() {
+            return Err(Validity::Failed);
+        }
+        Ok(Arc::from(text.as_str()))
     };
-    for (file, data) in files {
-        let Ok(data) = data else {
-            continue;
+    for file in requested.iter() {
+        let data = match helper_file(files, file) {
+            Some(Ok(data)) => Ok(data.as_slice()),
+            Some(Err(errno)) => Err(errno_validity(*errno, too_large)),
+            None => Err(Validity::Failed),
         };
-        match *file {
+        match file {
             ProcFiles::EXE => {
-                if let Some(exe) = link(data, &mut text) {
+                patch.exe = Some(data.and_then(|data| link(data, &mut text)).map(|exe| {
                     let deleted = exe.ends_with(DELETED_SUFFIX);
                     let location = ctx.map_or(ExeLocation::Other, |ctx| {
                         exe_location(rd::location(&exe, deleted, ctx))
                     });
-                    patch.exe = Some((exe, deleted, location));
-                }
+                    (exe, deleted, location)
+                }));
             }
-            ProcFiles::CWD => patch.cwd = link(data, &mut text),
-            ProcFiles::ROOT => patch.root = link(data, &mut text),
+            ProcFiles::CWD => patch.cwd = Some(data.and_then(|data| link(data, &mut text))),
+            ProcFiles::ROOT => patch.root = Some(data.and_then(|data| link(data, &mut text))),
             ProcFiles::IO => {
-                let mut io = PidIo::default();
-                if parse_io(data, &mut io).is_ok() {
-                    patch.io = Some(io);
-                }
+                patch.io = Some(data.and_then(|data| {
+                    let mut io = PidIo::default();
+                    parse_io(data, &mut io).map_err(|_| Validity::Failed)?;
+                    Ok(io)
+                }));
             }
             _ => {}
         }
@@ -2609,16 +2766,36 @@ fn general_patch(files: &[HelperFile], ctx: Option<&LocationCtx>) -> GeneralPatc
     patch
 }
 
-/// PSS, USS and swap from a helper `SMAPS_ROLLUP`. `None` when it was not read.
-fn pss_from_helper(files: ProcFiles, result: HelperResult) -> Option<Rollup> {
+/// PSS, USS and swap from a helper `SMAPS_ROLLUP`. `None` while the value stays Restricted:
+/// the helper was not `Unlocked`, the read failed, or the file gave EACCES or EPERM.
+fn pss_from_helper(
+    files: ProcFiles,
+    result: HelperResult,
+    too_large: &mut bool,
+) -> Option<HelperPss> {
     let replies = result.ok()?;
-    let files = helper_files(files, &replies).ok()?;
-    let Some(Ok(data)) = helper_file(&files, ProcFiles::SMAPS_ROLLUP) else {
-        return None;
+    let files = match helper_files(files, &replies, too_large) {
+        Ok(files) => files,
+        // `IdentityChanged` or `NoSuchProcess`.
+        Err(Validity::Missing) => return Some(HelperPss::Gone),
+        Err(Validity::Restricted) => return None,
+        Err(validity) => return Some(HelperPss::Invalid(validity)),
+    };
+    let data = match helper_file(&files, ProcFiles::SMAPS_ROLLUP) {
+        Some(Ok(data)) => data,
+        Some(Err(errno)) => {
+            return match errno_validity(*errno, too_large) {
+                Validity::Restricted => None,
+                validity => Some(HelperPss::Invalid(validity)),
+            };
+        }
+        None => return Some(HelperPss::Invalid(Validity::Failed)),
     };
     let mut rollup = Rollup::default();
-    parse_rollup(data, &mut rollup).ok()?;
-    Some(rollup)
+    if parse_rollup(data, &mut rollup).is_err() {
+        return Some(HelperPss::Invalid(Validity::Failed));
+    }
+    Some(HelperPss::Ok(rollup))
 }
 
 /// The parent of the proc root: `/` on the host, the fixture root in tests.
@@ -5933,5 +6110,126 @@ mod tests {
         // A dialog that opens again reads at once.
         let (_src, out) = affinity_step(src, &affinity_demand(&[b]), &s, 1100);
         assert_eq!(out.len(), 1);
+    }
+
+    fn reply(body: HelperReplyBody) -> HelperReply {
+        HelperReply {
+            seq: 1,
+            last: false,
+            body,
+        }
+    }
+
+    fn file(file: ProcFiles, data: &[u8]) -> HelperReply {
+        reply(HelperReplyBody::File {
+            file,
+            data: data.to_vec(),
+        })
+    }
+
+    fn os(errno: i32) -> HelperReply {
+        reply(HelperReplyBody::Err(HelperError::Os(errno)))
+    }
+
+    /// qfx.18 review: a General file the helper could not read keeps its errno's validity, and
+    /// EFBIG sets the "too large" error, instead of the field silently staying Restricted.
+    #[test]
+    fn general_patch_keeps_file_errors() {
+        let requested = ProcFiles::EXE | ProcFiles::CWD | ProcFiles::IO | ProcFiles::ROOT;
+        // Bit order: IO, CWD, EXE, ROOT. ROOT is missing from the reply.
+        let replies = [file(ProcFiles::IO, b"not io\n"), os(2), os(27)];
+        let mut too_large = false;
+        let files = helper_files(requested, &replies, &mut too_large).expect("per-file errors");
+        assert!(!too_large);
+        let patch = general_patch(requested, &files, None, &mut too_large);
+        assert!(too_large, "EFBIG on exe");
+        assert!(matches!(patch.exe, Some(Err(Validity::Failed))));
+        assert!(matches!(patch.cwd, Some(Err(Validity::Missing))));
+        assert!(matches!(patch.io, Some(Err(Validity::Failed))));
+        assert!(matches!(patch.root, Some(Err(Validity::Failed))));
+
+        let replies = [file(ProcFiles::CWD, b"/srv"), os(13)];
+        let mut too_large = false;
+        let requested = ProcFiles::EXE | ProcFiles::CWD;
+        let files = helper_files(requested, &replies, &mut too_large).expect("per-file errors");
+        let patch = general_patch(requested, &files, None, &mut too_large);
+        assert!(!too_large);
+        assert!(matches!(patch.exe, Some(Err(Validity::Restricted))));
+        assert!(matches!(&patch.cwd, Some(Ok(cwd)) if &**cwd == "/srv"));
+        assert!(patch.io.is_none() && patch.root.is_none(), "not requested");
+    }
+
+    /// qfx.18 review: a patch sets the helper's validity on a Restricted field and leaves a
+    /// field the direct read could read alone.
+    #[test]
+    fn patch_field_sets_validity_on_restricted() {
+        let restricted = || Total {
+            value: Arc::<str>::from(""),
+            validity: Validity::Restricted,
+        };
+        let mut field = restricted();
+        patch_field(&mut field, &Some(Err(Validity::Missing)));
+        assert_eq!(field.validity, Validity::Missing);
+        let mut field = restricted();
+        patch_field(&mut field, &Some(Ok(Arc::from("/"))));
+        assert_eq!((&*field.value, field.validity), ("/", Validity::Valid));
+        let mut field = valid(Arc::<str>::from("/home"));
+        patch_field(&mut field, &Some(Err(Validity::Failed)));
+        assert_eq!((&*field.value, field.validity), ("/home", Validity::Valid));
+    }
+
+    /// qfx.18 review: `IdentityChanged` and `NoSuchProcess` drop the PSS entry as for a gone
+    /// process; ENOENT is Missing, EFBIG Failed with "too large", EACCES stays Restricted.
+    #[test]
+    fn pss_from_helper_errors() {
+        let files = ProcFiles::SMAPS_ROLLUP;
+        let pss = |replies: Vec<HelperReply>, too_large: &mut bool| {
+            pss_from_helper(files, Ok(replies), too_large)
+        };
+        let mut too_large = false;
+        for e in [HelperError::IdentityChanged, HelperError::NoSuchProcess] {
+            let out = pss(vec![reply(HelperReplyBody::Err(e))], &mut too_large);
+            assert!(matches!(out, Some(HelperPss::Gone)));
+        }
+        assert!(matches!(
+            pss(vec![os(2)], &mut too_large),
+            Some(HelperPss::Invalid(Validity::Missing))
+        ));
+        assert!(matches!(
+            pss(vec![os(3)], &mut too_large),
+            Some(HelperPss::Invalid(Validity::Missing))
+        ));
+        assert!(pss(vec![os(13)], &mut too_large).is_none());
+        assert!(!too_large);
+        assert!(matches!(
+            pss(vec![os(27)], &mut too_large),
+            Some(HelperPss::Invalid(Validity::Failed))
+        ));
+        assert!(too_large);
+        let mut too_large = false;
+        let out = pss(vec![file(files, ROLLUP)], &mut too_large);
+        assert!(matches!(out, Some(HelperPss::Ok(r)) if r.pss > 0));
+        let not_running = pss_from_helper(files, Err(HelperReadError::NotRunning), &mut too_large);
+        assert!(not_running.is_none(), "stays Restricted");
+    }
+
+    /// qfx.18 review: a queued read is sent only while its slot is demanded.
+    #[test]
+    fn wanted_slots_follow_the_demand() {
+        let k = key(4201, START_TICKS);
+        let other = key(4202, START_TICKS);
+        let wanted = Wanted {
+            details: Arc::from([DetailDemand {
+                target: DetailTarget::Process(k),
+                tab: DetailTab::Maps,
+            }]),
+            pss: Arc::from([other]),
+        };
+        assert!(wanted.contains(HelperSlot::Tab(k, DetailTab::Maps)));
+        assert!(wanted.contains(HelperSlot::Tab(k, DetailTab::General)));
+        assert!(!wanted.contains(HelperSlot::Tab(k, DetailTab::Environment)));
+        assert!(!wanted.contains(HelperSlot::Tab(other, DetailTab::General)));
+        assert!(wanted.contains(HelperSlot::Pss(other)));
+        assert!(!wanted.contains(HelperSlot::Pss(k)));
     }
 }

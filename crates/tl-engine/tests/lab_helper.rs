@@ -2295,12 +2295,12 @@ mod detail_helper {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
     use asupersync::Cx;
     use asupersync::channel::{mpsc, watch};
-    use asupersync::runtime::TaskHandle;
+    use asupersync::runtime::{BlockingPool, TaskHandle};
     use asupersync::time::{TimeSource, VirtualClock};
     use tl_collect::SysRoot;
     use tl_engine::config::{EngineConfig, EngineMode};
@@ -2460,6 +2460,14 @@ mod detail_helper {
         reads: Vec<(u64, ProcessKey, ProcFiles)>,
         /// Every `ScanStrings` and `CancelScan`, in order.
         scans: Vec<HelperRequest>,
+        /// The frame `seq` of each `ScanStrings`.
+        scan_seqs: Vec<u32>,
+        /// With `hold_scan`, a scan sends its first batch and keeps the rest here until
+        /// `released`. Only a rig with a blocking pool may hold: the call then waits on its own
+        /// thread.
+        hold_scan: bool,
+        held: Vec<HelperReply>,
+        released: bool,
         /// Files answered with this errno instead of their data.
         errors: Vec<(ProcFiles, i32)>,
         pending: VecDeque<HelperReply>,
@@ -2467,16 +2475,25 @@ mod detail_helper {
         closed: bool,
     }
 
-    type Shared = Arc<Mutex<DetailState>>;
+    /// The fake's state, and the condvar a held scan waits on.
+    type Shared = Arc<(Mutex<DetailState>, Condvar)>;
 
     fn lock(state: &Shared) -> std::sync::MutexGuard<'_, DetailState> {
         state
+            .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Lets a held scan send the rest of its replies.
+    fn release(state: &Shared) {
+        lock(state).released = true;
+        state.1.notify_all();
+    }
+
     /// Answers like E29-004: one `File` body per requested file in bit order, or `Err(Os(_))`.
-    /// A scan sends two batches, the second one final.
+    /// A scan sends two batches, the second one final, or with `hold_scan` the first batch, then
+    /// after `release` the second and an empty final one.
     struct DetailLink(Shared);
 
     fn file_data(file: ProcFiles) -> Option<Vec<u8>> {
@@ -2515,6 +2532,21 @@ mod detail_helper {
                 }
                 req @ HelperRequest::ScanStrings { .. } => {
                     s.scans.push(req.clone());
+                    s.scan_seqs.push(frame.seq);
+                    if s.hold_scan {
+                        let reply = |last, body| HelperReply {
+                            seq: frame.seq,
+                            last,
+                            body,
+                        };
+                        let first = reply(false, batch(0x1000, "first"));
+                        s.held = vec![
+                            reply(false, batch(0x2000, "second")),
+                            reply(true, HelperReplyBody::Strings(Vec::new())),
+                        ];
+                        s.pending.push_back(first);
+                        return Ok(());
+                    }
                     bodies.push(batch(0x1000, "first"));
                     bodies.push(batch(0x2000, "second"));
                 }
@@ -2536,7 +2568,30 @@ mod detail_helper {
         }
 
         fn recv(&mut self, _timeout: Duration) -> Result<HelperReply, LinkError> {
-            lock(&self.0).pending.pop_front().ok_or(LinkError::Timeout)
+            let mut s = lock(&self.0);
+            loop {
+                if let Some(reply) = s.pending.pop_front() {
+                    return Ok(reply);
+                }
+                if s.held.is_empty() {
+                    return Err(LinkError::Timeout);
+                }
+                if s.released {
+                    let held = std::mem::take(&mut s.held);
+                    s.pending.extend(held);
+                    continue;
+                }
+                // Real time: this runs on a blocking pool thread while the lab goes on.
+                let (guard, wait) = self
+                    .0
+                    .1
+                    .wait_timeout(s, Duration::from_secs(10))
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                s = guard;
+                if wait.timed_out() {
+                    return Err(LinkError::Timeout);
+                }
+            }
         }
 
         fn exit_status(&mut self, _wait: Duration) -> Option<i32> {
@@ -2588,6 +2643,8 @@ mod detail_helper {
         tabs: Vec<TabOut>,
         pss: Vec<(u64, PssEntry)>,
         errors: Vec<Arc<str>>,
+        /// Set by `start_pooled`: helper calls run on this pool's threads, not inline.
+        _pool: Option<BlockingPool>,
     }
 
     impl Rig {
@@ -2603,7 +2660,35 @@ mod detail_helper {
             unlock: bool,
             errors: Vec<(ProcFiles, i32)>,
         ) -> Rig {
+            Rig::start_full(root, demand, interval_ms, unlock, errors, None)
+        }
+
+        /// Helper calls run on a blocking pool thread, so a held scan waits there while the
+        /// worker goes on, and the fake holds every scan after its first batch.
+        fn start_pooled(root: &Root, demand: Demand) -> Rig {
+            Rig::start_full(
+                root,
+                demand,
+                1000,
+                true,
+                Vec::new(),
+                Some(BlockingPool::new(1, 2)),
+            )
+        }
+
+        fn start_full(
+            root: &Root,
+            demand: Demand,
+            interval_ms: u32,
+            unlock: bool,
+            errors: Vec<(ProcFiles, i32)>,
+            pool: Option<BlockingPool>,
+        ) -> Rig {
             let mut fl = FakeLab::new();
+            if let Some(pool) = &pool {
+                // Before any task exists: each `Cx` keeps the pool it was made with.
+                fl.lab.state.set_blocking_pool(pool.handle());
+            }
             CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&fl.clock)));
             let (updates, rx) = mpsc::channel::<EngineMsg>(4096);
             let (demand_tx, _) = watch::channel(demand);
@@ -2614,6 +2699,7 @@ mod detail_helper {
             let (control, _) = watch::channel(WorkerControl::default());
             let fake = Shared::default();
             lock(&fake).errors = errors;
+            lock(&fake).hold_scan = pool.is_some();
             let (helper, queue) = helper_queue();
             let mut rig_tasks = Vec::new();
             let (helper_updates, link_env) = (updates.clone(), env(&fake));
@@ -2634,6 +2720,7 @@ mod detail_helper {
                 tabs: Vec::new(),
                 pss: Vec::new(),
                 errors: Vec::new(),
+                _pool: pool,
             };
             if unlock {
                 rig.unlock();
@@ -2664,7 +2751,34 @@ mod detail_helper {
                 let cx = Cx::current().expect("task has a Cx");
                 handle.send(&cx, HelperMsg::Start).await.expect("queued");
             }));
+            // With a pool the start runs on its thread.
+            self.wait_real(5_000, |rig| rig.helper.state() == HelperState::Unlocked);
             assert_eq!(self.helper.state(), HelperState::Unlocked);
+        }
+
+        /// Runs the lab without moving the clock, in real time, until `done` or `limit_ms` pass:
+        /// work on a pool thread wakes lab tasks from there.
+        fn wait_real(&mut self, limit_ms: u32, done: impl Fn(&Rig) -> bool) {
+            for _ in 0..limit_ms {
+                if done(self) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+                self.fl.lab.run_until_idle();
+                self.collect();
+            }
+        }
+
+        /// Moves the clock in 50 ms steps, with up to 20 ms of real time after each for the pool
+        /// thread, until `done` or 5 s of virtual time pass.
+        fn run_until(&mut self, done: impl Fn(&Rig) -> bool) {
+            for _ in 0..100 {
+                if done(self) {
+                    return;
+                }
+                self.run(Duration::from_millis(50));
+                self.wait_real(20, &done);
+            }
         }
 
         /// Forwards `command` to the worker, as the reducer does. The worker takes the commands
@@ -2905,18 +3019,15 @@ mod detail_helper {
         (state.scan, state.phase.clone(), hits)
     }
 
-    /// AC 5: a scan Yama refuses runs as a helper `ScanStrings`; `CancelStringScan` ends it
-    /// `Cancelled`. The lab runs the helper call inline, so the fake's stream has ended before
-    /// the cancel can reach it: `read_stream_drop_sends_cancel_scan` checks the `CancelScan`
-    /// that dropping the stream sends.
+    /// A scan Yama refuses runs as a helper `ScanStrings` to its end.
     #[test]
-    fn strings_through_helper_cancel() {
+    fn strings_through_helper_finished() {
         let root = Root::new();
         root.ptrace_scope_2();
         let mut rig = Rig::start(&root, demand(&[DetailTab::Strings]), 1000, true);
         let opts = StringScanOpts::default();
 
-        // A whole scan through the helper. Commands wait for the next sample, at 1000 ms.
+        // Commands wait for the next sample, at 1000 ms.
         rig.command(WorkerCommand::StringScan {
             scan: ScanId(1),
             key: key(),
@@ -2934,40 +3045,126 @@ mod detail_helper {
             )
         );
         assert!(strings.iter().all(|t| t.validity == Validity::Valid));
+        let scans = lock(&rig.fake).scans.clone();
+        assert_eq!(scans, [HelperRequest::ScanStrings { key: key(), opts }]);
+        assert!(rig.reads().is_empty());
+        rig.finish();
+    }
 
-        // A second scan, cancelled at the sample after its first payload, while the sample side
-        // has not seen its end yet.
+    /// AC 5: a scan Yama refuses runs as a helper `ScanStrings`. `CancelStringScan` after the
+    /// first batch, while the helper still scans, sends `CancelScan` with the scan frame's `seq`
+    /// and ends the scan `Cancelled`. The helper call runs on a pool thread and the fake holds
+    /// the rest of the scan until the cancel is in.
+    #[test]
+    fn strings_through_helper_cancel() {
+        let root = Root::new();
+        root.ptrace_scope_2();
+        let mut rig = Rig::start_pooled(&root, demand(&[DetailTab::Strings]));
+        let opts = StringScanOpts::default();
         rig.command(WorkerCommand::StringScan {
-            scan: ScanId(2),
+            scan: ScanId(1),
             key: key(),
             opts,
         });
-        let is_second = |t: &TabOut| t.tab == DetailTab::Strings && scan_state(t).0 == ScanId(2);
-        for _ in 0..40 {
-            if rig.tabs.iter().any(is_second) {
-                break;
-            }
-            rig.run(Duration::from_millis(50));
-        }
-        let first = rig
-            .tabs
-            .iter()
-            .find(|t| is_second(t))
-            .expect("scan 2 started");
-        assert_eq!(scan_state(first).1, ScanPhase::Scanning);
-        rig.command(WorkerCommand::CancelStringScan(ScanId(2)));
-        rig.run(Duration::from_millis(1_500));
+        let first_batch = |rig: &Rig| {
+            rig.tab(DetailTab::Strings).iter().any(|t| {
+                let (scan, phase, hits) = scan_state(t);
+                scan == ScanId(1) && phase == ScanPhase::Scanning && hits == ["first"]
+            })
+        };
+        rig.run_until(first_batch);
+        assert!(first_batch(&rig), "the first batch is shown");
+        assert_eq!(lock(&rig.fake).held.len(), 2, "the helper still scans");
+
+        rig.command(WorkerCommand::CancelStringScan(ScanId(1)));
+        let cancelled = |rig: &Rig| {
+            rig.tab(DetailTab::Strings)
+                .last()
+                .is_some_and(|t| scan_state(t).1 == ScanPhase::Cancelled)
+        };
+        rig.run_until(cancelled);
+        assert!(cancelled(&rig), "the scan ends Cancelled");
+
+        // The helper sends its next batch: it finds the stream dropped and cancels.
+        release(&rig.fake);
+        rig.wait_real(5_000, |rig| lock(&rig.fake).scans.len() == 2);
+        rig.run_until(|rig| lock(&rig.fake).pending.is_empty());
+        rig.run(Duration::from_millis(500));
+        let (scans, seqs) = {
+            let fake = lock(&rig.fake);
+            (fake.scans.clone(), fake.scan_seqs.clone())
+        };
+        assert_eq!(
+            scans,
+            [
+                HelperRequest::ScanStrings { key: key(), opts },
+                HelperRequest::CancelScan { seq: seqs[0] },
+            ]
+        );
+        assert_eq!(
+            rig.helper.state(),
+            HelperState::Unlocked,
+            "the session stays"
+        );
         let strings = rig.tab(DetailTab::Strings);
         let last = strings.last().expect("a Strings payload");
-        assert_eq!(scan_state(last).0, ScanId(2));
         assert_eq!(scan_state(last).1, ScanPhase::Cancelled);
-        let after = strings.iter().filter(|t| t.ms > last.ms).count();
-        assert_eq!(after, 0, "nothing after Cancelled");
-
-        let scans = lock(&rig.fake).scans.clone();
-        let want = HelperRequest::ScanStrings { key: key(), opts };
-        assert_eq!(scans, [want.clone(), want]);
+        assert!(
+            strings
+                .iter()
+                .all(|t| !scan_state(t).2.contains(&"second".to_string())),
+            "no batch after the cancel is shown"
+        );
         assert!(rig.reads().is_empty());
+        rig.finish();
+    }
+
+    /// qfx.18 review, security: a read queued behind a running helper scan for a tab that then
+    /// closes is never sent.
+    #[test]
+    fn detail_closed_tab_read_not_sent() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.ptrace_scope_2();
+        root.restrict("environ");
+        let mut rig = Rig::start_pooled(&root, demand(&[DetailTab::Strings]));
+        rig.command(WorkerCommand::StringScan {
+            scan: ScanId(1),
+            key: key(),
+            opts: StringScanOpts::default(),
+        });
+        rig.run_until(|rig| {
+            let fake = lock(&rig.fake);
+            fake.held.len() == 2 && fake.pending.is_empty()
+        });
+        assert_eq!(lock(&rig.fake).scans.len(), 1, "the helper scans");
+
+        // The Environment tab opens: its Restricted read waits behind the scan, so no payload
+        // goes out. Then the tab closes.
+        rig._demand
+            .send(demand(&[DetailTab::Strings, DetailTab::Environment]))
+            .expect("watch has receivers");
+        rig.run(Duration::from_millis(1_000));
+        assert!(rig.tab(DetailTab::Environment).is_empty(), "the read waits");
+        rig._demand
+            .send(demand(&[DetailTab::Strings]))
+            .expect("watch has receivers");
+        rig.run(Duration::from_millis(1_000));
+
+        release(&rig.fake);
+        let finished = |rig: &Rig| {
+            rig.tab(DetailTab::Strings)
+                .last()
+                .is_some_and(|t| scan_state(t).1 == ScanPhase::Finished)
+        };
+        rig.run_until(finished);
+        assert!(finished(&rig), "the scan ends");
+        // A read sent now would run on the pool thread: give it time to show.
+        rig.run(Duration::from_millis(1_000));
+        rig.wait_real(200, |rig| !rig.reads().is_empty());
+        assert!(rig.reads().is_empty(), "{:?}", rig.reads());
         rig.finish();
     }
 
