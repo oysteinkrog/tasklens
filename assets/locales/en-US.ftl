@@ -114,6 +114,7 @@ pwn-fds-drm-client = DRM client:
 pwn-fds-drm-driver = DRM driver:
 pwn-fds-menu-copy = Copy
 pwn-fds-menu-open-location = Open file location
+pwn-fds-menu-go-to-connection = Go to connection
 pwn-fds-toast-copied = Copied to clipboard
 pwn-fds-toast-opening = Opening file location
 pwn-fds-toast-open-failed = Could not open file location.

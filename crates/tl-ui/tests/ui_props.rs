@@ -3280,7 +3280,11 @@ mod window {
         let shown: Vec<(&str, bool)> = items.iter().map(|(l, e)| (&**l, *e)).collect();
         assert_eq!(
             shown,
-            [("Copy", true), ("Open file location", false)],
+            [
+                ("Copy", true),
+                ("Open file location", false),
+                ("Go to connection", false)
+            ],
             "pipe row"
         );
         rig.vcx.update(tl_ui::components::menu::close_context_menu);
@@ -3291,7 +3295,11 @@ mod window {
         let shown: Vec<(&str, bool)> = items.iter().map(|(l, e)| (&**l, *e)).collect();
         assert_eq!(
             shown,
-            [("Copy", true), ("Open file location", true)],
+            [
+                ("Copy", true),
+                ("Open file location", true),
+                ("Go to connection", false)
+            ],
             "file row"
         );
         // The first "down" highlights Copy.
@@ -3314,6 +3322,86 @@ mod window {
                 if &**path == "/home/u/notes.txt"
         ));
         assert_eq!(props_toasts(cx, rig.handle), ["Opening file location"]);
+    }
+
+    fn socket_rows() -> Vec<FdRow> {
+        let mut tcp = fd(9, FdKind::Tcp, "TCP 10.0.0.2:443", Some(0o2), None);
+        tcp.socket_inode = Some(1_234_567);
+        let mut fds = fd_rows();
+        fds.push(tcp);
+        fds
+    }
+
+    fn socket_rig(cx: &mut TestAppContext) -> FdsRig {
+        let (engine, main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let (handle, view, vcx, tab) =
+            fds_window(cx, &engine, 4321, socket_rows(), Validity::Valid);
+        FdsRig {
+            engine,
+            _main: main,
+            handle,
+            view,
+            vcx,
+            tab,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn fds_go_to_connection_enabled_only_for_sockets(cx: &mut TestAppContext) {
+        use tl_ui::pages::connections::actions::GoToConnection;
+        let mut rig = socket_rig(cx);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            cx.on_action(move |a: &GoToConnection, _| sink.borrow_mut().push(a.clone()));
+        });
+
+        select_fds(&mut rig, &[3]);
+        let items = fds_menu(&mut rig);
+        let shown: Vec<(&str, bool)> = items.iter().map(|(l, e)| (&**l, *e)).collect();
+        assert_eq!(
+            shown,
+            [
+                ("Copy", true),
+                ("Open file location", true),
+                ("Go to connection", false)
+            ],
+            "file row"
+        );
+        rig.vcx.update(tl_ui::components::menu::close_context_menu);
+        draw(&mut rig.vcx);
+
+        select_fds(&mut rig, &[9]);
+        let items = fds_menu(&mut rig);
+        let shown: Vec<(&str, bool)> = items.iter().map(|(l, e)| (&**l, *e)).collect();
+        assert_eq!(
+            shown,
+            [
+                ("Copy", true),
+                ("Open file location", false),
+                ("Go to connection", true)
+            ],
+            "TCP row"
+        );
+        // The first "down" highlights Copy; Open file location is disabled.
+        rig.vcx.simulate_keystrokes("down down enter");
+        draw(&mut rig.vcx);
+        assert_eq!(*seen.borrow(), [GoToConnection { inode: 1_234_567 }]);
+    }
+
+    #[gpui_kit::test]
+    fn fds_go_to_connection_not_found_toast(cx: &mut TestAppContext) {
+        let mut rig = socket_rig(cx);
+        select_fds(&mut rig, &[9]);
+        fds_menu(&mut rig);
+        rig.vcx.simulate_keystrokes("down down enter");
+        draw(&mut rig.vcx);
+        rig.vcx.run_until_parked();
+        assert_eq!(
+            main_toasts(&mut rig._main),
+            ["Connection not found in current view"]
+        );
     }
 
     #[gpui_kit::test]

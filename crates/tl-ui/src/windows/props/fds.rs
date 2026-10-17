@@ -42,6 +42,7 @@ use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
 use crate::i18n::{Strings, tr};
+use crate::pages::connections::actions::GoToConnection;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
@@ -54,8 +55,12 @@ use crate::table::tree_table::{
 };
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
+use crate::window::main::ShellState;
 
-gpui_kit::actions!(tasklens_fds, [FdsCopyCell, FdsOpenFileLocation]);
+gpui_kit::actions!(
+    tasklens_fds,
+    [FdsCopyCell, FdsOpenFileLocation, FdsGoToConnection]
+);
 
 /// Details pane heights at 100% scale: the default and the minimum. The maximum is half the
 /// tab body.
@@ -174,6 +179,7 @@ pub struct FdWords {
     pub right: [SharedString; 5],
     pub copy: SharedString,
     pub open_location: SharedString,
+    pub go_to_connection: SharedString,
     pub copied: SharedString,
     pub opening: SharedString,
     pub open_failed: SharedString,
@@ -209,6 +215,7 @@ impl FdWords {
             .map(t),
             copy: t("pwn-fds-menu-copy"),
             open_location: t("pwn-fds-menu-open-location"),
+            go_to_connection: t("pwn-fds-menu-go-to-connection"),
             copied: t("pwn-fds-toast-copied"),
             opening: t("pwn-fds-toast-opening"),
             open_failed: t("pwn-fds-toast-open-failed"),
@@ -324,6 +331,13 @@ fn compare(a: &FdRow, b: &FdRow, col: FdColumn) -> Ordering {
         FdColumn::Position => a.pos.cmp(&b.pos),
     };
     by.then(a.fd.cmp(&b.fd))
+}
+
+/// The socket inode "Go to connection" jumps to: `TCP`, `UDP` and `unix` rows only.
+fn socket_inode_of(r: &FdRow) -> Option<u64> {
+    matches!(r.kind, FdKind::Tcp | FdKind::Udp | FdKind::Unix)
+        .then(|| r.socket_inode.or(r.inode))
+        .flatten()
 }
 
 /// Whether the row has a file location to open.
@@ -606,8 +620,9 @@ impl TreeTableDelegate for FdsDelegate {
         true
     }
 
-    /// Copy and Open file location (enabled for `file` and `directory` rows). Everything is
-    /// disabled once the process exited.
+    /// Copy, Open file location (enabled for `file` and `directory` rows) and Go to connection
+    /// (enabled for `TCP`, `UDP` and `unix` rows). Everything is disabled once the process
+    /// exited.
     fn context_menu(
         &mut self,
         targets: &[i32],
@@ -623,17 +638,29 @@ impl TreeTableDelegate for FdsDelegate {
         if self.exited {
             return menu
                 .item_disabled(w.copy.clone(), None)
-                .item_disabled(w.open_location.clone(), None);
+                .item_disabled(w.open_location.clone(), None)
+                .item_disabled(w.go_to_connection.clone(), None);
         }
         let menu = menu.item(w.copy.clone(), Box::new(FdsCopyCell));
         let one_file = match targets {
             [fd] => self.row_of(*fd).is_some_and(has_location),
             _ => false,
         };
-        if one_file {
+        let menu = if one_file {
             menu.item(w.open_location.clone(), Box::new(FdsOpenFileLocation))
         } else {
             menu.item_disabled(w.open_location.clone(), None)
+        };
+        let one_socket = match targets {
+            [fd] => self
+                .row_of(*fd)
+                .is_some_and(|r| socket_inode_of(r).is_some()),
+            _ => false,
+        };
+        if one_socket {
+            menu.item(w.go_to_connection.clone(), Box::new(FdsGoToConnection))
+        } else {
+            menu.item_disabled(w.go_to_connection.clone(), None)
         }
     }
 
@@ -1180,6 +1207,37 @@ impl FdsTab {
             toast(window, cx, ToastKind::Info, self.words.opening.clone());
         }
     }
+
+    /// Go to connection (UI-PWN-012): dispatches `GoToConnection` for the focus row's socket on
+    /// the main window and brings it to the front.
+    fn on_go_to_connection(
+        &mut self,
+        _: &FdsGoToConnection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.exited {
+            return;
+        }
+        let inode = {
+            let t = self.table.read(cx);
+            t.selection
+                .focus()
+                .and_then(|fd| t.delegate.row_of(fd))
+                .and_then(socket_inode_of)
+        };
+        let Some(inode) = inode else {
+            return;
+        };
+        let Some(main) = cx.try_global::<ShellState>().and_then(|s| s.main_window) else {
+            warn!(target: "tasklens::ui", "no main window for Go to connection");
+            return;
+        };
+        let _ = main.update(cx, |_, window, cx| {
+            window.activate_window();
+            window.dispatch_action(Box::new(GoToConnection { inode }), cx);
+        });
+    }
 }
 
 impl Render for FdsTab {
@@ -1192,6 +1250,7 @@ impl Render for FdsTab {
             .on_action(cx.listener(Self::on_copy_row))
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_open_location))
+            .on_action(cx.listener(Self::on_go_to_connection))
             .child(
                 v_resizable("fds-split")
                     .with_state(&self.split)
