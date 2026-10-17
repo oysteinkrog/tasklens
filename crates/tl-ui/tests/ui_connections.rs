@@ -1393,8 +1393,8 @@ mod page {
             let mut record = super::super::connection(cookie, SmallVec::new());
             record.state = ConnState::Listening;
             record.four_tuple = FourTuple {
-                local: addr.parse().unwrap(),
-                remote: "0.0.0.0:0".parse().unwrap(),
+                local: addr.parse().expect("a socket address"),
+                remote: "0.0.0.0:0".parse().expect("a socket address"),
             };
             record.local = Arc::from(addr);
             record.foreign = Arc::from("*:*");
@@ -1403,14 +1403,15 @@ mod page {
 
         fn established(cookie: u64, local: &str) -> ConnRecord {
             let mut record = super::super::connection(cookie, SmallVec::new());
-            record.four_tuple.local = local.parse().unwrap();
+            record.four_tuple.local = local.parse().expect("a socket address");
             record.local = Arc::from(local);
             record
         }
 
         impl Rig {
             fn set_helper(&mut self, helper: HelperState) {
-                self.engine.publish_with(|s| s.health.helper = helper);
+                self.engine
+                    .publish_with(|s| Arc::make_mut(&mut s.health).helper = helper);
                 self.vcx.run_until_parked();
                 self.draw();
             }
@@ -1808,6 +1809,7 @@ fn connections_page_registered(cx: &mut TestAppContext) {
 }
 
 /// Jump to process and Go to service from the Connections tab (tasklens-9o0.18).
+#[cfg(feature = "test-hooks")]
 mod jump {
 
     use super::*;
@@ -2263,6 +2265,7 @@ mod jump {
 }
 
 /// The Connection Properties window (tasklens-9o0.19).
+#[cfg(feature = "test-hooks")]
 mod props {
     use super::*;
     use gpui_kit::base::Root;
