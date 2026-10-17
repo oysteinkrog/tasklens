@@ -922,3 +922,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-16 leader decision: o55.28 option A; engine part in tasklens-hjn.44 (all UPower devices, real kind, signed BATTERY_POWER).
 - 2026-10-16 leader decision: o55.30 option A; Battery copy_text and its update_page arm move to o55.28; o55.30 adds the Fan and aggregate arms.
 - 2026-10-17 leader decision: hk6.29 Q1 B (one journal handle per window, follow off while the tab is hidden); Q2 A in tasklens-y6k.30 (Load older takes the UI's oldest cursor).
+- 2026-10-17 leader decision: pdu.36 and pdu.40 use WindowEntry.stack_index from tasklens-y6k.31 for the app row's most recent window.
