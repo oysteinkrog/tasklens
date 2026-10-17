@@ -1099,11 +1099,12 @@ mod dialog_enter {
     use std::rc::Rc;
 
     use gpui_kit::base::Root;
+    use gpui_kit::base::test_support::snapshots;
     use gpui_kit::component::input::InputState;
     use gpui_kit::{
-        AnyWindowHandle, Context, Entity, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
-        ParentElement as _, Render, Styled as _, TestAppContext, VisualContext as _,
-        VisualTestContext, Window, WindowHandle, div,
+        AnyWindowHandle, Context, Entity, Focusable as _, IntoElement, KeyDownEvent, KeyUpEvent,
+        Keystroke, Modifiers, ParentElement as _, Render, Styled as _, TestAppContext,
+        VisualContext as _, VisualTestContext, Window, WindowHandle, div,
     };
     use tl_ui::components::dialog::{DialogButton, DialogResult, TlDialog, TlDialogView};
     use tl_ui::components::input::TlTextInput;
@@ -1299,6 +1300,197 @@ mod dialog_enter {
             "Cancel once"
         );
         assert!(!is_open(cx, o.handle));
+    }
+
+    // Text-input mode (tasklens-o55.41).
+
+    fn rename_fan() -> TlDialog {
+        TlDialog::confirm("Name for this fan:", "Rename")
+            .title("Rename fan")
+            .text_input("Fan 1", "Fan name")
+    }
+
+    fn field(o: &Opened) -> Entity<InputState> {
+        o.vcx
+            .read(|cx| o.view.read(cx).dialog().input_state().cloned())
+            .expect("the dialog has a field")
+    }
+
+    /// The accessible name drawn inside the dialog's field.
+    fn field_name(o: &mut Opened) -> Option<String> {
+        let field = o
+            .vcx
+            .debug_bounds("TlTextInput-TlDialogInput")
+            .expect("field drawn");
+        o.vcx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .filter(|s| field.contains(&s.bounds().center()))
+                .find_map(|s| s.label().map(str::to_owned))
+        })
+    }
+
+    #[gpui_kit::test]
+    fn text_input_starts_focused_with_text_selected(cx: &mut TestAppContext) {
+        let mut o = open(cx, rename_fan());
+        let state = field(&o);
+        assert_eq!(focused(&mut o), None, "no footer button has focus");
+        let (in_field, selected) = o.vcx.update(|window, cx| {
+            let s = state.read(cx);
+            (
+                s.focus_handle(cx).is_focused(window),
+                s.selected_text().to_string(),
+            )
+        });
+        assert!(in_field, "focus starts in the field");
+        assert_eq!(selected, "Fan 1", "the initial text is selected");
+        assert_eq!(field_name(&mut o).as_deref(), Some("Rename fan"));
+
+        let mut o = open(cx, rename_fan().input_label("Fan name"));
+        assert_eq!(field_name(&mut o).as_deref(), Some("Fan name"));
+    }
+
+    #[gpui_kit::test]
+    fn text_input_enter_returns_typed_text(cx: &mut TestAppContext) {
+        let mut o = open(cx, rename_fan());
+        // Typing replaces the selected initial text.
+        o.vcx.simulate_input("Front intake");
+        draw(&mut o.vcx);
+        press_enter(&mut o.vcx);
+        assert_eq!(
+            *o.results.borrow(),
+            [DialogResult::ConfirmedText("Front intake".into())],
+            "Enter in the field confirms once with its text"
+        );
+        assert!(!is_open(cx, o.handle));
+    }
+
+    #[gpui_kit::test]
+    fn text_input_enter_confirms_in_destructive_dialog(cx: &mut TestAppContext) {
+        let mut o = open(cx, rename_fan().destructive());
+        press_enter(&mut o.vcx);
+        assert_eq!(
+            *o.results.borrow(),
+            [DialogResult::ConfirmedText("Fan 1".into())]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn text_input_escape_cancels(cx: &mut TestAppContext) {
+        let mut o = open(cx, rename_fan());
+        o.vcx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(*o.results.borrow(), [DialogResult::Cancelled]);
+        assert!(!is_open(cx, o.handle), "Esc closes the window");
+    }
+
+    #[gpui_kit::test]
+    fn text_input_action_button_returns_text(cx: &mut TestAppContext) {
+        let mut o = open(cx, rename_fan());
+        // Backspace deletes the selected initial text.
+        o.vcx.simulate_keystrokes("backspace");
+        draw(&mut o.vcx);
+        let action = o.vcx.debug_bounds("TlDialogAction").expect("Rename");
+        o.vcx.simulate_click(action.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            *o.results.borrow(),
+            [DialogResult::ConfirmedText(String::new())],
+            "an emptied field confirms with empty text"
+        );
+    }
+}
+
+/// TlMenu value slot (tasklens-o55.41).
+mod menu_value {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui_kit::base::test_support::snapshots;
+    use gpui_kit::{
+        Context, FocusHandle, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _,
+        Render, Role, Styled as _, TestAppContext, Window, div, point, px,
+    };
+    use tl_ui::components::menu::{TlMenu, context_menu_layer, open_context_menu_at};
+
+    use super::{draw, setup};
+
+    gpui_kit::actions!(tl_menu_value_test, [PickSensor, PickNone]);
+
+    struct Host {
+        focus: FocusHandle,
+        ran: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let ran = self.ran.clone();
+            let ran_none = self.ran.clone();
+            div()
+                .size(px(800.))
+                .track_focus(&self.focus)
+                .on_action(move |_: &PickSensor, _, _| ran.borrow_mut().push("sensor"))
+                .on_action(move |_: &PickNone, _, _| ran_none.borrow_mut().push("none"))
+                .children(context_menu_layer(window, cx))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn value_is_drawn_right_and_named(cx: &mut TestAppContext) {
+        cx.update(setup);
+        let (view, cx) = cx.add_window_view(|_, cx| Host {
+            focus: cx.focus_handle(),
+            ran: Rc::default(),
+        });
+        cx.update(|window, _| window.activate_window());
+        draw(cx);
+        let focus = cx.update(|_, cx| view.read(cx).focus.clone());
+        cx.update(|window, cx| {
+            focus.focus(window, cx);
+            let menu = TlMenu::build(window, cx, focus, |menu, _, _| {
+                menu.radio_item("nct6797 CPUTIN", true, Box::new(PickSensor))
+                    .value("48 °C")
+                    .radio_item("None", false, Box::new(PickNone))
+            });
+            open_context_menu_at(point(px(20.), px(20.)), window, cx, menu);
+        });
+        cx.run_until_parked();
+        draw(cx);
+
+        let items: Vec<_> = cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .filter(|s| s.role() == Some(Role::MenuItem))
+                .collect()
+        });
+        let names: Vec<_> = items.iter().filter_map(|s| s.label()).collect();
+        assert_eq!(
+            names,
+            ["nct6797 CPUTIN 48 °C", "None"],
+            "the value follows the label in the accessible name"
+        );
+        assert!(
+            cx.debug_bounds("TlMenuValue-1").is_none(),
+            "no value, no slot"
+        );
+
+        let row = items[0].bounds();
+        let value = cx.debug_bounds("TlMenuValue-0").expect("value drawn");
+        assert!(row.contains(&value.center()), "the value sits in its row");
+        assert!(
+            value.left() > row.center().x,
+            "the value is right-aligned: {value:?} in {row:?}"
+        );
+        assert!(
+            row.right() - value.right() <= px(12.),
+            "only the row padding is right of the value"
+        );
+
+        // The value does not change the action.
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let ran = cx.update(|_, cx| view.read(cx).ran.borrow().clone());
+        assert_eq!(ran, ["sensor"]);
     }
 }
 

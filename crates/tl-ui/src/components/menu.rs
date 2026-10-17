@@ -122,6 +122,8 @@ enum Entry {
         icon: Option<TlIcon>,
         /// The label and icon use `status.danger` ([`TlMenu::danger_item`]).
         danger: bool,
+        /// The text right of the label ([`TlMenu::value`]).
+        value: Option<SharedString>,
     },
     Disabled {
         label: SharedString,
@@ -344,6 +346,7 @@ impl TlMenu {
             swatch: None,
             icon: None,
             danger: false,
+            value: None,
         });
         self
     }
@@ -446,6 +449,16 @@ impl TlMenu {
         self
     }
 
+    /// A value such as "1,200 RPM" right-aligned after the label of the item added last, in
+    /// `text_secondary`. The accessible name is the label, a space and the value. The action and
+    /// the mark do not change. On other rows this does nothing.
+    pub fn value(mut self, text: impl Into<SharedString>) -> Self {
+        if let Some(Entry::Item { value, .. }) = self.entries.last_mut() {
+            *value = Some(text.into());
+        }
+        self
+    }
+
     /// The column stays reserved in a menu where nothing is checked yet.
     fn marked(mut self, label: SharedString, mark: Mark, action: Box<dyn Action>) -> Self {
         self.has_mark_column = true;
@@ -459,6 +472,7 @@ impl TlMenu {
             swatch: None,
             icon: None,
             danger: false,
+            value: None,
         });
         self
     }
@@ -643,6 +657,8 @@ pub struct MenuEntryInfo {
     pub icon: Option<TlIcon>,
     /// The label is drawn in `status.danger` ([`TlMenu::danger_item`]).
     pub danger: bool,
+    /// The text right of the label ([`TlMenu::value`]).
+    pub value: Option<SharedString>,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -771,6 +787,10 @@ impl TlMenuPopup {
                     Entry::Item { icon, danger, .. } => (*icon, *danger),
                     _ => (None, false),
                 };
+                let value = match e {
+                    Entry::Item { value, .. } => value.clone(),
+                    _ => None,
+                };
                 let painted = match e {
                     Entry::Painted { bg, fg, .. } => Some((*bg, *fg)),
                     _ => None,
@@ -847,6 +867,7 @@ impl TlMenuPopup {
                     swatch,
                     icon,
                     danger,
+                    value,
                 }
             })
             .collect()
@@ -1333,6 +1354,7 @@ impl TlMenuPopup {
                 swatch,
                 icon: item_icon,
                 danger,
+                value,
                 ..
             } => {
                 let hint =
@@ -1351,7 +1373,23 @@ impl TlMenuPopup {
                         *hint.text_style() = t_xs(m);
                         hint
                     });
-                let item = row(Some(label), cx);
+                // The value is part of the accessible name, as on a slider row.
+                let name = match value {
+                    Some(value) => SharedString::from(format!("{label} {value}")),
+                    None => label.clone(),
+                };
+                let value = value.clone().map(|value| {
+                    let mut text = div()
+                        .debug_selector(move || format!("TlMenuValue-{ix}"))
+                        .flex_none()
+                        .ml(m.sp[6])
+                        .whitespace_nowrap()
+                        .text_color(t.text_secondary)
+                        .child(value);
+                    *text.text_style() = t_base(m);
+                    text
+                });
+                let item = row(Some(&name), cx);
                 let text = match tooltip {
                     Some(tip) => menu_label(label.clone(), Some(tip.clone()), false, window, cx),
                     None => label_text(label).into_any_element(),
@@ -1378,6 +1416,7 @@ impl TlMenuPopup {
                     })
                     .when(*danger, |d| d.text_color(t.status.danger))
                     .child(text)
+                    .children(value)
                     .children(hint)
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)),

@@ -309,7 +309,9 @@ pub fn confirm(
         let done = done.clone();
         move |result: DialogResult, _: &mut gpui_kit::Window, cx: &mut App| {
             let result = match result {
-                DialogResult::Confirmed { .. } => ConfirmResult::Confirmed,
+                DialogResult::Confirmed { .. } | DialogResult::ConfirmedText(_) => {
+                    ConfirmResult::Confirmed
+                }
                 DialogResult::Second => ConfirmResult::Second,
                 DialogResult::Cancelled => ConfirmResult::Cancelled,
             };

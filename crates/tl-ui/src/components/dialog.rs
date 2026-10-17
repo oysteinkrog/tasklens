@@ -12,6 +12,10 @@
 //! in a text field or on the checkbox, Enter runs the button that has focus on open. Esc, Ctrl+W
 //! and the window's close button cancel. `on_result` runs exactly once, in the parent window.
 //!
+//! A text-input dialog ([`TlDialog::text_input`]) adds a `TlTextInput` under the text. Focus
+//! starts in the field with its text selected. Enter in the field confirms, also in a destructive
+//! dialog, and the result is [`DialogResult::ConfirmedText`] with the field's text.
+//!
 //! Enter runs once. The `TlDialog` binding handles Enter on a footer button and stops it, so the
 //! button's own key-up click never comes. A `TlButton` in the owner's lines gets the key and
 //! clicks itself; the binding does not run the default then.
@@ -24,16 +28,18 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::base::{Button as BaseButton, ElementExt as _};
+use gpui_kit::component::input::InputState;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, Context, ElementId, FocusHandle,
-    FontWeight, Global, Hsla, InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels,
-    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb, size,
+    AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, Context, ElementId, Entity,
+    FocusHandle, Focusable as _, FontWeight, Global, Hsla, InteractiveElement, IntoElement,
+    KeyBinding, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, size,
 };
 
 use super::checkbox::TlCheckbox;
 use super::focus::TlFocusRing;
 use super::icons::{TlIcon, icon};
+use super::input::TlTextInput;
 use super::window_frame::{CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -93,10 +99,13 @@ pub enum DialogIcon {
 }
 
 /// How a confirmation ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DialogResult {
     /// The action button ran. `checkbox` is the checkbox value, `false` without one.
     Confirmed { checkbox: bool },
+    /// The action button of a text-input dialog ran (see [`TlDialog::text_input`]): the text
+    /// in the field.
+    ConfirmedText(String),
     /// The second action button ran (see [`TlDialog::second_action`]).
     Second,
     /// Cancel, Esc, Ctrl+W or the window's close button.
@@ -150,6 +159,16 @@ impl DialogFocus {
     }
 }
 
+/// The text field of a text-input dialog.
+struct DialogInput {
+    initial: SharedString,
+    placeholder: SharedString,
+    /// The accessible name. Without it the window title is the name.
+    label: Option<SharedString>,
+    /// The field's state, made when the window opens.
+    state: Option<Entity<InputState>>,
+}
+
 type ExtraBuilder = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 type ResultHandler = Box<dyn FnOnce(DialogResult, &mut Window, &mut App)>;
 
@@ -168,6 +187,7 @@ pub struct TlDialog {
     /// False for a notice with only the action button (see [`TlDialog::without_cancel`]).
     cancel: bool,
     cancel_label: SharedString,
+    input: Option<DialogInput>,
 }
 
 impl TlDialog {
@@ -186,6 +206,7 @@ impl TlDialog {
             title: DEFAULT_TITLE.into(),
             cancel: true,
             cancel_label: CANCEL_LABEL.into(),
+            input: None,
         }
     }
 
@@ -233,6 +254,37 @@ impl TlDialog {
     pub fn checkbox(mut self, label: impl Into<SharedString>, initial: bool) -> Self {
         self.checkbox = Some((label.into(), initial));
         self
+    }
+
+    /// A text field under the text, holding `initial` with `placeholder` shown while it is
+    /// empty. Focus starts in the field with the text selected, Enter in the field confirms and
+    /// the action button ends the dialog with [`DialogResult::ConfirmedText`].
+    pub fn text_input(
+        mut self,
+        initial: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+    ) -> Self {
+        self.input = Some(DialogInput {
+            initial: initial.into(),
+            placeholder: placeholder.into(),
+            label: None,
+            state: None,
+        });
+        self
+    }
+
+    /// The accessible name of the text field. Default: the window title. Without
+    /// [`text_input`](Self::text_input) this does nothing.
+    pub fn input_label(mut self, label: impl Into<SharedString>) -> Self {
+        if let Some(input) = self.input.as_mut() {
+            input.label = Some(label.into());
+        }
+        self
+    }
+
+    /// The text field's state while the dialog is open, `None` without a field.
+    pub fn input_state(&self) -> Option<&Entity<InputState>> {
+        self.input.as_ref().and_then(|input| input.state.as_ref())
     }
 
     /// Drops the Cancel button, for a notice whose one button closes it (the action tracker's
@@ -294,11 +346,31 @@ impl TlDialog {
             size(px(WIDTH * s), px(MIN_HEIGHT * s)),
         )
         .parent(parent_handle);
+        let mut dialog = self;
         TlSecondaryWindow::open(cx, spec, move |window, cx| {
             let focus = DialogFocus::new(cx);
-            focus.initial(self.destructive).focus(window, cx);
+            match dialog.input.as_mut() {
+                Some(input) => {
+                    let state = cx.new(|cx| InputState::new(window, cx));
+                    let initial = input.initial.clone();
+                    state.update(cx, |s, cx| {
+                        s.set_value(initial, window, cx);
+                        s.select_all(window, cx);
+                        s.focus(window, cx);
+                    });
+                    input.state = Some(state);
+                }
+                None => focus.initial(dialog.destructive).focus(window, cx),
+            }
             cx.new(|cx| {
-                TlDialogView::new(self, focus, parent_handle, Box::new(on_result), window, cx)
+                TlDialogView::new(
+                    dialog,
+                    focus,
+                    parent_handle,
+                    Box::new(on_result),
+                    window,
+                    cx,
+                )
             })
         })?;
         // The frame cannot refresh the parent while the parent is being updated.
@@ -352,6 +424,14 @@ impl TlDialog {
             .text_ellipsis()
             .child(self.text.clone());
         let extra = self.extra.as_ref().map(|build| build(window, cx));
+        let input = self.input.as_ref().and_then(|input| {
+            let state = input.state.as_ref()?;
+            Some(
+                TlTextInput::new("TlDialogInput", state)
+                    .placeholder(input.placeholder.clone())
+                    .aria_label(input.label.clone().unwrap_or_else(|| self.title.clone())),
+            )
+        });
         let checkbox = self.checkbox.as_ref().map(|(label, _)| {
             TlCheckbox::new("TlDialogCheckbox")
                 .label(label.clone())
@@ -390,6 +470,7 @@ impl TlDialog {
                 window,
             )
         });
+        let input_state = self.input_state().cloned();
         let action = footer_button(
             "TlDialogAction",
             self.action_label.clone(),
@@ -400,7 +481,8 @@ impl TlDialog {
             },
             &focus.action,
             move |_, window, cx| {
-                on_result(DialogResult::Confirmed { checkbox: checked }, window, cx)
+                let result = confirmed(checked, input_state.as_ref(), cx);
+                on_result(result, window, cx)
             },
             &theme,
             &m,
@@ -431,6 +513,7 @@ impl TlDialog {
                             .children(heading)
                             .child(text)
                             .children(extra)
+                            .children(input)
                             .children(checkbox),
                     ),
             )
@@ -537,6 +620,14 @@ fn footer_button(
         TlFocusRing::ring(button, m.radius_small, theme).into_any_element()
     } else {
         button.into_any_element()
+    }
+}
+
+/// The result of the action button: the field's text in a text-input dialog.
+fn confirmed(checked: bool, input: Option<&Entity<InputState>>, cx: &App) -> DialogResult {
+    match input {
+        Some(state) => DialogResult::ConfirmedText(state.read(cx).text().to_string()),
+        None => DialogResult::Confirmed { checkbox: checked },
     }
 }
 
@@ -652,7 +743,20 @@ impl TlDialogView {
             cx.propagate();
             return;
         }
-        let result = enter_result(focused, self.dialog.destructive, self.checked);
+        // The kit field lets Enter go on to this binding. Enter in the dialog's own field
+        // confirms, also in a destructive dialog.
+        let input = self.dialog.input_state().cloned();
+        let in_field = input
+            .as_ref()
+            .is_some_and(|state| state.focus_handle(cx).is_focused(window));
+        let result = if in_field {
+            confirmed(self.checked, input.as_ref(), cx)
+        } else {
+            match enter_result(focused, self.dialog.destructive, self.checked) {
+                DialogResult::Confirmed { .. } => confirmed(self.checked, input.as_ref(), cx),
+                other => other,
+            }
+        };
         self.finish(result, window, cx);
     }
 
