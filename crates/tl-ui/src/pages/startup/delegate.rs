@@ -495,6 +495,11 @@ impl StartupDelegate {
         Arc::from(std::env::var("HOME").unwrap_or_default())
     }
 
+    /// `$HOME`, shown as `~` in the Location column.
+    pub fn home(&self) -> &Arc<str> {
+        &self.home
+    }
+
     pub fn words(&self) -> &StartupWords {
         &self.words
     }

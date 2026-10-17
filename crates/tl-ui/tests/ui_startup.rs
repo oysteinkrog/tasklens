@@ -1040,7 +1040,11 @@ mod page {
 
     use tl_model::actions::{ActionError, ActionEvent as FlowEvent, ActionId, ActionRequest};
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, RejectReason};
-    use tl_ui::pages::startup::actions::{StartupDisable, StartupEnable, StartupRunNow};
+    use tl_ui::pages::processes::actions::CopyDetails;
+    use tl_ui::pages::startup::actions::{
+        StartupCopyCommand, StartupDisable, StartupEnable, StartupOpenFileLocation, StartupRunNow,
+    };
+    use tl_ui::table::actions::CopyRowsAsTable;
 
     fn with_status(name: &str, status: StartupStatus) -> StartupEntry {
         let mut e = super::entry(name, StartupKind::AutostartUser);
@@ -1858,6 +1862,154 @@ mod page {
         let sent = rig.requests();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].targets.as_slice(), [startup_target("mine")]);
+    }
+    fn discord() -> StartupEntry {
+        let mut e = super::entry("Discord", StartupKind::AutostartUser);
+        e.publisher = Some(Arc::from("Discord Inc."));
+        e.impact = Impact::Medium;
+        e.command = Arc::from("/usr/bin/discord --start-minimized");
+        e.resolved_path = Some(Arc::from("/usr/bin/discord"));
+        e
+    }
+
+    impl Rig {
+        fn clipboard(&mut self) -> Option<String> {
+            self.vcx.read_from_clipboard().and_then(|item| item.text())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn startup_copy_block_golden(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![discord()], &[0]);
+        rig.dispatch(Box::new(CopyDetails));
+        let expected = include_str!("golden/startup_copy_block.txt").trim_end_matches('\n');
+        assert_eq!(rig.clipboard().as_deref(), Some(expected));
+        assert!(
+            rig.toast_texts().iter().any(|t| t == "Copied to clipboard"),
+            "{:?}",
+            rig.toast_texts()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_copy_multi_blank_line(cx: &mut TestAppContext) {
+        let mut second = discord();
+        second.id.id = Arc::from("Other.desktop");
+        second.name = Arc::from("Other");
+        second.publisher = None;
+        second.resolved_path = None;
+        let mut rig = flow_rig(cx, vec![discord(), second], &[0, 1]);
+        rig.dispatch(Box::new(CopyDetails));
+        let text = rig.clipboard().expect("copied");
+        let blocks: Vec<&str> = text.split("\n\n").collect();
+        assert_eq!(blocks.len(), 2, "{text}");
+        assert!(blocks[0].starts_with("Name: Discord\n"));
+        assert!(blocks[1].starts_with("Name: Other\nPublisher: \n"));
+        assert!(blocks[1].ends_with("Resolved path: Not found"));
+        assert!(!text.ends_with('\n'));
+    }
+
+    #[gpui_kit::test]
+    fn startup_copy_nothing_selected_toast(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![discord()], &[]);
+        rig.vcx
+            .write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()));
+        rig.dispatch(Box::new(CopyDetails));
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "Select a startup row first."),
+            "{:?}",
+            rig.toast_texts()
+        );
+        assert_eq!(rig.clipboard().as_deref(), Some("before"));
+    }
+
+    #[gpui_kit::test]
+    fn startup_copy_location_full_vs_tilde(cx: &mut TestAppContext) {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() {
+            return;
+        }
+        let mut entry = discord();
+        entry.location = Arc::from(format!("{home}/.config/autostart"));
+        let mut rig = flow_rig(cx, vec![entry], &[0]);
+        rig.dispatch(Box::new(CopyDetails));
+        let block = rig.clipboard().expect("copied");
+        assert!(
+            block.contains(&format!("\nLocation: {home}/.config/autostart\n")),
+            "{block}"
+        );
+        rig.dispatch(Box::new(CopyRowsAsTable));
+        let table = rig.clipboard().expect("copied");
+        let mut lines = table.lines();
+        let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+        let row: Vec<&str> = lines.next().expect("row").split('\t').collect();
+        let at = header
+            .iter()
+            .position(|h| *h == "Location")
+            .expect("column");
+        assert_eq!(row[at], "~/.config/autostart");
+    }
+
+    #[gpui_kit::test]
+    fn startup_copy_command_toast(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![discord()], &[0]);
+        rig.dispatch(Box::new(StartupCopyCommand));
+        assert_eq!(
+            rig.clipboard().as_deref(),
+            Some("/usr/bin/discord --start-minimized")
+        );
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "Startup command copied.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn open_location_missing_file_toast(cx: &mut TestAppContext) {
+        let mut entry = discord();
+        entry.file_exists = false;
+        let mut rig = flow_rig(cx, vec![entry], &[0]);
+        rig.dispatch(Box::new(StartupOpenFileLocation));
+        assert!(rig.requests().is_empty());
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "Startup file location unavailable.")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn open_location_failure_replaces_toast(cx: &mut TestAppContext) {
+        let mut rig = flow_rig(cx, vec![discord()], &[0]);
+        rig.dispatch(Box::new(StartupOpenFileLocation));
+        let sent = rig.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].kind,
+            ActionKind::ShowInFileManager {
+                path: Arc::from("/home/u/.config/autostart/app.desktop"),
+                properties: false,
+            }
+        );
+        assert!(sent[0].targets.is_empty());
+        assert!(
+            rig.toast_texts()
+                .iter()
+                .any(|t| t == "Opening file location")
+        );
+        rig.finish_action(
+            sent[0].id,
+            &[ActionState::Failed(ActionError::PermissionDenied)],
+        );
+        let toasts = rig.toast_texts();
+        assert!(
+            toasts.iter().any(|t| t == "Failed to open file location"),
+            "{toasts:?}"
+        );
+        assert!(!toasts.iter().any(|t| t == "Opening file location"));
     }
 }
 

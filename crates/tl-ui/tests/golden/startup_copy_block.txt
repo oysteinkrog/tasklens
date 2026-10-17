@@ -1,0 +1,8 @@
+Name: Discord
+Publisher: Discord Inc.
+Status: Enabled
+Startup impact: Medium
+Type: Autostart (user)
+Location: /home/u/.config/autostart
+Command: /usr/bin/discord --start-minimized
+Resolved path: /usr/bin/discord

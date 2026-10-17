@@ -1851,6 +1851,16 @@ startup-action-launch-failed = Failed to launch startup entry
 startup-action-unknown = Outcome unknown
 startup-action-busy = A startup action is already in progress.
 
+# Startup Apps copy commands and Open file location (tasklens-9o0.11, UI-SYS-006, UI-SYS-048).
+startup-copy-row-ok = Copied to clipboard
+startup-copy-failed = Failed to copy to clipboard
+startup-copy-nothing-selected = Select a startup row first.
+startup-copy-command-ok = Startup command copied.
+startup-copy-not-found = Not found
+startup-open-location-opening = Opening file location
+startup-open-location-failed = Failed to open file location
+startup-open-location-unavailable = Startup file location unavailable.
+
 # Connections page status and refresh toast (tasklens-9o0.15, UI-SYS-067).
 connections-status-total = { $total } Total | { $tcp } TCP | { $udp } UDP | { $established } EST | { $listening } LISTEN
 connections-status-selected = { $selected } selected

@@ -5,6 +5,7 @@
 //! by `StartupRef`, so a rescan may reorder the view without losing the selected entries.
 
 pub mod actions;
+mod copy;
 pub mod delegate;
 mod flows;
 pub mod menu;
@@ -18,7 +19,7 @@ use gpui_kit::{
     IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
 };
 use smallvec::SmallVec;
-use tl_model::actions::ActionTarget;
+use tl_model::actions::{ActionId, ActionTarget};
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::SourceId;
@@ -28,12 +29,14 @@ use tl_model::units;
 
 use self::delegate::StartupDelegate;
 use self::menu::StartupMenuTargets;
+use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
 use crate::actions::ClearFilter;
 use crate::app::EngineGlobal;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
+use crate::pages::sys_copy::CopyTexts;
 use crate::pages::sys_table::{
     ActionKindTag, SysActionsEvent, SysBody, SysTableFrame, loading_status_text,
 };
@@ -57,6 +60,9 @@ pub struct StartupPage {
     last_status: (u32, u32, u32, usize),
     refresh: Option<(u64, Task<()>)>,
     menu_targets: Option<StartupMenuTargets>,
+    copy_texts: CopyTexts,
+    copy_prepared: copy::PreparedCopy,
+    open_requests: SmallVec<[ActionId; 2]>,
     _subs: SmallVec<[Subscription; 4]>,
 }
 
@@ -129,6 +135,15 @@ impl StartupPage {
             let SysActionsEvent::PendingChanged { target } = ev;
             this.on_pending_changed(target, cx);
         }));
+        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|g| g.0.clone()) {
+            subs.push(
+                cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, cx| {
+                    if let ActionTrackerEvent::Finished { id, failed, .. } = *ev {
+                        this.on_open_location_finished(id, failed, cx);
+                    }
+                }),
+            );
+        }
         Self {
             frame,
             focus,
@@ -137,6 +152,9 @@ impl StartupPage {
             last_status: STATUS_UNSET,
             refresh: None,
             menu_targets: None,
+            copy_texts: Self::copy_texts(cx),
+            copy_prepared: copy::PreparedCopy::default(),
+            open_requests: SmallVec::new(),
             _subs: subs,
         }
     }
@@ -342,6 +360,12 @@ impl Render for StartupPage {
             .on_action(cx.listener(Self::on_startup_enable))
             .on_action(cx.listener(Self::on_startup_disable))
             .on_action(cx.listener(Self::on_startup_run_now))
+            .on_action(cx.listener(Self::on_copy_cell))
+            .on_action(cx.listener(Self::on_copy_details))
+            .on_action(cx.listener(Self::on_copy_row))
+            .on_action(cx.listener(Self::on_copy_rows_as_table))
+            .on_action(cx.listener(Self::on_startup_copy_command))
+            .on_action(cx.listener(Self::on_startup_open_file_location))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }
