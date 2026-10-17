@@ -4885,12 +4885,13 @@ mod live {
 
 mod boot_time {
     use tl_model::snapshot::Snapshot;
+    use tl_model::time::BootId;
     use tl_model::validity::Validity;
     use tl_ui::pages::processes::cells::boot_time_s;
 
     #[test]
     fn start_time_base_comes_from_the_inventory() {
-        let mut s = Snapshot::default();
+        let mut s = Snapshot::empty(BootId(0), 0);
         assert_eq!(boot_time_s(&s), 0);
         std::sync::Arc::make_mut(&mut s.inventory)
             .system
