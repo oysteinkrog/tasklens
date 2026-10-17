@@ -1132,6 +1132,8 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
             .as_ref()
             .map_or(Value::Glyph(Validity::Unsupported), Value::Arc),
         C::Name | C::NameDisplay => Value::Arc(w.group_name(g)),
+        // Only a frozen app or unit row has a state word (PROC-036, PROC-064).
+        C::State if g.frozen => Value::Arc(&w.state[7]),
         C::User if g.kind == GroupRowKind::Pseudo => Value::Arc(root_user()),
         C::Type => Value::Arc(match g.kind {
             GroupRowKind::App => &w.type_app,

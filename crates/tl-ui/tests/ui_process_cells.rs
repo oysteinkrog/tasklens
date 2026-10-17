@@ -3961,4 +3961,97 @@ mod live {
             assert_eq!(validity(vcx, 1, col), na, "Memory compression {col:?}");
         }
     }
+
+    /// One app row (frozen when `frozen`) and two unit rows with 3 members: `pipewire.service`
+    /// with a Description (the engine puts it in `name`) and `plain.service` without one.
+    fn group_rows(frozen: bool) -> Arc<Snapshot> {
+        use tl_model::process::GroupRow;
+        use tl_model::table::{Manager, UnitRef};
+
+        let unit = |name: &str, shown: &str| GroupRow {
+            node: NodeId::Unit(UnitRef {
+                manager: Manager::System,
+                name: Arc::from(name),
+            }),
+            name: Arc::from(shown),
+            members: 3,
+            pids: 3,
+            ..group(GroupRowKind::Unit)
+        };
+        let groups = vec![
+            GroupRow {
+                frozen,
+                ..group(GroupRowKind::App)
+            },
+            unit("pipewire.service", "PipeWire Multimedia Service"),
+            unit("plain.service", "plain.service"),
+        ];
+        let row = |g: &GroupRow, ix: u32| TableRow {
+            node: g.node.clone(),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: None,
+            group: Some(ix),
+            descendants: 0,
+            subtree: None,
+        };
+        let mut s = Snapshot::empty(BootId(0), 0);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: groups
+                .iter()
+                .zip(0..)
+                .map(|(g, ix)| row(g, ix))
+                .collect::<Vec<_>>()
+                .into(),
+            groups: groups.into(),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot::default());
+        Arc::new(s)
+    }
+
+    /// PROC-009: a unit row reads "<Description> (N)", else "<unit name> (N)".
+    #[gpui_kit::test]
+    fn unit_row_description_or_name(cx: &mut TestAppContext) {
+        let (table, vcx) = open(cx, Settings::default(), group_rows(false));
+        let primary = |vcx: &mut VisualTestContext, ix| {
+            vcx.update(|_, cx| table.read(cx).delegate.name_cell(ix).primary.to_string())
+        };
+        assert_eq!(primary(vcx, 1), "PipeWire Multimedia Service (3)");
+        assert_eq!(primary(vcx, 2), "plain.service (3)");
+    }
+
+    /// PROC-064, UI-PRC-002: a frozen app row has RowFlags::FROZEN, the snowflake glyph after
+    /// the name and the State word "Frozen". A thawed row has none of them.
+    #[gpui_kit::test]
+    fn frozen_glyph_and_state(cx: &mut TestAppContext) {
+        use gpui_kit::assets::IconName;
+        use tl_ui::table::tree_table::RowFlags;
+
+        let (table, vcx) = open(cx, Settings::default(), group_rows(true));
+        let (flags, glyphs) = vcx.update(|_, cx| {
+            let d = &table.read(cx).delegate;
+            (d.row_flags(0), d.name_cell(0).glyphs)
+        });
+        assert!(flags.has(RowFlags::FROZEN));
+        assert_eq!(glyphs.len(), 1);
+        assert_eq!(glyphs[0].0, IconName::Snowflake);
+        assert_eq!(shown(&cell(vcx, &table, 0, ColumnId::State)), "Frozen");
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let (table, vcx) = open(cx, Settings::default(), group_rows(false));
+        let (flags, glyphs) = vcx.update(|_, cx| {
+            let d = &table.read(cx).delegate;
+            (d.row_flags(0), d.name_cell(0).glyphs)
+        });
+        assert!(!flags.has(RowFlags::FROZEN));
+        assert!(glyphs.is_empty());
+        assert!(shown(&cell(vcx, &table, 0, ColumnId::State)).is_empty());
+    }
 }

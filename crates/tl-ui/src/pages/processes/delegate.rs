@@ -1038,10 +1038,13 @@ impl TreeTableDelegate for ProcessDelegate {
             if restricted(&r.validity) {
                 bits |= RowFlags::RESTRICTED;
             }
-        } else if let Some(g) = self.group(row)
-            && restricted(&g.validity)
-        {
-            bits |= RowFlags::RESTRICTED;
+        } else if let Some(g) = self.group(row) {
+            if restricted(&g.validity) {
+                bits |= RowFlags::RESTRICTED;
+            }
+            if g.frozen {
+                bits |= RowFlags::FROZEN;
+            }
         }
         if self.snapshot.table.header.validity == Validity::Stale {
             bits |= RowFlags::STALE;
@@ -1135,6 +1138,9 @@ impl TreeTableDelegate for ProcessDelegate {
                     .map_or(NameIcon::None, |i| NameIcon::File(Arc::clone(i))),
             };
             d.primary = SharedString::from(self.cell_words.group_name(g));
+            if g.frozen {
+                d.state_glyph = Some(StateGlyph::Frozen);
+            }
         } else if let Some(r) = row
             .record
             .and_then(|i| self.snapshot.processes.records.get(i as usize))
