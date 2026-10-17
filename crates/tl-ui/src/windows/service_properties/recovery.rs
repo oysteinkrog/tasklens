@@ -796,7 +796,6 @@ impl RecoveryTab {
     fn stepper(
         &self,
         id: &'static str,
-        name: SharedString,
         state: &Entity<InputState>,
         value: u32,
         (max, step): (u32, i64),
@@ -805,7 +804,6 @@ impl RecoveryTab {
     ) -> TlStepper {
         let view = cx.weak_entity();
         TlStepper::new(id, state)
-            .aria_label(name)
             .range(0, i64::from(max), step)
             .value(i64::from(value))
             .disabled(!self.controls_enabled())
@@ -908,13 +906,13 @@ impl RecoveryTab {
         let restart_ms = self
             .stepper(
                 "ServiceRecoveryRestartMs",
-                self.words.name(ROW_RESTART_MS),
                 &self.restart_ms.clone(),
                 form.restart_ms,
                 (RESTART_MS_MAX, RESTART_MS_STEP),
                 |f, v| f.restart_ms = v,
                 cx,
             )
+            .aria_label(self.words.name(ROW_RESTART_MS))
             .suffix(self.words.suffix_ms.clone());
         let restart_ms = div()
             .id("ServiceRecoveryRestartMsBox")
@@ -925,24 +923,26 @@ impl RecoveryTab {
             self.with_helper_tip("ServiceRecoveryRestartMsBox", restart_ms, window, cx);
         rows.push(self.row(ROW_RESTART_MS, restart_ms, cx));
 
-        let burst = self.stepper(
-            "ServiceRecoveryBurst",
-            self.words.name_burst.clone(),
-            &self.burst.clone(),
-            form.burst,
-            (BURST_MAX, 1),
-            |f, v| f.burst = v,
-            cx,
-        );
-        let interval = self.stepper(
-            "ServiceRecoveryInterval",
-            self.words.name_interval.clone(),
-            &self.interval.clone(),
-            form.interval_s,
-            (INTERVAL_S_MAX, 1),
-            |f, v| f.interval_s = v,
-            cx,
-        );
+        let burst = self
+            .stepper(
+                "ServiceRecoveryBurst",
+                &self.burst.clone(),
+                form.burst,
+                (BURST_MAX, 1),
+                |f, v| f.burst = v,
+                cx,
+            )
+            .aria_label(self.words.name_burst.clone());
+        let interval = self
+            .stepper(
+                "ServiceRecoveryInterval",
+                &self.interval.clone(),
+                form.interval_s,
+                (INTERVAL_S_MAX, 1),
+                |f, v| f.interval_s = v,
+                cx,
+            )
+            .aria_label(self.words.name_interval.clone());
         let give_up = div()
             .id("ServiceRecoveryGiveUpBox")
             .role(Role::Group)
