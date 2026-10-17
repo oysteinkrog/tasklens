@@ -46,8 +46,8 @@ use tracing::warn;
 use self::actions::{
     ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
     EndProcess, EndProcessTree, EndTask, FreezeApp, GoToParent, KillApp, MAX_TARGETS,
-    OpenFileLocation, OpenVirusTotal, ResumeProcess, SetPriority, SuspendProcess, ThawApp,
-    ToggleGroupRow,
+    OpenFileLocation, OpenVirusTotal, PriorityClass, ResumeProcess, SetIoPriorityClass,
+    SetPriority, SuspendProcess, ThawApp, ToggleGroupRow,
 };
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
@@ -755,16 +755,69 @@ impl ProcessesPage {
         self.send(kind, keys, used, ask, window, cx);
     }
 
-    /// Set Priority High, Above normal, Normal, Below normal and Low (UI-PRC-013 item 6,
-    /// PROC-066, PROC-069): one `SetNice` request. App and unit rows apply to every current
-    /// member process. Only another user's process asks first. Realtime and Idle are E22-036.
+    /// Set Priority (UI-PRC-013 item 6, PROC-066, PROC-069): High to Low send one `SetNice`
+    /// request; Idle sends `SetSched { Idle, 0 }`. Realtime always asks first, because it can
+    /// freeze the desktop, then sends `SetSched { Rr, 1 }`; the kernel sets reset on fork. App
+    /// and unit rows apply to every current member process. Otherwise only another user's
+    /// process asks first.
     fn on_set_priority(&mut self, a: &SetPriority, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(nice) = a.class.nice() else {
+        let Some((used, clicked_col)) = self.setting_targets(cx) else {
             return;
         };
-        let Some((rows, clicked_col)) = self.prune(|_| None, cx) else {
+        let keys = process_keys(&used);
+        let other = other_user(&used, &self.confirm_words.set_priority);
+        let (kind, ask) = match a.class {
+            PriorityClass::Realtime => (
+                ActionKind::SetSched {
+                    policy: SchedPolicy::Rr,
+                    rt_prio: 1,
+                },
+                Some(ConfirmKind::Realtime),
+            ),
+            PriorityClass::Idle => (
+                ActionKind::SetSched {
+                    policy: SchedPolicy::Idle,
+                    rt_prio: 0,
+                },
+                other,
+            ),
+            class => {
+                let Some(nice) = class.nice() else {
+                    return;
+                };
+                (ActionKind::SetNice(nice), other)
+            }
+        };
+        let used = CapturedTargets::new(used, clicked_col);
+        self.send(kind, keys, used, ask, window, cx);
+    }
+
+    /// Set I/O Priority (UI-PRC-013 item 8, PROC-068, PROC-069): one `SetIoPriority` request,
+    /// with the same targets and confirmation rule as Set Priority.
+    fn on_set_io_priority(
+        &mut self,
+        a: &SetIoPriorityClass,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((used, clicked_col)) = self.setting_targets(cx) else {
             return;
         };
+        let keys = process_keys(&used);
+        let ask = other_user(&used, &self.confirm_words.set_io_priority);
+        let used = CapturedTargets::new(used, clicked_col);
+        let kind = ActionKind::SetIoPriority(a.class.to_model());
+        self.send(kind, keys, used, ask, window, cx);
+    }
+
+    /// The process targets of Set Priority and Set I/O Priority: each process row once, and
+    /// every current member process of an app or unit row, at most [`MAX_TARGETS`]. `None`
+    /// when there is no process to act on.
+    fn setting_targets(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<(Vec<CapturedTarget>, Option<ColumnId>)> {
+        let (rows, clicked_col) = self.prune(|_| None, cx)?;
         let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
         let p = &snapshot.processes;
         let mut seen = FxHashSet::default();
@@ -787,13 +840,7 @@ impl ProcessesPage {
             }
         }
         used.truncate(MAX_TARGETS);
-        let keys = process_keys(&used);
-        if keys.is_empty() {
-            return;
-        }
-        let ask = other_user(&used, &self.confirm_words.set_priority);
-        let used = CapturedTargets::new(used, clicked_col);
-        self.send(ActionKind::SetNice(nice), keys, used, ask, window, cx);
+        (!used.is_empty()).then_some((used, clicked_col))
     }
 
     fn on_copy_cell(&mut self, a: &CopyCell, _: &mut Window, cx: &mut Context<Self>) {
@@ -1253,6 +1300,7 @@ struct ConfirmWords {
     resume: SharedString,
     freeze: SharedString,
     set_priority: SharedString,
+    set_io_priority: SharedString,
 }
 
 impl ConfirmWords {
@@ -1265,6 +1313,7 @@ impl ConfirmWords {
             resume: tr(cx, "processes-confirm-action-resume"),
             freeze: tr(cx, "processes-confirm-action-freeze"),
             set_priority: tr(cx, "processes-confirm-action-set-priority"),
+            set_io_priority: tr(cx, "processes-confirm-action-set-io-priority"),
         }
     }
 }
@@ -1855,6 +1904,7 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_suspend))
             .on_action(cx.listener(Self::on_resume))
             .on_action(cx.listener(Self::on_set_priority))
+            .on_action(cx.listener(Self::on_set_io_priority))
             .on_action(cx.listener(Self::on_open_custom_priority))
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_details))

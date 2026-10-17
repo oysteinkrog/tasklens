@@ -10,22 +10,25 @@
 
 use std::sync::Arc;
 
+use fluent_bundle::FluentValue;
 use gpui_kit::{App, SharedString, Window, px};
+use tl_model::health::HelperState;
 use tl_model::ids::NodeId;
 use tl_model::process::{GroupKind, GroupRowKind};
 use tl_model::snapshot::{Snapshot, WindowEntry};
 use tl_model::table::Manager;
+use tl_model::validity::Validity;
 
 use super::actions::{
     ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
-    EndProcess, EndProcessTree, EndTask, FreezeApp, GoToParent, KillApp, OpenFileLocation,
-    OpenVirusTotal, PriorityClass, ResumeProcess, SetPriority, SuspendProcess, ThawApp,
-    ToggleGroupRow,
+    EndProcess, EndProcessTree, EndTask, FreezeApp, GoToParent, IoClass, KillApp, OpenFileLocation,
+    OpenVirusTotal, PriorityClass, ResumeProcess, SetIoPriorityClass, SetPriority, SuspendProcess,
+    ThawApp, ToggleGroupRow,
 };
 use super::{SuspendLabel, group_frozen, group_targets, suspend_or_resume};
 use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
 use crate::pages::minigraph::sources::{GraphColumn, MinigraphSource};
@@ -44,7 +47,8 @@ pub const ROW_MENU_MIN_W: f32 = 240.0;
 pub const WINDOW_POPUP_MAX_W: f32 = 480.0;
 
 /// What the desktop offers, for the items that need it. Every field is false until the bead
-/// that ships such an item fills it; no P1 item reads one.
+/// that ships such an item fills it; no P1 item reads one. Set I/O Priority also reads the
+/// helper state of the snapshot, so `helper_session` false is not the final word.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MenuCaps {
     pub kwin_bridge: bool,
@@ -53,8 +57,9 @@ pub struct MenuCaps {
     pub helper_session: bool,
 }
 
-/// The classes of the Set Priority submenu in P1, top to bottom (UI-PRC-020).
-const PRIORITY_CLASSES: [(PriorityClass, &str); 5] = [
+/// The classes of the Set Priority submenu, top to bottom (UI-PRC-020).
+const PRIORITY_CLASSES: [(PriorityClass, &str); 7] = [
+    (PriorityClass::Realtime, "processes-menu-priority-realtime"),
     (PriorityClass::High, "processes-menu-priority-high"),
     (
         PriorityClass::AboveNormal,
@@ -66,6 +71,17 @@ const PRIORITY_CLASSES: [(PriorityClass, &str); 5] = [
         "processes-menu-priority-below-normal",
     ),
     (PriorityClass::Low, "processes-menu-priority-low"),
+    (PriorityClass::Idle, "processes-menu-priority-idle"),
+];
+
+/// The classes of the Set I/O Priority submenu above its separator, top to bottom
+/// (UI-PRC-020). "Default (follows nice)" follows the separator.
+const IO_CLASSES: [(IoClass, &str); 5] = [
+    (IoClass::Realtime, "processes-menu-io-realtime"),
+    (IoClass::High, "processes-menu-io-high"),
+    (IoClass::Normal, "processes-menu-io-normal"),
+    (IoClass::Low, "processes-menu-io-low"),
+    (IoClass::Idle, "processes-menu-io-idle"),
 ];
 
 /// Which row-type rules apply to one menu.
@@ -121,6 +137,7 @@ pub fn row_menu(
     menu = add_send_signal(menu, targets, shape, window, cx);
     menu = add_set_priority(menu, targets, shape, window, cx);
     menu = add_set_affinity(menu, shape, cx);
+    menu = add_set_io_priority(menu, targets, caps, shape, window, cx);
     menu = menu.separator();
     menu = add_copy(menu, targets, cx);
     menu = add_copy_details(menu, cx);
@@ -175,9 +192,9 @@ pub fn window_popup(menu: TlMenu, windows: &[WindowEntry], cx: &App) -> TlMenu {
     )
 }
 
-/// The Set Priority submenu (UI-PRC-020): the autogroup note, the five P1 classes, a separator
-/// and Custom…. The current class has a check mark; with several targets only when every one
-/// shares it.
+/// The Set Priority submenu (UI-PRC-020): the autogroup note, Realtime, the five nice classes,
+/// Idle, a separator and Custom…. The current nice class has a check mark; with several targets
+/// only when every one shares it. Realtime and Idle are policies, so they are never checked.
 pub fn priority_submenu(
     menu: TlMenu,
     targets: &CapturedTargets,
@@ -200,7 +217,7 @@ pub fn priority_submenu(
 }
 
 /// The class whose nice value every target has. `None` when a target has no nice value (app,
-/// unit and pseudo rows), when they differ, or when the value is not one of the P1 classes.
+/// unit and pseudo rows), when they differ, or when the value is not one of the nice classes.
 fn current_class(t: &CapturedTargets) -> Option<PriorityClass> {
     let mut nices = t.items.iter().map(|t| t.nice);
     let first = nices.next()??;
@@ -211,6 +228,70 @@ fn current_class(t: &CapturedTargets) -> Option<PriorityClass> {
         .iter()
         .map(|(class, _)| *class)
         .find(|class| class.nice() == Some(first))
+}
+
+/// The Set I/O Priority submenu (UI-PRC-020, PROC-068): the "Scheduler: <name>" note, the five
+/// classes, a separator and "Default (follows nice)". Realtime needs a helper session. Nothing
+/// is checked yet: the current class of each target comes with tasklens-pdu.62, which reads
+/// `_targets` for the check marks.
+pub fn ioprio_submenu(
+    menu: TlMenu,
+    _targets: &CapturedTargets,
+    caps: &MenuCaps,
+    cx: &mut App,
+) -> TlMenu {
+    let snapshot = cx.try_global::<EngineGlobal>().map(|e| e.0.latest());
+    let helper = snapshot
+        .as_ref()
+        .map_or(HelperState::Missing, |s| s.health.helper);
+    let mut menu = menu;
+    if let Some(name) = snapshot.as_deref().and_then(system_scheduler) {
+        let args = [("name", FluentValue::from(name.to_string()))];
+        menu = menu.header(tr_args(cx, "processes-menu-io-scheduler", &args));
+    }
+    for (class, key) in IO_CLASSES {
+        let label = tr(cx, key);
+        let session = caps.helper_session || helper == HelperState::Unlocked;
+        menu = if class == IoClass::Realtime && !session {
+            let tip = match helper {
+                HelperState::Missing => "processes-menu-io-no-helper",
+                _ => "processes-menu-io-needs-admin",
+            };
+            menu.item_disabled(label, Some(tr(cx, tip)))
+        } else {
+            menu.item(label, Box::new(SetIoPriorityClass { class }))
+        };
+    }
+    menu.separator().item(
+        tr(cx, "processes-menu-io-default"),
+        Box::new(SetIoPriorityClass {
+            class: IoClass::Default,
+        }),
+    )
+}
+
+/// The block scheduler of the system disk (R-207). When two disks are system disks (`/` and
+/// `/boot` apart) both must name the same scheduler. `None` when none is known or they differ.
+fn system_scheduler(s: &Snapshot) -> Option<Arc<str>> {
+    let mut found: Option<Arc<str>> = None;
+    let system = s
+        .device_details
+        .disks
+        .iter()
+        .map(|(_, d)| d)
+        .filter(|d| d.system_disk.validity == Validity::Valid && d.system_disk.value);
+    for disk in system {
+        let sched = &disk.scheduler;
+        if sched.validity != Validity::Valid || sched.value.is_empty() {
+            return None;
+        }
+        match &found {
+            Some(name) if *name != sched.value => return None,
+            Some(_) => {}
+            None => found = Some(Arc::clone(&sched.value)),
+        }
+    }
+    found
 }
 
 /// An item that is disabled with "Process exited" on an exited row.
@@ -396,6 +477,27 @@ fn add_set_affinity(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
     }
     let label = tr(cx, "processes-menu-set-affinity");
     exitable(menu, shape, label, Box::new(SetAffinity), cx)
+}
+
+/// Item 8: the Set I/O Priority submenu, on process, app and unit rows and on several rows.
+/// App and unit rows apply to their current processes (the handler expands them).
+fn add_set_io_priority(
+    menu: TlMenu,
+    targets: &CapturedTargets,
+    caps: &MenuCaps,
+    shape: Shape,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let label = tr(cx, "processes-menu-set-io-priority");
+    if shape.exited {
+        return menu.item_disabled(label, Some(tr(cx, "processes-menu-process-exited")));
+    }
+    let targets = targets.clone();
+    let caps = *caps;
+    menu.submenu(label, window, cx, move |sub, _window, cx| {
+        ioprio_submenu(sub, &targets, &caps, cx)
+    })
 }
 
 /// Which of the three minigraph items (UI-PRC-013 items 15 to 17) a source is for.

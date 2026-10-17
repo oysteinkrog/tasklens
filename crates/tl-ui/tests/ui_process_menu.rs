@@ -1090,11 +1090,14 @@ mod end {
     use gpui_kit::{Keystroke, point, px};
     use tl_model::actions::ActionError;
     use tl_model::actions::CgroupRef;
+    use tl_model::actions::IoPriority;
     use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
     use tl_model::command::KWinCommand;
     use tl_model::command::{Command, Tab};
+    use tl_model::health::HelperState;
     use tl_model::ids::ColumnId;
+    use tl_model::ids::DeviceIdx;
     use tl_model::ids::PseudoKind;
     use tl_model::ids::{GroupKey, NodeId, ProcessKey};
     use tl_model::process::ProcessExtras;
@@ -1104,6 +1107,7 @@ mod end {
     };
     use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, WindowEntry, WindowsSnapshot};
+    use tl_model::snapshot::{DeviceDetailsSnapshot, DiskDetails};
     use tl_model::snapshot::{ServiceStatus, ServicesSnapshot, StartupType, UnitRecord};
     use tl_model::system::CpuSet;
     use tl_model::table::{Manager, Total, UnitRef, UnitType};
@@ -1119,8 +1123,9 @@ mod end {
     use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
         ActivateWindow, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree,
-        EndTask, FreezeApp, GoToParent, KillApp, OpenFileLocation, OpenVirusTotal, PriorityClass,
-        ProcessesShowHidden, ResumeProcess, SetPriority, SuspendProcess, ThawApp,
+        EndTask, FreezeApp, GoToParent, IoClass, KillApp, OpenFileLocation, OpenVirusTotal,
+        PriorityClass, ProcessesShowHidden, ResumeProcess, SetIoPriorityClass, SetPriority,
+        SuspendProcess, ThawApp,
     };
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
@@ -1984,6 +1989,7 @@ mod end {
             "Send Signal >",
             "Set Priority >",
             "Set Affinity…",
+            "Set I/O Priority >",
             "-",
         ];
         out.extend(COPIES);
@@ -2043,6 +2049,7 @@ mod end {
             "Send Signal >",
             "Set Priority >",
             "Set Affinity…",
+            "Set I/O Priority >",
             "-",
         ];
         multi.extend(COPIES);
@@ -2058,6 +2065,7 @@ mod end {
             "(Send Signal: Process exited)",
             "(Set Priority: Process exited)",
             "(Set Affinity…: Process exited)",
+            "(Set I/O Priority: Process exited)",
             "-",
         ];
         exited.extend(COPIES);
@@ -2084,6 +2092,7 @@ mod end {
             "Send Signal >",
             "Set Priority > [Applies to the app's current processes]",
             "Set Affinity…",
+            "Set I/O Priority >",
             "-",
         ];
         app.extend(COPIES);
@@ -2547,14 +2556,7 @@ mod end {
     fn row_menu_hides_unshipped_phases(cx: &mut TestAppContext) {
         let mut rig = Rig::new(cx);
         publish_kinds(&mut rig);
-        let unshipped = [
-            "Show Window",
-            "I/O",
-            "Restart",
-            "File properties",
-            "Realtime",
-            "Idle",
-        ];
+        let unshipped = ["Show Window", "Restart", "File properties"];
         for rows in [&[1][..], &[1, 2], &[4], &[5], &[7], &[8], &[9]] {
             let menu = build_menu(&mut rig, rows, ColumnId::Name);
             let mut labels = shape(&mut rig, &menu);
@@ -2593,7 +2595,16 @@ mod end {
         let classes = |checked: Option<&str>| -> Vec<String> {
             let note = "# With autogroup on, nice only orders processes within the same session.";
             let mut out = vec![note.to_owned()];
-            for class in ["High", "Above normal", "Normal", "Below normal", "Low"] {
+            let all = [
+                "Realtime",
+                "High",
+                "Above normal",
+                "Normal",
+                "Below normal",
+                "Low",
+                "Idle",
+            ];
+            for class in all {
                 out.push(if Some(class) == checked {
                     format!("* {class}")
                 } else {
@@ -3210,14 +3221,6 @@ mod end {
             Some((ActionKind::SetNice(19), vec![300, 301]))
         );
 
-        // Realtime and Idle are E22-036: nothing is sent here.
-        let before = rig.sent().len();
-        for class in [PriorityClass::Realtime, PriorityClass::Idle] {
-            rig.select_pids(&[300]);
-            assert!(rig.dispatch(SetPriority { class }).is_none());
-        }
-        assert_eq!(rig.sent().len(), before);
-
         // Another user's process: OtherUser with the primary "Set priority" button.
         rig.publish(vec![other_user_sshd(812)], &[812], Vec::new());
         rig.select_pids(&[812]);
@@ -3234,6 +3237,331 @@ mod end {
         assert_eq!(dialog.focused(), Some(DialogButton::Action));
         dialog.enter();
         assert_eq!(rig.sent().pop(), Some((ActionKind::SetNice(19), vec![812])));
+    }
+
+    #[gpui_kit::test]
+    fn realtime_confirms_then_sets_rr1(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300]), &[300], Vec::new());
+        let realtime = SetPriority {
+            class: PriorityClass::Realtime,
+        };
+        rig.select_pids(&[300]);
+        let mut dialog = rig
+            .dispatch(realtime.clone())
+            .expect("the Realtime dialog, even for an own process");
+        assert_eq!(
+            dialog.text(),
+            "Realtime priority can freeze the desktop if the process spins. Set it anyway?"
+        );
+        assert!(dialog.is_destructive());
+        assert_eq!(dialog.focused(), Some(DialogButton::Cancel));
+        dialog.cancel();
+        assert!(rig.sent().is_empty(), "Cancel sends nothing");
+
+        rig.select_pids(&[300]);
+        rig.dispatch(realtime.clone())
+            .expect("the Realtime dialog")
+            .confirm();
+        let rr1 = ActionKind::SetSched {
+            policy: SchedPolicy::Rr,
+            rt_prio: 1,
+        };
+        assert_eq!(rig.sent(), [(rr1.clone(), vec![300])]);
+        assert_eq!(
+            result(&mut rig, ActionState::Succeeded)
+                .last()
+                .map(String::as_str),
+            Some("Priority updated")
+        );
+
+        // Another user's process still gets the Realtime dialog, not OtherUser.
+        rig.publish(vec![other_user_sshd(812)], &[812], Vec::new());
+        rig.select_pids(&[812]);
+        let mut dialog = rig.dispatch(realtime).expect("the Realtime dialog");
+        assert_eq!(
+            dialog.text(),
+            "Realtime priority can freeze the desktop if the process spins. Set it anyway?"
+        );
+        dialog.confirm();
+        assert_eq!(rig.sent().pop(), Some((rr1, vec![812])));
+    }
+
+    #[gpui_kit::test]
+    fn idle_sets_sched_idle(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let member = |pid| ProcessRecord {
+            group: app_key(),
+            ..record(pid, 1, "firefox", ProcFlags::empty())
+        };
+        let mut records = own(&[300, 301]);
+        records.extend([member(200), member(201)]);
+        rig.publish(records, &[300, 301], vec![app_group(2)]);
+        let idle = SetPriority {
+            class: PriorityClass::Idle,
+        };
+        let sched_idle = ActionKind::SetSched {
+            policy: SchedPolicy::Idle,
+            rt_prio: 0,
+        };
+        rig.select_pids(&[300]);
+        assert!(rig.dispatch(idle.clone()).is_none(), "no dialog");
+        assert_eq!(rig.sent(), [(sched_idle.clone(), vec![300])]);
+
+        rig.select_pids(&[300, 301]);
+        assert!(rig.dispatch(idle.clone()).is_none());
+        assert_eq!(rig.sent().pop(), Some((sched_idle.clone(), vec![300, 301])));
+        assert_eq!(
+            result(&mut rig, ActionState::Succeeded)
+                .last()
+                .map(String::as_str),
+            Some("Selected process priority updated.")
+        );
+
+        rig.select(&[ProcRowId::Group(app_key())]);
+        assert!(rig.dispatch(idle).is_none());
+        assert_eq!(
+            rig.sent().pop(),
+            Some((sched_idle, vec![200, 201])),
+            "every current member"
+        );
+    }
+
+    /// Publishes the helper state and one disk per (system disk, scheduler) pair.
+    fn publish_ioprio_inputs(rig: &mut Rig, helper: HelperState, disks: &[(bool, &str)]) {
+        let valid = |value| Total {
+            value,
+            validity: Validity::Valid,
+        };
+        let disks: Vec<(DeviceIdx, DiskDetails)> = disks
+            .iter()
+            .enumerate()
+            .map(|(i, (system, sched))| {
+                let details = DiskDetails {
+                    system_disk: valid(*system),
+                    scheduler: valid(Arc::from(*sched)),
+                    ..DiskDetails::default()
+                };
+                (DeviceIdx(i as u16), details)
+            })
+            .collect();
+        rig.engine.publish_with(|s| {
+            let health = Arc::make_mut(&mut s.health);
+            health.helper = helper;
+            health.version += 1;
+            s.device_details = Arc::new(DeviceDetailsSnapshot {
+                disks: disks.into(),
+                ..DeviceDetailsSnapshot::default()
+            });
+        });
+        rig.vcx.run_until_parked();
+    }
+
+    /// The Set I/O Priority submenu of the rows at `rows`.
+    fn ioprio_submenu(rig: &mut Rig, rows: &[usize]) -> Entity<TlMenuPopup> {
+        let menu = build_menu(rig, rows, ColumnId::Name);
+        entries(rig, &menu)
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some("Set I/O Priority"))
+            .and_then(|e| e.submenu)
+            .expect("Set I/O Priority submenu")
+    }
+
+    /// The submenu shape with `realtime` as its Realtime entry and `scheduler` as its note.
+    fn ioprio_shape(scheduler: Option<&str>, realtime: &str) -> Vec<String> {
+        let mut out: Vec<String> = scheduler
+            .map(|s| format!("# Scheduler: {s}"))
+            .into_iter()
+            .collect();
+        out.push(realtime.to_owned());
+        out.extend(
+            [
+                "High",
+                "Normal",
+                "Low",
+                "Idle",
+                "-",
+                "Default (follows nice)",
+            ]
+            .map(String::from),
+        );
+        out
+    }
+
+    #[gpui_kit::test]
+    fn ioprio_realtime_disabled_without_helper(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        let no_session = "(Realtime: Needs administrator access.)";
+
+        publish_ioprio_inputs(
+            &mut rig,
+            HelperState::Locked,
+            &[(true, "bfq"), (false, "none")],
+        );
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        assert_eq!(shape(&mut rig, &sub), ioprio_shape(Some("bfq"), no_session));
+        let sub = ioprio_submenu(&mut rig, &[0, 1]);
+        assert_eq!(
+            shape(&mut rig, &sub),
+            ioprio_shape(Some("bfq"), no_session),
+            "nothing is checked on several rows"
+        );
+
+        publish_ioprio_inputs(&mut rig, HelperState::Starting, &[(true, "bfq")]);
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        assert_eq!(shape(&mut rig, &sub), ioprio_shape(Some("bfq"), no_session));
+
+        publish_ioprio_inputs(&mut rig, HelperState::Missing, &[(true, "bfq")]);
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        assert_eq!(
+            shape(&mut rig, &sub),
+            ioprio_shape(
+                Some("bfq"),
+                "(Realtime: Needs administrator helper (not installed))"
+            )
+        );
+
+        publish_ioprio_inputs(&mut rig, HelperState::Unlocked, &[(true, "bfq")]);
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        assert_eq!(shape(&mut rig, &sub), ioprio_shape(Some("bfq"), "Realtime"));
+
+        // Two system disks (`/` and `/boot`): the line only when they agree.
+        let two = [(true, "mq-deadline"), (true, "mq-deadline")];
+        publish_ioprio_inputs(&mut rig, HelperState::Unlocked, &two);
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        assert_eq!(
+            shape(&mut rig, &sub),
+            ioprio_shape(Some("mq-deadline"), "Realtime")
+        );
+        let two = [(true, "bfq"), (true, "mq-deadline")];
+        publish_ioprio_inputs(&mut rig, HelperState::Unlocked, &two);
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        assert_eq!(shape(&mut rig, &sub), ioprio_shape(None, "Realtime"));
+        publish_ioprio_inputs(&mut rig, HelperState::Unlocked, &[(false, "bfq")]);
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        assert_eq!(
+            shape(&mut rig, &sub),
+            ioprio_shape(None, "Realtime"),
+            "no system disk"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn ioprio_classes_map_and_check(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let member = |pid| ProcessRecord {
+            group: app_key(),
+            ..record(pid, 1, "firefox", ProcFlags::empty())
+        };
+        let mut records = own(&[300, 301]);
+        records.extend([member(200), member(201)]);
+        rig.publish(records, &[300, 301], vec![app_group(2)]);
+        publish_ioprio_inputs(&mut rig, HelperState::Unlocked, &[(true, "bfq")]);
+
+        // Each menu item carries its class.
+        let sub = ioprio_submenu(&mut rig, &[0]);
+        let classes: Vec<IoClass> = entries(&mut rig, &sub)
+            .iter()
+            .filter_map(|e| e.action.as_ref())
+            .filter_map(|a| a.as_any().downcast_ref::<SetIoPriorityClass>())
+            .map(|a| a.class)
+            .collect();
+        assert_eq!(
+            classes,
+            [
+                IoClass::Realtime,
+                IoClass::High,
+                IoClass::Normal,
+                IoClass::Low,
+                IoClass::Idle,
+                IoClass::Default
+            ]
+        );
+
+        let map = [
+            (IoClass::Realtime, IoPriority::Realtime(0)),
+            (IoClass::High, IoPriority::BestEffort(0)),
+            (IoClass::Normal, IoPriority::BestEffort(4)),
+            (IoClass::Low, IoPriority::BestEffort(7)),
+            (IoClass::Idle, IoPriority::Idle),
+            (IoClass::Default, IoPriority::None),
+        ];
+        for (class, model) in map {
+            rig.select_pids(&[300]);
+            assert!(
+                rig.dispatch(SetIoPriorityClass { class }).is_none(),
+                "no dialog"
+            );
+            assert_eq!(
+                rig.sent().pop(),
+                Some((ActionKind::SetIoPriority(model), vec![300])),
+                "{class:?}"
+            );
+        }
+
+        rig.select_pids(&[300]);
+        let normal = SetIoPriorityClass {
+            class: IoClass::Normal,
+        };
+        assert!(rig.dispatch(normal.clone()).is_none());
+        assert_eq!(
+            rig.sent().pop(),
+            Some((
+                ActionKind::SetIoPriority(IoPriority::BestEffort(4)),
+                vec![300]
+            ))
+        );
+        assert_eq!(
+            result(&mut rig, ActionState::Succeeded)
+                .last()
+                .map(String::as_str),
+            Some("I/O priority updated")
+        );
+
+        // Several targets and an app row: one request, every current member.
+        rig.select_pids(&[300, 301]);
+        assert!(rig.dispatch(normal.clone()).is_none());
+        assert_eq!(
+            rig.sent().pop(),
+            Some((
+                ActionKind::SetIoPriority(IoPriority::BestEffort(4)),
+                vec![300, 301]
+            ))
+        );
+        assert_eq!(
+            result(&mut rig, ActionState::Succeeded)
+                .last()
+                .map(String::as_str),
+            Some("Selected process I/O priority updated.")
+        );
+        rig.select(&[ProcRowId::Group(app_key())]);
+        assert!(rig.dispatch(normal.clone()).is_none());
+        assert_eq!(
+            rig.sent().pop(),
+            Some((
+                ActionKind::SetIoPriority(IoPriority::BestEffort(4)),
+                vec![200, 201]
+            ))
+        );
+
+        // Another user's process asks first, with the primary "Set I/O priority" button.
+        rig.publish(vec![other_user_sshd(812)], &[812], Vec::new());
+        rig.select_pids(&[812]);
+        let mut dialog = rig.dispatch(normal).expect("the OtherUser dialog");
+        assert_eq!(
+            dialog.text(),
+            "Set I/O priority on sshd (PID 812), owned by root. Continue?"
+        );
+        assert!(!dialog.is_destructive());
+        dialog.enter();
+        assert_eq!(
+            rig.sent().pop(),
+            Some((
+                ActionKind::SetIoPriority(IoPriority::BestEffort(4)),
+                vec![812]
+            ))
+        );
     }
 
     #[gpui_kit::test]

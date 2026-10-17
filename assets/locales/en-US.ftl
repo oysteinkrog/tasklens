@@ -2018,6 +2018,7 @@ processes-confirm-action-resume = Resume
 # tasklens-pdu.38: the action name in the Freeze App confirmation.
 processes-confirm-action-freeze = Freeze
 processes-confirm-action-set-priority = Set priority
+processes-confirm-action-set-io-priority = Set I/O priority
 
 # Send Signal menu and real-time dialog (tasklens-gma.2, UI-PWN-026, UI-PWN-027).
 pwn-signal-title = tasklens Send Signal
@@ -2653,6 +2654,19 @@ processes-menu-priority-normal = Normal
 processes-menu-priority-below-normal = Below normal
 processes-menu-priority-low = Low
 processes-menu-priority-custom = Custom…
+# tasklens-pdu.39: Set Priority Realtime and Idle, Set I/O Priority submenu (UI-PRC-020).
+processes-menu-priority-realtime = Realtime
+processes-menu-priority-idle = Idle
+processes-menu-set-io-priority = Set I/O Priority
+processes-menu-io-scheduler = Scheduler: { $name }
+processes-menu-io-realtime = Realtime
+processes-menu-io-high = High
+processes-menu-io-normal = Normal
+processes-menu-io-low = Low
+processes-menu-io-idle = Idle
+processes-menu-io-default = Default (follows nice)
+processes-menu-io-needs-admin = Needs administrator access.
+processes-menu-io-no-helper = Needs administrator helper (not installed)
 processes-menu-copy = Copy
 processes-menu-copy-details = Copy details
 processes-menu-copy-all-metrics = Copy all metrics
