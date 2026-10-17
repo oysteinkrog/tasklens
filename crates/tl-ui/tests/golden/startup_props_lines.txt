@@ -1,0 +1,11 @@
+Name	Discord
+Publisher	Discord Inc.
+Status / Enabled / State code	Enabled / Yes / active (running)
+Startup impact	Medium (420 ms)
+Type / Source / Scope	Autostart (user) / XDG autostart / user
+Location	/home/u/.config/autostart
+Source path	/home/u/.config/autostart/app.desktop
+Resolved path	/usr/bin/discord
+Command	/usr/bin/discord --start-minimized
+Can run / Can toggle / Can delete / File exists	Yes / Yes / Yes / Yes
+Generated unit	app-Discord@autostart.service

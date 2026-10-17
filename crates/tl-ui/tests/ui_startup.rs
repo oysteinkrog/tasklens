@@ -1521,8 +1521,16 @@ mod page {
         let second_row = point(x, body.origin.y + px(row_h * 1.5));
         let below_rows = point(x, body.origin.y + px(row_h * 2. + 40.));
 
+        let starts = |rig: &mut Rig| {
+            rig.vcx.update(|_, cx| {
+                cx.global::<tl_ui::window::registry::GlobalRegistry>()
+                    .0
+                    .read(cx)
+                    .count(tl_ui::window::registry::CapClass::StartupProps)
+            })
+        };
         rig.double_click(below_rows);
-        assert_eq!(rig.opened.get(), 0, "empty body double-click");
+        assert_eq!(starts(&mut rig), 0, "empty body double-click");
 
         rig.double_click(second_row);
         assert_eq!(
@@ -1530,11 +1538,12 @@ mod page {
             ["Steam"],
             "the click hit the second row"
         );
-        assert_eq!(rig.opened.get(), 1, "row double-click opens Properties");
+        assert_eq!(starts(&mut rig), 1, "row double-click opens Properties");
+        assert_eq!(rig.opened.get(), 0, "the page handles OpenProperties");
 
         // Last, because a header click sorts and sends a new query.
         rig.double_click(header);
-        assert_eq!(rig.opened.get(), 1, "header double-click with a selection");
+        assert_eq!(starts(&mut rig), 1, "header double-click with a selection");
     }
 
     #[gpui_kit::test]
@@ -2087,4 +2096,336 @@ fn startup_keymap_registered(cx: &mut TestAppContext) {
     let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
     let page = vcx.read_entity(&main, |m, _| m.page_entity::<StartupPage>(Tab::Startup));
     assert!(page.is_some(), "the Startup tab builds a StartupPage");
+}
+
+/// The Startup Properties window (tasklens-9o0.12).
+#[cfg(feature = "test-hooks")]
+mod props {
+    use super::*;
+    use gpui_kit::base::Root;
+    use gpui_kit::{Modifiers, VisualTestContext, WindowHandle};
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::hub::GlobalHub;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui::windows::startup_properties::{StartupPropertiesView, open_startup_properties};
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        main: VisualTestContext,
+        version: u64,
+    }
+
+    fn rig(cx: &mut TestAppContext, entries: Vec<StartupEntry>) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let handle = cx
+            .update(|cx| open_main_window_on(Tab::Startup, cx))
+            .expect("the main window opens");
+        let mut main = VisualTestContext::from_window(handle.into(), cx);
+        main.update(|window, _| window.activate_window());
+        main.run_until_parked();
+        let mut rig = Rig {
+            engine,
+            main,
+            version: 0,
+        };
+        rig.publish(entries);
+        rig
+    }
+
+    impl Rig {
+        fn publish(&mut self, entries: Vec<StartupEntry>) {
+            self.version += 1;
+            let version = self.version;
+            self.engine.publish_with(|snapshot| {
+                snapshot.startup = Arc::new(StartupSnapshot {
+                    header: ComponentHeader {
+                        version,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    entries: entries.into(),
+                    ..StartupSnapshot::default()
+                });
+            });
+            self.main.run_until_parked();
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.main.update(|_, cx| {
+                let view = main_window_view(cx).expect("main window");
+                let texts = view.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(ToString::to_string).collect()
+            })
+        }
+    }
+
+    fn named(name: &str) -> StartupEntry {
+        super::entry(name, StartupKind::AutostartUser)
+    }
+
+    fn discord() -> StartupEntry {
+        let mut e = named("Discord");
+        e.publisher = Some(Arc::from("Discord Inc."));
+        e.impact = Impact::Medium;
+        e.impact_detail = Some(ImpactDetail {
+            activation_ms: 420,
+            started_after_login_ms: 3000,
+            cpu_nsec: None,
+            fork_exec_only: false,
+        });
+        e.state_code = Some(Arc::from("active (running)"));
+        e.command = Arc::from("/usr/bin/discord --start-minimized");
+        e.resolved_path = Some(Arc::from("/usr/bin/discord"));
+        e.generated_unit = Some(Arc::from("app-Discord@autostart.service"));
+        e
+    }
+
+    fn open(cx: &mut TestAppContext, entry: &StartupEntry) -> Option<WindowHandle<Root>> {
+        let r = entry.id.clone();
+        cx.update(|cx| {
+            let hub = cx.global::<GlobalHub>().0.clone();
+            open_startup_properties(r.clone(), &hub, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            let handle = registry.read(cx).get(&WindowKey::StartupProperties(r));
+            handle.and_then(|h| h.downcast::<Root>())
+        })
+    }
+
+    fn frame(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+    ) -> gpui_kit::Entity<TlSecondaryWindow<StartupPropertiesView>> {
+        cx.update(|cx| TlSecondaryWindow::<StartupPropertiesView>::find(handle, cx))
+            .expect("startup properties frame")
+    }
+
+    fn title(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> String {
+        let frame = frame(cx, handle);
+        cx.update(|cx| frame.read(cx).title().to_string())
+    }
+
+    fn lines(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> Vec<String> {
+        let frame = frame(cx, handle);
+        cx.update(|cx| {
+            let view = frame.read(cx).content().clone();
+            let words = tl_ui::components::kv_grid::kv_words(cx);
+            view.read(cx).line_texts(&words)
+        })
+    }
+
+    fn count(cx: &mut TestAppContext) -> usize {
+        cx.update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .count(CapClass::StartupProps)
+        })
+    }
+
+    fn golden(name: &str, actual: &str) {
+        let path = format!("{}/tests/golden/{name}", env!("CARGO_MANIFEST_DIR"));
+        if std::env::var("TL_UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, actual).expect("write the golden");
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(actual, expected, "{name}");
+    }
+
+    #[gpui_kit::test]
+    fn startup_props_lines_golden(cx: &mut TestAppContext) {
+        let entry = discord();
+        let _rig = rig(cx, vec![entry.clone()]);
+        let handle = open(cx, &entry).expect("opened");
+        assert_eq!(title(cx, handle), "Startup properties: Discord");
+        let text = lines(cx, handle).join("\n") + "\n";
+        golden("startup_props_lines.txt", &text);
+    }
+
+    #[gpui_kit::test]
+    fn startup_props_optional_lines_only_when_set(cx: &mut TestAppContext) {
+        let base = named("Plain");
+        let _rig = rig(cx, vec![base.clone()]);
+        let handle = open(cx, &base).expect("opened");
+        let optional = [
+            "OnlyShowIn",
+            "NotShowIn",
+            "TryExec",
+            "Autostart phase",
+            "Generated unit",
+            "Overrides",
+        ];
+        let all = lines(cx, handle);
+        for label in optional {
+            assert!(
+                !all.iter().any(|l| l.starts_with(&format!("{label}\t"))),
+                "{label} in {all:?}"
+            );
+        }
+
+        let mut full = named("Full");
+        full.only_show_in = ["KDE".into(), "GNOME".into()].into_iter().collect();
+        full.not_show_in = ["LXQt".into()].into_iter().collect();
+        full.try_exec = Some(Arc::from("full"));
+        full.autostart_phase = Some(Arc::from("Applications"));
+        full.generated_unit = Some(Arc::from("app-Full@autostart.service"));
+        full.overrides = Some(Arc::from("/etc/xdg/autostart/Full.desktop"));
+        let mut rig = _rig;
+        rig.publish(vec![base, full.clone()]);
+        let handle = open(cx, &full).expect("opened");
+        let all = lines(cx, handle);
+        for label in optional {
+            assert!(
+                all.iter().any(|l| l.starts_with(&format!("{label}\t"))),
+                "{label} missing in {all:?}"
+            );
+        }
+        assert!(all.iter().any(|l| l == "OnlyShowIn\tKDE, GNOME"), "{all:?}");
+    }
+
+    #[gpui_kit::test]
+    fn startup_props_removed_title(cx: &mut TestAppContext) {
+        let entry = discord();
+        let mut rig = rig(cx, vec![entry.clone()]);
+        let handle = open(cx, &entry).expect("opened");
+        let before = lines(cx, handle);
+        rig.publish(Vec::new());
+        cx.run_until_parked();
+        assert_eq!(title(cx, handle), "Startup properties: Discord (removed)");
+        assert_eq!(lines(cx, handle), before, "the last values stay");
+        let frame = frame(cx, handle);
+        let secondary = cx.update(|cx| {
+            let view = frame.read(cx).content().clone();
+            let words = tl_ui::components::kv_grid::kv_words(cx);
+            let theme = current(cx).clone();
+            let view = view.read(cx);
+            view.is_removed()
+                && view
+                    .value_looks(&words, &theme)
+                    .iter()
+                    .all(|look| look.color == theme.text_secondary && !look.link)
+        });
+        assert!(secondary, "every value is text_secondary");
+    }
+
+    #[gpui_kit::test]
+    fn startup_props_cap(cx: &mut TestAppContext) {
+        let entries: Vec<StartupEntry> = (0..11).map(|i| named(&format!("e{i}"))).collect();
+        let mut rig = rig(cx, entries.clone());
+        for entry in &entries[..10] {
+            assert!(open(cx, entry).is_some());
+        }
+        rig.main.update(|window, _| window.activate_window());
+        rig.main.run_until_parked();
+        assert!(open(cx, &entries[10]).is_none());
+        assert_eq!(count(cx), 10);
+        assert!(
+            rig.toasts()
+                .iter()
+                .any(|t| t == "Too many startup properties windows are already open"),
+            "{:?}",
+            rig.toasts()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_props_same_entry_focuses(cx: &mut TestAppContext) {
+        let entry = named("A");
+        let _rig = rig(cx, vec![entry.clone()]);
+        let first = open(cx, &entry).expect("opened");
+        let again = open(cx, &entry).expect("still open");
+        assert_eq!(first.window_id(), again.window_id());
+        assert_eq!(count(cx), 1);
+    }
+
+    #[gpui_kit::test]
+    fn startup_props_copy_line(cx: &mut TestAppContext) {
+        let entry = discord();
+        let _rig = rig(cx, vec![entry.clone()]);
+        let handle = open(cx, &entry).expect("opened");
+        let mut win = VisualTestContext::from_window(handle.into(), cx);
+        win.update(|window, _| window.activate_window());
+        win.run_until_parked();
+        win.update(|window, cx| window.draw(cx).clear(cx));
+        // Line 8 is Command.
+        let bounds = win
+            .debug_bounds("StartupPropsCopy-8")
+            .expect("the Command copy button is drawn");
+        win.simulate_click(bounds.center(), Modifiers::default());
+        win.run_until_parked();
+        let clipboard = win.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(
+            clipboard.as_deref(),
+            Some("/usr/bin/discord --start-minimized")
+        );
+        let frame = frame(cx, handle);
+        let toasts = win.update(|window, cx| {
+            let queue = tl_ui::components::toast::ToastQueue::of_window(window, cx)
+                .expect("the window's toast stack");
+            let _ = &frame;
+            queue
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            toasts.iter().any(|t| t == "Copied to clipboard"),
+            "{toasts:?}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn startup_props_rerender_only_on_own_entry(cx: &mut TestAppContext) {
+        let a = named("A");
+        let b = named("B");
+        let mut rig = rig(cx, vec![a.clone(), b.clone()]);
+        let handle = open(cx, &a).expect("opened");
+        let mut win = VisualTestContext::from_window(handle.into(), cx);
+        win.update(|window, _| window.activate_window());
+        win.run_until_parked();
+        win.update(|window, cx| window.draw(cx).clear(cx));
+        let frame = frame(cx, handle);
+        let renders = |win: &mut VisualTestContext| {
+            win.update(|_, cx| frame.read(cx).content().read(cx).redraw_count())
+        };
+        let before = renders(&mut win);
+        let mut other = b.clone();
+        other.command = Arc::from("/usr/bin/changed");
+        rig.publish(vec![a.clone(), other]);
+        win.run_until_parked();
+        assert_eq!(renders(&mut win), before, "another entry changed");
+        let mut own = a;
+        own.command = Arc::from("/usr/bin/own");
+        rig.publish(vec![own, b]);
+        win.run_until_parked();
+        assert!(renders(&mut win) > before, "its own entry changed");
+    }
 }

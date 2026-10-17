@@ -45,6 +45,7 @@ use crate::table::actions::OpenProperties;
 use crate::table::tree_table::TreeTableEvent;
 use crate::window::main::{FilterChanged, GlobalShellEvents, ShellPage};
 use crate::window::status::StatusChanged;
+use crate::windows::startup_properties::open_startup_properties_all;
 
 /// The latest a manual refresh waits for a new Startup component version.
 pub const REFRESH_TOAST_AFTER: Duration = Duration::from_secs(2);
@@ -236,6 +237,30 @@ impl StartupPage {
             .map_or(&[], |targets| targets.refs.as_slice())
     }
 
+    /// Enter, Alt+Enter, Ctrl+I, double-click and the menu's Properties: one window per selected
+    /// entry, the focused one first. A full cap shows one toast and stops.
+    fn on_open_properties(&mut self, _: &OpenProperties, _: &mut Window, cx: &mut Context<Self>) {
+        let mut refs = self.take_targets(cx).refs;
+        let focused = {
+            let table = self.frame.table.read(cx);
+            table
+                .selection
+                .focus()
+                .and_then(|id| table.delegate.row_index(id))
+                .and_then(|ix| table.delegate.startup_ref(ix).cloned())
+        };
+        if let Some(pos) = focused.and_then(|f| refs.iter().position(|r| *r == f))
+            && pos > 0
+        {
+            let first = refs.remove(pos);
+            refs.insert(0, first);
+        }
+        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+            return;
+        };
+        open_startup_properties_all(refs, &hub, cx);
+    }
+
     /// An Enable or Disable started or finished on `target`: its Status cell shows or drops
     /// "Updating…". Run now changes no row.
     fn on_pending_changed(&mut self, target: &ActionTarget, cx: &mut Context<Self>) {
@@ -366,6 +391,7 @@ impl Render for StartupPage {
             .on_action(cx.listener(Self::on_copy_rows_as_table))
             .on_action(cx.listener(Self::on_startup_copy_command))
             .on_action(cx.listener(Self::on_startup_open_file_location))
+            .on_action(cx.listener(Self::on_open_properties))
             .child(self.frame.render(None, Box::new(ClearFilter), window, cx))
     }
 }
