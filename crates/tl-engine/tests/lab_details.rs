@@ -6,6 +6,7 @@
 mod fake_sources;
 
 use std::fs;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -21,7 +22,10 @@ use tl_engine::update::EngineMsg;
 use tl_engine::workers::{process_detail, processes};
 use tl_model::command::Command;
 use tl_model::demand::{ColumnSet, Demand, DetailDemand};
-use tl_model::details::{DetailTab, DetailTarget, TabPayload, TabSlot};
+use tl_model::details::{
+    DetailTab, DetailTarget, ScanId, ScanPhase, StringEncoding, StringScanOpts, StringScanState,
+    TabPayload, TabSlot,
+};
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::EngineSettings;
 use tl_model::time::BootId;
@@ -441,5 +445,317 @@ fn engine_general_follows_fixture_changes() {
     let changed = slot(&ui, DetailTab::General);
     assert_eq!(general_rchar(&changed), 50_000_000);
     assert!(changed.version > first.version);
+    stop(fl, ui, handle);
+}
+
+// Strings scan (tasklens-dwy.9) ---------------------------------------------------------------
+
+/// The start address of the fake memory region of the Strings tests.
+const MEM_BASE: u64 = 0x1000;
+
+/// Gives process-edge 4201 one private anonymous region of `len` bytes at `MEM_BASE`, and a
+/// sparse `mem` file that holds each `(offset, bytes)` at that offset in the region. `ProcMem`
+/// reads `mem` with `pread` at the address, so this file is the memory the scan sees.
+fn write_memory(root: &FixtureRoot, len: u64, data: &[(u64, &[u8])]) {
+    root.write(
+        4201,
+        "maps",
+        format!(
+            "{MEM_BASE:08x}-{:08x} rw-p 00000000 00:00 0\n",
+            MEM_BASE + len
+        ),
+    );
+    let mem = fs::File::create(root.pid_dir(4201).join("mem")).expect("create mem");
+    mem.set_len(MEM_BASE + len).expect("size mem");
+    for (offset, bytes) in data {
+        mem.write_all_at(bytes, MEM_BASE + offset)
+            .expect("write mem");
+    }
+}
+
+fn write_ptrace_scope(root: &FixtureRoot, scope: u8) {
+    let dir = root.root().join("proc/sys/kernel/yama");
+    fs::create_dir_all(&dir).expect("create yama dir");
+    fs::write(dir.join("ptrace_scope"), format!("{scope}\n")).expect("write ptrace_scope");
+}
+
+fn strings_demand(key: ProcessKey) -> Demand {
+    Demand {
+        any_surface_visible: true,
+        details: Arc::from([DetailDemand {
+            target: DetailTarget::Process(key),
+            tab: DetailTab::Strings,
+        }]),
+        ..Demand::default()
+    }
+}
+
+fn strings_slot(ui: &fake_sources::UiSide, key: ProcessKey) -> TabSlot {
+    let snap = ui.latest.load_full();
+    snap.details
+        .targets
+        .get(&DetailTarget::Process(key))
+        .map(|t| t.tab(DetailTab::Strings).clone())
+        .unwrap_or_default()
+}
+
+fn scan_state(slot: &TabSlot) -> Option<Arc<StringScanState>> {
+    match slot.payload.as_deref() {
+        Some(TabPayload::Strings(state)) => Some(Arc::clone(state)),
+        None => None,
+        other => panic!("expected a Strings payload, got {other:?}"),
+    }
+}
+
+fn send(ui: &fake_sources::UiSide, cmd: Command) {
+    ui.msgs_tx
+        .try_send(EngineMsg::Command(cmd))
+        .expect("the queue has room for the message");
+}
+
+/// Starts the engine on `root` with a 500 ms interval, opens the Strings tab of `key`, and
+/// sends scan 1 of `key` with `opts`.
+fn begin_scan(
+    root: &FixtureRoot,
+    key: ProcessKey,
+    opts: StringScanOpts,
+) -> (
+    FakeLab,
+    fake_sources::UiSide,
+    asupersync::runtime::TaskHandle<()>,
+) {
+    let (mut fl, ui, handle) = start_detail_engine(root, 500);
+    ui.demand_tx
+        .send(strings_demand(key))
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(1), Duration::from_millis(10));
+    send(
+        &ui,
+        Command::StringScan {
+            scan: ScanId(1),
+            key,
+            opts,
+        },
+    );
+    (fl, ui, handle)
+}
+
+/// Runs the lab in 10 ms steps for at most `limit` and returns each new Strings payload of
+/// `key` with its validity. Stops after the first payload that is not `Scanning`.
+fn collect_scan(
+    fl: &mut FakeLab,
+    ui: &fake_sources::UiSide,
+    key: ProcessKey,
+    limit: Duration,
+) -> Vec<(Validity, Arc<StringScanState>)> {
+    let mut seen = Vec::new();
+    let mut version = strings_slot(ui, key).version;
+    let end = fl.now_ms() + u64::try_from(limit.as_millis()).expect("short limit");
+    while fl.now_ms() < end {
+        fl.advance(Duration::from_millis(10));
+        let slot = strings_slot(ui, key);
+        if slot.version == version {
+            continue;
+        }
+        version = slot.version;
+        if let Some(state) = scan_state(&slot) {
+            let done = state.phase != ScanPhase::Scanning;
+            seen.push((slot.validity, state));
+            if done {
+                break;
+            }
+        }
+    }
+    seen
+}
+
+/// Address, encoding and value of every hit, in scan order.
+fn hits(state: &StringScanState) -> Vec<(u64, StringEncoding, String)> {
+    state
+        .chunks
+        .iter()
+        .flat_map(|chunk| chunk.iter())
+        .map(|h| (h.address, h.encoding, h.value.to_string()))
+        .collect()
+}
+
+/// tasklens-dwy.9: with `ptrace_scope` 0 the scan streams payloads with rising progress, and the
+/// last one is `Finished` with exactly the strings in memory.
+#[test]
+fn string_scan_streams_progress() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    write_ptrace_scope(&root, 0);
+    let strings: [(u64, &[u8]); 4] = [
+        (0x10, b"alpha string"),
+        (20 << 20, b"bravo string"),
+        (40 << 20, b"delta string"),
+        ((64 << 20) - 32, b"gamma string"),
+    ];
+    write_memory(&root, 64 << 20, &strings);
+    let (mut fl, ui, handle) = begin_scan(&root, edge_key(), StringScanOpts::default());
+
+    let payloads = collect_scan(&mut fl, &ui, edge_key(), Duration::from_secs(5));
+    assert!(payloads.len() >= 2, "{} payloads", payloads.len());
+    let pcts: Vec<u8> = payloads.iter().map(|(_, s)| s.progress_pct).collect();
+    assert!(pcts.windows(2).all(|w| w[0] <= w[1]), "{pcts:?}");
+    assert!(pcts[0] < 100, "{pcts:?}");
+    for (validity, state) in &payloads {
+        assert_eq!(*validity, Validity::Valid);
+        assert_eq!(state.scan, ScanId(1));
+    }
+    let (_, last) = payloads.last().expect("a payload");
+    assert_eq!(last.phase, ScanPhase::Finished);
+    assert_eq!(last.progress_pct, 100);
+    assert_eq!(last.found, 4);
+    let expected: Vec<(u64, StringEncoding, String)> = strings
+        .iter()
+        .map(|&(offset, bytes)| {
+            let text = std::str::from_utf8(bytes).expect("ASCII");
+            (MEM_BASE + offset, StringEncoding::Ascii, text.to_string())
+        })
+        .collect();
+    assert_eq!(hits(last), expected);
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.9: with `ptrace_scope` 1 and a target that is not a descendant of tasklens, one
+/// `Restricted` payload arrives and the memory is not scanned.
+#[test]
+fn string_scan_restricted_under_yama() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    write_ptrace_scope(&root, 1);
+    write_memory(&root, 1 << 20, &[(0x10, b"secret value")]);
+    let (mut fl, ui, handle) = begin_scan(&root, edge_key(), StringScanOpts::default());
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+
+    let slot = strings_slot(&ui, edge_key());
+    assert_eq!(slot.version, 1, "exactly one payload");
+    assert_eq!(slot.validity, Validity::Restricted);
+    let state = scan_state(&slot).expect("a Strings payload");
+    assert_eq!(state.scan, ScanId(1));
+    assert_eq!(
+        state.phase,
+        ScanPhase::Failed("Strings unavailable: needs administrator rights".into())
+    );
+    assert_eq!(state.found, 0);
+    assert!(state.chunks.is_empty());
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.9: with `ptrace_scope` 1 a target whose parent chain reaches tasklens is
+/// scanned.
+#[test]
+fn string_scan_descendant_allowed_under_yama() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    write_ptrace_scope(&root, 1);
+    write_memory(&root, 1 << 20, &[(0x10, b"child memory")]);
+    // 4201's parent is 4100. Make tasklens the parent of 4100.
+    let me = std::process::id();
+    let stat = fs::read_to_string(root.pid_dir(4201).join("stat")).expect("read stat");
+    let parent = stat.replace(
+        "4201 (Web Content) S 4100",
+        &format!("4100 (parent) S {me}"),
+    );
+    fs::create_dir_all(root.pid_dir(4100)).expect("create parent dir");
+    root.write(4100, "stat", parent);
+    let (mut fl, ui, handle) = begin_scan(&root, edge_key(), StringScanOpts::default());
+
+    let payloads = collect_scan(&mut fl, &ui, edge_key(), Duration::from_secs(2));
+    let (validity, last) = payloads.last().expect("a payload");
+    assert_eq!(*validity, Validity::Valid);
+    assert_eq!(last.phase, ScanPhase::Finished);
+    assert_eq!(
+        hits(last),
+        vec![(
+            MEM_BASE + 0x10,
+            StringEncoding::Ascii,
+            "child memory".to_string()
+        )]
+    );
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.9: `CancelStringScan` after the first chunks stops the scan. The final payload
+/// is `Cancelled`, and nothing changes after it.
+#[test]
+fn string_scan_cancel() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    write_ptrace_scope(&root, 0);
+    // One string every 4 MiB.
+    let data: Vec<(u64, &[u8])> = (0..16).map(|i| (i << 22, &b"some string"[..])).collect();
+    write_memory(&root, 64 << 20, &data);
+    let (mut fl, ui, handle) = begin_scan(&root, edge_key(), StringScanOpts::default());
+
+    let first = collect_scan(&mut fl, &ui, edge_key(), Duration::from_secs(2));
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].1.phase, ScanPhase::Scanning);
+    send(&ui, Command::CancelStringScan(ScanId(1)));
+
+    let rest = collect_scan(&mut fl, &ui, edge_key(), Duration::from_secs(2));
+    let (validity, last) = rest.last().expect("a final payload");
+    assert_eq!(*validity, Validity::Valid);
+    assert_eq!(last.phase, ScanPhase::Cancelled);
+    assert!(last.progress_pct < 100, "{}", last.progress_pct);
+    assert!(last.found < 16, "{}", last.found);
+
+    let at_cancel = strings_slot(&ui, edge_key());
+    fl.run_for(Duration::from_secs(1), Duration::from_millis(10));
+    let later = strings_slot(&ui, edge_key());
+    assert_eq!(later.version, at_cancel.version);
+    assert_eq!(
+        scan_state(&later).expect("payload").found,
+        last.found,
+        "no chunk is read after the cancel"
+    );
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.9: memory with 1,000,001 strings stops the scan at 1,000,000 with
+/// `StoppedLimit`, which the UI shows as "String scan stopped: not enough memory.".
+#[test]
+fn string_scan_limit() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    write_ptrace_scope(&root, 0);
+    let data = b"abcd\0".repeat(1_000_001);
+    let len = (data.len() as u64).next_multiple_of(4096);
+    write_memory(&root, len, &[(0, &data)]);
+    let opts = StringScanOpts {
+        ascii: true,
+        utf8: false,
+        utf16le: false,
+        ..StringScanOpts::default()
+    };
+    let (mut fl, ui, handle) = begin_scan(&root, edge_key(), opts);
+
+    let payloads = collect_scan(&mut fl, &ui, edge_key(), Duration::from_secs(5));
+    let (validity, last) = payloads.last().expect("a payload");
+    assert_eq!(*validity, Validity::Valid);
+    assert_eq!(last.phase, ScanPhase::StoppedLimit);
+    assert_eq!(last.found, 1_000_000);
+    let kept: usize = last.chunks.iter().map(|c| c.len()).sum();
+    assert_eq!(kept, 1_000_000);
+    stop(fl, ui, handle);
+}
+
+/// tasklens-dwy.9: a kernel thread is never scanned.
+#[test]
+fn string_scan_kernel_thread() {
+    let root = FixtureRoot::new(&["process-edge"]);
+    // process-edge pid 2 is kthreadd.
+    let kthread = ProcessKey {
+        start_ticks: 19,
+        boot_id: BootId(1),
+        pid: 2,
+    };
+    let (mut fl, ui, handle) = begin_scan(&root, kthread, StringScanOpts::default());
+
+    let payloads = collect_scan(&mut fl, &ui, kthread, Duration::from_secs(2));
+    assert_eq!(payloads.len(), 1);
+    let (validity, state) = &payloads[0];
+    assert_eq!(*validity, Validity::Unsupported);
+    assert_eq!(
+        state.phase,
+        ScanPhase::Failed("Strings unavailable for this process.".into())
+    );
     stop(fl, ui, handle);
 }

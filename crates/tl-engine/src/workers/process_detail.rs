@@ -53,8 +53,20 @@
 //! the interval and 1 s, at least 250 ms, so a 1500 ms interval samples every 500 ms and a
 //! 1600 ms one every 250 ms, and affinity reads at exactly 1 Hz.
 //!
+//! Strings (PROC-084, tasklens-dwy.9): `StringScan` queues a scan that the next sample starts.
+//! A kernel thread gets "Strings unavailable for this process.". A target that Yama
+//! `ptrace_scope` does not let tasklens attach to (scope 1 allows only descendants of tasklens,
+//! 2 and 3 allow none) gets one `Restricted` payload, and its memory is never opened; the helper
+//! path is E29's. A running scan reads `/proc/<pid>/mem` one `strings::CHUNK` per step, at most
+//! `SCAN_STEPS_PER_SAMPLE` steps per sample over all scans in turn, and the period is
+//! `SCAN_PERIOD` while any scan runs or waits. Tabs and affinity then read by the clock, so they
+//! keep their rates. A running scan is published at most every `SCAN_PUBLISH_PERIOD`, and its end
+//! at once. `CancelStringScan` drops the scan and publishes `Cancelled`, and no chunk is read
+//! after it. A scan whose process leaves the demand stops without a payload: its window closed.
+//!
 //! Per-key errors become `Validity`, never `WorkerError`. Hash failures are a `HashState`.
-//! Environment values, command lines and paths are never logged (ADR-015).
+//! Environment values, command lines and paths are never logged (ADR-015), nor are scan
+//! options, found strings or their addresses.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -90,6 +102,9 @@ use tl_collect::proc::smaps::{PssReader, RollupRead};
 use tl_collect::proc::status::{
     PidStatus, STATUS_READ_MAX, commit_bytes, parse_status, ws_shared_bytes,
 };
+use tl_collect::proc::strings::{
+    Encoding, ProcMem, ScanEnd, ScanOpts, StringHitInfo, StringScanner, select_regions,
+};
 use tl_collect::sanitize::{
     CMDLINE_MAX, EXE_LINK_MAX, sanitize_cmdline, sanitize_link, sanitize_text,
 };
@@ -101,7 +116,8 @@ use tl_model::details::{
     AffinityInfo, CapRow, DetailTab, DetailTarget, Elevated, ElfArch, EnvDetail, ExeLocation,
     FdDetail, FdKind, FdRow, GeneralDetail, GroupMembershipRow, HashError, HashState, IdTriple,
     MapNode, MapRegion, MapsDetail, NsKind, NsRow, NsState, PackageCheck, PackageInfo, Relro,
-    Seccomp, SecurityDetail, TabPayload, ThreadRow,
+    ScanId, ScanPhase, Seccomp, SecurityDetail, StringEncoding, StringHit, StringScanOpts,
+    StringScanState, TabPayload, ThreadRow,
 };
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, ProcessKey};
@@ -128,6 +144,27 @@ pub const SMAPS_MIN_PERIOD: Duration = Duration::from_secs(1);
 /// Affinity masks are read once a second while a Set Affinity dialog is open (ADR-008). It is
 /// the PSS rate, so both share the sample period.
 pub const AFFINITY_PERIOD: Duration = PSS_PERIOD;
+
+/// The sample period while a Strings scan runs.
+const SCAN_PERIOD: Duration = Duration::from_millis(50);
+
+/// `strings::CHUNK` reads per sample over all scans, 8 MiB, so the other detail reads keep
+/// running between them.
+const SCAN_STEPS_PER_SAMPLE: u32 = 8;
+
+/// A running scan is published at most 4 times a second (docs/ui/process-windows.md).
+const SCAN_PUBLISH_PERIOD: Duration = Duration::from_millis(250);
+
+/// The Strings tab shows its Enable button with this text.
+const SCAN_RESTRICTED: &str = "Strings unavailable: needs administrator rights";
+const SCAN_KERNEL_THREAD: &str = "Strings unavailable for this process.";
+const SCAN_READ_FAILED: &str = "Failed to read process memory.";
+
+/// Parents checked for the Yama scope 1 rule.
+const ANCESTOR_HOPS: u32 = 64;
+
+/// Read limit for `ptrace_scope`.
+const PTRACE_SCOPE_MAX: usize = 64;
 
 /// Read limit for `<root>/etc/group`.
 const GROUP_FILE_MAX: usize = 1024 * 1024;
@@ -227,6 +264,12 @@ fn nanos(d: Duration) -> TimeNs {
 /// True when no read happened at `last`, or `min` has passed since it.
 fn elapsed(last: Option<TimeNs>, now: TimeNs, min: Duration) -> bool {
     last.is_none_or(|at| now.saturating_sub(at) >= nanos(min))
+}
+
+/// `elapsed` for a read every `every` while a scan runs. Half a `SCAN_PERIOD` is taken off, so
+/// a sample a little early or late still reads and the rate does not drift.
+fn scan_elapsed(last: Option<TimeNs>, now: TimeNs, every: Duration) -> bool {
+    elapsed(last, now, every.saturating_sub(SCAN_PERIOD / 2))
 }
 
 /// A read that runs every `stride` samples. `ready` is true on the first sample and then on
@@ -393,6 +436,32 @@ struct TargetState {
     package_check: PackageCheck,
 }
 
+/// One running Strings scan.
+struct ScanState {
+    scan: ScanId,
+    key: ProcessKey,
+    scanner: StringScanner,
+    mem: ProcMem,
+    /// One chunk per step that found strings. Every payload shares these `Arc`s.
+    chunks: Vec<Arc<[StringHit]>>,
+    /// Clock time of the last `Scanning` payload.
+    last_publish: Option<TimeNs>,
+}
+
+impl ScanState {
+    fn update(&self, phase: ScanPhase, validity: Validity) -> SourceUpdate {
+        strings_update(
+            self.key,
+            self.scan,
+            self.scanner.progress_pct(),
+            self.scanner.found(),
+            &self.chunks,
+            phase,
+            validity,
+        )
+    }
+}
+
 pub struct ProcessDetailSource {
     cfg: Arc<EngineConfig>,
     pss: PssReader,
@@ -401,9 +470,24 @@ pub struct ProcessDetailSource {
     /// Reused every sample.
     buf: Vec<u8>,
     reads: Vec<(ProcessKey, RollupRead)>,
-    /// Commands the worker owns, drained at the start of every sample. tasklens-dwy.15, E10-006
-    /// and E10-A3 add their handlers; until then they are logged by kind and dropped.
+    /// `HandleSearch` and `CancelHandleSearch`, drained at the start of every sample. Until
+    /// their handler lands they are logged by kind and dropped.
     pending: Vec<WorkerCommand>,
+    /// `StringScan` commands not started yet, oldest first. The next sample starts them.
+    scan_requests: Vec<(ScanId, ProcessKey, StringScanOpts)>,
+    /// Running Strings scans, oldest first. With `scan_requests` at most `DETAILS_MAX`, and at
+    /// most one per process.
+    scans: Vec<ScanState>,
+    /// The chunk buffer and hit list of the scans. Freed when no scan runs.
+    scan_buf: Vec<u8>,
+    scan_hits: Vec<StringHitInfo>,
+    /// Set by `period`: true while a scan runs or waits, so tabs and affinity read by the clock.
+    scanning: Cell<bool>,
+    /// Set by `period`: `processes.interval_ms`.
+    interval: Cell<Duration>,
+    /// Clock time of the last periodic tab read and of the last affinity read.
+    last_tabs: Option<TimeNs>,
+    last_affinity: Option<TimeNs>,
     /// `ComputeHashes` keys, oldest first, at most `DETAILS_MAX`. A key waits here until its
     /// target has a General tab state.
     hash_requests: Vec<ProcessKey>,
@@ -482,6 +566,14 @@ impl ProcessDetailSource {
             buf: Vec::new(),
             reads: Vec::new(),
             pending: Vec::new(),
+            scan_requests: Vec::new(),
+            scans: Vec::new(),
+            scan_buf: Vec::new(),
+            scan_hits: Vec::new(),
+            scanning: Cell::new(false),
+            interval: Cell::new(Duration::from_millis(u64::from(MIN_INTERVAL_MS))),
+            last_tabs: None,
+            last_affinity: None,
             hash_requests: Vec::new(),
             hash_cache: HashCache::new(),
             verify_requests: Vec::new(),
@@ -559,6 +651,7 @@ impl ProcessDetailSource {
             .retain(|_, &mut at| !elapsed(Some(at), now, SMAPS_MIN_PERIOD));
         self.read_tabs(now);
         self.read_affinity(now);
+        self.step_scans(now);
 
         let keys = self.keys.borrow().clone();
         // With no keys the reader still runs while fds are cached, so hidden columns close them.
@@ -737,7 +830,7 @@ impl ProcessDetailSource {
         }
 
         let details = self.details.borrow().clone();
-        let periodic = wants_tabs(&details) && self.tabs_stride.ready();
+        let periodic = wants_tabs(&details) && self.tabs_due(now);
         // General first and once per target, then the demanded tab.
         let mut reads: SmallVec<[(ProcessKey, DetailTab); 2 * DETAILS_MAX]> = SmallVec::new();
         for d in details.iter() {
@@ -945,12 +1038,19 @@ impl ProcessDetailSource {
         let keys = self.affinity_keys.borrow().clone();
         if keys.is_empty() {
             self.affinity_stride = Stride::default();
+            self.last_affinity = None;
             return;
         }
-        self.affinity_stride.set(self.affinity_every.get());
-        if !self.affinity_stride.ready() {
+        let due = if self.scanning.get() {
+            scan_elapsed(self.last_affinity, now, AFFINITY_PERIOD)
+        } else {
+            self.affinity_stride.set(self.affinity_every.get());
+            self.affinity_stride.ready()
+        };
+        if !due {
             return;
         }
+        self.last_affinity = Some(now);
         let g = &mut self.general;
         let entries = keys
             .iter()
@@ -974,6 +1074,133 @@ impl ProcessDetailSource {
     }
 }
 
+impl ProcessDetailSource {
+    /// True when the periodic tab reads are due: every `tabs_every` samples, or by the clock
+    /// while a scan runs, as `SCAN_PERIOD` does not divide every interval.
+    fn tabs_due(&mut self, now: TimeNs) -> bool {
+        let due = if self.scanning.get() {
+            scan_elapsed(self.last_tabs, now, self.interval.get())
+        } else {
+            self.tabs_stride.ready()
+        };
+        if due {
+            self.last_tabs = Some(now);
+        }
+        due
+    }
+
+    /// Starts the requested scans, reads up to `SCAN_STEPS_PER_SAMPLE` chunks over the running
+    /// ones in turn and queues their payloads. A scan whose process left the demand stops
+    /// without a payload.
+    fn step_scans(&mut self, now: TimeNs) {
+        let details = self.details.borrow().clone();
+        let shown = |key: ProcessKey| {
+            details
+                .iter()
+                .any(|d| d.target == DetailTarget::Process(key))
+        };
+        self.scan_requests.retain(|&(_, key, _)| shown(key));
+        self.scans.retain(|s| shown(s.key));
+        for (scan, key, opts) in std::mem::take(&mut self.scan_requests) {
+            let started = start_scan(
+                &self.cfg.sys_root,
+                key,
+                opts,
+                &mut self.bufs,
+                &mut self.general.stat,
+            );
+            match started {
+                Ok((scanner, mem)) => self.scans.push(ScanState {
+                    scan,
+                    key,
+                    scanner,
+                    mem,
+                    chunks: Vec::new(),
+                    last_publish: None,
+                }),
+                Err((phase, validity)) => {
+                    self.extra
+                        .push_back(strings_update(key, scan, 0, 0, &[], phase, validity));
+                }
+            }
+        }
+        if self.scans.is_empty() {
+            self.scan_buf = Vec::new();
+            self.scan_hits = Vec::new();
+            return;
+        }
+
+        let mut ends: SmallVec<[Option<ScanEnd>; DETAILS_MAX]> =
+            smallvec::smallvec![None; self.scans.len()];
+        let mut budget = SCAN_STEPS_PER_SAMPLE;
+        while budget > 0 && ends.iter().any(Option::is_none) {
+            for (state, end) in self.scans.iter_mut().zip(ends.iter_mut()) {
+                if budget == 0 {
+                    break;
+                }
+                if end.is_some() {
+                    continue;
+                }
+                budget -= 1;
+                self.scan_hits.clear();
+                *end = state
+                    .scanner
+                    .step(&mut state.mem, &mut self.scan_buf, &mut self.scan_hits);
+                if !self.scan_hits.is_empty() {
+                    state
+                        .chunks
+                        .push(self.scan_hits.drain(..).map(string_hit).collect());
+                }
+            }
+        }
+
+        for (state, end) in self.scans.iter_mut().zip(&ends) {
+            let (phase, validity) = match end {
+                None if elapsed(state.last_publish, now, SCAN_PUBLISH_PERIOD) => {
+                    state.last_publish = Some(now);
+                    (ScanPhase::Scanning, Validity::Valid)
+                }
+                None => continue,
+                Some(ScanEnd::Finished) => (ScanPhase::Finished, Validity::Valid),
+                Some(ScanEnd::Stopped) => (ScanPhase::StoppedLimit, Validity::Valid),
+                Some(ScanEnd::Cancelled) => (ScanPhase::Cancelled, Validity::Valid),
+                Some(ScanEnd::Failed) => {
+                    (ScanPhase::Failed(SCAN_READ_FAILED.into()), Validity::Failed)
+                }
+            };
+            self.extra.push_back(state.update(phase, validity));
+        }
+        let mut ends = ends.iter();
+        self.scans
+            .retain(|_| ends.next().is_some_and(Option::is_none));
+    }
+
+    /// Stops scan `id` without another read and queues its `Cancelled` payload. False when no
+    /// such scan waits or runs.
+    fn cancel_scan(&mut self, id: ScanId) -> bool {
+        if let Some(i) = self.scan_requests.iter().position(|r| r.0 == id) {
+            let (scan, key, _) = self.scan_requests.remove(i);
+            self.extra.push_back(strings_update(
+                key,
+                scan,
+                0,
+                0,
+                &[],
+                ScanPhase::Cancelled,
+                Validity::Valid,
+            ));
+            return true;
+        }
+        let Some(i) = self.scans.iter().position(|s| s.scan == id) else {
+            return false;
+        };
+        let state = self.scans.remove(i);
+        self.extra
+            .push_back(state.update(ScanPhase::Cancelled, Validity::Valid));
+        true
+    }
+}
+
 impl Source for ProcessDetailSource {
     fn id(&self) -> SourceId {
         SourceId::ProcessDetail
@@ -984,7 +1211,8 @@ impl Source for ProcessDetailSource {
     /// at the interval, and PSS at the first sample 1 s or more after its last read. Affinity
     /// beside tabs uses `affinity_shared_period` instead, with or without PSS, so affinity reads
     /// every 1 s worth of samples. The period depends only on the demand and the settings, so it
-    /// changes only when they do.
+    /// changes only when they do, or when a Strings scan starts or ends: while one runs or waits
+    /// the period is `SCAN_PERIOD`, and tabs and affinity read by the clock.
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         // A forced `RefreshNow` samples even without a period, so hidden columns must leave
         // no keys behind.
@@ -1058,6 +1286,12 @@ impl Source for ProcessDetailSource {
         };
         self.tabs_every.set(tabs_every);
         self.affinity_every.set(affinity_every);
+        self.interval.set(interval);
+        let scanning = !self.scans.is_empty() || !self.scan_requests.is_empty();
+        self.scanning.set(scanning);
+        if scanning {
+            return Some(SCAN_PERIOD);
+        }
         period
     }
 
@@ -1096,10 +1330,22 @@ impl Source for ProcessDetailSource {
                 }
                 true
             }
-            WorkerCommand::StringScan { .. }
-            | WorkerCommand::CancelStringScan(_)
-            | WorkerCommand::HandleSearch { .. }
-            | WorkerCommand::CancelHandleSearch(_) => {
+            WorkerCommand::StringScan { scan, key, opts } => {
+                // A new scan of a process replaces the one it has.
+                self.scan_requests.retain(|r| r.1 != *key);
+                self.scans.retain(|s| s.key != *key);
+                if self.scan_requests.len() + self.scans.len() >= DETAILS_MAX {
+                    if self.scans.is_empty() {
+                        self.scan_requests.remove(0);
+                    } else {
+                        self.scans.remove(0);
+                    }
+                }
+                self.scan_requests.push((*scan, *key, *opts));
+                true
+            }
+            WorkerCommand::CancelStringScan(scan) => self.cancel_scan(*scan),
+            WorkerCommand::HandleSearch { .. } | WorkerCommand::CancelHandleSearch(_) => {
                 self.pending.push(cmd.clone());
                 true
             }
@@ -1114,6 +1360,174 @@ impl Source for ProcessDetailSource {
     fn take_extra(&mut self) -> Option<SourceUpdate> {
         self.extra.pop_front()
     }
+}
+
+/// A Strings tab update. Every payload carries its `ScanId`, as the UI drops the payloads of
+/// other scans.
+fn strings_update(
+    key: ProcessKey,
+    scan: ScanId,
+    progress_pct: u8,
+    found: u32,
+    chunks: &[Arc<[StringHit]>],
+    phase: ScanPhase,
+    validity: Validity,
+) -> SourceUpdate {
+    let state = StringScanState {
+        scan,
+        progress_pct,
+        found,
+        chunks: Arc::from(chunks),
+        phase,
+    };
+    SourceUpdate::Details(DetailsUpdate::Tab {
+        target: DetailTarget::Process(key),
+        tab: DetailTab::Strings,
+        payload: Arc::new(TabPayload::Strings(Arc::new(state))),
+        validity,
+    })
+}
+
+fn string_hit(hit: StringHitInfo) -> StringHit {
+    StringHit {
+        address: hit.address,
+        encoding: match hit.encoding {
+            Encoding::Ascii => StringEncoding::Ascii,
+            Encoding::Utf8 => StringEncoding::Utf8,
+            Encoding::Utf16Le => StringEncoding::Utf16Le,
+        },
+        length: hit.length,
+        value: Arc::from(hit.value),
+    }
+}
+
+/// Opens the memory of `key` for a Strings scan. A kernel thread, and a target Yama would not
+/// let tasklens attach to, are refused before anything is opened. The error is the phase and
+/// validity of the scan's only payload.
+fn start_scan(
+    root: &SysRoot,
+    key: ProcessKey,
+    opts: StringScanOpts,
+    bufs: &mut ReadBufs,
+    stat: &mut PidStat,
+) -> Result<(StringScanner, ProcMem), (ScanPhase, Validity)> {
+    let failed = || (ScanPhase::Failed(SCAN_READ_FAILED.into()), Validity::Failed);
+    let exited = || (ScanPhase::StoppedExited, Validity::Missing);
+    let restricted = || {
+        (
+            ScanPhase::Failed(SCAN_RESTRICTED.into()),
+            Validity::Restricted,
+        )
+    };
+    match read_pid_stat(root, key.pid, &mut bufs.small, stat) {
+        Ok(()) if stat.start_ticks == key.start_ticks => {}
+        Ok(()) | Err(CollectError::NotFound) => return Err(exited()),
+        Err(e) => {
+            tracing::debug!(error = %e, "strings scan: stat not read");
+            return Err(failed());
+        }
+    }
+    if stat.flags & PF_KTHREAD != 0 {
+        return Err((
+            ScanPhase::Failed(SCAN_KERNEL_THREAD.into()),
+            Validity::Unsupported,
+        ));
+    }
+    let ppid = stat.ppid;
+    if !ptrace_allowed(root, key.pid, ppid, &mut bufs.small, stat) {
+        return Err(restricted());
+    }
+    let mut regions = Vec::new();
+    let mut nodes = Vec::new();
+    match rd::read_maps(root, key, false, bufs, &mut regions, &mut nodes) {
+        Ok(DetailRead::Ok) => {}
+        Ok(DetailRead::Restricted) => return Err(restricted()),
+        Ok(DetailRead::Gone) => return Err(exited()),
+        Err(e) => {
+            tracing::debug!(error = %e, "strings scan: maps not read");
+            return Err(failed());
+        }
+    }
+    let mut ranges = Vec::new();
+    select_regions(&regions, opts.include_file_backed, &mut ranges);
+    let mem = match ProcMem::open(root, key) {
+        Ok(mem) => mem,
+        Err(CollectError::PermissionDenied) => return Err(restricted()),
+        Err(CollectError::ProcessGone { .. }) => return Err(exited()),
+        Err(e) => {
+            tracing::debug!(error = %e, "strings scan: mem not opened");
+            return Err(failed());
+        }
+    };
+    let opts = ScanOpts {
+        min_len: opts.min_len,
+        ascii: opts.ascii,
+        utf8: opts.utf8,
+        utf16le: opts.utf16le,
+        include_file_backed: opts.include_file_backed,
+    };
+    Ok((StringScanner::new(opts, ranges), mem))
+}
+
+/// Reads and parses `<proc>/<pid>/stat`.
+fn read_pid_stat(
+    root: &SysRoot,
+    pid: u32,
+    buf: &mut Vec<u8>,
+    stat: &mut PidStat,
+) -> Result<(), CollectError> {
+    read_file(
+        &root.proc.join(pid.to_string()).join("stat"),
+        buf,
+        SMALL_FILE_LIMIT,
+    )?;
+    parse_pid_stat(buf, stat)
+}
+
+/// True when Yama lets tasklens attach to `pid`, whose parent is `ppid`: scope 0, or scope 1
+/// with tasklens among the first `ANCESTOR_HOPS` parents of `pid`. No `ptrace_scope` file means
+/// no Yama, which counts as scope 0. Scope 2 or 3, or a file that cannot be read, refuses.
+/// Opening `mem` checks the rest of the ptrace rules.
+fn ptrace_allowed(
+    root: &SysRoot,
+    pid: u32,
+    mut ppid: u32,
+    buf: &mut Vec<u8>,
+    stat: &mut PidStat,
+) -> bool {
+    let scope = match read_file(
+        &root.proc.join("sys/kernel/yama/ptrace_scope"),
+        buf,
+        PTRACE_SCOPE_MAX,
+    ) {
+        Ok(_) => std::str::from_utf8(buf)
+            .ok()
+            .and_then(|s| s.trim().parse::<u8>().ok()),
+        Err(CollectError::NotFound) => Some(0),
+        Err(_) => None,
+    };
+    match scope {
+        Some(0) => return true,
+        Some(1) => {}
+        _ => return false,
+    }
+    let me = rustix::process::getpid()
+        .as_raw_nonzero()
+        .get()
+        .unsigned_abs();
+    if pid == me {
+        return true;
+    }
+    for _ in 0..ANCESTOR_HOPS {
+        if ppid == me {
+            return true;
+        }
+        if ppid <= 1 || read_pid_stat(root, ppid, buf, stat).is_err() {
+            return false;
+        }
+        ppid = stat.ppid;
+    }
+    false
 }
 
 /// Maps a reader result to `Ok` or the validity of a tab without data. Errors are logged
@@ -2390,7 +2804,7 @@ mod tests {
 
     use tl_collect::SysRoot;
     use tl_model::demand::ColumnSet;
-    use tl_model::details::ScanId;
+    use tl_model::details::SearchId;
     use tl_model::time::BootId;
 
     use super::*;
@@ -2465,7 +2879,15 @@ mod tests {
         assert!(src.command(&WorkerCommand::ComputeHashes(keys[0])));
         assert_eq!(src.pending_len(), 0);
         assert_eq!(src.hash_requests, vec![keys[0]]);
-        assert!(src.command(&WorkerCommand::CancelStringScan(ScanId(1))));
+        // A scan is queued for the next sample; a cancel of no scan has nothing to do.
+        assert!(src.command(&WorkerCommand::StringScan {
+            scan: ScanId(1),
+            key: keys[0],
+            opts: StringScanOpts::default(),
+        }));
+        assert_eq!(src.scan_requests.len(), 1);
+        assert!(!src.command(&WorkerCommand::CancelStringScan(ScanId(2))));
+        assert!(src.command(&WorkerCommand::CancelHandleSearch(SearchId(1))));
         assert!(src.command(&WorkerCommand::VerifyPackage(keys[0])));
         assert_eq!(src.verify_requests, vec![keys[0]]);
         assert_eq!(src.pending_len(), 1);
