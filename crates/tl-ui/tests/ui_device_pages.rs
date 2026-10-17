@@ -54,7 +54,7 @@ use tl_ui::pages::performance::memory::{
 use tl_ui::pages::performance::net::{
     NetPage, ROW_DISPLAY_UNIT, ROW_DOWNLOAD, ROW_TOTAL_DOWN, ROW_TOTAL_UP, ROW_UPLOAD,
 };
-use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage};
+use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage, build_page};
 use tl_ui::pages::performance::sensors::{BatteryPage, FanPage};
 use tl_ui::pages::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformancePage, PerformanceSettingsView, sidebar_order,
