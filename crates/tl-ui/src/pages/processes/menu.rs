@@ -18,10 +18,11 @@ use tl_model::table::Manager;
 
 use super::actions::{
     ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
-    EndProcess, EndProcessTree, EndTask, GoToParent, OpenFileLocation, OpenVirusTotal,
-    PriorityClass, ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
+    EndProcess, EndProcessTree, EndTask, FreezeApp, GoToParent, KillApp, OpenFileLocation,
+    OpenVirusTotal, PriorityClass, ResumeProcess, SetPriority, SuspendProcess, ThawApp,
+    ToggleGroupRow,
 };
-use super::{SuspendLabel, suspend_or_resume};
+use super::{SuspendLabel, group_frozen, group_targets, suspend_or_resume};
 use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
@@ -113,7 +114,7 @@ pub fn row_menu(
         return add_copy_all_metrics(menu, cx);
     }
     menu = add_end_task(menu, shape, cx);
-    menu = add_end_process(menu, shape, cx);
+    menu = add_end_process(menu, targets, shape, cx);
     menu = add_end_process_tree(menu, shape, cx);
     menu = menu.separator();
     menu = add_suspend(menu, targets, shape, cx);
@@ -239,10 +240,39 @@ fn add_end_task(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
     exitable(menu, shape, tr(cx, key), Box::new(EndTask), cx)
 }
 
-/// Item 2: End Process or End Selected Processes. Not on app and unit rows in P1.
-fn add_end_process(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
+/// Whether the one app or unit row of `targets` has something to act on: a unit row always,
+/// an app row when it has an app.slice cgroup. With no engine there is none.
+fn group_has_target(targets: &CapturedTargets, cx: &App) -> bool {
+    let [target] = targets.items.as_slice() else {
+        return false;
+    };
+    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+        return false;
+    };
+    !group_targets(&engine.0.latest(), target).is_empty()
+}
+
+/// An app or unit row item that needs a target: disabled with a tooltip when there is none.
+fn group_item(
+    menu: TlMenu,
+    targets: &CapturedTargets,
+    shape: Shape,
+    label: SharedString,
+    action: Box<dyn gpui_kit::Action>,
+    cx: &App,
+) -> TlMenu {
+    if !shape.exited && !group_has_target(targets, cx) {
+        return menu.item_disabled(label, Some(tr(cx, "processes-menu-no-app-cgroup")));
+    }
+    exitable(menu, shape, label, action, cx)
+}
+
+/// Item 2: End Process or End Selected Processes. On an app or unit row it is Kill App (all
+/// processes).
+fn add_end_process(menu: TlMenu, targets: &CapturedTargets, shape: Shape, cx: &App) -> TlMenu {
     if shape.group {
-        return menu;
+        let label = tr(cx, "processes-menu-kill-app");
+        return group_item(menu, targets, shape, label, Box::new(KillApp), cx);
     }
     let key = if shape.multi {
         "processes-menu-end-selected-processes"
@@ -277,10 +307,21 @@ fn add_properties(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
     )
 }
 
-/// Item 4: Suspend or Resume, by State T. Not on app and unit rows in P1.
+/// Item 4: Suspend or Resume, by State T. On an app or unit row it is Freeze App, or Thaw App
+/// when the row reads as frozen.
 fn add_suspend(menu: TlMenu, targets: &CapturedTargets, shape: Shape, cx: &App) -> TlMenu {
     if shape.group {
-        return menu;
+        let frozen = match (targets.items.as_slice(), cx.try_global::<EngineGlobal>()) {
+            ([target], Some(engine)) => group_frozen(&engine.0.latest(), &target.node),
+            _ => false,
+        };
+        return if frozen {
+            let label = tr(cx, "processes-menu-thaw-app");
+            group_item(menu, targets, shape, label, Box::new(ThawApp), cx)
+        } else {
+            let label = tr(cx, "processes-menu-freeze-app");
+            group_item(menu, targets, shape, label, Box::new(FreezeApp), cx)
+        };
     }
     let resume = suspend_or_resume(targets) == SuspendLabel::Resume;
     let (key, action): (&str, Box<dyn gpui_kit::Action>) = match (resume, shape.multi) {

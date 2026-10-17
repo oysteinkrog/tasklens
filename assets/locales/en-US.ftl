@@ -1991,6 +1991,8 @@ processes-confirm-action-end-process = End process
 # tasklens-pdu.21: the action names in the Suspend, Resume and Set Priority confirmations.
 processes-confirm-action-suspend = Suspend
 processes-confirm-action-resume = Resume
+# tasklens-pdu.38: the action name in the Freeze App confirmation.
+processes-confirm-action-freeze = Freeze
 processes-confirm-action-set-priority = Set priority
 
 # Send Signal menu and real-time dialog (tasklens-gma.2, UI-PWN-026, UI-PWN-027).
@@ -2609,6 +2611,11 @@ processes-menu-end-process = End Process
 processes-menu-end-selected-processes = End Selected Processes
 processes-menu-end-process-tip = Ends the process immediately (SIGKILL)
 processes-menu-end-process-tree = End Process Tree
+# tasklens-pdu.38: Kill App and Freeze App items on app and unit rows.
+processes-menu-kill-app = Kill App (all processes)
+processes-menu-freeze-app = Freeze App
+processes-menu-thaw-app = Thaw App
+processes-menu-no-app-cgroup = This app has no app scope of its own
 processes-menu-suspend-process = Suspend Process
 processes-menu-resume-process = Resume Process
 processes-menu-suspend-selected-tasks = Suspend Selected Tasks

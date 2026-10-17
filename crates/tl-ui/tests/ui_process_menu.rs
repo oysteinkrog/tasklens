@@ -1089,6 +1089,7 @@ mod end {
     };
     use gpui_kit::{Keystroke, point, px};
     use tl_model::actions::ActionError;
+    use tl_model::actions::CgroupRef;
     use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
     use tl_model::command::KWinCommand;
@@ -1098,7 +1099,8 @@ mod end {
     use tl_model::ids::{GroupKey, NodeId, ProcessKey};
     use tl_model::process::ProcessExtras;
     use tl_model::process::{
-        GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
+        AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta,
+        ProcessRecord,
     };
     use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, WindowEntry, WindowsSnapshot};
@@ -1117,8 +1119,8 @@ mod end {
     use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
         ActivateWindow, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree,
-        EndTask, GoToParent, OpenFileLocation, OpenVirusTotal, PriorityClass, ProcessesShowHidden,
-        ResumeProcess, SetPriority, SuspendProcess,
+        EndTask, FreezeApp, GoToParent, KillApp, OpenFileLocation, OpenVirusTotal, PriorityClass,
+        ProcessesShowHidden, ResumeProcess, SetPriority, SuspendProcess, ThawApp,
     };
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
@@ -1262,6 +1264,8 @@ mod end {
         vcx: VisualTestContext,
         page: Entity<ProcessesPage>,
         version: u64,
+        /// The app.slice samples the next publish carries (`ProcessSnapshot::apps`).
+        apps: Vec<AppCgroupSample>,
     }
 
     impl Rig {
@@ -1279,6 +1283,7 @@ mod end {
                 vcx,
                 page,
                 version: 1,
+                apps: Vec::new(),
             }
         }
 
@@ -1315,6 +1320,7 @@ mod end {
         ) {
             self.version += 1;
             let version = self.version;
+            let apps = self.apps.clone();
             let generation = self.vcx.update(|_, cx| {
                 self.page
                     .read(cx)
@@ -1339,6 +1345,7 @@ mod end {
                 s.processes = Arc::new(ProcessSnapshot {
                     records: records.into(),
                     extras: extras.into(),
+                    apps: apps.into(),
                     ..ProcessSnapshot::default()
                 });
             });
@@ -1399,6 +1406,14 @@ mod end {
             vcx.run_until_parked();
             vcx.update(|window, cx| window.draw(cx).clear(cx));
             Some(Dialog { vcx, view })
+        }
+
+        /// Every request sent, with its targets as they are.
+        fn sent_targets(&self) -> Vec<(ActionKind, Vec<ActionTarget>)> {
+            actions_sent(&self.engine)
+                .into_iter()
+                .map(|r| (r.kind, r.targets.to_vec()))
+                .collect()
         }
 
         fn sent(&self) -> Vec<(ActionKind, Vec<u32>)> {
@@ -1918,7 +1933,34 @@ mod end {
             row(NodeId::Pseudo(PseudoKind::Interrupts), None, None),
             at(1),
         ];
+        rig.apps = vec![firefox_sample(false)];
         rig.publish_rows(records, extras, rows, vec![app_group(1), unit]);
+    }
+
+    fn app_cgroup() -> CgroupRef {
+        CgroupRef {
+            rel_path: Arc::from(
+                "user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox-1.scope",
+            ),
+            cgroup_id: 77,
+        }
+    }
+
+    /// The app.slice sample of the firefox app row.
+    fn firefox_sample(frozen: bool) -> AppCgroupSample {
+        AppCgroupSample {
+            group: app_key(),
+            anon_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            rios: 0,
+            wios: 0,
+            pids: 1,
+            frozen,
+            cgroup: app_cgroup(),
+            validity: FieldValidity::all(Validity::Valid),
+        }
     }
 
     const COPIES: [&str; 4] = [
@@ -2032,7 +2074,9 @@ mod end {
 
         let mut app = vec![
             "End App",
+            "Kill App (all processes)",
             "-",
+            "Freeze App",
             "Send Signal >",
             "Set Priority > [Applies to the app's current processes]",
             "Set Affinity…",
@@ -2055,6 +2099,206 @@ mod end {
             ["Collapse"],
             "an expanded group header"
         );
+    }
+
+    /// Publishes `rows` and `groups` with one live firefox member, so an app row is not exited.
+    fn publish_app_rows(rig: &mut Rig, rows: Vec<TableRow>, groups: Vec<GroupRow>) {
+        let records = vec![ProcessRecord {
+            group: app_key(),
+            ..record(200, 1, "firefox", ProcFlags::empty())
+        }];
+        rig.publish_rows(records, vec![firefox_extras()], rows, groups);
+    }
+
+    /// The menu of row `ix` as text.
+    fn menu_of(rig: &mut Rig, ix: usize) -> Vec<String> {
+        let m = build_menu(rig, &[ix], ColumnId::Cpu);
+        shape(rig, &m)
+    }
+
+    /// Selects the row at `ix`, whatever its kind.
+    fn select_row(rig: &mut Rig, ix: usize) {
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        let id = rig.vcx.update(|_, cx| table.read(cx).delegate.row_id(ix));
+        rig.select(&[id]);
+    }
+
+    /// Row 7 is the firefox app row and row 8 the unit row of `publish_kinds`.
+    const APP_ROW: usize = 7;
+    const UNIT_ROW: usize = 8;
+
+    #[gpui_kit::test]
+    fn app_row_menu_p2_items(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        let items = |shape: Vec<String>| shape[..5].to_vec();
+        assert_eq!(
+            items(menu_of(&mut rig, APP_ROW)),
+            [
+                "End App",
+                "Kill App (all processes)",
+                "-",
+                "Freeze App",
+                "Send Signal >"
+            ],
+            "an app row under app.slice"
+        );
+        assert_eq!(
+            items(menu_of(&mut rig, UNIT_ROW))[3],
+            "Freeze App",
+            "a unit row"
+        );
+
+        // A frozen row reads Thaw App.
+        let mut records_frozen = rig.apps.clone();
+        records_frozen[0] = firefox_sample(true);
+        rig.apps = records_frozen;
+        let mut groups = vec![GroupRow {
+            frozen: true,
+            ..app_group(1)
+        }];
+        groups.push(GroupRow {
+            node: NodeId::Unit(unit_ref()),
+            kind: GroupRowKind::Unit,
+            name: Arc::from("foo.service"),
+            ..app_group(1)
+        });
+        let rows = vec![
+            row(NodeId::Group(app_key()), None, Some(0)),
+            row(NodeId::Unit(unit_ref()), None, Some(1)),
+        ];
+        publish_app_rows(&mut rig, rows, groups);
+        assert_eq!(menu_of(&mut rig, 0)[3], "Thaw App", "a frozen app row");
+
+        // No app.slice sample: both items are disabled, never a unit fallback.
+        rig.apps = Vec::new();
+        let rows = vec![row(NodeId::Group(app_key()), None, Some(0))];
+        publish_app_rows(&mut rig, rows, vec![app_group(1)]);
+        let tip = "This app has no app scope of its own";
+        let shape = menu_of(&mut rig, 0);
+        assert_eq!(shape[1], format!("(Kill App (all processes): {tip})"));
+        assert_eq!(shape[3], format!("(Freeze App: {tip})"));
+    }
+
+    #[gpui_kit::test]
+    fn freeze_targets_cgroup_or_unit_by_location(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        select_row(&mut rig, APP_ROW);
+        assert!(rig.dispatch(FreezeApp).is_none(), "no dialog");
+        select_row(&mut rig, UNIT_ROW);
+        assert!(rig.dispatch(FreezeApp).is_none(), "no dialog");
+        select_row(&mut rig, APP_ROW);
+        assert!(rig.dispatch(ThawApp).is_none(), "no dialog");
+        assert_eq!(
+            rig.sent_targets(),
+            [
+                (
+                    ActionKind::FreezeGroup,
+                    vec![ActionTarget::Cgroup(app_cgroup())]
+                ),
+                (
+                    ActionKind::FreezeGroup,
+                    vec![ActionTarget::Unit(unit_ref())]
+                ),
+                (
+                    ActionKind::ThawGroup,
+                    vec![ActionTarget::Cgroup(app_cgroup())]
+                ),
+            ]
+        );
+        let id = actions_sent(&rig.engine)[0].id;
+        emit(
+            &rig.engine,
+            &mut rig.vcx,
+            id,
+            Some(0),
+            ActionState::Succeeded,
+        );
+        emit(&rig.engine, &mut rig.vcx, id, None, ActionState::Succeeded);
+        assert_eq!(visible(&mut rig.vcx), ["App frozen"]);
+    }
+
+    #[gpui_kit::test]
+    fn freeze_without_app_sample_sends_nothing(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        rig.apps = Vec::new();
+        let rows = vec![row(NodeId::Group(app_key()), None, Some(0))];
+        publish_app_rows(&mut rig, rows, vec![app_group(1)]);
+        select_row(&mut rig, 0);
+        assert!(rig.dispatch(FreezeApp).is_none());
+        assert!(rig.dispatch(KillApp).is_none());
+        assert!(rig.sent_targets().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn freeze_protected_member_confirms(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        let protected = record(900, 1, "plasmashell", ProcFlags::PROTECTED);
+        let records = vec![ProcessRecord {
+            group: app_key(),
+            ..protected
+        }];
+        let extras = vec![firefox_extras()];
+        let rows = vec![
+            row(NodeId::Group(app_key()), None, Some(0)),
+            row(NodeId::Process(key(900)), Some(0), None),
+        ];
+        rig.publish_rows(records, extras, rows, vec![app_group(1)]);
+        select_row(&mut rig, 0);
+        let mut dialog = rig.dispatch(FreezeApp).expect("the Protected dialog");
+        assert_eq!(
+            dialog.text(),
+            "Ending Firefox will end your desktop session. End it anyway?"
+        );
+        dialog.cancel();
+        assert!(rig.sent_targets().is_empty(), "Cancel sends nothing");
+    }
+
+    #[gpui_kit::test]
+    fn kill_app_confirms_with_count(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        let rows = vec![row(NodeId::Group(app_key()), None, Some(0))];
+        publish_app_rows(&mut rig, rows, vec![app_group(14)]);
+        select_row(&mut rig, 0);
+        let mut dialog = rig.dispatch(KillApp).expect("the Kill App dialog");
+        assert_eq!(dialog.text(), "Kill all 14 processes of Firefox?");
+        dialog.cancel();
+        assert!(rig.sent_targets().is_empty());
+
+        let dialog = rig.dispatch(KillApp).expect("the Kill App dialog");
+        dialog.confirm();
+        assert_eq!(
+            rig.sent_targets(),
+            [(
+                ActionKind::KillGroup,
+                vec![ActionTarget::Cgroup(app_cgroup())]
+            )]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn shift_delete_on_app_row_is_kill_app(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        let rows = vec![row(NodeId::Group(app_key()), None, Some(0))];
+        publish_app_rows(&mut rig, rows, vec![app_group(14)]);
+        select_row(&mut rig, 0);
+        let page = rig.page.clone();
+        rig.vcx
+            .update(|window, cx| page.update(cx, |p, cx| p.focus_table(window, cx)));
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let before = rig.windows();
+        rig.vcx.simulate_keystrokes("shift-delete");
+        rig.vcx.run_until_parked();
+        assert!(
+            rig.windows().iter().any(|w| !before.contains(w)),
+            "the Kill App dialog opened"
+        );
+        assert!(rig.sent_targets().is_empty(), "nothing sent before confirm");
     }
 
     /// Shift+F10 on the focus row opens the menu without Copy: the keyboard names no cell.

@@ -45,8 +45,9 @@ use tracing::warn;
 
 use self::actions::{
     ActivateWindow, CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump,
-    EndProcess, EndProcessTree, EndTask, GoToParent, MAX_TARGETS, OpenFileLocation, OpenVirusTotal,
-    ResumeProcess, SetPriority, SuspendProcess, ToggleGroupRow,
+    EndProcess, EndProcessTree, EndTask, FreezeApp, GoToParent, KillApp, MAX_TARGETS,
+    OpenFileLocation, OpenVirusTotal, ResumeProcess, SetPriority, SuspendProcess, ThawApp,
+    ToggleGroupRow,
 };
 use self::cells::{DELETED_SUFFIX, copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
@@ -596,8 +597,73 @@ impl ProcessesPage {
         self.end(End::Task, window, cx);
     }
 
+    /// End Process, and Shift+Delete. On one app or unit row it is Kill App (UI-PRC-013 item 2).
     fn on_end_process(&mut self, _: &EndProcess, window: &mut Window, cx: &mut Context<Self>) {
-        self.end(End::Process, window, cx);
+        let captured = self.take_targets(cx);
+        let group = matches!(
+            captured.items.as_slice(),
+            [t] if matches!(t.kind, RowKind::App | RowKind::Unit)
+        );
+        self.menu_targets = Some(captured);
+        if group {
+            self.group_action(GroupOp::Kill, window, cx);
+        } else {
+            self.end(End::Process, window, cx);
+        }
+    }
+
+    fn on_kill_app(&mut self, _: &KillApp, window: &mut Window, cx: &mut Context<Self>) {
+        self.group_action(GroupOp::Kill, window, cx);
+    }
+
+    fn on_freeze_app(&mut self, _: &FreezeApp, window: &mut Window, cx: &mut Context<Self>) {
+        self.group_action(GroupOp::Freeze, window, cx);
+    }
+
+    fn on_thaw_app(&mut self, _: &ThawApp, window: &mut Window, cx: &mut Context<Self>) {
+        self.group_action(GroupOp::Thaw, window, cx);
+    }
+
+    /// Kill App, Freeze App and Thaw App (UI-PRC-013 items 2 and 4, PROC-059, PROC-064): one
+    /// `KillGroup`, `FreezeGroup` or `ThawGroup` request on the one app or unit row, with the
+    /// targets of [`group_targets`]. Kill App always asks. Freeze asks first when the row
+    /// holds a protected process. A row with no target sends nothing (the menu disables it).
+    fn group_action(&mut self, op: GroupOp, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((rows, clicked_col)) = self.prune(refusal_reason, cx) else {
+            return;
+        };
+        let [t] = rows.as_slice() else {
+            return;
+        };
+        if !matches!(t.kind, RowKind::App | RowKind::Unit) {
+            return;
+        }
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let targets = group_targets(&snapshot, t);
+        if targets.is_empty() {
+            return;
+        }
+        let ask = match op {
+            GroupOp::Kill => Some(ConfirmKind::KillApp {
+                app: t.name.clone(),
+                count: t.member_count,
+            }),
+            GroupOp::Freeze if t.flags.contains(ProcFlags::PROTECTED) => {
+                Some(ConfirmKind::Protected {
+                    action: self.confirm_words.freeze.clone(),
+                    name: t.name.clone(),
+                    tree_count: None,
+                })
+            }
+            GroupOp::Freeze | GroupOp::Thaw => None,
+        };
+        let kind = match op {
+            GroupOp::Kill => ActionKind::KillGroup,
+            GroupOp::Freeze => ActionKind::FreezeGroup,
+            GroupOp::Thaw => ActionKind::ThawGroup,
+        };
+        let used = CapturedTargets::new([t.clone()], clicked_col);
+        self.send_targets(kind, targets, used, ask, window, cx);
     }
 
     fn on_end_process_tree(
@@ -1106,6 +1172,21 @@ impl ProcessesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let targets = keys.into_iter().map(ActionTarget::Process).collect();
+        self.send_targets(kind, targets, used, ask, window, cx);
+    }
+
+    /// As [`Self::send`], for targets that are not all processes (Kill App, Freeze App and
+    /// Thaw App send cgroup and unit targets).
+    fn send_targets(
+        &mut self,
+        kind: ActionKind,
+        targets: SmallVec<[ActionTarget; 1]>,
+        used: CapturedTargets,
+        ask: Option<ConfirmKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(texts) = toast_words(cx).texts_for(&kind, &used) else {
             return;
         };
@@ -1113,7 +1194,7 @@ impl ProcessesPage {
             // The tracker gives id 0 its next ActionId.
             id: ActionId(0),
             kind,
-            targets: keys.into_iter().map(ActionTarget::Process).collect(),
+            targets,
             privileged: false,
         };
         let Some(ask) = ask else {
@@ -1170,6 +1251,7 @@ struct ConfirmWords {
     end_process: SharedString,
     suspend: SharedString,
     resume: SharedString,
+    freeze: SharedString,
     set_priority: SharedString,
 }
 
@@ -1181,6 +1263,7 @@ impl ConfirmWords {
             end_process: tr(cx, "processes-confirm-action-end-process"),
             suspend: tr(cx, "processes-confirm-action-suspend"),
             resume: tr(cx, "processes-confirm-action-resume"),
+            freeze: tr(cx, "processes-confirm-action-freeze"),
             set_priority: tr(cx, "processes-confirm-action-set-priority"),
         }
     }
@@ -1208,6 +1291,47 @@ fn other_user(rows: &[CapturedTarget], action: &SharedString) -> Option<ConfirmK
         user: t.user.clone(),
         destructive: false,
     })
+}
+
+/// Which app or unit row command runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GroupOp {
+    Kill,
+    Freeze,
+    Thaw,
+}
+
+/// The targets of Kill App, Freeze App and Thaw App on one app or unit row (R-092, PROC-064).
+/// An app row gives the cgroup of every app.slice sample with the row's key, and nothing when
+/// there is none: a member's unit is never the fallback, so no unit action reaches a session
+/// scope. A unit row gives its unit.
+pub(crate) fn group_targets(s: &Snapshot, t: &CapturedTarget) -> SmallVec<[ActionTarget; 1]> {
+    match (&t.node, t.kind) {
+        (NodeId::Unit(unit), RowKind::Unit) => {
+            SmallVec::from_buf([ActionTarget::Unit(unit.clone())])
+        }
+        (node, RowKind::App) => {
+            let Some(group) = s.table.groups.iter().find(|g| &g.node == node) else {
+                return SmallVec::new();
+            };
+            s.processes
+                .apps
+                .iter()
+                .filter(|a| a.group == group.key)
+                .map(|a| ActionTarget::Cgroup(a.cgroup.clone()))
+                .collect()
+        }
+        _ => SmallVec::new(),
+    }
+}
+
+/// Whether the app or unit row `node` reads as frozen (`cgroup.events` has `frozen 1`).
+pub(crate) fn group_frozen(s: &Snapshot, node: &NodeId) -> bool {
+    s.table
+        .groups
+        .iter()
+        .find(|g| &g.node == node)
+        .is_some_and(|g| g.frozen)
 }
 
 /// Which End command runs.
@@ -1725,6 +1849,9 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_end_task))
             .on_action(cx.listener(Self::on_end_process))
             .on_action(cx.listener(Self::on_end_process_tree))
+            .on_action(cx.listener(Self::on_kill_app))
+            .on_action(cx.listener(Self::on_freeze_app))
+            .on_action(cx.listener(Self::on_thaw_app))
             .on_action(cx.listener(Self::on_suspend))
             .on_action(cx.listener(Self::on_resume))
             .on_action(cx.listener(Self::on_set_priority))
