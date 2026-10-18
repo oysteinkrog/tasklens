@@ -59,6 +59,8 @@ const CONTENT_WIDTH: f32 = 560.;
 const PAGE_PAD: f32 = 16.;
 /// Spinner size, × ui_scale.
 const SPINNER: f32 = 12.;
+/// Widest status badge, × ui_scale. "Enabled (existing rule)" needs more than the 120 default.
+const STATUS_BADGE_MAX_WIDTH: f32 = 168.;
 /// Highest the script output grows before it scrolls, × ui_scale.
 const OUTPUT_MAX_HEIGHT: f32 = 160.;
 
@@ -923,7 +925,9 @@ impl gpui_kit::Render for SetupWindow {
                     tr(cx, "setup-status-running"),
                 ))
             } else {
-                st.map(|s| TlBadge::new(s.kind, tr(cx, s.text_key)))
+                st.map(|s| {
+                    TlBadge::new(s.kind, tr(cx, s.text_key)).max_width(STATUS_BADGE_MAX_WIDTH)
+                })
             };
             let buttons = row_buttons(row, self.status.as_ref(), self.running)
                 .into_iter()

@@ -90,6 +90,7 @@ pub struct TlBadge {
     kind: TlBadgeKind,
     text: SharedString,
     dot: bool,
+    max_width: f32,
 }
 
 impl TlBadge {
@@ -98,7 +99,15 @@ impl TlBadge {
             kind,
             text,
             dot: false,
+            max_width: MAX_WIDTH,
         }
+    }
+
+    /// Raises the width limit (× ui_scale) for a status text the spec fixes, such as
+    /// "Enabled (existing rule)". The default is [`MAX_WIDTH`].
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.max_width = width;
+        self
     }
 
     /// Draws a leading 6 px dot in the text colour. Used for service states.
@@ -144,7 +153,7 @@ impl RenderOnce for TlBadge {
             .gap(m.sp[2])
             .h(px(HEIGHT * s))
             .min_w(px(HEIGHT * s))
-            .max_w(px(MAX_WIDTH * s))
+            .max_w(px(self.max_width * s))
             .px(m.sp[3])
             .rounded_full()
             .bg(colors.bg)
@@ -282,6 +291,18 @@ mod tests {
             theme.status.success,
             "the dot uses the text colour"
         );
+    }
+
+    #[gpui_kit::test]
+    fn max_width_can_be_raised(cx: &mut TestAppContext) {
+        let (_, cx) = open(cx, || {
+            TlBadge::new(TlBadgeKind::Success, "Enabled (existing rule)".into()).max_width(180.)
+        });
+        let pill = cx.debug_bounds("TlBadge").expect("badge drawn");
+        let text = cx.debug_bounds("TlBadge-text").expect("text drawn");
+        assert!(pill.size.width > px(120.), "wider than the default limit");
+        assert!(pill.size.width <= px(180.));
+        assert!(text.right() <= pill.right());
     }
 
     #[gpui_kit::test]

@@ -896,6 +896,24 @@ mod row_builders {
     }
 
     #[test]
+    fn info_bios_date_reads_as_iso() {
+        for (raw, shown) in [
+            ("09/10/2025", "2025-09-10"),
+            ("2025-02-14", "2025-02-14"),
+            ("unknown", "unknown"),
+        ] {
+            let mut inv = inventory();
+            inv.firmware.bios_date = s(raw);
+            let rows = rows(&inv, &system(0), build_bios);
+            assert_eq!(
+                value_of(&rows, "BIOS date").as_deref(),
+                Some(shown),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
     fn info_chassis_words() {
         for (n, word) in [
             ("3", "Desktop"),

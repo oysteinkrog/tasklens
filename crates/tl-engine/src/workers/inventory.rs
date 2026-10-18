@@ -45,7 +45,7 @@ use tl_collect::gpu_drm::{
 };
 use tl_collect::inventory::{
     self, ConnectorType, CpuFlags, DmiInfo, Field, InventoryPaths, InventoryRaw, KernelInfo,
-    ModulesInfo, Virtualization, read_inventory,
+    ModulesInfo, read_inventory,
 };
 use tl_collect::net::addrs::{AddrDump, AddrFamily, AddrScope, IfAddr, format_cidr};
 use tl_collect::parse::block::{self, BlockDevice, DiskKind};
@@ -92,7 +92,7 @@ const MOUNTINFO_MAX: usize = 1 << 20;
 /// The udev keys read for a disk row (R-140 item 1).
 const DISK_UDEV_KEYS: [&str; 2] = ["ID_BUS", "ID_SERIAL_SHORT"];
 /// The udev key read for a GPU name.
-const GPU_UDEV_KEYS: [&str; 1] = ["ID_MODEL_FROM_DATABASE"];
+const GPU_UDEV_KEYS: [&str; 2] = ["ID_VENDOR_FROM_DATABASE", "ID_MODEL_FROM_DATABASE"];
 /// The udev keys read for a network adapter name (R-140 item 1).
 const NET_UDEV_KEYS: [&str; 2] = ["ID_VENDOR_FROM_DATABASE", "ID_MODEL_FROM_DATABASE"];
 /// Longest wait for the desktop shell's `--version`.
@@ -574,6 +574,49 @@ fn udev_text(value: Option<&str>) -> InvField<Arc<str>> {
     bus_text(value.unwrap_or(""))
 }
 
+/// The marketing name of a GPU: the vendor's short name and the bracket text of the PCI model,
+/// "NVIDIA GeForce RTX 5070 Ti" for "NVIDIA Corporation" and "GB203 [GeForce RTX 5070 Ti]". A
+/// model without brackets stays as it is.
+fn gpu_name(props: &UdevProps) -> InvField<Arc<str>> {
+    let part = |key| props.get(key).map(str::trim).filter(|v| !v.is_empty());
+    let Some(model) = part("ID_MODEL_FROM_DATABASE") else {
+        return with(Validity::Unsupported);
+    };
+    let marketing = match (model.find('['), model.rfind(']')) {
+        (Some(open), Some(close)) if open < close => model[open + 1..close].trim(),
+        _ => return bus_text(model),
+    };
+    let marketing = if marketing.is_empty() {
+        model
+    } else {
+        marketing
+    };
+    let vendor = part("ID_VENDOR_FROM_DATABASE").map(short_vendor);
+    match vendor {
+        Some(v) if !v.is_empty() && !marketing.starts_with(v.as_str()) => {
+            bus_text(&format!("{v} {marketing}"))
+        }
+        _ => bus_text(marketing),
+    }
+}
+
+/// "NVIDIA Corporation" is "NVIDIA", "Advanced Micro Devices, Inc. [AMD/ATI]" is "AMD".
+fn short_vendor(vendor: &str) -> String {
+    if let (Some(open), Some(close)) = (vendor.find('['), vendor.rfind(']'))
+        && open < close
+    {
+        let inner = vendor[open + 1..close].split('/').next().unwrap_or("");
+        if !inner.trim().is_empty() {
+            return inner.trim().to_string();
+        }
+    }
+    let mut v = vendor.trim();
+    for suffix in [" Corporation", " Corp.", ", Inc.", " Inc.", " Ltd."] {
+        v = v.strip_suffix(suffix).unwrap_or(v);
+    }
+    v.trim().to_string()
+}
+
 /// PERF-103: one adapter per DRM card, all vendors. No card list gives no rows.
 fn graphics(
     raw: &InventoryRaw,
@@ -587,7 +630,7 @@ fn graphics(
         .map(|card| {
             let path = root.run_path(&format!("udev/data/{}", pci_entry(&card.pci_slot)));
             let name = match read_udev_props(&path, &GPU_UDEV_KEYS, &mut props) {
-                Ok(()) => udev_text(props.get("ID_MODEL_FROM_DATABASE")),
+                Ok(()) => gpu_name(&props),
                 Err(e) => with(e.validity()),
             };
             let version = card.driver.as_deref().and_then(|driver| {
@@ -596,10 +639,10 @@ fn graphics(
                 let clean = bus_text(&String::from_utf8_lossy(text));
                 (clean.validity == Validity::Valid).then_some(clean.value)
             });
-            let kernel_module = match (&card.driver, &version) {
-                (Some(driver), Some(v)) => valid(Arc::from(format!("{driver} {v}"))),
-                (Some(driver), None) => valid(Arc::clone(driver)),
-                (None, _) => with(Validity::Unsupported),
+            // The module is the driver name alone; its version is `driver_version`.
+            let kernel_module = match &card.driver {
+                Some(driver) => valid(Arc::clone(driver)),
+                None => with(Validity::Unsupported),
             };
             let mut amd = AmdSample::default();
             if card.vendor == VENDOR_AMD {
@@ -777,15 +820,17 @@ fn adapter_name(props: &UdevProps) -> InvField<Arc<str>> {
 }
 
 /// The CIDR text of every IPv4 address of `ifindex` (scope Global or Site first), then its
-/// global IPv6 addresses (scope Global or Site), each group in dump order.
+/// global IPv6 addresses (scope Global or Site) and last its link-local IPv6 addresses, each
+/// group in dump order.
 fn adapter_addrs(all: &[IfAddr], ifindex: u32) -> Arc<[Arc<str>]> {
     let group = |a: &IfAddr| match (a.family, a.scope) {
         (AddrFamily::V4, AddrScope::Global | AddrScope::Site) => Some(0),
         (AddrFamily::V4, _) => Some(1),
         (AddrFamily::V6, AddrScope::Global | AddrScope::Site) => Some(2),
+        (AddrFamily::V6, AddrScope::Link) => Some(3),
         (AddrFamily::V6, _) => None,
     };
-    (0..3)
+    (0..4)
         .flat_map(|g| {
             all.iter()
                 .filter(move |a| a.ifindex == ifindex && group(a) == Some(g))
@@ -883,18 +928,21 @@ fn processor_info(raw: &InventoryRaw, root: &SysRoot) -> ProcessorInfo {
         },
         max_mhz: opt(max_mhz(&root.sys)),
         microcode: opt(cpu.microcode.clone()),
-        virtualization: valid(Arc::from(virtualization_text(raw.security.virtualization))),
+        virtualization: valid(Arc::from(virtualization_flag(cpu.flags))),
         avx512: valid(cpu.flags.contains(CpuFlags::AVX512F)),
         bits: opt((!raw.kernel.machine.is_empty()).then(|| machine_bits(&raw.kernel.machine))),
     }
 }
 
-/// The PERF-037 text.
-fn virtualization_text(v: Virtualization) -> &'static str {
-    match v {
-        Virtualization::EnabledKvm => "Enabled (KVM available)",
-        Virtualization::SupportedNoKvm => "Supported, KVM module not loaded",
-        Virtualization::NotSupported => "Not supported",
+/// The CPU virtualization flag the UI turns into "Yes (AMD-V)" or "Yes (VT-x)". Empty when the
+/// CPU has neither.
+fn virtualization_flag(flags: CpuFlags) -> &'static str {
+    if flags.contains(CpuFlags::SVM) {
+        "svm"
+    } else if flags.contains(CpuFlags::VMX) {
+        "vmx"
+    } else {
+        ""
     }
 }
 
@@ -1384,58 +1432,17 @@ fn board_info(dmi: &DmiInfo) -> BoardInfo {
         version: dmi_field(&dmi.board_version),
         system_vendor: dmi_field(&dmi.sys_vendor),
         system_product: dmi_field(&dmi.product_name),
-        chassis_type: opt(dmi.chassis_type.map(chassis_name)),
+        // The UI owns the words (information-chassis-<n>); the model holds the SMBIOS number.
+        chassis_type: opt(dmi.chassis_type.map(|code| Arc::from(code.to_string()))),
         serial: dmi_field(&dmi.board_serial),
     }
-}
-
-/// The SMBIOS chassis type name. Codes outside the table read "Type <n>".
-fn chassis_name(code: u8) -> Arc<str> {
-    let name = match code {
-        1 => "Other",
-        2 => "Unknown",
-        3 => "Desktop",
-        4 => "Low Profile Desktop",
-        5 => "Pizza Box",
-        6 => "Mini Tower",
-        7 => "Tower",
-        8 => "Portable",
-        9 => "Laptop",
-        10 => "Notebook",
-        11 => "Hand Held",
-        12 => "Docking Station",
-        13 => "All in One",
-        14 => "Sub Notebook",
-        15 => "Space-saving",
-        16 => "Lunch Box",
-        17 => "Main Server Chassis",
-        18 => "Expansion Chassis",
-        19 => "SubChassis",
-        20 => "Bus Expansion Chassis",
-        21 => "Peripheral Chassis",
-        22 => "RAID Chassis",
-        23 => "Rack Mount Chassis",
-        24 => "Sealed-case PC",
-        25 => "Multi-system chassis",
-        26 => "Compact PCI",
-        27 => "Advanced TCA",
-        28 => "Blade",
-        29 => "Blade Enclosure",
-        30 => "Tablet",
-        31 => "Convertible",
-        32 => "Detachable",
-        33 => "IoT Gateway",
-        34 => "Embedded PC",
-        35 => "Mini PC",
-        36 => "Stick PC",
-        n => return Arc::from(format!("Type {n}")),
-    };
-    Arc::from(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tl_collect::inventory::Virtualization;
 
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1859,6 +1866,45 @@ mod tests {
     }
 
     #[test]
+    fn gpu_marketing_names() {
+        let name = |vendor: Option<&str>, model: &str| {
+            let mut props = UdevProps::default();
+            if let Some(v) = vendor {
+                props
+                    .0
+                    .push((Arc::from("ID_VENDOR_FROM_DATABASE"), Arc::from(v)));
+            }
+            props
+                .0
+                .push((Arc::from("ID_MODEL_FROM_DATABASE"), Arc::from(model)));
+            gpu_name(&props).value
+        };
+        assert_eq!(
+            &*name(Some("NVIDIA Corporation"), "GB203 [GeForce RTX 5070 Ti]"),
+            "NVIDIA GeForce RTX 5070 Ti"
+        );
+        assert_eq!(
+            &*name(
+                Some("Advanced Micro Devices, Inc. [AMD/ATI]"),
+                "Navi 31 [Radeon RX 7900 XT]"
+            ),
+            "AMD Radeon RX 7900 XT"
+        );
+        assert_eq!(
+            &*name(None, "Navi 31 [Radeon RX 7900 XT]"),
+            "Radeon RX 7900 XT"
+        );
+        assert_eq!(&*name(Some("Acme"), "Plain Model"), "Plain Model");
+    }
+
+    #[test]
+    fn virtualization_flag_names_the_cpu_flag() {
+        assert_eq!(virtualization_flag(CpuFlags::SVM), "svm");
+        assert_eq!(virtualization_flag(CpuFlags::VMX), "vmx");
+        assert_eq!(virtualization_flag(CpuFlags::empty()), "");
+    }
+
+    #[test]
     fn missing_files_degrade_per_field() {
         let root = SysRoot::at(Path::new("/nonexistent-tasklens-root"));
         let snap = from_raw(&raw("x86_64"), &root);
@@ -1869,7 +1915,7 @@ mod tests {
         assert_eq!(snap.processor.name.validity, Validity::Unsupported);
         assert_eq!(snap.processor.cores.validity, Validity::Failed);
         assert_eq!(snap.processor.max_mhz.validity, Validity::Unsupported);
-        assert_eq!(&*snap.processor.virtualization.value, "Not supported");
+        assert_eq!(&*snap.processor.virtualization.value, "");
         assert_eq!(snap.memory.total_bytes.validity, Validity::Failed);
         assert_eq!(snap.memory.zram_bytes, valid(0));
         assert_eq!(

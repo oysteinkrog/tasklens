@@ -672,7 +672,12 @@ pub fn build_bios(i: &InfoInputs, out: &mut Vec<InfoRow>) {
         text_value(&f.bios_version),
         false,
     );
-    push(out, w.get(W::BiosDate), text_value(&f.bios_date), false);
+    push(
+        out,
+        w.get(W::BiosDate),
+        bios_date_value(&f.bios_date),
+        false,
+    );
     push(
         out,
         w.get(W::BiosRelease),
@@ -1275,6 +1280,25 @@ fn text_value(f: &InvField<Arc<str>>) -> TlValue {
     formatted(SharedString::from(f.value.clone()), f.validity)
 }
 
+/// The DMI BIOS date is `MM/DD/YYYY`; it shows as `YYYY-MM-DD`. Any other text stays as it is.
+fn bios_date_value(f: &InvField<Arc<str>>) -> TlValue {
+    let mut value = text_value(f);
+    if let Some(iso) = iso_bios_date(&f.value) {
+        value = formatted(SharedString::from(iso), f.validity);
+    }
+    value
+}
+
+fn iso_bios_date(raw: &str) -> Option<String> {
+    let mut parts = raw.trim().split('/');
+    let (month, day, year) = (parts.next()?, parts.next()?, parts.next()?);
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    if parts.next().is_some() || !digits(month, 2) || !digits(day, 2) || !digits(year, 4) {
+        return None;
+    }
+    Some(format!("{year}-{month}-{day}"))
+}
+
 fn num_value<T: Copy>(f: &InvField<T>, write: impl FnOnce(&mut String, T)) -> TlValue {
     if !shows(f.validity) {
         return word_value(f.validity);
@@ -1397,6 +1421,14 @@ mod tests {
         assert_eq!(combined(&[Valid, Valid]), Valid);
         assert_eq!(combined(&[Valid, Stale]), Stale);
         assert_eq!(combined(&[Stale, Restricted]), Restricted);
+    }
+
+    #[test]
+    fn bios_dates_read_as_iso() {
+        assert_eq!(iso_bios_date("09/10/2025").as_deref(), Some("2025-09-10"));
+        assert_eq!(iso_bios_date("2025-09-10"), None);
+        assert_eq!(iso_bios_date("9/10/25"), None);
+        assert_eq!(iso_bios_date("09/10/2025/1"), None);
     }
 
     #[test]

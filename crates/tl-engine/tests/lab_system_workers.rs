@@ -2904,15 +2904,15 @@ fn inventory_os_release_fallbacks() {
 }
 
 #[test]
-fn inventory_chassis_names() {
+fn inventory_chassis_codes() {
     let dir = fixture_copy("dmi-desktop", None);
     let chassis = dir.join("sys/class/dmi/id/chassis_type");
-    for (code, name) in [("3", "Desktop"), ("10", "Notebook"), ("36", "Stick PC")] {
+    for (code, name) in [("3", "3"), ("10", "10"), ("36", "36")] {
         fs::write(&chassis, format!("{code}\n")).expect("write chassis_type");
         assert_eq!(inventory_scan(&dir).board.chassis_type, inv_text(name));
     }
     fs::write(&chassis, "99\n").expect("write chassis_type");
-    assert_eq!(inventory_scan(&dir).board.chassis_type, inv_text("Type 99"));
+    assert_eq!(inventory_scan(&dir).board.chassis_type, inv_text("99"));
     fs::remove_file(&chassis).expect("remove chassis_type");
     assert_eq!(
         inventory_scan(&dir).board.chassis_type.validity,
@@ -3183,7 +3183,7 @@ fn inventory_graphics_amd() {
     let snap = inventory_scan(&dir);
     assert_eq!(snap.graphics.len(), 1);
     let gpu = &snap.graphics[0];
-    assert_eq!(gpu.name, inv_text("Navi 31 [Radeon RX 7900 XT]"));
+    assert_eq!(gpu.name, inv_text("Radeon RX 7900 XT"));
     assert_eq!(gpu.device, None);
     assert_eq!(gpu.pci_slot.as_deref(), Some("0000:03:00.0"));
     let sys = dir.join("sys");

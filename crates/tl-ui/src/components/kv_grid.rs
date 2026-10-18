@@ -1061,7 +1061,7 @@ impl TlKeyValueGrid {
         };
         let mut cell = match tooltip {
             Some(tip) => {
-                let state = HoverTooltip::state((id, "tooltip"), window, cx);
+                let state = HoverTooltip::state((id.clone(), "tooltip"), window, cx);
                 HoverTooltip::attach(&state, cell, DELAY_CONTROL, tip.build(), window, cx)
             }
             None => cell,
@@ -1072,12 +1072,20 @@ impl TlKeyValueGrid {
                 handler(n, window, cx);
             });
         }
+        // The menu sits on a wrapper that fills the row's value column, so a right-click on the
+        // empty part of the row opens it too (UI-SYS-081).
+        let hit = div()
+            .id((id.clone(), "menu"))
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .child(cell);
         if let Some(handler) = self.on_context_menu.clone() {
-            let cell = cell.on_mouse_down(MouseButton::Right, move |ev, window, cx| {
+            let hit = hit.on_mouse_down(MouseButton::Right, move |ev, window, cx| {
                 cx.stop_propagation();
                 handler(n, ev.position, window, cx);
             });
-            return Some((cell.into_any_element(), line_count));
+            return Some((hit.into_any_element(), line_count));
         }
         let on_copied = self.on_copied.clone();
         let on_copy_section = self.on_copy_section.clone();
@@ -1087,7 +1095,7 @@ impl TlKeyValueGrid {
         let words = f.words.clone();
         let menu_min = px(MENU_MIN_WIDTH * m.ui_scale);
         let menu_max = px(MENU_MAX_WIDTH * m.ui_scale);
-        let menu = cell.context_menu(move |menu: PopupMenu, _, _| {
+        let menu = hit.context_menu(move |menu: PopupMenu, _, _| {
             let item = |label: &SharedString, text: Rc<dyn Fn() -> SharedString>| {
                 let on_copied = on_copied.clone();
                 PopupMenuItem::new(label.clone()).on_click(move |_, window, cx| {
@@ -1213,6 +1221,7 @@ impl TlKeyValueGrid {
             .find(|(i, _)| *i == n)
             .map_or(1, |(_, l)| usize::from((*l).max(1)));
         let lines = value_lines.max(label_lines);
+        let centred = label_lines > 1 && value_lines == 1;
         let mut label = div().flex_none().w(label_width).min_w_0();
         *label.text_style() = t_base(&f.m);
         let label = if label_lines > 1 {
@@ -1248,8 +1257,9 @@ impl TlKeyValueGrid {
                 .debug_selector(move || format!("TlKv-row-{n}"))
                 .relative()
                 .flex()
-                .when(lines > 1, |d| d.items_start())
-                .when(lines == 1, |d| d.items_center())
+                // A one-line value beside a wrapped label sits at the label's middle.
+                .when(lines > 1 && !centred, |d| d.items_start())
+                .when(lines == 1 || centred, |d| d.items_center())
                 .h(f.row_height * lines as f32)
                 .child(label)
                 .child(div().flex().flex_1().min_w_0().child(value))
@@ -1952,6 +1962,25 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn context_menu_opens_on_the_empty_part_of_the_row(cx: &mut TestAppContext) {
+        let (cx, copied, _) = host(cx, pid_grid);
+        let value = bounds(cx, "TlKv-value-0").expect("value drawn");
+        let row = bounds(cx, "TlKv-row-0").expect("row drawn");
+        let empty = point(row.right() - px(8.), value.center().y);
+        assert!(
+            empty.x > value.right(),
+            "the point is right of the value text"
+        );
+        cx.simulate_mouse_down(empty, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(empty, MouseButton::Right, Modifiers::none());
+        draw(cx);
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        assert_eq!(clipboard(cx).as_deref(), Some("PID: 1234"));
+        assert_eq!(copied.borrow().len(), 1);
+    }
+
+    #[gpui_kit::test]
     fn inline_label_width_override(cx: &mut TestAppContext) {
         let scale = cx.update(|cx| {
             setup(cx);
@@ -2080,6 +2109,13 @@ mod tests {
         assert_eq!(height(cx, 0), px(56.), "a two-line label makes 2 × row_h");
         assert_eq!(height(cx, 1), px(84.), "the value's three lines win");
         assert_eq!(height(cx, 2), px(28.), "other rows stay one line");
+        let value = bounds(cx, "TlKv-value-0").expect("value drawn");
+        let row = bounds(cx, "TlKv-row-0").expect("row drawn");
+        assert_eq!(
+            value.center().y,
+            row.center().y,
+            "a one-line value is centred against its wrapped label"
+        );
     }
 
     fn hash_grid() -> TlKeyValueGrid {
