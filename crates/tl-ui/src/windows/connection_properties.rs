@@ -267,7 +267,8 @@ pub fn build_lines(
     ));
 
     if record.proto == Proto::Tcp {
-        let tcp = record.tcp;
+        // A listener has no connection to measure: the kernel reports zeros.
+        let tcp = record.tcp.filter(|_| record.state != ConnState::Listening);
         let value = |f: &dyn Fn(&tl_model::snapshot::TcpInfoView) -> String| {
             tcp.as_ref()
                 .map_or_else(not_reported, |info| TlValue::new(f(info)))

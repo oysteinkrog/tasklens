@@ -1,8 +1,10 @@
 //! Connections actions and key bindings (UI-SYS-060 to UI-SYS-067, R-128).
 
 use gpui_kit::gpui::private::schemars::JsonSchema;
-use gpui_kit::{Action, App, gpui};
+use gpui_kit::{Action, App, KeyBinding, gpui};
 use serde::Deserialize;
+
+use crate::pages::processes::actions::CopyDetails;
 
 gpui_kit::actions!(
     tasklens,
@@ -27,5 +29,12 @@ pub struct GoToConnection {
     pub inode: u64,
 }
 
-/// Connections has no page-specific P2 key bindings. Shared table bindings still apply.
-pub fn bind_keys_connections(_: &mut App) {}
+/// Binds Ctrl+C to `CopyDetails` for the row menu hint. The table's own `Table` context binds
+/// Ctrl+C to CopyRow; bound later at the same depth, this one wins the menu hint.
+pub fn bind_keys_connections(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-c",
+        CopyDetails,
+        Some("ConnectionTable > Table"),
+    )]);
+}

@@ -891,6 +891,22 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn conn_menu_copy_row_shows_ctrl_c_hint(cx: &mut TestAppContext) {
+        let record = super::connection(77, SmallVec::from_slice(&[super::key(4321)]));
+        let mut rig = menu_rig(cx, vec![record]);
+        let menu = rig.build_menu(&[77], None);
+        let hint = rig
+            .menu_entries(&menu)
+            .iter()
+            .find(|e| e.label.as_deref() == Some("Copy row"))
+            .and_then(|e| e.hint.clone())
+            .map(|h| h.to_string());
+        let expected =
+            gpui_kit::component::kbd::Kbd::format(&gpui_kit::Keystroke::parse("ctrl-c").unwrap());
+        assert_eq!(hint, Some(expected));
+    }
+
+    #[gpui_kit::test]
     fn conn_menu_foreign_disabled_for_listener(cx: &mut TestAppContext) {
         let mut record = super::connection(1, SmallVec::new());
         record.state = ConnState::Listening;
@@ -2722,6 +2738,27 @@ mod props {
             "{:?}",
             lines(cx, handle)
         );
+    }
+
+    #[gpui_kit::test]
+    fn conn_props_listener_tcp_stats_not_reported(cx: &mut TestAppContext) {
+        let mut record = tcp_record(1);
+        record.state = ConnState::Listening;
+        record.foreign = Arc::from("*:*");
+        assert!(record.tcp.is_some(), "the fixture carries zeroed stats");
+        let _rig = rig(cx, vec![record], procs());
+        let handle = open(cx, 1).expect("opened");
+        let all = lines(cx, handle);
+        for label in [
+            "RTT",
+            "Congestion window",
+            "Bytes sent / received",
+            "Retransmits",
+            "Last data received",
+        ] {
+            let want = format!("{label}: Not reported");
+            assert!(all.contains(&want), "{want} in {all:?}");
+        }
     }
 
     #[gpui_kit::test]
