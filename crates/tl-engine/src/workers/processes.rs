@@ -67,10 +67,12 @@ pub const MAX_INTERVAL_MS: u32 = 10_000;
 
 /// The process rate table (ADR-008 row "Process table"): on while any process consumer is
 /// visible or recording is on. Graph targets keep it on with the table hidden (R-154 item 2),
-/// and so does the Overview Top processes box (`process_top`, crw.45).
+/// and so does the Overview Top processes box (`process_top`, crw.45). The Connections tab
+/// needs the process names and users for its Process and User cells (UI-SYS-062, UI-SYS-068).
 pub fn processes_period(d: &Demand, s: &EngineSettings) -> Option<Duration> {
     let wanted = d.process_table
         || d.process_top
+        || d.connections
         || !d.detail_keys.is_empty()
         || d.gpu_process
         || d.recording
@@ -1043,6 +1045,19 @@ mod tests {
     fn period_graph_targets_without_table() {
         let d = Demand {
             graph_targets: Arc::from(vec![(GraphTarget::Name("firefox".into()), ColumnId::Cpu)]),
+            ..Demand::default()
+        };
+        assert!(!d.process_table);
+        assert_eq!(
+            processes_period(&d, &settings(1000)),
+            Some(Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn period_connections_without_table() {
+        let d = Demand {
+            connections: true,
             ..Demand::default()
         };
         assert!(!d.process_table);
