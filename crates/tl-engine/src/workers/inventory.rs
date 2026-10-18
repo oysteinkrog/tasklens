@@ -1010,16 +1010,7 @@ fn module(m: &inventory::MemoryModule) -> MemoryModule {
         part_number: opt(m.part_number.clone()),
         configured_speed_mts: nonzero(m.configured_speed_mts),
         rank: nonzero(m.rank),
-        configured_voltage_mv: voltage_mv(m.configured_voltage),
-    }
-}
-
-/// An unreadable `CONFIGURED_VOLTAGE` is `Failed`, so the page shows "Unavailable", never 0 V.
-fn voltage_mv(v: Option<inventory::DimmVoltage>) -> InvField<u32> {
-    match v {
-        Some(inventory::DimmVoltage::Millivolts(mv)) => nonzero(Some(mv)),
-        Some(inventory::DimmVoltage::Unreadable) => with(Validity::Failed),
-        None => with(Validity::Unsupported),
+        configured_voltage_mv: nonzero(m.configured_voltage_mv),
     }
 }
 
@@ -1927,7 +1918,7 @@ mod tests {
             manufacturer: None,
             part_number: None,
             rank: None,
-            configured_voltage: None,
+            configured_voltage_mv: None,
         }
     }
 
@@ -1936,7 +1927,7 @@ mod tests {
         let full = inventory::MemoryModule {
             configured_speed_mts: Some(4800),
             rank: Some(2),
-            configured_voltage: Some(inventory::DimmVoltage::Millivolts(1100)),
+            configured_voltage_mv: Some(1100),
             ..bare_module()
         };
         let m = module(&full);
@@ -1946,7 +1937,7 @@ mod tests {
         let zero = inventory::MemoryModule {
             configured_speed_mts: Some(0),
             rank: Some(0),
-            configured_voltage: Some(inventory::DimmVoltage::Millivolts(0)),
+            configured_voltage_mv: Some(0),
             ..bare_module()
         };
         for m in [module(&zero), module(&bare_module())] {
@@ -1954,14 +1945,6 @@ mod tests {
             assert_eq!(m.rank.validity, Validity::Unsupported);
             assert_eq!(m.configured_voltage_mv.validity, Validity::Unsupported);
         }
-        let unreadable = inventory::MemoryModule {
-            configured_voltage: Some(inventory::DimmVoltage::Unreadable),
-            ..bare_module()
-        };
-        assert_eq!(
-            module(&unreadable).configured_voltage_mv.validity,
-            Validity::Failed
-        );
     }
 
     #[test]

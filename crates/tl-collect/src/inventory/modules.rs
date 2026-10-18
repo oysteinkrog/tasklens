@@ -43,19 +43,9 @@ pub struct MemoryModule {
     pub part_number: Option<Arc<str>>,
     /// `RANK`.
     pub rank: Option<u32>,
-    /// `CONFIGURED_VOLTAGE`. `None` when the key is missing or reads 0.
-    pub configured_voltage: Option<DimmVoltage>,
-}
-
-/// `CONFIGURED_VOLTAGE` as systemd's `dmi_memory_id` writes it: volts with `%g`, except that a
-/// whole multiple of 100 mV is written with `%.1g`. So 1.35 V reads "1.35", 0.9 V reads "0.9",
-/// but 1.0 V to 1.4 V all read "1".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DimmVoltage {
-    Millivolts(u32),
-    /// The key is there but gives no exact value: a whole number of volts (the lossy `%.1g`
-    /// form) or text that is not a positive number.
-    Unreadable,
+    /// `CONFIGURED_VOLTAGE`, in millivolts. `None` when the key is missing or has no exact
+    /// value (see `voltage_mv`).
+    pub configured_voltage_mv: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,7 +75,7 @@ struct Partial {
     manufacturer: Option<Arc<str>>,
     part_number: Option<Arc<str>>,
     rank: Option<u32>,
-    configured_voltage: Option<DimmVoltage>,
+    configured_voltage_mv: Option<u32>,
 }
 
 /// Parses a udev database entry. Only `E:KEY=value` lines are read.
@@ -133,7 +123,7 @@ pub fn parse_udev_dmi(bytes: &[u8]) -> ModulesInfo {
             b"MANUFACTURER" => |d, v| d.manufacturer = text(v),
             b"PART_NUMBER" => |d, v| d.part_number = text(v),
             b"RANK" => |d, v| d.rank = number(v),
-            b"CONFIGURED_VOLTAGE" => |d, v| d.configured_voltage = voltage(v),
+            b"CONFIGURED_VOLTAGE" => |d, v| d.configured_voltage_mv = voltage_mv(v),
             _ => continue,
         };
         apply(devices.entry(index).or_default(), value);
@@ -157,7 +147,7 @@ pub fn parse_udev_dmi(bytes: &[u8]) -> ModulesInfo {
                 manufacturer: d.manufacturer,
                 part_number: d.part_number,
                 rank: d.rank,
-                configured_voltage: d.configured_voltage,
+                configured_voltage_mv: d.configured_voltage_mv,
             })
         })
         .collect();
@@ -190,19 +180,15 @@ fn number<T: std::str::FromStr>(raw: &[u8]) -> Option<T> {
     std::str::from_utf8(raw.trim_ascii()).ok()?.parse().ok()
 }
 
-/// See [`DimmVoltage`]. A value of 0 counts as missing.
-fn voltage(raw: &[u8]) -> Option<DimmVoltage> {
+/// `CONFIGURED_VOLTAGE` as systemd's `dmi_memory_id` writes it: volts with `%g`, except that a
+/// whole multiple of 100 mV is written with `%.1g`. So 1.35 V reads "1.35" and 0.9 V reads
+/// "0.9", but 1.0 V to 1.4 V all read "1". A whole number has no exact value and gives `None`,
+/// as do 0 and text that is not a number (the page shows "Not reported", PERF-013).
+fn voltage_mv(raw: &[u8]) -> Option<u32> {
     let raw = raw.trim_ascii();
-    let Some(volts) = number::<f64>(raw).filter(|v| v.is_finite() && *v >= 0.) else {
-        return Some(DimmVoltage::Unreadable);
-    };
-    if volts == 0. {
-        return None;
-    }
-    if !raw.contains(&b'.') || volts > 10. {
-        return Some(DimmVoltage::Unreadable);
-    }
-    Some(DimmVoltage::Millivolts((volts * 1000.).round() as u32))
+    let volts = number::<f64>(raw)?;
+    let exact = raw.contains(&b'.') && volts > 0. && volts < 10.;
+    exact.then(|| (volts * 1000.).round() as u32)
 }
 
 #[cfg(test)]
@@ -258,17 +244,14 @@ G:systemd
             assert_eq!(modules.iter().map(|m| m.index).collect::<Vec<_>>(), [0, 2]);
             let m = &modules[0];
             assert_eq!(m.size_bytes, 17_179_869_184);
-            assert_eq!(m.configured_voltage, Some(DimmVoltage::Millivolts(1350)));
+            assert_eq!(m.configured_voltage_mv, Some(1350));
             assert_eq!(m.speed_mts, Some(3200));
             assert_eq!(m.mem_type.as_deref(), Some("DDR4"));
             assert_eq!(m.manufacturer.as_deref(), Some("Kingston"));
             assert_eq!(m.part_number.as_deref(), Some("KHX3200C18D4/16G"));
             assert_eq!(m.locator.as_deref(), Some("DIMM 0"));
             assert_eq!(m.bank_locator.as_deref(), Some("P0 CHANNEL A"));
-            assert_eq!(
-                modules[1].configured_voltage,
-                Some(DimmVoltage::Millivolts(1350))
-            );
+            assert_eq!(modules[1].configured_voltage_mv, Some(1350));
         }
     }
 
@@ -323,28 +306,26 @@ E:MEMORY_DEVICE_2_SIZE=0\n";
     /// systemd writes volts; a whole number is the lossy `%.1g` form (1.2 V reads "1").
     #[test]
     fn configured_voltage_in_volts() {
-        let cases: [(&[u8], Option<DimmVoltage>); 9] = [
-            (b"1.35", Some(DimmVoltage::Millivolts(1350))),
-            (b"1.1\n", Some(DimmVoltage::Millivolts(1100))),
-            (b"0.9", Some(DimmVoltage::Millivolts(900))),
-            (b"1.25", Some(DimmVoltage::Millivolts(1250))),
-            (b"1", Some(DimmVoltage::Unreadable)),
-            (b"1350", Some(DimmVoltage::Unreadable)),
-            (b"abc", Some(DimmVoltage::Unreadable)),
-            (b"-1.2", Some(DimmVoltage::Unreadable)),
+        let cases: [(&[u8], Option<u32>); 9] = [
+            (b"1.35", Some(1350)),
+            (b"1.1\n", Some(1100)),
+            (b"0.9", Some(900)),
+            (b"1.25", Some(1250)),
+            (b"1", None),
+            (b"1350", None),
+            (b"abc", None),
+            (b"-1.2", None),
             (b"0", None),
         ];
         for (raw, want) in cases {
-            assert_eq!(voltage(raw), want, "{:?}", String::from_utf8_lossy(raw));
+            assert_eq!(voltage_mv(raw), want, "{:?}", String::from_utf8_lossy(raw));
         }
 
-        // Owner machine (2026-10-17): DDR4 reported as "1" shows no voltage, never 1 mV.
-        let data = b"E:MEMORY_DEVICE_0_SIZE=17179869184\nE:MEMORY_DEVICE_0_CONFIGURED_VOLTAGE=1\n\
-E:MEMORY_DEVICE_1_SIZE=17179869184\n";
+        // Owner machine (2026-10-17): DDR4 reported as "1" has no voltage, never 1 mV (0.00 V).
+        let data = b"E:MEMORY_DEVICE_0_SIZE=17179869184\nE:MEMORY_DEVICE_0_CONFIGURED_VOLTAGE=1\n";
         let ModulesInfo::Modules { modules, .. } = parse_udev_dmi(data) else {
             panic!("expected modules");
         };
-        assert_eq!(modules[0].configured_voltage, Some(DimmVoltage::Unreadable));
-        assert_eq!(modules[1].configured_voltage, None);
+        assert_eq!(modules[0].configured_voltage_mv, None);
     }
 }

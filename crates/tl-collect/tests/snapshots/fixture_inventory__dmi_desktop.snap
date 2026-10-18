@@ -158,10 +158,8 @@ InventoryRaw {
                 rank: Some(
                     2,
                 ),
-                configured_voltage: Some(
-                    Millivolts(
-                        1350,
-                    ),
+                configured_voltage_mv: Some(
+                    1350,
                 ),
             },
             MemoryModule {
@@ -194,10 +192,8 @@ InventoryRaw {
                 rank: Some(
                     2,
                 ),
-                configured_voltage: Some(
-                    Millivolts(
-                        1350,
-                    ),
+                configured_voltage_mv: Some(
+                    1350,
                 ),
             },
         ],
