@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
+    AnyElement, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Size, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -45,6 +46,7 @@ use crate::components::validity::copy_text;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::TlSettings;
+use crate::text::style::{numeric_style, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The debug selector of the gap between the chart and the core rows.
@@ -58,11 +60,82 @@ pub const CORE_COLUMN_MIN_W: f32 = 188.;
 
 /// The box's layout modes (UI-PRF-019). `chart_cores` has the total chart and the core rows,
 /// the chart taking 40% of a wide body by default.
-pub const MODES: &[BoxMode] = &[BoxMode {
-    id: "chart_cores",
-    label: "perf-overview-mode-chart-cores",
-    split: Some(0.4),
-}];
+pub const MODES: &[BoxMode] = &[
+    BoxMode {
+        id: "chart_cores",
+        label: "perf-overview-mode-chart-cores",
+        split: Some(0.4),
+    },
+    BoxMode {
+        id: "chart",
+        label: "perf-overview-mode-chart",
+        split: None,
+    },
+    BoxMode {
+        id: "cores",
+        label: "perf-overview-mode-cores",
+        split: None,
+    },
+    BoxMode {
+        id: "core_charts",
+        label: "perf-overview-mode-core-charts",
+        split: None,
+    },
+];
+
+/// The smallest cell of the `core_charts` grid, logical px before `ui_scale` (UI-PRF-019).
+pub const CORE_CHART_MIN: (f32, f32) = (120., 60.);
+
+/// The gap between `core_charts` cells, logical px before `ui_scale`.
+const CORE_CHART_GAP: f32 = 8.;
+
+/// The debug selector of the `core_charts` grid.
+pub const CORE_CHARTS_ID: &str = "perf-overview-core-charts";
+
+/// The debug selector of core `i`'s cell in the `core_charts` grid.
+pub fn core_chart_id(i: usize) -> String {
+    format!("perf-overview-core-chart-{i}")
+}
+
+/// Which parts the box shows (UI-PRF-019).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CpuMode {
+    ChartCores,
+    Chart,
+    Cores,
+    CoreCharts,
+}
+
+impl CpuMode {
+    /// The mode `id`; an unknown id is the default.
+    fn from_id(id: &str) -> Self {
+        match id {
+            "chart" => Self::Chart,
+            "cores" => Self::Cores,
+            "core_charts" => Self::CoreCharts,
+            _ => Self::ChartCores,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::ChartCores => MODES[0].id,
+            Self::Chart => MODES[1].id,
+            Self::Cores => MODES[2].id,
+            Self::CoreCharts => MODES[3].id,
+        }
+    }
+}
+
+/// The `core_charts` grid for `n` cores in a body `w` px wide: as many columns of at least
+/// 120 px as fit, and the rows they need. Returns `(columns, rows)`.
+pub fn core_chart_dims(n: usize, w: Pixels, scale: f32) -> (usize, usize) {
+    let n = n.max(1);
+    let gap = CORE_CHART_GAP * scale;
+    let fit = ((f32::from(w).max(0.) + gap) / (CORE_CHART_MIN.0 * scale + gap)).floor() as usize;
+    let cols = fit.clamp(1, n);
+    (cols, n.div_ceil(cols))
+}
 
 /// The page saves the chart share the box ended a drag or a double-click on.
 impl EventEmitter<InnerSplitChanged> for CpuBox {}
@@ -245,6 +318,7 @@ pub struct CpuBox {
     /// chart.
     width: Rc<Cell<Pixels>>,
     wide: bool,
+    mode: CpuMode,
     /// The gap between the chart and the core rows (UI-PRF-018 "CPU box splitter").
     split: InnerSplit,
     settings: ChartSettings,
@@ -287,6 +361,7 @@ impl CpuBox {
             text_bits: 0,
             width: Rc::new(Cell::new(px(0.))),
             wide: true,
+            mode: CpuMode::ChartCores,
             split: InnerSplit::new(
                 CPU_SPLITTER_ID,
                 CPU_SPLITTER_LINE_ID,
@@ -349,6 +424,20 @@ impl CpuBox {
     /// Takes the saved share. Nothing changes while the gap is held.
     pub fn set_split(&mut self, share: f32, cx: &mut Context<Self>) {
         if self.split.set_share(share) {
+            cx.notify();
+        }
+    }
+
+    /// The shown mode's id.
+    pub fn mode(&self) -> &'static str {
+        self.mode.id()
+    }
+
+    /// Shows mode `id`; an unknown id is the default mode. Only this box renders again.
+    pub fn set_mode(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mode = CpuMode::from_id(id);
+        if mode != self.mode {
+            self.mode = mode;
             cx.notify();
         }
     }
@@ -593,14 +682,10 @@ impl CpuBox {
     }
 }
 
-impl Render for CpuBox {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.render_count.set(self.render_count.get() + 1);
-        let m = *metrics(cx);
-        let theme = current(cx).clone();
-        self.wide = is_wide(self.width.get(), m.ui_scale);
-        let chart: AnyElement = div()
+impl CpuBox {
+    /// The total chart, filling its part.
+    fn chart_part(&self) -> AnyElement {
+        div()
             .relative()
             .size_full()
             .child(
@@ -608,40 +693,143 @@ impl Render for CpuBox {
                     .clone()
                     .cached(StyleRefinement::default().size_full()),
             )
-            .into_any_element();
+            .into_any_element()
+    }
+
+    /// The core rows with their sparklines.
+    fn rows_part(&mut self, m: &UiMetrics, cx: &mut Context<Self>) -> AnyElement {
         let n = self.logical.len();
         let s = m.ui_scale;
         let grid_size = self.grid_size.get();
         self.grid = core_bars_layout(n, grid_size.width, grid_size.height, s);
-        let rows = div()
+        div()
             .relative()
             .size_full()
             .child(CoreBars {
                 model: Rc::clone(&self.bars),
             })
-            .child(core_sparks(&self.sparks, &self.grid, &m))
+            .child(core_sparks(&self.sparks, &self.grid, m))
             .child(class_probe(
                 Rc::clone(&self.grid_size),
                 self.grid.class(),
                 move |size| core_bars_layout(n, size.width, size.height, s).class(),
                 cx.entity_id(),
             ))
-            .into_any_element();
-        let share = self.split(&m);
-        let split = split_body_share(chart, rows, self.wide, share, &m);
-        let mut body = div()
+            .into_any_element()
+    }
+
+    /// One filled chart per logical CPU in a grid, each with "C{n}" and the smoothed percent.
+    /// The grid keeps cells at 120 × 60 px at least and scrolls when the rows need more.
+    fn core_charts_part(
+        &self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let n = self.logical.len();
+        let s = m.ui_scale;
+        let gap = px(CORE_CHART_GAP * s);
+        let (cols, rows) = core_chart_dims(n, self.grid_size.get().width, s);
+        let bars = self.bars.borrow();
+        let mut grid = div()
+            .id(CORE_CHARTS_ID)
+            .debug_selector(|| CORE_CHARTS_ID.into())
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(gap)
+            .overflow_y_scroll();
+        for r in 0..rows {
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .gap(gap)
+                .flex_1()
+                .min_h(px(CORE_CHART_MIN.1 * s))
+                .w_full();
+            for c in 0..cols {
+                let i = r * cols + c;
+                let cell = div().relative().flex_1().min_w_0().h_full();
+                let Some(chart) = self.sparks.get(i).filter(|_| i < n) else {
+                    row = row.child(cell);
+                    continue;
+                };
+                let mut name = div();
+                *name.text_style() = t_xs(m);
+                let mut pct = div();
+                *pct.text_style() = numeric_style(m, m.text.xs);
+                let cell = cell
+                    .debug_selector(move || core_chart_id(i))
+                    .child(chart.clone().cached(StyleRefinement::default().size_full()))
+                    .child(
+                        name.absolute()
+                            .top(px(2. * s))
+                            .left(px(4. * s))
+                            .text_color(theme.text_secondary)
+                            .child(SharedString::from(bars.name(i).to_owned())),
+                    )
+                    .child(
+                        pct.absolute()
+                            .top(px(2. * s))
+                            .right(px(4. * s))
+                            .text_color(theme.text_primary)
+                            .child(SharedString::from(bars.pct_label(i).to_owned())),
+                    );
+                row = row.child(cell);
+            }
+            grid = grid.child(row);
+        }
+        drop(bars);
+        div()
             .relative()
             .size_full()
-            .child(split)
-            .child(self.split.probe(Self::inner_split, cx));
-        if self.wide {
-            body =
-                body.child(
-                    self.split
-                        .gap(SplitAxis::Row, share, m.sp[5], Self::inner_split, cx),
-                );
-        }
-        let body = body.into_any_element();
+            .child(grid)
+            .child(class_probe(
+                Rc::clone(&self.grid_size),
+                (cols | (rows << 10)) as u32,
+                move |size| {
+                    let (cols, rows) = core_chart_dims(n, size.width, s);
+                    (cols | (rows << 10)) as u32
+                },
+                cx.entity_id(),
+            ))
+            .into_any_element()
+    }
+}
+
+impl Render for CpuBox {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        self.wide = is_wide(self.width.get(), m.ui_scale);
+        let body: AnyElement = match self.mode {
+            CpuMode::Chart => self.chart_part(),
+            CpuMode::Cores => self.rows_part(&m, cx),
+            CpuMode::CoreCharts => self.core_charts_part(&m, &theme, cx),
+            CpuMode::ChartCores => {
+                let chart = self.chart_part();
+                let rows = self.rows_part(&m, cx);
+                let share = self.split(&m);
+                let split = split_body_share(chart, rows, self.wide, share, &m);
+                let mut body = div()
+                    .relative()
+                    .size_full()
+                    .child(split)
+                    .child(self.split.probe(Self::inner_split, cx));
+                if self.wide {
+                    body = body.child(self.split.gap(
+                        SplitAxis::Row,
+                        share,
+                        m.sp[5],
+                        Self::inner_split,
+                        cx,
+                    ));
+                }
+                body.into_any_element()
+            }
+        };
         box_frame(
             CPU_BOX_ID,
             Some(DeviceKey(DeviceKey::CPU.into())),

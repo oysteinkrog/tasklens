@@ -194,6 +194,8 @@ impl OverviewPage {
         let disk_cards = cards_of(sidebar, DeviceKind::Disk, cx);
         let cpu = cx.new(|cx| CpuBox::new(&hub, cpu_idx, cx));
         let layout = saved_layout(cx);
+        let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
+        cpu.update(cx, |b, cx| b.set_mode(cpu_mode, cx));
         if let Some(split) = layout.split(BoxKind::Cpu) {
             cpu.update(cx, |b, cx| b.set_split(split, cx));
         }
@@ -400,7 +402,9 @@ impl OverviewPage {
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
         let split = layout.split(BoxKind::Cpu);
+        let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
         self.layout = layout;
+        self.cpu.update(cx, |b, cx| b.set_mode(cpu_mode, cx));
         if let Some(split) = split {
             self.cpu.update(cx, |b, cx| b.set_split(split, cx));
         }

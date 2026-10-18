@@ -2334,7 +2334,7 @@ mod page {
     };
     use tl_ui::pages::performance::overview::box_menu::gear_id;
     use tl_ui::pages::performance::overview::cpu_box::{
-        CPU_BOX_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID,
+        CORE_CHARTS_ID, CPU_BOX_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID, core_chart_id,
     };
     use tl_ui::pages::performance::overview::edit::{
         DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, GHOST_VALUE_ID, TOOLBAR_ID, hide_button_id,
@@ -3146,6 +3146,64 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn overview_cpu_modes_render(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::parts::core_spark_id;
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let set = |r: &mut Rig, mode: &str| {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "cpu".into(),
+                mode: mode.into(),
+            });
+        };
+        let shown = |r: &mut Rig, id: &str| {
+            let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+            r.vcx.debug_bounds(id).is_some()
+        };
+        let parts = |r: &mut Rig| {
+            [
+                shown(r, CPU_SPLITTER_ID),
+                shown(r, &core_spark_id(0)),
+                shown(r, CORE_CHARTS_ID),
+            ]
+        };
+
+        // The default: total chart and core rows with the splitter.
+        assert_eq!(parts(&mut r), [true, true, false]);
+        assert!(r.layout().split(BoxKind::Cpu).is_some());
+
+        // The total chart only: no rows, no splitter, no split.
+        set(&mut r, "chart");
+        assert_eq!(parts(&mut r), [false, false, false]);
+        assert_eq!(r.layout().split(BoxKind::Cpu), None);
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+
+        // Core rows only.
+        set(&mut r, "cores");
+        assert_eq!(parts(&mut r), [false, true, false]);
+        let frame = r.bounds_of(CPU_BOX_ID.into());
+        let spark = r.bounds_of(core_spark_id(0));
+        assert!(spark.left() >= frame.left() && spark.right() <= frame.right());
+
+        // One chart per logical CPU in a grid of cells of at least 120 × 60 px.
+        set(&mut r, "core_charts");
+        assert_eq!(parts(&mut r), [false, false, true]);
+        let grid = r.bounds_of(CORE_CHARTS_ID.into());
+        let first = r.bounds_of(core_chart_id(0));
+        let second = r.bounds_of(core_chart_id(1));
+        assert!(first.size.width >= px(120.), "{first:?}");
+        assert!(first.size.height >= px(60.), "{first:?}");
+        assert!(first.left() >= grid.left() && first.top() >= grid.top());
+        assert_eq!(first.top(), second.top(), "cells fill a row first");
+        assert!(second.left() > first.right(), "{first:?} {second:?}");
+
+        // Back to the default mode: the default split returns.
+        set(&mut r, "chart_cores");
+        assert_eq!(parts(&mut r), [true, true, false]);
+        assert_eq!(r.layout().split(BoxKind::Cpu), Some(0.4));
+    }
+
+    #[gpui_kit::test]
     fn overview_inner_split_drag_and_reset(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
         // CPU and Memory share the row equally, so in the CPU body the 120 px chart minimum is
@@ -3256,7 +3314,15 @@ mod page {
                 })
                 .collect()
         });
-        assert_eq!(items, [("Chart and cores".to_owned(), true)]);
+        let expected: Vec<(String, bool)> = [
+            ("Chart and cores", true),
+            ("Chart", false),
+            ("Cores", false),
+            ("Core charts", false),
+        ]
+        .map(|(l, c)| (l.to_owned(), c))
+        .into();
+        assert_eq!(items, expected);
     }
 
     #[gpui_kit::test]
@@ -3985,7 +4051,15 @@ mod wired {
             ]
         );
         // One radio item per mode the box offers, the shown one selected.
-        assert_eq!(modes, [("Chart and cores".to_owned(), true)]);
+        assert_eq!(
+            modes,
+            [
+                ("Chart and cores".to_owned(), true),
+                ("Chart".to_owned(), false),
+                ("Cores".to_owned(), false),
+                ("Core charts".to_owned(), false),
+            ]
+        );
         // Choosing the shown mode changes and saves nothing.
         r.vcx.update(|window, cx| {
             let menu = open_context_menu(window, cx).expect("the box menu is open");
@@ -4055,7 +4129,15 @@ mod wired {
                 (MenuEntryKind::Separator, String::new()),
             ]
         );
-        assert_eq!(modes, [("Chart and cores".to_owned(), true)]);
+        assert_eq!(
+            modes,
+            [
+                ("Chart and cores".to_owned(), true),
+                ("Chart".to_owned(), false),
+                ("Cores".to_owned(), false),
+                ("Core charts".to_owned(), false),
+            ]
+        );
     }
 
     #[gpui_kit::test]

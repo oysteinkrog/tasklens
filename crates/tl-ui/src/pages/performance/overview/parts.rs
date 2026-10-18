@@ -300,6 +300,16 @@ impl CoreBarsModel {
         changed
     }
 
+    /// CPU `i`'s name ("C3"), empty for an unknown CPU.
+    pub fn name(&self, i: usize) -> &str {
+        self.names.get(i).map_or("", |n| n)
+    }
+
+    /// CPU `i`'s percent label ("12%"), or "…" for no valid sample.
+    pub fn pct_label(&self, i: usize) -> &str {
+        self.pct_text.get(i).map_or(WARMING, |t| t)
+    }
+
     /// The GHz label of each CPU: "3.9 GHz", or "…" for no valid sample.
     pub fn ghz_labels(&self) -> &[SharedString] {
         &self.ghz_text
