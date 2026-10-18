@@ -196,7 +196,7 @@ impl InnerSplit {
     }
 
     /// The pointer moved while the gap is held.
-    fn moved<V>(&mut self, position: Point<Pixels>, cx: &mut Context<V>) {
+    fn moved<V: 'static>(&mut self, position: Point<Pixels>, cx: &mut Context<V>) {
         let Some(drag) = &mut self.drag else {
             return;
         };
