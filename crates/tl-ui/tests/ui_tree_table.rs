@@ -1131,14 +1131,16 @@ fn group_label_stays_at_the_viewport_edge_while_scrolling_sideways() {
     assert_eq!(label.left(), body.left());
 }
 
-/// Opens the table in a body 1600 px wide, makes the body `narrow_w` px wide, draws exactly one
-/// frame, then delivers the next frame. Returns how often the table asked to render again.
-fn notifies_after_narrowing(narrow_w: f32) -> usize {
+/// Opens the table with columns 200 + 300 px in a body 1000 px wide, then makes the body
+/// `narrow_w` px wide. That update draws one frame, whose rows were measured with the body width
+/// of the frame before. Delivers the next frame, then draws again. Returns how often the table
+/// asked to render again, and the content width after the last frame.
+fn narrow_body(narrow_w: f32) -> (usize, Pixels) {
     let mut cx = cosmic_cx();
     let rows = (0..3).map(plain).collect();
-    let delegate = TDelegate::with_widths(rows, 400., 1000.);
+    let delegate = TDelegate::with_widths(rows, 200., 300.);
     let (host, vcx) = cx.add_window_view(move |window, cx| TableHost {
-        w: 1600.,
+        w: 1000.,
         h: 200. + HEADER_H,
         table: cx.new(|cx| TlTreeTable::new(delegate, window, cx)),
     });
@@ -1147,6 +1149,7 @@ fn notifies_after_narrowing(narrow_w: f32) -> usize {
     vcx.update(|window, cx| window.simulate_next_frame(cx));
     redraw(vcx);
     let table = vcx.update(|_, cx| host.read(cx).table.clone());
+    assert!(!vcx.update(|_, cx| table.read(cx).horizontal_overflow()));
     let count = Rc::new(Cell::new(0));
     let seen = count.clone();
     let _sub = vcx.update(|_, cx| cx.observe(&table, move |_, _| seen.set(seen.get() + 1)));
@@ -1156,19 +1159,26 @@ fn notifies_after_narrowing(narrow_w: f32) -> usize {
             cx.notify();
         })
     });
-    // One frame only: its rows were measured with the body width of the frame before.
-    vcx.update(|window, cx| window.draw(cx).clear(cx));
     count.set(0);
     vcx.update(|window, cx| window.simulate_next_frame(cx));
-    count.get()
+    let notified = count.get();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    let content =
+        vcx.update(|_, cx| ScrollbarHandle::content_size(&table.read(cx).scroll_handle()));
+    (notified, content.width)
 }
 
 #[test]
 fn body_narrowed_into_overflow_renders_again_for_the_gutter() {
-    // 400 + 1000 px of columns fit 1600 px; in 1000 px they overflow and need the gutter.
-    assert!(notifies_after_narrowing(1000.) > 0);
-    // Still no overflow at 1500 px, so the frame was right and nothing renders again.
-    assert_eq!(notifies_after_narrowing(1500.), 0);
+    // 200 + 300 px of columns fit 1000 px. In 400 px they overflow, and the frame after the
+    // resize asks for one more render so the rows get the gutter.
+    let (notified, content) = narrow_body(400.);
+    assert!(notified > 0, "no render after the frame without the gutter");
+    assert_eq!(content, px(500. + SCROLLBAR_W));
+    // At 900 px they still fit: the frame was right and nothing renders again.
+    let (notified, content) = narrow_body(900.);
+    assert_eq!(notified, 0);
+    assert_eq!(content, px(900.));
 }
 
 #[test]
