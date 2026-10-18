@@ -1813,8 +1813,29 @@ mod end {
         build_menu_from(rig, rows, Some(col))
     }
 
-    /// As [`build_menu`], with `None` for the keyboard path.
+    /// As [`build_menu`], with `None` for the keyboard path. The menu is only inspected, never
+    /// shown, so the table's hold on the row order is released at once.
     fn build_menu_from(
+        rig: &mut Rig,
+        rows: &[usize],
+        col: Option<ColumnId>,
+    ) -> Entity<TlMenuPopup> {
+        let menu = build_menu_held(rig, rows, col);
+        close_menu(rig);
+        menu
+    }
+
+    /// Tells the table the row menu closed, which ends its hold on the row order.
+    fn close_menu(rig: &mut Rig) {
+        use tl_ui::table::tree_table::TreeTableDelegate as _;
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        rig.vcx.update(|_, cx| {
+            table.update(cx, |t, cx| t.delegate.on_menu_closed(cx));
+        });
+    }
+
+    /// Builds the row menu and leaves the table holding its row order, as an open menu does.
+    fn build_menu_held(
         rig: &mut Rig,
         rows: &[usize],
         col: Option<ColumnId>,
@@ -3322,12 +3343,10 @@ mod end {
         let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
         let first = |rig: &mut Rig| rig.vcx.update(|_, cx| table.read(cx).delegate.row_id(0));
         let a = first(&mut rig);
-        let _menu = build_menu(&mut rig, &[0], ColumnId::Name);
+        let _menu = build_menu_held(&mut rig, &[0], Some(ColumnId::Name));
         rig.publish(own(&[300, 301]), &[301, 300], Vec::new());
         assert_eq!(first(&mut rig), a, "row A stays first under the open menu");
-        rig.vcx.update(|_, cx| {
-            table.update(cx, |t, cx| t.delegate.on_menu_closed(cx));
-        });
+        close_menu(&mut rig);
         assert_ne!(
             first(&mut rig),
             a,
