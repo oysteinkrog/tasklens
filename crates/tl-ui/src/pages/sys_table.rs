@@ -1099,11 +1099,16 @@ impl<D: SysDelegate> SysTableFrame<D> {
             .map(|id| health.get(*id))
             .find(|s| s.state == SourceState::Failed)
             .or_else(|| self.state.source_ids.first().map(|id| health.get(*id)));
+        let query = self.query.query();
         sys_body(&SysBodyInput {
             tab: self.state.tab,
             first_data_seen: self.state.first_data_seen,
             rows_len: self.table.read(cx).delegate.row_count(),
-            filter_active: !self.query.query().filter.is_empty(),
+            filter_active: !query.filter.is_empty()
+                || query
+                    .services
+                    .as_ref()
+                    .is_some_and(|strip| *strip != ServiceFilter::default()),
             source,
             managers_unavailable: false,
         })

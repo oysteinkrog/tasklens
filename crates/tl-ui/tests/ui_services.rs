@@ -2899,7 +2899,7 @@ mod page {
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::services::actions::{
         GoToService, JumpOrigin, ManagerArg, ServicesClearAllFilters, ServicesShowHidden,
-        ServicesToggleStateFilter, StateFilterArg,
+        ServicesToggleManagerFilter, ServicesToggleStateFilter, StateFilterArg,
     };
     use tl_ui::pages::services::delegate::ServicesDelegate;
     use tl_ui::pages::services::{REFRESH_TOAST_AFTER, ServicesPage};
@@ -4000,6 +4000,51 @@ mod page {
         let query = last_services_query(&engine).expect("a query");
         assert!(query.filter.is_empty());
         assert!(query.services.expect("a strip filter").states.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn both_managers_off_shows_no_matches(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        init(cx, engine.clone());
+        let handle = cx.update(|cx| {
+            set_test_page(cx, Tab::Services, services_page);
+            open_main_window_on(Tab::Services, cx).expect("main window opens")
+        });
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let page = vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window view")
+                .read(cx)
+                .page_entity::<ServicesPage>(Tab::Services)
+                .expect("services page")
+        });
+        let focus = vcx.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
+        let draw = |vcx: &mut VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        for manager in [ManagerArg::System, ManagerArg::User] {
+            vcx.update(|window, cx| {
+                window.focus(&focus, cx);
+                window.dispatch_action(Box::new(ServicesToggleManagerFilter { manager }), cx);
+            });
+        }
+        draw(&mut vcx);
+        // No text filter, and the engine answers with no rows at all.
+        publish_services(
+            &engine,
+            1,
+            Vec::new(),
+            &[],
+            Vec::new(),
+            ServiceCounts::default(),
+        );
+        draw(&mut vcx);
+        assert!(vcx.read_entity(&page, |p, _| p.filter_text().is_empty()));
+        assert_eq!(vcx.read_entity(&page, |p, _| p.body()), SysBody::NoMatches);
     }
 
     /// Publishes `units` as the unfiltered records and group and unit rows for the first `shown`

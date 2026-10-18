@@ -911,6 +911,13 @@ fn is_hidden(name: &str, load_state: &str, has_file: bool) -> bool {
     !name_shown(name) || (load_state == "not-found" && !has_file)
 }
 
+/// True when `Id` names another unit: `name` is an alias that systemd resolved to that unit.
+/// The target is listed under its own name, so the alias would repeat its PID and state.
+fn is_alias(name: &str, unit: &Props) -> bool {
+    let id = prop_str(unit, "Id");
+    !id.is_empty() && *id != *name
+}
+
 /// The properties one record needs, read from the `Unit` map and the type interface map.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct RawUnit {
@@ -1288,6 +1295,10 @@ async fn fetch_unit(
         }
         Err(e) => return Err(e),
     };
+    if is_alias(name, &unit) {
+        tracing::debug!(unit = %name, "systemd: alias unit left out");
+        return Ok(None);
+    }
     let typed = match type_iface(kind) {
         Some(iface) => match get_all(cx, conn, path, iface).await {
             Ok(props) => props,
@@ -3277,6 +3288,14 @@ mod tests {
             let rec = record(Manager::User, UnitType::Service, &raw, "u".into());
             assert_eq!(rec.startup, want, "{state:?}");
         }
+    }
+
+    #[test]
+    fn alias_unit_is_detected_by_id() {
+        let target = props(vec![("Id", Value::from("dbus-broker.service"))]);
+        assert!(is_alias("dbus.service", &target));
+        assert!(!is_alias("dbus-broker.service", &target));
+        assert!(!is_alias("a.service", &Props::new()));
     }
 
     #[test]
