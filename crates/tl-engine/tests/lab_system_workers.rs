@@ -1224,6 +1224,51 @@ fn sensors_fan_label_connected() {
     assert!(r.fan_connected);
 }
 
+fn fan_ids(list: &DeviceList) -> Vec<DeviceIdentity> {
+    list.entries
+        .iter()
+        .filter(|e| matches!(e.identity, DeviceIdentity::Fan { .. }))
+        .map(|e| e.identity.clone())
+        .collect()
+}
+
+/// tasklens-hjn.45: a plain hwmon tree with fan1..fan3 gives three listed, connected fans.
+#[test]
+fn sensors_three_fan_tree() {
+    let dir = fixture_copy("no-fans", None);
+    let chip = hwmon_dir(&dir, 9);
+    fs::create_dir_all(&chip).expect("create hwmon9");
+    fs::write(chip.join("name"), "nct6775\n").expect("write name");
+    for (n, rpm) in [(1, 1500), (2, 900), (3, 2100)] {
+        fs::write(chip.join(format!("fan{n}_input")), format!("{rpm}\n")).expect("write fan");
+    }
+    let (mut src, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    let want: Vec<DeviceIdentity> = (1..=3).map(|n| fan("nct6775", n)).collect();
+    assert_eq!(fan_ids(&sensors_devices(&mut src)), want);
+    for (id, rpm) in want.iter().zip([1500., 900., 2100.]) {
+        let r = reading(&s, id);
+        assert_eq!(r.value, Metric::valid(rpm));
+        assert!(r.fan_connected, "{id:?}");
+    }
+}
+
+/// tasklens-hjn.45: the owner machine's nct6797 (captured 2026-10) lists all seven fans; the
+/// five that spin are connected, the two at 0 RPM are not.
+#[test]
+fn sensors_owner_desktop_seven_fans() {
+    let dir = fixture_copy("owner-desktop", None);
+    let (mut src, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    let nct: Vec<DeviceIdentity> = fan_ids(&sensors_devices(&mut src))
+        .into_iter()
+        .filter(|id| chip_of(id) == "nct6797")
+        .collect();
+    assert_eq!(nct, (1..=7).map(|n| fan("nct6797", n)).collect::<Vec<_>>());
+    let connected: Vec<u16> = (1..=7)
+        .filter(|&n| reading(&s, &fan("nct6797", n)).fan_connected)
+        .collect();
+    assert_eq!(connected, [1, 2, 3, 4, 6]);
+}
+
 #[test]
 fn sensors_listed_once_in_full_mode() {
     let ids: Vec<SourceId> = workers_for(EngineMode::Full)
