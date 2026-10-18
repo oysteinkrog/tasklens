@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tl_model::ids::ColumnId;
-use tl_model::settings::{ColumnState, SCHEMA_VERSION, Settings, StartupSettings, UiState};
+use tl_model::settings::{
+    ColumnState, OVERVIEW_KEY, SCHEMA_VERSION, Settings, StartupSettings, UiState,
+};
 use tl_model::table::{SysColumnId, SysTable};
 use tl_ui::theme::user_store::serialize_user_themes;
 use tl_ui::{PersistTheme, RunHistoryEntry, RunHistoryStore};
@@ -181,6 +183,14 @@ fn load<T: Stored>(kind: FileKind, path: &Path, now_unix: u64) -> Loaded<T> {
     let mut value: T = deserialize_by_section(kind, table);
     value.set_version(version);
     for key in value.clamp() {
+        if key == OVERVIEW_KEY {
+            warn!(
+                target: "tasklens::settings",
+                "{}: {key} had invalid rows or boxes and they have been dropped",
+                kind.label()
+            );
+            continue;
+        }
         info!(
             target: "tasklens::settings",
             "{}: {key} was out of range and has been clamped",

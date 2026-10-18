@@ -320,6 +320,10 @@ pub struct PerformanceSettings {
     pub overview: Option<OverviewLayoutSetting>,
 }
 
+/// The key [`Settings::clamp`] returns when it dropped invalid parts of `[performance.overview]`.
+/// The load step logs it with `warn!` (UI-PRF-018), not as a clamped value.
+pub const OVERVIEW_KEY: &str = "performance.overview";
+
 /// The kinds `[performance.overview]` accepts, in default order.
 pub const OVERVIEW_BOX_KINDS: [&str; 6] = ["cpu", "memory", "gpu", "disk", "net", "processes"];
 
@@ -391,10 +395,11 @@ impl OverviewLayoutSetting {
         layout
     }
 
-    /// Drops unknown and repeated kinds, weights that are not finite and above 0, and rows left
-    /// with no box. Returns `true` when it dropped anything.
+    /// Drops unknown and repeated kinds, weights that are not above 0 and at most `f32::MAX`
+    /// (the UI places in `f32`), and rows left with no box. Returns `true` when it dropped
+    /// anything.
     pub fn drop_invalid(&mut self) -> bool {
-        let good = |w: f64| w.is_finite() && w > 0.;
+        let good = |w: f64| w > 0. && w <= f64::from(f32::MAX);
         let before = self.rows.len() + self.rows.iter().map(|r| r.boxes.len()).sum::<usize>();
         let mut seen: Vec<&'static str> = Vec::new();
         self.rows.retain_mut(|row| {
@@ -1227,8 +1232,8 @@ impl Settings {
 impl PerformanceSettings {
     /// A profile with `overview_top_processes = true` and no `overview` gets the default plus a
     /// Top processes row; the old key is then cleared and never written. An invalid part of
-    /// `overview` is dropped and `performance.overview` is pushed to `changed` once; with
-    /// nothing valid left the layout is the default.
+    /// `overview` is dropped and [`OVERVIEW_KEY`] is pushed to `changed` once, for one `warn!`
+    /// line from the load step; with nothing valid left the layout is the default.
     fn migrate_overview(&mut self, changed: &mut Vec<&'static str>) {
         if self.overview_top_processes && self.overview.is_none() {
             self.overview = Some(OverviewLayoutSetting::with_top_procs());
@@ -1236,7 +1241,7 @@ impl PerformanceSettings {
         self.overview_top_processes = false;
         if let Some(layout) = &mut self.overview {
             if layout.drop_invalid() {
-                changed.push("performance.overview");
+                changed.push(OVERVIEW_KEY);
             }
             if layout.rows.is_empty() {
                 self.overview = None;
@@ -1833,7 +1838,7 @@ mod tests {
         let (s, changed) = load_toml(
             "[performance]\ngraph_range_s = 30\n[performance.overview]\nrows = [\
              { height = 3.0, boxes = [{ kind = \"cpu\", width = 2.0 }, { kind = \"fans\", width \
-             = 1.0 }, { kind = \"cpu\", width = 1.0 }, { kind = \"net\", width = -1.0 }] },\
+             = 1.0 }, { kind = \"cpu\", width = 1.0 }, { kind = \"net\", width = -1.0 }, { kind = \"gpu\", width = 1e39 }] },\
              { height = 2.0, boxes = [{ kind = \"bogus\", width = 1.0 }] },\
              { height = nan, boxes = [{ kind = \"disk\", width = 1.0 }] },\
              { height = 1.0, boxes = [{ kind = \"memory\", width = inf }, { kind = \"disk\", \
