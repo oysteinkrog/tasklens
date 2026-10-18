@@ -2157,7 +2157,14 @@ mod window {
     /// values while General is active, and only then.
     #[gpui_kit::test]
     fn props_general_demands_gpu_process(cx: &mut TestAppContext) {
-        let (engine, _main) = setup(cx);
+        let (engine, mut main) = setup(cx);
+        // The Processes table shows the GPU column by default and asks for the same values
+        // (tasklens-rsf.30), so the main window moves to a page that does not.
+        main.update(|window, cx| {
+            let view = main_window_view(cx).expect("main window");
+            view.update(cx, |m, cx| m.select_tab(Tab::Services, window, cx));
+        });
+        main.run_until_parked();
         publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
         let gpu_process = |cx: &mut TestAppContext| {
             cx.update(|cx| {
