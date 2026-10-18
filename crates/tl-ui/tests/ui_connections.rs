@@ -2633,13 +2633,6 @@ mod props {
         #[cfg(target_os = "linux")]
         assert_eq!(inset, gpui_kit::px(21.), "the client frame hook is on");
         let window = vcx.update(|window, _| window.bounds());
-        assert_eq!(
-            window.size,
-            gpui_kit::size(
-                gpui_kit::px(560.) + inset * 2.,
-                gpui_kit::px(520.) + inset * 2.
-            )
-        );
         let last = format!("TlKv-row-{}", texts.len() - 1);
         let last = vcx.debug_bounds(last.leak()).expect("the last row");
         let footer = vcx.debug_bounds("ConnPropsFooter").expect("footer");
@@ -2647,6 +2640,13 @@ mod props {
         assert!(
             footer.bottom() <= window.size.height - inset,
             "{footer:?} in {window:?}"
+        );
+        assert_eq!(
+            window.size,
+            gpui_kit::size(
+                gpui_kit::px(560.) + inset * 2.,
+                gpui_kit::px(520.) + inset * 2.
+            )
         );
     }
 
