@@ -1105,7 +1105,7 @@ mod boxes {
 
     #[gpui_kit::test]
     fn overview_core_sparkline_plots_second_means(cx: &mut TestAppContext) {
-        let mut r = open(cx);
+        let r = open(cx);
         let cpu = r.cpu();
         let means = r.vcx.update(|_, cx| {
             let c = cpu.read(cx);
