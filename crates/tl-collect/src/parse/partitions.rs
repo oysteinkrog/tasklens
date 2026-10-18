@@ -643,6 +643,7 @@ mod tests {
                     minor,
                     mount_point: Arc::from(path),
                     fs_type: Arc::from("ext4"),
+                    source_dev: None,
                 })
                 .collect();
             let mut statvfs = |_: &str| -> Result<FsStat, CollectError> {
