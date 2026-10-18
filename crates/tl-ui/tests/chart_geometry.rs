@@ -8,7 +8,8 @@ use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_ui::chart::geometry::{
     BuildInput, Pt, Run, Scratch, TimeMap, bucket_ns, build, build_cell, decimate, emit_run,
-    finish_grid, is_stale, right_edge_ns, split_runs, stale_age_ns, window_start, y_of,
+    finish_grid, is_stale, mean_samples, right_edge_ns, split_runs, stale_age_ns, window_start,
+    y_of,
 };
 use tl_ui::chart::{ChartCache, ChartSeries, ChartSpec, PathSet, YScale};
 
@@ -1200,4 +1201,27 @@ fn grid_build_accepts_cache_from_ordinary_chart() {
     finish_grid(&input, (BLUE, fill), RED, None, &mut cache, &mut scratch);
     assert_eq!(cache.strokes.len(), 1);
     assert_eq!(cache.strokes[0].color, RED);
+}
+
+#[test]
+fn overview_core_sparkline_plots_second_means() {
+    // 10 Hz samples from 0.05 s: 0/100 alternating, 3 buckets of 10 and a partial one.
+    let samples = series(
+        35,
+        100 * MS,
+        50 * MS,
+        |i| if i % 2 == 0 { 0. } else { 100. },
+    );
+    let mut out = Vec::new();
+    mean_samples(&samples, 0, SEC, &mut out);
+    assert_eq!(out.len(), 4);
+    assert_eq!(out[0].value, 50.);
+    assert_eq!(out[0].t_ns, 950 * MS, "at the newest sample of the bucket");
+    assert!(out.iter().all(|s| s.is_valid()));
+    // An invalid sample stays and ends the bucket.
+    let mut gap = series(5, 100 * MS, 0, |_| 10.);
+    gap.insert(2, Sample::gap(150 * MS));
+    mean_samples(&gap, 0, SEC, &mut out);
+    assert_eq!(out.len(), 3);
+    assert!(out[0].is_valid() && !out[1].is_valid() && out[2].is_valid());
 }

@@ -94,6 +94,30 @@ pub enum CpuSecondaryGraph {
     Temperature,
 }
 
+/// `performance.overview_core_smoothing` (UI-PRF-018, D-024): the time constant of the moving
+/// average the Overview core rows show.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoreSmoothing {
+    Off,
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl CoreSmoothing {
+    /// The time constant in seconds; 0 for `Off` (raw samples).
+    pub const fn tau_s(self) -> f32 {
+        match self {
+            Self::Off => 0.0,
+            Self::Low => 0.5,
+            Self::Medium => 1.0,
+            Self::High => 2.0,
+        }
+    }
+}
+
 /// Entries of `performance.gpu_optional_graphs`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -310,6 +334,8 @@ pub struct PerformanceSettings {
     pub curved_lines: bool,
     /// `false` scales the network graph to the link speed.
     pub network_dynamic_scale: bool,
+    /// Smoothing of the Overview core rows (UI-PRF-018, D-024).
+    pub overview_core_smoothing: CoreSmoothing,
     /// The old opt-in Top processes switch (crw.45). Read once by [`Settings::clamp`], which
     /// turns `true` into an `overview` layout, and never written (UI-PRF-018).
     #[serde(skip_serializing)]
@@ -572,6 +598,7 @@ impl Default for PerformanceSettings {
             device_overrides: BTreeMap::new(),
             curved_lines: false,
             network_dynamic_scale: true,
+            overview_core_smoothing: CoreSmoothing::default(),
             overview_top_processes: false,
             overview: None,
         }
@@ -1540,6 +1567,7 @@ mod tests {
         assert!(p.device_overrides.is_empty());
         assert!(!p.curved_lines);
         assert!(p.network_dynamic_scale);
+        assert_eq!(p.overview_core_smoothing, CoreSmoothing::Medium);
         assert!(!p.overview_top_processes);
         assert_eq!(p.overview, None);
 

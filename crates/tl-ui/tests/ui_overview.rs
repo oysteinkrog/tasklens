@@ -991,6 +991,131 @@ mod boxes {
         let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
         assert_eq!((layout.cols, layout.rows), (3, 11));
     }
+
+    /// `CPU_TOTAL` of logical CPU 0 as `values` at 10 Hz ending now.
+    fn publish_train(r: &mut Rig, values: &[f32]) {
+        const PERIOD: u64 = 100_000_000;
+        let newest = now_boot_ns();
+        let n = values.len() as u64;
+        let samples: Vec<Sample> = values
+            .iter()
+            .enumerate()
+            .map(|(k, &v)| Sample::valid(newest - (n - 1 - k as u64) * PERIOD, v))
+            .collect();
+        r.version += 1;
+        let version = r.version;
+        r.publish(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: vec![Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(100),
+                        metric: MetricId::CPU_TOTAL,
+                    },
+                    version,
+                    period_ns: PERIOD,
+                    samples: samples.into(),
+                })]
+                .into(),
+                slow: Arc::from([]),
+            });
+        });
+    }
+
+    fn core0(r: &mut Rig) -> Option<f32> {
+        let cpu = r.cpu();
+        r.vcx.update(|_, cx| cpu.read(cx).bars().values[0])
+    }
+
+    /// 0, 100, 0, 100 at 10 Hz for 3 s.
+    fn flicker() -> Vec<f32> {
+        (0..31)
+            .map(|i| if i % 2 == 0 { 0. } else { 100. })
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn overview_core_rows_use_smoothed_value(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_train(&mut r, &flicker());
+        let v = core0(&mut r).expect("a smoothed value");
+        assert!((40. ..=60.).contains(&v), "smoothed {v}");
+        // The total chart and the title value stay raw.
+        let cpu = r.cpu();
+        let spec_total = r
+            .vcx
+            .update(|_, cx| cpu.read(cx).total_chart().read(cx).spec.clone());
+        assert!(spec_total.series.iter().all(|s| s.mean_ns == 0));
+    }
+
+    #[gpui_kit::test]
+    fn overview_core_smoothing_off_shows_raw(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.performance.overview_core_smoothing =
+                    tl_model::settings::CoreSmoothing::Off;
+            });
+        });
+        publish_train(&mut r, &flicker());
+        assert_eq!(core0(&mut r), Some(100.), "the newest raw sample");
+    }
+
+    #[gpui_kit::test]
+    fn overview_core_invalid_sample_resets_average(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_train(&mut r, &[100.; 10]);
+        assert_eq!(core0(&mut r), Some(100.));
+        let newest = now_boot_ns() + 10_000_000_000;
+        r.version += 1;
+        let version = r.version;
+        r.publish(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: vec![Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(100),
+                        metric: MetricId::CPU_TOTAL,
+                    },
+                    version,
+                    period_ns: 100_000_000,
+                    samples: vec![
+                        Sample::valid(newest, 100.),
+                        Sample::gap(newest + 100_000_000),
+                        Sample::valid(newest + 200_000_000, 20.),
+                    ]
+                    .into(),
+                })]
+                .into(),
+                slow: Arc::from([]),
+            });
+        });
+        assert_eq!(
+            core0(&mut r),
+            Some(20.),
+            "restarts from the next valid sample"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn overview_core_sparkline_plots_second_means(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        let cpu = r.cpu();
+        let means = r.vcx.update(|_, cx| {
+            let c = cpu.read(cx);
+            (
+                c.core_sparks()[0].read(cx).spec.series[0].mean_ns,
+                c.total_chart().read(cx).spec.series[0].mean_ns,
+            )
+        });
+        assert_eq!(means, (1_000_000_000, 0));
+    }
 }
 
 // The GPU, Disk and Network boxes (crw.39).

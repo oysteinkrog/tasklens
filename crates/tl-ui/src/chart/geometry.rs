@@ -224,6 +224,59 @@ pub fn stale_age_ns(newest_ns: u64, now_boot_ns: u64) -> u64 {
     now_boot_ns.saturating_sub(newest_ns)
 }
 
+/// Replaces the valid samples of `samples[from..]` with their means over `bucket_ns` buckets
+/// (aligned to time 0), each at the time and with the flags of its newest sample. A sample
+/// without `VALID` is kept as it is and ends the bucket. Clears `out` first.
+pub fn mean_samples(samples: &[Sample], from: usize, bucket_ns: u64, out: &mut Vec<Sample>) {
+    /// The bucket being filled: its index, sum, count, newest sample and the first one's
+    /// `GAP_BEFORE`.
+    struct Open {
+        bucket: u64,
+        sum: f64,
+        n: u32,
+        last: Sample,
+        gap: SampleFlags,
+    }
+    fn flush(open: &mut Option<Open>, out: &mut Vec<Sample>) {
+        if let Some(o) = open.take() {
+            out.push(Sample {
+                value: (o.sum / f64::from(o.n)) as f32,
+                flags: o.last.flags | o.gap,
+                ..o.last
+            });
+        }
+    }
+    out.clear();
+    let bucket_ns = bucket_ns.max(1);
+    let mut open: Option<Open> = None;
+    for s in &samples[from..] {
+        if !s.is_valid() {
+            flush(&mut open, out);
+            out.push(*s);
+            continue;
+        }
+        let bucket = s.t_ns / bucket_ns;
+        match &mut open {
+            Some(o) if o.bucket == bucket && !s.flags.contains(SampleFlags::GAP_BEFORE) => {
+                o.sum += f64::from(s.value);
+                o.n += 1;
+                o.last = *s;
+            }
+            _ => {
+                flush(&mut open, out);
+                open = Some(Open {
+                    bucket,
+                    sum: f64::from(s.value),
+                    n: 1,
+                    last: *s,
+                    gap: s.flags & SampleFlags::GAP_BEFORE,
+                });
+            }
+        }
+    }
+    flush(&mut open, out);
+}
+
 /// Inputs of one geometry build. All lengths are physical pixels.
 pub struct BuildInput<'a> {
     /// Spec series paired with the resolved views (`None` = absent).
@@ -251,6 +304,8 @@ pub struct Scratch {
     /// each of those samples, the floor under each decimated point, and the running sum per
     /// period slot.
     stacked: Vec<Sample>,
+    /// Series drawn as means (`ChartSeries::mean_ns`): the window's means.
+    meaned: Vec<Sample>,
     floors: Vec<f32>,
     pt_floors: Vec<f32>,
     acc: Vec<f32>,
@@ -1089,6 +1144,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         pts,
         stale_pts,
         stacked,
+        meaned,
         floors,
         pt_floors,
         acc,
@@ -1118,6 +1174,10 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
                 g.stack(window, acc, stacked, floors);
                 g.add(window, acc);
                 (&stacked[..], 0, Some(&floors[..]))
+            }
+            None if spec.mean_ns > 0 => {
+                mean_samples(&view.samples, from, spec.mean_ns, meaned);
+                (&meaned[..], 0, None)
             }
             None => (&view.samples[..], from, None),
         };

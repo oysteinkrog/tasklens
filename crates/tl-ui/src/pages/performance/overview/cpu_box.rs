@@ -1,6 +1,9 @@
 //! The Overview page's CPU box (UI-PRF-017, D-022, UI-PRF-023): the total chart and one row per
 //! logical CPU (crw.53): name, sparkline, meter, percent and GHz.
 //!
+//! The core rows show a moving average of each core's `CPU_TOTAL` (UI-PRF-018, D-024), and the
+//! core sparklines plot 1-second means. The total chart and the title value stay raw.
+//!
 //! The box is its own view. It formats its text only when the inputs' hash changes and notifies
 //! only when the text, a core's 1% bucket or a core's 0.1 GHz bucket changed, so an idle tick
 //! renders nothing. The total chart and the core sparklines are cached child views that re-render
@@ -19,7 +22,8 @@ use gpui_kit::{
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::NetworkUnit;
+use tl_model::series::Sample;
+use tl_model::settings::{CoreSmoothing, NetworkUnit};
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
@@ -47,6 +51,41 @@ pub const CPU_BOX_ID: &str = "perf-overview-box-cpu";
 const KEY_TITLE: &str = "perf-card-heading-cpu";
 const KEY_CORE: &str = "perf-overview-core";
 const KEY_RANGE: &str = "perf-cpu-heading-utilization";
+
+/// The span one core sparkline point averages (UI-PRF-018).
+const SPARK_MEAN_NS: u64 = 1_000_000_000;
+
+/// One core's exponential moving average of `CPU_TOTAL`.
+#[derive(Clone, Copy, Debug, Default)]
+struct CoreAverage {
+    /// Time of the newest sample taken in.
+    t_ns: u64,
+    /// The average; `None` before the first valid sample and after an invalid one.
+    value: Option<f32>,
+}
+
+impl CoreAverage {
+    /// Takes in the samples newer than `t_ns`: `s += (x − s) · (1 − e^(−Δt/τ))`. An invalid
+    /// sample clears the average, and the next valid sample starts it again.
+    fn advance(&mut self, samples: &[Sample], tau_s: f32) {
+        let from = samples.partition_point(|s| s.t_ns <= self.t_ns);
+        for s in &samples[from..] {
+            self.value = if !s.is_valid() {
+                None
+            } else {
+                match self.value {
+                    Some(v) if self.t_ns > 0 => {
+                        let dt_s = (s.t_ns - self.t_ns) as f32 * 1e-9;
+                        let k = 1.0 - (-dt_s / tau_s).exp();
+                        Some(v + (s.value - v) * k)
+                    }
+                    _ => Some(s.value),
+                }
+            };
+            self.t_ns = s.t_ns;
+        }
+    }
+}
 
 /// The joint between the clock and the temperature.
 const SEP: &str = " · ";
@@ -103,6 +142,7 @@ fn core_spec(device: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec
             },
             fill: Some(theme.graph.cpu_fill),
             line: theme.graph.cpu_line,
+            mean_ns: SPARK_MEAN_NS,
             ..ChartSeries::default()
         }],
         y: YScale::Fixed {
@@ -167,6 +207,9 @@ pub struct CpuBox {
     logical_ids: Vec<SeriesId>,
     /// `CPU_FREQ` of each entry of `logical`.
     freq_ids: Vec<SeriesId>,
+    /// `performance.overview_core_smoothing`, and the average of each entry of `logical`.
+    smoothing: CoreSmoothing,
+    averages: Vec<CoreAverage>,
     /// The core grid's size at the last paint, and the layout the last render used.
     grid_size: Rc<Cell<Size<Pixels>>>,
     grid: CoreBarsLayout,
@@ -209,6 +252,8 @@ impl CpuBox {
             logical: Vec::new(),
             logical_ids: Vec::new(),
             freq_ids: Vec::new(),
+            smoothing: TlSettings::settings(cx).performance.overview_core_smoothing,
+            averages: Vec::new(),
             grid_size: Rc::new(Cell::new(grid_size)),
             grid: core_bars_layout(0, grid_size.width, grid_size.height, 1.),
             catalog_version: u64::MAX,
@@ -340,6 +385,9 @@ impl CpuBox {
                 .iter()
                 .map(|&device| id(device, MetricId::CPU_FREQ)),
         );
+        self.averages.clear();
+        self.averages
+            .resize(self.logical.len(), CoreAverage::default());
         self.sync_sparks(&old, cx);
         self.sync_names(cx);
         self.sync_bars(snap);
@@ -372,11 +420,24 @@ impl CpuBox {
         bars.set_cpus(names.into_iter());
     }
 
-    /// The newest valid `CPU_TOTAL` and `CPU_FREQ` of each logical CPU to the rows. True when a
-    /// row's 1% or 0.1 GHz bucket changed.
+    /// The smoothed `CPU_TOTAL` (the newest valid sample with smoothing off) and the newest valid
+    /// `CPU_FREQ` of each logical CPU to the rows. True when a row's 1% or 0.1 GHz bucket
+    /// changed.
     fn sync_bars(&mut self, snap: &Snapshot) -> bool {
+        let tau_s = self.smoothing.tau_s();
+        if tau_s > 0.0 {
+            for (avg, id) in self.averages.iter_mut().zip(&self.logical_ids) {
+                if let Some(view) = snap.series.get(*id) {
+                    avg.advance(&view.samples, tau_s);
+                }
+            }
+        }
         let mut bars = self.bars.borrow_mut();
-        let pct = bars.set_values(self.logical_ids.iter().map(|id| newest(snap, *id)));
+        let pct = if tau_s > 0.0 {
+            bars.set_values(self.averages.iter().map(|avg| avg.value))
+        } else {
+            bars.set_values(self.logical_ids.iter().map(|id| newest(snap, *id)))
+        };
         let ghz = bars.set_freqs(self.freq_ids.iter().map(|id| newest(snap, *id)));
         pct || ghz
     }
@@ -418,6 +479,17 @@ impl CpuBox {
 
     /// Applies the chart settings when one of their sections changed.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        let smoothing = TlSettings::settings(cx).performance.overview_core_smoothing;
+        if smoothing != self.smoothing {
+            self.smoothing = smoothing;
+            self.averages.fill(CoreAverage::default());
+            let snap = Arc::clone(self.hub.read(cx).current());
+            if self.sync_bars(&snap) {
+                #[cfg(any(test, feature = "test-hooks"))]
+                self.notify_count.set(self.notify_count.get() + 1);
+                cx.notify();
+            }
+        }
         let versions = chart_section_versions(cx);
         if versions == self.settings_versions {
             return;

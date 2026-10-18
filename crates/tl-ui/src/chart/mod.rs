@@ -92,6 +92,9 @@ pub struct ChartSeries {
     pub dashed: bool,
     /// How the gaps of the first series are drawn (PERF-022, PERF-079).
     pub gap_style: GapStyle,
+    /// When above 0, the series is drawn as means of its valid samples over this many ns
+    /// (one point per bucket), not sample by sample. Ignored in stacked charts.
+    pub mean_ns: u64,
 }
 
 /// How a gap between two runs of samples is drawn.
@@ -118,6 +121,7 @@ impl Default for ChartSeries {
             line_width: px(1.0),
             dashed: false,
             gap_style: GapStyle::Break,
+            mean_ns: 0,
         }
     }
 }

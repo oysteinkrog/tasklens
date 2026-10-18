@@ -60,6 +60,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
     let gpu = tr(cx, "shell-settings-perf-group-gpu");
     let devices = tr(cx, "shell-settings-perf-group-devices");
     let network = tr(cx, "shell-settings-perf-group-network");
+    let overview = tr(cx, "shell-settings-perf-group-overview");
 
     let ranges: Vec<(SharedString, SettingValue)> = GRAPH_RANGES_S
         .into_iter()
@@ -126,6 +127,21 @@ pub fn page(cx: &mut App) -> PageBuilder {
         SettingKey::PerformanceCpuSecondaryGraph,
         tr(cx, "shell-settings-perf-secondary-graph"),
         &secondary,
+    );
+    let smoothing = options(
+        cx,
+        &[
+            ("shell-settings-perf-core-smoothing-off", "off"),
+            ("shell-settings-perf-core-smoothing-low", "low"),
+            ("shell-settings-perf-core-smoothing-medium", "medium"),
+            ("shell-settings-perf-core-smoothing-high", "high"),
+        ],
+    );
+    page.dropdown(
+        overview,
+        SettingKey::PerformanceOverviewCoreSmoothing,
+        tr(cx, "shell-settings-perf-core-smoothing"),
+        &smoothing,
     );
 
     for (key, label) in [
