@@ -2111,6 +2111,65 @@ mod summary {
         assert_eq!(t3.left(), t0.left());
     }
 
+    /// Each tile's legend names its series in the UI-PRF-003 words and styles: Memory "Used"
+    /// solid and "Committed" dashed, Network "Download" solid and "Upload" dashed, CPU "Total"
+    /// and "Kernel" only with the kernel line, and none on the one-series tiles. Checked against
+    /// the 1.0.0 smoke-test shot of summary mode (o55.43 h).
+    #[gpui_kit::test]
+    fn summary_tile_legends_match_their_series(cx: &mut TestAppContext) {
+        use tl_ui::chart::LegendStyle::{Dashed, Solid};
+        use tl_ui::pages::performance::DeviceKind;
+        let mut r = open(cx, 1600., 1000., false);
+        let view = enter(&mut r);
+        let tiles: Vec<_> = r.vcx.update(|_, cx| {
+            view.read(cx)
+                .tiles
+                .iter()
+                .map(|t| {
+                    let c = t.chart.read(cx);
+                    let legend: Vec<_> = c
+                        .labels
+                        .legend
+                        .iter()
+                        .map(|(s, style)| (s.to_string(), *style))
+                        .collect();
+                    let dashed: Vec<bool> = c.spec.series.iter().map(|s| s.dashed).collect();
+                    (t.kind, legend, dashed)
+                })
+                .collect()
+        });
+        let words = |l: &[(String, tl_ui::chart::LegendStyle)]| -> Vec<_> {
+            l.iter().map(|(s, style)| (s.clone(), *style)).collect()
+        };
+        for (kind, legend, dashed) in &tiles {
+            let pairs = |a: &str, sa, b: &str, sb| vec![(a.to_string(), sa), (b.to_string(), sb)];
+            match kind {
+                DeviceKind::Memory => {
+                    assert_eq!(words(legend), pairs("Used", Solid, "Committed", Dashed));
+                }
+                DeviceKind::Net => {
+                    assert_eq!(words(legend), pairs("Download", Solid, "Upload", Dashed));
+                }
+                DeviceKind::Cpu if dashed.len() > 1 => {
+                    assert_eq!(words(legend), pairs("Total", Solid, "Kernel", Solid));
+                }
+                _ => assert!(legend.is_empty(), "{kind:?}: {legend:?}"),
+            }
+            if !legend.is_empty() {
+                assert_eq!(legend.len(), dashed.len(), "{kind:?}: one item per series");
+                for ((_, style), dashed) in legend.iter().zip(dashed) {
+                    assert_eq!(
+                        *style == Dashed,
+                        *dashed,
+                        "{kind:?}: swatch matches the line"
+                    );
+                }
+            }
+        }
+        let kinds: Vec<_> = tiles.iter().map(|t| t.0).collect();
+        assert!(kinds.contains(&DeviceKind::Memory) && kinds.contains(&DeviceKind::Net));
+    }
+
     #[gpui_kit::test]
     fn summary_blocks_tab_switch(cx: &mut TestAppContext) {
         let mut r = open(cx, 1600., 1000., false);
