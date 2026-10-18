@@ -282,8 +282,9 @@ mod delegate {
     use tl_ui::pages::processes::cells::{NO_SOURCE, PROCESS_COLUMNS, process_column};
     use tl_ui::pages::processes::delegate::{ProcRowId, ProcessDelegate, SHIPPED_PHASE, UnitIds};
     use tl_ui::pages::processes::table::GroupHeader;
-    use tl_ui::table::actions::OpenProperties;
+    use tl_ui::table::actions::{OpenProperties, ResizeColumnsToFit};
     use tl_ui::table::cells::CellOut;
+    use tl_ui::table::columns::TableId;
     use tl_ui::table::tree_table::{IconSlot, RowKind, TlTreeTable, TreeTableDelegate};
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -1117,6 +1118,73 @@ mod delegate {
             redraw(vcx);
         }
         assert_eq!(tr_calls(), before, "a frame called tr");
+    }
+
+    /// "Resize columns to fit content" makes the Type column at least as wide as its widest
+    /// value, even when no visible row shows that value (bead tasklens-pdu.65 d, shot 19c).
+    /// Fails before the fix: the fit measured only the visible rows' "System process" and
+    /// shorter words, never "Background process".
+    #[gpui_kit::test]
+    fn fit_to_content_holds_the_widest_type(cx: &mut TestAppContext) {
+        const TYPES: [&str; 6] = [
+            "App",
+            "Unit",
+            "Background process",
+            "System process",
+            "Kernel thread",
+            "Pseudo",
+        ];
+        let (table, _, _, vcx) = open_host(cx);
+        vcx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                let mut layout = t.delegate.columns().clone();
+                assert!(layout.order.contains(&ColumnId::Type));
+                layout.visible.insert(ColumnId::Type);
+                let scale = layout.ui_scale();
+                layout.rebuild(scale);
+                t.delegate.on_columns_changed(&layout, cx);
+            })
+        });
+        redraw(vcx);
+
+        let (size, gap, scale) = vcx.update(|_, cx| {
+            let m = *tl_ui::theme::metrics(cx);
+            (m.text.base, m.sp[6], m.ui_scale)
+        });
+        let advance = |vcx: &mut VisualTestContext, text: &str| {
+            vcx.update(|window, cx| {
+                let mut cache = tl_ui::text::metrics::TextMetricsCache::default();
+                text.chars()
+                    .fold(px(0.), |w, ch| w + cache.char_advance(ch, size, window, cx))
+            })
+        };
+        let widest = TYPES
+            .iter()
+            .copied()
+            .max_by(|a, b| {
+                let (wa, wb) = (advance(vcx, a), advance(vcx, b));
+                wa.partial_cmp(&wb).expect("finite widths")
+            })
+            .expect("six words");
+        let need = advance(vcx, widest) + gap;
+        // No row shows the widest word, so only the fit samples can make room for it.
+        let shown: Vec<String> = vcx.update(|_, cx| {
+            let d = &table.read(cx).delegate;
+            (0..d.row_count())
+                .map(|ix| text(d, ix, ColumnId::Type).0)
+                .collect()
+        });
+        assert!(!shown.iter().any(|s| s == widest), "{shown:?}");
+
+        vcx.dispatch_action(ResizeColumnsToFit {
+            table: TableId::Processes,
+        });
+        redraw(vcx);
+        let w = vcx.update(|_, cx| table.read(cx).delegate.columns().widths[&ColumnId::Type]);
+        assert!(
+            w * scale >= need,
+            "Type is {w:?} after the fit, {widest:?} needs {need:?}"
+        );
     }
 }
 

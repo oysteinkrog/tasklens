@@ -794,8 +794,8 @@ fn fit_columns_never_below_minimum() {
     assert!(stored_width(vcx, &table, ColumnId::Name) < px(200.));
 }
 
-/// Resize columns to fit content leaves room for the widest visible text, as the Type column's
-/// "Background process" needs (bead tasklens-pdu.65 d, shot 19c).
+/// Resize columns to fit content leaves room for the widest visible text (bead tasklens-pdu.65 d).
+/// The process Type column's own test is `fit_to_content_holds_the_widest_type` in ui_processes.
 #[test]
 fn fit_all_columns_holds_the_widest_text() {
     const TYPE: &str = "Background process";

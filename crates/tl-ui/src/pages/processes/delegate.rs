@@ -1568,6 +1568,26 @@ impl TreeTableDelegate for ProcessDelegate {
             .then(|| view.clone())
     }
 
+    /// Every Type word, so "Resize columns to fit content" fits the widest one even when no
+    /// visible row shows it (UI-PRC-006, shot 19c of the 1.0.0 smoke test).
+    fn fit_samples(&self, col: ColumnId) -> Vec<Arc<str>> {
+        let w = &self.cell_words;
+        match col {
+            ColumnId::Type => [
+                &w.type_app,
+                &w.type_unit,
+                &w.type_background,
+                &w.type_system,
+                &w.type_kernel_thread,
+                &w.type_pseudo,
+            ]
+            .into_iter()
+            .cloned()
+            .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// An empty view under a filter: "No processes match the filter" (UI-PRC-024). The engine
     /// sends no group header when nothing matches at all.
     fn empty_text(&self) -> Option<SharedString> {

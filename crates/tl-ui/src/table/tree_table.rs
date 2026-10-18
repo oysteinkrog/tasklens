@@ -235,6 +235,13 @@ pub trait TreeTableDelegate: 'static + Sized {
         false
     }
 
+    /// Texts "Resize columns to fit content" makes room for in `col` even when no visible row
+    /// shows them, such as every word of a fixed set (the process Type column). The default is
+    /// none.
+    fn fit_samples(&self, _col: Self::Column) -> Vec<Arc<str>> {
+        Vec::new()
+    }
+
     /// The NEW or EXITED tint drawn over the zebra of row `ix`, or `None`. The default is the
     /// theme's tint for the `NEW` and `EXITED` row flags.
     fn row_tint(&self, ix: usize, theme: &TlTheme) -> Option<Hsla> {
@@ -2075,8 +2082,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     /// Fits `only`, or every visible column on `None`, to its content (UI-PRC-006): the largest
     /// of the minimum, the widest text + 16 and the header label + 16 + 12. Texts come from the
-    /// rows the last frame built and the cell texts still cached from the last 3 table versions,
-    /// never from a pass over all rows. Then calls `on_columns_changed` once.
+    /// rows the last frame built, the cell texts still cached from the last 3 table versions and
+    /// the delegate's `fit_samples`, never from a pass over all rows. Then calls
+    /// `on_columns_changed` once.
     fn fit_columns(
         &mut self,
         only: Option<D::Column>,
@@ -2147,6 +2155,11 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     None => self.formatted_text(ix, id, col),
                 };
                 texts.push((i, text, Pixels::ZERO));
+            }
+        }
+        for (i, &col) in targets.iter().enumerate() {
+            for text in self.delegate.fit_samples(col) {
+                texts.push((i, SharedString::from(text), Pixels::ZERO));
             }
         }
         let numeric: SmallVec<[bool; 24]> = targets
