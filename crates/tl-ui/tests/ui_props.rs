@@ -274,29 +274,23 @@ fn general_verify_button_stays_inside_its_column(cx: &mut TestAppContext) {
     assert!(button.right() <= right.left(), "no overlap with column 3");
 }
 
-/// Memory % and CPU % print one decimal, and only an exact measured zero prints "0%" (R-013,
-/// table d): 0.0 prints "0%", 0.04 prints "0.0%", 12.34 prints "12.3%".
+/// Memory % and CPU % print one decimal. A value that rounds to 0.0 is a measured zero and
+/// prints "0%" (PROC-003, table d). The smoke test's "0%" was a 3 MiB idle process.
 #[gpui_kit::test]
 fn general_memory_and_cpu_percent_one_decimal(cx: &mut TestAppContext) {
     let (view, cx) = host(cx, 900.);
     let t = tab(&view, cx);
-    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
-    // MemTotal 10^9 bytes, so RssAnon pct × 10^7 bytes is pct %.
-    for (pct, rss_anon, shown) in [
-        (0.0, 0, "0%"),
-        (0.04, 400_000, "0.0%"),
-        (12.34, 123_400_000, "12.3%"),
-    ] {
-        let mut r = record(pct);
-        r.rss_anon_bytes = rss_anon;
-        cx.update(|_, cx| t.update(cx, |t, cx| t.set_record(Some(&r), 1_000_000_000, cx)));
-        assert_eq!(
-            value(&t, cx, FieldId::MemoryPct),
-            shown,
-            "Memory % at {pct}"
-        );
-        assert_eq!(value(&t, cx, FieldId::CpuPct), shown, "CPU % at {pct}");
-    }
+    let p = payload(detail("firefox"));
+    // RssAnon 800 MiB of MemTotal 32 GiB is 2.44%.
+    feed(&t, cx, Some(&p), 12.34);
+    assert_eq!(value(&t, cx, FieldId::MemoryPct), "2.4%");
+    assert_eq!(value(&t, cx, FieldId::CpuPct), "12.3%");
+    feed(&t, cx, Some(&p), 0.4);
+    assert_eq!(value(&t, cx, FieldId::CpuPct), "0.4%");
+    // 800 MiB of 32 TiB is 0.002%, and CPU 0.04% also rounds to 0.0.
+    cx.update(|_, cx| t.update(cx, |t, cx| t.set_record(Some(&record(0.04)), 32 << 40, cx)));
+    assert_eq!(value(&t, cx, FieldId::MemoryPct), "0%");
+    assert_eq!(value(&t, cx, FieldId::CpuPct), "0%");
 }
 
 #[gpui_kit::test]
