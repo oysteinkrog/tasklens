@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use asupersync::channel::{mpsc, watch};
@@ -16,7 +17,7 @@ use smallvec::SmallVec;
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
 use tl_engine::reducer::{DRAIN_MAX, InvariantViolation, Publisher, Reducer};
-use tl_engine::source::{WorkerCommand, WorkerControl};
+use tl_engine::source::{Source, WorkerCommand, WorkerControl};
 use tl_engine::update::{
     ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
     DeviceKinds, DeviceList, DiskSample, DrmProcessVram, EngineMsg, GpuInfoUpdate, GpuSample,
@@ -24,6 +25,7 @@ use tl_engine::update::{
     ServicesUpdate, SourceUpdate, StartupUpdate,
 };
 use tl_engine::workers::cpu::CpuSource;
+use tl_engine::workers::sensors::SensorsSource;
 use tl_model::actions::{
     ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, SchedPolicy,
     Signal,
@@ -3573,4 +3575,50 @@ fn nvidia_and_amd_gpus_coexist() {
     assert!(!rows.contains(&ids[2]));
     assert_eq!(rig.reducer().apply_state.gpu_cap(&[9; 16]), Some(true));
     rig.passed();
+}
+
+/// tasklens-hjn.45: with no demand the sensors worker still lists a fan1..fan3 tree (fan3 at
+/// 0 RPM), and all three fans reach the snapshot's device catalog. No value is read.
+#[test]
+fn sensors_list_fans_into_snapshot_without_demand() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lab-reducer-three-fans");
+    if dir.exists() {
+        fs::remove_dir_all(&dir).expect("remove old fixture");
+    }
+    let chip = dir.join("sys/class/hwmon/hwmon0");
+    fs::create_dir_all(&chip).expect("create hwmon0");
+    fs::write(chip.join("name"), "nct6775\n").expect("write name");
+    for (n, rpm) in [(1, 1500), (2, 900), (3, 0)] {
+        fs::write(chip.join(format!("fan{n}_input")), format!("{rpm}\n")).expect("write fan");
+    }
+
+    // As `source::run` does: read the period for the current demand, then sample.
+    let worker = SensorsSource::new(SysRoot::at(&dir));
+    let period = worker.period(&Demand::default(), &EngineSettings::default());
+    assert_eq!(period, Some(Duration::from_secs(30)));
+    let (mut worker, update) = worker.sample();
+    assert!(matches!(update, SourceUpdate::Devices(_)), "{update:?}");
+    assert!(worker.take_extra().is_none());
+
+    let mut rig = Rig::new();
+    rig.run(vec![src(update)]).expect("reducer runs");
+    let snap = rig.latest();
+    let fans: Vec<DeviceIdentity> = snap
+        .devices
+        .entries
+        .iter()
+        .filter(|e| matches!(e.identity, DeviceIdentity::Fan { .. }))
+        .map(|e| e.identity.clone())
+        .collect();
+    let want: Vec<DeviceIdentity> = (1..=3)
+        .map(|index| DeviceIdentity::Fan {
+            chip: Arc::from("nct6775"),
+            index,
+        })
+        .collect();
+    assert_eq!(fans, want);
+    assert!(
+        snap.system.sensors.is_empty(),
+        "no value read without demand"
+    );
 }

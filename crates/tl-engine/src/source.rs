@@ -3,7 +3,8 @@
 //! Each turn the loop re-reads demand and settings, sleeps until the next absolute deadline,
 //! applies baseline resets and forwarded commands from the control watch, runs one sample on
 //! the source's own sampling thread, and sends the result to the reducer. Missed ticks are
-//! skipped, never caught up. An off source wakes every `IDLE_RECHECK` and does no I/O.
+//! skipped, never caught up. An off source wakes every `IDLE_RECHECK` and does no I/O. A source
+//! whose `wakes_on_demand` is true also wakes at once when demand changes.
 //!
 //! Each source has its own sampling thread, started at its first sample and asleep between
 //! samples (ADR-004, tasklens-wlf.30). A hung `sample` stalls only that source: after
@@ -23,7 +24,7 @@ use std::time::Duration;
 
 use asupersync::channel::{mpsc, oneshot, watch};
 use asupersync::runtime::JoinError;
-use asupersync::time::{Interval, MissedTickBehavior, interval, sleep_until, timeout};
+use asupersync::time::{Interval, MissedTickBehavior, interval, sleep_until, timeout, timeout_at};
 use asupersync::{Cx, Outcome, PanicPayload};
 use tl_model::command::{DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
 use tl_model::demand::Demand;
@@ -230,13 +231,19 @@ pub trait Source: Send + 'static {
     fn take_extra(&mut self) -> Option<SourceUpdate> {
         None
     }
+    /// True when a demand change must end the wait for the next sample at once, so a long
+    /// period does not delay the switch to a new one. Other sources keep the old rate until
+    /// the sample already scheduled.
+    fn wakes_on_demand(&self) -> bool {
+        false
+    }
 }
 
 /// The sampling loop (ADR-004). Returns `Outcome::Ok(())` when `cx` is cancelled and
 /// `Outcome::Err` when the sampling thread cannot be started or the reducer's queue is closed,
 /// so the supervisor restarts the worker. On return the sampling thread ends; a thread stuck in
 /// `sample` is left detached and ends when that sample returns.
-pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), WorkerError> {
+pub async fn run<S: Source>(cx: Cx, mut io: WorkerIo, mut src: S) -> Outcome<(), WorkerError> {
     let id = src.id();
     let mut period = src.period(
         &io.demand.borrow_and_clone(),
@@ -291,7 +298,27 @@ pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), Wor
             iv = new_interval(&cx, period);
         }
 
-        sleep_until(iv.deadline()).await;
+        if src.wakes_on_demand() {
+            match timeout_at(iv.deadline(), io.demand.changed(&cx)).await {
+                // Read the new demand at the top of the loop; the deadline stays.
+                Ok(Ok(())) => {
+                    if cx.checkpoint().is_err() {
+                        return Outcome::Ok(());
+                    }
+                    continue;
+                }
+                // The demand sender is gone: wait for the deadline as the other sources do.
+                Ok(Err(_)) => {
+                    if cx.checkpoint().is_err() {
+                        return Outcome::Ok(());
+                    }
+                    sleep_until(iv.deadline()).await;
+                }
+                Err(_) => {}
+            }
+        } else {
+            sleep_until(iv.deadline()).await;
+        }
         if cx.checkpoint().is_err() {
             return Outcome::Ok(());
         }

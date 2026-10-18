@@ -1,13 +1,16 @@
 //! The `Sensors` worker (ADR-004, ADR-008, ADR-016): wraps the tl-collect `SensorsSampler` and
 //! turns each `SensorsReading` into a `SourceUpdate::Sensors(SensorSample)`.
 //!
-//! It reads every hwmon temperature and fan at 1 Hz while sensors are demanded, and not at all
-//! otherwise: unlike the other sources, history recording does not keep it on (ADR-008 row
-//! "Sensors (hwmon), fans"). The chips are enumerated again every 5 s; each enumeration also
-//! sends a full `DeviceList` for `SENSORS | FANS` through `take_extra`. GPU chips are skipped:
+//! It reads every hwmon temperature and fan at 1 Hz while sensors are demanded: unlike the other
+//! sources, history recording does not keep it on (ADR-008 row "Sensors (hwmon), fans"). The
+//! chips are enumerated again every 5 s; each enumeration also sends a full `DeviceList` for
+//! `SENSORS | FANS` through `take_extra`. Without demand it reads no values, but it still lists
+//! the chips at start and every 30 s, so the fan and sensor rows exist before anything asks for
+//! their values (leader decision on tasklens-hjn.45). GPU chips are skipped:
 //! their temperature and fan belong to the GPU page (PERF-068). CPU temperature stays in the
 //! CPU worker (PERF-039).
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,11 +38,13 @@ use crate::workers::WorkerSpec;
 use crate::workers::enumerate::{self, EnumClock};
 
 pub const PERIOD: Duration = Duration::from_secs(1);
+/// How often the chips are listed while sensors are not demanded.
+pub const DISCOVERY_PERIOD: Duration = Duration::from_secs(30);
 
 /// The sensors rate table (ADR-008 row "Sensors (hwmon), fans"): recording does not keep
-/// sensors on.
+/// sensors on. Without demand only the device list runs, at [`DISCOVERY_PERIOD`].
 pub fn sensors_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.sensors { Some(PERIOD) } else { None }
+    Some(if d.sensors { PERIOD } else { DISCOVERY_PERIOD })
 }
 
 pub struct SensorsSource {
@@ -52,8 +57,11 @@ pub struct SensorsSource {
     pending: Option<SourceUpdate>,
     /// Fans that reported a non-zero RPM this session (R-170 item 5).
     fan_seen: FxHashSet<DeviceIdentity>,
-    /// False until the first `sample_at`: `SensorsSampler::new` already ran one rescan.
+    /// False until the first `sample_at` or `discover_at`: `SensorsSampler::new` already ran one
+    /// rescan.
     started: bool,
+    /// `Demand.sensors` as last seen by `period`. Values are read only while it is true.
+    demanded: Cell<bool>,
 }
 
 impl SensorsSource {
@@ -65,7 +73,21 @@ impl SensorsSource {
             pending: None,
             fan_seen: FxHashSet::default(),
             started: false,
+            demanded: Cell::new(false),
         }
+    }
+
+    /// The sample while sensors are not demanded: lists the chips again and reads no value.
+    /// The next demanded sample sends the list again, so a change in between is not lost.
+    pub fn discover_at(mut self, clock: Clock) -> (Self, SourceUpdate) {
+        if self.started {
+            self.sampler.rescan();
+        }
+        self.started = true;
+        self.pending = None;
+        self.clock.force();
+        let list = enumerate::sensor_list(clock.boot_ns, self.sampler.chips());
+        (self, SourceUpdate::Devices(list))
     }
 
     /// `sample()` is `self.sample_at(Clock::now())`; tests call this with an injected clock.
@@ -110,11 +132,16 @@ impl Source for SensorsSource {
     }
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
+        self.demanded.set(d.sensors);
         sensors_period(d, s)
     }
 
     fn sample(self) -> (Self, SourceUpdate) {
-        self.sample_at(Clock::now())
+        if self.demanded.get() {
+            self.sample_at(Clock::now())
+        } else {
+            self.discover_at(Clock::now())
+        }
     }
 
     /// There are no rates; only the next enumeration is forced.
@@ -124,6 +151,11 @@ impl Source for SensorsSource {
 
     fn take_extra(&mut self) -> Option<SourceUpdate> {
         self.pending.take()
+    }
+
+    /// The 30 s list period must not hold back values once the UI asks for them.
+    fn wakes_on_demand(&self) -> bool {
+        true
     }
 }
 
@@ -224,7 +256,10 @@ mod tests {
     #[test]
     fn period_table() {
         let s = EngineSettings::default();
-        assert_eq!(sensors_period(&Demand::default(), &s), None);
+        assert_eq!(
+            sensors_period(&Demand::default(), &s),
+            Some(Duration::from_secs(30))
+        );
 
         let sensors = Demand {
             sensors: true,
@@ -237,6 +272,9 @@ mod tests {
             recording: true,
             ..Demand::default()
         };
-        assert_eq!(sensors_period(&recording, &s), None);
+        assert_eq!(
+            sensors_period(&recording, &s),
+            Some(Duration::from_secs(30))
+        );
     }
 }

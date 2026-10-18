@@ -1269,6 +1269,78 @@ fn sensors_owner_desktop_seven_fans() {
     assert_eq!(connected, [1, 2, 3, 4, 6]);
 }
 
+/// Runs the lab for `span` and returns the times (ms) of the device lists and sensor samples.
+fn sensors_messages(
+    fl: &mut FakeLab,
+    rx: &mut mpsc::Receiver<EngineMsg>,
+    span: Duration,
+) -> (Vec<u64>, Vec<u64>) {
+    let end = fl.now_ms() + span.as_millis() as u64;
+    let (mut lists, mut samples) = (Vec::new(), Vec::new());
+    loop {
+        for msg in drain(rx) {
+            match msg {
+                EngineMsg::Source(SourceUpdate::Devices(list)) => {
+                    assert_eq!(list.kinds, DeviceKinds::SENSORS | DeviceKinds::FANS);
+                    lists.push(fl.now_ms());
+                }
+                EngineMsg::Source(SourceUpdate::Sensors(_)) => samples.push(fl.now_ms()),
+                _ => {}
+            }
+        }
+        if fl.now_ms() >= end {
+            return (lists, samples);
+        }
+        fl.advance(Duration::from_millis(10));
+    }
+}
+
+/// tasklens-hjn.45: with no demand the loop lists the chips at start and every 30 s and reads
+/// no value. A demand change starts the 1 Hz values at once, not at the next 30 s tick.
+#[test]
+fn sensors_list_without_demand_then_sample_on_demand() {
+    let dir = fixture_copy("fans", None);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    let worker_io = io(&updates, &demand_tx, &settings, &control);
+    let src = SensorsSource::new(SysRoot::at(&dir));
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let _ = source::run(cx, worker_io, src).await;
+    });
+
+    let (lists, samples) = sensors_messages(&mut fl, &mut rx, Duration::from_millis(61_000));
+    assert_eq!(lists, [0, 30_000, 60_000]);
+    assert!(samples.is_empty(), "{samples:?}");
+
+    let asked = fl.now_ms();
+    demand_tx
+        .send(Demand {
+            sensors: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    let (lists, samples) = sensors_messages(&mut fl, &mut rx, Duration::from_millis(2_500));
+    assert!(samples.len() >= 3, "{samples:?}");
+    assert!(
+        samples[0] - asked <= 100,
+        "first value {} ms late",
+        samples[0] - asked
+    );
+    assert!(
+        samples.windows(2).all(|w| w[1] - w[0] == 1_000),
+        "{samples:?}"
+    );
+    assert_eq!(
+        lists,
+        [samples[0]],
+        "the first demanded sample sends the list again"
+    );
+
+    handle.abort();
+    fl.finish();
+}
+
 #[test]
 fn sensors_listed_once_in_full_mode() {
     let ids: Vec<SourceId> = workers_for(EngineMode::Full)
