@@ -22,7 +22,7 @@ use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::menu::TlMenu;
 use crate::components::stepper::TlStepper;
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::TlSecondaryWindow;
+use crate::components::window_frame::{TlSecondaryWindow, frame_bottom};
 use crate::i18n::tr;
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
@@ -894,7 +894,10 @@ impl Render for RtSignalDialog {
             if fitted.get() != Some(want) {
                 fitted.set(Some(want));
                 window.defer(cx, move |window, _| {
-                    window.resize(size(window.bounds().size.width, want));
+                    window.resize(size(
+                        window.bounds().size.width,
+                        want + frame_bottom(window),
+                    ));
                 });
             }
         };

@@ -40,7 +40,9 @@ use super::checkbox::TlCheckbox;
 use super::focus::TlFocusRing;
 use super::icons::{TlIcon, icon};
 use super::input::TlTextInput;
-use super::window_frame::{CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use super::window_frame::{
+    CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec, frame_bottom,
+};
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -798,7 +800,7 @@ impl Render for TlDialogView {
                 fitted.set(Some(want));
                 window.defer(cx, move |window, _| {
                     let width = window.bounds().size.width;
-                    window.resize(size(width, want));
+                    window.resize(size(width, want + frame_bottom(window)));
                 });
             }
         };

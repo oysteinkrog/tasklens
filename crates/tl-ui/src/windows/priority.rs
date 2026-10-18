@@ -40,7 +40,7 @@ use crate::components::slider::{KeyMove, SliderPageDown, SliderPageUp, TlSlider,
 use crate::components::stepper::TlStepper;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::window_frame::TlSecondaryWindow;
+use crate::components::window_frame::{TlSecondaryWindow, frame_bottom};
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
@@ -905,7 +905,7 @@ impl Render for PriorityDialog {
                 fitted.set(Some(want));
                 window.defer(cx, move |window, _| {
                     let width = window.bounds().size.width;
-                    window.resize(size(width, want));
+                    window.resize(size(width, want + frame_bottom(window)));
                 });
             }
         };

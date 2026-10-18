@@ -21,7 +21,7 @@ use tl_ui::components::dialog::{DialogButton, DialogResult, TlDialog, TlDialogVi
 use tl_ui::components::toast::{self, ToastKind};
 use tl_ui::components::window_frame::{
     APP_ID, PIN_TOOLTIP_OFF, PIN_TOOLTIP_ON, PIN_TOOLTIP_UNSUPPORTED, PinLook, TlSecondaryWindow,
-    TlWindowKind, TlWindowSpec, ToggleAlwaysOnTop, window_options,
+    TlWindowKind, TlWindowSpec, ToggleAlwaysOnTop, client_frame_extra, window_options,
 };
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::registry::{CapClass, GlobalRegistry, OpenOutcome, WindowKey, WindowRegistry};
@@ -108,12 +108,16 @@ fn tool_window_options(cx: &mut TestAppContext) {
     let spec = tool("tasklens Settings").key(WindowKey::Settings);
     let options = cx.update(|cx| window_options(&spec, Decorations::Client, cx));
     assert_eq!(options.kind, WindowKind::Floating);
-    assert_eq!(options.window_min_size, Some(size(px(480.), px(320.))));
+    let extra = client_frame_extra(Decorations::Client);
+    assert_eq!(
+        options.window_min_size,
+        Some(size(px(480.) + extra, px(320.) + extra))
+    );
     assert_eq!(options.window_decorations, Some(WindowDecorations::Client));
     assert!(options.is_resizable);
     assert_eq!(options.app_id.as_deref(), Some(APP_ID));
     let bounds = options.window_bounds.expect("bounds").get_bounds();
-    assert_eq!(bounds.size, size(px(600.), px(400.)));
+    assert_eq!(bounds.size, size(px(600.) + extra, px(400.) + extra));
 
     let (_, mut vcx, frame) = open(cx, spec);
     assert!(vcx.read(|cx| frame.read(cx).has_title_bar()));
@@ -139,8 +143,38 @@ fn confirmation_is_a_modal_dialog(cx: &mut TestAppContext) {
     );
     let options = cx.update(|cx| window_options(&spec, Decorations::Client, cx));
     assert_eq!(options.kind, WindowKind::Dialog);
-    assert_eq!(options.window_min_size, Some(size(px(360.), px(120.))));
+    let extra = client_frame_extra(Decorations::Client);
+    assert_eq!(
+        options.window_min_size,
+        Some(size(px(360.) + extra, px(120.) + extra))
+    );
     assert!(!options.is_resizable);
+    let bounds = options.window_bounds.expect("bounds").get_bounds();
+    assert_eq!(bounds.size, size(px(420.) + extra, px(160.) + extra));
+}
+
+/// The kit's window border draws a 20 px shadow and a 1 px border inside a client-decorated
+/// window on Linux, so the window opens 42 px larger on each axis and the visible size is the
+/// spec size. Server decorations add nothing (tasklens-fut.23).
+#[gpui_kit::test]
+fn client_frame_extra_grows_the_window_not_the_spec(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    assert_eq!(client_frame_extra(Decorations::Server), px(0.));
+    #[cfg(target_os = "linux")]
+    assert_eq!(client_frame_extra(Decorations::Client), px(42.));
+    let spec = TlWindowSpec::new(
+        TlWindowKind::Properties,
+        "Connection Properties",
+        size(px(560.), px(520.)),
+    );
+    for (decorations, extra) in [
+        (Decorations::Server, px(0.)),
+        (Decorations::Client, client_frame_extra(Decorations::Client)),
+    ] {
+        let options = cx.update(|cx| window_options(&spec, decorations, cx));
+        let bounds = options.window_bounds.expect("bounds").get_bounds();
+        assert_eq!(bounds.size, size(px(560.) + extra, px(520.) + extra));
+    }
 }
 
 #[gpui_kit::test]
@@ -150,11 +184,16 @@ fn run_window_fixed_size(cx: &mut TestAppContext) {
         .key(WindowKey::Run);
     let options = cx.update(|cx| window_options(&spec, Decorations::Client, cx));
     assert!(!options.is_resizable);
-    assert_eq!(options.window_min_size, Some(size(px(480.), px(248.))));
+    let extra = client_frame_extra(Decorations::Client);
+    assert_eq!(
+        options.window_min_size,
+        Some(size(px(480.) + extra, px(248.) + extra))
+    );
 
     let (_, mut vcx, _) = open(cx, spec);
+    let extra = client_frame_extra(Settings::default().appearance.decorations);
     let bounds = vcx.update(|window, _| window.bounds());
-    assert_eq!(bounds.size, size(px(480.), px(248.)));
+    assert_eq!(bounds.size, size(px(480.) + extra, px(248.) + extra));
     assert!(!vcx.update(|window, _| window.is_resizable()));
 }
 

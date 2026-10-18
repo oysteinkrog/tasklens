@@ -70,6 +70,37 @@ const TOAST_TOP: f32 = 72.;
 /// The same under server decorations, × ui_scale.
 const TOAST_TOP_SERVER: f32 = 66.;
 
+/// Shadow inset of the client-side frame on each edge, in px. The kit's window border draws the
+/// shadow inside the window, so the visible window is smaller than the size GPUI is asked for.
+#[cfg(target_os = "linux")]
+const CLIENT_SHADOW: f32 = 20.;
+/// The one-pixel frame border drawn inside the shadow.
+#[cfg(target_os = "linux")]
+const CLIENT_BORDER: f32 = 1.;
+
+/// Width and height the client-side frame takes from the window, in px. Zero under server
+/// decorations and off Linux. An owner's size is the visible size, so the window opens this much
+/// larger and the spec size is what is left for the content.
+pub fn client_frame_extra(decorations: Decorations) -> Pixels {
+    #[cfg(target_os = "linux")]
+    if decorations == Decorations::Client {
+        return px(2. * (CLIENT_SHADOW + CLIENT_BORDER));
+    }
+    let _ = decorations;
+    px(0.)
+}
+
+/// What the frame takes below the content in this window: the bottom shadow and border. Add it to
+/// a content-measured height before `Window::resize`, so the footer stays inside the window.
+pub fn frame_bottom(window: &Window) -> Pixels {
+    match window.window_decorations() {
+        gpui_kit::Decorations::Client { tiling } if !tiling.bottom => {
+            window.client_inset().unwrap_or(px(0.)) + px(1.)
+        }
+        _ => px(0.),
+    }
+}
+
 /// The Run window's fixed size (APP-014), × ui_scale.
 pub const RUN_SIZE: (f32, f32) = (480., 248.);
 
@@ -222,10 +253,12 @@ pub fn window_options(
     decorations: Decorations,
     cx: &mut App,
 ) -> WindowOptions {
-    let open_size = spec.open_size(metrics(cx).ui_scale);
+    let extra = client_frame_extra(decorations);
+    let grow = |s: gpui_kit::Size<Pixels>| size(s.width + extra, s.height + extra);
+    let open_size = grow(spec.open_size(metrics(cx).ui_scale));
     let min_size = match spec.kind {
         TlWindowKind::Run => open_size,
-        _ => spec.min_size,
+        _ => grow(spec.min_size),
     };
     let parent_bounds = spec
         .parent
