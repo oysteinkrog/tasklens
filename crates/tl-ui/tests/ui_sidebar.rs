@@ -3257,7 +3257,7 @@ mod sidebar {
         settings.performance.show_network_vpn = false;
         settings.performance.show_network_virtual = false;
         settings.performance.show_network_other = false;
-        let mut r = open(cx, cpu_and_memory(), settings, UiState::default());
+        let r = open(cx, cpu_and_memory(), settings, UiState::default());
         let sidebar = r.sidebar.clone();
         let d = r.vcx.update(|_, cx| sidebar.read(cx).demand_part());
         assert!(!d.disks && !d.nets, "{d:?}");
