@@ -2322,6 +2322,29 @@ mod signal {
         }
     }
 
+    /// A number typed in the field commits when the field loses focus. The blur handler used to
+    /// update the dialog from inside the dialog's own subscription, which panicked ("already
+    /// being updated") and ended the app (tasklens-fut.23).
+    #[gpui_kit::test]
+    fn rt_signal_typed_value_commits_on_blur(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let (_, dialog, mut vcx) = open_rt(&mut rig);
+        let field = vcx
+            .debug_bounds("TlStepper-field-SignalStepper")
+            .expect("field");
+        vcx.simulate_click(field.center(), gpui_kit::Modifiers::none());
+        vcx.simulate_keystrokes("ctrl-a");
+        vcx.simulate_input("40");
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(vcx.read(|cx| dialog.read(cx).value()), 40);
+        assert_eq!(
+            vcx.read(|cx| dialog.read(cx).label().to_string()),
+            "SIGRTMIN+6"
+        );
+    }
+
     #[gpui_kit::test]
     fn rt_signal_label_for_34_and_64(cx: &mut TestAppContext) {
         let mut rig = rig(cx);

@@ -700,7 +700,7 @@ impl RtSignalDialog {
         let events = cx.subscribe_in(
             &input,
             window,
-            move |_, _, event: &InputEvent, window, cx| {
+            move |this, _, event: &InputEvent, window, cx| {
                 let typed = || {
                     event_input
                         .read(cx)
@@ -722,7 +722,9 @@ impl RtSignalDialog {
                     InputEvent::Blur => {
                         if let Some(value) = typed() {
                             let value = value.clamp(SIGRTMIN, SIGRTMAX);
-                            let _ = view.update(cx, |this, cx| this.set_value(value, cx));
+                            // The handler already runs inside this dialog's update, so it sets
+                            // the value through `this`; `view.update` here panics.
+                            this.set_value(value, cx);
                             event_input.update(cx, |input, cx| {
                                 input.set_value(value.to_string(), window, cx);
                             });
