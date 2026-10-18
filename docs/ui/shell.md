@@ -906,6 +906,7 @@ x=0, bottom=0
 |---|---|---|---|---|
 | Animations | switch | `motion.animations` | | P2 |
 | Smooth Graphs | switch | `motion.smooth_graphs` | Under system reduce motion the switch keeps its value and a `t_sm` `text_secondary` note under it reads "Turned off by the system reduce-motion setting" (UI-PRF-003) | P2 |
+| Save power on battery | switch | `motion.save_power_on_battery` | A `t_sm` `text_secondary` note under it reads "On battery, CPU values update once a second and graphs do not slide" | P2 |
 | Smooth Scroll | switch | `motion.smooth_scroll` | | P2 |
 | Smooth scroll amount | slider "%d" | `motion.smooth_scroll_amount` | 1..=50 step 1; disabled while Smooth Scroll is off | P2 |
 | Tab Switch | slider "%d ms" | `motion.tab_switch_ms` | 0..=500 step 10 | P2 |
@@ -1221,7 +1222,7 @@ x=0, bottom=0
 ### UI-SHL-098 Search File Handles window frame
 
 - **Implements**: APP-015, PROC-096, R-061.
-- **Frame**: "tasklens Handle Search", Floating, not modal, 900 × 560, minimum 640 × 400 [C]. Content per PROC-096 [S].
+- **Frame**: "tasklens Handle Search", Floating, not modal, 860 × 560, minimum 560 × 360 [C], the sizes in docs/ui/process-windows.md (UI-PWN-001). Content per PROC-096 [S].
 - **Phase**: P3.
 
 ### UI-SHL-099 Collector Health window

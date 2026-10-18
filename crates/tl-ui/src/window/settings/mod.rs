@@ -30,23 +30,26 @@ mod units;
 
 pub(crate) use performance::{set_fan_label, set_fan_temp};
 
+use std::cell::RefCell;
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::slider::SliderState;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
     Settings as KitSettings,
 };
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::text::Text;
 use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, Global, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
-    px, size,
+    Action, AnyElement, App, AppContext as _, Context, Entity, FontWeight, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, size,
 };
 use tracing::warn;
 
@@ -70,6 +73,11 @@ pub const SIZE: (f32, f32) = (900., 640.);
 pub const MIN_SIZE: (f32, f32) = (720., 480.);
 /// Sidebar width before the UI scale.
 pub const SIDEBAR_W: f32 = 220.;
+/// Space kept free at the right of every group so the kit scrollbar does not cover controls,
+/// before the UI scale.
+pub const SCROLLBAR_GAP: f32 = 12.;
+/// A page needs this many groups to get sub-entries (and a chevron) in the sidebar.
+const MIN_SIDEBAR_GROUPS: usize = 3;
 
 const TITLE: &str = "shell-settings-title";
 const RESTART_NOTE: &str = "shell-settings-restart-note";
@@ -972,21 +980,86 @@ impl PageBuilder {
 
     /// The kit page with the page's groups, titled and with its icon.
     pub fn into_page(self, cx: &App) -> SettingPage {
-        let groups = self.groups.into_iter().map(|(title, items)| {
-            let group = SettingGroup::new().items(items);
-            if title.is_empty() {
-                group
-            } else {
-                group.title(title)
-            }
-        });
-        let page = SettingPage::new(tr(cx, self.id.title_key()))
-            .icon(self.id.icon())
-            .groups(groups);
-        match self.description {
+        let title = tr(cx, self.id.title_key());
+        let icon = self.id.icon();
+        let description = self.description.clone();
+        let page = SettingPage::new(title)
+            .icon(icon)
+            .groups(self.kit_groups(cx));
+        match description {
             Some(text) => page.description(text),
             None => page,
         }
+    }
+
+    /// The kit groups of the page.
+    ///
+    /// The kit sidebar draws a chevron and one sub-entry per titled group on any page with two
+    /// or more groups. A page with fewer than [`MIN_SIDEBAR_GROUPS`] groups is not worth that,
+    /// so its groups become one kit group and each title a heading row in it. Every group keeps
+    /// [`SCROLLBAR_GAP`] free at its right, since the kit draws its scrollbar over the right
+    /// edge of the page.
+    pub fn kit_groups(self, cx: &App) -> Vec<SettingGroup> {
+        let s = metrics(cx).ui_scale;
+        let groups: Vec<(SharedString, Vec<SettingItem>)> =
+            if self.groups.len() < MIN_SIDEBAR_GROUPS {
+                let theme = current(cx).clone();
+                let m = *metrics(cx);
+                let mut items = Vec::new();
+                for (title, group_items) in self.groups {
+                    if !title.is_empty() {
+                        let theme = theme.clone();
+                        items.push(SettingItem::render(move |_, _, _| {
+                            let mut heading = div()
+                                .text_color(theme.text_secondary)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title.clone());
+                            *heading.text_style() = t_sm(&m);
+                            heading
+                        }));
+                    }
+                    items.extend(group_items);
+                }
+                vec![(SharedString::default(), items)]
+            } else {
+                self.groups
+            };
+        groups
+            .into_iter()
+            .map(|(title, items)| {
+                let group = SettingGroup::new().items(items).pr(px(SCROLLBAR_GAP * s));
+                if title.is_empty() {
+                    group
+                } else {
+                    group.title(title)
+                }
+            })
+            .collect()
+    }
+
+    /// True when the kit search for `query` finds an item on this page: the same rule as the kit
+    /// (title, description or keyword contains the query, case folded; a custom row only by
+    /// keyword). An empty query matches everything.
+    pub fn matches_search(&self, query: &str) -> bool {
+        let q = query.to_lowercase();
+        self.groups
+            .iter()
+            .flat_map(|(_, items)| items)
+            .any(|item| match item {
+                SettingItem::Item {
+                    title,
+                    description,
+                    keywords,
+                    ..
+                } => {
+                    title.to_lowercase().contains(&q)
+                        || matches!(description, Some(Text::String(d)) if d.to_lowercase().contains(&q))
+                        || keywords.iter().any(|k| k.to_lowercase().contains(&q))
+                }
+                SettingItem::Element { keywords, .. } => {
+                    q.is_empty() || keywords.iter().any(|k| k.to_lowercase().contains(&q))
+                }
+            })
     }
 
     /// Runs the switch or checkbox setter of `key` as a click on it would.
@@ -1438,6 +1511,12 @@ fn kind_toast(kind: ToastKind, text: SharedString, cx: &mut App) {
 /// The Settings window content.
 pub struct SettingsWindow {
     sliders: Vec<(SettingKey, Entity<SliderState>)>,
+    /// The kit's search field. The kit keeps it private; it is the first `InputState` its
+    /// `Settings` creates after this window is built, so an observer on new `InputState`s picks it
+    /// up (the observer gets no window for entities made inside a render).
+    search: Rc<RefCell<Option<Entity<InputState>>>>,
+    _search_capture: Subscription,
+    _search_sub: Option<Subscription>,
     #[cfg(any(test, feature = "test-hooks"))]
     renders: u64,
     _slider_subs: Vec<Subscription>,
@@ -1447,6 +1526,16 @@ pub struct SettingsWindow {
 
 impl SettingsWindow {
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
+        let slot = search.clone();
+        let search_capture = cx.observe_new(
+            move |_: &mut InputState, _: Option<&mut Window>, cx: &mut Context<InputState>| {
+                let mut slot = slot.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(cx.entity());
+                }
+            },
+        );
         let specs: Vec<SliderSpec> = all_pages(cx)
             .into_iter()
             .flat_map(|page| page.sliders)
@@ -1505,6 +1594,9 @@ impl SettingsWindow {
             });
         Self {
             sliders,
+            search,
+            _search_capture: search_capture,
+            _search_sub: None,
             #[cfg(any(test, feature = "test-hooks"))]
             renders: 0,
             _slider_subs: slider_subs,
@@ -1546,25 +1638,86 @@ fn set_in(settings: &mut tl_model::settings::Settings, key: SettingKey, value: S
     }
 }
 
+impl SettingsWindow {
+    /// Subscribes to the kit's search field once it exists, so typing re-renders this window.
+    fn attach_search(&mut self, cx: &mut Context<Self>) {
+        if self._search_sub.is_some() {
+            return;
+        }
+        let Some(input) = self.search.borrow().clone() else {
+            return;
+        };
+        self._search_sub = Some(cx.subscribe(&input, |_, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                cx.notify();
+            }
+        }));
+        cx.notify();
+    }
+
+    /// The text in the search field.
+    fn query(&self, cx: &App) -> SharedString {
+        self.search
+            .borrow()
+            .as_ref()
+            .map(|input| input.read(cx).value())
+            .unwrap_or_default()
+    }
+
+    /// Sets the search text as typing it would.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.search.borrow().clone().expect("search field exists");
+        input.update(cx, |state, cx| state.set_value(text.to_owned(), window, cx));
+        cx.notify();
+    }
+}
+
 impl Render for SettingsWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         {
             self.renders += 1;
         }
+        if self._search_sub.is_none() {
+            cx.defer_in(window, |this, _, cx| this.attach_search(cx));
+        }
         let s = metrics(cx).ui_scale;
-        let pages: Vec<SettingPage> = all_pages(cx)
+        let builders: Vec<PageBuilder> = all_pages(cx)
             .into_iter()
             .filter(|p| !p.is_empty())
-            .map(|p| p.into_page(cx))
             .collect();
+        let query = self.query(cx);
+        let no_match = !query.is_empty() && !builders.iter().any(|p| p.matches_search(&query));
+        let pages: Vec<SettingPage> = builders.into_iter().map(|p| p.into_page(cx)).collect();
+        let theme = current(cx).clone();
+        let m = *metrics(cx);
         div()
             .debug_selector(|| "SettingsWindowBody".into())
             .size_full()
+            .relative()
             .child(
                 KitSettings::new("settings")
                     .sidebar_width(px(SIDEBAR_W * s))
                     .pages(pages),
             )
+            .when(no_match, |d| {
+                // The kit draws a blank page when nothing matches. Cover the page area (right of
+                // the sidebar) with the message.
+                let mut text = div()
+                    .debug_selector(|| "SettingsNoMatch".into())
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .left(px(SIDEBAR_W * s))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.text_secondary)
+                    .child(tr(cx, "shell-settings-no-match"));
+                *text.text_style() = t_sm(&m);
+                d.child(text)
+            })
     }
 }

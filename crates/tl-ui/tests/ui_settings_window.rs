@@ -2448,3 +2448,61 @@ fn ts_import_themes_file(cx: &mut TestAppContext) {
     press_import(&mut vcx, "/home/u/themes.json");
     assert!(window_toasts(&mut vcx).contains(&"Could not import TaskSlinger settings".to_owned()));
 }
+
+// Smoke-test polish (tasklens-bj6.56).
+
+fn set_search(frame: &Entity<Frame>, vcx: &mut VisualTestContext, text: &str) {
+    let content = vcx.read(|cx| frame.read(cx).content().clone());
+    vcx.update(|window, cx| content.update(cx, |w, cx| w.set_search(text, window, cx)));
+    draw_probe(vcx);
+}
+
+#[gpui_kit::test]
+fn settings_search_without_match_shows_message(cx: &mut TestAppContext) {
+    setup(cx);
+    let (frame, mut vcx) = open(cx, 1);
+    assert!(vcx.debug_bounds("SettingsNoMatch").is_none());
+    set_search(&frame, &mut vcx, "zzqqxx");
+    assert!(
+        vcx.debug_bounds("SettingsNoMatch").is_some(),
+        "a search with no match says so"
+    );
+    set_search(&frame, &mut vcx, "default tab");
+    assert!(
+        vcx.debug_bounds("SettingsNoMatch").is_none(),
+        "a title match shows the page"
+    );
+    set_search(&frame, &mut vcx, "");
+    assert!(vcx.debug_bounds("SettingsNoMatch").is_none());
+}
+
+#[gpui_kit::test]
+fn settings_two_group_page_has_no_sidebar_children(cx: &mut TestAppContext) {
+    setup(cx);
+    // The kit lists sub-entries (and a chevron) for a page with 2+ kit groups.
+    let general = page(cx, PageId::General);
+    let appearance = page(cx, PageId::Appearance);
+    let (general, appearance) = cx.update(|cx| (general.kit_groups(cx), appearance.kit_groups(cx)));
+    assert_eq!(general.len(), 1, "General has two groups: one kit group");
+    assert!(appearance.len() > 2, "Appearance keeps its groups");
+}
+
+#[gpui_kit::test]
+fn settings_groups_keep_clear_of_the_scrollbar(cx: &mut TestAppContext) {
+    setup(cx);
+    let groups = cx.update(|cx| {
+        all_pages(cx)
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .flat_map(|p| p.kit_groups(cx))
+            .collect::<Vec<_>>()
+    });
+    assert!(!groups.is_empty());
+    for mut group in groups {
+        assert_eq!(
+            group.style().padding.right,
+            Some(px(tl_ui::window::settings::SCROLLBAR_GAP).into()),
+            "every group leaves room for the scrollbar"
+        );
+    }
+}

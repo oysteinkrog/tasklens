@@ -339,6 +339,8 @@ impl RenderOnce for TlSlider {
             } else {
                 LENGTH_PAGE
             }))
+            // The thumb overhangs the track end by half its width: keep the value text clear.
+            .when(!self.in_menu, |d| d.mr(s(THUMB_ACTIVE / 2.0)))
             .child(
                 SliderTrack::new(&state)
                     .disabled(disabled)
@@ -594,5 +596,18 @@ mod tests {
         assert!(events.borrow().is_empty());
         let after = thumb_center(&state, cx);
         assert!(after.x > before.x, "thumb moved: {before:?} to {after:?}");
+    }
+
+    #[gpui_kit::test]
+    fn value_text_clears_the_thumb_at_max(cx: &mut TestAppContext) {
+        let (cx, state, _) = setup(cx, 200.0);
+        let track = track(&state, cx);
+        let value = cx.debug_bounds("TlSliderValue").expect("value drawn");
+        let thumb_right = track.right() + px(THUMB_ACTIVE / 2.0);
+        assert!(
+            value.left() - thumb_right >= px(4.0),
+            "thumb right {thumb_right:?}, value left {:?}",
+            value.left()
+        );
     }
 }

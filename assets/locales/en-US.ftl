@@ -2786,6 +2786,7 @@ shell-menu-help-about = About tasklens…
 shell-menu-help-setup = Additional setup…
 shell-settings-page-advanced = Advanced
 shell-settings-restart-note = Takes effect after restart
+shell-settings-no-match = No settings match
 # Settings window, General and Units pages (tasklens-bj6.22, UI-SHL-061, UI-SHL-064).
 shell-settings-group-startup = Startup
 shell-settings-group-language = Language
