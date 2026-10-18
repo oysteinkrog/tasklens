@@ -1511,11 +1511,10 @@ mod sidebar {
                 cpu: CpuDemand::Total,
                 memory: true,
                 disks: true,
-                sensors: true,
                 ..Demand::default()
             }
         );
-        assert!(!merged.nets && !merged.gpus && !merged.cpu_fast);
+        assert!(!merged.nets && !merged.gpus && !merged.sensors && !merged.cpu_fast);
     }
 
     /// Advances past the demand coalesce delay and returns the merge and every `set_demand`.
@@ -3155,11 +3154,13 @@ mod sidebar {
         assert!(wanted, "sensors demanded while a fan row is hidden");
     }
 
+    /// tasklens-hjn.45: the engine lists fans without demand, so the sidebar asks for no
+    /// sensors until a fan row exists. Three listed fans then fill the FANS group; the two
+    /// that spin get cards.
     #[gpui_kit::test]
-    fn sensors_demanded_before_any_fan_row_exists(cx: &mut TestAppContext) {
-        // The engine lists fans only while sensors are sampled. With no fan row yet, the
-        // sidebar must ask for sensors anyway, or the list never arrives.
-        let r = open(
+    fn listed_fans_fill_the_fans_group(cx: &mut TestAppContext) {
+        use tl_model::system::{SensorKind, SensorReading};
+        let mut r = open(
             cx,
             cpu_and_memory(),
             Settings::default(),
@@ -3167,14 +3168,55 @@ mod sidebar {
         );
         let sidebar = r.sidebar.clone();
         let wanted = r.vcx.update(|_, cx| sidebar.read(cx).demand_part().sensors);
-        assert!(wanted, "sensors demanded with no fan row");
+        assert!(!wanted, "no fan row: no sensor demand");
 
-        let mut settings = Settings::default();
-        settings.performance.show_fans = false;
-        let r = open(cx, cpu_and_memory(), settings, UiState::default());
-        let sidebar = r.sidebar.clone();
+        let mut entries = cpu_and_memory();
+        entries.extend([fan(2), fan(3), fan(4)]);
+        plug(&mut r, 2, entries);
         let wanted = r.vcx.update(|_, cx| sidebar.read(cx).demand_part().sensors);
-        assert!(!wanted, "fans disabled: no sensor demand");
+        assert!(wanted, "fan rows listed: sensors demanded");
+
+        // fan2 and fan3 spin, fan4 reads 0 RPM and was never seen spinning.
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let reading = |idx: u16, rpm: f32| {
+                (
+                    DeviceIdx(idx),
+                    SensorReading {
+                        device: DeviceIdx(idx),
+                        kind: SensorKind::Fan,
+                        value: Metric::valid(rpm),
+                        pwm_pct: Metric::with(Validity::Unsupported),
+                        fan_control: None,
+                        fan_connected: rpm > 0.,
+                        fan_max_rpm: None,
+                    },
+                )
+            };
+            sys.sensors = Arc::from(vec![reading(2, 1500.), reading(3, 900.), reading(4, 0.)]);
+        });
+        draw(r.vcx);
+        settle(&mut r);
+        let cards: Vec<String> = keys(&mut r)
+            .into_iter()
+            .filter(|k| k.starts_with("fan:"))
+            .collect();
+        assert_eq!(cards, ["fan:nct6797:2", "fan:nct6797:3"]);
+
+        enter_edit(&mut r);
+        let rows = r.vcx.update(|_, cx| sidebar.read(cx).edit_rows_for_test());
+        let fans: Vec<String> = rows
+            .iter()
+            .filter(|(_, kind, _)| *kind == DeviceKind::Fan)
+            .map(|(key, _, _)| key.0.to_string())
+            .collect();
+        assert_eq!(fans, ["fan:nct6797:2", "fan:nct6797:3", "fan:nct6797:4"]);
+        assert!(r.vcx.debug_bounds("perf-edit-group-5").is_some());
+        assert!(
+            r.vcx.debug_bounds("perf-edit-empty-5").is_none(),
+            "no 'No fan found'"
+        );
     }
 
     #[gpui_kit::test]
