@@ -810,6 +810,16 @@ pub fn fmt_priority(
     };
 }
 
+/// Memory % and CPU %: one decimal, "12.3%" (R-013, table d). Only an exact measured zero prints
+/// "0%"; 0.04 prints "0.0%", unlike [`units::percent`], which also turns a rounded zero into "0%".
+fn percent_1dp(out: &mut String, pct: f32) {
+    if pct > 0.0 {
+        let _ = write!(out, "{pct:.1}%");
+    } else {
+        out.push_str("0%");
+    }
+}
+
 /// CPU ids as ranges: "0-7,16-23", "3", "0,2".
 fn write_ranges(out: &mut String, set: &CpuSet) {
     let mut run: Option<(u16, u16)> = None;
@@ -2915,7 +2925,7 @@ impl GeneralTab {
                     l.get(ProcessField::RssAnon),
                     UnsupportedWord::NotSupported,
                     u64::from(pct.to_bits()),
-                    |s| units::percent(s, pct),
+                    |s| percent_1dp(s, pct),
                 );
             }
             _ => b.collecting(FieldId::MemoryPct, KvKind::Text),
@@ -2929,7 +2939,7 @@ impl GeneralTab {
                     l.get(ProcessField::Cpu),
                     UnsupportedWord::NotSupported,
                     u64::from(pct.to_bits()),
-                    |s| units::percent(s, pct),
+                    |s| percent_1dp(s, pct),
                 );
             }
             None => b.collecting(FieldId::CpuPct, KvKind::Text),
