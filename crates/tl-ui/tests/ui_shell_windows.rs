@@ -20,7 +20,8 @@ use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::components::window_frame::{
-    CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, has_modal_child,
+    CloseSecondaryWindow, TestClientFrame, TlSecondaryWindow, TlWindowKind, frame_bottom,
+    has_modal_child,
 };
 use tl_ui::i18n::{set_test_catalogue, tr_calls};
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -1223,6 +1224,41 @@ fn about_no_foreign_branding(cx: &mut TestAppContext) {
     check(&mut vcx);
 }
 
+/// Inside the 21 px client frame on each edge (the test hook lays it out as under KWin with client
+/// decorations) the About window is the 440 x 380 spec and its content and buttons are in view
+/// (UI-SHL-092, tasklens-fut.23).
+#[gpui_kit::test]
+fn about_window_is_spec_size_inside_the_frame(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(TestClientFrame));
+    setup_about(cx);
+    let (_, mut vcx) = open_about(cx, 1);
+    let inset = vcx.update(|window, cx| frame_bottom(window, cx));
+    #[cfg(target_os = "linux")]
+    assert_eq!(inset, gpui_kit::px(21.), "the client frame hook is on");
+    let window = vcx.update(|window, _| window.bounds());
+    assert_eq!(
+        window.size,
+        gpui_kit::size(
+            gpui_kit::px(440.) + inset * 2.,
+            gpui_kit::px(380.) + inset * 2.
+        )
+    );
+    for selector in [
+        "TlWindowContent",
+        "TlButton-About-copy-version",
+        "TlButton-About-licenses",
+    ] {
+        let at = vcx.debug_bounds(selector).expect(selector);
+        assert!(
+            at.left() >= inset
+                && at.top() >= inset
+                && at.right() <= window.size.width - inset
+                && at.bottom() <= window.size.height - inset,
+            "{selector}: {at:?} in {window:?}"
+        );
+    }
+}
+
 // ---- Reset settings confirmation (E21-005, tasklens-bj6.3) ----
 
 mod reset_settings {
@@ -1240,7 +1276,9 @@ mod reset_settings {
     use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui::components::window_frame::{
+        TestClientFrame, TlSecondaryWindow, TlWindowKind, TlWindowSpec, frame_bottom,
+    };
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::ThemeStore;
@@ -1419,6 +1457,40 @@ mod reset_settings {
         assert!(!is_open(cx, handle), "Esc closes it");
         assert_eq!(settings(cx), before, "no setting changes");
         assert!(r.saves.borrow().is_empty());
+    }
+
+    /// Inside the 21 px client frame on each edge the confirmation is 420 x ui_scale wide (the
+    /// rig runs at 150 %), its footer ends inside the window, and the window ends at the body
+    /// with no empty band below it (UI-PWN-025, tasklens-fut.23).
+    #[gpui_kit::test]
+    fn reset_confirm_is_spec_width_and_fits_its_body(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(TestClientFrame));
+        let mut r = rig(cx, true);
+        let (_, _, mut vcx) = open_confirm(&mut r, cx);
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let inset = vcx.update(|window, cx| frame_bottom(window, cx));
+        #[cfg(target_os = "linux")]
+        assert_eq!(inset, px(21.), "the client frame hook is on");
+        let window = vcx.update(|window, _| window.bounds());
+        assert_eq!(window.size.width - inset * 2., px(420. * 1.5), "{window:?}");
+        let inner_bottom = window.size.height - inset;
+        let footer = vcx.debug_bounds("TlDialogFooter").expect("footer");
+        let body = vcx.debug_bounds("TlDialogBody").expect("body");
+        for selector in ["TlDialogCancel", "TlDialogAction"] {
+            let button = vcx.debug_bounds(selector).expect(selector);
+            assert!(
+                button.bottom() <= inner_bottom && button.right() <= window.size.width - inset,
+                "{selector}: {button:?} in {window:?}"
+            );
+        }
+        assert!(footer.bottom() <= inner_bottom, "{footer:?} in {window:?}");
+        assert!(
+            (inner_bottom - body.bottom()).abs() < px(1.),
+            "{body:?} in {window:?}"
+        );
     }
 
     /// The Cancel label comes from `shell-confirm-cancel`, not the dialog's English default.

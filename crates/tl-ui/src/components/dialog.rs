@@ -798,9 +798,9 @@ impl Render for TlDialogView {
                 .clamp(px(MIN_HEIGHT * s), px(MAX_HEIGHT * s));
             if fitted.get() != Some(want) {
                 fitted.set(Some(want));
-                window.defer(cx, move |window, _| {
+                window.defer(cx, move |window, cx| {
                     let width = window.bounds().size.width;
-                    window.resize(size(width, want + frame_bottom(window)));
+                    window.resize(size(width, want + frame_bottom(window, cx)));
                 });
             }
         };

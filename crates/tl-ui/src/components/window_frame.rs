@@ -96,9 +96,31 @@ pub fn client_frame_extra(decorations: Decorations) -> Pixels {
     px(0.)
 }
 
+/// Test hook: the GPUI test window always reports server decorations, so the kit draws no frame
+/// and `frame_bottom` is 0. With this global set, every secondary window acts as an untiled
+/// client-decorated window: the frame pads its content by the shadow and border on each edge, the
+/// way the kit's window border does, and `frame_bottom` returns that inset (tasklens-fut.23).
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestClientFrame;
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Global for TestClientFrame {}
+
+/// The per-edge inset the test hook simulates, or `None` when it is off.
+#[cfg(any(test, feature = "test-hooks"))]
+fn test_frame_inset(cx: &App) -> Option<Pixels> {
+    cx.has_global::<TestClientFrame>()
+        .then(|| client_frame_extra(Decorations::Client) * 0.5)
+}
+
 /// What the frame takes below the content in this window: the bottom shadow and border. Add it to
 /// a content-measured height before `Window::resize`, so the footer stays inside the window.
-pub fn frame_bottom(window: &Window) -> Pixels {
+pub fn frame_bottom(window: &Window, cx: &App) -> Pixels {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(inset) = test_frame_inset(cx) {
+        return inset;
+    }
+    let _ = cx;
     #[cfg(target_os = "linux")]
     if let gpui_kit::Decorations::Client { tiling } = window.window_decorations()
         && !tiling.bottom
@@ -926,8 +948,13 @@ impl<V: Render> Render for TlSecondaryWindow<V> {
             .server
             .then(|| TlWindowPin::new(px(SERVER_PIN * m.ui_scale), look).on_pin(on_pin));
 
-        div()
-            .id("TlWindow")
+        let root = div();
+        #[cfg(any(test, feature = "test-hooks"))]
+        let root = match test_frame_inset(cx) {
+            Some(inset) => root.p(inset),
+            None => root,
+        };
+        root.id("TlWindow")
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_close))

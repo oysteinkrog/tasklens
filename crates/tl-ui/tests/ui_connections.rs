@@ -2428,7 +2428,7 @@ mod props {
     use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{ConnCounts, ProcessSnapshot, TcpInfoView};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::components::window_frame::{TestClientFrame, TlSecondaryWindow, frame_bottom};
     use tl_ui::demand::GlobalDemand;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
@@ -2610,6 +2610,44 @@ mod props {
         assert_eq!(title(cx, handle), "Connection properties: TCP ESTABLISHED");
         let text = lines(cx, handle).join("\n") + "\n";
         golden("conn_props_lines.txt", &text);
+    }
+
+    /// Inside the 21 px client frame on each edge (the test hook lays it out as under KWin with
+    /// client decorations) the window is the 560 x 520 spec (UI-SYS-068), the last line "Closable
+    /// here" shows above the footer without scrolling, and the footer ends inside the window
+    /// (tasklens-fut.23).
+    #[gpui_kit::test]
+    fn conn_props_last_line_shows_inside_the_frame(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(TestClientFrame));
+        let _rig = rig(cx, vec![tcp_record(1)], procs());
+        let handle = open(cx, 1).expect("opened");
+        let texts = lines(cx, handle);
+        assert!(
+            texts.last().is_some_and(|l| l.starts_with("Closable here")),
+            "{texts:?}"
+        );
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let inset = vcx.update(|window, cx| frame_bottom(window, cx));
+        #[cfg(target_os = "linux")]
+        assert_eq!(inset, gpui_kit::px(21.), "the client frame hook is on");
+        let window = vcx.update(|window, _| window.bounds());
+        assert_eq!(
+            window.size,
+            gpui_kit::size(
+                gpui_kit::px(560.) + inset * 2.,
+                gpui_kit::px(520.) + inset * 2.
+            )
+        );
+        let last = format!("TlKv-row-{}", texts.len() - 1);
+        let last = vcx.debug_bounds(last.leak()).expect("the last row");
+        let footer = vcx.debug_bounds("ConnPropsFooter").expect("footer");
+        assert!(last.bottom() <= footer.top(), "{last:?} above {footer:?}");
+        assert!(
+            footer.bottom() <= window.size.height - inset,
+            "{footer:?} in {window:?}"
+        );
     }
 
     fn closable(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> String {

@@ -20,6 +20,7 @@ use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
 use tl_model::time::BootId;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::toast::{self, ToastQueue};
+use tl_ui::components::window_frame::{TestClientFrame, frame_bottom};
 use tl_ui::demand::GlobalDemand;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::windows::affinity::{self, AffinityDialog, affinity_words};
@@ -458,19 +459,33 @@ fn affinity_hybrid_core_icons(cx: &mut TestAppContext) {
     }
 }
 
-/// After the dialog fitted its height, the footer ends inside the visible window, which is the
-/// window less the bottom frame (tasklens-fut.23). A server-decorated test window has no frame.
-fn assert_footer_inside(vcx: &mut VisualTestContext, footer: &'static str) {
+/// Turns on the client-frame test hook before a dialog opens: the dialog then lays out inside the
+/// 20 px shadow and 1 px border on each edge, the way it does under KWin with client decorations.
+fn client_frame(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(TestClientFrame));
+}
+
+/// After the dialog fitted its height, the visible window (the window less the client frame on
+/// each edge) is `width` wide and the 52 px footer ends inside it (tasklens-fut.23). Needs
+/// `client_frame` first.
+fn assert_footer_inside(vcx: &mut VisualTestContext, footer: &'static str, width: f32) {
     vcx.run_until_parked();
     vcx.update(|window, cx| window.draw(cx).clear(cx));
     vcx.run_until_parked();
     vcx.update(|window, cx| window.draw(cx).clear(cx));
-    let inset = vcx.update(|window, _| tl_ui::components::window_frame::frame_bottom(window));
+    let inset = vcx.update(|window, cx| frame_bottom(window, cx));
+    #[cfg(target_os = "linux")]
+    assert_eq!(inset, px(21.), "the client frame hook is on");
     let window = vcx.update(|window, _| window.bounds());
+    assert_eq!(window.size.width - inset * 2., px(width), "{window:?}");
     let footer = vcx.debug_bounds(footer).expect("footer");
-    assert_eq!(footer.size.height, gpui_kit::px(52.));
+    assert_eq!(footer.size.height, px(52.));
     assert!(
         footer.bottom() <= window.size.height - inset,
+        "{footer:?} in {window:?}"
+    );
+    assert!(
+        footer.right() <= window.size.width - inset,
         "{footer:?} in {window:?}"
     );
 }
@@ -1470,8 +1485,9 @@ mod priority {
 
     #[gpui_kit::test]
     fn priority_dialog_shows_footer(cx: &mut TestAppContext) {
+        super::client_frame(cx);
         let mut rig = open(cx, (SchedPolicy::Other, 0, 0));
-        super::assert_footer_inside(&mut rig.vcx, "PriorityFooter");
+        super::assert_footer_inside(&mut rig.vcx, "PriorityFooter", 440.);
     }
 
     #[gpui_kit::test]
@@ -2267,17 +2283,43 @@ mod signal {
         (handle, dialog, vcx)
     }
 
+    /// The dialog is 360 px wide inside the client frame and its footer is in view, for the short
+    /// and the long signal name (UI-PWN-027, tasklens-fut.23).
     #[gpui_kit::test]
-    fn rt_signal_shows_footer_and_the_stepper_clears_the_name(cx: &mut TestAppContext) {
+    fn rt_signal_shows_footer(cx: &mut TestAppContext) {
+        super::client_frame(cx);
         let mut rig = rig(cx);
-        let (_, _, mut vcx) = open_rt(&mut rig);
-        super::assert_footer_inside(&mut vcx, "SignalFooter");
-        let stepper = vcx
-            .debug_bounds("TlStepper-SignalStepper")
-            .expect("stepper");
-        let row = vcx.debug_bounds("SignalRow").expect("row");
-        assert!(stepper.size.width >= gpui_kit::px(72.), "{stepper:?}");
-        assert!(stepper.right() < row.right(), "{stepper:?} {row:?}");
+        let (_, dialog, mut vcx) = open_rt(&mut rig);
+        for value in [34, 64] {
+            vcx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.set_value(value, cx)));
+            super::assert_footer_inside(&mut vcx, "SignalFooter", 360.);
+        }
+    }
+
+    /// The stepper (28 + 72 + 28 px) never runs under the signal name, which wraps when it is
+    /// long (UI-PWN-027, tasklens-fut.23).
+    #[gpui_kit::test]
+    fn rt_signal_stepper_clears_the_name(cx: &mut TestAppContext) {
+        super::client_frame(cx);
+        let mut rig = rig(cx);
+        let (_, dialog, mut vcx) = open_rt(&mut rig);
+        for value in [34, 64] {
+            vcx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.set_value(value, cx)));
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            let stepper = vcx
+                .debug_bounds("TlStepper-SignalStepper")
+                .expect("stepper");
+            let name = vcx.debug_bounds("SignalName").expect("name");
+            let row = vcx.debug_bounds("SignalRow").expect("row");
+            assert_eq!(stepper.size.width, px(128.), "{stepper:?}");
+            assert!(
+                name.left() >= stepper.right(),
+                "{value}: {name:?} {stepper:?}"
+            );
+            assert!(name.right() <= row.right(), "{value}: {name:?} {row:?}");
+            assert!(name.bottom() <= row.bottom(), "{value}: {name:?} {row:?}");
+        }
     }
 
     #[gpui_kit::test]

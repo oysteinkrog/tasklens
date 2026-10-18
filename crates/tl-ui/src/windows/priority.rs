@@ -903,9 +903,9 @@ impl Render for PriorityDialog {
             let want = bounds.bottom();
             if fitted.get() != Some(want) {
                 fitted.set(Some(want));
-                window.defer(cx, move |window, _| {
+                window.defer(cx, move |window, cx| {
                     let width = window.bounds().size.width;
-                    window.resize(size(width, want + frame_bottom(window)));
+                    window.resize(size(width, want + frame_bottom(window, cx)));
                 });
             }
         };

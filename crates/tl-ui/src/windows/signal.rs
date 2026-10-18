@@ -662,8 +662,9 @@ pub fn send_signal(
 static LAST_RT_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 const SUBTITLE_H: f32 = 24.;
+/// The row's minimum height. A name too long for one line beside the stepper wraps and the row
+/// grows, so "SIGRTMIN+30 (SIGRTMAX)" never runs under the stepper.
 const ROW_H: f32 = 32.;
-const STEPPER_W: f32 = 72.;
 const FOOTER_H: f32 = 52.;
 
 /// The real-time signal picker.
@@ -839,7 +840,11 @@ impl Render for RtSignalDialog {
             });
         let mut row_label = div().flex_none().text_color(theme.text_secondary);
         *row_label.text_style() = t_base(&m);
-        let mut signal_name = div().text_color(theme.text_primary);
+        let mut signal_name = div()
+            .debug_selector(|| "SignalName".into())
+            .flex_1()
+            .min_w_0()
+            .text_color(theme.text_primary);
         *signal_name.text_style() = t_base(&m);
         let row = div()
             .debug_selector(|| "SignalRow".into())
@@ -847,9 +852,11 @@ impl Render for RtSignalDialog {
             .flex()
             .items_center()
             .gap(m.sp[4])
-            .h(px(ROW_H * s))
+            .min_h(px(ROW_H * s))
             .child(row_label.child(tr(cx, "pwn-signal-field")))
-            .child(div().flex_none().w(px(STEPPER_W * s)).child(stepper))
+            // The stepper takes its own width: two 28 px buttons around the 72 px field. A
+            // narrower slot let it draw over the name (UI-PWN-027, tasklens-fut.23).
+            .child(stepper)
             .child(signal_name.child(self.label()));
 
         let mut note = div().text_color(theme.text_secondary);
@@ -893,10 +900,10 @@ impl Render for RtSignalDialog {
             let want = bounds.bottom();
             if fitted.get() != Some(want) {
                 fitted.set(Some(want));
-                window.defer(cx, move |window, _| {
+                window.defer(cx, move |window, cx| {
                     window.resize(size(
                         window.bounds().size.width,
-                        want + frame_bottom(window),
+                        want + frame_bottom(window, cx),
                     ));
                 });
             }

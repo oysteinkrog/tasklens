@@ -69,7 +69,7 @@ mod window {
     use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{AppEnv, RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit};
     use tl_ui::components::toast::ToastQueue;
-    use tl_ui::components::window_frame::client_frame_extra;
+    use tl_ui::components::window_frame::{TestClientFrame, client_frame_extra, frame_bottom};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::windows::run::{POPUP_ID, ROW_H, RunWindow, VISIBLE_ROWS, open_run_window};
@@ -226,18 +226,20 @@ mod window {
 
     /// The visible window is the 480 x 248 spec: the footer and its buttons end inside it, the
     /// root note has its own row above the footer, and the empty-command toast stays off the
-    /// input (UI-PWN-028, tasklens-fut.23).
+    /// input (UI-PWN-028, tasklens-fut.23). The client-frame hook lays the window out inside the
+    /// 21 px frame on each edge, as under KWin with client decorations.
     #[gpui_kit::test]
     fn run_window_shows_all_content_and_toast_clears_the_input(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(TestClientFrame));
         let mut rig = setup(cx, &["firefox"]);
         let extra = client_frame_extra(Settings::default().appearance.decorations);
         draw(&mut rig.run);
         let window = rig.run.update(|window, _| window.bounds());
         assert_eq!(window.size, size(px(480.) + extra, px(248.) + extra));
-        let inner_bottom = window.size.height
-            - rig
-                .run
-                .update(|window, _| tl_ui::components::window_frame::frame_bottom(window));
+        let inset = rig.run.update(|window, cx| frame_bottom(window, cx));
+        #[cfg(target_os = "linux")]
+        assert_eq!(inset, px(21.), "the client frame hook is on");
+        let inner_bottom = window.size.height - inset;
         let footer = rig.run.debug_bounds("RunFooter").expect("footer");
         let note = rig.run.debug_bounds("RunWaylandNote").expect("note");
         assert_eq!(note.size.height, px(18.));
