@@ -562,6 +562,18 @@ impl ProcessDelegate {
         true
     }
 
+    /// Ends the hold a row menu puts on the row order and catches up with the latest view. The
+    /// page tells the table about the new version on the next hub change at the latest.
+    pub fn release_menu_hold(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
+        if std::mem::take(&mut self.menu_hold)
+            && let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone())
+        {
+            let snapshot = Arc::clone(hub.read(cx).current());
+            self.install(&snapshot);
+            cx.notify();
+        }
+    }
+
     /// Drops the installed view when it was not built for the current query generation: the
     /// view the hub held before the page sent its first query (pdu.55). The table then shows no
     /// rows until a view for the query arrives.
@@ -1430,15 +1442,7 @@ impl TreeTableDelegate for ProcessDelegate {
     }
 
     fn on_menu_closed(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
-        // Catch up with the latest view. The page tells the table about the new version on the
-        // next hub change at the latest.
-        if std::mem::take(&mut self.menu_hold)
-            && let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone())
-        {
-            let snapshot = Arc::clone(hub.read(cx).current());
-            self.install(&snapshot);
-            cx.notify();
-        }
+        self.release_menu_hold(cx);
         if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
             page.update(cx, |p, _| p.clear_menu_targets());
         }

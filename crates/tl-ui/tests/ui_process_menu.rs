@@ -1825,12 +1825,11 @@ mod end {
         menu
     }
 
-    /// Tells the table the row menu closed, which ends its hold on the row order.
+    /// Ends the table's hold on the row order, without the page forgetting the menu's targets.
     fn close_menu(rig: &mut Rig) {
-        use tl_ui::table::tree_table::TreeTableDelegate as _;
         let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
         rig.vcx.update(|_, cx| {
-            table.update(cx, |t, cx| t.delegate.on_menu_closed(cx));
+            table.update(cx, |t, cx| t.delegate.release_menu_hold(cx));
         });
     }
 
