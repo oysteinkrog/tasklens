@@ -274,6 +274,25 @@ fn general_verify_button_stays_inside_its_column(cx: &mut TestAppContext) {
     assert!(button.right() <= right.left(), "no overlap with column 3");
 }
 
+/// Memory % and CPU % print one decimal. A value that rounds to 0.0 is a measured zero and
+/// prints "0%" (PROC-003, table d). The smoke test's "0%" was a 3 MiB idle process.
+#[gpui_kit::test]
+fn general_memory_and_cpu_percent_one_decimal(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    let p = payload(detail("firefox"));
+    // RssAnon 800 MiB of MemTotal 32 GiB is 2.44%.
+    feed(&t, cx, Some(&p), 12.34);
+    assert_eq!(value(&t, cx, FieldId::MemoryPct), "2.4%");
+    assert_eq!(value(&t, cx, FieldId::CpuPct), "12.3%");
+    feed(&t, cx, Some(&p), 0.4);
+    assert_eq!(value(&t, cx, FieldId::CpuPct), "0.4%");
+    // 800 MiB of 32 TiB is 0.002%, and CPU 0.04% also rounds to 0.0.
+    cx.update(|_, cx| t.update(cx, |t, cx| t.set_record(Some(&record(0.04)), 32 << 40, cx)));
+    assert_eq!(value(&t, cx, FieldId::MemoryPct), "0%");
+    assert_eq!(value(&t, cx, FieldId::CpuPct), "0%");
+}
+
 #[gpui_kit::test]
 fn general_three_columns_at_900(cx: &mut TestAppContext) {
     // Body 900 - 2 × 12 = 876 px.
