@@ -4,6 +4,13 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-17
 
+### D-024: CPU box splitter and smoothed core rows
+
+Oystein (2026-10-18, after trying the layout editor): the gap between the CPU chart and the core
+rows should be draggable too, and the per-core loads are too noisy and need smoothing. Spec in
+UI-PRF-018. Core rows use a 1 s moving average by default, with a setting for Off, Low, Medium
+and High; the core sparklines show 1-second means; the total CPU chart stays raw at 10 Hz.
+
 ### D-023: Overview layout editing
 
 Oystein wants the Overview page layout and box sizes to be customizable (2026-10-17). He chose
