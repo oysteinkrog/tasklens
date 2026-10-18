@@ -2782,9 +2782,17 @@ mod tests {
 
     #[test]
     fn card_text_layout_keeps_a_rate_on_one_row() {
-        // 21 px of text in a 16 px column: it wraps between the rates, not inside one.
-        let two = "↓\u{a0}6.6\u{a0}Mbps ↑\u{a0}8.5\u{a0}Mbps";
-        let l = layout(&card_text("tailscale0", "Tunnel", two), 6., 16.);
+        // Line 2 comes from the card formatter, so a rate that loses its no-break space fails
+        // here. 21 px of text in a 16 px column: it wraps between the rates, not inside one.
+        let net = net_entry(Some(NetKind::Wired));
+        // 6.6 Mbps down, 8.5 Mbps up, in bytes per second.
+        let s = snap(
+            net_system(825_000.0, 1_062_500.0, LinkState::Up),
+            InventorySnapshot::default(),
+            net_details("Ethernet", None),
+        );
+        let two = lines(&input(DeviceKind::Net, &net, &s)).line2;
+        let l = layout(&card_text("tailscale0", "Tunnel", &two), 6., 16.);
         assert_eq!(
             rows(&l.line2),
             ["↓\u{a0}6.6\u{a0}Mbps", "↑\u{a0}8.5\u{a0}Mbps"]
