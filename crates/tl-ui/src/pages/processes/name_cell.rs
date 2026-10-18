@@ -119,11 +119,15 @@ pub fn icon_slot(kind: RowKind) -> IconSlot {
 
 /// The icon a row of `kind` draws: Lucide `cog` for unit rows, Lucide `cpu` for the
 /// "Kernel threads (N)" row and kernel thread rows (the delegate gives both
-/// `RowKind::KernelThread`), else `icon`.
+/// `RowKind::KernelThread`), else `icon`. An app or process row without an icon file draws the
+/// generic Lucide `binary` glyph (UI-PRC-003).
 pub fn row_icon(kind: RowKind, icon: NameIcon) -> NameIcon {
     match kind {
         RowKind::Unit => NameIcon::Lucide(IconName::Cog),
         RowKind::KernelThread => NameIcon::Lucide(IconName::Cpu),
+        RowKind::App | RowKind::Process if matches!(icon, NameIcon::None) => {
+            NameIcon::Lucide(IconName::Binary)
+        }
         _ => icon,
     }
 }

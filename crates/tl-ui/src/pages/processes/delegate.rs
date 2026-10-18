@@ -67,6 +67,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_PROCESS_CELL, TlTooltip};
 use crate::components::validity::{GlyphCtx, tooltip_text};
 use crate::demand::GlobalDemand;
+use crate::hub::GlobalHub;
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
 use crate::table::cells::CellOut;
@@ -275,6 +276,9 @@ pub struct ProcessDelegate {
     built_for: Option<(u64, usize, u64)>,
     /// Bumps on every rebuild.
     version: u64,
+    /// A row menu is open: no new view is installed, so the rows keep their order under the
+    /// menu's targets until it closes.
+    menu_hold: bool,
     row_index: FxHashMap<ProcRowId, u32>,
     /// The id of each row, by index.
     ids: Vec<ProcRowId>,
@@ -354,6 +358,7 @@ impl ProcessDelegate {
             query: ProcessQuery::new(settings, state),
             snapshot: Arc::clone(&snapshot),
             built_for: None,
+            menu_hold: false,
             version: 0,
             row_index: FxHashMap::default(),
             ids: Vec::new(),
@@ -529,6 +534,9 @@ impl ProcessDelegate {
     /// Shows `snapshot` when its table view was built for the current query generation. True
     /// when the rows on screen changed, so the page calls `TlTreeTable::on_new_version`.
     pub fn install(&mut self, snapshot: &Arc<Snapshot>) -> bool {
+        if self.menu_hold {
+            return false;
+        }
         if !self.query.accept(&snapshot.table) {
             return false;
         }
@@ -1094,6 +1102,17 @@ fn build_specs(settings: &Settings, window: &Window, cx: &App) -> FxHashMap<Colu
         .collect()
 }
 
+/// A typical wide value of a text column whose label is narrower than its cells, so the default
+/// width shows the value without a trailing ellipsis (UI-PRC-006). Image path is a long path.
+fn sample_text(id: ColumnId) -> Option<&'static str> {
+    match id {
+        ColumnId::Type => Some("Background process"),
+        ColumnId::Architecture => Some("AArch64 (64-bit)"),
+        ColumnId::ImagePath => Some("/usr/lib/systemd/systemd-journald"),
+        _ => None,
+    }
+}
+
 fn spec(
     c: &ProcColumn,
     net_bytes: bool,
@@ -1104,8 +1123,16 @@ fn spec(
 ) -> ColumnSpec {
     let label = tr(cx, c.label);
     let default_width = c.default_width.unwrap_or_else(|| {
+        let scale = m.ui_scale.max(0.01);
         let w = measure.template_width(&label, m.text.base, window, cx);
-        (f32::from(w) / m.ui_scale.max(0.01) + LABEL_PAD).max(MEASURED_MIN_WIDTH)
+        let by_label = (f32::from(w) / scale + LABEL_PAD).max(MEASURED_MIN_WIDTH);
+        match sample_text(c.id) {
+            Some(sample) => {
+                let w = measure.template_width(sample, m.text.base, window, cx);
+                by_label.max(f32::from(w) / scale + LABEL_PAD)
+            }
+            None => by_label,
+        }
     });
     let align = c.align();
     ColumnSpec {
@@ -1376,6 +1403,7 @@ impl TreeTableDelegate for ProcessDelegate {
             && self.row_kind(ix) == RowKind::GroupHeader
         {
             let expanded = self.row_expandable(ix).unwrap_or(false);
+            self.menu_hold = true;
             return group_header_menu(menu, expanded, self.row(ix).node.clone(), cx);
         }
         let captured = CapturedTargets::new(
@@ -1386,6 +1414,7 @@ impl TreeTableDelegate for ProcessDelegate {
         if captured.items.is_empty() {
             return menu;
         }
+        self.menu_hold = true;
         if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
             let stored = captured.clone();
             page.update(cx, |p, _| p.set_menu_targets(stored));
@@ -1401,6 +1430,15 @@ impl TreeTableDelegate for ProcessDelegate {
     }
 
     fn on_menu_closed(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
+        // Catch up with the latest view. The page tells the table about the new version on the
+        // next hub change at the latest.
+        if std::mem::take(&mut self.menu_hold)
+            && let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone())
+        {
+            let snapshot = Arc::clone(hub.read(cx).current());
+            self.install(&snapshot);
+            cx.notify();
+        }
         if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
             page.update(cx, |p, _| p.clear_menu_targets());
         }

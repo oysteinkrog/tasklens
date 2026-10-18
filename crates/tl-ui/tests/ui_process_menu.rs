@@ -3312,6 +3312,29 @@ mod end {
         assert!(rig.sent().is_empty(), "the dialog sends on OK only");
     }
 
+    /// tasklens-pdu.65 (g): while a row menu is open a re-sort does not move the rows; when it
+    /// closes the table shows the new order.
+    #[gpui_kit::test]
+    fn row_order_is_frozen_while_a_row_menu_is_open(cx: &mut TestAppContext) {
+        use tl_ui::table::tree_table::TreeTableDelegate as _;
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        let first = |rig: &mut Rig| rig.vcx.update(|_, cx| table.read(cx).delegate.row_id(0));
+        let a = first(&mut rig);
+        let _menu = build_menu(&mut rig, &[0], ColumnId::Name);
+        rig.publish(own(&[300, 301]), &[301, 300], Vec::new());
+        assert_eq!(first(&mut rig), a, "row A stays first under the open menu");
+        rig.vcx.update(|_, cx| {
+            table.update(cx, |t, cx| t.delegate.on_menu_closed(cx));
+        });
+        assert_ne!(
+            first(&mut rig),
+            a,
+            "the new order shows once the menu closed"
+        );
+    }
+
     #[gpui_kit::test]
     fn set_affinity_on_two_rows_opens_with_both(cx: &mut TestAppContext) {
         let mut rig = Rig::new(cx);

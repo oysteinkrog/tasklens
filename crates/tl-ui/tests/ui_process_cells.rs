@@ -2358,6 +2358,16 @@ mod name_cell {
         assert!(matches!(kthread.icon, NameIcon::Lucide(IconName::Cpu)));
         let file = NameIcon::File(Arc::from("/usr/share/icons/a.png"));
         assert!(matches!(row_icon(RowKind::App, file), NameIcon::File(_)));
+        for kind in [RowKind::App, RowKind::Process] {
+            assert!(matches!(
+                row_icon(kind, NameIcon::None),
+                NameIcon::Lucide(IconName::Binary)
+            ));
+        }
+        assert!(matches!(
+            row_icon(RowKind::GroupHeader, NameIcon::None),
+            NameIcon::None
+        ));
         let app = name_cell(data(RowKind::App, 0, Some(false)), &words());
         assert_eq!(app.icon_size, IconSlot::Large);
         assert!(app.highlight_fffd && app.secondary.is_none() && app.trailing.is_none());

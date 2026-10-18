@@ -200,6 +200,9 @@ pub fn window_popup(menu: TlMenu, windows: &[WindowEntry], cx: &App) -> TlMenu {
     )
 }
 
+/// Widest Set Priority submenu at 100% scale: room for the autogroup note without an ellipsis.
+const PRIORITY_MENU_MAX_W: f32 = 520.0;
+
 /// The Set Priority submenu (UI-PRC-020): the autogroup note, Realtime, the five nice classes,
 /// Idle, a separator and Custom…. The current class has a check mark; with several targets only
 /// when every one shares it (PROC-066, PROC-069). The scheduler policy comes from the latest
@@ -214,7 +217,10 @@ pub fn priority_submenu(
     let current = snapshot
         .as_deref()
         .and_then(|s| current_class(targets, &s.processes));
-    let mut menu = menu.header(tr(cx, "processes-menu-autogroup-note"));
+    // The autogroup note is one long line, wider than the default maximum menu width.
+    let mut menu = menu
+        .max_w(px(PRIORITY_MENU_MAX_W))
+        .header(tr(cx, "processes-menu-autogroup-note"));
     for (class, key) in PRIORITY_CLASSES {
         menu = menu.check_item(
             tr(cx, key),

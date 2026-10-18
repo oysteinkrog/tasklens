@@ -725,9 +725,25 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             self.hover_clips
                 .resize_with(columns, || Rc::new(Cell::new(false)));
         }
+        // When the columns overflow, the rows get the scrollbar's width on the right, so the
+        // last column can scroll out from under the vertical scrollbar.
+        let tail = if self.horizontal_overflow() {
+            px(SCROLLBAR_W * m.ui_scale)
+        } else {
+            Pixels::ZERO
+        };
         let mut rows = Vec::with_capacity(range.len());
         for ix in range {
-            rows.push(self.build_row(ix, &frame, window, cx));
+            let row = self.build_row(ix, &frame, window, cx);
+            rows.push(if tail > Pixels::ZERO {
+                div()
+                    .w(total_width + tail)
+                    .h(m.row_height)
+                    .child(row)
+                    .into_any_element()
+            } else {
+                row
+            });
         }
         rows
     }
@@ -793,7 +809,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 );
             }
             if let Some(pos) = name_col.and_then(|c| visible.iter().position(|v| *v == c)) {
+                // The label stays at the left edge of the viewport while the table scrolls
+                // sideways, as far as the row reaches.
                 let x = offsets[pos];
+                let shift =
+                    (self.x_offset - x).clamp(Pixels::ZERO, (f.total_width - x).max(Pixels::ZERO));
+                let x = x + shift;
                 let ctx = CellCtx {
                     m,
                     theme,
