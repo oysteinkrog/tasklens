@@ -9,7 +9,9 @@
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::{SmallVec, smallvec};
-use tl_model::settings::{OverviewBoxSetting, OverviewLayoutSetting, OverviewRowSetting};
+use tl_model::settings::{
+    OVERVIEW_WEIGHT_RANGE, OverviewBoxSetting, OverviewLayoutSetting, OverviewRowSetting,
+};
 
 use super::super::page::PAGE_PAD;
 use crate::theme::DeviceAccent;
@@ -131,6 +133,12 @@ fn good_weight(w: f32) -> bool {
     w.is_finite() && w > 0.
 }
 
+/// A saved weight clamped into [`OVERVIEW_WEIGHT_RANGE`]. NaN stays NaN and fails `validate`.
+fn saved_weight(w: f64) -> f32 {
+    let (min, max) = OVERVIEW_WEIGHT_RANGE;
+    w.clamp(min, max) as f32
+}
+
 impl OverviewLayout {
     /// The btop-style default: CPU (width 2) and Memory on a row of height 3, then GPU, Disk and
     /// Net on a row of height 2.
@@ -155,7 +163,9 @@ impl OverviewLayout {
     }
 
     /// The saved layout, or the default when there is none. Loading already dropped unknown
-    /// kinds, repeats, bad weights and empty rows; anything still invalid gives the default.
+    /// kinds, repeats, bad weights and empty rows. Weights are clamped into
+    /// [`OVERVIEW_WEIGHT_RANGE`] again, so none rounds to 0 in `f32`; anything still invalid
+    /// gives the default.
     pub fn from_setting(setting: Option<&OverviewLayoutSetting>) -> Self {
         let Some(setting) = setting else {
             return Self::btop_default();
@@ -165,7 +175,7 @@ impl OverviewLayout {
             .rows
             .iter()
             .map(|r| RowSpec {
-                height: r.height as f32,
+                height: saved_weight(r.height),
                 boxes: r
                     .boxes
                     .iter()
@@ -175,7 +185,7 @@ impl OverviewLayout {
                             seen.push(kind);
                             BoxSpec {
                                 kind,
-                                width: b.width as f32,
+                                width: saved_weight(b.width),
                             }
                         })
                     })
@@ -727,6 +737,37 @@ mod tests {
         let p = place(&l, |_| true, area(1200., 900.), 1.);
         assert_eq!(rect(&p, Memory).2, Memory.min_w());
         assert_eq!(rect(&p, Cpu).2, 1168. - 8. - Memory.min_w());
+    }
+
+    #[test]
+    fn overview_tiny_and_huge_saved_weights_clamp_and_place() {
+        use BoxKind::*;
+        // 1e-50 is 0 in f32 and 1e38 is near f32::MAX. Both clamp into 0.001..=1000, so the
+        // saved layout is kept and every box has finite bounds.
+        let mut saved = OverviewLayoutSetting::btop_default();
+        saved.rows[0].height = 1e-50;
+        saved.rows[0].boxes[0].width = 1e38;
+        saved.rows[0].boxes[1].width = 1e-50;
+        saved.rows[1].height = 1e38;
+        let l = OverviewLayout::from_setting(Some(&saved));
+        assert_ne!(l, OverviewLayout::btop_default());
+        assert_eq!(l.rows[0].height, 0.001);
+        assert_eq!(l.rows[0].boxes[0].width, 1000.);
+        assert_eq!(l.rows[0].boxes[1].width, 0.001);
+        assert_eq!(l.rows[1].height, 1000.);
+        let p = place(&l, |_| true, area(1200., 900.), 1.);
+        assert_eq!(p.boxes.len(), 5);
+        assert!(!p.scrolls);
+        for b in &p.boxes {
+            let (x, y, w, h) = rect(&p, b.kind);
+            assert!([x, y, w, h].iter().all(|v| v.is_finite()), "{:?}", b.kind);
+            assert!(w >= b.kind.min_w() && h >= b.kind.min_h(), "{:?}", b.kind);
+        }
+        // The tiny row and box get their minimums, the huge ones the rest.
+        assert_eq!(rect(&p, Memory).2, Memory.min_w());
+        assert_eq!(rect(&p, Cpu).2, 1168. - 8. - Memory.min_w());
+        assert_eq!(rect(&p, Cpu).3, Cpu.min_h());
+        assert_eq!(rect(&p, Gpu).3, 900. - 32. - 8. - Cpu.min_h());
     }
 
     #[test]
