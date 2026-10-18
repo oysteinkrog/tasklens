@@ -1201,7 +1201,12 @@ impl Render for MinigraphPanel {
         let s = metrics(cx).ui_scale;
         self.scale = s;
         if self.cards.is_empty() {
-            return root;
+            // With no cards the row under the table takes no height.
+            return if self.own_space {
+                root.flex_none().h(px(0.0))
+            } else {
+                root
+            };
         }
         let (w, h) = (MINI_CARD_W * s, MINI_CARD_H * s);
         let offset = |slot: u16| {

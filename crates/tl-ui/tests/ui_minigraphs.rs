@@ -3013,6 +3013,26 @@ mod mounted {
         }
     }
 
+    /// With every card hidden the panel row has no height, so the table fills the page.
+    #[gpui_kit::test]
+    fn table_fills_page_without_cards(cx: &mut TestAppContext) {
+        let mut vcx = open(cx, StartTab::Processes);
+        let before = vcx.debug_bounds("TlTreeTable").expect("table drawn");
+        let panel = vcx.update(|_, cx| MinigraphPanel::global(cx).expect("panel"));
+        vcx.update(|_, cx| {
+            panel.update(cx, |p, cx| {
+                let ids: Vec<_> = p.attached().map(|e| e.id).collect();
+                for id in ids {
+                    p.hide(id, cx);
+                }
+            });
+        });
+        draw(&mut vcx);
+        let after = vcx.debug_bounds("TlTreeTable").expect("table drawn");
+        assert!(after.size.height >= before.size.height);
+        assert!(after.size.height > px(100.));
+    }
+
     #[gpui_kit::test]
     fn reset_reaches_panel_from_window(cx: &mut TestAppContext) {
         let mut vcx = open(cx, StartTab::Processes);
