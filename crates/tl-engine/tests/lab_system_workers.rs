@@ -2848,7 +2848,7 @@ fn inventory_files_sections() {
     assert_eq!(snap.firmware.firmware_type.value, Some(FirmwareType::Uefi));
     assert_eq!(snap.firmware.firmware_type.validity, Validity::Valid);
     assert_eq!(snap.board.product, inv_text("ROG STRIX X570-E GAMING"));
-    assert_eq!(snap.board.chassis_type, inv_text("Desktop"));
+    assert_eq!(snap.board.chassis_type, inv_text("3"));
     // No `board_serial` file in the fixture.
     assert_eq!(snap.board.serial.validity, Validity::Unsupported);
     assert_eq!(snap.os.name, inv_text("CachyOS Linux"));
