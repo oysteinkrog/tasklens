@@ -1307,6 +1307,25 @@ mod mini {
         assert_eq!(*saved(&mut vcx), *main_pick.0);
     }
 
+    /// The visible mini window is 260 px wide (UI-PRF-045, tasklens-xdh.26). The client-frame
+    /// hook puts the window's own width at 260 plus the 21 px shadow and border on each edge,
+    /// as under KWin with client decorations.
+    #[cfg(target_os = "linux")]
+    #[gpui_kit::test]
+    fn mini_window_visible_width_is_260_inside_the_frame(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(tl_ui::components::window_frame::TestClientFrame));
+        let _rig = setup(cx);
+        let (mut vcx, _view) = open(cx);
+        draw(&mut vcx);
+        draw(&mut vcx);
+        let frame = f32::from(tl_ui::components::window_frame::client_frame_extra(
+            tl_model::settings::Decorations::Client,
+        ));
+        assert_eq!(frame, 42.);
+        let width = f32::from(vcx.update(|window, _| window.bounds().size.width));
+        assert_eq!(width - frame, 260., "window width {width}");
+    }
+
     #[gpui_kit::test]
     fn mini_window_esc_closes(cx: &mut TestAppContext) {
         let _rig = setup(cx);

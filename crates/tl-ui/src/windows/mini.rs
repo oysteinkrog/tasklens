@@ -98,8 +98,16 @@ pub fn mini_height(
 
 /// The width and height the client-side frame takes from the window: the kit's shadow and border
 /// on every edge. Zero under server decorations. The spec size (UI-PRF-045) is the visible
-/// window, so the window is this much larger.
-fn frame_extra(window: &Window) -> f32 {
+/// window, so the window is this much larger. The `TestClientFrame` hook counts as client
+/// decorations. Tiled edges are not known when the window opens and the kit's frame inset for
+/// them is the same constant, so a tiled window keeps this extra until the compositor says
+/// otherwise.
+fn frame_extra(window: &Window, cx: &App) -> f32 {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if cx.has_global::<crate::components::window_frame::TestClientFrame>() {
+        return f32::from(client_frame_extra(Decorations::Client));
+    }
+    let _ = cx;
     match window.window_decorations() {
         gpui_kit::Decorations::Client { .. } => f32::from(client_frame_extra(Decorations::Client)),
         gpui_kit::Decorations::Server => 0.,
@@ -562,7 +570,7 @@ impl Render for MiniWindow {
             heights,
             work_area_h(Some(window), cx),
             s,
-            frame_extra(window),
+            frame_extra(window, cx),
         );
         if want != self.size {
             self.size = want;
