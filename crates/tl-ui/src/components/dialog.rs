@@ -821,6 +821,11 @@ impl Render for TlDialogView {
                     .tab_index(-1)
                     .tab_stop(false)
                     .flex_none()
+                    // A flex column measures the body at the width it draws at. As a block the
+                    // wrapper measured about twice the body's height and the window fitted to
+                    // that, which left an empty band under the buttons (tasklens-fut.23).
+                    .flex()
+                    .flex_col()
                     .w_full()
                     .child(body)
                     .on_prepaint(fit),
