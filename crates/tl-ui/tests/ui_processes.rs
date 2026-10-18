@@ -820,6 +820,36 @@ mod delegate {
     }
 
     #[gpui_kit::test]
+    fn text_columns_default_wide_enough_for_a_typical_value(cx: &mut TestAppContext) {
+        setup(cx);
+        let (rows, groups, records) = every_kind();
+        let vcx = cx.add_empty_window();
+        let d = new_delegate(vcx, snapshot(1, rows, groups, records));
+        for (id, sample) in [
+            (ColumnId::Type, "Background process"),
+            (ColumnId::Architecture, "AArch64 (64-bit)"),
+            (ColumnId::ImagePath, "/usr/lib/systemd/systemd-journald"),
+        ] {
+            let need = vcx.update(|window, cx| {
+                let m = *tl_ui::theme::metrics(cx);
+                let w = tl_ui::text::metrics::TextMetricsCache::default().template_width(
+                    sample,
+                    m.text.base,
+                    window,
+                    cx,
+                );
+                f32::from(w) / m.ui_scale.max(0.01)
+            });
+            let width = f32::from(d.column_spec(id).default_width);
+            assert!(
+                width >= need,
+                "{} default width {width} px is narrower than {sample:?} ({need} px)",
+                id.as_str()
+            );
+        }
+    }
+
+    #[gpui_kit::test]
     fn gpu_slots_only_for_present_adapters(cx: &mut TestAppContext) {
         setup(cx);
         let (rows, groups, records) = every_kind();

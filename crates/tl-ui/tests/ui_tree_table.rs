@@ -40,8 +40,8 @@ use tl_ui::table::columns::{
 };
 use tl_ui::table::header::{HeaderMenuItem, header_menu_rows};
 use tl_ui::table::tree_table::{
-    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
-    TreeTableEvent, metric_cell_opacity,
+    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, SCROLLBAR_W, TlTreeTable,
+    TreeTableDelegate, TreeTableEvent, metric_cell_opacity,
 };
 use tl_ui::text::fonts::load_bundled_fonts;
 use tl_ui::theme::{current, metrics};
@@ -1082,6 +1082,53 @@ fn horizontal_scrollbar_only_on_overflow() {
         200.,
     );
     assert!(!cx.update(|cx| table.read(cx).horizontal_overflow()));
+}
+
+fn scroll_x(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>, x: f32) {
+    vcx.update(|_, cx| {
+        let handle = table.read(cx).scroll_handle();
+        ScrollbarHandle::set_offset(&handle, point(px(-x), px(0.)));
+    });
+    vcx.update(|window, _| window.refresh());
+    redraw(vcx);
+}
+
+#[test]
+fn last_column_clears_the_vertical_scrollbar_at_full_right_scroll() {
+    let mut cx = cosmic_cx();
+    let rows = (0..3).map(plain).collect();
+    // Columns 400 + 1000 px in a 1000 px body: 400 px of horizontal scroll, plus the gutter.
+    let (table, vcx) = open_table(
+        &mut cx,
+        TDelegate::with_widths(rows, 400., 1000.),
+        1000.,
+        200.,
+    );
+    scroll_x(vcx, &table, 400. + SCROLLBAR_W);
+    let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
+    let cell = vcx.debug_bounds("TlCell-numeric").expect("cpu cell");
+    assert!(
+        cell.right() <= body.right() - px(SCROLLBAR_W),
+        "last column ends at {:?}, scrollbar starts at {:?}",
+        cell.right(),
+        body.right() - px(SCROLLBAR_W)
+    );
+}
+
+#[test]
+fn group_label_stays_at_the_viewport_edge_while_scrolling_sideways() {
+    let mut cx = cosmic_cx();
+    let rows = vec![group(0), plain(1)];
+    let (table, vcx) = open_table(
+        &mut cx,
+        TDelegate::with_widths(rows, 400., 1000.),
+        1000.,
+        200.,
+    );
+    scroll_x(vcx, &table, 200.);
+    let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
+    let label = vcx.debug_bounds("TlGroupHeaderCell").expect("group label");
+    assert_eq!(label.left(), body.left());
 }
 
 #[test]

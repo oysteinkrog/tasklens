@@ -700,8 +700,22 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         self.list_calls = self.list_calls.saturating_add(1);
         let m = *metrics(cx);
         let total_width = self.columns().total_width();
+        // When the columns overflow, the rows get the scrollbar's width on the right, so the
+        // last column can scroll out from under the vertical scrollbar.
+        let tail = if self.horizontal_overflow() {
+            px(SCROLLBAR_W * m.ui_scale)
+        } else {
+            Pixels::ZERO
+        };
+        // The list measures its content width from this first probe row, so it carries the
+        // gutter too.
         if call < 2 && range.len() == 1 {
-            return vec![div().w(total_width).h(m.row_height).into_any_element()];
+            return vec![
+                div()
+                    .w(total_width + tail)
+                    .h(m.row_height)
+                    .into_any_element(),
+            ];
         }
         #[cfg(any(test, feature = "test-hooks"))]
         self.rows_built_last_frame.set(range.len() as u32);
@@ -725,13 +739,6 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             self.hover_clips
                 .resize_with(columns, || Rc::new(Cell::new(false)));
         }
-        // When the columns overflow, the rows get the scrollbar's width on the right, so the
-        // last column can scroll out from under the vertical scrollbar.
-        let tail = if self.horizontal_overflow() {
-            px(SCROLLBAR_W * m.ui_scale)
-        } else {
-            Pixels::ZERO
-        };
         let mut rows = Vec::with_capacity(range.len());
         for ix in range {
             let row = self.build_row(ix, &frame, window, cx);
