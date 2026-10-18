@@ -377,7 +377,13 @@ fn service_props_demand_unit_details(cx: &mut TestAppContext) {
             .expect("window")
     });
     let scale = cx.update(|cx| tl_ui::theme::metrics(cx).ui_scale);
-    assert_eq!((width, height), (720. * scale, 560. * scale));
+    let extra = f32::from(tl_ui::components::window_frame::client_frame_extra(
+        tl_model::settings::Decorations::Client,
+    ));
+    assert_eq!(
+        (width, height),
+        (720. * scale + extra, 560. * scale + extra)
+    );
     {
         let win = view(cx, handle);
         cx.read(|cx| {

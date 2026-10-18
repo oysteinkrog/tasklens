@@ -234,7 +234,10 @@ fn settings_window_size_and_sidebar(cx: &mut TestAppContext) {
     setup(cx);
     let (_, mut vcx) = open(cx, 1);
     let viewport = vcx.update(|window, _| window.viewport_size());
-    assert_eq!(viewport, size(px(900.), px(640.)));
+    let extra = tl_ui::components::window_frame::client_frame_extra(
+        tl_model::settings::Decorations::Client,
+    );
+    assert_eq!(viewport, size(px(900.) + extra, px(640.) + extra));
     assert_eq!(SIDEBAR_W, 220.);
     assert!(vcx.debug_bounds("SettingsWindowBody").is_some());
 }
