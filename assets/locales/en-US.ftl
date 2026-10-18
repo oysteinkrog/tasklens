@@ -735,6 +735,13 @@ perf-overview-gpu-more-engines = +{$n} more engines
 perf-overview-more = +{$n} more
 perf-overview-net-peak = Peak
 perf-overview-net-total = Total (since boot)
+perf-overview-box-gpu = GPU
+perf-overview-edit-layout = Edit Layout
+perf-overview-add-box = Add Box
+perf-overview-reset-layout = Reset Layout
+perf-overview-edit-done = Done
+perf-overview-hide-box = Hide box
+perf-overview-toast-last-box = At least one box must stay on the Overview page
 
 perf-menu-select-pages = Select Pages
 perf-menu-hide-page = Hide This Page

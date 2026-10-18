@@ -24,6 +24,8 @@ pub const PERFORMANCE_CONTEXT: &str = "Performance";
 pub const PERFORMANCE_EDIT_CONTEXT: &str = "PerformanceEdit";
 /// Key context of the Summary mode view (PERF-010).
 pub const PERFORMANCE_SUMMARY_CONTEXT: &str = "PerformanceSummary";
+/// Key context of the Overview page while Edit Layout mode is on (UI-PRF-018).
+pub const PERFORMANCE_OVERVIEW_EDIT_CONTEXT: &str = "PerformanceOverviewEdit";
 
 gpui_kit::actions!(
     tasklens,
@@ -52,8 +54,43 @@ gpui_kit::actions!(
         NoOp,
         /// Opens the card menu of the selected sidebar card (Shift+F10, Menu; UI-PRF-014).
         PerfOpenCardMenu,
+        /// Turns on Edit Layout mode of the Overview page (UI-PRF-018).
+        PerfOverviewEditLayout,
+        /// Turns off Edit Layout mode (Done, Esc).
+        PerfOverviewEditDone,
+        /// Restores the default Overview layout and keeps Edit Layout mode on.
+        PerfOverviewResetLayout,
+        /// Hides the focused Overview box (Delete in Edit Layout mode).
+        PerfOverviewHideBox,
     ]
 );
+
+/// Adds the Overview box of `kind` (its `[performance.overview]` name) to the layout.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewAddBox {
+    pub kind: Arc<str>,
+}
+
+/// Moves the focused Overview box one slot left or right (`dx`), or to the row above or below
+/// (`dy`).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewMoveBox {
+    pub dx: i8,
+    pub dy: i8,
+}
+
+/// Shrinks (−1) or grows (1) the focused Overview box's width (`dw`) or row height (`dh`).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewResizeBox {
+    pub dw: i8,
+    pub dh: i8,
+}
 
 /// Selects the device page of `key` (a sidebar card click).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
@@ -277,6 +314,7 @@ pub fn bind_keys_performance(cx: &mut App) {
     let perf = Some(PERFORMANCE_CONTEXT);
     let edit = Some(PERFORMANCE_EDIT_CONTEXT);
     let summary = Some(PERFORMANCE_SUMMARY_CONTEXT);
+    let overview_edit = Some(PERFORMANCE_OVERVIEW_EDIT_CONTEXT);
     let mut bindings = Vec::new();
     for i in 0..8u8 {
         bindings.push(KeyBinding::new(
@@ -315,5 +353,20 @@ pub fn bind_keys_performance(cx: &mut App) {
         KeyBinding::new("alt-s", NoOp, summary),
         KeyBinding::new("alt-h", NoOp, summary),
         KeyBinding::new("alt-d", NoOp, summary),
+    ]);
+
+    let move_box = |dx, dy| PerfOverviewMoveBox { dx, dy };
+    let resize_box = |dw, dh| PerfOverviewResizeBox { dw, dh };
+    cx.bind_keys([
+        KeyBinding::new("escape", PerfOverviewEditDone, overview_edit),
+        KeyBinding::new("delete", PerfOverviewHideBox, overview_edit),
+        KeyBinding::new("alt-left", move_box(-1, 0), overview_edit),
+        KeyBinding::new("alt-right", move_box(1, 0), overview_edit),
+        KeyBinding::new("alt-up", move_box(0, -1), overview_edit),
+        KeyBinding::new("alt-down", move_box(0, 1), overview_edit),
+        KeyBinding::new("alt-shift-left", resize_box(-1, 0), overview_edit),
+        KeyBinding::new("alt-shift-right", resize_box(1, 0), overview_edit),
+        KeyBinding::new("alt-shift-up", resize_box(0, -1), overview_edit),
+        KeyBinding::new("alt-shift-down", resize_box(0, 1), overview_edit),
     ]);
 }

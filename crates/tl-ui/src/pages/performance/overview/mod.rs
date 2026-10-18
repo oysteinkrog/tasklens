@@ -17,6 +17,7 @@
 
 pub mod cpu_box;
 pub mod disk_box;
+pub mod edit;
 pub mod gpu_box;
 pub mod layout;
 pub mod mem_box;
@@ -25,15 +26,14 @@ pub mod parts;
 pub mod procs_box;
 pub mod splitter;
 
-#[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
-
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Render, SharedString, Size,
+    MouseUpEvent, ParentElement as _, Pixels, Point, Render, SharedString, Size,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Task, Window,
     canvas, div, px, size,
 };
@@ -43,12 +43,14 @@ use tl_model::ids::DeviceIdx;
 
 use self::cpu_box::CpuBox;
 use self::disk_box::DiskBox;
+use self::edit::EditState;
 use self::gpu_box::GpuBox;
 use self::layout::{BoxKind, OverviewLayout, Placement, place};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
 use self::splitter::{Drag, Splitter, Target, round_weights, set_weights, splitters};
+use super::actions::{PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout};
 use super::details::KeyValueModel;
 use super::page::DevicePage;
 use super::sidebar::DeviceSidebar;
@@ -155,6 +157,10 @@ pub struct OverviewPage {
     hover: Option<Target>,
     hover_shown: bool,
     hover_task: Option<Task<()>>,
+    /// Edit Layout mode (UI-PRF-018), while it is on.
+    edit: Option<EditState>,
+    /// The box area's origin in window px from the last paint, for the box drag.
+    content_origin: Rc<Cell<Point<Pixels>>>,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -231,6 +237,8 @@ impl OverviewPage {
             hover: None,
             hover_shown: false,
             hover_task: None,
+            edit: None,
+            content_origin: Rc::default(),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -364,9 +372,15 @@ impl OverviewPage {
     /// box with its demand comes or goes. Any other settings change does nothing here.
     fn sync_layout(&mut self, cx: &mut Context<Self>) {
         let layout = saved_layout(cx);
-        if layout == self.layout || self.drag.is_some() {
+        if layout == self.layout || self.drag.is_some() || self.box_dragging() {
             return;
         }
+        self.set_layout(layout, cx);
+    }
+
+    /// Takes `layout`: the Top processes box with its demand comes or goes, then a new
+    /// placement and one render.
+    fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
         self.layout = layout;
         if procs != self.procs.is_some() {
@@ -596,8 +610,11 @@ impl DevicePage for OverviewPage {
         SmallVec::new()
     }
 
-    fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
-        menu
+    fn menu_items(&self, menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+        menu.item(
+            tr(cx, "perf-overview-edit-layout"),
+            Box::new(PerfOverviewEditLayout),
+        )
     }
 
     /// "Overview", then each box's copy text. The boxes' text is read through the app, so this
@@ -652,6 +669,19 @@ impl Focusable for OverviewPage {
     }
 }
 
+impl OverviewPage {
+    /// The page's action handlers: Edit Layout mode and its keys (UI-PRF-018).
+    fn with_actions<E: InteractiveElement>(el: E, cx: &mut Context<Self>) -> E {
+        el.on_action(cx.listener(Self::on_edit_layout))
+            .on_action(cx.listener(Self::on_edit_done))
+            .on_action(cx.listener(Self::on_reset_layout))
+            .on_action(cx.listener(Self::on_add_box))
+            .on_action(cx.listener(Self::on_hide_box))
+            .on_action(cx.listener(Self::on_move_box))
+            .on_action(cx.listener(Self::on_resize_box))
+    }
+}
+
 impl Render for OverviewPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
@@ -665,6 +695,7 @@ impl Render for OverviewPage {
         let this = cx.entity().downgrade();
         let this_move = this.clone();
         let dragging = self.drag.is_some();
+        let box_dragging = self.box_dragging();
         let measure = canvas(
             move |bounds, _, cx| {
                 // After the frame: a notify during the frame is lost, so the page would keep
@@ -675,61 +706,112 @@ impl Render for OverviewPage {
                 });
             },
             move |_, _, window, _| {
-                if !dragging {
+                if !dragging && !box_dragging {
                     return;
                 }
-                // The held gap follows the pointer wherever it goes, also outside the gap.
+                // The held gap or box follows the pointer wherever it goes.
                 let moved = this_move.clone();
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                     if !phase.bubble() {
                         return;
                     }
                     let _ = moved.update(cx, |p, cx| {
-                        if e.pressed_button == Some(MouseButton::Left) {
-                            p.splitter_move(e.position, cx);
-                        } else {
-                            p.splitter_up(cx);
+                        match (e.pressed_button == Some(MouseButton::Left), box_dragging) {
+                            (true, false) => p.splitter_move(e.position, cx),
+                            (true, true) => p.box_drag_move(e.position, cx),
+                            (false, false) => p.splitter_up(cx),
+                            (false, true) => p.box_drag_up(cx),
                         }
                     });
                 });
                 let released = this_move.clone();
                 window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
                     if phase.bubble() {
-                        let _ = released.update(cx, |p, cx| p.splitter_up(cx));
+                        let _ = released.update(cx, |p, cx| {
+                            if box_dragging {
+                                p.box_drag_up(cx);
+                            } else {
+                                p.splitter_up(cx);
+                            }
+                        });
                     }
                 });
             },
         )
         .absolute()
         .inset_0();
-        let gaps: SmallVec<[AnyElement; 8]> = splitters(&self.layout, &self.placement)
-            .into_iter()
-            .map(|s| self.gap_element(s, cx))
-            .collect();
-        let content = div()
-            .relative()
-            .w_full()
-            .h(self.placement.content_h)
-            .children(self.placement.boxes.iter().map(|p| {
-                div()
+        let gaps: SmallVec<[AnyElement; 8]> = if box_dragging {
+            SmallVec::new()
+        } else {
+            splitters(&self.layout, &self.placement)
+                .into_iter()
+                .map(|s| self.gap_element(s, cx))
+                .collect()
+        };
+        let boxes: SmallVec<[AnyElement; 8]> = self
+            .placement
+            .boxes
+            .iter()
+            .map(|p| {
+                let el = div()
                     .absolute()
                     .left(p.bounds.left())
                     .top(p.bounds.top())
                     .w(p.bounds.size.width)
                     .h(p.bounds.size.height)
-                    .child(self.box_element(p.kind))
-            }))
-            .children(gaps);
-        let root = div()
+                    .child(self.box_element(p.kind));
+                self.edit_box(p, el, window, cx).into_any_element()
+            })
+            .collect();
+        let overlays = self.edit_overlays(window, cx);
+        let origin = Rc::clone(&self.content_origin);
+        let content = div()
+            .relative()
+            .w_full()
+            .h(self.placement.content_h)
+            .child(
+                canvas(move |b, _, _| origin.set(b.origin), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0(),
+            )
+            .children(boxes)
+            .children(gaps)
+            .children(overlays);
+        let Some(toolbar) = self.edit_toolbar(cx) else {
+            let root = div()
+                .id(SCROLL_ID)
+                .relative()
+                .size_full()
+                .track_focus(&self.focus)
+                .child(measure);
+            let root = Self::with_actions(root, cx);
+            return if self.placement.scrolls {
+                root.overflow_y_scroll().child(content)
+            } else {
+                root.child(content)
+            }
+            .into_any_element();
+        };
+        let body = div()
             .id(SCROLL_ID)
             .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(measure);
+        let body = if self.placement.scrolls {
+            body.overflow_y_scroll().child(content)
+        } else {
+            body.child(content)
+        };
+        let root = div()
+            .flex()
+            .flex_col()
             .size_full()
             .track_focus(&self.focus)
-            .child(measure);
-        if self.placement.scrolls {
-            root.overflow_y_scroll().child(content)
-        } else {
-            root.child(content)
-        }
+            .key_context(PERFORMANCE_OVERVIEW_EDIT_CONTEXT)
+            .child(toolbar)
+            .child(body);
+        Self::with_actions(root, cx).into_any_element()
     }
 }
