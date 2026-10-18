@@ -2414,11 +2414,14 @@ mod summary {
         entries_of(r, &sub)
     }
 
+    /// A point inside the page panel's top-left padding, away from every Details value, so the
+    /// page menu opens without "Copy value" whatever the values are.
     fn page_panel(r: &mut Rig) -> gpui_kit::Point<gpui_kit::Pixels> {
-        r.vcx
+        let b = r
+            .vcx
             .debug_bounds(tl_ui::pages::performance::PAGE_PANEL_ID)
-            .expect("the page panel")
-            .center()
+            .expect("the page panel");
+        b.origin + gpui_kit::point(gpui_kit::px(6.), gpui_kit::px(6.))
     }
 
     #[gpui_kit::test]
