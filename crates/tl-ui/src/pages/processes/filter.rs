@@ -61,13 +61,15 @@ impl ProcessesPage {
     fn apply_filter(&mut self, text: &str, cx: &mut Context<Self>) {
         let lower = text.to_lowercase();
         let client = Arc::clone(&self.client);
-        self.table.update(cx, |t, _| {
+        self.table.update(cx, |t, cx| {
             let q = t.delegate.query_mut();
             if q.filter().as_ref() == lower {
                 return;
             }
             q.set_filter(Arc::from(lower));
             q.bump_and_send(&*client);
+            // The filtered list opens at its first match, not at the old offset.
+            t.scroll_to_top(cx);
         });
     }
 

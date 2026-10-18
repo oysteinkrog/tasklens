@@ -492,6 +492,15 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         ScrollbarHandle::set_offset(&self.scroll, point(x, -top));
     }
 
+    /// Scrolls to the first row and drops the scroll anchor, so the next view stays at the top.
+    /// The owner calls this when a filter change replaces the rows.
+    pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        self.anchor = None;
+        let x = ScrollbarHandle::offset(&self.scroll).x;
+        ScrollbarHandle::set_offset(&self.scroll, point(x, Pixels::ZERO));
+        cx.notify();
+    }
+
     /// Scrolls row `id` to the viewport centre and selects it (PROC-071). False when `id` is not
     /// in the view; the delegate expands its path before calling.
     pub fn jump_to(&mut self, id: D::RowId, cx: &mut Context<Self>) -> bool {
@@ -716,10 +725,16 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     fn record_frame(&mut self, range: Range<usize>, row_h: Pixels) {
         let scroll_top = -ScrollbarHandle::offset(&self.scroll).y;
         let sub = (scroll_top - row_h * range.start).max(Pixels::ZERO);
-        self.anchor = range
-            .clone()
-            .find(|&ix| self.delegate.selectable(ix))
-            .map(|ix| (self.delegate.row_id(ix), ix - range.start, sub));
+        // At the very top there is nothing to hold: a new view must show its own first rows,
+        // not follow the old top row to wherever the sort moved it.
+        self.anchor = if scroll_top <= Pixels::ZERO {
+            None
+        } else {
+            range
+                .clone()
+                .find(|&ix| self.delegate.selectable(ix))
+                .map(|ix| (self.delegate.row_id(ix), ix - range.start, sub))
+        };
         self.visible_range = range;
     }
 

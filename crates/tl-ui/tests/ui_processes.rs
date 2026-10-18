@@ -1012,6 +1012,7 @@ mod page {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Command;
+    use tl_model::command::Tab;
     use tl_model::ids::ColumnId;
     use tl_model::ids::NodeId;
     use tl_model::process::{ProcFlags, ProcessRecord};
@@ -1025,6 +1026,7 @@ mod page {
     use tl_ui::table::actions::{CollapseAll, OpenProperties};
     use tl_ui::table::tree_table::HEADER_H_TWO;
     use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{FilterChanged, GlobalShellEvents, ShellEvents};
 
     use super::delegate::{every_kind, firefox, key, record, redraw, row, setup, snapshot};
 
@@ -1065,6 +1067,8 @@ mod page {
             cx.set_global(EngineGlobal(Arc::clone(&client)));
             let hub = cx.new(|cx| SnapshotHub::new(client, cx));
             cx.set_global(GlobalHub(hub));
+            let events = cx.new(|_| ShellEvents);
+            cx.set_global(GlobalShellEvents(events));
         });
         let opened = Rc::new(Cell::new(0));
         let slot = Rc::new(std::cell::RefCell::new(None));
@@ -1326,6 +1330,79 @@ mod page {
             "first row {}",
             first.1
         );
+    }
+
+    /// 500 flat rows, pids 100..600, in ascending or descending order.
+    fn rows_500(version: u64, descending: bool) -> Arc<Snapshot> {
+        let mut pids: Vec<u32> = (100..600).collect();
+        if descending {
+            pids.reverse();
+        }
+        let records: Vec<ProcessRecord> = pids
+            .iter()
+            .map(|&p| record(p, &format!("proc-{p}"), ProcFlags::empty()))
+            .collect();
+        let rows: Vec<TableRow> = pids
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| row(NodeId::Process(key(p)), 0, Some(i as u32), None))
+            .collect();
+        snapshot(version, rows, Vec::new(), records)
+    }
+
+    fn first_row(o: &mut Opened<'_>) -> usize {
+        let page = o.page.clone();
+        o.vcx
+            .update(|_, cx| page.read(cx).table().read(cx).first_visible_row())
+            .expect("rows")
+            .1
+    }
+
+    /// pdu.64: a table at the top stays at the top when a new view reorders the rows. The old
+    /// anchor followed the former top row to the far end of the list.
+    #[gpui_kit::test]
+    fn opens_at_top_and_stays_after_reorder(cx: &mut TestAppContext) {
+        let mut o = open(cx);
+        publish(&o.engine, rows_500(2, false), 1);
+        redraw(o.vcx);
+        assert_eq!(first_row(&mut o), 0);
+        publish(&o.engine, rows_500(3, true), 1);
+        redraw(o.vcx);
+        redraw(o.vcx);
+        assert_eq!(
+            first_row(&mut o),
+            0,
+            "reordered view opens at its first row"
+        );
+    }
+
+    /// pdu.64: a filter change scrolls the filtered list to its first match.
+    #[gpui_kit::test]
+    fn filter_change_scrolls_to_top(cx: &mut TestAppContext) {
+        let mut o = open(cx);
+        publish(&o.engine, rows_500(2, false), 1);
+        redraw(o.vcx);
+        let page = o.page.clone();
+        let handle = o.vcx.update(|_, cx| page.read(cx).scroll_handle(cx));
+        handle.scroll_to_item_strict(400, ScrollStrategy::Top);
+        o.vcx.update(|window, _| window.refresh());
+        redraw(o.vcx);
+        assert!(first_row(&mut o) > 300, "scrolled down first");
+        o.vcx.update(|_, cx| {
+            let events = cx.global::<GlobalShellEvents>().0.clone();
+            events.update(cx, |_, cx| {
+                cx.emit(FilterChanged {
+                    tab: Tab::Processes,
+                    text: "proc-1".into(),
+                });
+            });
+        });
+        redraw(o.vcx);
+        let generation = sent(&o.engine).last().expect("query sent").generation;
+        publish(&o.engine, rows_500(3, false), generation);
+        redraw(o.vcx);
+        redraw(o.vcx);
+        assert_eq!(first_row(&mut o), 0, "first match is visible");
     }
 
     /// Scrolling frames over a 2,000-row view call `tr` zero times (rendering budget).
