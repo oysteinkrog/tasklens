@@ -958,3 +958,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-18 crw.59: Overview weights clamp to 0.001..=1000 with a warn, bad values drop only their part; a type error in [performance.overview] must not reset other [performance] settings.
 - 2026-10-18 gma.45 and fut.23 shared dialog test files; footer tests belong to fut.23, gma.45 keeps only the Affinity fix.
 - 2026-10-18 crw.61 accepted; ui_performance menu tests now right-click the panel padding (centre hit a Details value after 9o0.41).
+- 2026-10-18 gma.46 (g): a percent that rounds to 0.0 prints '0%' (proc.md:70); my first ruling said '0.0%' and was wrong.
