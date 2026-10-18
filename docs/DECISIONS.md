@@ -4,6 +4,14 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-17
 
+### D-025: Overview box modes and inner splitters
+
+Oystein (2026-10-18): every Overview box needs its own layout modes and draggable parts. For
+example, the Memory bars are too big compared to their graphs when the box is resized, and the
+GPU box should be able to show a chart for each engine (3D, encode, decode), not only the main
+load. Spec in UI-PRF-019: a "Layout" submenu per box, modes per kind, one inner splitter where a
+mode has two parts, all saved per box.
+
 ### D-024: CPU box splitter and smoothed core rows
 
 Oystein (2026-10-18, after trying the layout editor): the gap between the CPU chart and the core

@@ -588,6 +588,27 @@ Minimum tile 200 × 120; when the window is too small for that, cols shrink unti
 - **Phase**: P2.
 - **Decided here**: the weight model, kind minimums, row wrap instead of sideways scroll, drop thirds, keyboard keys, the toolbar and the toast text.
 
+
+### UI-PRF-019 Overview box modes and inner splitters
+
+- **Implements**: owner decision D-025 (2026-10-18). Builds on UI-PRF-017 (box contents) and UI-PRF-018 (layout, splitters, saved layout).
+- **Box menu**: right-click on a box's title line opens the box menu: a "Layout" submenu with one radio item per mode below, then "Reset Box" (the box's default mode and split), then a separator and the page menu items of UI-PRF-015. The same "Layout" submenu is on a gear `TlButton` (ghost, 16 px icon `settings-2`, tooltip "Box layout") at the right end of the title line in Edit Layout mode. Right-click elsewhere in a box keeps the page menu.
+- **Saved per box**: each box entry in `[performance.overview]` gains `mode` (the mode id below) and `split` (0.2..=0.8, 3 decimals). A missing or unknown mode loads as the kind's default, and a missing or out-of-range split as the mode's default, with the layout's single warn line. The CPU box's `cpu_split` from crw.63 loads as `split` and is written back as `split`.
+- **Inner splitter**: every mode with two parts has one 8 px splitter between them that works like the UI-PRF-018 gaps (cursor, 2 px `accent` hover line after 150 ms, drag clamped so each part keeps its minimum, double-click resets to the mode's default split, saved when the drag ends). Side-by-side parts get a vertical splitter, stacked parts a horizontal one. A part's minimum is 120 px unless a mode says otherwise.
+- **Modes**:
+  - **CPU**: `chart_cores` (default; total chart, then core rows; side by side at 560 px or more, else stacked; default split 0.4), `chart` (total chart only, with kernel time), `cores` (core rows only), `core_charts` (one small filled chart per logical CPU in a grid, cells at least 120 × 60 px, each with "C{n}" and the smoothed percent; the grid takes as many columns as fit). Core values use the smoothing of UI-PRF-018.
+  - **Memory**: `rows` (default; the five rows of UI-PRF-017) with a vertical splitter between the text and meter part and the sparkline column, so the sparklines can be wider than 96 px (default split puts the sparkline column at 96 px; the text part keeps at least 128 px); `chart_rows` (a `MEM_USED` chart over the box range on top, the five rows below without sparklines, horizontal splitter, default split 0.5); `chart` (the used chart with a stacked composition fill of In use, Cached and Available, no rows).
+  - **GPU**: `chart_engines` (default; the UI-PRF-017 sections) with a horizontal splitter between the utilization chart and the engine rows; `engine_charts` (one chart per shown engine of the first GPU, such as 3D, Copy, Video Encode and Video Decode, in a grid of cells at least 160 × 70 px with the engine name and percent, then the VRAM row; a second GPU gets its own grid when it fits, else "+n more"); `chart` (utilization chart and VRAM row only).
+  - **Disk**: `rows` (default; UI-PRF-017) with a vertical splitter between the label part and the sparkline part; `disk_charts` (one read and write chart per shown disk, read and write as two lines in one chart, in a grid of cells at least 200 × 80 px, header with name and active percent); `total_chart` (one chart of the summed read and write rates over all shown disks).
+  - **Net**: `columns` (default; Download and Upload, UI-PRF-017) with a vertical splitter between the two columns; `combined` (one chart with download and upload as two lines, then the Peak and Total rows for both); `adapter_charts` (one combined chart per counted adapter in a grid of cells at least 200 × 80 px).
+  - **Top processes**: `list` only; no splitter.
+- **Render contract**: as UI-PRF-017. A mode change rebuilds that box only. Every chart in every mode is a cached `ChartView` built only when its series version or its size changes. Grid modes build their cells once per cell count and size, not per tick.
+- **Demand**: unchanged per kind, plus per-engine GPU series in `engine_charts` and per-adapter net series in `adapter_charts` (the series already exist for the device pages).
+- **Build**: `overview/box_menu.rs` (box menu and gear), `overview/inner_split.rs` (one inner splitter type shared by all boxes), the mode enums beside each box in its `*_box.rs`, and the settings conversion in `overview/layout.rs` and `tl-model` settings.
+- **Tests**: per kind, a test that each mode renders its parts at 1200 × 900 (`overview_<kind>_modes_render`), `overview_box_menu_switches_mode_and_saves`, `overview_inner_split_drag_and_reset`, `overview_box_mode_unknown_loads_default`, `overview_gpu_engine_charts_one_per_engine`.
+- **Phase**: P2.
+- **Decided here**: the mode list, ids and defaults, the box menu and gear, the per-box `mode` and `split` keys, the inner splitter rules.
+
 ---
 
 ## Part C: device pages
