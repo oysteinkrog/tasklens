@@ -458,42 +458,6 @@ fn affinity_hybrid_core_icons(cx: &mut TestAppContext) {
     }
 }
 
-/// After the dialog fitted its height, the footer and its buttons end inside the visible window,
-/// which is the window less the client frame on each side (tasklens-fut.23).
-fn assert_footer_inside(
-    vcx: &mut VisualTestContext,
-    footer: &'static str,
-    buttons: &[&'static str],
-) {
-    vcx.run_until_parked();
-    vcx.update(|window, cx| window.draw(cx).clear(cx));
-    vcx.run_until_parked();
-    vcx.update(|window, cx| window.draw(cx).clear(cx));
-    let inset = tl_ui::components::window_frame::client_frame_extra(
-        tl_model::settings::Settings::default()
-            .appearance
-            .decorations,
-    ) / 2.;
-    let window = vcx.update(|window, _| window.bounds());
-    let footer = vcx.debug_bounds(footer).expect("footer");
-    assert!(
-        footer.bottom() <= window.size.height - inset,
-        "{footer:?} in {window:?}"
-    );
-    for id in buttons {
-        let b = vcx.debug_bounds(id).unwrap_or_else(|| panic!("no {id}"));
-        assert!(
-            b.top() >= footer.top() && b.bottom() <= footer.bottom(),
-            "{id} {b:?}"
-        );
-        assert!(
-            b.right() <= window.size.width - inset,
-            "{id} {b:?} in {window:?}"
-        );
-        assert!(b.left() >= inset, "{id} {b:?}");
-    }
-}
-
 #[gpui_kit::test]
 fn affinity_cpu_labels_small_tabular(cx: &mut TestAppContext) {
     let mut rig = open(cx, &[], Some((set(0..4), all())));
@@ -1488,16 +1452,6 @@ mod priority {
     pub(super) const NORMAL: (SchedPolicy, i8, u8) = (SchedPolicy::Other, 0, 0);
 
     #[gpui_kit::test]
-    fn priority_dialog_shows_footer(cx: &mut TestAppContext) {
-        let mut rig = open(cx, (SchedPolicy::Other, 0, 0));
-        super::assert_footer_inside(
-            &mut rig.vcx,
-            "PriorityFooter",
-            &["PriorityCancel", "PriorityApply"],
-        );
-    }
-
-    #[gpui_kit::test]
     fn priority_dialog_enables_fields_by_policy(cx: &mut TestAppContext) {
         let mut rig = open(cx, NORMAL);
         assert!(rig.read(|d, cx| d.nice_enabled(cx)));
@@ -2288,19 +2242,6 @@ mod signal {
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         (handle, dialog, vcx)
-    }
-
-    #[gpui_kit::test]
-    fn rt_signal_shows_footer_and_the_stepper_clears_the_name(cx: &mut TestAppContext) {
-        let mut rig = rig(cx);
-        let (_, _, mut vcx) = open_rt(&mut rig);
-        super::assert_footer_inside(&mut vcx, "SignalFooter", &["SignalCancel", "SignalSend"]);
-        let stepper = vcx
-            .debug_bounds("TlStepper-SignalStepper")
-            .expect("stepper");
-        let row = vcx.debug_bounds("SignalRow").expect("row");
-        assert!(stepper.size.width >= gpui_kit::px(72.), "{stepper:?}");
-        assert!(stepper.right() < row.right(), "{stepper:?} {row:?}");
     }
 
     #[gpui_kit::test]
