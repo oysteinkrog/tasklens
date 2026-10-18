@@ -4093,9 +4093,13 @@ mod smartctl_fallback {
         let mut r = open_smart_rig(cx);
         publish(&mut r, SmartKind::NeedsFallback, None);
         let (mut vcx, _view) = open_window(&mut r);
+        // The window opens with room for a client frame; without the frame the content would get
+        // that room too. Size it so the content is the default 760 x 520 either way.
         let inset = vcx.update(|window, cx| frame_bottom(window, cx));
+        vcx.simulate_resize(size(px(760.) + inset * 2., px(520.) + inset * 2.));
+        redraw(&mut vcx);
         let width = vcx.update(|window, _| window.viewport_size().width);
-        assert_eq!(width, px(760.) + inset * 2., "default size");
+        assert_eq!(width - inset * 2., px(760.), "default content width");
         let (header, button, rows) = header_layout(&mut vcx, "SmartReadSmartctl");
         assert_clear(header, button, &rows);
         assert!(rows[2].top() > rows[0].top(), "2 columns: {rows:?}");
