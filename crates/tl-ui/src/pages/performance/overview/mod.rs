@@ -8,7 +8,9 @@
 //!
 //! The layout comes from `[performance.overview]` (UI-PRF-018), the default when there is none.
 //! [`procs_box`] is the opt-in Top processes box: it is built only while the layout places it,
-//! and only then does the page ask for the process sweep (`process_top`).
+//! and only then does the page ask for the process sweep (`process_top`). [`splitter`] resizes
+//! boxes and rows by dragging the gaps; [`edit`] is Edit Layout mode, which moves, hides and
+//! adds boxes.
 //!
 //! Render contract (D-022, crw.34): the page never notifies on a sample. Each box is a cached
 //! child view that notifies only when its own text or bars change. The page re-renders on a
@@ -671,7 +673,7 @@ impl Focusable for OverviewPage {
 
 impl OverviewPage {
     /// The page's action handlers: Edit Layout mode and its keys (UI-PRF-018).
-    fn with_actions<E: InteractiveElement>(el: E, cx: &mut Context<Self>) -> E {
+    fn with_actions<E: gpui_kit::InteractiveElement>(el: E, cx: &mut Context<Self>) -> E {
         el.on_action(cx.listener(Self::on_edit_layout))
             .on_action(cx.listener(Self::on_edit_done))
             .on_action(cx.listener(Self::on_reset_layout))

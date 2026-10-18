@@ -2143,30 +2143,43 @@ mod bottom {
 
 #[cfg(feature = "test-hooks")]
 mod page {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::time::Duration;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-        MouseUpEvent, ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext,
-        VisualTestContext, Window, div, point, px, size,
+        AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+        Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render,
+        StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
+        size,
     };
     use tl_model::client::EngineClient;
     use tl_model::demand::{CpuDemand, Demand};
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::settings::{
+        AppearanceSettings, OverviewBoxSetting, OverviewLayoutSetting, OverviewRowSetting,
+        Settings, ThemeSettings, UiState,
+    };
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
     use tl_ui::anim::AnimationDriver;
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::chart::ChartView;
     use tl_ui::components::kv_grid;
+    use tl_ui::components::toast::ToastQueue;
     use tl_ui::demand::DemandAggregator;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::DeviceKey;
+    use tl_ui::pages::performance::actions::{
+        PerfOverviewEditLayout, PerfOverviewResetLayout, bind_keys_performance,
+    };
+    use tl_ui::pages::performance::overview::edit::{
+        DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, TOOLBAR_ID, hide_button_id, title_handle_id,
+    };
     use tl_ui::pages::performance::overview::layout::{BoxKind, OverviewLayout, place};
     use tl_ui::pages::performance::overview::{BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage};
     use tl_ui::pages::performance::page::DevicePage as _;
@@ -2179,13 +2192,20 @@ mod page {
     struct Host {
         page: Option<Entity<OverviewPage>>,
         sidebar: Entity<DeviceSidebar>,
+        /// Esc presses that reached the global Esc rule.
+        escapes: Rc<Cell<u32>>,
     }
 
     impl Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let escapes = Rc::clone(&self.escapes);
             // The sidebar draws out of the way, so its demand part carries this window as in
             // the main window.
             div()
+                .key_context(tl_ui::actions::GLOBAL_CONTEXT)
+                .on_action(move |_: &tl_ui::actions::EscapeChain, _, _| {
+                    escapes.set(escapes.get() + 1);
+                })
                 .relative()
                 .size_full()
                 .children(
@@ -2281,6 +2301,9 @@ mod page {
         hub: Entity<SnapshotHub>,
         vcx: &'a mut VisualTestContext,
         version: u64,
+        escapes: Rc<Cell<u32>>,
+        /// The toast queue of a window opened by [`open_rooted`].
+        toasts: Option<Entity<ToastQueue>>,
         _driver: Entity<AnimationDriver>,
     }
 
@@ -2293,6 +2316,22 @@ mod page {
 
     /// [`open`] with `smooth_graphs` set to `smooth`.
     fn open_with(cx: &mut TestAppContext, gpu: bool, w: f32, h: f32, smooth: bool) -> Rig<'_> {
+        open_in(cx, gpu, w, h, smooth, false)
+    }
+
+    /// [`open`] in a window with the kit `Root` and a toast queue.
+    fn open_rooted(cx: &mut TestAppContext, gpu: bool, w: f32, h: f32) -> Rig<'_> {
+        open_in(cx, gpu, w, h, false, true)
+    }
+
+    fn open_in(
+        cx: &mut TestAppContext,
+        gpu: bool,
+        w: f32,
+        h: f32,
+        smooth: bool,
+        rooted: bool,
+    ) -> Rig<'_> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| s.devices = Arc::new(catalog(gpu)));
         let client: Arc<dyn EngineClient> = engine.clone();
@@ -2321,7 +2360,9 @@ mod page {
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
         let (hub2, demand2) = (hub.clone(), demand.clone());
-        let (host, vcx) = cx.add_window_view(move |_, cx| {
+        let escapes = Rc::new(Cell::new(0));
+        let host_escapes = Rc::clone(&escapes);
+        let build = move |cx: &mut Context<Host>| {
             let sidebar = cx.new(|cx| DeviceSidebar::new(hub2.clone(), demand2.clone(), cx));
             let page = cx.new(|cx| {
                 OverviewPage::new(
@@ -2335,8 +2376,26 @@ mod page {
             Host {
                 page: Some(page),
                 sidebar,
+                escapes: host_escapes,
             }
-        });
+        };
+        let (host, vcx, toasts) = if rooted {
+            cx.update(tl_ui::components::toast::init);
+            let slot: Rc<RefCell<Option<Entity<Host>>>> = Rc::default();
+            let out = Rc::clone(&slot);
+            let window = cx.add_window(move |window, cx| {
+                let host = cx.new(build);
+                *out.borrow_mut() = Some(host.clone());
+                gpui_kit::base::Root::new(host, window, cx)
+            });
+            let vcx = VisualTestContext::from_window(window.into(), cx).into_mut();
+            let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.))));
+            let host = slot.borrow_mut().take().expect("host");
+            (host, vcx, Some(queue))
+        } else {
+            let (host, vcx) = cx.add_window_view(move |_, cx| build(cx));
+            (host, vcx, None)
+        };
         vcx.simulate_scale_factor_change(1.0);
         vcx.simulate_resize(size(px(w), px(h)));
         let driver = vcx.update(|window, cx| {
@@ -2356,6 +2415,8 @@ mod page {
             hub,
             vcx,
             version: 0,
+            escapes,
+            toasts,
             _driver: driver,
         }
     }
@@ -2860,6 +2921,173 @@ mod page {
             .simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::none());
         draw(r.vcx);
         assert!(r.vcx.debug_bounds("perf-overview-splitter-line").is_none());
+    }
+
+    impl Rig<'_> {
+        /// Turns Edit Layout mode on the way the page menu does: the action on the page.
+        fn edit_layout(&mut self) {
+            self.page_action(&PerfOverviewEditLayout);
+            assert!(self.editing());
+        }
+
+        fn page_action(&mut self, action: &dyn gpui_kit::Action) {
+            let page = self.page.clone();
+            self.vcx.update(|window, cx| {
+                let focus = page.read(cx).focus_handle(cx);
+                focus.dispatch_action(action, window, cx);
+            });
+            draw(self.vcx);
+        }
+
+        fn editing(&mut self) -> bool {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| page.read(cx).is_editing())
+        }
+
+        fn kinds(&mut self) -> Vec<Vec<BoxKind>> {
+            self.layout()
+                .rows
+                .iter()
+                .map(|r| r.boxes.iter().map(|b| b.kind).collect())
+                .collect()
+        }
+
+        fn bounds_of(&mut self, id: String) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+            let id: &'static str = Box::leak(id.into_boxed_str());
+            self.vcx.debug_bounds(id).expect(id)
+        }
+
+        /// Drags `kind` by the middle of its title line to `to`, through one point halfway.
+        fn drag_title(&mut self, kind: BoxKind, to: gpui_kit::Point<gpui_kit::Pixels>) {
+            let from = center(self.bounds_of(title_handle_id(kind)));
+            self.press(from, 1);
+            self.move_to(point((from.x + to.x) / 2., (from.y + to.y) / 2.));
+            self.move_to(to);
+        }
+
+        /// A click on `kind`'s Hide box button.
+        fn hide(&mut self, kind: BoxKind) {
+            let at = center(self.bounds_of(hide_button_id(kind)));
+            self.press(at, 1);
+            self.release(at);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn overview_edit_drag_swaps_boxes(cx: &mut TestAppContext) {
+        use BoxKind::{Cpu, Disk, Gpu, Memory, Net};
+        let mut r = open(cx, true, 1200., 900.);
+        assert!(r.vcx.debug_bounds(TOOLBAR_ID).is_none());
+        r.edit_layout();
+        let toolbar = r.vcx.debug_bounds(TOOLBAR_ID).expect("toolbar");
+        assert_eq!(f32::from(toolbar.size.height), 40.);
+        // Every box has its title line handle and a 16 px Hide box button.
+        for kind in [Cpu, Memory, Gpu, Disk, Net] {
+            r.bounds_of(title_handle_id(kind));
+            let hide = r.bounds_of(hide_button_id(kind));
+            assert_eq!(f32::from(hide.size.width), 16.);
+        }
+        let disk = center(r.vcx.debug_bounds(box_id(Disk)).expect("disk"));
+        r.drag_title(Cpu, disk);
+        assert!(r.vcx.debug_bounds(DROP_SWAP_ID).is_some(), "swap border");
+        assert!(r.vcx.debug_bounds(GHOST_ID).is_some(), "the dragged copy");
+        assert_eq!(r.saved(), None, "nothing is saved during the drag");
+        r.release(disk);
+        assert!(r.vcx.debug_bounds(GHOST_ID).is_none());
+        assert_eq!(r.kinds(), [vec![Disk, Memory], vec![Gpu, Cpu, Net]]);
+        let layout = r.layout();
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), layout);
+        assert!(r.editing(), "the mode stays on");
+        // Disk is now at the top left, under the 40 px toolbar.
+        let disk = r.vcx.debug_bounds(box_id(Disk)).expect("disk");
+        assert_eq!((f32::from(disk.left()), f32::from(disk.top())), (16., 56.));
+    }
+
+    #[gpui_kit::test]
+    fn overview_edit_drop_between_rows_makes_row(cx: &mut TestAppContext) {
+        use BoxKind::{Cpu, Disk, Gpu, Memory, Net};
+        let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
+        let gap = center(r.gap("perf-overview-splitter-row-0"));
+        r.drag_title(Memory, gap);
+        let line = r.vcx.debug_bounds(DROP_LINE_ID).expect("drop line");
+        assert_eq!(f32::from(line.size.height), 3.);
+        assert!(r.vcx.debug_bounds(DROP_SWAP_ID).is_none());
+        r.release(gap);
+        assert_eq!(r.kinds(), [vec![Cpu], vec![Memory], vec![Gpu, Disk, Net]]);
+        let layout = r.layout();
+        let heights: Vec<f32> = layout.rows.iter().map(|r| r.height).collect();
+        assert_eq!(heights, [3., 1., 2.], "the new row has height 1");
+        assert_eq!(layout.rows[1].boxes[0].width, 1.);
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), layout);
+        // Reset Layout restores the default and keeps the mode on.
+        r.page_action(&PerfOverviewResetLayout);
+        assert_eq!(r.layout(), OverviewLayout::btop_default());
+        assert!(r.editing());
+    }
+
+    #[gpui_kit::test]
+    fn overview_edit_hide_last_box_refused(cx: &mut TestAppContext) {
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.performance.overview = Some(OverviewLayoutSetting {
+                    rows: vec![OverviewRowSetting {
+                        height: 1.,
+                        boxes: ["cpu", "memory"]
+                            .map(|kind| OverviewBoxSetting {
+                                kind: kind.into(),
+                                width: 1.,
+                            })
+                            .to_vec(),
+                    }],
+                });
+            });
+        });
+        draw(r.vcx);
+        r.edit_layout();
+        r.hide(BoxKind::Memory);
+        assert_eq!(r.kinds(), [vec![BoxKind::Cpu]]);
+        r.hide(BoxKind::Cpu);
+        assert_eq!(r.kinds(), [vec![BoxKind::Cpu]], "the last box stays");
+        let queue = r.toasts.clone().expect("a toast queue");
+        let shown = r.vcx.update(|_, cx| queue.read(cx).visible_texts());
+        assert_eq!(shown, ["At least one box must stay on the Overview page"]);
+        assert_eq!(
+            OverviewLayout::from_setting(r.saved().as_ref()),
+            r.layout(),
+            "the hide of Memory was saved"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn overview_edit_esc_leaves_mode(cx: &mut TestAppContext) {
+        use BoxKind::{Cpu, Disk, Gpu, Net};
+        let mut r = open(cx, true, 1200., 900.);
+        r.vcx.update(|_, cx| {
+            tl_ui::actions::bind_keys_global(cx);
+            bind_keys_performance(cx);
+        });
+        r.edit_layout();
+        // A press on a title line focuses that box; Alt+Left moves it one slot.
+        let title = center(r.bounds_of(title_handle_id(Disk)));
+        r.press(title, 1);
+        r.release(title);
+        assert_eq!(r.saved(), None, "a click without a move changes nothing");
+        r.vcx.simulate_keystrokes("alt-left");
+        draw(r.vcx);
+        assert_eq!(r.kinds()[1], [Disk, Gpu, Net]);
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        assert!(!r.editing());
+        assert!(r.vcx.debug_bounds(TOOLBAR_ID).is_none());
+        assert_eq!(r.escapes.get(), 0, "Esc did not reach the global Esc rule");
+        // Out of the mode, Esc goes to the global rule.
+        r.vcx.simulate_keystrokes("escape");
+        assert_eq!(r.escapes.get(), 1);
+        // The boxes are back at the page top.
+        let cpu = r.vcx.debug_bounds(box_id(Cpu)).expect("cpu");
+        assert_eq!(f32::from(cpu.top()), 16.);
     }
 
     #[gpui_kit::test]

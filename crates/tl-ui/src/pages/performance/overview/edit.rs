@@ -18,8 +18,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, v_flex};
 use gpui_kit::{
     AnyElement, App, Bounds, Context, Div, FocusHandle, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px, size,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, SharedString, Styled as _,
+    Window, canvas, div, point, px, size,
 };
 use smallvec::{SmallVec, smallvec};
 
