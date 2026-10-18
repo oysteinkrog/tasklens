@@ -13,18 +13,14 @@ use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::settings::{EngineSettings, Settings, UiState};
 use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
-use tl_ui::{AppEnv, BuildInfo, OpenMode, StartOptions, UiInit, UiLaunch};
+use tl_ui::{AppEnv, OpenMode, StartOptions, UiInit, UiLaunch};
 use tracing::info;
 
 /// Opens the gallery window and runs GPUI until it closes. Returns the exit code (always 0).
 pub fn run() -> i32 {
     let (_app_requests_tx, app_requests) = async_channel::bounded(1);
     let env = AppEnv {
-        build: BuildInfo {
-            version: env!("CARGO_PKG_VERSION"),
-            git_hash: env!("TASKLENS_GIT_SHA"),
-            ..BuildInfo::default()
-        },
+        build: crate::build_info::build_info(),
         ..AppEnv::test()
     };
     let exit = tl_ui::run(UiLaunch {

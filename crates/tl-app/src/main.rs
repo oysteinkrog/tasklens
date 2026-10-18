@@ -11,6 +11,7 @@ mod atomic;
 mod autostart;
 #[cfg(feature = "bench")]
 mod bench_main;
+mod build_info;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
 #[cfg(feature = "bench")]
@@ -42,7 +43,7 @@ use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
 use tl_model::settings::{EngineSettings, StartTab};
 use tl_ui::app::ToastKindTag;
-use tl_ui::{AppEnv, BuildInfo, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
+use tl_ui::{AppEnv, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
 use tracing::{error, info, warn};
 
 use crate::args::TabArg;
@@ -253,11 +254,7 @@ fn main() -> ExitCode {
         config_dir: paths.config_dir.clone(),
         state_dir: paths.state_dir.clone(),
         logs_dir: paths.logs_dir(),
-        build: BuildInfo {
-            version: env!("CARGO_PKG_VERSION"),
-            git_hash: env!("TASKLENS_GIT_SHA"),
-            ..BuildInfo::default()
-        },
+        build: build_info::build_info(),
         pending_crash: None,
         mark_crash_seen: Arc::new(|| {}),
         write_settings_now: Arc::new(move |s| write_store.write_settings_now(s)),
