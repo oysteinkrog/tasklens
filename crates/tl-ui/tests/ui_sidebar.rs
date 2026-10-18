@@ -1566,10 +1566,13 @@ mod sidebar {
                 cpu: CpuDemand::Total,
                 memory: true,
                 disks: true,
+                // No interface is listed yet, and the engine lists them only while they are
+                // demanded (o55.43 j).
+                nets: true,
                 ..Demand::default()
             }
         );
-        assert!(!merged.nets && !merged.gpus && !merged.sensors && !merged.cpu_fast);
+        assert!(!merged.gpus && !merged.sensors && !merged.cpu_fast);
     }
 
     /// Advances past the demand coalesce delay and returns the merge and every `set_demand`.
