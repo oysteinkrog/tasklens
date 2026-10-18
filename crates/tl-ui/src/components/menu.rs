@@ -1562,7 +1562,7 @@ impl TlMenuPopup {
                 .id(ix)
                 .test_support()
                 .flex_none()
-                .h(px(1.))
+                .h(px(1. / window.scale_factor()))
                 .my(m.sp[2])
                 .mx(m.sp[4])
                 .bg(t.divider)

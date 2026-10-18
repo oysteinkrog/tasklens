@@ -3375,6 +3375,34 @@ fn mini_window_item_dispatch(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn graphs_menu_is_wide_and_separator_is_a_visible_hairline(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    set_gpus(&mut r, 1);
+    open_graphs(r.cx);
+    let scale = r.cx.update(|window, _| window.scale_factor());
+    let seps: Vec<_> = entries(r.cx)
+        .into_iter()
+        .filter(|e| e.role().is_none() && e.label().is_none())
+        .collect();
+    assert!(!seps.is_empty(), "the Graphs menu has a separator");
+    for sep in &seps {
+        let b = sep.bounds();
+        assert!(b.size.width > px(50.), "a separator spans the menu: {b:?}");
+        assert!(
+            (b.size.height - px(1. / scale)).abs() < px(0.01),
+            "one physical pixel high: {b:?}"
+        );
+    }
+    let widest =
+        r.cx.update(|window, _| snapshots(window))
+            .into_iter()
+            .filter(|s| s.role() == Some(Role::Menu))
+            .map(|s| s.bounds().size.width)
+            .fold(px(0.), |a, b| a.max(b));
+    assert!(widest > px(400.), "the Graphs submenu widens: {widest:?}");
+}
+
+#[gpui_kit::test]
 fn keep_detached_toggle(cx: &mut TestAppContext) {
     let mut r = rig(cx);
     set_gpus(&mut r, 1);

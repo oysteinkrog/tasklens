@@ -22,7 +22,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::gpui::private::schemars::JsonSchema;
-use gpui_kit::{Action, App, Entity, FocusHandle, SharedString, Window, gpui};
+use gpui_kit::{Action, App, Entity, FocusHandle, SharedString, Window, gpui, px};
 use serde::Deserialize;
 use tl_model::command::Tab;
 use tl_model::devices::DeviceKind;
@@ -563,6 +563,10 @@ pub fn has_gpu(cx: &App) -> bool {
     })
 }
 
+/// Graphs submenu width limits at 100% scale: wide enough for the keep-detached label.
+const GRAPHS_MENU_MIN_W: f32 = 440.;
+const GRAPHS_MENU_MAX_W: f32 = 480.;
+
 /// The seven minigraph checks, a separator and "Reset Minigraph Layout". The GPU, VRAM and GPU
 /// Temperature checks are disabled with "No GPU found" when [`has_gpu`] is false. The
 /// separator is followed by "Keep detached graphs open when closing main window" (E21-034) and
@@ -578,7 +582,10 @@ fn graphs_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
         };
     }
     let keep = TlSettings::settings(cx).graphs.keep_detached_on_close;
-    menu.separator()
+    // The longest label ("Keep detached graphs open when closing main window") fits on one line.
+    menu.min_w(px(GRAPHS_MENU_MIN_W))
+        .max_w(px(GRAPHS_MENU_MAX_W))
+        .separator()
         .check_item(
             tr(cx, "shell-menu-graphs-keep-detached"),
             keep,
