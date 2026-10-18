@@ -605,11 +605,11 @@ impl TreeTableDelegate for FdsDelegate {
         }
     }
 
-    /// The Name column marks U+FFFD and anchors the keyboard menu.
     fn flat_names(&self) -> bool {
         true
     }
 
+    /// The Name column marks U+FFFD and anchors the keyboard menu.
     fn name_column(&self) -> Option<FdColumn> {
         Some(FdColumn::Name)
     }
