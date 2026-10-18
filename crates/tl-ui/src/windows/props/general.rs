@@ -3308,9 +3308,12 @@ fn verify_row(
     h_flex()
         .debug_selector(|| "GeneralTab-verify-row".into())
         .h(height)
-        .pl(label_width)
+        .w_full()
+        .min_w_0()
         .items_center()
-        .child(tab_slot(TAB_VERIFY, b))
+        // The spacer gives way when the column is narrower than label plus button.
+        .child(div().w(label_width).min_w_0().flex_shrink(1.))
+        .child(tab_slot(TAB_VERIFY, b).flex_none())
 }
 
 /// `child` at tab index `index` of the tab's tab group. The slot itself is not a tab stop.

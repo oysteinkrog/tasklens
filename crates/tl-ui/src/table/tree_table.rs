@@ -174,6 +174,18 @@ pub trait TreeTableDelegate: 'static + Sized {
         false
     }
 
+    /// The action the "Clear filter" button of the empty state dispatches. The shell's
+    /// `ClearFilter` unless the owner has its own filter box.
+    fn empty_clear_action(&self) -> Box<dyn gpui_kit::Action> {
+        Box::new(ClearFilter)
+    }
+
+    /// True for a flat table: the Name column reserves no chevron box and its text lines up with
+    /// the header label.
+    fn flat_names(&self) -> bool {
+        false
+    }
+
     fn header_lines(&self) -> HeaderLines {
         HeaderLines::Two
     }
@@ -843,6 +855,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     self.delegate.name_weight(ix),
                     depth,
                     expandable,
+                    self.delegate.flat_names(),
                     flags,
                     &ctx,
                     tips.then_some(row_key),
@@ -1421,10 +1434,13 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     NameIcon::None => 0.0,
                     _ => ICON_GAP + icon_px(cell.icon_size),
                 };
-                layout.offsets()[pos]
-                    + name_indent(self.delegate.row_depth(ix), s)
-                    + px((CHEVRON + icon + ICON_GAP) * s)
-                    + scroll.x
+                let start = if self.delegate.flat_names() {
+                    m.sp[4] + px(icon * s)
+                } else {
+                    name_indent(self.delegate.row_depth(ix), s)
+                        + px((CHEVRON + icon + ICON_GAP) * s)
+                };
+                layout.offsets()[pos] + start + scroll.x
             }
             None => m.sp[4],
         };
@@ -2453,7 +2469,9 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
                     .w_full()
                     .flex()
                     .justify_center()
-                    .child(TlEmptyState::new(text).clear_filter(Box::new(ClearFilter))),
+                    .child(
+                        TlEmptyState::new(text).clear_filter(self.delegate.empty_clear_action()),
+                    ),
             );
         } else if let Some(text) = empty {
             let mut label = div();

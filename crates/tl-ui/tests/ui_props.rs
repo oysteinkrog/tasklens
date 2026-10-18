@@ -256,6 +256,25 @@ fn panels(cx: &mut VisualTestContext) -> [Bounds<Pixels>; 3] {
 }
 
 #[gpui_kit::test]
+fn general_verify_button_stays_inside_its_column(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    draw(cx);
+    let [_, middle, right] = panels(cx);
+    let button = cx
+        .debug_bounds("TlButton-general-verify")
+        .expect("button drawn");
+    assert!(
+        button.right() <= middle.right(),
+        "button right {:?} passes the column right {:?}",
+        button.right(),
+        middle.right()
+    );
+    assert!(button.right() <= right.left(), "no overlap with column 3");
+}
+
+#[gpui_kit::test]
 fn general_three_columns_at_900(cx: &mut TestAppContext) {
     // Body 900 - 2 × 12 = 876 px.
     let (view, cx) = host(cx, 900.);
@@ -3966,6 +3985,39 @@ mod window {
             "Environment unavailable (insufficient privileges)"
         );
     }
+    #[gpui_kit::test]
+    fn env_filter_no_match_has_clear_button(cx: &mut TestAppContext) {
+        let mut rig = env_rig(cx, env_vars());
+        env_filter(&mut rig, "zzzz");
+        assert!(env_names(&mut rig).is_empty());
+        let button = rig
+            .vcx
+            .debug_bounds("TlButton-TlEmptyState-clear-filter")
+            .expect("Clear filter button drawn");
+        rig.vcx.simulate_click(button.center(), Modifiers::none());
+        rig.vcx.executor().advance_clock(Duration::from_millis(200));
+        draw(&mut rig.vcx);
+        assert_eq!(env_names(&mut rig).len(), 3, "the click cleared the filter");
+    }
+
+    #[gpui_kit::test]
+    fn restricted_tabs_show_no_count(cx: &mut TestAppContext) {
+        let rig = env_rig(cx, env_vars());
+        let view = props(cx, rig.handle);
+        assert_eq!(
+            cx.read(|cx| view.read(cx).tab_text(DetailTab::Environment)),
+            "Environment [3]"
+        );
+        publish_detail(cx, &rig.engine, 4321, |d| {
+            d.tabs[DetailTab::Environment.index()].validity = Validity::Restricted;
+        });
+        assert_eq!(
+            cx.read(|cx| view.read(cx).tab_text(DetailTab::Environment)),
+            "Environment",
+            "no count while the source is restricted"
+        );
+    }
+
     // ---- Strings tab (E23-021, UI-PWN-017) ----
 
     use tl_model::details::{ScanId, ScanPhase, StringEncoding, StringHit, StringScanState};
@@ -4816,6 +4868,26 @@ mod threads {
     }
 
     #[gpui_kit::test]
+    fn threads_name_cells_line_up_with_their_header(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        feed(&view, cx, Some(threads(sample())));
+        let header = cx
+            .debug_bounds("TlTreeTableHeader-label-name")
+            .expect("Name header drawn");
+        let cell = cx
+            .debug_bounds("TlNameCell-primary")
+            .expect("Name cell drawn");
+        // The header label box includes its 8 px left padding; the text starts inside it.
+        let off = (cell.left() - (header.left() + px(8.))).abs();
+        assert!(off <= px(1.), "Name cell sits {off:?} from its header");
+        let tid = cx
+            .debug_bounds("TlTreeTableHeader-label-tid")
+            .expect("Thread ID header drawn");
+        let table = cx.debug_bounds("TlTreeTable").map_or(px(0.), |b| b.left());
+        assert!(tid.left() >= table, "Thread ID header is not clipped");
+    }
+
+    #[gpui_kit::test]
     fn threads_loading_and_empty_texts(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);
         assert_eq!(empty_text(&view, cx).as_deref(), Some("Loading threads..."));
@@ -5577,6 +5649,51 @@ mod security {
         assert_eq!(value(&view, cx, SecField::RiskyCaps), "SYS_ADMIN");
         let tip = cx.update(|_, cx| view.read(cx).tab.read(cx).tooltip(SecField::RiskyCaps));
         assert_eq!(tip.as_deref(), Some(RISKY_TOOLTIP));
+    }
+
+    #[gpui_kit::test]
+    fn security_admin_groups_list_plain_admin_first(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.groups = Arc::from(vec![
+            group("docker", 965, false, true),
+            group("audio", 995, false, false),
+            group("wheel", 998, true, false),
+        ]);
+        feed(&view, cx, d);
+        assert_eq!(
+            value(&view, cx, SecField::AdminGroups),
+            "wheel, docker (root-equivalent)"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn security_tables_share_height_by_row_count(cx: &mut TestAppContext) {
+        let (view, cx) = open(cx);
+        let mut d = detail(ids(1000, 1000), names("oystein", "oystein"));
+        d.caps = Arc::from(vec![CapRow {
+            cap: 21,
+            effective: true,
+            permitted: true,
+            inheritable: false,
+            bounding: true,
+            ambient: false,
+            risky: true,
+        }]);
+        d.groups = Arc::from(
+            (0..12)
+                .map(|i| group(&format!("group{i}"), 2000 + i, false, false))
+                .collect::<Vec<_>>(),
+        );
+        feed(&view, cx, d);
+        let caps = cx.debug_bounds("SecurityCapabilities").expect("caps");
+        let groups = cx.debug_bounds("SecurityGroups").expect("groups");
+        assert!(
+            groups.size.height > caps.size.height * 2.,
+            "groups {:?} high, capabilities {:?}",
+            groups.size.height,
+            caps.size.height
+        );
     }
 
     #[gpui_kit::test]

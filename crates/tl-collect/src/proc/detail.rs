@@ -798,8 +798,7 @@ pub struct MapRegionInfo {
 /// One node of the Memory maps tree: a backing file, or the outside node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapNodeInfo {
-    /// The file basename, `<basename> (Primary)` for the executable, or
-    /// `Outside loaded modules`.
+    /// The file basename, or `Outside loaded modules`. The UI adds "(Primary)".
     pub name: Arc<str>,
     /// The file path. `None` for the outside node.
     pub path: Option<Arc<str>>,
@@ -996,8 +995,8 @@ fn push_file_node(out: &mut Vec<MapNodeInfo>, path: &Arc<str>, exe: Option<&str>
     let plain = strip_deleted(path);
     let base = basename(plain);
     let primary = exe == Some(plain);
-    let name = if primary {
-        Arc::from(format!("{base} (Primary)"))
+    let name: Arc<str> = if primary {
+        Arc::from(base)
     } else {
         Arc::from(basename(path))
     };

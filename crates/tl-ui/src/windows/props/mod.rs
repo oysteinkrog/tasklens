@@ -697,10 +697,31 @@ impl PropsWindow {
     /// accessible name; the strip draws label and count as separate runs.
     pub fn tab_text(&self, tab: DetailTab) -> String {
         let i = strip_index(tab);
-        match self.labels[i].0 {
+        match self.shown_count(tab) {
             Some(_) => format!("{} {}", self.words.tabs[i], self.labels[i].1),
             None => self.words.tabs[i].to_string(),
         }
+    }
+
+    /// The count of `tab` when its source has a value. A Restricted, unsupported, failed or
+    /// warming-up File descriptors, Memory maps or Environment tab shows no count (UI-PWN-004).
+    fn shown_count(&self, tab: DetailTab) -> Option<u32> {
+        let count = self.labels[strip_index(tab)].0?;
+        let sourced = matches!(
+            tab,
+            DetailTab::Fds | DetailTab::Maps | DetailTab::Environment
+        );
+        let empty = sourced
+            && self.last_detail.as_ref().is_some_and(|d| {
+                matches!(
+                    d.tab(tab).validity,
+                    Validity::Restricted
+                        | Validity::WarmingUp
+                        | Validity::Unsupported
+                        | Validity::Failed
+                )
+            });
+        (!empty).then_some(count)
     }
 
     /// Times this view rendered, for the re-render tests.
@@ -1456,7 +1477,7 @@ impl gpui_kit::Render for PropsWindow {
             .map(|i| {
                 let spec = TlTabSpec::new(self.words.tabs[i].clone())
                     .tooltip(self.words.tab_tips[i].clone());
-                match self.labels[i].0 {
+                match self.shown_count(TABS[i]) {
                     Some(_) => spec.count(self.labels[i].1.clone()),
                     None => spec,
                 }

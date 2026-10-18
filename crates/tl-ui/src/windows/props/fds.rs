@@ -32,7 +32,7 @@ use tl_model::ids::ProcessKey;
 use tl_model::validity::Validity;
 use tracing::warn;
 
-use super::filter::{FilterChanged, NO_MATCH, PropsFilter, lowercase};
+use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH, PropsFilter, lowercase};
 use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::components::checkbox::TlCheckbox;
 use crate::components::kv_grid::{
@@ -606,6 +606,10 @@ impl TreeTableDelegate for FdsDelegate {
     }
 
     /// The Name column marks U+FFFD and anchors the keyboard menu.
+    fn flat_names(&self) -> bool {
+        true
+    }
+
     fn name_column(&self) -> Option<FdColumn> {
         Some(FdColumn::Name)
     }
@@ -707,6 +711,15 @@ impl TreeTableDelegate for FdsDelegate {
         } else {
             w.no_match.clone()
         })
+    }
+
+    /// The no-match text comes with "Clear filter" (UI-PWN-005).
+    fn empty_clear_filter(&self) -> bool {
+        !self.loading && self.count() != 0
+    }
+
+    fn empty_clear_action(&self) -> Box<dyn gpui_kit::Action> {
+        Box::new(ClearPropsFilter)
     }
 
     fn header_lines(&self) -> HeaderLines {

@@ -75,6 +75,9 @@ use crate::windows::actions::{
 const ROW_HEIGHT: f32 = 26.;
 /// Label column clamp, × ui_scale (UI-PWN-006).
 const LABEL_MIN: f32 = 96.;
+/// Row counts at which the Capabilities and Groups tables take their full 60% and 40% share.
+const CAPS_SHARE_ROWS: usize = 18;
+const GROUPS_SHARE_ROWS: usize = 12;
 const LABEL_MAX: f32 = 150.;
 /// The summary takes at most this share of the body.
 const SUMMARY_MAX: f32 = 0.45;
@@ -471,10 +474,16 @@ pub fn fmt_risky(out: &mut String, d: &SecurityDetail) {
     }
 }
 
-/// `wheel, docker (root-equivalent)` in payload order. Empty when none.
+/// `wheel, docker (root-equivalent)`: admin groups first, then root-equivalent ones. Empty when none.
 pub fn fmt_admin_groups(out: &mut String, w: &SecurityWords, d: &SecurityDetail) {
-    let groups = d.groups.iter().filter(|g| g.admin || g.root_equivalent);
-    for (i, g) in groups.enumerate() {
+    let mut groups: Vec<_> = d
+        .groups
+        .iter()
+        .filter(|g| g.admin || g.root_equivalent)
+        .collect();
+    // Plain admin groups first, then the root-equivalent ones; each keeps the payload order.
+    groups.sort_by_key(|g| g.root_equivalent);
+    for (i, g) in groups.into_iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
@@ -1110,6 +1119,10 @@ impl TreeTableDelegate for CapDelegate {
             trailing: None,
         }
     }
+    fn flat_names(&self) -> bool {
+        true
+    }
+
     fn name_column(&self) -> Option<CapColumn> {
         // Name needs a per-cell warning colour and tooltip. Description is the flat table's
         // navigation anchor, leaving Name to the normal cell painter.
@@ -1472,6 +1485,10 @@ impl TreeTableDelegate for GroupDelegate {
             trailing: None,
         }
     }
+    fn flat_names(&self) -> bool {
+        true
+    }
+
     fn name_column(&self) -> Option<GroupColumn> {
         Some(GroupColumn::Name)
     }
@@ -2313,9 +2330,22 @@ impl Render for SecurityTab {
                 .child(title)
         };
         let caps_table = self.caps_table.as_ref().expect("initialized").clone();
+        // The tables share the height by row count: 60% and 40% when both are long, less for a
+        // short table (UI-PWN-015).
+        let caps_weight = caps_table
+            .read(cx)
+            .delegate
+            .row_count()
+            .clamp(3, CAPS_SHARE_ROWS);
+        let groups_weight = self
+            .groups_table
+            .as_ref()
+            .map_or(0, |t| t.read(cx).delegate.row_count())
+            .clamp(3, GROUPS_SHARE_ROWS);
         let caps = v_flex()
             .debug_selector(|| "SecurityCapabilities".into())
-            .h(relative(0.6))
+            .flex_grow(caps_weight as f32)
+            .flex_basis(px(0.))
             .min_h_0()
             .child(section_header(caps_title))
             .child(
@@ -2328,7 +2358,8 @@ impl Render for SecurityTab {
             );
         let groups = v_flex()
             .debug_selector(|| "SecurityGroups".into())
-            .flex_1()
+            .flex_grow(groups_weight as f32)
+            .flex_basis(px(0.))
             .min_h_0()
             .child(section_header(groups_title))
             .child(

@@ -958,6 +958,9 @@ pub fn name_look(flags: RowFlags, ctx: &CellCtx) -> (Hsla, f32) {
 /// lines are not part of the cell: `TlTreeTable` paints them with the row's column separators
 /// ([`guide_quads`]).
 ///
+/// `flat` is a flat table (a delegate with no expandable rows and no tree): the chevron box is not
+/// reserved and the text starts at the header's left padding, under its column label.
+///
 /// `window` measures the primary text, and only when there is a secondary text. `tips` is
 /// `Some(key)` on the hovered row: the state glyphs then get their tooltips, keyed by `key`.
 /// File icons take their image source from `icons`, and a name with a count its bidi-isolated
@@ -969,6 +972,7 @@ pub fn paint_name_cell(
     weight: FontWeight,
     depth: u8,
     expandable: Option<bool>,
+    flat: bool,
     flags: RowFlags,
     ctx: &CellCtx,
     tips: Option<u64>,
@@ -978,7 +982,7 @@ pub fn paint_name_cell(
 ) -> Div {
     let m = ctx.m;
     let s = m.ui_scale;
-    let indent = name_indent(depth, s);
+    let indent = if flat { m.sp[4] } else { name_indent(depth, s) };
     let mut root = div();
     *root.text_style() = t_base(m);
     root = root
@@ -1025,8 +1029,10 @@ pub fn paint_name_cell(
         .flex()
         .items_center()
         .pl(indent)
-        .pr(m.sp[4])
-        .child(chevron_slot);
+        .pr(m.sp[4]);
+    if !flat {
+        content = content.child(chevron_slot);
+    }
 
     let gap = px(ICON_GAP * s);
     let icon_w = px(icon_px(cell.icon_size) * s);
@@ -1082,9 +1088,10 @@ pub fn paint_name_cell(
         }
         None => StyledText::new(shaped),
     };
+    let text_gap = if flat && !has_icon { px(0.) } else { gap };
     let primary_el = div()
         .debug_selector(|| "TlNameCell-primary".into())
-        .ml(gap)
+        .ml(text_gap)
         .min_w_0()
         .flex_shrink(1.)
         .overflow_hidden()
@@ -1113,7 +1120,8 @@ pub fn paint_name_cell(
             .shape_line(cell.primary.clone(), font_size, &[run], None)
             .width;
         let icon_room = if has_icon { icon_w + gap } else { px(0.) };
-        let text_x = indent + px(CHEVRON * s) + gap + icon_room;
+        let chevron_room = if flat { px(0.) } else { px(CHEVRON * s) };
+        let text_x = indent + chevron_room + text_gap + icon_room;
         let room = ctx.width - text_x - m.sp[4];
         if room >= primary_w + px((NAME_SECONDARY_GAP + NAME_SECONDARY_MIN) * s) {
             // The caption gives way first: the primary text stays whole while it is drawn.

@@ -1850,10 +1850,7 @@ fn region_sum(regions: &[MapRegionInfo], node: &MapNodeInfo) -> u64 {
 fn maps_nodes_grouped_and_ordered() {
     let (regions, nodes) = grouped(MAPS_GROUPING, Some("/usr/bin/foo"));
     let names: Vec<&str> = nodes.iter().map(|n| &*n.name).collect();
-    assert_eq!(
-        names,
-        ["foo (Primary)", "libc.so.6", "Outside loaded modules"]
-    );
+    assert_eq!(names, ["foo", "libc.so.6", "Outside loaded modules"]);
     assert!(nodes[0].primary && !nodes[0].outside && !nodes[0].shared_object);
     assert!(!nodes[1].primary && nodes[1].shared_object);
     assert!(nodes[2].outside && nodes[2].path.is_none());
@@ -1882,7 +1879,7 @@ fn maps_nodes_grouped_and_ordered() {
 fn maps_primary_deleted_exe() {
     let buf = b"555555554000-555555556000 r-xp 00000000 08:01 1001 /usr/bin/foo (deleted)\n";
     let (_, nodes) = grouped(buf, Some("/usr/bin/foo"));
-    assert_eq!(&*nodes[0].name, "foo (Primary)");
+    assert_eq!(&*nodes[0].name, "foo");
     assert!(nodes[0].primary);
 }
 

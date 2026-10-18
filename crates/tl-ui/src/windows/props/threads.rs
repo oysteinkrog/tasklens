@@ -30,7 +30,7 @@ use tl_model::system::CpuSet;
 use tl_model::units;
 use tl_model::validity::Validity;
 
-use super::filter::{FilterChanged, NO_MATCH_THREADS, PropsFilter, lowercase};
+use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH_THREADS, PropsFilter, lowercase};
 use crate::action_tracker::{GlobalActionTracker, SummaryTexts, ToastTexts, action_words};
 use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
@@ -104,7 +104,7 @@ impl ThreadColumn {
     fn meta(self) -> (&'static str, f32, ColumnAlign, Option<&'static str>) {
         use ColumnAlign::{Left, Right};
         match self {
-            Self::Tid => ("pwn-threads-col-tid", 80., Right, None),
+            Self::Tid => ("pwn-threads-col-tid", 100., Right, None),
             Self::Name => ("pwn-threads-col-name", 160., Left, None),
             Self::State => ("pwn-threads-col-state", 96., Left, None),
             Self::Cpu => ("pwn-threads-col-cpu", 70., Right, None),
@@ -694,6 +694,10 @@ impl TreeTableDelegate for ThreadsDelegate {
         }
     }
 
+    fn flat_names(&self) -> bool {
+        true
+    }
+
     fn name_column(&self) -> Option<ThreadColumn> {
         Some(ThreadColumn::Name)
     }
@@ -838,6 +842,15 @@ impl TreeTableDelegate for ThreadsDelegate {
         } else {
             w.no_match.clone()
         })
+    }
+
+    /// The no-match text comes with "Clear filter" (UI-PWN-005).
+    fn empty_clear_filter(&self) -> bool {
+        !self.loading && !self.rows.is_empty()
+    }
+
+    fn empty_clear_action(&self) -> Box<dyn gpui_kit::Action> {
+        Box::new(ClearPropsFilter)
     }
 
     fn header_lines(&self) -> HeaderLines {

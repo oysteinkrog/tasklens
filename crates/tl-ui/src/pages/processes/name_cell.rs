@@ -184,6 +184,7 @@ pub fn render_name_cell(
         FontWeight::NORMAL,
         depth,
         expandable,
+        false,
         flags,
         ctx,
         tips.then_some(node_key),

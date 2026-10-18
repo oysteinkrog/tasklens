@@ -34,7 +34,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 use tracing::warn;
 
-use super::filter::{FilterChanged, NO_MATCH, PropsFilter, lowercase};
+use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH, PropsFilter, lowercase};
 use crate::action_tracker::{GlobalActionTracker, ToastTexts};
 use crate::components::checkbox::TlCheckbox;
 use crate::components::menu::TlMenu;
@@ -854,6 +854,15 @@ impl TreeTableDelegate for MapsDelegate {
         } else {
             w.no_match.clone()
         })
+    }
+
+    /// The no-match text comes with "Clear filter" (UI-PWN-005).
+    fn empty_clear_filter(&self) -> bool {
+        !self.loading && self.count() != 0
+    }
+
+    fn empty_clear_action(&self) -> Box<dyn gpui_kit::Action> {
+        Box::new(ClearPropsFilter)
     }
 
     fn header_lines(&self) -> HeaderLines {
