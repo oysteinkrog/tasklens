@@ -2610,7 +2610,7 @@ mod tests {
         assert_eq!(header.label(), Some("Group"));
         assert_eq!(header.bounds().size.height, px(MENU_HEADER_H));
         let separator = row(cx, false, 2);
-        assert_eq!(separator.bounds().size.height, px(1.));
+        assert_eq!(separator.bounds().size.height, px(0.5));
 
         let mark = all(cx)
             .into_iter()
