@@ -2801,3 +2801,41 @@ fn logs_not_found_no_button(cx: &mut TestAppContext) {
             .is_none()
     );
 }
+
+#[gpui_kit::test]
+fn deps_opened_window_demands_and_fills_details(cx: &mut TestAppContext) {
+    let t = open_deps(
+        cx,
+        Some(deps_details(vec![dep("system.slice", Relation::Requires)])),
+    );
+    t.keys(cx, "down enter");
+    let handle = cx
+        .update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            let handle = registry
+                .read(cx)
+                .get(&WindowKey::Service(unit("system.slice")));
+            handle.and_then(|h| h.downcast::<Root>())
+        })
+        .expect("the dependency's window is open");
+    let win = view(cx, handle);
+    assert!(cx.read(|cx| win.read(cx).details().is_none()));
+    let demanded = demanded(cx);
+    assert!(
+        demanded.contains(&unit("system.slice")),
+        "the dependency's unit is demanded: {demanded:?}"
+    );
+    let mut map = HashMap::new();
+    map.insert(unit("system.slice"), details("system.slice"));
+    publish(
+        cx,
+        &t.engine,
+        &["sshd.service", "system.slice"],
+        &map,
+        ServiceBackend::Systemd,
+    );
+    assert!(
+        cx.read(|cx| win.read(cx).details().is_some()),
+        "the details fill once the engine publishes them"
+    );
+}
