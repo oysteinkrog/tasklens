@@ -65,6 +65,8 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 /// Debug selectors of the chart boxes.
 pub const PHYSICAL_ID: &str = "perf-mem-physical";
 pub const COMMIT_ID: &str = "perf-mem-commit";
+/// Debug selector of the box around the composition bar view.
+pub const BAR_WRAP_ID: &str = "perf-mem-bar-wrap";
 pub const SWAP_ID: &str = "perf-mem-swap";
 
 /// Element ids and debug selectors of the grids in the "Compressed memory" block. Each zram
@@ -2320,10 +2322,13 @@ impl DevicePage for MemoryPage {
             .as_ref()
             .filter(|_| self.show_composition)
             .map(|bar| {
+                // Not cached: a cached view with only a width has no height of its own, so the
+                // Details heading below would be drawn over the bar.
                 div()
+                    .debug_selector(|| BAR_WRAP_ID.into())
                     .w_full()
                     .pt(m.sp[6] - m.sp[4])
-                    .child(bar.clone().cached(StyleRefinement::default().w_full()))
+                    .child(bar.clone())
             });
         v_flex()
             .w_full()

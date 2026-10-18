@@ -579,6 +579,28 @@ mod composition {
         });
         assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "bar drawn");
     }
+
+    /// The box around the bar holds the caption and the bar, so what follows it (the Details
+    /// heading) cannot be drawn over the bar.
+    #[gpui_kit::test]
+    fn composition_box_encloses_caption_and_bar(cx: &mut TestAppContext) {
+        let mut sys = system(64 * GIB, 80 * GIB, 0);
+        sys.memory.free = 20 * GIB;
+        let r = open(cx, Settings::default(), sys);
+        let wrap = r
+            .vcx
+            .debug_bounds(tl_ui::pages::performance::memory::BAR_WRAP_ID)
+            .expect("bar box");
+        let bar = r.vcx.debug_bounds(BAR_ID).expect("bar");
+        assert!(
+            bar.bottom() <= wrap.bottom(),
+            "bar {bar:?} inside box {wrap:?}"
+        );
+        assert!(
+            wrap.size.height > bar.size.height,
+            "box also holds the caption"
+        );
+    }
 }
 
 // Memory Details rows (E25, UI-PRF-028; PERF-043).
