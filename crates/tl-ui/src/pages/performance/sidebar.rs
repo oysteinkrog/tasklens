@@ -761,13 +761,12 @@ impl DeviceSidebar {
     }
 
     /// This surface's demand part: CPU total and memory always, and each device class that has
-    /// a visible card. `cpu_fast` is the CPU page's. Sensors are also wanted while a fan row
-    /// exists and fans are enabled: a fan is shown only after it has spun, and that is only
-    /// known from sensor readings, so a hidden fan must keep sampling on.
+    /// a visible card. `cpu_fast` is the CPU page's. Sensors are also wanted while fans are
+    /// enabled: the engine lists the fans only while sensors are sampled, and a fan is shown
+    /// only after it has spun, so without this demand no fan row would ever exist.
     pub fn demand_part(&self) -> Demand {
         let has = |kind| self.live().any(|c| c.row.kind == kind);
-        let fans_pending =
-            self.settings.view().show_fans && self.rows.iter().any(|r| r.kind == DeviceKind::Fan);
+        let fans_pending = self.settings.view().show_fans;
         Demand {
             any_surface_visible: true,
             cpu: CpuDemand::Total,

@@ -1511,10 +1511,11 @@ mod sidebar {
                 cpu: CpuDemand::Total,
                 memory: true,
                 disks: true,
+                sensors: true,
                 ..Demand::default()
             }
         );
-        assert!(!merged.nets && !merged.gpus && !merged.sensors && !merged.cpu_fast);
+        assert!(!merged.nets && !merged.gpus && !merged.cpu_fast);
     }
 
     /// Advances past the demand coalesce delay and returns the merge and every `set_demand`.
@@ -3152,6 +3153,28 @@ mod sidebar {
         let sidebar = r.sidebar.clone();
         let wanted = r.vcx.update(|_, cx| sidebar.read(cx).demand_part().sensors);
         assert!(wanted, "sensors demanded while a fan row is hidden");
+    }
+
+    #[gpui_kit::test]
+    fn sensors_demanded_before_any_fan_row_exists(cx: &mut TestAppContext) {
+        // The engine lists fans only while sensors are sampled. With no fan row yet, the
+        // sidebar must ask for sensors anyway, or the list never arrives.
+        let r = open(
+            cx,
+            cpu_and_memory(),
+            Settings::default(),
+            UiState::default(),
+        );
+        let sidebar = r.sidebar.clone();
+        let wanted = r.vcx.update(|_, cx| sidebar.read(cx).demand_part().sensors);
+        assert!(wanted, "sensors demanded with no fan row");
+
+        let mut settings = Settings::default();
+        settings.performance.show_fans = false;
+        let r = open(cx, cpu_and_memory(), settings, UiState::default());
+        let sidebar = r.sidebar.clone();
+        let wanted = r.vcx.update(|_, cx| sidebar.read(cx).demand_part().sensors);
+        assert!(!wanted, "fans disabled: no sensor demand");
     }
 
     #[gpui_kit::test]
