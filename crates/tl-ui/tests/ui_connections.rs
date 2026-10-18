@@ -3469,6 +3469,8 @@ mod drawn_text {
     use gpui_kit::base::Root;
     use gpui_kit::{AppContext as _, VisualTestContext};
     use smallvec::smallvec;
+    use tl_model::table::SysColumnId;
+    use tl_ui::table::cells::{record_painted_texts, take_painted_texts};
     use tl_ui::table::tree_table::TlTreeTable;
 
     #[gpui_kit::test]
@@ -3488,32 +3490,36 @@ mod drawn_text {
         let table = slot.borrow().clone().expect("table");
         let mut vcx = VisualTestContext::from_window(handle.into(), cx);
         vcx.run_until_parked();
+        record_painted_texts();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(
-            vcx.debug_bounds("TlCell-text").is_some(),
-            "text cells drawn"
-        );
+        let painted = take_painted_texts();
         assert!(
             vcx.debug_bounds("TlCell-glyph").is_none(),
             "no cell of a current row draws a validity glyph"
         );
 
-        let tsv = vcx.update(|_, cx| {
-            table.update(cx, |t, _| {
-                let row = t.delegate.row_id(0);
-                t.rows_as_tsv(&[row])
-            })
+        // The one row's painted text by column, left to right. Process is the Name cell.
+        let drawn: Vec<(SysColumnId, String)> = vcx.update(|_, cx| {
+            let t = table.read(cx);
+            let layout = t.columns();
+            let mut drawn: Vec<(SysColumnId, String)> = painted
+                .iter()
+                .filter_map(|(bounds, text)| {
+                    let col = layout.column_at_x(bounds.center().x)?;
+                    Some((col, text.to_string()))
+                })
+                .collect();
+            drawn.sort_by_key(|(col, _)| layout.visible_columns().iter().position(|c| c == col));
+            drawn
         });
-        let shown: Vec<&str> = tsv.lines().nth(1).expect("one row").split('\t').collect();
         assert_eq!(
-            shown,
+            drawn,
             [
-                "TCP",
-                "127.0.0.1:8080",
-                "10.0.0.1:443",
-                "ESTABLISHED",
-                "42",
-                "sshd"
+                (id(ConnColumn::Proto), "TCP".to_owned()),
+                (id(ConnColumn::Local), "127.0.0.1:8080".to_owned()),
+                (id(ConnColumn::Foreign), "10.0.0.1:443".to_owned()),
+                (id(ConnColumn::State), "ESTABLISHED".to_owned()),
+                (id(ConnColumn::Pid), "42".to_owned()),
             ]
         );
     }

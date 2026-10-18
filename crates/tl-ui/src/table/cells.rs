@@ -626,12 +626,42 @@ impl Element for CellText {
         window: &mut Window,
         cx: &mut App,
     ) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        PAINTED_TEXTS.with_borrow_mut(|log| {
+            if let Some(log) = log {
+                log.push((bounds, self.inner.layout().text().into()));
+            }
+        });
         let mask = (self.fit == Fit::Clip).then_some(ContentMask { bounds });
         window.with_content_mask(mask, |window| {
             self.inner
                 .paint(None, None, bounds, &mut (), &mut (), window, cx);
         });
     }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    /// The texts [`CellText`] painted on this thread while recording, with their bounds in
+    /// window coordinates. `None` while not recording.
+    static PAINTED_TEXTS: std::cell::RefCell<Option<Vec<(Bounds<Pixels>, SharedString)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Starts recording the shaped text of every text, path and numeric cell painted on this
+/// thread. Glyph cells and Name cells are not recorded. Drops an earlier record.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn record_painted_texts() {
+    PAINTED_TEXTS.with_borrow_mut(|log| *log = Some(Vec::new()));
+}
+
+/// Stops recording and returns the cell texts painted since [`record_painted_texts`], in paint
+/// order, each with its text bounds in window coordinates.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn take_painted_texts() -> Vec<(Bounds<Pixels>, SharedString)> {
+    PAINTED_TEXTS
+        .with_borrow_mut(Option::take)
+        .unwrap_or_default()
 }
 
 /// Gap between the primary and the secondary Name text (sp4).

@@ -742,6 +742,67 @@ mod delegate {
         assert!(show(vcx, ColumnId::Gpu, true), "GPU utilization");
     }
 
+    /// A GPU cell with a current value paints that value. A warming-up one paints no value,
+    /// only the "…" glyph (tasklens-rsf.30).
+    #[gpui_kit::test]
+    fn gpu_cell_draws_value(cx: &mut TestAppContext) {
+        use gpui_kit::base::Root;
+        use tl_model::validity::ProcessField;
+        use tl_ui::table::cells::{record_painted_texts, take_painted_texts};
+
+        setup(cx);
+        let mut busy = record(10, "bash", ProcFlags::empty());
+        busy.gpu_util_pct = 37.0;
+        let mut waiting = record(30, "sshd", ProcFlags::empty());
+        waiting
+            .validity
+            .set(ProcessField::GpuUtil, Validity::WarmingUp);
+        let rows = vec![
+            row(NodeId::Process(key(10)), 0, Some(0), None),
+            row(NodeId::Process(key(30)), 0, Some(1), None),
+        ];
+        let snap = snapshot(1, rows, Vec::new(), vec![busy, waiting]);
+        let slot = Rc::new(std::cell::RefCell::new(None));
+        let keep = Rc::clone(&slot);
+        let handle = cx.add_window(move |window, cx| {
+            let d =
+                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
+            *keep.borrow_mut() = Some(table.clone());
+            Root::new(table, window, cx)
+        });
+        let table = slot.borrow().clone().expect("table");
+        let vcx = &mut VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        record_painted_texts();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let painted = take_painted_texts();
+        let body = vcx.debug_bounds("TlTreeTable-body").expect("table body");
+
+        // The GPU texts painted in the body, top to bottom. The header total is not in the body.
+        let (drawn, want) = vcx.update(|_, cx| {
+            let t = table.read(cx);
+            let layout = t.columns();
+            let mut drawn: Vec<_> = painted
+                .iter()
+                .filter(|(bounds, _)| {
+                    body.contains(&bounds.center())
+                        && layout.column_at_x(bounds.center().x) == Some(ColumnId::Gpu)
+                })
+                .collect();
+            drawn.sort_by(|a, b| f32::from(a.0.origin.y).total_cmp(&f32::from(b.0.origin.y)));
+            let drawn: Vec<String> = drawn.iter().map(|(_, text)| text.to_string()).collect();
+            (drawn, text(&t.delegate, 0, ColumnId::Gpu))
+        });
+        assert_eq!(want.1, Validity::Valid);
+        assert!(want.0.contains("37"), "{want:?}");
+        assert_eq!(drawn, [want.0], "only the current row paints a GPU value");
+        assert!(
+            vcx.debug_bounds("TlCell-glyph").is_some(),
+            "the warming-up GPU cell draws its glyph"
+        );
+    }
+
     fn gpu(n: u16, pci: &str, name: &str, present: bool) -> DeviceEntry {
         DeviceEntry {
             idx: DeviceIdx(n),

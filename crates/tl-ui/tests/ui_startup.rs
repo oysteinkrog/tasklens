@@ -2934,6 +2934,7 @@ mod drawn_text {
 
     use gpui_kit::base::Root;
     use gpui_kit::{AppContext as _, VisualTestContext};
+    use tl_ui::table::cells::{record_painted_texts, take_painted_texts};
     use tl_ui::table::tree_table::TlTreeTable;
 
     #[gpui_kit::test]
@@ -2949,39 +2950,48 @@ mod drawn_text {
         let table = slot.borrow().clone().expect("table");
         let mut vcx = VisualTestContext::from_window(handle.into(), cx);
         vcx.run_until_parked();
+        record_painted_texts();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(
-            vcx.debug_bounds("TlCell-text").is_some(),
-            "text cells drawn"
-        );
+        let painted = take_painted_texts();
         assert!(
             vcx.debug_bounds("TlCell-glyph").is_none(),
             "no cell of a current row draws a validity glyph"
         );
 
-        // Each copied cell is the delegate's value for that column.
-        let (tsv, want) = vcx.update(|_, cx| {
-            table.update(cx, |t, _| {
-                let row = t.delegate.row_id(0);
-                let want: Vec<String> = t
-                    .columns()
-                    .visible_columns()
-                    .iter()
-                    .map(|&col| {
-                        if col == id(StartupColumn::Name) {
-                            return "app".to_owned();
-                        }
-                        let mut out = CellOut::default();
-                        t.delegate.cell(0, col, &mut out);
-                        text(&out).to_owned()
-                    })
-                    .collect();
-                (t.rows_as_tsv(&[row]), want)
-            })
+        // Each painted cell, found by its x, holds the delegate's value for its column. Name is
+        // the Name cell and paints no value cell.
+        let (drawn, want) = vcx.update(|_, cx| {
+            let t = table.read(cx);
+            let layout = t.columns();
+            let mut drawn: Vec<(SysColumnId, String)> = painted
+                .iter()
+                .filter_map(|(bounds, text)| {
+                    let col = layout.column_at_x(bounds.center().x)?;
+                    Some((col, text.to_string()))
+                })
+                .collect();
+            drawn.sort_by_key(|(col, _)| layout.visible_columns().iter().position(|c| c == col));
+            let want: Vec<(SysColumnId, String)> = layout
+                .visible_columns()
+                .iter()
+                .filter(|&&col| col != id(StartupColumn::Name))
+                .map(|&col| {
+                    let mut out = CellOut::default();
+                    t.delegate.cell(0, col, &mut out);
+                    (col, text(&out).to_owned())
+                })
+                .collect();
+            (drawn, want)
         });
-        let shown: Vec<&str> = tsv.lines().nth(1).expect("one row").split('\t').collect();
-        assert_eq!(shown.len(), STARTUP_COLUMNS.len(), "every column is shown");
-        assert!(want.iter().all(|w| !w.is_empty() && w != "…"), "{want:?}");
-        assert_eq!(shown, want);
+        assert_eq!(
+            want.len(),
+            STARTUP_COLUMNS.len() - 1,
+            "every column is shown"
+        );
+        assert!(
+            want.iter().all(|(_, w)| !w.is_empty() && w != "…"),
+            "{want:?}"
+        );
+        assert_eq!(drawn, want);
     }
 }
