@@ -133,10 +133,15 @@ fn good_weight(w: f32) -> bool {
     w.is_finite() && w > 0.
 }
 
-/// A saved weight clamped into [`OVERVIEW_WEIGHT_RANGE`]. NaN stays NaN and fails `validate`.
+/// A saved weight clamped into [`OVERVIEW_WEIGHT_RANGE`]. A weight that is NaN, infinite, zero
+/// or negative becomes 0, which fails `validate`.
 fn saved_weight(w: f64) -> f32 {
     let (min, max) = OVERVIEW_WEIGHT_RANGE;
-    w.clamp(min, max) as f32
+    if w.is_finite() && w > 0. {
+        w.clamp(min, max) as f32
+    } else {
+        0.
+    }
 }
 
 impl OverviewLayout {
@@ -794,11 +799,14 @@ mod tests {
         assert_eq!(empty.validate(), Err(LayoutError::Empty));
 
         // A saved layout that does not validate gives the default.
-        let mut saved = OverviewLayoutSetting::btop_default();
-        saved.rows[0].height = 0.;
-        assert_eq!(
-            OverviewLayout::from_setting(Some(&saved)),
-            OverviewLayout::btop_default()
-        );
+        for bad in [0., -1., f64::NAN, f64::INFINITY] {
+            let mut saved = OverviewLayoutSetting::btop_default();
+            saved.rows[0].height = bad;
+            assert_eq!(
+                OverviewLayout::from_setting(Some(&saved)),
+                OverviewLayout::btop_default(),
+                "{bad}"
+            );
+        }
     }
 }
