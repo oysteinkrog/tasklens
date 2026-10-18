@@ -239,8 +239,8 @@ fn partition_row(
 
     let own = (part.major, part.minor);
     let mut matching = mounts.iter().filter(|m| {
-        let dev = (m.major, m.minor);
-        dev.0 != 0 && (dev == own || Some(dev) == holder_dev)
+        m.is_on(own.0, own.1, &part.name)
+            || (m.major != 0 && Some((m.major, m.minor)) == holder_dev)
     });
     let mount = matching.next().map(|m| m.mount_point.clone());
     let extra_mounts: Arc<[Arc<str>]> = matching.map(|m| m.mount_point.clone()).collect();

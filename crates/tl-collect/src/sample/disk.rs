@@ -3,6 +3,7 @@
 //! filesystem usage from the mount table and `statvfs` (ADR-016, ADR-008, PERF-048, PERF-049,
 //! PERF-053, R-052).
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use tl_model::series::SampleFlags;
@@ -332,15 +333,20 @@ pub fn disk_usage(
     swap_dev: &mut dyn FnMut(&str) -> Option<(u32, u32)>,
 ) -> Vec<DiskUsage> {
     let swap_devs: Vec<(u32, u32)> = swaps.iter().filter_map(|s| swap_dev(&s.name)).collect();
-    let mut owned: Vec<(u32, u32)> = Vec::new();
+    let mut owned: Vec<(u32, u32, String)> = Vec::new();
     let mut seen: Vec<(u32, u32)> = Vec::new();
+    let mut seen_sources: Vec<Arc<str>> = Vec::new();
     disks
         .iter()
         .map(|disk| {
             owned.clear();
-            owned.push((disk.major, disk.minor));
-            owned.extend(disk.children.iter().map(|c| (c.major, c.minor)));
-            owned.retain(|&(major, _)| major != 0);
+            owned.push((disk.major, disk.minor, disk.name.to_string()));
+            owned.extend(
+                disk.children
+                    .iter()
+                    .map(|c| (c.major, c.minor, c.name.to_string())),
+            );
+            owned.retain(|&(major, ..)| major != 0);
 
             let mut usage = DiskUsage {
                 major: disk.major,
@@ -348,20 +354,41 @@ pub fn disk_usage(
                 ..DiskUsage::default()
             };
             seen.clear();
+            seen_sources.clear();
             let (mut formatted, mut used, mut free) = (0u64, 0u64, 0u64);
             let mut error: Option<CollectError> = None;
+            let mut seen_count = 0usize;
             for mount in mounts {
                 let dev = (mount.major, mount.minor);
-                if !owned.contains(&dev) {
+                if !owned
+                    .iter()
+                    .any(|(ma, mi, name)| mount.is_on(*ma, *mi, name))
+                {
                     continue;
                 }
                 if matches!(&*mount.mount_point, "/" | "/boot") {
                     usage.system_disk = true;
                 }
-                if seen.contains(&dev) || error.is_some() {
+                if error.is_some() {
                     continue;
                 }
-                seen.push(dev);
+                if mount.major == 0 {
+                    // Subvolume mounts of one btrfs filesystem have different anonymous device
+                    // numbers but share the source device: count the filesystem once.
+                    let Some(source) = &mount.source_dev else {
+                        continue;
+                    };
+                    if seen_sources.contains(source) {
+                        continue;
+                    }
+                    seen_sources.push(Arc::clone(source));
+                } else {
+                    if seen.contains(&dev) {
+                        continue;
+                    }
+                    seen.push(dev);
+                }
+                seen_count += 1;
                 match statvfs(&mount.mount_point) {
                     Ok(st) => {
                         formatted = formatted.saturating_add(st.blocks.saturating_mul(st.frsize));
@@ -373,7 +400,7 @@ pub fn disk_usage(
                     Err(err) => error = Some(err),
                 }
             }
-            let validity = match (&error, seen.is_empty()) {
+            let validity = match (&error, seen_count == 0) {
                 (Some(err), _) => Some(err.validity()),
                 (None, true) => Some(Validity::Unsupported),
                 (None, false) => None,
@@ -390,7 +417,9 @@ pub fn disk_usage(
                     usage.free_bytes = Measured::valid(free);
                 }
             }
-            usage.swap = swap_devs.iter().any(|dev| owned.contains(dev));
+            usage.swap = swap_devs
+                .iter()
+                .any(|dev| owned.iter().any(|(ma, mi, _)| (*ma, *mi) == *dev));
             usage
         })
         .collect()
@@ -750,6 +779,29 @@ mod tests {
         assert_eq!(sda.free_bytes, Measured::valid(2_457_600));
         assert!(sda.system_disk);
         assert!(!sda.swap);
+    }
+
+    #[test]
+    fn usage_btrfs_subvolumes_count_once_on_their_disk() {
+        let mut mounts = Vec::new();
+        let text = b"30 1 0:30 /@ / rw - btrfs /dev/nvme0n1[/@] rw\n\
+            31 30 0:31 /@home /home rw - btrfs /dev/nvme0n1[/@home] rw\n";
+        crate::parse::mountinfo::parse_mountinfo(text, &mut mounts).unwrap();
+        let mut calls = Vec::new();
+        let usage = disk_usage(
+            &fixture_disks(),
+            &mounts,
+            &[],
+            &mut |path| {
+                calls.push(path.to_owned());
+                Ok(FAKE_STAT)
+            },
+            &mut |_| None,
+        );
+        assert_eq!(calls, vec!["/".to_owned()]);
+        let nvme = named(&usage, 259, 0);
+        assert!(nvme.system_disk);
+        assert_eq!(nvme.formatted_bytes, Measured::valid(4_096_000));
     }
 
     #[test]

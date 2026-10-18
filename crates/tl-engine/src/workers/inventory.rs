@@ -527,17 +527,16 @@ fn disk_drives(root: &SysRoot, host: bool) -> Arc<[DiskDrive]> {
 
 /// The mount points of the disk, its partitions and its dm children, in mountinfo order.
 fn volumes(disk: &BlockDevice, mounts: &[MountEntry]) -> Arc<[Arc<str>]> {
-    let owns = |major: u32, minor: u32| {
-        major != 0
-            && ((disk.major, disk.minor) == (major, minor)
-                || disk
-                    .children
-                    .iter()
-                    .any(|c| (c.major, c.minor) == (major, minor)))
+    let owns = |m: &MountEntry| {
+        m.is_on(disk.major, disk.minor, &disk.name)
+            || disk
+                .children
+                .iter()
+                .any(|c| m.is_on(c.major, c.minor, &c.name))
     };
     mounts
         .iter()
-        .filter(|m| owns(m.major, m.minor))
+        .filter(|m| !(m.major == 0 && m.source_dev.is_none()) && owns(m))
         .map(|m| Arc::clone(&m.mount_point))
         .collect()
 }

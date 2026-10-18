@@ -9,6 +9,23 @@ pub struct MountEntry {
     pub minor: u32,
     pub mount_point: Arc<str>,
     pub fs_type: Arc<str>,
+    /// The block device name behind a `/dev/` mount source, with any btrfs `[/subvol]` suffix
+    /// removed (`nvme0n1p2` for `/dev/nvme0n1p2[/@home]`). `None` for other sources.
+    ///
+    /// A btrfs subvolume mount reports an anonymous `0:N` device number, so the name is the only
+    /// link back to its partition.
+    pub source_dev: Option<Arc<str>>,
+}
+
+impl MountEntry {
+    /// The mount sits on the block device `name` (a disk, partition or dm node), by its device
+    /// number or, for anonymous device numbers, by its mount source.
+    pub fn is_on(&self, major: u32, minor: u32, name: &str) -> bool {
+        if self.major != 0 {
+            return (self.major, self.minor) == (major, minor);
+        }
+        self.source_dev.as_deref() == Some(name)
+    }
 }
 
 /// Clears `out` and pushes one entry per line of the form
@@ -34,6 +51,7 @@ fn parse_line(line: &[u8]) -> Option<MountEntry> {
     let _options = fields.next()?;
     fields.by_ref().find(|w| *w == b"-")?;
     let fs_type = fields.next()?;
+    let source = fields.next().map(unescape);
 
     let colon = dev.iter().position(|&b| b == b':')?;
     let major = parse_u32(&dev[..colon])?;
@@ -43,7 +61,15 @@ fn parse_line(line: &[u8]) -> Option<MountEntry> {
         minor,
         mount_point: Arc::from(String::from_utf8_lossy(&unescape(mount_point))),
         fs_type: Arc::from(String::from_utf8_lossy(&unescape(fs_type))),
+        source_dev: source.and_then(|s| source_dev(&s)),
     })
+}
+
+fn source_dev(source: &[u8]) -> Option<Arc<str>> {
+    let source = String::from_utf8_lossy(source);
+    let path = source.strip_prefix("/dev/")?;
+    let name = path.split('[').next().unwrap_or(path);
+    (!name.is_empty()).then(|| Arc::from(name))
 }
 
 fn parse_u32(word: &[u8]) -> Option<u32> {
@@ -110,6 +136,20 @@ mod tests {
                 (0, 25, "/run", "tmpfs"),
             ]
         );
+    }
+
+    #[test]
+    fn btrfs_subvolume_mounts_name_their_partition() {
+        let text = b"30 1 0:30 /@ / rw - btrfs /dev/nvme0n1p2[/@] rw\n\
+            31 30 0:31 /@home /home rw - btrfs /dev/nvme0n1p2[/@home] rw\n\
+            32 30 0:25 / /run rw - tmpfs tmpfs rw\n";
+        let out = parsed(text);
+        assert_eq!(out.len(), 3);
+        assert!(out[0].is_on(259, 2, "nvme0n1p2"));
+        assert!(out[1].is_on(259, 2, "nvme0n1p2"));
+        assert!(!out[1].is_on(259, 3, "nvme0n1p3"));
+        assert_eq!(out[2].source_dev, None);
+        assert!(!out[2].is_on(0, 25, "tmpfs"));
     }
 
     #[test]
