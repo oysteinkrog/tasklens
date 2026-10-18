@@ -27,6 +27,7 @@ use crate::actions::OpenShortcuts;
 use crate::app::AppEnv;
 use crate::components::icons::TlIcon;
 use crate::components::input::{TlInputSize, TlTextInput};
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
@@ -39,6 +40,8 @@ const SIZE: (f32, f32) = (560., 640.);
 const MIN_SIZE: (f32, f32) = (420., 360.);
 /// Row and heading height, × ui_scale.
 const ROW: f32 = 28.;
+/// Max width of the keys column, × ui_scale.
+const KEYS_MAX_WIDTH: f32 = 220.;
 
 const TITLE: &str = "shortcuts-title";
 const PLACEHOLDER: &str = "shortcuts-search-placeholder";
@@ -1010,7 +1013,7 @@ impl ShortcutsWindow {
 }
 
 impl Render for ShortcutsWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         let m = *metrics(cx);
         let row_h = px(ROW * m.ui_scale);
@@ -1039,7 +1042,16 @@ impl Render for ShortcutsWindow {
                 *heading.text_style() = t_sm(&m);
                 list = list.child(heading.child(self.heading_name(row.heading).clone()));
             }
-            let mut caps = div().flex().flex_none().items_center().gap(m.sp[2]);
+            // The keys column shrinks to a maximum width and clips, so the description always
+            // shows; the tooltip carries the full key text.
+            let mut caps = div()
+                .flex()
+                .flex_shrink(1.)
+                .min_w_0()
+                .max_w(px(KEYS_MAX_WIDTH * m.ui_scale))
+                .overflow_hidden()
+                .items_center()
+                .gap(m.sp[2]);
             let mut first = true;
             let mut sep = |caps: gpui_kit::Div| {
                 if std::mem::take(&mut first) {
@@ -1048,16 +1060,34 @@ impl Render for ShortcutsWindow {
                     caps.child(
                         div()
                             .text_color(theme.text_secondary)
+                            .flex_none()
                             .child(self.words.or.clone()),
                     )
                 }
             };
             for key in &row.keys {
-                caps = sep(caps).child(key.clone());
+                caps = sep(caps).child(div().flex_none().child(key.clone()));
             }
             for text in &row.literal {
-                caps = sep(caps).child(div().text_color(theme.text_secondary).child(text.clone()));
+                caps = sep(caps).child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_secondary)
+                        .child(text.clone()),
+                );
             }
+            let caps = {
+                let text = row.key_text.clone();
+                let state = HoverTooltip::state(("shortcuts-keys-tip", ix), window, cx);
+                HoverTooltip::attach(
+                    &state,
+                    caps.id(("shortcuts-keys", ix)),
+                    DELAY_CONTROL,
+                    move |_, cx| TlTooltip::text(text.clone()).view(cx),
+                    window,
+                    cx,
+                )
+            };
             let mut r = div()
                 .flex()
                 .flex_row()

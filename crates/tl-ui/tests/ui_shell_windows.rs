@@ -757,6 +757,24 @@ fn shortcuts_search_filters(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn shortcuts_second_esc_closes_from_search(cx: &mut TestAppContext) {
+    setup(cx);
+    let (frame, mut vcx) = open_shortcuts(cx, 1);
+    drop(frame);
+    vcx.simulate_input("filter");
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(shortcuts_window(cx).is_some(), "the first Esc clears");
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(
+        shortcuts_window(cx).is_none(),
+        "the second Esc closes the window with focus still in the search box"
+    );
+}
+
+#[gpui_kit::test]
 fn shortcuts_refocus(cx: &mut TestAppContext) {
     setup(cx);
     let before = cx.update(|cx| cx.windows().len());
