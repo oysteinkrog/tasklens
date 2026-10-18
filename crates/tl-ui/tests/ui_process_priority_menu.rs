@@ -3,9 +3,8 @@
 
 use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
-    AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Role, Styled as _, TestAppContext, TestDispatcher,
-    VisualTestContext, Window, div, px,
+    Context, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
+    Styled as _, TestAppContext, TestDispatcher, VisualTestContext, Window, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::ids::{NodeId, ProcessKey};
