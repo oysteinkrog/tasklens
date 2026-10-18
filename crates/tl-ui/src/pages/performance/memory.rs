@@ -1201,6 +1201,14 @@ fn update_module_model(model: &mut KeyValueModel, m: &MemoryModule) -> bool {
                 let _ = write!(o, "{:.2}", f64::from(mv) / 1000.);
             });
         });
+    } else if mv.validity == Validity::Failed {
+        // udev has the key but no exact value (PERF-013 Failed word).
+        changed |= model.set_fallback(
+            ROW_MOD_VOLTAGE,
+            Validity::Failed,
+            Fallback::Unavailable,
+            None,
+        );
     } else {
         changed |= not_reported(model, ROW_MOD_VOLTAGE);
     }

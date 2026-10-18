@@ -2725,6 +2725,18 @@ fn module_voltage_and_missing_fields() {
         value_of(&block.modules[0].1, ROW_MOD_VOLTAGE),
         "Not reported"
     );
+
+    // An unreadable udev value (systemd's "1" for 1.0 to 1.4 V) is Unavailable, never 0.00 V.
+    let mut dimm = full_dimm(3200, 3200);
+    dimm.configured_voltage_mv = InvField {
+        value: 0,
+        validity: Validity::Failed,
+    };
+    let block = module_block(vec![dimm], inv_ok(2));
+    assert_eq!(
+        value_of(&block.modules[0].1, ROW_MOD_VOLTAGE),
+        "Unavailable"
+    );
 }
 
 #[test]

@@ -16,7 +16,7 @@ pub use cpuinfo::{
 };
 pub use displays::{ConnectorInfo, ConnectorType, edid_monitor_name, read_connectors};
 pub use dmi::{DmiInfo, Field, FirmwareType, read_dmi};
-pub use modules::{MemoryModule, ModulesInfo, read_modules};
+pub use modules::{DimmVoltage, MemoryModule, ModulesInfo, read_modules};
 pub use os_release::{
     InstallDateSource, KernelInfo, OsRelease, package_manager_version, read_install_date,
     read_kernel, read_machine_id, read_os_release,
