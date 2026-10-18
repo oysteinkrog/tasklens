@@ -1061,7 +1061,7 @@ mod boxes {
             });
         });
         publish_train(&mut r, &flicker());
-        assert_eq!(core0(&mut r), Some(100.), "the newest raw sample");
+        assert_eq!(core0(&mut r), Some(0.), "the newest raw sample");
     }
 
     #[gpui_kit::test]
