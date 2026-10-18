@@ -315,8 +315,12 @@ pub struct PerformanceSettings {
     #[serde(skip_serializing)]
     pub overview_top_processes: bool,
     /// `[performance.overview]`: the Overview page layout (UI-PRF-018, D-023). `None` is the
-    /// default layout.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// default layout. A value of the wrong type anywhere in it is dropped by [`Settings::clamp`]
+    /// with the part it is in, so it never resets the rest of `[performance]`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "loose_some"
+    )]
     pub overview: Option<OverviewLayoutSetting>,
 }
 
@@ -327,11 +331,16 @@ pub const OVERVIEW_KEY: &str = "performance.overview";
 /// The kinds `[performance.overview]` accepts, in default order.
 pub const OVERVIEW_BOX_KINDS: [&str; 6] = ["cpu", "memory", "gpu", "disk", "net", "processes"];
 
+/// The smallest and largest Overview weight. Load and save clamp into this range; the minimum
+/// matches the 3 decimals a weight is written with, so a saved layout always reloads.
+pub const OVERVIEW_WEIGHT_RANGE: (f64, f64) = (0.001, 1000.);
+
 /// `[performance.overview]` (UI-PRF-018): rows top to bottom, each with its boxes left to right.
 /// Weights are shares, not pixels. `tl-ui` turns this into its layout.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverviewLayoutSetting {
+    #[serde(deserialize_with = "loose_vec")]
     pub rows: Vec<OverviewRowSetting>,
 }
 
@@ -339,8 +348,9 @@ pub struct OverviewLayoutSetting {
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverviewRowSetting {
-    #[serde(serialize_with = "serialize_weight")]
+    #[serde(serialize_with = "serialize_weight", deserialize_with = "loose")]
     pub height: f64,
+    #[serde(deserialize_with = "loose_vec")]
     pub boxes: Vec<OverviewBoxSetting>,
 }
 
@@ -349,14 +359,108 @@ pub struct OverviewRowSetting {
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverviewBoxSetting {
+    #[serde(deserialize_with = "loose")]
     pub kind: String,
-    #[serde(serialize_with = "serialize_weight")]
+    #[serde(serialize_with = "serialize_weight", deserialize_with = "loose")]
     pub width: f64,
 }
 
-/// Writes a weight rounded to 3 decimals.
+/// Writes a weight clamped to [`OVERVIEW_WEIGHT_RANGE`] and rounded to 3 decimals.
 fn serialize_weight<S: serde::Serializer>(w: &f64, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_f64((w * 1000.).round() / 1000.)
+    let (min, max) = OVERVIEW_WEIGHT_RANGE;
+    s.serialize_f64((w.clamp(min, max) * 1000.).round() / 1000.)
+}
+
+/// A value of the right type, or anything else. Lets one bad part of `[performance.overview]`
+/// fail alone instead of failing the whole `[performance]` section.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Loose<T> {
+    Value(T),
+    Bad(serde::de::IgnoredAny),
+}
+
+/// The value a part of the wrong type loads as. [`OverviewLayoutSetting::drop_invalid`] always
+/// drops it, so a type error drops its part and logs the same warn line as a bad value.
+trait Unreadable {
+    fn unreadable() -> Self;
+}
+
+impl Unreadable for f64 {
+    fn unreadable() -> Self {
+        f64::NAN
+    }
+}
+
+impl Unreadable for String {
+    /// Not a kind.
+    fn unreadable() -> Self {
+        String::new()
+    }
+}
+
+impl Unreadable for OverviewBoxSetting {
+    fn unreadable() -> Self {
+        Self {
+            kind: String::unreadable(),
+            width: 1.,
+        }
+    }
+}
+
+impl Unreadable for OverviewRowSetting {
+    fn unreadable() -> Self {
+        Self {
+            height: f64::unreadable(),
+            boxes: Vec::new(),
+        }
+    }
+}
+
+impl Unreadable for OverviewLayoutSetting {
+    fn unreadable() -> Self {
+        Self {
+            rows: vec![OverviewRowSetting::unreadable()],
+        }
+    }
+}
+
+fn loose<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Unreadable,
+{
+    Ok(match Loose::deserialize(d)? {
+        Loose::Value(v) => v,
+        Loose::Bad(_) => T::unreadable(),
+    })
+}
+
+fn loose_some<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Unreadable,
+{
+    loose(d).map(Some)
+}
+
+/// A list where each item of the wrong type is unreadable on its own. A value that is not a
+/// list is one unreadable item.
+fn loose_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Unreadable,
+{
+    Ok(match Loose::<Vec<Loose<T>>>::deserialize(d)? {
+        Loose::Value(items) => items
+            .into_iter()
+            .map(|item| match item {
+                Loose::Value(v) => v,
+                Loose::Bad(_) => T::unreadable(),
+            })
+            .collect(),
+        Loose::Bad(_) => vec![T::unreadable()],
+    })
 }
 
 impl OverviewLayoutSetting {
@@ -395,32 +499,52 @@ impl OverviewLayoutSetting {
         layout
     }
 
-    /// Drops unknown and repeated kinds, weights that are not above 0 and at most `f32::MAX`
-    /// (the UI places in `f32`), and rows left with no box. Returns `true` when it dropped
-    /// anything.
+    /// Drops unknown and repeated kinds, weights that are NaN, infinite, zero or negative, and
+    /// rows left with no box. Clamps the other weights into [`OVERVIEW_WEIGHT_RANGE`]. Returns
+    /// `true` when it dropped or clamped anything.
     pub fn drop_invalid(&mut self) -> bool {
-        let good = |w: f64| w > 0. && w <= f64::from(f32::MAX);
-        let before = self.rows.len() + self.rows.iter().map(|r| r.boxes.len()).sum::<usize>();
+        let mut changed = false;
         let mut seen: Vec<&'static str> = Vec::new();
         self.rows.retain_mut(|row| {
-            if !good(row.height) {
+            let Some(clamped) = fix_weight(&mut row.height) else {
+                changed = true;
                 return false;
-            }
-            row.boxes.retain(|b| {
-                let Some(kind) = OVERVIEW_BOX_KINDS.iter().find(|k| **k == b.kind) else {
+            };
+            changed |= clamped;
+            row.boxes.retain_mut(|b| {
+                let kind = OVERVIEW_BOX_KINDS.iter().copied().find(|k| *k == b.kind);
+                let fixed = kind
+                    .filter(|k| !seen.contains(k))
+                    .zip(fix_weight(&mut b.width));
+                let Some((kind, clamped)) = fixed else {
+                    changed = true;
                     return false;
                 };
-                if !good(b.width) || seen.contains(kind) {
-                    return false;
-                }
+                changed |= clamped;
                 seen.push(kind);
                 true
             });
-            !row.boxes.is_empty()
+            if row.boxes.is_empty() {
+                changed = true;
+                return false;
+            }
+            true
         });
-        let after = self.rows.len() + self.rows.iter().map(|r| r.boxes.len()).sum::<usize>();
-        after != before
+        changed
     }
+}
+
+/// `None` for a weight that is NaN, infinite, zero or negative. Otherwise clamps it into
+/// [`OVERVIEW_WEIGHT_RANGE`] and returns whether it changed.
+fn fix_weight(w: &mut f64) -> Option<bool> {
+    if !w.is_finite() || *w <= 0. {
+        return None;
+    }
+    let (min, max) = OVERVIEW_WEIGHT_RANGE;
+    let clamped = w.clamp(min, max);
+    let changed = clamped != *w;
+    *w = clamped;
+    Some(changed)
 }
 
 impl Default for PerformanceSettings {
@@ -1853,7 +1977,9 @@ mod tests {
             .iter()
             .map(|r| (r.height, r.boxes.iter().map(|b| b.kind.as_str()).collect()))
             .collect();
-        assert_eq!(rows, [(3., vec!["cpu"]), (1., vec!["disk"])]);
+        // 1e39 is clamped to 1000, not dropped.
+        assert_eq!(rows, [(3., vec!["cpu", "gpu"]), (1., vec!["disk"])]);
+        assert_eq!(layout.rows[0].boxes[1].width, 1000.);
 
         // Nothing valid left: the default.
         let (s, changed) = load_toml(
@@ -1862,6 +1988,80 @@ mod tests {
         );
         assert_eq!(s.performance.overview, None);
         assert_eq!(changed, ["performance.overview"]);
+    }
+
+    #[test]
+    fn overview_weights_clamp_to_range() {
+        // Tiny and huge weights clamp into 0.001..=1000 with one warn line.
+        let (s, changed) = load_toml(
+            "[performance.overview]\nrows = [{ height = 1e-50, boxes = [{ kind = \"cpu\", width \
+             = 1e38 }, { kind = \"memory\", width = 1e-50 }] }, { height = 1e38, boxes = [{ kind \
+             = \"net\", width = 0.0004 }] }]\n",
+        );
+        assert_eq!(changed, ["performance.overview"], "one log line");
+        let rows = s.performance.overview.expect("clamped, not dropped").rows;
+        let weights: Vec<(f64, Vec<f64>)> = rows
+            .iter()
+            .map(|r| (r.height, r.boxes.iter().map(|b| b.width).collect()))
+            .collect();
+        assert_eq!(weights, [(0.001, vec![1000., 0.001]), (1000., vec![0.001])]);
+
+        // Weights in range are left alone and log nothing.
+        let (_, changed) = load_toml(
+            "[performance.overview]\nrows = [{ height = 0.001, boxes = [{ kind = \"cpu\", width \
+             = 1000 }] }]\n",
+        );
+        assert!(changed.is_empty(), "{changed:?}");
+
+        // A weight of 0.0004 in memory is saved as 0.001, so the saved layout reloads.
+        let mut s = Settings::default();
+        let mut layout = OverviewLayoutSetting::btop_default();
+        layout.rows[0].height = 0.0004;
+        layout.rows[1].boxes[0].width = 5000.;
+        s.performance.overview = Some(layout);
+        let text = toml::to_string(&s).expect("serializes");
+        let (back, changed) = load_toml(&text);
+        assert!(changed.is_empty(), "{changed:?}");
+        let rows = back.performance.overview.expect("saved").rows;
+        assert_eq!(rows[0].height, 0.001);
+        assert_eq!(rows[1].boxes[0].width, 1000.);
+    }
+
+    #[test]
+    fn overview_type_error_drops_only_its_part() {
+        // A value of the wrong type drops the part it is in; the rest of [performance] loads.
+        let (s, changed) = load_toml(
+            "[performance]\ngraph_range_s = 30\ncurved_lines = true\n[performance.overview]\n\
+             rows = [{ height = 3.0, boxes = [{ kind = \"cpu\", width = \"bad\" }, { kind = \
+             \"memory\", width = 1.0 }, { kind = 5, width = 1.0 }, \"box\"] }, \
+             { height = \"tall\", boxes = [{ kind = \"gpu\", width = 1.0 }] }, \
+             { height = 1.0, boxes = \"none\" }, 7, \
+             { height = 2.0, boxes = [{ kind = \"net\", width = 2 }] }]\n",
+        );
+        assert_eq!(s.performance.graph_range_s, 30);
+        assert!(s.performance.curved_lines);
+        assert_eq!(changed, ["performance.overview"], "one log line");
+        let layout = s.performance.overview.expect("valid rows kept");
+        let rows: Vec<(f64, Vec<(&str, f64)>)> = layout
+            .rows
+            .iter()
+            .map(|r| {
+                let boxes = r.boxes.iter().map(|b| (b.kind.as_str(), b.width)).collect();
+                (r.height, boxes)
+            })
+            .collect();
+        assert_eq!(rows, [(3., vec![("memory", 1.)]), (2., vec![("net", 2.)])]);
+
+        // Rows or the whole table of the wrong type: the default, with the warn line.
+        for text in [
+            "[performance]\ngraph_range_s = 30\noverview = 5\n",
+            "[performance]\ngraph_range_s = 30\n[performance.overview]\nrows = \"x\"\n",
+        ] {
+            let (s, changed) = load_toml(text);
+            assert_eq!(s.performance.graph_range_s, 30, "{text}");
+            assert_eq!(s.performance.overview, None, "{text}");
+            assert_eq!(changed, ["performance.overview"], "{text}");
+        }
     }
 
     #[test]

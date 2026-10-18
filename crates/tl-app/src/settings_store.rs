@@ -186,7 +186,7 @@ fn load<T: Stored>(kind: FileKind, path: &Path, now_unix: u64) -> Loaded<T> {
         if key == OVERVIEW_KEY {
             warn!(
                 target: "tasklens::settings",
-                "{}: {key} had invalid rows or boxes and they have been dropped",
+                "{}: {key} had invalid parts; they have been dropped or clamped",
                 kind.label()
             );
             continue;

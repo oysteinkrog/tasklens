@@ -242,6 +242,37 @@ fn bad_section_keeps_others() {
 }
 
 #[test]
+fn overview_type_error_keeps_performance() {
+    // A value of the wrong type in [performance.overview] drops only its box; every other
+    // [performance] setting loads, and one warn line names the table without the value.
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "settings.toml",
+        "[performance]\ngraph_range_s = 30\ncurved_lines = true\n[performance.overview]\n\
+         rows = [{ height = 3.0, boxes = [{ kind = \"cpu\", width = \"bad\" }, { kind = \
+         \"memory\", width = 1e-50 }] }, { height = 2.0, boxes = [{ kind = \"net\", width = \
+         1.0 }] }]\n",
+    );
+    let (s, logs) = capture_logs(|| load_settings(&path, NOW));
+    let p = &s.value.performance;
+    assert_eq!(p.graph_range_s, 30);
+    assert!(p.curved_lines);
+    let rows: Vec<Vec<(&str, f64)>> = p
+        .overview
+        .as_ref()
+        .expect("valid rows kept")
+        .rows
+        .iter()
+        .map(|r| r.boxes.iter().map(|b| (b.kind.as_str(), b.width)).collect())
+        .collect();
+    assert_eq!(rows, [vec![("memory", 0.001)], vec![("net", 1.)]]);
+    assert_eq!(logs.matches("WARN").count(), 1, "{logs}");
+    assert!(logs.contains("performance.overview"), "{logs}");
+    assert!(!logs.contains("bad"), "setting value logged: {logs}");
+}
+
+#[test]
 fn bad_schema_version_type_loads() {
     let dir = TempDir::new().unwrap();
     let path = write(
