@@ -921,6 +921,13 @@ impl OverviewPage {
                             this.box_drag_down(kind, ev, window, cx);
                         }),
                     )
+                    // The handle occludes the box below, so the box menu is named here.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            this.title_handle_right_down(kind, cx);
+                        }),
+                    )
                     .child(grip)
                     .child(self.box_gear(kind, cx))
                     .child(hide_button)

@@ -3508,8 +3508,10 @@ mod wired {
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::actions::PerfOverviewEditLayout;
     use tl_ui::pages::performance::overview::cpu_box::CPU_BOX_ID;
     use tl_ui::pages::performance::overview::disk_box::{DISK_BOX_ID, DISK_ROW_ID_PREFIX};
+    use tl_ui::pages::performance::overview::edit::title_handle_id;
     use tl_ui::pages::performance::overview::gpu_box::GPU_BOX_ID;
     use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
@@ -4026,6 +4028,34 @@ mod wired {
         mouse(r.vcx, MouseButton::Right, frame.center());
         let (labels, _) = open_menu(&mut r);
         assert_eq!(labels[0], (MenuEntryKind::Item, "Copy".to_owned()));
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+
+        // In Edit Layout mode the title handle covers the title line: a right-click on it
+        // still opens the box menu.
+        r.vcx.update(|window, cx| {
+            let focus = gpui_kit::Focusable::focus_handle(page.read(cx), cx);
+            focus.dispatch_action(&PerfOverviewEditLayout, window, cx);
+        });
+        draw(r.vcx);
+        let handle = r
+            .vcx
+            .debug_bounds(Box::leak(
+                title_handle_id(tl_ui::pages::performance::overview::layout::BoxKind::Cpu)
+                    .into_boxed_str(),
+            ))
+            .expect("the CPU title handle");
+        mouse(r.vcx, MouseButton::Right, handle.center());
+        let (labels, modes) = open_menu(&mut r);
+        assert_eq!(
+            labels[..3],
+            [
+                (MenuEntryKind::Submenu, "Layout".to_owned()),
+                (MenuEntryKind::Item, "Reset Box".to_owned()),
+                (MenuEntryKind::Separator, String::new()),
+            ]
+        );
+        assert_eq!(modes, [("Chart and cores".to_owned(), true)]);
     }
 
     #[gpui_kit::test]

@@ -4,8 +4,8 @@
 //! opens its page menu for every right-click on the page (UI-PRF-015); when a box is named, the
 //! menu starts with [`box_menu`]: a "Layout" submenu with one radio item per mode the box
 //! offers, then "Reset Box", then a separator. A right-click elsewhere in a box names no box and
-//! keeps the plain page menu. In Edit Layout mode a gear at the right end of each title line
-//! opens the same mode items.
+//! keeps the plain page menu. In Edit Layout mode the title handle names the box the same way,
+//! and a gear at the right end of each title line opens the same mode items.
 //!
 //! The items dispatch [`PerfOverviewSetBoxMode`] and [`PerfOverviewResetBox`], which the page
 //! handles here: the layout takes the new mode or the default, the box views follow, and the
@@ -108,6 +108,13 @@ impl OverviewPage {
         if f32::from(y) <= TITLE_LINE * metrics(cx).ui_scale {
             cx.set_global(ClickedBox(Some(self.menu_target(kind))));
         }
+    }
+
+    /// A right-press on `kind`'s title handle in Edit Layout mode. The handle covers the title
+    /// line and sits above the box, so it names the box itself. The press goes on to the
+    /// Performance tab, which opens the menu.
+    pub(super) fn title_handle_right_down(&self, kind: BoxKind, cx: &mut App) {
+        cx.set_global(ClickedBox(Some(self.menu_target(kind))));
     }
 
     /// `PerfOverviewSetBoxMode`: the box takes the mode and the layout is saved. A mode the box
