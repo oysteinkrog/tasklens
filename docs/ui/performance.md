@@ -1064,7 +1064,7 @@ system battery with ≥ 2 history points (P3):
 ### UI-PRF-040 Minigraph panel
 
 - **Implements**: PERF-080, PERF-082, R-089, APP-021 (View > Graphs items are the shell's; their effect is here).
-- **Anatomy** (over the Processes tab table, anchored bottom right; measured from `advanced-12.png`: cards 180 × 90 logical, 8 px apart, 16 px from the right and bottom edges of the table area):
+- **Anatomy** (in its own row under the Processes tab table, cards anchored bottom right; leader decision 2026-10-18, xdh.25: an overlay hid the table's last rows; measured from `advanced-12.png`: cards 180 × 90 logical, 8 px apart, 16 px from the right and bottom edges of the table area):
 
 ```
                                                  table area
@@ -1079,7 +1079,7 @@ slot numbering: slot 0 = bottom right, 1 = left of it, …, up to 4 per row, the
 ```
 
   - **Default cards and slots** (PERF-080): CPU slot 0, Memory slot 1, Disk slot 2, Network slot 3, GPU slot 4, VRAM slot 5; GPU temp off by default (slot 6 when enabled). In `advanced-12.png` the user's layout is CPU 0, Memory 1, Disk 2, Network 3.
-  - The panel is a `div().absolute()` overlay in the Processes page, `pointer-events` only on the cards (the gaps pass clicks to the table).
+  - The panel is a row below the table in the Processes page's flex column, as high as the card rows in use (`own_space`); the table takes the rest of the height (`flex_1`, `min_h_0`). With no visible card the panel takes no height. The 16 px edge measurements apply inside the panel row.
   - Panel visibility: only on the Processes tab (also in History mode). Hidden during Ctrl-pause? No: the cards keep sliding (they draw from live series, not the paused table snapshot; chosen).
 - **States**: panel empty (every card hidden): nothing is drawn. Full grid: adding shows the toast "No space for more minigraphs". Reset: toast "Minigraph layout reset".
 - **Interaction**: View > Graphs check items (shell) dispatch `MinigraphToggleSystemCard { source }`; "Reset Minigraph Layout" dispatches `MinigraphResetLayout` (restores the six default cards and slots, removes process cards, resets range and colour per card; chosen: a reset means the default state). Card interactions in UI-PRF-041 to UI-PRF-043.
