@@ -122,6 +122,7 @@ mod drawn {
         VisualTestContext, Window, div, hsla, px, size,
     };
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui::pages::performance::overview::mem_box::{METER_ROW_LABEL_ID, MeterRow, meter_row};
     use tl_ui::pages::performance::overview::parts::{
         CoreBars, CoreBarsModel, METER_H, Meter, take_meter_quads,
     };
@@ -129,18 +130,24 @@ mod drawn {
     enum Part {
         Meter(Option<f32>),
         Cores(Rc<RefCell<CoreBarsModel>>),
+        Row(MeterRow),
     }
 
     struct Host(Part);
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let body = match &self.0 {
                 Part::Meter(fraction) => Meter {
                     fraction: *fraction,
                     color: hsla(0.5, 0.5, 0.5, 1.),
                 }
                 .into_any_element(),
+                Part::Row(row) => {
+                    let m = *tl_ui::theme::metrics(cx);
+                    let theme = tl_ui::theme::current(cx).clone();
+                    meter_row(row, &m, &theme)
+                }
                 Part::Cores(model) => CoreBars {
                     model: Rc::clone(model),
                 }
@@ -185,6 +192,28 @@ mod drawn {
         vcx.simulate_scale_factor_change(1.0);
         vcx.simulate_resize(size(px(400.), px(300.)));
         (host, vcx)
+    }
+
+    #[gpui_kit::test]
+    fn meter_row_label_stays_on_one_line(cx: &mut TestAppContext) {
+        let row = MeterRow {
+            label: "3D / Compute".into(),
+            value: "7.0%".into(),
+            fraction: Some(0.07),
+            color: hsla(0.5, 0.5, 0.5, 1.),
+        };
+        let (_host, vcx) = open(cx, Part::Row(row));
+        vcx.run_until_parked();
+        draw(vcx);
+        let label = vcx
+            .debug_bounds(METER_ROW_LABEL_ID)
+            .expect("the row label is drawn");
+        // One 12 px line; a wrapped label is two lines tall.
+        assert!(
+            label.size.height < px(20.),
+            "label wrapped: {:?}",
+            label.size
+        );
     }
 
     #[gpui_kit::test]

@@ -258,6 +258,39 @@ fn disk_page_two_charts_and_header(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn disk_number_skips_partition_entries(cx: &mut TestAppContext) {
+    let r = open(cx);
+    // The catalog lists a partition of the disk before the disk. The sidebar gives it no card,
+    // so the page still reads "Disk 0".
+    r.engine.publish_with(|s| {
+        let mut partition = entry(
+            3,
+            DeviceIdentity::Disk {
+                major: 259,
+                minor: 1,
+                name: Arc::from("nvme0n1p1"),
+                wwn_or_serial: None,
+            },
+        );
+        partition.parent = Some(DISK);
+        s.devices = Arc::new(DeviceCatalog {
+            version: 2,
+            entries: Arc::from(vec![
+                entry(0, DeviceIdentity::CpuPackage),
+                entry(1, DeviceIdentity::Memory),
+                partition,
+                entry(2, nvme()),
+            ]),
+        });
+    });
+    draw(r.vcx);
+    draw(r.vcx);
+    let page = r.page.clone();
+    let header = r.vcx.update(|_, cx| page.read(cx).header());
+    assert_eq!(header.0.as_ref(), "Disk 0");
+}
+
+#[gpui_kit::test]
 fn disk_demand_only_when_active(cx: &mut TestAppContext) {
     let r = open(cx);
     let (page, demand) = (r.page.clone(), r.demand.clone());
@@ -622,7 +655,7 @@ fn partitions_columns(cx: &mut TestAppContext) {
             assert_eq!(&**layout.visible_columns(), &PartColumn::ALL[..]);
             let s = layout.ui_scale();
             for (col, w) in [
-                (PartColumn::Partition, 120.),
+                (PartColumn::Partition, 170.),
                 (PartColumn::Size, 90.),
                 (PartColumn::Offset, 110.),
                 (PartColumn::Device, 110.),

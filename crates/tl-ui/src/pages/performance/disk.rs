@@ -39,6 +39,7 @@ use super::actions::{PerfEject, PerfShowSmart};
 use super::details::{Fallback, KeyValueModel};
 use super::memory::flat_static_table;
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
+use super::sidebar::retain_whole_disks;
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
     visible_rows,
@@ -759,6 +760,8 @@ fn disk_number(key: &DeviceKey, snap: &Snapshot, cx: &App) -> u16 {
     };
     let mut rows = Vec::new();
     sidebar_order(&snap.devices, &snap.system.sensors, &view, &mut rows);
+    // Partitions and device-mapper devices get no card, so they take no number.
+    retain_whole_disks(&mut rows, &snap.devices);
     let visible: Vec<DeviceRow> = visible_rows(&rows, &view).cloned().collect();
     type_number(&visible, key)
 }
@@ -828,7 +831,9 @@ impl PartColumn {
     /// Logical px at 100%. A flex column's width is its width before the first fit.
     pub fn width(self) -> f32 {
         match self {
-            Self::Partition | Self::Label => 120.,
+            // The name cell spends about 60 px on its indent, chevron and icon before the text.
+            Self::Partition => 170.,
+            Self::Label => 120.,
             Self::Size | Self::FileSystem => 90.,
             Self::Offset | Self::Device | Self::Flags => 110.,
             Self::Usage => 140.,

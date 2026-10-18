@@ -1021,7 +1021,9 @@ pub fn spark_row(
                 .child(meter_row(row, m, theme))
                 .into_any_element();
         };
-        let mut label = div()
+        let mut label = div();
+        *label.text_style() = t_sm(m);
+        let label = label
             .flex_none()
             .w(px(ROW_LABEL_W * s))
             .overflow_hidden()
@@ -1029,8 +1031,9 @@ pub fn spark_row(
             .text_ellipsis()
             .text_color(theme.text_secondary)
             .child(row.label.clone());
-        *label.text_style() = t_sm(m);
-        let mut value = div()
+        let mut value = div();
+        *value.text_style() = numeric_style(m, m.text.sm);
+        let value = value
             .flex_none()
             .w(px(SPARK_VALUE_W * s))
             .flex()
@@ -1038,7 +1041,6 @@ pub fn spark_row(
             .whitespace_nowrap()
             .text_color(theme.text_primary)
             .child(row.value.clone());
-        *value.text_style() = numeric_style(m, m.text.sm);
         return div()
             .flex()
             .flex_row()

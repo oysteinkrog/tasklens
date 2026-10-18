@@ -83,7 +83,10 @@ const BATTERY_COLOR: &str = "mint";
 
 /// Removes disk children from a sidebar list. The engine keeps partitions and device-mapper
 /// devices in the catalog for attribution, but only their whole parent disks get cards.
-fn retain_whole_disks(rows: &mut Vec<DeviceRow>, catalog: &tl_model::devices::DeviceCatalog) {
+pub(super) fn retain_whole_disks(
+    rows: &mut Vec<DeviceRow>,
+    catalog: &tl_model::devices::DeviceCatalog,
+) {
     rows.retain(|row| {
         row.kind != DeviceKind::Disk
             || catalog
@@ -2043,41 +2046,38 @@ impl Render for DeviceSidebar {
                                 .child(self.edit_words.title.clone()),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .gap(m.sp[2])
-                                .child(
-                                    TlButton::new("perf-edit-enable-all", TlButtonKind::Ghost)
-                                        .size(TlButtonSize::Sm)
-                                        .label(self.edit_words.enable_all.clone())
-                                        .action(Box::new(PerfEnableAllPages)),
-                                )
-                                .child(
-                                    TlButton::new("perf-edit-disable-all", TlButtonKind::Ghost)
-                                        .size(TlButtonSize::Sm)
-                                        .label(self.edit_words.disable_all.clone())
-                                        .action(Box::new(PerfDisableAllPages)),
-                                ),
+                            TlButton::new("perf-edit-done", TlButtonKind::Primary)
+                                .size(TlButtonSize::Sm)
+                                .label(self.edit_words.done.clone())
+                                .action(Box::new(PerfExitEditMode)),
                         ),
                 )
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
+                        .gap(m.sp[2])
                         .h(px(32. * m.ui_scale))
                         .child(
-                            TlButton::new("perf-edit-reset", TlButtonKind::Ghost)
+                            TlButton::new("perf-edit-enable-all", TlButtonKind::Ghost)
                                 .size(TlButtonSize::Sm)
-                                .label(self.edit_words.reset.clone())
-                                .action(Box::new(PerfResetPagesToDefault)),
+                                .label(self.edit_words.enable_all.clone())
+                                .action(Box::new(PerfEnableAllPages)),
                         )
                         .child(
-                            TlButton::new("perf-edit-done", TlButtonKind::Primary)
+                            TlButton::new("perf-edit-disable-all", TlButtonKind::Ghost)
                                 .size(TlButtonSize::Sm)
-                                .label(self.edit_words.done.clone())
-                                .action(Box::new(PerfExitEditMode)),
+                                .label(self.edit_words.disable_all.clone())
+                                .action(Box::new(PerfDisableAllPages)),
                         ),
+                )
+                .child(
+                    div().flex().items_center().h(px(32. * m.ui_scale)).child(
+                        TlButton::new("perf-edit-reset", TlButtonKind::Ghost)
+                            .size(TlButtonSize::Sm)
+                            .label(self.edit_words.reset.clone())
+                            .action(Box::new(PerfResetPagesToDefault)),
+                    ),
                 );
             let header: AnyElement = if edit_present && animate_edit {
                 header
@@ -2086,12 +2086,12 @@ impl Render for DeviceSidebar {
                         Animation::new(M_BASE).with_easing(ease_out_cubic),
                         move |header, t| {
                             let t = if entering { t } else { 1. - t };
-                            header.h(px(64. * m.ui_scale * t)).opacity(t)
+                            header.h(px(96. * m.ui_scale * t)).opacity(t)
                         },
                     )
                     .into_any_element()
             } else {
-                header.h(px(64. * m.ui_scale)).into_any_element()
+                header.h(px(96. * m.ui_scale)).into_any_element()
             };
 
             v_flex()

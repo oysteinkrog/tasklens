@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, AsyncApp, Context, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px, size,
 };
 use smallvec::SmallVec;
@@ -67,6 +67,19 @@ pub const MIN_SIZE: (f32, f32) = (560., 360.);
 /// NVMe list: Value column width and row height, × ui_scale.
 const NVME_VALUE_W: f32 = 160.;
 const NVME_ROW_H: f32 = 26.;
+/// The header grid has 4 columns from this window width, × ui_scale. A narrower window gets 2,
+/// so the grid never runs under the Refresh button.
+const HEADER_4_COLUMNS_MIN_W: f32 = 760.;
+
+/// The columns of the header grid in a window `width` wide at `ui_scale`.
+pub fn header_columns(width: Pixels, ui_scale: f32) -> usize {
+    if width >= px(HEADER_4_COLUMNS_MIN_W * ui_scale) {
+        4
+    } else {
+        2
+    }
+}
+
 /// How often the "Last updated" age moves.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -974,7 +987,7 @@ impl SmartWindow {
         }
     }
 
-    fn header_grid(&self, cx: &App) -> TlKeyValueGrid {
+    fn header_grid(&self, columns: usize, gap: Pixels, cx: &App) -> TlKeyValueGrid {
         let w = &self.words;
         let missing = |cx_validity| TlValue {
             validity: cx_validity,
@@ -1039,13 +1052,14 @@ impl SmartWindow {
             }],
         };
         TlKeyValueGrid::new("SmartHeader", KvLayout::Stacked)
-            .columns(4)
+            .columns(columns)
+            .column_gap(gap)
             .sections(&[section])
     }
 }
 
 impl Render for SmartWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         if !Arc::ptr_eq(&theme, &self.theme) {
             self.theme = theme.clone();
@@ -1082,13 +1096,19 @@ impl Render for SmartWindow {
                 });
             (b, "SmartRefresh")
         };
+        let columns = header_columns(window.viewport_size().width, s);
         let header = div()
             .flex_none()
             .flex()
             .items_start()
             .gap(m.sp[3])
             .p(m.sp[3])
-            .child(div().flex_1().min_w_0().child(self.header_grid(cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.header_grid(columns, m.sp[3], cx)),
+            )
             .child(
                 div()
                     .debug_selector(move || selector.into())
@@ -1230,5 +1250,21 @@ fn with_open(key: &DeviceKey, cx: &mut App, f: fn(&mut SmartWindow, &mut Context
                 content.update(cx, f);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_has_two_columns_below_the_default_width() {
+        // 4 columns of at least 160 px and the Refresh button need the default width.
+        assert_eq!(header_columns(px(SIZE.0), 1.0), 4);
+        assert_eq!(header_columns(px(SIZE.0 - 1.0), 1.0), 2);
+        assert_eq!(header_columns(px(MIN_SIZE.0), 1.0), 2);
+        // The threshold scales.
+        assert_eq!(header_columns(px(SIZE.0), 1.5), 2);
+        assert_eq!(header_columns(px(SIZE.0 * 1.5), 1.5), 4);
     }
 }

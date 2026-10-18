@@ -57,6 +57,9 @@ pub const CARD_GRAPH_W: f32 = 116.0;
 /// Narrowest mini graph, × ui_scale. With less room the card draws no graph and the text
 /// column takes the whole card.
 const CARD_GRAPH_MIN_W: f32 = 40.0;
+/// Narrowest text column the graph leaves, × ui_scale, when the card's values are narrower. It
+/// holds a whole heading word such as "Aggregate".
+const CARD_TEXT_MIN_W: f32 = 80.0;
 /// Mini graph height, × ui_scale.
 pub const CARD_GRAPH_H: f32 = 56.0;
 
@@ -909,6 +912,11 @@ impl CardTextLayout {
     }
 }
 
+/// The text column the graph must leave: the widest value, and at least [`CARD_TEXT_MIN_W`].
+pub fn card_text_floor(value_w: Pixels, m: &UiMetrics) -> Pixels {
+    value_w.max(px(CARD_TEXT_MIN_W * m.ui_scale))
+}
+
 /// The mini graph width of a card `card_w` wide: [`CARD_GRAPH_W`], or less so that the text
 /// column is at least `text_min` (the card's widest value) wide. Zero, no graph, when less than
 /// [`CARD_GRAPH_MIN_W`] is left.
@@ -1614,7 +1622,7 @@ impl DeviceCard {
                     });
                 px(f32::from(w).ceil())
             });
-            let graph_w = card_graph_width(self.width, value_w, &m);
+            let graph_w = card_graph_width(self.width, card_text_floor(value_w, &m), &m);
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
@@ -2680,6 +2688,18 @@ mod tests {
             f(ValueFormat::RateIec, 1023.96 * kib, NetworkUnit::Bits),
             "1.0 MiB/s"
         );
+    }
+
+    #[test]
+    fn card_graph_leaves_a_heading_word_for_a_card_without_a_value() {
+        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        // An edit-mode aggregate card has no value: the text column still holds "Aggregate".
+        let floor = card_text_floor(Pixels::ZERO, &m);
+        assert_eq!(floor, px(CARD_TEXT_MIN_W));
+        let graph = card_graph_width(px(164.), floor, &m);
+        assert!(card_text_width(px(164.), graph, &m) >= px(CARD_TEXT_MIN_W));
+        // A wider value still wins.
+        assert_eq!(card_text_floor(px(96.), &m), px(96.));
     }
 
     #[test]

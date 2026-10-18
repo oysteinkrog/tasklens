@@ -2668,7 +2668,8 @@ mod sidebar {
         r.vcx.dispatch_action(PerfEnterEditMode);
         draw(r.vcx);
         let header = r.vcx.debug_bounds("perf-edit-header").expect("edit header");
-        assert_eq!(header.size.height, px(64.));
+        // Title and Done, Enable All and Disable All, Reset to Default: three 32 px rows.
+        assert_eq!(header.size.height, px(96.));
     }
 
     #[gpui_kit::test]

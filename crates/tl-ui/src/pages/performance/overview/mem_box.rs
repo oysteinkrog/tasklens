@@ -484,10 +484,18 @@ impl MemBox {
     }
 }
 
+/// The debug selector of a meter row's label.
+pub const METER_ROW_LABEL_ID: &str = "perf-meter-row-label";
+
 /// One meter row: label, meter, value.
-pub(super) fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+pub fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let s = m.ui_scale;
-    let mut label = div()
+    // The text style is assigned first: assigning it later would drop the nowrap, the ellipsis
+    // and the colour set on the element.
+    let mut label = div();
+    *label.text_style() = t_sm(m);
+    let label = label
+        .debug_selector(|| METER_ROW_LABEL_ID.into())
         .flex_none()
         .w(px(ROW_LABEL_W * s))
         .overflow_hidden()
@@ -495,16 +503,16 @@ pub(super) fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyEl
         .text_ellipsis()
         .text_color(theme.text_secondary)
         .child(row.label.clone());
-    *label.text_style() = t_sm(m);
-    let mut value = div()
+    let mut value = div();
+    *value.text_style() = numeric_style(m, m.text.sm);
+    let value = value
         .flex_none()
-        .w(px(ROW_VALUE_W * s))
+        .min_w(px(ROW_VALUE_W * s))
         .flex()
         .justify_end()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
         .child(row.value.clone());
-    *value.text_style() = numeric_style(m, m.text.sm);
     div()
         .flex()
         .flex_row()
