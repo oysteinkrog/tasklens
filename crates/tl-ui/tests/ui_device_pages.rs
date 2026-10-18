@@ -3828,6 +3828,7 @@ mod smartctl_fallback {
     use gpui_kit::Modifiers;
     use tl_model::snapshot::{SmartData, SmartKind};
     use tl_model::table::Total;
+    use tl_ui::components::window_frame::{TestClientFrame, frame_bottom};
     use tl_ui::hub::GlobalHub;
     use tl_ui::i18n::tr;
     use tl_ui::pages::performance::actions::PerfShowSmart;
@@ -4044,5 +4045,83 @@ mod smartctl_fallback {
         );
         let (mut vcx, _view) = open_window(&mut r);
         assert!(vcx.debug_bounds("SmartReadSmartctl").is_none());
+    }
+
+    /// The header pairs as drawn: box, button and the four pairs, after the paint that measures
+    /// the box and the one that draws its columns.
+    fn header_layout(
+        vcx: &mut VisualTestContext,
+        button: &'static str,
+    ) -> (
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+        Vec<gpui_kit::Bounds<gpui_kit::Pixels>>,
+    ) {
+        redraw(vcx);
+        let header = vcx.debug_bounds("SmartHeaderBox").expect("header box");
+        let button = vcx.debug_bounds(button).expect(button);
+        let rows = ["TlKv-row-0", "TlKv-row-1", "TlKv-row-2", "TlKv-row-3"]
+            .into_iter()
+            .map(|s| vcx.debug_bounds(s).expect(s))
+            .collect();
+        (header, button, rows)
+    }
+
+    fn assert_clear(
+        header: gpui_kit::Bounds<gpui_kit::Pixels>,
+        button: gpui_kit::Bounds<gpui_kit::Pixels>,
+        rows: &[gpui_kit::Bounds<gpui_kit::Pixels>],
+    ) {
+        for (i, row) in rows.iter().enumerate() {
+            assert!(
+                row.right() <= header.right() && row.right() < button.left(),
+                "pair {i} {row:?} runs under the button {button:?} (box {header:?})"
+            );
+            for (j, other) in rows.iter().enumerate().skip(i + 1) {
+                assert!(!row.intersects(other), "pairs {i} and {j} overlap");
+            }
+        }
+    }
+
+    /// Shot s1: at the default 760 px the four header pairs ran under "Read with smartctl
+    /// (admin)". The grid drops to 2 columns when 4 do not fit beside the button, also inside
+    /// the client frame (UI-PRF-030).
+    fn smartctl_header(cx: &mut TestAppContext, frame: bool) {
+        if frame {
+            cx.update(|cx| cx.set_global(TestClientFrame));
+        }
+        let mut r = open_smart_rig(cx);
+        publish(&mut r, SmartKind::NeedsFallback, None);
+        let (mut vcx, _view) = open_window(&mut r);
+        let inset = vcx.update(|window, cx| frame_bottom(window, cx));
+        let width = vcx.update(|window, _| window.viewport_size().width);
+        assert_eq!(width, px(760.) + inset * 2., "default size");
+        let (header, button, rows) = header_layout(&mut vcx, "SmartReadSmartctl");
+        assert_clear(header, button, &rows);
+        assert!(rows[2].top() > rows[0].top(), "2 columns: {rows:?}");
+    }
+
+    #[gpui_kit::test]
+    fn smartctl_header_pairs_clear_the_button(cx: &mut TestAppContext) {
+        smartctl_header(cx, false);
+    }
+
+    #[gpui_kit::test]
+    fn smartctl_header_pairs_clear_the_button_in_the_frame(cx: &mut TestAppContext) {
+        smartctl_header(cx, true);
+    }
+
+    /// With the short Refresh button the default size keeps the spec's 4 columns on one line.
+    #[gpui_kit::test]
+    fn refresh_header_has_four_columns(cx: &mut TestAppContext) {
+        let mut r = open_smart_rig(cx);
+        publish(&mut r, SmartKind::Nvme, None);
+        let (mut vcx, _view) = open_window(&mut r);
+        let (header, button, rows) = header_layout(&mut vcx, "SmartRefresh");
+        assert_clear(header, button, &rows);
+        assert!(
+            rows.iter().all(|row| row.top() == rows[0].top()),
+            "{rows:?}"
+        );
     }
 }

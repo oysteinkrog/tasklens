@@ -17,6 +17,7 @@
 //! with the window moves the "Last updated" age. Esc and Ctrl+W close the window through the
 //! frame.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -26,7 +27,8 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, AsyncApp, Context, Entity, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px, size,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
+    px, size,
 };
 use smallvec::SmallVec;
 use tl_model::command::{Command, CommandError, DeviceCommand};
@@ -67,17 +69,21 @@ pub const MIN_SIZE: (f32, f32) = (560., 360.);
 /// NVMe list: Value column width and row height, × ui_scale.
 const NVME_VALUE_W: f32 = 160.;
 const NVME_ROW_H: f32 = 26.;
-/// The header grid has 4 columns from this window width, × ui_scale. A narrower window gets 2,
-/// so the grid never runs under the Refresh button.
-const HEADER_4_COLUMNS_MIN_W: f32 = 760.;
+/// The header grid's minimum column width, × ui_scale: `TlKeyValueGrid`'s stacked minimum.
+const HEADER_MIN_COLUMN_W: f32 = 160.;
 
-/// The columns of the header grid in a window `width` wide at `ui_scale`.
-pub fn header_columns(width: Pixels, ui_scale: f32) -> usize {
-    if width >= px(HEADER_4_COLUMNS_MIN_W * ui_scale) {
-        4
-    } else {
-        2
+/// The columns of the header grid in a box `width` wide: 4, or 2 or 1 when 4 do not fit beside
+/// the button. `gap` is the column gap, already scaled. A box not measured yet (0) gets 2, which
+/// fits beside either button at the minimum window size.
+pub fn header_columns(width: Pixels, gap: Pixels, ui_scale: f32) -> usize {
+    if width <= px(0.) {
+        return 2;
     }
+    let min = px(HEADER_MIN_COLUMN_W * ui_scale);
+    [4, 2]
+        .into_iter()
+        .find(|&n| min * n as f32 + gap * (n - 1) as f32 <= width)
+        .unwrap_or(1)
 }
 
 /// How often the "Last updated" age moves.
@@ -738,6 +744,9 @@ pub struct SmartWindow {
     seen: Option<Arc<SmartData>>,
     table: Entity<TlTreeTable<SmartAtaDelegate>>,
     nvme: Vec<(SharedString, SharedString)>,
+    /// Width of the header grid's box from the last paint, 0 before the first. The box is what
+    /// the button leaves of the header row, so the column count follows the button's width.
+    header_width: Rc<Cell<Pixels>>,
     words: Rc<Words>,
     theme: Arc<TlTheme>,
     _subs: SmallVec<[Subscription; 3]>,
@@ -794,6 +803,7 @@ impl SmartWindow {
             seen: None,
             table,
             nvme: Vec::new(),
+            header_width: Rc::new(Cell::new(px(0.))),
             words,
             theme,
             _subs: subs,
@@ -1059,7 +1069,7 @@ impl SmartWindow {
 }
 
 impl Render for SmartWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         if !Arc::ptr_eq(&theme, &self.theme) {
             self.theme = theme.clone();
@@ -1096,7 +1106,22 @@ impl Render for SmartWindow {
                 });
             (b, "SmartRefresh")
         };
-        let columns = header_columns(window.viewport_size().width, s);
+        let gap = m.sp[3];
+        let columns = header_columns(self.header_width.get(), gap, s);
+        let measure = {
+            let cell = Rc::clone(&self.header_width);
+            canvas(
+                move |bounds, window, cx| {
+                    let old = cell.replace(bounds.size.width);
+                    if header_columns(old, gap, s) != header_columns(bounds.size.width, gap, s) {
+                        cx.notify(window.current_view());
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
         let header = div()
             .flex_none()
             .flex()
@@ -1105,9 +1130,12 @@ impl Render for SmartWindow {
             .p(m.sp[3])
             .child(
                 div()
+                    .debug_selector(|| "SmartHeaderBox".into())
+                    .relative()
                     .flex_1()
                     .min_w_0()
-                    .child(self.header_grid(columns, m.sp[3], cx)),
+                    .child(self.header_grid(columns, gap, cx))
+                    .child(measure),
             )
             .child(
                 div()
@@ -1258,13 +1286,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_has_two_columns_below_the_default_width() {
-        // 4 columns of at least 160 px and the Refresh button need the default width.
-        assert_eq!(header_columns(px(SIZE.0), 1.0), 4);
-        assert_eq!(header_columns(px(SIZE.0 - 1.0), 1.0), 2);
-        assert_eq!(header_columns(px(MIN_SIZE.0), 1.0), 2);
-        // The threshold scales.
-        assert_eq!(header_columns(px(SIZE.0), 1.5), 2);
-        assert_eq!(header_columns(px(SIZE.0 * 1.5), 1.5), 4);
+    fn header_columns_fit_the_measured_box() {
+        let gap = px(6.);
+        // 4 × 160 + 3 × 6 = 658 and 2 × 160 + 6 = 326.
+        assert_eq!(header_columns(px(658.), gap, 1.0), 4);
+        assert_eq!(header_columns(px(657.), gap, 1.0), 2);
+        assert_eq!(header_columns(px(326.), gap, 1.0), 2);
+        assert_eq!(header_columns(px(325.), gap, 1.0), 1);
+        // Not measured yet.
+        assert_eq!(header_columns(px(0.), gap, 1.0), 2);
+        // The minimum width scales; the gap comes in scaled.
+        assert_eq!(header_columns(px(658.), px(9.), 1.5), 2);
+        assert_eq!(header_columns(px(987.), px(9.), 1.5), 4);
     }
 }
