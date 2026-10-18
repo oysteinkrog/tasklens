@@ -2267,6 +2267,9 @@ fn details_of(
 #[derive(Debug)]
 struct DetailEntry {
     name: Arc<str>,
+    /// The object path from `LoadUnit`, for a unit that has no record (not loaded, or hidden
+    /// from the table, as a dependency can be).
+    path: Option<OwnedObjectPath>,
     /// `None` until the first `GetAll` pair succeeds.
     raw: Option<DetailRaw>,
     ids: Option<PidIds>,
@@ -2285,6 +2288,7 @@ impl DetailEntry {
     fn new(name: Arc<str>) -> Self {
         Self {
             name,
+            path: None,
             raw: None,
             ids: None,
             dropin: None,
@@ -2333,20 +2337,40 @@ impl ServicesState {
     }
 
     /// The demanded units to read with `GetAll`: those marked, or with `full` every one not
-    /// read yet. Units without a record have no object path and wait for one.
+    /// read yet. A unit without a record uses the path from `LoadUnit`; without either it waits
+    /// for one (see `details_to_resolve`).
     fn details_to_fetch(&self, full: bool) -> Vec<(Arc<str>, OwnedObjectPath, UnitType)> {
         self.details
             .iter()
             .filter(|d| d.refetch || (full && d.raw.is_none()))
             .filter_map(|d| {
-                let e = self.units.get(&d.name)?;
-                Some((Arc::clone(&d.name), e.path.clone(), e.kind))
+                let name = Arc::clone(&d.name);
+                match self.units.get(&d.name) {
+                    Some(e) => Some((name, e.path.clone(), e.kind)),
+                    None => Some((name, d.path.clone()?, unit_kind(&d.name)?)),
+                }
             })
             .collect()
     }
 
-    /// The result of a `GetAll` pair: `None` when it failed, so the unit is tried again later.
-    /// True when published details changed.
+    /// The demanded units that have neither a record nor a loaded path. They are loaded with
+    /// `LoadUnit` to get one.
+    fn details_to_resolve(&self) -> Vec<Arc<str>> {
+        self.details
+            .iter()
+            .filter(|d| {
+                d.path.is_none() && name_shown(&d.name) && !self.units.contains_key(&d.name)
+            })
+            .map(|d| Arc::clone(&d.name))
+            .collect()
+    }
+
+    fn set_detail_path(&mut self, name: &str, path: OwnedObjectPath) {
+        if let Some(d) = self.details.iter_mut().find(|d| *d.name == *name) {
+            d.path = Some(path);
+        }
+    }
+
     fn set_detail_raw(&mut self, name: &str, raw: Option<DetailRaw>) -> bool {
         let manager = self.manager;
         let Some(d) = self.details.iter_mut().find(|d| *d.name == *name) else {
@@ -2582,6 +2606,13 @@ async fn sync_details(
     full: bool,
 ) -> Result<bool, DbusError> {
     let mut changed = state.want_details(wanted);
+    for name in state.details_to_resolve() {
+        match manager_call::<_, OwnedObjectPath>(cx, conn, "LoadUnit", &(&*name,)).await {
+            Ok(path) => state.set_detail_path(&name, path),
+            Err(DbusError::Closed) => return Err(DbusError::Closed),
+            Err(e) => tracing::debug!(unit = %name, error = %e, "systemd: LoadUnit failed"),
+        }
+    }
     for (name, path, kind) in state.details_to_fetch(full) {
         let raw = match fetch_details(cx, conn, &path, kind).await {
             Ok(raw) => Some(raw),
@@ -4988,6 +5019,22 @@ mod tests {
         assert!(!user.want_details(&wanted));
         assert!(fetch_all(&mut user, &raw).is_empty());
         assert!(published(&user).is_empty());
+    }
+
+    #[test]
+    fn details_for_unit_without_record_load_a_path_first() {
+        // A dependency can be a unit the table does not list: not loaded, or hidden.
+        let mut state = sample_state();
+        let wanted = [unit_ref(Manager::User, "dep.target")];
+        state.want_details(&wanted);
+        assert!(state.details_to_fetch(true).is_empty(), "no path yet");
+        assert_eq!(state.details_to_resolve(), vec![Arc::from("dep.target")]);
+
+        state.set_detail_path("dep.target", unit_path("dep.target"));
+        assert!(state.details_to_resolve().is_empty());
+        let raw = detail_raw(vec![("Id", Value::from("dep.target"))]);
+        assert_eq!(fetch_all(&mut state, &raw), vec![Arc::from("dep.target")]);
+        assert_eq!(published(&state).len(), 1);
     }
 
     #[test]
