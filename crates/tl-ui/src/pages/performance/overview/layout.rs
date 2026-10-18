@@ -2,7 +2,8 @@
 //! with a height weight and its boxes left to right, each box with a width weight. Minimum sizes
 //! come from the box kind. The profile saves it as `[performance.overview]`
 //! ([`OverviewLayoutSetting`]); [`OverviewLayout::from_setting`] and
-//! [`OverviewLayout::to_setting`] convert.
+//! [`OverviewLayout::to_setting`] convert. Each box kind also has a layout mode and a split
+//! (UI-PRF-019, D-025), kept per kind in [`BoxConfig`] and saved on the box's entry.
 //!
 //! [`place`] turns a layout, the kinds present now and the page area into box bounds. It runs on
 //! resize and on presence changes, never per tick, and does not allocate for up to 8 boxes.
@@ -14,6 +15,7 @@ use tl_model::settings::{
 };
 
 use super::super::page::PAGE_PAD;
+use super::{cpu_box, disk_box, gpu_box, mem_box, net_box, procs_box};
 use crate::theme::DeviceAccent;
 
 /// The gap between boxes and rows (`sp4`), logical px.
@@ -93,6 +95,90 @@ impl BoxKind {
             _ => 200.,
         }
     }
+
+    /// The layout modes the box offers, its default first (UI-PRF-019).
+    pub fn modes(self) -> &'static [BoxMode] {
+        match self {
+            Self::Cpu => cpu_box::MODES,
+            Self::Memory => mem_box::MODES,
+            Self::Gpu => gpu_box::MODES,
+            Self::Disk => disk_box::MODES,
+            Self::Net => net_box::MODES,
+            Self::TopProcs => procs_box::MODES,
+        }
+    }
+
+    /// The mode `id` of this kind.
+    pub fn mode(self, id: &str) -> Option<&'static BoxMode> {
+        self.modes().iter().find(|m| m.id == id)
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// One layout mode of a box (UI-PRF-019): its id in `[performance.overview]`, the string key
+/// of its "Layout" menu item, and its default split when it has two parts.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BoxMode {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub split: Option<f32>,
+}
+
+/// The smallest and largest split.
+pub const SPLIT_RANGE: (f32, f32) = (0.2, 0.8);
+
+/// A box's mode and split. `split` is the first part's share, `None` in a mode with one part.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BoxConfig {
+    pub mode: &'static BoxMode,
+    pub split: Option<f32>,
+}
+
+impl BoxConfig {
+    /// `mode` with its default split.
+    pub fn of(mode: &'static BoxMode) -> Self {
+        Self {
+            mode,
+            split: mode.split,
+        }
+    }
+
+    /// The default mode of `kind` and its split.
+    pub fn default_for(kind: BoxKind) -> Self {
+        Self::of(&kind.modes()[0])
+    }
+
+    /// The saved entry's mode and split: a mode `kind` does not offer is its default, and a
+    /// split out of range or missing is the mode's default.
+    fn from_setting(kind: BoxKind, b: &OverviewBoxSetting) -> Self {
+        let mode = b
+            .mode
+            .as_deref()
+            .and_then(|id| kind.mode(id))
+            .unwrap_or(&kind.modes()[0]);
+        let saved = b
+            .split
+            .map(|v| v as f32)
+            .filter(|v| (SPLIT_RANGE.0..=SPLIT_RANGE.1).contains(v));
+        Self {
+            mode,
+            split: mode.split.map(|d| saved.unwrap_or(d)),
+        }
+    }
+
+    /// The mode when not the kind's default, and the split when not the mode's default.
+    fn to_setting(self, kind: BoxKind) -> (Option<String>, Option<f64>) {
+        let mode = (self.mode.id != kind.modes()[0].id).then(|| self.mode.id.to_owned());
+        let split = self
+            .split
+            .zip(self.mode.split)
+            .filter(|(s, d)| (s - d).abs() >= 5e-4)
+            .map(|(s, _)| f64::from(s));
+        (mode, split)
+    }
 }
 
 /// One box: its kind and its share of the row width.
@@ -113,16 +199,9 @@ pub struct RowSpec {
 #[derive(Clone, PartialEq, Debug)]
 pub struct OverviewLayout {
     pub rows: SmallVec<[RowSpec; 4]>,
-    /// The CPU box chart's share of its body (UI-PRF-018 "CPU box splitter"), in
-    /// [`CPU_SPLIT_RANGE`]. Saved as `cpu_split` on the CPU box entry.
-    pub cpu_split: f32,
+    /// Each kind's mode and split in [`BoxKind::ALL`] order, kept while its box is hidden.
+    configs: [BoxConfig; 6],
 }
-
-/// The CPU split when none is saved.
-pub const CPU_SPLIT_DEFAULT: f32 = 0.4;
-
-/// The smallest and largest saved CPU split.
-pub const CPU_SPLIT_RANGE: (f32, f32) = (0.2, 0.8);
 
 /// Why a layout is not valid.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -159,7 +238,7 @@ impl OverviewLayout {
     pub fn btop_default() -> Self {
         let b = |kind, width| BoxSpec { kind, width };
         Self {
-            cpu_split: CPU_SPLIT_DEFAULT,
+            configs: BoxKind::ALL.map(BoxConfig::default_for),
             rows: smallvec![
                 RowSpec {
                     height: 3.,
@@ -186,6 +265,7 @@ impl OverviewLayout {
             return Self::btop_default();
         };
         let mut seen: SmallVec<[BoxKind; 8]> = SmallVec::new();
+        let mut configs = BoxKind::ALL.map(BoxConfig::default_for);
         let rows = setting
             .rows
             .iter()
@@ -198,6 +278,7 @@ impl OverviewLayout {
                         let kind = BoxKind::from_key(&b.kind)?;
                         (!seen.contains(&kind)).then(|| {
                             seen.push(kind);
+                            configs[kind.index()] = BoxConfig::from_setting(kind, b);
                             BoxSpec {
                                 kind,
                                 width: saved_weight(b.width),
@@ -207,16 +288,7 @@ impl OverviewLayout {
                     .collect(),
             })
             .collect();
-        let cpu_split = setting
-            .rows
-            .iter()
-            .flat_map(|r| &r.boxes)
-            .find(|b| b.kind == "cpu")
-            .and_then(|b| b.cpu_split)
-            .map(|v| v as f32)
-            .filter(|v| (CPU_SPLIT_RANGE.0..=CPU_SPLIT_RANGE.1).contains(v))
-            .unwrap_or(CPU_SPLIT_DEFAULT);
-        let layout = Self { rows, cpu_split };
+        let layout = Self { rows, configs };
         if layout.validate().is_ok() {
             layout
         } else {
@@ -235,17 +307,59 @@ impl OverviewLayout {
                     boxes: r
                         .boxes
                         .iter()
-                        .map(|b| OverviewBoxSetting {
-                            kind: b.kind.key().to_owned(),
-                            width: f64::from(b.width),
-                            cpu_split: (b.kind == BoxKind::Cpu
-                                && (self.cpu_split - CPU_SPLIT_DEFAULT).abs() >= 5e-4)
-                                .then(|| f64::from(self.cpu_split)),
+                        .map(|b| {
+                            let (mode, split) = self.config(b.kind).to_setting(b.kind);
+                            OverviewBoxSetting {
+                                kind: b.kind.key().to_owned(),
+                                width: f64::from(b.width),
+                                mode,
+                                split,
+                                cpu_split: None,
+                            }
                         })
                         .collect(),
                 })
                 .collect(),
         }
+    }
+
+    /// `kind`'s mode and split.
+    pub fn config(&self, kind: BoxKind) -> BoxConfig {
+        self.configs[kind.index()]
+    }
+
+    /// `kind`'s split, `None` when its mode has one part.
+    pub fn split(&self, kind: BoxKind) -> Option<f32> {
+        self.config(kind).split
+    }
+
+    /// Switches `kind` to its mode `id` with that mode's default split. Returns `false` when
+    /// the kind has no such mode or already shows it.
+    pub fn set_mode(&mut self, kind: BoxKind, id: &str) -> bool {
+        let Some(mode) = kind.mode(id).filter(|m| m.id != self.config(kind).mode.id) else {
+            return false;
+        };
+        self.configs[kind.index()] = BoxConfig::of(mode);
+        true
+    }
+
+    /// Sets `kind`'s split when its mode has two parts. Returns whether it changed.
+    pub fn set_split(&mut self, kind: BoxKind, share: f32) -> bool {
+        let config = &mut self.configs[kind.index()];
+        if config.split.is_none_or(|s| s == share) {
+            return false;
+        }
+        config.split = Some(share.clamp(SPLIT_RANGE.0, SPLIT_RANGE.1));
+        true
+    }
+
+    /// Gives `kind` its default mode and split (the box menu's "Reset Box"). Returns whether it
+    /// changed.
+    pub fn reset_box(&mut self, kind: BoxKind) -> bool {
+        let default = BoxConfig::default_for(kind);
+        let changed = self.config(kind) != default;
+        self.configs[kind.index()] = default;
+        changed
     }
 
     pub fn has(&self, kind: BoxKind) -> bool {
@@ -526,29 +640,70 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
-            cpu_split: CPU_SPLIT_DEFAULT,
+            configs: BoxKind::ALL.map(BoxConfig::default_for),
         }
     }
 
     #[test]
-    fn cpu_split_converts_to_and_from_the_setting() {
+    fn box_split_converts_to_and_from_the_setting() {
         let mut layout = OverviewLayout::btop_default();
         assert_eq!(layout.to_setting(), OverviewLayoutSetting::btop_default());
-        layout.cpu_split = 0.55;
+        assert_eq!(layout.split(BoxKind::Cpu), Some(0.4));
+        assert!(layout.set_split(BoxKind::Cpu, 0.55));
+        assert!(!layout.set_split(BoxKind::Cpu, 0.55), "same value");
         let setting = layout.to_setting();
-        assert_eq!(
-            setting.rows[0].boxes[0].cpu_split,
-            Some(f64::from(0.55_f32))
-        );
-        assert_eq!(setting.rows[0].boxes[1].cpu_split, None);
+        assert_eq!(setting.rows[0].boxes[0].split, Some(f64::from(0.55_f32)));
+        assert_eq!(setting.rows[0].boxes[0].mode, None, "the default mode");
+        assert_eq!(setting.rows[0].boxes[1].split, None);
         assert_eq!(OverviewLayout::from_setting(Some(&setting)), layout);
         // A saved value out of range is the default.
         let mut bad = setting;
-        bad.rows[0].boxes[0].cpu_split = Some(0.95);
+        bad.rows[0].boxes[0].split = Some(0.95);
         assert_eq!(
-            OverviewLayout::from_setting(Some(&bad)).cpu_split,
-            CPU_SPLIT_DEFAULT
+            OverviewLayout::from_setting(Some(&bad)).split(BoxKind::Cpu),
+            Some(0.4)
         );
+        // A kind whose mode has one part keeps no split.
+        bad.rows[0].boxes[1].split = Some(0.5);
+        let back = OverviewLayout::from_setting(Some(&bad));
+        assert_eq!(back.split(BoxKind::Memory), None);
+        assert!(!layout.set_split(BoxKind::Memory, 0.5));
+        // Reset Box restores the default and Reset Layout every box.
+        assert!(layout.reset_box(BoxKind::Cpu));
+        assert!(!layout.reset_box(BoxKind::Cpu));
+        assert_eq!(layout, OverviewLayout::btop_default());
+    }
+
+    #[test]
+    fn box_mode_unknown_loads_default() {
+        // An id another kind has, or none has, loads as the kind's default mode.
+        let mut setting = OverviewLayoutSetting::btop_default();
+        setting.rows[0].boxes[0].mode = Some("rows".to_owned());
+        setting.rows[0].boxes[1].mode = Some("bogus".to_owned());
+        let layout = OverviewLayout::from_setting(Some(&setting));
+        for kind in [BoxKind::Cpu, BoxKind::Memory] {
+            assert_eq!(layout.config(kind), BoxConfig::default_for(kind));
+        }
+        // The default mode is not written; switching to a mode the kind lacks does nothing.
+        assert_eq!(layout.to_setting(), OverviewLayoutSetting::btop_default());
+        let mut edited = layout.clone();
+        assert!(!edited.set_mode(BoxKind::Cpu, "rows"));
+        assert!(
+            !edited.set_mode(BoxKind::Cpu, cpu_box::MODES[0].id),
+            "already shown"
+        );
+        assert_eq!(edited, layout);
+        // Every kind offers its default first, with a menu label.
+        for kind in BoxKind::ALL {
+            let modes = kind.modes();
+            assert!(!modes.is_empty(), "{kind:?}");
+            assert!(
+                modes
+                    .iter()
+                    .all(|m| m.label.starts_with("perf-overview-mode-"))
+            );
+            assert_eq!(kind.mode(modes[0].id), Some(&modes[0]));
+        }
     }
 
     #[test]

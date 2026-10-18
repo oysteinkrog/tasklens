@@ -922,6 +922,7 @@ impl OverviewPage {
                         }),
                     )
                     .child(grip)
+                    .child(self.box_gear(kind, cx))
                     .child(hide_button)
                     .into_any_element(),
             );

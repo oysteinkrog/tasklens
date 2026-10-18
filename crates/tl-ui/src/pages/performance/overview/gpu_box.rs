@@ -34,6 +34,7 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::super::gpu::{GpuVendor, gpu_totals, shown_engines};
 use super::cpu_box::value_text;
+use super::layout::BoxMode;
 use super::mem_box::MeterRow;
 use super::parts::{
     ChartSettings, MIN_CHART_H, SPARK_GRID, box_chart, box_frame, chart_section_versions,
@@ -52,6 +53,13 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The box's debug selector.
 pub const GPU_BOX_ID: &str = "perf-overview-box-gpu";
+
+/// The box's layout modes (UI-PRF-019). `chart_engines` is the sections of UI-PRF-017.
+pub const MODES: &[BoxMode] = &[BoxMode {
+    id: "chart_engines",
+    label: "perf-overview-mode-chart-engines",
+    split: None,
+}];
 
 /// GPUs with a section; the rest are counted in the "+n more" line.
 pub const MAX_GPUS: usize = 2;

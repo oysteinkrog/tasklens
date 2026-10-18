@@ -27,6 +27,7 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::layout::BoxMode;
 use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -42,6 +43,13 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The box's debug selector.
 pub const NET_BOX_ID: &str = "perf-overview-box-net";
+
+/// The box's layout modes (UI-PRF-019). `columns` is the Download and Upload columns of UI-PRF-017.
+pub const MODES: &[BoxMode] = &[BoxMode {
+    id: "columns",
+    label: "perf-overview-mode-columns",
+    split: None,
+}];
 
 const KEY_TITLE: &str = "perf-overview-box-network";
 const KEY_DOWNLOAD: &str = "perf-net-legend-download";

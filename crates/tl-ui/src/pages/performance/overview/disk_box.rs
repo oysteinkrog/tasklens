@@ -31,6 +31,7 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::layout::BoxMode;
 use super::mem_box::ROW_LABEL_W;
 use super::parts::{
     ChartSettings, SPARK_GRID, box_frame, chart_section_versions, class_probe, opens_device,
@@ -46,6 +47,13 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The box's debug selector.
 pub const DISK_BOX_ID: &str = "perf-overview-box-disk";
+
+/// The box's layout modes (UI-PRF-019). `rows` is the disk sections of UI-PRF-017.
+pub const MODES: &[BoxMode] = &[BoxMode {
+    id: "rows",
+    label: "perf-overview-mode-rows",
+    split: None,
+}];
 
 /// Disks with a section; the rest are counted in the "+n more" line.
 pub const MAX_DISK_ROWS: usize = 8;

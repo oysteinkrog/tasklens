@@ -389,23 +389,49 @@ pub struct OverviewBoxSetting {
     pub kind: String,
     #[serde(serialize_with = "serialize_weight", deserialize_with = "loose")]
     pub width: f64,
-    /// The CPU box's chart share of its body (UI-PRF-018 "CPU box splitter", D-024). `None` is
-    /// [`CPU_SPLIT_DEFAULT`]. Only the `cpu` entry uses it.
+    /// The box's layout mode, an id from [`OVERVIEW_BOX_MODES`] for its kind (UI-PRF-019, D-025).
+    /// `None` is the kind's default mode.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "loose_some"
+    )]
+    pub mode: Option<String>,
+    /// The share of the first part in a mode with two parts, in [`OVERVIEW_SPLIT_RANGE`]
+    /// (UI-PRF-019). `None` is the mode's default split.
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_split",
         deserialize_with = "loose_some"
     )]
+    pub split: Option<f64>,
+    /// The crw.63 name of the CPU box's `split` (UI-PRF-018 "CPU box splitter"). Loading moves
+    /// it into `split`; it is never written.
+    #[serde(skip_serializing, deserialize_with = "loose_some")]
     pub cpu_split: Option<f64>,
 }
 
-/// The CPU box chart share when `cpu_split` is not saved.
-pub const CPU_SPLIT_DEFAULT: f64 = 0.4;
+/// The layout modes of each Overview box kind (UI-PRF-019), the default mode first.
+pub const OVERVIEW_BOX_MODES: [(&str, &[&str]); 6] = [
+    ("cpu", &["chart_cores", "chart", "cores", "core_charts"]),
+    ("memory", &["rows", "chart_rows", "chart"]),
+    ("gpu", &["chart_engines", "engine_charts", "chart"]),
+    ("disk", &["rows", "disk_charts", "total_chart"]),
+    ("net", &["columns", "combined", "adapter_charts"]),
+    ("processes", &["list"]),
+];
 
-/// The range `cpu_split` is accepted in.
-pub const CPU_SPLIT_RANGE: (f64, f64) = (0.2, 0.8);
+/// The range a box's `split` is accepted in.
+pub const OVERVIEW_SPLIT_RANGE: (f64, f64) = (0.2, 0.8);
 
-/// Writes a CPU split rounded to 3 decimals.
+/// The modes of `kind` in [`OVERVIEW_BOX_MODES`]; none for an unknown kind.
+fn modes_of(kind: &str) -> &'static [&'static str] {
+    OVERVIEW_BOX_MODES
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map_or(&[], |(_, modes)| *modes)
+}
+
+/// Writes a split rounded to 3 decimals.
 fn serialize_split<S: serde::Serializer>(w: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
     match w {
         Some(w) => s.serialize_f64((w * 1000.).round() / 1000.),
@@ -452,6 +478,8 @@ impl Unreadable for OverviewBoxSetting {
         Self {
             kind: String::unreadable(),
             width: 1.,
+            mode: None,
+            split: None,
             cpu_split: None,
         }
     }
@@ -523,7 +551,7 @@ impl OverviewLayoutSetting {
                 .map(|&(kind, width)| OverviewBoxSetting {
                     kind: kind.to_owned(),
                     width,
-                    cpu_split: None,
+                    ..OverviewBoxSetting::default()
                 })
                 .collect(),
         };
@@ -544,7 +572,7 @@ impl OverviewLayoutSetting {
             boxes: vec![OverviewBoxSetting {
                 kind: "processes".to_owned(),
                 width: 1.,
-                cpu_split: None,
+                ..OverviewBoxSetting::default()
             }],
         });
         layout
@@ -572,13 +600,7 @@ impl OverviewLayoutSetting {
                     return false;
                 };
                 changed |= clamped;
-                if let Some(split) = b.cpu_split {
-                    let (lo, hi) = CPU_SPLIT_RANGE;
-                    if kind != "cpu" || !(lo..=hi).contains(&split) {
-                        b.cpu_split = None;
-                        changed = true;
-                    }
-                }
+                changed |= b.drop_invalid_mode(kind);
                 seen.push(kind);
                 true
             });
@@ -588,6 +610,36 @@ impl OverviewLayoutSetting {
             }
             true
         });
+        changed
+    }
+}
+
+impl OverviewBoxSetting {
+    /// Moves a CPU `cpu_split` into `split`, and drops a mode that `kind` does not have and a
+    /// split outside [`OVERVIEW_SPLIT_RANGE`] (UI-PRF-019). Returns `true` when it dropped
+    /// anything; the move alone is not a change.
+    fn drop_invalid_mode(&mut self, kind: &str) -> bool {
+        let mut changed = false;
+        if let Some(legacy) = self.cpu_split.take() {
+            if kind == "cpu" {
+                self.split = self.split.or(Some(legacy));
+            } else {
+                changed = true;
+            }
+        }
+        if self
+            .mode
+            .as_deref()
+            .is_some_and(|m| !modes_of(kind).contains(&m))
+        {
+            self.mode = None;
+            changed = true;
+        }
+        let (lo, hi) = OVERVIEW_SPLIT_RANGE;
+        if self.split.is_some_and(|v| !(lo..=hi).contains(&v)) {
+            self.split = None;
+            changed = true;
+        }
         changed
     }
 }
@@ -1981,47 +2033,93 @@ mod tests {
         (s, changed)
     }
 
+    /// One `cpu` box in a one-row layout, with `extra` added to its entry.
+    fn cpu_entry(extra: &str) -> String {
+        format!(
+            "[performance.overview]\nrows = [{{ height = 1.0, boxes = [{{ kind = \"cpu\", \
+             width = 1.0, {extra} }}] }}]\n"
+        )
+    }
+
     #[test]
     fn overview_cpu_split_saved_and_clamped() {
-        // A split is written with 3 decimals on the cpu entry and loads back.
+        // A split is written with 3 decimals on its box entry and loads back.
         let mut s = Settings::default();
         let mut layout = OverviewLayoutSetting::btop_default();
-        layout.rows[0].boxes[0].cpu_split = Some(0.456_789);
+        layout.rows[0].boxes[0].split = Some(0.456_789);
         s.performance.overview = Some(layout);
         let text = toml::to_string(&s).expect("serializes");
-        assert!(text.contains("cpu_split = 0.457"), "{text}");
+        assert!(text.contains("split = 0.457"), "{text}");
+        assert!(!text.contains("cpu_split"), "{text}");
         let (back, changed) = load_toml(&text);
         assert!(changed.is_empty(), "{changed:?}");
         let rows = back.performance.overview.expect("saved").rows;
-        assert_eq!(rows[0].boxes[0].cpu_split, Some(0.457));
-        assert_eq!(rows[0].boxes[1].cpu_split, None);
-        // The default layout writes no cpu_split.
+        assert_eq!(rows[0].boxes[0].split, Some(0.457));
+        assert_eq!(rows[0].boxes[1].split, None);
+        // The default layout writes no split and no mode.
         let mut s = Settings::default();
         s.performance.overview = Some(OverviewLayoutSetting::btop_default());
-        assert!(
-            !toml::to_string(&s)
-                .expect("serializes")
-                .contains("cpu_split")
-        );
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(!text.contains("split") && !text.contains("mode"), "{text}");
 
-        // Out of range, not a number and a split on another kind load as the default, with one
-        // log line.
-        for split in ["0.1", "0.9", "\"x\"", "nan"] {
-            let (s, changed) = load_toml(&format!(
-                "[performance.overview]\nrows = [{{ height = 1.0, boxes = [{{ kind = \"cpu\", \
-                 width = 1.0, cpu_split = {split} }}] }}]\n"
-            ));
-            assert_eq!(changed, ["performance.overview"], "{split}");
-            let layout = s.performance.overview.expect("kept");
-            assert_eq!(layout.rows[0].boxes[0].cpu_split, None, "{split}");
+        // The crw.63 `cpu_split` loads as `split` without a log line, and is written as `split`.
+        let (s, changed) = load_toml(&cpu_entry("cpu_split = 0.6"));
+        assert!(changed.is_empty(), "{changed:?}");
+        let b = &s.performance.overview.as_ref().expect("kept").rows[0].boxes[0];
+        assert_eq!((b.split, b.cpu_split), (Some(0.6), None));
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(
+            text.contains("split = 0.6") && !text.contains("cpu_split"),
+            "{text}"
+        );
+        // A saved `split` wins over an old `cpu_split`.
+        let (s, _) = load_toml(&cpu_entry("split = 0.3, cpu_split = 0.6"));
+        let b = &s.performance.overview.expect("kept").rows[0].boxes[0];
+        assert_eq!(b.split, Some(0.3));
+
+        // Out of range and not a number load as the default, with one log line.
+        for key in ["split", "cpu_split"] {
+            for v in ["0.1", "0.9", "\"x\"", "nan"] {
+                let (s, changed) = load_toml(&cpu_entry(&format!("{key} = {v}")));
+                assert_eq!(changed, ["performance.overview"], "{key} {v}");
+                let b = &s.performance.overview.expect("kept").rows[0].boxes[0];
+                assert_eq!((b.split, b.cpu_split), (None, None), "{key} {v}");
+            }
         }
+        // `split` is per box; an old `cpu_split` on another kind is dropped.
         let (s, changed) = load_toml(
             "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"cpu\", width = \
-             1.0, cpu_split = 0.5 }, { kind = \"memory\", width = 1.0, cpu_split = 0.5 }] }]\n",
+             1.0, cpu_split = 0.5 }, { kind = \"memory\", width = 1.0, cpu_split = 0.5 }, \
+             { kind = \"net\", width = 1.0, split = 0.7 }] }]\n",
         );
         assert_eq!(changed, ["performance.overview"]);
         let boxes = &s.performance.overview.expect("kept").rows[0].boxes;
-        assert_eq!((boxes[0].cpu_split, boxes[1].cpu_split), (Some(0.5), None));
+        let splits: Vec<_> = boxes.iter().map(|b| b.split).collect();
+        assert_eq!(splits, [Some(0.5), None, Some(0.7)]);
+    }
+
+    #[test]
+    fn overview_box_mode_unknown_loads_default() {
+        // A mode of the box's kind loads and is written back.
+        let (s, changed) = load_toml(&cpu_entry("mode = \"core_charts\""));
+        assert!(changed.is_empty(), "{changed:?}");
+        let b = &s.performance.overview.as_ref().expect("kept").rows[0].boxes[0];
+        assert_eq!(b.mode.as_deref(), Some("core_charts"));
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("mode = \"core_charts\""), "{text}");
+        // An unknown mode, another kind's mode and a value of the wrong type load as the
+        // default (`None`) with one log line; the box and its other keys stay.
+        for v in ["\"bogus\"", "\"engine_charts\"", "3", "\"\""] {
+            let (s, changed) = load_toml(&cpu_entry(&format!("mode = {v}, split = 0.5")));
+            assert_eq!(changed, ["performance.overview"], "{v}");
+            let b = &s.performance.overview.expect("kept").rows[0].boxes[0];
+            assert_eq!((b.kind.as_str(), b.mode.as_deref()), ("cpu", None), "{v}");
+            assert_eq!(b.split, Some(0.5), "{v}");
+        }
+        // Every kind's list starts with its default and every kind has one.
+        for kind in OVERVIEW_BOX_KINDS {
+            assert!(!modes_of(kind).is_empty(), "{kind}");
+        }
     }
 
     #[test]

@@ -53,10 +53,11 @@ pub enum TlIcon {
     Terminal,
     ArrowDownToLine,
     AppWindow,
+    Settings2,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 41] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -97,6 +98,7 @@ impl TlIcon {
         Self::Terminal,
         Self::ArrowDownToLine,
         Self::AppWindow,
+        Self::Settings2,
     ];
 
     /// The kit name for this icon.
@@ -142,6 +144,7 @@ impl TlIcon {
             Self::Terminal => IconName::Terminal,
             Self::ArrowDownToLine => IconName::ArrowDownToLine,
             Self::AppWindow => IconName::AppWindow,
+            Self::Settings2 => IconName::Settings2,
         }
     }
 }

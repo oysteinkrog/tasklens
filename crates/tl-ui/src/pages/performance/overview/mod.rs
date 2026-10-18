@@ -10,17 +10,20 @@
 //! [`procs_box`] is the opt-in Top processes box: it is built only while the layout places it,
 //! and only then does the page ask for the process sweep (`process_top`). [`splitter`] resizes
 //! boxes and rows by dragging the gaps; [`edit`] is Edit Layout mode, which moves, hides and
-//! adds boxes.
+//! adds boxes. Each box has layout modes (UI-PRF-019): [`box_menu`] is the box menu and the
+//! Edit Layout gear, and [`inner_split`] is the one splitter a mode with two parts uses.
 //!
 //! Render contract (D-022, crw.34): the page never notifies on a sample. Each box is a cached
 //! child view that notifies only when its own text or bars change. The page re-renders on a
 //! resize, when a GPU or disk card comes or goes, and (from GPUI's ancestor marking) when a box
 //! notifies; its render reads no snapshot and formats nothing.
 
+pub mod box_menu;
 pub mod cpu_box;
 pub mod disk_box;
 pub mod edit;
 pub mod gpu_box;
+pub mod inner_split;
 pub mod layout;
 pub mod mem_box;
 pub mod net_box;
@@ -47,6 +50,7 @@ use self::cpu_box::CpuBox;
 use self::disk_box::DiskBox;
 use self::edit::EditState;
 use self::gpu_box::GpuBox;
+use self::inner_split::InnerSplitChanged;
 use self::layout::{BoxKind, OverviewLayout, Placement, place};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
@@ -190,7 +194,9 @@ impl OverviewPage {
         let disk_cards = cards_of(sidebar, DeviceKind::Disk, cx);
         let cpu = cx.new(|cx| CpuBox::new(&hub, cpu_idx, cx));
         let layout = saved_layout(cx);
-        cpu.update(cx, |b, cx| b.set_split(layout.cpu_split, cx));
+        if let Some(split) = layout.split(BoxKind::Cpu) {
+            cpu.update(cx, |b, cx| b.set_split(split, cx));
+        }
         let mem = cx.new(|cx| MemBox::new(&hub, mem_idx, cx));
         let gpu = cx.new(|cx| GpuBox::new(&hub, &gpu_cards, cx));
         let disk = cx.new(|cx| DiskBox::new(&hub, &disk_cards, cx));
@@ -384,13 +390,8 @@ impl OverviewPage {
 
     /// The CPU box ended a split drag or a double-click: the share goes into the layout and the
     /// profile.
-    fn on_cpu_split(
-        &mut self,
-        _: Entity<CpuBox>,
-        ev: &cpu_box::CpuSplitChanged,
-        cx: &mut Context<Self>,
-    ) {
-        self.layout.cpu_split = ev.0;
+    fn on_cpu_split(&mut self, _: Entity<CpuBox>, ev: &InnerSplitChanged, cx: &mut Context<Self>) {
+        self.layout.set_split(BoxKind::Cpu, ev.0);
         self.save_layout(cx);
     }
 
@@ -398,9 +399,11 @@ impl OverviewPage {
     /// placement and one render.
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
-        let split = layout.cpu_split;
+        let split = layout.split(BoxKind::Cpu);
         self.layout = layout;
-        self.cpu.update(cx, |b, cx| b.set_split(split, cx));
+        if let Some(split) = split {
+            self.cpu.update(cx, |b, cx| b.set_split(split, cx));
+        }
         if procs != self.procs.is_some() {
             self.procs = procs.then(|| {
                 let hub = self.hub.clone();
@@ -697,6 +700,8 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_hide_box))
             .on_action(cx.listener(Self::on_move_box))
             .on_action(cx.listener(Self::on_resize_box))
+            .on_action(cx.listener(Self::on_set_box_mode))
+            .on_action(cx.listener(Self::on_reset_box))
     }
 }
 
@@ -771,12 +776,19 @@ impl Render for OverviewPage {
             .boxes
             .iter()
             .map(|p| {
+                let kind = p.kind;
                 let el = div()
                     .absolute()
                     .left(p.bounds.left())
                     .top(p.bounds.top())
                     .w(p.bounds.size.width)
                     .h(p.bounds.size.height)
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            this.box_right_down(kind, ev, cx);
+                        }),
+                    )
                     .child(self.box_element(p.kind));
                 self.edit_box(p, el, window, cx).into_any_element()
             })

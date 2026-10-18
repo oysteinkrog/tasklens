@@ -53,6 +53,7 @@ use self::actions::{
 };
 use self::details::ClickedValue;
 use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
+use self::overview::box_menu::{ClickedBox, box_menu};
 use self::page::DevicePage;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
@@ -768,6 +769,11 @@ impl PerformancePage {
             .has_global::<ClickedEngine>()
             .then(|| cx.remove_global::<ClickedEngine>().0)
             .flatten();
+        // A right-click on an Overview box's title line: the box menu comes first (UI-PRF-019).
+        let clicked_box = cx
+            .has_global::<ClickedBox>()
+            .then(|| cx.remove_global::<ClickedBox>().0)
+            .flatten();
         let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
             let types = view_types(sidebar.read(cx));
             let ctx = PageMenuCtx {
@@ -775,6 +781,10 @@ impl PerformancePage {
                 clicked_value,
                 cell_engine: cell_engine.clone(),
                 ..page_menu_ctx(summary_on, cx)
+            };
+            let menu = match clicked_box {
+                Some(target) => box_menu(menu, target, window, cx),
+                None => menu,
             };
             let mut slot = Some(menu);
             update_page(&view, cx, |p, cx| {
@@ -1069,6 +1079,7 @@ impl Render for PerformancePage {
                 }
                 cx.set_global(ClickedValue(None));
                 cx.set_global(ClickedEngine(None));
+                cx.set_global(ClickedBox(None));
                 let at = ev.position;
                 cx.defer_in(window, move |this, window, cx| {
                     this.open_page_menu(at, window, cx)

@@ -2329,9 +2329,13 @@ mod page {
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::DeviceKey;
     use tl_ui::pages::performance::actions::{
-        PerfOverviewEditLayout, PerfOverviewResetLayout, bind_keys_performance,
+        PerfOverviewEditLayout, PerfOverviewResetBox, PerfOverviewResetLayout,
+        PerfOverviewSetBoxMode, bind_keys_performance,
     };
-    use tl_ui::pages::performance::overview::cpu_box::{CPU_BOX_ID, CPU_SPLITTER_ID};
+    use tl_ui::pages::performance::overview::box_menu::gear_id;
+    use tl_ui::pages::performance::overview::cpu_box::{
+        CPU_BOX_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID,
+    };
     use tl_ui::pages::performance::overview::edit::{
         DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, GHOST_VALUE_ID, TOOLBAR_ID, hide_button_id,
         title_handle_id,
@@ -3060,7 +3064,14 @@ mod page {
     }
 
     fn cpu_split_of(setting: &Option<tl_model::settings::OverviewLayoutSetting>) -> Option<f64> {
-        setting.as_ref().and_then(|s| s.rows[0].boxes[0].cpu_split)
+        setting.as_ref().and_then(|s| s.rows[0].boxes[0].split)
+    }
+
+    /// The layout's CPU split.
+    fn cpu_split(r: &mut Rig) -> f32 {
+        r.layout()
+            .split(BoxKind::Cpu)
+            .expect("chart_cores has a split")
     }
 
     #[gpui_kit::test]
@@ -3074,7 +3085,7 @@ mod page {
         assert!((moved - 60.).abs() <= 1.5, "gap moved {moved}");
         assert_eq!(r.saved(), None, "nothing is saved during the drag");
         r.release(point(start.x + px(60.), start.y));
-        let split = r.layout().cpu_split;
+        let split = cpu_split(&mut r);
         assert!(split > 0.4 && split <= 0.8, "{split}");
         let saved = r.saved();
         assert_eq!(cpu_split_of(&saved), Some(f64::from(split)));
@@ -3091,7 +3102,7 @@ mod page {
         let gap = r.gap(CPU_SPLITTER_ID);
         let rows_w = f32::from(frame.right() - gap.right());
         assert!(rows_w >= 188., "core rows {rows_w}");
-        assert!(r.layout().cpu_split <= 0.8);
+        assert!(cpu_split(&mut r) <= 0.8);
     }
 
     #[gpui_kit::test]
@@ -3101,12 +3112,12 @@ mod page {
         r.press(start, 1);
         r.move_to(point(start.x - px(80.), start.y));
         r.release(point(start.x - px(80.), start.y));
-        assert!(r.layout().cpu_split < 0.4);
+        assert!(cpu_split(&mut r) < 0.4);
         assert!(cpu_split_of(&r.saved()).is_some());
         let at = center(r.gap(CPU_SPLITTER_ID));
         r.press(at, 2);
         r.release(at);
-        assert_eq!(r.layout().cpu_split, 0.4);
+        assert_eq!(cpu_split(&mut r), 0.4);
         assert_eq!(cpu_split_of(&r.saved()), None, "the default is not written");
         // The gap is back where it started.
         let back = center(r.gap(CPU_SPLITTER_ID));
@@ -3120,18 +3131,132 @@ mod page {
         r.press(start, 1);
         r.move_to(point(px(-5000.), start.y));
         r.release(point(px(-5000.), start.y));
-        assert_eq!(r.layout().cpu_split, 0.2, "clamped at 20%");
+        assert_eq!(cpu_split(&mut r), 0.2, "clamped at 20%");
         assert_eq!(cpu_split_of(&r.saved()), Some(0.2_f32 as f64));
         // A saved value reloads into the layout and the gap.
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
                 let mut layout = OverviewLayoutSetting::btop_default();
-                layout.rows[0].boxes[0].cpu_split = Some(0.6);
+                layout.rows[0].boxes[0].split = Some(0.6);
                 d.settings.performance.overview = Some(layout);
             });
         });
         draw(r.vcx);
-        assert_eq!(r.layout().cpu_split, 0.6_f32);
+        assert_eq!(cpu_split(&mut r), 0.6_f32);
+    }
+
+    #[gpui_kit::test]
+    fn overview_inner_split_drag_and_reset(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        // CPU and Memory share the row equally, so in the CPU body the 120 px chart minimum is
+        // above the 20% floor.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                layout.rows[0].boxes[0].width = 1.;
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box");
+        assert!(frame.size.width >= px(560.), "side by side: {frame:?}");
+        let pad = r
+            .vcx
+            .update(|_, cx| f32::from(tl_ui::theme::metrics(cx).sp[5]));
+        let chart_w = |gap: gpui_kit::Bounds<gpui_kit::Pixels>| {
+            f32::from(gap.left() - frame.left()) - 1. - pad
+        };
+        let before = r.saved();
+
+        // Hover shows the accent line after 150 ms.
+        let at = center(r.gap(CPU_SPLITTER_ID));
+        r.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(CPU_SPLITTER_LINE_ID).is_none());
+        r.vcx.executor().advance_clock(Duration::from_millis(150));
+        draw(r.vcx);
+        let line = r.vcx.debug_bounds(CPU_SPLITTER_LINE_ID).expect("line");
+        assert_eq!(f32::from(line.size.width), 2.);
+
+        // A drag far left stops at the chart's 120 px minimum. Nothing is saved until the
+        // button goes up.
+        r.press(at, 1);
+        r.move_to(point(px(-5000.), at.y));
+        assert!(
+            r.vcx.debug_bounds(CPU_SPLITTER_LINE_ID).is_some(),
+            "lit while held"
+        );
+        assert_eq!(r.saved(), before, "nothing is saved during the drag");
+        r.release(point(px(-5000.), at.y));
+        let w = chart_w(r.gap(CPU_SPLITTER_ID));
+        assert!((w - 120.).abs() <= 1.5, "chart {w}");
+        let split = cpu_split(&mut r);
+        assert!(split > 0.2, "{split}");
+        assert_eq!(cpu_split_of(&r.saved()), Some(f64::from(split)));
+
+        // A double-click resets the mode's default, which is not written.
+        let at = center(r.gap(CPU_SPLITTER_ID));
+        r.press(at, 2);
+        r.release(at);
+        assert_eq!(cpu_split(&mut r), 0.4);
+        assert_eq!(cpu_split_of(&r.saved()), None);
+        let w = chart_w(r.gap(CPU_SPLITTER_ID));
+        let body = f32::from(frame.size.width) - 2. - 2. * pad;
+        assert!((w - 0.4 * body).abs() <= 1.5, "chart {w} of {body}");
+    }
+
+    #[gpui_kit::test]
+    fn overview_box_reset_and_gear(cx: &mut TestAppContext) {
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                layout.rows[0].boxes[0].split = Some(0.6);
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(cpu_split(&mut r), 0.6);
+        // A mode the box does not offer changes nothing.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "cpu".into(),
+            mode: "rows".into(),
+        });
+        assert_eq!(cpu_split(&mut r), 0.6);
+        // Reset Box: the default mode and split, saved.
+        r.page_action(&PerfOverviewResetBox { kind: "cpu".into() });
+        assert_eq!(cpu_split(&mut r), 0.4);
+        assert_eq!(r.saved(), Some(OverviewLayoutSetting::btop_default()));
+
+        // No gear outside Edit Layout mode; in it, one per box, left of Hide box.
+        assert!(r.vcx.debug_bounds("perf-overview-gear-cpu").is_none());
+        r.edit_layout();
+        for kind in [BoxKind::Cpu, BoxKind::Memory, BoxKind::Net] {
+            let gear = r.bounds_of(gear_id(kind));
+            let hide = r.bounds_of(hide_button_id(kind));
+            assert!(gear.right() <= hide.left(), "{kind:?}: {gear:?} {hide:?}");
+            assert!(gear.top() >= r.bounds_of(title_handle_id(kind)).top());
+        }
+        // The gear opens the box's modes, the shown one selected, and starts no box drag.
+        let at = center(r.bounds_of(gear_id(BoxKind::Cpu)));
+        r.press(at, 1);
+        assert_eq!(r.page_box_drag(), None, "no box drag");
+        r.release(at);
+        let items: Vec<(String, bool)> = r.vcx.update(|window, cx| {
+            let menu = tl_ui::components::menu::open_context_menu(window, cx)
+                .expect("the gear menu is open");
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.label.map(|l| l.to_string()).unwrap_or_default(),
+                        e.checked,
+                    )
+                })
+                .collect()
+        });
+        assert_eq!(items, [("Chart and cores".to_owned(), true)]);
     }
 
     #[gpui_kit::test]
@@ -3168,6 +3293,12 @@ mod page {
                 focus.dispatch_action(action, window, cx);
             });
             draw(self.vcx);
+        }
+
+        fn page_box_drag(&mut self) -> Option<BoxKind> {
+            let page = self.page.clone();
+            self.vcx
+                .update(|_, cx| page.read(cx).box_drag().map(|d| d.kind))
         }
 
         fn editing(&mut self) -> bool {
@@ -3281,7 +3412,7 @@ mod page {
                             .map(|kind| OverviewBoxSetting {
                                 kind: kind.into(),
                                 width: 1.,
-                                cpu_split: None,
+                                ..OverviewBoxSetting::default()
                             })
                             .to_vec(),
                     }],
@@ -3784,6 +3915,117 @@ mod wired {
         assert!(r.vcx.read_entity(&page, |p, _| p.summary().is_none()));
         assert_eq!(selected(&mut r).as_deref(), Some(OVERVIEW_KEY));
         assert!(has_overview_part(&merged(&mut r)));
+    }
+
+    /// The kind and label of each entry of the open context menu, and its first entry's
+    /// submenu entries with their marks.
+    #[allow(clippy::type_complexity, reason = "test helper")]
+    fn open_menu(r: &mut Rig) -> (Vec<(MenuEntryKind, String)>, Vec<(String, bool)>) {
+        r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("a context menu is open");
+            let entries = menu.read(cx).entries_for_test(window);
+            let sub = entries[0]
+                .submenu
+                .as_ref()
+                .map(|sub| {
+                    sub.read(cx)
+                        .entries_for_test(window)
+                        .into_iter()
+                        .map(|e| {
+                            (
+                                e.label.map(|l| l.to_string()).unwrap_or_default(),
+                                e.checked,
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let labels = entries
+                .into_iter()
+                .map(|e| (e.kind, e.label.map(|l| l.to_string()).unwrap_or_default()))
+                .collect();
+            (labels, sub)
+        })
+    }
+
+    #[gpui_kit::test]
+    fn overview_box_menu_switches_mode_and_saves(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        select(&mut r, OVERVIEW_KEY);
+        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        let page = overview(&mut r).expect("an OverviewPage");
+        let saved = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| TlSettings::settings(cx).performance.overview.clone())
+        };
+        let cpu_split = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                page.read(cx)
+                    .layout()
+                    .split(tl_ui::pages::performance::overview::layout::BoxKind::Cpu)
+            })
+        };
+        let title = r
+            .vcx
+            .debug_bounds(Box::leak(title_row_id(CPU_BOX_ID).into_boxed_str()))
+            .expect("the CPU title line");
+
+        // Right-click on the title line: Layout, Reset Box, a separator, then the page menu.
+        mouse(r.vcx, MouseButton::Right, title.center());
+        let (labels, modes) = open_menu(&mut r);
+        assert_eq!(
+            labels[..4],
+            [
+                (MenuEntryKind::Submenu, "Layout".to_owned()),
+                (MenuEntryKind::Item, "Reset Box".to_owned()),
+                (MenuEntryKind::Separator, String::new()),
+                (MenuEntryKind::Item, "Copy".to_owned()),
+            ]
+        );
+        // One radio item per mode the box offers, the shown one selected.
+        assert_eq!(modes, [("Chart and cores".to_owned(), true)]);
+        // Choosing the shown mode changes and saves nothing.
+        r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the box menu is open");
+            let layout = menu.read(cx).entries_for_test(window)[0]
+                .submenu
+                .clone()
+                .expect("the Layout submenu");
+            let action = layout
+                .read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .next()
+                .and_then(|e| e.action)
+                .expect("a mode item action");
+            let focus = gpui_kit::Focusable::focus_handle(page.read(cx), cx);
+            focus.dispatch_action(&*action, window, cx);
+        });
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        assert_eq!(saved(&mut r), None);
+
+        // Reset Box after a saved split: the default split, saved.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                layout.rows[0].boxes[0].split = Some(0.6);
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(cpu_split(&mut r), Some(0.6));
+        mouse(r.vcx, MouseButton::Right, title.center());
+        r.vcx.simulate_keystrokes("down down enter");
+        draw(r.vcx);
+        assert_eq!(cpu_split(&mut r), Some(0.4));
+        assert_eq!(saved(&mut r), Some(OverviewLayoutSetting::btop_default()));
+
+        // A right-click in the box body keeps the plain page menu.
+        let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("the CPU box");
+        mouse(r.vcx, MouseButton::Right, frame.center());
+        let (labels, _) = open_menu(&mut r);
+        assert_eq!(labels[0], (MenuEntryKind::Item, "Copy".to_owned()));
     }
 
     #[gpui_kit::test]

@@ -742,6 +742,14 @@ perf-overview-reset-layout = Reset Layout
 perf-overview-edit-done = Done
 perf-overview-hide-box = Hide box
 perf-overview-toast-last-box = At least one box must stay on the Overview page
+perf-overview-box-layout = Layout
+perf-overview-box-layout-tip = Box layout
+perf-overview-reset-box = Reset Box
+perf-overview-mode-chart-cores = Chart and cores
+perf-overview-mode-rows = Rows
+perf-overview-mode-chart-engines = Chart and engines
+perf-overview-mode-columns = Columns
+perf-overview-mode-list = List
 
 perf-menu-select-pages = Select Pages
 perf-menu-hide-page = Hide This Page

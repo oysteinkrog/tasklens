@@ -28,6 +28,7 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::layout::BoxMode;
 use super::parts::{
     ChartSettings, Meter, SPARK_GRID, SPARK_W, box_frame, chart_section_versions, class_probe,
     spark_chart,
@@ -42,6 +43,13 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The box's debug selector.
 pub const MEM_BOX_ID: &str = "perf-overview-box-memory";
+
+/// The box's layout modes (UI-PRF-019). `rows` is the five rows of UI-PRF-017.
+pub const MODES: &[BoxMode] = &[BoxMode {
+    id: "rows",
+    label: "perf-overview-mode-rows",
+    split: None,
+}];
 
 const KEY_TITLE: &str = "perf-card-heading-memory";
 /// The rows in order: In use, Cached, Available, Swap, Commit.

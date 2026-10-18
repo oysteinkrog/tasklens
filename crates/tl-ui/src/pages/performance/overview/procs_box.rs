@@ -27,6 +27,7 @@ use tl_model::ids::ProcessKey;
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::ProcessSnapshot;
 
+use super::layout::BoxMode;
 use super::parts::{Meter, box_frame};
 use crate::chart::labels::LABEL_ROW;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
@@ -39,6 +40,13 @@ use crate::window::main::main_window_view;
 
 /// The box's debug selector.
 pub const PROCS_BOX_ID: &str = "perf-overview-box-processes";
+
+/// The box's layout modes (UI-PRF-019). `list` is the only one.
+pub const MODES: &[BoxMode] = &[BoxMode {
+    id: "list",
+    label: "perf-overview-mode-list",
+    split: None,
+}];
 
 /// The prefix of each process row's debug selector, followed by the PID.
 pub const PROC_ROW_ID_PREFIX: &str = "perf-overview-proc-row:";

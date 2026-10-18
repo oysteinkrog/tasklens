@@ -92,6 +92,24 @@ pub struct PerfOverviewResizeBox {
     pub dh: i8,
 }
 
+/// Switches the Overview box of `kind` to its layout mode `mode` (the box menu's "Layout"
+/// items, UI-PRF-019).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewSetBoxMode {
+    pub kind: Arc<str>,
+    pub mode: Arc<str>,
+}
+
+/// Gives the Overview box of `kind` its default mode and split (the box menu's "Reset Box").
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewResetBox {
+    pub kind: Arc<str>,
+}
+
 /// Selects the device page of `key` (a sidebar card click).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]

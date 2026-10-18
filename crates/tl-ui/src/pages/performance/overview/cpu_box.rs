@@ -13,14 +13,11 @@ use std::cell::{Cell, Ref, RefCell};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Bounds, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
-    Render, SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Subscription, Task, Window, canvas, div, px, relative, size,
+    AnyElement, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -32,13 +29,13 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::super::cpu::logical_devices;
-use super::layout::CPU_SPLIT_DEFAULT;
+use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
+use super::layout::BoxMode;
 use super::parts::{
     ChartSettings, CoreBars, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, box_chart,
     box_frame, chart_section_versions, class_probe, core_bars_layout, core_sparks, is_wide,
     spark_chart, split_body_share, width_probe,
 };
-use super::splitter::{CpuSplitDrag, clamp_cpu_split, round_split};
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
@@ -56,18 +53,19 @@ pub const CPU_SPLITTER_ID: &str = "perf-overview-cpu-splitter";
 /// The debug selector of its accent line.
 pub const CPU_SPLITTER_LINE_ID: &str = "perf-overview-cpu-splitter-line";
 
-/// How long the pointer rests on the gap before its accent line shows.
-const SPLITTER_HOVER_DELAY: Duration = Duration::from_millis(150);
+/// The narrowest column of core rows (UI-PRF-018 "CPU box splitter"), logical px.
+pub const CORE_COLUMN_MIN_W: f32 = 188.;
 
-/// The accent line in the gap, logical px.
-const SPLITTER_LINE: f32 = 2.;
+/// The box's layout modes (UI-PRF-019). `chart_cores` has the total chart and the core rows,
+/// the chart taking 40% of a wide body by default.
+pub const MODES: &[BoxMode] = &[BoxMode {
+    id: "chart_cores",
+    label: "perf-overview-mode-chart-cores",
+    split: Some(0.4),
+}];
 
-/// The chart share the box ended a drag or a double-click on, rounded to 3 decimals. The page
-/// saves it.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct CpuSplitChanged(pub f32);
-
-impl EventEmitter<CpuSplitChanged> for CpuBox {}
+/// The page saves the chart share the box ended a drag or a double-click on.
+impl EventEmitter<InnerSplitChanged> for CpuBox {}
 
 /// The box's debug selector.
 pub const CPU_BOX_ID: &str = "perf-overview-box-cpu";
@@ -247,14 +245,8 @@ pub struct CpuBox {
     /// chart.
     width: Rc<Cell<Pixels>>,
     wide: bool,
-    /// The chart's share of the body, the body's bounds at the last paint, the drag in progress
-    /// and the hover state of the gap (UI-PRF-018 "CPU box splitter").
-    split: f32,
-    body: Rc<Cell<Bounds<Pixels>>>,
-    drag: Option<CpuSplitDrag>,
-    hover: bool,
-    hover_shown: bool,
-    hover_task: Option<Task<()>>,
+    /// The gap between the chart and the core rows (UI-PRF-018 "CPU box splitter").
+    split: InnerSplit,
     settings: ChartSettings,
     settings_versions: [u64; 3],
     style_version: u64,
@@ -295,12 +287,12 @@ impl CpuBox {
             text_bits: 0,
             width: Rc::new(Cell::new(px(0.))),
             wide: true,
-            split: CPU_SPLIT_DEFAULT,
-            body: Rc::default(),
-            drag: None,
-            hover: false,
-            hover_shown: false,
-            hover_task: None,
+            split: InnerSplit::new(
+                CPU_SPLITTER_ID,
+                CPU_SPLITTER_LINE_ID,
+                MODES[0].split.unwrap_or_default(),
+            )
+            .with_mins(PART_MIN, CORE_COLUMN_MIN_W),
             settings,
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
@@ -351,155 +343,18 @@ impl CpuBox {
 
     /// The chart's share of the body as the box lays it out, after the clamps.
     pub fn split(&self, m: &UiMetrics) -> f32 {
-        self.effective_split(m)
+        self.split.share(SplitAxis::Row, m.sp[5], m.ui_scale)
     }
 
     /// Takes the saved share. Nothing changes while the gap is held.
     pub fn set_split(&mut self, share: f32, cx: &mut Context<Self>) {
-        if self.drag.is_some() || share == self.split {
-            return;
-        }
-        self.split = share;
-        cx.notify();
-    }
-
-    fn effective_split(&self, m: &UiMetrics) -> f32 {
-        let width = f32::from(self.body.get().size.width);
-        clamp_cpu_split(self.split, width, f32::from(m.sp[5]), m.ui_scale)
-    }
-
-    /// Button down on the gap: a double-click resets the share, a single press starts a drag.
-    fn split_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
-        cx.stop_propagation();
-        if ev.click_count >= 2 {
-            self.drag = None;
-            if self.split != CPU_SPLIT_DEFAULT {
-                self.split = CPU_SPLIT_DEFAULT;
-                cx.emit(CpuSplitChanged(self.split));
-            }
-        } else {
-            let share = self.effective_split(metrics(cx));
-            self.drag = Some(CpuSplitDrag::start(f32::from(ev.position.x), share));
-        }
-        cx.notify();
-    }
-
-    /// The pointer moved while the gap is held.
-    fn split_move(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(drag) = &mut self.drag else {
-            return;
-        };
-        let m = *metrics(cx);
-        let width = f32::from(self.body.get().size.width);
-        let share = drag.share_at(f32::from(position.x), width, f32::from(m.sp[5]), m.ui_scale);
-        if share != self.split {
-            drag.changed = true;
-            self.split = share;
+        if self.split.set_share(share) {
             cx.notify();
         }
     }
 
-    /// The button went up: the drag ends and a changed share goes to the page to be saved.
-    fn split_up(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.drag.take() else {
-            return;
-        };
-        if drag.changed {
-            self.split = round_split(self.split);
-            cx.emit(CpuSplitChanged(self.split));
-        }
-        cx.notify();
-    }
-
-    /// The pointer entered or left the gap. The accent line shows after
-    /// [`SPLITTER_HOVER_DELAY`] and goes at once on leaving.
-    fn split_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        if hovered == self.hover {
-            return;
-        }
-        self.hover = hovered;
-        self.hover_shown = false;
-        self.hover_task = hovered.then(|| {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(SPLITTER_HOVER_DELAY).await;
-                let _ = this.update(cx, |this, cx| {
-                    this.hover_task = None;
-                    if this.hover {
-                        this.hover_shown = true;
-                        cx.notify();
-                    }
-                });
-            })
-        });
-        cx.notify();
-    }
-
-    /// The hit area of the gap with its cursor, handlers and accent line.
-    fn gap_element(&self, share: f32, gap: Pixels, cx: &mut Context<Self>) -> AnyElement {
-        let gap_el = div()
-            .id("perf-overview-cpu-splitter")
-            .debug_selector(|| CPU_SPLITTER_ID.into())
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(relative(share))
-            .w(gap)
-            .cursor_ew_resize()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, ev: &MouseDownEvent, _, cx| this.split_down(ev, cx)),
-            )
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.split_hover(*hovered, cx)));
-        if !(self.drag.is_some() || (self.hover && self.hover_shown)) {
-            return gap_el.into_any_element();
-        }
-        let x = (f32::from(gap) - SPLITTER_LINE) / 2.;
-        let line = div()
-            .debug_selector(|| CPU_SPLITTER_LINE_ID.into())
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(px(x))
-            .w(px(SPLITTER_LINE))
-            .bg(current(cx).accent);
-        gap_el.child(line).into_any_element()
-    }
-
-    /// A canvas over the body that keeps its bounds, and follows the pointer while the gap is
-    /// held, wherever it goes.
-    fn body_probe(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = Rc::clone(&self.body);
-        let this = cx.entity().downgrade();
-        let dragging = self.drag.is_some();
-        canvas(
-            move |bounds, _, _| body.set(bounds),
-            move |_, _, window, _| {
-                if !dragging {
-                    return;
-                }
-                let moved = this.clone();
-                window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                    if !phase.bubble() {
-                        return;
-                    }
-                    let _ = moved.update(cx, |b, cx| {
-                        if e.pressed_button == Some(MouseButton::Left) {
-                            b.split_move(e.position, cx);
-                        } else {
-                            b.split_up(cx);
-                        }
-                    });
-                });
-                let released = this.clone();
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                    if phase.bubble() {
-                        let _ = released.update(cx, |b, cx| b.split_up(cx));
-                    }
-                });
-            },
-        )
-        .absolute()
-        .inset_0()
+    fn inner_split(&mut self) -> &mut InnerSplit {
+        &mut self.split
     }
 
     /// "CPU\t12%", the line when there is one, then "C0\t10%" per logical CPU, with "\t3.9 GHz"
@@ -772,15 +627,19 @@ impl Render for CpuBox {
                 cx.entity_id(),
             ))
             .into_any_element();
-        let share = self.effective_split(&m);
+        let share = self.split(&m);
         let split = split_body_share(chart, rows, self.wide, share, &m);
         let mut body = div()
             .relative()
             .size_full()
             .child(split)
-            .child(self.body_probe(cx));
+            .child(self.split.probe(Self::inner_split, cx));
         if self.wide {
-            body = body.child(self.gap_element(share, m.sp[5], cx));
+            body =
+                body.child(
+                    self.split
+                        .gap(SplitAxis::Row, share, m.sp[5], Self::inner_split, cx),
+                );
         }
         let body = body.into_any_element();
         box_frame(
