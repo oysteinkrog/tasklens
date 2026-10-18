@@ -837,7 +837,7 @@ impl Render for RtSignalDialog {
             .on_change(move |value, _, cx| {
                 let _ = view.update(cx, |this, cx| this.set_value(value as i32, cx));
             });
-        let mut row_label = div().text_color(theme.text_secondary);
+        let mut row_label = div().flex_none().text_color(theme.text_secondary);
         *row_label.text_style() = t_base(&m);
         let mut signal_name = div().text_color(theme.text_primary);
         *signal_name.text_style() = t_base(&m);
@@ -849,7 +849,7 @@ impl Render for RtSignalDialog {
             .gap(m.sp[4])
             .h(px(ROW_H * s))
             .child(row_label.child(tr(cx, "pwn-signal-field")))
-            .child(div().w(px(STEPPER_W * s)).child(stepper))
+            .child(div().flex_none().w(px(STEPPER_W * s)).child(stepper))
             .child(signal_name.child(self.label()));
 
         let mut note = div().text_color(theme.text_secondary);

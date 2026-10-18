@@ -70,6 +70,12 @@ const TOAST_TOP: f32 = 72.;
 /// The same under server decorations, × ui_scale.
 const TOAST_TOP_SERVER: f32 = 66.;
 
+/// Toast stack top in the Run window, × ui_scale. The 42 px toast sits over the prompt text and
+/// ends above the combo, so the empty-command toast never covers the input (UI-PWN-028).
+const TOAST_TOP_RUN: f32 = 48.;
+/// The same under server decorations, × ui_scale.
+const TOAST_TOP_RUN_SERVER: f32 = 42.;
+
 /// Shadow inset of the client-side frame on each edge, in px. The kit's window border draws the
 /// shadow inside the window, so the visible window is smaller than the size GPUI is asked for.
 #[cfg(target_os = "linux")]
@@ -93,12 +99,17 @@ pub fn client_frame_extra(decorations: Decorations) -> Pixels {
 /// What the frame takes below the content in this window: the bottom shadow and border. Add it to
 /// a content-measured height before `Window::resize`, so the footer stays inside the window.
 pub fn frame_bottom(window: &Window) -> Pixels {
-    match window.window_decorations() {
-        gpui_kit::Decorations::Client { tiling } if !tiling.bottom => {
-            window.client_inset().unwrap_or(px(0.)) + px(1.)
-        }
-        _ => px(0.),
+    #[cfg(target_os = "linux")]
+    if let gpui_kit::Decorations::Client { tiling } = window.window_decorations()
+        && !tiling.bottom
+    {
+        // The same constants `client_frame_extra` opens the window with, so the two agree. The
+        // kit draws the shadow in unscaled px, so ui_scale does not apply. The open size cannot
+        // know the tiled edges before the compositor tells; a resize after that does.
+        return px(CLIENT_SHADOW + CLIENT_BORDER);
     }
+    let _ = window;
+    px(0.)
 }
 
 /// The Run window's fixed size (APP-014), × ui_scale.
@@ -412,7 +423,13 @@ impl<V: Render> TlSecondaryWindow<V> {
     ) -> Self {
         tracing::debug!(target: "tasklens::ui", kind = ?spec.kind, "secondary window opens");
         let ui_scale = metrics(cx).ui_scale;
-        let top = px(if server { TOAST_TOP_SERVER } else { TOAST_TOP } * ui_scale);
+        let top = match (spec.kind, server) {
+            (TlWindowKind::Run, true) => TOAST_TOP_RUN_SERVER,
+            (TlWindowKind::Run, false) => TOAST_TOP_RUN,
+            (_, true) => TOAST_TOP_SERVER,
+            (_, false) => TOAST_TOP,
+        };
+        let top = px(top * ui_scale);
         let toasts = cx.new(|cx| ToastQueue::new(window, cx, top));
         let content = build(window, cx);
         let focus = cx.focus_handle();

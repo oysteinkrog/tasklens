@@ -60,7 +60,7 @@ mod window {
     use std::sync::Arc;
 
     use gpui_kit::base::Root;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext, WindowHandle};
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext, WindowHandle, px, size};
     use tl_model::actions::{
         ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, LaunchWhat,
     };
@@ -69,6 +69,7 @@ mod window {
     use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{AppEnv, RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit};
     use tl_ui::components::toast::ToastQueue;
+    use tl_ui::components::window_frame::client_frame_extra;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::windows::run::{POPUP_ID, ROW_H, RunWindow, VISIBLE_ROWS, open_run_window};
@@ -221,6 +222,38 @@ mod window {
         assert_eq!(run_toasts(&mut rig.run), ["Please enter a command"]);
         assert!(launches(&rig.engine).is_empty());
         assert!(find_run(cx).is_some(), "the window stays open");
+    }
+
+    /// The visible window is the 480 x 248 spec: the footer and its buttons end inside it, the
+    /// root note has its own row above the footer, and the empty-command toast stays off the
+    /// input (UI-PWN-028, tasklens-fut.23).
+    #[gpui_kit::test]
+    fn run_window_shows_all_content_and_toast_clears_the_input(cx: &mut TestAppContext) {
+        let mut rig = setup(cx, &["firefox"]);
+        let extra = client_frame_extra(Settings::default().appearance.decorations);
+        draw(&mut rig.run);
+        let window = rig.run.update(|window, _| window.bounds());
+        assert_eq!(window.size, size(px(480.) + extra, px(248.) + extra));
+        let inner_bottom = window.size.height
+            - rig
+                .run
+                .update(|window, _| tl_ui::components::window_frame::frame_bottom(window));
+        let footer = rig.run.debug_bounds("RunFooter").expect("footer");
+        let note = rig.run.debug_bounds("RunWaylandNote").expect("note");
+        assert_eq!(note.size.height, px(18.));
+        assert_eq!(footer.size.height, px(52.));
+        assert!(note.bottom() <= footer.top(), "{note:?} over {footer:?}");
+        assert!(footer.bottom() <= inner_bottom, "{footer:?} in {window:?}");
+
+        set_text(&mut rig, "");
+        rig.run.simulate_keystrokes("enter");
+        draw(&mut rig.run);
+        let input = rig.run.debug_bounds("RunCombo").expect("combo");
+        let toast = rig.run.debug_bounds("TlToast-a1-frame").expect("toast");
+        assert!(
+            toast.bottom() <= input.top() || toast.top() >= input.bottom(),
+            "{toast:?} covers {input:?}"
+        );
     }
 
     #[gpui_kit::test]
