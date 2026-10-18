@@ -956,3 +956,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-18 xdh.25: minigraph panel is a row under the Processes table, not an overlay (overlay hid the last rows). UI-PRF-040 updated.
 - 2026-10-18 bj6.55: Esc from the Shortcuts search box not reproducible (9 harness runs); first paint 45 to 61 ms; accepted without an Esc code change.
 - 2026-10-18 crw.59: Overview weights clamp to 0.001..=1000 with a warn, bad values drop only their part; a type error in [performance.overview] must not reset other [performance] settings.
+- 2026-10-18 gma.45 and fut.23 shared dialog test files; footer tests belong to fut.23, gma.45 keeps only the Affinity fix.
