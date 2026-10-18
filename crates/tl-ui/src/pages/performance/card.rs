@@ -79,8 +79,9 @@ const FOCUS_RING_ALPHA: f32 = 0.5;
 const SEP: &str = " · ";
 /// Between the disk kind and its mount.
 const KIND_SEP: &str = " - ";
-const DOWN: &str = "↓ ";
-const UP: &str = " ↑ ";
+// The arrows of the two-rate network line, each with a no-break space after it.
+const DOWN_GLUED: &str = "↓\u{a0}";
+const UP_GLUED: &str = " ↑\u{a0}";
 
 /// The card words, translated once per strings version by [`card_words`]. [`CardWords::en`] is
 /// in en-US.
@@ -599,7 +600,7 @@ fn write_common<'a>(out: &mut String, mut words: impl Iterator<Item = &'a str>, 
     });
 }
 
-/// "↓ 1.2 Mbps ↑ 0.3 Mbps" when both rates are non-zero, else the total rate (table (d)).
+/// "↓\u{a0}1.2\u{a0}Mbps ↑\u{a0}0.3\u{a0}Mbps" when both rates are non-zero, else the total rate (table (d)).
 fn write_rates(
     input: &CardTextInput,
     rx: Metric<f64>,
@@ -619,12 +620,22 @@ fn write_rates(
         return;
     }
     if rx.value > 0.0 && tx.value > 0.0 {
-        out.push_str(DOWN);
-        units::net_rate(out, rx.value, unit, auto);
-        out.push_str(UP);
-        units::net_rate(out, tx.value, unit, auto);
+        out.push_str(DOWN_GLUED);
+        glued_rate(out, rx.value, unit, auto);
+        out.push_str(UP_GLUED);
+        glued_rate(out, tx.value, unit, auto);
     } else {
-        units::net_rate(out, rx.value + tx.value, unit, auto);
+        glued_rate(out, rx.value + tx.value, unit, auto);
+    }
+}
+
+/// A network rate whose space before the unit is a no-break space, so a card line wraps
+/// between the two rates and never inside one ("8.5 / Mbps").
+fn glued_rate(out: &mut String, bytes_per_s: f64, unit: NetUnit, auto: bool) {
+    let start = out.len();
+    units::net_rate(out, bytes_per_s, unit, auto);
+    if let Some(at) = out[start..].rfind(' ') {
+        out.replace_range(start + at..start + at + 1, "\u{a0}");
     }
 }
 
@@ -2165,7 +2176,14 @@ mod tests {
             net_details("Ethernet", Some("Wired connection 1")),
         );
         let l = lines(&input(DeviceKind::Net, &net, &s));
-        assert_eq!(strs(&l), ("enp38s0", "Ethernet", "↓ 1.2 Mbps ↑ 0.3 Mbps"));
+        assert_eq!(
+            strs(&l),
+            (
+                "enp38s0",
+                "Ethernet",
+                "↓\u{a0}1.2\u{a0}Mbps ↑\u{a0}0.3\u{a0}Mbps"
+            )
+        );
         assert!(l.line2_accent);
         assert!(!l.disconnected);
         assert_eq!(
@@ -2184,7 +2202,7 @@ mod tests {
         );
         let l = lines(&input(DeviceKind::Net, &net, &s));
         // No details yet: the type word comes from the catalog class.
-        assert_eq!(strs(&l), ("enp38s0", "Wi-Fi", "1.2 Mbps"));
+        assert_eq!(strs(&l), ("enp38s0", "Wi-Fi", "1.2\u{a0}Mbps"));
         assert!(l.line2_accent);
         assert_eq!(l.tooltip.as_deref(), Some("Wi-Fi"));
 
@@ -2194,7 +2212,7 @@ mod tests {
             auto_scale: true,
             ..input(DeviceKind::Net, &net, &s)
         };
-        assert_eq!(lines(&i).line2, "146.5 KiB/s");
+        assert_eq!(lines(&i).line2, "146.5\u{a0}KiB/s");
 
         // Down: the state word, not the accent, and the card dims.
         let s = snap(
@@ -2614,7 +2632,7 @@ mod tests {
             &input(DeviceKind::Net, &net, &s2),
             &mut scratch
         ));
-        assert_eq!(kept.line2, "↓ 2.4 Mbps ↑ 0.3 Mbps");
+        assert_eq!(kept.line2, "↓\u{a0}2.4\u{a0}Mbps ↑\u{a0}0.3\u{a0}Mbps");
         assert!(!same(&kept.line2, &first.line2));
         assert!(same(&tip(&kept), &tip(&first)));
 
@@ -2741,6 +2759,18 @@ mod tests {
         assert_eq!(l.card_height(1.0), px(80.));
         assert_eq!(l.card_height(1.5), px(120.));
         assert!(card_tooltip(&lines, &l).is_empty());
+    }
+
+    #[test]
+    fn card_text_layout_keeps_a_rate_on_one_row() {
+        // 21 px of text in a 16 px column: it wraps between the rates, not inside one.
+        let two = "↓\u{a0}6.6\u{a0}Mbps ↑\u{a0}8.5\u{a0}Mbps";
+        let l = layout(&card_text("tailscale0", "Tunnel", two), 6., 16.);
+        assert_eq!(
+            rows(&l.line2),
+            ["↓\u{a0}6.6\u{a0}Mbps", "↑\u{a0}8.5\u{a0}Mbps"]
+        );
+        assert!(!l.line2.cut);
     }
 
     #[test]
