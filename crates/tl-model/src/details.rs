@@ -222,7 +222,8 @@ pub struct GeneralDetail {
     pub shadow_stack: Total<bool>,
     /// 0, 1 or 2 from /proc/sys/kernel/randomize_va_space.
     pub aslr_system: Total<u8>,
-    /// Personality ADDR_NO_RANDOMIZE.
+    /// Personality ADDR_NO_RANDOMIZE. `Failed` with a valid `aslr_system` means the personality of
+    /// a process of the user's own could not be read because of the kernel ptrace setting.
     pub aslr_disabled_for_process: Total<bool>,
     pub no_new_privs: Total<bool>,
     pub seccomp: Total<Seccomp>,
@@ -641,9 +642,14 @@ pub enum ScanPhase {
     StoppedLimit,
     /// "Scan stopped: the process exited."
     StoppedExited,
-    /// "Failed to read process memory." The text lives in the UI.
+    /// "Failed to read process memory." The text lives in the UI. The text
+    /// [`SCAN_PTRACE_BLOCKED`] means the kernel ptrace setting refused a process of the same user.
     Failed(Arc<str>),
 }
+
+/// The `ScanPhase::Failed` text for a process of the user's own that Yama `ptrace_scope` keeps
+/// tasklens from reading. The UI shows its own words for it.
+pub const SCAN_PTRACE_BLOCKED: &str = "ptrace-blocked";
 
 /// The Strings tab.
 #[derive(Clone, Debug)]

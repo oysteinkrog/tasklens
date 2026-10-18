@@ -657,18 +657,19 @@ pub fn build(w: &SecurityWords, d: Option<&SecurityDetail>) -> [Vec<SecRow>; 2] 
         or_none_reported(w, admin),
         Validity::Valid,
     ));
-    let flags_validity = worst(
-        worst(d.no_new_privs.validity, d.seccomp.validity),
-        d.dumpable.validity,
-    );
+    // An unreported Dumpable (R-163) is left out of the list; it does not make the row
+    // unsupported.
+    let flags_validity = worst(d.no_new_privs.validity, d.seccomp.validity);
     let mut flags = String::new();
     if matches!(flags_validity, Validity::Valid | Validity::Stale) {
+        let dumpable =
+            matches!(d.dumpable.validity, Validity::Valid | Validity::Stale) && d.dumpable.value;
         fmt_flags(
             &mut flags,
             w,
             d.no_new_privs.value,
             d.seccomp.value,
-            d.dumpable.value,
+            dumpable,
         );
         flags = or_none_reported(w, flags);
     }
@@ -2480,5 +2481,25 @@ mod tests {
         fmt_ns(&mut s, &w, NsState::Isolated { inode: 4026532211 });
         assert_eq!(s, "Isolated (4026532211)");
         assert_eq!(build(&w, None)[1].len(), RIGHT.len());
+    }
+
+    /// tasklens-yms.41: an unreported Dumpable leaves the Flags row at "None reported"; the
+    /// Login UID and speculation rows carry their values.
+    #[test]
+    fn flags_ignore_unreported_dumpable() {
+        let mut d = detail();
+        d.dumpable = Total {
+            value: true,
+            validity: Validity::Unsupported,
+        };
+        let w = SecurityWords::en();
+        let [left, right] = build(&w, Some(&d));
+        assert_eq!(text(&left, SecField::Flags), "None reported");
+        assert_eq!(text(&left, SecField::LoginUid), "oystein (1000)");
+        assert_eq!(text(&right, SecField::StoreBypass), "thread vulnerable");
+        assert_eq!(
+            text(&right, SecField::IndirectBranch),
+            "conditional enabled"
+        );
     }
 }

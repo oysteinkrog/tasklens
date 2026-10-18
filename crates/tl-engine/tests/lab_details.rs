@@ -619,7 +619,7 @@ fn string_scan_streams_progress() {
 }
 
 /// tasklens-dwy.9: with `ptrace_scope` 1 and a target that is not a descendant of tasklens, one
-/// `Restricted` payload arrives and the memory is not scanned.
+/// `Failed` payload with the ptrace reason arrives and the memory is not scanned.
 #[test]
 fn string_scan_restricted_under_yama() {
     let root = FixtureRoot::new(&["process-edge"]);
@@ -630,12 +630,13 @@ fn string_scan_restricted_under_yama() {
 
     let slot = strings_slot(&ui, edge_key());
     assert_eq!(slot.version, 1, "exactly one payload");
-    assert_eq!(slot.validity, Validity::Restricted);
+    // The fixture belongs to the test user, so the refusal is the ptrace setting's (tasklens-yms.41).
+    assert_eq!(slot.validity, Validity::Failed);
     let state = scan_state(&slot).expect("a Strings payload");
     assert_eq!(state.scan, ScanId(1));
     assert_eq!(
         state.phase,
-        ScanPhase::Failed("Strings unavailable: needs administrator rights".into())
+        ScanPhase::Failed(tl_model::details::SCAN_PTRACE_BLOCKED.into())
     );
     assert_eq!(state.found, 0);
     assert!(state.chunks.is_empty());

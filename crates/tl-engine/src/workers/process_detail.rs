@@ -172,8 +172,8 @@ use tl_model::details::{
     AffinityInfo, CapRow, DetailTab, DetailTarget, Elevated, ElfArch, EnvDetail, ExeLocation,
     FdDetail, FdKind, FdRow, GeneralDetail, GroupMembershipRow, HashError, HashState, IdTriple,
     MapNode, MapRegion, MapsDetail, NsKind, NsRow, NsState, PackageCheck, PackageInfo, Relro,
-    ScanId, ScanPhase, SearchId, Seccomp, SecurityDetail, StringEncoding, StringHit,
-    StringScanOpts, StringScanState, TabPayload, ThreadRow,
+    SCAN_PTRACE_BLOCKED, ScanId, ScanPhase, SearchId, Seccomp, SecurityDetail, StringEncoding,
+    StringHit, StringScanOpts, StringScanState, TabPayload, ThreadRow,
 };
 use tl_model::health::{HelperState, SourceId, SourceState};
 use tl_model::helper_proto::{HelperError, HelperReply, HelperReplyBody, HelperRequest, ProcFiles};
@@ -2179,8 +2179,13 @@ impl ProcessDetailSource {
                 Err((phase, validity)) => {
                     // A target tasklens may not read is scanned through the helper while it is
                     // `Unlocked` (PROC-084).
+                    let ptrace_blocked =
+                        matches!(&phase, ScanPhase::Failed(t) if &**t == SCAN_PTRACE_BLOCKED);
                     let helper = match &mut self.helper {
-                        Some(side) if validity == Validity::Restricted && side.unlocked() => {
+                        Some(side)
+                            if (validity == Validity::Restricted || ptrace_blocked)
+                                && side.unlocked() =>
+                        {
                             side.start_scan(scan, key, opts)
                         }
                         _ => None,
@@ -2700,6 +2705,12 @@ fn start_scan(
     }
     let ppid = stat.ppid;
     if !ptrace_allowed(root, key.pid, ppid, &mut bufs.small, stat) {
+        if owned_by_me(root, key.pid) {
+            return Err((
+                ScanPhase::Failed(SCAN_PTRACE_BLOCKED.into()),
+                Validity::Failed,
+            ));
+        }
         return Err(restricted());
     }
     let mut regions = Vec::new();
@@ -2765,6 +2776,34 @@ fn read_pid_stat(
         SMALL_FILE_LIMIT,
     )?;
     parse_pid_stat(buf, stat)
+}
+
+/// True when `pid` belongs to the user tasklens runs as.
+fn owned_by_me(root: &SysRoot, pid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(root.proc.join(pid.to_string()))
+        .is_ok_and(|m| m.uid() == rustix::process::getuid().as_raw())
+}
+
+/// True when a process with real uid `ruid` is the user's own and Yama `ptrace_scope` is above 0,
+/// which is what makes the kernel refuse reads such as `personality` for a non-child process.
+fn ptrace_blocks_own(root: &SysRoot, ruid: u32, self_uid: u32, buf: &mut Vec<u8>) -> bool {
+    if ruid != self_uid {
+        return false;
+    }
+    match read_file(
+        &root.proc.join("sys/kernel/yama/ptrace_scope"),
+        buf,
+        PTRACE_SCOPE_MAX,
+    ) {
+        Ok(_) => {
+            std::str::from_utf8(buf)
+                .ok()
+                .and_then(|s| s.trim().parse::<u8>().ok())
+                != Some(0)
+        }
+        Err(_) => false,
+    }
 }
 
 /// True when Yama lets tasklens attach to `pid`, whose parent is `ppid`: scope 0, or scope 1
@@ -4045,6 +4084,12 @@ fn read_general(
             .map_or(total(false, Validity::Failed), |p| {
                 valid(p & rd::ADDR_NO_RANDOMIZE != 0)
             }),
+        Err(e)
+            if error_validity(&e) == Validity::Restricted
+                && ptrace_blocks_own(root, status.uid[0], g.self_uid, &mut bufs.small) =>
+        {
+            total(false, Validity::Failed)
+        }
         Err(e) => total(false, error_validity(&e)),
     };
     let no_new_privs = match status.no_new_privs {
@@ -5835,6 +5880,32 @@ mod tests {
         assert_eq!(g.unit, total(None, Validity::Restricted));
         assert_eq!(g.uids.validity, Validity::Valid);
         assert_eq!(g.cpu_time_ms.validity, Validity::Valid);
+    }
+
+    /// tasklens-yms.41: EACCES on `personality` of the user's own process under Yama
+    /// `ptrace_scope` 1 is `Failed`, not `Restricted`; with scope 0 it stays `Restricted`.
+    #[test]
+    fn general_personality_blocked_by_ptrace_scope() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skipped: running as root");
+            return;
+        }
+        for (scope, expected) in [(1, Validity::Failed), (0, Validity::Restricted)] {
+            let (tmp, src) = general_src();
+            let yama = tmp.path().join("proc/sys/kernel/yama");
+            fs::create_dir_all(&yama).expect("create yama dir");
+            fs::write(yama.join("ptrace_scope"), format!("{scope}\n")).expect("write scope");
+            let path = tmp.path().join("proc/4201/personality");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
+            let d = tabs(&[(a(), DetailTab::General)]);
+            let (_src, out, _) = step_all(src, &d, &every_ms(500), 0);
+            let (g, _) = general(&out);
+            assert_eq!(g.aslr_system, valid(2));
+            assert_eq!(
+                g.aslr_disabled_for_process.validity, expected,
+                "scope {scope}"
+            );
+        }
     }
 
     /// EACCES on `status`, `autogroup` and `randomize_va_space` makes only their fields

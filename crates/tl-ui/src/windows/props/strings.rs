@@ -36,7 +36,8 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::command::Command;
 use tl_model::details::{
-    ScanId, ScanPhase, StringEncoding, StringHit, StringScanOpts, StringScanState, TabPayload,
+    SCAN_PTRACE_BLOCKED, ScanId, ScanPhase, StringEncoding, StringHit, StringScanOpts,
+    StringScanState, TabPayload,
 };
 use tl_model::ids::ProcessKey;
 use tl_model::units;
@@ -187,6 +188,7 @@ pub struct StringsWords {
     pub limit: SharedString,
     pub failed: SharedString,
     pub kernel_thread: SharedString,
+    pub ptrace_blocked: SharedString,
     pub sort_after_scan: SharedString,
     pub no_match: SharedString,
     pub copy_value: SharedString,
@@ -225,6 +227,7 @@ impl StringsWords {
             limit: t("pwn-strings-limit"),
             failed: t("pwn-strings-failed"),
             kernel_thread: t("pwn-strings-kernel-thread"),
+            ptrace_blocked: t("pwn-strings-ptrace-blocked"),
             sort_after_scan: t("pwn-strings-sort-after-scan"),
             no_match: t(NO_MATCH),
             copy_value: t("pwn-strings-menu-copy-value"),
@@ -965,7 +968,13 @@ impl StringsTab {
         }
         match &self.phase {
             None => Some(self.words.idle.clone()),
-            Some(ScanPhase::Failed(_)) if self.found == 0 => Some(self.words.failed.clone()),
+            Some(ScanPhase::Failed(why)) if self.found == 0 => {
+                Some(if &**why == SCAN_PTRACE_BLOCKED {
+                    self.words.ptrace_blocked.clone()
+                } else {
+                    self.words.failed.clone()
+                })
+            }
             Some(_) => None,
         }
     }

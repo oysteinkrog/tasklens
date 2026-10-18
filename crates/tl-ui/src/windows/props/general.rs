@@ -227,6 +227,7 @@ pub struct GeneralWords {
     aslr: [SharedString; 3],
     aslr_unknown: Template,
     aslr_disabled: SharedString,
+    aslr_ptrace_blocked: SharedString,
     seccomp_disabled: SharedString,
     seccomp_strict: SharedString,
     seccomp_one: SharedString,
@@ -317,6 +318,7 @@ impl GeneralWords {
             ],
             aslr_unknown: tmpl("pwn-general-aslr-unknown", &["n"]),
             aslr_disabled: t("pwn-general-aslr-disabled-for-process"),
+            aslr_ptrace_blocked: t("pwn-general-aslr-ptrace-blocked"),
             seccomp_disabled: t("pwn-general-seccomp-disabled"),
             seccomp_strict: t("pwn-general-seccomp-strict"),
             seccomp_one: t("pwn-general-seccomp-filter-one"),
@@ -899,6 +901,14 @@ pub fn fmt_aslr(out: &mut String, w: &GeneralWords, system: u8, disabled_for_pro
         out.push_str(", ");
         out.push_str(&w.aslr_disabled);
     }
+}
+
+/// The system setting and why the process setting is missing: the personality of a process of
+/// the user's own that the kernel ptrace setting keeps tasklens from reading.
+pub fn fmt_aslr_ptrace_blocked(out: &mut String, w: &GeneralWords, system: u8) {
+    fmt_aslr(out, w, system, false);
+    out.push_str(", ");
+    out.push_str(&w.aslr_ptrace_blocked);
 }
 
 /// `Disabled`, `Strict` or `Filter (3 filters)`.
@@ -2578,15 +2588,27 @@ impl GeneralTab {
         );
         match d {
             Some(d) => {
-                let validity = worst(d.aslr_system.validity, d.aslr_disabled_for_process.validity);
                 let (sys, off) = (d.aslr_system.value, d.aslr_disabled_for_process.value);
+                let blocked = d.aslr_system.validity == Validity::Valid
+                    && d.aslr_disabled_for_process.validity == Validity::Failed;
+                let validity = if blocked {
+                    Validity::Valid
+                } else {
+                    worst(d.aslr_system.validity, d.aslr_disabled_for_process.validity)
+                };
                 b.add(
                     FieldId::Aslr,
                     KvKind::Text,
                     validity,
                     UnsupportedWord::NotSupported,
-                    hash_of((sys, off)),
-                    |s| fmt_aslr(s, &gw, sys, off),
+                    hash_of((sys, off, blocked)),
+                    |s| {
+                        if blocked {
+                            fmt_aslr_ptrace_blocked(s, &gw, sys);
+                        } else {
+                            fmt_aslr(s, &gw, sys, off);
+                        }
+                    },
                 );
             }
             None => b.collecting(FieldId::Aslr, KvKind::Text),
@@ -3635,6 +3657,14 @@ mod tests {
         assert_eq!(
             run(|s| fmt_aslr(s, &w(), 2, true)),
             "Full (2), disabled for this process"
+        );
+    }
+
+    #[test]
+    fn fmt_aslr_ptrace_blocked_names_the_setting() {
+        assert_eq!(
+            run(|s| fmt_aslr_ptrace_blocked(s, &w(), 2)),
+            "Full (2), process setting hidden by the kernel ptrace setting"
         );
     }
 
