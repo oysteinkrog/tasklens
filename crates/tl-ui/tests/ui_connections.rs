@@ -3459,3 +3459,62 @@ fn netns_cell_shows_name(cx: &mut TestAppContext) {
     assert_eq!(text(&cell_at(&delegate, 0, ConnColumn::Netns)), "");
     assert_eq!(text(&cell_at(&delegate, 1, ConnColumn::Netns)), "blue");
 }
+
+/// Text cells draw their values, never the warming-up "…" glyph (tasklens-rsf.30).
+mod drawn_text {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{AppContext as _, VisualTestContext};
+    use smallvec::smallvec;
+    use tl_ui::table::tree_table::TlTreeTable;
+
+    #[gpui_kit::test]
+    fn conn_table_draws_cell_values(cx: &mut TestAppContext) {
+        let delegate = delegate(
+            cx,
+            vec![connection(7, smallvec![key(42)])],
+            vec![process(42, "sshd", "root", 0)],
+        );
+        let slot = Rc::new(RefCell::new(None));
+        let keep = Rc::clone(&slot);
+        let handle = cx.add_window(move |window, cx| {
+            let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
+            *keep.borrow_mut() = Some(table.clone());
+            Root::new(table, window, cx)
+        });
+        let table = slot.borrow().clone().expect("table");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            vcx.debug_bounds("TlCell-text").is_some(),
+            "text cells drawn"
+        );
+        assert!(
+            vcx.debug_bounds("TlCell-glyph").is_none(),
+            "no cell of a current row draws a validity glyph"
+        );
+
+        let tsv = vcx.update(|_, cx| {
+            table.update(cx, |t, _| {
+                let row = t.delegate.row_id(0);
+                t.rows_as_tsv(&[row])
+            })
+        });
+        let shown: Vec<&str> = tsv.lines().nth(1).expect("one row").split('\t').collect();
+        assert_eq!(
+            shown,
+            [
+                "TCP",
+                "127.0.0.1:8080",
+                "10.0.0.1:443",
+                "Established",
+                "42",
+                "sshd"
+            ]
+        );
+    }
+}

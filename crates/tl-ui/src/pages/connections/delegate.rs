@@ -795,6 +795,8 @@ impl TreeTableDelegate for ConnectionsDelegate {
         let (Some(record), SysColumnId::Connections(column)) = (self.record(ix), col) else {
             return;
         };
+        // Every value here is current; the default `WarmingUp` would draw the "…" glyph.
+        out.validity = Validity::Valid;
         match column {
             ConnColumn::Proto => out.arc = Some(Arc::from(proto(record.proto))),
             ConnColumn::Local => out.arc = Some(record.local.clone()),

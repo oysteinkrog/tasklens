@@ -2925,3 +2925,63 @@ mod main_window {
         );
     }
 }
+
+/// Text cells draw their values, never the warming-up "…" glyph (tasklens-rsf.30).
+mod drawn_text {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{AppContext as _, VisualTestContext};
+    use tl_ui::table::tree_table::TlTreeTable;
+
+    #[gpui_kit::test]
+    fn startup_table_draws_cell_values(cx: &mut TestAppContext) {
+        let (d, _) = delegate(cx, vec![entry("app", StartupKind::AutostartUser)]);
+        let slot = Rc::new(RefCell::new(None));
+        let keep = Rc::clone(&slot);
+        let handle = cx.add_window(move |window, cx| {
+            let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
+            *keep.borrow_mut() = Some(table.clone());
+            Root::new(table, window, cx)
+        });
+        let table = slot.borrow().clone().expect("table");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            vcx.debug_bounds("TlCell-text").is_some(),
+            "text cells drawn"
+        );
+        assert!(
+            vcx.debug_bounds("TlCell-glyph").is_none(),
+            "no cell of a current row draws a validity glyph"
+        );
+
+        // Each copied cell is the delegate's value for that column.
+        let (tsv, want) = vcx.update(|_, cx| {
+            table.update(cx, |t, _| {
+                let row = t.delegate.row_id(0);
+                let want: Vec<String> = t
+                    .columns()
+                    .visible_columns()
+                    .iter()
+                    .map(|&col| {
+                        if col == id(StartupColumn::Name) {
+                            return "app".to_owned();
+                        }
+                        let mut out = CellOut::default();
+                        t.delegate.cell(0, col, &mut out);
+                        text(&out).to_owned()
+                    })
+                    .collect();
+                (t.rows_as_tsv(&[row]), want)
+            })
+        });
+        let shown: Vec<&str> = tsv.lines().nth(1).expect("one row").split('\t').collect();
+        assert_eq!(shown.len(), STARTUP_COLUMNS.len(), "every column is shown");
+        assert!(want.iter().all(|w| !w.is_empty() && w != "…"), "{want:?}");
+        assert_eq!(shown, want);
+    }
+}

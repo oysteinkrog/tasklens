@@ -48,7 +48,7 @@ use tl_model::validity::{FieldValidity, Validity};
 use super::actions::CapturedTargets;
 use super::cells::{
     CellCtx, CellTipWords, CellWords, DEFAULT_VISIBLE, GroupMembers, PROCESS_COLUMNS, PaintState,
-    PowerSensor, ProcColumn, RowRef, SUBTREE_PREFIX, TipCtx, boot_time_s, cell_suffix,
+    PickerGroup, PowerSensor, ProcColumn, RowRef, SUBTREE_PREFIX, TipCtx, boot_time_s, cell_suffix,
     cell_tooltip, dims_zero, fill_cell, heat_background, process_column, row_tint, subtree_column,
     subtree_total, tint_deadline,
 };
@@ -453,16 +453,20 @@ impl ProcessDelegate {
     }
 
     /// This surface's demand part: the process table with its shown columns, and the visible
-    /// process keys for the detail reads.
+    /// process keys for the detail reads. A shown GPU column also asks for the per-process GPU
+    /// rows (ARCHITECTURE "Rates": process data only while a GPU process column is visible).
     pub fn demand_part(&self) -> Demand {
         let mut columns = ColumnSet::EMPTY;
-        for col in self.layout.visible_columns().iter() {
-            columns.insert(*col);
+        let mut gpu_process = false;
+        for &col in self.layout.visible_columns().iter() {
+            columns.insert(col);
+            gpu_process |= process_column(col).group == PickerGroup::Gpu;
         }
         Demand {
             any_surface_visible: true,
             process_table: true,
             process_columns: columns,
+            gpu_process,
             detail_keys: Arc::clone(&self.visible_keys),
             ..Demand::default()
         }

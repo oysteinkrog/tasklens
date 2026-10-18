@@ -655,6 +655,8 @@ impl TreeTableDelegate for StartupDelegate {
         let (Some(e), SysColumnId::Startup(c)) = (self.entry(ix), col) else {
             return;
         };
+        // Every value here is current; the default `WarmingUp` would draw the "…" glyph.
+        out.validity = Validity::Valid;
         let theme = &self.theme;
         let w = &self.words;
         match c {

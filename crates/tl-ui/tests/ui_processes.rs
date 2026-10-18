@@ -712,6 +712,36 @@ mod delegate {
         assert!(merged.detail_keys.is_empty());
     }
 
+    /// A shown GPU column asks for the per-process GPU rows; without them every GPU cell stays
+    /// `WarmingUp` and draws "…" (tasklens-rsf.30).
+    #[gpui_kit::test]
+    fn gpu_columns_demand_gpu_process(cx: &mut TestAppContext) {
+        setup(cx);
+        let (rows, groups, records) = every_kind();
+        let vcx = cx.add_empty_window();
+        let d = new_delegate(vcx, snapshot(1, rows, groups, records));
+        let table = vcx.update(|window, cx| cx.new(|cx| TlTreeTable::new(d, window, cx)));
+        let show = |vcx: &mut VisualTestContext, col: ColumnId, on: bool| {
+            vcx.update(|_, cx| {
+                table.update(cx, |t, cx| {
+                    let mut layout = t.delegate.columns().clone();
+                    layout.set_visible(col, on).expect("visibility changes");
+                    t.delegate.on_columns_changed(&layout, cx);
+                    t.delegate.demand_part().gpu_process
+                })
+            })
+        };
+        let gpu_process = vcx.update(|_, cx| table.read(cx).delegate.demand_part().gpu_process);
+        assert!(gpu_process, "GPU is a default column");
+        assert!(!show(vcx, ColumnId::Gpu, false), "no GPU column shown");
+        assert!(
+            show(vcx, ColumnId::GpuMemDedicated, true),
+            "dedicated GPU memory"
+        );
+        assert!(!show(vcx, ColumnId::GpuMemDedicated, false));
+        assert!(show(vcx, ColumnId::Gpu, true), "GPU utilization");
+    }
+
     fn gpu(n: u16, pci: &str, name: &str, present: bool) -> DeviceEntry {
         DeviceEntry {
             idx: DeviceIdx(n),
