@@ -1555,7 +1555,15 @@ impl Render for AffinityDialog {
                                 this.cycle_cpu(cpu, window, cx);
                             });
                         });
-                    let mut row = row.id(("AffinityCpuRow", usize::from(cpu))).child(check);
+                    let mut row = row
+                        .id(("AffinityCpuRow", usize::from(cpu)))
+                        .debug_selector(move || format!("AffinityCpuRow-{cpu}"))
+                        .child(
+                            div()
+                                .debug_selector(move || format!("AffinityCpuCheck-{cpu}"))
+                                .flex_none()
+                                .child(check),
+                        );
                     if grid_focused && self.cursor == Some(cpu) {
                         row = TlFocusRing::ring(row, m.radius_small, &theme);
                     }
@@ -1587,7 +1595,8 @@ impl Render for AffinityDialog {
                     .justify_center()
                     .w(px(TILE_W * s))
                     .h(px(TILE_H * s))
-                    .px(m.sp[2])
+                    // 2 px a side: the 72 px tile must hold a two-digit "CPU 31" checkbox (66 px).
+                    .px(m.sp[1])
                     .overflow_hidden()
                     .rounded(m.radius_small)
                     .bg(theme.list_bg)
