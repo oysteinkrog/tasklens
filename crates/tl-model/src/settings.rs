@@ -1800,7 +1800,7 @@ mod tests {
         layout.rows[0].boxes[0].width = 1. / 3.;
         s.performance.overview = Some(layout);
         let text = toml::to_string(&s).expect("serializes");
-        assert!(text.contains("[performance.overview]"), "{text}");
+        assert!(text.contains("[[performance.overview.rows]]"), "{text}");
         assert!(!text.contains("overview_top_processes"), "{text}");
         let (back, changed) = load_toml(&text);
         assert!(changed.is_empty(), "{changed:?}");
