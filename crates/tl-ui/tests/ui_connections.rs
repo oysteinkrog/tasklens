@@ -3511,7 +3511,7 @@ mod drawn_text {
                 "TCP",
                 "127.0.0.1:8080",
                 "10.0.0.1:443",
-                "Established",
+                "ESTABLISHED",
                 "42",
                 "sshd"
             ]
