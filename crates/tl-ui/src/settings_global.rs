@@ -421,7 +421,6 @@ setting_keys! {
     PerformanceDeviceOverrides => "performance.device_overrides", Performance, Map;
     PerformanceCurvedLines => "performance.curved_lines", Performance, Bool;
     PerformanceNetworkDynamicScale => "performance.network_dynamic_scale", Performance, Bool;
-    PerformanceOverviewTopProcesses => "performance.overview_top_processes", Performance, Bool;
     Fans => "fans", Fans, Map;
     GraphsMinigraphCpu => "graphs.minigraph_cpu", Graphs, Bool;
     GraphsMinigraphMemory => "graphs.minigraph_memory", Graphs, Bool;
@@ -491,7 +490,6 @@ fn bool_mut(s: &mut Settings, key: SettingKey) -> Option<&mut bool> {
         K::PerformanceShowDisconnectedFans => &mut p.show_disconnected_fans,
         K::PerformanceCurvedLines => &mut p.curved_lines,
         K::PerformanceNetworkDynamicScale => &mut p.network_dynamic_scale,
-        K::PerformanceOverviewTopProcesses => &mut p.overview_top_processes,
         K::GraphsMinigraphCpu => &mut s.graphs.minigraph_cpu,
         K::GraphsMinigraphMemory => &mut s.graphs.minigraph_memory,
         K::GraphsMinigraphDisk => &mut s.graphs.minigraph_disk,

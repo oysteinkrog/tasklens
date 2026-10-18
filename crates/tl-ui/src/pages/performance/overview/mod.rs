@@ -6,8 +6,9 @@
 //! owns its view. [`OverviewPage`] places the box views and sends one demand part while it is
 //! shown.
 //!
-//! [`procs_box`] is the opt-in Top processes box: `performance.overview_top_processes` places it
-//! in a third row, and only then does the page ask for the process sweep (`process_top`).
+//! The layout comes from `[performance.overview]` (UI-PRF-018), the default when there is none.
+//! [`procs_box`] is the opt-in Top processes box: it is built only while the layout places it,
+//! and only then does the page ask for the process sweep (`process_top`).
 //!
 //! Render contract (D-022, crw.34): the page never notifies on a sample. Each box is a cached
 //! child view that notifies only when its own text or bars change. The page re-renders on a
@@ -89,19 +90,14 @@ fn first_card(sidebar: &Entity<DeviceSidebar>, kind: DeviceKind, cx: &App) -> Op
         .map(|c| c.row.key.clone())
 }
 
-/// `performance.overview_top_processes`; off before settings load.
-fn top_procs_on(cx: &App) -> bool {
-    cx.has_global::<TlSettings>() && TlSettings::settings(cx).performance.overview_top_processes
-}
-
-/// The layout for the Top processes setting. Until the layout editor exists the setting is the
-/// only way to place the box (crw.45).
-fn layout_for(top_procs: bool) -> OverviewLayout {
-    if top_procs {
-        OverviewLayout::with_top_procs()
-    } else {
-        OverviewLayout::btop_default()
-    }
+/// The saved layout (`[performance.overview]`); the default before settings load or when none
+/// is saved.
+fn saved_layout(cx: &App) -> OverviewLayout {
+    let saved = cx
+        .has_global::<TlSettings>()
+        .then(|| TlSettings::settings(cx).performance.overview.as_ref())
+        .flatten();
+    OverviewLayout::from_setting(saved)
 }
 
 /// The Overview page.
@@ -171,7 +167,7 @@ impl OverviewPage {
         let mut subs = SmallVec::new();
         subs.push(cx.observe(sidebar, |this, _, cx| this.sync_cards(cx)));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_layout));
-        let layout = layout_for(top_procs_on(cx));
+        let layout = saved_layout(cx);
         let procs = layout
             .has(BoxKind::TopProcs)
             .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
@@ -333,20 +329,23 @@ impl OverviewPage {
         }
     }
 
-    /// `performance.overview_top_processes` changed: the Top processes box comes or goes, with
-    /// a new layout, demand and one render. Any other settings change does nothing here.
+    /// `[performance.overview]` changed: a new placement and one render, and the Top processes
+    /// box with its demand comes or goes. Any other settings change does nothing here.
     fn sync_layout(&mut self, cx: &mut Context<Self>) {
-        let on = top_procs_on(cx);
-        if on == self.procs.is_some() {
+        let layout = saved_layout(cx);
+        if layout == self.layout {
             return;
         }
-        self.layout = layout_for(on);
-        self.procs = on.then(|| {
-            let hub = self.hub.clone();
-            cx.new(|cx| ProcsBox::new(&hub, cx))
-        });
+        let procs = layout.has(BoxKind::TopProcs);
+        self.layout = layout;
+        if procs != self.procs.is_some() {
+            self.procs = procs.then(|| {
+                let hub = self.hub.clone();
+                cx.new(|cx| ProcsBox::new(&hub, cx))
+            });
+            self.send_demand(cx);
+        }
         self.relayout(cx);
-        self.send_demand(cx);
         self.notify(cx);
     }
 

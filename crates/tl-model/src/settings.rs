@@ -310,9 +310,112 @@ pub struct PerformanceSettings {
     pub curved_lines: bool,
     /// `false` scales the network graph to the link speed.
     pub network_dynamic_scale: bool,
-    /// The Overview page's opt-in Top processes box (crw.45). Set by hand until the layout
-    /// editor exists.
+    /// The old opt-in Top processes switch (crw.45). Read once by [`Settings::clamp`], which
+    /// turns `true` into an `overview` layout, and never written (UI-PRF-018).
+    #[serde(skip_serializing)]
     pub overview_top_processes: bool,
+    /// `[performance.overview]`: the Overview page layout (UI-PRF-018, D-023). `None` is the
+    /// default layout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview: Option<OverviewLayoutSetting>,
+}
+
+/// The kinds `[performance.overview]` accepts, in default order.
+pub const OVERVIEW_BOX_KINDS: [&str; 6] = ["cpu", "memory", "gpu", "disk", "net", "processes"];
+
+/// `[performance.overview]` (UI-PRF-018): rows top to bottom, each with its boxes left to right.
+/// Weights are shares, not pixels. `tl-ui` turns this into its layout.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverviewLayoutSetting {
+    pub rows: Vec<OverviewRowSetting>,
+}
+
+/// One Overview row: its share of the page height and its boxes.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverviewRowSetting {
+    #[serde(serialize_with = "serialize_weight")]
+    pub height: f64,
+    pub boxes: Vec<OverviewBoxSetting>,
+}
+
+/// One Overview box: a kind from [`OVERVIEW_BOX_KINDS`] and its share of the row width. The
+/// kind is a string so an unknown kind drops only this box, not the whole section.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverviewBoxSetting {
+    pub kind: String,
+    #[serde(serialize_with = "serialize_weight")]
+    pub width: f64,
+}
+
+/// Writes a weight rounded to 3 decimals.
+fn serialize_weight<S: serde::Serializer>(w: &f64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64((w * 1000.).round() / 1000.)
+}
+
+impl OverviewLayoutSetting {
+    /// The default layout: CPU (width 2) and Memory on a row of height 3, then GPU, Disk and Net
+    /// on a row of height 2.
+    pub fn btop_default() -> Self {
+        let row = |height, boxes: &[(&str, f64)]| OverviewRowSetting {
+            height,
+            boxes: boxes
+                .iter()
+                .map(|&(kind, width)| OverviewBoxSetting {
+                    kind: kind.to_owned(),
+                    width,
+                })
+                .collect(),
+        };
+        Self {
+            rows: vec![
+                row(3., &[("cpu", 2.), ("memory", 1.)]),
+                row(2., &[("gpu", 1.), ("disk", 1.), ("net", 1.)]),
+            ],
+        }
+    }
+
+    /// The default plus a third row of height 2 with Top processes, the layout an old
+    /// `overview_top_processes = true` migrates to.
+    pub fn with_top_procs() -> Self {
+        let mut layout = Self::btop_default();
+        layout.rows.push(OverviewRowSetting {
+            height: 2.,
+            boxes: vec![OverviewBoxSetting {
+                kind: "processes".to_owned(),
+                width: 1.,
+            }],
+        });
+        layout
+    }
+
+    /// Drops unknown and repeated kinds, weights that are not finite and above 0, and rows left
+    /// with no box. Returns `true` when it dropped anything.
+    pub fn drop_invalid(&mut self) -> bool {
+        let good = |w: f64| w.is_finite() && w > 0.;
+        let before = self.rows.len() + self.rows.iter().map(|r| r.boxes.len()).sum::<usize>();
+        let mut seen: Vec<&'static str> = Vec::new();
+        self.rows.retain_mut(|row| {
+            if !good(row.height) {
+                return false;
+            }
+            row.boxes.retain(|b| {
+                let Some(kind) = OVERVIEW_BOX_KINDS.iter().find(|k| **k == b.kind) else {
+                    return false;
+                };
+                if !good(b.width) || seen.contains(kind) {
+                    return false;
+                }
+                seen.push(kind);
+                true
+            });
+            !row.boxes.is_empty()
+        });
+        let after = self.rows.len() + self.rows.iter().map(|r| r.boxes.len()).sum::<usize>();
+        after != before
+    }
 }
 
 impl Default for PerformanceSettings {
@@ -341,6 +444,7 @@ impl Default for PerformanceSettings {
             curved_lines: false,
             network_dynamic_scale: true,
             overview_top_processes: false,
+            overview: None,
         }
     }
 }
@@ -1048,7 +1152,8 @@ fn clamp_key<T>(
 
 impl Settings {
     /// Load step 4: clamp out-of-range values, return the dotted keys that changed (the caller
-    /// logs them). Valid values are left alone.
+    /// logs them). Valid values are left alone. Also migrates `overview_top_processes = true`
+    /// once and drops the invalid parts of `[performance.overview]` (UI-PRF-018).
     pub fn clamp(&mut self) -> Vec<&'static str> {
         let mut changed = Vec::new();
         let c = &mut changed;
@@ -1114,7 +1219,29 @@ impl Settings {
             self.services.unit_types = UnitType::DEFAULT_SHOWN.to_vec();
             c.push("services.unit_types");
         }
+        self.performance.migrate_overview(c);
         changed
+    }
+}
+
+impl PerformanceSettings {
+    /// A profile with `overview_top_processes = true` and no `overview` gets the default plus a
+    /// Top processes row; the old key is then cleared and never written. An invalid part of
+    /// `overview` is dropped and `performance.overview` is pushed to `changed` once; with
+    /// nothing valid left the layout is the default.
+    fn migrate_overview(&mut self, changed: &mut Vec<&'static str>) {
+        if self.overview_top_processes && self.overview.is_none() {
+            self.overview = Some(OverviewLayoutSetting::with_top_procs());
+        }
+        self.overview_top_processes = false;
+        if let Some(layout) = &mut self.overview {
+            if layout.drop_invalid() {
+                changed.push("performance.overview");
+            }
+            if layout.rows.is_empty() {
+                self.overview = None;
+            }
+        }
     }
 }
 
@@ -1285,6 +1412,7 @@ mod tests {
         assert!(!p.curved_lines);
         assert!(p.network_dynamic_scale);
         assert!(!p.overview_top_processes);
+        assert_eq!(p.overview, None);
 
         assert!(s.fans.is_empty());
         assert_eq!(
@@ -1655,6 +1783,107 @@ mod tests {
         assert!(!e.subtree_totals);
         assert!(!e.hide_system);
         assert_eq!(EngineSettings::default().interval_ms, 1000);
+    }
+
+    /// Loads `text` as `settings.toml` the way load steps 3 and 4 do.
+    fn load_toml(text: &str) -> (Settings, Vec<&'static str>) {
+        let mut s: Settings = toml::from_str(text).expect("valid TOML");
+        let changed = s.clamp();
+        (s, changed)
+    }
+
+    #[test]
+    fn overview_layout_roundtrip() {
+        let mut s = Settings::default();
+        let mut layout = OverviewLayoutSetting::btop_default();
+        layout.rows[0].height = 2.123_456;
+        layout.rows[0].boxes[0].width = 1. / 3.;
+        s.performance.overview = Some(layout);
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("[performance.overview]"), "{text}");
+        assert!(!text.contains("overview_top_processes"), "{text}");
+        let (back, changed) = load_toml(&text);
+        assert!(changed.is_empty(), "{changed:?}");
+        let rows = &back.performance.overview.as_ref().expect("saved").rows;
+        // Weights are written with 3 decimals.
+        assert_eq!(rows[0].height, 2.123);
+        assert_eq!(rows[0].boxes[0].width, 0.333);
+        let kinds: Vec<&str> = rows
+            .iter()
+            .flat_map(|r| r.boxes.iter().map(|b| b.kind.as_str()))
+            .collect();
+        assert_eq!(kinds, ["cpu", "memory", "gpu", "disk", "net"]);
+
+        // The spec's inline form loads too; a missing table is the default.
+        let (inline, _) = load_toml(
+            "[performance.overview]\nrows = [{ height = 3.0, boxes = [{ kind = \"cpu\", width = \
+             2.0 }, { kind = \"memory\", width = 1.0 }] }, { height = 2.0, boxes = [{ kind = \
+             \"gpu\", width = 1.0 }, { kind = \"disk\", width = 1.0 }, { kind = \"net\", width = \
+             1.0 }] }]\n",
+        );
+        assert_eq!(
+            inline.performance.overview,
+            Some(OverviewLayoutSetting::btop_default())
+        );
+        assert_eq!(load_toml("").0.performance.overview, None);
+    }
+
+    #[test]
+    fn overview_layout_drops_unknown_kind() {
+        let (s, changed) = load_toml(
+            "[performance]\ngraph_range_s = 30\n[performance.overview]\nrows = [\
+             { height = 3.0, boxes = [{ kind = \"cpu\", width = 2.0 }, { kind = \"fans\", width \
+             = 1.0 }, { kind = \"cpu\", width = 1.0 }, { kind = \"net\", width = -1.0 }] },\
+             { height = 2.0, boxes = [{ kind = \"bogus\", width = 1.0 }] },\
+             { height = nan, boxes = [{ kind = \"disk\", width = 1.0 }] },\
+             { height = 1.0, boxes = [{ kind = \"memory\", width = inf }, { kind = \"disk\", \
+             width = 1.0 }] }]\n",
+        );
+        // The rest of [performance] is kept.
+        assert_eq!(s.performance.graph_range_s, 30);
+        assert_eq!(changed, ["performance.overview"], "one log line");
+        let layout = s.performance.overview.expect("valid rows kept");
+        let rows: Vec<(f64, Vec<&str>)> = layout
+            .rows
+            .iter()
+            .map(|r| (r.height, r.boxes.iter().map(|b| b.kind.as_str()).collect()))
+            .collect();
+        assert_eq!(rows, [(3., vec!["cpu"]), (1., vec!["disk"])]);
+
+        // Nothing valid left: the default.
+        let (s, changed) = load_toml(
+            "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"fans\", width \
+             = 1.0 }] }]\n",
+        );
+        assert_eq!(s.performance.overview, None);
+        assert_eq!(changed, ["performance.overview"]);
+    }
+
+    #[test]
+    fn overview_top_processes_migrates() {
+        let (s, changed) = load_toml("[performance]\noverview_top_processes = true\n");
+        assert!(changed.is_empty(), "{changed:?}");
+        assert!(!s.performance.overview_top_processes);
+        let layout = s.performance.overview.clone().expect("migrated");
+        assert_eq!(layout, OverviewLayoutSetting::with_top_procs());
+        let last = layout.rows.last().expect("a third row");
+        assert_eq!(last.height, 2.);
+        assert_eq!(last.boxes[0].kind, "processes");
+        // The old key is not written, so the migration runs once.
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(!text.contains("overview_top_processes"), "{text}");
+        assert_eq!(load_toml(&text).0, s);
+
+        // A saved layout wins over the old key.
+        let (s, _) = load_toml(
+            "[performance]\noverview_top_processes = true\n[performance.overview]\nrows = [{ \
+             height = 1.0, boxes = [{ kind = \"cpu\", width = 1.0 }] }]\n",
+        );
+        let rows = s.performance.overview.expect("kept").rows;
+        assert_eq!(rows.len(), 1);
+        // Off: no layout, the default.
+        let (s, _) = load_toml("[performance]\noverview_top_processes = false\n");
+        assert_eq!(s.performance.overview, None);
     }
 
     fn not_unit_variant() -> ValueError {

@@ -1,8 +1,8 @@
 //! The Overview page's opt-in Top processes box (UI-PRF-017, D-022, crw.45): the 10 busiest
 //! processes by CPU, one row each with name, PID and a CPU meter.
 //!
-//! The page builds the box only while `performance.overview_top_processes` places it, and only
-//! then asks for `Demand.process_top`. On each `PROCESSES` change the box picks the top rows with
+//! The page builds the box only while the saved layout (`[performance.overview]`) places it,
+//! and only then asks for `Demand.process_top`. On each `PROCESSES` change the box picks the top rows with
 //! a bounded selection over the records (no sort of the whole list) and hashes what the rows
 //! show. It formats text and notifies only when that hash changes, so a tick with the same top
 //! 10 at the same whole percents renders nothing. A click on a row selects that process on the

@@ -2715,7 +2715,9 @@ mod wired {
     use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::settings::{
+        AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+    };
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, SeriesSet};
     use tl_model::time::{BootId, now_boot_ns};
     use tl_model::validity::{FieldValidity, Validity};
@@ -3524,7 +3526,9 @@ mod wired {
 
     fn set_top_procs(r: &mut Rig, on: bool) {
         r.vcx.update(|_, cx| {
-            TlSettings::update(cx, |d| d.settings.performance.overview_top_processes = on);
+            TlSettings::update(cx, |d| {
+                d.settings.performance.overview = on.then(OverviewLayoutSetting::with_top_procs);
+            });
         });
         draw(r.vcx);
     }

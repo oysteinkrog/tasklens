@@ -80,7 +80,11 @@ device_order = []              # device keys (PERF-005)
 device_overrides = {}          # device key -> "show" | "hide"
 curved_lines = false
 network_dynamic_scale = true   # false = link speed
-overview_top_processes = false # Overview Top processes box (crw.45)
+# [performance.overview]        # Overview layout (UI-PRF-018); missing = the default below
+# rows = [
+#   { height = 3.0, boxes = [{ kind = "cpu", width = 2.0 }, { kind = "memory", width = 1.0 }] },
+#   { height = 2.0, boxes = [{ kind = "gpu", width = 1.0 }, { kind = "disk", width = 1.0 }, { kind = "net", width = 1.0 }] },
+# ]                              # kinds cpu memory gpu disk net processes; weights > 0, 3 decimals
 
 [fans]                          # per fan key, P3
 # "<key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }

@@ -1,12 +1,15 @@
-//! The Overview page's layout as data (UI-PRF-017, D-022): a grid of rows and columns, each box
-//! a kind on one row spanning one or more columns. A later bead edits and saves it; this module
-//! only validates and places it.
+//! The Overview page's layout as data (UI-PRF-017, UI-PRF-018, D-023): rows top to bottom, each
+//! with a height weight and its boxes left to right, each box with a width weight. Minimum sizes
+//! come from the box kind. The profile saves it as `[performance.overview]`
+//! ([`OverviewLayoutSetting`]); [`OverviewLayout::from_setting`] and
+//! [`OverviewLayout::to_setting`] convert.
 //!
 //! [`place`] turns a layout, the kinds present now and the page area into box bounds. It runs on
 //! resize and on presence changes, never per tick, and does not allocate for up to 8 boxes.
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::{SmallVec, smallvec};
+use tl_model::settings::{OverviewBoxSetting, OverviewLayoutSetting, OverviewRowSetting};
 
 use super::super::page::PAGE_PAD;
 use crate::theme::DeviceAccent;
@@ -30,6 +33,15 @@ pub enum BoxKind {
 }
 
 impl BoxKind {
+    pub const ALL: [Self; 6] = [
+        Self::Cpu,
+        Self::Memory,
+        Self::Gpu,
+        Self::Disk,
+        Self::Net,
+        Self::TopProcs,
+    ];
+
     /// The colour family shared by this box, its charts and its sidebar card. The optional Top
     /// processes box uses the CPU family because its only measure is CPU utilization.
     pub const fn accent(self) -> DeviceAccent {
@@ -42,132 +54,190 @@ impl BoxKind {
         }
     }
 
+    /// The kind's name in `[performance.overview]` and in the frame selector.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::Gpu => "gpu",
+            Self::Disk => "disk",
+            Self::Net => "net",
+            Self::TopProcs => "processes",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.key() == key)
+    }
+
     /// Resolves the stable frame selector passed by every Overview box.
     pub fn from_frame_id(id: &str) -> Option<Self> {
-        match id.strip_prefix("perf-overview-box-")? {
-            "cpu" => Some(Self::Cpu),
-            "memory" => Some(Self::Memory),
-            "gpu" => Some(Self::Gpu),
-            "disk" => Some(Self::Disk),
-            "net" => Some(Self::Net),
-            "processes" => Some(Self::TopProcs),
-            _ => None,
+        Self::from_key(id.strip_prefix("perf-overview-box-")?)
+    }
+
+    /// The smallest height the box is placed at, logical px.
+    pub const fn min_h(self) -> f32 {
+        match self {
+            Self::Cpu => 280.,
+            Self::TopProcs => 260.,
+            _ => 220.,
+        }
+    }
+
+    /// The smallest width the box is placed at in the wide layout, logical px.
+    pub const fn min_w(self) -> f32 {
+        match self {
+            Self::Cpu | Self::TopProcs => 280.,
+            _ => 200.,
         }
     }
 }
 
-/// One box: its kind, its row, its first column and how many columns it spans.
+/// One box: its kind and its share of the row width.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BoxSpec {
     pub kind: BoxKind,
-    pub row: u8,
-    pub col: u8,
-    pub col_span: u8,
+    pub width: f32,
 }
 
-/// One row: its share of the page height and its minimum height.
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// One row: its share of the page height and its boxes, left to right.
+#[derive(Clone, PartialEq, Debug)]
 pub struct RowSpec {
-    pub weight: u16,
-    /// Logical px.
-    pub min_h: f32,
+    pub height: f32,
+    pub boxes: SmallVec<[BoxSpec; 4]>,
 }
 
-/// The whole layout.
+/// The whole layout: rows top to bottom.
 #[derive(Clone, PartialEq, Debug)]
 pub struct OverviewLayout {
-    pub columns: u8,
     pub rows: SmallVec<[RowSpec; 4]>,
-    pub boxes: SmallVec<[BoxSpec; 8]>,
 }
 
 /// Why a layout is not valid.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LayoutError {
-    /// No column, no row or no box.
+    /// No row.
     Empty,
-    /// The box's row does not exist, its span is 0, or it reaches past the last column.
-    OutOfGrid(BoxKind),
-    /// Two boxes share a cell.
-    Overlap(BoxKind, BoxKind),
+    /// The row at this index has no box.
+    EmptyRow(usize),
+    /// A height or width that is not finite and above 0.
+    BadWeight,
     /// A kind appears twice.
     Duplicate(BoxKind),
 }
 
+/// A finite weight above 0.
+fn good_weight(w: f32) -> bool {
+    w.is_finite() && w > 0.
+}
+
 impl OverviewLayout {
-    /// The btop-style default: CPU (2 columns) and Memory on a 3:2 top row, then GPU, Disk and
-    /// Net.
+    /// The btop-style default: CPU (width 2) and Memory on a row of height 3, then GPU, Disk and
+    /// Net on a row of height 2.
     pub fn btop_default() -> Self {
-        let b = |kind, row, col, col_span| BoxSpec {
-            kind,
-            row,
-            col,
-            col_span,
-        };
+        let b = |kind, width| BoxSpec { kind, width };
         Self {
-            columns: 3,
             rows: smallvec![
                 RowSpec {
-                    weight: 3,
-                    min_h: 280.,
+                    height: 3.,
+                    boxes: smallvec![b(BoxKind::Cpu, 2.), b(BoxKind::Memory, 1.)],
                 },
                 RowSpec {
-                    weight: 2,
-                    min_h: 220.,
+                    height: 2.,
+                    boxes: smallvec![
+                        b(BoxKind::Gpu, 1.),
+                        b(BoxKind::Disk, 1.),
+                        b(BoxKind::Net, 1.)
+                    ],
                 },
-            ],
-            boxes: smallvec![
-                b(BoxKind::Cpu, 0, 0, 2),
-                b(BoxKind::Memory, 0, 2, 1),
-                b(BoxKind::Gpu, 1, 0, 1),
-                b(BoxKind::Disk, 1, 1, 1),
-                b(BoxKind::Net, 1, 2, 1),
             ],
         }
     }
 
-    /// [`Self::btop_default`] with a third row, weight 2 and at least 260 px, that holds the Top
-    /// processes box across all columns (crw.45).
-    pub fn with_top_procs() -> Self {
-        let mut layout = Self::btop_default();
-        layout.rows.push(RowSpec {
-            weight: 2,
-            min_h: 260.,
-        });
-        layout.boxes.push(BoxSpec {
-            kind: BoxKind::TopProcs,
-            row: 2,
-            col: 0,
-            col_span: 3,
-        });
-        layout
+    /// The saved layout, or the default when there is none. Loading already dropped unknown
+    /// kinds, repeats, bad weights and empty rows; anything still invalid gives the default.
+    pub fn from_setting(setting: Option<&OverviewLayoutSetting>) -> Self {
+        let Some(setting) = setting else {
+            return Self::btop_default();
+        };
+        let mut seen: SmallVec<[BoxKind; 8]> = SmallVec::new();
+        let rows = setting
+            .rows
+            .iter()
+            .map(|r| RowSpec {
+                height: r.height as f32,
+                boxes: r
+                    .boxes
+                    .iter()
+                    .filter_map(|b| {
+                        let kind = BoxKind::from_key(&b.kind)?;
+                        (!seen.contains(&kind)).then(|| {
+                            seen.push(kind);
+                            BoxSpec {
+                                kind,
+                                width: b.width as f32,
+                            }
+                        })
+                    })
+                    .collect(),
+            })
+            .collect();
+        let layout = Self { rows };
+        if layout.validate().is_ok() {
+            layout
+        } else {
+            Self::btop_default()
+        }
+    }
+
+    /// The layout as `[performance.overview]` data.
+    pub fn to_setting(&self) -> OverviewLayoutSetting {
+        OverviewLayoutSetting {
+            rows: self
+                .rows
+                .iter()
+                .map(|r| OverviewRowSetting {
+                    height: f64::from(r.height),
+                    boxes: r
+                        .boxes
+                        .iter()
+                        .map(|b| OverviewBoxSetting {
+                            kind: b.kind.key().to_owned(),
+                            width: f64::from(b.width),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
     }
 
     pub fn has(&self, kind: BoxKind) -> bool {
-        self.boxes.iter().any(|b| b.kind == kind)
+        self.rows
+            .iter()
+            .flat_map(|r| &r.boxes)
+            .any(|b| b.kind == kind)
     }
 
     pub fn validate(&self) -> Result<(), LayoutError> {
-        if self.columns == 0 || self.rows.is_empty() || self.boxes.is_empty() {
+        if self.rows.is_empty() {
             return Err(LayoutError::Empty);
         }
-        for (i, b) in self.boxes.iter().enumerate() {
-            let end = u16::from(b.col) + u16::from(b.col_span);
-            if usize::from(b.row) >= self.rows.len()
-                || b.col_span == 0
-                || end > u16::from(self.columns)
-            {
-                return Err(LayoutError::OutOfGrid(b.kind));
+        let mut seen: SmallVec<[BoxKind; 8]> = SmallVec::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            if row.boxes.is_empty() {
+                return Err(LayoutError::EmptyRow(i));
             }
-            for other in &self.boxes[..i] {
-                if other.kind == b.kind {
+            if !good_weight(row.height) {
+                return Err(LayoutError::BadWeight);
+            }
+            for b in &row.boxes {
+                if !good_weight(b.width) {
+                    return Err(LayoutError::BadWeight);
+                }
+                if seen.contains(&b.kind) {
                     return Err(LayoutError::Duplicate(b.kind));
                 }
-                let other_end = u16::from(other.col) + u16::from(other.col_span);
-                if other.row == b.row && u16::from(b.col) < other_end && u16::from(other.col) < end
-                {
-                    return Err(LayoutError::Overlap(other.kind, b.kind));
-                }
+                seen.push(b.kind);
             }
         }
         Ok(())
@@ -181,7 +251,7 @@ pub struct PlacedBox {
     pub bounds: Bounds<Pixels>,
 }
 
-/// Where the present boxes go, in (row, col) order. `content_h` includes the padding; the page
+/// Where the present boxes go, in row order. `content_h` includes the padding; the page
 /// scrolls when `scrolls`. `stacked` is the one-column layout below [`STACK_W`].
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Placement {
@@ -191,14 +261,75 @@ pub struct Placement {
     pub stacked: bool,
 }
 
+/// Splits `total` by the weights of `items` (weight, minimum). An item whose share would fall
+/// below its minimum takes the minimum and the others share what is left. Returns `false` when
+/// the minimums do not fit; every item then has its minimum.
+fn share(total: f32, items: &[(f32, f32)], out: &mut SmallVec<[f32; 8]>) -> bool {
+    let mut fixed: SmallVec<[bool; 8]> = smallvec![false; items.len()];
+    out.clear();
+    out.extend(items.iter().map(|&(_, min)| min));
+    loop {
+        let mut left = total;
+        let mut free_w = 0.;
+        for (&(w, min), &f) in items.iter().zip(&fixed) {
+            if f {
+                left -= min;
+            } else {
+                free_w += w;
+            }
+        }
+        if free_w <= 0. {
+            break;
+        }
+        let mut more = false;
+        for ((&(w, min), f), v) in items.iter().zip(fixed.iter_mut()).zip(out.iter_mut()) {
+            if *f {
+                continue;
+            }
+            *v = left * w / free_w;
+            if *v < min {
+                *v = min;
+                *f = true;
+                more = true;
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    items.iter().map(|&(_, min)| min).sum::<f32>() <= total + 0.01
+}
+
+/// Bounds with every edge rounded to a whole px, so neighbours never overlap or leave a seam.
+fn snapped(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+    let (left, top) = (x.round(), y.round());
+    let (right, bottom) = ((x + w).round(), (y + h).round());
+    Bounds::new(
+        point(px(left), px(top)),
+        size(px(right - left), px(bottom - top)),
+    )
+}
+
+/// One line of boxes in the wide layout: its row, the range of `shown` it holds, and whether
+/// it is an extra line of a row whose minimum widths did not fit.
+#[derive(Clone, Copy)]
+struct Line {
+    row: usize,
+    start: usize,
+    end: usize,
+    extra: bool,
+}
+
 /// Places the boxes of `layout` whose kind is `present` in `area`. Logical sizes are × `scale`.
 ///
-/// - Padding `PAGE_PAD` on every side; gap 8 between boxes and rows.
-/// - A row's present boxes share the row width by `col_span`, in `col` order; with every box
-///   present a box is `span·unit + (span − 1)·gap` wide. A row with no present box is dropped.
-/// - Row heights split the height by `weight`. If a row comes out below its `min_h`, every row
-///   takes its `min_h` and the page scrolls.
-/// - Below `STACK_W` the boxes stack full width, each with its row's `min_h`.
+/// - Padding `PAGE_PAD` on every side; gap 8 between boxes and rows. Edges round to whole px.
+/// - A row's present boxes share `row_w − (n − 1)·gap` by `width`. Rows with no present box
+///   drop out; the rest share `H − 2·pad − (rows − 1)·gap` by `height`.
+/// - A box or row that would come out below its kind minimum takes the minimum and the others
+///   share what is left. When the rows' minimum heights do not fit, the page scrolls.
+/// - When a row's minimum widths do not fit, its last boxes wrap onto extra lines at the row's
+///   minimum height, so the page never scrolls sideways.
+/// - Below `STACK_W` the boxes stack in row order, full width, each at its kind minimum.
 pub fn place(
     layout: &OverviewLayout,
     present: impl Fn(BoxKind) -> bool,
@@ -210,14 +341,14 @@ pub fn place(
     let (w, h) = (f32::from(area.width), f32::from(area.height));
     let inner_w = (w - 2. * pad).max(0.);
 
-    // The present boxes in (row, col) order.
-    let mut shown: SmallVec<[BoxSpec; 8]> = layout
-        .boxes
+    // The present boxes in row order, with their row index.
+    let shown: SmallVec<[(usize, BoxSpec); 8]> = layout
+        .rows
         .iter()
-        .copied()
-        .filter(|b| present(b.kind) && usize::from(b.row) < layout.rows.len())
+        .enumerate()
+        .flat_map(|(r, row)| row.boxes.iter().map(move |b| (r, *b)))
+        .filter(|(_, b)| present(b.kind))
         .collect();
-    shown.sort_by_key(|b| (b.row, b.col));
     let mut placement = Placement::default();
     if shown.is_empty() {
         placement.content_h = px(2. * pad);
@@ -227,75 +358,94 @@ pub fn place(
     if w < STACK_W * scale {
         placement.stacked = true;
         let mut y = pad;
-        for (i, b) in shown.iter().enumerate() {
+        for (i, (_, b)) in shown.iter().enumerate() {
             if i > 0 {
                 y += gap;
             }
-            let box_h = layout.rows[usize::from(b.row)].min_h * scale;
+            let box_h = b.kind.min_h() * scale;
             placement.boxes.push(PlacedBox {
                 kind: b.kind,
-                bounds: Bounds::new(point(px(pad), px(y)), size(px(inner_w), px(box_h))),
+                bounds: snapped(pad, y, inner_w, box_h),
             });
             y += box_h;
         }
-        let content_h = y + pad;
+        let content_h = y.round() + pad;
         placement.content_h = px(content_h);
         placement.scrolls = content_h > h;
         return placement;
     }
 
-    // The rows that keep a box, as (row index, height).
-    let mut rows: SmallVec<[(u8, f32); 4]> = SmallVec::new();
-    for b in &shown {
-        if rows.last().is_none_or(|(r, _)| *r != b.row) {
-            rows.push((b.row, 0.));
+    // Break each row into lines whose minimum widths fit, and find each row's minimum height.
+    let mut lines: SmallVec<[Line; 8]> = SmallVec::new();
+    let mut row_min_h: SmallVec<[f32; 4]> = smallvec![0.; layout.rows.len()];
+    let mut line_w = 0.;
+    for (i, &(r, b)) in shown.iter().enumerate() {
+        let min_w = b.kind.min_w() * scale;
+        row_min_h[r] = row_min_h[r].max(b.kind.min_h() * scale);
+        match lines.last_mut() {
+            Some(line) if line.row == r && line_w + gap + min_w <= inner_w => {
+                line.end = i + 1;
+                line_w += gap + min_w;
+            }
+            last => {
+                let extra = last.is_some_and(|l| l.row == r);
+                lines.push(Line {
+                    row: r,
+                    start: i,
+                    end: i + 1,
+                    extra,
+                });
+                line_w = min_w;
+            }
         }
-    }
-    let gaps_h = (rows.len() as f32 - 1.) * gap;
-    let avail_h = h - 2. * pad - gaps_h;
-    let weights: f32 = rows
-        .iter()
-        .map(|(r, _)| f32::from(layout.rows[usize::from(*r)].weight))
-        .sum();
-    let mut short = weights <= 0.;
-    for (r, row_h) in rows.iter_mut() {
-        let spec = layout.rows[usize::from(*r)];
-        *row_h = if weights > 0. {
-            avail_h * f32::from(spec.weight) / weights
-        } else {
-            0.
-        };
-        short |= *row_h < spec.min_h * scale;
-    }
-    if short {
-        for (r, row_h) in rows.iter_mut() {
-            *row_h = layout.rows[usize::from(*r)].min_h * scale;
-        }
-        placement.scrolls = true;
     }
 
+    // Extra lines take their row's minimum height; the main lines share the rest by weight.
+    let mut avail_h = h - 2. * pad - (lines.len() as f32 - 1.) * gap;
+    let mut rows: SmallVec<[(f32, f32); 8]> = SmallVec::new();
+    for line in &lines {
+        if line.extra {
+            avail_h -= row_min_h[line.row];
+        } else {
+            rows.push((layout.rows[line.row].height, row_min_h[line.row]));
+        }
+    }
+    let mut heights = SmallVec::new();
+    placement.scrolls = !share(avail_h, &rows, &mut heights);
+
     let mut y = pad;
-    for (i, (r, row_h)) in rows.iter().enumerate() {
+    let mut main = heights.iter();
+    let mut widths = SmallVec::new();
+    let mut items: SmallVec<[(f32, f32); 8]> = SmallVec::new();
+    for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             y += gap;
         }
-        let in_row = shown.iter().filter(|b| b.row == *r);
-        let spans: u16 = in_row.clone().map(|b| u16::from(b.col_span)).sum();
-        let spans_f = f32::from(spans.max(1));
-        let unit = (inner_w - (spans_f - 1.) * gap) / spans_f;
+        let line_h = if line.extra {
+            row_min_h[line.row]
+        } else {
+            main.next().copied().unwrap_or(row_min_h[line.row])
+        };
+        let in_line = &shown[line.start..line.end];
+        items.clear();
+        items.extend(
+            in_line
+                .iter()
+                .map(|(_, b)| (b.width, b.kind.min_w() * scale)),
+        );
+        let gaps_w = (in_line.len() as f32 - 1.) * gap;
+        share(inner_w - gaps_w, &items, &mut widths);
         let mut x = pad;
-        for b in in_row {
-            let span = f32::from(b.col_span);
-            let box_w = span * unit + (span - 1.) * gap;
+        for ((_, b), box_w) in in_line.iter().zip(&widths) {
             placement.boxes.push(PlacedBox {
                 kind: b.kind,
-                bounds: Bounds::new(point(px(x), px(y)), size(px(box_w), px(*row_h))),
+                bounds: snapped(x, y, *box_w, line_h),
             });
             x += box_w + gap;
         }
-        y += row_h;
+        y += line_h;
     }
-    placement.content_h = px(y + pad);
+    placement.content_h = px(y.round() + pad);
     placement
 }
 
@@ -323,10 +473,34 @@ mod tests {
         )
     }
 
+    /// One row per entry: (height, [(kind, width)]).
+    fn layout(rows: &[(f32, &[(BoxKind, f32)])]) -> OverviewLayout {
+        OverviewLayout {
+            rows: rows
+                .iter()
+                .map(|(height, boxes)| RowSpec {
+                    height: *height,
+                    boxes: boxes
+                        .iter()
+                        .map(|&(kind, width)| BoxSpec { kind, width })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn overview_default_layout_validates() {
-        assert_eq!(OverviewLayout::btop_default().validate(), Ok(()));
-        assert!(!OverviewLayout::btop_default().has(BoxKind::TopProcs));
+        let default = OverviewLayout::btop_default();
+        assert_eq!(default.validate(), Ok(()));
+        assert!(!default.has(BoxKind::TopProcs));
+        // The saved form of the default converts both ways.
+        assert_eq!(default.to_setting(), OverviewLayoutSetting::btop_default());
+        assert_eq!(OverviewLayout::from_setting(None), default);
+        assert_eq!(
+            OverviewLayout::from_setting(Some(&OverviewLayoutSetting::btop_default())),
+            default
+        );
     }
 
     #[test]
@@ -345,14 +519,16 @@ mod tests {
             assert_eq!(kind.accent(), accent);
         }
         assert_eq!(BoxKind::from_frame_id("perf-overview-box-other"), None);
+        let keys: Vec<&str> = BoxKind::ALL.iter().map(|k| k.key()).collect();
+        assert_eq!(keys, tl_model::settings::OVERVIEW_BOX_KINDS);
     }
 
     #[test]
     fn overview_top_procs_layout_adds_a_full_row() {
-        let layout = OverviewLayout::with_top_procs();
+        let layout = OverviewLayout::from_setting(Some(&OverviewLayoutSetting::with_top_procs()));
         assert_eq!(layout.validate(), Ok(()));
         assert!(layout.has(BoxKind::TopProcs));
-        let p = place(&layout, |_| true, size(px(1200.), px(1000.)), 1.);
+        let p = place(&layout, |_| true, area(1200., 1000.), 1.);
         let procs = p.boxes.last().expect("placed");
         assert_eq!(procs.kind, BoxKind::TopProcs);
         let cpu = p.boxes.first().expect("placed");
@@ -375,8 +551,8 @@ mod tests {
             1.,
         );
         assert!(!p.stacked && !p.scrolls);
-        assert_eq!(rect(&p, BoxKind::Cpu), (16., 16., 776., 516.));
-        assert_eq!(rect(&p, BoxKind::Memory), (800., 16., 384., 516.));
+        assert_eq!(rect(&p, BoxKind::Cpu), (16., 16., 773., 516.));
+        assert_eq!(rect(&p, BoxKind::Memory), (797., 16., 387., 516.));
         for (kind, x) in [
             (BoxKind::Gpu, 16.),
             (BoxKind::Disk, 408.),
@@ -399,6 +575,66 @@ mod tests {
     }
 
     #[test]
+    fn overview_place_custom_weights() {
+        use BoxKind::*;
+        let l = layout(&[
+            (1., &[(Cpu, 1.), (Memory, 1.)]),
+            (1., &[(Gpu, 1.), (Disk, 2.), (Net, 1.)]),
+        ]);
+        let p = place(&l, |_| true, area(1200., 900.), 1.);
+        assert!(!p.scrolls);
+        assert_eq!(rect(&p, Cpu), (16., 16., 580., 430.));
+        assert_eq!(rect(&p, Memory), (604., 16., 580., 430.));
+        // 1168 − 2 gaps = 1152 split 1:2:1.
+        assert_eq!(rect(&p, Gpu), (16., 454., 288., 430.));
+        assert_eq!(rect(&p, Disk), (312., 454., 576., 430.));
+        assert_eq!(rect(&p, Net), (896., 454., 288., 430.));
+    }
+
+    #[test]
+    fn overview_place_clamps_to_kind_minimum() {
+        use BoxKind::*;
+        // CPU's share of 1160 at 1:4 is 232, below its 280 minimum; the first row's share of
+        // 860 at 1:9 is 86, below CPU's 280.
+        let l = layout(&[(1., &[(Cpu, 1.), (Memory, 4.)]), (9., &[(Net, 1.)])]);
+        let p = place(&l, |_| true, area(1200., 900.), 1.);
+        assert!(!p.scrolls);
+        assert_eq!(rect(&p, Cpu), (16., 16., 280., 280.));
+        assert_eq!(rect(&p, Memory), (304., 16., 880., 280.));
+        assert_eq!(rect(&p, Net), (16., 304., 1168., 580.));
+        assert_eq!(p.content_h, px(900.));
+
+        // A row without CPU has the minimum of the kinds it holds.
+        let l = layout(&[(9., &[(Cpu, 1.)]), (1., &[(Memory, 1.), (Disk, 1.)])]);
+        let p = place(&l, |_| true, area(1200., 900.), 1.);
+        assert_eq!(rect(&p, Disk).3, 220.);
+        assert_eq!(rect(&p, Cpu).3, 640.);
+    }
+
+    #[test]
+    fn overview_place_wraps_row_below_minimum() {
+        use BoxKind::*;
+        // One row of five: 280 + 4 × 200 + 4 gaps = 1112 does not fit 968, so Net wraps onto
+        // an extra line at the row's 280 minimum.
+        let l = layout(&[(
+            1.,
+            &[(Cpu, 1.), (Memory, 1.), (Gpu, 1.), (Disk, 1.), (Net, 1.)],
+        )]);
+        let p = place(&l, |_| true, area(1000., 900.), 1.);
+        assert!(!p.scrolls && !p.stacked);
+        // 900 − 32 − 8 − 280 = 580 for the main line; CPU keeps its minimum width.
+        assert_eq!(rect(&p, Cpu), (16., 16., 280., 580.));
+        assert_eq!(rect(&p, Disk).0 + rect(&p, Disk).2, 984.);
+        assert_eq!(rect(&p, Net), (16., 604., 968., 280.));
+        assert!(p.boxes.iter().all(|b| b.bounds.right() <= px(984.)));
+        assert_eq!(p.content_h, px(900.));
+
+        // Without GPU the row fits again.
+        let p = place(&l, |k| k != Gpu, area(1000., 900.), 1.);
+        assert_eq!(rect(&p, Net).1, 16.);
+    }
+
+    #[test]
     fn overview_place_without_gpu_widens_row() {
         let p = place(
             &OverviewLayout::btop_default(),
@@ -416,7 +652,7 @@ mod tests {
             area(1200., 900.),
             1.,
         );
-        assert_eq!(rect(&top_only, BoxKind::Cpu), (16., 16., 776., 868.));
+        assert_eq!(rect(&top_only, BoxKind::Cpu), (16., 16., 773., 868.));
     }
 
     #[test]
@@ -429,11 +665,11 @@ mod tests {
         );
         assert!(p.stacked);
         assert!(p.boxes.iter().all(|b| b.bounds.size.width == px(668.)));
-        // 280 + 280 + 3 × 220, 4 gaps of 8 and 2 × 16 padding.
-        assert_eq!(p.content_h, px(1284.));
+        // Each box at its kind minimum: 280 + 4 × 220, 4 gaps of 8 and 2 × 16 padding.
+        assert_eq!(p.content_h, px(1224.));
         assert!(p.scrolls);
-        assert_eq!(rect(&p, BoxKind::Memory), (16., 304., 668., 280.));
-        assert_eq!(rect(&p, BoxKind::Net), (16., 1048., 668., 220.));
+        assert_eq!(rect(&p, BoxKind::Memory), (16., 304., 668., 220.));
+        assert_eq!(rect(&p, BoxKind::Net), (16., 988., 668., 220.));
     }
 
     #[test]
@@ -458,32 +694,39 @@ mod tests {
             area(2400., 1800.),
             2.,
         );
-        assert_eq!(rect(&p, BoxKind::Cpu), (32., 32., 1552., 1032.));
+        assert_eq!(rect(&p, BoxKind::Cpu), (32., 32., 1547., 1032.));
+        assert_eq!(rect(&p, BoxKind::Memory), (1595., 32., 773., 1032.));
     }
 
     #[test]
-    fn overview_validate_rejects_overlap_and_out_of_grid() {
-        let mut overlap = OverviewLayout::btop_default();
-        overlap.boxes[1].col = 1;
-        assert_eq!(
-            overlap.validate(),
-            Err(LayoutError::Overlap(BoxKind::Cpu, BoxKind::Memory))
-        );
-
-        let mut out = OverviewLayout::btop_default();
-        out.boxes[4].col_span = 2;
-        assert_eq!(out.validate(), Err(LayoutError::OutOfGrid(BoxKind::Net)));
-
-        let mut no_row = OverviewLayout::btop_default();
-        no_row.boxes[0].row = 5;
-        assert_eq!(no_row.validate(), Err(LayoutError::OutOfGrid(BoxKind::Cpu)));
-
+    fn overview_validate_rejects_bad_weight_and_duplicate() {
         let mut dup = OverviewLayout::btop_default();
-        dup.boxes[4].kind = BoxKind::Gpu;
-        assert_eq!(dup.validate(), Err(LayoutError::Duplicate(BoxKind::Gpu)));
+        dup.rows[1].boxes[2].kind = BoxKind::Cpu;
+        assert_eq!(dup.validate(), Err(LayoutError::Duplicate(BoxKind::Cpu)));
+
+        for bad in [0., -1., f32::NAN, f32::INFINITY] {
+            let mut width = OverviewLayout::btop_default();
+            width.rows[0].boxes[1].width = bad;
+            assert_eq!(width.validate(), Err(LayoutError::BadWeight), "{bad}");
+            let mut height = OverviewLayout::btop_default();
+            height.rows[1].height = bad;
+            assert_eq!(height.validate(), Err(LayoutError::BadWeight), "{bad}");
+        }
+
+        let mut empty_row = OverviewLayout::btop_default();
+        empty_row.rows[1].boxes.clear();
+        assert_eq!(empty_row.validate(), Err(LayoutError::EmptyRow(1)));
 
         let mut empty = OverviewLayout::btop_default();
-        empty.boxes.clear();
+        empty.rows.clear();
         assert_eq!(empty.validate(), Err(LayoutError::Empty));
+
+        // A saved layout that does not validate gives the default.
+        let mut saved = OverviewLayoutSetting::btop_default();
+        saved.rows[0].height = 0.;
+        assert_eq!(
+            OverviewLayout::from_setting(Some(&saved)),
+            OverviewLayout::btop_default()
+        );
     }
 }
