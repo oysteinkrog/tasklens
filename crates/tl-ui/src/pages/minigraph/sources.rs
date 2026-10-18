@@ -20,7 +20,7 @@ use super::card::{CardState, resolve_colors};
 use crate::chart::{ChartSeries, NetFormat, ValueFormat, YScale, format_value};
 use crate::i18n::{tr, tr_args};
 use crate::pages::performance::DeviceKey;
-use crate::settings_global::{SettingKey, TlSettings};
+use crate::settings_global::SettingKey;
 use crate::theme::TlTheme;
 
 /// A card's identity, assigned at load and stable while the app runs. Never stored.

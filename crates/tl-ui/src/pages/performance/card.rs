@@ -43,7 +43,6 @@ use crate::components::icons::{TlIcon, icon};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::i18n::{Strings, tr, tr_en};
-use crate::settings_global::TlSettings;
 use crate::text::ellipsis::{ELLIPSIS, middle_ellipsis};
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{TNUM, label_style, numeric_style};
