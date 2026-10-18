@@ -3210,6 +3210,59 @@ mod sidebar {
         assert!(wanted, "sensors demanded while a fan row is hidden");
     }
 
+    /// tasklens-o55.43 (j): the engine lists disks and interfaces only while they are demanded.
+    /// The sidebar once asked for them only when it had a card of that kind, so a start on the
+    /// CPU page showed no Disk or network card until the Overview page asked for them.
+    #[gpui_kit::test]
+    fn unlisted_disks_and_nets_are_demanded(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            cpu_and_memory(),
+            Settings::default(),
+            UiState::default(),
+        );
+        let sidebar = r.sidebar.clone();
+        let wanted = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let d = sidebar.read(cx).demand_part();
+                (d.disks, d.nets)
+            })
+        };
+        assert_eq!(
+            wanted(&mut r),
+            (true, true),
+            "no row yet: ask, so they get listed"
+        );
+
+        let mut entries = cpu_and_memory();
+        entries.extend(nine().into_iter().filter(|e| {
+            matches!(
+                e.identity,
+                DeviceIdentity::Disk { .. } | DeviceIdentity::Net { .. }
+            )
+        }));
+        plug(&mut r, 2, entries);
+        settle(&mut r);
+        assert!(keys(&mut r).iter().any(|k| k.starts_with("disk:")));
+        assert_eq!(wanted(&mut r), (true, true), "cards shown");
+    }
+
+    /// A class switched off in Settings is not asked for just because it has no row.
+    #[gpui_kit::test]
+    fn hidden_classes_are_not_demanded_for_listing(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.performance.show_disks = false;
+        settings.performance.show_network_wired = false;
+        settings.performance.show_network_wireless = false;
+        settings.performance.show_network_vpn = false;
+        settings.performance.show_network_virtual = false;
+        settings.performance.show_network_other = false;
+        let mut r = open(cx, cpu_and_memory(), settings, UiState::default());
+        let sidebar = r.sidebar.clone();
+        let d = r.vcx.update(|_, cx| sidebar.read(cx).demand_part());
+        assert!(!d.disks && !d.nets, "{d:?}");
+    }
+
     /// tasklens-hjn.45: the engine lists fans without demand, so the sidebar asks for no
     /// sensors until a fan row exists. Three listed fans then fill the FANS group; the two
     /// that spin get cards.

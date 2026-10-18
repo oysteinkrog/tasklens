@@ -768,16 +768,27 @@ impl DeviceSidebar {
     /// exists and fans are enabled: a fan is shown only after it has spun, and that is only
     /// known from sensor readings, so a hidden fan must keep sampling on. The engine lists the
     /// fans without any demand, so no fan row means no sensor demand.
+    ///
+    /// Disks and network interfaces are the other way round: the engine lists them only while
+    /// they are demanded (ARCHITECTURE "Device enumeration ... while any of those is
+    /// demanded"). So while a class is shown and has no row yet, the sidebar asks for it, or
+    /// a start on a page other than Overview never gets a Disk or network card.
     pub fn demand_part(&self) -> Demand {
         let has = |kind| self.live().any(|c| c.row.kind == kind);
-        let fans_pending =
-            self.settings.view().show_fans && self.rows.iter().any(|r| r.kind == DeviceKind::Fan);
+        let view = self.settings.view();
+        let fans_pending = view.show_fans && self.rows.iter().any(|r| r.kind == DeviceKind::Fan);
+        let unlisted = |kind, shown: bool| shown && !self.rows.iter().any(|r| r.kind == kind);
+        let nets_shown = view.show_network_wired
+            || view.show_network_wireless
+            || view.show_network_vpn
+            || view.show_network_virtual
+            || view.show_network_other;
         Demand {
             any_surface_visible: true,
             cpu: CpuDemand::Total,
             memory: true,
-            disks: has(DeviceKind::Disk),
-            nets: has(DeviceKind::Net),
+            disks: has(DeviceKind::Disk) || unlisted(DeviceKind::Disk, view.show_disks),
+            nets: has(DeviceKind::Net) || unlisted(DeviceKind::Net, nets_shown),
             gpus: has(DeviceKind::Gpu),
             sensors: has(DeviceKind::Fan) || has(DeviceKind::Battery) || fans_pending,
             ..Demand::default()
