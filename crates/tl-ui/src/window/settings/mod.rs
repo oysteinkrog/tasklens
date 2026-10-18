@@ -1515,7 +1515,9 @@ pub struct SettingsWindow {
     /// `Settings` creates after this window is built, so an observer on new `InputState`s picks it
     /// up (the observer gets no window for entities made inside a render).
     search: Rc<RefCell<Option<Entity<InputState>>>>,
-    _search_capture: Subscription,
+    /// Armed by the first render, dropped once the field is found, so inputs created elsewhere
+    /// later (or before the first render) are never taken for the search field.
+    _search_capture: Option<Subscription>,
     _search_sub: Option<Subscription>,
     #[cfg(any(test, feature = "test-hooks"))]
     renders: u64,
@@ -1527,15 +1529,6 @@ pub struct SettingsWindow {
 impl SettingsWindow {
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
-        let slot = search.clone();
-        let search_capture = cx.observe_new(
-            move |_: &mut InputState, _: Option<&mut Window>, cx: &mut Context<InputState>| {
-                let mut slot = slot.borrow_mut();
-                if slot.is_none() {
-                    *slot = Some(cx.entity());
-                }
-            },
-        );
         let specs: Vec<SliderSpec> = all_pages(cx)
             .into_iter()
             .flat_map(|page| page.sliders)
@@ -1595,7 +1588,7 @@ impl SettingsWindow {
         Self {
             sliders,
             search,
-            _search_capture: search_capture,
+            _search_capture: None,
             _search_sub: None,
             #[cfg(any(test, feature = "test-hooks"))]
             renders: 0,
@@ -1647,6 +1640,7 @@ impl SettingsWindow {
         let Some(input) = self.search.borrow().clone() else {
             return;
         };
+        self._search_capture = None;
         self._search_sub = Some(cx.subscribe(&input, |_, _, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change) {
                 cx.notify();
@@ -1680,6 +1674,19 @@ impl Render for SettingsWindow {
             self.renders += 1;
         }
         if self._search_sub.is_none() {
+            if self._search_capture.is_none() {
+                let slot = self.search.clone();
+                self._search_capture = Some(cx.observe_new(
+                    move |_: &mut InputState,
+                          _: Option<&mut Window>,
+                          cx: &mut Context<InputState>| {
+                        let mut slot = slot.borrow_mut();
+                        if slot.is_none() {
+                            *slot = Some(cx.entity());
+                        }
+                    },
+                ));
+            }
             cx.defer_in(window, |this, _, cx| this.attach_search(cx));
         }
         let s = metrics(cx).ui_scale;
