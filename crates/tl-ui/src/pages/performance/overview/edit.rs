@@ -38,7 +38,7 @@ use crate::pages::performance::actions::{
     PerfOverviewMoveBox, PerfOverviewResetLayout, PerfOverviewResizeBox,
 };
 use crate::pages::performance::page::PAGE_PAD;
-use crate::text::style::t_md;
+use crate::text::style::{numeric_style, t_md};
 use crate::theme::{current, metrics};
 
 /// The toolbar height, logical px.
@@ -70,6 +70,7 @@ pub const DONE_BUTTON_ID: &str = "perf-overview-edit-done";
 pub const DROP_LINE_ID: &str = "perf-overview-drop-line";
 pub const DROP_SWAP_ID: &str = "perf-overview-drop-swap";
 pub const GHOST_ID: &str = "perf-overview-drag-ghost";
+pub const GHOST_VALUE_ID: &str = "perf-overview-drag-ghost-value";
 
 /// The debug selector of `kind`'s title line drag area in edit mode.
 pub fn title_handle_id(kind: BoxKind) -> String {
@@ -471,6 +472,30 @@ fn kind_name(kind: BoxKind, cx: &App) -> SharedString {
 }
 
 impl OverviewPage {
+    /// The title and key value on `kind`'s title line, as the box last rendered them. Disks,
+    /// Network and Top processes show their name and no value.
+    fn title_and_value(&self, kind: BoxKind, cx: &App) -> (SharedString, SharedString) {
+        let name = || (kind_name(kind, cx), SharedString::default());
+        match kind {
+            BoxKind::Cpu => {
+                let (title, value, _) = self.cpu.read(cx).text();
+                (title.clone(), value.clone())
+            }
+            BoxKind::Memory => {
+                let (title, value) = self.mem.read(cx).text();
+                (title.clone(), value.clone())
+            }
+            BoxKind::Gpu => self
+                .gpu
+                .read(cx)
+                .sections()
+                .first()
+                .map(|s| (s.heading.clone(), s.value.clone()))
+                .unwrap_or_else(name),
+            BoxKind::Disk | BoxKind::Net | BoxKind::TopProcs => name(),
+        }
+    }
+
     /// Whether Edit Layout mode is on.
     pub fn is_editing(&self) -> bool {
         self.edit.is_some()
@@ -921,16 +946,35 @@ impl OverviewPage {
             );
         }
         if let Some(p) = self.placement.boxes.iter().find(|b| b.kind == drag.kind) {
+            // The frame and title line only, without charts or rows, so the drag never renders
+            // the box twice per frame.
             let at = drag.pointer - drag.grab;
             let accent = theme.graph.device_accent(drag.kind.accent());
-            let mut title = div()
-                .h(px(TITLE_H * s))
-                .mx(m.sp[5])
+            let (title, value) = self.title_and_value(drag.kind, cx);
+            let mut tab = div()
+                .h_full()
                 .flex()
                 .items_center()
+                .flex_none()
+                .px(m.sp[4])
+                .bg(theme.list_bg)
+                .border_l_1()
+                .border_r_1()
+                .border_b_1()
+                .border_color(accent)
+                .rounded_bl(m.radius_small)
+                .rounded_br(m.radius_small)
+                .whitespace_nowrap()
                 .text_color(theme.text_primary)
-                .child(kind_name(drag.kind, cx));
-            *title.text_style() = t_md(&m);
+                .child(title);
+            *tab.text_style() = t_md(&m);
+            let mut value_el = div()
+                .debug_selector(|| GHOST_VALUE_ID.into())
+                .flex_none()
+                .whitespace_nowrap()
+                .text_color(theme.text_primary)
+                .child(value);
+            *value_el.text_style() = numeric_style(&m, m.text.md);
             out.push(
                 div()
                     .debug_selector(|| GHOST_ID.into())
@@ -944,7 +988,18 @@ impl OverviewPage {
                     .border_1()
                     .border_color(accent)
                     .rounded(m.radius_card)
-                    .child(title)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(m.sp[4])
+                            .h(px(TITLE_H * s))
+                            .mx(m.sp[5])
+                            .child(tab)
+                            .child(div().flex_1())
+                            .child(value_el),
+                    )
                     .into_any_element(),
             );
         }

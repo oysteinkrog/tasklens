@@ -2178,7 +2178,8 @@ mod page {
         PerfOverviewEditLayout, PerfOverviewResetLayout, bind_keys_performance,
     };
     use tl_ui::pages::performance::overview::edit::{
-        DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, TOOLBAR_ID, hide_button_id, title_handle_id,
+        DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, GHOST_VALUE_ID, TOOLBAR_ID, hide_button_id,
+        title_handle_id,
     };
     use tl_ui::pages::performance::overview::layout::{BoxKind, OverviewLayout, place};
     use tl_ui::pages::performance::overview::{BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage};
@@ -2990,7 +2991,19 @@ mod page {
         let disk = center(r.vcx.debug_bounds(box_id(Disk)).expect("disk"));
         r.drag_title(Cpu, disk);
         assert!(r.vcx.debug_bounds(DROP_SWAP_ID).is_some(), "swap border");
-        assert!(r.vcx.debug_bounds(GHOST_ID).is_some(), "the dragged copy");
+        // The preview is the CPU frame at the box's size with the box's key value on its title
+        // line, without charts or rows.
+        let cpu = r.vcx.debug_bounds(box_id(Cpu)).expect("cpu");
+        let ghost = r.vcx.debug_bounds(GHOST_ID).expect("the dragged copy");
+        assert_eq!(ghost.size, cpu.size);
+        let page = r.page.clone();
+        let value = r
+            .vcx
+            .update(|_, cx| page.read(cx).cpu_box().read(cx).text().1.clone());
+        assert!(!value.is_empty(), "the CPU box shows a value");
+        let value_el = r.vcx.debug_bounds(GHOST_VALUE_ID).expect("ghost value");
+        assert!(f32::from(value_el.size.width) > 0.);
+        assert!(value_el.top() >= ghost.top() && value_el.bottom() <= ghost.top() + px(25.));
         assert_eq!(r.saved(), None, "nothing is saved during the drag");
         r.release(disk);
         assert!(r.vcx.debug_bounds(GHOST_ID).is_none());
