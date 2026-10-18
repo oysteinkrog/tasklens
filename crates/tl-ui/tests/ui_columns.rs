@@ -794,6 +794,31 @@ fn fit_columns_never_below_minimum() {
     assert!(stored_width(vcx, &table, ColumnId::Name) < px(200.));
 }
 
+/// Resize columns to fit content leaves room for the widest visible text, as the Type column's
+/// "Background process" needs (bead tasklens-pdu.65 d, shot 19c).
+#[test]
+fn fit_all_columns_holds_the_widest_text() {
+    const TYPE: &str = "Background process";
+    let mut cx = cosmic_cx();
+    let mut d = HDelegate::new();
+    d.texts.push((ColumnId::User, TYPE));
+    let (table, vcx) = open(&mut cx, d);
+    let handle = vcx.update(|_, cx| table.read(cx).focus_handle().clone());
+    vcx.update(|window, cx| window.focus(&handle, cx));
+    redraw(vcx);
+
+    vcx.dispatch_action(ResizeColumnsToFit {
+        table: TableId::Processes,
+    });
+    redraw(vcx);
+    let w = stored_width(vcx, &table, ColumnId::User);
+    let text = advance_width(vcx, TYPE);
+    assert!(
+        w >= text + px(16.),
+        "{w:?} is too narrow for {TYPE:?} ({text:?})"
+    );
+}
+
 // Column reorder drag (E18-011).
 
 fn visible_order(

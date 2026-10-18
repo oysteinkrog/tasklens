@@ -1131,6 +1131,46 @@ fn group_label_stays_at_the_viewport_edge_while_scrolling_sideways() {
     assert_eq!(label.left(), body.left());
 }
 
+/// Opens the table in a body 1400 px wide, makes the body `narrow_w` px wide, draws exactly one
+/// frame, then delivers the next frame. Returns how often the table asked to render again.
+fn notifies_after_narrowing(narrow_w: f32) -> usize {
+    let mut cx = cosmic_cx();
+    let rows = (0..3).map(plain).collect();
+    let delegate = TDelegate::with_widths(rows, 400., 1000.);
+    let (host, vcx) = cx.add_window_view(move |window, cx| TableHost {
+        w: 1400.,
+        h: 200. + HEADER_H,
+        table: cx.new(|cx| TlTreeTable::new(delegate, window, cx)),
+    });
+    vcx.update(|window, _| window.activate_window());
+    redraw(vcx);
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    redraw(vcx);
+    let table = vcx.update(|_, cx| host.read(cx).table.clone());
+    let count = Rc::new(Cell::new(0));
+    let seen = count.clone();
+    let _sub = vcx.update(|_, cx| cx.observe(&table, move |_, _| seen.set(seen.get() + 1)));
+    vcx.update(|_, cx| {
+        host.update(cx, |host, cx| {
+            host.w = narrow_w;
+            cx.notify();
+        })
+    });
+    // One frame only: its rows were measured with the body width of the frame before.
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    count.set(0);
+    vcx.update(|window, cx| window.simulate_next_frame(cx));
+    count.get()
+}
+
+#[test]
+fn body_narrowed_into_overflow_renders_again_for_the_gutter() {
+    // 400 + 1000 px of columns fit 1400 px; in 1000 px they overflow and need the gutter.
+    assert!(notifies_after_narrowing(1000.) > 0);
+    // Still no overflow at 1400 px, so the frame was right and nothing renders again.
+    assert_eq!(notifies_after_narrowing(1400.), 0);
+}
+
 #[test]
 fn stale_row_dims_metric_cells() {
     let stale = RowFlags {

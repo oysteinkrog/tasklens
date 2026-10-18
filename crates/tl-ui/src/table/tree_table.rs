@@ -352,6 +352,10 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     /// Calls of the body's item builder in the current frame. The `uniform_list` calls it twice
     /// to measure one row before it asks for the visible range.
     list_calls: u8,
+    /// Whether this frame's probe row carried the scrollbar gutter, or `None` when no probe ran.
+    /// The probe reads the body width of the last frame, so after the frame
+    /// [`Self::check_gutter`] compares it with the new width.
+    probe_gutter: Option<bool>,
     /// Truncation flags of the hovered row's cells, by visible column position. Kept across
     /// frames so a cut cell gets its tooltip on the next render.
     hover_clips: Vec<Rc<Cell<bool>>>,
@@ -422,6 +426,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             last_version: 0,
             last_style_version: 0,
             list_calls: 0,
+            probe_gutter: None,
             hover_clips: Vec::new(),
             clip_sink: Rc::new(Cell::new(false)),
             hover_tips_ready: false,
@@ -607,6 +612,18 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         self.demand_ids = ids;
     }
 
+    /// Renders once more when the last frame's rows were measured with the wrong gutter: on the
+    /// first frame, or after the body width changed so the columns started or stopped
+    /// overflowing. Without it the last column could stay under the vertical scrollbar until
+    /// the next update.
+    fn check_gutter(&mut self, cx: &mut Context<Self>) {
+        if let Some(drawn) = self.probe_gutter.take()
+            && drawn != self.horizontal_overflow()
+        {
+            cx.notify();
+        }
+    }
+
     /// A clone of the body's scroll handle. The handle is `Rc`-backed, so scrolling through the
     /// clone moves this table (R-186).
     pub fn scroll_handle(&self) -> UniformListScrollHandle {
@@ -710,6 +727,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         // The list measures its content width from this first probe row, so it carries the
         // gutter too.
         if call < 2 && range.len() == 1 {
+            self.probe_gutter = Some(tail > Pixels::ZERO);
             return vec![
                 div()
                     .w(total_width + tail)
@@ -2385,6 +2403,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         let theme = current(cx).clone();
         self.sync_versions(m.style_version);
         self.list_calls = 0;
+        self.probe_gutter = None;
         #[cfg(any(test, feature = "test-hooks"))]
         {
             self.separator_quads.borrow_mut().clear();
@@ -2422,7 +2441,10 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         // a changed id set (ADR-009).
         if !self.demand_scheduled {
             self.demand_scheduled = true;
-            cx.on_next_frame(window, |this, _, cx| this.report_demand(cx));
+            cx.on_next_frame(window, |this, _, cx| {
+                this.report_demand(cx);
+                this.check_gutter(cx);
+            });
         }
         let empty = if count == 0 {
             self.delegate.empty_text()

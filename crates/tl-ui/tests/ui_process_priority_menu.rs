@@ -4,7 +4,7 @@
 use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
     Context, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
-    Styled as _, TestAppContext, TestDispatcher, VisualTestContext, Window, div, px,
+    Styled as _, TestAppContext, TestDispatcher, TextRun, VisualTestContext, Window, div, font, px,
 };
 use smallvec::SmallVec;
 use tl_model::ids::{NodeId, ProcessKey};
@@ -15,7 +15,11 @@ use tl_ui::components::menu::{MENU_MAX_W, TlMenu, context_menu_layer, open_conte
 use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
 use tl_ui::pages::processes::menu::priority_submenu;
 use tl_ui::table::tree_table::RowKind;
-use tl_ui::text::fonts::load_bundled_fonts;
+use tl_ui::text::fonts::{UI_FAMILY, load_bundled_fonts};
+use tl_ui::theme::metrics;
+
+/// The en-US autogroup note, the first line of the submenu.
+const NOTE: &str = "With autogroup on, nice only orders processes within the same session.";
 
 fn cosmic_cx() -> TestAppContext {
     let text_system = gpui_kit::platform::current_platform(true).text_system();
@@ -107,5 +111,40 @@ fn priority_menu_is_wider_than_the_default_for_the_autogroup_note() {
     assert!(
         width > px(MENU_MAX_W) && width <= px(520.),
         "priority menu is {width:?} wide"
+    );
+
+    // The note's label starts after the mark column and ends at the row's right padding. It
+    // must hold the whole line, so the note shows no ellipsis.
+    let (room, need) = vcx.update(|window, cx| {
+        let snaps = snapshots(window);
+        let header = snaps
+            .iter()
+            .find(|s| s.label() == Some(NOTE))
+            .expect("autogroup note row");
+        let mark = snaps
+            .iter()
+            .find(|s| {
+                s.path().len() == header.path().len() + 1 && s.path().starts_with(header.path())
+            })
+            .expect("mark column of the note row");
+        let m = *metrics(cx);
+        let room = header.bounds().right() - m.sp[4] - mark.bounds().right();
+        let run = TextRun {
+            len: NOTE.len(),
+            font: font(UI_FAMILY),
+            color: gpui_kit::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let need = window
+            .text_system()
+            .shape_line(NOTE.into(), m.text.xs, &[run], None)
+            .width;
+        (room, need)
+    });
+    assert!(
+        room >= need,
+        "the note needs {need:?} but its label has {room:?}"
     );
 }
