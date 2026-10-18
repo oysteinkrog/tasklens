@@ -2801,7 +2801,7 @@ mod panel {
 mod mounted {
     use std::sync::Arc;
 
-    use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
+    use gpui_kit::{TestAppContext, VisualTestContext, px, size};
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::ids::{NodeId, ProcessKey};
@@ -2815,7 +2815,6 @@ mod mounted {
     use tl_ui::pages::minigraph::actions::{MinigraphHide, ResetMinigraphLayout};
     use tl_ui::pages::minigraph::panel::MinigraphPanel;
     use tl_ui::pages::minigraph::sources::{MinigraphSource, default_entries};
-    use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window};
@@ -2950,23 +2949,14 @@ mod mounted {
         vcx.run_until_parked();
     }
 
-    fn page(vcx: &mut VisualTestContext) -> gpui_kit::Entity<ProcessesPage> {
-        vcx.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window")
-                .read(cx)
-                .page_entity::<ProcessesPage>(Tab::Processes)
-                .expect("the Processes page is built")
-        })
-    }
-
     #[gpui_kit::test]
     fn panel_mounted_bottom_right(cx: &mut TestAppContext) {
         let mut vcx = open(cx, StartTab::Processes);
         let table = vcx.debug_bounds("TlTreeTable").expect("table drawn");
         let cpu = vcx.debug_bounds("MinigraphSlot-0").expect("CPU card drawn");
         assert_eq!(table.right() - cpu.right(), px(16.));
-        assert_eq!(table.bottom() - cpu.bottom(), px(16.));
+        let area = vcx.debug_bounds("MinigraphPanel").expect("panel drawn");
+        assert_eq!(area.bottom() - cpu.bottom(), px(16.));
         let cards = vcx.update(|_, cx| {
             MinigraphPanel::global(cx)
                 .expect("panel")
@@ -2999,21 +2989,28 @@ mod mounted {
         assert!(vcx.debug_bounds("MinigraphSlot-0").is_none());
     }
 
+    /// The cards sit in a row of their own: the table ends at or above the panel's top edge, so
+    /// no row is covered, and no card reaches into the table.
     #[gpui_kit::test]
-    fn gap_click_reaches_table(cx: &mut TestAppContext) {
+    fn table_ends_above_panel(cx: &mut TestAppContext) {
         let mut vcx = open(cx, StartTab::Processes);
-        let page = page(&mut vcx);
-        let selected = |vcx: &mut VisualTestContext| {
-            vcx.update(|_, cx| page.read(cx).table().read(cx).selection.len())
-        };
-        assert_eq!(selected(&mut vcx), 0);
-        let cpu = vcx.debug_bounds("MinigraphSlot-0").expect("CPU card");
-        let memory = vcx.debug_bounds("MinigraphSlot-1").expect("Memory card");
-        assert_eq!(cpu.left() - memory.right(), px(8.));
-        let gap = point(cpu.left() - px(4.), cpu.center().y);
-        vcx.simulate_click(gap, Modifiers::none());
-        draw(&mut vcx);
-        assert_eq!(selected(&mut vcx), 1, "the row under the gap is selected");
+        let table = vcx.debug_bounds("TlTreeTable").expect("table drawn");
+        let panel = vcx.debug_bounds("MinigraphPanel").expect("panel drawn");
+        assert!(
+            table.bottom() <= panel.top(),
+            "table bottom {:?} is below panel top {:?}",
+            table.bottom(),
+            panel.top()
+        );
+        for slot in 0..6 {
+            let selector: &'static str =
+                Box::leak(format!("MinigraphSlot-{slot}").into_boxed_str());
+            let card = vcx.debug_bounds(selector).expect("card drawn");
+            assert!(
+                card.top() >= table.bottom(),
+                "card {slot} overlaps the table"
+            );
+        }
     }
 
     #[gpui_kit::test]

@@ -125,6 +125,8 @@ pub struct MinigraphPanel {
     drag: Option<DragPreview>,
     /// `ui_scale` of the last render, for `slot_at`.
     scale: f32,
+    /// The host lays the panel out as a row of its own under the table, not as an overlay.
+    own_space: bool,
     /// The panel bounds of the last paint, for the slot under a release.
     bounds: Rc<Cell<Bounds<Pixels>>>,
     _settings_sub: Option<Subscription>,
@@ -215,6 +217,7 @@ impl MinigraphPanel {
             graphs: graphs.clone(),
             drag: None,
             scale: 1.,
+            own_space: false,
             bounds: Rc::default(),
             _settings_sub,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -799,6 +802,12 @@ impl MinigraphPanel {
         });
     }
 
+    /// Makes the panel size itself to the rows in use, for a host that gives it a row under the
+    /// table. The default fills its box, so the cards overlay whatever is under it.
+    pub fn set_own_space(&mut self, own_space: bool) {
+        self.own_space = own_space;
+    }
+
     /// Called by the Processes page on tab activation. Active sends the demand part; inactive
     /// withdraws it. The always-on graph targets stay.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -1204,6 +1213,12 @@ impl Render for MinigraphPanel {
         };
         let drag = self.drag.as_ref().map(|d| (d.id, d.over, d.from, d.epoch));
         let now = self.arranged(drag.map(|(id, over, _, _)| (id, over)), cx);
+        if self.own_space {
+            // The panel is a row under the table, tall enough for the rows in use.
+            let rows = now.iter().map(|slot| slot_cell(*slot).0).max().unwrap_or(0) + 1;
+            let height = (MARGIN + f32::from(rows) * (MINI_CARD_H + GAP)) * s;
+            root = root.flex_none().h(px(height));
+        }
         // The order before the last change of the slot under the pointer, to slide from.
         let before = match drag {
             Some((id, _, from, _)) if animations_on(cx) => {

@@ -220,7 +220,13 @@ impl ProcessesPage {
         let minigraphs = cx
             .try_global::<GlobalDemand>()
             .map(|d| d.0.clone())
-            .map(|demand| cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx)));
+            .map(|demand| {
+                cx.new(|cx| {
+                    let mut panel = MinigraphPanel::new(&hub, &demand, cx);
+                    panel.set_own_space(true);
+                    panel
+                })
+            });
         let history_mode = state.processes.history_mode;
         let state_version = cx
             .try_global::<TlSettings>()
@@ -1441,8 +1447,10 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_process_action::<FileProperties>))
             .child(
                 div()
-                    .relative()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .debug_selector(|| "ProcessesTableArea".into())
                     .child(match &self.history {
                         Some(history) => history
                             .clone()
@@ -1453,11 +1461,10 @@ impl Render for ProcessesPage {
                             .clone()
                             .cached(StyleRefinement::default().size_full())
                             .into_any_element(),
-                    })
-                    .children(self.minigraphs.clone().map(|panel| {
-                        panel.cached(StyleRefinement::default().absolute().inset_0())
-                    })),
+                    }),
             )
+            // The cards get a row of their own under the table, so no row is covered.
+            .children(self.minigraphs.clone())
     }
 }
 
