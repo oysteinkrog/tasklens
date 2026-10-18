@@ -1131,14 +1131,14 @@ fn group_label_stays_at_the_viewport_edge_while_scrolling_sideways() {
     assert_eq!(label.left(), body.left());
 }
 
-/// Opens the table in a body 1400 px wide, makes the body `narrow_w` px wide, draws exactly one
+/// Opens the table in a body 1600 px wide, makes the body `narrow_w` px wide, draws exactly one
 /// frame, then delivers the next frame. Returns how often the table asked to render again.
 fn notifies_after_narrowing(narrow_w: f32) -> usize {
     let mut cx = cosmic_cx();
     let rows = (0..3).map(plain).collect();
     let delegate = TDelegate::with_widths(rows, 400., 1000.);
     let (host, vcx) = cx.add_window_view(move |window, cx| TableHost {
-        w: 1400.,
+        w: 1600.,
         h: 200. + HEADER_H,
         table: cx.new(|cx| TlTreeTable::new(delegate, window, cx)),
     });
@@ -1165,10 +1165,10 @@ fn notifies_after_narrowing(narrow_w: f32) -> usize {
 
 #[test]
 fn body_narrowed_into_overflow_renders_again_for_the_gutter() {
-    // 400 + 1000 px of columns fit 1400 px; in 1000 px they overflow and need the gutter.
+    // 400 + 1000 px of columns fit 1600 px; in 1000 px they overflow and need the gutter.
     assert!(notifies_after_narrowing(1000.) > 0);
-    // Still no overflow at 1400 px, so the frame was right and nothing renders again.
-    assert_eq!(notifies_after_narrowing(1400.), 0);
+    // Still no overflow at 1500 px, so the frame was right and nothing renders again.
+    assert_eq!(notifies_after_narrowing(1500.), 0);
 }
 
 #[test]
