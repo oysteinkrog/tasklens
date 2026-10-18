@@ -1929,3 +1929,29 @@ fn enable_all_columns_shows_every_column() {
     assert_eq!(visible_order(vcx, &table), ColumnId::ALL[..10].to_vec());
     assert_eq!(changed_count(vcx, &table), 1);
 }
+
+#[test]
+fn column_widths_follow_ui_scale_change() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    let width = |vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| f32::from(table.read(cx).delegate.columns().width(ColumnId::Cpu)))
+    };
+    let base = width(vcx);
+    assert!(base > 0.0);
+
+    vcx.update(|_, cx| {
+        let appearance = AppearanceSettings {
+            ui_scale_pct: 115,
+            ..AppearanceSettings::default()
+        };
+        assert!(tl_ui::theme::metrics::recompute(&appearance, cx));
+        table.update(cx, |_, cx| cx.notify());
+    });
+    redraw(vcx);
+    let scaled = width(vcx);
+    assert!(
+        (scaled - base * 1.15).abs() < 0.01,
+        "width at 1.15 is {scaled}, 1.0 is {base}"
+    );
+}

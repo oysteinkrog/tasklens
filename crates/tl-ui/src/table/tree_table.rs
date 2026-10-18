@@ -660,6 +660,18 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         viewport > Pixels::ZERO && self.columns().total_width() > viewport
     }
 
+    /// Column widths are stored at 100%. After a UI scale change the delegate's layout still
+    /// holds the old scale, so rebuild it at `ui_scale` and hand it back. Skipped during a
+    /// resize drag, which works on its own copy.
+    fn follow_ui_scale(&mut self, ui_scale: f32, cx: &mut Context<Self>) {
+        if self.header_state.resize.is_some() || self.delegate.columns().ui_scale() == ui_scale {
+            return;
+        }
+        let mut layout = self.delegate.columns().clone();
+        layout.rebuild(ui_scale);
+        self.delegate.on_columns_changed(&layout, cx);
+    }
+
     fn sync_versions(&mut self, style_version: u64) {
         let version = self.delegate.table_version();
         if version != self.last_version || style_version != self.last_style_version {
@@ -2415,6 +2427,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         self.sync_versions(m.style_version);
+        self.follow_ui_scale(m.ui_scale, cx);
         self.list_calls = 0;
         self.probe_gutter = None;
         #[cfg(any(test, feature = "test-hooks"))]
