@@ -4081,7 +4081,7 @@ fn read_general(
         Ok(_) => std::str::from_utf8(bufs.small.trim_ascii())
             .ok()
             .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-            .map_or(total(false, Validity::Failed), |p| {
+            .map_or(total(false, Validity::Unsupported), |p| {
                 valid(p & rd::ADDR_NO_RANDOMIZE != 0)
             }),
         Err(e)
