@@ -11,15 +11,22 @@
 //! The rows are built once per open and again on a language change; the search filters indices
 //! into them. The search box has focus on open. Up and Down scroll the list. Esc clears the
 //! search, or closes the window when the search is empty; Ctrl+W closes it through the frame.
+//!
+//! The keys column is at most 220 px wide (× ui_scale), so the description always shows. Keys
+//! wider than the column are clipped, and only then does the column get a tooltip with the full
+//! key text. Prepaint measures each row and asks for one more frame when a row changes.
 
 use gpui_kit::base::Root;
 use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, WindowHandle, div, point, px, size,
+    App, AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement, Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, WindowHandle, canvas, div, point, px, size,
 };
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use smallvec::SmallVec;
 
 use super::registry::{GlobalRegistry, WindowKey};
@@ -907,6 +914,8 @@ pub struct ShortcutsWindow {
     strings_version: u64,
     debug: bool,
     scroll: ScrollHandle,
+    /// Per row in `rows`: the keys are wider than the keys column. Written at prepaint.
+    clipped: Rc<RefCell<Vec<bool>>>,
     _search: Subscription,
     _strings: Subscription,
 }
@@ -928,12 +937,14 @@ impl ShortcutsWindow {
                 this.strings_version = version;
                 this.words = ShortcutsWords::new(cx);
                 this.rows = build_rows(cx, this.debug);
+                *this.clipped.borrow_mut() = vec![false; this.rows.len()];
                 this.refilter();
                 cx.notify();
             }
         });
         let debug = cx.try_global::<AppEnv>().is_some_and(|e| e.debug);
         let rows = build_rows(cx, debug);
+        let clipped = Rc::new(RefCell::new(vec![false; rows.len()]));
         let mut this = Self {
             search,
             filtered: Vec::with_capacity(rows.len()),
@@ -943,6 +954,7 @@ impl ShortcutsWindow {
             strings_version: strings_version(cx),
             debug,
             scroll: ScrollHandle::new(),
+            clipped,
             _search,
             _strings,
         };
@@ -1042,16 +1054,9 @@ impl Render for ShortcutsWindow {
                 *heading.text_style() = t_sm(&m);
                 list = list.child(heading.child(self.heading_name(row.heading).clone()));
             }
-            // The keys column shrinks to a maximum width and clips, so the description always
-            // shows; the tooltip carries the full key text.
-            let mut caps = div()
-                .flex()
-                .flex_shrink(1.)
-                .min_w_0()
-                .max_w(px(KEYS_MAX_WIDTH * m.ui_scale))
-                .overflow_hidden()
-                .items_center()
-                .gap(m.sp[2]);
+            // The caps at their own width, in a column that shrinks to a maximum width and clips,
+            // so the description always shows.
+            let mut caps = div().flex().flex_none().items_center().gap(m.sp[2]);
             let mut first = true;
             let mut sep = |caps: gpui_kit::Div| {
                 if std::mem::take(&mut first) {
@@ -1076,17 +1081,55 @@ impl Render for ShortcutsWindow {
                         .child(text.clone()),
                 );
             }
-            let caps = {
+            let measure = {
+                let flags = Rc::clone(&self.clipped);
+                let view = cx.weak_entity();
+                // Children: the caps at their own width, then a canvas the size of the column.
+                move |children: Vec<Bounds<Pixels>>, _: &mut Window, cx: &mut App| {
+                    let (Some(caps), Some(column)) = (children.first(), children.get(1)) else {
+                        return;
+                    };
+                    let now = caps.size.width > column.size.width + px(0.5);
+                    if let Some(was) = flags.borrow_mut().get_mut(ix)
+                        && *was != now
+                    {
+                        *was = now;
+                        // The tooltip is attached at render, so draw once more.
+                        let view = view.clone();
+                        cx.defer(move |cx| {
+                            let _ = view.update(cx, |_, cx| cx.notify());
+                        });
+                    }
+                }
+            };
+            let column = div()
+                .debug_selector(move || format!("Shortcuts-keys-{ix}"))
+                .relative()
+                .flex()
+                .flex_shrink(1.)
+                .min_w_0()
+                .max_w(px(KEYS_MAX_WIDTH * m.ui_scale))
+                .overflow_hidden()
+                .items_center()
+                .child(caps)
+                .child(canvas(|_, _, _| {}, |_, _, _, _| {}).absolute().size_full())
+                .on_children_prepainted(measure)
+                .id(("shortcuts-keys", ix));
+            let clipped = self.clipped.borrow().get(ix).copied().unwrap_or(false);
+            let column = if clipped {
                 let text = row.key_text.clone();
                 let state = HoverTooltip::state(("shortcuts-keys-tip", ix), window, cx);
                 HoverTooltip::attach(
                     &state,
-                    caps.id(("shortcuts-keys", ix)),
+                    column,
                     DELAY_CONTROL,
                     move |_, cx| TlTooltip::text(text.clone()).view(cx),
                     window,
                     cx,
                 )
+                .into_any_element()
+            } else {
+                column.into_any_element()
             };
             let mut r = div()
                 .flex()
@@ -1100,12 +1143,13 @@ impl Render for ShortcutsWindow {
                 .text_color(theme.text_primary)
                 .child(
                     div()
+                        .debug_selector(move || format!("Shortcuts-desc-{ix}"))
                         .min_w_0()
                         .flex_1()
                         .truncate()
                         .child(row.description.clone()),
                 )
-                .child(caps);
+                .child(column);
             *r.text_style() = t_base(&m);
             list = list.child(r);
         }

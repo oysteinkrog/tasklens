@@ -18,6 +18,7 @@ use tl_model::time::{TimeNs, now_boot_ns};
 use tl_ui::actions::{OpenCollectorHealth, OpenShortcuts};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::toast::ToastQueue;
+use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, has_modal_child,
 };
@@ -25,7 +26,7 @@ use tl_ui::i18n::{set_test_catalogue, tr_calls};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::share_code::{decode_tl1, encode_tl1};
 use tl_ui::theme::user_store::serialize_user_themes;
-use tl_ui::theme::{ThemeDef, ThemeStore, builtin, current};
+use tl_ui::theme::{ThemeDef, ThemeStore, builtin, current, metrics};
 use tl_ui::window::collector_health::{CollectorHealthWindow, StateLook};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::share_theme::{ShareTheme, ShareThemeView};
@@ -771,6 +772,69 @@ fn shortcuts_second_esc_closes_from_search(cx: &mut TestAppContext) {
     assert!(
         shortcuts_window(cx).is_none(),
         "the second Esc closes the window with focus still in the search box"
+    );
+}
+
+/// Hovers the centre of `selector`, coming from outside the window, and waits out the tooltip
+/// delay. True when a tooltip shows.
+fn hover_shows_tooltip(vcx: &mut VisualTestContext, selector: &'static str) -> bool {
+    let at = vcx.debug_bounds(selector).expect("drawn");
+    let none = gpui_kit::Modifiers::none();
+    vcx.simulate_mouse_move(
+        gpui_kit::point(gpui_kit::px(2.), gpui_kit::px(2.)),
+        None,
+        none,
+    );
+    vcx.executor().advance_clock(DELAY_CONTROL);
+    vcx.run_until_parked();
+    draw(vcx);
+    vcx.simulate_mouse_move(at.center(), None, none);
+    vcx.executor().advance_clock(DELAY_CONTROL);
+    vcx.run_until_parked();
+    draw(vcx);
+    vcx.debug_bounds("TlTooltip").is_some()
+}
+
+#[gpui_kit::test]
+fn shortcuts_keys_column_max_width_tooltip_when_clipped(cx: &mut TestAppContext) {
+    setup(cx);
+    let (frame, mut vcx) = open_shortcuts(cx, 1);
+    // The first frame measures the keys; the next one attaches the tooltips.
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    let rows = shortcut_rows(&frame, &mut vcx);
+    let long = rows
+        .iter()
+        .position(|r| r.0 == Heading::Global && r.2.starts_with("Ctrl+1 or Alt+1"))
+        .expect("tab number row");
+    let short = rows.iter().position(|r| r.2 == "Ctrl+N").expect("Run row");
+    let selector =
+        |kind: &str, ix: usize| -> &'static str { format!("Shortcuts-{kind}-{ix}").leak() };
+    let scale = vcx.update(|_, cx| metrics(cx).ui_scale);
+
+    let keys = vcx
+        .debug_bounds(selector("keys", long))
+        .expect("keys drawn");
+    assert!(
+        keys.size.width <= gpui_kit::px(220. * scale + 0.5),
+        "the keys column is at most 220 px wide, got {:?}",
+        keys.size.width
+    );
+    let desc = vcx
+        .debug_bounds(selector("desc", long))
+        .expect("description drawn");
+    assert!(
+        desc.size.width >= gpui_kit::px(100. * scale),
+        "the description keeps its room next to a long key list, got {:?}",
+        desc.size.width
+    );
+    assert!(
+        hover_shows_tooltip(&mut vcx, selector("keys", long)),
+        "clipped keys show the full key text in a tooltip"
+    );
+    assert!(
+        !hover_shows_tooltip(&mut vcx, selector("keys", short)),
+        "keys that fit get no tooltip"
     );
 }
 
