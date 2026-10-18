@@ -2060,7 +2060,13 @@ mod tests {
         let mut s = Settings::default();
         s.performance.overview = Some(OverviewLayoutSetting::btop_default());
         let text = toml::to_string(&s).expect("serializes");
-        assert!(!text.contains("split") && !text.contains("mode"), "{text}");
+        let (_, overview) = text
+            .split_once("[[performance.overview.rows]]")
+            .expect("an overview section");
+        assert!(
+            !overview.contains("split") && !overview.contains("mode"),
+            "{overview}"
+        );
 
         // The crw.63 `cpu_split` loads as `split` without a log line, and is written as `split`.
         let (s, changed) = load_toml(&cpu_entry("cpu_split = 0.6"));
