@@ -189,6 +189,8 @@ impl OverviewPage {
         let gpu_cards = cards_of(sidebar, DeviceKind::Gpu, cx);
         let disk_cards = cards_of(sidebar, DeviceKind::Disk, cx);
         let cpu = cx.new(|cx| CpuBox::new(&hub, cpu_idx, cx));
+        let layout = saved_layout(cx);
+        cpu.update(cx, |b, cx| b.set_split(layout.cpu_split, cx));
         let mem = cx.new(|cx| MemBox::new(&hub, mem_idx, cx));
         let gpu = cx.new(|cx| GpuBox::new(&hub, &gpu_cards, cx));
         let disk = cx.new(|cx| DiskBox::new(&hub, &disk_cards, cx));
@@ -202,7 +204,7 @@ impl OverviewPage {
         let mut subs = SmallVec::new();
         subs.push(cx.observe(sidebar, |this, _, cx| this.sync_cards(cx)));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_layout));
-        let layout = saved_layout(cx);
+        subs.push(cx.subscribe(&cpu, Self::on_cpu_split));
         let procs = layout
             .has(BoxKind::TopProcs)
             .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
@@ -380,11 +382,25 @@ impl OverviewPage {
         self.set_layout(layout, cx);
     }
 
+    /// The CPU box ended a split drag or a double-click: the share goes into the layout and the
+    /// profile.
+    fn on_cpu_split(
+        &mut self,
+        _: Entity<CpuBox>,
+        ev: &cpu_box::CpuSplitChanged,
+        cx: &mut Context<Self>,
+    ) {
+        self.layout.cpu_split = ev.0;
+        self.save_layout(cx);
+    }
+
     /// Takes `layout`: the Top processes box with its demand comes or goes, then a new
     /// placement and one render.
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
+        let split = layout.cpu_split;
         self.layout = layout;
+        self.cpu.update(cx, |b, cx| b.set_split(split, cx));
         if procs != self.procs.is_some() {
             self.procs = procs.then(|| {
                 let hub = self.hub.clone();

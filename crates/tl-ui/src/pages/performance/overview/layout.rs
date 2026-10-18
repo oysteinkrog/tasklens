@@ -113,7 +113,16 @@ pub struct RowSpec {
 #[derive(Clone, PartialEq, Debug)]
 pub struct OverviewLayout {
     pub rows: SmallVec<[RowSpec; 4]>,
+    /// The CPU box chart's share of its body (UI-PRF-018 "CPU box splitter"), in
+    /// [`CPU_SPLIT_RANGE`]. Saved as `cpu_split` on the CPU box entry.
+    pub cpu_split: f32,
 }
+
+/// The CPU split when none is saved.
+pub const CPU_SPLIT_DEFAULT: f32 = 0.4;
+
+/// The smallest and largest saved CPU split.
+pub const CPU_SPLIT_RANGE: (f32, f32) = (0.2, 0.8);
 
 /// Why a layout is not valid.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -150,6 +159,7 @@ impl OverviewLayout {
     pub fn btop_default() -> Self {
         let b = |kind, width| BoxSpec { kind, width };
         Self {
+            cpu_split: CPU_SPLIT_DEFAULT,
             rows: smallvec![
                 RowSpec {
                     height: 3.,
@@ -197,7 +207,16 @@ impl OverviewLayout {
                     .collect(),
             })
             .collect();
-        let layout = Self { rows };
+        let cpu_split = setting
+            .rows
+            .iter()
+            .flat_map(|r| &r.boxes)
+            .find(|b| b.kind == "cpu")
+            .and_then(|b| b.cpu_split)
+            .map(|v| v as f32)
+            .filter(|v| (CPU_SPLIT_RANGE.0..=CPU_SPLIT_RANGE.1).contains(v))
+            .unwrap_or(CPU_SPLIT_DEFAULT);
+        let layout = Self { rows, cpu_split };
         if layout.validate().is_ok() {
             layout
         } else {
@@ -219,6 +238,9 @@ impl OverviewLayout {
                         .map(|b| OverviewBoxSetting {
                             kind: b.kind.key().to_owned(),
                             width: f64::from(b.width),
+                            cpu_split: (b.kind == BoxKind::Cpu
+                                && (self.cpu_split - CPU_SPLIT_DEFAULT).abs() >= 5e-4)
+                                .then(|| f64::from(self.cpu_split)),
                         })
                         .collect(),
                 })
@@ -504,7 +526,29 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
+            cpu_split: CPU_SPLIT_DEFAULT,
         }
+    }
+
+    #[test]
+    fn cpu_split_converts_to_and_from_the_setting() {
+        let mut layout = OverviewLayout::btop_default();
+        assert_eq!(layout.to_setting(), OverviewLayoutSetting::btop_default());
+        layout.cpu_split = 0.55;
+        let setting = layout.to_setting();
+        assert_eq!(
+            setting.rows[0].boxes[0].cpu_split,
+            Some(f64::from(0.55_f32))
+        );
+        assert_eq!(setting.rows[0].boxes[1].cpu_split, None);
+        assert_eq!(OverviewLayout::from_setting(Some(&setting)), layout);
+        // A saved value out of range is the default.
+        let mut bad = setting;
+        bad.rows[0].boxes[0].cpu_split = Some(0.95);
+        assert_eq!(
+            OverviewLayout::from_setting(Some(&bad)).cpu_split,
+            CPU_SPLIT_DEFAULT
+        );
     }
 
     #[test]

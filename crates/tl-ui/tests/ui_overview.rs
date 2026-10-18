@@ -2331,6 +2331,7 @@ mod page {
     use tl_ui::pages::performance::actions::{
         PerfOverviewEditLayout, PerfOverviewResetLayout, bind_keys_performance,
     };
+    use tl_ui::pages::performance::overview::cpu_box::{CPU_BOX_ID, CPU_SPLITTER_ID};
     use tl_ui::pages::performance::overview::edit::{
         DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, GHOST_VALUE_ID, TOOLBAR_ID, hide_button_id,
         title_handle_id,
@@ -3058,6 +3059,81 @@ mod page {
         assert_eq!(r.saved(), Some(before));
     }
 
+    fn cpu_split_of(setting: &Option<tl_model::settings::OverviewLayoutSetting>) -> Option<f64> {
+        setting.as_ref().and_then(|s| s.rows[0].boxes[0].cpu_split)
+    }
+
+    #[gpui_kit::test]
+    fn overview_cpu_split_drag_moves_split(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let start = center(r.gap(CPU_SPLITTER_ID));
+        let before = r.gap(CPU_SPLITTER_ID).left();
+        r.press(start, 1);
+        r.move_to(point(start.x + px(60.), start.y));
+        let moved = f32::from(r.gap(CPU_SPLITTER_ID).left() - before);
+        assert!((moved - 60.).abs() <= 1.5, "gap moved {moved}");
+        assert_eq!(r.saved(), None, "nothing is saved during the drag");
+        r.release(point(start.x + px(60.), start.y));
+        let split = r.layout().cpu_split;
+        assert!(split > 0.4 && split <= 0.8, "{split}");
+        let saved = r.saved();
+        assert_eq!(cpu_split_of(&saved), Some(f64::from(split)));
+        assert_eq!(OverviewLayout::from_setting(saved.as_ref()), r.layout());
+        // Weights and the other box do not change.
+        assert_eq!(widths(&r.layout(), 0), vec![2., 1.]);
+
+        // A drag far to the right stops where the core rows keep a 188 px column.
+        let at = center(r.gap(CPU_SPLITTER_ID));
+        r.press(at, 1);
+        r.move_to(point(px(5000.), at.y));
+        r.release(point(px(5000.), at.y));
+        let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box");
+        let gap = r.gap(CPU_SPLITTER_ID);
+        let rows_w = f32::from(frame.right() - gap.right());
+        assert!(rows_w >= 188., "core rows {rows_w}");
+        assert!(r.layout().cpu_split <= 0.8);
+    }
+
+    #[gpui_kit::test]
+    fn overview_cpu_split_double_click_resets(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let start = center(r.gap(CPU_SPLITTER_ID));
+        r.press(start, 1);
+        r.move_to(point(start.x - px(80.), start.y));
+        r.release(point(start.x - px(80.), start.y));
+        assert!(r.layout().cpu_split < 0.4);
+        assert!(cpu_split_of(&r.saved()).is_some());
+        let at = center(r.gap(CPU_SPLITTER_ID));
+        r.press(at, 2);
+        r.release(at);
+        assert_eq!(r.layout().cpu_split, 0.4);
+        assert_eq!(cpu_split_of(&r.saved()), None, "the default is not written");
+        // The gap is back where it started.
+        let back = center(r.gap(CPU_SPLITTER_ID));
+        assert!((f32::from(back.x - start.x)).abs() <= 1.5);
+    }
+
+    #[gpui_kit::test]
+    fn overview_cpu_split_saved_and_clamped(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let start = center(r.gap(CPU_SPLITTER_ID));
+        r.press(start, 1);
+        r.move_to(point(px(-5000.), start.y));
+        r.release(point(px(-5000.), start.y));
+        assert_eq!(r.layout().cpu_split, 0.2, "clamped at 20%");
+        assert_eq!(cpu_split_of(&r.saved()), Some(0.2_f32 as f64));
+        // A saved value reloads into the layout and the gap.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                layout.rows[0].boxes[0].cpu_split = Some(0.6);
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(r.layout().cpu_split, 0.6_f32);
+    }
+
     #[gpui_kit::test]
     fn overview_gap_accent_line_after_150ms(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
@@ -3205,6 +3281,7 @@ mod page {
                             .map(|kind| OverviewBoxSetting {
                                 kind: kind.into(),
                                 width: 1.,
+                                cpu_split: None,
                             })
                             .to_vec(),
                     }],

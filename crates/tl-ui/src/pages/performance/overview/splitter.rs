@@ -10,7 +10,7 @@ use gpui_kit::{Bounds, Pixels, point, size};
 use smallvec::SmallVec;
 use tl_model::settings::OVERVIEW_WEIGHT_RANGE;
 
-use super::layout::{BoxKind, OverviewLayout, Placement};
+use super::layout::{BoxKind, CPU_SPLIT_RANGE, OverviewLayout, Placement};
 
 /// Which two neighbours a splitter sits between.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,6 +42,55 @@ impl Target {
 pub struct Splitter {
     pub target: Target,
     pub bounds: Bounds<Pixels>,
+}
+
+/// The narrowest column of core rows (UI-PRF-018 "CPU box splitter"), logical px.
+pub const CORE_COLUMN_MIN_W: f32 = 188.;
+
+/// `share` of a CPU box body `body_w` wide, clamped to 20%..=80% and so that the core rows keep
+/// one [`CORE_COLUMN_MIN_W`] column beside the `gap` (all px, `scale` the UI scale). The 20%
+/// floor wins when the body is too narrow for both.
+pub fn clamp_cpu_split(share: f32, body_w: f32, gap: f32, scale: f32) -> f32 {
+    let (lo, hi) = CPU_SPLIT_RANGE;
+    let hi = if body_w > 0. {
+        hi.min((body_w - gap - CORE_COLUMN_MIN_W * scale) / body_w)
+    } else {
+        hi
+    };
+    share.clamp(lo, hi.max(lo))
+}
+
+/// A drag of the CPU box splitter: the share and pointer x when the button went down.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct CpuSplitDrag {
+    start_x: f32,
+    start_share: f32,
+    /// True once a move changed the share.
+    pub changed: bool,
+}
+
+impl CpuSplitDrag {
+    pub fn start(pointer_x: f32, share: f32) -> Self {
+        Self {
+            start_x: pointer_x,
+            start_share: share,
+            changed: false,
+        }
+    }
+
+    /// The share with the pointer at `pointer_x`, in a body `body_w` wide.
+    pub fn share_at(&self, pointer_x: f32, body_w: f32, gap: f32, scale: f32) -> f32 {
+        if body_w <= 0. {
+            return self.start_share;
+        }
+        let share = self.start_share + (pointer_x - self.start_x) / body_w;
+        clamp_cpu_split(share, body_w, gap, scale)
+    }
+}
+
+/// A share rounded to 3 decimals, as the profile stores it.
+pub fn round_split(share: f32) -> f32 {
+    (share * 1000.).round() / 1000.
 }
 
 /// The row of `kind` in `layout`.
@@ -310,6 +359,30 @@ mod tests {
         let (layout, placement) = placed();
         let drag = Drag::start(&layout, &placement, Target::Rows(0, 1), 540., 1.).expect("placed");
         assert_eq!(drag.equal_weights(), (2.5, 2.5));
+    }
+
+    #[test]
+    fn cpu_split_clamps_to_range_and_one_core_column() {
+        // A 1000 px body: 20%..=80%, and 1000 - 8 - 188 = 804 leaves 80.4%.
+        assert_eq!(clamp_cpu_split(0.1, 1000., 8., 1.), 0.2);
+        assert_eq!(clamp_cpu_split(0.9, 1000., 8., 1.), 0.8);
+        assert_eq!(clamp_cpu_split(0.5, 1000., 8., 1.), 0.5);
+        // A 600 px body keeps 188 px for the rows: (600 - 8 - 188) / 600.
+        let hi = clamp_cpu_split(0.8, 600., 8., 1.);
+        assert!((hi - 404. / 600.).abs() < 1e-6, "{hi}");
+        // A body too narrow for both takes the floor.
+        assert_eq!(clamp_cpu_split(0.5, 300., 8., 1.), 0.2);
+        // Scale widens the column.
+        assert!(clamp_cpu_split(0.8, 600., 8., 2.) < hi);
+    }
+
+    #[test]
+    fn cpu_split_drag_follows_the_pointer() {
+        let drag = CpuSplitDrag::start(400., 0.4);
+        assert!((drag.share_at(500., 1000., 8., 1.) - 0.5).abs() < 1e-6);
+        assert_eq!(drag.share_at(-5000., 1000., 8., 1.), 0.2);
+        assert_eq!(drag.share_at(5000., 1000., 8., 1.), 0.8);
+        assert_eq!(round_split(0.123_456), 0.123);
     }
 
     #[test]
