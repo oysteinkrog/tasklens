@@ -32,6 +32,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::command::{Command, KWinCommand, Tab};
 use tl_model::demand::Demand;
+use tl_model::settings::Decorations;
 
 use crate::actions::{ShowMainWindow, ToggleMiniWindow};
 use crate::anim::AnimationDriver;
@@ -39,6 +40,7 @@ use crate::app::EngineGlobal;
 use crate::chart::ChartView;
 use crate::components::menu::{TlMenu, context_menu_layer, open_context_menu_at};
 use crate::components::toast::ToastKind;
+use crate::components::window_frame::client_frame_extra;
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
@@ -92,6 +94,30 @@ pub fn mini_height(
         .fold((0u32, 0.), |(n, sum), h| (n + 1, sum + h.max(CARD_H)));
     let content = (sum + (n as f32 + 1.) * SP4) * ui_scale;
     content.min(HEIGHT_CAP * work_area_h)
+}
+
+/// The width and height the client-side frame takes from the window: the kit's shadow and border
+/// on every edge. Zero under server decorations. The spec size (UI-PRF-045) is the visible
+/// window, so the window is this much larger.
+fn frame_extra(window: &Window) -> f32 {
+    match window.window_decorations() {
+        gpui_kit::Decorations::Client { .. } => f32::from(client_frame_extra(Decorations::Client)),
+        gpui_kit::Decorations::Server => 0.,
+    }
+}
+
+/// The window size for `card_heights`: the spec size plus the frame, the height capped at 90% of
+/// the work area including the frame.
+fn mini_size(
+    card_heights: impl IntoIterator<Item = f32>,
+    work_area_h: f32,
+    ui_scale: f32,
+    extra: f32,
+) -> Size<Pixels> {
+    size(
+        px(MINI_W * ui_scale + extra),
+        px(mini_height(card_heights, work_area_h - extra, ui_scale) + extra),
+    )
 }
 
 /// The options of a mini window of `size`. No position: KDE places it through the KWin bridge.
@@ -494,10 +520,9 @@ pub fn open_mini(cx: &mut App) -> OpenOutcome {
             .filter(|c| !c.is_removing())
             .map(|c| f32::from(c.height.get()) / s)
             .collect();
-        let size = size(
-            px(MINI_W * s),
-            px(mini_height(heights, work_area_h(None, cx), s)),
-        );
+        // The frame is a guess until the window exists: the render corrects it.
+        let extra = f32::from(client_frame_extra(Decorations::Client));
+        let size = mini_size(heights, work_area_h(None, cx), s, extra);
         let options = mini_window_options(size, cx);
         let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
             let this = cx.new(|cx| MiniWindow::new(sidebar, hub, demand, size, window, cx));
@@ -533,9 +558,11 @@ impl Render for MiniWindow {
         // The cards measured their heights on their last render; each notifies this view when
         // its height changed. The window follows the sum, up to the cap.
         let heights = self.cards.iter().map(|c| f32::from(c.height.get()) / s);
-        let want = size(
-            px(MINI_W * s),
-            px(mini_height(heights, work_area_h(Some(window), cx), s)),
+        let want = mini_size(
+            heights,
+            work_area_h(Some(window), cx),
+            s,
+            frame_extra(window),
         );
         if want != self.size {
             self.size = want;
@@ -597,5 +624,20 @@ mod tests {
         assert_eq!(mini_height([80.; 2], 1000., 1.5), 276.);
         assert_eq!(mini_height([80.; 9], 1000., 1.5), 900.);
         assert_eq!(mini_height([], 1000., 1.), 8.);
+    }
+
+    /// The window is the spec size plus the client frame, so the visible window is 260 wide
+    /// (UI-PRF-045); the cap counts the frame.
+    #[test]
+    fn mini_size_adds_the_frame() {
+        assert_eq!(mini_size([80.; 2], 1000., 1., 0.), size(px(260.), px(184.)));
+        assert_eq!(
+            mini_size([80.; 2], 1000., 1., 42.),
+            size(px(302.), px(226.))
+        );
+        let capped = f32::from(mini_size([80.; 15], 1000., 1., 42.).height);
+        assert!((capped - 904.2).abs() < 0.01, "{capped}");
+        // The frame does not scale.
+        assert_eq!(mini_size([80.; 2], 1000., 1.5, 42.).width, px(432.));
     }
 }
