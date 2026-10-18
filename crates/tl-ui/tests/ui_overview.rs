@@ -3204,6 +3204,64 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn overview_memory_modes_render(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::mem_box::{
+            MEM_BOX_ID, MEM_CHART_SPLITTER_ID, MEM_COMP_CHART_ID, MEM_SPLITTER_ID,
+            MEM_USED_CHART_ID, spark_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let set = |r: &mut Rig, mode: &str| {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "memory".into(),
+                mode: mode.into(),
+            });
+        };
+        let shown = |r: &mut Rig, id: &str| {
+            let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+            r.vcx.debug_bounds(id).is_some()
+        };
+        let parts = |r: &mut Rig| {
+            [
+                shown(r, MEM_SPLITTER_ID),
+                shown(r, &spark_id(0)),
+                shown(r, MEM_USED_CHART_ID),
+                shown(r, MEM_CHART_SPLITTER_ID),
+                shown(r, MEM_COMP_CHART_ID),
+            ]
+        };
+
+        // The default: text and meter part, splitter and a 96 px sparkline column.
+        assert_eq!(parts(&mut r), [true, true, false, false, false]);
+        assert_eq!(r.layout().split(BoxKind::Memory), Some(0.7));
+        let frame = r.bounds_of(MEM_BOX_ID.into());
+        let spark = r.bounds_of(spark_id(0));
+        assert!((f32::from(spark.size.width) - 96.).abs() < 1., "{spark:?}");
+        assert!(spark.right() <= frame.right());
+
+        // The used chart over the rows, with a horizontal splitter and no sparklines.
+        set(&mut r, "chart_rows");
+        assert_eq!(parts(&mut r), [false, false, true, true, false]);
+        assert_eq!(r.layout().split(BoxKind::Memory), Some(0.5));
+        let chart = r.bounds_of(MEM_USED_CHART_ID.into());
+        let gap = r.bounds_of(MEM_CHART_SPLITTER_ID.into());
+        assert!(chart.bottom() <= gap.top() + px(1.), "{chart:?} {gap:?}");
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+
+        // The composition chart alone: no rows, no splitter, no split.
+        set(&mut r, "chart");
+        assert_eq!(parts(&mut r), [false, false, false, false, true]);
+        assert_eq!(r.layout().split(BoxKind::Memory), None);
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+
+        // Back to the default mode: the default split returns.
+        set(&mut r, "rows");
+        assert_eq!(parts(&mut r), [true, true, false, false, false]);
+        assert_eq!(r.layout().split(BoxKind::Memory), Some(0.7));
+    }
+
+    #[gpui_kit::test]
     fn overview_inner_split_drag_and_reset(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
         // CPU and Memory share the row equally, so in the CPU body the 120 px chart minimum is

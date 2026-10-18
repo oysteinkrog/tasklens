@@ -200,6 +200,11 @@ impl OverviewPage {
             cpu.update(cx, |b, cx| b.set_split(split, cx));
         }
         let mem = cx.new(|cx| MemBox::new(&hub, mem_idx, cx));
+        let mem_mode = layout.config(BoxKind::Memory).mode.id;
+        mem.update(cx, |b, cx| b.set_mode(mem_mode, cx));
+        if let Some(split) = layout.split(BoxKind::Memory) {
+            mem.update(cx, |b, cx| b.set_split(split, cx));
+        }
         let gpu = cx.new(|cx| GpuBox::new(&hub, &gpu_cards, cx));
         let disk = cx.new(|cx| DiskBox::new(&hub, &disk_cards, cx));
         let net_target = first_card(sidebar, DeviceKind::Net, cx);
@@ -213,6 +218,7 @@ impl OverviewPage {
         subs.push(cx.observe(sidebar, |this, _, cx| this.sync_cards(cx)));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_layout));
         subs.push(cx.subscribe(&cpu, Self::on_cpu_split));
+        subs.push(cx.subscribe(&mem, Self::on_mem_split));
         let procs = layout
             .has(BoxKind::TopProcs)
             .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
@@ -397,16 +403,29 @@ impl OverviewPage {
         self.save_layout(cx);
     }
 
+    /// The Memory box ended a split drag or a double-click: the share goes into the layout and
+    /// the profile.
+    fn on_mem_split(&mut self, _: Entity<MemBox>, ev: &InnerSplitChanged, cx: &mut Context<Self>) {
+        self.layout.set_split(BoxKind::Memory, ev.0);
+        self.save_layout(cx);
+    }
+
     /// Takes `layout`: the Top processes box with its demand comes or goes, then a new
     /// placement and one render.
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
         let split = layout.split(BoxKind::Cpu);
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
+        let mem_split = layout.split(BoxKind::Memory);
+        let mem_mode = layout.config(BoxKind::Memory).mode.id;
         self.layout = layout;
         self.cpu.update(cx, |b, cx| b.set_mode(cpu_mode, cx));
         if let Some(split) = split {
             self.cpu.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        self.mem.update(cx, |b, cx| b.set_mode(mem_mode, cx));
+        if let Some(split) = mem_split {
+            self.mem.update(cx, |b, cx| b.set_split(split, cx));
         }
         if procs != self.procs.is_some() {
             self.procs = procs.then(|| {

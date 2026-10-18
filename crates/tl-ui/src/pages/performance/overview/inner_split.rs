@@ -106,6 +106,8 @@ pub struct InnerSplit {
     share: f32,
     default: f32,
     mins: (f32, f32),
+    /// When set, the untouched default share leaves the second part this many logical px.
+    default_second_px: Option<f32>,
     /// The body's bounds at the last paint.
     body: Rc<Cell<Bounds<Pixels>>>,
     drag: Option<SplitDrag>,
@@ -124,6 +126,7 @@ impl InnerSplit {
             share: default,
             default,
             mins: (PART_MIN, PART_MIN),
+            default_second_px: None,
             body: Rc::default(),
             drag: None,
             hover: false,
@@ -135,6 +138,13 @@ impl InnerSplit {
     /// The parts' minimums in logical px, when the mode sets its own.
     pub fn with_mins(mut self, first: f32, second: f32) -> Self {
         self.mins = (first, second);
+        self
+    }
+
+    /// Makes the default share a fixed second part: while the share is the default, the second
+    /// part is `px` logical px wide (or tall) whatever the body size, within the clamps.
+    pub fn with_default_second_px(mut self, px: f32) -> Self {
+        self.default_second_px = Some(px);
         self
     }
 
@@ -154,8 +164,22 @@ impl InnerSplit {
     /// The first part's share of the body as laid out along `axis`, after the clamps. `gap` is
     /// the gap in px.
     pub fn share(&self, axis: SplitAxis, gap: Pixels, scale: f32) -> f32 {
-        let len = axis.length(self.body.get());
-        clamp_split(self.share, len, f32::from(gap), self.mins, scale)
+        self.sharer(gap, scale)(axis.length(self.body.get()))
+    }
+
+    /// [`Self::share`] as a function of the body length in px, for a probe that must classify
+    /// the layout from the state of this render.
+    pub fn sharer(&self, gap: Pixels, scale: f32) -> impl Fn(f32) -> f32 + 'static + use<> {
+        let (share, default, mins) = (self.share, self.default, self.mins);
+        let second_px = self.default_second_px;
+        let gap = f32::from(gap);
+        move |len| {
+            let share = match second_px {
+                Some(second) if len > 0. && share == default => (len - gap - second * scale) / len,
+                _ => share,
+            };
+            clamp_split(share, len, gap, mins, scale)
+        }
     }
 
     /// Takes the saved share. Nothing changes while the gap is held. Returns whether it changed.

@@ -664,10 +664,12 @@ mod tests {
             Some(0.4)
         );
         // A kind whose mode has one part keeps no split.
+        bad.rows[0].boxes[1].mode = Some("chart".to_owned());
         bad.rows[0].boxes[1].split = Some(0.5);
         let back = OverviewLayout::from_setting(Some(&bad));
         assert_eq!(back.split(BoxKind::Memory), None);
-        assert!(!layout.set_split(BoxKind::Memory, 0.5));
+        let mut chart = back;
+        assert!(!chart.set_split(BoxKind::Memory, 0.5));
         // Reset Box restores the default and Reset Layout every box.
         assert!(layout.reset_box(BoxKind::Cpu));
         assert!(!layout.reset_box(BoxKind::Cpu));

@@ -2,6 +2,10 @@
 //! body height (In use, Cached, Available, Swap, Commit). A row is its label, value, meter,
 //! percent and a sparkline.
 //!
+//! UI-PRF-019 gives the box three modes. `rows` puts the text and meter part and the sparkline
+//! column side by side with an inner splitter between them. `chart_rows` has a used chart over
+//! the rows, with a horizontal splitter. `chart` is the composition chart alone.
+//!
 //! The box is its own view and reads `SYSTEM` only, so a tick with only series changes does not
 //! touch it. It formats its text only when the memory totals' hash changes. Each sparkline is a
 //! cached child view that re-renders for its own series; its spec is rebuilt only when its scale
@@ -13,11 +17,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, Context, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    AnyElement, Context, Entity, EventEmitter, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
+    Subscription, Window, div, px, relative,
 };
 use rustc_hash::FxHasher;
-use smallvec::smallvec;
+use smallvec::{SmallVec, smallvec};
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
@@ -28,13 +33,17 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::BoxMode;
 use super::parts::{
-    ChartSettings, Meter, SPARK_GRID, SPARK_W, box_frame, chart_section_versions, class_probe,
-    spark_chart,
+    ChartSettings, Meter, SPARK_GRID, SPARK_W, box_chart, box_frame, chart_section_versions,
+    class_probe, spark_chart,
 };
 use crate::chart::labels::LABEL_ROW;
-use crate::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, ValueFormat, YScale, format_value};
+use crate::chart::{
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
+    YScale, format_value,
+};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::TlSettings;
@@ -45,11 +54,75 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 pub const MEM_BOX_ID: &str = "perf-overview-box-memory";
 
 /// The box's layout modes (UI-PRF-019). `rows` is the five rows of UI-PRF-017.
-pub const MODES: &[BoxMode] = &[BoxMode {
-    id: "rows",
-    label: "perf-overview-mode-rows",
-    split: None,
-}];
+///
+/// The `rows` split is the text part's share. Its default is a nominal 0.7: while the share is
+/// that value, the sparkline column keeps `SPARK_W` whatever the box width (see
+/// [`InnerSplit::with_default_second_px`]).
+pub const MODES: &[BoxMode] = &[
+    BoxMode {
+        id: "rows",
+        label: "perf-overview-mode-rows",
+        split: Some(0.7),
+    },
+    BoxMode {
+        id: "chart_rows",
+        label: "perf-overview-mode-chart-rows",
+        split: Some(0.5),
+    },
+    BoxMode {
+        id: "chart",
+        label: "perf-overview-mode-chart",
+        split: None,
+    },
+];
+
+/// The debug selector of the splitter between the text part and the sparkline column.
+pub const MEM_SPLITTER_ID: &str = "perf-overview-memory-splitter";
+/// The debug selector of its accent line.
+pub const MEM_SPLITTER_LINE_ID: &str = "perf-overview-memory-splitter-line";
+/// The debug selector of the splitter between the chart and the rows in `chart_rows`.
+pub const MEM_CHART_SPLITTER_ID: &str = "perf-overview-memory-chart-splitter";
+/// The debug selector of its accent line.
+pub const MEM_CHART_SPLITTER_LINE_ID: &str = "perf-overview-memory-chart-splitter-line";
+/// The debug selector of the used chart in `chart_rows`.
+pub const MEM_USED_CHART_ID: &str = "perf-overview-memory-used-chart";
+/// The debug selector of the composition chart in `chart`.
+pub const MEM_COMP_CHART_ID: &str = "perf-overview-memory-comp-chart";
+
+/// The narrowest text part of `rows`, logical px (UI-PRF-019).
+const TEXT_PART_MIN_W: f32 = 128.;
+/// The narrowest sparkline column, logical px. The default is `SPARK_W`, below `PART_MIN`.
+const SPARK_COLUMN_MIN_W: f32 = 48.;
+
+/// Which parts the box shows (UI-PRF-019).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MemMode {
+    Rows,
+    ChartRows,
+    Chart,
+}
+
+impl MemMode {
+    /// The mode `id`; an unknown id is the default.
+    fn from_id(id: &str) -> Self {
+        match id {
+            "chart_rows" => Self::ChartRows,
+            "chart" => Self::Chart,
+            _ => Self::Rows,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Rows => MODES[0].id,
+            Self::ChartRows => MODES[1].id,
+            Self::Chart => MODES[2].id,
+        }
+    }
+}
+
+/// The page saves the share the box ended a drag or a double-click on.
+impl EventEmitter<InnerSplitChanged> for MemBox {}
 
 const KEY_TITLE: &str = "perf-card-heading-memory";
 /// The rows in order: In use, Cached, Available, Swap, Commit.
@@ -94,17 +167,12 @@ const ROW_PCT_W: f32 = 48.;
 /// The narrowest meter a wide row keeps, logical px before `ui_scale`.
 const ROW_MIN_METER_W: f32 = 32.;
 
-/// The narrowest text column of a narrow row, logical px before `ui_scale`: a 72 px meter (as wide
-/// as the one-line label column), the gap and the percent. The sparkline takes the rest, at most
-/// `SPARK_W`.
-const ROW_NARROW_TEXT_W: f32 = ROW_LABEL_W + ROW_PCT_W + 8.;
-
-/// Whether a body `width` wide (0 before the first paint) has room for the one-line row: label,
-/// value, a meter of at least `ROW_MIN_METER_W`, percent and the sparkline, with their 4 gaps.
-/// Narrower bodies get the two-line row (`memory_row`).
+/// Whether a text part `width` wide (0 before the first paint) has room for the one-line row:
+/// label, value, a meter of at least `ROW_MIN_METER_W` and percent, with their 3 gaps. Narrower
+/// parts get the two-line row (`text_row`).
 fn row_wide(width: Pixels, m: &UiMetrics) -> bool {
-    let fixed = (ROW_LABEL_W + ROW_VALUE_W + ROW_MIN_METER_W + ROW_PCT_W + SPARK_W) * m.ui_scale;
-    width == px(0.) || f32::from(width) >= fixed + 4. * f32::from(m.sp[4])
+    let fixed = (ROW_LABEL_W + ROW_VALUE_W + ROW_MIN_METER_W + ROW_PCT_W) * m.ui_scale;
+    width == px(0.) || f32::from(width) >= fixed + 3. * f32::from(m.sp[4])
 }
 
 /// The meter label column, logical px before `ui_scale`.
@@ -197,6 +265,88 @@ fn spark_spec(
     }
 }
 
+/// The used chart of `chart_rows`: `MEM_USED` over the box range, filled, 0..total.
+fn used_spec(memory: DeviceIdx, totals: &Totals, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+    ChartSpec {
+        series: smallvec![ChartSeries {
+            id: SeriesId {
+                device: memory,
+                metric: MetricId::MEM_USED,
+            },
+            fill: Some(theme.graph.mem_fill),
+            line: theme.graph.mem_line,
+            ..ChartSeries::default()
+        }],
+        y: totals.scale(0),
+        range_ns: s.range_ns,
+        grid: chart_grid(s),
+        smooth: s.smooth,
+        background: ChartBg::List,
+        ..ChartSpec::default()
+    }
+}
+
+/// The composition chart of `chart`: In use, Cached and Available stacked, filled, 0..total.
+fn comp_spec(
+    memory: DeviceIdx,
+    totals: &Totals,
+    colors: &[Hsla; ROWS],
+    s: &ChartSettings,
+    theme: &TlTheme,
+) -> ChartSpec {
+    let band = |i: usize| {
+        let line = if i == 0 {
+            theme.graph.mem_line
+        } else {
+            colors[i]
+        };
+        ChartSeries {
+            id: SeriesId {
+                device: memory,
+                metric: ROW_METRICS[i],
+            },
+            fill: Some(Hsla {
+                a: line.a * if i == 0 { 0.6 } else { 0.4 },
+                ..line
+            }),
+            line,
+            ..ChartSeries::default()
+        }
+    };
+    ChartSpec {
+        series: smallvec![band(0), band(1), band(2)],
+        y: totals.scale(0),
+        range_ns: s.range_ns,
+        grid: chart_grid(s),
+        smooth: s.smooth,
+        stack: true,
+        background: ChartBg::List,
+        ..ChartSpec::default()
+    }
+}
+
+fn chart_grid(s: &ChartSettings) -> GridStyle {
+    GridStyle {
+        lines: true,
+        baseline: false,
+        outline: true,
+        rounded: s.rounded,
+        vertical_at: None,
+    }
+}
+
+/// The labels of a box chart: no readout, no range word (the box frame draws the time axis).
+fn chart_labels() -> ChartLabels {
+    ChartLabels {
+        heading: None,
+        value_fmt: ValueFormat::Bytes,
+        value_align: ValueAlign::Hidden,
+        range_word: SharedString::default(),
+        legend: SmallVec::new(),
+        show_axis_max: false,
+    }
+}
+
 /// `part / whole` as a fraction, `None` when `whole` is 0.
 fn fraction(part: u64, whole: u64) -> Option<f32> {
     (whole > 0).then(|| (part as f64 / whole as f64) as f32)
@@ -224,6 +374,14 @@ pub struct MemBox {
     memory: DeviceIdx,
     /// One sparkline per row.
     sparks: [Entity<ChartView>; ROWS],
+    /// The used chart of `chart_rows` and the composition chart of `chart`.
+    used_chart: Entity<ChartView>,
+    comp_chart: Entity<ChartView>,
+    mode: MemMode,
+    /// The gap between the text part and the sparkline column (`rows`).
+    spark_split: InnerSplit,
+    /// The gap between the chart and the rows (`chart_rows`).
+    chart_split: InnerSplit,
     rows: [MeterRow; ROWS],
     /// The percent column of each row; empty when unknown.
     percents: [SharedString; ROWS],
@@ -257,6 +415,18 @@ impl MemBox {
             let spec = spark_spec(memory, i, &totals, &colors, &settings, &theme);
             spark_chart(spec, ValueFormat::Bytes, hub, cx)
         });
+        let used_chart = box_chart(
+            used_spec(memory, &totals, &settings, &theme),
+            chart_labels(),
+            hub,
+            cx,
+        );
+        let comp_chart = box_chart(
+            comp_spec(memory, &totals, &colors, &settings, &theme),
+            chart_labels(),
+            hub,
+            cx,
+        );
         let rows = std::array::from_fn(|i| MeterRow {
             label: tr(cx, KEY_ROWS[i]),
             value: SharedString::default(),
@@ -267,6 +437,22 @@ impl MemBox {
             hub: hub.clone(),
             memory,
             sparks,
+            used_chart,
+            comp_chart,
+            mode: MemMode::Rows,
+            spark_split: InnerSplit::new(
+                MEM_SPLITTER_ID,
+                MEM_SPLITTER_LINE_ID,
+                MODES[0].split.unwrap_or_default(),
+            )
+            .with_mins(TEXT_PART_MIN_W, SPARK_COLUMN_MIN_W)
+            .with_default_second_px(SPARK_W),
+            chart_split: InnerSplit::new(
+                MEM_CHART_SPLITTER_ID,
+                MEM_CHART_SPLITTER_LINE_ID,
+                MODES[1].split.unwrap_or_default(),
+            )
+            .with_mins(PART_MIN, PART_MIN),
             rows,
             percents: Default::default(),
             totals,
@@ -305,6 +491,62 @@ impl MemBox {
     /// One sparkline per row, in row order.
     pub fn sparks(&self) -> &[Entity<ChartView>; ROWS] {
         &self.sparks
+    }
+
+    /// The shown mode's id.
+    pub fn mode(&self) -> &'static str {
+        self.mode.id()
+    }
+
+    /// Shows mode `id`; an unknown id is the default mode. Only this box renders again.
+    pub fn set_mode(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mode = MemMode::from_id(id);
+        if mode != self.mode {
+            self.mode = mode;
+            cx.notify();
+        }
+    }
+
+    /// The shown mode's split as the box lays it out, after the clamps: the text part's share in
+    /// `rows`, the chart's in `chart_rows`, 0 in `chart`.
+    pub fn split(&self, m: &UiMetrics) -> f32 {
+        match self.mode {
+            MemMode::Rows => self.spark_split.share(SplitAxis::Row, m.sp[5], m.ui_scale),
+            MemMode::ChartRows => self
+                .chart_split
+                .share(SplitAxis::Column, m.sp[5], m.ui_scale),
+            MemMode::Chart => 0.,
+        }
+    }
+
+    /// Takes the saved share for the shown mode. Nothing changes while the gap is held.
+    pub fn set_split(&mut self, share: f32, cx: &mut Context<Self>) {
+        let changed = match self.mode {
+            MemMode::Rows => self.spark_split.set_share(share),
+            MemMode::ChartRows => self.chart_split.set_share(share),
+            MemMode::Chart => false,
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn spark_inner_split(&mut self) -> &mut InnerSplit {
+        &mut self.spark_split
+    }
+
+    fn chart_inner_split(&mut self) -> &mut InnerSplit {
+        &mut self.chart_split
+    }
+
+    /// The used chart of `chart_rows`.
+    pub fn used_chart(&self) -> &Entity<ChartView> {
+        &self.used_chart
+    }
+
+    /// The composition chart of `chart`.
+    pub fn comp_chart(&self) -> &Entity<ChartView> {
+        &self.comp_chart
     }
 
     /// The title and value text.
@@ -489,6 +731,10 @@ impl MemBox {
             );
             chart.update(cx, |v, cx| v.set_spec(spec, cx));
         }
+        let used = used_spec(self.memory, &self.totals, &self.settings, &theme);
+        self.used_chart.update(cx, |v, cx| v.set_spec(used, cx));
+        let comp = comp_spec(self.memory, &self.totals, &colors, &self.settings, &theme);
+        self.comp_chart.update(cx, |v, cx| v.set_spec(comp, cx));
     }
 }
 
@@ -536,13 +782,16 @@ pub fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .into_any_element()
 }
 
-/// One memory row: label, value, meter, percent and a sparkline that fills the row height.
-/// A `wide` row puts them on one line. A narrow row has two lines of text, the label and value
-/// over the meter and percent, with the sparkline beside them.
-fn memory_row(
+/// The height of a text row, logical px before `ui_scale`: one line, or two when not `wide`.
+fn row_min_h(wide: bool, s: f32) -> gpui_kit::Pixels {
+    px(if wide { LABEL_ROW } else { 2. * LABEL_ROW } * s)
+}
+
+/// One memory row's text and meter part: label, value, meter and percent. A `wide` row puts them
+/// on one line. A narrow row has two lines, the label and value over the meter and percent.
+fn text_row(
     row: &MeterRow,
     percent: &SharedString,
-    chart: &Entity<ChartView>,
     index: usize,
     wide: bool,
     m: &UiMetrics,
@@ -582,11 +831,6 @@ fn memory_row(
             fraction: row.fraction,
             color: row.color,
         });
-    let spark = div()
-        .debug_selector(move || spark_id(index))
-        .relative()
-        .h_full()
-        .child(chart.clone().cached(StyleRefinement::default().size_full()));
     let line = || div().flex().flex_row().items_center().gap(m.sp[4]);
     let row_el = div()
         .debug_selector(move || row_id(index))
@@ -594,6 +838,7 @@ fn memory_row(
         .flex_row()
         .flex_1()
         .items_center()
+        .min_h(row_min_h(wide, s))
         .gap(m.sp[4]);
     if !wide {
         let text = div()
@@ -601,7 +846,7 @@ fn memory_row(
             .flex_col()
             .justify_center()
             .flex_1()
-            .min_w(px(ROW_NARROW_TEXT_W * s))
+            .min_w_0()
             .child(
                 line()
                     .h(px(LABEL_ROW * s))
@@ -609,20 +854,124 @@ fn memory_row(
                     .child(value),
             )
             .child(line().h(px(LABEL_ROW * s)).child(meter).child(pct));
-        return row_el
-            .min_h(px(2. * LABEL_ROW * s))
-            .child(text)
-            .child(spark.flex_1().min_w_0().max_w(px(SPARK_W * s)))
-            .into_any_element();
+        return row_el.child(text).into_any_element();
     }
     row_el
-        .min_h(px(LABEL_ROW * s))
         .child(label.flex_none().w(px(ROW_LABEL_W * s)))
         .child(value.w(px(ROW_VALUE_W * s)))
         .child(meter)
         .child(pct)
-        .child(spark.flex_none().w(px(SPARK_W * s)))
         .into_any_element()
+}
+
+/// Row `index`'s sparkline cell. It has the height of its text row, so the two columns line up.
+fn spark_cell(chart: &Entity<ChartView>, index: usize, wide: bool, m: &UiMetrics) -> AnyElement {
+    div()
+        .debug_selector(move || spark_id(index))
+        .relative()
+        .flex_1()
+        .min_h(row_min_h(wide, m.ui_scale))
+        .child(chart.clone().cached(StyleRefinement::default().size_full()))
+        .into_any_element()
+}
+
+impl MemBox {
+    /// The five text rows in a column that shares the body height.
+    fn text_rows(&self, wide: bool, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap(m.sp[2])
+            .children(
+                self.rows
+                    .iter()
+                    .zip(&self.percents)
+                    .enumerate()
+                    .map(|(i, (r, p))| text_row(r, p, i, wide, m, theme)),
+            )
+            .into_any_element()
+    }
+
+    /// `rows`: the text part, the splitter and the sparkline column.
+    fn rows_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        wide: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let share = self.split(m);
+        let text = self.text_rows(wide, m, theme);
+        let sparks = div().flex().flex_col().size_full().gap(m.sp[2]).children(
+            self.sparks
+                .iter()
+                .enumerate()
+                .map(|(i, c)| spark_cell(c, i, wide, m)),
+        );
+        div()
+            .relative()
+            .flex()
+            .flex_row()
+            .size_full()
+            .gap(m.sp[5])
+            .child(div().flex_none().w(relative(share)).h_full().child(text))
+            .child(div().flex_1().min_w_0().h_full().child(sparks))
+            .child(self.spark_split.probe(Self::spark_inner_split, cx))
+            .child(self.spark_split.gap(
+                SplitAxis::Row,
+                share,
+                m.sp[5],
+                Self::spark_inner_split,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// `chart_rows`: the used chart over the five rows, with a horizontal splitter.
+    fn chart_rows_body(
+        &mut self,
+        wide: bool,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let share = self.split(m);
+        let chart = div()
+            .debug_selector(|| MEM_USED_CHART_ID.into())
+            .relative()
+            .flex_none()
+            .h(relative(share))
+            .w_full()
+            .child(
+                self.used_chart
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            );
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap(m.sp[5])
+            .child(chart)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(self.text_rows(wide, m, theme)),
+            )
+            .child(self.chart_split.probe(Self::chart_inner_split, cx))
+            .child(self.chart_split.gap(
+                SplitAxis::Column,
+                share,
+                m.sp[5],
+                Self::chart_inner_split,
+                cx,
+            ))
+            .into_any_element()
+    }
 }
 
 impl Render for MemBox {
@@ -632,26 +981,49 @@ impl Render for MemBox {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let probe_m = m;
-        let wide = row_wide(self.body.get().width, &m);
+        let body_w = self.body.get().width;
+        // The class the probe reports: whether the text rows are one line. `chart` has none.
+        let (class, classify): (u32, Box<dyn Fn(Size<Pixels>) -> u32>) = match self.mode {
+            MemMode::Rows => {
+                let sharer = self.spark_split.sharer(m.sp[5], m.ui_scale);
+                let text_w = move |len: f32| sharer(len) * len;
+                let wide = row_wide(px(text_w(f32::from(body_w))), &m);
+                (
+                    u32::from(wide),
+                    Box::new(move |b| {
+                        u32::from(row_wide(px(text_w(f32::from(b.width))), &probe_m))
+                    }),
+                )
+            }
+            MemMode::ChartRows => (
+                u32::from(row_wide(body_w, &m)),
+                Box::new(move |b| u32::from(row_wide(b.width, &probe_m))),
+            ),
+            MemMode::Chart => (0, Box::new(|_| 0)),
+        };
+        let inner: AnyElement = match self.mode {
+            MemMode::Rows => self.rows_body(&m, &theme, class == 1, cx),
+            MemMode::ChartRows => self.chart_rows_body(class == 1, &m, &theme, cx),
+            MemMode::Chart => div()
+                .debug_selector(|| MEM_COMP_CHART_ID.into())
+                .relative()
+                .size_full()
+                .child(
+                    self.comp_chart
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                )
+                .into_any_element(),
+        };
         let body = div()
             .debug_selector(|| MEM_BODY_ID.into())
             .relative()
-            .flex()
-            .flex_col()
             .size_full()
-            .gap(m.sp[2])
-            .children(
-                self.rows
-                    .iter()
-                    .zip(&self.percents)
-                    .zip(&self.sparks)
-                    .enumerate()
-                    .map(|(i, ((r, p), c))| memory_row(r, p, c, i, wide, &m, &theme)),
-            )
+            .child(inner)
             .child(class_probe(
                 Rc::clone(&self.body),
-                u32::from(wide),
-                move |b| u32::from(row_wide(b.width, &probe_m)),
+                class,
+                classify,
                 cx.entity_id(),
             ))
             .into_any_element();

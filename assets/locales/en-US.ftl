@@ -751,6 +751,7 @@ perf-overview-mode-cores = Cores
 perf-overview-mode-core-charts = Core charts
 perf-overview-mode-rows = Rows
 perf-overview-mode-chart-engines = Chart and engines
+perf-overview-mode-chart-rows = Chart and rows
 perf-overview-mode-columns = Columns
 perf-overview-mode-list = List
 
