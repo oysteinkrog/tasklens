@@ -3189,6 +3189,17 @@ fn security_loginuid_unset() {
 }
 
 #[test]
+fn security_speculation_text_from_status() {
+    let (_tmp, root) = security_root();
+    let s = security(&root, 4201);
+    assert_eq!(&*s.speculation_store_bypass, "thread force mitigated");
+    assert_eq!(
+        &*s.speculation_indirect_branch,
+        "conditional force disabled"
+    );
+}
+
+#[test]
 fn security_ns_shared_and_isolated() {
     let (_tmp, root) = security_root();
     let s = security(&root, 4212);

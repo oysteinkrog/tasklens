@@ -2483,8 +2483,7 @@ mod tests {
         assert_eq!(build(&w, None)[1].len(), RIGHT.len());
     }
 
-    /// tasklens-yms.41: an unreported Dumpable leaves the Flags row at "None reported"; the
-    /// Login UID and speculation rows carry their values.
+    /// tasklens-yms.41: an unreported Dumpable leaves the Flags row at "None reported".
     #[test]
     fn flags_ignore_unreported_dumpable() {
         let mut d = detail();
@@ -2495,11 +2494,5 @@ mod tests {
         let w = SecurityWords::en();
         let [left, right] = build(&w, Some(&d));
         assert_eq!(text(&left, SecField::Flags), "None reported");
-        assert_eq!(text(&left, SecField::LoginUid), "oystein (1000)");
-        assert_eq!(text(&right, SecField::StoreBypass), "thread vulnerable");
-        assert_eq!(
-            text(&right, SecField::IndirectBranch),
-            "conditional enabled"
-        );
     }
 }

@@ -5634,6 +5634,25 @@ mod tests {
         );
     }
 
+    /// tasklens-yms.41: fixture `status` and `loginuid` reach the payload as the Login UID,
+    /// Store bypass and Indirect branch values.
+    #[test]
+    fn security_payload_login_uid_and_speculation() {
+        let (tmp, cfg) = edge_root();
+        let dir = tmp.path().join("proc/4201");
+        fs::write(dir.join("loginuid"), b"1000\n").expect("write loginuid");
+        let d = tabs(&[(a(), DetailTab::Security)]);
+        let (_src, out, _) = step(ProcessDetailSource::new(cfg), &d, &every_ms(500), 0);
+        let TabPayload::Security(sec) = &*out[0].1 else {
+            panic!("expected Security");
+        };
+        assert_eq!(sec.login_uid, Some(1000));
+        assert_eq!(&*sec.store_bypass.value, "thread force mitigated");
+        assert_eq!(sec.store_bypass.validity, Validity::Valid);
+        assert_eq!(&*sec.indirect_branch.value, "conditional force disabled");
+        assert_eq!(sec.indirect_branch.validity, Validity::Valid);
+    }
+
     // ---- General tab (tasklens-dwy.13) ----
 
     /// `btime` in the General fixture's `proc/stat`.
