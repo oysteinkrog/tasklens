@@ -1986,14 +1986,14 @@ mod tests {
         // A split is written with 3 decimals on the cpu entry and loads back.
         let mut s = Settings::default();
         let mut layout = OverviewLayoutSetting::btop_default();
-        layout.rows[0].boxes[0].cpu_split = Some(0.123_456);
+        layout.rows[0].boxes[0].cpu_split = Some(0.456_789);
         s.performance.overview = Some(layout);
         let text = toml::to_string(&s).expect("serializes");
-        assert!(text.contains("cpu_split = 0.123"), "{text}");
+        assert!(text.contains("cpu_split = 0.457"), "{text}");
         let (back, changed) = load_toml(&text);
         assert!(changed.is_empty(), "{changed:?}");
         let rows = back.performance.overview.expect("saved").rows;
-        assert_eq!(rows[0].boxes[0].cpu_split, Some(0.123));
+        assert_eq!(rows[0].boxes[0].cpu_split, Some(0.457));
         assert_eq!(rows[0].boxes[1].cpu_split, None);
         // The default layout writes no cpu_split.
         let mut s = Settings::default();

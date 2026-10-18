@@ -371,7 +371,7 @@ mod tests {
         let hi = clamp_cpu_split(0.8, 600., 8., 1.);
         assert!((hi - 404. / 600.).abs() < 1e-6, "{hi}");
         // A body too narrow for both takes the floor.
-        assert_eq!(clamp_cpu_split(0.5, 300., 8., 1.), 0.2);
+        assert_eq!(clamp_cpu_split(0.5, 200., 8., 1.), 0.2);
         // Scale widens the column.
         assert!(clamp_cpu_split(0.8, 600., 8., 2.) < hi);
     }
