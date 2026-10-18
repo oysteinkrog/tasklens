@@ -21,7 +21,7 @@ use tl_model::table::Total;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::components::kv_grid::{ValueLook, kv_words, value_look_in};
-use tl_ui::components::window_frame::window_options;
+use tl_ui::components::window_frame::{client_frame_extra, window_options};
 use tl_ui::windows::frame::{PwnWindow, open_pwn, pwn_window_spec, spec};
 use tl_ui::windows::props::filter::{PropsFilter, filter_bar};
 use tl_ui::windows::props::general::{FieldId, GeneralTab, RESTRICTED_TOOLTIP};
@@ -981,7 +981,10 @@ fn open_sizes(
     let mut vcx = VisualTestContext::from_window(handle.into(), cx);
     vcx.run_until_parked();
     let opened = vcx.update(|window, _| window.bounds().size);
-    (opened, min.expect("minimum size set"))
+    // The window is larger than the spec by the client frame (tasklens-fut.23).
+    let extra = client_frame_extra(Decorations::Client);
+    let visible = |s: gpui_kit::Size<Pixels>| size(s.width - extra, s.height - extra);
+    (visible(opened), visible(min.expect("minimum size set")))
 }
 
 #[gpui_kit::test]
