@@ -1562,10 +1562,10 @@ impl TlMenuPopup {
                 .id(ix)
                 .test_support()
                 .flex_none()
-                .h(px(1. / window.scale_factor()))
+                .h(UiMetrics::hairline(window))
                 .my(m.sp[2])
                 .mx(m.sp[4])
-                .bg(t.divider)
+                .bg(separator_color(t.menu_bg, t.text_secondary))
                 .into_any_element(),
             Entry::Header(label) => {
                 let mut header = div()
@@ -1718,6 +1718,20 @@ impl Render for TlMenuPopup {
 
 /// The text of the first key binding for `action` as seen from `context`, for example
 /// "Shift+Delete". Falls back to a binding with no key context.
+/// Separator line colour: the menu text colour mixed 30% into the menu background. The theme
+/// `divider` is one RGB step from `menu_bg`, so it cannot be seen inside a menu.
+fn separator_color(menu_bg: Hsla, text: Hsla) -> Hsla {
+    let (bg, fg): (gpui_kit::Rgba, gpui_kit::Rgba) = (menu_bg.into(), text.into());
+    let mix = |a: f32, b: f32| a + (b - a) * 0.3;
+    gpui_kit::Rgba {
+        r: mix(bg.r, fg.r),
+        g: mix(bg.g, fg.g),
+        b: mix(bg.b, fg.b),
+        a: 1.0,
+    }
+    .into()
+}
+
 fn shortcut_hint(
     action: &dyn Action,
     context: &FocusHandle,
@@ -2016,6 +2030,31 @@ pub fn context_menu_layer(window: &mut Window, cx: &mut App) -> Option<AnyElemen
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn separator_contrasts_with_the_menu_background() {
+        use gpui_kit::{Hsla, Rgba, rgb};
+        let lum = |c: Hsla| {
+            let c: Rgba = c.into();
+            0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+        };
+        // Default Dark: divider #2B2F33 on menu_bg #2A2E31 is one step apart (invisible).
+        let bg: Hsla = rgb(0x2A2E31).into();
+        let old: Hsla = rgb(0x2B2F33).into();
+        assert!((lum(old) - lum(bg)).abs() < 0.01);
+        let line = super::separator_color(bg, rgb(0x959A9C).into());
+        assert!(
+            (lum(line) - lum(bg)).abs() > 0.05,
+            "dark separator is visible"
+        );
+        // Default Light: menu_bg #FFFFFF, text_secondary #5F6368.
+        let bg: Hsla = rgb(0xFFFFFF).into();
+        let line = super::separator_color(bg, rgb(0x5F6368).into());
+        assert!(
+            (lum(line) - lum(bg)).abs() > 0.05,
+            "light separator is visible"
+        );
+    }
+
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
