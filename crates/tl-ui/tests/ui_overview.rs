@@ -2147,8 +2147,9 @@ mod page {
     use std::time::Duration;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
-        Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+        MouseUpEvent, ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext,
+        VisualTestContext, Window, div, point, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::demand::{CpuDemand, Demand};
@@ -2694,6 +2695,182 @@ mod page {
         let hub = r.hub.clone();
         assert!(r.vcx.read_entity(&hub, |h, _| h.is_hidden()));
         assert_eq!(r.merged(), Demand::default());
+    }
+
+    fn center(b: gpui_kit::Bounds<gpui_kit::Pixels>) -> gpui_kit::Point<gpui_kit::Pixels> {
+        point(b.left() + b.size.width / 2., b.top() + b.size.height / 2.)
+    }
+
+    impl Rig<'_> {
+        fn gap(&mut self, id: &'static str) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+            self.vcx.debug_bounds(id).expect(id)
+        }
+
+        fn layout(&mut self) -> OverviewLayout {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| page.read(cx).layout().clone())
+        }
+
+        fn saved(&mut self) -> Option<tl_model::settings::OverviewLayoutSetting> {
+            self.vcx
+                .update(|_, cx| TlSettings::settings(cx).performance.overview.clone())
+        }
+
+        fn press(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>, click_count: usize) {
+            self.vcx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count,
+                first_mouse: false,
+            });
+            draw(self.vcx);
+        }
+
+        fn move_to(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
+            self.vcx
+                .simulate_mouse_move(at, Some(MouseButton::Left), Modifiers::none());
+            draw(self.vcx);
+        }
+
+        fn release(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
+            self.vcx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+            });
+            draw(self.vcx);
+        }
+    }
+
+    fn widths(layout: &OverviewLayout, row: usize) -> Vec<f32> {
+        layout.rows[row].boxes.iter().map(|b| b.width).collect()
+    }
+
+    #[gpui_kit::test]
+    fn overview_gap_drag_moves_weight_between_neighbours(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let start = center(r.gap("perf-overview-splitter-col-cpu"));
+        r.press(start, 1);
+        r.move_to(point(start.x - px(100.), start.y));
+        let layout = r.layout();
+        let w = widths(&layout, 0);
+        assert!(w[0] < 2. && w[1] > 1., "weights {w:?}");
+        assert!((w[0] + w[1] - 3.).abs() < 1e-3, "the sum stays: {w:?}");
+        assert_eq!(widths(&layout, 1), vec![1., 1., 1.], "other boxes stay");
+        assert_eq!((layout.rows[0].height, layout.rows[1].height), (3., 2.));
+        // CPU lost 100 px and Memory has it: 773 - 100 and 387 + 100, within a px of rounding.
+        let page = r.page.clone();
+        let placed = r.vcx.update(|_, cx| page.read(cx).placement().clone());
+        let width = |kind| {
+            f32::from(
+                placed
+                    .boxes
+                    .iter()
+                    .find(|b| b.kind == kind)
+                    .expect("placed")
+                    .bounds
+                    .size
+                    .width,
+            )
+        };
+        assert!(
+            (width(BoxKind::Cpu) - 673.).abs() <= 1.5,
+            "{}",
+            width(BoxKind::Cpu)
+        );
+        assert!((width(BoxKind::Memory) - 487.).abs() <= 1.5);
+        // A drag past the minimum stops at it: CPU 280 px.
+        r.move_to(point(px(0.), start.y));
+        let page = r.page.clone();
+        let placed = r.vcx.update(|_, cx| page.read(cx).placement().clone());
+        let cpu = placed
+            .boxes
+            .iter()
+            .find(|b| b.kind == BoxKind::Cpu)
+            .expect("cpu");
+        assert_eq!(f32::from(cpu.bounds.size.width), 280.);
+        r.release(point(px(0.), start.y));
+    }
+
+    #[gpui_kit::test]
+    fn overview_row_gap_double_click_equalizes(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let at = center(r.gap("perf-overview-splitter-row-0"));
+        r.press(at, 2);
+        let layout = r.layout();
+        assert_eq!((layout.rows[0].height, layout.rows[1].height), (2.5, 2.5));
+        assert_eq!(widths(&layout, 0), vec![2., 1.], "boxes keep their widths");
+        // The double-click saves at once.
+        assert_eq!(
+            OverviewLayout::from_setting(r.saved().as_ref()),
+            layout,
+            "saved at once"
+        );
+        // A vertical gap equalizes its two boxes only.
+        let at = center(r.gap("perf-overview-splitter-col-cpu"));
+        r.press(at, 2);
+        r.release(at);
+        assert_eq!(widths(&r.layout(), 0), vec![1.5, 1.5]);
+    }
+
+    #[gpui_kit::test]
+    fn overview_layout_saved_after_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        assert_eq!(r.saved(), None);
+        let start = center(r.gap("perf-overview-splitter-row-0"));
+        r.press(start, 1);
+        r.move_to(point(start.x, start.y + px(37.)));
+        r.move_to(point(start.x, start.y + px(61.)));
+        assert_eq!(r.saved(), None, "nothing is saved during the drag");
+        let layout = r.layout();
+        assert!(layout.rows[0].height > 3. && layout.rows[1].height < 2.);
+        r.release(point(start.x, start.y + px(61.)));
+        let saved = r.saved().expect("saved when the drag ends");
+        let layout = r.layout();
+        assert_eq!(OverviewLayout::from_setting(Some(&saved)), layout);
+        // Weights are stored with 3 decimals.
+        for row in &saved.rows {
+            assert_eq!(row.height, (row.height * 1000.).round() / 1000.);
+        }
+        // A click that moves nothing saves nothing more: the settings stay as they are.
+        let before = saved;
+        let again = center(r.gap("perf-overview-splitter-row-0"));
+        r.press(again, 1);
+        r.release(again);
+        assert_eq!(r.saved(), Some(before));
+    }
+
+    #[gpui_kit::test]
+    fn overview_gap_accent_line_after_150ms(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let at = center(r.gap("perf-overview-splitter-col-cpu"));
+        r.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds("perf-overview-splitter-line").is_none());
+        r.vcx.executor().advance_clock(Duration::from_millis(150));
+        draw(r.vcx);
+        let line = r
+            .vcx
+            .debug_bounds("perf-overview-splitter-line")
+            .expect("line");
+        assert_eq!(f32::from(line.size.width), 2.);
+        r.vcx
+            .simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::none());
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds("perf-overview-splitter-line").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn overview_stacked_layout_has_no_splitters(cx: &mut TestAppContext) {
+        let r = open(cx, true, 600., 900.);
+        assert!(
+            r.vcx
+                .debug_bounds("perf-overview-splitter-col-cpu")
+                .is_none()
+        );
+        assert!(r.vcx.debug_bounds("perf-overview-splitter-row-0").is_none());
     }
 }
 

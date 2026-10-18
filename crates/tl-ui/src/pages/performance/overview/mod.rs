@@ -23,15 +23,19 @@ pub mod mem_box;
 pub mod net_box;
 pub mod parts;
 pub mod procs_box;
+pub mod splitter;
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
 
+use std::time::Duration;
+
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Subscription, Window, canvas, div, px, size,
+    Focusable, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Pixels, Render, SharedString, Size,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Task, Window,
+    canvas, div, px, size,
 };
 use smallvec::SmallVec;
 use tl_model::demand::{CpuDemand, Demand};
@@ -44,6 +48,7 @@ use self::layout::{BoxKind, OverviewLayout, Placement, place};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
+use self::splitter::{Drag, Splitter, Target, round_weights, set_weights, splitters};
 use super::details::KeyValueModel;
 use super::page::DevicePage;
 use super::sidebar::DeviceSidebar;
@@ -53,7 +58,7 @@ use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::settings_global::TlSettings;
-use crate::theme::metrics;
+use crate::theme::{current, metrics};
 
 /// The Overview page's key.
 pub const OVERVIEW_KEY: &str = "overview";
@@ -65,6 +70,22 @@ pub const BOX_ID_PREFIX: &str = "perf-overview-box-";
 const SCROLL_ID: &str = "perf-overview-scroll";
 
 const KEY_TITLE: &str = "perf-overview-title";
+
+/// How long the pointer rests on a gap before its accent line shows.
+pub const SPLITTER_HOVER_DELAY: Duration = Duration::from_millis(150);
+
+/// The accent line in a hovered gap, logical px.
+const SPLITTER_LINE: f32 = 2.;
+
+/// The debug selector of the accent line of the hovered or dragged gap.
+pub const SPLITTER_LINE_ID: &str = "perf-overview-splitter-line";
+
+/// A gap drag in progress. `changed` is set once a move changed a weight, so a click that
+/// moved nothing saves nothing.
+struct ActiveDrag {
+    drag: Drag,
+    changed: bool,
+}
 
 /// (key, device, heading) of each live GPU or disk card, in sidebar order.
 type CardList = SmallVec<[(DeviceKey, DeviceIdx, SharedString); 8]>;
@@ -128,6 +149,12 @@ pub struct OverviewPage {
     header: (SharedString, SharedString),
     details: KeyValueModel,
     focus: FocusHandle,
+    /// The gap being dragged. The layout is saved when the drag ends, never during it.
+    drag: Option<ActiveDrag>,
+    /// The gap under the pointer, and whether its accent line shows yet.
+    hover: Option<Target>,
+    hover_shown: bool,
+    hover_task: Option<Task<()>>,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -200,6 +227,10 @@ impl OverviewPage {
             header: (tr(cx, KEY_TITLE), SharedString::default()),
             details: KeyValueModel::new(&[]),
             focus: cx.focus_handle(),
+            drag: None,
+            hover: None,
+            hover_shown: false,
+            hover_task: None,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -333,7 +364,7 @@ impl OverviewPage {
     /// box with its demand comes or goes. Any other settings change does nothing here.
     fn sync_layout(&mut self, cx: &mut Context<Self>) {
         let layout = saved_layout(cx);
-        if layout == self.layout {
+        if layout == self.layout || self.drag.is_some() {
             return;
         }
         let procs = layout.has(BoxKind::TopProcs);
@@ -347,6 +378,166 @@ impl OverviewPage {
         }
         self.relayout(cx);
         self.notify(cx);
+    }
+
+    /// The pointer position along `target`'s drag axis.
+    fn axis(target: Target, position: gpui_kit::Point<Pixels>) -> f32 {
+        f32::from(if target.is_vertical() {
+            position.x
+        } else {
+            position.y
+        })
+    }
+
+    /// Button down on a gap: a double-click gives the two neighbours equal sizes and saves; a
+    /// single press starts a drag.
+    fn splitter_down(&mut self, target: Target, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        let scale = metrics(cx).ui_scale;
+        let Some(drag) = Drag::start(
+            &self.layout,
+            &self.placement,
+            target,
+            Self::axis(target, ev.position),
+            scale,
+        ) else {
+            return;
+        };
+        cx.stop_propagation();
+        if ev.click_count >= 2 {
+            self.drag = None;
+            let weights = drag.equal_weights();
+            set_weights(&mut self.layout, target, weights);
+            self.apply_layout(cx);
+            self.save_layout(cx);
+        } else {
+            self.drag = Some(ActiveDrag {
+                drag,
+                changed: false,
+            });
+            self.notify(cx);
+        }
+    }
+
+    /// The pointer moved while a gap is held: the two neighbours take new weights and the page
+    /// places again.
+    fn splitter_move(&mut self, position: gpui_kit::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(active) = &mut self.drag else {
+            return;
+        };
+        let (drag, target) = (active.drag, active.drag.target);
+        let weights = drag.weights_at(Self::axis(target, position));
+        set_weights(&mut self.layout, target, weights);
+        active.changed = true;
+        self.apply_layout(cx);
+    }
+
+    /// The button went up: the drag ends and a changed layout is saved to the profile.
+    fn splitter_up(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.drag.take() else {
+            return;
+        };
+        if active.changed {
+            round_weights(&mut self.layout);
+            self.apply_layout(cx);
+            self.save_layout(cx);
+        } else {
+            self.notify(cx);
+        }
+    }
+
+    /// Places the page again after a weight change.
+    fn apply_layout(&mut self, cx: &mut Context<Self>) {
+        self.relayout(cx);
+        self.notify(cx);
+    }
+
+    /// Writes the layout to `[performance.overview]`.
+    fn save_layout(&self, cx: &mut Context<Self>) {
+        if !cx.has_global::<TlSettings>() {
+            return;
+        }
+        let mut setting = self.layout.to_setting();
+        let round = |w: &mut f64| *w = (*w * 1000.).round() / 1000.;
+        for row in &mut setting.rows {
+            round(&mut row.height);
+            row.boxes.iter_mut().for_each(|b| round(&mut b.width));
+        }
+        TlSettings::update(cx, |d| d.settings.performance.overview = Some(setting));
+    }
+
+    /// The pointer entered or left a gap. The accent line shows after
+    /// [`SPLITTER_HOVER_DELAY`] and goes at once on leaving.
+    fn splitter_hover(&mut self, target: Target, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            if self.hover == Some(target) {
+                return;
+            }
+            self.hover = Some(target);
+            self.hover_shown = false;
+            self.hover_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SPLITTER_HOVER_DELAY).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.hover_task = None;
+                    if this.hover == Some(target) {
+                        this.hover_shown = true;
+                        this.notify(cx);
+                    }
+                });
+            }));
+        } else if self.hover == Some(target) {
+            self.hover = None;
+            self.hover_shown = false;
+            self.hover_task = None;
+        } else {
+            return;
+        }
+        self.notify(cx);
+    }
+
+    /// The hit area of one gap, with its cursor, its handlers and its accent line.
+    fn gap_element(&self, s: Splitter, cx: &mut Context<Self>) -> AnyElement {
+        let target = s.target;
+        let vertical = target.is_vertical();
+        let dragging = self.drag.as_ref().map(|a| a.drag.target);
+        let lit = dragging == Some(target)
+            || (dragging.is_none() && self.hover == Some(target) && self.hover_shown);
+        let gap = div()
+            .id(SharedString::from(target.selector()))
+            .debug_selector(move || target.selector())
+            .absolute()
+            .left(s.bounds.left())
+            .top(s.bounds.top())
+            .w(s.bounds.size.width)
+            .h(s.bounds.size.height)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    this.splitter_down(target, ev, cx);
+                }),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.splitter_hover(target, *hovered, cx);
+            }));
+        let gap = if vertical {
+            gap.cursor_ew_resize()
+        } else {
+            gap.cursor_ns_resize()
+        };
+        if !lit {
+            return gap.into_any_element();
+        }
+        let line = div()
+            .debug_selector(|| SPLITTER_LINE_ID.into())
+            .absolute()
+            .bg(current(cx).accent);
+        let line = if vertical {
+            let x = (f32::from(s.bounds.size.width) - SPLITTER_LINE) / 2.;
+            line.left(px(x)).top_0().bottom_0().w(px(SPLITTER_LINE))
+        } else {
+            let y = (f32::from(s.bounds.size.height) - SPLITTER_LINE) / 2.;
+            line.top(px(y)).left_0().right_0().h(px(SPLITTER_LINE))
+        };
+        gap.child(line).into_any_element()
     }
 
     fn notify(&self, cx: &mut Context<Self>) {
@@ -472,6 +663,8 @@ impl Render for OverviewPage {
             self.send_demand(cx);
         }
         let this = cx.entity().downgrade();
+        let this_move = this.clone();
+        let dragging = self.drag.is_some();
         let measure = canvas(
             move |bounds, _, cx| {
                 // After the frame: a notify during the frame is lost, so the page would keep
@@ -481,10 +674,38 @@ impl Render for OverviewPage {
                     let _ = this.update(cx, |v, cx| v.resize(size, cx));
                 });
             },
-            |_, _, _, _| {},
+            move |_, _, window, _| {
+                if !dragging {
+                    return;
+                }
+                // The held gap follows the pointer wherever it goes, also outside the gap.
+                let moved = this_move.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                    if !phase.bubble() {
+                        return;
+                    }
+                    let _ = moved.update(cx, |p, cx| {
+                        if e.pressed_button == Some(MouseButton::Left) {
+                            p.splitter_move(e.position, cx);
+                        } else {
+                            p.splitter_up(cx);
+                        }
+                    });
+                });
+                let released = this_move.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        let _ = released.update(cx, |p, cx| p.splitter_up(cx));
+                    }
+                });
+            },
         )
         .absolute()
         .inset_0();
+        let gaps: SmallVec<[AnyElement; 8]> = splitters(&self.layout, &self.placement)
+            .into_iter()
+            .map(|s| self.gap_element(s, cx))
+            .collect();
         let content = div()
             .relative()
             .w_full()
@@ -497,7 +718,8 @@ impl Render for OverviewPage {
                     .w(p.bounds.size.width)
                     .h(p.bounds.size.height)
                     .child(self.box_element(p.kind))
-            }));
+            }))
+            .children(gaps);
         let root = div()
             .id(SCROLL_ID)
             .relative()
