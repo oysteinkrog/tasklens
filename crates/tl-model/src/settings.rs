@@ -2063,6 +2063,12 @@ mod tests {
         let (_, overview) = text
             .split_once("[[performance.overview.rows]]")
             .expect("an overview section");
+        // Up to the next plain `[section]`; the overview's own tables start with `[[`.
+        let overview = overview
+            .split("\n[")
+            .take_while(|part| !part.starts_with(|c: char| c.is_ascii_lowercase()))
+            .collect::<Vec<_>>()
+            .join("\n[");
         assert!(
             !overview.contains("split") && !overview.contains("mode"),
             "{overview}"
