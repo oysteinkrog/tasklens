@@ -640,11 +640,15 @@ impl Element for CellText {
     }
 }
 
+/// One painted cell text and its bounds in window coordinates.
+#[cfg(any(test, feature = "test-hooks"))]
+pub type PaintedText = (Bounds<Pixels>, SharedString);
+
 #[cfg(any(test, feature = "test-hooks"))]
 thread_local! {
-    /// The texts [`CellText`] painted on this thread while recording, with their bounds in
-    /// window coordinates. `None` while not recording.
-    static PAINTED_TEXTS: std::cell::RefCell<Option<Vec<(Bounds<Pixels>, SharedString)>>> =
+    /// The texts [`CellText`] painted on this thread while recording. `None` while not
+    /// recording.
+    static PAINTED_TEXTS: std::cell::RefCell<Option<Vec<PaintedText>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -658,7 +662,7 @@ pub fn record_painted_texts() {
 /// Stops recording and returns the cell texts painted since [`record_painted_texts`], in paint
 /// order, each with its text bounds in window coordinates.
 #[cfg(any(test, feature = "test-hooks"))]
-pub fn take_painted_texts() -> Vec<(Bounds<Pixels>, SharedString)> {
+pub fn take_painted_texts() -> Vec<PaintedText> {
     PAINTED_TEXTS
         .with_borrow_mut(Option::take)
         .unwrap_or_default()
