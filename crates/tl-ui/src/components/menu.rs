@@ -1716,8 +1716,6 @@ impl Render for TlMenuPopup {
     }
 }
 
-/// The text of the first key binding for `action` as seen from `context`, for example
-/// "Shift+Delete". Falls back to a binding with no key context.
 /// Separator line colour: the menu text colour mixed 30% into the menu background. The theme
 /// `divider` is one RGB step from `menu_bg`, so it cannot be seen inside a menu.
 fn separator_color(menu_bg: Hsla, text: Hsla) -> Hsla {
@@ -1732,6 +1730,8 @@ fn separator_color(menu_bg: Hsla, text: Hsla) -> Hsla {
     .into()
 }
 
+/// The text of the first key binding for `action` as seen from `context`, for example
+/// "Shift+Delete". Falls back to a binding with no key context.
 fn shortcut_hint(
     action: &dyn Action,
     context: &FocusHandle,
