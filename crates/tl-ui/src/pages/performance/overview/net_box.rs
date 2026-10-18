@@ -30,8 +30,8 @@ use super::cpu_box::value_text;
 use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
-    YScale, format_value,
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
+    ValueFormat, YScale, format_value,
 };
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
@@ -63,6 +63,8 @@ const LOOPBACK: &str = "lo";
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct NetSettings {
     unit: NetworkUnit,
+    /// `units.network_auto_scale`: the rate rows print as every other network value (R-015).
+    auto_scale: bool,
     wired: bool,
     wireless: bool,
     vpn: bool,
@@ -75,6 +77,7 @@ impl NetSettings {
         let p = &s.performance;
         Self {
             unit: s.units.network,
+            auto_scale: s.units.network_auto_scale,
             wired: p.show_network_wired,
             wireless: p.show_network_wireless,
             vpn: p.show_network_vpn,
@@ -498,12 +501,16 @@ impl NetBox {
         self.down_peak.map(f32::to_bits).hash(&mut h);
         self.up_peak.map(f32::to_bits).hash(&mut h);
         self.net.unit.hash(&mut h);
+        self.net.auto_scale.hash(&mut h);
         let bits = h.finish();
         if !force && bits == self.text_bits {
             return false;
         }
         self.text_bits = bits;
-        let unit = self.net.unit;
+        let unit = NetFormat {
+            unit: self.net.unit,
+            auto_scale: self.net.auto_scale,
+        };
         let rate = |ok: bool, v: f64| {
             let validity = if ok {
                 Validity::Valid

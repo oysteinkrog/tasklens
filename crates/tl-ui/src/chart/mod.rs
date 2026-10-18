@@ -24,7 +24,7 @@ pub use geometry::{TimeMap, is_stale, right_edge_ns};
 pub use grid_element::{
     ChartGridElement, ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
 };
-pub use labels::{format_value, range_label};
+pub use labels::{NetFormat, format_value, range_label};
 pub use scale::{ScaleResult, ScaleState};
 pub use view::ChartView;
 

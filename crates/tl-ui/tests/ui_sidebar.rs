@@ -1212,6 +1212,8 @@ mod sidebar {
         let mut settings = Settings::default();
         settings.motion.animations = false;
         settings.units.network = NetworkUnit::Bytes;
+        // Auto-scale on: the unit steps from KiB/s to MiB/s at 1024.
+        settings.units.network_auto_scale = true;
         let mut r = open(cx, nine(), settings, UiState::default());
         r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
         r.host_w.set(180.);
@@ -1261,6 +1263,59 @@ mod sidebar {
             assert!(r.vcx.debug_bounds(id).is_some(), "edit value row {i}");
         }
         assert_values_inside(&mut r, "edit mode at nav_width 180, 1023.9 KiB/s");
+    }
+
+    /// Publishes one eth0 download series whose newest sample is `bps` bytes per second.
+    fn publish_eth0_rx(r: &mut Rig, bps: f32) {
+        let newest = now_boot_ns();
+        r.engine.publish_with(|s| {
+            let version = s.series.header.version + 1;
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: Arc::from([Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(7),
+                        metric: MetricId::NET_RX,
+                    },
+                    version,
+                    period_ns: 100_000_000,
+                    samples: Arc::from([
+                        Sample::valid(newest - 100_000_000, bps),
+                        Sample::valid(newest, bps),
+                    ]),
+                })]),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+        draw(r.vcx);
+    }
+
+    /// The card value prints network rates as line 2 and the process columns do (R-015): with
+    /// auto-scale off (the default) 62 500 B/s is "0.5 Mbps". The graph value once auto-scaled
+    /// on its own and read "500.0 Kbps" next to a line 2 in fixed Mbps.
+    #[gpui_kit::test]
+    fn net_card_value_is_fixed_mbps_with_auto_scale_off(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        publish_eth0_rx(&mut r, 62_500.);
+        let value = prepared(&mut r, "net:eth0").value.expect("value");
+        assert_eq!(&*value.text, "0.5 Mbps");
+    }
+
+    #[gpui_kit::test]
+    fn net_card_value_steps_units_with_auto_scale_on(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        settings.units.network_auto_scale = true;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        publish_eth0_rx(&mut r, 62_500.);
+        let value = prepared(&mut r, "net:eth0").value.expect("value");
+        assert_eq!(&*value.text, "500.0 Kbps");
     }
 
     /// A card with no room for its graph keeps the chart mounted, so a new sample still draws

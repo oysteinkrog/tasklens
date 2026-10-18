@@ -42,7 +42,6 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
 use tl_model::series::{SampleFlags, SeriesView};
-use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -51,7 +50,7 @@ use super::element::translated;
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint, HoverState};
-use super::labels::{self, CachedLine, LabelCache, LineStyle};
+use super::labels::{self, CachedLine, LabelCache, LineStyle, NetFormat};
 use super::view::{ChangedRuns, find_tiered};
 use super::{
     ChartCache, ChartLabels, ChartSeries, ChartSpec, ChartState, DEFAULT_RANGE_NS, GeometryScalars,
@@ -61,7 +60,6 @@ use crate::anim::AnimationDriver;
 use crate::components::icons::AppIcon;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
-use crate::settings_global::TlSettings;
 use crate::theme::{TlTheme, UiMetrics};
 
 /// Period used when no cell has data: 1 s.
@@ -642,11 +640,7 @@ impl Element for ChartGridElement {
             theme: crate::theme::current(cx).clone(),
             reduce_motion: cx.reduce_motion(),
             power_saving: crate::demand::power_saving(cx),
-            network_unit: if cx.has_global::<TlSettings>() {
-                TlSettings::settings(cx).units.network
-            } else {
-                NetworkUnit::default()
-            },
+            network_unit: NetFormat::of(cx),
         };
         let view_id = self.view.entity_id();
         let had_hitboxes = !hitboxes.headings.is_empty();
@@ -749,7 +743,7 @@ struct PaintEnv {
     reduce_motion: bool,
     /// Save power on battery is in effect: no sliding (wlf.32).
     power_saving: bool,
-    network_unit: NetworkUnit,
+    network_unit: NetFormat,
 }
 
 struct PaintOut {
@@ -869,7 +863,7 @@ fn paint_grid_view(
             now,
             scale_state,
             spec.value_fmt,
-            env.network_unit,
+            env.network_unit.unit,
             axis_text,
         );
         // Sum of every cell's versions plus the cell count, and the column count. Offline cells

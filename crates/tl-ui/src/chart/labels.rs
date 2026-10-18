@@ -20,6 +20,7 @@ use tl_model::validity::Validity;
 
 use super::{ChartLabels, ChartSpec, ChartState, LegendStyle, ValueAlign, ValueFormat, YScale};
 use crate::components::icons::TlIcon;
+use crate::settings_global::TlSettings;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::TNUM;
 use crate::theme::{TlTheme, UiMetrics};
@@ -245,7 +246,7 @@ pub struct LabelPaint<'a> {
     pub compact_scale: bool,
     pub metrics: &'a UiMetrics,
     pub theme: &'a TlTheme,
-    pub network_unit: NetworkUnit,
+    pub network_unit: NetFormat,
 }
 
 /// The owner's value text when set, else `v` formatted.
@@ -584,9 +585,43 @@ pub fn range_label(range_word: &str, range_ns: u64, out: &mut String) {
     }
 }
 
+/// How network rates print: `units.network` and `units.network_auto_scale` (R-015). A bare
+/// [`NetworkUnit`] converts with auto-scale off, the default.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct NetFormat {
+    pub unit: NetworkUnit,
+    pub auto_scale: bool,
+}
+
+impl NetFormat {
+    /// The two settings, or the defaults when no settings are loaded.
+    pub fn of(cx: &App) -> Self {
+        if cx.has_global::<TlSettings>() {
+            let u = &TlSettings::settings(cx).units;
+            Self {
+                unit: u.network,
+                auto_scale: u.network_auto_scale,
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
+impl From<NetworkUnit> for NetFormat {
+    fn from(unit: NetworkUnit) -> Self {
+        Self {
+            unit,
+            auto_scale: false,
+        }
+    }
+}
+
 /// Appends `value` in the chart value form of canonical table (d), through `tl_model::units`.
-/// Byte and network rates are bytes per second; network rates auto-scale on graphs.
-pub fn format_value(fmt: ValueFormat, value: f32, unit: NetworkUnit, out: &mut String) {
+/// Byte and network rates are bytes per second. Network rates follow `net` like every other
+/// network value: fixed Mbps (or MiB/s) with one decimal unless auto-scale is on (R-015).
+pub fn format_value(fmt: ValueFormat, value: f32, net: impl Into<NetFormat>, out: &mut String) {
+    let net = net.into();
     // NaN and negative values clamp to 0 in the integer casts.
     let whole = |v: f32| v.max(0.0).round() as u64;
     match fmt {
@@ -595,11 +630,11 @@ pub fn format_value(fmt: ValueFormat, value: f32, unit: NetworkUnit, out: &mut S
         ValueFormat::Bytes => units::bytes(out, whole(value)),
         ValueFormat::RateIec => units::rate_iec_auto(out, f64::from(value)),
         ValueFormat::RateNetwork => {
-            let unit = match unit {
+            let unit = match net.unit {
                 NetworkUnit::Bits => NetUnit::Bits,
                 NetworkUnit::Bytes => NetUnit::Bytes,
             };
-            units::net_rate(out, f64::from(value), unit, true);
+            units::net_rate(out, f64::from(value), unit, net.auto_scale);
         }
         ValueFormat::Mhz => units::mhz(out, value),
         ValueFormat::Celsius => units::celsius(out, value),
@@ -649,5 +684,32 @@ mod tests {
         assert_eq!(f(34.68 * GIB, (63.16 * GIB) as u64), "54.9%");
         assert_eq!(f(0.0, 16 << 30), "0%");
         assert_eq!(f(8.0 * GIB, 0), "0%", "no total yet");
+    }
+
+    /// Graph values print network rates as every other network value does (R-015). They once
+    /// always auto-scaled: 62 500 B/s read "500.0 Kbps" with auto-scale off.
+    #[test]
+    fn network_rate_follows_auto_scale() {
+        let f = |v: f32, unit: NetworkUnit, auto_scale: bool| {
+            let mut out = String::new();
+            let net = NetFormat { unit, auto_scale };
+            format_value(ValueFormat::RateNetwork, v, net, &mut out);
+            out
+        };
+        assert_eq!(f(62_500.0, NetworkUnit::Bits, false), "0.5 Mbps");
+        assert_eq!(f(0.0, NetworkUnit::Bits, false), "0 Mbps");
+        assert_eq!(f(1.25e9, NetworkUnit::Bits, false), "10000.0 Mbps");
+        assert_eq!(f(62_500.0, NetworkUnit::Bits, true), "500.0 Kbps");
+        assert_eq!(f(1024.0, NetworkUnit::Bytes, false), "0 MiB/s");
+        assert_eq!(f(1024.0, NetworkUnit::Bytes, true), "1.0 KiB/s");
+        // A bare unit is auto-scale off, the default.
+        let mut out = String::new();
+        format_value(
+            ValueFormat::RateNetwork,
+            62_500.0,
+            NetworkUnit::Bits,
+            &mut out,
+        );
+        assert_eq!(out, "0.5 Mbps");
     }
 }

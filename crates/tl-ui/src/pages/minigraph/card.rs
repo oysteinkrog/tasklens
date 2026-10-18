@@ -22,7 +22,6 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, DeviceKind};
 use tl_model::ids::{ColumnId, GraphTarget};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{ComponentMask, Snapshot, SystemSnapshot};
 use tl_model::validity::Validity;
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -36,8 +35,8 @@ use super::sources::{
 };
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
-    YScale, format_value,
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
+    ValueFormat, YScale, format_value,
 };
 use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -552,11 +551,7 @@ impl MinigraphCard {
     fn update_value(&mut self, snap: &Snapshot, first: bool, cx: &mut Context<Self>) {
         let ids = self.value_series();
         let newest: SmallVec<[Option<f32>; 2]> = ids.iter().map(|id| newest(snap, *id)).collect();
-        let unit = if cx.has_global::<TlSettings>() {
-            TlSettings::settings(cx).units.network
-        } else {
-            NetworkUnit::default()
-        };
+        let unit = NetFormat::of(cx);
         let total = self.total(&snap.system);
         let mut h = FxHasher::default();
         for v in &newest {
@@ -564,7 +559,8 @@ impl MinigraphCard {
             h.write_u8(u8::from(v.is_some()));
         }
         h.write_u64(total);
-        h.write_u8(unit as u8);
+        h.write_u8(unit.unit as u8);
+        h.write_u8(u8::from(unit.auto_scale));
         let bits = h.finish();
         if !first && bits == self.value_bits {
             return;
@@ -608,7 +604,7 @@ impl MinigraphCard {
         }
     }
 
-    fn format(&self, newest: &[Option<f32>], total: u64, unit: NetworkUnit) -> SharedString {
+    fn format(&self, newest: &[Option<f32>], total: u64, unit: NetFormat) -> SharedString {
         let first = newest.first().copied().flatten();
         let sum = || -> Option<f32> { newest.iter().copied().sum() };
         let (fmt, value) = match self.entry.source {

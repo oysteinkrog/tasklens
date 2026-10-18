@@ -23,13 +23,12 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::series::{SampleFlags, SeriesView};
-use tl_model::settings::NetworkUnit;
 use tl_model::time::now_boot_ns;
 
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint};
-use super::labels::{self, LabelPaint};
+use super::labels::{self, LabelPaint, NetFormat};
 use super::view::ChartView;
 use super::{ChartSeries, ChartState, GeometryScalars, PathSet, scale};
 use crate::anim::AnimationDriver;
@@ -127,11 +126,7 @@ impl Element for ChartElement {
             theme: crate::theme::current(cx).clone(),
             reduce_motion: cx.reduce_motion(),
             power_saving: crate::demand::power_saving(cx),
-            network_unit: if cx.has_global::<TlSettings>() {
-                TlSettings::settings(cx).units.network
-            } else {
-                NetworkUnit::default()
-            },
+            network_unit: NetFormat::of(cx),
             curved: cx.has_global::<TlSettings>()
                 && TlSettings::settings(cx).performance.curved_lines,
         };
@@ -215,7 +210,7 @@ struct PaintEnv {
     reduce_motion: bool,
     /// Save power on battery is in effect: no sliding (wlf.32).
     power_saving: bool,
-    network_unit: NetworkUnit,
+    network_unit: NetFormat,
     /// `performance.curved_lines`.
     curved: bool,
 }
@@ -322,7 +317,7 @@ fn paint_view(
             now,
             scale_state,
             labels.value_fmt,
-            env.network_unit,
+            env.network_unit.unit,
             axis_text,
         );
         // Compared in place, so an unchanged chart allocates nothing here (tasklens-yrf.19).

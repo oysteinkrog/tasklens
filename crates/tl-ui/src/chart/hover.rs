@@ -15,7 +15,6 @@ use std::sync::Arc;
 use gpui_kit::{App, BorderStyle, Bounds, FontWeight, Pixels, Window, fill, point, px, quad, size};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::NetworkUnit;
 use tl_model::units;
 
 use super::geometry::{self, TimeMap};
@@ -210,7 +209,7 @@ pub struct HoverPaint<'a> {
     pub y_max: f32,
     pub metrics: &'a UiMetrics,
     pub theme: &'a TlTheme,
-    pub network_unit: NetworkUnit,
+    pub network_unit: labels::NetFormat,
 }
 
 /// Paints the marker, the dots and the value box for `state.pinned_t_ns`. Paints nothing when

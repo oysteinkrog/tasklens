@@ -10,14 +10,14 @@ use gpui_kit::{App, SharedString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tl_model::ids::{ColumnId, GraphTarget, ProcessKey, ProcessSeriesId};
 use tl_model::process::{GroupKind, ProcessRecord};
-use tl_model::settings::{MinigraphState, NetworkUnit};
+use tl_model::settings::MinigraphState;
 use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
 use tl_model::validity::{ProcessField, Validity};
 
 use super::GraphColor;
 use super::card::{CardState, resolve_colors};
-use crate::chart::{ChartSeries, ValueFormat, YScale, format_value};
+use crate::chart::{ChartSeries, NetFormat, ValueFormat, YScale, format_value};
 use crate::i18n::{tr, tr_args};
 use crate::pages::performance::DeviceKey;
 use crate::settings_global::{SettingKey, TlSettings};
@@ -425,11 +425,7 @@ pub fn resolve_process_source(
         ..ChartSeries::default()
     };
     let label_parts = process_label(source, column, snap, cx)?;
-    let unit = if cx.has_global::<TlSettings>() {
-        TlSettings::settings(cx).units.network
-    } else {
-        NetworkUnit::default()
-    };
+    let unit = NetFormat::of(cx);
     let (y, fmt) = column_scale(source, column);
     let state = match_state(source, column, snap);
     let value = if state == CardState::NoMatch {

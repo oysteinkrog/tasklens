@@ -37,7 +37,7 @@ use super::actions::PerfSelectDevice;
 use super::details::Template;
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{
-    ChartBg, ChartLabels, ChartView, GridStyle, ValueAlign, ValueFormat, format_value,
+    ChartBg, ChartLabels, ChartView, GridStyle, NetFormat, ValueAlign, ValueFormat, format_value,
 };
 use crate::components::icons::{TlIcon, icon};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
@@ -1230,13 +1230,13 @@ pub struct CardValue {
 
 impl CardValue {
     /// Reads the value of `chart`, or `None` when the chart has no series.
-    pub fn of(chart: &ChartView, unit: NetworkUnit) -> Option<Self> {
+    pub fn of(chart: &ChartView, net: NetFormat) -> Option<Self> {
         let (v, validity) = chart.value_now()?;
         let fmt = chart.labels.value_fmt;
         let text = match validity {
             Validity::Valid | Validity::Stale => {
                 let mut out = String::new();
-                format_value(fmt, v, unit, &mut out);
+                format_value(fmt, v, net, &mut out);
                 SharedString::from(out)
             }
             Validity::Restricted => SharedString::default(),
@@ -1245,7 +1245,7 @@ impl CardValue {
         Some(Self {
             text,
             validity,
-            templates: value_templates(fmt, unit),
+            templates: value_templates(fmt, net.unit),
         })
     }
 
@@ -1596,12 +1596,7 @@ impl DeviceCard {
     pub fn prepare(&mut self, window: &Window, cx: &mut App) -> &CardPrepared {
         if self.prepared.is_none() {
             let m = *metrics(cx);
-            let unit = if cx.has_global::<TlSettings>() {
-                TlSettings::settings(cx).units.network
-            } else {
-                NetworkUnit::default()
-            };
-            let value = CardValue::of(self.chart.read(cx), unit);
+            let value = CardValue::of(self.chart.read(cx), NetFormat::of(cx));
             if !cx.has_global::<CardAdvances>() {
                 cx.set_global(CardAdvances::default());
             }
@@ -2660,9 +2655,14 @@ mod tests {
     /// The templates are what the formatter prints just below each unit step.
     #[test]
     fn value_templates_match_the_widest_formatted_values() {
+        // The unit steps only with auto-scale on; fixed Mbps has no step.
         let f = |fmt: ValueFormat, v: f32, unit: NetworkUnit| {
             let mut out = String::new();
-            format_value(fmt, v, unit, &mut out);
+            let net = NetFormat {
+                unit,
+                auto_scale: true,
+            };
+            format_value(fmt, v, net, &mut out);
             out
         };
         let (kib, mib) = (1024.0_f32, 1024.0_f32 * 1024.0);
