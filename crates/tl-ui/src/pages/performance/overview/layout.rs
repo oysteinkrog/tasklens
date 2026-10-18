@@ -264,18 +264,21 @@ pub struct Placement {
 /// Splits `total` by the weights of `items` (weight, minimum). An item whose share would fall
 /// below its minimum takes the minimum and the others share what is left. Returns `false` when
 /// the minimums do not fit; every item then has its minimum.
+///
+/// The sums and products run in `f64`: any finite `f32` weight is valid, and with weights near
+/// `f32::MAX` the `f32` sum or `left * w` would overflow to infinity.
 fn share(total: f32, items: &[(f32, f32)], out: &mut SmallVec<[f32; 8]>) -> bool {
     let mut fixed: SmallVec<[bool; 8]> = smallvec![false; items.len()];
     out.clear();
     out.extend(items.iter().map(|&(_, min)| min));
     loop {
-        let mut left = total;
+        let mut left = f64::from(total);
         let mut free_w = 0.;
         for (&(w, min), &f) in items.iter().zip(&fixed) {
             if f {
-                left -= min;
+                left -= f64::from(min);
             } else {
-                free_w += w;
+                free_w += f64::from(w);
             }
         }
         if free_w <= 0. {
@@ -286,7 +289,7 @@ fn share(total: f32, items: &[(f32, f32)], out: &mut SmallVec<[f32; 8]>) -> bool
             if *f {
                 continue;
             }
-            *v = left * w / free_w;
+            *v = (left * f64::from(w) / free_w) as f32;
             if *v < min {
                 *v = min;
                 *f = true;
@@ -696,6 +699,34 @@ mod tests {
         );
         assert_eq!(rect(&p, BoxKind::Cpu), (32., 32., 1547., 1032.));
         assert_eq!(rect(&p, BoxKind::Memory), (1595., 32., 773., 1032.));
+    }
+
+    #[test]
+    fn overview_place_huge_weights_stay_finite() {
+        use BoxKind::*;
+        // Any finite weight is valid. Equal huge weights place like equal weights of 1, with no
+        // infinite or NaN bounds from an overflowing sum or product.
+        let ones = place(
+            &layout(&[(1., &[(Cpu, 1.), (Memory, 1.)]), (1., &[(Net, 1.)])]),
+            |_| true,
+            area(1200., 900.),
+            1.,
+        );
+        for huge in [1e38, f32::MAX] {
+            let l = layout(&[
+                (huge, &[(Cpu, huge), (Memory, huge)]),
+                (huge, &[(Net, huge)]),
+            ]);
+            assert_eq!(l.validate(), Ok(()));
+            let p = place(&l, |_| true, area(1200., 900.), 1.);
+            assert_eq!(p, ones, "{huge}");
+        }
+
+        // A huge weight beside a weight of 1 takes all but the other box's minimum.
+        let l = layout(&[(1., &[(Cpu, 1e38), (Memory, 1.)])]);
+        let p = place(&l, |_| true, area(1200., 900.), 1.);
+        assert_eq!(rect(&p, Memory).2, Memory.min_w());
+        assert_eq!(rect(&p, Cpu).2, 1168. - 8. - Memory.min_w());
     }
 
     #[test]
