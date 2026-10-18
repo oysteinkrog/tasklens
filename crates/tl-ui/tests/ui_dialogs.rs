@@ -617,7 +617,7 @@ fn heading_and_long_text_fit() {
     assert!(height >= px(140.) && height <= px(320.), "{height:?}");
     assert_eq!(
         o.vcx.update(|window, _| window.bounds().size.width),
-        px(420.)
+        px(420.) + client_frame_extra(Settings::default().appearance.decorations)
     );
 }
 
