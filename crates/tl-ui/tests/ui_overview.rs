@@ -3380,6 +3380,78 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn overview_disk_modes_render(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{
+            CELL_MIN_H, CELL_MIN_W, DISK_BOX_ID, DISK_SPLITTER_ID, TOTAL_CHART_ID, cell_id,
+            io_row_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let key = r.vcx.update(|_, cx| {
+            let rows = page.read(cx).disk_box().read(cx).rows().to_vec();
+            assert!(!rows.is_empty());
+            rows[0].key.clone()
+        });
+        let set = |r: &mut Rig, mode: &str| {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "disk".into(),
+                mode: mode.into(),
+            });
+        };
+        let shown = |r: &mut Rig, id: String| {
+            let id: &'static str = Box::leak(id.into_boxed_str());
+            r.vcx.debug_bounds(id).is_some()
+        };
+        let parts = |r: &mut Rig| {
+            [
+                shown(r, DISK_SPLITTER_ID.into()),
+                shown(r, io_row_id(&key, "read")),
+                shown(r, io_row_id(&key, "read-spark")),
+                shown(r, cell_id(&key)),
+                shown(r, TOTAL_CHART_ID.into()),
+            ]
+        };
+
+        // The default: label part, splitter and sparkline part, level with each other.
+        assert_eq!(parts(&mut r), [true, true, true, false, false]);
+        assert_eq!(r.layout().split(BoxKind::Disk), Some(0.4));
+        let text = r.bounds_of(io_row_id(&key, "read"));
+        let spark = r.bounds_of(io_row_id(&key, "read-spark"));
+        let gap = r.bounds_of(DISK_SPLITTER_ID.into());
+        assert!(text.right() <= gap.left() + px(1.), "{text:?} {gap:?}");
+        assert!(spark.left() >= gap.right() - px(1.), "{spark:?} {gap:?}");
+        assert_eq!(text.origin.y, spark.origin.y);
+
+        // One read and write chart per disk in a grid, no splitter, no split.
+        set(&mut r, "disk_charts");
+        assert_eq!(parts(&mut r), [false, false, false, true, false]);
+        assert_eq!(r.layout().split(BoxKind::Disk), None);
+        let frame = r.bounds_of(DISK_BOX_ID.into());
+        let cell = r.bounds_of(cell_id(&key));
+        assert!(
+            cell.size.width >= px(CELL_MIN_W) && cell.size.height >= px(CELL_MIN_H),
+            "{cell:?}"
+        );
+        assert!(cell.right() <= frame.right() && cell.bottom() <= frame.bottom());
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+
+        // One chart of the summed rates.
+        set(&mut r, "total_chart");
+        assert_eq!(parts(&mut r), [false, false, false, false, true]);
+        assert_eq!(r.layout().split(BoxKind::Disk), None);
+        let total = r.bounds_of(TOTAL_CHART_ID.into());
+        assert!(total.right() <= frame.right() && total.bottom() <= frame.bottom());
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+
+        // Back to the default mode: the default split returns.
+        set(&mut r, "rows");
+        assert_eq!(parts(&mut r), [true, true, true, false, false]);
+        assert_eq!(r.layout().split(BoxKind::Disk), Some(0.4));
+    }
+
+    #[gpui_kit::test]
     fn overview_inner_split_drag_and_reset(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
         // CPU and Memory share the row equally, so in the CPU body the 120 px chart minimum is

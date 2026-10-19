@@ -9,6 +9,11 @@
 //! When the sections do not fit the box height they collapse to their headers, the busiest disks
 //! expanded first (`fit`); a resize re-renders the box only when that changes. Pointer movement
 //! never notifies.
+//!
+//! UI-PRF-019 gives the box three modes. `rows` is the layout above with a vertical splitter
+//! between the label part (headers, words and rates) and the sparkline part. `disk_charts` is a
+//! grid of one chart per shown disk, read and write as two lines, in cells of at least
+//! 200 × 80 px. `total_chart` is one chart of the summed read and write rates.
 
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
@@ -17,13 +22,13 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, size,
+    Subscription, Window, div, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
-use tl_model::devices::DeviceCatalog;
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{InvField, Snapshot};
@@ -31,14 +36,18 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::BoxMode;
 use super::mem_box::ROW_LABEL_W;
 use super::parts::{
-    ChartSettings, SPARK_GRID, box_frame, chart_section_versions, class_probe, opens_device,
-    spark_chart,
+    ChartSettings, SPARK_GRID, box_chart, box_frame, chart_section_versions, class_probe,
+    opens_device, spark_chart,
 };
 use crate::chart::labels::LABEL_ROW;
-use crate::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, ValueFormat, YScale, format_value};
+use crate::chart::{
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
+    YScale, format_value,
+};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::TlSettings;
@@ -49,11 +58,71 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 pub const DISK_BOX_ID: &str = "perf-overview-box-disk";
 
 /// The box's layout modes (UI-PRF-019). `rows` is the disk sections of UI-PRF-017.
-pub const MODES: &[BoxMode] = &[BoxMode {
-    id: "rows",
-    label: "perf-overview-mode-rows",
-    split: None,
-}];
+///
+/// The `rows` split is the label part's share of the body.
+pub const MODES: &[BoxMode] = &[
+    BoxMode {
+        id: "rows",
+        label: "perf-overview-mode-rows",
+        split: Some(0.4),
+    },
+    BoxMode {
+        id: "disk_charts",
+        label: "perf-overview-mode-disk-charts",
+        split: None,
+    },
+    BoxMode {
+        id: "total_chart",
+        label: "perf-overview-mode-total-chart",
+        split: None,
+    },
+];
+
+/// The debug selector of the splitter between the label part and the sparkline part.
+pub const DISK_SPLITTER_ID: &str = "perf-overview-disk-splitter";
+/// The debug selector of the splitter's accent line.
+pub const DISK_SPLITTER_LINE_ID: &str = "perf-overview-disk-splitter-line";
+/// The debug selector of the `total_chart` chart.
+pub const TOTAL_CHART_ID: &str = "perf-overview-disk-total-chart";
+
+/// The smallest `disk_charts` cell, logical px before `ui_scale`.
+pub const CELL_MIN_W: f32 = 200.;
+pub const CELL_MIN_H: f32 = 80.;
+
+/// The `rows` parts' minimums: the label part keeps the word and rate columns, the sparkline
+/// part a short sparkline. Logical px before `ui_scale`.
+const LABEL_PART_MIN_W: f32 = 128.;
+const SPARK_PART_MIN_W: f32 = 64.;
+
+/// Which parts the box shows (UI-PRF-019).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DiskMode {
+    Rows,
+    DiskCharts,
+    TotalChart,
+}
+
+impl DiskMode {
+    /// The mode `id`; an unknown id is the default.
+    fn from_id(id: &str) -> Self {
+        match id {
+            "disk_charts" => Self::DiskCharts,
+            "total_chart" => Self::TotalChart,
+            _ => Self::Rows,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Rows => MODES[0].id,
+            Self::DiskCharts => MODES[1].id,
+            Self::TotalChart => MODES[2].id,
+        }
+    }
+}
+
+/// The page saves the share the box ended a drag or a double-click on.
+impl EventEmitter<InnerSplitChanged> for DiskBox {}
 
 /// Disks with a section; the rest are counted in the "+n more" line.
 pub const MAX_DISK_ROWS: usize = 8;
@@ -98,6 +167,8 @@ pub struct DiskRow {
     /// The sparklines of the disk's `DISK_READ` and `DISK_WRITE` series.
     pub read_chart: Entity<ChartView>,
     pub write_chart: Entity<ChartView>,
+    /// The read and write lines of `disk_charts`.
+    pub pair_chart: Entity<ChartView>,
 }
 
 /// A Read or Write sparkline: filled, auto-scaled IEC rates.
@@ -116,6 +187,67 @@ fn io_spec(device: DeviceIdx, metric: MetricId, s: &ChartSettings, theme: &TlThe
         background: ChartBg::List,
         ..ChartSpec::default()
     }
+}
+
+/// A `disk_charts` cell or the total chart: read filled, write dashed, auto-scaled IEC rates.
+fn pair_spec(device: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+    let line = theme.graph.disk_line;
+    ChartSpec {
+        series: smallvec![
+            ChartSeries {
+                id: SeriesId {
+                    device,
+                    metric: MetricId::DISK_READ,
+                },
+                fill: Some(theme.graph.disk_fill),
+                line,
+                ..ChartSeries::default()
+            },
+            ChartSeries {
+                id: SeriesId {
+                    device,
+                    metric: MetricId::DISK_WRITE,
+                },
+                line,
+                dashed: true,
+                ..ChartSeries::default()
+            },
+        ],
+        y: YScale::AutoRate { iec: true },
+        range_ns: s.range_ns,
+        grid: GridStyle {
+            lines: true,
+            baseline: false,
+            outline: true,
+            rounded: s.rounded,
+            vertical_at: None,
+        },
+        smooth: s.smooth,
+        background: ChartBg::List,
+        ..ChartSpec::default()
+    }
+}
+
+/// No heading and no value: the cell header or the box carries the numbers.
+fn pair_labels() -> ChartLabels {
+    ChartLabels {
+        heading: None,
+        value_fmt: ValueFormat::RateIec,
+        value_align: ValueAlign::Hidden,
+        range_word: SharedString::default(),
+        legend: SmallVec::new(),
+        show_axis_max: false,
+    }
+}
+
+/// The aggregate disks device, whose series sum the physical disks. The fixed entries come
+/// first in every catalog, so index 1 stands in until the catalog has been read.
+fn aggregate_disks(catalog: &DeviceCatalog) -> DeviceIdx {
+    catalog
+        .entries
+        .iter()
+        .find(|e| e.identity == DeviceIdentity::Aggregate(AggregateKind::Disks))
+        .map_or(DeviceIdx(1), |e| e.idx)
 }
 
 /// The trimmed text of `f` when it is Valid or Stale and not blank.
@@ -181,6 +313,62 @@ fn fit(body: Size<Pixels>, rows: usize, total: usize, m: &UiMetrics) -> Fit {
     }
 }
 
+/// The grid columns of a body `width` wide: as many cells of at least `CELL_MIN_W` as fit.
+fn grid_cols(width: Pixels, m: &UiMetrics) -> usize {
+    let gap = f32::from(m.sp[2]);
+    let w = f32::from(width);
+    if w <= 0. {
+        return 1;
+    }
+    (((w + gap) / (CELL_MIN_W * m.ui_scale + gap)).floor() as usize).max(1)
+}
+
+/// What `disk_charts` shows: the grid columns and how many cells fit. The cells fill the body
+/// before the first paint.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ChartsFit {
+    cols: usize,
+    shown: usize,
+}
+
+impl ChartsFit {
+    fn class(self) -> u32 {
+        self.cols as u32 | (self.shown as u32) << 8
+    }
+}
+
+/// The grid for `rows` cells in `body`. A cell is at least `CELL_MIN_H` high, and when the
+/// grid does not fit the cells that fit show, with one line left for "+n more".
+fn charts_fit(body: Size<Pixels>, rows: usize, total: usize, m: &UiMetrics) -> ChartsFit {
+    let cols = grid_cols(body.width, m);
+    if body.height == px(0.) {
+        return ChartsFit { cols, shown: rows };
+    }
+    let gap = f32::from(m.sp[2]);
+    let line = LABEL_ROW * m.ui_scale + gap;
+    let more = usize::from(total > rows);
+    let avail = f32::from(body.height) - more as f32 * line;
+    let cell = CELL_MIN_H * m.ui_scale + gap;
+    let grid_rows = ((avail + gap) / cell).floor().max(0.) as usize;
+    let fits = grid_rows * cols;
+    if fits >= rows {
+        return ChartsFit { cols, shown: rows };
+    }
+    // Showing fewer cells than disks needs the "+n more" line, so a grid row is given up for it
+    // when the first count left no room for that line.
+    let avail = f32::from(body.height) - line;
+    let grid_rows = ((avail + gap) / cell).floor().max(0.) as usize;
+    ChartsFit {
+        cols,
+        shown: (grid_rows * cols).min(rows),
+    }
+}
+
+/// The debug selector of a disk's `disk_charts` cell.
+pub fn cell_id(key: &DeviceKey) -> String {
+    format!("{DISK_BOX_ID}-cell:{}", key.0)
+}
+
 /// The debug selector of a disk's Read ("read") or Write ("write") row.
 pub fn io_row_id(key: &DeviceKey, which: &str) -> String {
     format!("{DISK_BOX_ID}-{which}:{}", key.0)
@@ -192,6 +380,14 @@ pub struct DiskBox {
     /// The latest disk cards from the sidebar, including any entry whose parent was not known yet.
     disks: SmallVec<[(DeviceKey, DeviceIdx, SharedString); 8]>,
     rows: SmallVec<[DiskRow; 8]>,
+    mode: DiskMode,
+    /// The gap between the label part and the sparkline part (`rows`).
+    row_split: InnerSplit,
+    /// The summed read and write lines of `total_chart`, and the aggregate device they read.
+    total_chart: Entity<ChartView>,
+    aggregate: DeviceIdx,
+    /// How many `disk_charts` cells the last render showed.
+    cells: usize,
     /// Disks past `MAX_DISK_ROWS`.
     more: usize,
     /// "+n more" by the number of sections shown, empty when every disk has a section.
@@ -224,10 +420,28 @@ impl DiskBox {
         cx: &mut Context<Self>,
     ) -> Self {
         let snap = Arc::clone(hub.read(cx).current());
+        let settings = ChartSettings::read(cx);
+        let aggregate = aggregate_disks(&snap.devices);
+        let total_chart = box_chart(
+            pair_spec(aggregate, &settings, current(cx)),
+            pair_labels(),
+            hub,
+            cx,
+        );
         let mut this = Self {
             hub: hub.clone(),
             disks: disks.iter().cloned().collect(),
             rows: SmallVec::new(),
+            mode: DiskMode::Rows,
+            row_split: InnerSplit::new(
+                DISK_SPLITTER_ID,
+                DISK_SPLITTER_LINE_ID,
+                MODES[0].split.unwrap_or_default(),
+            )
+            .with_mins(LABEL_PART_MIN_W, SPARK_PART_MIN_W),
+            total_chart,
+            aggregate,
+            cells: 0,
             more: 0,
             more_texts: SmallVec::new(),
             catalog_version: snap.devices.version,
@@ -238,7 +452,7 @@ impl DiskBox {
             body: Rc::new(Cell::new(size(px(0.), px(0.)))),
             shown: 0,
             expanded: 0,
-            settings: ChartSettings::read(cx),
+            settings,
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
             strings_version: cx.global::<Strings>().strings_version,
@@ -273,6 +487,45 @@ impl DiskBox {
         #[cfg(any(test, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
+    }
+
+    /// The shown mode's id.
+    pub fn mode(&self) -> &'static str {
+        self.mode.id()
+    }
+
+    /// Shows mode `id`; an unknown id is the default mode. Only this box renders again.
+    pub fn set_mode(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mode = DiskMode::from_id(id);
+        if mode != self.mode {
+            self.mode = mode;
+            cx.notify();
+        }
+    }
+
+    /// The label part's share of the body as laid out in `rows`, after the clamps; 0 in the
+    /// other modes.
+    pub fn split(&self, m: &UiMetrics) -> f32 {
+        match self.mode {
+            DiskMode::Rows => self.row_split.share(SplitAxis::Row, m.sp[5], m.ui_scale),
+            _ => 0.,
+        }
+    }
+
+    /// Takes the saved share for `rows`. Nothing changes while the gap is held.
+    pub fn set_split(&mut self, share: f32, cx: &mut Context<Self>) {
+        if self.mode == DiskMode::Rows && self.row_split.set_share(share) {
+            cx.notify();
+        }
+    }
+
+    fn row_inner_split(&mut self) -> &mut InnerSplit {
+        &mut self.row_split
+    }
+
+    /// How many `disk_charts` cells the last render showed.
+    pub fn cells(&self) -> usize {
+        self.cells
     }
 
     pub fn rows(&self) -> &[DiskRow] {
@@ -356,6 +609,12 @@ impl DiskBox {
                         busy: None,
                         read_chart: chart(MetricId::DISK_READ, cx),
                         write_chart: chart(MetricId::DISK_WRITE, cx),
+                        pair_chart: box_chart(
+                            pair_spec(*idx, &self.settings, &theme),
+                            pair_labels(),
+                            &hub,
+                            cx,
+                        ),
                     }
                 }
             };
@@ -399,6 +658,11 @@ impl DiskBox {
         if ev.mask.contains(ComponentMask::DEVICES) && snap.devices.version != self.catalog_version
         {
             self.catalog_version = snap.devices.version;
+            let aggregate = aggregate_disks(&snap.devices);
+            if aggregate != self.aggregate {
+                self.aggregate = aggregate;
+                self.rebuild_specs(cx);
+            }
             self.build_rows(&snap, cx);
             rebuilt = true;
         }
@@ -513,6 +777,8 @@ impl DiskBox {
         r.read_chart.update(cx, |v, cx| v.set_spec(read, cx));
         let write = io_spec(r.idx, MetricId::DISK_WRITE, &self.settings, theme);
         r.write_chart.update(cx, |v, cx| v.set_spec(write, cx));
+        let pair = pair_spec(r.idx, &self.settings, theme);
+        r.pair_chart.update(cx, |v, cx| v.set_spec(pair, cx));
     }
 
     fn rebuild_specs(&mut self, cx: &mut Context<Self>) {
@@ -520,6 +786,8 @@ impl DiskBox {
         for r in &self.rows {
             self.set_specs(r, &theme, cx);
         }
+        let total = pair_spec(self.aggregate, &self.settings, &theme);
+        self.total_chart.update(cx, |v, cx| v.set_spec(total, cx));
     }
 }
 
@@ -574,11 +842,10 @@ fn header(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     opens_device(row, Some(r.key.clone())).into_any_element()
 }
 
-/// A Read or Write row: the word, the cached sparkline and the current rate.
-fn io_row(
+/// A Read or Write text row of the label part: the word and the current rate.
+fn io_text_row(
     id: String,
     word: &SharedString,
-    chart: &Entity<ChartView>,
     rate: &SharedString,
     m: &UiMetrics,
     theme: &TlTheme,
@@ -599,18 +866,68 @@ fn io_row(
         .flex_row()
         .flex_none()
         .items_center()
+        .justify_between()
         .gap(m.sp[4])
         .h(px(LABEL_ROW * s))
         .child(label)
-        .child(
-            div()
-                .relative()
-                .flex_1()
-                .min_w_0()
-                .h(px(LABEL_ROW * s))
-                .child(chart.clone().cached(StyleRefinement::default().size_full())),
-        )
         .child(rate_cell(rate, m, theme))
+        .into_any_element()
+}
+
+/// A Read or Write sparkline cell of the sparkline part, as high as its text row.
+fn spark_cell(id: String, chart: &Entity<ChartView>, m: &UiMetrics) -> AnyElement {
+    div()
+        .debug_selector(move || id)
+        .relative()
+        .flex_none()
+        .w_full()
+        .h(px(LABEL_ROW * m.ui_scale))
+        .child(chart.clone().cached(StyleRefinement::default().size_full()))
+        .into_any_element()
+}
+
+/// A `disk_charts` cell header: name and active percent. A click opens that disk.
+fn cell_head(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let mut name = div()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.text_primary)
+        .child(r.name.clone());
+    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let row = div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(m.sp[4])
+        .h(px(LABEL_ROW * m.ui_scale))
+        .child(name)
+        .child(rate_cell(&r.active, m, theme));
+    opens_device(row, Some(r.key.clone())).into_any_element()
+}
+
+/// A `disk_charts` cell: the header over the read and write chart.
+fn chart_cell(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let key = r.key.clone();
+    div()
+        .debug_selector(move || cell_id(&key))
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h(px(CELL_MIN_H * m.ui_scale))
+        .gap(m.sp[2])
+        .child(cell_head(r, m, theme))
+        .child(
+            div().relative().flex_1().min_h_0().child(
+                r.pair_chart
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            ),
+        )
         .into_any_element()
 }
 
@@ -623,18 +940,116 @@ fn busiest(rows: &[DiskRow], shown: usize, n: usize) -> u8 {
     order.iter().take(n).fold(0, |mask, &i| mask | 1 << i)
 }
 
-impl Render for DiskBox {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.render_count.set(self.render_count.get() + 1);
-        let m = *metrics(cx);
-        let theme = current(cx).clone();
+/// The "+n more" line.
+fn more_line(text: SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let mut line = div()
+        .flex_none()
+        .h(px(LABEL_ROW * m.ui_scale))
+        .whitespace_nowrap()
+        .text_color(theme.text_secondary)
+        .child(text);
+    *line.text_style() = t_xs(m);
+    line.into_any_element()
+}
+
+impl DiskBox {
+    /// `rows`: the label part (headers, words and rates), the splitter and the sparkline part.
+    /// Both parts stack their lines alike, so a sparkline sits level with its text row.
+    fn rows_body(&mut self, m: &UiMetrics, theme: &TlTheme, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.rows.len();
         let total = rows + self.more;
-        let shown = fit(self.body.get(), rows, total, &m);
+        let shown = fit(self.body.get(), rows, total, m);
         self.shown = shown.shown;
         self.expanded = busiest(&self.rows, shown.shown, shown.expanded);
+        let share = self.split(m);
 
+        let column = || {
+            div()
+                .flex()
+                .flex_col()
+                .h_full()
+                .overflow_hidden()
+                .gap(m.sp[2])
+        };
+        let mut left = column().flex_none().w(relative(share));
+        let mut right = column().flex_1().min_w_0();
+        for (i, r) in self.rows.iter().take(shown.shown).enumerate() {
+            left = left.child(header(r, m, theme));
+            right = right.child(div().flex_none().h(px(LABEL_ROW * m.ui_scale)));
+            if self.expanded(i) {
+                left = left
+                    .child(io_text_row(
+                        io_row_id(&r.key, "read"),
+                        &self.read_word,
+                        &r.read,
+                        m,
+                        theme,
+                    ))
+                    .child(io_text_row(
+                        io_row_id(&r.key, "write"),
+                        &self.write_word,
+                        &r.write,
+                        m,
+                        theme,
+                    ));
+                right = right
+                    .child(spark_cell(
+                        io_row_id(&r.key, "read-spark"),
+                        &r.read_chart,
+                        m,
+                    ))
+                    .child(spark_cell(
+                        io_row_id(&r.key, "write-spark"),
+                        &r.write_chart,
+                        m,
+                    ));
+            }
+        }
+        let more = self.shown_more_text();
+        if !more.is_empty() {
+            left = left.child(more_line(more, m, theme));
+        }
+        let probe_m = *m;
+        div()
+            .relative()
+            .size_full()
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .size_full()
+                    .gap(m.sp[5])
+                    .child(left)
+                    .child(right),
+            )
+            .child(self.row_split.probe(Self::row_inner_split, cx))
+            .child(
+                self.row_split
+                    .gap(SplitAxis::Row, share, m.sp[5], Self::row_inner_split, cx),
+            )
+            .child(class_probe(
+                Rc::clone(&self.body),
+                shown.class(),
+                move |b| fit(b, rows, total, &probe_m).class(),
+                cx.entity_id(),
+            ))
+            .into_any_element()
+    }
+
+    /// `disk_charts`: a grid of one read and write chart per shown disk.
+    fn charts_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rows = self.rows.len();
+        let total = rows + self.more;
+        let shown = charts_fit(self.body.get(), rows, total, m);
+        self.shown = shown.shown;
+        self.cells = shown.shown;
+        self.expanded = 0;
         let mut body = div()
             .relative()
             .flex()
@@ -642,53 +1057,79 @@ impl Render for DiskBox {
             .size_full()
             .overflow_hidden()
             .gap(m.sp[2]);
-        for (i, r) in self.rows.iter().take(shown.shown).enumerate() {
-            body = body.child(header(r, &m, &theme));
-            if self.expanded(i) {
-                body = body
-                    .child(io_row(
-                        io_row_id(&r.key, "read"),
-                        &self.read_word,
-                        &r.read_chart,
-                        &r.read,
-                        &m,
-                        &theme,
-                    ))
-                    .child(io_row(
-                        io_row_id(&r.key, "write"),
-                        &self.write_word,
-                        &r.write_chart,
-                        &r.write,
-                        &m,
-                        &theme,
-                    ));
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .gap(m.sp[2]);
+        for chunk in self.rows[..shown.shown].chunks(shown.cols) {
+            let mut line = div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(px(CELL_MIN_H * m.ui_scale))
+                .gap(m.sp[2]);
+            for r in chunk {
+                line = line.child(chart_cell(r, m, theme));
             }
+            for _ in chunk.len()..shown.cols {
+                line = line.child(div().flex_1().min_w_0());
+            }
+            grid = grid.child(line);
         }
+        body = body.child(grid);
         let more = self.shown_more_text();
         if !more.is_empty() {
-            let mut line = div()
-                .flex_none()
-                .h(px(LABEL_ROW * m.ui_scale))
-                .whitespace_nowrap()
-                .text_color(theme.text_secondary)
-                .child(more);
-            *line.text_style() = t_xs(&m);
-            body = body.child(line);
+            body = body.child(more_line(more, m, theme));
         }
-        let probe_m = m;
-        body = body.child(class_probe(
+        let probe_m = *m;
+        body.child(class_probe(
             Rc::clone(&self.body),
             shown.class(),
-            move |b| fit(b, rows, total, &probe_m).class(),
+            move |b| charts_fit(b, rows, total, &probe_m).class(),
             cx.entity_id(),
-        ));
+        ))
+        .into_any_element()
+    }
+
+    /// `total_chart`: the summed read and write lines.
+    fn total_body(&mut self) -> AnyElement {
+        self.shown = self.rows.len();
+        self.cells = 0;
+        self.expanded = 0;
+        div()
+            .debug_selector(|| TOTAL_CHART_ID.into())
+            .relative()
+            .size_full()
+            .child(
+                self.total_chart
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for DiskBox {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        let body = match self.mode {
+            DiskMode::Rows => self.rows_body(&m, &theme, cx),
+            DiskMode::DiskCharts => self.charts_body(&m, &theme, cx),
+            DiskMode::TotalChart => self.total_body(),
+        };
         box_frame(
             DISK_BOX_ID,
             self.rows.first().map(|r| r.key.clone()),
             self.title.clone(),
             SharedString::default(),
             SharedString::default(),
-            body.into_any_element(),
+            body,
             &m,
             &theme,
         )
