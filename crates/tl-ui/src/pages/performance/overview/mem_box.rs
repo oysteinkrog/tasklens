@@ -121,6 +121,9 @@ impl MemMode {
     }
 }
 
+/// Maps the body size to the layout class the probe compares with the render's.
+type Classify = Box<dyn Fn(Size<Pixels>) -> u32>;
+
 /// The page saves the share the box ended a drag or a double-click on.
 impl EventEmitter<InnerSplitChanged> for MemBox {}
 
@@ -983,7 +986,7 @@ impl Render for MemBox {
         let probe_m = m;
         let body_w = self.body.get().width;
         // The class the probe reports: whether the text rows are one line. `chart` has none.
-        let (class, classify): (u32, Box<dyn Fn(Size<Pixels>) -> u32>) = match self.mode {
+        let (class, classify): (u32, Classify) = match self.mode {
             MemMode::Rows => {
                 let sharer = self.spark_split.sharer(m.sp[5], m.ui_scale);
                 let text_w = move |len: f32| sharer(len) * len;

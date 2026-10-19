@@ -736,8 +736,8 @@ mod boxes {
         let host = r.host.clone();
         let leak = |id: String| -> &'static str { Box::leak(id.into_boxed_str()) };
         // (box width, box height, sparkline width): one-line rows at 800 px, the 1200 x 900
-        // default (384 x 516, a 358 px body) and a 720 px page (224 x 280, a 198 px body).
-        for (w, h, spark_w) in [(800., 300., 96.), (384., 516., 96.), (224., 280., 62.)] {
+        // default (384 x 516, a 358 px body) and a 720 px page (224 x 280, a 198 px body, 128 px text part and the 8 px splitter).
+        for (w, h, spark_w) in [(800., 300., 96.), (384., 516., 96.), (224., 280., 58.)] {
             r.vcx.update(|_, cx| {
                 host.update(cx, |hst, cx| {
                     hst.mem_w = w;
@@ -2341,6 +2341,7 @@ mod page {
         title_handle_id,
     };
     use tl_ui::pages::performance::overview::layout::{BoxKind, OverviewLayout, place};
+    use tl_ui::pages::performance::overview::mem_box::MEM_SPLITTER_ID;
     use tl_ui::pages::performance::overview::{BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage};
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::sidebar::DeviceSidebar;
@@ -2830,12 +2831,21 @@ mod page {
                 for j in 0..5 {
                     let x = b.left() + b.size.width * ((i as f32 + 0.5) / 8.);
                     let y = b.top() + b.size.height * ((j as f32 + 0.5) / 5.);
+                    moves += 1;
+                    // The Memory box's inner splitter lights up under the pointer, so that
+                    // box renders by design (UI-PRF-019); the sweep steps over it.
+                    let at = gpui_kit::point(x, y);
+                    if r.vcx
+                        .debug_bounds(MEM_SPLITTER_ID)
+                        .is_some_and(|gap| gap.contains(&at))
+                    {
+                        continue;
+                    }
                     r.vcx.simulate_event(gpui_kit::MouseMoveEvent {
                         position: gpui_kit::point(x, y),
                         pressed_button: None,
                         modifiers: gpui_kit::Modifiers::none(),
                     });
-                    moves += 1;
                 }
             }
             draw(r.vcx);

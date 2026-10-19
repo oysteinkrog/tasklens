@@ -174,11 +174,15 @@ impl InnerSplit {
         let second_px = self.default_second_px;
         let gap = f32::from(gap);
         move |len| {
-            let share = match second_px {
-                Some(second) if len > 0. && share == default => (len - gap - second * scale) / len,
-                _ => share,
-            };
-            clamp_split(share, len, gap, mins, scale)
+            match second_px {
+                // The fixed default is exempt from `SPLIT_RANGE`: a wide box keeps its column.
+                Some(second) if len > 0. && share == default => {
+                    let lo = mins.0 * scale / len;
+                    let hi = (len - gap - mins.1 * scale) / len;
+                    ((len - gap - second * scale) / len).clamp(lo, hi.max(lo))
+                }
+                _ => clamp_split(share, len, gap, mins, scale),
+            }
         }
     }
 
@@ -341,8 +345,16 @@ impl InnerSplit {
         let body = Rc::clone(&self.body);
         let view = cx.entity().downgrade();
         let dragging = self.drag.is_some();
+        // A fixed second part depends on the body length, so a new length needs one more render.
+        let fixed = self.default_second_px.is_some() && self.share == self.default;
+        let id = cx.entity_id();
         canvas(
-            move |bounds, _, _| body.set(bounds),
+            move |bounds, _, cx| {
+                let old = body.replace(bounds);
+                if fixed && old.size != bounds.size {
+                    cx.defer(move |cx| cx.notify(id));
+                }
+            },
             move |_, _, window, _| {
                 if !dragging {
                     return;
