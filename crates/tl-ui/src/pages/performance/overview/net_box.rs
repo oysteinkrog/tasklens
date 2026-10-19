@@ -38,7 +38,7 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
-use super::disk_box::{CELL_MIN_H, CELL_MIN_W, ChartsFit, charts_fit, more_line};
+use super::disk_box::{CELL_MIN_H, charts_fit, more_line};
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::BoxMode;
 use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions, class_probe};
