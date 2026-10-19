@@ -148,6 +148,12 @@ impl InnerSplit {
         self
     }
 
+    /// Sets the fixed second part of the untouched default share, for a box whose default
+    /// follows its content. Call it on each render before [`Self::share`].
+    pub fn set_default_second_px(&mut self, px: f32) {
+        self.default_second_px = Some(px);
+    }
+
     /// The share as saved or dragged, before the clamps.
     pub fn saved(&self) -> f32 {
         self.share

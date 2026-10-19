@@ -206,6 +206,11 @@ impl OverviewPage {
             mem.update(cx, |b, cx| b.set_split(split, cx));
         }
         let gpu = cx.new(|cx| GpuBox::new(&hub, &gpu_cards, cx));
+        let gpu_mode = layout.config(BoxKind::Gpu).mode.id;
+        gpu.update(cx, |b, cx| b.set_mode(gpu_mode, cx));
+        if let Some(split) = layout.split(BoxKind::Gpu) {
+            gpu.update(cx, |b, cx| b.set_split(split, cx));
+        }
         let disk = cx.new(|cx| DiskBox::new(&hub, &disk_cards, cx));
         let net_target = first_card(sidebar, DeviceKind::Net, cx);
         let net = cx.new(|cx| {
@@ -219,6 +224,7 @@ impl OverviewPage {
         subs.push(cx.observe_global::<TlSettings>(Self::sync_layout));
         subs.push(cx.subscribe(&cpu, Self::on_cpu_split));
         subs.push(cx.subscribe(&mem, Self::on_mem_split));
+        subs.push(cx.subscribe(&gpu, Self::on_gpu_split));
         let procs = layout
             .has(BoxKind::TopProcs)
             .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
@@ -410,6 +416,13 @@ impl OverviewPage {
         self.save_layout(cx);
     }
 
+    /// The GPU box ended a split drag or a double-click: the share goes into the layout and the
+    /// profile.
+    fn on_gpu_split(&mut self, _: Entity<GpuBox>, ev: &InnerSplitChanged, cx: &mut Context<Self>) {
+        self.layout.set_split(BoxKind::Gpu, ev.0);
+        self.save_layout(cx);
+    }
+
     /// Takes `layout`: the Top processes box with its demand comes or goes, then a new
     /// placement and one render.
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
@@ -418,6 +431,8 @@ impl OverviewPage {
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
         let mem_split = layout.split(BoxKind::Memory);
         let mem_mode = layout.config(BoxKind::Memory).mode.id;
+        let gpu_split = layout.split(BoxKind::Gpu);
+        let gpu_mode = layout.config(BoxKind::Gpu).mode.id;
         self.layout = layout;
         self.cpu.update(cx, |b, cx| b.set_mode(cpu_mode, cx));
         if let Some(split) = split {
@@ -426,6 +441,10 @@ impl OverviewPage {
         self.mem.update(cx, |b, cx| b.set_mode(mem_mode, cx));
         if let Some(split) = mem_split {
             self.mem.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        self.gpu.update(cx, |b, cx| b.set_mode(gpu_mode, cx));
+        if let Some(split) = gpu_split {
+            self.gpu.update(cx, |b, cx| b.set_split(split, cx));
         }
         if procs != self.procs.is_some() {
             self.procs = procs.then(|| {

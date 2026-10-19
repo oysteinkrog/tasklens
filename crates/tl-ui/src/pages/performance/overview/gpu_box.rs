@@ -10,6 +10,11 @@
 //! busiest engine and a "+n more engines" row. Narrow rows drop the meter and keep the sparkline
 //! (`meter_fits`). A resize re-renders the box only when one of those changes. Pointer movement
 //! never notifies.
+//!
+//! UI-PRF-019 gives the box three modes. `chart_engines` is the layout above, with an inner
+//! splitter under the first section's chart. `engine_charts` shows one chart per shown engine in
+//! a grid of cells at least 160 × 70 px, then the VRAM row. `chart` is the utilization chart and
+//! the VRAM row only.
 
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
@@ -18,9 +23,9 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, size,
+    AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
+    Styled as _, Subscription, Window, div, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -34,6 +39,7 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::super::gpu::{GpuVendor, gpu_totals, shown_engines};
 use super::cpu_box::value_text;
+use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::BoxMode;
 use super::mem_box::MeterRow;
 use super::parts::{
@@ -55,11 +61,65 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 pub const GPU_BOX_ID: &str = "perf-overview-box-gpu";
 
 /// The box's layout modes (UI-PRF-019). `chart_engines` is the sections of UI-PRF-017.
-pub const MODES: &[BoxMode] = &[BoxMode {
-    id: "chart_engines",
-    label: "perf-overview-mode-chart-engines",
-    split: None,
-}];
+///
+/// The `chart_engines` split is the first section's chart share of the body. Its default is a
+/// nominal 0.5: while the share is that value, the chart takes the spare height as before.
+pub const MODES: &[BoxMode] = &[
+    BoxMode {
+        id: "chart_engines",
+        label: "perf-overview-mode-chart-engines",
+        split: Some(0.5),
+    },
+    BoxMode {
+        id: "engine_charts",
+        label: "perf-overview-mode-engine-charts",
+        split: None,
+    },
+    BoxMode {
+        id: "chart",
+        label: "perf-overview-mode-chart",
+        split: None,
+    },
+];
+
+/// The debug selector of the splitter under the first chart in `chart_engines`.
+pub const GPU_SPLITTER_ID: &str = "perf-overview-gpu-splitter";
+/// The debug selector of its accent line.
+pub const GPU_SPLITTER_LINE_ID: &str = "perf-overview-gpu-splitter-line";
+
+/// The smallest engine chart cell of `engine_charts`, logical px.
+pub const CELL_MIN_W: f32 = 160.;
+pub const CELL_MIN_H: f32 = 70.;
+
+/// Which parts the box shows (UI-PRF-019).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GpuMode {
+    ChartEngines,
+    EngineCharts,
+    Chart,
+}
+
+impl GpuMode {
+    /// The mode `id`; an unknown id is the default.
+    fn from_id(id: &str) -> Self {
+        match id {
+            "engine_charts" => Self::EngineCharts,
+            "chart" => Self::Chart,
+            _ => Self::ChartEngines,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::ChartEngines => MODES[0].id,
+            Self::EngineCharts => MODES[1].id,
+            Self::Chart => MODES[2].id,
+        }
+    }
+}
+
+/// The page saves the share the box ended a drag or a double-click on.
+impl EventEmitter<InnerSplitChanged> for GpuBox {}
 
 /// GPUs with a section; the rest are counted in the "+n more" line.
 pub const MAX_GPUS: usize = 2;
@@ -246,11 +306,85 @@ struct SectionRows {
     rest: usize,
 }
 
-fn section_rows(s: &GpuSection) -> SectionRows {
+/// `chart` shows the chart and the VRAM row only.
+fn section_rows(s: &GpuSection, mode: GpuMode) -> SectionRows {
+    if mode == GpuMode::Chart {
+        return SectionRows {
+            engines: 0,
+            rest: 1,
+        };
+    }
     SectionRows {
         engines: s.engines.len(),
         rest: 1 + usize::from(!s.line.is_empty()),
     }
+}
+
+/// What `engine_charts` shows: how many sections and grid columns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ChartsFit {
+    sections: usize,
+    cols: usize,
+}
+
+impl ChartsFit {
+    fn class(self) -> u32 {
+        self.sections as u32 | (self.cols as u32) << 2
+    }
+}
+
+/// The grid columns of a body `width` wide: as many cells of at least `CELL_MIN_W` as fit.
+fn grid_cols(width: Pixels, m: &UiMetrics) -> usize {
+    let (_, gap, _) = spacing(m);
+    let w = f32::from(width);
+    if w <= 0. {
+        return 1;
+    }
+    (((w + gap) / (CELL_MIN_W * m.ui_scale + gap)).floor() as usize).max(1)
+}
+
+/// The height of an `engine_charts` section: a grid of `engines` cells in `cols` columns, then
+/// the VRAM row, `lines` more rows, and a heading row when `heading`.
+fn charts_section_h(
+    engines: usize,
+    cols: usize,
+    lines: usize,
+    heading: bool,
+    m: &UiMetrics,
+) -> f32 {
+    let (row, gap, _) = spacing(m);
+    let grid_rows = engines.div_ceil(cols.max(1));
+    let head = if heading { row + gap } else { 0. };
+    let grid = if grid_rows == 0 {
+        0.
+    } else {
+        grid_rows as f32 * (CELL_MIN_H * m.ui_scale + gap)
+    };
+    head + grid + (1 + lines) as f32 * (gap + row) - if grid_rows == 0 { gap } else { 0. }
+}
+
+/// What `engine_charts` fits in `body`: both sections when both fit in full, else the first with
+/// "+n more" for the others.
+fn charts_fit(body: Size<Pixels>, engines: &[usize], total: usize, m: &UiMetrics) -> ChartsFit {
+    let cols = grid_cols(body.width, m);
+    let count = engines.len();
+    if body.height == px(0.) || count == 0 {
+        return ChartsFit {
+            sections: count,
+            cols,
+        };
+    }
+    let (_, _, section_gap) = spacing(m);
+    let more = |shown: usize| usize::from(total > shown);
+    if count >= 2 {
+        let two = charts_section_h(engines[0], cols, 0, false, m)
+            + section_gap
+            + charts_section_h(engines[1], cols, more(2), true, m);
+        if f32::from(body.height) >= two {
+            return ChartsFit { sections: 2, cols };
+        }
+    }
+    ChartsFit { sections: 1, cols }
 }
 
 /// What a body shows.
@@ -333,10 +467,23 @@ pub fn engine_row_id(i: usize, key: &str) -> String {
     format!("{GPU_BOX_ID}-engine-{i}-{key}")
 }
 
+/// The debug selector of section `i`'s `engine_charts` cell `key`.
+pub fn engine_cell_id(i: usize, key: &str) -> String {
+    format!("{GPU_BOX_ID}-cell-{i}-{key}")
+}
+
+/// The debug selector of section `i`'s utilization chart.
+pub fn chart_id(i: usize) -> String {
+    format!("{GPU_BOX_ID}-chart-{i}")
+}
+
 /// The GPU box.
 pub struct GpuBox {
     hub: Entity<SnapshotHub>,
     sections: SmallVec<[GpuSection; 2]>,
+    mode: GpuMode,
+    /// The gap under the first chart (`chart_engines`).
+    chart_split: InnerSplit,
     /// GPUs past `MAX_GPUS`.
     more: usize,
     /// "+n more" for `more`, and for `more + 1` when the second section does not fit.
@@ -370,6 +517,14 @@ impl GpuBox {
         let mut this = Self {
             hub: hub.clone(),
             sections: SmallVec::new(),
+            mode: GpuMode::ChartEngines,
+            chart_split: InnerSplit::new(
+                GPU_SPLITTER_ID,
+                GPU_SPLITTER_LINE_ID,
+                MODES[0].split.unwrap_or_default(),
+            )
+            .with_mins(MIN_CHART_H, 2. * LABEL_ROW)
+            .with_default_second_px(0.),
             more: 0,
             more_text: SharedString::default(),
             more_text_fit: SharedString::default(),
@@ -419,6 +574,42 @@ impl GpuBox {
         #[cfg(any(test, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
+    }
+
+    /// The shown mode's id.
+    pub fn mode(&self) -> &'static str {
+        self.mode.id()
+    }
+
+    /// Shows mode `id`; an unknown id is the default mode. Only this box renders again.
+    pub fn set_mode(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mode = GpuMode::from_id(id);
+        if mode != self.mode {
+            self.mode = mode;
+            cx.notify();
+        }
+    }
+
+    /// The first chart's share of the body as laid out in `chart_engines`, after the clamps; 0 in
+    /// the other modes.
+    pub fn split(&self, m: &UiMetrics) -> f32 {
+        match self.mode {
+            GpuMode::ChartEngines => self
+                .chart_split
+                .share(SplitAxis::Column, m.sp[5], m.ui_scale),
+            _ => 0.,
+        }
+    }
+
+    /// Takes the saved share for `chart_engines`. Nothing changes while the gap is held.
+    pub fn set_split(&mut self, share: f32, cx: &mut Context<Self>) {
+        if self.mode == GpuMode::ChartEngines && self.chart_split.set_share(share) {
+            cx.notify();
+        }
+    }
+
+    fn chart_inner_split(&mut self) -> &mut InnerSplit {
+        &mut self.chart_split
     }
 
     pub fn sections(&self) -> &[GpuSection] {
@@ -849,23 +1040,136 @@ fn busiest(engines: &[EngineRow]) -> usize {
     best
 }
 
-impl Render for GpuBox {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.render_count.set(self.render_count.get() + 1);
-        let m = *metrics(cx);
-        let theme = current(cx).clone();
+/// A later section's heading row: the GPU name and its utilization.
+fn section_heading(
+    section: &GpuSection,
+    row_h: Pixels,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    let mut heading = div()
+        .flex_none()
+        .whitespace_nowrap()
+        .text_color(theme.text_primary)
+        .child(section.heading.clone());
+    *heading.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let mut value = div()
+        .flex_none()
+        .whitespace_nowrap()
+        .text_color(theme.text_primary)
+        .child(section.value.clone());
+    *value.text_style() = numeric_style(m, m.text.sm);
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .justify_between()
+        .h(row_h)
+        .child(heading)
+        .child(value)
+        .into_any_element()
+}
+
+/// One `engine_charts` cell: the engine name and percent over its chart.
+fn engine_cell(i: usize, e: &EngineRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let key = e.key;
+    let mut name = div()
+        .flex_1()
+        .min_w_0()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_ellipsis()
+        .text_color(theme.text_secondary)
+        .child(e.meter.label.clone());
+    *name.text_style() = t_xs(m);
+    let mut value = div()
+        .flex_none()
+        .whitespace_nowrap()
+        .text_color(theme.text_primary)
+        .child(e.meter.value.clone());
+    *value.text_style() = numeric_style(m, m.text.sm);
+    div()
+        .debug_selector(move || engine_cell_id(i, key))
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h(px(CELL_MIN_H * m.ui_scale))
+        .gap(m.sp[2])
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(m.sp[2])
+                .h(px(LABEL_ROW * m.ui_scale))
+                .child(name)
+                .child(value),
+        )
+        .child(
+            div().relative().flex_1().min_h_0().child(
+                e.chart
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            ),
+        )
+        .into_any_element()
+}
+
+impl GpuBox {
+    /// `chart_engines` and `chart`: the sections of UI-PRF-017, or only their charts and VRAM rows.
+    fn list_body(&mut self, m: &UiMetrics, theme: &TlTheme, cx: &mut Context<Self>) -> AnyElement {
         let s = m.ui_scale;
         let row_h = px(LABEL_ROW * s);
-        let rows: SmallVec<[SectionRows; MAX_GPUS]> =
-            self.sections.iter().map(section_rows).collect();
+        let mode = self.mode;
+        let rows: SmallVec<[SectionRows; MAX_GPUS]> = self
+            .sections
+            .iter()
+            .map(|sec| section_rows(sec, mode))
+            .collect();
         let total = self.sections.len() + self.more;
         let body_size = self.body.get();
-        let shown = fit(body_size, &rows, total, &m);
+        let shown = fit(body_size, &rows, total, m);
         self.shown = shown.sections;
         self.collapsed = shown.collapsed;
         self.meters = shown.meters;
         let more = self.shown_more_text();
+        let with_rows = mode == GpuMode::ChartEngines;
+
+        // The first chart's height under the splitter. The untouched default keeps the flex
+        // layout: the split then reads what that layout gives the chart.
+        let (_, gap, section_gap) = spacing(m);
+        let len = f32::from(body_size.height);
+        let lines: SmallVec<[usize; MAX_GPUS]> = (0..shown.sections)
+            .map(|i| {
+                engine_lines(rows[i].engines, shown.collapsed && i == 0)
+                    + rows[i].rest
+                    + usize::from(i + 1 == shown.sections && !more.is_empty())
+            })
+            .collect();
+        let mut split_share = None;
+        let mut custom_chart_h = None;
+        if with_rows && shown.sections > 0 {
+            let n = shown.sections as f32;
+            let basis: f32 = lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| section_h(*l, i > 0, m))
+                .sum();
+            let spare = (len - basis - (n - 1.) * section_gap).max(0.);
+            let first_h = section_h(lines[0], false, m) + spare / n;
+            let chart_h =
+                (first_h - lines[0] as f32 * (gap + f32::from(row_h))).max(MIN_CHART_H * s);
+            let second = (len - f32::from(m.sp[5]) - chart_h).max(0.) / s;
+            self.chart_split.set_default_second_px(second);
+            let share = self.chart_split.share(SplitAxis::Column, m.sp[5], s);
+            split_share = Some(share);
+            if self.chart_split.saved() != self.chart_split.default_share() && len > 0. {
+                custom_chart_h = Some(share * len);
+            }
+        }
 
         let mut body = div()
             .relative()
@@ -877,41 +1181,23 @@ impl Render for GpuBox {
         for (i, section) in self.sections.iter().take(shown.sections).enumerate() {
             let collapsed = shown.collapsed && i == 0;
             let last = i + 1 == shown.sections;
-            let lines = engine_lines(rows[i].engines, collapsed)
-                + rows[i].rest
-                + usize::from(last && !more.is_empty());
+            let fixed = custom_chart_h.filter(|_| i == 0);
             let mut col = div()
                 .flex()
                 .flex_col()
-                .flex_grow(1.)
                 .flex_shrink_0()
-                .flex_basis(px(section_h(lines, i > 0, &m)))
                 .w_full()
                 .gap(m.sp[2]);
+            col = match fixed {
+                Some(h) => col
+                    .flex_grow(0.)
+                    .flex_basis(px(h + lines[i] as f32 * (gap + f32::from(row_h)))),
+                None => col
+                    .flex_grow(1.)
+                    .flex_basis(px(section_h(lines[i], i > 0, m))),
+            };
             if i > 0 {
-                let mut heading = div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_color(theme.text_primary)
-                    .child(section.heading.clone());
-                *heading.text_style() = label_style(&m, m.text.sm, FontWeight::MEDIUM);
-                let mut value = div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_color(theme.text_primary)
-                    .child(section.value.clone());
-                *value.text_style() = numeric_style(&m, m.text.sm);
-                col = col.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_none()
-                        .items_center()
-                        .justify_between()
-                        .h(row_h)
-                        .child(heading)
-                        .child(value),
-                );
+                col = col.child(section_heading(section, row_h, m, theme));
             }
             let engine = |e: &EngineRow| {
                 let key = e.key;
@@ -919,13 +1205,7 @@ impl Render for GpuBox {
                     .debug_selector(move || engine_row_id(i, key))
                     .flex_none()
                     .w_full()
-                    .child(spark_row(
-                        &e.meter,
-                        Some(&e.chart),
-                        shown.meters,
-                        &m,
-                        &theme,
-                    ))
+                    .child(spark_row(&e.meter, Some(&e.chart), shown.meters, m, theme))
             };
             let mut section_rows = div()
                 .debug_selector(move || rows_id(i))
@@ -934,40 +1214,151 @@ impl Render for GpuBox {
                 .flex_none()
                 .w_full()
                 .gap(m.sp[2]);
-            if collapsed && section.engines.len() > 2 {
-                section_rows = section_rows
-                    .child(engine(&section.engines[busiest(&section.engines)]))
-                    .child(text_row(&section.engines_more, &m, &theme));
-            } else {
-                section_rows = section_rows.children(section.engines.iter().map(engine));
+            if with_rows {
+                if collapsed && section.engines.len() > 2 {
+                    section_rows = section_rows
+                        .child(engine(&section.engines[busiest(&section.engines)]))
+                        .child(text_row(&section.engines_more, m, theme));
+                } else {
+                    section_rows = section_rows.children(section.engines.iter().map(engine));
+                }
             }
             section_rows =
-                section_rows.child(spark_row(&section.vram, None, shown.meters, &m, &theme));
-            if !section.line.is_empty() {
-                section_rows = section_rows.child(text_row(&section.line, &m, &theme));
+                section_rows.child(spark_row(&section.vram, None, shown.meters, m, theme));
+            if with_rows && !section.line.is_empty() {
+                section_rows = section_rows.child(text_row(&section.line, m, theme));
             }
             if last && !more.is_empty() {
-                section_rows = section_rows.child(text_row(&more, &m, &theme));
+                section_rows = section_rows.child(text_row(&more, m, theme));
             }
-            col = col
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h(px(MIN_CHART_H * s))
-                        .w_full()
-                        .child(chart_element(section)),
-                )
-                .child(section_rows);
-            body = body.child(col);
+            let chart = div()
+                .debug_selector(move || chart_id(i))
+                .min_h(px(MIN_CHART_H * s))
+                .w_full()
+                .child(chart_element(section));
+            let chart = match fixed {
+                Some(h) => chart.flex_none().h(px(h)),
+                None => chart.flex_1(),
+            };
+            body = body.child(col.child(chart).child(section_rows));
         }
-        let probe_m = m;
+        let probe_m = *m;
         body = body.child(class_probe(
             Rc::clone(&self.body),
             shown.class(),
             move |b| fit(b, &rows, total, &probe_m).class(),
             cx.entity_id(),
         ));
+        if let Some(share) = split_share {
+            body = body
+                .child(self.chart_split.probe(Self::chart_inner_split, cx))
+                .child(self.chart_split.gap(
+                    SplitAxis::Column,
+                    share,
+                    m.sp[5],
+                    Self::chart_inner_split,
+                    cx,
+                ));
+        }
+        body.into_any_element()
+    }
 
+    /// `engine_charts`: per section a grid of engine charts, then the VRAM row.
+    fn charts_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let s = m.ui_scale;
+        let row_h = px(LABEL_ROW * s);
+        let engines: SmallVec<[usize; MAX_GPUS]> =
+            self.sections.iter().map(|sec| sec.engines.len()).collect();
+        let total = self.sections.len() + self.more;
+        let shown = charts_fit(self.body.get(), &engines, total, m);
+        self.shown = shown.sections;
+        self.collapsed = false;
+        self.meters = meter_fits(self.body.get().width, m);
+        let more = self.shown_more_text();
+        let cols = shown.cols;
+
+        let mut body = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .overflow_hidden()
+            .gap(m.sp[5]);
+        for (i, section) in self.sections.iter().take(shown.sections).enumerate() {
+            let last = i + 1 == shown.sections;
+            let extra = usize::from(last && !more.is_empty());
+            let mut col = div()
+                .flex()
+                .flex_col()
+                .flex_grow(1.)
+                .flex_shrink_0()
+                .flex_basis(px(charts_section_h(engines[i], cols, extra, i > 0, m)))
+                .w_full()
+                .gap(m.sp[2]);
+            if i > 0 {
+                col = col.child(section_heading(section, row_h, m, theme));
+            }
+            let mut grid = div()
+                .debug_selector(move || rows_id(i))
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(engines[i].div_ceil(cols) as f32 * CELL_MIN_H * s))
+                .w_full()
+                .gap(m.sp[2]);
+            for chunk in section.engines.chunks(cols) {
+                let mut line = div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(CELL_MIN_H * s))
+                    .gap(m.sp[2]);
+                for e in chunk {
+                    line = line.child(engine_cell(i, e, m, theme));
+                }
+                for _ in chunk.len()..cols {
+                    line = line.child(div().flex_1().min_w_0());
+                }
+                grid = grid.child(line);
+            }
+            let mut rest = div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w_full()
+                .gap(m.sp[2])
+                .child(spark_row(&section.vram, None, self.meters, m, theme));
+            if last && !more.is_empty() {
+                rest = rest.child(text_row(&more, m, theme));
+            }
+            body = body.child(col.child(grid).child(rest));
+        }
+        let probe_m = *m;
+        body = body.child(class_probe(
+            Rc::clone(&self.body),
+            shown.class(),
+            move |b| charts_fit(b, &engines, total, &probe_m).class(),
+            cx.entity_id(),
+        ));
+        body.into_any_element()
+    }
+}
+
+impl Render for GpuBox {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        let body = match self.mode {
+            GpuMode::EngineCharts => self.charts_body(&m, &theme, cx),
+            GpuMode::ChartEngines | GpuMode::Chart => self.list_body(&m, &theme, cx),
+        };
         let first = self.sections.first();
         let pick = |f: fn(&GpuSection) -> &SharedString| first.map(f).cloned().unwrap_or_default();
         box_frame(
@@ -976,7 +1367,7 @@ impl Render for GpuBox {
             pick(|s| &s.heading),
             pick(|s| &s.value),
             SharedString::default(),
-            body.into_any_element(),
+            body,
             &m,
             &theme,
         )

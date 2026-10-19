@@ -3272,6 +3272,114 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn overview_gpu_modes_render(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::gpu_box::{
+            GPU_BOX_ID, GPU_SPLITTER_ID, chart_id, engine_cell_id, engine_row_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let keys = |r: &mut Rig| -> Vec<&'static str> {
+            r.vcx.update(|_, cx| {
+                page.read(cx).gpu_box().read(cx).sections()[0]
+                    .engines
+                    .iter()
+                    .map(|e| e.key)
+                    .collect()
+            })
+        };
+        let set = |r: &mut Rig, mode: &str| {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "gpu".into(),
+                mode: mode.into(),
+            });
+        };
+        let shown = |r: &mut Rig, id: String| {
+            let id: &'static str = Box::leak(id.into_boxed_str());
+            r.vcx.debug_bounds(id).is_some()
+        };
+        let engines = keys(&mut r);
+        assert!(engines.len() >= 2, "{engines:?}");
+        let parts = |r: &mut Rig| {
+            [
+                shown(r, GPU_SPLITTER_ID.into()),
+                shown(r, chart_id(0)),
+                shown(r, engine_row_id(0, engines[0])),
+                shown(r, engine_cell_id(0, engines[0])),
+            ]
+        };
+
+        // The default: chart, engine rows and the splitter under the chart.
+        assert_eq!(parts(&mut r), [true, true, true, false]);
+        assert_eq!(r.layout().split(BoxKind::Gpu), Some(0.5));
+        let chart = r.bounds_of(chart_id(0));
+        let gap = r.bounds_of(GPU_SPLITTER_ID.into());
+        assert!(chart.bottom() <= gap.bottom(), "{chart:?} {gap:?}");
+
+        // One chart per engine, no rows, no splitter, no split.
+        set(&mut r, "engine_charts");
+        assert_eq!(parts(&mut r), [false, false, false, true]);
+        assert_eq!(r.layout().split(BoxKind::Gpu), None);
+        let frame = r.bounds_of(GPU_BOX_ID.into());
+        for k in &engines {
+            let cell = r.bounds_of(engine_cell_id(0, k));
+            assert!(
+                cell.size.width >= px(160.) && cell.size.height >= px(70.),
+                "{cell:?}"
+            );
+            assert!(cell.right() <= frame.right() && cell.bottom() <= frame.bottom());
+        }
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+
+        // The utilization chart and the VRAM row only.
+        set(&mut r, "chart");
+        assert_eq!(parts(&mut r), [false, true, false, false]);
+        assert_eq!(r.layout().split(BoxKind::Gpu), None);
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+
+        // Back to the default mode: the default split returns.
+        set(&mut r, "chart_engines");
+        assert_eq!(parts(&mut r), [true, true, true, false]);
+        assert_eq!(r.layout().split(BoxKind::Gpu), Some(0.5));
+    }
+
+    #[gpui_kit::test]
+    fn overview_gpu_engine_charts_one_per_engine(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::gpu_box::engine_cell_id;
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "gpu".into(),
+            mode: "engine_charts".into(),
+        });
+        let page = r.page.clone();
+        let keys: Vec<&'static str> = r.vcx.update(|_, cx| {
+            page.read(cx).gpu_box().read(cx).sections()[0]
+                .engines
+                .iter()
+                .map(|e| e.key)
+                .collect()
+        });
+        assert!(keys.len() >= 2, "{keys:?}");
+        let mut cells = Vec::new();
+        for (i, k) in keys.iter().enumerate() {
+            let id: &'static str = Box::leak(engine_cell_id(0, k).into_boxed_str());
+            let b = r.vcx.debug_bounds(id);
+            assert!(b.is_some(), "no cell for engine {i} {k}");
+            cells.push(b.unwrap());
+        }
+        // Distinct cells: no two share a place.
+        for (i, a) in cells.iter().enumerate() {
+            for b in &cells[i + 1..] {
+                assert!(a.origin != b.origin, "{a:?} {b:?}");
+            }
+        }
+        // No cell for a key that is not shown.
+        let id: &'static str = Box::leak(engine_cell_id(0, "nope").into_boxed_str());
+        assert!(r.vcx.debug_bounds(id).is_none());
+    }
+
+    #[gpui_kit::test]
     fn overview_inner_split_drag_and_reset(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
         // CPU and Memory share the row equally, so in the CPU body the 120 px chart minimum is
