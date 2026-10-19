@@ -25,7 +25,7 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
-    Styled as _, Subscription, Window, div, px, relative, size,
+    Styled as _, Subscription, Window, div, px, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
