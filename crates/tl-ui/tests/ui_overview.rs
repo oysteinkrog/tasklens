@@ -3486,6 +3486,25 @@ mod page {
         assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
 
         // One combined chart per counted adapter in a grid.
+        // The fixture's catalog has eth0 (idx 5); give it rates so it is counted.
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let m = tl_model::system::Metric::valid;
+            sys.nets = Arc::from([(
+                tl_model::ids::DeviceIdx(5),
+                tl_model::system::NetTotals {
+                    device: tl_model::ids::DeviceIdx(5),
+                    rx_bps: m(1000.),
+                    tx_bps: m(100.),
+                    rx_total: 1 << 30,
+                    tx_total: 1 << 29,
+                    link_speed_mbps: tl_model::system::Metric::default(),
+                    state: tl_model::system::LinkState::Up,
+                },
+            )]);
+        });
+        r.vcx.run_until_parked();
         set(&mut r, "adapter_charts");
         assert!(!shown(&mut r, NET_SPLITTER_ID.into()));
         assert!(!shown(&mut r, COMBINED_CHART_ID.into()));
