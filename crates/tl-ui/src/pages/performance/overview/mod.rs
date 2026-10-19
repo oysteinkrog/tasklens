@@ -223,6 +223,11 @@ impl OverviewPage {
             b.set_target(net_target, cx);
             b
         });
+        let net_mode = layout.config(BoxKind::Net).mode.id;
+        net.update(cx, |b, cx| b.set_mode(net_mode, cx));
+        if let Some(split) = layout.split(BoxKind::Net) {
+            net.update(cx, |b, cx| b.set_split(split, cx));
+        }
 
         let mut subs = SmallVec::new();
         subs.push(cx.observe(sidebar, |this, _, cx| this.sync_cards(cx)));
@@ -231,6 +236,7 @@ impl OverviewPage {
         subs.push(cx.subscribe(&mem, Self::on_mem_split));
         subs.push(cx.subscribe(&gpu, Self::on_gpu_split));
         subs.push(cx.subscribe(&disk, Self::on_disk_split));
+        subs.push(cx.subscribe(&net, Self::on_net_split));
         let procs = layout
             .has(BoxKind::TopProcs)
             .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
@@ -441,6 +447,13 @@ impl OverviewPage {
         self.save_layout(cx);
     }
 
+    /// The Network box ended a split drag or a double-click: the share goes into the layout and
+    /// the profile.
+    fn on_net_split(&mut self, _: Entity<NetBox>, ev: &InnerSplitChanged, cx: &mut Context<Self>) {
+        self.layout.set_split(BoxKind::Net, ev.0);
+        self.save_layout(cx);
+    }
+
     /// Takes `layout`: the Top processes box with its demand comes or goes, then a new
     /// placement and one render.
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
@@ -453,6 +466,8 @@ impl OverviewPage {
         let gpu_mode = layout.config(BoxKind::Gpu).mode.id;
         let disk_split = layout.split(BoxKind::Disk);
         let disk_mode = layout.config(BoxKind::Disk).mode.id;
+        let net_split = layout.split(BoxKind::Net);
+        let net_mode = layout.config(BoxKind::Net).mode.id;
         self.layout = layout;
         self.cpu.update(cx, |b, cx| b.set_mode(cpu_mode, cx));
         if let Some(split) = split {
@@ -469,6 +484,10 @@ impl OverviewPage {
         self.disk.update(cx, |b, cx| b.set_mode(disk_mode, cx));
         if let Some(split) = disk_split {
             self.disk.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        self.net.update(cx, |b, cx| b.set_mode(net_mode, cx));
+        if let Some(split) = net_split {
+            self.net.update(cx, |b, cx| b.set_split(split, cx));
         }
         if procs != self.procs.is_some() {
             self.procs = procs.then(|| {

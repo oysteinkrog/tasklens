@@ -326,20 +326,25 @@ fn grid_cols(width: Pixels, m: &UiMetrics) -> usize {
 /// What `disk_charts` shows: the grid columns and how many cells fit. The cells fill the body
 /// before the first paint.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct ChartsFit {
-    cols: usize,
-    shown: usize,
+pub(super) struct ChartsFit {
+    pub(super) cols: usize,
+    pub(super) shown: usize,
 }
 
 impl ChartsFit {
-    fn class(self) -> u32 {
+    pub(super) fn class(self) -> u32 {
         self.cols as u32 | (self.shown as u32) << 8
     }
 }
 
 /// The grid for `rows` cells in `body`. A cell is at least `CELL_MIN_H` high, and when the
 /// grid does not fit the cells that fit show, with one line left for "+n more".
-fn charts_fit(body: Size<Pixels>, rows: usize, total: usize, m: &UiMetrics) -> ChartsFit {
+pub(super) fn charts_fit(
+    body: Size<Pixels>,
+    rows: usize,
+    total: usize,
+    m: &UiMetrics,
+) -> ChartsFit {
     let cols = grid_cols(body.width, m);
     if body.height == px(0.) {
         return ChartsFit { cols, shown: rows };
@@ -941,7 +946,7 @@ fn busiest(rows: &[DiskRow], shown: usize, n: usize) -> u8 {
 }
 
 /// The "+n more" line.
-fn more_line(text: SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+pub(super) fn more_line(text: SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let mut line = div()
         .flex_none()
         .h(px(LABEL_ROW * m.ui_scale))

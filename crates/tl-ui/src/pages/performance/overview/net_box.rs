@@ -6,15 +6,26 @@
 //! `show_network_*` settings show, the set the engine's aggregate counts. The box formats its
 //! text only when the inputs' hash changes and notifies only then. Pointer movement never
 //! notifies.
+//!
+//! UI-PRF-019 gives the box three modes. `columns` is the Download and Upload columns above with
+//! a vertical splitter between them. `combined` is one chart with download and upload as two
+//! lines, under a rate header and over the Peak and Total rows of both directions.
+//! `adapter_charts` is a grid of one combined chart per counted adapter, in cells of at least
+//! 200 × 80 px. The adapter charts are built when the mode is shown and when the set of counted
+//! adapters changes, never per tick.
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
+use std::cell::Cell as StdCell;
 use std::hash::{Hash as _, Hasher as _};
+use std::rc::Rc;
 use std::sync::Arc;
 
+use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Window, div, px, white,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    relative, size, white,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -27,17 +38,19 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::disk_box::{CELL_MIN_H, CELL_MIN_W, ChartsFit, charts_fit, more_line};
+use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::BoxMode;
-use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions};
+use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions, class_probe};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
     ValueFormat, YScale, format_value,
 };
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
+use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::{Section, TlSettings};
-use crate::text::style::{numeric_style, t_xs};
+use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::derived::blend_over;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -45,17 +58,77 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 pub const NET_BOX_ID: &str = "perf-overview-box-net";
 
 /// The box's layout modes (UI-PRF-019). `columns` is the Download and Upload columns of UI-PRF-017.
-pub const MODES: &[BoxMode] = &[BoxMode {
-    id: "columns",
-    label: "perf-overview-mode-columns",
-    split: None,
-}];
+///
+/// The `columns` split is the Download column's share of the body.
+pub const MODES: &[BoxMode] = &[
+    BoxMode {
+        id: "columns",
+        label: "perf-overview-mode-columns",
+        split: Some(0.5),
+    },
+    BoxMode {
+        id: "combined",
+        label: "perf-overview-mode-combined",
+        split: None,
+    },
+    BoxMode {
+        id: "adapter_charts",
+        label: "perf-overview-mode-adapter-charts",
+        split: None,
+    },
+];
+
+/// The debug selector of the splitter between the Download and Upload columns.
+pub const NET_SPLITTER_ID: &str = "perf-overview-net-splitter";
+/// The debug selector of the splitter's accent line.
+pub const NET_SPLITTER_LINE_ID: &str = "perf-overview-net-splitter-line";
+/// The debug selector of the `combined` chart.
+pub const COMBINED_CHART_ID: &str = "perf-overview-net-combined-chart";
+
+/// The most adapter charts the box builds; the rest count into "+n more".
+pub const MAX_ADAPTER_CELLS: usize = 16;
+
+/// Which parts the box shows (UI-PRF-019).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NetMode {
+    Columns,
+    Combined,
+    AdapterCharts,
+}
+
+impl NetMode {
+    /// The mode `id`; an unknown id is the default.
+    fn from_id(id: &str) -> Self {
+        match id {
+            "combined" => Self::Combined,
+            "adapter_charts" => Self::AdapterCharts,
+            _ => Self::Columns,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Columns => MODES[0].id,
+            Self::Combined => MODES[1].id,
+            Self::AdapterCharts => MODES[2].id,
+        }
+    }
+}
+
+/// The page saves the share the box ended a drag or a double-click on.
+impl EventEmitter<InnerSplitChanged> for NetBox {}
+
+/// The debug selector of an adapter's `adapter_charts` cell, by its interface index.
+pub fn cell_id(idx: DeviceIdx) -> String {
+    format!("{NET_BOX_ID}-cell:{}", idx.0)
+}
 
 const KEY_TITLE: &str = "perf-overview-box-network";
 const KEY_DOWNLOAD: &str = "perf-net-legend-download";
 const KEY_UPLOAD: &str = "perf-net-legend-upload";
 const KEY_PEAK: &str = "perf-overview-net-peak";
 const KEY_TOTAL: &str = "perf-overview-net-total";
+const KEY_MORE: &str = "perf-overview-more";
 const KEY_RANGE: &str = "perf-net-heading-throughput";
 
 /// The upload line: the network colour blended with white, as the sidebar draws it.
@@ -120,16 +193,10 @@ fn aggregate(catalog: &DeviceCatalog) -> DeviceIdx {
         .map_or(DeviceIdx(u16::MAX), |e| e.idx)
 }
 
-/// One direction's chart: download filled, upload as a lighter line.
-fn chart_spec(
-    device: DeviceIdx,
-    upload: bool,
-    unit: NetworkUnit,
-    s: &ChartSettings,
-    theme: &TlTheme,
-) -> ChartSpec {
+/// One direction's series: download filled, upload as a lighter line.
+fn direction_series(device: DeviceIdx, upload: bool, theme: &TlTheme) -> ChartSeries {
     let g = &theme.graph;
-    let series = if upload {
+    if upload {
         ChartSeries {
             id: SeriesId {
                 device,
@@ -149,9 +216,13 @@ fn chart_spec(
             line: g.net_line,
             ..ChartSeries::default()
         }
-    };
+    }
+}
+
+/// The chart of `series` over the box range.
+fn spec_of(series: SmallVec<[ChartSeries; 4]>, unit: NetworkUnit, s: &ChartSettings) -> ChartSpec {
     ChartSpec {
-        series: smallvec![series],
+        series,
         y: YScale::AutoRate {
             iec: unit == NetworkUnit::Bytes,
         },
@@ -167,6 +238,34 @@ fn chart_spec(
         background: ChartBg::List,
         ..ChartSpec::default()
     }
+}
+
+/// One direction's chart.
+fn chart_spec(
+    device: DeviceIdx,
+    upload: bool,
+    unit: NetworkUnit,
+    s: &ChartSettings,
+    theme: &TlTheme,
+) -> ChartSpec {
+    spec_of(smallvec![direction_series(device, upload, theme)], unit, s)
+}
+
+/// Download and upload as two lines in one chart, for `combined` and the adapter cells.
+fn pair_spec(
+    device: DeviceIdx,
+    unit: NetworkUnit,
+    s: &ChartSettings,
+    theme: &TlTheme,
+) -> ChartSpec {
+    spec_of(
+        smallvec![
+            direction_series(device, false, theme),
+            direction_series(device, true, theme)
+        ],
+        unit,
+        s,
+    )
 }
 
 /// No heading and no value: the rows under the charts carry the numbers.
@@ -194,6 +293,16 @@ struct Sums {
     busiest: Option<DeviceIdx>,
 }
 
+/// Whether interface `idx` is one the box counts: present, not `lo`, and of a shown class.
+fn counted(snap: &Snapshot, idx: DeviceIdx, s: &NetSettings) -> bool {
+    let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == idx) else {
+        return false;
+    };
+    let loopback =
+        matches!(&entry.identity, DeviceIdentity::Net { name, .. } if &**name == LOOPBACK);
+    entry.present && !loopback && s.shown(entry.net_kind)
+}
+
 fn sums(snap: &Snapshot, s: &NetSettings) -> Sums {
     let mut out = Sums {
         rx: 0.,
@@ -207,12 +316,7 @@ fn sums(snap: &Snapshot, s: &NetSettings) -> Sums {
     };
     let mut busiest_rate = f64::NEG_INFINITY;
     for (idx, n) in snap.system.nets.iter() {
-        let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == *idx) else {
-            continue;
-        };
-        let loopback =
-            matches!(&entry.identity, DeviceIdentity::Net { name, .. } if &**name == LOOPBACK);
-        if !entry.present || loopback || !s.shown(entry.net_kind) {
+        if !counted(snap, *idx, s) {
             continue;
         }
         out.counted += 1;
@@ -277,11 +381,32 @@ fn series_version(snap: &Snapshot, id: SeriesId) -> u64 {
     snap.series.get(id).map_or(0, |v| v.version)
 }
 
+/// One `adapter_charts` cell: an interface, its name, its rates and its chart.
+struct AdapterCell {
+    idx: DeviceIdx,
+    name: SharedString,
+    /// "1.2 Mbps / 3.4 Mbps": download, then upload.
+    rates: SharedString,
+    chart: Entity<ChartView>,
+}
+
 /// The Network box.
 pub struct NetBox {
     hub: Entity<SnapshotHub>,
     down: Entity<ChartView>,
     up: Entity<ChartView>,
+    /// Download and upload as two lines of the aggregate series (`combined`).
+    combined: Entity<ChartView>,
+    mode: NetMode,
+    /// The gap between the Download and Upload columns (`columns`).
+    col_split: InnerSplit,
+    /// The counted adapters' cells, built only while `adapter_charts` is the mode.
+    adapters: Vec<AdapterCell>,
+    /// Counted adapters past `MAX_ADAPTER_CELLS`.
+    extra: usize,
+    /// How many cells the last `adapter_charts` render showed.
+    cells: usize,
+    body: Rc<StdCell<Size<Pixels>>>,
     down_text: SharedString,
     up_text: SharedString,
     down_total: SharedString,
@@ -338,10 +463,27 @@ impl NetBox {
             box_chart(spec, labels, hub, cx)
         };
         let (down, up) = (chart(false, cx), chart(true, cx));
+        let combined = box_chart(
+            pair_spec(aggregate, net.unit, &settings, &theme),
+            chart_labels(range.clone()),
+            hub,
+            cx,
+        );
         let mut this = Self {
             hub: hub.clone(),
             down,
             up,
+            combined,
+            mode: NetMode::Columns,
+            col_split: InnerSplit::new(
+                NET_SPLITTER_ID,
+                NET_SPLITTER_LINE_ID,
+                MODES[0].split.unwrap_or_default(),
+            ),
+            adapters: Vec::new(),
+            extra: 0,
+            cells: 0,
+            body: Rc::new(StdCell::new(size(px(0.), px(0.)))),
             down_text: SharedString::default(),
             up_text: SharedString::default(),
             down_total: SharedString::default(),
@@ -380,6 +522,63 @@ impl NetBox {
         this.sync_peaks(&snap, true);
         this.sync_text(&snap, true);
         this
+    }
+
+    /// The shown mode's id.
+    pub fn mode(&self) -> &'static str {
+        self.mode.id()
+    }
+
+    /// Shows mode `id`; an unknown id is the default mode. Only this box renders again.
+    pub fn set_mode(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mode = NetMode::from_id(id);
+        if mode == self.mode {
+            return;
+        }
+        self.mode = mode;
+        if mode == NetMode::AdapterCharts {
+            let snap = Arc::clone(self.hub.read(cx).current());
+            self.sync_adapters(&snap, cx);
+        } else {
+            self.adapters.clear();
+            self.extra = 0;
+        }
+        cx.notify();
+    }
+
+    /// The Download column's share of the body as laid out in `columns`, after the clamps; 0 in
+    /// the other modes.
+    pub fn split(&self, m: &UiMetrics) -> f32 {
+        match self.mode {
+            NetMode::Columns => self.col_split.share(SplitAxis::Row, m.sp[5], m.ui_scale),
+            _ => 0.,
+        }
+    }
+
+    /// Takes the saved share for `columns`. Nothing changes while the gap is held.
+    pub fn set_split(&mut self, share: f32, cx: &mut Context<Self>) {
+        if self.mode == NetMode::Columns && self.col_split.set_share(share) {
+            cx.notify();
+        }
+    }
+
+    fn col_inner_split(&mut self) -> &mut InnerSplit {
+        &mut self.col_split
+    }
+
+    /// The `combined` chart.
+    pub fn combined_chart(&self) -> &Entity<ChartView> {
+        &self.combined
+    }
+
+    /// The interface indexes of the `adapter_charts` cells, in catalog order.
+    pub fn adapter_idxs(&self) -> Vec<DeviceIdx> {
+        self.adapters.iter().map(|a| a.idx).collect()
+    }
+
+    /// How many `adapter_charts` cells the last render showed.
+    pub fn cells(&self) -> usize {
+        self.cells
     }
 
     pub fn down_chart(&self) -> &Entity<ChartView> {
@@ -459,6 +658,66 @@ impl NetBox {
         changed
     }
 
+    /// Brings the `adapter_charts` cells up to date with the counted adapters: a new adapter
+    /// builds a chart, a gone one drops its cell, a kept one keeps its chart. True when a cell
+    /// changed. Does nothing in the other modes.
+    fn sync_adapters(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
+        if self.mode != NetMode::AdapterCharts {
+            return false;
+        }
+        let unit = NetFormat {
+            unit: self.net.unit,
+            auto_scale: self.net.auto_scale,
+        };
+        let theme = current(cx).clone();
+        let hub = self.hub.clone();
+        let range = tr(cx, KEY_RANGE);
+        let mut old = std::mem::take(&mut self.adapters);
+        let mut changed = false;
+        let mut total = 0;
+        for (idx, n) in snap.system.nets.iter() {
+            if !counted(snap, *idx, &self.net) {
+                continue;
+            }
+            total += 1;
+            if self.adapters.len() == MAX_ADAPTER_CELLS {
+                continue;
+            }
+            let name: SharedString = adapter_name(snap, *idx).unwrap_or("").to_owned().into();
+            let rate = |m: &tl_model::system::Metric<f64>| {
+                value_text(m.validity, |out| {
+                    format_value(ValueFormat::RateNetwork, m.value as f32, unit, out);
+                })
+            };
+            let rates: SharedString = format!("{} / {}", rate(&n.rx_bps), rate(&n.tx_bps)).into();
+            let cell = match old.iter().position(|c| c.idx == *idx) {
+                Some(i) => {
+                    let mut c = old.remove(i);
+                    changed |= c.name != name || c.rates != rates;
+                    c.name = name;
+                    c.rates = rates;
+                    c
+                }
+                None => {
+                    changed = true;
+                    let spec = pair_spec(*idx, self.net.unit, &self.settings, &theme);
+                    AdapterCell {
+                        idx: *idx,
+                        name,
+                        rates,
+                        chart: box_chart(spec, chart_labels(range.clone()), &hub, cx),
+                    }
+                }
+            };
+            self.adapters.push(cell);
+        }
+        changed |= !old.is_empty();
+        let extra = total - self.adapters.len();
+        changed |= extra != self.extra;
+        self.extra = extra;
+        changed
+    }
+
     fn on_snapshot(
         &mut self,
         hub: Entity<SnapshotHub>,
@@ -483,7 +742,8 @@ impl NetBox {
             }
         }
         let peaks = ev.mask.contains(ComponentMask::SERIES) && self.sync_peaks(&snap, false);
-        if self.sync_text(&snap, peaks) {
+        let text = self.sync_text(&snap, peaks);
+        if self.sync_adapters(&snap, cx) || text {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
@@ -577,7 +837,8 @@ impl NetBox {
             self.rebuild_specs(cx);
         }
         let snap = Arc::clone(self.hub.read(cx).current());
-        if self.sync_text(&snap, false) {
+        let text = self.sync_text(&snap, false);
+        if self.sync_adapters(&snap, cx) || text {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
@@ -608,7 +869,10 @@ impl NetBox {
         self.peak_word = tr(cx, KEY_PEAK);
         self.total_word = tr(cx, KEY_TOTAL);
         let range = tr(cx, KEY_RANGE);
-        for v in [self.down.clone(), self.up.clone()] {
+        for v in [self.down.clone(), self.up.clone(), self.combined.clone()]
+            .into_iter()
+            .chain(self.adapters.iter().map(|a| a.chart.clone()))
+        {
             let labels = chart_labels(range.clone());
             v.update(cx, |v, cx| v.set_labels(labels, cx));
         }
@@ -619,6 +883,12 @@ impl NetBox {
 
     fn rebuild_specs(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
+        let pair = pair_spec(self.aggregate, self.net.unit, &self.settings, &theme);
+        self.combined.update(cx, |v, cx| v.set_spec(pair, cx));
+        for a in &self.adapters {
+            let spec = pair_spec(a.idx, self.net.unit, &self.settings, &theme);
+            a.chart.update(cx, |v, cx| v.set_spec(spec, cx));
+        }
         for (view, upload) in [(self.down.clone(), false), (self.up.clone(), true)] {
             let spec = chart_spec(
                 self.aggregate,
@@ -698,50 +968,264 @@ fn column(c: Column, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .into_any_element()
 }
 
+/// A half of a `combined` row: label and value.
+fn half(label: &SharedString, value: &SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .child(stat_row(label, value, m, theme))
+        .into_any_element()
+}
+
+/// A `combined` row: the download half, then the upload half.
+fn pair_row(
+    label: (&SharedString, &SharedString),
+    down: &SharedString,
+    up: &SharedString,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .gap(m.sp[5])
+        .child(half(label.0, down, m, theme))
+        .child(half(label.1, up, m, theme))
+        .into_any_element()
+}
+
+/// An `adapter_charts` cell header: the adapter name and its two rates.
+fn cell_head(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let mut name = div()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.text_primary)
+        .child(a.name.clone());
+    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let mut rates = div()
+        .flex_none()
+        .whitespace_nowrap()
+        .text_color(theme.text_secondary)
+        .child(a.rates.clone());
+    *rates.text_style() = numeric_style(m, m.text.sm);
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(m.sp[4])
+        .h(px(LABEL_ROW * m.ui_scale))
+        .child(name)
+        .child(rates)
+        .into_any_element()
+}
+
+/// An `adapter_charts` cell: the header over the combined chart.
+fn chart_cell(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    let idx = a.idx;
+    div()
+        .debug_selector(move || cell_id(idx))
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h(px(CELL_MIN_H * m.ui_scale))
+        .gap(m.sp[2])
+        .child(cell_head(a, m, theme))
+        .child(
+            div().relative().flex_1().min_h_0().child(
+                a.chart
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            ),
+        )
+        .into_any_element()
+}
+
+impl NetBox {
+    /// `columns`: the Download column, the splitter and the Upload column.
+    fn columns_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.cells = 0;
+        let share = self.split(m);
+        let down = column(
+            Column {
+                chart: &self.down,
+                word: &self.down_word,
+                rate: &self.down_text,
+                peak_word: &self.peak_word,
+                peak: &self.down_peak_text,
+                total_word: &self.total_word,
+                total: &self.down_total,
+            },
+            m,
+            theme,
+        );
+        let up = column(
+            Column {
+                chart: &self.up,
+                word: &self.up_word,
+                rate: &self.up_text,
+                peak_word: &self.peak_word,
+                peak: &self.up_peak_text,
+                total_word: &self.total_word,
+                total: &self.up_total,
+            },
+            m,
+            theme,
+        );
+        div()
+            .relative()
+            .flex()
+            .flex_row()
+            .size_full()
+            .gap(m.sp[5])
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .h_full()
+                    .w(relative(share))
+                    .child(down),
+            )
+            .child(div().flex().flex_1().min_w_0().h_full().child(up))
+            .child(self.col_split.probe(Self::col_inner_split, cx))
+            .child(
+                self.col_split
+                    .gap(SplitAxis::Row, share, m.sp[5], Self::col_inner_split, cx),
+            )
+            .into_any_element()
+    }
+
+    /// `combined`: the rates, one chart with both lines, then the Peak and Total rows.
+    fn combined_body(&mut self, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+        self.cells = 0;
+        let words = (&self.down_word, &self.up_word);
+        let peak = (&self.peak_word, &self.peak_word);
+        let total = (&self.total_word, &self.total_word);
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap(m.sp[2])
+            .child(pair_row(words, &self.down_text, &self.up_text, m, theme))
+            .child(
+                div()
+                    .debug_selector(|| COMBINED_CHART_ID.into())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(
+                        self.combined
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
+            )
+            .child(pair_row(
+                peak,
+                &self.down_peak_text,
+                &self.up_peak_text,
+                m,
+                theme,
+            ))
+            .child(pair_row(total, &self.down_total, &self.up_total, m, theme))
+            .into_any_element()
+    }
+
+    /// The "+n more" text for `shown` cells shown, empty when every counted adapter shows.
+    fn more_text(&self, shown: usize, cx: &Context<Self>) -> SharedString {
+        let n = self.adapters.len() + self.extra - shown;
+        if n == 0 {
+            SharedString::default()
+        } else {
+            tr_args(cx, KEY_MORE, &[("n", FluentValue::from(n))])
+        }
+    }
+
+    /// `adapter_charts`: a grid of one combined chart per counted adapter.
+    fn charts_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rows = self.adapters.len();
+        let total = rows + self.extra;
+        let shown = charts_fit(self.body.get(), rows, total, m);
+        self.cells = shown.shown;
+        let mut body = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .overflow_hidden()
+            .gap(m.sp[2]);
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .gap(m.sp[2]);
+        for chunk in self.adapters[..shown.shown].chunks(shown.cols) {
+            let mut line = div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(px(CELL_MIN_H * m.ui_scale))
+                .gap(m.sp[2]);
+            for a in chunk {
+                line = line.child(chart_cell(a, m, theme));
+            }
+            for _ in chunk.len()..shown.cols {
+                line = line.child(div().flex_1().min_w_0());
+            }
+            grid = grid.child(line);
+        }
+        body = body.child(grid);
+        let more = self.more_text(shown.shown, cx);
+        if !more.is_empty() {
+            body = body.child(more_line(more, m, theme));
+        }
+        let probe_m = *m;
+        body.child(class_probe(
+            Rc::clone(&self.body),
+            shown.class(),
+            move |b| charts_fit(b, rows, total, &probe_m).class(),
+            cx.entity_id(),
+        ))
+        .into_any_element()
+    }
+}
+
 impl Render for NetBox {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        let body = div()
-            .flex()
-            .flex_row()
-            .size_full()
-            .gap(m.sp[5])
-            .child(column(
-                Column {
-                    chart: &self.down,
-                    word: &self.down_word,
-                    rate: &self.down_text,
-                    peak_word: &self.peak_word,
-                    peak: &self.down_peak_text,
-                    total_word: &self.total_word,
-                    total: &self.down_total,
-                },
-                &m,
-                &theme,
-            ))
-            .child(column(
-                Column {
-                    chart: &self.up,
-                    word: &self.up_word,
-                    rate: &self.up_text,
-                    peak_word: &self.peak_word,
-                    peak: &self.up_peak_text,
-                    total_word: &self.total_word,
-                    total: &self.up_total,
-                },
-                &m,
-                &theme,
-            ));
+        let body = match self.mode {
+            NetMode::Columns => self.columns_body(&m, &theme, cx),
+            NetMode::Combined => self.combined_body(&m, &theme),
+            NetMode::AdapterCharts => self.charts_body(&m, &theme, cx),
+        };
         box_frame(
             NET_BOX_ID,
             self.target.clone(),
             self.title.clone(),
             SharedString::default(),
             self.adapter.clone(),
-            body.into_any_element(),
+            body,
             &m,
             &theme,
         )

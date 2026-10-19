@@ -3452,6 +3452,68 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn overview_net_modes_render(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::net_box::{
+            COMBINED_CHART_ID, NET_BOX_ID, NET_SPLITTER_ID, cell_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let set = |r: &mut Rig, mode: &str| {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "net".into(),
+                mode: mode.into(),
+            });
+        };
+        let shown = |r: &mut Rig, id: String| {
+            let id: &'static str = Box::leak(id.into_boxed_str());
+            r.vcx.debug_bounds(id).is_some()
+        };
+
+        // The default: two columns with the splitter between them.
+        assert!(shown(&mut r, NET_SPLITTER_ID.into()));
+        assert!(!shown(&mut r, COMBINED_CHART_ID.into()));
+        assert_eq!(r.layout().split(BoxKind::Net), Some(0.5));
+
+        // One combined chart, no splitter, no split.
+        set(&mut r, "combined");
+        assert!(!shown(&mut r, NET_SPLITTER_ID.into()));
+        assert!(shown(&mut r, COMBINED_CHART_ID.into()));
+        assert_eq!(r.layout().split(BoxKind::Net), None);
+        let frame = r.bounds_of(NET_BOX_ID.into());
+        let chart = r.bounds_of(COMBINED_CHART_ID.into());
+        assert!(chart.right() <= frame.right() && chart.bottom() <= frame.bottom());
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+
+        // One combined chart per counted adapter in a grid.
+        set(&mut r, "adapter_charts");
+        assert!(!shown(&mut r, NET_SPLITTER_ID.into()));
+        assert!(!shown(&mut r, COMBINED_CHART_ID.into()));
+        let idxs = r
+            .vcx
+            .update(|_, cx| page.read(cx).net_box().read(cx).adapter_idxs());
+        assert!(!idxs.is_empty(), "the fixture has a counted adapter");
+        let cells = r
+            .vcx
+            .update(|_, cx| page.read(cx).net_box().read(cx).cells());
+        assert!(cells >= 1);
+        let frame = r.bounds_of(NET_BOX_ID.into());
+        let cell = r.bounds_of(cell_id(idxs[0]));
+        assert!(
+            cell.size.width >= px(200.) && cell.size.height >= px(80.),
+            "{cell:?}"
+        );
+        assert!(cell.right() <= frame.right() && cell.bottom() <= frame.bottom());
+        assert_eq!(r.layout().split(BoxKind::Net), None);
+
+        // Back to the default mode: the splitter and the default split return.
+        set(&mut r, "columns");
+        assert!(shown(&mut r, NET_SPLITTER_ID.into()));
+        assert!(!shown(&mut r, cell_id(idxs[0])));
+        assert_eq!(r.layout().split(BoxKind::Net), Some(0.5));
+    }
+
+    #[gpui_kit::test]
     fn overview_inner_split_drag_and_reset(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
         // CPU and Memory share the row equally, so in the CPU body the 120 px chart minimum is
