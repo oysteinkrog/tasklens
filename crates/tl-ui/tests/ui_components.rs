@@ -1461,12 +1461,14 @@ mod menu_value {
         cx.run_until_parked();
         draw(cx);
 
-        let items: Vec<_> = cx.update(|window, _| {
+        let mut items: Vec<_> = cx.update(|window, _| {
             snapshots(window)
                 .into_iter()
                 .filter(|s| s.role() == Some(Role::MenuItem))
                 .collect()
         });
+        // `snapshots` walks a HashMap, so its order is random. Sort by row position.
+        items.sort_by(|a, b| a.bounds().origin.y.partial_cmp(&b.bounds().origin.y).unwrap());
         let names: Vec<_> = items.iter().filter_map(|s| s.label()).collect();
         assert_eq!(
             names,
