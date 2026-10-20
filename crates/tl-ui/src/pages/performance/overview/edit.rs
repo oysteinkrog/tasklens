@@ -913,7 +913,9 @@ impl OverviewPage {
                     .top(b.top())
                     .w(b.size.width)
                     .h(px(1. + TITLE_H * s))
-                    .occlude()
+                    // No `occlude()`: it takes the Performance tab out of the hit test, so the
+                    // tab's right-press capture never opens the box menu. The left press stops
+                    // at the handle (drag, gear, Hide box), so the box below never sees it.
                     .cursor_grab()
                     .on_mouse_down(
                         MouseButton::Left,

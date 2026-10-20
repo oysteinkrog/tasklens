@@ -4448,10 +4448,6 @@ mod wired {
                     .into_boxed_str(),
             ))
             .expect("the CPU title handle");
-        // The handle is new since the last press: a pointer move first, so the hit test sees it
-        // (a real pointer always moves before it presses).
-        r.vcx
-            .simulate_mouse_move(handle.center(), None, Modifiers::none());
         mouse(r.vcx, MouseButton::Right, handle.center());
         let (labels, modes) = open_menu(&mut r);
         assert_eq!(
