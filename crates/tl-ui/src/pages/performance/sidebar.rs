@@ -1682,7 +1682,7 @@ impl DeviceSidebar {
     }
 
     /// Selects the visible card at `ix`; collapsing cards do not count.
-    fn select_at(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(crate) fn select_at(&mut self, ix: usize, cx: &mut Context<Self>) {
         let key = self.live().nth(ix).map(|c| c.row.key.clone());
         if let Some(key) = key {
             self.select(key, cx);

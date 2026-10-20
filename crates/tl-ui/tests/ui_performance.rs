@@ -2573,6 +2573,62 @@ mod summary {
         );
     }
 
+    fn menu_is_open(r: &mut Rig) -> bool {
+        r.vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .is_some()
+    }
+
+    /// jqk.37: after Esc closes the page menu, F2 selects the second card at once, with no
+    /// click in between.
+    #[gpui_kit::test]
+    fn page_menu_esc_keeps_keys(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        draw(r.vcx);
+        assert!(menu_is_open(&mut r));
+
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        assert!(!menu_is_open(&mut r), "Esc closed the menu");
+
+        r.vcx.simulate_keystrokes("f2");
+        draw(r.vcx);
+        assert_ne!(
+            selected(&mut r).as_deref(),
+            Some("cpu"),
+            "F2 ran after the menu closed"
+        );
+    }
+
+    /// jqk.37: after a picked item closes the page menu, F2 selects the second card and Ctrl+M
+    /// turns summary mode on, with no click in between.
+    #[gpui_kit::test]
+    fn page_menu_pick_keeps_keys(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        draw(r.vcx);
+        assert!(menu_is_open(&mut r));
+
+        // "Copy", the first item.
+        r.vcx.simulate_keystrokes("down enter");
+        draw(r.vcx);
+        assert!(!menu_is_open(&mut r), "the picked item closed the menu");
+
+        r.vcx.simulate_keystrokes("f2");
+        draw(r.vcx);
+        assert_ne!(
+            selected(&mut r).as_deref(),
+            Some("cpu"),
+            "F2 ran after the menu closed"
+        );
+        enter(&mut r);
+    }
+
     #[gpui_kit::test]
     fn jump_to_type_selects_first_visible(cx: &mut TestAppContext) {
         use tl_ui::components::menu::close_context_menu;

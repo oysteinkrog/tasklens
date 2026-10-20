@@ -49,7 +49,7 @@ use tl_model::system::{SensorKind, SensorReading};
 
 use self::actions::{
     PERFORMANCE_CONTEXT, PerfCopyDeviceInfo, PerfCopyValue, PerfJumpToType, PerfSelectDevice,
-    PerfSetGraphRange, PerfToggleSidebar, PerfToggleSummaryMode,
+    PerfSelectVisibleDevice, PerfSetGraphRange, PerfToggleSidebar, PerfToggleSummaryMode,
 };
 use self::details::ClickedValue;
 use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
@@ -851,6 +851,18 @@ impl PerformancePage {
         self.sidebar.update(cx, |s, cx| s.select(key, cx));
     }
 
+    /// F1..F8 while the focus is outside the sidebar, for example on the device page after a
+    /// click or after its context menu closes (jqk.37). The keys work in the whole tab.
+    fn on_select_visible_device(
+        &mut self,
+        a: &PerfSelectVisibleDevice,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ix = usize::from(a.index);
+        self.sidebar.update(cx, |s, cx| s.select_at(ix, cx));
+    }
+
     /// The split handle was let go: saves the sidebar width (ADR-011; tl-app debounces the
     /// write by 500 ms).
     fn on_split_resized(&mut self, width: Pixels, cx: &mut Context<Self>) {
@@ -1139,6 +1151,7 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_jump_to_type))
             .on_action(cx.listener(Self::on_select_device))
+            .on_action(cx.listener(Self::on_select_visible_device))
             .on_action(cx.listener(Self::on_toggle_summary))
             .on_action(cx.listener(Self::on_set_graph_range))
             .on_action(cx.listener(Self::on_copy_value))
