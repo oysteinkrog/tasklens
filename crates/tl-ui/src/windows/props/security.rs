@@ -2492,7 +2492,7 @@ mod tests {
             validity: Validity::Unsupported,
         };
         let w = SecurityWords::en();
-        let [left, right] = build(&w, Some(&d));
+        let [left, _right] = build(&w, Some(&d));
         assert_eq!(text(&left, SecField::Flags), "None reported");
     }
 }
