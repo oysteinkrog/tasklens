@@ -1468,7 +1468,13 @@ mod menu_value {
                 .collect()
         });
         // `snapshots` walks a HashMap, so its order is random. Sort by row position.
-        items.sort_by(|a, b| a.bounds().origin.y.partial_cmp(&b.bounds().origin.y).unwrap());
+        items.sort_by(|a, b| {
+            a.bounds()
+                .origin
+                .y
+                .partial_cmp(&b.bounds().origin.y)
+                .unwrap()
+        });
         let names: Vec<_> = items.iter().filter_map(|s| s.label()).collect();
         assert_eq!(
             names,
