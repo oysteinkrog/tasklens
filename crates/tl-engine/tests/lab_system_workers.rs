@@ -1389,6 +1389,12 @@ fn sensors_fan_control_changes() {
 /// The injected-clock entry point the four P1 sources share.
 trait SampleAt: Source + Sized {
     fn sample_at(self, clock: Clock) -> (Self, SourceUpdate);
+
+    /// The sample the source's own `sample` takes under the demand `period` last saw. Only
+    /// sensors differ: without demand they list the chips and read no value (tasklens-hjn.45).
+    fn sample_demanded(self, clock: Clock, _sensors_demanded: bool) -> (Self, SourceUpdate) {
+        self.sample_at(clock)
+    }
 }
 
 impl SampleAt for MemorySource {
@@ -1413,6 +1419,14 @@ impl SampleAt for SensorsSource {
     fn sample_at(self, clock: Clock) -> (Self, SourceUpdate) {
         SensorsSource::sample_at(self, clock)
     }
+
+    fn sample_demanded(self, clock: Clock, sensors_demanded: bool) -> (Self, SourceUpdate) {
+        if sensors_demanded {
+            SensorsSource::sample_at(self, clock)
+        } else {
+            SensorsSource::discover_at(self, clock)
+        }
+    }
 }
 
 /// A real source whose `sample` reads the lab's virtual clock instead of the host clock, so the
@@ -1420,6 +1434,8 @@ impl SampleAt for SensorsSource {
 struct OnLabClock<S> {
     inner: S,
     clock: Arc<VirtualClock>,
+    /// `Demand.sensors` as last seen by `period`.
+    sensors_demanded: std::cell::Cell<bool>,
 }
 
 impl<S: SampleAt> Source for OnLabClock<S> {
@@ -1428,14 +1444,28 @@ impl<S: SampleAt> Source for OnLabClock<S> {
     }
 
     fn period(&self, demand: &Demand, settings: &EngineSettings) -> Option<Duration> {
+        self.sensors_demanded.set(demand.sensors);
         self.inner.period(demand, settings)
     }
 
     fn sample(self) -> (Self, SourceUpdate) {
         let t = self.clock.now().as_nanos();
-        let (inner, update) = self.inner.sample_at(at(t));
+        let demanded = self.sensors_demanded.get();
+        let (inner, update) = self.inner.sample_demanded(at(t), demanded);
         let clock = self.clock;
-        (OnLabClock { inner, clock }, update)
+        let sensors_demanded = self.sensors_demanded;
+        (
+            OnLabClock {
+                inner,
+                clock,
+                sensors_demanded,
+            },
+            update,
+        )
+    }
+
+    fn wakes_on_demand(&self) -> bool {
+        self.inner.wakes_on_demand()
     }
 
     fn reset_baselines(&mut self) {
@@ -1460,6 +1490,7 @@ fn spawn_on_lab<S: SampleAt>(
     let src = OnLabClock {
         inner: src,
         clock: Arc::clone(&fl.clock),
+        sensors_demanded: std::cell::Cell::new(false),
     };
     fl.spawn(async move {
         let cx = Cx::current().expect("task has a Cx");
@@ -1562,11 +1593,14 @@ fn p1_times(msgs: &[P1Msg], kind: P1) -> Vec<u64> {
     msgs.iter().filter(|m| m.1 == kind).map(|m| m.0).collect()
 }
 
-/// ADR-008: hidden with recording off produces zero `sample()` calls over 60 virtual s.
+/// ADR-008: hidden with recording off reads no value over 60 virtual s. Sensors still list their
+/// chips at start and every 30 s (tasklens-hjn.45).
 #[test]
 fn p1_sources_hidden_zero_samples() {
     let msgs = run_p1(Demand::default(), Duration::from_secs(60));
-    assert!(msgs.is_empty(), "{msgs:?}");
+    let others: Vec<_> = msgs.iter().filter(|m| m.1 != P1::SensorList).collect();
+    assert!(others.is_empty(), "{msgs:?}");
+    assert_eq!(p1_times(&msgs, P1::SensorList), [0, 30_000, 60_000]);
 }
 
 #[test]
@@ -1581,7 +1615,8 @@ fn p1_sources_recording_policy() {
         assert_eq!(p1_times(&msgs, kind), every_second, "{kind:?}");
     }
     assert!(p1_times(&msgs, P1::Sensors).is_empty());
-    assert!(p1_times(&msgs, P1::SensorList).is_empty());
+    // Recording does not demand sensors: only the list at start (tasklens-hjn.45).
+    assert_eq!(p1_times(&msgs, P1::SensorList), [0]);
 }
 
 #[test]
