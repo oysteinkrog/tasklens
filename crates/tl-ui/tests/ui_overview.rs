@@ -5121,6 +5121,14 @@ mod wired {
     #[gpui_kit::test]
     fn overview_titles_open_device_pages(cx: &mut TestAppContext) {
         let mut r = open_with(cx, true);
+        // The disk row is a `rows` part; `disk_charts` has cells with headers instead (D-026).
+        select(&mut r, OVERVIEW_KEY);
+        let page = overview(&mut r).expect("an OverviewPage");
+        r.vcx.update(|_, cx| {
+            let disk = page.read(cx).disk_box().clone();
+            disk.update(cx, |d, cx| d.set_mode("rows", cx));
+        });
+        draw(r.vcx);
         for (target, want) in [
             (title_row_id(CPU_BOX_ID), "cpu"),
             (title_row_id(MEM_BOX_ID), "memory"),
