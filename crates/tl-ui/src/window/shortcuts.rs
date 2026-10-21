@@ -12,7 +12,8 @@
 //! into them. The search box has focus on open. Up and Down scroll the list. Esc clears the
 //! search, or closes the window when the search is empty; Ctrl+W closes it through the frame.
 //!
-//! The keys column is at most 220 px wide (× ui_scale), so the description always shows. Keys
+//! The keys column is at most 220 px wide (× ui_scale), so the description always shows. A
+//! long description wraps and the row grows. Keys
 //! wider than the column are clipped, and only then does the column get a tooltip with the full
 //! key text. Prepaint measures each row and asks for one more frame when a row changes.
 
@@ -1138,15 +1139,17 @@ impl Render for ShortcutsWindow {
                 .items_center()
                 .justify_between()
                 .gap(m.sp[4])
-                .h(row_h)
+                .min_h(row_h)
+                .py(m.sp[1])
                 .px(m.sp[4])
                 .text_color(theme.text_primary)
+                .debug_selector(move || format!("Shortcuts-row-{ix}"))
                 .child(
+                    // Wraps, so a long description shows in full and the row grows.
                     div()
                         .debug_selector(move || format!("Shortcuts-desc-{ix}"))
                         .min_w_0()
                         .flex_1()
-                        .truncate()
                         .child(row.description.clone()),
                 )
                 .child(column);

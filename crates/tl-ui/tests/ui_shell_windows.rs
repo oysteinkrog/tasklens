@@ -839,6 +839,41 @@ fn shortcuts_keys_column_max_width_tooltip_when_clipped(cx: &mut TestAppContext)
     );
 }
 
+/// bj6.57: a long description wraps inside its row instead of being cut with an ellipsis.
+#[gpui_kit::test]
+fn shortcuts_long_description_visible_in_row(cx: &mut TestAppContext) {
+    setup(cx);
+    let (frame, mut vcx) = open_shortcuts(cx, 1);
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    let rows = shortcut_rows(&frame, &mut vcx);
+    let long = rows
+        .iter()
+        .position(|r| r.1.starts_with("Select tab 1 to 6 (Processes"))
+        .expect("tab number row");
+    let selector =
+        |kind: &str, ix: usize| -> &'static str { format!("Shortcuts-{kind}-{ix}").leak() };
+    let scale = vcx.update(|_, cx| metrics(cx).ui_scale);
+    let row = vcx.debug_bounds(selector("row", long)).expect("row drawn");
+    let desc = vcx
+        .debug_bounds(selector("desc", long))
+        .expect("desc drawn");
+    assert!(
+        desc.top() >= row.top() && desc.bottom() <= row.bottom(),
+        "the description lies inside its row: {desc:?} in {row:?}"
+    );
+    assert!(
+        row.size.height > gpui_kit::px(28. * scale + 0.5),
+        "the long description wraps and the row grows, got {:?}",
+        row.size.height
+    );
+    assert!(
+        desc.size.height > gpui_kit::px(28. * scale),
+        "the description shows on more than one line, got {:?}",
+        desc.size.height
+    );
+}
+
 #[gpui_kit::test]
 fn shortcuts_refocus(cx: &mut TestAppContext) {
     setup(cx);
