@@ -368,6 +368,10 @@ pub struct PerformancePage {
     pub(crate) selected: Option<DeviceKey>,
     /// The selected page's `focus_order`, read once when it is selected.
     page_focus: SmallVec<[FocusHandle; 4]>,
+    /// The focus handle of the page [`show`](Self::show) or a removal just took away. If the
+    /// keys were in that page, the next render moves them to the shown page, so F1..F8 and
+    /// Ctrl+M keep working (jqk.37).
+    left_page_focus: Option<FocusHandle>,
     /// Graph summary mode (E24-015), `Some` while it is on.
     pub(crate) summary: Option<Entity<summary::SummaryView>>,
     summary_sub: Option<Subscription>,
@@ -422,6 +426,7 @@ impl PerformancePage {
             pages: FxHashMap::default(),
             selected: None,
             page_focus: SmallVec::new(),
+            left_page_focus: None,
             sidebar_visible: true,
             anim: None,
             anim_generation: 0,
@@ -637,7 +642,10 @@ impl PerformancePage {
             // A device that went away or came back with a new generation gets a new page on
             // its next visit. Dropping the view drops its demand part.
             sidebar::SidebarEvent::Removed(key) => {
-                if self.pages.remove(key).is_some() && self.selected.as_ref() == Some(key) {
+                if let Some(old) = self.pages.remove(key)
+                    && self.selected.as_ref() == Some(key)
+                {
+                    self.leave_page(&old, cx);
                     self.selected = None;
                     self.page_focus.clear();
                     cx.notify();
@@ -679,6 +687,7 @@ impl PerformancePage {
             }
         };
         if let Some(old) = self.selected_view() {
+            self.leave_page(&old, cx);
             update_page(&old, cx, |p, cx| p.set_active(false, cx));
         }
         if self.page_on() {
@@ -687,6 +696,29 @@ impl PerformancePage {
         self.page_focus = page_focus_order(&view, cx);
         self.selected = Some(key);
         true
+    }
+
+    /// Notes that `old` leaves the tree. The first page left before a render counts: the keys
+    /// can only be in a page that was drawn.
+    fn leave_page(&mut self, old: &AnyView, cx: &App) {
+        if self.left_page_focus.is_none() {
+            self.left_page_focus = page_focus(old, cx);
+        }
+    }
+
+    /// Moves the keys from a page that left the tree to the shown page, else to this tab. Runs
+    /// in render, while the last frame still has the old page.
+    fn follow_page_focus(&mut self, window: &mut Window, cx: &mut App) {
+        let Some(left) = self.left_page_focus.take() else {
+            return;
+        };
+        if !left.contains_focused(window, cx) {
+            return;
+        }
+        self.selected_view()
+            .and_then(|view| page_focus(&view, cx))
+            .unwrap_or_else(|| self.focus.clone())
+            .focus(window, cx);
     }
 
     /// `PerfToggleSidebar` (F9, Ctrl+T): hides or shows the sidebar. The width animates over
@@ -1060,9 +1092,10 @@ impl ShellPage for PerformancePage {
 }
 
 impl Render for PerformancePage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
+        self.follow_page_focus(window, cx);
         let s = metrics(cx).ui_scale;
         let nav = px(f32::from(self.nav_width) * s);
         let width = self.split.read(cx).container_size();

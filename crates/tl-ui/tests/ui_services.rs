@@ -3816,10 +3816,11 @@ mod page {
         assert!(focused, "the table keeps the keys");
     }
 
-    /// jqk.37: Esc on the row menu gives the keys back to the table, so Down moves the
-    /// selection with no click in between.
+    /// jqk.37: closing the row menu gives the keys back to the table, so Down moves the
+    /// selection with no click in between. This host draws no menu layer, so the menu is
+    /// closed as Esc in the main window closes it, through `close_context_menu`.
     #[gpui_kit::test]
-    fn row_menu_esc_gives_keys_back_to_table(cx: &mut TestAppContext) {
+    fn row_menu_close_gives_keys_back_to_table(cx: &mut TestAppContext) {
         let mut rig = rig(cx);
         rig.activate();
         rig.publish_fixture();
@@ -3828,8 +3829,7 @@ mod page {
         rig.focus_table();
         assert!(rig.right_click(1).is_some(), "the unit menu");
 
-        rig.vcx.simulate_keystrokes("escape");
-        rig.vcx.run_until_parked();
+        rig.vcx.update(close_context_menu);
         rig.draw();
         let table = rig.table();
         let focused = rig.vcx.update(|window, cx| {

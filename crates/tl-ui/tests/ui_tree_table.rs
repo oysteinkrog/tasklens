@@ -2264,6 +2264,7 @@ fn shift_f10_opens_at_focus_row() {
 #[test]
 fn menu_esc_gives_keys_back_to_table() {
     let mut cx = cosmic_cx();
+    cx.update(tl_ui::components::menu::bind_keys);
     let (table, _, vcx) = open_menu_host(&mut cx, TDelegate::new(abc()));
     focus_table(vcx, &table);
     select(vcx, &table, 1);

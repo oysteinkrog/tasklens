@@ -2629,6 +2629,22 @@ mod summary {
         enter(&mut r);
     }
 
+    /// jqk.37: with the keys on the device page, F2 shows another page and the keys follow
+    /// it, so Ctrl+M still turns summary mode on.
+    #[gpui_kit::test]
+    fn keys_follow_the_shown_page(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+        let at = page_panel(&mut r);
+        click(r.vcx, at);
+        draw(r.vcx);
+
+        r.vcx.simulate_keystrokes("f2");
+        draw(r.vcx);
+        assert_ne!(selected(&mut r).as_deref(), Some("cpu"), "F2 ran");
+        enter(&mut r);
+    }
+
     #[gpui_kit::test]
     fn jump_to_type_selects_first_visible(cx: &mut TestAppContext) {
         use tl_ui::components::menu::close_context_menu;
