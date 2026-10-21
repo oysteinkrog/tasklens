@@ -11,10 +11,14 @@
 //! (`meter_fits`). A resize re-renders the box only when one of those changes. Pointer movement
 //! never notifies.
 //!
-//! UI-PRF-019 gives the box three modes. `chart_engines` is the layout above, with an inner
-//! splitter under the first section's chart. `engine_charts` shows one chart per shown engine in
-//! a grid of cells at least 160 × 70 px, then the VRAM row. `chart` is the utilization chart and
-//! the VRAM row only.
+//! UI-PRF-019 gives the box three modes. `engine_charts`, the default since D-026, shows one
+//! chart per engine of the GPU page's grid (3D, Copy, Video Encode, Video Decode, Compute and the
+//! rest the GPU reports), then the VRAM row. The grid fills the box: `parts::fill_grid` picks the
+//! column count that gives the largest equal cells of at least 120 × 48 px, and when they do not
+//! fit the grid scrolls with a scrollbar while the VRAM row stays put. `chart_engines` is the
+//! layout above, with an inner splitter under the first section's chart, clamped so every
+//! engine row and the VRAM row stay in the body. `chart` is the utilization chart and the VRAM
+//! row only.
 
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
@@ -22,6 +26,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
@@ -32,19 +37,19 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
-use tl_model::system::{GpuTotals, Metric};
+use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
-use super::super::gpu::{GpuVendor, gpu_totals, shown_engines};
+use super::super::gpu::{GpuVendor, gpu_totals, grid_engines, shown_engines};
 use super::cpu_box::value_text;
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::BoxMode;
 use super::mem_box::MeterRow;
 use super::parts::{
-    ChartSettings, MIN_CHART_H, SPARK_GRID, box_chart, box_frame, chart_section_versions,
-    class_probe, meter_fits, spark_chart, spark_row,
+    ChartSettings, GridFit, MIN_CHART_H, SPARK_GRID, box_chart, box_frame, chart_section_versions,
+    class_probe, fill_grid, grid_min_h, meter_fits, spark_chart, spark_row,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -60,20 +65,21 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 /// The box's debug selector.
 pub const GPU_BOX_ID: &str = "perf-overview-box-gpu";
 
-/// The box's layout modes (UI-PRF-019). `chart_engines` is the sections of UI-PRF-017.
+/// The box's layout modes (UI-PRF-019), the default first (`engine_charts` since D-026).
+/// `chart_engines` is the sections of UI-PRF-017.
 ///
 /// The `chart_engines` split is the first section's chart share of the body. Its default is a
 /// nominal 0.5: while the share is that value, the chart takes the spare height as before.
 pub const MODES: &[BoxMode] = &[
     BoxMode {
-        id: "chart_engines",
-        label: "perf-overview-mode-chart-engines",
-        split: Some(0.5),
-    },
-    BoxMode {
         id: "engine_charts",
         label: "perf-overview-mode-engine-charts",
         split: None,
+    },
+    BoxMode {
+        id: "chart_engines",
+        label: "perf-overview-mode-chart-engines",
+        split: Some(0.5),
     },
     BoxMode {
         id: "chart",
@@ -87,9 +93,12 @@ pub const GPU_SPLITTER_ID: &str = "perf-overview-gpu-splitter";
 /// The debug selector of its accent line.
 pub const GPU_SPLITTER_LINE_ID: &str = "perf-overview-gpu-splitter-line";
 
-/// The smallest engine chart cell of `engine_charts`, logical px.
-pub const CELL_MIN_W: f32 = 160.;
-pub const CELL_MIN_H: f32 = 70.;
+/// The smallest engine chart cell of `engine_charts`, logical px (D-026).
+pub const CELL_MIN_W: f32 = 120.;
+pub const CELL_MIN_H: f32 = 48.;
+
+/// The width an `engine_charts` grid keeps for its scrollbar when it scrolls, logical px.
+const GRID_BAR_W: f32 = 16.;
 
 /// Which parts the box shows (UI-PRF-019).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -103,16 +112,16 @@ impl GpuMode {
     /// The mode `id`; an unknown id is the default.
     fn from_id(id: &str) -> Self {
         match id {
-            "engine_charts" => Self::EngineCharts,
+            "chart_engines" => Self::ChartEngines,
             "chart" => Self::Chart,
-            _ => Self::ChartEngines,
+            _ => Self::EngineCharts,
         }
     }
 
     fn id(self) -> &'static str {
         match self {
-            Self::ChartEngines => MODES[0].id,
-            Self::EngineCharts => MODES[1].id,
+            Self::EngineCharts => MODES[0].id,
+            Self::ChartEngines => MODES[1].id,
             Self::Chart => MODES[2].id,
         }
     }
@@ -170,11 +179,27 @@ struct EngineWant {
     metric: MetricId,
 }
 
-/// The engine rows of GPU `idx`: every reported engine that is not hidden, in the vendor's order.
-/// A shared encode/decode engine (`enc_dec_shared`) is one row at the place of the first of the
-/// two; it is hidden only when both "enc" and "dec" are.
-fn engine_wants(snap: &Snapshot, idx: DeviceIdx, hidden: &[String]) -> SmallVec<[EngineWant; 4]> {
+/// The engine rows of GPU `idx` in `mode`. `engine_charts` has one per engine of the GPU page's
+/// grid that is not hidden, in the page's order. The other modes have every reported Overview
+/// engine that is not hidden, in the vendor's order, where a shared encode/decode engine
+/// (`enc_dec_shared`) is one row at the place of the first of the two; it is hidden only when
+/// both "enc" and "dec" are.
+fn engine_wants(
+    snap: &Snapshot,
+    idx: DeviceIdx,
+    hidden: &[String],
+    mode: GpuMode,
+) -> SmallVec<[EngineWant; 4]> {
     let totals = gpu_totals(snap, idx);
+    if mode == GpuMode::EngineCharts {
+        return grid_engines(GpuVendor::of(snap, idx), totals, hidden)
+            .map(|(e, name)| EngineWant {
+                key: e.key(),
+                name,
+                metric: e.metric(),
+            })
+            .collect();
+    }
     let shared = totals.is_some_and(|t| t.enc_dec_shared);
     let mut merged = false;
     let mut out = SmallVec::new();
@@ -201,7 +226,8 @@ fn engine_wants(snap: &Snapshot, idx: DeviceIdx, hidden: &[String]) -> SmallVec<
     out
 }
 
-/// The current value of an engine's series in `t`.
+/// The current value of an engine's series in `t`: 3D, encode and decode from their totals,
+/// the other engines from the engine list.
 fn engine_metric(t: &GpuTotals, metric: MetricId) -> Metric<f32> {
     if metric == MetricId::GPU_UTIL {
         t.util_pct
@@ -210,7 +236,10 @@ fn engine_metric(t: &GpuTotals, metric: MetricId) -> Metric<f32> {
     } else if metric == MetricId::GPU_DEC {
         t.dec_pct
     } else {
-        Metric::with(Validity::Unsupported)
+        GpuEngine::ALL
+            .into_iter()
+            .find(|e| e.metric() == metric)
+            .map_or(Metric::with(Validity::Unsupported), |e| t.engines.get(e))
     }
 }
 
@@ -320,71 +349,81 @@ fn section_rows(s: &GpuSection, mode: GpuMode) -> SectionRows {
     }
 }
 
-/// What `engine_charts` shows: how many sections and grid columns.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// What `engine_charts` shows: how many sections, and each shown section's grid.
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct ChartsFit {
     sections: usize,
-    cols: usize,
+    grids: [GridFit; MAX_GPUS],
 }
 
 impl ChartsFit {
-    fn class(self) -> u32 {
-        self.sections as u32 | (self.cols as u32) << 2
+    /// The layout class for `class_probe`: the sections and every shown grid's class.
+    fn class(&self) -> u32 {
+        let mut h = FxHasher::default();
+        self.sections.hash(&mut h);
+        for g in &self.grids[..self.sections.min(MAX_GPUS)] {
+            g.class().hash(&mut h);
+        }
+        h.finish() as u32
     }
 }
 
-/// The grid columns of a body `width` wide: as many cells of at least `CELL_MIN_W` as fit.
-fn grid_cols(width: Pixels, m: &UiMetrics) -> usize {
-    let (_, gap, _) = spacing(m);
-    let w = f32::from(width);
-    if w <= 0. {
-        return 1;
-    }
-    (((w + gap) / (CELL_MIN_W * m.ui_scale + gap)).floor() as usize).max(1)
+/// The smallest `engine_charts` cell, in px.
+fn cell_min(m: &UiMetrics) -> Size<Pixels> {
+    size(px(CELL_MIN_W * m.ui_scale), px(CELL_MIN_H * m.ui_scale))
 }
 
-/// The height of an `engine_charts` section: a grid of `engines` cells in `cols` columns, then
-/// the VRAM row, `lines` more rows, and a heading row when `heading`.
-fn charts_section_h(
-    engines: usize,
-    cols: usize,
-    lines: usize,
-    heading: bool,
-    m: &UiMetrics,
-) -> f32 {
+/// The height of an `engine_charts` section without its grid: a heading row when `heading`,
+/// the gap above the rows when it has `engines`, then the VRAM row and `lines` more rows.
+fn charts_fixed_h(engines: usize, lines: usize, heading: bool, m: &UiMetrics) -> f32 {
     let (row, gap, _) = spacing(m);
-    let grid_rows = engines.div_ceil(cols.max(1));
     let head = if heading { row + gap } else { 0. };
-    let grid = if grid_rows == 0 {
-        0.
-    } else {
-        grid_rows as f32 * (CELL_MIN_H * m.ui_scale + gap)
-    };
-    head + grid + (1 + lines) as f32 * (gap + row) - if grid_rows == 0 { gap } else { 0. }
+    let above = if engines > 0 { gap } else { 0. };
+    head + above + (1 + lines) as f32 * row + lines as f32 * gap
 }
 
-/// What `engine_charts` fits in `body`: both sections when both fit in full, else the first with
-/// "+n more" for the others.
+/// What `engine_charts` fits in `body`. Both sections show when both grids fit at the smallest
+/// cells, else the first with "+n more" for the others. The spare height goes to the grids in
+/// equal parts, and each grid fills its part (`fill_grid`). A grid that does not fit scrolls.
 fn charts_fit(body: Size<Pixels>, engines: &[usize], total: usize, m: &UiMetrics) -> ChartsFit {
-    let cols = grid_cols(body.width, m);
-    let count = engines.len();
-    if body.height == px(0.) || count == 0 {
-        return ChartsFit {
-            sections: count,
-            cols,
-        };
+    let count = engines.len().min(MAX_GPUS);
+    let mut fit = ChartsFit {
+        sections: count,
+        grids: [GridFit::default(); MAX_GPUS],
+    };
+    if count == 0 {
+        return fit;
     }
-    let (_, _, section_gap) = spacing(m);
+    let (_, gap, section_gap) = spacing(m);
+    let (min, gap_px) = (cell_min(m), px(gap));
+    let min_grid = |i: usize| f32::from(grid_min_h(engines[i], body.width, min, gap_px));
     let more = |shown: usize| usize::from(total > shown);
-    if count >= 2 {
-        let two = charts_section_h(engines[0], cols, 0, false, m)
-            + section_gap
-            + charts_section_h(engines[1], cols, more(2), true, m);
-        if f32::from(body.height) >= two {
-            return ChartsFit { sections: 2, cols };
+    if body.height > px(0.) {
+        fit.sections = 1;
+        if count >= 2 {
+            let two = charts_fixed_h(engines[0], 0, false, m)
+                + min_grid(0)
+                + section_gap
+                + charts_fixed_h(engines[1], more(2), true, m)
+                + min_grid(1);
+            if f32::from(body.height) >= two {
+                fit.sections = 2;
+            }
         }
     }
-    ChartsFit { sections: 1, cols }
+    let n = fit.sections;
+    let lines = |i: usize| if i + 1 == n { more(n) } else { 0 };
+    let needed: f32 = (0..n)
+        .map(|i| charts_fixed_h(engines[i], lines(i), i > 0, m) + min_grid(i))
+        .sum::<f32>()
+        + (n - 1) as f32 * section_gap;
+    let spare = (f32::from(body.height) - needed) / n as f32;
+    let bar = px(GRID_BAR_W * m.ui_scale);
+    for i in 0..n {
+        let h = (min_grid(i) + spare).max(0.);
+        fit.grids[i] = fill_grid(engines[i], size(body.width, px(h)), min, gap_px, bar);
+    }
+    fit
 }
 
 /// What a body shows.
@@ -472,6 +511,16 @@ pub fn engine_cell_id(i: usize, key: &str) -> String {
     format!("{GPU_BOX_ID}-cell-{i}-{key}")
 }
 
+/// The debug selector of section `i`'s `engine_charts` grid viewport.
+pub fn grid_id(i: usize) -> String {
+    format!("{GPU_BOX_ID}-grid-{i}")
+}
+
+/// The debug selector of section `i`'s `engine_charts` VRAM row.
+pub fn vram_id(i: usize) -> String {
+    format!("{GPU_BOX_ID}-vram-{i}")
+}
+
 /// The debug selector of section `i`'s utilization chart.
 pub fn chart_id(i: usize) -> String {
     format!("{GPU_BOX_ID}-chart-{i}")
@@ -517,11 +566,11 @@ impl GpuBox {
         let mut this = Self {
             hub: hub.clone(),
             sections: SmallVec::new(),
-            mode: GpuMode::ChartEngines,
+            mode: GpuMode::EngineCharts,
             chart_split: InnerSplit::new(
                 GPU_SPLITTER_ID,
                 GPU_SPLITTER_LINE_ID,
-                MODES[0].split.unwrap_or_default(),
+                MODES[1].split.unwrap_or_default(),
             )
             .with_mins(MIN_CHART_H, 2. * LABEL_ROW)
             .with_default_second_px(0.),
@@ -581,11 +630,16 @@ impl GpuBox {
         self.mode.id()
     }
 
-    /// Shows mode `id`; an unknown id is the default mode. Only this box renders again.
+    /// Shows mode `id`; an unknown id is the default mode. Only this box renders again. The
+    /// engine list follows the mode; engines in both lists keep their charts.
     pub fn set_mode(&mut self, id: &str, cx: &mut Context<Self>) {
         let mode = GpuMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
+            let snap = Arc::clone(self.hub.read(cx).current());
+            if self.sync_engines(&snap, cx) {
+                self.sync_text(&snap, true);
+            }
             cx.notify();
         }
     }
@@ -741,7 +795,7 @@ impl GpuBox {
         let mut changed = false;
         for i in 0..self.sections.len() {
             let idx = self.sections[i].idx;
-            let wants = engine_wants(snap, idx, &self.hidden);
+            let wants = engine_wants(snap, idx, &self.hidden, self.mode);
             let same = {
                 let rows = &self.sections[i].engines;
                 rows.len() == wants.len()
@@ -851,6 +905,9 @@ impl GpuBox {
             hash_metric(&mut h, &t.mem_total, |v| v);
             hash_metric(&mut h, &t.temp_c, |v| u64::from(v.to_bits()));
             hash_metric(&mut h, &t.power_w, |v| u64::from(v.to_bits()));
+            for e in GpuEngine::ALL {
+                hash_metric(&mut h, &t.engines.get(e), |v| u64::from(v.to_bits()));
+            }
         }
         let bits = h.finish();
         if !force && bits == self.text_bits {
@@ -1071,8 +1128,14 @@ fn section_heading(
         .into_any_element()
 }
 
-/// One `engine_charts` cell: the engine name and percent over its chart.
-fn engine_cell(i: usize, e: &EngineRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+/// One `engine_charts` cell of `cell` size: the engine name and percent over its chart.
+fn engine_cell(
+    i: usize,
+    e: &EngineRow,
+    cell: Size<Pixels>,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
     let key = e.key;
     let mut name = div()
         .flex_1()
@@ -1093,9 +1156,10 @@ fn engine_cell(i: usize, e: &EngineRow, m: &UiMetrics, theme: &TlTheme) -> AnyEl
         .debug_selector(move || engine_cell_id(i, key))
         .flex()
         .flex_col()
-        .flex_1()
-        .min_w_0()
-        .min_h(px(CELL_MIN_H * m.ui_scale))
+        .flex_none()
+        .w(cell.width)
+        .h(cell.height)
+        .overflow_hidden()
         .gap(m.sp[2])
         .child(
             div()
@@ -1159,6 +1223,12 @@ impl GpuBox {
                 .map(|(i, l)| section_h(*l, i > 0, m))
                 .sum();
             let spare = (len - basis - (n - 1.) * section_gap).max(0.);
+            // Everything under the first chart: its rows, then the later sections at their
+            // smallest. Dragging down stops there, so every engine row and the VRAM row stay
+            // in the body (crw.73).
+            let under = basis + (n - 1.) * section_gap - MIN_CHART_H * s;
+            let min_second = ((under - f32::from(m.sp[5])) / s).max(0.);
+            self.chart_split.set_mins(MIN_CHART_H, min_second);
             let first_h = section_h(lines[0], false, m) + spare / n;
             let chart_h =
                 (first_h - lines[0] as f32 * (gap + f32::from(row_h))).max(MIN_CHART_H * s);
@@ -1263,7 +1333,8 @@ impl GpuBox {
         body.into_any_element()
     }
 
-    /// `engine_charts`: per section a grid of engine charts, then the VRAM row.
+    /// `engine_charts`: per section a grid of engine charts that fills its part of the body,
+    /// then the VRAM row. A grid that does not fit scrolls under a scrollbar.
     fn charts_body(
         &mut self,
         m: &UiMetrics,
@@ -1280,7 +1351,7 @@ impl GpuBox {
         self.collapsed = false;
         self.meters = meter_fits(self.body.get().width, m);
         let more = self.shown_more_text();
-        let cols = shown.cols;
+        let min = cell_min(m);
 
         let mut body = div()
             .relative()
@@ -1292,41 +1363,50 @@ impl GpuBox {
         for (i, section) in self.sections.iter().take(shown.sections).enumerate() {
             let last = i + 1 == shown.sections;
             let extra = usize::from(last && !more.is_empty());
+            let fit = shown.grids[i];
+            let basis = charts_fixed_h(engines[i], extra, i > 0, m)
+                + f32::from(grid_min_h(engines[i], self.body.get().width, min, m.sp[2]));
             let mut col = div()
                 .flex()
                 .flex_col()
                 .flex_grow(1.)
-                .flex_shrink_0()
-                .flex_basis(px(charts_section_h(engines[i], cols, extra, i > 0, m)))
+                .flex_shrink(1.)
+                .flex_basis(px(basis))
+                .min_h_0()
                 .w_full()
                 .gap(m.sp[2]);
             if i > 0 {
                 col = col.child(section_heading(section, row_h, m, theme));
             }
-            let mut grid = div()
-                .debug_selector(move || rows_id(i))
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(engines[i].div_ceil(cols) as f32 * CELL_MIN_H * s))
-                .w_full()
-                .gap(m.sp[2]);
-            for chunk in section.engines.chunks(cols) {
-                let mut line = div()
+            let mut cells = div().flex().flex_col().flex_none().w_full().gap(m.sp[2]);
+            for chunk in section.engines.chunks(fit.cols.max(1)) {
+                let line = div()
                     .flex()
                     .flex_row()
-                    .flex_1()
-                    .min_h(px(CELL_MIN_H * s))
-                    .gap(m.sp[2]);
-                for e in chunk {
-                    line = line.child(engine_cell(i, e, m, theme));
-                }
-                for _ in chunk.len()..cols {
-                    line = line.child(div().flex_1().min_w_0());
-                }
-                grid = grid.child(line);
+                    .flex_none()
+                    .gap(m.sp[2])
+                    .children(chunk.iter().map(|e| engine_cell(i, e, fit.cell, m, theme)));
+                cells = cells.child(line);
             }
+            let cells = if fit.scrolls {
+                div()
+                    .size_full()
+                    .child(cells)
+                    .overflow_y_scrollbar()
+                    .id(SharedString::from(grid_id(i)))
+                    .into_any_element()
+            } else {
+                cells.into_any_element()
+            };
+            let grid = div()
+                .debug_selector(move || grid_id(i))
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_hidden()
+                .child(cells);
             let mut rest = div()
+                .debug_selector(move || vram_id(i))
                 .flex()
                 .flex_col()
                 .flex_none()
@@ -1336,7 +1416,12 @@ impl GpuBox {
             if last && !more.is_empty() {
                 rest = rest.child(text_row(&more, m, theme));
             }
-            body = body.child(col.child(grid).child(rest));
+            if section.engines.is_empty() {
+                col = col.child(rest);
+            } else {
+                col = col.child(grid).child(rest);
+            }
+            body = body.child(col);
         }
         let probe_m = *m;
         body = body.child(class_probe(

@@ -141,6 +141,12 @@ impl InnerSplit {
         self
     }
 
+    /// Sets the parts' minimums in logical px, for a box whose minimum follows its content.
+    /// Call it on each render before [`Self::share`].
+    pub fn set_mins(&mut self, first: f32, second: f32) {
+        self.mins = (first, second);
+    }
+
     /// Makes the default share a fixed second part: while the share is the default, the second
     /// part is `px` logical px wide (or tall) whatever the body size, within the clamps.
     pub fn with_default_second_px(mut self, px: f32) -> Self {

@@ -839,6 +839,121 @@ pub fn class_probe(
     .size_full()
 }
 
+/// A grid of equal cells that fills its area (UI-PRF-019, D-026), from [`fill_grid`].
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct GridFit {
+    pub cols: usize,
+    pub rows: usize,
+    /// Every cell's size, in whole px.
+    pub cell: Size<Pixels>,
+    /// The cells do not fit at their minimum height, so the grid scrolls vertically.
+    pub scrolls: bool,
+}
+
+impl GridFit {
+    /// The height of every row with `gap` between them.
+    pub fn content_h(&self, gap: Pixels) -> Pixels {
+        if self.rows == 0 {
+            return px(0.);
+        }
+        self.cell.height * self.rows as f32 + gap * (self.rows - 1) as f32
+    }
+
+    /// A layout class for [`class_probe`]: it changes when the columns, the rows, the scrolling
+    /// or the cell size change. Cell sizes are whole px, so a sub-pixel resize keeps the class.
+    pub fn class(&self) -> u32 {
+        let (w, h) = (
+            f32::from(self.cell.width) as u32,
+            f32::from(self.cell.height) as u32,
+        );
+        (self.cols as u32 & 0xf)
+            | (self.rows as u32 & 0xf) << 4
+            | u32::from(self.scrolls) << 8
+            | (w & 0x7ff) << 9
+            | (h & 0xfff) << 20
+    }
+}
+
+/// The columns of `n` cells of at least `min_w` that fit a row `width` wide with `gap` between
+/// them: at least 1 and at most `n`.
+fn grid_max_cols(n: usize, width: f32, min_w: f32, gap: f32) -> usize {
+    if min_w + gap <= 0. {
+        return n.max(1);
+    }
+    (((width + gap) / (min_w + gap)).floor().max(1.) as usize).min(n.max(1))
+}
+
+/// The lowest grid of `n` cells of at least `min` in a row `width` wide, `gap` apart: as many
+/// columns as fit, rows at the minimum height.
+pub fn grid_min_h(n: usize, width: Pixels, min: Size<Pixels>, gap: Pixels) -> Pixels {
+    if n == 0 {
+        return px(0.);
+    }
+    let cols = grid_max_cols(n, f32::from(width), f32::from(min.width), f32::from(gap));
+    let rows = n.div_ceil(cols);
+    min.height * rows as f32 + gap * (rows - 1) as f32
+}
+
+/// Lays out `n` equal cells in `area`, `gap` apart (UI-PRF-019, D-026). Of the column counts
+/// whose cells are at least `min`, it takes the one with the largest cells. When no column
+/// count fits the minimum height, the grid scrolls: it keeps `bar` px at the right for the
+/// scrollbar, takes as many columns as fit the width, and gives the cells the minimum height.
+/// A row narrower than one minimum cell has one column as wide as the row. Sizes are floored to
+/// whole px, so every cell is the same size.
+pub fn fill_grid(
+    n: usize,
+    area: Size<Pixels>,
+    min: Size<Pixels>,
+    gap: Pixels,
+    bar: Pixels,
+) -> GridFit {
+    if n == 0 {
+        return GridFit::default();
+    }
+    let (w, h, g) = (
+        f32::from(area.width),
+        f32::from(area.height),
+        f32::from(gap),
+    );
+    let (min_w, min_h) = (f32::from(min.width), f32::from(min.height));
+    let cell_w = |w: f32, cols: usize| {
+        ((w - g * (cols - 1) as f32) / cols as f32 + 1e-3)
+            .floor()
+            .max(0.)
+    };
+    let mut best: Option<(f32, GridFit)> = None;
+    for cols in 1..=grid_max_cols(n, w, min_w, g) {
+        let rows = n.div_ceil(cols);
+        let raw = (h - g * (rows - 1) as f32) / rows as f32;
+        if raw + 1e-3 < min_h {
+            continue;
+        }
+        let ch = (raw + 1e-3).floor();
+        let cw = cell_w(w, cols);
+        let size_now = cw * ch;
+        if best.is_none_or(|(a, _)| size_now > a) {
+            let fit = GridFit {
+                cols,
+                rows,
+                cell: size(px(cw), px(ch)),
+                scrolls: false,
+            };
+            best = Some((size_now, fit));
+        }
+    }
+    if let Some((_, fit)) = best {
+        return fit;
+    }
+    let w = (w - f32::from(bar)).max(0.);
+    let cols = grid_max_cols(n, w, min_w, g);
+    GridFit {
+        cols,
+        rows: n.div_ceil(cols),
+        cell: size(px(cell_w(w, cols)), px(min_h.floor())),
+        scrolls: true,
+    }
+}
+
 /// The lowest a chart in a box with rows below it gets, logical px before `ui_scale` (TMOG).
 pub const MIN_CHART_H: f32 = 48.;
 

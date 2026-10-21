@@ -1125,8 +1125,9 @@ mod bottom {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-        StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, ScrollDelta,
+        ScrollWheelEvent, SharedString, StyleRefinement, Styled as _, TestAppContext,
+        VisualTestContext, Window, div, point, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
@@ -1134,9 +1135,10 @@ mod bottom {
     use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{
-        ComponentHeader, DeviceDetailsSnapshot, DiskDetails, SeriesSet, Snapshot, SystemSnapshot,
+        ComponentHeader, DeviceDetailsSnapshot, DiskDetails, GraphicsAdapter, InvField, SeriesSet,
+        Snapshot, SystemSnapshot,
     };
-    use tl_model::system::{DiskTotals, GpuTotals, LinkState, Metric, NetTotals};
+    use tl_model::system::{DiskTotals, GpuEngine, GpuTotals, LinkState, Metric, NetTotals};
     use tl_model::table::Total;
     use tl_model::time::now_boot_ns;
     use tl_model::units;
@@ -1150,10 +1152,10 @@ mod bottom {
         DISK_ROW_ID_PREFIX, DiskBox, DiskRow, io_row_id,
     };
     use tl_ui::pages::performance::overview::gpu_box::{
-        GPU_BOX_ID, GpuBox, engine_row_id, rows_id,
+        GPU_BOX_ID, GpuBox, engine_cell_id, engine_row_id, grid_id, rows_id, vram_id,
     };
     use tl_ui::pages::performance::overview::net_box::NetBox;
-    use tl_ui::pages::performance::overview::parts::time_axis_id;
+    use tl_ui::pages::performance::overview::parts::{GridFit, fill_grid, time_axis_id};
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -1393,7 +1395,12 @@ mod bottom {
         });
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let (host, vcx) = cx.add_window_view(move |_, cx| Host {
-            gpu: cx.new(|cx| GpuBox::new(&hub, &gpus, cx)),
+            // These tests cover the UI-PRF-017 sections, `chart_engines` since D-026.
+            gpu: cx.new(|cx| {
+                let mut gpu = GpuBox::new(&hub, &gpus, cx);
+                gpu.set_mode("chart_engines", cx);
+                gpu
+            }),
             disk: cx.new(|cx| DiskBox::new(&hub, &disks, cx)),
             net: cx.new(|cx| NetBox::new(&hub, cx)),
             gpu_h: heights.0,
@@ -1847,6 +1854,248 @@ mod bottom {
                 Some(0.1)
             )
         );
+    }
+
+    /// GPU 10 as an Intel GPU: Render, Compute, Copy, Video and Video Enhance at 25, 30, 40, 10
+    /// and 5 percent, in the inventory with the `xe` module.
+    fn intel_gpu(r: &mut Rig) {
+        r.publish(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let mut t = gpu_totals(10);
+            for (e, v) in [
+                (GpuEngine::Render, 25.),
+                (GpuEngine::Compute, 30.),
+                (GpuEngine::Copy, 40.),
+                (GpuEngine::Video, 10.),
+                (GpuEngine::VideoEnhance, 5.),
+            ] {
+                t.engines.set(e, Metric::valid(v));
+            }
+            sys.gpus = Arc::from([(DeviceIdx(10), t)]);
+            let inv = Arc::make_mut(&mut s.inventory);
+            inv.header.version += 1;
+            inv.graphics = Arc::from(
+                [GraphicsAdapter {
+                    device: Some(DeviceIdx(10)),
+                    kernel_module: InvField {
+                        value: Arc::from("xe"),
+                        validity: Validity::Valid,
+                    },
+                    ..GraphicsAdapter::default()
+                }]
+                .as_slice(),
+            );
+        });
+        draw(r.vcx);
+    }
+
+    fn set_gpu_mode(r: &mut Rig, mode: &str) {
+        let (gpu, _, _) = r.boxes();
+        r.vcx
+            .update(|_, cx| gpu.update(cx, |g, cx| g.set_mode(mode, cx)));
+        draw(r.vcx);
+    }
+
+    /// D-026: `engine_charts` draws one chart per engine of the GPU page's grid, in its order,
+    /// with the engine name and percent; the other modes keep the three Overview engines.
+    #[gpui_kit::test]
+    fn overview_gpu_engine_charts_follow_gpu_page(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (344., 200.));
+        intel_gpu(&mut r);
+        set_gpu_mode(&mut r, "engine_charts");
+        let rows = engine_rows(&mut r);
+        assert_eq!(
+            rows,
+            [
+                ("render", "Render/3D".into(), "25.0%".into(), Some(0.25)),
+                ("compute", "Compute".into(), "30.0%".into(), Some(0.3)),
+                ("copy", "Copy".into(), "40.0%".into(), Some(0.4)),
+                ("video", "Video".into(), "10.0%".into(), Some(0.1)),
+                (
+                    "video-enhance",
+                    "Video Processing".into(),
+                    "5.0%".into(),
+                    Some(0.05)
+                ),
+            ]
+        );
+        let (gpu, _, _) = r.boxes();
+        let series: Vec<MetricId> = r.vcx.update(|_, cx| {
+            gpu.read(cx).sections()[0]
+                .engines
+                .iter()
+                .flat_map(|e| e.chart.read(cx).series_ids().map(|id| id.metric))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            series,
+            [
+                MetricId::GPU_ENGINE_RENDER,
+                MetricId::GPU_ENGINE_COMPUTE,
+                MetricId::GPU_ENGINE_COPY,
+                MetricId::GPU_ENGINE_VIDEO,
+                MetricId::GPU_ENGINE_VIDEO_ENHANCE,
+            ]
+        );
+        for (key, ..) in &rows {
+            assert!(
+                r.vcx.debug_bounds(leak(engine_cell_id(0, key))).is_some(),
+                "{key}"
+            );
+        }
+        assert!(r.vcx.debug_bounds(leak(vram_id(0))).is_some());
+
+        // A hidden engine has no chart.
+        r.vcx.update(|_, cx| {
+            TlSettings::set(
+                cx,
+                SettingKey::PerformanceHiddenGpuEngines,
+                SettingValue::StrList(Arc::from(["copy".into()])),
+            )
+        });
+        draw(r.vcx);
+        assert!(engine_rows(&mut r).iter().all(|row| row.0 != "copy"));
+        assert!(
+            r.vcx
+                .debug_bounds(leak(engine_cell_id(0, "copy")))
+                .is_none()
+        );
+    }
+
+    /// The `engine_charts` grid of `n` cells: every cell the same size, at least 120 × 48 px,
+    /// with the size `fill_grid` gives for the grid viewport. Returns the viewport and the cells.
+    fn grid_cells(
+        r: &mut Rig,
+        keys: &[&str],
+    ) -> (
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+        Vec<gpui_kit::Bounds<gpui_kit::Pixels>>,
+        GridFit,
+    ) {
+        let grid = r.bounds(grid_id(0));
+        let cells: Vec<_> = keys
+            .iter()
+            .map(|k| r.bounds(engine_cell_id(0, k)))
+            .collect();
+        let fit = fill_grid(
+            keys.len(),
+            grid.size,
+            size(px(120.), px(48.)),
+            px(4.),
+            px(16.),
+        );
+        for c in &cells {
+            assert_eq!(c.size, fit.cell, "{c:?} in {grid:?}");
+            assert!(
+                c.size.width >= px(120.) && c.size.height >= px(48.),
+                "{c:?}"
+            );
+        }
+        (grid, cells, fit)
+    }
+
+    /// D-026: the engine grid fills the box with equal cells and the VRAM row below; when the
+    /// cells do not fit at 120 × 48 px the grid scrolls and the VRAM row stays in the body.
+    #[gpui_kit::test]
+    fn overview_grid_cells_fill_box(cx: &mut TestAppContext) {
+        let keys = ["render", "compute", "copy", "video", "video-enhance"];
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (344., 200.));
+        intel_gpu(&mut r);
+        set_gpu_mode(&mut r, "engine_charts");
+        let check_vram = |r: &mut Rig, grid: gpui_kit::Bounds<gpui_kit::Pixels>| {
+            let vram = r.bounds(vram_id(0));
+            let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+            assert!(grid.bottom() <= vram.top(), "{grid:?} above {vram:?}");
+            assert!(vram.bottom() <= axis.top(), "{vram:?} above {axis:?}");
+            assert_eq!(f32::from(vram.size.height), 18.);
+        };
+
+        // 500 × 344: every cell inside the grid, which ends 4 px above the VRAM row.
+        for (w, h) in [(500., 344.), (900., 600.), (300., 500.)] {
+            r.gpu_width(w);
+            r.heights(h, 200.);
+            let (grid, cells, fit) = grid_cells(&mut r, &keys);
+            assert!(!fit.scrolls, "{w} × {h}");
+            for c in &cells {
+                assert!(
+                    c.left() >= grid.left()
+                        && c.right() <= grid.right()
+                        && c.top() >= grid.top()
+                        && c.bottom() <= grid.bottom(),
+                    "{w} × {h}: {c:?} in {grid:?}"
+                );
+            }
+            // The cells fill the grid: no other column count gives larger cells.
+            let area = |f: &GridFit| f32::from(f.cell.width) * f32::from(f.cell.height);
+            for cols in 1..=keys.len() {
+                let rows = keys.len().div_ceil(cols);
+                let cw =
+                    ((f32::from(grid.size.width) - 4. * (cols - 1) as f32) / cols as f32).floor();
+                let ch =
+                    ((f32::from(grid.size.height) - 4. * (rows - 1) as f32) / rows as f32).floor();
+                if cw >= 120. && ch >= 48. {
+                    assert!(cw * ch <= area(&fit), "{w} × {h}: {cols} columns");
+                }
+            }
+            let first = cells[0];
+            assert!(
+                first.top() - grid.top() < px(1.) && first.left() - grid.left() < px(1.),
+                "{first:?} at the grid's top left {grid:?}"
+            );
+            check_vram(&mut r, grid);
+        }
+
+        // 500 × 150: the grid scrolls with the cells at 48 px, the VRAM row stays.
+        r.gpu_width(500.);
+        r.heights(150., 200.);
+        let (grid, cells, fit) = grid_cells(&mut r, &keys);
+        assert!(fit.scrolls);
+        assert_eq!(fit.cell.height, px(48.));
+        let last = *cells.last().expect("cells");
+        assert!(last.bottom() > grid.bottom(), "{last:?} below {grid:?}");
+        for c in &cells {
+            assert!(
+                c.right() <= grid.right() - px(16.),
+                "{c:?} clear of the scrollbar"
+            );
+        }
+        check_vram(&mut r, grid);
+        r.vcx.simulate_event(ScrollWheelEvent {
+            position: grid.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
+            ..Default::default()
+        });
+        draw(r.vcx);
+        let scrolled = r.bounds(engine_cell_id(0, keys[keys.len() - 1]));
+        assert!(
+            scrolled.top() < last.top(),
+            "{scrolled:?} scrolled up from {last:?}"
+        );
+        assert!(
+            scrolled.bottom() <= grid.bottom() + px(1.),
+            "{scrolled:?} in {grid:?}"
+        );
+    }
+
+    #[test]
+    fn fill_grid_takes_largest_cells() {
+        let min = size(px(120.), px(48.));
+        let fit = |n, w: f32, h: f32| fill_grid(n, size(px(w), px(h)), min, px(4.), px(16.));
+        // 4 cells in 358 × 230: 2 columns of 177 × 113 beat 1 column of 358 × 54.
+        let f = fit(4, 358., 230.);
+        assert_eq!((f.cols, f.rows, f.scrolls), (2, 2, false));
+        assert_eq!(f.cell, size(px(177.), px(113.)));
+        // Too low for 48 px cells: as many columns as fit beside the 16 px scrollbar.
+        let f = fit(5, 474., 60.);
+        assert_eq!((f.cols, f.rows, f.scrolls), (3, 2, true));
+        assert_eq!(f.cell, size(px(150.), px(48.)));
+        // Narrower than one cell: one column the row's width.
+        let f = fit(2, 100., 200.);
+        assert_eq!((f.cols, f.cell.width), (1, px(100.)));
+        assert_eq!(fit(0, 500., 500.), GridFit::default());
+        assert_eq!(f.class(), fit(2, 100.4, 200.4).class(), "sub-pixel resize");
+        assert_ne!(f.class(), fit(2, 102., 200.).class());
     }
 
     #[gpui_kit::test]
@@ -3308,26 +3557,26 @@ mod page {
             ]
         };
 
-        // The default: chart, engine rows and the splitter under the chart.
-        assert_eq!(parts(&mut r), [true, true, true, false]);
-        assert_eq!(r.layout().split(BoxKind::Gpu), Some(0.5));
-        let chart = r.bounds_of(chart_id(0));
-        let gap = r.bounds_of(GPU_SPLITTER_ID.into());
-        assert!(chart.bottom() <= gap.bottom(), "{chart:?} {gap:?}");
-
-        // One chart per engine, no rows, no splitter, no split.
-        set(&mut r, "engine_charts");
+        // The default since D-026: one chart per engine, no rows, no splitter, no split.
         assert_eq!(parts(&mut r), [false, false, false, true]);
         assert_eq!(r.layout().split(BoxKind::Gpu), None);
         let frame = r.bounds_of(GPU_BOX_ID.into());
         for k in &engines {
             let cell = r.bounds_of(engine_cell_id(0, k));
             assert!(
-                cell.size.width >= px(160.) && cell.size.height >= px(70.),
+                cell.size.width >= px(120.) && cell.size.height >= px(48.),
                 "{cell:?}"
             );
             assert!(cell.right() <= frame.right() && cell.bottom() <= frame.bottom());
         }
+
+        // Chart, engine rows and the splitter under the chart.
+        set(&mut r, "chart_engines");
+        assert_eq!(parts(&mut r), [true, true, true, false]);
+        assert_eq!(r.layout().split(BoxKind::Gpu), Some(0.5));
+        let chart = r.bounds_of(chart_id(0));
+        let gap = r.bounds_of(GPU_SPLITTER_ID.into());
+        assert!(chart.bottom() <= gap.bottom(), "{chart:?} {gap:?}");
         let setting = r.saved();
         assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
 
@@ -3338,10 +3587,10 @@ mod page {
         let setting = r.saved();
         assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
 
-        // Back to the default mode: the default split returns.
-        set(&mut r, "chart_engines");
-        assert_eq!(parts(&mut r), [true, true, true, false]);
-        assert_eq!(r.layout().split(BoxKind::Gpu), Some(0.5));
+        // Back to the default mode: no split.
+        set(&mut r, "engine_charts");
+        assert_eq!(parts(&mut r), [false, false, false, true]);
+        assert_eq!(r.layout().split(BoxKind::Gpu), None);
     }
 
     #[gpui_kit::test]
@@ -3377,6 +3626,82 @@ mod page {
         // No cell for a key that is not shown.
         let id: &'static str = Box::leak(engine_cell_id(0, "nope").into_boxed_str());
         assert!(r.vcx.debug_bounds(id).is_none());
+    }
+
+    /// D-026: a layout with no saved mode shows the GPU box as one chart per engine; a saved
+    /// mode still wins.
+    #[gpui_kit::test]
+    fn overview_defaults_d026(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::gpu_box::{engine_cell_id, engine_row_id};
+        let mut r = open(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let mode = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| page.read(cx).gpu_box().read(cx).mode())
+        };
+        assert_eq!(r.layout().config(BoxKind::Gpu).mode.id, "engine_charts");
+        assert_eq!(mode(&mut r), "engine_charts");
+        assert!(
+            r.vcx
+                .debug_bounds(Box::leak(engine_cell_id(0, "gpu").into_boxed_str()))
+                .is_some()
+        );
+        assert_eq!(r.saved(), None, "nothing is written for the default");
+
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                let gpu = layout.rows[1]
+                    .boxes
+                    .iter_mut()
+                    .find(|b| b.kind == "gpu")
+                    .expect("a GPU box");
+                gpu.mode = Some("chart_engines".to_owned());
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(mode(&mut r), "chart_engines");
+        assert!(
+            r.vcx
+                .debug_bounds(Box::leak(engine_row_id(0, "gpu").into_boxed_str()))
+                .is_some()
+        );
+    }
+
+    /// crw.73: in `chart_engines` a drag far down stops where every engine row and the VRAM row
+    /// still end above the time axis.
+    #[gpui_kit::test]
+    fn overview_gpu_chart_engines_drag_keeps_rows(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::gpu_box::{
+            GPU_BOX_ID, GPU_SPLITTER_ID, engine_row_id, rows_id,
+        };
+        use tl_ui::pages::performance::overview::parts::time_axis_id;
+        let mut r = open_rooted(cx, true, 1280., 800.);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "gpu".into(),
+            mode: "chart_engines".into(),
+        });
+        let at = center(r.gap(GPU_SPLITTER_ID));
+        r.press(at, 1);
+        r.move_to(point(at.x, px(5000.)));
+        r.release(point(at.x, px(5000.)));
+        draw(r.vcx);
+        let axis = r.bounds_of(time_axis_id(GPU_BOX_ID));
+        let rows = r.bounds_of(rows_id(0));
+        assert!(rows.bottom() <= axis.top(), "{rows:?} above {axis:?}");
+        for key in ["gpu", "enc", "dec"] {
+            let row = r.bounds_of(engine_row_id(0, key));
+            assert!(row.bottom() <= axis.top(), "{key} {row:?} above {axis:?}");
+        }
+        let split = r.layout().split(BoxKind::Gpu).expect("a split");
+        assert!(split > 0.5, "the drag moved the split: {split}");
+        // A drag back up works too.
+        let at = center(r.gap(GPU_SPLITTER_ID));
+        r.press(at, 1);
+        r.move_to(point(at.x, px(-5000.)));
+        r.release(point(at.x, px(-5000.)));
+        assert!(r.layout().split(BoxKind::Gpu).expect("a split") < split);
     }
 
     #[gpui_kit::test]

@@ -414,7 +414,7 @@ pub struct OverviewBoxSetting {
 pub const OVERVIEW_BOX_MODES: [(&str, &[&str]); 6] = [
     ("cpu", &["chart_cores", "chart", "cores", "core_charts"]),
     ("memory", &["rows", "chart_rows", "chart"]),
-    ("gpu", &["chart_engines", "engine_charts", "chart"]),
+    ("gpu", &["engine_charts", "chart_engines", "chart"]),
     ("disk", &["rows", "disk_charts", "total_chart"]),
     ("net", &["columns", "combined", "adapter_charts"]),
     ("processes", &["list"]),
@@ -2132,6 +2132,19 @@ mod tests {
         for kind in OVERVIEW_BOX_KINDS {
             assert!(!modes_of(kind).is_empty(), "{kind}");
         }
+    }
+
+    #[test]
+    fn overview_defaults_d026() {
+        // D-026: the GPU box defaults to one chart per engine. A saved mode still wins, and
+        // the old default is now a saved mode like any other.
+        assert_eq!(modes_of("gpu")[0], "engine_charts");
+        let gpu = "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"gpu\", \
+                   width = 1.0, mode = \"chart_engines\" }] }]\n";
+        let (s, changed) = load_toml(gpu);
+        assert!(changed.is_empty(), "{changed:?}");
+        let b = &s.performance.overview.as_ref().expect("kept").rows[0].boxes[0];
+        assert_eq!(b.mode.as_deref(), Some("chart_engines"));
     }
 
     #[test]

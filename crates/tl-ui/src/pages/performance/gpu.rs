@@ -387,6 +387,22 @@ pub(crate) fn shown_engines<'a, H: AsRef<str>>(
         .filter(move |e| !hidden.iter().any(|k| k.as_ref() == e.key))
 }
 
+/// The engines of the page's engine grid for a GPU of `vendor` with `totals`, as (engine, name
+/// key), in grid order, without those `hidden` hides (`performance.hidden_gpu_engines`). The
+/// Overview GPU box's `engine_charts` mode draws one chart per engine from here (crw.77).
+pub(crate) fn grid_engines<'a, H: AsRef<str>>(
+    vendor: GpuVendor,
+    totals: Option<&GpuTotals>,
+    hidden: &'a [H],
+) -> impl Iterator<Item = (GpuEngine, &'static str)> + 'a {
+    let reported = Reported::of(vendor, totals);
+    vendor_cells(vendor)
+        .iter()
+        .filter(move |c| reported.has(c.engine))
+        .filter(move |c| !c.engine.is_hidden(hidden))
+        .map(|c| (c.engine, c.name))
+}
+
 /// Every engine `device` reports, (key, name), in the vendor's order, hidden ones included.
 /// The Settings window's hidden engine checklist lists these (E21-023). Names are en-US.
 pub fn device_engines(snap: &Snapshot, device: DeviceIdx) -> Vec<(Arc<str>, SharedString)> {
