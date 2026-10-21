@@ -377,30 +377,38 @@ fn wrap_persist_coalesces_while_busy() {
     assert_eq!(fake.saved.lock().unwrap().len(), 4);
 }
 
+/// One capturing subscriber for the whole test binary. A per-test `with_default` subscriber is
+/// flaky here: tests run in parallel, and a callsite first hit on a thread without a subscriber
+/// can cache "never" for the thread that has one.
+fn captured_logs() -> &'static Captured {
+    static LOGS: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let out = Captured::default();
+        let writer = out.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).expect("one global subscriber");
+        out
+    })
+}
+
 #[test]
 fn wrap_persist_inner_called_on_failure() {
-    let out = Captured::default();
-    let writer = out.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .without_time()
-        .finish();
-    let fake = tracing::subscriber::with_default(subscriber, || {
-        let (fake, persist) = wrap(false, false, install_fails);
-        persist(&with_lowmem(true), &UiState::default());
-        wait_idle(&fake, 2);
-        fake
-    });
+    let out = captured_logs();
+    let (fake, persist) = wrap(false, false, install_fails);
+    persist(&with_lowmem(true), &UiState::default());
+    wait_idle(&fake, 2);
     assert_eq!(fake.installs(), 1);
     assert!(!fake.saved.lock().unwrap().is_empty());
     let logs = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
     let warn = logs
         .lines()
-        .find(|l| l.contains("WARN"))
+        .find(|l| l.contains("WARN") && l.contains("fake failure"))
         .unwrap_or_else(|| panic!("no warn line:\n{logs}"));
     assert!(warn.contains("tasklens::engine"), "{warn}");
-    assert!(warn.contains("fake failure"), "{warn}");
 }
 
 #[test]
