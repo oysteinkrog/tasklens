@@ -1137,10 +1137,15 @@ impl TlMenuPopup {
     /// Gives the keys to the element that had them before the menu opened, else to the
     /// action context.
     fn give_back_keys(&self, window: &mut Window, cx: &mut App) {
+        self.keys_target().focus(window, cx);
+    }
+
+    /// Where closing gives the keys back: the element that had them before the menu opened,
+    /// else the action context.
+    fn keys_target(&self) -> FocusHandle {
         self.restore_focus
-            .as_ref()
-            .unwrap_or(&self.action_context)
-            .focus(window, cx);
+            .clone()
+            .unwrap_or_else(|| self.action_context.clone())
     }
 
     /// Whether this menu or one of its open submenus has the keys.
@@ -1990,8 +1995,9 @@ pub fn close_context_menu(window: &mut Window, cx: &mut App) {
     cx.global_mut::<OpenMenus>()
         .0
         .retain(|o| o.window != window_id);
-    if menu.read(cx).holds_keys(window, cx) {
-        menu.read(cx).give_back_keys(window, cx);
+    let menu = menu.read(cx);
+    if let Some(target) = menu.holds_keys(window, cx).then(|| menu.keys_target()) {
+        target.focus(window, cx);
     }
     window.refresh();
 }
