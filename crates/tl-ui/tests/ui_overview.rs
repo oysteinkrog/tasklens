@@ -1401,7 +1401,12 @@ mod bottom {
                 gpu.set_mode("chart_engines", cx);
                 gpu
             }),
-            disk: cx.new(|cx| DiskBox::new(&hub, &disks, cx)),
+            // These tests cover the UI-PRF-017 sections, `rows` since D-026.
+            disk: cx.new(|cx| {
+                let mut disk = DiskBox::new(&hub, &disks, cx);
+                disk.set_mode("rows", cx);
+                disk
+            }),
             net: cx.new(|cx| NetBox::new(&hub, cx)),
             gpu_h: heights.0,
             disk_h: heights.1,
@@ -3737,7 +3742,12 @@ mod page {
             ]
         };
 
-        // The default: label part, splitter and sparkline part, level with each other.
+        // The default (D-026): one read and write chart per disk, no splitter, no split.
+        assert_eq!(parts(&mut r), [false, false, false, true, false]);
+        assert_eq!(r.layout().split(BoxKind::Disk), None);
+
+        // The sections: label part, splitter and sparkline part, level with each other.
+        set(&mut r, "rows");
         assert_eq!(parts(&mut r), [true, true, true, false, false]);
         assert_eq!(r.layout().split(BoxKind::Disk), Some(0.4));
         let text = r.bounds_of(io_row_id(&key, "read"));
@@ -3749,9 +3759,9 @@ mod page {
 
         // One read and write chart per disk in a grid, no splitter, no split.
         set(&mut r, "disk_charts");
+        let frame = r.bounds_of(DISK_BOX_ID.into());
         assert_eq!(parts(&mut r), [false, false, false, true, false]);
         assert_eq!(r.layout().split(BoxKind::Disk), None);
-        let frame = r.bounds_of(DISK_BOX_ID.into());
         let cell = r.bounds_of(cell_id(&key));
         assert!(
             cell.size.width >= px(CELL_MIN_W) && cell.size.height >= px(CELL_MIN_H),
@@ -3770,10 +3780,94 @@ mod page {
         let setting = r.saved();
         assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
 
-        // Back to the default mode: the default split returns.
-        set(&mut r, "rows");
-        assert_eq!(parts(&mut r), [true, true, true, false, false]);
-        assert_eq!(r.layout().split(BoxKind::Disk), Some(0.4));
+        // Back to the default mode: no split.
+        set(&mut r, "disk_charts");
+        assert_eq!(parts(&mut r), [false, false, false, true, false]);
+        assert_eq!(r.layout().split(BoxKind::Disk), None);
+    }
+
+    /// D-026: a new layout shows the Disk box as one chart per disk, and a saved mode still wins.
+    #[gpui_kit::test]
+    fn overview_disk_defaults_d026(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{DISK_SPLITTER_ID, GRID_ID, cell_id};
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let mode = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| page.read(cx).disk_box().read(cx).mode())
+        };
+        assert_eq!(r.layout().config(BoxKind::Disk).mode.id, "disk_charts");
+        assert_eq!(mode(&mut r), "disk_charts");
+        assert!(r.vcx.debug_bounds(GRID_ID).is_some());
+        assert_eq!(r.saved(), None, "nothing is written for the default");
+
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                let disk = layout
+                    .rows
+                    .iter_mut()
+                    .flat_map(|row| row.boxes.iter_mut())
+                    .find(|b| b.kind == "disk")
+                    .expect("a Disk box");
+                disk.mode = Some("rows".to_owned());
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(mode(&mut r), "rows");
+        assert!(r.vcx.debug_bounds(DISK_SPLITTER_ID).is_some());
+        let key = r
+            .vcx
+            .update(|_, cx| page.read(cx).disk_box().read(cx).rows()[0].key.clone());
+        assert!(
+            r.vcx
+                .debug_bounds(Box::leak(cell_id(&key).into_boxed_str()))
+                .is_none()
+        );
+    }
+
+    /// D-026: the `disk_charts` cells are equal, at least 160 × 60 px, fill the box, and the
+    /// grid scrolls when they do not fit.
+    #[gpui_kit::test]
+    fn overview_disk_grid_cells_fill_box(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{
+            CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let keys: Vec<_> = r.vcx.update(|_, cx| {
+            page.read(cx)
+                .disk_box()
+                .read(cx)
+                .rows()
+                .iter()
+                .map(|d| d.key.clone())
+                .collect()
+        });
+        assert!(keys.len() >= 2, "{} disks", keys.len());
+        let cells = |r: &mut Rig| {
+            keys.iter()
+                .map(|k| r.bounds_of(cell_id(k)))
+                .collect::<Vec<_>>()
+        };
+        let grid = r.bounds_of(GRID_ID.into());
+        let cs = cells(&mut r);
+        for c in &cs {
+            assert_eq!(c.size, cs[0].size, "equal cells");
+            assert!(c.size.width >= px(CELL_MIN_W) && c.size.height >= px(CELL_MIN_H));
+            assert!(c.right() <= grid.right() && c.bottom() <= grid.bottom());
+        }
+        // The cells fill the grid: the last row ends within one cell gap of its bottom, or the
+        // width is used by a single column.
+        let last = cs.iter().map(|c| c.bottom()).max().expect("cells");
+        let right = cs.iter().map(|c| c.right()).max().expect("cells");
+        assert!(
+            grid.bottom() - last < px(CELL_MIN_H) && grid.right() - right < px(CELL_MIN_W),
+            "{cs:?} in {grid:?}"
+        );
+        // Taller than the minimum: the cells grow with the box.
+        assert!(cs[0].size.height > px(CELL_MIN_H), "{:?}", cs[0]);
     }
 
     #[gpui_kit::test]
