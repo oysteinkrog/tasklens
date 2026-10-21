@@ -419,9 +419,9 @@ fn charts_fit(body: Size<Pixels>, engines: &[usize], total: usize, m: &UiMetrics
         + (n - 1) as f32 * section_gap;
     let spare = (f32::from(body.height) - needed) / n as f32;
     let bar = px(GRID_BAR_W * m.ui_scale);
-    for i in 0..n {
+    for (i, grid) in fit.grids.iter_mut().enumerate().take(n) {
         let h = (min_grid(i) + spare).max(0.);
-        fit.grids[i] = fill_grid(engines[i], size(body.width, px(h)), min, gap_px, bar);
+        *grid = fill_grid(engines[i], size(body.width, px(h)), min, gap_px, bar);
     }
     fit
 }
