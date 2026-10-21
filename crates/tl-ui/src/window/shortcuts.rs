@@ -13,9 +13,8 @@
 //! search, or closes the window when the search is empty; Ctrl+W closes it through the frame.
 //!
 //! The keys column is at most 220 px wide (× ui_scale), so the description always shows. A
-//! long description wraps and the row grows. Keys
-//! wider than the column are clipped, and only then does the column get a tooltip with the full
-//! key text. Prepaint measures each row and asks for one more frame when a row changes.
+//! long description wraps and the row grows. Keys wider than the column are clipped, and only
+//! then does the column get a tooltip with the full key text. Prepaint measures each row and asks for one more frame when a row changes.
 
 use gpui_kit::base::Root;
 use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp};
