@@ -2,6 +2,17 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-21
+
+### D-026: Overview GPU, Disk and Net defaults
+
+Oystein (2026-10-21, using 1.0.1): the CPU and Memory boxes are fine. The GPU box should show a
+chart for every engine (3D, video encode, video decode and the rest), the Disk graphs are much
+smaller than the other graphs on the page, and the Net Download and Upload graphs should be
+stacked vertically, not side by side. UI-PRF-019 changes the defaults to `engine_charts`,
+`disk_charts` and a new `stacked` Net mode, and the chart grids now grow to fill their box.
+A box with a saved mode keeps it; only boxes without one get the new defaults.
+
 ## 2026-10-17
 
 ### D-025: Overview box modes and inner splitters
