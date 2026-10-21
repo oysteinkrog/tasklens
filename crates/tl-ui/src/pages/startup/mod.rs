@@ -262,7 +262,8 @@ impl StartupPage {
     }
 
     /// An Enable or Disable started or finished on `target`: its Status cell shows or drops
-    /// "Updating…". Run now changes no row.
+    /// "Updating…". Run now changes no row. When an Enable or Disable ends, the page rescans at
+    /// once so the row does not keep the old status until the next watcher event.
     fn on_pending_changed(&mut self, target: &ActionTarget, cx: &mut Context<Self>) {
         let ActionTarget::Startup(entry) = target else {
             return;
@@ -278,10 +279,15 @@ impl StartupPage {
                     ActionKindTag::StartupEnable | ActionKindTag::StartupDisable
                 )
             });
+        let finished = !updating && self.frame.table.read(cx).delegate.is_updating(entry);
         self.frame.table.update(cx, |table, cx| {
             table.delegate.set_updating(entry, updating);
             cx.notify();
         });
+        if finished {
+            // Do not wait for the file watcher: rescan now so the row shows its new status.
+            self.frame.refresh(cx);
+        }
         cx.notify();
     }
 

@@ -55,13 +55,14 @@ pub const STARTUP_COLUMNS: [StartupColumn; 7] = [
     StartupColumn::Command,
 ];
 
-/// Default width of `c`, logical px at 100% (UI-SYS-041).
+/// Default width of `c`, logical px at 100% (UI-SYS-041). Status and Impact are wider than the
+/// spec's 90 and 100: with the dot, "Not in this desktop" and "Not measured" were cut.
 pub fn default_width(c: StartupColumn) -> f32 {
     match c {
         StartupColumn::Name => 220.,
         StartupColumn::Publisher => 180.,
-        StartupColumn::Status => 90.,
-        StartupColumn::Impact => 100.,
+        StartupColumn::Status => 170.,
+        StartupColumn::Impact => 120.,
         StartupColumn::Type => 190.,
         StartupColumn::Location => 260.,
         StartupColumn::Command => 170.,
@@ -672,10 +673,13 @@ impl TreeTableDelegate for StartupDelegate {
             },
             StartupColumn::Status if self.updating.contains(&e.id) => {
                 out.arc = Some(w.updating.clone());
+                out.dot = Some(UPDATING_LOOK.dot);
             }
             StartupColumn::Status => {
                 out.arc = Some(w.status(e.status).clone());
-                if status_look(sys_status(e.status)).label == LabelTone::Secondary {
+                let look = status_look(sys_status(e.status));
+                out.dot = Some(look.dot);
+                if look.label == LabelTone::Secondary {
                     out.text_color = Some(theme.text_secondary);
                 }
             }

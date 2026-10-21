@@ -124,8 +124,8 @@ fn startup_columns_widths(cx: &mut TestAppContext) {
     let expect = [
         (StartupColumn::Name, 220., 120.),
         (StartupColumn::Publisher, 180., 60.),
-        (StartupColumn::Status, 90., 80.),
-        (StartupColumn::Impact, 100., 80.),
+        (StartupColumn::Status, 170., 80.),
+        (StartupColumn::Impact, 120., 80.),
         (StartupColumn::Type, 190., 60.),
         (StartupColumn::Location, 260., 60.),
         (StartupColumn::Command, 170., 60.),
@@ -246,6 +246,11 @@ fn startup_status_cell_looks(cx: &mut TestAppContext) {
         assert_eq!(text(&out), word);
         let secondary = (label == Secondary).then_some(theme.text_secondary);
         assert_eq!(out.text_color, secondary, "{s:?}");
+        assert_eq!(
+            out.dot,
+            Some(dot),
+            "{s:?}: the cell draws the UI-SYS-003 dot"
+        );
     }
     let enabled = cell_colors(
         status_look(sys_status(StartupStatus::Enabled)),
@@ -1115,6 +1120,15 @@ mod page {
                 text(&out).to_owned()
             })
         }
+
+        fn status_dot(&mut self, ix: usize) -> Option<DotStyle> {
+            let table = self.table();
+            self.vcx.read_entity(&table, |table, _| {
+                let mut out = CellOut::default();
+                table.delegate.cell(ix, id(StartupColumn::Status), &mut out);
+                out.dot
+            })
+        }
     }
 
     fn startup_target(name: &str) -> ActionTarget {
@@ -1210,9 +1224,23 @@ mod page {
         rig.dispatch(Box::new(StartupEnable));
         assert_eq!(rig.status_cell(0), "Updating\u{2026}");
         assert_eq!(UPDATING_LOOK.dot, DotStyle::Filled(LabelTone::Info));
+        assert_eq!(rig.status_dot(0), Some(UPDATING_LOOK.dot));
+        let refreshes = |rig: &Rig| {
+            rig.engine
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, Command::RefreshNow(SourceId::Startup)))
+                .count()
+        };
+        let before = refreshes(&rig);
         let id = rig.requests()[0].id;
         rig.finish_action(id, &[ActionState::Succeeded]);
         assert_eq!(rig.status_cell(0), "Disabled");
+        assert_eq!(
+            refreshes(&rig),
+            before + 1,
+            "a finished Enable or Disable rescans at once instead of waiting for the watcher"
+        );
     }
 
     #[gpui_kit::test]
@@ -2184,6 +2212,50 @@ mod props {
 
     fn named(name: &str) -> StartupEntry {
         super::entry(name, StartupKind::AutostartUser)
+    }
+
+    /// Width of `text` in the table font, as the cell fit rule measures it.
+    fn advance_width(vcx: &mut VisualTestContext, text: &str) -> gpui_kit::Pixels {
+        use tl_ui::text::metrics::TextMetricsCache;
+        use tl_ui::theme::metrics;
+        vcx.update(|window, cx| {
+            let size = metrics(cx).text.base;
+            let mut cache = TextMetricsCache::default();
+            text.chars()
+                .fold(px(0.), |w, ch| w + cache.char_advance(ch, size, window, cx))
+        })
+    }
+
+    /// The longest Status and Impact words, with the dot and padding, fit their default widths.
+    #[gpui_kit::test]
+    fn startup_columns_fit_longest_status_and_impact(cx: &mut TestAppContext) {
+        let mut rig = rig(cx, vec![named("a")]);
+        // Cell padding 8 px on both sides; the Status dot is 8 px plus a 6 px gap.
+        let cases = [
+            ("Not in this desktop", 16. + 14., StartupColumn::Status),
+            ("Missing program", 16. + 14., StartupColumn::Status),
+            ("Not measured", 16., StartupColumn::Impact),
+        ];
+        for (word, extra, c) in cases {
+            let need = advance_width(&mut rig.main, word) + px(extra);
+            assert!(
+                need <= px(tl_ui::pages::startup::delegate::default_width(c)),
+                "{word:?} needs {need:?} in {c:?}"
+            );
+        }
+    }
+
+    /// The longest Properties label fits its column, so it is not cut with an ellipsis.
+    #[gpui_kit::test]
+    fn startup_props_flags_label_fits(cx: &mut TestAppContext) {
+        use tl_ui::windows::startup_properties::LABEL_W;
+        let mut rig = rig(cx, vec![named("a")]);
+        let label = "Can run / Can toggle / Can delete / File exists";
+        let need = advance_width(&mut rig.main, label);
+        assert!(
+            need <= px(LABEL_W),
+            "{label:?} needs {need:?}, column {LABEL_W}"
+        );
     }
 
     fn discord() -> StartupEntry {
