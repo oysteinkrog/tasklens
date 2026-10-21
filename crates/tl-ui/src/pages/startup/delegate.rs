@@ -61,7 +61,7 @@ pub fn default_width(c: StartupColumn) -> f32 {
     match c {
         StartupColumn::Name => 220.,
         StartupColumn::Publisher => 180.,
-        StartupColumn::Status => 170.,
+        StartupColumn::Status => 190.,
         StartupColumn::Impact => 120.,
         StartupColumn::Type => 190.,
         StartupColumn::Location => 260.,

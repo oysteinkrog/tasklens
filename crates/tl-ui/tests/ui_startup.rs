@@ -124,7 +124,7 @@ fn startup_columns_widths(cx: &mut TestAppContext) {
     let expect = [
         (StartupColumn::Name, 220., 120.),
         (StartupColumn::Publisher, 180., 60.),
-        (StartupColumn::Status, 170., 80.),
+        (StartupColumn::Status, 190., 80.),
         (StartupColumn::Impact, 120., 80.),
         (StartupColumn::Type, 190., 60.),
         (StartupColumn::Location, 260., 60.),

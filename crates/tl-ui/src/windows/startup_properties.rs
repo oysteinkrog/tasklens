@@ -40,14 +40,14 @@ use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 /// Default window size at 100% scale.
-const WINDOW_SIZE: (f32, f32) = (800., 520.);
+const WINDOW_SIZE: (f32, f32) = (860., 520.);
 /// Smallest window size at 100% scale.
-const MIN_SIZE: (f32, f32) = (640., 360.);
+const MIN_SIZE: (f32, f32) = (700., 360.);
 /// Footer height at 100% scale.
 const FOOTER_H: f32 = 48.;
 /// Label column width at 100% scale. The longest label, "Can run / Can toggle / Can delete / File
 /// exists", must fit in it.
-pub const LABEL_W: f32 = 330.;
+pub const LABEL_W: f32 = 380.;
 /// Row height at 100% scale.
 const ROW_H: f32 = 28.;
 /// Copy icon size and hit area at 100% scale.
