@@ -3870,6 +3870,116 @@ mod page {
         assert!(cs[0].size.height > px(CELL_MIN_H), "{:?}", cs[0]);
     }
 
+    /// Adds a third disk, sdc at 6, to the catalog and returns the Disk box's disk keys.
+    fn three_disks(r: &mut Rig) -> Vec<DeviceKey> {
+        let mut cat = catalog(true);
+        let mut entries = cat.entries.to_vec();
+        entries.push(entry(
+            6,
+            DeviceIdentity::Disk {
+                major: 8,
+                minor: 6,
+                name: Arc::from("sdc"),
+                wwn_or_serial: None,
+            },
+            None,
+        ));
+        cat.entries = Arc::from(entries);
+        cat.version += 1;
+        r.engine.publish_with(|s| s.devices = Arc::new(cat));
+        r.vcx.run_until_parked();
+        draw(r.vcx);
+        let page = r.page.clone();
+        let keys: Vec<_> = r.vcx.update(|_, cx| {
+            page.read(cx)
+                .disk_box()
+                .read(cx)
+                .rows()
+                .iter()
+                .map(|d| d.key.clone())
+                .collect()
+        });
+        assert_eq!(keys.len(), 3, "{keys:?}");
+        keys
+    }
+
+    /// D-026: with three disks at 1200 × 900 the Disk charts are about as tall as the GPU
+    /// engine charts in the same row, where the old cells were the 18 px rows.
+    #[gpui_kit::test]
+    fn overview_disk_charts_as_tall_as_gpu(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{DISK_BOX_ID, cell_id};
+        use tl_ui::pages::performance::overview::gpu_box::{GPU_BOX_ID, engine_cell_id};
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let keys = three_disks(&mut r);
+        let page = r.page.clone();
+        let engines: Vec<&'static str> = r.vcx.update(|_, cx| {
+            page.read(cx).gpu_box().read(cx).sections()[0]
+                .engines
+                .iter()
+                .map(|e| e.key)
+                .collect()
+        });
+        assert!(!engines.is_empty());
+        // The GPU and Disk boxes share the second row at the same size.
+        let (gpu, disk) = (
+            r.bounds_of(GPU_BOX_ID.into()),
+            r.bounds_of(DISK_BOX_ID.into()),
+        );
+        assert_eq!(gpu.size, disk.size);
+        let gpu_h = f32::from(r.bounds_of(engine_cell_id(0, engines[0])).size.height);
+        for k in &keys {
+            let h = f32::from(r.bounds_of(cell_id(k)).size.height);
+            assert!(
+                h >= 0.6 * gpu_h && h <= 1.67 * gpu_h,
+                "disk {h} px, GPU {gpu_h} px with {} engines",
+                engines.len()
+            );
+        }
+    }
+
+    /// D-026: when three disks do not fit at 60 px, the Disk grid scrolls under a scrollbar
+    /// and the cells keep their minimum size.
+    #[gpui_kit::test]
+    fn overview_disk_grid_scrolls(cx: &mut TestAppContext) {
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent};
+        use tl_ui::pages::performance::overview::disk_box::{
+            CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let keys = three_disks(&mut r);
+        // 1200 × 560: the second row gets its 220 px minimum and the page does not scroll.
+        r.vcx.simulate_resize(size(px(1200.), px(560.)));
+        draw(r.vcx);
+        let grid = r.bounds_of(GRID_ID.into());
+        let cs: Vec<_> = keys.iter().map(|k| r.bounds_of(cell_id(k))).collect();
+        for c in &cs {
+            assert_eq!(c.size, cs[0].size, "equal cells");
+            assert_eq!(c.size.height, px(CELL_MIN_H), "{c:?}");
+            assert!(c.size.width >= px(CELL_MIN_W), "{c:?}");
+            assert!(
+                c.right() <= grid.right() - px(16.),
+                "{c:?} clear of the scrollbar in {grid:?}"
+            );
+        }
+        let last = *cs.last().expect("cells");
+        assert!(last.bottom() > grid.bottom(), "{last:?} below {grid:?}");
+        r.vcx.simulate_event(ScrollWheelEvent {
+            position: center(grid),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
+            ..Default::default()
+        });
+        draw(r.vcx);
+        let scrolled = r.bounds_of(cell_id(&keys[2]));
+        assert!(
+            scrolled.top() < last.top(),
+            "{scrolled:?} scrolled up from {last:?}"
+        );
+        assert!(
+            scrolled.bottom() <= grid.bottom() + px(1.),
+            "{scrolled:?} in {grid:?}"
+        );
+    }
+
     #[gpui_kit::test]
     fn overview_net_modes_render(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::net_box::{
