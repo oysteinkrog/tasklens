@@ -38,7 +38,7 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
-use super::disk_box::{CELL_MIN_H, charts_fit, more_line};
+use super::disk_box::{GRID_CELL_MIN_H, charts_fit, more_line};
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::BoxMode;
 use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions, class_probe};
@@ -1034,7 +1034,7 @@ fn chart_cell(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .flex_col()
         .flex_1()
         .min_w_0()
-        .min_h(px(CELL_MIN_H * m.ui_scale))
+        .min_h(px(GRID_CELL_MIN_H * m.ui_scale))
         .gap(m.sp[2])
         .child(cell_head(a, m, theme))
         .child(
@@ -1182,7 +1182,7 @@ impl NetBox {
                 .flex()
                 .flex_row()
                 .flex_1()
-                .min_h(px(CELL_MIN_H * m.ui_scale))
+                .min_h(px(GRID_CELL_MIN_H * m.ui_scale))
                 .gap(m.sp[2]);
             for a in chunk {
                 line = line.child(chart_cell(a, m, theme));
