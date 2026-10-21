@@ -210,3 +210,6 @@ Oystein reviewed this and chose to keep asupersync and accept the risk. Source:
 
 Consequence: if the rider has to be honoured later, the engine runtime must be swappable. Keep
 asupersync types inside `tl-engine` and out of `tl-model`, `tl-collect` and `tl-ui`.
+
+Oystein (2026-10-21) chose to publish the repo as public at github.com/oysteinkrog/tasklens with
+this rider known. The repo holds no asupersync code, only the version pin.
