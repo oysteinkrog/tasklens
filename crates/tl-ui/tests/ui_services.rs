@@ -3816,6 +3816,36 @@ mod page {
         assert!(focused, "the table keeps the keys");
     }
 
+    /// jqk.37: Esc on the row menu gives the keys back to the table, so Down moves the
+    /// selection with no click in between.
+    #[gpui_kit::test]
+    fn row_menu_esc_gives_keys_back_to_table(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        rig.publish_fixture();
+        // Rows: 0 System group, 1 unit00, 2 unit01, 3 unit02.
+        rig.select(&[1]);
+        rig.focus_table();
+        assert!(rig.right_click(1).is_some(), "the unit menu");
+
+        rig.vcx.simulate_keystrokes("escape");
+        rig.vcx.run_until_parked();
+        rig.draw();
+        let table = rig.table();
+        let focused = rig.vcx.update(|window, cx| {
+            !context_menu_open(window, cx) && table.read(cx).focus_handle().is_focused(window)
+        });
+        assert!(focused, "the table has the keys again");
+
+        rig.vcx.simulate_keystrokes("down");
+        rig.vcx.run_until_parked();
+        let unit01 = rig.row_id(2);
+        let selected: Vec<u64> = rig
+            .vcx
+            .read_entity(&table, |t, _| t.selection.ids().collect());
+        assert_eq!(selected, [unit01], "Down ran after the menu closed");
+    }
+
     /// The menu's copy items copy the rows captured when it opened, not the live selection.
     #[gpui_kit::test]
     fn menu_copy_uses_captured_rows(cx: &mut TestAppContext) {

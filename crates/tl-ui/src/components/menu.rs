@@ -243,7 +243,8 @@ impl MenuSuffixAction {
 impl TlMenu {
     /// Builds a menu. `action_context` is where the item actions are dispatched and where the
     /// shortcut hints are looked up: the row menu passes the table's focus handle, a menu bar
-    /// menu the window's. Esc and a run item return focus there.
+    /// menu the window's. Esc and a run item give the keys back to the element that had them
+    /// when [`open_context_menu_at`] opened the menu, else to the action context.
     pub fn build(
         window: &mut Window,
         cx: &mut App,
@@ -261,6 +262,7 @@ impl TlMenu {
             max_w: tl.max_w,
             max_h,
             action_context,
+            restore_focus: None,
             highlight: None,
             open_sub: None,
             parent: None,
@@ -681,6 +683,9 @@ pub struct TlMenuPopup {
     max_w: Pixels,
     max_h: Pixels,
     action_context: FocusHandle,
+    /// The element that had the keys when [`open_context_menu_at`] opened this menu. Closing
+    /// gives them back there, else to the action context.
+    restore_focus: Option<FocusHandle>,
     /// The keyboard and hover highlight, always a selectable entry.
     highlight: Option<usize>,
     /// The submenu entry whose menu is drawn.
@@ -1095,21 +1100,47 @@ impl TlMenuPopup {
     }
 
     /// Closes this menu and every menu above it. The top menu emits [`DismissEvent`] and gives
-    /// focus back to the action context, unless an item moved focus elsewhere.
+    /// the keys back to the element that had them before the menu opened, unless an item
+    /// moved them elsewhere.
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Read before `open_sub` is cleared: Esc in a submenu leaves the keys there.
+        let keys_in_chain = self.chain_focused(window, cx);
+        self.close_chain(keys_in_chain, window, cx);
+    }
+
+    /// [`dismiss`](Self::dismiss) for this menu and its parents. `keys_below` says whether a
+    /// menu above this one had the keys; a parent cannot read its submenu while the submenu
+    /// is being updated.
+    fn close_chain(&mut self, keys_below: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.hover_task = None;
         self.highlight = None;
         self.open_sub = None;
         cx.notify();
         if let Some(parent) = self.parent() {
-            parent.update(cx, |parent, cx| parent.dismiss(window, cx));
+            parent.update(cx, |parent, cx| parent.close_chain(keys_below, window, cx));
             return;
         }
-        let moved_away = window.focused(cx).is_some() && !self.focus.contains_focused(window, cx);
-        if !moved_away {
-            self.action_context.focus(window, cx);
+        // A run item moved the keys to the action context to dispatch there; they still go back.
+        if keys_below || self.holds_keys(window, cx) || self.action_context.is_focused(window) {
+            self.give_back_keys(window, cx);
         }
         cx.emit(DismissEvent);
+    }
+
+    /// Whether the keys are on this menu, on one of its submenus or on nothing.
+    fn holds_keys(&self, window: &Window, cx: &App) -> bool {
+        window.focused(cx).is_none()
+            || self.focus.contains_focused(window, cx)
+            || self.chain_focused(window, cx)
+    }
+
+    /// Gives the keys to the element that had them before the menu opened, else to the
+    /// action context.
+    fn give_back_keys(&self, window: &mut Window, cx: &mut App) {
+        self.restore_focus
+            .as_ref()
+            .unwrap_or(&self.action_context)
+            .focus(window, cx);
     }
 
     /// Whether this menu or one of its open submenus has the keys.
@@ -1910,6 +1941,19 @@ pub fn open_context_menu_at(
 ) {
     let window_id = window.window_handle().window_id();
     let menu_id = menu.entity_id();
+    // Closing gives the keys back to the element that has them now. A menu that replaces an
+    // open one gives them back where that one would have.
+    let replaced = cx.try_global::<OpenMenus>().and_then(|open| {
+        open.0
+            .iter()
+            .find(|o| o.window == window_id)
+            .map(|o| o.menu.clone())
+    });
+    let restore = match replaced {
+        Some(old) if old.read(cx).holds_keys(window, cx) => old.read(cx).restore_focus.clone(),
+        _ => window.focused(cx),
+    };
+    menu.update(cx, |menu, _| menu.restore_focus = restore);
     let dismiss = window.subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
         if let Some(open) = cx.try_global::<OpenMenus>()
             && open.0.iter().any(|o| o.menu.entity_id() == menu_id)
@@ -1932,17 +1976,24 @@ pub fn open_context_menu_at(
     window.refresh();
 }
 
-/// Closes the context menu open in this window, if any, without running an item.
+/// Closes the context menu open in this window, if any, without running an item. Keys on the
+/// menu go back to the element that had them before it opened.
 pub fn close_context_menu(window: &mut Window, cx: &mut App) {
     let window_id = window.window_handle().window_id();
-    if let Some(open) = cx.try_global::<OpenMenus>()
-        && open.0.iter().any(|o| o.window == window_id)
-    {
-        cx.global_mut::<OpenMenus>()
-            .0
-            .retain(|o| o.window != window_id);
-        window.refresh();
+    let Some(menu) = cx
+        .try_global::<OpenMenus>()
+        .and_then(|open| open.0.iter().find(|o| o.window == window_id))
+        .map(|o| o.menu.clone())
+    else {
+        return;
+    };
+    cx.global_mut::<OpenMenus>()
+        .0
+        .retain(|o| o.window != window_id);
+    if menu.read(cx).holds_keys(window, cx) {
+        menu.read(cx).give_back_keys(window, cx);
     }
+    window.refresh();
 }
 
 /// The context menu open in this window, if any (tests).
@@ -2090,6 +2141,8 @@ mod tests {
     /// A window with a table-like row at the top and the context menu layer.
     struct Host {
         focus: FocusHandle,
+        /// A second focusable element: the one that has the keys before a menu opens.
+        field: FocusHandle,
         row_pressed: Rc<Cell<bool>>,
         ran: Rc<RefCell<Vec<&'static str>>>,
     }
@@ -2115,6 +2168,15 @@ mod tests {
                         .w_full()
                         .on_mouse_down(MouseButton::Left, move |_, _, _| pressed.set(true)),
                 )
+                .child(
+                    div()
+                        .id("field")
+                        .track_focus(&self.field)
+                        .absolute()
+                        .right_0()
+                        .bottom_0()
+                        .size(px(10.)),
+                )
                 .children(context_menu_layer(window, cx))
         }
     }
@@ -2126,6 +2188,7 @@ mod tests {
         cx.update(init);
         let (view, cx) = cx.add_window_view(|_, cx| Host {
             focus: cx.focus_handle(),
+            field: cx.focus_handle(),
             row_pressed: Rc::default(),
             ran: Rc::default(),
         });
@@ -2266,6 +2329,97 @@ mod tests {
         assert!(
             cx.update(|window, _| focus.is_focused(window)),
             "focus is back on the opener"
+        );
+    }
+
+    /// Focuses the host's field, then opens a menu whose actions run on the host (jqk.37).
+    fn open_from_field(
+        view: &Entity<Host>,
+        cx: &mut VisualTestContext,
+        f: impl FnOnce(TlMenu, &mut Window, &mut App) -> TlMenu + 'static,
+    ) -> (FocusHandle, Entity<TlMenuPopup>) {
+        let (focus, field) = view.read_with(cx, |h, _| (h.focus.clone(), h.field.clone()));
+        let menu = cx.update(|window, cx| {
+            field.focus(window, cx);
+            let menu = TlMenu::build(window, cx, focus, f);
+            open_context_menu_at(point(px(100.), px(100.)), window, cx, menu.clone());
+            menu
+        });
+        draw(cx);
+        (field, menu)
+    }
+
+    fn is_focused(cx: &mut VisualTestContext, focus: &FocusHandle) -> bool {
+        cx.update(|window, _| focus.is_focused(window))
+    }
+
+    #[gpui_kit::test]
+    fn esc_gives_keys_back_to_prior_element(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let (field, menu) = open_from_field(&view, cx, a_sep_b_c);
+        assert!(cx.update(|window, cx| menu.focus_handle(cx).is_focused(window)));
+
+        keys(cx, "escape");
+        assert!(!cx.update(|window, cx| context_menu_open(window, cx)));
+        assert!(
+            is_focused(cx, &field),
+            "the field had the keys before the menu opened"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn run_item_gives_keys_back_to_prior_element(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let (field, _) = open_from_field(&view, cx, a_sep_b_c);
+
+        keys(cx, "down enter");
+        assert_eq!(*view.read_with(cx, |h, _| h.ran.clone()).borrow(), ["A"]);
+        assert!(!cx.update(|window, cx| context_menu_open(window, cx)));
+        assert!(is_focused(cx, &field), "the keys went back to the field");
+    }
+
+    #[gpui_kit::test]
+    fn submenu_item_gives_keys_back_to_prior_element(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let (field, _) = open_from_field(&view, cx, |menu, window, cx| {
+            menu.item("A", Box::new(RunA))
+                .submenu("More", window, cx, |menu, _, _| {
+                    menu.item("X", Box::new(RunX)).item("Y", Box::new(RunY))
+                })
+        });
+
+        keys(cx, "down down right enter");
+        assert!(!cx.update(|window, cx| context_menu_open(window, cx)));
+        assert!(is_focused(cx, &field), "the keys went back to the field");
+    }
+
+    #[gpui_kit::test]
+    fn close_context_menu_gives_keys_back(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let (field, _) = open_from_field(&view, cx, a_sep_b_c);
+
+        cx.update(close_context_menu);
+        draw(cx);
+        assert!(is_focused(cx, &field));
+    }
+
+    #[gpui_kit::test]
+    fn replacing_menu_keeps_the_first_prior_element(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let (field, _) = open_from_field(&view, cx, a_sep_b_c);
+        // A second menu opens while the first one has the keys.
+        let focus = view.read_with(cx, |h, _| h.focus.clone());
+        cx.update(|window, cx| {
+            let menu = TlMenu::build(window, cx, focus, a_sep_b_c);
+            open_context_menu_at(point(px(200.), px(200.)), window, cx, menu);
+        });
+        draw(cx);
+
+        keys(cx, "escape");
+        assert!(!cx.update(|window, cx| context_menu_open(window, cx)));
+        assert!(
+            is_focused(cx, &field),
+            "the keys went back to the field, not to the first menu"
         );
     }
 

@@ -2258,6 +2258,31 @@ fn shift_f10_opens_at_focus_row() {
     assert_eq!(menu.origin, point(px(text_x), px(b_bottom)));
 }
 
+/// jqk.37: Esc on the row menu gives the keys back to the table, so Down moves the focus row
+/// with no click in between. The Processes, Services, Startup and Connections tabs use this
+/// table.
+#[test]
+fn menu_esc_gives_keys_back_to_table() {
+    let mut cx = cosmic_cx();
+    let (table, _, vcx) = open_menu_host(&mut cx, TDelegate::new(abc()));
+    focus_table(vcx, &table);
+    select(vcx, &table, 1);
+    keys(vcx, "shift-f10");
+    assert!(menu_bounds(vcx).is_some(), "menu open");
+
+    keys(vcx, "escape");
+    assert!(menu_bounds(vcx).is_none(), "Esc closed the menu");
+    let focused = vcx.update(|window, cx| table.read(cx).focus_handle().is_focused(window));
+    assert!(focused, "the table has the keys again");
+
+    keys(vcx, "down");
+    assert_eq!(
+        sel(vcx, &table),
+        (vec![2], Some(2)),
+        "Down ran after the menu closed"
+    );
+}
+
 /// Subscribes to the table's events.
 fn events(
     vcx: &mut VisualTestContext,

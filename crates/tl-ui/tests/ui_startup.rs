@@ -2864,6 +2864,12 @@ mod main_window {
         );
         rig.vcx.simulate_keystrokes("escape");
         rig.vcx.run_until_parked();
+        let table = rig.table();
+        assert!(
+            rig.vcx
+                .update(|window, cx| table.read(cx).focus_handle().is_focused(window)),
+            "Esc gives the keys back to the table (jqk.37)"
+        );
 
         rig.select_row(0);
         rig.vcx.simulate_keystrokes("delete");
