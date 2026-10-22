@@ -4012,6 +4012,8 @@ mod page {
             .vcx
             .update(|_, cx| page.read(cx).net_box().read(cx).adapter_idxs());
         assert!(!idxs.is_empty(), "the fixture has a counted adapter");
+        // One adapter fills the whole Net box, so its chart is the tallest a cell can be there:
+        // a Disk chart is never taller. Disk cells stay a real chart, not the old 18 px row.
         let net_cell = r.bounds_of(net_cell_id(idxs[0]));
         let net_chart = f32::from(net_cell.size.height) - HEAD_LINE;
         assert!(net_chart > 0., "Net cell {net_cell:?}");
@@ -4024,7 +4026,7 @@ mod page {
             };
             let chart = f32::from(cell.size.height) - lines * HEAD_LINE;
             assert!(
-                chart >= 0.6 * net_chart && chart <= 1.67 * net_chart,
+                chart > HEAD_LINE && chart <= net_chart,
                 "disk chart {chart} px, Net chart {net_chart} px"
             );
         }
@@ -4057,8 +4059,14 @@ mod page {
         }
         let last = *cs.last().expect("cells");
         assert!(last.bottom() > grid.bottom(), "{last:?} below {grid:?}");
+        // The wheel goes to a point of the grid that lies inside the 560 px window.
+        let at = point(center(grid).x, center(grid).y.min(px(540.)));
+        assert!(
+            grid.top() < at.y && at.y < grid.bottom(),
+            "{at:?} inside {grid:?}"
+        );
         r.vcx.simulate_event(ScrollWheelEvent {
-            position: center(grid),
+            position: at,
             delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
             ..Default::default()
         });
