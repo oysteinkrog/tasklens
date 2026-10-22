@@ -3653,6 +3653,29 @@ mod page {
         );
         assert_eq!(r.saved(), None, "nothing is written for the default");
 
+        // Net: stacked, Download above Upload, each the full box width.
+        assert_eq!(r.layout().config(BoxKind::Net).mode.id, "stacked");
+        let net_mode = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| page.read(cx).net_box().read(cx).mode())
+        };
+        assert_eq!(net_mode(&mut r), "stacked");
+
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                let net = layout.rows[1]
+                    .boxes
+                    .iter_mut()
+                    .find(|b| b.kind == "net")
+                    .expect("a Net box");
+                net.mode = Some("columns".to_owned());
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(net_mode(&mut r), "columns", "a saved mode wins");
+
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
                 let mut layout = OverviewLayoutSetting::btop_default();
@@ -4036,7 +4059,7 @@ mod page {
     #[gpui_kit::test]
     fn overview_net_modes_render(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::net_box::{
-            COMBINED_CHART_ID, NET_BOX_ID, NET_SPLITTER_ID, cell_id,
+            COMBINED_CHART_ID, NET_BOX_ID, NET_SPLITTER_ID, NET_STACK_SPLITTER_ID, cell_id,
         };
         let mut r = open_rooted(cx, true, 1200., 900.);
         let page = r.page.clone();
@@ -4051,9 +4074,29 @@ mod page {
             r.vcx.debug_bounds(id).is_some()
         };
 
-        // The default: two columns with the splitter between them.
-        assert!(shown(&mut r, NET_SPLITTER_ID.into()));
+        // The default (D-026): Download over Upload, each the full width, a splitter between.
+        assert!(shown(&mut r, NET_STACK_SPLITTER_ID.into()));
+        assert!(!shown(&mut r, NET_SPLITTER_ID.into()));
         assert!(!shown(&mut r, COMBINED_CHART_ID.into()));
+        assert_eq!(r.layout().split(BoxKind::Net), Some(0.5));
+        // The splitter is horizontal: it spans the box width, with 120 px of body on each side.
+        let frame = r.bounds_of(NET_BOX_ID.into());
+        let gap = r.gap(NET_STACK_SPLITTER_ID);
+        assert!(
+            gap.size.width >= frame.size.width * 0.8,
+            "{gap:?} in {frame:?}"
+        );
+        assert!(gap.size.width > gap.size.height);
+        assert!(gap.top() - frame.top() >= px(120.), "{gap:?} in {frame:?}");
+        assert!(
+            frame.bottom() - gap.bottom() >= px(120.),
+            "{gap:?} in {frame:?}"
+        );
+
+        // Two columns with the splitter between them.
+        set(&mut r, "columns");
+        assert!(shown(&mut r, NET_SPLITTER_ID.into()));
+        assert!(!shown(&mut r, NET_STACK_SPLITTER_ID.into()));
         assert_eq!(r.layout().split(BoxKind::Net), Some(0.5));
 
         // One combined chart, no splitter, no split.
@@ -4108,8 +4151,8 @@ mod page {
         assert_eq!(r.layout().split(BoxKind::Net), None);
 
         // Back to the default mode: the splitter and the default split return.
-        set(&mut r, "columns");
-        assert!(shown(&mut r, NET_SPLITTER_ID.into()));
+        set(&mut r, "stacked");
+        assert!(shown(&mut r, NET_STACK_SPLITTER_ID.into()));
         assert!(!shown(&mut r, cell_id(idxs[0])));
         assert_eq!(r.layout().split(BoxKind::Net), Some(0.5));
     }

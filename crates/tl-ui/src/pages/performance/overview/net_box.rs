@@ -57,10 +57,17 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 /// The box's debug selector.
 pub const NET_BOX_ID: &str = "perf-overview-box-net";
 
-/// The box's layout modes (UI-PRF-019). `columns` is the Download and Upload columns of UI-PRF-017.
+/// The box's layout modes (UI-PRF-019). `stacked` is the default since D-026: Download over
+/// Upload. `columns` is the Download and Upload columns of UI-PRF-017.
 ///
-/// The `columns` split is the Download column's share of the body.
+/// The `stacked` split is the Download part's share of the body height, the `columns` split the
+/// Download column's share of the width.
 pub const MODES: &[BoxMode] = &[
+    BoxMode {
+        id: "stacked",
+        label: "perf-overview-mode-stacked",
+        split: Some(0.5),
+    },
     BoxMode {
         id: "columns",
         label: "perf-overview-mode-columns",
@@ -78,6 +85,10 @@ pub const MODES: &[BoxMode] = &[
     },
 ];
 
+/// The debug selector of the splitter between the stacked Download and Upload parts.
+pub const NET_STACK_SPLITTER_ID: &str = "perf-overview-net-stack-splitter";
+/// The debug selector of that splitter's accent line.
+pub const NET_STACK_SPLITTER_LINE_ID: &str = "perf-overview-net-stack-splitter-line";
 /// The debug selector of the splitter between the Download and Upload columns.
 pub const NET_SPLITTER_ID: &str = "perf-overview-net-splitter";
 /// The debug selector of the splitter's accent line.
@@ -91,6 +102,7 @@ pub const MAX_ADAPTER_CELLS: usize = 16;
 /// Which parts the box shows (UI-PRF-019).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NetMode {
+    Stacked,
     Columns,
     Combined,
     AdapterCharts,
@@ -100,17 +112,19 @@ impl NetMode {
     /// The mode `id`; an unknown id is the default.
     fn from_id(id: &str) -> Self {
         match id {
+            "columns" => Self::Columns,
             "combined" => Self::Combined,
             "adapter_charts" => Self::AdapterCharts,
-            _ => Self::Columns,
+            _ => Self::Stacked,
         }
     }
 
     fn id(self) -> &'static str {
         match self {
-            Self::Columns => MODES[0].id,
-            Self::Combined => MODES[1].id,
-            Self::AdapterCharts => MODES[2].id,
+            Self::Stacked => MODES[0].id,
+            Self::Columns => MODES[1].id,
+            Self::Combined => MODES[2].id,
+            Self::AdapterCharts => MODES[3].id,
         }
     }
 }
@@ -398,6 +412,8 @@ pub struct NetBox {
     /// Download and upload as two lines of the aggregate series (`combined`).
     combined: Entity<ChartView>,
     mode: NetMode,
+    /// The gap between the Download and Upload parts (`stacked`).
+    stack_split: InnerSplit,
     /// The gap between the Download and Upload columns (`columns`).
     col_split: InnerSplit,
     /// The counted adapters' cells, built only while `adapter_charts` is the mode.
@@ -474,11 +490,16 @@ impl NetBox {
             down,
             up,
             combined,
-            mode: NetMode::Columns,
+            mode: NetMode::Stacked,
+            stack_split: InnerSplit::new(
+                NET_STACK_SPLITTER_ID,
+                NET_STACK_SPLITTER_LINE_ID,
+                MODES[0].split.unwrap_or_default(),
+            ),
             col_split: InnerSplit::new(
                 NET_SPLITTER_ID,
                 NET_SPLITTER_LINE_ID,
-                MODES[0].split.unwrap_or_default(),
+                MODES[1].split.unwrap_or_default(),
             ),
             adapters: Vec::new(),
             extra: 0,
@@ -546,20 +567,32 @@ impl NetBox {
         cx.notify();
     }
 
-    /// The Download column's share of the body as laid out in `columns`, after the clamps; 0 in
-    /// the other modes.
+    /// The Download part's share of the body as laid out in `stacked` (height) or `columns`
+    /// (width), after the clamps; 0 in the other modes.
     pub fn split(&self, m: &UiMetrics) -> f32 {
         match self.mode {
+            NetMode::Stacked => self
+                .stack_split
+                .share(SplitAxis::Column, m.sp[5], m.ui_scale),
             NetMode::Columns => self.col_split.share(SplitAxis::Row, m.sp[5], m.ui_scale),
             _ => 0.,
         }
     }
 
-    /// Takes the saved share for `columns`. Nothing changes while the gap is held.
+    /// Takes the saved share for the shown mode. Nothing changes while the gap is held.
     pub fn set_split(&mut self, share: f32, cx: &mut Context<Self>) {
-        if self.mode == NetMode::Columns && self.col_split.set_share(share) {
+        let changed = match self.mode {
+            NetMode::Stacked => self.stack_split.set_share(share),
+            NetMode::Columns => self.col_split.set_share(share),
+            _ => false,
+        };
+        if changed {
             cx.notify();
         }
+    }
+
+    fn stack_inner_split(&mut self) -> &mut InnerSplit {
+        &mut self.stack_split
     }
 
     fn col_inner_split(&mut self) -> &mut InnerSplit {
@@ -1048,6 +1081,67 @@ fn chart_cell(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
 }
 
 impl NetBox {
+    /// `stacked`: the Download part, the splitter and the Upload part, each the full width.
+    fn stacked_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.cells = 0;
+        let share = self.split(m);
+        let down = column(
+            Column {
+                chart: &self.down,
+                word: &self.down_word,
+                rate: &self.down_text,
+                peak_word: &self.peak_word,
+                peak: &self.down_peak_text,
+                total_word: &self.total_word,
+                total: &self.down_total,
+            },
+            m,
+            theme,
+        );
+        let up = column(
+            Column {
+                chart: &self.up,
+                word: &self.up_word,
+                rate: &self.up_text,
+                peak_word: &self.peak_word,
+                peak: &self.up_peak_text,
+                total_word: &self.total_word,
+                total: &self.up_total,
+            },
+            m,
+            theme,
+        );
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap(m.sp[5])
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .w_full()
+                    .h(relative(share))
+                    .child(down),
+            )
+            .child(div().flex().flex_1().min_h_0().w_full().child(up))
+            .child(self.stack_split.probe(Self::stack_inner_split, cx))
+            .child(self.stack_split.gap(
+                SplitAxis::Column,
+                share,
+                m.sp[5],
+                Self::stack_inner_split,
+                cx,
+            ))
+            .into_any_element()
+    }
+
     /// `columns`: the Download column, the splitter and the Upload column.
     fn columns_body(
         &mut self,
@@ -1215,6 +1309,7 @@ impl Render for NetBox {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let body = match self.mode {
+            NetMode::Stacked => self.stacked_body(&m, &theme, cx),
             NetMode::Columns => self.columns_body(&m, &theme, cx),
             NetMode::Combined => self.combined_body(&m, &theme),
             NetMode::AdapterCharts => self.charts_body(&m, &theme, cx),
