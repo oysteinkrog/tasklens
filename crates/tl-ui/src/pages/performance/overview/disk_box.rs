@@ -977,16 +977,16 @@ fn cell_head(
     let key = &r.key;
     let one_line = width >= px(HEAD_ONE_LINE_W * m.ui_scale);
     let part = |id: String, text: SharedString, color| {
-        let d = div()
+        // Only the name gives way, so the numbers always show whole.
+        div()
             .debug_selector(move || id)
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
             .text_color(color)
-            .child(text);
-        // On one line only the name gives way, so the numbers always show whole.
-        if one_line { d.flex_shrink_0() } else { d }
+            .child(text)
+            .flex_shrink_0()
     };
     let mut name = part(head_id(key, "name"), r.name.clone(), theme.text_primary)
         .flex_shrink(1.)
