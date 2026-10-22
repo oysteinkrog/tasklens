@@ -138,7 +138,11 @@ mod tests {
             x = std::hint::black_box(x.wrapping_add(1));
             used = thread_cpu_ns().saturating_sub(before);
         }
-        assert!(used >= 1_000_000, "{used} ns of CPU after {:?} of wall time", start.elapsed());
+        assert!(
+            used >= 1_000_000,
+            "{used} ns of CPU after {:?} of wall time",
+            start.elapsed()
+        );
     }
 
     proptest! {
