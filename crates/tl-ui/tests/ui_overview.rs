@@ -3944,6 +3944,7 @@ mod page {
             DISK_BOX_ID, HEAD_ONE_LINE_W, cell_id,
         };
         use tl_ui::pages::performance::overview::gpu_box::{GPU_BOX_ID, engine_cell_id};
+        use tl_ui::pages::performance::overview::net_box::cell_id as net_cell_id;
         /// The header line of a cell: `LABEL_ROW` px at the test's `ui_scale` of 1.
         const HEAD_LINE: f32 = 18.;
         let mut r = open_rooted(cx, true, 1200., 900.);
@@ -3982,6 +3983,50 @@ mod page {
             );
             // The chart is a real chart, not the 18 px row it replaced.
             assert!(chart > HEAD_LINE, "disk chart {chart} px");
+        }
+        // The Net adapter charts in the box beside them are about as tall too.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "net".into(),
+            mode: "adapter_charts".into(),
+        });
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let m = tl_model::system::Metric::valid;
+            sys.nets = Arc::from([(
+                tl_model::ids::DeviceIdx(5),
+                tl_model::system::NetTotals {
+                    device: tl_model::ids::DeviceIdx(5),
+                    rx_bps: m(1000.),
+                    tx_bps: m(100.),
+                    rx_total: 1 << 30,
+                    tx_total: 1 << 29,
+                    link_speed_mbps: tl_model::system::Metric::default(),
+                    state: tl_model::system::LinkState::Up,
+                },
+            )]);
+        });
+        r.vcx.run_until_parked();
+        let page = r.page.clone();
+        let idxs = r
+            .vcx
+            .update(|_, cx| page.read(cx).net_box().read(cx).adapter_idxs());
+        assert!(!idxs.is_empty(), "the fixture has a counted adapter");
+        let net_cell = r.bounds_of(net_cell_id(idxs[0]));
+        let net_chart = f32::from(net_cell.size.height) - HEAD_LINE;
+        assert!(net_chart > 0., "Net cell {net_cell:?}");
+        for k in &keys {
+            let cell = r.bounds_of(cell_id(k));
+            let lines = if cell.size.width < px(HEAD_ONE_LINE_W) {
+                2.
+            } else {
+                1.
+            };
+            let chart = f32::from(cell.size.height) - lines * HEAD_LINE;
+            assert!(
+                chart >= 0.6 * net_chart && chart <= 1.67 * net_chart,
+                "disk chart {chart} px, Net chart {net_chart} px"
+            );
         }
     }
 

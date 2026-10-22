@@ -947,6 +947,22 @@ fn spark_cell(id: String, chart: &Entity<ChartView>, m: &UiMetrics) -> AnyElemen
         .into_any_element()
 }
 
+/// A header rate: the value led by the first letter of `word` when the cell is at least
+/// `HEAD_LABEL_W` px wide, the bare value when it is narrower.
+fn rate_text(
+    width: Pixels,
+    ui_scale: f32,
+    word: &SharedString,
+    value: &SharedString,
+) -> SharedString {
+    if width >= px(HEAD_LABEL_W * ui_scale) {
+        let letter = word.chars().next().unwrap_or(' ');
+        SharedString::from(format!("{letter} {value}"))
+    } else {
+        value.clone()
+    }
+}
+
 /// A `disk_charts` cell header `width` px wide: name, active percent and the current read and
 /// write rates, each rate led by the first letter of its word. Below `HEAD_ONE_LINE_W` the rates
 /// go on a second line, and below `HEAD_LABEL_W` they drop the letter. Every part shrinks with an
@@ -959,29 +975,28 @@ fn cell_head(
     theme: &TlTheme,
 ) -> AnyElement {
     let key = &r.key;
+    let one_line = width >= px(HEAD_ONE_LINE_W * m.ui_scale);
     let part = |id: String, text: SharedString, color| {
-        div()
+        let d = div()
             .debug_selector(move || id)
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
             .text_color(color)
-            .child(text)
+            .child(text);
+        // On one line only the name gives way, so the numbers always show whole.
+        if one_line { d.flex_shrink_0() } else { d }
     };
     let mut name = part(head_id(key, "name"), r.name.clone(), theme.text_primary)
+        .flex_shrink(1.)
         .flex_1()
         .min_w(px(HEAD_NAME_MIN_W * m.ui_scale));
     *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
     let mut active = part(head_id(key, "active"), r.active.clone(), theme.text_primary);
     *active.text_style() = numeric_style(m, m.text.sm);
     let rate = |which: &str, word: &SharedString, value: &SharedString| {
-        let text = if width >= px(HEAD_LABEL_W * m.ui_scale) {
-            let letter = word.chars().next().unwrap_or(' ');
-            SharedString::from(format!("{letter} {value}"))
-        } else {
-            value.clone()
-        };
+        let text = rate_text(width, m.ui_scale, word, value);
         let mut d = part(head_id(key, which), text, theme.text_secondary);
         *d.text_style() = numeric_style(m, m.text.xs);
         d
@@ -999,7 +1014,7 @@ fn cell_head(
             .gap(m.sp[4])
             .h(px(LABEL_ROW * m.ui_scale))
     };
-    let head = if width >= px(HEAD_ONE_LINE_W * m.ui_scale) {
+    let head = if one_line {
         line().child(name).child(active).child(read).child(write)
     } else {
         div()
@@ -1258,6 +1273,17 @@ impl Render for DiskBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_letter_drops_below_head_label_w() {
+        let (word, value) = (SharedString::from("Read"), SharedString::from("1.5 MB/s"));
+        let at = |w: f32| rate_text(px(w), 1., &word, &value);
+        assert_eq!(at(HEAD_LABEL_W), "R 1.5 MB/s");
+        assert_eq!(at(HEAD_LABEL_W - 1.), "1.5 MB/s");
+        assert_eq!(at(160.), "1.5 MB/s");
+        // The threshold follows the UI scale.
+        assert_eq!(rate_text(px(HEAD_LABEL_W), 1.5, &word, &value), "1.5 MB/s");
+    }
     use tl_model::devices::{DeviceEntry, DeviceIdentity};
 
     fn disk(
