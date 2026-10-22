@@ -4,6 +4,14 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-21
 
+### D-027: Overview chart stacking choice
+
+Oystein (2026-10-22): the layout inside each Overview box should be more configurable. The Disk
+and Network graphs should stack vertically, or at least there should be a choice between
+vertical and horizontal stacking. UI-PRF-019 adds an "Arrange" choice per box (Automatic,
+Stack vertically, Side by side), saved as `arrange`, with Disk and Net stacked vertically by
+default.
+
 ### D-026: Overview GPU, Disk and Net defaults
 
 Oystein (2026-10-21, using 1.0.1): the CPU and Memory boxes are fine. The GPU box should show a
