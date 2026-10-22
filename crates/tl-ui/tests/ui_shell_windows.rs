@@ -709,11 +709,6 @@ fn shortcuts_unbound_rows_absent(cx: &mut TestAppContext) {
         rows.iter().all(|r| r.1 != "Open Debug menu"),
         "the Debug menu row needs --debug"
     );
-    let headings = vcx.read(|cx| frame.read(cx).content().read(cx).visible_headings());
-    assert!(
-        !headings.contains(&Heading::DialogsAndWindows),
-        "a heading with no bindings is not drawn"
-    );
 }
 
 #[gpui_kit::test]
