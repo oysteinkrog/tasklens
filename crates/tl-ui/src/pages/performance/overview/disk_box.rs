@@ -98,7 +98,7 @@ pub const HEAD_ONE_LINE_W: f32 = 320.;
 
 /// The narrowest `disk_charts` cell whose rates keep their first-letter label, logical px. A
 /// narrower cell shows the bare values.
-const HEAD_LABEL_W: f32 = 200.;
+pub const HEAD_LABEL_W: f32 = 200.;
 
 /// The width a `disk_charts` cell header keeps for the disk name, logical px.
 const HEAD_NAME_MIN_W: f32 = 48.;

@@ -4082,11 +4082,54 @@ mod page {
         );
     }
 
+    /// Checks that every part of disk `k`'s `disk_charts` cell header stays inside its cell with
+    /// no overlap and the name keeps its width, with the rates on a second line below
+    /// `HEAD_ONE_LINE_W`. Returns the cell.
+    fn assert_head_fits(
+        r: &mut Rig,
+        k: &DeviceKey,
+        at: &str,
+    ) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        use tl_ui::pages::performance::overview::disk_box::{HEAD_ONE_LINE_W, cell_id, head_id};
+        let cell = r.bounds_of(cell_id(k));
+        let [name, active, read, write] =
+            ["name", "active", "read", "write"].map(|p| r.bounds_of(head_id(k, p)));
+        for (p, b) in [
+            ("name", name),
+            ("active", active),
+            ("read", read),
+            ("write", write),
+        ] {
+            assert!(
+                b.left() >= cell.left()
+                    && b.right() <= cell.right() + px(0.5)
+                    && b.top() >= cell.top()
+                    && b.bottom() <= cell.bottom() + px(0.5),
+                "{at} {p} {b:?} outside {cell:?}"
+            );
+        }
+        assert!(name.size.width >= px(48.), "{at} name {name:?}");
+        let row = [name, active, read, write];
+        for (i, a) in row.iter().enumerate() {
+            for b in &row[i + 1..] {
+                let same_line = a.top() < b.bottom() && b.top() < a.bottom();
+                let apart = a.right() <= b.left() + px(0.5) || b.right() <= a.left() + px(0.5);
+                assert!(!same_line || apart, "{at} {a:?} overlaps {b:?}");
+            }
+        }
+        if cell.size.width < px(HEAD_ONE_LINE_W) {
+            assert!(read.top() >= name.bottom(), "{at} rates under the name");
+        } else {
+            assert!(read.top() < name.bottom(), "{at} one line");
+        }
+        cell
+    }
+
     /// D-026: every part of a `disk_charts` cell header stays inside its cell with no overlap,
     /// and the name keeps its width. Below `HEAD_ONE_LINE_W` the rates go on a second line.
     #[gpui_kit::test]
     fn overview_disk_cell_head_fits(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::disk_box::{HEAD_ONE_LINE_W, cell_id, head_id};
+        use tl_ui::pages::performance::overview::disk_box::HEAD_ONE_LINE_W;
         let mut r = open_rooted(cx, true, 1200., 900.);
         let keys = three_disks(&mut r);
         let mut widths = Vec::new();
@@ -4094,44 +4137,43 @@ mod page {
             r.vcx.simulate_resize(size(px(w), px(h)));
             draw(r.vcx);
             for k in &keys {
-                let cell = r.bounds_of(cell_id(k));
+                let cell = assert_head_fits(&mut r, k, &format!("{w}x{h}"));
                 widths.push(f32::from(cell.size.width));
-                let [name, active, read, write] =
-                    ["name", "active", "read", "write"].map(|p| r.bounds_of(head_id(k, p)));
-                for (p, b) in [
-                    ("name", name),
-                    ("active", active),
-                    ("read", read),
-                    ("write", write),
-                ] {
-                    assert!(
-                        b.left() >= cell.left()
-                            && b.right() <= cell.right() + px(0.5)
-                            && b.top() >= cell.top()
-                            && b.bottom() <= cell.bottom() + px(0.5),
-                        "{w}x{h} {p} {b:?} outside {cell:?}"
-                    );
-                }
-                assert!(name.size.width >= px(48.), "{w}x{h} name {name:?}");
-                let row = [name, active, read, write];
-                for (i, a) in row.iter().enumerate() {
-                    for b in &row[i + 1..] {
-                        let same_line = a.top() < b.bottom() && b.top() < a.bottom();
-                        let apart =
-                            a.right() <= b.left() + px(0.5) || b.right() <= a.left() + px(0.5);
-                        assert!(!same_line || apart, "{w}x{h} {a:?} overlaps {b:?}");
-                    }
-                }
-                if cell.size.width < px(HEAD_ONE_LINE_W) {
-                    assert!(read.top() >= name.bottom(), "{w}x{h} rates under the name");
-                } else {
-                    assert!(read.top() < name.bottom(), "{w}x{h} one line");
-                }
             }
         }
         assert!(
             widths.iter().any(|&w| w < HEAD_ONE_LINE_W),
             "a cell below {HEAD_ONE_LINE_W} px: {widths:?}"
+        );
+    }
+
+    /// D-026: with eight disks in narrow windows the `disk_charts` cells get narrower than
+    /// `HEAD_LABEL_W`, down toward the 160 px minimum. The rates drop their letters there, and
+    /// the header still fits its cell.
+    #[gpui_kit::test]
+    fn overview_disk_narrow_cell_head_fits(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{CELL_MIN_W, HEAD_LABEL_W};
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let keys = more_disks(&mut r, 6);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "disk".into(),
+            mode: "disk_charts".into(),
+        });
+        let mut widths = Vec::new();
+        for w in [500., 600., 700., 800., 900., 1000.] {
+            for h in [560., 900.] {
+                r.vcx.simulate_resize(size(px(w), px(h)));
+                draw(r.vcx);
+                for k in &keys {
+                    let cell = assert_head_fits(&mut r, k, &format!("{w}x{h}"));
+                    assert!(cell.size.width >= px(CELL_MIN_W), "{w}x{h} {cell:?}");
+                    widths.push(f32::from(cell.size.width));
+                }
+            }
+        }
+        assert!(
+            widths.iter().any(|&w| w < HEAD_LABEL_W),
+            "a cell below {HEAD_LABEL_W} px: {widths:?}"
         );
     }
 
