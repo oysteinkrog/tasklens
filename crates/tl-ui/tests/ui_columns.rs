@@ -1730,6 +1730,30 @@ fn picker_count_text() {
 }
 
 #[test]
+fn picker_count_text_follows_the_filter() {
+    let mut cx = cosmic_cx();
+    let d = registry_delegate(image_identity_memory(), &[ColumnId::Name]);
+    let mut rig = open_picker(&mut cx, d);
+    let all = rig.picker.read_with(&rig.pcx, |p, cx| p.count_text(cx));
+    type_filter(&mut rig, "working set", 100);
+    let listed = picker_items(&mut rig)
+        .iter()
+        .filter(|i| matches!(i, PickerItem::Column(_)))
+        .count();
+    let count = rig.picker.read_with(&rig.pcx, |p, cx| p.count_text(cx));
+    assert_ne!(count, all, "the count changes with the filter");
+    assert!(
+        count
+            .as_ref()
+            .ends_with(&format!("of {listed} columns shown")),
+        "{count} for {listed} listed columns"
+    );
+    type_filter(&mut rig, "xyz", 100);
+    let count = rig.picker.read_with(&rig.pcx, |p, cx| p.count_text(cx));
+    assert_eq!(count.as_ref(), "0 of 0 columns shown");
+}
+
+#[test]
 fn picker_na_column_enabled_with_note() {
     let mut cx = cosmic_cx();
     let mut specs = image_identity_memory();

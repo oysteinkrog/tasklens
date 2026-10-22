@@ -246,7 +246,12 @@ impl DependenciesTab {
                     .iter()
                     .filter(|e| block(e.relation) == which)
                     .collect();
-                entries.sort_by(|a, b| a.unit.name.cmp(&b.unit.name));
+                entries.sort_by(|a, b| {
+                    a.unit
+                        .name
+                        .cmp(&b.unit.name)
+                        .then_with(|| relation_word(a.relation).cmp(relation_word(b.relation)))
+                });
                 // The same unit under the same relation is one row; two relations stay two
                 // rows, each with its own tag.
                 entries.dedup_by(|a, b| a.unit == b.unit && a.relation == b.relation);

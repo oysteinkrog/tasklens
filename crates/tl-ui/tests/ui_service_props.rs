@@ -2002,6 +2002,29 @@ fn deps_one_row_per_relation_sorted(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn deps_duplicate_unit_and_relation_is_one_row(cx: &mut TestAppContext) {
+    let t = open_deps(
+        cx,
+        Some(deps_details(vec![
+            dep("system.slice", Relation::Requires),
+            dep("system.slice", Relation::Wants),
+            dep("system.slice", Relation::Requires),
+        ])),
+    );
+    assert_eq!(
+        t.lines(cx),
+        [
+            "Depends on:",
+            "system.slice Requires",
+            "system.slice Wants",
+            "Dependents:",
+            "(None)",
+            "Ordering (0)",
+        ]
+    );
+}
+
+#[gpui_kit::test]
 fn deps_ordering_collapsed_by_default(cx: &mut TestAppContext) {
     let entries: Vec<DepEntry> = (0..12)
         .map(|i| {
