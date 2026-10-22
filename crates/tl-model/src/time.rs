@@ -131,12 +131,14 @@ mod tests {
         let before = thread_cpu_ns();
         let start = std::time::Instant::now();
         let mut x = 0u64;
-        while start.elapsed() < std::time::Duration::from_millis(5) {
+        // Spin until the thread's own CPU clock has advanced 1 ms. Wall time is only a cap, so a
+        // descheduled thread on a busy machine does not fail the test.
+        let mut used = 0;
+        while used < 1_000_000 && start.elapsed() < std::time::Duration::from_secs(30) {
             x = std::hint::black_box(x.wrapping_add(1));
+            used = thread_cpu_ns().saturating_sub(before);
         }
-        let used = thread_cpu_ns().saturating_sub(before);
-        // The thread may be preempted on a busy machine, so less than the 5 ms of wall time.
-        assert!(used >= 1_000_000, "{used} ns of CPU for a 5 ms busy loop");
+        assert!(used >= 1_000_000, "{used} ns of CPU after {:?} of wall time", start.elapsed());
     }
 
     proptest! {
