@@ -445,6 +445,13 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         Heading::Services,
         "shortcuts-service-restart",
     ),
+    // Connections
+    doc(
+        &["tasklens::CopyDetails"],
+        "ConnectionTable > Table",
+        Heading::Connections,
+        "shortcuts-copy-details",
+    ),
     // Information
     doc(
         &[
