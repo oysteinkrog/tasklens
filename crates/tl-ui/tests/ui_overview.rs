@@ -4042,11 +4042,27 @@ mod page {
         };
         let mut r = open_rooted(cx, true, 1200., 900.);
         let keys = more_disks(&mut r, 6);
-        // 700 × 560: the Disk box has room for two columns, so eight cells need four rows of
-        // 60 px, which is more than its body.
-        r.vcx.simulate_resize(size(px(700.), px(560.)));
-        draw(r.vcx);
-        let grid = r.bounds_of(GRID_ID.into());
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "disk".into(),
+            mode: "disk_charts".into(),
+        });
+        // The first window where the eight cells overflow the Disk grid and the grid shows on
+        // screen. A narrow window stacks the boxes, so the Disk box is below the window there.
+        let mut seen = Vec::new();
+        let mut found = None;
+        for (w, h) in [(1200., 560.), (1200., 640.), (1000., 560.), (1400., 600.)] {
+            r.vcx.simulate_resize(size(px(w), px(h)));
+            draw(r.vcx);
+            let grid = r.bounds_of(GRID_ID.into());
+            let last = r.bounds_of(cell_id(&keys[keys.len() - 1]));
+            seen.push((w, h, grid));
+            if last.bottom() > grid.bottom() && grid.bottom() <= px(h) {
+                found = Some(grid);
+                break;
+            }
+        }
+        let grid =
+            found.unwrap_or_else(|| panic!("no window scrolls the grid on screen: {seen:?}"));
         let cs: Vec<_> = keys.iter().map(|k| r.bounds_of(cell_id(k))).collect();
         for c in &cs {
             assert_eq!(c.size, cs[0].size, "equal cells");
@@ -4059,12 +4075,7 @@ mod page {
         }
         let last = *cs.last().expect("cells");
         assert!(last.bottom() > grid.bottom(), "{last:?} below {grid:?}");
-        // The wheel goes to a point of the grid that lies inside the 560 px window.
-        let at = point(center(grid).x, center(grid).y.min(px(540.)));
-        assert!(
-            grid.top() < at.y && at.y < grid.bottom(),
-            "{at:?} inside {grid:?}"
-        );
+        let at = center(grid);
         r.vcx.simulate_event(ScrollWheelEvent {
             position: at,
             delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
