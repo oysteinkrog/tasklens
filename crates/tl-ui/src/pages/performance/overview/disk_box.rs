@@ -424,6 +424,11 @@ pub fn cell_id(key: &DeviceKey) -> String {
     format!("{DISK_BOX_ID}-cell:{}", key.0)
 }
 
+/// The debug selector of the chart area of a disk's `disk_charts` cell, below its header.
+pub fn chart_id(key: &DeviceKey) -> String {
+    format!("{DISK_BOX_ID}-chart:{}", key.0)
+}
+
 /// The debug selector of a part of a disk's `disk_charts` cell header: "name", "active", "read"
 /// or "write".
 pub fn head_id(key: &DeviceKey, part: &str) -> String {
@@ -1035,7 +1040,7 @@ fn chart_cell(
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
-    let key = r.key.clone();
+    let (key, chart_key) = (r.key.clone(), r.key.clone());
     div()
         .debug_selector(move || cell_id(&key))
         .flex()
@@ -1047,11 +1052,16 @@ fn chart_cell(
         .gap(m.sp[2])
         .child(cell_head(r, cell.width, words, m, theme))
         .child(
-            div().relative().flex_1().min_h_0().child(
-                r.pair_chart
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            ),
+            div()
+                .debug_selector(move || chart_id(&chart_key))
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    r.pair_chart
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                ),
         )
         .into_any_element()
 }

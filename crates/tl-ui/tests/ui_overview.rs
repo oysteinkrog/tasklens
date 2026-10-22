@@ -3935,16 +3935,18 @@ mod page {
         more_disks(r, 1)
     }
 
-    /// D-026: with three disks at 1200 × 900 the Disk chart areas (the cell below its header) are
-    /// about as tall as the GPU engine chart areas in the same row, where the old cells were the
-    /// 18 px rows.
+    /// D-026: with three disks at 1200 × 900 the Disk chart areas (each cell's chart below its
+    /// header and gap, measured) are about as tall as the GPU engine chart areas in the same row,
+    /// where the old cells were the 18 px rows. None is taller than the one Net adapter chart.
     #[gpui_kit::test]
     fn overview_disk_charts_as_tall_as_gpu(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::disk_box::{
-            DISK_BOX_ID, HEAD_ONE_LINE_W, cell_id,
+        use tl_ui::pages::performance::overview::disk_box::{DISK_BOX_ID, cell_id, chart_id};
+        use tl_ui::pages::performance::overview::gpu_box::{
+            GPU_BOX_ID, engine_cell_id, engine_chart_id,
         };
-        use tl_ui::pages::performance::overview::gpu_box::{GPU_BOX_ID, engine_cell_id};
-        use tl_ui::pages::performance::overview::net_box::cell_id as net_cell_id;
+        use tl_ui::pages::performance::overview::net_box::{
+            cell_id as net_cell_id, chart_id as net_chart_id,
+        };
         /// The header line of a cell: `LABEL_ROW` px at the test's `ui_scale` of 1.
         const HEAD_LINE: f32 = 18.;
         let mut r = open_rooted(cx, true, 1200., 900.);
@@ -3964,18 +3966,34 @@ mod page {
             r.bounds_of(DISK_BOX_ID.into()),
         );
         assert_eq!(gpu.size, disk.size);
-        // The GPU cell is one header line over its chart.
-        let gpu_cell = r.bounds_of(engine_cell_id(0, engines[0]));
-        let gpu_chart = f32::from(gpu_cell.size.height) - HEAD_LINE;
-        assert!(gpu_chart > 0., "GPU cell {gpu_cell:?}");
-        for k in &keys {
-            let cell = r.bounds_of(cell_id(k));
-            let lines = if cell.size.width < px(HEAD_ONE_LINE_W) {
-                2.
-            } else {
-                1.
-            };
-            let chart = f32::from(cell.size.height) - lines * HEAD_LINE;
+        // A chart area sits at the bottom of its cell, below the header and the gap.
+        let chart_in = |chart: gpui_kit::Bounds<gpui_kit::Pixels>,
+                        cell: gpui_kit::Bounds<gpui_kit::Pixels>,
+                        what: &str| {
+            assert!(
+                chart.left() >= cell.left()
+                    && chart.right() <= cell.right()
+                    && (f32::from(chart.bottom()) - f32::from(cell.bottom())).abs() < 0.5
+                    && chart.top() >= cell.top() + px(HEAD_LINE),
+                "{what} chart {chart:?} in cell {cell:?}"
+            );
+            assert!(
+                chart.size.height < cell.size.height - px(HEAD_LINE),
+                "{what} gap"
+            );
+            f32::from(chart.size.height)
+        };
+        let gpu_chart = chart_in(
+            r.bounds_of(engine_chart_id(0, engines[0])),
+            r.bounds_of(engine_cell_id(0, engines[0])),
+            "GPU",
+        );
+        assert!(gpu_chart > HEAD_LINE, "GPU chart {gpu_chart} px");
+        let disk_charts: Vec<f32> = keys
+            .iter()
+            .map(|k| chart_in(r.bounds_of(chart_id(k)), r.bounds_of(cell_id(k)), "disk"))
+            .collect();
+        for &chart in &disk_charts {
             assert!(
                 chart >= 0.6 * gpu_chart && chart <= 1.67 * gpu_chart,
                 "disk chart {chart} px, GPU chart {gpu_chart} px with {} engines",
@@ -4013,18 +4031,14 @@ mod page {
             .update(|_, cx| page.read(cx).net_box().read(cx).adapter_idxs());
         assert!(!idxs.is_empty(), "the fixture has a counted adapter");
         // One adapter fills the whole Net box, so its chart is the tallest a cell can be there:
-        // a Disk chart is never taller. Disk cells stay a real chart, not the old 18 px row.
-        let net_cell = r.bounds_of(net_cell_id(idxs[0]));
-        let net_chart = f32::from(net_cell.size.height) - HEAD_LINE;
-        assert!(net_chart > 0., "Net cell {net_cell:?}");
+        // a Disk chart is never taller.
+        let net_chart = chart_in(
+            r.bounds_of(net_chart_id(idxs[0])),
+            r.bounds_of(net_cell_id(idxs[0])),
+            "Net",
+        );
         for k in &keys {
-            let cell = r.bounds_of(cell_id(k));
-            let lines = if cell.size.width < px(HEAD_ONE_LINE_W) {
-                2.
-            } else {
-                1.
-            };
-            let chart = f32::from(cell.size.height) - lines * HEAD_LINE;
+            let chart = f32::from(r.bounds_of(chart_id(k)).size.height);
             assert!(
                 chart > HEAD_LINE && chart <= net_chart,
                 "disk chart {chart} px, Net chart {net_chart} px"
@@ -4136,6 +4150,60 @@ mod page {
         cell
     }
 
+    /// Publishes the widest real header values for every disk in the Disk box: 100.0% active,
+    /// 1023.9 MiB/s read and 1023.8 MiB/s write, and checks the rows show them.
+    fn widest_rates(r: &mut Rig) {
+        use tl_model::system::{DiskTotals, Metric};
+        const MIB: f64 = 1024. * 1024.;
+        let page = r.page.clone();
+        let idxs: Vec<DeviceIdx> = r.vcx.update(|_, cx| {
+            page.read(cx)
+                .disk_box()
+                .read(cx)
+                .rows()
+                .iter()
+                .map(|d| d.idx)
+                .collect()
+        });
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.disks = idxs
+                .iter()
+                .map(|&device| {
+                    (
+                        device,
+                        DiskTotals {
+                            device,
+                            active_pct: Metric::valid(100.),
+                            read_bps: Metric::valid(1023.9 * MIB),
+                            write_bps: Metric::valid(1023.8 * MIB),
+                            response_ms: Metric::valid(1.),
+                            read_total: 1 << 40,
+                            written_total: 1 << 40,
+                            capacity: 1 << 41,
+                            temp_c: Metric::default(),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into();
+        });
+        r.vcx.run_until_parked();
+        draw(r.vcx);
+        let rows = r
+            .vcx
+            .update(|_, cx| page.read(cx).disk_box().read(cx).rows().to_vec());
+        for d in &rows {
+            assert_eq!(
+                (d.active.as_ref(), d.read.as_ref(), d.write.as_ref()),
+                ("100.0%", "1023.9 MiB/s", "1023.8 MiB/s"),
+                "{}",
+                d.name
+            );
+        }
+    }
+
     /// D-026: every part of a `disk_charts` cell header stays inside its cell with no overlap,
     /// and the name keeps its width. Below `HEAD_ONE_LINE_W` the rates go on a second line.
     #[gpui_kit::test]
@@ -4143,6 +4211,7 @@ mod page {
         use tl_ui::pages::performance::overview::disk_box::HEAD_ONE_LINE_W;
         let mut r = open_rooted(cx, true, 1200., 900.);
         let keys = three_disks(&mut r);
+        widest_rates(&mut r);
         let mut widths = Vec::new();
         for (w, h) in [(1200., 900.), (1200., 560.), (900., 560.)] {
             r.vcx.simulate_resize(size(px(w), px(h)));
@@ -4160,7 +4229,7 @@ mod page {
 
     /// D-026: with eight disks in narrow windows the `disk_charts` cells get narrower than
     /// `HEAD_LABEL_W`, down toward the 160 px minimum. The rates drop their letters there, and
-    /// the header still fits its cell.
+    /// the header still fits its cell with the widest real values.
     #[gpui_kit::test]
     fn overview_disk_narrow_cell_head_fits(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::disk_box::{CELL_MIN_W, HEAD_LABEL_W};
@@ -4170,6 +4239,7 @@ mod page {
             kind: "disk".into(),
             mode: "disk_charts".into(),
         });
+        widest_rates(&mut r);
         let mut widths = Vec::new();
         for w in [500., 600., 700., 800., 900., 1000.] {
             for h in [560., 900.] {

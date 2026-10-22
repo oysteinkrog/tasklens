@@ -511,6 +511,12 @@ pub fn engine_cell_id(i: usize, key: &str) -> String {
     format!("{GPU_BOX_ID}-cell-{i}-{key}")
 }
 
+/// The debug selector of the chart area of section `i`'s `engine_charts` cell `key`, below its
+/// header.
+pub fn engine_chart_id(i: usize, key: &str) -> String {
+    format!("{GPU_BOX_ID}-cell-chart-{i}-{key}")
+}
+
 /// The debug selector of section `i`'s `engine_charts` grid viewport.
 pub fn grid_id(i: usize) -> String {
     format!("{GPU_BOX_ID}-grid-{i}")
@@ -1173,11 +1179,16 @@ fn engine_cell(
                 .child(value),
         )
         .child(
-            div().relative().flex_1().min_h_0().child(
-                e.chart
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            ),
+            div()
+                .debug_selector(move || engine_chart_id(i, key))
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    e.chart
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                ),
         )
         .into_any_element()
 }

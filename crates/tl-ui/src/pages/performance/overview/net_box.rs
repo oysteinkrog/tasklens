@@ -137,6 +137,11 @@ pub fn cell_id(idx: DeviceIdx) -> String {
     format!("{NET_BOX_ID}-cell:{}", idx.0)
 }
 
+/// The debug selector of the chart area of an adapter's `adapter_charts` cell, below its header.
+pub fn chart_id(idx: DeviceIdx) -> String {
+    format!("{NET_BOX_ID}-chart:{}", idx.0)
+}
+
 const KEY_TITLE: &str = "perf-overview-box-network";
 const KEY_DOWNLOAD: &str = "perf-net-legend-download";
 const KEY_UPLOAD: &str = "perf-net-legend-upload";
@@ -1071,11 +1076,16 @@ fn chart_cell(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .gap(m.sp[2])
         .child(cell_head(a, m, theme))
         .child(
-            div().relative().flex_1().min_h_0().child(
-                a.chart
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            ),
+            div()
+                .debug_selector(move || chart_id(idx))
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    a.chart
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                ),
         )
         .into_any_element()
 }
