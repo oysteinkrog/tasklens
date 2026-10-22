@@ -758,6 +758,7 @@ perf-overview-mode-combined = Combined chart
 perf-overview-mode-adapter-charts = Adapter charts
 perf-overview-mode-chart-rows = Chart and rows
 perf-overview-mode-columns = Columns
+perf-overview-mode-stacked = Stacked
 perf-overview-mode-list = List
 
 perf-menu-select-pages = Select Pages
