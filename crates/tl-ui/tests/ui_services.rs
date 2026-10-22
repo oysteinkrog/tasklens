@@ -3450,6 +3450,7 @@ mod page {
             rig.vcx.read_entity(&rig.page, |p, _| p.body()),
             SysBody::Skeleton
         );
+        rig.version = 1;
         rig.publish_fixture();
         assert_eq!(
             rig.vcx.read_entity(&rig.page, |p, _| p.body()),
