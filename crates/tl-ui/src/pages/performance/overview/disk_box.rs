@@ -96,6 +96,10 @@ pub const CELL_MIN_H: f32 = 60.;
 /// puts the read and write rates on a second header line.
 pub const HEAD_ONE_LINE_W: f32 = 320.;
 
+/// The narrowest `disk_charts` cell whose rates keep their first-letter label, logical px. A
+/// narrower cell shows the bare values.
+const HEAD_LABEL_W: f32 = 200.;
+
 /// The width a `disk_charts` cell header keeps for the disk name, logical px.
 const HEAD_NAME_MIN_W: f32 = 48.;
 
@@ -945,8 +949,8 @@ fn spark_cell(id: String, chart: &Entity<ChartView>, m: &UiMetrics) -> AnyElemen
 
 /// A `disk_charts` cell header `width` px wide: name, active percent and the current read and
 /// write rates, each rate led by the first letter of its word. Below `HEAD_ONE_LINE_W` the rates
-/// go on a second line. Every part shrinks with an ellipsis, so none spills out of the cell. A
-/// click opens that disk.
+/// go on a second line, and below `HEAD_LABEL_W` they drop the letter. Every part shrinks with an
+/// ellipsis, the name first, so none spills out of the cell. A click opens that disk.
 fn cell_head(
     r: &DiskRow,
     width: Pixels,
@@ -972,8 +976,12 @@ fn cell_head(
     let mut active = part(head_id(key, "active"), r.active.clone(), theme.text_primary);
     *active.text_style() = numeric_style(m, m.text.sm);
     let rate = |which: &str, word: &SharedString, value: &SharedString| {
-        let letter = word.chars().next().unwrap_or(' ');
-        let text = SharedString::from(format!("{letter} {value}"));
+        let text = if width >= px(HEAD_LABEL_W * m.ui_scale) {
+            let letter = word.chars().next().unwrap_or(' ');
+            SharedString::from(format!("{letter} {value}"))
+        } else {
+            value.clone()
+        };
         let mut d = part(head_id(key, which), text, theme.text_secondary);
         *d.text_style() = numeric_style(m, m.text.xs);
         d

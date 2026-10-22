@@ -3894,20 +3894,23 @@ mod page {
         assert!(cs[0].size.height > px(CELL_MIN_H), "{:?}", cs[0]);
     }
 
-    /// Adds a third disk, sdc at 6, to the catalog and returns the Disk box's disk keys.
-    fn three_disks(r: &mut Rig) -> Vec<DeviceKey> {
+    /// Adds `extra` disks, sdc onward from index 6, to the catalog and returns the Disk box's
+    /// disk keys.
+    fn more_disks(r: &mut Rig, extra: u16) -> Vec<DeviceKey> {
         let mut cat = catalog(true);
         let mut entries = cat.entries.to_vec();
-        entries.push(entry(
-            6,
-            DeviceIdentity::Disk {
-                major: 8,
-                minor: 6,
-                name: Arc::from("sdc"),
-                wwn_or_serial: None,
-            },
-            None,
-        ));
+        for i in 0..extra {
+            entries.push(entry(
+                6 + i,
+                DeviceIdentity::Disk {
+                    major: 8,
+                    minor: u32::from(6 + i),
+                    name: Arc::from(format!("sd{}", (b'c' + i as u8) as char)),
+                    wwn_or_serial: None,
+                },
+                None,
+            ));
+        }
         cat.entries = Arc::from(entries);
         cat.version += 1;
         r.engine.publish_with(|s| s.devices = Arc::new(cat));
@@ -3923,16 +3926,26 @@ mod page {
                 .map(|d| d.key.clone())
                 .collect()
         });
-        assert_eq!(keys.len(), 3, "{keys:?}");
+        assert_eq!(keys.len(), 2 + usize::from(extra), "{keys:?}");
         keys
     }
 
-    /// D-026: with three disks at 1200 × 900 the Disk charts are about as tall as the GPU
-    /// engine charts in the same row, where the old cells were the 18 px rows.
+    /// Adds a third disk, sdc at 6, to the catalog and returns the Disk box's disk keys.
+    fn three_disks(r: &mut Rig) -> Vec<DeviceKey> {
+        more_disks(r, 1)
+    }
+
+    /// D-026: with three disks at 1200 × 900 the Disk chart areas (the cell below its header) are
+    /// about as tall as the GPU engine chart areas in the same row, where the old cells were the
+    /// 18 px rows.
     #[gpui_kit::test]
     fn overview_disk_charts_as_tall_as_gpu(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::disk_box::{DISK_BOX_ID, cell_id};
+        use tl_ui::pages::performance::overview::disk_box::{
+            DISK_BOX_ID, HEAD_ONE_LINE_W, cell_id,
+        };
         use tl_ui::pages::performance::overview::gpu_box::{GPU_BOX_ID, engine_cell_id};
+        /// The header line of a cell: `LABEL_ROW` px at the test's `ui_scale` of 1.
+        const HEAD_LINE: f32 = 18.;
         let mut r = open_rooted(cx, true, 1200., 900.);
         let keys = three_disks(&mut r);
         let page = r.page.clone();
@@ -3950,18 +3963,29 @@ mod page {
             r.bounds_of(DISK_BOX_ID.into()),
         );
         assert_eq!(gpu.size, disk.size);
-        let gpu_h = f32::from(r.bounds_of(engine_cell_id(0, engines[0])).size.height);
+        // The GPU cell is one header line over its chart.
+        let gpu_cell = r.bounds_of(engine_cell_id(0, engines[0]));
+        let gpu_chart = f32::from(gpu_cell.size.height) - HEAD_LINE;
+        assert!(gpu_chart > 0., "GPU cell {gpu_cell:?}");
         for k in &keys {
-            let h = f32::from(r.bounds_of(cell_id(k)).size.height);
+            let cell = r.bounds_of(cell_id(k));
+            let lines = if cell.size.width < px(HEAD_ONE_LINE_W) {
+                2.
+            } else {
+                1.
+            };
+            let chart = f32::from(cell.size.height) - lines * HEAD_LINE;
             assert!(
-                h >= 0.6 * gpu_h && h <= 1.67 * gpu_h,
-                "disk {h} px, GPU {gpu_h} px with {} engines",
+                chart >= 0.6 * gpu_chart && chart <= 1.67 * gpu_chart,
+                "disk chart {chart} px, GPU chart {gpu_chart} px with {} engines",
                 engines.len()
             );
+            // The chart is a real chart, not the 18 px row it replaced.
+            assert!(chart > HEAD_LINE, "disk chart {chart} px");
         }
     }
 
-    /// D-026: when three disks do not fit at 60 px, the Disk grid scrolls under a scrollbar
+    /// D-026: when eight disks do not fit at 60 px, the Disk grid scrolls under a scrollbar
     /// and the cells keep their minimum size.
     #[gpui_kit::test]
     fn overview_disk_grid_scrolls(cx: &mut TestAppContext) {
@@ -3970,9 +3994,10 @@ mod page {
             CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
         };
         let mut r = open_rooted(cx, true, 1200., 900.);
-        let keys = three_disks(&mut r);
-        // 1200 × 560: the second row gets its 220 px minimum and the page does not scroll.
-        r.vcx.simulate_resize(size(px(1200.), px(560.)));
+        let keys = more_disks(&mut r, 6);
+        // 700 × 560: the Disk box has room for two columns, so eight cells need four rows of
+        // 60 px, which is more than its body.
+        r.vcx.simulate_resize(size(px(700.), px(560.)));
         draw(r.vcx);
         let grid = r.bounds_of(GRID_ID.into());
         let cs: Vec<_> = keys.iter().map(|k| r.bounds_of(cell_id(k))).collect();
@@ -3993,7 +4018,7 @@ mod page {
             ..Default::default()
         });
         draw(r.vcx);
-        let scrolled = r.bounds_of(cell_id(&keys[2]));
+        let scrolled = r.bounds_of(cell_id(&keys[keys.len() - 1]));
         assert!(
             scrolled.top() < last.top(),
             "{scrolled:?} scrolled up from {last:?}"
