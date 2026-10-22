@@ -2,7 +2,7 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
-## 2026-10-21
+## 2026-10-22
 
 ### D-027: Overview chart stacking choice
 
@@ -11,6 +11,8 @@ and Network graphs should stack vertically, or at least there should be a choice
 vertical and horizontal stacking. UI-PRF-019 adds an "Arrange" choice per box (Automatic,
 Stack vertically, Side by side), saved as `arrange`, with Disk and Net stacked vertically by
 default.
+
+## 2026-10-21
 
 ### D-026: Overview GPU, Disk and Net defaults
 
