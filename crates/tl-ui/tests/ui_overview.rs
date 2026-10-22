@@ -2596,6 +2596,7 @@ mod page {
     };
     use tl_ui::pages::performance::overview::layout::{BoxKind, OverviewLayout, place};
     use tl_ui::pages::performance::overview::mem_box::MEM_SPLITTER_ID;
+    use tl_ui::pages::performance::overview::net_box::NET_STACK_SPLITTER_ID;
     use tl_ui::pages::performance::overview::{BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage};
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::sidebar::DeviceSidebar;
@@ -3086,12 +3087,12 @@ mod page {
                     let x = b.left() + b.size.width * ((i as f32 + 0.5) / 8.);
                     let y = b.top() + b.size.height * ((j as f32 + 0.5) / 5.);
                     moves += 1;
-                    // The Memory box's inner splitter lights up under the pointer, so that
-                    // box renders by design (UI-PRF-019); the sweep steps over it.
+                    // The Memory and Net boxes' inner splitters light up under the pointer, so
+                    // those boxes render by design (UI-PRF-019); the sweep steps over them.
                     let at = gpui_kit::point(x, y);
-                    if r.vcx
-                        .debug_bounds(MEM_SPLITTER_ID)
-                        .is_some_and(|gap| gap.contains(&at))
+                    if [MEM_SPLITTER_ID, NET_STACK_SPLITTER_ID]
+                        .iter()
+                        .any(|id| r.vcx.debug_bounds(id).is_some_and(|gap| gap.contains(&at)))
                     {
                         continue;
                     }
