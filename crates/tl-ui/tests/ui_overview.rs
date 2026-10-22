@@ -3980,6 +3980,59 @@ mod page {
         );
     }
 
+    /// D-026: every part of a `disk_charts` cell header stays inside its cell with no overlap,
+    /// and the name keeps its width. Below `HEAD_ONE_LINE_W` the rates go on a second line.
+    #[gpui_kit::test]
+    fn overview_disk_cell_head_fits(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{HEAD_ONE_LINE_W, cell_id, head_id};
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let keys = three_disks(&mut r);
+        let mut widths = Vec::new();
+        for (w, h) in [(1200., 900.), (1200., 560.), (900., 560.)] {
+            r.vcx.simulate_resize(size(px(w), px(h)));
+            draw(r.vcx);
+            for k in &keys {
+                let cell = r.bounds_of(cell_id(k));
+                widths.push(f32::from(cell.size.width));
+                let [name, active, read, write] =
+                    ["name", "active", "read", "write"].map(|p| r.bounds_of(head_id(k, p)));
+                for (p, b) in [
+                    ("name", name),
+                    ("active", active),
+                    ("read", read),
+                    ("write", write),
+                ] {
+                    assert!(
+                        b.left() >= cell.left()
+                            && b.right() <= cell.right() + px(0.5)
+                            && b.top() >= cell.top()
+                            && b.bottom() <= cell.bottom() + px(0.5),
+                        "{w}x{h} {p} {b:?} outside {cell:?}"
+                    );
+                }
+                assert!(name.size.width >= px(48.), "{w}x{h} name {name:?}");
+                let row = [name, active, read, write];
+                for (i, a) in row.iter().enumerate() {
+                    for b in &row[i + 1..] {
+                        let same_line = a.top() < b.bottom() && b.top() < a.bottom();
+                        let apart =
+                            a.right() <= b.left() + px(0.5) || b.right() <= a.left() + px(0.5);
+                        assert!(!same_line || apart, "{w}x{h} {a:?} overlaps {b:?}");
+                    }
+                }
+                if cell.size.width < px(HEAD_ONE_LINE_W) {
+                    assert!(read.top() >= name.bottom(), "{w}x{h} rates under the name");
+                } else {
+                    assert!(read.top() < name.bottom(), "{w}x{h} one line");
+                }
+            }
+        }
+        assert!(
+            widths.iter().any(|&w| w < HEAD_ONE_LINE_W),
+            "a cell below {HEAD_ONE_LINE_W} px: {widths:?}"
+        );
+    }
+
     #[gpui_kit::test]
     fn overview_net_modes_render(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::net_box::{

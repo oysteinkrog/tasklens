@@ -92,6 +92,13 @@ pub const TOTAL_CHART_ID: &str = "perf-overview-disk-total-chart";
 pub const CELL_MIN_W: f32 = 160.;
 pub const CELL_MIN_H: f32 = 60.;
 
+/// The narrowest `disk_charts` cell whose header fits on one line, logical px. A narrower cell
+/// puts the read and write rates on a second header line.
+pub const HEAD_ONE_LINE_W: f32 = 320.;
+
+/// The width a `disk_charts` cell header keeps for the disk name, logical px.
+const HEAD_NAME_MIN_W: f32 = 48.;
+
 /// The width a `disk_charts` grid keeps for its scrollbar when it scrolls, logical px.
 const GRID_BAR_W: f32 = 16.;
 
@@ -411,6 +418,12 @@ pub(super) fn charts_fit(
 /// The debug selector of a disk's `disk_charts` cell.
 pub fn cell_id(key: &DeviceKey) -> String {
     format!("{DISK_BOX_ID}-cell:{}", key.0)
+}
+
+/// The debug selector of a part of a disk's `disk_charts` cell header: "name", "active", "read"
+/// or "write".
+pub fn head_id(key: &DeviceKey, part: &str) -> String {
+    format!("{DISK_BOX_ID}-head-{part}:{}", key.0)
 }
 
 /// The debug selector of a disk's Read ("read") or Write ("write") row.
@@ -930,46 +943,65 @@ fn spark_cell(id: String, chart: &Entity<ChartView>, m: &UiMetrics) -> AnyElemen
         .into_any_element()
 }
 
-/// A `disk_charts` cell header: name, active percent and the current read and write rates, each
-/// rate led by the first letter of its word. A click opens that disk.
-fn cell_head(r: &DiskRow, words: &[SharedString; 2], m: &UiMetrics, theme: &TlTheme) -> AnyElement {
-    let mut name = div()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .text_color(theme.text_primary)
-        .child(r.name.clone());
-    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
-    let rate = |word: &SharedString, value: &SharedString| {
-        let letter = word.chars().next().unwrap_or(' ');
-        let mut d = div()
-            .flex_none()
+/// A `disk_charts` cell header `width` px wide: name, active percent and the current read and
+/// write rates, each rate led by the first letter of its word. Below `HEAD_ONE_LINE_W` the rates
+/// go on a second line. Every part shrinks with an ellipsis, so none spills out of the cell. A
+/// click opens that disk.
+fn cell_head(
+    r: &DiskRow,
+    width: Pixels,
+    words: &[SharedString; 2],
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    let key = &r.key;
+    let part = |id: String, text: SharedString, color| {
+        div()
+            .debug_selector(move || id)
+            .min_w_0()
+            .overflow_hidden()
             .whitespace_nowrap()
-            .text_color(theme.text_secondary)
-            .child(SharedString::from(format!("{letter} {value}")));
+            .text_ellipsis()
+            .text_color(color)
+            .child(text)
+    };
+    let mut name = part(head_id(key, "name"), r.name.clone(), theme.text_primary)
+        .flex_1()
+        .min_w(px(HEAD_NAME_MIN_W * m.ui_scale));
+    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let mut active = part(head_id(key, "active"), r.active.clone(), theme.text_primary);
+    *active.text_style() = numeric_style(m, m.text.sm);
+    let rate = |which: &str, word: &SharedString, value: &SharedString| {
+        let letter = word.chars().next().unwrap_or(' ');
+        let text = SharedString::from(format!("{letter} {value}"));
+        let mut d = part(head_id(key, which), text, theme.text_secondary);
         *d.text_style() = numeric_style(m, m.text.xs);
         d
     };
-    let mut active = div()
-        .flex_none()
-        .whitespace_nowrap()
-        .text_color(theme.text_primary)
-        .child(r.active.clone());
-    *active.text_style() = numeric_style(m, m.text.sm);
-    let row = div()
-        .flex()
-        .flex_row()
-        .flex_none()
-        .items_center()
-        .gap(m.sp[4])
-        .h(px(LABEL_ROW * m.ui_scale))
-        .child(name)
-        .child(active)
-        .child(rate(&words[0], &r.read))
-        .child(rate(&words[1], &r.write));
-    opens_device(row, Some(r.key.clone())).into_any_element()
+    let (read, write) = (
+        rate("read", &words[0], &r.read),
+        rate("write", &words[1], &r.write),
+    );
+    let line = || {
+        div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(m.sp[4])
+            .h(px(LABEL_ROW * m.ui_scale))
+    };
+    let head = if width >= px(HEAD_ONE_LINE_W * m.ui_scale) {
+        line().child(name).child(active).child(read).child(write)
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .child(line().child(name).child(active))
+            .child(line().justify_between().child(read).child(write))
+    };
+    opens_device(head, Some(r.key.clone())).into_any_element()
 }
 
 /// A `disk_charts` cell of `cell` px: the header over the read and write chart.
@@ -988,8 +1020,9 @@ fn chart_cell(
         .flex_none()
         .w(cell.width)
         .h(cell.height)
+        .overflow_hidden()
         .gap(m.sp[2])
-        .child(cell_head(r, words, m, theme))
+        .child(cell_head(r, cell.width, words, m, theme))
         .child(
             div().relative().flex_1().min_h_0().child(
                 r.pair_chart
