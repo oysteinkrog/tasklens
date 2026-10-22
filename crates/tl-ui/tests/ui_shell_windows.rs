@@ -711,7 +711,7 @@ fn shortcuts_unbound_rows_absent(cx: &mut TestAppContext) {
     );
     let headings = vcx.read(|cx| frame.read(cx).content().read(cx).visible_headings());
     assert!(
-        !headings.contains(&Heading::Connections),
+        !headings.contains(&Heading::DialogsAndWindows),
         "a heading with no bindings is not drawn"
     );
 }
