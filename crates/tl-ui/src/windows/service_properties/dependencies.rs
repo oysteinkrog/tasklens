@@ -247,6 +247,9 @@ impl DependenciesTab {
                     .filter(|e| block(e.relation) == which)
                     .collect();
                 entries.sort_by(|a, b| a.unit.name.cmp(&b.unit.name));
+                // The same unit under the same relation is one row; two relations stay two
+                // rows, each with its own tag.
+                entries.dedup_by(|a, b| a.unit == b.unit && a.relation == b.relation);
                 counts[slot] = entries.len();
                 for e in entries {
                     let (look, status) = self.status_of(&e.unit, cx);

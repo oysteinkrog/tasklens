@@ -1415,7 +1415,10 @@ fn recovery_view_formats(cx: &mut TestAppContext) {
         cx.read(|cx| t.tab.read(cx).saved_as_for_test().to_string()),
         "/etc/systemd/system/sshd.service.d/50-tasklens-recovery.conf"
     );
-    assert!(t.drawn(cx, "ServiceRecoverySavedAs"));
+    assert!(
+        !t.drawn(cx, "ServiceRecoverySavedAs"),
+        "no drop-in yet, so no Saved as line"
+    );
     assert!(!t.drawn(cx, "ServiceRecoveryNote"), "the P2 note is gone");
     assert!(
         !t.drawn(cx, "TlButton-ServiceRecoveryRemove"),
@@ -1561,6 +1564,10 @@ fn recovery_helper_missing_disables(cx: &mut TestAppContext) {
     assert!(!enabled, "every control is disabled");
     assert_eq!(tip.as_deref(), Some("Needs the tasklens helper"));
     assert!(t.drawn(cx, "ServiceRecoverySetupLink"));
+    assert!(
+        t.drawn(cx, "ServiceRecoverySavedAs"),
+        "the drop-in exists, so the Saved as line shows"
+    );
     assert!(t.drawn(cx, "TlButton-ServiceRecoveryRemove"));
     t.click(cx, "TlButton-ServiceRecoveryRemove");
     let dialog = cx.update(|cx| {

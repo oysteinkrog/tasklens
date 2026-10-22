@@ -1068,24 +1068,27 @@ impl RecoveryTab {
     fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = current(cx).clone();
         let m = *metrics(cx);
-        let mut saved = h_flex()
-            .debug_selector(|| "ServiceRecoverySavedAs".into())
-            .flex_1()
-            .min_w_0()
-            .gap(m.sp[2])
-            .text_color(theme.text_secondary)
-            .child(div().flex_none().child(self.words.saved_as.clone()))
-            .child(
-                div().min_w_0().child(
-                    SelectableText::new("svc-recovery-saved-as", saved_as(&self.unit))
-                        .text_style(t_sm(&m)),
-                ),
-            );
-        *saved.text_style() = t_sm(&m);
         let exists = self
             .details
             .as_ref()
             .is_some_and(|d| d.recovery_dropin_exists);
+        let saved = exists.then(|| {
+            let mut saved = h_flex()
+                .debug_selector(|| "ServiceRecoverySavedAs".into())
+                .flex_1()
+                .min_w_0()
+                .gap(m.sp[2])
+                .text_color(theme.text_secondary)
+                .child(div().flex_none().child(self.words.saved_as.clone()))
+                .child(
+                    div().min_w_0().child(
+                        SelectableText::new("svc-recovery-saved-as", saved_as(&self.unit))
+                            .text_style(t_sm(&m)),
+                    ),
+                );
+            *saved.text_style() = t_sm(&m);
+            saved
+        });
         let remove = exists.then(|| {
             let view = cx.weak_entity();
             let mut button = TlButton::new("ServiceRecoveryRemove", TlButtonKind::Secondary)
@@ -1108,7 +1111,7 @@ impl RecoveryTab {
             .pt(m.sp[4])
             .border_t_1()
             .border_color(theme.divider)
-            .child(saved)
+            .children(saved)
             .children(remove)
             .into_any_element()
     }

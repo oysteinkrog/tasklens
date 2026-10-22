@@ -3417,6 +3417,46 @@ mod page {
         assert_eq!(rig.count_toast("Loading service data..."), 0);
     }
 
+    /// tasklens-hk6.42, UI-SYS-005: the two group rows exist before the first answer, with both
+    /// managers Unavailable. They do not end the skeleton, so "System manager not available"
+    /// never shows before the first data.
+    #[gpui_kit::test]
+    fn services_skeleton_until_first_answer(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.activate();
+        let generation = rig.last_query().map_or(0, |q| q.generation);
+        let group = |manager| SysRow {
+            node: SysNodeId::ServiceGroup(manager),
+            depth: 0,
+            expanded: true,
+            has_children: false,
+            record: None,
+        };
+        rig.engine.publish_with(|snapshot| {
+            snapshot.services = Arc::new(ServicesSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::WarmingUp,
+                    ..ComponentHeader::default()
+                },
+                rows: vec![group(Manager::System), group(Manager::User)].into(),
+                query_generation: generation,
+                ..ServicesSnapshot::default()
+            });
+        });
+        rig.vcx.run_until_parked();
+        rig.draw();
+        assert_eq!(
+            rig.vcx.read_entity(&rig.page, |p, _| p.body()),
+            SysBody::Skeleton
+        );
+        rig.publish_fixture();
+        assert_eq!(
+            rig.vcx.read_entity(&rig.page, |p, _| p.body()),
+            SysBody::Rows
+        );
+    }
+
     /// tasklens-hk6.39, UI-SYS-004: the group rows open from the saved state, so the first query
     /// carries them as expanded and the unit rows show on open with no input. The view is built
     /// as the engine builds it: a group lists its units only when the query expands it.

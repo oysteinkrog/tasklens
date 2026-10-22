@@ -58,9 +58,9 @@ pub fn build(input: &SysTableInput<'_>, query: &SysTableQuery) -> SysTableOutput
 /// The default sort of each table (R-011): Services Name ascending, Startup Status ascending,
 /// Connections Proto ascending.
 ///
-/// `SysSortSpec` holds one column. Two tables also have a fixed secondary sort that `build`
-/// applies after the primary column: Startup then sorts by Name ascending, Connections by local
-/// port ascending.
+/// `SysSortSpec` holds one column. All three tables also have a fixed secondary sort that `build`
+/// applies after the primary column: Services and Startup then sort by Name ascending (ignoring
+/// case), Connections by local port ascending.
 pub fn default_sort(table: SysTable) -> SysSortSpec {
     let column = match table {
         SysTable::Services => SysColumnId::Services(ServiceColumn::Name),
@@ -277,7 +277,11 @@ pub fn build_services(
 
         sort_indices(
             &mut members,
-            |a, b| cmp_units(&units[a], &units[b], column, ascending),
+            |a, b| {
+                // Name ascending, ignoring case, is the fixed secondary sort.
+                cmp_units(&units[a], &units[b], column, ascending)
+                    .then_with(|| cmp_text(&units[a].unit.name, &units[b].unit.name))
+            },
             |a, b| units[a].unit.cmp(&units[b].unit),
         );
         for &i in &members {
@@ -1391,6 +1395,37 @@ mod tests {
             unit_names(&out),
             ["b.service", "d.service", "c.service", "a.service"]
         );
+    }
+
+    #[test]
+    fn services_status_sort_names_ignore_case() {
+        // Same status for all four, so the secondary sort orders them: one test per letter case.
+        let s = snapshot(vec![
+            sys("NetworkManager.service"),
+            sys("ananicy.service"),
+            sys("Zebra.service"),
+            sys("bluetooth.service"),
+        ]);
+        for ascending in [true, false] {
+            let q = SysTableQuery {
+                sort: SysSortSpec {
+                    column: SysColumnId::Services(ServiceColumn::Status),
+                    ascending,
+                },
+                ..open_query()
+            };
+            let (out, _) = run(&s, &q);
+            assert_eq!(
+                unit_names(&out),
+                [
+                    "ananicy.service",
+                    "bluetooth.service",
+                    "NetworkManager.service",
+                    "Zebra.service"
+                ],
+                "ascending {ascending}"
+            );
+        }
     }
 
     #[test]

@@ -1616,8 +1616,14 @@ impl SysDelegate for ServicesDelegate {
     fn component_header<'a>(&self, snap: &'a Snapshot) -> &'a ComponentHeader {
         &snap.services.header
     }
+    /// Unit rows only. The two group rows exist before the first answer, with both managers
+    /// Unavailable, and must not end the loading skeleton (UI-SYS-005).
     fn rows_len(&self, snap: &Snapshot) -> usize {
-        snap.services.rows.len()
+        snap.services
+            .rows
+            .iter()
+            .filter(|r| matches!(r.node, SysNodeId::Unit(_)))
+            .count()
     }
     fn query_generation(&self, snap: &Snapshot) -> u64 {
         snap.services.query_generation

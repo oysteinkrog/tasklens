@@ -260,7 +260,7 @@ impl ColumnPicker {
 
     /// The footer text, e.g. "9 of 96 columns shown".
     pub fn count_text(&self, cx: &App) -> SharedString {
-        count_text(&self.host.columns(cx), cx)
+        count_text(&self.host.columns(cx), &self.needle, cx)
     }
 
     fn schedule_filter(&mut self, cx: &mut Context<Self>) {
@@ -492,15 +492,16 @@ impl ColumnPicker {
     }
 }
 
-/// "{shown} of {total} columns shown".
-fn count_text(columns: &[PickerColumn], cx: &App) -> SharedString {
-    let shown = columns.iter().filter(|c| c.visible).count();
+/// "{shown} of {total} columns shown", counting the columns the list holds under `needle`.
+fn count_text(columns: &[PickerColumn], needle: &str, cx: &App) -> SharedString {
+    let listed = || columns.iter().filter(|c| c.matches(needle));
+    let shown = listed().filter(|c| c.visible).count();
     tr_args(
         cx,
         "table-picker-count",
         &[
             ("shown", shown.to_string().into()),
-            ("total", columns.len().to_string().into()),
+            ("total", listed().count().to_string().into()),
         ],
     )
 }
@@ -510,7 +511,7 @@ impl Render for ColumnPicker {
         let theme = current(cx).clone();
         let m = *metrics(cx);
         let columns = self.host.columns(cx);
-        let count = count_text(&columns, cx);
+        let count = count_text(&columns, &self.needle, cx);
         let items: Rc<[PickerItem]> =
             picker_items(self.host.table_name(cx), &columns, &self.needle).into();
         let any_column = items.iter().any(|i| matches!(i, PickerItem::Column(_)));
