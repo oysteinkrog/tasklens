@@ -4,6 +4,12 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-22
 
+### D-028: Power draw strip in the Overview CPU box
+
+Oystein (2026-10-22): the CPU page's power draw graph should be available inside the Overview
+CPU box, underneath the main graph and the per-core part. UI-PRF-019 adds a "Show power draw"
+check item to the CPU box's Layout submenu; off by default, saved per box as `power`.
+
 ### D-027: Overview chart stacking choice
 
 Oystein (2026-10-22): the layout inside each Overview box should be more configurable. The Disk
