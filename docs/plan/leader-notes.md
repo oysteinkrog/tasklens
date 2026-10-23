@@ -965,3 +965,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-22 D-028: optional power draw strip in the Overview CPU box (tasklens-crw.84).
 - 2026-10-23 o55.44: dead-sensor rule kept, pre-page case to tasklens-o55.46. pdu.68: not a bug (helper shield). y6k.33: requeued with the cancel-path close and a broker-disconnect lab test.
 - 2026-10-23 D-029: edit-mode overlap tasklens-crw.85, core rows tasklens-crw.86, Memory charts tasklens-crw.87, GPU engine choice tasklens-crw.88.
+- 2026-10-23 D-030 beads: status bar tasklens-hjn.47 tasklens-hjn.48 tasklens-crw.89; polish tasklens-o55.47 tasklens-crw.90 tasklens-yrf.23; history and range tasklens-8fx.42 tasklens-8q0.44 tasklens-crw.91; snap grid tasklens-crw.92 tasklens-crw.93; timeline tasklens-8fx.43 tasklens-crw.94. ADR-017 RAM: only the last hour in RAM (leader).
