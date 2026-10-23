@@ -1287,6 +1287,7 @@ mod bottom {
     use tl_ui::pages::performance::overview::gpu_box::{
         GPU_BOX_ID, GpuBox, engine_cell_id, engine_row_id, grid_id, rows_id, vram_id,
     };
+    use tl_ui::pages::performance::overview::layout::Arrange;
     use tl_ui::pages::performance::overview::net_box::NetBox;
     use tl_ui::pages::performance::overview::parts::{GridFit, fill_grid, time_axis_id};
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -1827,6 +1828,29 @@ mod bottom {
         assert!(meters(&mut r), "330 px (304 px body): meters");
         r.gpu_width(329.);
         assert!(!meters(&mut r), "329 px: no meters");
+    }
+
+    /// D-027 Side by side: the engine rows get the width beside the chart, so the meters follow
+    /// that width and not the body's. A 500 px box has room for meters across its body, but its
+    /// rows beside the chart are narrower than the 304 px a meter row needs.
+    #[gpui_kit::test]
+    fn gpu_box_side_by_side_meters_follow_rows_width(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (300., 200.));
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let meters = |r: &mut Rig| r.vcx.update(|_, cx| gpu.read(cx).meters());
+        assert!(meters(&mut r), "500 px stacked: meters");
+        r.vcx
+            .update(|_, cx| gpu.update(cx, |b, cx| b.set_arrange(Arrange::Horizontal, cx)));
+        draw(r.vcx);
+        let row = r.bounds(engine_row_id(0, "gpu"));
+        assert!(f32::from(row.size.width) < 304., "{row:?}");
+        assert!(!meters(&mut r), "500 px side by side: no meters");
+        r.gpu_width(700.);
+        let row = r.bounds(engine_row_id(0, "gpu"));
+        assert!(f32::from(row.size.width) >= 304., "{row:?}");
+        assert!(meters(&mut r), "700 px side by side: meters");
     }
 
     fn leak(id: String) -> &'static str {

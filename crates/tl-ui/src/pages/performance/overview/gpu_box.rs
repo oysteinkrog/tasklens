@@ -483,9 +483,22 @@ fn section_h(lines: usize, heading: bool, side: bool, m: &UiMetrics) -> f32 {
 /// What fits a body of `body` (everything before the first paint). `rows` has each section's
 /// body rows and `total` counts every GPU; those without a section get a "+n more" row under the
 /// last section. Both sections show only when both fit in full. Otherwise one section shows, and
-/// when its rows do not fit, only its busiest engine and "+n more engines".
-fn fit(body: Size<Pixels>, rows: &[SectionRows], total: usize, side: bool, m: &UiMetrics) -> Fit {
-    let meters = meter_fits(body.width, m);
+/// when its rows do not fit, only its busiest engine and "+n more engines". `side` is the
+/// chart's share of the width when it sits beside the rows (Side by side).
+fn fit(
+    body: Size<Pixels>,
+    rows: &[SectionRows],
+    total: usize,
+    side: Option<f32>,
+    m: &UiMetrics,
+) -> Fit {
+    // Side by side the rows get the width the chart and the gap leave.
+    let rows_w = match side {
+        Some(share) if body.width > px(0.) => body.width * (1. - share) - m.sp[5],
+        _ => body.width,
+    };
+    let meters = meter_fits(rows_w, m);
+    let side = side.is_some();
     let count = rows.len();
     if body.height == px(0.) || count == 0 {
         return Fit {
@@ -1258,7 +1271,16 @@ impl GpuBox {
         let total = self.sections.len() + self.more;
         let body_size = self.body.get();
         let side = mode == GpuMode::ChartEngines && self.arrange == Arrange::Horizontal;
-        let shown = fit(body_size, &rows, total, side, m);
+        // Side by side the chart takes a share of the width; the untouched default is half.
+        let sharer = side.then(|| {
+            self.chart_split.set_mins(PART_MIN, PART_MIN);
+            let w = f32::from(body_size.width);
+            self.chart_split
+                .set_default_second_px(((w - f32::from(m.sp[5])) / 2. / s).max(0.));
+            self.chart_split.sharer(m.sp[5], s)
+        });
+        let share_at = sharer.as_ref().map(|f| f(f32::from(body_size.width)));
+        let shown = fit(body_size, &rows, total, share_at, m);
         self.shown = shown.sections;
         self.collapsed = shown.collapsed;
         self.meters = shown.meters;
@@ -1279,11 +1301,6 @@ impl GpuBox {
         let mut split_share = None;
         let mut custom_chart_h = None;
         if side && shown.sections > 0 {
-            // The chart takes a share of the width; the untouched default is half of it.
-            self.chart_split.set_mins(PART_MIN, PART_MIN);
-            let w = f32::from(body_size.width);
-            self.chart_split
-                .set_default_second_px(((w - f32::from(m.sp[5])) / 2. / s).max(0.));
             split_share = Some(self.chart_split.share(SplitAxis::Row, m.sp[5], s));
         } else if with_rows && shown.sections > 0 {
             let n = shown.sections as f32;
@@ -1400,7 +1417,10 @@ impl GpuBox {
         body = body.child(class_probe(
             Rc::clone(&self.body),
             shown.class(),
-            move |b| fit(b, &rows, total, side, &probe_m).class(),
+            move |b| {
+                let share = sharer.as_ref().map(|f| f(f32::from(b.width)));
+                fit(b, &rows, total, share, &probe_m).class()
+            },
             cx.entity_id(),
         ));
         if let Some(share) = split_share {
