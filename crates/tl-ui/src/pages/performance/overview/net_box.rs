@@ -1084,7 +1084,11 @@ fn pair_row(
 
 /// An `adapter_charts` cell header: the adapter name and its two rates.
 fn cell_head(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
-    let mut name = div()
+    // The text style is set first: setting it replaces the nowrap, ellipsis and colour set
+    // before it, and a Side by side cell is narrow enough for a long name to wrap.
+    let mut name = div();
+    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let name = name
         .flex_1()
         .min_w_0()
         .overflow_hidden()
@@ -1092,13 +1096,13 @@ fn cell_head(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .text_ellipsis()
         .text_color(theme.text_primary)
         .child(a.name.clone());
-    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
-    let mut rates = div()
+    let mut rates = div();
+    *rates.text_style() = numeric_style(m, m.text.sm);
+    let rates = rates
         .flex_none()
         .whitespace_nowrap()
         .text_color(theme.text_secondary)
         .child(a.rates.clone());
-    *rates.text_style() = numeric_style(m, m.text.sm);
     div()
         .flex()
         .flex_row()

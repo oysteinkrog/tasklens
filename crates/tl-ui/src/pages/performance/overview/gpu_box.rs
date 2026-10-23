@@ -1190,7 +1190,11 @@ fn engine_cell(
     theme: &TlTheme,
 ) -> AnyElement {
     let key = e.key;
-    let mut name = div()
+    // The text style is set first: setting it replaces the nowrap, ellipsis and colour set
+    // before it, and a Side by side cell is narrow enough for a long name to wrap.
+    let mut name = div();
+    *name.text_style() = t_xs(m);
+    let name = name
         .flex_1()
         .min_w_0()
         .whitespace_nowrap()
@@ -1198,13 +1202,13 @@ fn engine_cell(
         .text_ellipsis()
         .text_color(theme.text_secondary)
         .child(e.meter.label.clone());
-    *name.text_style() = t_xs(m);
-    let mut value = div()
+    let mut value = div();
+    *value.text_style() = numeric_style(m, m.text.sm);
+    let value = value
         .flex_none()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
         .child(e.meter.value.clone());
-    *value.text_style() = numeric_style(m, m.text.sm);
     div()
         .debug_selector(move || engine_cell_id(i, key))
         .flex()
