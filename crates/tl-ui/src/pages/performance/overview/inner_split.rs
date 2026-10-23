@@ -159,6 +159,12 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
         self
     }
 
+    /// Sets the smallest and largest share, for a box whose range follows its size. Call it on
+    /// each render before [`Self::share`].
+    pub fn set_range(&mut self, lo: f32, hi: f32) {
+        self.range = (lo, hi);
+    }
+
     /// The parts' minimums in logical px, when the mode sets its own.
     pub fn with_mins(mut self, first: f32, second: f32) -> Self {
         self.mins = (first, second);

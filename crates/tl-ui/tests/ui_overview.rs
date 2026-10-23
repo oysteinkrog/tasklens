@@ -1860,6 +1860,23 @@ mod bottom {
         let chart = r.bounds(chart_id(0));
         assert!(f32::from(chart.size.width) >= 48., "{chart:?}");
         assert!(chart.right() < rows.left(), "{chart:?} left of {rows:?}");
+        // A saved or dragged split keeps the same room for the rows: in a 320 px box (294 px
+        // body) the chart gives up the 20% floor and keeps its 48 px.
+        r.gpu_width(320.);
+        r.vcx
+            .update(|_, cx| gpu.update(cx, |b, cx| b.set_split(0.4, cx)));
+        draw(r.vcx);
+        let rows = r.bounds(rows_id(0));
+        assert!(
+            f32::from(rows.size.width) >= SIDE_ROWS_MIN_W,
+            "saved: {rows:?}"
+        );
+        let chart = r.bounds(chart_id(0));
+        assert!(f32::from(chart.size.width) >= 48., "saved: {chart:?}");
+        assert!(
+            chart.right() < rows.left(),
+            "saved: {chart:?} left of {rows:?}"
+        );
     }
 
     fn leak(id: String) -> &'static str {
@@ -5003,6 +5020,36 @@ mod page {
         });
         draw(r.vcx);
         assert_eq!(shown(&mut r), Arrange::Auto);
+        // Automatic fills the grid with the largest cells (`fill_grid`): two adapters sit side
+        // by side in a wide grid and stack in a tall one. Both shapes must show.
+        let (gap, scale) = r.vcx.update(|_, cx| {
+            let m = tl_ui::theme::metrics(cx);
+            (m.sp[2], m.ui_scale)
+        });
+        let (mut wide, mut tall) = (false, false);
+        let mut seen = Vec::new();
+        for (w, h) in [(1200., 900.), (2400., 700.), (1200., 2400.), (1000., 3000.)] {
+            r.vcx.simulate_resize(size(px(w), px(h)));
+            draw(r.vcx);
+            let grid = r.bounds_of(tl_ui::pages::performance::overview::net_box::GRID_ID.into());
+            seen.push((w, h, grid.size));
+            let fit = tl_ui::pages::performance::overview::parts::fill_grid(
+                2,
+                grid.size,
+                size(px(200. * scale), px(80. * scale)),
+                gap,
+                px(16. * scale),
+            );
+            assert!(
+                !fit.scrolls && !fit.scrolls_x,
+                "{w}x{h}: {fit:?} in {grid:?}"
+            );
+            let side = fit.cols == 2;
+            assert_line(&mut r, ids(), !side, &format!("auto {w}x{h}"));
+            wide |= side;
+            tall |= !side;
+        }
+        assert!(wide && tall, "both shapes: {seen:?}");
         // Stacked and columns keep their switch and have no saved arrangement.
         r.page_action(&PerfOverviewSetBoxMode {
             kind: "net".into(),

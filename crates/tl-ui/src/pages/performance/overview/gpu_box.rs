@@ -44,7 +44,7 @@ use super::super::DeviceKey;
 use super::super::gpu::{GpuVendor, gpu_totals, grid_engines, shown_engines};
 use super::cpu_box::value_text;
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
-use super::layout::{Arrange, ArrangeChoice, BoxMode};
+use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
 use super::mem_box::MeterRow;
 use super::parts::{
     ChartSettings, GridFit, MIN_CHART_H, SPARK_GRID, arrange_grid, arrange_min_h, box_chart,
@@ -1278,10 +1278,18 @@ impl GpuBox {
         let body_size = self.body.get();
         let side = mode == GpuMode::ChartEngines && self.arrange == Arrange::Horizontal;
         // Side by side the chart takes a share of the width; the untouched default is half. The
-        // rows keep room for the whole VRAM value, so a narrow box narrows the chart.
+        // rows keep room for the whole VRAM value, so a narrow box narrows the chart, below the
+        // 20% floor of a saved or dragged split when it must.
         let sharer = side.then(|| {
             self.chart_split.set_mins(MIN_CHART_H, SIDE_ROWS_MIN_W);
             let w = f32::from(body_size.width);
+            let rows_hi = if w > 0. {
+                (w - f32::from(m.sp[5]) - SIDE_ROWS_MIN_W * s) / w
+            } else {
+                SPLIT_RANGE.0
+            };
+            self.chart_split
+                .set_range(SPLIT_RANGE.0.min(rows_hi).max(0.), SPLIT_RANGE.1);
             self.chart_split
                 .set_default_second_px(((w - f32::from(m.sp[5])) / 2. / s).max(0.));
             self.chart_split.sharer(m.sp[5], s)
@@ -1310,6 +1318,7 @@ impl GpuBox {
         if side && shown.sections > 0 {
             split_share = Some(self.chart_split.share(SplitAxis::Row, m.sp[5], s));
         } else if with_rows && shown.sections > 0 {
+            self.chart_split.set_range(SPLIT_RANGE.0, SPLIT_RANGE.1);
             let n = shown.sections as f32;
             let basis: f32 = lines
                 .iter()
