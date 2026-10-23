@@ -845,7 +845,8 @@ impl DeviceSidebar {
         let scale = scale_input(row, snap, &self.settings);
         let (spec, fmt) = card_spec(row, scale, &self.settings, current(cx));
         let hub = self.hub.clone();
-        let chart = cx.new(|cx| ChartView::new(spec, card_chart_labels(fmt), &hub, cx));
+        let chart =
+            cx.new(|cx| ChartView::new(spec, card_chart_labels(fmt), &hub, cx).with_newest_marks());
         let height = Rc::new(Cell::new(px(CARD_H * metrics(cx).ui_scale)));
         let view = cx.new(|_| {
             CardView::new(

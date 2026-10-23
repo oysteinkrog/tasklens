@@ -133,7 +133,8 @@ impl ChartView {
         this
     }
 
-    /// Turns on the newest-point glow and dot (UI-PRF-058): Overview boxes and device pages.
+    /// Turns on the newest-point glow and dot (UI-PRF-058): Overview boxes, device pages and
+    /// sidebar cards. Charts under `grid::MARKS_MIN_HEIGHT` tall still draw none.
     #[must_use]
     pub fn with_newest_marks(mut self) -> Self {
         self.newest_marks = true;

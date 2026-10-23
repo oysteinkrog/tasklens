@@ -43,6 +43,10 @@ pub const HALO_WIDTH: f32 = 2.0;
 /// Alpha of the halo.
 pub const HALO_ALPHA: f32 = 0.30;
 
+/// Charts shorter than this, logical px, get no glow, dot or halo: at that size they hide the
+/// line (the Overview core-row sparklines).
+pub const MARKS_MIN_HEIGHT: f32 = 24.0;
+
 /// Where quads go. `Window` paints them; tests can record them instead.
 pub trait QuadSink {
     fn quad(&mut self, quad: PaintQuad);
@@ -224,6 +228,11 @@ pub fn paint_outline(window: &mut impl QuadSink, p: &GridPaint) {
     ));
 }
 
+/// Whether a chart `chart_bounds` tall is tall enough for the newest-point glow, dot and halo.
+pub fn newest_marks_fit(chart_bounds: Bounds<Pixels>) -> bool {
+    chart_bounds.size.height >= px(MARKS_MIN_HEIGHT)
+}
+
 /// The radial glow behind the newest 10% of the plot (UI-PRF-058): `color` at 6% at the centre,
 /// fading to clear. GPUI quads have no radial fill, so `GLOW_RINGS` rounded quads of shrinking size
 /// share one centre, on the right edge at mid height, and their low alphas add up toward it. The
@@ -340,5 +349,16 @@ mod tests {
         paint_newest_dot(&mut quads, center, line, true);
         assert_eq!(quads.len(), 1);
         assert_eq!(quads[0].bounds.size.width, px(4.));
+    }
+
+    #[test]
+    fn polish_short_chart_drops_marks() {
+        let chart = |h: f32| Bounds::new(point(px(0.), px(0.)), size(px(96.), px(h)));
+        // An Overview core-row sparkline is under 24 px: no glow, dot or halo.
+        assert!(!newest_marks_fit(chart(18.)));
+        assert!(!newest_marks_fit(chart(23.9)));
+        // From 24 px up, and on sidebar cards and box charts, the marks are drawn.
+        assert!(newest_marks_fit(chart(24.)));
+        assert!(newest_marks_fit(chart(80.)));
     }
 }

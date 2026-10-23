@@ -474,7 +474,8 @@ fn paint_view(
             }
         };
         window.with_content_mask(Some(ContentMask { bounds: plot }), |window| {
-            let live = newest_marks && matches!(state, ChartState::Live);
+            let live =
+                newest_marks && matches!(state, ChartState::Live) && grid::newest_marks_fit(bounds);
             if live {
                 grid::paint_newest_glow(window, plot, gp.outline_color, env.reduce_motion);
             }

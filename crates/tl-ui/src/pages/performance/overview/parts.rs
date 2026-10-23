@@ -1501,7 +1501,8 @@ pub const SPARK_GRID: GridStyle = GridStyle {
     vertical_at: None,
 };
 
-/// A sparkline chart for a spark row: no heading, no value, no range word, no scale label.
+/// A sparkline chart for a spark row: no heading, no value, no range word, no scale label. The
+/// newest-point marks are on, and a sparkline under `grid::MARKS_MIN_HEIGHT` tall draws none.
 pub fn spark_chart<T: 'static>(
     spec: ChartSpec,
     value_fmt: ValueFormat,
@@ -1516,7 +1517,7 @@ pub fn spark_chart<T: 'static>(
         legend: SmallVec::new(),
         show_axis_max: false,
     };
-    cx.new(|cx| ChartView::new(spec, labels, hub, cx))
+    cx.new(|cx| ChartView::new(spec, labels, hub, cx).with_newest_marks())
 }
 
 /// A meter row with a sparkline column at the right: label, meter, value, then `chart` in a
