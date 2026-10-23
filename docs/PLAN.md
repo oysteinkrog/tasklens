@@ -1,10 +1,10 @@
-# tasklens Implementation Plan: a native Linux task manager modeled on TaskSlinger
+# tasklens Implementation Plan: a native Linux task manager
 
 Status: draft for review, 2026-10-02. `tasklens` is a working name.
 
 ## Goal
 
-A native Linux task manager with TaskSlinger's layout and feel, built for this desktop first:
+A native Linux task manager in the style of the Windows task managers, built for this desktop first:
 CachyOS, KDE Plasma 6 on Wayland, an RTX 5070 Ti, 32 logical CPUs, three monitors at 110%
 scale. UI and rendering speed come first:
 
@@ -12,8 +12,9 @@ scale. UI and rendering speed come first:
 - the process table stays responsive with 2,000 live rows;
 - the app costs almost nothing when it is idle or hidden.
 
-TaskSlinger 0.9.2 under Wine is the reference. Its screenshots, demo videos and a full feature
-inventory are in `~/.local/opt/taskslinger/design-reference/` and section 9.
+TaskSlinger 0.9.2 under Wine was the main design reference. Its screenshots, demo videos and the
+feature inventory are kept outside the repo, in `~/work/tasklens-ref/taskslinger/`. Section 9
+lists the values the plan uses.
 
 ## 1. Stack
 
@@ -179,10 +180,10 @@ estimate, and phase 0 will sharpen it.
 2. Repo: public (oysteinkrog) or private. TaskSlinger is a commercial product, so a public repo should not use its name, logo or icons. Copying its layout and colours for a personal tool is a different matter from publishing it.
 3. Whether v1 stops after phase 3 or includes phase 4.
 
-## 9. TaskSlinger reference
+## 9. Design reference
 
-The full feature inventory, with what was seen in screenshots versus reported in reviews, is in
-the research notes. The parts the plan depends on:
+The full feature inventory, with what was seen in screenshots versus reported in reviews, is kept
+outside the repo in `~/work/tasklens-ref/taskslinger/`. The parts the plan depends on:
 
 **Default Dark palette:**
 

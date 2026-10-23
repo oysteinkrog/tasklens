@@ -11,7 +11,7 @@ make significant decisions later, so every feature entry must be decided now.
 Read first (fully, for your area):
 - /home/oystein/work/tasklens/docs/PLAN.md (draft plan; crates tl-model, tl-collect, tl-engine, tl-ui, tl-helper)
 - /home/oystein/work/tasklens/docs/DECISIONS.md
-- /home/oystein/work/tasklens/docs/research/claude-taskslinger-inventory.md
+- ~/work/tasklens-ref/taskslinger/claude-taskslinger-inventory.md
 - /home/oystein/work/tasklens/docs/research/claude-missioncenter-inventory.md
 - /home/oystein/work/tasklens/docs/research/astra-missioncenter-inventory.md (large; grep your area)
 - /home/oystein/work/tasklens/docs/research/astra-architecture-review.md. Its recommendations are

@@ -31,7 +31,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   `TlSecondaryWindow` (UI-FND-021), `TlTooltip` (UI-FND-019), `TlCheckbox`, `TlTextInput` and
   `TlFilterBox` (UI-FND-016), `TlSwitch`, `TlSlider`, `TlBadge` (UI-FND-027), `TlEmptyState`
   (UI-FND-029), and the kit `Scrollbar` with the foundation geometry (UI-FND-003).
-- Measured values come from `docs/taskslinger-reference/processes.png` (2720 × 1680, row pitch
+- Measured values come from `~/work/tasklens-ref/taskslinger/processes.png` (2720 × 1680, row pitch
   53 physical px, so 1 logical px at `row_h` 28 ≈ 1.9 physical px) and
   `tasklens-ref/evidence-frames/advanced-02.png`, `advanced-11.png`, `customize-28.png`. Each
   value says "measured", "spec" or "decided".

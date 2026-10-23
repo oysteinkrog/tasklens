@@ -25,7 +25,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   `m_base`, `m_slow` and the colour tokens are the shared vocabulary from the brief. Colour tokens
   are `TlTheme` fields; status colours are `status.success`, `status.warning`, `status.danger`,
   `status.info`.
-- "Measured" means read from `docs/taskslinger-reference/information.png` or `processes.png`.
+- "Measured" means read from `~/work/tasklens-ref/taskslinger/information.png` or `processes.png`.
   Both are 2720 × 1680 physical px. The window is TaskSlinger's 1280 × 800 default at a device
   scale near 2.1, so 1 logical px is about 2.1 physical px. Measured values are rounded to the
   nearest spacing token and say so. "Spec" means taken from a merged spec entry. "Chosen" means
@@ -1955,7 +1955,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
 # E. Information tab
 
-Measurements in this part come from `docs/taskslinger-reference/information.png` (2720 × 1680
+Measurements in this part come from `~/work/tasklens-ref/taskslinger/information.png` (2720 × 1680
 physical px, about 2.1 physical px per logical px). Values are given in logical px.
 
 ### UI-SYS-080 Information page layout

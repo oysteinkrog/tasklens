@@ -7,7 +7,7 @@ every other UI spec file (`shell.md`, `processes.md`, `process-windows.md`, `per
 
 How to read a value:
 - **measured**: sampled from a TaskSlinger screenshot or video frame with ImageMagick
-  (`docs/taskslinger-reference/*.png` at 2720 × 1680, and the contact sheets in the scratchpad).
+  (`~/work/tasklens-ref/taskslinger/*.png` at 2720 × 1680, and the contact sheets in the scratchpad).
   Colours are the raw sample; sizes are the ratio to the 28 px row, because the screenshots were
   taken at a Windows scale above 100%.
 - **spec**: taken from an ADR, an R entry or a merged spec entry (the source is named).

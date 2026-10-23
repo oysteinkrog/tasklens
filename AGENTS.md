@@ -1,8 +1,8 @@
 # tasklens: rules for implementation agents
 
 tasklens is a native Linux task manager in Rust: GPUI through `gpui-kit =0.7.0` for the UI,
-asupersync 0.5.0 for the engine, stable rustc 1.98.1. It copies every feature of TaskSlinger 0.9.2
-and Mission Center 1.2.0. UI and rendering speed come first.
+asupersync 0.5.0 for the engine, stable rustc 1.98.1. Its feature set and layout use
+TaskSlinger 0.9.2 and Mission Center 1.2.0 as references. UI and rendering speed come first.
 
 ## Where the truth is
 

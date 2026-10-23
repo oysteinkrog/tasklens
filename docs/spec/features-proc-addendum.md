@@ -4,7 +4,7 @@
 
 # PROC addendum: TaskSlinger cross-check folded in
 
-This addendum adds PROC-096 to PROC-107 and amends 15 existing entries. It covers every item you listed, from sections A to C of `/home/oystein/work/tasklens/docs/research/fable-taskslinger-crosscheck.md`. I checked `docs/spec/features-sys-app.md` (APP-002, APP-004, APP-005, SYS-010, SYS-035) so these entries line up with the chrome and services specs.
+This addendum adds PROC-096 to PROC-107 and amends 15 existing entries. It covers every item you listed, from sections A to C of `~/work/tasklens-ref/taskslinger/fable-taskslinger-crosscheck.md`. I checked `docs/spec/features-sys-app.md` (APP-002, APP-004, APP-005, SYS-010, SYS-035) so these entries line up with the chrome and services specs.
 
 Two new facts from the owner's machine are used below:
 - `CONFIG_IRQ_TIME_ACCOUNTING=y`. IRQ and softirq time is counted only in the `/proc/stat` irq and softirq fields, not in any task's `stime`.

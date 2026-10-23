@@ -19,7 +19,7 @@ and the GPUI or gpui-kit building block for each piece.
 - `docs/research/claude-gpui-apis.md` and `docs/research/claude-gpui-component-widgets.md`: what
   GPUI and gpui-kit can do, which widgets are rejected and why.
 - Visual references. Look at the images with the Read tool:
-  - `docs/taskslinger-reference/processes.png`, `performance.png`, `information.png`
+  - `~/work/tasklens-ref/taskslinger/processes.png`, `performance.png`, `information.png`
   - `/home/oystein/work/tasklens-ref/evidence-frames/*.png`, each with a `.txt` description
   - `/var/tmp/claude/claude-1000/-home-oystein/3bebe002-7be5-4c37-8e3b-0d5332a57446/scratchpad/ts/`
     (frames from the TaskSlinger advanced and customize videos)
