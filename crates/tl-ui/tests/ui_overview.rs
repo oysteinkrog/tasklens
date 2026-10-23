@@ -2717,11 +2717,13 @@ mod page {
     use tl_ui::pages::performance::DeviceKey;
     use tl_ui::pages::performance::actions::{
         PerfOverviewEditLayout, PerfOverviewResetBox, PerfOverviewResetLayout,
-        PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode, bind_keys_performance,
+        PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode, PerfOverviewSetBoxPower,
+        bind_keys_performance,
     };
     use tl_ui::pages::performance::overview::box_menu::gear_id;
     use tl_ui::pages::performance::overview::cpu_box::{
-        CORE_CHARTS_ID, CPU_BOX_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID, core_chart_id,
+        CORE_CHARTS_ID, CPU_BOX_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID, POWER_SPLITTER_ID,
+        POWER_STRIP_ID, core_chart_id,
     };
     use tl_ui::pages::performance::overview::edit::{
         DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, GHOST_VALUE_ID, TOOLBAR_ID, hide_button_id,
@@ -3043,6 +3045,16 @@ mod page {
                 }
                 out
             })
+        }
+
+        /// Publishes the static RAPL state the CPU box reads.
+        fn set_rapl(&mut self, rapl: Option<tl_model::snapshot::RaplState>) {
+            self.engine.publish_with(|s| {
+                let d = Arc::make_mut(&mut s.device_details);
+                Arc::make_mut(&mut d.cpu).rapl = rapl;
+                d.header.version += 1;
+            });
+            draw(self.vcx);
         }
 
         /// One CPU tick: the package and every logical CPU's `CPU_TOTAL`, a new value each time.
@@ -3599,6 +3611,132 @@ mod page {
         set(&mut r, "chart_cores");
         assert_eq!(parts(&mut r), [true, true, false]);
         assert_eq!(r.layout().split(BoxKind::Cpu), Some(0.4));
+    }
+
+    /// The CPU box's saved `power` and `power_split`.
+    fn saved_power(r: &mut Rig) -> (bool, Option<f64>) {
+        let b = r.saved().map(|s| s.rows[0].boxes[0].clone());
+        b.map_or((false, None), |b| (b.power, b.power_split))
+    }
+
+    /// D-028: the power draw strip sits at the bottom of the CPU box under the parts of every
+    /// mode, with a horizontal splitter above it. A drag saves `power_split`, a double-click
+    /// resets it, "Reset Box" turns the strip off, and without a readable RAPL zone nothing is
+    /// drawn.
+    #[gpui_kit::test]
+    fn overview_cpu_power_strip(cx: &mut TestAppContext) {
+        use tl_model::snapshot::RaplState;
+        use tl_ui::pages::performance::overview::parts::core_spark_id;
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let power = |r: &mut Rig, on: bool| {
+            r.page_action(&PerfOverviewSetBoxPower {
+                kind: "cpu".into(),
+                on,
+            });
+        };
+        let mode = |r: &mut Rig, mode: &str| {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "cpu".into(),
+                mode: mode.into(),
+            });
+        };
+        let strip = |r: &mut Rig| r.vcx.debug_bounds(POWER_STRIP_ID);
+
+        // Off by default, and nothing is written.
+        r.set_rapl(Some(RaplState::NoZone));
+        assert!(strip(&mut r).is_none());
+        assert_eq!(saved_power(&mut r), (false, None));
+        power(&mut r, true);
+        assert_eq!(saved_power(&mut r), (true, None));
+        assert!(strip(&mut r).is_none(), "no RAPL zone draws nothing");
+        r.set_rapl(Some(RaplState::Unreadable));
+        assert!(strip(&mut r).is_none(), "an unreadable zone draws nothing");
+        r.set_rapl(Some(RaplState::Readable));
+        let frame = r.bounds_of(CPU_BOX_ID.into());
+
+        // Chart and cores: full width at the bottom, the splitter between it and the parts.
+        let bar = strip(&mut r).expect("the strip");
+        assert!(bar.size.height >= px(64.), "{bar:?}");
+        assert!(bar.left() >= frame.left() && bar.right() <= frame.right());
+        assert!(bar.bottom() <= frame.bottom());
+        let rows = r.bounds_of(core_spark_id(0));
+        let gap = r.gap(POWER_SPLITTER_ID);
+        assert!(rows.bottom() <= gap.top() && gap.bottom() <= bar.top() + px(1.));
+        let wide = f32::from(bar.size.width);
+        assert!(wide > 500., "full width {wide}");
+
+        // The other modes: the strip stays under their parts.
+        mode(&mut r, "cores");
+        let bar = strip(&mut r).expect("the strip under the cores");
+        assert!(r.bounds_of(core_spark_id(0)).bottom() <= bar.top());
+        mode(&mut r, "core_charts");
+        let bar = strip(&mut r).expect("the strip under the core charts");
+        assert!(r.bounds_of(core_chart_id(0)).bottom() <= bar.top());
+        mode(&mut r, "chart");
+        let bar = strip(&mut r).expect("the strip under the chart");
+        assert!(bar.top() > frame.top() + px(100.));
+        // A mode change keeps the strip on and its size.
+        assert_eq!(saved_power(&mut r), (true, None));
+
+        // A drag up grows the strip and saves `power_split` when it ends.
+        let before = bar.size.height;
+        let start = center(r.gap(POWER_SPLITTER_ID));
+        r.press(start, 1);
+        r.move_to(point(start.x, start.y - px(40.)));
+        assert_eq!(
+            saved_power(&mut r),
+            (true, None),
+            "nothing is saved mid-drag"
+        );
+        r.release(point(start.x, start.y - px(40.)));
+        let grown = strip(&mut r).expect("the strip").size.height;
+        assert!(grown > before + px(30.), "{before:?} -> {grown:?}");
+        let (on, split) = saved_power(&mut r);
+        let split = split.expect("power_split saved");
+        assert!(
+            on && (0.1..=0.5).contains(&split) && split > 0.25,
+            "{split}"
+        );
+        let saved = r.saved();
+        assert_eq!(OverviewLayout::from_setting(saved.as_ref()), r.layout());
+        assert_eq!(r.layout().config(BoxKind::Cpu).power_split, split as f32);
+
+        // A far drag stops at half the body; a far drag down keeps 64 px.
+        let at = center(r.gap(POWER_SPLITTER_ID));
+        r.press(at, 1);
+        r.move_to(point(at.x, px(-5000.)));
+        r.release(point(at.x, px(-5000.)));
+        assert_eq!(saved_power(&mut r).1, Some(0.5));
+        let at = center(r.gap(POWER_SPLITTER_ID));
+        r.press(at, 1);
+        r.move_to(point(at.x, px(5000.)));
+        r.release(point(at.x, px(5000.)));
+        assert!(strip(&mut r).expect("the strip").size.height >= px(64.));
+        assert!(saved_power(&mut r).1.is_some_and(|v| v >= 0.1));
+
+        // A double-click on the gap resets the share and writes nothing for the default.
+        let at = center(r.gap(POWER_SPLITTER_ID));
+        r.press(at, 2);
+        r.release(at);
+        assert_eq!(saved_power(&mut r), (true, None));
+        assert_eq!(r.layout().config(BoxKind::Cpu).power_split, 0.25);
+
+        // Reset Box turns the strip off.
+        r.page_action(&PerfOverviewResetBox { kind: "cpu".into() });
+        assert!(strip(&mut r).is_none());
+        assert_eq!(saved_power(&mut r), (false, None));
+        // Switching on and off again.
+        power(&mut r, true);
+        assert!(strip(&mut r).is_some());
+        power(&mut r, false);
+        assert!(strip(&mut r).is_none());
+        assert_eq!(saved_power(&mut r), (false, None));
+        // The strip is the CPU box's: another kind ignores the action.
+        r.page_action(&PerfOverviewSetBoxPower {
+            kind: "memory".into(),
+            on: true,
+        });
+        assert_eq!(r.saved().map(|s| s.rows[0].boxes[1].power), Some(false));
     }
 
     #[gpui_kit::test]
@@ -4881,6 +5019,9 @@ mod page {
             ("Chart", false),
             ("Cores", false),
             ("Core charts", false),
+            // The default snapshot reads as RAPL readable: a separator and the power item.
+            ("", false),
+            ("Show power draw", false),
         ]
         .map(|(l, c)| (l.to_owned(), c))
         .into();
@@ -5578,6 +5719,90 @@ mod wired {
         })
     }
 
+    /// The kind, label, tooltip and mark of each entry of the Layout submenu of the open menu.
+    #[allow(clippy::type_complexity, reason = "test helper")]
+    fn layout_entries(r: &mut Rig) -> Vec<(MenuEntryKind, String, Option<String>, bool)> {
+        r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("a context menu is open");
+            let layout = menu.read(cx).entries_for_test(window)[0]
+                .submenu
+                .clone()
+                .expect("the Layout submenu");
+            let entries = layout.read(cx).entries_for_test(window);
+            entries
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.kind,
+                        e.label.map(|l| l.to_string()).unwrap_or_default(),
+                        e.tooltip.map(|t| t.to_string()),
+                        e.checked,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// D-028: "Show power draw" follows the mode radios in the CPU Layout submenu. It is a check
+    /// item with RAPL readable, disabled with "Needs setup" and followed by "Set up CPU power
+    /// draw…" when RAPL is unreadable, and missing without a RAPL zone.
+    #[gpui_kit::test]
+    fn overview_cpu_power_menu_item(cx: &mut TestAppContext) {
+        use tl_model::snapshot::RaplState;
+        let mut r = open(cx);
+        select(&mut r, OVERVIEW_KEY);
+        r.vcx.update(|_, cx| tl_ui::components::menu::bind_keys(cx));
+        let title = r
+            .vcx
+            .debug_bounds(Box::leak(title_row_id(CPU_BOX_ID).into_boxed_str()))
+            .expect("the CPU title line");
+        let tail = |r: &mut Rig, rapl: Option<RaplState>| {
+            r.engine.publish_with(|s| {
+                let d = Arc::make_mut(&mut s.device_details);
+                Arc::make_mut(&mut d.cpu).rapl = rapl;
+                d.header.version += 1;
+            });
+            draw(r.vcx);
+            mouse(r.vcx, MouseButton::Right, title.center());
+            let entries = layout_entries(r);
+            r.vcx.simulate_keystrokes("escape");
+            draw(r.vcx);
+            // The four mode radios come first.
+            entries[4..].to_vec()
+        };
+        assert_eq!(tail(&mut r, Some(RaplState::NoZone)), []);
+        assert_eq!(
+            tail(&mut r, Some(RaplState::Readable)),
+            [
+                (MenuEntryKind::Separator, String::new(), None, false),
+                (
+                    MenuEntryKind::Item,
+                    "Show power draw".to_owned(),
+                    None,
+                    false
+                ),
+            ]
+        );
+        assert_eq!(
+            tail(&mut r, Some(RaplState::Unreadable)),
+            [
+                (MenuEntryKind::Separator, String::new(), None, false),
+                (
+                    MenuEntryKind::Disabled,
+                    "Show power draw".to_owned(),
+                    Some("Needs setup".to_owned()),
+                    false
+                ),
+                (
+                    MenuEntryKind::Item,
+                    "Set up CPU power draw…".to_owned(),
+                    None,
+                    false
+                ),
+            ]
+        );
+    }
+
     #[gpui_kit::test]
     fn overview_box_menu_switches_mode_and_saves(cx: &mut TestAppContext) {
         let mut r = open(cx);
@@ -5620,6 +5845,9 @@ mod wired {
                 ("Chart".to_owned(), false),
                 ("Cores".to_owned(), false),
                 ("Core charts".to_owned(), false),
+                // The default snapshot reads as RAPL readable.
+                (String::new(), false),
+                ("Show power draw".to_owned(), false),
             ]
         );
         // Choosing the shown mode changes and saves nothing.
@@ -5698,6 +5926,9 @@ mod wired {
                 ("Chart".to_owned(), false),
                 ("Cores".to_owned(), false),
                 ("Core charts".to_owned(), false),
+                // The default snapshot reads as RAPL readable.
+                (String::new(), false),
+                ("Show power draw".to_owned(), false),
             ]
         );
     }

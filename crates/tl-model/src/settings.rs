@@ -2100,6 +2100,38 @@ mod tests {
     }
 
     #[test]
+    fn overview_cpu_power_keys_saved_and_dropped() {
+        // `power` and `power_split` load, and are written only when not the default.
+        let (s, changed) = load_toml(&cpu_entry("power = true, power_split = 0.3"));
+        assert!(changed.is_empty(), "{changed:?}");
+        let b = &s.performance.overview.as_ref().expect("overview").rows[0].boxes[0];
+        assert_eq!((b.power, b.power_split), (true, Some(0.3)));
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("power = true"), "{text}");
+        assert!(text.contains("power_split = 0.3"), "{text}");
+        let (s, _) = load_toml(&cpu_entry(""));
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(
+            !text.contains("power_split") && !text.contains("power = "),
+            "{text}"
+        );
+        // A split out of range or of the wrong type loads as the default.
+        for v in ["0.05", "0.6", "\"x\""] {
+            let (s, changed) = load_toml(&cpu_entry(&format!("power = true, power_split = {v}")));
+            let b = &s.performance.overview.as_ref().expect("overview").rows[0].boxes[0];
+            assert_eq!((b.power, b.power_split), (true, None), "{v}");
+            assert!(!changed.is_empty(), "{v}");
+        }
+        // The strip belongs to the CPU box: other kinds drop the keys.
+        let text = "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"memory\", \
+                    width = 1.0, power = true, power_split = 0.3 }] }]\n";
+        let (s, changed) = load_toml(text);
+        let b = &s.performance.overview.as_ref().expect("overview").rows[0].boxes[0];
+        assert_eq!((b.power, b.power_split), (false, None));
+        assert!(!changed.is_empty());
+    }
+
+    #[test]
     fn overview_cpu_split_saved_and_clamped() {
         // A split is written with 3 decimals on its box entry and loads back.
         let mut s = Settings::default();

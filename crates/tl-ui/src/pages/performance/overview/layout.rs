@@ -454,13 +454,20 @@ impl OverviewLayout {
         self.config(kind).arrange
     }
 
-    /// Switches `kind` to its mode `id` with that mode's default split and arrangement.
+    /// Switches `kind` to its mode `id` with that mode's default split and arrangement. The CPU
+    /// box keeps its power draw strip.
     /// Returns `false` when the kind has no such mode or already shows it.
     pub fn set_mode(&mut self, kind: BoxKind, id: &str) -> bool {
         let Some(mode) = kind.mode(id).filter(|m| m.id != self.config(kind).mode.id) else {
             return false;
         };
-        self.configs[kind.index()] = BoxConfig::of(kind, mode);
+        // The power draw strip belongs to the box, not to a mode.
+        let old = self.config(kind);
+        self.configs[kind.index()] = BoxConfig {
+            power: old.power,
+            power_split: old.power_split,
+            ..BoxConfig::of(kind, mode)
+        };
         true
     }
 
