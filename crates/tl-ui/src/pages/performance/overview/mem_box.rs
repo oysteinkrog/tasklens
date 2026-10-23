@@ -4,7 +4,9 @@
 //!
 //! UI-PRF-019 gives the box three modes. `rows` puts the text and meter part and the sparkline
 //! column side by side with an inner splitter between them. `chart_rows` has a used chart over
-//! the rows, with a horizontal splitter. `chart` is the composition chart alone.
+//! the rows, with a horizontal splitter. `chart` is the composition chart alone. `charts` (D-029)
+//! is one filled chart per row, each under a header with its name, value and percent, placed by
+//! the Arrange choice.
 //!
 //! The box is its own view and reads `SYSTEM` only, so a tick with only series changes does not
 //! touch it. It formats its text only when the memory totals' hash changes. Each sparkline is a
@@ -19,7 +21,7 @@ use std::sync::Arc;
 use gpui_kit::{
     AnyElement, Context, Entity, EventEmitter, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, relative,
+    Subscription, Window, div, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -36,8 +38,8 @@ use super::cpu_box::value_text;
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::parts::{
-    ChartSettings, Meter, SPARK_GRID, SPARK_W, box_chart, box_frame, chart_section_versions,
-    class_probe, edit_chrome, spark_chart,
+    ChartSettings, GridFit, Meter, SPARK_GRID, SPARK_W, arrange_grid, box_chart, box_frame,
+    chart_section_versions, class_probe, edit_chrome, grid_cells, spark_chart,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -74,6 +76,11 @@ pub const MODES: &[BoxMode] = &[
         label: "perf-overview-mode-chart",
         split: None,
     },
+    BoxMode {
+        id: "charts",
+        label: "perf-overview-mode-charts",
+        split: None,
+    },
 ];
 
 /// The debug selector of the splitter between the text part and the sparkline column.
@@ -94,10 +101,23 @@ const TEXT_PART_MIN_W: f32 = 128.;
 /// The narrowest sparkline column, logical px. The default is `SPARK_W`, below `PART_MIN`.
 const SPARK_COLUMN_MIN_W: f32 = 48.;
 
-/// The modes with an Arrange choice (UI-PRF-019, D-027): the two parts of `chart_rows`, the chart
-/// on top (Automatic and Stack vertically) or on the left (Side by side).
-pub const ARRANGE: &[(&str, ArrangeChoice)] =
-    &[("chart_rows", ArrangeChoice::Saved(Arrange::Auto))];
+/// The smallest `charts` cell, logical px before `ui_scale` (D-029).
+pub const CELL_MIN_W: f32 = 160.;
+pub const CELL_MIN_H: f32 = 60.;
+
+/// The width a `charts` grid keeps for its scrollbar when it scrolls, logical px.
+const GRID_BAR_W: f32 = 16.;
+
+/// The debug selector of the `charts` grid viewport.
+pub const CHARTS_GRID_ID: &str = "perf-overview-memory-charts-grid";
+
+/// The modes with an Arrange choice (UI-PRF-019, D-027, D-029): the two parts of `chart_rows`,
+/// the chart on top (Automatic and Stack vertically) or on the left (Side by side), and the
+/// cells of `charts`.
+pub const ARRANGE: &[(&str, ArrangeChoice)] = &[
+    ("chart_rows", ArrangeChoice::Saved(Arrange::Auto)),
+    ("charts", ArrangeChoice::Saved(Arrange::Auto)),
+];
 
 /// Which parts the box shows (UI-PRF-019).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,6 +125,7 @@ enum MemMode {
     Rows,
     ChartRows,
     Chart,
+    Charts,
 }
 
 impl MemMode {
@@ -113,6 +134,7 @@ impl MemMode {
         match id {
             "chart_rows" => Self::ChartRows,
             "chart" => Self::Chart,
+            "charts" => Self::Charts,
             _ => Self::Rows,
         }
     }
@@ -122,6 +144,7 @@ impl MemMode {
             Self::Rows => MODES[0].id,
             Self::ChartRows => MODES[1].id,
             Self::Chart => MODES[2].id,
+            Self::Charts => MODES[3].id,
         }
     }
 }
@@ -150,6 +173,21 @@ pub fn spark_id(i: usize) -> String {
 /// The debug selector of row `i`.
 pub fn row_id(i: usize) -> String {
     format!("{MEM_BOX_ID}-row-{i}")
+}
+
+/// The debug selector of row `i`'s `charts` cell.
+pub fn cell_id(i: usize) -> String {
+    format!("{MEM_BOX_ID}-cell-{i}")
+}
+
+/// The debug selector of the chart area of row `i`'s `charts` cell, below its header.
+pub fn cell_chart_id(i: usize) -> String {
+    format!("{MEM_BOX_ID}-cell-chart-{i}")
+}
+
+/// The debug selector of a part of row `i`'s `charts` cell header: "name", "value" or "percent".
+pub fn cell_head_id(i: usize, part: &str) -> String {
+    format!("{MEM_BOX_ID}-cell-head-{part}-{i}")
 }
 
 /// The debug selector of row `i`'s value text.
@@ -273,6 +311,21 @@ fn spark_spec(
     }
 }
 
+/// The chart of row `i` in `charts`: its series, filled, in the row's colour, 0..its scale.
+fn cell_spec(
+    memory: DeviceIdx,
+    i: usize,
+    totals: &Totals,
+    colors: &[Hsla; ROWS],
+    s: &ChartSettings,
+    theme: &TlTheme,
+) -> ChartSpec {
+    ChartSpec {
+        grid: chart_grid(s),
+        ..spark_spec(memory, i, totals, colors, s, theme)
+    }
+}
+
 /// The used chart of `chart_rows`: `MEM_USED` over the box range, filled, 0..total.
 fn used_spec(memory: DeviceIdx, totals: &Totals, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
     ChartSpec {
@@ -385,8 +438,10 @@ pub struct MemBox {
     /// The used chart of `chart_rows` and the composition chart of `chart`.
     used_chart: Entity<ChartView>,
     comp_chart: Entity<ChartView>,
+    /// One chart per row for `charts`.
+    cell_charts: [Entity<ChartView>; ROWS],
     mode: MemMode,
-    /// How `chart_rows` places its two parts (D-027).
+    /// How `chart_rows` places its two parts and `charts` its cells (D-027).
     arrange: Arrange,
     /// The gap between the text part and the sparkline column (`rows`).
     spark_split: InnerSplit,
@@ -437,6 +492,10 @@ impl MemBox {
             hub,
             cx,
         );
+        let cell_charts = std::array::from_fn(|i| {
+            let spec = cell_spec(memory, i, &totals, &colors, &settings, &theme);
+            box_chart(spec, chart_labels(), hub, cx)
+        });
         let rows = std::array::from_fn(|i| MeterRow {
             label: tr(cx, KEY_ROWS[i]),
             value: SharedString::default(),
@@ -449,6 +508,7 @@ impl MemBox {
             sparks,
             used_chart,
             comp_chart,
+            cell_charts,
             mode: MemMode::Rows,
             arrange: Arrange::Auto,
             spark_split: InnerSplit::new(
@@ -526,21 +586,21 @@ impl MemBox {
             MemMode::ChartRows => self
                 .chart_split
                 .share(self.chart_axis(), m.sp[5], m.ui_scale),
-            MemMode::Chart => 0.,
+            MemMode::Chart | MemMode::Charts => 0.,
         }
     }
 
-    /// How `chart_rows` places its two parts.
+    /// How `chart_rows` places its two parts and `charts` its cells.
     pub fn arrange(&self) -> Arrange {
         self.arrange
     }
 
-    /// Places the two parts of `chart_rows` as `arrange` says. Only this box renders again, and
-    /// only when it shows `chart_rows`.
+    /// Places the two parts of `chart_rows` or the cells of `charts` as `arrange` says. Only this
+    /// box renders again, and only when it shows one of those modes.
     pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
         if arrange != self.arrange {
             self.arrange = arrange;
-            if self.mode == MemMode::ChartRows {
+            if matches!(self.mode, MemMode::ChartRows | MemMode::Charts) {
                 cx.notify();
             }
         }
@@ -560,7 +620,7 @@ impl MemBox {
         let changed = match self.mode {
             MemMode::Rows => self.spark_split.set_share(share),
             MemMode::ChartRows => self.chart_split.set_share(share),
-            MemMode::Chart => false,
+            MemMode::Chart | MemMode::Charts => false,
         };
         if changed {
             cx.notify();
@@ -583,6 +643,11 @@ impl MemBox {
     /// The composition chart of `chart`.
     pub fn comp_chart(&self) -> &Entity<ChartView> {
         &self.comp_chart
+    }
+
+    /// One chart per row, in row order, for `charts`.
+    pub fn cell_charts(&self) -> &[Entity<ChartView>; ROWS] {
+        &self.cell_charts
     }
 
     /// The title and value text.
@@ -771,6 +836,17 @@ impl MemBox {
         self.used_chart.update(cx, |v, cx| v.set_spec(used, cx));
         let comp = comp_spec(self.memory, &self.totals, &colors, &self.settings, &theme);
         self.comp_chart.update(cx, |v, cx| v.set_spec(comp, cx));
+        for (i, chart) in self.cell_charts.iter().enumerate() {
+            let spec = cell_spec(
+                self.memory,
+                i,
+                &self.totals,
+                &colors,
+                &self.settings,
+                &theme,
+            );
+            chart.update(cx, |v, cx| v.set_spec(spec, cx));
+        }
     }
 }
 
@@ -911,7 +987,126 @@ fn spark_cell(chart: &Entity<ChartView>, index: usize, wide: bool, m: &UiMetrics
         .into_any_element()
 }
 
+/// The smallest `charts` cell, in px.
+fn cell_min(m: &UiMetrics) -> Size<Pixels> {
+    size(px(CELL_MIN_W * m.ui_scale), px(CELL_MIN_H * m.ui_scale))
+}
+
+/// The `charts` grid for the five cells in `body`, placed as `arrange` says (`arrange_grid`).
+/// Before the first paint the body is empty and the fit is one column or one row.
+fn charts_fit(arrange: Arrange, body: Size<Pixels>, m: &UiMetrics) -> GridFit {
+    arrange_grid(
+        arrange,
+        ROWS,
+        body,
+        cell_min(m),
+        m.sp[2],
+        px(GRID_BAR_W * m.ui_scale),
+    )
+}
+
+/// A `charts` cell of `cell` px: the header with the row's name, value and percent over its chart.
+fn chart_cell(
+    i: usize,
+    row: &MeterRow,
+    percent: &SharedString,
+    chart: &Entity<ChartView>,
+    cell: Size<Pixels>,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    // The text style is set first: setting it replaces the nowrap, ellipsis and colour set
+    // before it, and a narrow cell would wrap a long name.
+    let mut name = div();
+    *name.text_style() = t_sm(m);
+    let name = name
+        .debug_selector(move || cell_head_id(i, "name"))
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.text_secondary)
+        .child(row.label.clone());
+    let mut value = div();
+    *value.text_style() = numeric_style(m, m.text.sm);
+    let value = value
+        .debug_selector(move || cell_head_id(i, "value"))
+        .flex_none()
+        .whitespace_nowrap()
+        .text_color(theme.text_primary)
+        .child(row.value.clone());
+    let mut pct = div();
+    *pct.text_style() = numeric_style(m, m.text.sm);
+    let pct = pct
+        .debug_selector(move || cell_head_id(i, "percent"))
+        .flex_none()
+        .whitespace_nowrap()
+        .text_color(theme.text_secondary)
+        .child(percent.clone());
+    div()
+        .debug_selector(move || cell_id(i))
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(cell.width)
+        .h(cell.height)
+        .overflow_hidden()
+        .gap(m.sp[2])
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(m.sp[4])
+                .h(px(LABEL_ROW * m.ui_scale))
+                .child(name)
+                .child(value)
+                .child(pct),
+        )
+        .child(
+            div()
+                .debug_selector(move || cell_chart_id(i))
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(chart.clone().cached(StyleRefinement::default().size_full())),
+        )
+        .into_any_element()
+}
+
 impl MemBox {
+    /// `charts`: one chart per row that fills the body in one column, one row or a grid. Cells
+    /// that do not fit scroll under a scrollbar.
+    fn charts_body(&mut self, m: &UiMetrics, theme: &TlTheme) -> (AnyElement, GridFit) {
+        let fit = charts_fit(self.arrange, self.body.get(), m);
+        let cells = grid_cells(
+            &fit,
+            (0..ROWS).map(|i| {
+                chart_cell(
+                    i,
+                    &self.rows[i],
+                    &self.percents[i],
+                    &self.cell_charts[i],
+                    fit.cell,
+                    m,
+                    theme,
+                )
+            }),
+            m.sp[2],
+            CHARTS_GRID_ID,
+        );
+        let body = div()
+            .debug_selector(|| CHARTS_GRID_ID.into())
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .child(cells)
+            .into_any_element();
+        (body, fit)
+    }
+
     /// The five text rows in a column that shares the body height.
     fn text_rows(&self, wide: bool, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         div()
@@ -1047,10 +1242,18 @@ impl Render for MemBox {
                 Box::new(move |b| u32::from(row_wide(b.width, &probe_m))),
             ),
             MemMode::Chart => (0, Box::new(|_| 0)),
+            MemMode::Charts => {
+                let arrange = self.arrange;
+                (
+                    charts_fit(arrange, self.body.get(), &m).class(),
+                    Box::new(move |b| charts_fit(arrange, b, &probe_m).class()),
+                )
+            }
         };
         let inner: AnyElement = match self.mode {
             MemMode::Rows => self.rows_body(&m, &theme, class == 1, cx),
             MemMode::ChartRows => self.chart_rows_body(class == 1, &m, &theme, cx),
+            MemMode::Charts => self.charts_body(&m, &theme).0,
             MemMode::Chart => div()
                 .debug_selector(|| MEM_COMP_CHART_ID.into())
                 .relative()

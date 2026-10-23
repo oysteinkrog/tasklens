@@ -5082,6 +5082,93 @@ mod page {
         assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
     }
 
+    /// D-029: Memory `charts` shows one chart per row (In use, Cached, Available, Swap, Commit),
+    /// each under a header with its name, value and percent. The Arrange choice puts the cells in
+    /// a grid, one column or one row, each at least 160 x 60 px, and it saves.
+    #[gpui_kit::test]
+    fn overview_mem_charts_arrange(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::mem_box::{
+            CELL_MIN_H, CELL_MIN_W, CHARTS_GRID_ID, cell_chart_id, cell_head_id, cell_id,
+        };
+        use tl_ui::pages::performance::overview::parts::arrange_grid;
+        for (w, h) in [(1920., 1200.), (1280., 800.)] {
+            let mut r = open_rooted(cx, true, w, h);
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "memory".into(),
+                mode: "charts".into(),
+            });
+            assert_eq!(r.layout().arrange(BoxKind::Memory), Some(Arrange::Auto));
+            let page = r.page.clone();
+            let mode = r
+                .vcx
+                .update(|_, cx| page.read(cx).mem_box().read(cx).mode());
+            assert_eq!(mode, "charts");
+            let ids = |i: usize| (cell_id(i), cell_chart_id(i));
+            let cells = |r: &mut Rig, arrange: Arrange| {
+                let grid = r.bounds_of(CHARTS_GRID_ID.into());
+                let min = size(px(CELL_MIN_W), px(CELL_MIN_H));
+                let fit = arrange_grid(arrange, 5, grid.size, min, px(4.), px(16.));
+                let cs: Vec<_> = (0..5).map(|i| r.bounds_of(ids(i).0)).collect();
+                for (i, c) in cs.iter().enumerate() {
+                    assert_eq!(
+                        c.size, fit.cell,
+                        "{w}: {arrange:?} cell {i}: {c:?} in {grid:?}"
+                    );
+                    assert!(c.size.width >= px(CELL_MIN_W), "{w}: {c:?}");
+                    assert!(c.size.height >= px(CELL_MIN_H), "{w}: {c:?}");
+                }
+                (grid, cs, fit)
+            };
+
+            // Every cell has its name, value and percent, and a chart below the header.
+            for i in 0..5 {
+                let cell = r.bounds_of(ids(i).0);
+                let chart = r.bounds_of(ids(i).1);
+                assert!(chart.top() > cell.top() && chart.bottom() <= cell.bottom() + px(1.));
+                for part in ["name", "value", "percent"] {
+                    let head = r.bounds_of(cell_head_id(i, part));
+                    assert!(head.top() >= cell.top() && head.bottom() <= chart.top() + px(1.));
+                }
+            }
+
+            // Automatic: the grid, every cell the same size.
+            let (grid, _, fit) = cells(&mut r, Arrange::Auto);
+            assert!(fit.cols >= 1 && fit.cols <= 5, "{fit:?} in {grid:?}");
+            assert_eq!(saved_arrange(&mut r, "memory"), None);
+
+            // Stack vertically: one column as wide as the grid.
+            set_arrange(&mut r, "memory", "vertical");
+            let (grid, cs, _) = cells(&mut r, Arrange::Vertical);
+            assert!(
+                cs.windows(2)
+                    .all(|p| p[0].left() == p[1].left() && p[1].top() >= p[0].bottom()),
+                "{cs:?} in {grid:?}"
+            );
+            assert_eq!(saved_arrange(&mut r, "memory").as_deref(), Some("vertical"));
+            assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+
+            // Side by side: one row.
+            set_arrange(&mut r, "memory", "horizontal");
+            let (grid, cs, _) = cells(&mut r, Arrange::Horizontal);
+            assert!(
+                cs.windows(2)
+                    .all(|p| p[0].top() == p[1].top() && p[1].left() >= p[0].right()),
+                "{cs:?} in {grid:?}"
+            );
+            assert_eq!(
+                saved_arrange(&mut r, "memory").as_deref(),
+                Some("horizontal")
+            );
+            assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+
+            // Reset Box gives the automatic grid back.
+            r.page_action(&PerfOverviewResetBox {
+                kind: "memory".into(),
+            });
+            assert_eq!(r.layout().arrange(BoxKind::Memory), Some(Arrange::Auto));
+        }
+    }
+
     /// D-027: GPU `engine_charts` cells go in one column or one row, and the `chart_engines`
     /// chart sits on the left of its rows for Side by side.
     #[gpui_kit::test]
