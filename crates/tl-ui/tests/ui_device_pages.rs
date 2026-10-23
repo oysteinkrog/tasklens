@@ -3763,6 +3763,35 @@ mod fan_menu {
         assert_eq!(checked, expected, "only temp3 is checked");
     }
 
+    /// Sensors that read -128 °C or exactly 0 °C with no history are not listed.
+    #[gpui_kit::test]
+    fn fan_sensor_menu_hides_dead_readings(cx: &mut TestAppContext) {
+        rig!(cx, r);
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let mut sensors = sys.sensors.to_vec();
+            for (idx, r) in &mut sensors {
+                if *idx == DeviceIdx(20) {
+                    r.value = Metric::valid(-128.0);
+                } else if *idx == DeviceIdx(21) {
+                    r.value = Metric::valid(0.0);
+                }
+            }
+            sys.sensors = Arc::from(sensors);
+        });
+        draw(r.vcx);
+        let items = sensor_entries(&mut r);
+        let labels: Vec<_> = items
+            .iter()
+            .filter(|e| e.kind != MenuEntryKind::Separator)
+            .filter_map(|e| e.label.as_deref())
+            .collect();
+        assert_eq!(labels.len(), 11, "10 sensors and None: {labels:?}");
+        assert_eq!(labels[0], "nct6797 temp3");
+        assert!(!labels.contains(&"nct6797 temp1") && !labels.contains(&"nct6797 temp2"));
+    }
+
     #[gpui_kit::test]
     fn fan_sensor_choice_rebinds_chart(cx: &mut TestAppContext) {
         rig!(cx, r);

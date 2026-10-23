@@ -29,7 +29,7 @@ use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::page::DevicePage as _;
-use tl_ui::pages::performance::sensors::FanPage;
+use tl_ui::pages::performance::sensors::{CHOOSE_SENSOR_ID, FanPage, NO_VALUE_ID, TEMPERATURE_ID};
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -260,6 +260,26 @@ fn fan_choose_a_sensor_state(cx: &mut TestAppContext) {
         assert_eq!(t.labels.value_fmt, ValueFormat::Celsius);
         assert_eq!(t.spec.y, YScale::StickyTemp);
     });
+}
+
+/// UI-PRF-034: without a sensor, "Choose a sensor" is centred in the Temperature plot and the
+/// value `-` sits in its heading row, both inside the plot.
+#[gpui_kit::test]
+fn fan_choose_a_sensor_inside_temperature_plot(cx: &mut TestAppContext) {
+    let r = open(cx, 7, None, None);
+    let plot = r.vcx.debug_bounds(TEMPERATURE_ID).expect("plot drawn");
+    let choose = r.vcx.debug_bounds(CHOOSE_SENSOR_ID).expect("prompt drawn");
+    let dash = r.vcx.debug_bounds(NO_VALUE_ID).expect("value drawn");
+    assert!(plot.contains(&choose.center()), "{choose:?} in {plot:?}");
+    let (dx, dy) = (
+        choose.center().x - plot.center().x,
+        choose.center().y - plot.center().y,
+    );
+    assert!(
+        f32::from(dx).abs() < 2.0 && f32::from(dy).abs() < 2.0,
+        "centred: {dx:?} {dy:?}"
+    );
+    assert!(plot.contains(&dash.center()), "{dash:?} in {plot:?}");
 }
 
 #[gpui_kit::test]

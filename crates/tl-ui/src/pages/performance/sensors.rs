@@ -62,6 +62,9 @@ use crate::window::settings::{set_fan_label, set_fan_temp};
 pub const SPEED_ID: &str = "perf-fan-speed";
 /// Debug selector of the Temperature chart box.
 pub const TEMPERATURE_ID: &str = "perf-fan-temperature";
+/// Debug selectors of the empty Temperature plot's two texts.
+pub const CHOOSE_SENSOR_ID: &str = "perf-fan-choose-sensor";
+pub const NO_VALUE_ID: &str = "perf-fan-no-value";
 /// Debug selector of the Battery chart box.
 pub const BATTERY_CHART_ID: &str = "perf-battery-chart";
 /// Debug selector of the Battery charge history chart box.
@@ -945,6 +948,7 @@ impl FanPage {
     /// text "Choose a sensor".
     fn empty_overlay(&self, m: &crate::theme::UiMetrics, theme: &TlTheme) -> AnyElement {
         let mut value = div()
+            .debug_selector(|| NO_VALUE_ID.into())
             .absolute()
             .top(m.sp[3])
             .right(m.sp[3])
@@ -952,7 +956,10 @@ impl FanPage {
             .child(SharedString::from(NO_VALUE));
         *value.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
         let mut choose = div()
+            .debug_selector(|| CHOOSE_SENSOR_ID.into())
             .absolute()
+            .top_0()
+            .left_0()
             .size_full()
             .flex()
             .items_center()
@@ -960,8 +967,12 @@ impl FanPage {
             .text_color(theme.text_secondary)
             .child(self.words.choose.clone());
         *choose.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
+        // Insets are explicit: an absolute box without them sits at its static position, below
+        // the chart in the flow.
         div()
             .absolute()
+            .top_0()
+            .left_0()
             .size_full()
             .child(choose)
             .child(value)
@@ -1006,8 +1017,25 @@ struct FanSensorOption {
     reading: SharedString,
 }
 
-/// Every present hwmon temperature sensor in catalog order.
-fn fan_sensor_options(snap: &Snapshot) -> Vec<FanSensorOption> {
+/// Chips report -128 °C or exactly 0 °C for a pin with nothing connected.
+fn is_dead_reading(celsius: f32) -> bool {
+    celsius <= -128.0 || celsius == 0.0
+}
+
+/// True when the sensor's temperature series holds a sample with a real value.
+fn has_history(snap: &Snapshot, device: DeviceIdx) -> bool {
+    find_tiered(&snap.series, series(device, MetricId::SENSOR_TEMP), 0)
+        .0
+        .is_some_and(|v| {
+            v.samples
+                .iter()
+                .any(|s| s.flags.contains(SampleFlags::VALID) && !is_dead_reading(s.value))
+        })
+}
+
+/// Every present hwmon temperature sensor in catalog order, without sensors that read a dead
+/// value (-128 °C or 0 °C) and have no history. The `current` sensor stays so its radio shows.
+fn fan_sensor_options(snap: &Snapshot, current: Option<&str>) -> Vec<FanSensorOption> {
     snap.devices
         .entries
         .iter()
@@ -1023,15 +1051,19 @@ fn fan_sensor_options(snap: &Snapshot) -> Vec<FanSensorOption> {
                 .find(|(idx, r)| *idx == e.idx && r.kind == SensorKind::Temperature)
                 .map(|(_, r)| r.value)
                 .filter(|m| m.validity == Validity::Valid);
+            let value = e
+                .persistent_key
+                .strip_prefix("sensor:")
+                .unwrap_or(&e.persistent_key);
+            let dead = reading.is_some_and(|m| is_dead_reading(m.value));
+            if dead && current != Some(value) && !has_history(snap, e.idx) {
+                return None;
+            }
             let mut text = String::new();
             match reading {
                 Some(m) => units::celsius(&mut text, m.value),
                 None => text.push_str(NO_VALUE),
             }
-            let value = e
-                .persistent_key
-                .strip_prefix("sensor:")
-                .unwrap_or(&e.persistent_key);
             Some(FanSensorOption {
                 value: Arc::from(value),
                 label: format!("{chip} {label}").into(),
@@ -1117,7 +1149,7 @@ impl DevicePage for FanPage {
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
         let key = self.key.clone();
         let snap = Arc::clone(self.hub.read(cx).current());
-        let options = fan_sensor_options(&snap);
+        let options = fan_sensor_options(&snap, self.sensor.as_deref());
         let current = self.sensor.clone();
         let none = tr(cx, "perf-fan-sensor-none");
         let rename = Box::new(PerfRenameFan { key: key.clone() });

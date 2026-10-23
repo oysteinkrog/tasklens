@@ -549,14 +549,15 @@ fn write_line2(
             }
         },
         DeviceKind::Fan => {
-            let rpm = sensor(snap, idx, SensorKind::Fan).map_or_else(Metric::default, |s| s.value);
-            value(out, locks, rpm.validity, |o| {
-                let _ = write!(o, "{:.0} RPM", rpm.value.max(0.0).round());
-            });
+            // The RPM is the card's value, so the line holds only the paired temperature.
             if let Some(t) = input.fan_temp {
                 let temp = sensor(snap, t, SensorKind::Temperature)
                     .map_or_else(Metric::default, |s| s.value);
-                optional_part(out, locks, temp, units::celsius);
+                if !matches!(temp.validity, Validity::Unsupported | Validity::WarmingUp) {
+                    value(out, locks, temp.validity, |o| {
+                        units::celsius(o, temp.value);
+                    });
+                }
             }
         }
         DeviceKind::Battery => match battery(input) {
@@ -2434,13 +2435,13 @@ mod tests {
             number: 2,
             ..input(DeviceKind::Fan, &fan, &s)
         });
-        assert_eq!(strs(&l), ("Fan 2", "nct6799", "1200 RPM"));
+        assert_eq!(strs(&l), ("Fan 2", "nct6799", ""));
         let l = lines(&CardTextInput {
             fan_label: Some("CPU fan"),
             fan_temp: Some(DeviceIdx(5)),
             ..input(DeviceKind::Fan, &fan, &s)
         });
-        assert_eq!(strs(&l), ("CPU fan", "CPU fan", "1200 RPM · 45 °C"));
+        assert_eq!(strs(&l), ("CPU fan", "CPU fan", "45 °C"));
 
         // Battery: kind word, vendor and model, percentage and state.
         let mouse = entry(
