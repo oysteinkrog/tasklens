@@ -7270,3 +7270,67 @@ mod wired {
         assert!(has_overview_part(&d) && !d.process_top, "{d:?}");
     }
 }
+
+/// The box title line (UI-PRF-017, UI-PRF-058): a summary too long for the line stays on one
+/// row and ends in an ellipsis. Its text style once replaced its nowrap and ellipsis.
+mod title_row {
+    use gpui_kit::{
+        Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, Window, div,
+        px, size,
+    };
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
+    use tl_ui::pages::performance::overview::parts::{box_frame, title_line_id};
+    use tl_ui::theme::{current, metrics};
+
+    const LONG: &str = "Realtek Semiconductor Co., Ltd. RTL8125 2.5GbE Controller";
+
+    struct Frame;
+
+    impl Render for Frame {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let m = *metrics(cx);
+            let theme = current(cx).clone();
+            div().w(px(300.)).h(px(200.)).child(box_frame(
+                NET_BOX_ID,
+                None,
+                "Network".into(),
+                "4.7 Mbps".into(),
+                LONG.into(),
+                div().into_any_element(),
+                false,
+                &m,
+                &theme,
+            ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn title_line_summary_stays_one_row(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+        let (_view, vcx) = cx.add_window_view(|_, _| Frame);
+        vcx.simulate_resize(size(px(400.), px(300.)));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+        let id = title_line_id(NET_BOX_ID);
+        let line = vcx
+            .debug_bounds(Box::leak(id.into_boxed_str()))
+            .expect("title line drawn");
+        let frame = vcx.debug_bounds(NET_BOX_ID).expect("box drawn");
+        // One t_sm row (12 px at line height 1.3 is under 20 px), inside the box's width.
+        assert!(line.size.height < px(20.), "one row: {line:?}");
+        assert!(line.right() <= frame.right(), "{line:?} in {frame:?}");
+    }
+}

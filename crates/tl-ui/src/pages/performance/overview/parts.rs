@@ -813,6 +813,12 @@ pub fn title_value_id(box_id: &str) -> String {
     format!("{box_id}-title-value")
 }
 
+/// The debug selector of a box's one-line summary in its title line: the box id with
+/// `-title-line`.
+pub fn title_line_id(box_id: &str) -> String {
+    format!("{box_id}-title-line")
+}
+
 /// The debug selector of the title tab inset into a box's top border.
 pub fn title_tab_id(box_id: &str) -> String {
     format!("{box_id}-title-tab")
@@ -922,7 +928,11 @@ pub fn box_frame(
         px(0.)
     };
     let draws_time_axis = BoxKind::from_frame_id(id) != Some(BoxKind::TopProcs);
-    let mut title_el = div()
+    // Each text style goes in first: it replaces the whole text refinement, so the nowrap,
+    // ellipsis and colour set after it would otherwise be lost.
+    let mut title_el = div();
+    *title_el.text_style() = t_md(m);
+    let title_el = title_el
         .debug_selector(move || title_tab_id(id))
         .h_full()
         .flex()
@@ -941,8 +951,10 @@ pub fn box_frame(
         .text_color(theme.text_primary)
         .children(box_icon(id, m, theme))
         .child(title);
-    *title_el.text_style() = t_md(m);
-    let mut line_el = div()
+    let mut line_el = div();
+    *line_el.text_style() = t_sm(m);
+    let line_el = line_el
+        .debug_selector(move || title_line_id(id))
         .flex_1()
         .min_w_0()
         .overflow_hidden()
@@ -950,14 +962,14 @@ pub fn box_frame(
         .text_ellipsis()
         .text_color(theme.text_secondary)
         .child(line);
-    *line_el.text_style() = t_sm(m);
-    let mut value_el = div()
+    let mut value_el = div();
+    *value_el.text_style() = title_value_style(m);
+    let value_el = value_el
         .debug_selector(move || title_value_id(id))
         .flex_none()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
         .child(value);
-    *value_el.text_style() = title_value_style(m);
     let mut frame = div()
         .debug_selector(move || id.into())
         .relative()
