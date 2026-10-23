@@ -3792,6 +3792,66 @@ mod fan_menu {
         assert!(!labels.contains(&"nct6797 temp1") && !labels.contains(&"nct6797 temp2"));
     }
 
+    /// A dead reading stays listed when it is the paired sensor or has a real value in its history.
+    #[gpui_kit::test]
+    fn fan_sensor_menu_keeps_paired_and_history_sensors(cx: &mut TestAppContext) {
+        use tl_model::ids::{MetricId, SeriesId};
+        use tl_model::series::{Sample, SeriesView};
+        use tl_model::snapshot::SeriesSet;
+
+        rig!(cx, r);
+        dispatch(
+            &mut r,
+            PerfSetFanTempSensor {
+                key: key(FAN),
+                sensor: Some(Arc::from(sensor_key(1).as_str())),
+            },
+        );
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let mut sensors = sys.sensors.to_vec();
+            for (idx, r) in &mut sensors {
+                if *idx == DeviceIdx(20) || *idx == DeviceIdx(22) {
+                    r.value = Metric::valid(-128.0);
+                } else if *idx == DeviceIdx(21) {
+                    r.value = Metric::valid(0.0);
+                }
+            }
+            sys.sensors = Arc::from(sensors);
+            let mut views = s.series.series.to_vec();
+            views.push(Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(21),
+                    metric: MetricId::SENSOR_TEMP,
+                },
+                version: 1,
+                period_ns: 1_000_000_000,
+                samples: Arc::from([Sample::valid(1_000_000_000, 45.0)]),
+            }));
+            views.sort_by_key(|v| v.id);
+            s.series = Arc::new(SeriesSet {
+                header: s.series.header,
+                series: Arc::from(views),
+                slow: s.series.slow.clone(),
+            });
+        });
+        draw(r.vcx);
+        let items = sensor_entries(&mut r);
+        let labels: Vec<_> = items
+            .iter()
+            .filter(|e| e.kind != MenuEntryKind::Separator)
+            .filter_map(|e| e.label.as_deref())
+            .collect();
+        assert_eq!(labels.len(), 12, "11 sensors and None: {labels:?}");
+        assert_eq!(labels[0], "nct6797 temp1", "the paired sensor stays");
+        assert_eq!(labels[1], "nct6797 temp2", "a sensor with history stays");
+        assert!(
+            !labels.contains(&"nct6797 temp3"),
+            "temp3 is dead with no history"
+        );
+    }
+
     #[gpui_kit::test]
     fn fan_sensor_choice_rebinds_chart(cx: &mut TestAppContext) {
         rig!(cx, r);
