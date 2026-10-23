@@ -1285,7 +1285,8 @@ mod bottom {
         DISK_ROW_ID_PREFIX, DiskBox, DiskRow, io_row_id,
     };
     use tl_ui::pages::performance::overview::gpu_box::{
-        GPU_BOX_ID, GpuBox, engine_cell_id, engine_row_id, grid_id, rows_id, vram_id,
+        GPU_BOX_ID, GpuBox, SIDE_ROWS_MIN_W, chart_id, engine_cell_id, engine_row_id, grid_id,
+        rows_id, vram_id,
     };
     use tl_ui::pages::performance::overview::layout::Arrange;
     use tl_ui::pages::performance::overview::net_box::NetBox;
@@ -1851,6 +1852,14 @@ mod bottom {
         let row = r.bounds(engine_row_id(0, "gpu"));
         assert!(f32::from(row.size.width) >= 304., "{row:?}");
         assert!(meters(&mut r), "700 px side by side: meters");
+        // A 330 px box (304 px body) cannot give both parts half: the rows keep room for the
+        // whole VRAM value and the chart takes what is left.
+        r.gpu_width(330.);
+        let rows = r.bounds(rows_id(0));
+        assert!(f32::from(rows.size.width) >= SIDE_ROWS_MIN_W, "{rows:?}");
+        let chart = r.bounds(chart_id(0));
+        assert!(f32::from(chart.size.width) >= 48., "{chart:?}");
+        assert!(chart.right() < rows.left(), "{chart:?} left of {rows:?}");
     }
 
     fn leak(id: String) -> &'static str {

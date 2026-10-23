@@ -43,7 +43,7 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::super::gpu::{GpuVendor, gpu_totals, grid_engines, shown_engines};
 use super::cpu_box::value_text;
-use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
+use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_box::MeterRow;
 use super::parts::{
@@ -105,6 +105,12 @@ pub const CELL_MIN_H: f32 = 48.;
 
 /// The width an `engine_charts` grid keeps for its scrollbar when it scrolls, logical px.
 const GRID_BAR_W: f32 = 16.;
+
+/// The narrowest rows part beside the chart in `chart_engines` Side by side, logical px: the
+/// VRAM row's 72 px label, its two 12 px gaps and 136 px for the widest value
+/// ("1023.99 MiB / 24.00 GiB"), so the VRAM value is never cut. The chart gives way first, down
+/// to `MIN_CHART_H`.
+pub const SIDE_ROWS_MIN_W: f32 = 232.;
 
 /// Which parts the box shows (UI-PRF-019).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1271,9 +1277,10 @@ impl GpuBox {
         let total = self.sections.len() + self.more;
         let body_size = self.body.get();
         let side = mode == GpuMode::ChartEngines && self.arrange == Arrange::Horizontal;
-        // Side by side the chart takes a share of the width; the untouched default is half.
+        // Side by side the chart takes a share of the width; the untouched default is half. The
+        // rows keep room for the whole VRAM value, so a narrow box narrows the chart.
         let sharer = side.then(|| {
-            self.chart_split.set_mins(PART_MIN, PART_MIN);
+            self.chart_split.set_mins(MIN_CHART_H, SIDE_ROWS_MIN_W);
             let w = f32::from(body_size.width);
             self.chart_split
                 .set_default_second_px(((w - f32::from(m.sp[5])) / 2. / s).max(0.));
