@@ -1233,8 +1233,9 @@ mod sidebar {
         assert_values_inside(&mut r, "edit mode");
     }
 
-    /// UI-PRF-058: the Overview card has no icon and keeps its full graph, so its value takes a
-    /// row of its own and stays clear of the edit button over the card's top right corner.
+    /// UI-PRF-058: the Overview card has no icon and does not narrow its graph for an inline
+    /// value, so its value takes a row of its own. As the top card it leaves the edit button's
+    /// column free; the CPU card below it does not.
     #[gpui_kit::test]
     fn overview_card_keeps_value_row(cx: &mut TestAppContext) {
         let mut settings = with_overview();
@@ -1250,17 +1251,20 @@ mod sidebar {
         let overview = prepared(&mut r, OVERVIEW);
         assert_eq!(&*overview.value.expect("value").text, "100.0%");
         assert!(!overview.icon, "the Overview card has no icon");
-        assert_eq!(overview.graph_w, px(116.), "full graph");
+        // 236 − 30 (the edit button's column) − 2 − 12 − 8 − 80 (the least text column).
+        assert_eq!(overview.graph_w, px(104.));
+        assert_eq!(overview.clear, px(30.));
         assert!(!overview.layout.value_inline, "the value has its own row");
         let cpu = prepared(&mut r, "cpu");
         assert!(
             cpu.icon && cpu.layout.value_inline,
             "the CPU card keeps it inline"
         );
+        assert_eq!(cpu.clear, px(0.));
     }
 
-    /// UI-PRF-058: the top card's heading row ends sp3 before the sidebar's edit button over its
-    /// top right corner, so its value never runs under the button. Here the CPU card is first.
+    /// UI-PRF-058: the top card leaves a column as wide as the sidebar's edit button plus sp3
+    /// free at its right, so no text runs under the button. Here the CPU card is first.
     #[gpui_kit::test]
     fn top_card_value_clear_of_edit_button(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
