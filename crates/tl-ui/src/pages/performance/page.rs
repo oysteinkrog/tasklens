@@ -409,8 +409,9 @@ impl DevicePageFrame<'_> {
                     .debug_selector(|| "perf-page-type".into())
                     .flex_none()
                     .whitespace_nowrap()
-                    .text_color(theme.text_primary)
+                    // The style first: it replaces the whole text refinement, colour included.
                     .map_text(label_style(m, m.text.lg, FontWeight::MEDIUM))
+                    .text_color(theme.text_primary)
                     .child(word),
             )
             .child(model_text(model, key, m, theme, window, cx))
@@ -446,8 +447,8 @@ impl DevicePageFrame<'_> {
             .flex()
             .items_center()
             .h(px(DETAILS_HEADING_H * s))
-            .text_color(theme.text_primary)
             .map_text(label_style(m, m.text.md, FontWeight::MEDIUM))
+            .text_color(theme.text_primary)
             .child(details_heading);
 
         // The page menu (UI-PRF-015) opens from the page panel of `PerformancePage`.
@@ -547,8 +548,8 @@ fn model_text(
         .debug_selector(|| "perf-page-model".into())
         .relative()
         .min_w_0()
-        .text_color(theme.text_secondary)
         .map_text(label_style(m, m.text.lg, FontWeight::NORMAL))
+        .text_color(theme.text_secondary)
         .truncate()
         .child(model.clone())
         .child(measure);
