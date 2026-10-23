@@ -24,10 +24,11 @@ use tl_model::settings::Settings;
 
 use crate::chart::labels::{self, CachedLine, LABEL_ROW, LineStyle, WARMING};
 use crate::chart::{ChartLabels, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat};
+use crate::components::icons::icon;
 use crate::components::progress::bucket;
 use crate::hub::SnapshotHub;
-use crate::pages::performance::DeviceKey;
 use crate::pages::performance::actions::PerfSelectDevice;
+use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current};
@@ -826,6 +827,38 @@ pub fn time_axis_label_id(box_id: &str, end: &str) -> String {
     format!("{box_id}-time-axis-{end}")
 }
 
+/// The debug selector of a box's device icon in its title tab: the box id with `-title-icon`.
+pub fn title_icon_id(box_id: &str) -> String {
+    format!("{box_id}-title-icon")
+}
+
+/// The title value style (UI-PRF-058): `t_lg` (16 px), weight 600, tabular figures.
+pub fn title_value_style(m: &UiMetrics) -> gpui_kit::TextStyleRefinement {
+    gpui_kit::TextStyleRefinement {
+        font_weight: Some(gpui_kit::FontWeight::SEMIBOLD),
+        ..numeric_style(m, m.text.lg)
+    }
+}
+
+/// The 20 px device icon in a box's title tab, tinted in the device colour (UI-PRF-058).
+fn box_icon(id: &'static str, m: &UiMetrics, theme: &TlTheme) -> Option<impl IntoElement> {
+    let kind = BoxKind::from_frame_id(id)?;
+    let device = match kind {
+        BoxKind::Cpu | BoxKind::TopProcs => DeviceKind::Cpu,
+        BoxKind::Memory => DeviceKind::Memory,
+        BoxKind::Gpu => DeviceKind::Gpu,
+        BoxKind::Disk => DeviceKind::Disk,
+        BoxKind::Net => DeviceKind::Net,
+    };
+    let name = device.icon()?;
+    Some(
+        div()
+            .debug_selector(move || title_icon_id(id))
+            .flex_none()
+            .child(icon(name, m.icon.lg, device.icon_color(theme))),
+    )
+}
+
 /// The one accent used by an Overview box frame and all of that device's data marks.
 pub fn box_accent(box_id: &str, theme: &TlTheme) -> Hsla {
     let kind = BoxKind::from_frame_id(box_id)
@@ -875,7 +908,9 @@ pub fn box_frame(
         .rounded_bl(m.radius_small)
         .rounded_br(m.radius_small)
         .whitespace_nowrap()
+        .gap(m.sp[3])
         .text_color(theme.text_primary)
+        .children(box_icon(id, m, theme))
         .child(title);
     *title_el.text_style() = t_md(m);
     let mut line_el = div()
@@ -893,7 +928,7 @@ pub fn box_frame(
         .whitespace_nowrap()
         .text_color(theme.text_primary)
         .child(value);
-    *value_el.text_style() = numeric_style(m, m.text.md);
+    *value_el.text_style() = title_value_style(m);
     div()
         .debug_selector(move || id.into())
         .flex()

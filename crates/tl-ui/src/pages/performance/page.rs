@@ -31,6 +31,7 @@ use super::memory::MemoryPage;
 use super::net::NetPage;
 use super::sensors::{BatteryPage, FanPage};
 use super::{DeviceKey, DeviceKind, DeviceRow};
+use crate::components::icons::icon;
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
@@ -395,7 +396,14 @@ impl DevicePageFrame<'_> {
             .flex_none()
             .w_full()
             .h(px(PAGE_HEADER_H * s))
+            .items_center()
             .gap(m.sp[4])
+            .children(key.kind().icon().map(|name| {
+                div()
+                    .debug_selector(|| "perf-page-icon".into())
+                    .flex_none()
+                    .child(icon(name, m.icon.lg, key.kind().icon_color(theme)))
+            }))
             .child(
                 div()
                     .debug_selector(|| "perf-page-type".into())

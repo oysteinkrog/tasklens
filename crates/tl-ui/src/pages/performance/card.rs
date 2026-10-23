@@ -912,6 +912,16 @@ impl CardTextLayout {
     }
 }
 
+/// The width the device icon takes at the left of a card (UI-PRF-058): the 16 px icon and the
+/// sp3 gap after it. Zero for the Overview card, which has no icon.
+pub fn card_icon_column(key: &DeviceKey, m: &UiMetrics) -> Pixels {
+    if key.kind().icon().is_some() {
+        m.icon.md + m.sp[3]
+    } else {
+        Pixels::ZERO
+    }
+}
+
 /// The text column the graph must leave: the widest value, and at least [`CARD_TEXT_MIN_W`].
 pub fn card_text_floor(value_w: Pixels, m: &UiMetrics) -> Pixels {
     value_w.max(px(CARD_TEXT_MIN_W * m.ui_scale))
@@ -1617,11 +1627,12 @@ impl DeviceCard {
                     });
                 px(f32::from(w).ceil())
             });
-            let graph_w = card_graph_width(self.width, card_text_floor(value_w, &m), &m);
+            let inner_w = self.width - card_icon_column(&self.key, &m);
+            let graph_w = card_graph_width(inner_w, card_text_floor(value_w, &m), &m);
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
-                card_text_width(self.width, graph_w, &m),
+                card_text_width(inner_w, graph_w, &m),
                 m.sp[3],
                 m.icon.xs,
                 &mut measure,
@@ -1656,6 +1667,7 @@ impl RenderOnce for DeviceCard {
         } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
         let key = self.key;
+        let icon_kind = key.kind();
         let cursor = if self.pointer {
             CursorStyle::PointingHand
         } else {
@@ -1789,6 +1801,13 @@ impl RenderOnce for DeviceCard {
             .on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(PerfSelectDevice { key: key.clone() }), cx);
             })
+            .children(icon_kind.icon().map(|name| {
+                div()
+                    .debug_selector(|| "perf-card-icon".into())
+                    .flex_none()
+                    .mr(m.sp[3])
+                    .child(icon(name, m.icon.md, icon_kind.icon_color(&theme)))
+            }))
             .child(graph)
             .child(text);
         if opacity < 1.0 {

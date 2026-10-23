@@ -54,10 +54,17 @@ pub enum TlIcon {
     ArrowDownToLine,
     AppWindow,
     Settings2,
+    Cpu,
+    MemoryStick,
+    Gpu,
+    HardDrive,
+    Network,
+    Fan,
+    Battery,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 48] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -99,6 +106,13 @@ impl TlIcon {
         Self::ArrowDownToLine,
         Self::AppWindow,
         Self::Settings2,
+        Self::Cpu,
+        Self::MemoryStick,
+        Self::Gpu,
+        Self::HardDrive,
+        Self::Network,
+        Self::Fan,
+        Self::Battery,
     ];
 
     /// The kit name for this icon.
@@ -145,6 +159,13 @@ impl TlIcon {
             Self::ArrowDownToLine => IconName::ArrowDownToLine,
             Self::AppWindow => IconName::AppWindow,
             Self::Settings2 => IconName::Settings2,
+            Self::Cpu => IconName::Cpu,
+            Self::MemoryStick => IconName::MemoryStick,
+            Self::Gpu => IconName::Gpu,
+            Self::HardDrive => IconName::HardDrive,
+            Self::Network => IconName::Network,
+            Self::Fan => IconName::Fan,
+            Self::Battery => IconName::Battery,
         }
     }
 }
@@ -226,7 +247,8 @@ impl IconNamed for AppIcon {
 // button (UI-PWN-017). `Terminal` and `ArrowDownToLine` are the Service Properties Logs Open in
 // terminal and Follow buttons (UI-SYS-036). `Pencil` is the sidebar edit mode button. `Plug`,
 // `Clock`, `CircleDot` and `Box` are the Services Name icons of sockets, timers, targets and
-// slices or scopes (UI-SYS-015).
+// slices or scopes (UI-SYS-015). `Gpu` and `Fan` are two of the seven device icons of
+// UI-PRF-058; the other five are in the kit bundle.
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
@@ -235,7 +257,7 @@ gpui_kit::assets::icon_assets!(
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
         Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive, Cog, FileCode,
         FunnelX, Eject, Trash, ScanSearch, Terminal, ArrowDownToLine, Pencil, Plug, Clock,
-        CircleDot, Box
+        CircleDot, Box, Gpu, Fan
     ]
 );
 

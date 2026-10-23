@@ -35,7 +35,7 @@ use gpui_kit::component::{ResizableState, h_flex, h_resizable, resizable_panel};
 use gpui_kit::private::schemars::JsonSchema;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyView, App, AppContext as _, AsyncApp, ClipboardItem, Context,
-    Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    Entity, EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString,
     Styled as _, Subscription, WeakEntity, Window, div, px,
 };
@@ -55,6 +55,7 @@ use self::details::ClickedValue;
 use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
 use self::overview::box_menu::{ClickedBox, box_menu};
 use self::page::DevicePage;
+use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
 use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
@@ -62,7 +63,8 @@ use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::settings_global::{TlSettings, animations_on};
-use crate::theme::metrics;
+use crate::theme::palette::DeviceAccent;
+use crate::theme::{TlTheme, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{ShellPage, WINDOW_TITLE};
 use crate::window::status::StatusChanged;
@@ -159,6 +161,36 @@ impl DeviceKey {
             _ if k.starts_with("bat:") => DeviceKind::Battery,
             _ => DeviceKind::Cpu,
         }
+    }
+}
+
+impl DeviceKind {
+    /// The device icon of UI-PRF-058. The Overview has none.
+    pub const fn icon(self) -> Option<TlIcon> {
+        match self {
+            Self::Overview => None,
+            Self::Cpu => Some(TlIcon::Cpu),
+            Self::Memory => Some(TlIcon::MemoryStick),
+            Self::Gpu | Self::AggregateGpu => Some(TlIcon::Gpu),
+            Self::Disk | Self::AggregateDisk => Some(TlIcon::HardDrive),
+            Self::Net => Some(TlIcon::Network),
+            Self::Fan => Some(TlIcon::Fan),
+            Self::Battery => Some(TlIcon::Battery),
+        }
+    }
+
+    /// The tint of the device icon: the device graph colour. Fan and Battery have no graph
+    /// colour family, so they use the theme accent.
+    pub fn icon_color(self, theme: &TlTheme) -> Hsla {
+        let family = match self {
+            Self::Cpu => DeviceAccent::Cpu,
+            Self::Memory => DeviceAccent::Memory,
+            Self::Gpu | Self::AggregateGpu => DeviceAccent::Gpu,
+            Self::Disk | Self::AggregateDisk => DeviceAccent::Disk,
+            Self::Net => DeviceAccent::Net,
+            Self::Overview | Self::Fan | Self::Battery => return theme.accent,
+        };
+        theme.graph.device_accent(family)
     }
 }
 
@@ -1209,6 +1241,34 @@ impl Render for PerformancePage {
 mod tests {
     use super::*;
     use tl_model::devices::DeviceEntry;
+
+    #[test]
+    fn polish_icons_per_kind() {
+        let expect = [
+            (DeviceKind::Overview, None),
+            (DeviceKind::Cpu, Some(TlIcon::Cpu)),
+            (DeviceKind::Memory, Some(TlIcon::MemoryStick)),
+            (DeviceKind::Gpu, Some(TlIcon::Gpu)),
+            (DeviceKind::Disk, Some(TlIcon::HardDrive)),
+            (DeviceKind::Net, Some(TlIcon::Network)),
+            (DeviceKind::Fan, Some(TlIcon::Fan)),
+            (DeviceKind::Battery, Some(TlIcon::Battery)),
+            (DeviceKind::AggregateDisk, Some(TlIcon::HardDrive)),
+            (DeviceKind::AggregateGpu, Some(TlIcon::Gpu)),
+        ];
+        for (kind, icon) in expect {
+            assert_eq!(kind.icon(), icon, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn title_value_is_lg_semibold_tnum() {
+        let m = metrics::compute(&tl_model::settings::AppearanceSettings::default(), 0);
+        let style = overview::parts::title_value_style(&m);
+        assert_eq!(style.font_weight, Some(gpui_kit::FontWeight::SEMIBOLD));
+        assert_eq!(style.font_size, Some(m.text.lg.into()));
+        assert!(style.font_features.is_some());
+    }
 
     fn key(s: &str) -> DeviceKey {
         DeviceKey(Arc::from(s))
