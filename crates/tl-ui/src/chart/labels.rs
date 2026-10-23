@@ -476,8 +476,7 @@ pub fn paint(
     }
     // Ticks: x at the quarter points of the range, y at 25% steps of a percent scale. Like every
     // label they need a plot at least MIN_PLOT_H tall, or they would collide with the rows above.
-    // Ticks: x at the quarter points of the range, y at 25% steps of a percent scale.
-    if f32::from(b.size.width) >= TICKS_MIN_BOX_W * s {
+    if tall && f32::from(b.size.width) >= TICKS_MIN_BOX_W * s {
         let ticks = LineStyle {
             tnum: true,
             ..secondary
