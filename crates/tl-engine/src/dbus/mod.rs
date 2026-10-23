@@ -1,7 +1,8 @@
 //! The shared zbus connection recipe for every D-Bus worker (ADR-004, API notes section 9).
 //!
 //! A connection runs with `internal_executor(false)`. A child task ticks its executor, each tick
-//! under `EXECUTOR_TICK`, so the task sees cancellation at least that often. zbus futures do not
+//! under `EXECUTOR_TICK`, so the task sees cancellation at least that often. When the owner drops
+//! the `DbusConn`, the task closes the connection (`release`). zbus futures do not
 //! see `Cx` cancellation, so every call goes through `DbusConn::call` or `DbusConn::read`: a
 //! `time::timeout` followed by a checkpoint. Proxies built on a connection must not outlive the
 //! worker generation that made it.
@@ -11,6 +12,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
@@ -27,6 +29,11 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(2);
 pub const EXECUTOR_TICK: Duration = Duration::from_millis(500);
 /// The deadline for opening a bus connection.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest the tick task keeps a connection going after its generation ends: first for the
+/// owner's last calls, then to close it (`release`). Shutdown drains the root region for 1 s.
+pub const RELEASE_WAIT: Duration = Duration::from_millis(500);
+/// How often `release` checks whether the owner dropped the `DbusConn`.
+const RELEASE_STEP: Duration = Duration::from_millis(20);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbusError {
@@ -66,10 +73,13 @@ pub enum Bus {
     System,
 }
 
-/// One bus connection and the task that drives it. Dropping it ends the tick task.
+/// One bus connection and the task that drives it. Dropping it closes the connection and ends
+/// the tick task.
 pub struct DbusConn {
     conn: zbus::Connection,
     tick: TaskHandle<()>,
+    /// Set when the owner is done with the connection, so the tick task may close it.
+    dropped: Arc<AtomicBool>,
 }
 
 /// Opens a connection to `bus` and spawns its executor tick task in the caller's region.
@@ -94,6 +104,8 @@ pub async fn connect(cx: &Cx, bus: Bus) -> Result<DbusConn, DbusError> {
 /// Spawns the executor tick task of `conn` in the caller's region.
 fn drive(cx: &Cx, conn: zbus::Connection) -> Result<DbusConn, DbusError> {
     let driven = conn.clone();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let owner_done = Arc::clone(&dropped);
     let tick = cx
         .spawn(move |cx| async move {
             loop {
@@ -102,9 +114,46 @@ fn drive(cx: &Cx, conn: zbus::Connection) -> Result<DbusConn, DbusError> {
                     break;
                 }
             }
+            let mut release = std::pin::pin!(release(&cx, &driven, &owner_done));
+            std::future::poll_fn(|task| cx.masked(|| release.as_mut().poll(task))).await;
         })
         .map_err(|e| DbusError::Connect(format!("spawn: {e}").into()))?;
-    Ok(DbusConn { conn, tick })
+    Ok(DbusConn {
+        conn,
+        tick,
+        dropped,
+    })
+}
+
+/// Closes `conn` once its owner dropped the `DbusConn`, within `RELEASE_WAIT`. Runs with
+/// cancellation masked, so its timers still run.
+///
+/// zbus queues a `RemoveMatch` task on the connection's own executor when a match-rule stream
+/// drops, and that task holds a clone of the connection. With no tick task the executor never
+/// runs it, so the connection keeps itself alive: the socket stays open and the bus queues every
+/// signal for it against the user's quota. When the quota runs out, dbus-broker disconnects
+/// other peers of the same user, and their workers restart (y6k.33). Closing the socket frees
+/// the peer on the bus at once and fails the queued tasks; ticking until the executor is empty
+/// lets them drop their clones.
+async fn release(cx: &Cx, conn: &zbus::Connection, dropped: &AtomicBool) {
+    let start = cx.now();
+    let left = || RELEASE_WAIT.saturating_sub(Duration::from_nanos(cx.now().duration_since(start)));
+    // A cancelled region stops the tick loop before the owner drops the `DbusConn`. Keep driving
+    // the connection for the owner's last calls (the KWin script unload) until it does.
+    while !dropped.load(Ordering::Acquire) {
+        if left().is_zero() {
+            return;
+        }
+        let step = RELEASE_STEP.min(left());
+        let _ = time::timeout(cx.now(), step, conn.executor().tick()).await;
+    }
+    let close = async {
+        let _ = conn.clone().close().await;
+        while !conn.executor().is_empty() {
+            conn.executor().tick().await;
+        }
+    };
+    let _ = time::timeout(cx.now(), left(), close).await;
 }
 
 impl DbusConn {
@@ -160,6 +209,7 @@ impl DbusConn {
     }
 
     fn stop_tick(&self) {
+        self.dropped.store(true, Ordering::Release);
         self.tick.abort();
     }
 }
@@ -457,6 +507,51 @@ mod tests {
         assert!(shared.systemd_system.get().is_none());
         slot.clear();
         assert!(shared.systemd_user.get().is_none());
+    }
+
+    /// Regression (y6k.33): a match-rule stream dropped just before its `DbusConn` left a
+    /// `RemoveMatch` task that nothing ran. The connection kept itself alive and its socket
+    /// stayed open, so the bus kept queueing signals for it until dbus-broker cut the user's
+    /// other peers. Dropping the `DbusConn` now closes the socket.
+    #[test]
+    fn dropped_conn_closes_its_socket() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let server = zbus::connection::Builder::async_io_unix_stream(a)
+            .server(zbus::Guid::generate())
+            .expect("server builder")
+            .p2p()
+            .build();
+        let client = zbus::connection::Builder::async_io_unix_stream(b)
+            .p2p()
+            .internal_executor(false)
+            .build();
+        let (server, client) =
+            futures_lite::future::block_on(futures_lite::future::zip(server, client));
+        let server = server.expect("server connects");
+        let client = client.expect("client connects");
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let join = rt.handle().spawn_checked(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
+            let rule = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .build();
+            let stream = conn
+                .read(
+                    &cx,
+                    zbus::MessageStream::for_match_rule(rule, conn.raw(), Some(8)),
+                )
+                .await
+                .expect("signal stream");
+            drop(stream);
+            drop(conn);
+        });
+        rt.block_on(join).expect("task completes");
+        let end = std::time::Instant::now() + Duration::from_secs(2);
+        while !server.is_closed() && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(server.is_closed(), "the peer saw the socket close");
     }
 
     /// Needs a real session bus. Read-only: it connects and reads its own unique name.
