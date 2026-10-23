@@ -58,6 +58,10 @@ pub const QUEUE_MAX: usize = 64;
 const FAST_NS: u64 = 100_000_000;
 const SLOW_NS: u64 = 1_000_000_000;
 const FAST_LIMIT_NS: u64 = 500_000_000;
+/// The CPU pressure series take a CPU sample once this long after the last one they took, so
+/// they stay at 1 Hz while the CPU runs at 10 Hz (ADR-016 "System pressure"). Half a fast tick
+/// below 1 s, so timer jitter does not skip a second.
+const PRESSURE_EVERY_NS: u64 = SLOW_NS - FAST_NS / 2;
 
 const DISK_METRICS: [MetricId; 4] = [
     MetricId::DISK_ACTIVE,
@@ -105,6 +109,9 @@ pub struct ApplyState {
     irq_zero_samples: u32,
     /// A valid CPU sample had an irq share above 0, so the kernel accounts interrupt time.
     irq_seen: bool,
+    /// Time of the last CPU sample that the CPU_LOAD1 and PSI_CPU_SOME series took; 0 before
+    /// the first.
+    cpu_pressure_t: TimeNs,
     /// The running maximum of `Committed_AS` since engine start (R-166).
     pub peak_committed: u64,
     /// Device details per contributing source (R-139 item 7): sysfs and D-Bus.
@@ -964,10 +971,36 @@ impl Reducer {
         valid: bool,
         period: u64,
     ) {
+        self.push_flagged(
+            device,
+            metric,
+            t,
+            value,
+            valid,
+            period,
+            SampleFlags::empty(),
+        );
+    }
+
+    /// `push` that also keeps the `RESET` and `GAP_BEFORE` of a counter rate (ADR-008).
+    #[allow(clippy::too_many_arguments, reason = "push plus the rate flags")]
+    fn push_flagged(
+        &mut self,
+        device: DeviceIdx,
+        metric: MetricId,
+        t: TimeNs,
+        value: f32,
+        valid: bool,
+        period: u64,
+        rate_flags: SampleFlags,
+    ) {
         // Samples between `PrepareForSleep(true)` and the resume are gaps (ADR-008).
         let valid = valid && !self.suspend.drop_rates();
         let id = sid(device, metric);
-        let sample = self.series.append(id, t, value, period, flags(valid));
+        let kept = rate_flags & (SampleFlags::RESET | SampleFlags::GAP_BEFORE);
+        let sample = self
+            .series
+            .append(id, t, value, period, flags(valid) | kept);
         self.collect(id, sample);
     }
 
@@ -1056,26 +1089,31 @@ impl Reducer {
             ok && fastest.validity.is_valid(),
             period,
         );
-        // System pressure (ADR-016). These do not come from /proc/stat, so only their own
+        // System pressure (ADR-016), at 1 Hz also while the CPU runs at 10 Hz: fast ticks
+        // only repeat the last slow read. These do not come from /proc/stat, so only their own
         // validity counts.
-        let load = totals.load_avg;
-        self.push(
-            pkg,
-            MetricId::CPU_LOAD1,
-            t,
-            load.value[0],
-            load.validity.is_valid(),
-            period,
-        );
-        let psi = totals.psi_some_pct;
-        self.push(
-            pkg,
-            MetricId::PSI_CPU_SOME,
-            t,
-            psi.value,
-            psi.validity.is_valid(),
-            period,
-        );
+        let last = self.apply_state.cpu_pressure_t;
+        if last == 0 || t < last || t - last >= PRESSURE_EVERY_NS {
+            self.apply_state.cpu_pressure_t = t;
+            let load = totals.load_avg;
+            self.push(
+                pkg,
+                MetricId::CPU_LOAD1,
+                t,
+                load.value[0],
+                load.validity.is_valid(),
+                SLOW_NS,
+            );
+            let psi = totals.psi_some_pct;
+            self.push(
+                pkg,
+                MetricId::PSI_CPU_SOME,
+                t,
+                psi.value,
+                psi.validity.is_valid(),
+                SLOW_NS,
+            );
+        }
         for core in &s.per_cpu {
             let (idx, present) =
                 self.sample_device(&DeviceIdentity::CpuLogical { id: core.cpu })?;
@@ -1139,13 +1177,21 @@ impl Reducer {
             period,
         );
         // System pressure (ADR-016). These do not come from /proc/meminfo, so only their own
-        // validity counts.
-        for (metric, v) in [
-            (MetricId::PSI_MEM_SOME, m.psi_some_pct),
-            (MetricId::PSI_MEM_FULL, m.psi_full_pct),
-            (MetricId::SWAP_IN, m.swap_in_pps),
+        // validity counts. The swap-in rate keeps its counter flags.
+        for (metric, v, rate_flags) in [
+            (MetricId::PSI_MEM_SOME, m.psi_some_pct, SampleFlags::empty()),
+            (MetricId::PSI_MEM_FULL, m.psi_full_pct, SampleFlags::empty()),
+            (MetricId::SWAP_IN, m.swap_in_pps, s.swap_in_flags),
         ] {
-            self.push(idx, metric, t, v.value, v.validity.is_valid(), period);
+            self.push_flagged(
+                idx,
+                metric,
+                t,
+                v.value,
+                v.validity.is_valid(),
+                period,
+                rate_flags,
+            );
         }
         if readable(m.validity) && m.committed > self.apply_state.peak_committed {
             self.apply_state.peak_committed = m.committed;

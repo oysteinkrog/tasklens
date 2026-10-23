@@ -1426,6 +1426,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
                 ..MemoryTotals::default()
             },
             zram: Vec::new(),
+            swap_in_flags: SampleFlags::empty(),
             validity: Validity::Valid,
         }),
         SourceUpdate::Disks(DiskSample {
@@ -2276,6 +2277,7 @@ fn memory_msg(t_ns: TimeNs) -> EngineMsg {
             ..MemoryTotals::default()
         },
         zram: Vec::new(),
+        swap_in_flags: SampleFlags::empty(),
         validity: Validity::Valid,
     }))
 }
@@ -2341,6 +2343,7 @@ fn memory_available_series() {
             ..MemoryTotals::default()
         },
         zram: Vec::new(),
+        swap_in_flags: SampleFlags::empty(),
         validity: Validity::Valid,
     }))])
     .expect("no invariant violation");
@@ -2376,6 +2379,7 @@ fn system_pressure_series() {
                 ..MemoryTotals::default()
             },
             zram: Vec::new(),
+            swap_in_flags: SampleFlags::empty(),
             validity: Validity::Valid,
         }))
     };
@@ -2402,6 +2406,94 @@ fn system_pressure_series() {
         metric: MetricId::PSI_MEM_SOME,
     });
     assert!(!some.flags.contains(SampleFlags::VALID));
+}
+
+/// tasklens-hjn.47: CPU_LOAD1 and PSI_CPU_SOME stay at 1 Hz while the CPU runs at 10 Hz
+/// (ADR-016 "System pressure"). The CPU total series takes every sample.
+#[test]
+fn cpu_pressure_series_at_1_hz() {
+    let mut rig = Rig::new();
+    let msgs = (0..=20u64)
+        .map(|n| {
+            let mut m = cpu_msg(SEC + n * 100 * MS, 50.0, n == 0);
+            if let EngineMsg::Source(SourceUpdate::Cpu(s)) = &mut m {
+                s.totals.load_avg = Metric::valid([1.0 + n as f32, 0.0, 0.0]);
+                s.totals.psi_some_pct = Metric::valid(n as f32);
+            }
+            m
+        })
+        .collect();
+    rig.run(msgs).expect("no invariant violation");
+    let pkg = rig.idx(&DeviceIdentity::CpuPackage);
+    let snap = rig.latest();
+    let samples = |metric| {
+        snap.series
+            .get(SeriesId {
+                device: pkg,
+                metric,
+            })
+            .expect("series exists")
+            .samples
+            .clone()
+    };
+    assert_eq!(samples(MetricId::CPU_TOTAL).len(), 21);
+    for (metric, first) in [(MetricId::CPU_LOAD1, 1.0), (MetricId::PSI_CPU_SOME, 0.0)] {
+        let s = samples(metric);
+        let times: Vec<TimeNs> = s.iter().map(|x| x.t_ns).collect();
+        assert_eq!(times, [SEC, 2 * SEC, 3 * SEC], "{metric:?}");
+        let values: Vec<f32> = s.iter().map(|x| x.value).collect();
+        assert_eq!(values, [first, first + 10.0, first + 20.0], "{metric:?}");
+    }
+}
+
+/// tasklens-hjn.47: the swap-in rate's RESET and GAP_BEFORE reach the SWAP_IN series (ADR-008).
+#[test]
+fn swap_in_series_keeps_counter_flags() {
+    let mut rig = Rig::new();
+    let memory = |t_ns, pps: Metric<f32>, swap_in_flags| {
+        src(SourceUpdate::Memory(MemorySample {
+            t_ns,
+            totals: MemoryTotals {
+                validity: Validity::Valid,
+                used: 1 << 30,
+                swap_in_pps: pps,
+                ..MemoryTotals::default()
+            },
+            zram: Vec::new(),
+            swap_in_flags,
+            validity: Validity::Valid,
+        }))
+    };
+    let warming = Metric::with(Validity::WarmingUp);
+    rig.run(vec![
+        memory(SEC, Metric::valid(10.0), SampleFlags::VALID),
+        memory(2 * SEC, warming, SampleFlags::RESET),
+        memory(3 * SEC, Metric::valid(20.0), SampleFlags::VALID),
+        memory(4 * SEC, warming, SampleFlags::GAP_BEFORE),
+    ])
+    .expect("no invariant violation");
+    let mem = rig.idx(&DeviceIdentity::Memory);
+    let snap = rig.latest();
+    let s = &snap
+        .series
+        .get(SeriesId {
+            device: mem,
+            metric: MetricId::SWAP_IN,
+        })
+        .expect("SWAP_IN exists")
+        .samples;
+    // The first sample may carry the session start's GAP_BEFORE, so it is checked for VALID only.
+    assert_eq!(s.len(), 4);
+    assert!(s[0].flags.contains(SampleFlags::VALID));
+    let flags: Vec<SampleFlags> = s[1..].iter().map(|x| x.flags).collect();
+    assert_eq!(
+        flags,
+        [
+            SampleFlags::RESET,
+            SampleFlags::VALID,
+            SampleFlags::GAP_BEFORE,
+        ]
+    );
 }
 
 /// tasklens-hjn.41: each fan gets its own FAN_PWM series, and `fan_max_rpm` reaches the snapshot.

@@ -1,11 +1,12 @@
 //! The `Memory` worker (ADR-004, ADR-008): wraps the tl-collect `MemorySampler` and turns each
 //! `MemoryReading` into a `SourceUpdate::Memory(MemorySample)`.
 //!
-//! It samples at 1 Hz while memory is demanded or history recording is on, and not at all
-//! otherwise. zram devices are enumerated again every 5 s (PERF-041 to PERF-043, PROC-012).
-//! While memory is demanded, the swap list and zswap parameters are read every 5 s and sent as
-//! `DeviceDetails::Memory` when they change (PERF-044, PERF-045), and /proc/pressure/memory and
-//! the /proc/vmstat `pswpin` counter are read every sample (ADR-016 "System pressure").
+//! It samples at 1 Hz while memory is demanded, history recording or device history is on, and
+//! not at all otherwise. zram devices are enumerated again every 5 s (PERF-041 to PERF-043,
+//! PROC-012). While memory is demanded, the swap list and zswap parameters are read every 5 s
+//! and sent as `DeviceDetails::Memory` when they change (PERF-044, PERF-045). While memory or
+//! device history is demanded, /proc/pressure/memory and the /proc/vmstat `pswpin` counter are
+//! read every sample (ADR-016 "System pressure").
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +42,7 @@ pub const PERIOD: Duration = Duration::from_secs(1);
 /// The memory rate table (ADR-008 row "Memory, swap, zram"). The process table keeps it at
 /// 1 Hz for the "Memory compression (zram)" pseudo row (PROC-012, R-166).
 pub fn memory_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.memory || d.recording || d.process_table {
+    if d.memory || d.recording || d.process_table || d.device_history {
         Some(PERIOD)
     } else {
         None
@@ -54,9 +55,10 @@ pub struct MemorySource {
     reading: MemoryReading,
     /// When the zram devices are enumerated again.
     zram_clock: EnumClock,
-    /// `Demand.memory`. Written by `period()`, read by `sample()`. Also gates the pressure
-    /// reads.
+    /// `Demand.memory`. Written by `period()`, read by `sample()`.
     details_wanted: AtomicBool,
+    /// `Demand.memory` or `Demand.device_history`. Written by `period()`, read by `sample()`.
+    pressure_wanted: AtomicBool,
     pressure: MemPressureSampler,
     /// When the swap list and zswap parameters are read again.
     details_clock: EnumClock,
@@ -76,6 +78,7 @@ impl MemorySource {
             reading: MemoryReading::default(),
             zram_clock: EnumClock::default(),
             details_wanted: AtomicBool::new(false),
+            pressure_wanted: AtomicBool::new(false),
             details_clock: EnumClock::default(),
             last_details: None,
             pending_details: None,
@@ -95,10 +98,10 @@ impl MemorySource {
         }
         let wanted = self.details_wanted.load(Ordering::Relaxed);
         let details = wanted && self.details_clock.due(clock.boot_ns);
-        let pressure = if wanted {
+        let pressure = if self.pressure_wanted.load(Ordering::Relaxed) {
             self.pressure.sample_at(clock)
         } else {
-            // The swap-in rate restarts with a gap when memory is demanded again.
+            // The swap-in rate restarts with a gap when it is demanded again.
             self.pressure.reset_baselines();
             MemPressureReading::default()
         };
@@ -162,6 +165,7 @@ impl MemorySource {
             t_ns: r.t_ns,
             totals,
             zram: r.zram.iter().map(zram_stat).collect(),
+            swap_in_flags: pressure.swap_in_pps.flags,
             validity: r.validity,
         };
         (self, SourceUpdate::Memory(sample))
@@ -200,6 +204,8 @@ impl Source for MemorySource {
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.details_wanted.store(d.memory, Ordering::Relaxed);
+        self.pressure_wanted
+            .store(d.memory || d.device_history, Ordering::Relaxed);
         memory_period(d, s)
     }
 
@@ -349,5 +355,12 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(memory_period(&table, &s), Some(Duration::from_secs(1)));
+
+        // Device history keeps memory at 1 Hz while nothing is visible (ADR-008, ADR-016).
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        assert_eq!(memory_period(&history, &s), Some(Duration::from_secs(1)));
     }
 }

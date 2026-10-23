@@ -36,6 +36,7 @@ use tl_engine::workers::workers_for;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
+use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::DiskDetails;
 use tl_model::system::{FanControlMode, GpuEngine, Metric, SensorKind, SensorReading, ZramTotals};
@@ -665,7 +666,8 @@ fn pressure_fixture(base: &str) -> PathBuf {
     dir
 }
 
-/// tasklens-hjn.47: PSI_CPU_SOME is read on slow ticks while CPU is demanded, and not otherwise.
+/// tasklens-hjn.47: PSI_CPU_SOME is read on slow ticks while CPU or device history is demanded,
+/// and not otherwise.
 #[test]
 fn cpu_pressure_follows_demand() {
     let dir = pressure_fixture("owner-desktop");
@@ -683,8 +685,17 @@ fn cpu_pressure_follows_demand() {
         ..Demand::default()
     };
     src.period(&table, &s);
-    let (_, sample) = cpu_sample(src, 2 * SEC);
+    let (src, sample) = cpu_sample(src, 2 * SEC);
     assert_eq!(sample.totals.psi_some_pct.validity, Validity::WarmingUp);
+
+    // Device history alone reads it (ADR-016 "System pressure").
+    let history = Demand {
+        device_history: true,
+        ..Demand::default()
+    };
+    assert_eq!(src.period(&history, &s), Some(Duration::from_secs(1)));
+    let (_, sample) = cpu_sample(src, 3 * SEC);
+    assert_eq!(sample.totals.psi_some_pct, Metric::valid(10.66));
 }
 
 /// A kernel without PSI has no /proc/pressure: the PSI values are Unsupported.
@@ -697,7 +708,8 @@ fn cpu_pressure_unsupported_without_psi() {
     assert_eq!(sample.totals.psi_some_pct.validity, Validity::Unsupported);
 }
 
-/// tasklens-hjn.47: memory PSI and the swap-in rate are read while memory is demanded.
+/// tasklens-hjn.47: memory PSI and the swap-in rate are read while memory or device history is
+/// demanded, and the swap-in counter flags reach the sample.
 #[test]
 fn memory_pressure_follows_demand() {
     let dir = pressure_fixture("mem-composition");
@@ -732,9 +744,23 @@ fn memory_pressure_follows_demand() {
 
     // Demanded again, the swap-in rate warms up instead of spanning the unread time.
     src.period(&memory, &s);
-    let (_, sample) = memory_sample(src, 5 * SEC);
+    let (src, sample) = memory_sample(src, 5 * SEC);
     assert_eq!(sample.totals.psi_some_pct, Metric::valid(6.25));
     assert_eq!(sample.totals.swap_in_pps.validity, Validity::WarmingUp);
+    assert_eq!(sample.swap_in_flags, SampleFlags::GAP_BEFORE);
+
+    // Device history alone reads pressure (ADR-016 "System pressure"). A pswpin decrease is a
+    // counter reset (ADR-008).
+    let history = Demand {
+        device_history: true,
+        ..Demand::default()
+    };
+    assert_eq!(src.period(&history, &s), Some(Duration::from_secs(1)));
+    fs::write(dir.join("proc/vmstat"), "pswpin 10\npswpout 12000000\n").expect("write vmstat");
+    let (_, sample) = memory_sample(src, 6 * SEC);
+    assert_eq!(sample.totals.psi_full_pct, Metric::valid(2.5));
+    assert_eq!(sample.totals.swap_in_pps.validity, Validity::WarmingUp);
+    assert_eq!(sample.swap_in_flags, SampleFlags::RESET);
 }
 
 #[test]

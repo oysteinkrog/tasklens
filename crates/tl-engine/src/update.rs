@@ -24,6 +24,7 @@ use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
     AppCgroupSample, LowMemoryInfo, ProcessExtras, ProcessExtrasP2, ProcessRecord,
 };
+use tl_model::series::SampleFlags;
 use tl_model::snapshot::{
     BatteryDetails, ConnRecord, CpuStaticInfo, DiskDetails, InventorySnapshot, MemoryDetails,
     NetDetails, ServiceBackend, StartupEntry, UnitDetails, UnitRecord, WindowsSnapshot,
@@ -176,6 +177,8 @@ pub struct MemorySample {
     pub t_ns: TimeNs,
     pub totals: MemoryTotals,
     pub zram: Vec<ZramStat>,
+    /// `RESET` and `GAP_BEFORE` of the swap-in rate (ADR-008), for the `SWAP_IN` series.
+    pub swap_in_flags: SampleFlags,
     pub validity: Validity,
 }
 
@@ -563,6 +566,7 @@ mod tests {
                     t_ns: 0,
                     totals: MemoryTotals::default(),
                     zram: Vec::new(),
+                    swap_in_flags: SampleFlags::empty(),
                     validity: Validity::default(),
                 }),
                 Some(SourceId::Memory),

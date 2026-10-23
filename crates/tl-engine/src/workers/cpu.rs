@@ -2,10 +2,11 @@
 //! each `CpuReading` into a `SourceUpdate::Cpu(CpuSample)`.
 //!
 //! It samples at 10 Hz while a visible CPU chart animates, at 1 Hz while CPU is otherwise
-//! demanded or history recording is on, and not at all otherwise. Clock, temperature, live stats
-//! and RAPL power are read at most once per second; fast ticks repeat the last values (PERF-028,
-//! PERF-033, PERF-038, PERF-039, PERF-040). /proc/pressure/cpu is read on the same 1 Hz ticks
-//! while CPU is demanded (ADR-016 "System pressure").
+//! demanded, history recording or device history is on, and not at all otherwise. Clock,
+//! temperature, live stats and RAPL power are read at most once per second; fast ticks repeat
+//! the last values (PERF-028, PERF-033, PERF-038, PERF-039, PERF-040). /proc/pressure/cpu is
+//! read on the same 1 Hz ticks while CPU or device history is demanded (ADR-016 "System
+//! pressure").
 //!
 //! It also sends the CPU page's static rows as one `CpuStaticInfo` through `take_extra`: on the
 //! first sample of a generation and again after a CPU hotplug (E12-010, PERF-031, PERF-035 to
@@ -60,7 +61,7 @@ pub const SLOW_EVERY_NS: u64 = 1_000_000_000;
 /// pseudo row (PROC-012, R-166). `tests/lab_demand.rs` holds an E08-008 copy of this function
 /// that predates the pseudo-row rule.
 pub fn cpu_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.cpu == CpuDemand::Off && !d.recording && !d.process_table {
+    if d.cpu == CpuDemand::Off && !d.recording && !d.process_table && !d.device_history {
         None
     } else if d.cpu_fast {
         Some(FAST_PERIOD)
@@ -332,7 +333,8 @@ struct SlowFields {
     temp_c: Measured<f32>,
     live: LiveStats,
     power: RaplReading,
-    /// /proc/pressure/cpu `some` avg10. `WarmingUp` while CPU is not demanded.
+    /// /proc/pressure/cpu `some` avg10. `WarmingUp` while neither CPU nor device history is
+    /// demanded.
     psi_some_pct: Measured<f32>,
     /// `freq.per_cpu_mhz` as sent. A new `Arc` only when a value changed.
     per_cpu_mhz: Arc<[Metric<u32>]>,
@@ -344,7 +346,8 @@ pub struct CpuSource {
     reading: CpuReading,
     /// Written by `period()`, read by `sample()`.
     per_cpu_wanted: Arc<AtomicBool>,
-    /// `Demand.cpu` is not `Off`. Written by `period()`, read by `sample()`.
+    /// `Demand.cpu` is not `Off`, or `Demand.device_history`. Written by `period()`, read by
+    /// `sample()`.
     pressure_wanted: Arc<AtomicBool>,
     pressure: CpuPressureSampler,
     /// Boot ns of the last sample that read clock, temperature, live stats and power.
@@ -517,8 +520,10 @@ impl Source for CpuSource {
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.per_cpu_wanted
             .store(d.cpu.wants_per_core() || d.recording, Ordering::Relaxed);
-        self.pressure_wanted
-            .store(d.cpu != CpuDemand::Off, Ordering::Relaxed);
+        self.pressure_wanted.store(
+            d.cpu != CpuDemand::Off || d.device_history,
+            Ordering::Relaxed,
+        );
         cpu_period(d, s)
     }
 
@@ -640,5 +645,12 @@ mod tests {
             cpu_period(&table_fast, &s),
             Some(Duration::from_millis(100))
         );
+
+        // Device history keeps the CPU at 1 Hz while nothing is visible (ADR-008, ADR-016).
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        assert_eq!(cpu_period(&history, &s), Some(Duration::from_secs(1)));
     }
 }

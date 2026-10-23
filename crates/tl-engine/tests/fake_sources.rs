@@ -363,6 +363,7 @@ fn fake_memory(t_ns: TimeNs) -> MemorySample {
             ..MemoryTotals::default()
         },
         zram: Vec::new(),
+        swap_in_flags: Default::default(),
         validity: Validity::Valid,
     }
 }

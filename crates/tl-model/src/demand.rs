@@ -132,6 +132,8 @@ pub struct Demand {
     pub graph_targets: Arc<[(GraphTarget, ColumnId)]>,
     /// P3: history recording is enabled.
     pub recording: bool,
+    /// P2: `history.device_metrics` is on (ADR-017). Independent of visibility.
+    pub device_history: bool,
 }
 
 impl Demand {
