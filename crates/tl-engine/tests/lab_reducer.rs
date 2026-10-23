@@ -2354,6 +2354,56 @@ fn memory_available_series() {
     assert_eq!(s[0].value, (6u64 << 30) as f32);
 }
 
+/// tasklens-hjn.47: the Cpu and Memory samples fill the five system pressure series. A value
+/// that is not Valid, such as Unsupported PSI, is a gap.
+#[test]
+fn system_pressure_series() {
+    let mut rig = Rig::new();
+    let mut cpu = cpu_msg(SEC, 50.0, true);
+    if let EngineMsg::Source(SourceUpdate::Cpu(s)) = &mut cpu {
+        s.totals.load_avg = Metric::valid([3.5, 2.0, 1.0]);
+        s.totals.psi_some_pct = Metric::valid(12.5);
+    }
+    let memory = |t_ns, some: Metric<f32>| {
+        src(SourceUpdate::Memory(MemorySample {
+            t_ns,
+            totals: MemoryTotals {
+                validity: Validity::Valid,
+                used: 1 << 30,
+                psi_some_pct: some,
+                psi_full_pct: Metric::valid(2.25),
+                swap_in_pps: Metric::valid(640.0),
+                ..MemoryTotals::default()
+            },
+            zram: Vec::new(),
+            validity: Validity::Valid,
+        }))
+    };
+    rig.run(vec![cpu, memory(SEC, Metric::valid(7.5))])
+        .expect("no invariant violation");
+    let pkg = rig.idx(&DeviceIdentity::CpuPackage);
+    let mem = rig.idx(&DeviceIdentity::Memory);
+    for (device, metric, want) in [
+        (pkg, MetricId::CPU_LOAD1, 3.5),
+        (pkg, MetricId::PSI_CPU_SOME, 12.5),
+        (mem, MetricId::PSI_MEM_SOME, 7.5),
+        (mem, MetricId::PSI_MEM_FULL, 2.25),
+        (mem, MetricId::SWAP_IN, 640.0),
+    ] {
+        let last = rig.last_sample(SeriesId { device, metric });
+        assert_eq!(last.value, want, "{metric:?}");
+        assert!(last.flags.contains(SampleFlags::VALID), "{metric:?}");
+    }
+
+    rig.run(vec![memory(2 * SEC, Metric::with(Validity::Unsupported))])
+        .expect("no invariant violation");
+    let some = rig.last_sample(SeriesId {
+        device: mem,
+        metric: MetricId::PSI_MEM_SOME,
+    });
+    assert!(!some.flags.contains(SampleFlags::VALID));
+}
+
 /// tasklens-hjn.41: each fan gets its own FAN_PWM series, and `fan_max_rpm` reaches the snapshot.
 #[test]
 fn fan_pwm_series_and_max_rpm() {

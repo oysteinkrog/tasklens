@@ -156,10 +156,13 @@ pub struct CpuTotals {
     pub threads: Metric<u32>,
     /// /proc/sys/fs/file-nr field 1 (PERF-033).
     pub handles: Metric<u64>,
-    /// /proc/loadavg 1, 5 and 15 min.
+    /// /proc/loadavg 1, 5 and 15 min. `load_avg[0]` is also series CPU_LOAD1.
     pub load_avg: Metric<[f32; 3]>,
     /// Distinct physical_package_id.
     pub sockets: Metric<u16>,
+    /// /proc/pressure/cpu `some` avg10 in percent; series PSI_CPU_SOME (ADR-016 "System
+    /// pressure"). `Unsupported` on a kernel without PSI.
+    pub psi_some_pct: Metric<f32>,
 }
 
 /// All bytes, from /proc/meminfo unless noted (PERF-041 to PERF-043).
@@ -190,6 +193,13 @@ pub struct MemoryTotals {
     pub zswapped: u64,
     /// Summed over zram devices; Unsupported when none.
     pub zram: Metric<ZramTotals>,
+    /// /proc/pressure/memory `some` avg10 in percent; series PSI_MEM_SOME (ADR-016 "System
+    /// pressure"). `Unsupported` on a kernel without PSI.
+    pub psi_some_pct: Metric<f32>,
+    /// /proc/pressure/memory `full` avg10 in percent; series PSI_MEM_FULL.
+    pub psi_full_pct: Metric<f32>,
+    /// Pages swapped in per second from the /proc/vmstat `pswpin` delta; series SWAP_IN.
+    pub swap_in_pps: Metric<f32>,
 }
 
 /// zram `mm_stat` fields 1, 2 and 3.

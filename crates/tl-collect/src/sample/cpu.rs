@@ -35,7 +35,7 @@ pub struct CpuOpts {
     pub power: bool,
 }
 
-/// Byte limit for the one-shot reads of /proc/loadavg and /proc/sys/fs/file-nr.
+/// Byte limit for the one-shot read of /proc/sys/fs/file-nr.
 const LIVE_FILE_LIMIT: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -95,6 +95,8 @@ pub struct CpuReading {
 pub struct CpuSampler {
     root: SysRoot,
     stat: KeptFile,
+    /// Kept open from P2 (ADR-016 "System pressure"): it also feeds series CPU_LOAD1.
+    loadavg: KeptFile,
     buf: Vec<u8>,
     /// The spare buffer each sample parses into.
     cur: StatData,
@@ -143,6 +145,7 @@ impl CpuSampler {
         };
         Ok(Self {
             stat: KeptFile::new(root.proc_path("stat")),
+            loadavg: KeptFile::new(root.proc_path("loadavg")),
             root,
             buf: Vec::new(),
             cur: StatData::default(),
@@ -270,15 +273,13 @@ impl CpuSampler {
         };
     }
 
-    /// One-shot reads of loadavg and file-nr and one pass over `root.proc`. Each field gets its
-    /// own validity.
+    /// A `pread` of the kept loadavg, a one-shot read of file-nr and one pass over
+    /// `root.proc`. Each field gets its own validity.
     fn live_stats(&mut self, clock: Clock, realtime_s: i64) -> LiveStats {
-        let load = match read_file(
-            &self.root.proc_path("loadavg"),
-            &mut self.buf,
-            LIVE_FILE_LIMIT,
-        )
-        .and_then(|_| parse_loadavg(&self.buf))
+        let load = match self
+            .loadavg
+            .read(&mut self.buf)
+            .and_then(|_| parse_loadavg(&self.buf))
         {
             Ok(load) => Measured::valid(load),
             Err(err) => Measured::invalid(err.validity()),

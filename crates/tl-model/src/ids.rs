@@ -88,10 +88,23 @@ impl MetricId {
     pub const GPU_ENGINE_VIDEO: Self = Self(74);
     /// Intel video-enhance engine (Video Processing).
     pub const GPU_ENGINE_VIDEO_ENHANCE: Self = Self(75);
+    // System pressure for the status bar and device history (tasklens-hjn.47, ADR-016 "System
+    // pressure"). CPU_LOAD1 and PSI_CPU_SOME are on the CpuPackage device, the other three on
+    // the Memory device.
+    /// The 1-minute load average from /proc/loadavg.
+    pub const CPU_LOAD1: Self = Self(8);
+    /// /proc/pressure/cpu `some` avg10, percent.
+    pub const PSI_CPU_SOME: Self = Self(9);
+    /// /proc/pressure/memory `some` avg10, percent.
+    pub const PSI_MEM_SOME: Self = Self(16);
+    /// /proc/pressure/memory `full` avg10, percent.
+    pub const PSI_MEM_FULL: Self = Self(17);
+    /// Pages swapped in per second, from the /proc/vmstat `pswpin` delta.
+    pub const SWAP_IN: Self = Self(18);
 
-    /// Every constant with its name: the 24 base ones in order, then the 22 appended ones in
-    /// order (46 entries). Used by the frozen-id test.
-    pub const ALL: [(&'static str, MetricId); 46] = [
+    /// Every constant with its name: the 24 base ones in order, then the 27 appended ones in
+    /// order (51 entries). Used by the frozen-id test.
+    pub const ALL: [(&'static str, MetricId); 51] = [
         ("CPU_TOTAL", Self::CPU_TOTAL),
         ("CPU_KERNEL", Self::CPU_KERNEL),
         ("CPU_FREQ", Self::CPU_FREQ),
@@ -138,6 +151,11 @@ impl MetricId {
         ("GPU_ENGINE_COPY", Self::GPU_ENGINE_COPY),
         ("GPU_ENGINE_VIDEO", Self::GPU_ENGINE_VIDEO),
         ("GPU_ENGINE_VIDEO_ENHANCE", Self::GPU_ENGINE_VIDEO_ENHANCE),
+        ("CPU_LOAD1", Self::CPU_LOAD1),
+        ("PSI_CPU_SOME", Self::PSI_CPU_SOME),
+        ("PSI_MEM_SOME", Self::PSI_MEM_SOME),
+        ("PSI_MEM_FULL", Self::PSI_MEM_FULL),
+        ("SWAP_IN", Self::SWAP_IN),
     ];
 
     /// Bit 15 marks the 1 Hz slow-tier view of a metric (R-170 item 2).
@@ -812,7 +830,7 @@ mod tests {
 
     #[test]
     fn metric_all_matches_constants() {
-        let expected: [(&str, u16); 46] = [
+        let expected: [(&str, u16); 51] = [
             ("CPU_TOTAL", 1),
             ("CPU_KERNEL", 2),
             ("CPU_FREQ", 3),
@@ -859,17 +877,22 @@ mod tests {
             ("GPU_ENGINE_COPY", 73),
             ("GPU_ENGINE_VIDEO", 74),
             ("GPU_ENGINE_VIDEO_ENHANCE", 75),
+            ("CPU_LOAD1", 8),
+            ("PSI_CPU_SOME", 9),
+            ("PSI_MEM_SOME", 16),
+            ("PSI_MEM_FULL", 17),
+            ("SWAP_IN", 18),
         ];
-        assert_eq!(MetricId::ALL.len(), 46);
+        assert_eq!(MetricId::ALL.len(), 51);
         for ((name, id), (want_name, want_num)) in MetricId::ALL.iter().zip(expected) {
             assert_eq!(*name, want_name);
             assert_eq!(id.0, want_num, "{name}");
             assert!(id.0 < MetricId::TIER_1HZ, "{name}");
         }
         let numbers: HashSet<u16> = MetricId::ALL.iter().map(|(_, id)| id.0).collect();
-        assert_eq!(numbers.len(), 46, "a metric number is used twice");
+        assert_eq!(numbers.len(), 51, "a metric number is used twice");
         let names: HashSet<&str> = MetricId::ALL.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names.len(), 46, "a metric name is used twice");
+        assert_eq!(names.len(), 51, "a metric name is used twice");
     }
 
     #[test]

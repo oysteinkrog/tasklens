@@ -242,6 +242,8 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
             MetricId::CPU_POWER_PKG,
             MetricId::CPU_POWER_CORE,
             MetricId::CPU_CLOCK_MAX,
+            MetricId::CPU_LOAD1,
+            MetricId::PSI_CPU_SOME,
         ],
         DeviceKind::CpuLogical => &[
             MetricId::CPU_TOTAL,
@@ -254,6 +256,9 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
             MetricId::SWAP_USED,
             MetricId::MEM_CACHED,
             MetricId::MEM_AVAILABLE,
+            MetricId::PSI_MEM_SOME,
+            MetricId::PSI_MEM_FULL,
+            MetricId::SWAP_IN,
         ],
         DeviceKind::Gpu => &GPU_METRICS,
         DeviceKind::Disk => &DISK_METRICS,
@@ -1051,6 +1056,26 @@ impl Reducer {
             ok && fastest.validity.is_valid(),
             period,
         );
+        // System pressure (ADR-016). These do not come from /proc/stat, so only their own
+        // validity counts.
+        let load = totals.load_avg;
+        self.push(
+            pkg,
+            MetricId::CPU_LOAD1,
+            t,
+            load.value[0],
+            load.validity.is_valid(),
+            period,
+        );
+        let psi = totals.psi_some_pct;
+        self.push(
+            pkg,
+            MetricId::PSI_CPU_SOME,
+            t,
+            psi.value,
+            psi.validity.is_valid(),
+            period,
+        );
         for core in &s.per_cpu {
             let (idx, present) =
                 self.sample_device(&DeviceIdentity::CpuLogical { id: core.cpu })?;
@@ -1113,6 +1138,15 @@ impl Reducer {
             ok,
             period,
         );
+        // System pressure (ADR-016). These do not come from /proc/meminfo, so only their own
+        // validity counts.
+        for (metric, v) in [
+            (MetricId::PSI_MEM_SOME, m.psi_some_pct),
+            (MetricId::PSI_MEM_FULL, m.psi_full_pct),
+            (MetricId::SWAP_IN, m.swap_in_pps),
+        ] {
+            self.push(idx, metric, t, v.value, v.validity.is_valid(), period);
+        }
         if readable(m.validity) && m.committed > self.apply_state.peak_committed {
             self.apply_state.peak_committed = m.committed;
             Arc::make_mut(&mut self.components.inventory)

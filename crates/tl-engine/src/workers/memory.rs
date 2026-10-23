@@ -4,7 +4,8 @@
 //! It samples at 1 Hz while memory is demanded or history recording is on, and not at all
 //! otherwise. zram devices are enumerated again every 5 s (PERF-041 to PERF-043, PROC-012).
 //! While memory is demanded, the swap list and zswap parameters are read every 5 s and sent as
-//! `DeviceDetails::Memory` when they change (PERF-044, PERF-045).
+//! `DeviceDetails::Memory` when they change (PERF-044, PERF-045), and /proc/pressure/memory and
+//! the /proc/vmstat `pswpin` counter are read every sample (ADR-016 "System pressure").
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,10 +15,11 @@ use asupersync::runtime::JoinError;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::{Cx, Outcome};
 use tl_collect::SysRoot;
-use tl_collect::counters::{Clock, Rate};
+use tl_collect::counters::{Clock, Measured, Rate};
 use tl_collect::parse::swaps::{SwapEntry, SwapKind};
 use tl_collect::parse::zswap::ZswapParams;
 use tl_collect::sample::memory::{MemOpts, MemoryReading, MemorySampler, ZramReading};
+use tl_collect::sample::pressure::{MemPressureReading, MemPressureSampler};
 use tl_model::demand::Demand;
 use tl_model::health::SourceId;
 use tl_model::settings::EngineSettings;
@@ -52,8 +54,10 @@ pub struct MemorySource {
     reading: MemoryReading,
     /// When the zram devices are enumerated again.
     zram_clock: EnumClock,
-    /// `Demand.memory`. Written by `period()`, read by `sample()`.
+    /// `Demand.memory`. Written by `period()`, read by `sample()`. Also gates the pressure
+    /// reads.
     details_wanted: AtomicBool,
+    pressure: MemPressureSampler,
     /// When the swap list and zswap parameters are read again.
     details_clock: EnumClock,
     /// The last details sent.
@@ -67,6 +71,7 @@ pub struct MemorySource {
 impl MemorySource {
     pub fn new(root: SysRoot) -> Self {
         Self {
+            pressure: MemPressureSampler::new(&root),
             sampler: MemorySampler::new(root),
             reading: MemoryReading::default(),
             zram_clock: EnumClock::default(),
@@ -88,8 +93,15 @@ impl MemorySource {
         if self.zram_clock.due(clock.boot_ns) {
             self.sampler.rescan_zram();
         }
-        let details =
-            self.details_wanted.load(Ordering::Relaxed) && self.details_clock.due(clock.boot_ns);
+        let wanted = self.details_wanted.load(Ordering::Relaxed);
+        let details = wanted && self.details_clock.due(clock.boot_ns);
+        let pressure = if wanted {
+            self.pressure.sample_at(clock)
+        } else {
+            // The swap-in rate restarts with a gap when memory is demanded again.
+            self.pressure.reset_baselines();
+            MemPressureReading::default()
+        };
         self.sampler
             .sample_at(clock, MemOpts { details }, &mut self.reading);
         if details {
@@ -139,6 +151,12 @@ impl MemorySource {
             zswap: info.zswap.unwrap_or(0),
             zswapped: info.zswapped.unwrap_or(0),
             zram,
+            psi_some_pct: metric(pressure.psi_some_pct),
+            psi_full_pct: metric(pressure.psi_full_pct),
+            swap_in_pps: Metric {
+                value: pressure.swap_in_pps.per_sec as f32,
+                validity: pressure.swap_in_pps.validity,
+            },
         };
         let sample = MemorySample {
             t_ns: r.t_ns,
@@ -191,6 +209,7 @@ impl Source for MemorySource {
 
     fn reset_baselines(&mut self) {
         self.sampler.reset_baselines();
+        self.pressure.reset_baselines();
         self.zram_clock.force();
         self.details_clock.force();
     }
@@ -274,6 +293,13 @@ fn swap_device(e: &SwapEntry) -> SwapDevice {
         size_bytes: e.size_bytes,
         used_bytes: e.used_bytes,
         priority: e.priority,
+    }
+}
+
+fn metric(m: Measured<f32>) -> Metric<f32> {
+    Metric {
+        value: m.value,
+        validity: m.validity,
     }
 }
 

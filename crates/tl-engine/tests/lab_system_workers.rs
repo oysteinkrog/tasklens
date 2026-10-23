@@ -658,6 +658,85 @@ fn memory_without_zram() -> (PathBuf, PathBuf) {
     (dir, fixtures().join("mem-composition/sys/block/zram0"))
 }
 
+/// `owner-desktop` with the `pressure` fixture's /proc/pressure and /proc/vmstat on top.
+fn pressure_fixture(base: &str) -> PathBuf {
+    let dir = fixture_copy(base, None);
+    copy_tree(&fixtures().join("pressure"), &dir);
+    dir
+}
+
+/// tasklens-hjn.47: PSI_CPU_SOME is read on slow ticks while CPU is demanded, and not otherwise.
+#[test]
+fn cpu_pressure_follows_demand() {
+    let dir = pressure_fixture("owner-desktop");
+    let s = EngineSettings::default();
+    let src = cpu_source(&dir);
+    src.period(&demand(CpuDemand::Total), &s);
+    let (src, sample) = cpu_sample(src, SEC);
+    assert_eq!(sample.totals.psi_some_pct, Metric::valid(10.66));
+    // CPU_LOAD1 comes from the load average the live stats read.
+    assert_eq!(sample.totals.load_avg.value[0], 31.35);
+
+    // The process table alone keeps the worker at 1 Hz but does not read pressure.
+    let table = Demand {
+        process_table: true,
+        ..Demand::default()
+    };
+    src.period(&table, &s);
+    let (_, sample) = cpu_sample(src, 2 * SEC);
+    assert_eq!(sample.totals.psi_some_pct.validity, Validity::WarmingUp);
+}
+
+/// A kernel without PSI has no /proc/pressure: the PSI values are Unsupported.
+#[test]
+fn cpu_pressure_unsupported_without_psi() {
+    let dir = fixture_copy("owner-desktop", None);
+    let src = cpu_source(&dir);
+    src.period(&demand(CpuDemand::Total), &EngineSettings::default());
+    let (_, sample) = cpu_sample(src, SEC);
+    assert_eq!(sample.totals.psi_some_pct.validity, Validity::Unsupported);
+}
+
+/// tasklens-hjn.47: memory PSI and the swap-in rate are read while memory is demanded.
+#[test]
+fn memory_pressure_follows_demand() {
+    let dir = pressure_fixture("mem-composition");
+    let s = EngineSettings::default();
+    let memory = Demand {
+        memory: true,
+        ..Demand::default()
+    };
+    let src = MemorySource::new(SysRoot::at(&dir));
+    src.period(&memory, &s);
+    let (src, sample) = memory_sample(src, SEC);
+    let t = &sample.totals;
+    assert_eq!(t.psi_some_pct, Metric::valid(6.25));
+    assert_eq!(t.psi_full_pct, Metric::valid(2.5));
+    assert_eq!(t.swap_in_pps.validity, Validity::WarmingUp);
+
+    // 9_689_207 + 1_000 pages over 2 s.
+    let vmstat = "pswpin 9690207\npswpout 12000000\n";
+    fs::write(dir.join("proc/vmstat"), vmstat).expect("write vmstat");
+    let (src, sample) = memory_sample(src, 3 * SEC);
+    assert_eq!(sample.totals.swap_in_pps, Metric::valid(500.0));
+
+    // Recording alone keeps the worker at 1 Hz but does not read pressure.
+    let recording = Demand {
+        recording: true,
+        ..Demand::default()
+    };
+    src.period(&recording, &s);
+    let (src, sample) = memory_sample(src, 4 * SEC);
+    assert_eq!(sample.totals.psi_some_pct.validity, Validity::WarmingUp);
+    assert_eq!(sample.totals.swap_in_pps.validity, Validity::WarmingUp);
+
+    // Demanded again, the swap-in rate warms up instead of spanning the unread time.
+    src.period(&memory, &s);
+    let (_, sample) = memory_sample(src, 5 * SEC);
+    assert_eq!(sample.totals.psi_some_pct, Metric::valid(6.25));
+    assert_eq!(sample.totals.swap_in_pps.validity, Validity::WarmingUp);
+}
+
 #[test]
 fn memory_composition_fixture_totals() {
     let dir = fixture_copy("mem-composition", None);

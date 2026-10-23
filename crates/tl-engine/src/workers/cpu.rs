@@ -4,7 +4,8 @@
 //! It samples at 10 Hz while a visible CPU chart animates, at 1 Hz while CPU is otherwise
 //! demanded or history recording is on, and not at all otherwise. Clock, temperature, live stats
 //! and RAPL power are read at most once per second; fast ticks repeat the last values (PERF-028,
-//! PERF-033, PERF-038, PERF-039, PERF-040).
+//! PERF-033, PERF-038, PERF-039, PERF-040). /proc/pressure/cpu is read on the same 1 Hz ticks
+//! while CPU is demanded (ADR-016 "System pressure").
 //!
 //! It also sends the CPU page's static rows as one `CpuStaticInfo` through `take_extra`: on the
 //! first sample of a generation and again after a CPU hotplug (E12-010, PERF-031, PERF-035 to
@@ -28,6 +29,7 @@ use tl_collect::parse::cpufreq::{FreqReading, FreqSource, read_base_mhz, read_st
 use tl_collect::parse::rapl::{RaplReading, RaplStatus, rapl_status};
 use tl_collect::parse::topology::{CacheLevel, TopologyInfo};
 use tl_collect::sample::cpu::{CpuOpts, CpuReading, CpuSampler, LiveStats};
+use tl_collect::sample::pressure::CpuPressureSampler;
 use tl_collect::sysroot::read_file;
 use tl_collect::{CollectError, SysRoot};
 use tl_model::demand::{CpuDemand, Demand};
@@ -51,7 +53,7 @@ use crate::workers::WorkerSpec;
 /// `cpu_fast`: a visible CPU chart animates.
 pub const FAST_PERIOD: Duration = Duration::from_millis(100);
 pub const SLOW_PERIOD: Duration = Duration::from_secs(1);
-/// Clock, temperature, live stats and power are read at most this often.
+/// Clock, temperature, live stats, power and CPU pressure are read at most this often.
 pub const SLOW_EVERY_NS: u64 = 1_000_000_000;
 
 /// The CPU rate table (ADR-008). The process table keeps it at 1 Hz for the "Interrupts"
@@ -330,6 +332,8 @@ struct SlowFields {
     temp_c: Measured<f32>,
     live: LiveStats,
     power: RaplReading,
+    /// /proc/pressure/cpu `some` avg10. `WarmingUp` while CPU is not demanded.
+    psi_some_pct: Measured<f32>,
     /// `freq.per_cpu_mhz` as sent. A new `Arc` only when a value changed.
     per_cpu_mhz: Arc<[Metric<u32>]>,
 }
@@ -340,6 +344,9 @@ pub struct CpuSource {
     reading: CpuReading,
     /// Written by `period()`, read by `sample()`.
     per_cpu_wanted: Arc<AtomicBool>,
+    /// `Demand.cpu` is not `Off`. Written by `period()`, read by `sample()`.
+    pressure_wanted: Arc<AtomicBool>,
+    pressure: CpuPressureSampler,
     /// Boot ns of the last sample that read clock, temperature, live stats and power.
     last_slow_ns: Option<TimeNs>,
     last: SlowFields,
@@ -366,6 +373,8 @@ impl CpuSource {
             sampler,
             reading: CpuReading::default(),
             per_cpu_wanted: Arc::new(AtomicBool::new(false)),
+            pressure_wanted: Arc::new(AtomicBool::new(false)),
+            pressure: CpuPressureSampler::new(&root),
             last_slow_ns: None,
             last: SlowFields::default(),
             base_mhz,
@@ -417,6 +426,11 @@ impl CpuSource {
             self.last.temp_c = r.temp_c;
             self.last.live = r.live;
             self.last.power = r.power;
+            self.last.psi_some_pct = if self.pressure_wanted.load(Ordering::Relaxed) {
+                self.pressure.sample()
+            } else {
+                Measured::default()
+            };
             self.last_slow_ns = Some(clock.boot_ns);
         }
         if r.topology_changed {
@@ -460,6 +474,7 @@ impl CpuSource {
                 validity: last.live.load.validity,
             },
             sockets: Metric::valid(self.sampler.topology().sockets),
+            psi_some_pct: metric(last.psi_some_pct),
         };
         let irq_pct = if r.interrupts_pct.validity.is_valid() {
             r.interrupts_pct.value
@@ -502,6 +517,8 @@ impl Source for CpuSource {
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.per_cpu_wanted
             .store(d.cpu.wants_per_core() || d.recording, Ordering::Relaxed);
+        self.pressure_wanted
+            .store(d.cpu != CpuDemand::Off, Ordering::Relaxed);
         cpu_period(d, s)
     }
 
