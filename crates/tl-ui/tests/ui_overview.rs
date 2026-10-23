@@ -206,6 +206,12 @@ mod drawn {
 
     impl Render for Host {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            // Core rows get room for every part, the GHz label included (D-029).
+            let width = if matches!(self.0, Part::Cores(_)) {
+                200.
+            } else {
+                101.
+            };
             let body = match &self.0 {
                 Part::Meter(fraction) => Meter {
                     fraction: *fraction,
@@ -227,7 +233,7 @@ mod drawn {
                     .absolute()
                     .top(px(10.))
                     .left(px(20.))
-                    .w(px(101.))
+                    .w(px(width))
                     .h(px(200.))
                     .child(body),
             )

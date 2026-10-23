@@ -620,6 +620,7 @@ pub fn core_rows(
         .child(content)
         .overflow_y_scrollbar()
         .id(CORE_ROWS_SCROLL_ID)
+        .debug_selector(|| CORE_ROWS_SCROLL_ID.into())
         .into_any_element()
 }
 
