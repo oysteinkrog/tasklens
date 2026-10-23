@@ -2,6 +2,17 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-23
+
+### D-029: Memory charts, GPU engine choice, core rows, edit-mode title
+
+Oystein (2026-10-23, using 1.0.3): Memory should be able to show a chart for each of its rows,
+arranged vertically, horizontally or in a grid. The GPU box should let him pick which engine
+charts to show. The CPU box looks right, but the per-core rows should show the core name and
+history again. In Edit Layout mode the title values overlap the box's gear icon. UI-PRF-019 adds
+the Memory `charts` mode, the GPU "Engines" submenu, core rows with name, sparkline, bar and
+percent that flow into columns, and title values that end before the edit controls.
+
 ## 2026-10-22
 
 ### D-028: Power draw strip in the Overview CPU box
