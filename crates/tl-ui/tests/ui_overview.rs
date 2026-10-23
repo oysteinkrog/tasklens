@@ -4,7 +4,7 @@
 
 use gpui_kit::px;
 use tl_ui::pages::performance::overview::parts::{
-    CoreBarsModel, CoreCell, core_bars_layout, core_cell, ghz_bucket, meter_fill_w,
+    CoreBarsModel, CoreCell, CoreCellFit, core_bars_layout, core_cell, ghz_bucket, meter_fill_w,
 };
 
 #[test]
@@ -21,22 +21,49 @@ fn meter_fill_width_rounds_to_physical_px() {
     assert_eq!(meter_fill_w(f32::NAN, px(101.), sf), px(0.));
 }
 
+/// D-029: rows at least 16 px high in the fewest columns that fit them, at most 4, then the
+/// rows scroll. Rows are 18 px when they fit.
 #[test]
 fn core_bars_layout_32_cores() {
+    let l = core_bars_layout(32, px(776.), px(600.), 1.);
+    assert_eq!((l.cols, l.rows, l.row_h), (1, 32, px(18.)));
+    assert!(!l.squeezed && !l.scrolls);
+    // One column at 16 px still fits: the rows share the height.
+    let l = core_bars_layout(32, px(776.), px(520.), 1.);
+    assert_eq!((l.cols, l.rows, l.row_h), (1, 32, px(16.25)));
+    assert!(l.squeezed && !l.scrolls);
+    // Too low for one column: the fewest columns that fit.
     let l = core_bars_layout(32, px(776.), px(400.), 1.);
-    assert_eq!((l.cols, l.rows), (4, 8));
-    assert_eq!(l.row_h, px(18.));
-    assert!(l.labels && l.meter && !l.squeezed);
-    // Too low for 18 px rows: squeezed, labels kept at 14 px and hidden below.
-    let l = core_bars_layout(32, px(776.), px(8. * 15.), 1.);
-    assert_eq!(l.row_h, px(15.));
-    assert!(l.squeezed && l.labels);
+    assert_eq!((l.cols, l.rows, l.row_h), (2, 16, px(18.)));
+    let l = core_bars_layout(32, px(776.), px(200.), 1.);
+    assert_eq!((l.cols, l.rows), (3, 11));
+    let l = core_bars_layout(32, px(776.), px(128.), 1.);
+    assert_eq!((l.cols, l.rows, l.row_h), (4, 8, px(16.)));
+    assert!(!l.scrolls);
+    // Not even 4 columns fit: 16 px rows that scroll, with 16 px kept for the scrollbar.
     let l = core_bars_layout(32, px(776.), px(50.), 1.);
-    assert_eq!(l.row_h, px(12.));
-    assert!(!l.labels && !l.meter);
-    // Narrower than one cell: one column.
-    let l = core_bars_layout(4, px(100.), px(400.), 1.);
-    assert_eq!((l.cols, l.rows), (1, 4));
+    assert_eq!((l.cols, l.rows, l.row_h), (4, 8, px(16.)));
+    assert!(l.scrolls);
+    assert_eq!(l.cell_w, px((760. - 24.) / 4.));
+    assert_eq!(l.content_h(), px(128.));
+    // No column is left empty: 9 cores in 3 rows take 3 columns, not 4.
+    let l = core_bars_layout(9, px(776.), px(40.), 1.);
+    assert_eq!((l.cols, l.rows), (3, 3));
+    // A cell keeps its name and percent: a 150 px part holds 1 column and scrolls.
+    let l = core_bars_layout(8, px(150.), px(60.), 1.);
+    assert_eq!((l.cols, l.rows, l.cell_w), (1, 8, px(134.)));
+    assert!(l.scrolls);
+}
+
+/// D-029: C0 to C15 fill the first column top to bottom, C16 to C31 the second.
+#[test]
+fn core_rows_fill_columns_top_to_bottom() {
+    let l = core_bars_layout(32, px(438.), px(456.), 1.);
+    assert_eq!((l.cols, l.rows), (2, 16));
+    assert_eq!(l.cell_of(0), (0, 0));
+    assert_eq!(l.cell_of(15), (0, 15));
+    assert_eq!(l.cell_of(16), (1, 0));
+    assert_eq!(l.cell_of(31), (1, 15));
 }
 
 /// crw.53: the CPU box at 1200 × 900 is 776 × 516. Its body is 750 × 456 and the side part
@@ -47,7 +74,8 @@ fn core_rows_fit_32_threads_at_1200x900() {
     assert_eq!((l.cols, l.rows), (2, 16));
     assert_eq!(l.cell_w, px(215.));
     assert_eq!(l.row_h, px(18.));
-    assert!(!l.squeezed && l.labels && l.meter);
+    assert!(!l.squeezed && !l.scrolls);
+    assert_eq!(l.fit, CoreCellFit::Full);
     assert_eq!(
         core_cell(&l, 1.),
         CoreCell {
@@ -56,25 +84,66 @@ fn core_rows_fit_32_threads_at_1200x900() {
             meter_x: px(84.),
             meter_w: px(43.),
             pct_right: px(167.),
+            ghz: true,
         }
     );
 }
 
+/// D-029: a narrower cell drops the GHz label first, then shrinks the sparkline, then the
+/// meter. The name and the percent stay.
 #[test]
-fn core_columns_follow_width() {
-    let cols = |w: f32| core_bars_layout(32, px(w), px(900.), 1.).cols;
-    assert_eq!(cols(170.), 1);
-    assert_eq!(cols(368.), 2);
-    assert_eq!(cols(564.), 3);
-    assert_eq!(cols(752.), 4);
-    // UI scale widens every cell.
-    assert_eq!(core_bars_layout(32, px(752.), px(900.), 2.).cols, 2);
-    // A cell under 188 px gives the meter's room to the sparkline.
-    let l = core_bars_layout(32, px(376.), px(900.), 1.);
-    assert_eq!((l.cols, l.cell_w), (2, px(184.)));
-    assert!(l.labels && !l.meter);
-    let c = core_cell(&l, 1.);
-    assert_eq!((c.spark_w, c.meter_w), (px(64.), px(0.)));
+fn core_cell_shrinks_spark_then_meter() {
+    let cell = |w: f32| {
+        let l = core_bars_layout(32, px(w), px(128.), 1.);
+        assert_eq!(l.cols, 4);
+        (l.fit, core_cell(&l, 1.))
+    };
+    // 188 px cells hold every part with a 16 px meter.
+    let (fit, c) = cell(4. * 188. + 24.);
+    assert_eq!(fit, CoreCellFit::Full);
+    assert_eq!((c.spark_w, c.meter_w, c.ghz), (px(48.), px(16.), true));
+    // 140 px: no GHz, the percent ends at the cell's right edge.
+    let (fit, c) = cell(4. * 140. + 24.);
+    assert_eq!(fit, CoreCellFit::NoGhz);
+    assert_eq!(
+        c,
+        CoreCell {
+            spark_x: px(32.),
+            spark_w: px(48.),
+            meter_x: px(84.),
+            meter_w: px(16.),
+            pct_right: px(140.),
+            ghz: false,
+        }
+    );
+    // 119 px: the sparkline shrinks to 27 px, the meter keeps 16 px.
+    let (fit, c) = cell(4. * 119. + 24.);
+    assert_eq!(fit, CoreCellFit::SparkShrinks);
+    assert_eq!(
+        c,
+        CoreCell {
+            spark_x: px(32.),
+            spark_w: px(27.),
+            meter_x: px(63.),
+            meter_w: px(16.),
+            pct_right: px(119.),
+            ghz: false,
+        }
+    );
+    // 90 px: no sparkline, the meter takes what is left.
+    let (fit, c) = cell(4. * 90. + 24.);
+    assert_eq!(fit, CoreCellFit::NoSpark);
+    assert_eq!(
+        (c.spark_w, c.meter_x, c.meter_w),
+        (px(0.), px(32.), px(18.))
+    );
+    // 72 px: name and percent only.
+    let (fit, c) = cell(4. * 72. + 24.);
+    assert_eq!(fit, CoreCellFit::NoSpark);
+    assert_eq!((c.meter_w, c.pct_right), (px(0.), px(72.)));
+    // UI scale widens every part.
+    let l = core_bars_layout(32, px(2. * (4. * 188. + 24.)), px(256.), 2.);
+    assert_eq!((l.cols, l.fit), (4, CoreCellFit::Full));
 }
 
 #[test]
@@ -321,7 +390,7 @@ mod boxes {
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::overview::cpu_box::{CPU_BOX_ID, CpuBox};
     use tl_ui::pages::performance::overview::mem_box::{MEM_BOX_ID, MemBox};
-    use tl_ui::pages::performance::overview::parts::core_spark_id;
+    use tl_ui::pages::performance::overview::parts::{CoreCellFit, core_cell, core_spark_id};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -922,7 +991,7 @@ mod boxes {
 
     /// crw.53 AC: on a 32-thread fixture every core row shows in the CPU box at 1200 × 900
     /// (776 × 516), in 2 columns of 18 px rows beside the 40% chart, each with its sparkline.
-    /// The column count follows the box width.
+    /// The column count follows the height (D-029), so a wider box keeps 2 columns.
     #[gpui_kit::test]
     fn cpu_box_fits_32_threads_at_1200x900(cx: &mut TestAppContext) {
         const N: u16 = 32;
@@ -939,7 +1008,8 @@ mod boxes {
         assert!(r.vcx.update(|_, cx| cpu.read(cx).side_by_side()));
         assert_eq!((layout.cols, layout.rows), (2, 16));
         assert_eq!(layout.row_h, px(18.));
-        assert!(!layout.squeezed && layout.labels && layout.meter);
+        assert!(!layout.squeezed && !layout.scrolls);
+        assert_eq!(layout.fit, CoreCellFit::Full);
         assert_eq!(sparks.len(), usize::from(N));
 
         let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box drawn");
@@ -956,18 +1026,18 @@ mod boxes {
                     && b.bottom() <= frame.bottom(),
                 "core {i} inside the box: {b:?} in {frame:?}"
             );
-            let (row, col) = (i / 2, i % 2);
+            let (col, row) = (i / 16, i % 16);
             if col == 1 {
                 let left = r
                     .vcx
-                    .debug_bounds(Box::leak(core_spark_id(i - 1).into_boxed_str()));
+                    .debug_bounds(Box::leak(core_spark_id(i - 16).into_boxed_str()));
                 let left = left.expect("left neighbour");
-                assert_eq!(b.top(), left.top(), "core {i} beside core {}", i - 1);
+                assert_eq!(b.top(), left.top(), "core {i} beside core {}", i - 16);
                 assert!(b.left() > left.right(), "core {i} in the right column");
             } else if row > 0 {
                 let above = r
                     .vcx
-                    .debug_bounds(Box::leak(core_spark_id(i - 2).into_boxed_str()));
+                    .debug_bounds(Box::leak(core_spark_id(i - 1).into_boxed_str()));
                 let above = above.expect("row above");
                 assert_eq!(b.top() - above.top(), px(18.), "core {i} one row lower");
             }
@@ -978,7 +1048,7 @@ mod boxes {
             assert!(chart.resolved()[0].is_some(), "C31 CPU_TOTAL resolved");
         });
 
-        // The column count follows the width: 1000 px gives a 572 px side part, 3 columns.
+        // A wider box keeps 2 columns: the rows still need them at its height.
         r.vcx.simulate_resize(size(px(1200.), px(816.)));
         let host = r.host.clone();
         r.vcx.update(|_, cx| {
@@ -989,7 +1059,103 @@ mod boxes {
         });
         draw(r.vcx);
         let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
-        assert_eq!((layout.cols, layout.rows), (3, 11));
+        assert_eq!((layout.cols, layout.rows), (2, 16));
+    }
+
+    /// D-029: every core row shows its name, sparkline, bar and percent in that order. Rows are
+    /// at least 16 px; 32 threads that do not fit one column flow top to bottom into 2 (C0 to
+    /// C15, then C16 to C31). A box too short for 4 columns keeps 16 px rows, with the name and
+    /// percent, and scrolls.
+    #[gpui_kit::test]
+    fn overview_core_rows_name_spark_columns(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::parts::{
+            CORE_ROWS_SCROLL_ID, take_core_labels, take_meter_quads,
+        };
+        const N: usize = 32;
+        // The last painted labels of each core.
+        let last_labels = || {
+            let mut by_core = std::collections::BTreeMap::new();
+            for l in take_core_labels() {
+                by_core.insert(l.core, l);
+            }
+            by_core.into_values().collect::<Vec<_>>()
+        };
+        let mut r = open_sized(cx, DeviceIdx(1), N as u16, (776., 516.));
+        take_core_labels();
+        take_meter_quads();
+        let pct: Vec<f32> = (0..N).map(|i| 1. + i as f32 * 3.).collect();
+        r.publish_core_series(&pct, &[]);
+        draw(r.vcx);
+        let cpu = r.cpu();
+        let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
+        assert_eq!((layout.cols, layout.rows, layout.row_h), (2, 16, px(18.)));
+        let parts = core_cell(&layout, 1.);
+        let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box drawn");
+
+        // One name and percent per core, the columns filled top to bottom.
+        let labels = last_labels();
+        assert_eq!(labels.len(), N, "{labels:?}");
+        let first = labels[0];
+        for l in &labels {
+            let (col, row) = (l.core / 16, l.core % 16);
+            assert!(l.name.x > frame.left() && l.pct_right <= frame.right());
+            assert!(
+                l.name.y + px(18.) <= frame.bottom(),
+                "C{} inside the box",
+                l.core
+            );
+            let x = first.name.x + (layout.cell_w + px(8.)) * col as f32;
+            assert_eq!(l.name.x, x, "C{} in column {col}", l.core);
+            assert_eq!(l.name.y, first.name.y + px(18.) * row as f32, "C{}", l.core);
+            assert_eq!(l.pct_right, l.name.x + parts.pct_right);
+        }
+
+        // Name, sparkline, bar, percent from left to right in every row.
+        let quads = take_meter_quads();
+        for l in &labels {
+            let id: &'static str = Box::leak(core_spark_id(l.core).into_boxed_str());
+            let spark = r.vcx.debug_bounds(id).expect("sparkline drawn");
+            assert!(spark.top() >= l.name.y && spark.bottom() <= l.name.y + px(18.));
+            assert_eq!(spark.left(), l.name.x + parts.spark_x, "C{}", l.core);
+            let track = quads
+                .iter()
+                .find(|q| q.left() == l.name.x + parts.meter_x && q.top() > l.name.y)
+                .filter(|q| q.bottom() < l.name.y + px(18.))
+                .unwrap_or_else(|| panic!("C{} bar", l.core));
+            assert!(spark.right() < track.left(), "C{} spark before bar", l.core);
+            assert!(
+                track.right() < l.pct_right,
+                "C{} bar before percent",
+                l.core
+            );
+        }
+
+        // Too short for 4 columns of 16 px rows: the rows scroll, name and percent stay.
+        r.vcx.simulate_resize(size(px(800.), px(440.)));
+        let host = r.host.clone();
+        r.vcx.update(|_, cx| {
+            host.update(cx, |h, cx| {
+                h.cpu_h = 140.;
+                cx.notify();
+            })
+        });
+        take_core_labels();
+        draw(r.vcx);
+        let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
+        assert!(layout.scrolls, "{layout:?}");
+        assert_eq!((layout.cols, layout.rows, layout.row_h), (4, 8, px(16.)));
+        let view = r
+            .vcx
+            .debug_bounds(CORE_ROWS_SCROLL_ID)
+            .expect("scroll view");
+        assert!(view.size.height < layout.content_h(), "{view:?}");
+        let labels = last_labels();
+        assert_eq!(labels.len(), N);
+        assert_eq!(labels[1].name.y - labels[0].name.y, px(16.));
+        assert_eq!(
+            labels[8].name.y, labels[0].name.y,
+            "C8 tops the second column"
+        );
     }
 
     /// `CPU_TOTAL` of logical CPU 0 as `values` at 10 Hz ending now.

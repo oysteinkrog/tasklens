@@ -1,5 +1,6 @@
 //! The Overview page's CPU box (UI-PRF-017, D-022, UI-PRF-023): the total chart and one row per
-//! logical CPU (crw.53): name, sparkline, meter, percent and GHz.
+//! logical CPU (crw.53): name, sparkline, meter, percent and GHz. The rows are at least 16 px high
+//! and flow top to bottom into up to 4 columns, then scroll (D-029).
 //!
 //! The core rows show a moving average of each core's `CPU_TOTAL` (UI-PRF-018, D-024), and the
 //! core sparklines plot 1-second means. The total chart and the title value stay raw.
@@ -33,9 +34,9 @@ use super::super::cpu::{PowerState, SecondaryAvail, logical_devices};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE};
 use super::parts::{
-    ChartSettings, CoreBars, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, arrange_grid,
-    box_chart, box_frame, chart_section_versions, class_probe, core_bars_layout, core_sparks,
-    edit_chrome, grid_cells, is_wide, spark_chart, width_probe,
+    ChartSettings, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, arrange_grid, box_chart,
+    box_frame, chart_section_versions, class_probe, core_bars_layout, core_rows, edit_chrome,
+    grid_cells, is_wide, spark_chart, width_probe,
 };
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
@@ -907,10 +908,7 @@ impl CpuBox {
         div()
             .relative()
             .size_full()
-            .child(CoreBars {
-                model: Rc::clone(&self.bars),
-            })
-            .child(core_sparks(&self.sparks, &self.grid, m))
+            .child(core_rows(&self.bars, &self.sparks, &self.grid, m))
             .child(class_probe(
                 Rc::clone(&self.grid_size),
                 self.grid.class(),

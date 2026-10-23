@@ -38,11 +38,15 @@ use super::mem_box::{MeterRow, ROW_LABEL_W, ROW_VALUE_W, meter_row};
 /// The meter bar height, logical px before `ui_scale`.
 pub const METER_H: f32 = 6.;
 
-/// The narrowest core cell, logical px before `ui_scale` (crw.53). A 438 px side part (CPU box
-/// at 1200 × 900) holds 2 cells of 215 px.
-const CELL_MIN_W: f32 = 180.;
 /// The gap between core cells, logical px before `ui_scale`.
 const CELL_GAP: f32 = 8.;
+/// The most columns the core rows flow into before they scroll (D-029).
+const MAX_CORE_COLS: usize = 4;
+/// The width a scrolling core grid keeps for its scrollbar, logical px before `ui_scale`.
+const CORE_ROWS_BAR_W: f32 = 16.;
+/// The narrowest sparkline a core cell keeps; a narrower one is left out. Logical px before
+/// `ui_scale`.
+const CORE_SPARK_MIN_W: f32 = 12.;
 /// The core name column ("C12"), logical px before `ui_scale`.
 const NAME_W: f32 = 28.;
 /// The sparkline in a core cell, logical px before `ui_scale`.
@@ -53,15 +57,15 @@ const PCT_W: f32 = 36.;
 const GHZ_W: f32 = 44.;
 /// The gap between the parts of a core cell, logical px before `ui_scale`.
 const PART_GAP: f32 = 4.;
-/// The narrowest meter a core cell keeps. A narrower cell gives the meter's room to the
-/// sparkline. Logical px before `ui_scale`.
+/// The meter width a core cell keeps while its sparkline shrinks. Logical px before `ui_scale`.
 const CORE_METER_MIN_W: f32 = 16.;
 /// The space above and below a core sparkline in its row, logical px before `ui_scale`.
 const CORE_SPARK_INSET: f32 = 2.;
-/// The lowest row a squeezed core grid gets, logical px before `ui_scale`.
-const MIN_ROW_H: f32 = 12.;
-/// Rows lower than this hide the core labels, logical px before `ui_scale`.
-const LABELS_MIN_ROW_H: f32 = 14.;
+/// The lowest core row, logical px before `ui_scale` (D-029).
+const MIN_ROW_H: f32 = 16.;
+/// The narrowest core cell: the name and the percent with their gap. Logical px before
+/// `ui_scale`.
+const CELL_MIN_W: f32 = NAME_W + PART_GAP + PCT_W;
 /// The box title row, logical px before `ui_scale`.
 const TITLE_ROW: f32 = 24.;
 /// The two labels on the one time axis shared by every device box.
@@ -90,6 +94,29 @@ thread_local! {
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn take_meter_quads() -> Vec<Bounds<Pixels>> {
     METER_QUADS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    static CORE_LABELS: RefCell<Vec<CoreLabelPaint>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Where [`CoreBars`] painted one core's labels.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct CoreLabelPaint {
+    pub core: usize,
+    /// The top left of the name.
+    pub name: gpui_kit::Point<Pixels>,
+    /// The right edge of the percent.
+    pub pct_right: Pixels,
+    pub ghz: bool,
+}
+
+/// The core labels every [`CoreBars`] painted on this thread since the last call.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn take_core_labels() -> Vec<CoreLabelPaint> {
+    CORE_LABELS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// A horizontal meter as wide as its parent and `METER_H` high: a track quad (`theme.divider`)
@@ -334,9 +361,23 @@ impl CoreBarsModel {
 }
 
 /// A grid of per-core rows, as large as its parent. Each cell is a name, room for the sparkline
-/// ([`core_sparks`] draws it), a meter, a percent and a GHz label.
+/// ([`core_sparks`] draws it), a meter, a percent and, when there is room, a GHz label.
 pub struct CoreBars {
     pub model: Rc<RefCell<CoreBarsModel>>,
+}
+
+/// How a core cell shares its width (D-029). The GHz label goes first, then the sparkline
+/// shrinks, then the meter; the name and the percent always show.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CoreCellFit {
+    /// Name, 48 px sparkline, meter, percent and GHz.
+    Full,
+    /// Name, 48 px sparkline, meter and percent.
+    NoGhz,
+    /// Name, a sparkline under 48 px, a 16 px meter and percent.
+    SparkShrinks,
+    /// Name, a meter under 16 px (or none) and percent.
+    NoSpark,
 }
 
 /// Where the core cells go.
@@ -348,10 +389,9 @@ pub struct CoreBarsLayout {
     pub row_h: Pixels,
     /// True when the rows are lower than 18 px and share the height equally.
     pub squeezed: bool,
-    /// False when the rows are too low for the name, sparkline, percent and GHz.
-    pub labels: bool,
-    /// False when a cell is too narrow for its meter; the sparkline then takes its room.
-    pub meter: bool,
+    /// True when 16 px rows do not fit in 4 columns: the rows scroll under a scrollbar.
+    pub scrolls: bool,
+    pub fit: CoreCellFit,
 }
 
 impl CoreBarsLayout {
@@ -361,41 +401,81 @@ impl CoreBarsLayout {
         (self.cols.min(0x3ff) as u32)
             | ((self.rows.min(0xfff) as u32) << 10)
             | (u32::from(self.squeezed) << 22)
-            | (u32::from(self.labels) << 23)
-            | (u32::from(self.meter) << 24)
+            | (u32::from(self.scrolls) << 23)
+            | ((self.fit as u32) << 24)
+    }
+
+    /// The column and row of core `i`: the rows fill the first column top to bottom, then the
+    /// next (C0 to C15, then C16 to C31 for 32 CPUs in 2 columns).
+    pub fn cell_of(&self, i: usize) -> (usize, usize) {
+        let rows = self.rows.max(1);
+        (i / rows, i % rows)
+    }
+
+    /// The height of all rows: what a scrolling grid scrolls through.
+    pub fn content_h(&self) -> Pixels {
+        self.row_h * self.rows as f32
     }
 }
 
-/// The width a core cell needs before its meter, logical px before `ui_scale`: name, sparkline,
-/// percent and GHz with their 4 gaps.
-const CORE_FIXED_W: f32 = NAME_W + CORE_SPARK_W + PCT_W + GHZ_W + 4. * PART_GAP;
+/// The width a core cell needs for every part: name, sparkline, a 16 px meter, percent and GHz
+/// with their 4 gaps, logical px before `ui_scale`.
+const CORE_FULL_W: f32 = NAME_W + CORE_SPARK_W + CORE_METER_MIN_W + PCT_W + GHZ_W + 4. * PART_GAP;
+/// The same without the GHz label and its gap.
+const CORE_NO_GHZ_W: f32 = CORE_FULL_W - GHZ_W - PART_GAP;
+/// The cell width right of a shrinking sparkline: a gap, the 16 px meter, a gap and the percent.
+const CORE_SPARK_TAIL_W: f32 = PART_GAP + CORE_METER_MIN_W + PART_GAP + PCT_W;
 
-/// The grid for `n` cores in `w × h`: as many 180 px cells per row as fit, 18 px rows, squeezed
-/// down to 12 px when the rows do not fit. Labels and sparklines hide below 14 px. A cell
-/// narrower than 188 px has no meter.
+/// The grid for `n` cores in `w × h` (D-029): one column of rows at least 16 px high, or the
+/// fewest equal columns (at most 4) that fit them. When 16 px rows do not fit in 4 columns the
+/// rows stay 16 px and scroll, with room for the scrollbar. Rows are 18 px when they fit and
+/// share the height down to 16 px when not. A cell never gets narrower than its name and
+/// percent, so a narrow part takes fewer columns and scrolls sooner.
 pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsLayout {
     let n = n.max(1);
     let gap = CELL_GAP * scale;
-    let w = f32::from(w).max(0.);
-    let fit = ((w + gap) / (CELL_MIN_W * scale + gap)).floor() as usize;
-    let cols = fit.clamp(1, n);
+    let (w, h) = (f32::from(w).max(0.), f32::from(h).max(0.));
+    let min_row = MIN_ROW_H * scale;
+    let max_cols = |w: f32| {
+        (((w + gap) / (CELL_MIN_W * scale + gap)).floor() as usize).clamp(1, MAX_CORE_COLS)
+    };
+    let fits = |cols: usize| n.div_ceil(cols) as f32 * min_row <= h + 1e-3;
+    let (w, cols, scrolls) = match (1..=max_cols(w)).find(|&c| fits(c)) {
+        Some(cols) => (w, cols, false),
+        None => {
+            let w = (w - CORE_ROWS_BAR_W * scale).max(0.);
+            (w, max_cols(w), true)
+        }
+    };
     let rows = n.div_ceil(cols);
+    // The fewest columns for those rows, so no column is left empty.
+    let cols = n.div_ceil(rows);
     let cell_w = ((w - gap * (cols - 1) as f32) / cols as f32).max(0.);
-    let mut row_h = LABEL_ROW * scale;
-    let h = f32::from(h);
-    let squeezed = rows as f32 * row_h > h;
-    if squeezed {
-        row_h = (MIN_ROW_H * scale).max(h / rows as f32);
-    }
-    let labels = row_h >= LABELS_MIN_ROW_H * scale;
+    let full_row = LABEL_ROW * scale;
+    let (row_h, squeezed) = if scrolls {
+        (min_row, false)
+    } else if rows as f32 * full_row <= h + 1e-3 {
+        (full_row, false)
+    } else {
+        ((h / rows as f32).max(min_row), true)
+    };
+    let fit = if cell_w >= CORE_FULL_W * scale {
+        CoreCellFit::Full
+    } else if cell_w >= CORE_NO_GHZ_W * scale {
+        CoreCellFit::NoGhz
+    } else if cell_w >= (NAME_W + PART_GAP + CORE_SPARK_MIN_W + CORE_SPARK_TAIL_W) * scale {
+        CoreCellFit::SparkShrinks
+    } else {
+        CoreCellFit::NoSpark
+    };
     CoreBarsLayout {
         cols,
         rows,
         cell_w: px(cell_w),
         row_h: px(row_h),
         squeezed,
-        labels,
-        meter: labels && cell_w >= (CORE_FIXED_W + CORE_METER_MIN_W) * scale,
+        scrolls,
+        fit,
     }
 }
 
@@ -403,48 +483,48 @@ pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsL
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct CoreCell {
     pub spark_x: Pixels,
+    /// 0 when the cell has no sparkline.
     pub spark_w: Pixels,
     pub meter_x: Pixels,
-    /// 0 when the cell has no meter.
+    /// 0 when the cell has no room for a meter.
     pub meter_w: Pixels,
-    /// The right edge of the percent label; the GHz label ends at the cell's right edge.
+    /// The right edge of the percent label.
     pub pct_right: Pixels,
+    /// Whether the GHz label shows; it ends at the cell's right edge.
+    pub ghz: bool,
 }
 
-/// The parts of a cell of `l`. Without labels the meter is the whole cell.
+/// The parts of a cell of `l`, in the order name, sparkline, meter, percent, GHz.
 pub fn core_cell(l: &CoreBarsLayout, scale: f32) -> CoreCell {
     let cell = l.cell_w;
-    if !l.labels {
-        return CoreCell {
-            spark_x: px(0.),
-            spark_w: px(0.),
-            meter_x: px(0.),
-            meter_w: cell,
-            pct_right: cell,
-        };
-    }
     let gap = px(PART_GAP * scale);
     let spark_x = px(NAME_W * scale) + gap;
-    let tail = px((PCT_W + GHZ_W) * scale) + gap * 2.;
-    let pct_right = cell - px(GHZ_W * scale) - gap;
-    if l.meter {
-        let spark_w = px(CORE_SPARK_W * scale);
-        let meter_x = spark_x + spark_w + gap;
-        CoreCell {
-            spark_x,
-            spark_w,
-            meter_x,
-            meter_w: (cell - meter_x - tail).max(px(0.)),
-            pct_right,
-        }
+    let ghz = l.fit == CoreCellFit::Full;
+    let pct_right = if ghz {
+        cell - px(GHZ_W * scale) - gap
     } else {
-        CoreCell {
-            spark_x,
-            spark_w: (cell - spark_x - tail).max(px(0.)),
-            meter_x: cell - tail,
-            meter_w: px(0.),
-            pct_right,
+        cell
+    };
+    // The meter ends one gap before the percent column.
+    let meter_end = pct_right - px(PCT_W * scale) - gap;
+    let (spark_w, meter_x) = match l.fit {
+        CoreCellFit::Full | CoreCellFit::NoGhz => {
+            let spark_w = px(CORE_SPARK_W * scale);
+            (spark_w, spark_x + spark_w + gap)
         }
+        CoreCellFit::SparkShrinks => {
+            let meter_x = meter_end - px(CORE_METER_MIN_W * scale);
+            ((meter_x - gap - spark_x).max(px(0.)), meter_x)
+        }
+        CoreCellFit::NoSpark => (px(0.), spark_x),
+    };
+    CoreCell {
+        spark_x,
+        spark_w,
+        meter_x,
+        meter_w: (meter_end - meter_x).max(px(0.)),
+        pct_right,
+        ghz,
     }
 }
 
@@ -453,9 +533,13 @@ pub fn core_spark_id(i: usize) -> String {
     format!("perf-overview-core-spark-{i}")
 }
 
+/// The debug selector of the core rows' scrolling viewport.
+pub const CORE_ROWS_SCROLL_ID: &str = "perf-overview-core-rows-scroll";
+
 /// The sparklines over a [`CoreBars`] grid laid out as `l`, one cached chart per core in
-/// `charts`. A flex grid of the same columns, rows and gaps, so each sparkline sits in its painted
-/// cell at any size inside `l`'s class. Empty when the rows are too low for labels.
+/// `charts`. A flex grid of the same columns, rows and gaps, with the cores in the same
+/// column-first order, so each sparkline sits in its painted cell at any size inside `l`'s
+/// class. Empty when the cells have no room for a sparkline.
 pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetrics) -> Div {
     let s = m.ui_scale;
     let mut grid = div()
@@ -465,22 +549,22 @@ pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetri
         .size_full()
         .flex()
         .flex_col();
-    if !l.labels || charts.is_empty() {
+    if l.fit == CoreCellFit::NoSpark || charts.is_empty() {
         return grid;
     }
     let gap = px(PART_GAP * s);
     let left = px(NAME_W * s) + gap;
     let inset = px(CORE_SPARK_INSET * s);
-    let tail = px((PCT_W + GHZ_W) * s) + gap * 2.;
+    let tail = px(CORE_SPARK_TAIL_W * s);
     for r in 0..l.rows {
         let mut row = div().flex().flex_row().w_full().gap(px(CELL_GAP * s));
         row = if l.squeezed {
             row.flex_1().min_h(px(MIN_ROW_H * s))
         } else {
-            row.flex_none().h(px(LABEL_ROW * s))
+            row.flex_none().h(l.row_h)
         };
         for c in 0..l.cols {
-            let i = r * l.cols + c;
+            let i = c * l.rows + r;
             let mut cell = div().relative().flex_1().min_w_0().h_full();
             if let Some(chart) = charts.get(i) {
                 let spark = div()
@@ -489,10 +573,10 @@ pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetri
                     .top(inset)
                     .bottom(inset)
                     .left(left);
-                let spark = if l.meter {
-                    spark.w(px(CORE_SPARK_W * s))
-                } else {
+                let spark = if l.fit == CoreCellFit::SparkShrinks {
                     spark.right(tail)
+                } else {
+                    spark.w(px(CORE_SPARK_W * s))
                 };
                 cell = cell.child(
                     spark.child(chart.clone().cached(StyleRefinement::default().size_full())),
@@ -503,6 +587,40 @@ pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetri
         grid = grid.child(row);
     }
     grid
+}
+
+/// The core rows laid out as `l`: [`CoreBars`] with its sparklines over it, filling the part.
+/// When the rows scroll they are as high as all rows, in a viewport with a vertical scrollbar.
+pub fn core_rows(
+    model: &Rc<RefCell<CoreBarsModel>>,
+    charts: &[Entity<ChartView>],
+    l: &CoreBarsLayout,
+    m: &UiMetrics,
+) -> AnyElement {
+    let rows = div()
+        .relative()
+        .child(CoreBars {
+            model: Rc::clone(model),
+        })
+        .child(core_sparks(charts, l, m));
+    if !l.scrolls {
+        return rows.size_full().into_any_element();
+    }
+    // The rows leave the scrollbar's width free at the right, as `core_bars_layout` counts it.
+    let content = div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .w_full()
+        .h(l.content_h())
+        .child(rows.flex_1().min_w_0().h_full())
+        .child(div().flex_none().w(px(CORE_ROWS_BAR_W * m.ui_scale)));
+    div()
+        .size_full()
+        .child(content)
+        .overflow_y_scrollbar()
+        .id(CORE_ROWS_SCROLL_ID)
+        .into_any_element()
 }
 
 impl IntoElement for CoreBars {
@@ -588,7 +706,7 @@ impl Element for CoreBars {
             ..name_style
         };
         for i in 0..n {
-            let (col, row) = (i % l.cols, i / l.cols);
+            let (col, row) = l.cell_of(i);
             let x = bounds.left() + (l.cell_w + gap) * col as f32;
             let y = bounds.top() + l.row_h * row as f32;
             if parts.meter_w > px(0.) {
@@ -607,9 +725,6 @@ impl Element for CoreBars {
                     sf,
                 );
             }
-            if !l.labels {
-                continue;
-            }
             let name = &mut model.name_lines[i];
             let mut shaped = u32::from(name.sync(window, &model.names[i], name_style));
             labels::paint_line(window, cx, name, point(x, y), l.row_h);
@@ -617,12 +732,24 @@ impl Element for CoreBars {
             shaped += u32::from(pct.sync(window, &model.pct_text[i], num_style));
             let pct_x = x + parts.pct_right - pct.width();
             labels::paint_line(window, cx, pct, point(pct_x, y), l.row_h);
-            let ghz = &mut model.ghz_lines[i];
-            shaped += u32::from(ghz.sync(window, &model.ghz_text[i], num_style));
-            let ghz_x = x + l.cell_w - ghz.width();
-            labels::paint_line(window, cx, ghz, point(ghz_x, y), l.row_h);
+            if parts.ghz {
+                let ghz = &mut model.ghz_lines[i];
+                shaped += u32::from(ghz.sync(window, &model.ghz_text[i], num_style));
+                let ghz_x = x + l.cell_w - ghz.width();
+                labels::paint_line(window, cx, ghz, point(ghz_x, y), l.row_h);
+            }
             #[cfg(any(test, feature = "test-hooks"))]
-            model.shape_count.set(model.shape_count.get() + shaped);
+            {
+                model.shape_count.set(model.shape_count.get() + shaped);
+                CORE_LABELS.with(|q| {
+                    q.borrow_mut().push(CoreLabelPaint {
+                        core: i,
+                        name: point(x, y),
+                        pct_right: x + parts.pct_right,
+                        ghz: parts.ghz,
+                    });
+                });
+            }
             #[cfg(not(any(test, feature = "test-hooks")))]
             let _ = shaped;
         }
