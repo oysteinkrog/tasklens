@@ -43,6 +43,39 @@ it records history so you can look back at what used the CPU or memory.
 | **Low-memory rescue** | `tasklens-watch` runs as a systemd user service (one switch in Settings) and opens a small rescue window when memory runs out, so you can kill the culprit before the OOM killer picks |
 | **Tray graphs** | Tray icons that draw a live CPU, memory, disk, network or GPU graph |
 
+## Screenshots
+
+All six tabs, taken on the author's machine (a 16-core Ryzen with an NVIDIA RTX 5070 Ti) with
+the default dark theme. The machine ID and computer name on the Information tab are blurred.
+
+**Processes.** Apps first, then background processes, with live totals in the column headers.
+
+![The Processes tab](docs/img/processes.png)
+
+**Performance, CPU page.** One graph per logical CPU with the kernel share in red, a power draw
+strip, and the device sidebar on the left.
+
+![The CPU page of the Performance tab](docs/img/performance-cpu.png)
+
+**Performance, Overview page.** The overview image at the top of this README.
+
+**Services.** systemd system and user units with status, startup type, PID and path.
+
+![The Services tab](docs/img/services.png)
+
+**Startup Apps.** XDG autostart entries and whether each runs in this desktop.
+
+![The Startup Apps tab](docs/img/startup-apps.png)
+
+**Connections.** Every TCP and UDP socket with its state and owning process.
+
+![The Connections tab](docs/img/connections.png)
+
+**Information.** Operating system, processor, memory modules and system details, each with a
+copy button.
+
+![The Information tab](docs/img/information.png)
+
 ## Quick example
 
 ```sh
