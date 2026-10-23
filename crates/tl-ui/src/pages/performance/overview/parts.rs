@@ -615,12 +615,17 @@ pub fn core_rows(
         .h(l.content_h())
         .child(rows.flex_1().min_w_0().h_full())
         .child(div().flex_none().w(px(CORE_ROWS_BAR_W * m.ui_scale)));
+    // The selector sits on a plain wrapper: the scrollable's own element is its content.
     div()
         .size_full()
-        .child(content)
-        .overflow_y_scrollbar()
-        .id(CORE_ROWS_SCROLL_ID)
         .debug_selector(|| CORE_ROWS_SCROLL_ID.into())
+        .child(
+            div()
+                .size_full()
+                .child(content)
+                .overflow_y_scrollbar()
+                .id(CORE_ROWS_SCROLL_ID),
+        )
         .into_any_element()
 }
 
