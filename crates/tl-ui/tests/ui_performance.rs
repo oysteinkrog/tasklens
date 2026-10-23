@@ -2426,7 +2426,7 @@ mod summary {
     /// the right before the toggles, and draws it again on each new sample.
     #[gpui_kit::test]
     fn page_header_value_follows_the_card(cx: &mut TestAppContext) {
-        let mut r = open(cx, 1600., 1000., true);
+        let r = open(cx, 1600., 1000., true);
         let publish = |r: &Rig, version: u64, value: f32| {
             r.engine.publish_with(|s| {
                 let mut set = SeriesSet::default();

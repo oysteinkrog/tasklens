@@ -1341,7 +1341,8 @@ pub struct CardPrepared {
     pub height: Pixels,
     /// The mini graph width, zero when the card has no room for one ([`card_graph_width`]).
     pub graph_w: Pixels,
-    /// Whether the card draws its device icon: every device card does, the Overview card not.
+    /// Whether the card draws its device icon: every device card does, unless the value would
+    /// not fit next to it. The Overview card has none.
     pub icon: bool,
 }
 
@@ -1654,29 +1655,52 @@ impl DeviceCard {
                     });
                 px(f32::from(w).ceil())
             });
+            // The narrowest the value can be drawn: its widest part when it splits into number
+            // and unit rows.
+            let value_min_w = value.as_ref().map_or(Pixels::ZERO, |v| {
+                let mut part_w = |t: &str| match t.rsplit_once(' ') {
+                    Some((number, unit)) => {
+                        measure(CardFont::Value, number).max(measure(CardFont::Value, unit))
+                    }
+                    None => measure(CardFont::Value, t),
+                };
+                let w = v
+                    .templates
+                    .iter()
+                    .fold(part_w(&v.text), |w, t| w.max(part_w(t)));
+                px(f32::from(w).ceil())
+            });
             // Every device card shows its icon (UI-PRF-058); on a narrow card the graph gives
-            // way first, down to none (UI-PRF-011).
+            // way first, down to none (UI-PRF-011). Only a card too narrow for the value next to
+            // the icon even without a graph, below the least nav_width, drops the icon: a value is
+            // never cut.
             let floor = card_text_floor(value_w, &m);
             let icon_w = card_icon_column(&self.key, &m);
-            let icon = icon_w > Pixels::ZERO;
-            let inner_w = self.width - icon_w;
+            let icon = icon_w > Pixels::ZERO
+                && card_text_width(self.width - icon_w, Pixels::ZERO, &m) >= value_min_w;
+            let inner_w = if icon {
+                self.width - icon_w
+            } else {
+                self.width
+            };
             let clear = if top {
                 px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3]
             } else {
                 Pixels::ZERO
             };
             // On a card with the icon, the graph narrows so the value stays in the heading row
-            // when it can, rather than taking a row of its own and growing the card. The Overview
-            // card has no icon and keeps its value row.
+            // when it can, rather than taking a row of its own and growing the card. The top card
+            // keeps its graph, and its value takes its own row when the heading row, which ends
+            // before the edit button, has no room for it. The Overview card has no icon and
+            // keeps its value row.
             let inline_floor = card_text_floor(
                 px(f32::from(measure(CardFont::Heading, &self.lines.heading)).ceil())
                     + m.sp[3]
-                    + value_w
-                    + clear,
+                    + value_w,
                 &m,
             );
             let graph_w = match card_graph_width(inner_w, inline_floor, &m) {
-                w if icon && w > Pixels::ZERO && value_w > Pixels::ZERO => w,
+                w if icon && !top && w > Pixels::ZERO && value_w > Pixels::ZERO => w,
                 _ => card_graph_width(inner_w, floor, &m),
             };
             let layout = card_text_layout(

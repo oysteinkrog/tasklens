@@ -1219,12 +1219,12 @@ mod sidebar {
         r.host_w.set(252.);
         r.vcx.update(|window, _| window.refresh());
         draw(r.vcx);
-        // 236 − 24 (icon and gap) − 2 − 12 − 8 − 90 ("CPU", sp3, "100.0%" in one row) − 30
-        // (the edit button and sp3: the CPU card is the top card).
+        // 236 − 24 (icon and gap) − 2 − 12 − 8 − 80 (the least text column). The CPU card is
+        // the top card, so it keeps its graph rather than narrowing it for an inline value.
         assert_eq!(
             prepared(&mut r, "cpu").graph_w,
-            px(70.),
-            "graph at 252 next to the icon and the inline value"
+            px(110.),
+            "graph at 252 next to the icon"
         );
         assert!(prepared(&mut r, "cpu").icon, "device icon at 252");
         enter_edit(&mut r);
@@ -1293,6 +1293,35 @@ mod sidebar {
                 }
             }
         }
+    }
+
+    /// UI-PRF-058: at the least nav_width (180) and 200% UI scale every device card keeps its
+    /// 32 px icon, and every value fits its text column.
+    #[gpui_kit::test]
+    fn icons_kept_at_nav_width_180_at_200(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.update(|window, cx| {
+            let appearance = AppearanceSettings {
+                ui_scale_pct: 200,
+                ..AppearanceSettings::default()
+            };
+            assert!(tl_ui::theme::metrics::recompute(&appearance, cx));
+            window.refresh();
+        });
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(1800.)));
+        r.host_w.set(360.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
+        draw(r.vcx);
+        for key in keys(&mut r) {
+            assert!(prepared(&mut r, &key).icon, "{key} keeps its device icon");
+        }
+        let icon = r.vcx.debug_bounds("perf-card-icon").expect("card icon");
+        assert_eq!(icon.size.width, px(32.), "i_md at 200%");
+        assert_values_inside(&mut r, "nav_width 180 at 200%");
     }
 
     /// A card that is not first leaves no room for the edit button: moved below Memory, the CPU
@@ -1365,8 +1394,8 @@ mod sidebar {
         let col = text_column(&mut r, "net:eth0");
         assert_eq!(
             col.size.width,
-            px(82.),
-            "edit card: 180 - 2 × 8 - 52 - 2 × 8 - 2 - 12"
+            px(58.),
+            "edit card: 180 - 2 × 8 - 52 - 2 × 8 - 2 - 12 - 24 (icon and gap)"
         );
         for i in 0..2 {
             let id = sel(format!("perf-card-row:net:eth0:value:{i}"));
@@ -1452,12 +1481,9 @@ mod sidebar {
         draw(r.vcx);
         let before = prepared(&mut r, "cpu");
         assert_eq!(before.graph_w, px(0.), "no graph: {before:?}");
-        assert!(before.icon, "the device icon stays at 200%");
-        let icon = r
-            .vcx
-            .debug_bounds("perf-card-icon")
-            .expect("card icon at 200%");
-        assert_eq!(icon.size.width, px(32.), "i_md at 200%");
+        // 180 px at 200% is 90 px at 100%, below the least nav_width: the value does not fit
+        // next to the icon, so the icon gives way.
+        assert!(!before.icon, "no icon: {before:?}");
         assert_eq!(&*before.value.expect("value").text, "30.0%");
         let cpu_renders = |r: &mut Rig| {
             card_counts(r)
