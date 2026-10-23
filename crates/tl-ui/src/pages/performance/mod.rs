@@ -1578,4 +1578,13 @@ mod tests {
         assert_eq!(type_number(&visible, &key("disk:X")), 0);
         assert_eq!(type_number(&visible, &key("gpu:pci:A")), 0);
     }
+
+    #[test]
+    fn fans_are_numbered_from_zero_like_disks() {
+        // Fan, Disk and GPU share one rule: the first visible row of a kind is 0.
+        let visible = [row("fan:nct6797:1"), row("disk:X"), row("fan:nct6797:2")];
+        assert_eq!(type_number(&visible, &key("fan:nct6797:1")), 0);
+        assert_eq!(type_number(&visible, &key("fan:nct6797:2")), 1);
+        assert_eq!(type_number(&visible, &key("disk:X")), 0);
+    }
 }

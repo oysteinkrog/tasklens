@@ -361,7 +361,7 @@ element height = rows × cell_h + (rows − 1) × gap
 | GPU | "GPU N" | name, or "Unknown GPU" | "52 °C" | 3D/Compute engine (or the max engine, PERF-009 rule) | `10.9%` |
 | Disk | "Disk N" | "NVMe - /" (kind, " - ", primary mount; no mount: kind only) | model; from P2 "<model> · 41 °C" | active time | `0.1%` |
 | Network | `<ifname>` | type ("Ethernet", "Wi-Fi", "Tunnel", …) | `↓ 1.2 Mbps ↑ 0.3 Mbps` when both non-zero, else total rate, in `accent`; disconnected: the state word ("Disconnected") in `text_secondary` | download filled, upload dashed | total rate, e.g. `0.01 Mbps` |
-| Fan | "Fan N" or label | label (or chip) | "1200 RPM · 45 °C" | RPM | `1200 RPM` |
+| Fan | "Fan N" or label | label (or chip) | "45 °C" (empty without a paired sensor) | RPM | `1200 RPM` |
 | Battery | kind ("Battery", "Mouse", "UPS") | vendor and model | "85.0% · Discharging" | percentage (peripheral) or power (system battery) | `85.0%` |
 | Aggregate (P4) | "Aggregate storage" / "Aggregate graphics" | "3 disks" / "2 adapters" | "Multiple" when kinds differ, else the kind | busiest disk active / highest engine | percent |
 
@@ -1025,7 +1025,7 @@ row 3 (optional, P2): same split; present per performance.gpu_optional_graphs
 - **Anatomy**:
 
 ```
-Fan 1  nct6797                                                           (no toggles)
+Fan 0  nct6797                                                           (no toggles)
 sp4
 ┌ Fan speed                                               1200 RPM ┐  W × 150; RPM filled (Violet), PWM % dashed on a second 0..100 axis (right side, no labels; chosen)
 │ ── RPM  ── PWM                                           1800 RPM │  axis max = fanN_max when present (StickyUp hw_max), else sticky 1-2-5
@@ -1038,10 +1038,12 @@ sp4
 
 - **Details rows**: Fan speed (`1200 RPM`), PWM (`45%`), Control mode (`Automatic` / `Manual` / `Full speed`), Temperature (`45 °C`; `Not reported` when no sensor is paired), Chip (`nct6797`).
 - **Interaction**: page menu page-specific items (P3): "Rename fan…" → `PerfRenameFan { key }` opens a `TlDialog` with one text input (default the current label, placeholder "Fan name") and buttons "Rename" (primary) and "Cancel"; empty input restores the default label. "Temperature sensor >" → radio items, one per hwmon temperature `"<chip> <label>  48 °C"` (value right-aligned in `text_secondary`) plus "None" → `PerfSetFanTempSensor { key, sensor }`.
+- **Numbering**: fans are numbered from 0 among the visible fans, the same rule as "Disk 0" and "GPU 0" (`type_number`).
+- **Sensor list**: the "Temperature sensor" submenu hides sensors that read -128 °C or exactly 0 °C, unless the sensor is the one currently paired or has history in the session.
 - **Sidebar visibility**: fans that read 0 RPM for the whole session and have no label are hidden unless `performance.show_disconnected_fans` (Settings, shell spec).
 - **Data binding**: series `fan.rpm`, `fan.pwm`, `temp.<sensor>` at 1 Hz; demand `sensors`.
 - **Build**: `pages/performance/sensors.rs` `FanPage`.
-- **Tests**: `fan_choose_a_sensor_state`, `fan_rename_empty_restores_default`.
+- **Tests**: `fan_choose_a_sensor_state`, `fan_choose_a_sensor_inside_temperature_plot`, `fan_rename_empty_restores_default`, `fans_are_numbered_from_zero_like_disks`.
 - **Phase**: P2 (page); P3 (rename and sensor menu).
 - **Decided here**: dual axis for PWM, rename dialog layout, sensor item format.
 
