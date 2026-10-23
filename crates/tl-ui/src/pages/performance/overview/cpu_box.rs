@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    AnyElement, Context, Div, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, Size, StatefulInteractiveElement as _,
     StyleRefinement, Styled as _, Subscription, Window, div, px, relative, size,
 };
@@ -31,11 +31,11 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::super::cpu::{PowerState, SecondaryAvail, logical_devices};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
-use super::layout::{BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE};
+use super::layout::{Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE};
 use super::parts::{
-    ChartSettings, CoreBars, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, box_chart,
-    box_frame, chart_section_versions, class_probe, core_bars_layout, core_sparks, is_wide,
-    spark_chart, split_body_share, width_probe,
+    ChartSettings, CoreBars, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, arrange_grid,
+    box_chart, box_frame, chart_section_versions, class_probe, core_bars_layout, core_sparks,
+    grid_cells, is_wide, spark_chart, split_body_share, width_probe,
 };
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
@@ -106,11 +106,22 @@ pub const MODES: &[BoxMode] = &[
     },
 ];
 
+/// The modes with an Arrange choice (UI-PRF-019, D-027): the grid of `core_charts` and the two
+/// parts of `chart_cores`, automatic by default.
+pub const ARRANGE: &[(&str, ArrangeChoice)] = &[
+    ("chart_cores", ArrangeChoice::Saved(Arrange::Auto)),
+    ("core_charts", ArrangeChoice::Saved(Arrange::Auto)),
+];
+
 /// The smallest cell of the `core_charts` grid, logical px before `ui_scale` (UI-PRF-019).
 pub const CORE_CHART_MIN: (f32, f32) = (120., 60.);
 
 /// The gap between `core_charts` cells, logical px before `ui_scale`.
 const CORE_CHART_GAP: f32 = 8.;
+
+/// The width a one-column `core_charts` grid keeps for its scrollbar when it scrolls, logical
+/// px before `ui_scale`.
+const CORE_GRID_BAR_W: f32 = 16.;
 
 /// The debug selector of the `core_charts` grid.
 pub const CORE_CHARTS_ID: &str = "perf-overview-core-charts";
@@ -374,6 +385,9 @@ pub struct CpuBox {
     /// `performance.overview_core_smoothing`, and the average of each entry of `logical`.
     smoothing: CoreSmoothing,
     averages: Vec<CoreAverage>,
+    /// Whether the last render put the core rows beside the chart: the box is wide and the
+    /// arrangement is automatic, or the arrangement is Side by side.
+    side: bool,
     /// The core grid's size at the last paint, and the layout the last render used.
     grid_size: Rc<Cell<Size<Pixels>>>,
     grid: CoreBarsLayout,
@@ -388,6 +402,8 @@ pub struct CpuBox {
     width: Rc<Cell<Pixels>>,
     wide: bool,
     mode: CpuMode,
+    /// How `core_charts` places its cells and `chart_cores` its two parts (D-027).
+    arrange: Arrange,
     /// The gap between the chart and the core rows (UI-PRF-018 "CPU box splitter").
     split: InnerSplit,
     /// Whether the power draw strip is switched on, and whether RAPL can be read.
@@ -437,7 +453,9 @@ impl CpuBox {
             text_bits: 0,
             width: Rc::new(Cell::new(px(0.))),
             wide: true,
+            side: true,
             mode: CpuMode::ChartCores,
+            arrange: Arrange::Auto,
             split: InnerSplit::new(
                 CPU_SPLITTER_ID,
                 CPU_SPLITTER_LINE_ID,
@@ -498,9 +516,26 @@ impl CpuBox {
         (&self.title, &self.value, &self.line)
     }
 
-    /// Whether the last render put the bars beside the chart (box at least 560 px wide).
+    /// Whether the last render put the bars beside the chart (box at least 560 px wide, or the
+    /// arrangement is Side by side).
     pub fn side_by_side(&self) -> bool {
-        self.wide
+        self.side
+    }
+
+    /// How `core_charts` places its cells and `chart_cores` its parts.
+    pub fn arrange(&self) -> Arrange {
+        self.arrange
+    }
+
+    /// Places the `core_charts` cells and the `chart_cores` parts as `arrange` says. Only this
+    /// box renders again, and only in a mode the choice applies to.
+    pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
+        if arrange != self.arrange {
+            self.arrange = arrange;
+            if matches!(self.mode, CpuMode::ChartCores | CpuMode::CoreCharts) {
+                cx.notify();
+            }
+        }
     }
 
     /// The chart's share of the body as the box lays it out, after the clamps.
@@ -885,6 +920,9 @@ impl CpuBox {
         let n = self.logical.len();
         let s = m.ui_scale;
         let gap = px(CORE_CHART_GAP * s);
+        if self.arrange != Arrange::Auto {
+            return self.core_charts_arranged(m, theme, cx);
+        }
         let (cols, rows) = core_chart_dims(n, self.grid_size.get().width, s);
         let bars = self.bars.borrow();
         let mut grid = div()
@@ -910,27 +948,7 @@ impl CpuBox {
                     row = row.child(cell);
                     continue;
                 };
-                let mut name = div();
-                *name.text_style() = t_xs(m);
-                let mut pct = div();
-                *pct.text_style() = numeric_style(m, m.text.xs);
-                let cell = cell
-                    .debug_selector(move || core_chart_id(i))
-                    .child(chart.clone().cached(StyleRefinement::default().size_full()))
-                    .child(
-                        name.absolute()
-                            .top(px(2. * s))
-                            .left(px(4. * s))
-                            .text_color(theme.text_secondary)
-                            .child(SharedString::from(bars.name(i).to_owned())),
-                    )
-                    .child(
-                        pct.absolute()
-                            .top(px(2. * s))
-                            .right(px(4. * s))
-                            .text_color(theme.text_primary)
-                            .child(SharedString::from(bars.pct_label(i).to_owned())),
-                    );
+                let cell = core_cell(cell, i, chart, &bars, m, theme);
                 row = row.child(cell);
             }
             grid = grid.child(row);
@@ -947,6 +965,89 @@ impl CpuBox {
                     let (cols, rows) = core_chart_dims(n, size.width, s);
                     (cols | (rows << 10)) as u32
                 },
+                cx.entity_id(),
+            ))
+            .into_any_element()
+    }
+}
+
+/// The chart of core `i` as `cell`: the name at the top left, the smoothed percent at the top
+/// right.
+fn core_cell(
+    cell: Div,
+    i: usize,
+    chart: &Entity<ChartView>,
+    bars: &CoreBarsModel,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> Div {
+    let s = m.ui_scale;
+    let mut name = div();
+    *name.text_style() = t_xs(m);
+    let mut pct = div();
+    *pct.text_style() = numeric_style(m, m.text.xs);
+    cell.debug_selector(move || core_chart_id(i))
+        .child(chart.clone().cached(StyleRefinement::default().size_full()))
+        .child(
+            name.absolute()
+                .top(px(2. * s))
+                .left(px(4. * s))
+                .text_color(theme.text_secondary)
+                .child(SharedString::from(bars.name(i).to_owned())),
+        )
+        .child(
+            pct.absolute()
+                .top(px(2. * s))
+                .right(px(4. * s))
+                .text_color(theme.text_primary)
+                .child(SharedString::from(bars.pct_label(i).to_owned())),
+        )
+}
+
+impl CpuBox {
+    /// `core_charts` in one column or one row: every cell an equal share of the grid, at least
+    /// the minimum cell. Cells that do not fit scroll under a scrollbar.
+    fn core_charts_arranged(
+        &self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let n = self.logical.len();
+        let s = m.ui_scale;
+        let (arrange, gap) = (self.arrange, px(CORE_CHART_GAP * s));
+        let min = size(px(CORE_CHART_MIN.0 * s), px(CORE_CHART_MIN.1 * s));
+        let bar = px(CORE_GRID_BAR_W * s);
+        let fit = arrange_grid(arrange, n, self.grid_size.get(), min, gap, bar);
+        let bars = self.bars.borrow();
+        let cells = grid_cells(
+            &fit,
+            self.sparks.iter().take(n).enumerate().map(|(i, chart)| {
+                let cell = div()
+                    .relative()
+                    .flex_none()
+                    .w(fit.cell.width)
+                    .h(fit.cell.height);
+                core_cell(cell, i, chart, &bars, m, theme).into_any_element()
+            }),
+            gap,
+            CORE_CHARTS_ID,
+        );
+        drop(bars);
+        div()
+            .relative()
+            .size_full()
+            .child(
+                div()
+                    .debug_selector(|| CORE_CHARTS_ID.into())
+                    .size_full()
+                    .overflow_hidden()
+                    .child(cells),
+            )
+            .child(class_probe(
+                Rc::clone(&self.grid_size),
+                fit.class(),
+                move |size| arrange_grid(arrange, n, size, min, gap, bar).class(),
                 cx.entity_id(),
             ))
             .into_any_element()
@@ -1009,6 +1110,11 @@ impl Render for CpuBox {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         self.wide = is_wide(self.width.get(), m.ui_scale);
+        self.side = match self.arrange {
+            Arrange::Auto => self.wide,
+            Arrange::Vertical => false,
+            Arrange::Horizontal => true,
+        };
         let body: AnyElement = match self.mode {
             CpuMode::Chart => self.chart_part(),
             CpuMode::Cores => self.rows_part(&m, cx),
@@ -1017,13 +1123,13 @@ impl Render for CpuBox {
                 let chart = self.chart_part();
                 let rows = self.rows_part(&m, cx);
                 let share = self.split(&m);
-                let split = split_body_share(chart, rows, self.wide, share, &m);
+                let split = split_body_share(chart, rows, self.side, share, &m);
                 let mut body = div()
                     .relative()
                     .size_full()
                     .child(split)
                     .child(self.split.probe(Self::inner_split, cx));
-                if self.wide {
+                if self.side {
                     body = body.child(self.split.gap(
                         SplitAxis::Row,
                         share,

@@ -40,10 +40,13 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
-use super::disk_box::{GRID_CELL_MIN_H, charts_fit, more_line};
+use super::disk_box::more_line;
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
-use super::layout::{ArrangeChoice, BoxMode};
-use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions, class_probe};
+use super::layout::{Arrange, ArrangeChoice, BoxMode};
+use super::parts::{
+    ChartSettings, GridFit, arrange_grid, box_chart, box_frame, chart_section_versions,
+    class_probe, grid_cells,
+};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
@@ -94,8 +97,22 @@ const SWITCH: ArrangeChoice = ArrangeChoice::Modes {
     horizontal: "columns",
 };
 
-/// The modes with an Arrange choice.
-pub const ARRANGE: &[(&str, ArrangeChoice)] = &[("stacked", SWITCH), ("columns", SWITCH)];
+/// The modes with an Arrange choice: `adapter_charts` saves its own, one column by default.
+pub const ARRANGE: &[(&str, ArrangeChoice)] = &[
+    ("stacked", SWITCH),
+    ("columns", SWITCH),
+    ("adapter_charts", ArrangeChoice::Saved(Arrange::Vertical)),
+];
+
+/// The smallest `adapter_charts` cell, logical px before `ui_scale`.
+const GRID_CELL_MIN_W: f32 = 200.;
+const GRID_CELL_MIN_H: f32 = 80.;
+
+/// The width an `adapter_charts` grid keeps for its scrollbar when it scrolls, logical px.
+const GRID_BAR_W: f32 = 16.;
+
+/// The debug selector of the `adapter_charts` grid viewport.
+pub const GRID_ID: &str = "perf-overview-net-grid";
 
 /// The debug selector of the splitter between the stacked Download and Upload parts.
 pub const NET_STACK_SPLITTER_ID: &str = "perf-overview-net-stack-splitter";
@@ -429,6 +446,8 @@ pub struct NetBox {
     /// Download and upload as two lines of the aggregate series (`combined`).
     combined: Entity<ChartView>,
     mode: NetMode,
+    /// How `adapter_charts` places its cells (D-027).
+    arrange: Arrange,
     /// The gap between the Download and Upload parts (`stacked`).
     stack_split: InnerSplit,
     /// The gap between the Download and Upload columns (`columns`).
@@ -508,6 +527,7 @@ impl NetBox {
             up,
             combined,
             mode: NetMode::Stacked,
+            arrange: Arrange::Vertical,
             stack_split: InnerSplit::new(
                 NET_STACK_SPLITTER_ID,
                 NET_STACK_SPLITTER_LINE_ID,
@@ -624,6 +644,22 @@ impl NetBox {
     /// The interface indexes of the `adapter_charts` cells, in catalog order.
     pub fn adapter_idxs(&self) -> Vec<DeviceIdx> {
         self.adapters.iter().map(|a| a.idx).collect()
+    }
+
+    /// How `adapter_charts` places its cells.
+    pub fn arrange(&self) -> Arrange {
+        self.arrange
+    }
+
+    /// Places the `adapter_charts` cells as `arrange` says. Only this box renders again, and
+    /// only when it shows `adapter_charts`.
+    pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
+        if arrange != self.arrange {
+            self.arrange = arrange;
+            if self.mode == NetMode::AdapterCharts {
+                cx.notify();
+            }
+        }
     }
 
     /// How many `adapter_charts` cells the last render showed.
@@ -1075,16 +1111,53 @@ fn cell_head(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .into_any_element()
 }
 
-/// An `adapter_charts` cell: the header over the combined chart.
-fn chart_cell(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+/// The smallest `adapter_charts` cell, in px.
+fn cell_min(m: &UiMetrics) -> Size<Pixels> {
+    size(
+        px(GRID_CELL_MIN_W * m.ui_scale),
+        px(GRID_CELL_MIN_H * m.ui_scale),
+    )
+}
+
+/// The `adapter_charts` grid for `rows` cells in `body`, placed as `arrange` says
+/// (`arrange_grid`). Every counted adapter gets a cell; the "+n more" line for adapters past
+/// `MAX_ADAPTER_CELLS` takes its height from the body first. Before the first paint the body is
+/// empty and the fit is one column or one row.
+fn charts_fit(
+    arrange: Arrange,
+    body: Size<Pixels>,
+    rows: usize,
+    total: usize,
+    m: &UiMetrics,
+) -> GridFit {
+    let gap = f32::from(m.sp[2]);
+    let more = if total > rows {
+        LABEL_ROW * m.ui_scale + gap
+    } else {
+        0.
+    };
+    let area = size(body.width, px((f32::from(body.height) - more).max(0.)));
+    arrange_grid(
+        arrange,
+        rows,
+        area,
+        cell_min(m),
+        m.sp[2],
+        px(GRID_BAR_W * m.ui_scale),
+    )
+}
+
+/// An `adapter_charts` cell of `cell` px: the header over the combined chart.
+fn chart_cell(a: &AdapterCell, cell: Size<Pixels>, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let idx = a.idx;
     div()
         .debug_selector(move || cell_id(idx))
         .flex()
         .flex_col()
-        .flex_1()
-        .min_w_0()
-        .min_h(px(GRID_CELL_MIN_H * m.ui_scale))
+        .flex_none()
+        .w(cell.width)
+        .h(cell.height)
+        .overflow_hidden()
         .gap(m.sp[2])
         .child(cell_head(a, m, theme))
         .child(
@@ -1268,7 +1341,8 @@ impl NetBox {
         }
     }
 
-    /// `adapter_charts`: a grid of one combined chart per counted adapter.
+    /// `adapter_charts`: one combined chart per counted adapter in one column, one row or a
+    /// grid. Cells that do not fit scroll under a scrollbar.
     fn charts_body(
         &mut self,
         m: &UiMetrics,
@@ -1277,47 +1351,42 @@ impl NetBox {
     ) -> AnyElement {
         let rows = self.adapters.len();
         let total = rows + self.extra;
-        let shown = charts_fit(self.body.get(), rows, total, m);
-        self.cells = shown.shown;
+        let arrange = self.arrange;
+        let fit = charts_fit(arrange, self.body.get(), rows, total, m);
+        self.cells = rows;
+        let cells = grid_cells(
+            &fit,
+            self.adapters
+                .iter()
+                .map(|a| chart_cell(a, fit.cell, m, theme)),
+            m.sp[2],
+            GRID_ID,
+        );
         let mut body = div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
             .overflow_hidden()
-            .gap(m.sp[2]);
-        let mut grid = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .gap(m.sp[2]);
-        for chunk in self.adapters[..shown.shown].chunks(shown.cols) {
-            let mut line = div()
-                .flex()
-                .flex_row()
-                .flex_1()
-                .min_h(px(GRID_CELL_MIN_H * m.ui_scale))
-                .gap(m.sp[2]);
-            for a in chunk {
-                line = line.child(chart_cell(a, m, theme));
-            }
-            for _ in chunk.len()..shown.cols {
-                line = line.child(div().flex_1().min_w_0());
-            }
-            grid = grid.child(line);
-        }
-        body = body.child(grid);
-        let more = self.more_text(shown.shown, cx);
+            .gap(m.sp[2])
+            .child(
+                div()
+                    .debug_selector(|| GRID_ID.into())
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(cells),
+            );
+        let more = self.more_text(rows, cx);
         if !more.is_empty() {
             body = body.child(more_line(more, m, theme));
         }
         let probe_m = *m;
         body.child(class_probe(
             Rc::clone(&self.body),
-            shown.class(),
-            move |b| charts_fit(b, rows, total, &probe_m).class(),
+            fit.class(),
+            move |b| charts_fit(arrange, b, rows, total, &probe_m).class(),
             cx.entity_id(),
         ))
         .into_any_element()

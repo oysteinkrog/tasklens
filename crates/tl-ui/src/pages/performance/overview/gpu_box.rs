@@ -26,11 +26,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
-    Styled as _, Subscription, Window, div, px, size,
+    Styled as _, Subscription, Window, div, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -44,12 +43,12 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::super::gpu::{GpuVendor, gpu_totals, grid_engines, shown_engines};
 use super::cpu_box::value_text;
-use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
-use super::layout::BoxMode;
+use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
+use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_box::MeterRow;
 use super::parts::{
-    ChartSettings, GridFit, MIN_CHART_H, SPARK_GRID, box_chart, box_frame, chart_section_versions,
-    class_probe, fill_grid, grid_min_h, meter_fits, spark_chart, spark_row,
+    ChartSettings, GridFit, MIN_CHART_H, SPARK_GRID, arrange_grid, arrange_min_h, box_chart,
+    box_frame, chart_section_versions, class_probe, grid_cells, meter_fits, spark_chart, spark_row,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -86,6 +85,13 @@ pub const MODES: &[BoxMode] = &[
         label: "perf-overview-mode-chart",
         split: None,
     },
+];
+
+/// The modes with an Arrange choice (UI-PRF-019, D-027): the grid of `engine_charts` and the two
+/// parts of `chart_engines` (chart on top, or on the left for Side by side), automatic by default.
+pub const ARRANGE: &[(&str, ArrangeChoice)] = &[
+    ("engine_charts", ArrangeChoice::Saved(Arrange::Auto)),
+    ("chart_engines", ArrangeChoice::Saved(Arrange::Auto)),
 ];
 
 /// The debug selector of the splitter under the first chart in `chart_engines`.
@@ -384,8 +390,14 @@ fn charts_fixed_h(engines: usize, lines: usize, heading: bool, m: &UiMetrics) ->
 
 /// What `engine_charts` fits in `body`. Both sections show when both grids fit at the smallest
 /// cells, else the first with "+n more" for the others. The spare height goes to the grids in
-/// equal parts, and each grid fills its part (`fill_grid`). A grid that does not fit scrolls.
-fn charts_fit(body: Size<Pixels>, engines: &[usize], total: usize, m: &UiMetrics) -> ChartsFit {
+/// equal parts, and each grid fills its part (`arrange_grid`). A grid that does not fit scrolls.
+fn charts_fit(
+    arrange: Arrange,
+    body: Size<Pixels>,
+    engines: &[usize],
+    total: usize,
+    m: &UiMetrics,
+) -> ChartsFit {
     let count = engines.len().min(MAX_GPUS);
     let mut fit = ChartsFit {
         sections: count,
@@ -396,7 +408,8 @@ fn charts_fit(body: Size<Pixels>, engines: &[usize], total: usize, m: &UiMetrics
     }
     let (_, gap, section_gap) = spacing(m);
     let (min, gap_px) = (cell_min(m), px(gap));
-    let min_grid = |i: usize| f32::from(grid_min_h(engines[i], body.width, min, gap_px));
+    let min_grid =
+        |i: usize| f32::from(arrange_min_h(arrange, engines[i], body.width, min, gap_px));
     let more = |shown: usize| usize::from(total > shown);
     if body.height > px(0.) {
         fit.sections = 1;
@@ -421,7 +434,14 @@ fn charts_fit(body: Size<Pixels>, engines: &[usize], total: usize, m: &UiMetrics
     let bar = px(GRID_BAR_W * m.ui_scale);
     for (i, grid) in fit.grids.iter_mut().enumerate().take(n) {
         let h = (min_grid(i) + spare).max(0.);
-        *grid = fill_grid(engines[i], size(body.width, px(h)), min, gap_px, bar);
+        *grid = arrange_grid(
+            arrange,
+            engines[i],
+            size(body.width, px(h)),
+            min,
+            gap_px,
+            bar,
+        );
     }
     fit
 }
@@ -451,18 +471,20 @@ fn engine_lines(engines: usize, collapsed: bool) -> usize {
 }
 
 /// The content height of a section, in px: its heading row (`heading`), a `MIN_CHART_H` chart
-/// and `lines` body rows.
-fn section_h(lines: usize, heading: bool, m: &UiMetrics) -> f32 {
+/// and `lines` body rows. `side` puts the chart beside the rows, so the section is as high as
+/// the taller of the two.
+fn section_h(lines: usize, heading: bool, side: bool, m: &UiMetrics) -> f32 {
     let (row, gap, _) = spacing(m);
     let head = if heading { row + gap } else { 0. };
-    head + MIN_CHART_H * m.ui_scale + lines as f32 * (gap + row)
+    let (chart, rows) = (MIN_CHART_H * m.ui_scale, lines as f32 * (gap + row));
+    head + if side { chart.max(rows) } else { chart + rows }
 }
 
 /// What fits a body of `body` (everything before the first paint). `rows` has each section's
 /// body rows and `total` counts every GPU; those without a section get a "+n more" row under the
 /// last section. Both sections show only when both fit in full. Otherwise one section shows, and
 /// when its rows do not fit, only its busiest engine and "+n more engines".
-fn fit(body: Size<Pixels>, rows: &[SectionRows], total: usize, m: &UiMetrics) -> Fit {
+fn fit(body: Size<Pixels>, rows: &[SectionRows], total: usize, side: bool, m: &UiMetrics) -> Fit {
     let meters = meter_fits(body.width, m);
     let count = rows.len();
     if body.height == px(0.) || count == 0 {
@@ -477,9 +499,9 @@ fn fit(body: Size<Pixels>, rows: &[SectionRows], total: usize, m: &UiMetrics) ->
     let h = f32::from(body.height);
     let lines = |r: SectionRows, collapsed: bool| engine_lines(r.engines, collapsed) + r.rest;
     if count >= 2 {
-        let two = section_h(lines(rows[0], false), false, m)
+        let two = section_h(lines(rows[0], false), false, side, m)
             + section_gap
-            + section_h(lines(rows[1], false) + more(2), true, m);
+            + section_h(lines(rows[1], false) + more(2), true, side, m);
         if h >= two {
             return Fit {
                 sections: 2,
@@ -488,7 +510,7 @@ fn fit(body: Size<Pixels>, rows: &[SectionRows], total: usize, m: &UiMetrics) ->
             };
         }
     }
-    let full = section_h(lines(rows[0], false) + more(1), false, m);
+    let full = section_h(lines(rows[0], false) + more(1), false, side, m);
     Fit {
         sections: 1,
         collapsed: h < full && rows[0].engines > 2,
@@ -537,6 +559,8 @@ pub struct GpuBox {
     hub: Entity<SnapshotHub>,
     sections: SmallVec<[GpuSection; 2]>,
     mode: GpuMode,
+    /// How `engine_charts` places its cells (D-027).
+    arrange: Arrange,
     /// The gap under the first chart (`chart_engines`).
     chart_split: InnerSplit,
     /// GPUs past `MAX_GPUS`.
@@ -573,6 +597,7 @@ impl GpuBox {
             hub: hub.clone(),
             sections: SmallVec::new(),
             mode: GpuMode::EngineCharts,
+            arrange: Arrange::Auto,
             chart_split: InnerSplit::new(
                 GPU_SPLITTER_ID,
                 GPU_SPLITTER_LINE_ID,
@@ -650,13 +675,35 @@ impl GpuBox {
         }
     }
 
+    /// How `engine_charts` places its cells and `chart_engines` its parts.
+    pub fn arrange(&self) -> Arrange {
+        self.arrange
+    }
+
+    /// Places the `engine_charts` cells and the `chart_engines` parts as `arrange` says. Only this
+    /// box renders again, and only in a mode the choice applies to.
+    pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
+        if arrange != self.arrange {
+            self.arrange = arrange;
+            if matches!(self.mode, GpuMode::EngineCharts | GpuMode::ChartEngines) {
+                cx.notify();
+            }
+        }
+    }
+
     /// The first chart's share of the body as laid out in `chart_engines`, after the clamps; 0 in
     /// the other modes.
     pub fn split(&self, m: &UiMetrics) -> f32 {
         match self.mode {
-            GpuMode::ChartEngines => self
-                .chart_split
-                .share(SplitAxis::Column, m.sp[5], m.ui_scale),
+            GpuMode::ChartEngines => self.chart_split.share(
+                if self.arrange == Arrange::Horizontal {
+                    SplitAxis::Row
+                } else {
+                    SplitAxis::Column
+                },
+                m.sp[5],
+                m.ui_scale,
+            ),
             _ => 0.,
         }
     }
@@ -1206,7 +1253,8 @@ impl GpuBox {
             .collect();
         let total = self.sections.len() + self.more;
         let body_size = self.body.get();
-        let shown = fit(body_size, &rows, total, m);
+        let side = mode == GpuMode::ChartEngines && self.arrange == Arrange::Horizontal;
+        let shown = fit(body_size, &rows, total, side, m);
         self.shown = shown.sections;
         self.collapsed = shown.collapsed;
         self.meters = shown.meters;
@@ -1226,12 +1274,19 @@ impl GpuBox {
             .collect();
         let mut split_share = None;
         let mut custom_chart_h = None;
-        if with_rows && shown.sections > 0 {
+        if side && shown.sections > 0 {
+            // The chart takes a share of the width; the untouched default is half of it.
+            self.chart_split.set_mins(PART_MIN, PART_MIN);
+            let w = f32::from(body_size.width);
+            self.chart_split
+                .set_default_second_px(((w - f32::from(m.sp[5])) / 2. / s).max(0.));
+            split_share = Some(self.chart_split.share(SplitAxis::Row, m.sp[5], s));
+        } else if with_rows && shown.sections > 0 {
             let n = shown.sections as f32;
             let basis: f32 = lines
                 .iter()
                 .enumerate()
-                .map(|(i, l)| section_h(*l, i > 0, m))
+                .map(|(i, l)| section_h(*l, i > 0, false, m))
                 .sum();
             let spare = (len - basis - (n - 1.) * section_gap).max(0.);
             // Everything under the first chart: its rows, then the later sections at their
@@ -1240,7 +1295,7 @@ impl GpuBox {
             let under = basis + (n - 1.) * section_gap - MIN_CHART_H * s;
             let min_second = ((under - f32::from(m.sp[5])) / s).max(0.);
             self.chart_split.set_mins(MIN_CHART_H, min_second);
-            let first_h = section_h(lines[0], false, m) + spare / n;
+            let first_h = section_h(lines[0], false, false, m) + spare / n;
             let chart_h =
                 (first_h - lines[0] as f32 * (gap + f32::from(row_h))).max(MIN_CHART_H * s);
             let second = (len - f32::from(m.sp[5]) - chart_h).max(0.) / s;
@@ -1275,7 +1330,7 @@ impl GpuBox {
                     .flex_basis(px(h + lines[i] as f32 * (gap + f32::from(row_h)))),
                 None => col
                     .flex_grow(1.)
-                    .flex_basis(px(section_h(lines[i], i > 0, m))),
+                    .flex_basis(px(section_h(lines[i], i > 0, side, m))),
             };
             if i > 0 {
                 col = col.child(section_heading(section, row_h, m, theme));
@@ -1315,8 +1370,22 @@ impl GpuBox {
             let chart = div()
                 .debug_selector(move || chart_id(i))
                 .min_h(px(MIN_CHART_H * s))
-                .w_full()
                 .child(chart_element(section));
+            if let Some(share) = split_share.filter(|_| side) {
+                // Side by side: the chart takes the share of the width, the rows the rest.
+                let parts = div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .gap(m.sp[5])
+                    .child(chart.flex_none().w(relative(share)).h_full())
+                    .child(section_rows.flex_1().min_w_0());
+                body = body.child(col.child(parts));
+                continue;
+            }
+            let chart = chart.w_full();
             let chart = match fixed {
                 Some(h) => chart.flex_none().h(px(h)),
                 None => chart.flex_1(),
@@ -1327,14 +1396,18 @@ impl GpuBox {
         body = body.child(class_probe(
             Rc::clone(&self.body),
             shown.class(),
-            move |b| fit(b, &rows, total, &probe_m).class(),
+            move |b| fit(b, &rows, total, side, &probe_m).class(),
             cx.entity_id(),
         ));
         if let Some(share) = split_share {
             body = body
                 .child(self.chart_split.probe(Self::chart_inner_split, cx))
                 .child(self.chart_split.gap(
-                    SplitAxis::Column,
+                    if side {
+                        SplitAxis::Row
+                    } else {
+                        SplitAxis::Column
+                    },
                     share,
                     m.sp[5],
                     Self::chart_inner_split,
@@ -1357,7 +1430,8 @@ impl GpuBox {
         let engines: SmallVec<[usize; MAX_GPUS]> =
             self.sections.iter().map(|sec| sec.engines.len()).collect();
         let total = self.sections.len() + self.more;
-        let shown = charts_fit(self.body.get(), &engines, total, m);
+        let arrange = self.arrange;
+        let shown = charts_fit(arrange, self.body.get(), &engines, total, m);
         self.shown = shown.sections;
         self.collapsed = false;
         self.meters = meter_fits(self.body.get().width, m);
@@ -1376,7 +1450,13 @@ impl GpuBox {
             let extra = usize::from(last && !more.is_empty());
             let fit = shown.grids[i];
             let basis = charts_fixed_h(engines[i], extra, i > 0, m)
-                + f32::from(grid_min_h(engines[i], self.body.get().width, min, m.sp[2]));
+                + f32::from(arrange_min_h(
+                    arrange,
+                    engines[i],
+                    self.body.get().width,
+                    min,
+                    m.sp[2],
+                ));
             let mut col = div()
                 .flex()
                 .flex_col()
@@ -1389,26 +1469,15 @@ impl GpuBox {
             if i > 0 {
                 col = col.child(section_heading(section, row_h, m, theme));
             }
-            let mut cells = div().flex().flex_col().flex_none().w_full().gap(m.sp[2]);
-            for chunk in section.engines.chunks(fit.cols.max(1)) {
-                let line = div()
-                    .flex()
-                    .flex_row()
-                    .flex_none()
-                    .gap(m.sp[2])
-                    .children(chunk.iter().map(|e| engine_cell(i, e, fit.cell, m, theme)));
-                cells = cells.child(line);
-            }
-            let cells = if fit.scrolls {
-                div()
-                    .size_full()
-                    .child(cells)
-                    .overflow_y_scrollbar()
-                    .id(SharedString::from(grid_id(i)))
-                    .into_any_element()
-            } else {
-                cells.into_any_element()
-            };
+            let cells = grid_cells(
+                &fit,
+                section
+                    .engines
+                    .iter()
+                    .map(|e| engine_cell(i, e, fit.cell, m, theme)),
+                m.sp[2],
+                grid_id(i),
+            );
             let grid = div()
                 .debug_selector(move || grid_id(i))
                 .flex_1()
@@ -1438,7 +1507,7 @@ impl GpuBox {
         body = body.child(class_probe(
             Rc::clone(&self.body),
             shown.class(),
-            move |b| charts_fit(b, &engines, total, &probe_m).class(),
+            move |b| charts_fit(arrange, b, &engines, total, &probe_m).class(),
             cx.entity_id(),
         ));
         body.into_any_element()

@@ -199,6 +199,9 @@ impl OverviewPage {
         if let Some(split) = layout.split(BoxKind::Cpu) {
             cpu.update(cx, |b, cx| b.set_split(split, cx));
         }
+        if let Some(arrange) = layout.arrange(BoxKind::Cpu) {
+            cpu.update(cx, |b, cx| b.set_arrange(arrange, cx));
+        }
         let power = layout.config(BoxKind::Cpu);
         cpu.update(cx, |b, cx| b.set_power(power.power, power.power_split, cx));
         let mem = cx.new(|cx| MemBox::new(&hub, mem_idx, cx));
@@ -207,11 +210,17 @@ impl OverviewPage {
         if let Some(split) = layout.split(BoxKind::Memory) {
             mem.update(cx, |b, cx| b.set_split(split, cx));
         }
+        if let Some(arrange) = layout.arrange(BoxKind::Memory) {
+            mem.update(cx, |b, cx| b.set_arrange(arrange, cx));
+        }
         let gpu = cx.new(|cx| GpuBox::new(&hub, &gpu_cards, cx));
         let gpu_mode = layout.config(BoxKind::Gpu).mode.id;
         gpu.update(cx, |b, cx| b.set_mode(gpu_mode, cx));
         if let Some(split) = layout.split(BoxKind::Gpu) {
             gpu.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        if let Some(arrange) = layout.arrange(BoxKind::Gpu) {
+            gpu.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
         let disk = cx.new(|cx| DiskBox::new(&hub, &disk_cards, cx));
         let disk_mode = layout.config(BoxKind::Disk).mode.id;
@@ -232,6 +241,9 @@ impl OverviewPage {
         net.update(cx, |b, cx| b.set_mode(net_mode, cx));
         if let Some(split) = layout.split(BoxKind::Net) {
             net.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        if let Some(arrange) = layout.arrange(BoxKind::Net) {
+            net.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
 
         let mut subs = SmallVec::new();
@@ -478,21 +490,28 @@ impl OverviewPage {
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
         let split = layout.split(BoxKind::Cpu);
+        let cpu_arrange = layout.arrange(BoxKind::Cpu);
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
         let cpu_power = layout.config(BoxKind::Cpu);
         let mem_split = layout.split(BoxKind::Memory);
+        let mem_arrange = layout.arrange(BoxKind::Memory);
         let mem_mode = layout.config(BoxKind::Memory).mode.id;
         let gpu_split = layout.split(BoxKind::Gpu);
+        let gpu_arrange = layout.arrange(BoxKind::Gpu);
         let gpu_mode = layout.config(BoxKind::Gpu).mode.id;
         let disk_split = layout.split(BoxKind::Disk);
         let disk_mode = layout.config(BoxKind::Disk).mode.id;
         let disk_arrange = layout.arrange(BoxKind::Disk);
         let net_split = layout.split(BoxKind::Net);
+        let net_arrange = layout.arrange(BoxKind::Net);
         let net_mode = layout.config(BoxKind::Net).mode.id;
         self.layout = layout;
         self.cpu.update(cx, |b, cx| b.set_mode(cpu_mode, cx));
         if let Some(split) = split {
             self.cpu.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        if let Some(arrange) = cpu_arrange {
+            self.cpu.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
         self.cpu.update(cx, |b, cx| {
             b.set_power(cpu_power.power, cpu_power.power_split, cx);
@@ -501,9 +520,15 @@ impl OverviewPage {
         if let Some(split) = mem_split {
             self.mem.update(cx, |b, cx| b.set_split(split, cx));
         }
+        if let Some(arrange) = mem_arrange {
+            self.mem.update(cx, |b, cx| b.set_arrange(arrange, cx));
+        }
         self.gpu.update(cx, |b, cx| b.set_mode(gpu_mode, cx));
         if let Some(split) = gpu_split {
             self.gpu.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        if let Some(arrange) = gpu_arrange {
+            self.gpu.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
         self.disk.update(cx, |b, cx| b.set_mode(disk_mode, cx));
         if let Some(split) = disk_split {
@@ -515,6 +540,9 @@ impl OverviewPage {
         self.net.update(cx, |b, cx| b.set_mode(net_mode, cx));
         if let Some(split) = net_split {
             self.net.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        if let Some(arrange) = net_arrange {
+            self.net.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
         if procs != self.procs.is_some() {
             self.procs = procs.then(|| {

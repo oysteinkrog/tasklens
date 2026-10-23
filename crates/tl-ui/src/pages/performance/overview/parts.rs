@@ -905,6 +905,28 @@ pub fn grid_min_h(n: usize, width: Pixels, min: Size<Pixels>, gap: Pixels) -> Pi
     min.height * rows as f32 + gap * (rows - 1) as f32
 }
 
+/// The lowest `n` cells of at least `min` need in a row `width` wide when placed as `arrange`
+/// says: [`grid_min_h`] for `Auto`, `n` cells for `Vertical`, one cell for `Horizontal`.
+pub fn arrange_min_h(
+    arrange: Arrange,
+    n: usize,
+    width: Pixels,
+    min: Size<Pixels>,
+    gap: Pixels,
+) -> Pixels {
+    match arrange {
+        Arrange::Auto => grid_min_h(n, width, min, gap),
+        Arrange::Vertical if n > 0 => min.height * n as f32 + gap * (n - 1) as f32,
+        Arrange::Vertical | Arrange::Horizontal => {
+            if n == 0 {
+                px(0.)
+            } else {
+                min.height
+            }
+        }
+    }
+}
+
 /// Lays out `n` equal cells in `area`, `gap` apart (UI-PRF-019, D-026). Of the column counts
 /// whose cells are at least `min`, it takes the one with the largest cells. When no column
 /// count fits the minimum height, the grid scrolls: it keeps `bar` px at the right for the
@@ -1034,8 +1056,9 @@ pub fn grid_cells(
     fit: &GridFit,
     cells: impl IntoIterator<Item = AnyElement>,
     gap: Pixels,
-    id: &'static str,
+    id: impl Into<SharedString>,
 ) -> AnyElement {
+    let id = id.into();
     let mut cells = cells.into_iter();
     let mut grid = div().flex().flex_col().flex_none().gap(gap);
     for _ in 0..fit.rows {
@@ -1055,14 +1078,14 @@ pub fn grid_cells(
             .size_full()
             .child(grid.w(fit.content_w(gap)).h(fit.content_h(gap)))
             .overflow_x_scrollbar()
-            .id(SharedString::from(id))
+            .id(id)
             .into_any_element()
     } else if fit.scrolls {
         div()
             .size_full()
             .child(grid.w_full())
             .overflow_y_scrollbar()
-            .id(SharedString::from(id))
+            .id(id)
             .into_any_element()
     } else {
         grid.w_full().into_any_element()

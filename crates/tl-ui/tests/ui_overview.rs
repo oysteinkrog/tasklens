@@ -4650,6 +4650,226 @@ mod page {
         assert!(items.is_empty());
     }
 
+    /// Applies the Arrange choice `arrange` to the box `kind`, as the Arrange items do.
+    fn set_arrange(r: &mut Rig, kind: &str, arrange: &str) {
+        r.page_action(&PerfOverviewSetBoxArrange {
+            kind: kind.into(),
+            arrange: arrange.into(),
+        });
+    }
+
+    /// The saved `arrange` of the box `kind`.
+    fn saved_arrange(r: &mut Rig, kind: &str) -> Option<String> {
+        r.saved().and_then(|s| {
+            s.rows
+                .into_iter()
+                .flat_map(|row| row.boxes)
+                .find(|b| b.kind == kind)
+                .and_then(|b| b.arrange)
+        })
+    }
+
+    /// The first two of `ids` are in one column (same left, the second below) or in one row
+    /// (same top, the second right of the first).
+    fn assert_line(r: &mut Rig, ids: [String; 2], column: bool, at: &str) {
+        let [a, b] = ids.map(|id| r.bounds_of(id));
+        if column {
+            assert_eq!(a.left(), b.left(), "{at}: {a:?} {b:?}");
+            assert!(b.top() >= a.bottom(), "{at}: {a:?} {b:?}");
+        } else {
+            assert_eq!(a.top(), b.top(), "{at}: {a:?} {b:?}");
+            assert!(b.left() >= a.right(), "{at}: {a:?} {b:?}");
+        }
+    }
+
+    /// D-027: the CPU `core_charts` cells go in one column or one row, and the `chart_cores`
+    /// parts stack or sit side by side. The choice saves, the default is not written, and
+    /// Reset Box gives the automatic rule back.
+    #[gpui_kit::test]
+    fn overview_arrange_cpu_vertical_horizontal_auto(cx: &mut TestAppContext) {
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let side = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| page.read(cx).cpu_box().read(cx).side_by_side())
+        };
+        let ids = || [core_chart_id(0), core_chart_id(1)];
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "cpu".into(),
+            mode: "core_charts".into(),
+        });
+        assert_eq!(r.layout().arrange(BoxKind::Cpu), Some(Arrange::Auto));
+        assert_line(&mut r, ids(), false, "auto fills a row first");
+        set_arrange(&mut r, "cpu", "vertical");
+        assert_line(&mut r, ids(), true, "vertical");
+        assert_eq!(saved_arrange(&mut r, "cpu").as_deref(), Some("vertical"));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        set_arrange(&mut r, "cpu", "horizontal");
+        assert_line(&mut r, ids(), false, "horizontal");
+        let grid = r.bounds_of(CORE_CHARTS_ID.into());
+        let cell = r.bounds_of(core_chart_id(0));
+        assert!(
+            grid.bottom() - cell.bottom() < px(1.),
+            "{cell:?} in {grid:?}"
+        );
+        set_arrange(&mut r, "cpu", "auto");
+        assert_eq!(saved_arrange(&mut r, "cpu"), None);
+
+        // `chart_cores`: the box is wide, so Automatic is side by side.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "cpu".into(),
+            mode: "chart_cores".into(),
+        });
+        let splitter = |r: &mut Rig| r.vcx.debug_bounds(CPU_SPLITTER_ID).is_some();
+        assert!(side(&mut r) && splitter(&mut r));
+        set_arrange(&mut r, "cpu", "vertical");
+        assert!(!side(&mut r) && !splitter(&mut r));
+        assert_eq!(saved_arrange(&mut r, "cpu").as_deref(), Some("vertical"));
+        set_arrange(&mut r, "cpu", "horizontal");
+        assert!(side(&mut r) && splitter(&mut r));
+        // Reset Box gives the automatic rule back and writes nothing for the box.
+        r.page_action(&PerfOverviewResetBox { kind: "cpu".into() });
+        assert_eq!(r.layout().arrange(BoxKind::Cpu), Some(Arrange::Auto));
+        assert_eq!(saved_arrange(&mut r, "cpu"), None);
+    }
+
+    /// D-027: Memory `chart_rows` has the used chart on top (Automatic, Stack vertically) or on
+    /// the left (Side by side) with a splitter of the matching direction.
+    #[gpui_kit::test]
+    fn overview_arrange_memory_vertical_horizontal_auto(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::mem_box::{
+            MEM_CHART_SPLITTER_ID, MEM_USED_CHART_ID,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "memory".into(),
+            mode: "chart_rows".into(),
+        });
+        assert_eq!(r.layout().arrange(BoxKind::Memory), Some(Arrange::Auto));
+        for arrange in ["auto", "vertical"] {
+            set_arrange(&mut r, "memory", arrange);
+            let chart = r.bounds_of(MEM_USED_CHART_ID.into());
+            let gap = r.bounds_of(MEM_CHART_SPLITTER_ID.into());
+            assert!(
+                chart.bottom() <= gap.top() + px(1.),
+                "{arrange}: {chart:?} {gap:?}"
+            );
+        }
+        set_arrange(&mut r, "memory", "auto");
+        assert_eq!(saved_arrange(&mut r, "memory"), None);
+        set_arrange(&mut r, "memory", "horizontal");
+        let chart = r.bounds_of(MEM_USED_CHART_ID.into());
+        let gap = r.bounds_of(MEM_CHART_SPLITTER_ID.into());
+        let frame = r.bounds_of("perf-overview-box-memory".into());
+        assert!(chart.right() <= gap.left() + px(1.), "{chart:?} {gap:?}");
+        assert!(gap.size.height > gap.size.width, "a vertical gap: {gap:?}");
+        assert!(chart.size.height > px(100.), "{chart:?} in {frame:?}");
+        assert_eq!(
+            saved_arrange(&mut r, "memory").as_deref(),
+            Some("horizontal")
+        );
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+    }
+
+    /// D-027: GPU `engine_charts` cells go in one column or one row, and the `chart_engines`
+    /// chart sits on the left of its rows for Side by side.
+    #[gpui_kit::test]
+    fn overview_arrange_gpu_vertical_horizontal_auto(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::gpu_box::{
+            GPU_SPLITTER_ID, chart_id, engine_cell_id, engine_row_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let keys: Vec<&'static str> = r.vcx.update(|_, cx| {
+            page.read(cx).gpu_box().read(cx).sections()[0]
+                .engines
+                .iter()
+                .map(|e| e.key)
+                .collect()
+        });
+        assert!(keys.len() >= 2, "{keys:?}");
+        let ids = || [engine_cell_id(0, keys[0]), engine_cell_id(0, keys[1])];
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "gpu".into(),
+            mode: "engine_charts".into(),
+        });
+        assert_eq!(r.layout().arrange(BoxKind::Gpu), Some(Arrange::Auto));
+        set_arrange(&mut r, "gpu", "vertical");
+        assert_line(&mut r, ids(), true, "vertical");
+        assert_eq!(saved_arrange(&mut r, "gpu").as_deref(), Some("vertical"));
+        set_arrange(&mut r, "gpu", "horizontal");
+        assert_line(&mut r, ids(), false, "horizontal");
+        set_arrange(&mut r, "gpu", "auto");
+        assert_eq!(saved_arrange(&mut r, "gpu"), None);
+
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "gpu".into(),
+            mode: "chart_engines".into(),
+        });
+        let chart = r.bounds_of(chart_id(0));
+        let gap = r.bounds_of(GPU_SPLITTER_ID.into());
+        assert!(chart.bottom() <= gap.bottom(), "stacked: {chart:?} {gap:?}");
+        set_arrange(&mut r, "gpu", "horizontal");
+        let chart = r.bounds_of(chart_id(0));
+        let gap = r.bounds_of(GPU_SPLITTER_ID.into());
+        let row = r.bounds_of(engine_row_id(0, keys[0]));
+        assert!(chart.right() <= gap.left() + px(1.), "{chart:?} {gap:?}");
+        assert!(row.left() >= gap.right() - px(1.), "{row:?} {gap:?}");
+        assert_eq!(saved_arrange(&mut r, "gpu").as_deref(), Some("horizontal"));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+    }
+
+    /// D-027: Net `adapter_charts` is one column by default, the choice saves, and a saved
+    /// value wins over the default.
+    #[gpui_kit::test]
+    fn overview_arrange_net_adapter_charts(cx: &mut TestAppContext) {
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let shown = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| page.read(cx).net_box().read(cx).arrange())
+        };
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "net".into(),
+            mode: "adapter_charts".into(),
+        });
+        assert_eq!(r.layout().arrange(BoxKind::Net), Some(Arrange::Vertical));
+        assert_eq!(shown(&mut r), Arrange::Vertical);
+        set_arrange(&mut r, "net", "horizontal");
+        assert_eq!(shown(&mut r), Arrange::Horizontal);
+        assert_eq!(saved_arrange(&mut r, "net").as_deref(), Some("horizontal"));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        set_arrange(&mut r, "net", "vertical");
+        assert_eq!(
+            saved_arrange(&mut r, "net"),
+            None,
+            "the default is not written"
+        );
+        // A saved value wins over the default.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                let net = layout
+                    .rows
+                    .iter_mut()
+                    .flat_map(|row| row.boxes.iter_mut())
+                    .find(|b| b.kind == "net")
+                    .expect("a Net box");
+                net.mode = Some("adapter_charts".to_owned());
+                net.arrange = Some("auto".to_owned());
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(shown(&mut r), Arrange::Auto);
+        // Stacked and columns keep their switch and have no saved arrangement.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "net".into(),
+            mode: "stacked".into(),
+        });
+        assert_eq!(r.layout().arrange(BoxKind::Net), None);
+    }
+
     /// Checks that every part of disk `k`'s `disk_charts` cell header stays inside its cell with
     /// no overlap and the name keeps its width, with the rates on a second line below
     /// `HEAD_ONE_LINE_W`. Returns the cell.
@@ -5022,6 +5242,8 @@ mod page {
             // The default snapshot reads as RAPL readable: a separator and the power item.
             ("", false),
             ("Show power draw", false),
+            ("", false),
+            ("Arrange", false),
         ]
         .map(|(l, c)| (l.to_owned(), c))
         .into();
@@ -5770,7 +5992,10 @@ mod wired {
             // The four mode radios come first.
             entries[4..].to_vec()
         };
-        assert_eq!(tail(&mut r, Some(RaplState::NoZone)), []);
+        // The Arrange submenu closes the list, after a separator.
+        let arrange = || (MenuEntryKind::Submenu, "Arrange".to_owned(), None, false);
+        let sep = || (MenuEntryKind::Separator, String::new(), None, false);
+        assert_eq!(tail(&mut r, Some(RaplState::NoZone)), [sep(), arrange()]);
         assert_eq!(
             tail(&mut r, Some(RaplState::Readable)),
             [
@@ -5781,6 +6006,8 @@ mod wired {
                     None,
                     false
                 ),
+                sep(),
+                arrange(),
             ]
         );
         assert_eq!(
@@ -5799,6 +6026,8 @@ mod wired {
                     None,
                     false
                 ),
+                sep(),
+                arrange(),
             ]
         );
     }
@@ -5848,6 +6077,8 @@ mod wired {
                 // The default snapshot reads as RAPL readable.
                 (String::new(), false),
                 ("Show power draw".to_owned(), false),
+                (String::new(), false),
+                ("Arrange".to_owned(), false),
             ]
         );
         // Choosing the shown mode changes and saves nothing.
@@ -5929,6 +6160,8 @@ mod wired {
                 // The default snapshot reads as RAPL readable.
                 (String::new(), false),
                 ("Show power draw".to_owned(), false),
+                (String::new(), false),
+                ("Arrange".to_owned(), false),
             ]
         );
     }

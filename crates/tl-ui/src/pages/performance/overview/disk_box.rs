@@ -371,67 +371,6 @@ fn disk_fit(
     )
 }
 
-/// The smallest cell of the Net box's `adapter_charts` grid, which still uses the column and row
-/// fit below, logical px before `ui_scale`.
-pub(super) const GRID_CELL_MIN_W: f32 = 200.;
-pub(super) const GRID_CELL_MIN_H: f32 = 80.;
-
-/// The grid columns of a body `width` wide: as many cells of at least `GRID_CELL_MIN_W` as fit.
-fn grid_cols(width: Pixels, m: &UiMetrics) -> usize {
-    let gap = f32::from(m.sp[2]);
-    let w = f32::from(width);
-    if w <= 0. {
-        return 1;
-    }
-    (((w + gap) / (GRID_CELL_MIN_W * m.ui_scale + gap)).floor() as usize).max(1)
-}
-
-/// What `disk_charts` shows: the grid columns and how many cells fit. The cells fill the body
-/// before the first paint.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct ChartsFit {
-    pub(super) cols: usize,
-    pub(super) shown: usize,
-}
-
-impl ChartsFit {
-    pub(super) fn class(self) -> u32 {
-        self.cols as u32 | (self.shown as u32) << 8
-    }
-}
-
-/// The grid for `rows` cells in `body`. A cell is at least `GRID_CELL_MIN_H` high, and when the
-/// grid does not fit the cells that fit show, with one line left for "+n more".
-pub(super) fn charts_fit(
-    body: Size<Pixels>,
-    rows: usize,
-    total: usize,
-    m: &UiMetrics,
-) -> ChartsFit {
-    let cols = grid_cols(body.width, m);
-    if body.height == px(0.) {
-        return ChartsFit { cols, shown: rows };
-    }
-    let gap = f32::from(m.sp[2]);
-    let line = LABEL_ROW * m.ui_scale + gap;
-    let more = usize::from(total > rows);
-    let avail = f32::from(body.height) - more as f32 * line;
-    let cell = GRID_CELL_MIN_H * m.ui_scale + gap;
-    let grid_rows = ((avail + gap) / cell).floor().max(0.) as usize;
-    let fits = grid_rows * cols;
-    if fits >= rows {
-        return ChartsFit { cols, shown: rows };
-    }
-    // Showing fewer cells than disks needs the "+n more" line, so a grid row is given up for it
-    // when the first count left no room for that line.
-    let avail = f32::from(body.height) - line;
-    let grid_rows = ((avail + gap) / cell).floor().max(0.) as usize;
-    ChartsFit {
-        cols,
-        shown: (grid_rows * cols).min(rows),
-    }
-}
-
 /// The debug selector of a disk's `disk_charts` cell.
 pub fn cell_id(key: &DeviceKey) -> String {
     format!("{DISK_BOX_ID}-cell:{}", key.0)

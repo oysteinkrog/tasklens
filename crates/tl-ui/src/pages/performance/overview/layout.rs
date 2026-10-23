@@ -118,9 +118,12 @@ impl BoxKind {
     /// choice (UI-PRF-019, D-027).
     pub fn arrange(self, id: &str) -> Option<ArrangeChoice> {
         let choices: &[(&str, ArrangeChoice)] = match self {
+            Self::Cpu => cpu_box::ARRANGE,
+            Self::Memory => mem_box::ARRANGE,
+            Self::Gpu => gpu_box::ARRANGE,
             Self::Disk => disk_box::ARRANGE,
             Self::Net => net_box::ARRANGE,
-            _ => &[],
+            Self::TopProcs => &[],
         };
         choices.iter().find(|(m, _)| *m == id).map(|&(_, c)| c)
     }

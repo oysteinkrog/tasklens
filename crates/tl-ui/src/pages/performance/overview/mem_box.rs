@@ -34,7 +34,7 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
-use super::layout::BoxMode;
+use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::parts::{
     ChartSettings, Meter, SPARK_GRID, SPARK_W, box_chart, box_frame, chart_section_versions,
     class_probe, spark_chart,
@@ -93,6 +93,11 @@ pub const MEM_COMP_CHART_ID: &str = "perf-overview-memory-comp-chart";
 const TEXT_PART_MIN_W: f32 = 128.;
 /// The narrowest sparkline column, logical px. The default is `SPARK_W`, below `PART_MIN`.
 const SPARK_COLUMN_MIN_W: f32 = 48.;
+
+/// The modes with an Arrange choice (UI-PRF-019, D-027): the two parts of `chart_rows`, the chart
+/// on top (Automatic and Stack vertically) or on the left (Side by side).
+pub const ARRANGE: &[(&str, ArrangeChoice)] =
+    &[("chart_rows", ArrangeChoice::Saved(Arrange::Auto))];
 
 /// Which parts the box shows (UI-PRF-019).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -381,6 +386,8 @@ pub struct MemBox {
     used_chart: Entity<ChartView>,
     comp_chart: Entity<ChartView>,
     mode: MemMode,
+    /// How `chart_rows` places its two parts (D-027).
+    arrange: Arrange,
     /// The gap between the text part and the sparkline column (`rows`).
     spark_split: InnerSplit,
     /// The gap between the chart and the rows (`chart_rows`).
@@ -443,6 +450,7 @@ impl MemBox {
             used_chart,
             comp_chart,
             mode: MemMode::Rows,
+            arrange: Arrange::Auto,
             spark_split: InnerSplit::new(
                 MEM_SPLITTER_ID,
                 MEM_SPLITTER_LINE_ID,
@@ -517,8 +525,33 @@ impl MemBox {
             MemMode::Rows => self.spark_split.share(SplitAxis::Row, m.sp[5], m.ui_scale),
             MemMode::ChartRows => self
                 .chart_split
-                .share(SplitAxis::Column, m.sp[5], m.ui_scale),
+                .share(self.chart_axis(), m.sp[5], m.ui_scale),
             MemMode::Chart => 0.,
+        }
+    }
+
+    /// How `chart_rows` places its two parts.
+    pub fn arrange(&self) -> Arrange {
+        self.arrange
+    }
+
+    /// Places the two parts of `chart_rows` as `arrange` says. Only this box renders again, and
+    /// only when it shows `chart_rows`.
+    pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
+        if arrange != self.arrange {
+            self.arrange = arrange;
+            if self.mode == MemMode::ChartRows {
+                cx.notify();
+            }
+        }
+    }
+
+    /// The axis of the `chart_rows` parts: stacked with a horizontal gap, or side by side with a
+    /// vertical gap.
+    fn chart_axis(&self) -> SplitAxis {
+        match self.arrange {
+            Arrange::Horizontal => SplitAxis::Row,
+            Arrange::Auto | Arrange::Vertical => SplitAxis::Column,
         }
     }
 
@@ -940,34 +973,35 @@ impl MemBox {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let share = self.split(m);
+        let side = self.arrange == Arrange::Horizontal;
         let chart = div()
             .debug_selector(|| MEM_USED_CHART_ID.into())
             .relative()
             .flex_none()
-            .h(relative(share))
-            .w_full()
             .child(
                 self.used_chart
                     .clone()
                     .cached(StyleRefinement::default().size_full()),
             );
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .gap(m.sp[5])
+        let chart = if side {
+            chart.w(relative(share)).h_full()
+        } else {
+            chart.h(relative(share)).w_full()
+        };
+        let rows = div().flex_1().min_h_0().min_w_0();
+        let rows = if side { rows.h_full() } else { rows.w_full() };
+        let frame = div().relative().flex().size_full().gap(m.sp[5]);
+        let frame = if side {
+            frame.flex_row()
+        } else {
+            frame.flex_col()
+        };
+        frame
             .child(chart)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(self.text_rows(wide, m, theme)),
-            )
+            .child(rows.child(self.text_rows(wide, m, theme)))
             .child(self.chart_split.probe(Self::chart_inner_split, cx))
             .child(self.chart_split.gap(
-                SplitAxis::Column,
+                self.chart_axis(),
                 share,
                 m.sp[5],
                 Self::chart_inner_split,
@@ -996,6 +1030,16 @@ impl Render for MemBox {
                     Box::new(move |b| {
                         u32::from(row_wide(px(text_w(f32::from(b.width))), &probe_m))
                     }),
+                )
+            }
+            MemMode::ChartRows if self.arrange == Arrange::Horizontal => {
+                // The rows are the right part: what the chart leaves of the width.
+                let sharer = self.chart_split.sharer(m.sp[5], m.ui_scale);
+                let gap = f32::from(m.sp[5]);
+                let rows_w = move |len: f32| px(((1. - sharer(len)) * len - gap).max(0.));
+                (
+                    u32::from(row_wide(rows_w(f32::from(body_w)), &m)),
+                    Box::new(move |b| u32::from(row_wide(rows_w(f32::from(b.width)), &probe_m))),
                 )
             }
             MemMode::ChartRows => (
