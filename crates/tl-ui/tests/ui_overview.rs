@@ -4747,10 +4747,72 @@ mod page {
         let splitter = |r: &mut Rig| r.vcx.debug_bounds(CPU_SPLITTER_ID).is_some();
         assert!(side(&mut r) && splitter(&mut r));
         set_arrange(&mut r, "cpu", "vertical");
-        assert!(!side(&mut r) && !splitter(&mut r));
+        assert!(!side(&mut r) && splitter(&mut r));
         assert_eq!(saved_arrange(&mut r, "cpu").as_deref(), Some("vertical"));
+
+        // Stacked parts get a horizontal splitter at the default 40% of the body height.
+        let frame = r.bounds_of(CPU_BOX_ID.into());
+        let gap = r.gap(CPU_SPLITTER_ID);
+        assert!(
+            gap.size.width > gap.size.height,
+            "a horizontal gap: {gap:?}"
+        );
+        assert_eq!(cpu_split(&mut r), 0.4);
+        // A drag down moves the gap and saves the new split when the button goes up.
+        let start = center(gap);
+        r.press(start, 1);
+        r.move_to(point(start.x, start.y + px(60.)));
+        let moved = f32::from(r.gap(CPU_SPLITTER_ID).top() - gap.top());
+        assert!((moved - 60.).abs() <= 1.5, "gap moved {moved}");
+        r.release(point(start.x, start.y + px(60.)));
+        let split = cpu_split(&mut r);
+        assert!(split > 0.4 && split <= 0.8, "{split}");
+        assert_eq!(cpu_split_of(&r.saved()), Some(f64::from(split)));
+        // The body height the drag implies: 60 px moved the split by `split - 0.4`.
+        let body_h = 60. / (split - 0.4);
+        // A drag far down stops where the core rows keep 120 px.
+        let at = center(r.gap(CPU_SPLITTER_ID));
+        r.press(at, 1);
+        r.move_to(point(at.x, px(5000.)));
+        r.release(point(at.x, px(5000.)));
+        let rows_h = f32::from(frame.bottom() - r.gap(CPU_SPLITTER_ID).bottom());
+        assert!(rows_h >= 120., "core rows {rows_h}");
+        // A double-click resets the default, which is not written.
+        let at = center(r.gap(CPU_SPLITTER_ID));
+        r.press(at, 2);
+        r.release(at);
+        assert_eq!(cpu_split(&mut r), 0.4);
+        assert_eq!(cpu_split_of(&r.saved()), None);
+        // A saved split places the stacked parts.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                let cpu = &mut layout.rows[0].boxes[0];
+                cpu.mode = Some("chart_cores".into());
+                cpu.arrange = Some("vertical".into());
+                cpu.split = Some(0.6);
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert!(!side(&mut r));
+        assert_eq!(cpu_split(&mut r), 0.6);
+        let saved_gap = r.gap(CPU_SPLITTER_ID);
+        assert!(
+            saved_gap.size.width > saved_gap.size.height,
+            "a horizontal gap: {saved_gap:?}"
+        );
+        // From 40% to 60% the gap moves down a fifth of the body.
+        let moved = f32::from(saved_gap.top() - gap.top());
+        assert!(
+            (moved - 0.2 * body_h).abs() <= 2.,
+            "gap moved {moved} of {body_h}"
+        );
+
         set_arrange(&mut r, "cpu", "horizontal");
         assert!(side(&mut r) && splitter(&mut r));
+        let gap = r.gap(CPU_SPLITTER_ID);
+        assert!(gap.size.height > gap.size.width, "a vertical gap: {gap:?}");
         // Reset Box gives the automatic rule back and writes nothing for the box.
         r.page_action(&PerfOverviewResetBox { kind: "cpu".into() });
         assert_eq!(r.layout().arrange(BoxKind::Cpu), Some(Arrange::Auto));

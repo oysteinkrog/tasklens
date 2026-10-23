@@ -35,7 +35,7 @@ use super::layout::{Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_
 use super::parts::{
     ChartSettings, CoreBars, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, arrange_grid,
     box_chart, box_frame, chart_section_versions, class_probe, core_bars_layout, core_sparks,
-    grid_cells, is_wide, spark_chart, split_body_share, width_probe,
+    grid_cells, is_wide, spark_chart, width_probe,
 };
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
@@ -538,9 +538,20 @@ impl CpuBox {
         }
     }
 
-    /// The chart's share of the body as the box lays it out, after the clamps.
+    /// The chart's share of the body as the box lays it out, after the clamps: its width side by
+    /// side, its height stacked.
     pub fn split(&self, m: &UiMetrics) -> f32 {
-        self.split.share(SplitAxis::Row, m.sp[5], m.ui_scale)
+        self.split.share(self.split_axis(), m.sp[5], m.ui_scale)
+    }
+
+    /// The axis of the `chart_cores` parts: side by side with a vertical gap, or stacked with a
+    /// horizontal gap.
+    fn split_axis(&self) -> SplitAxis {
+        if self.side {
+            SplitAxis::Row
+        } else {
+            SplitAxis::Column
+        }
     }
 
     /// Takes the saved share. Nothing changes while the gap is held.
@@ -1122,23 +1133,43 @@ impl Render for CpuBox {
             CpuMode::ChartCores => {
                 let chart = self.chart_part();
                 let rows = self.rows_part(&m, cx);
+                // Side by side the core rows keep their 188 px column; stacked they keep the
+                // usual part minimum.
+                let rows_min = if self.side {
+                    CORE_COLUMN_MIN_W
+                } else {
+                    PART_MIN
+                };
+                self.split.set_mins(PART_MIN, rows_min);
                 let share = self.split(&m);
-                let split = split_body_share(chart, rows, self.side, share, &m);
-                let mut body = div()
+                let frame = div().flex().size_full().gap(m.sp[5]);
+                let (frame, chart_part, rows_part) = if self.side {
+                    (
+                        frame.flex_row(),
+                        div().flex_none().w(relative(share)).h_full(),
+                        div().flex_1().min_w_0().h_full(),
+                    )
+                } else {
+                    (
+                        frame.flex_col(),
+                        div().flex_none().h(relative(share)).w_full(),
+                        div().flex_1().min_h_0().w_full(),
+                    )
+                };
+                div()
                     .relative()
                     .size_full()
-                    .child(split)
-                    .child(self.split.probe(Self::inner_split, cx));
-                if self.side {
-                    body = body.child(self.split.gap(
-                        SplitAxis::Row,
-                        share,
-                        m.sp[5],
-                        Self::inner_split,
-                        cx,
-                    ));
-                }
-                body.into_any_element()
+                    .child(
+                        frame
+                            .child(chart_part.child(chart))
+                            .child(rows_part.child(rows)),
+                    )
+                    .child(self.split.probe(Self::inner_split, cx))
+                    .child(
+                        self.split
+                            .gap(self.split_axis(), share, m.sp[5], Self::inner_split, cx),
+                    )
+                    .into_any_element()
             }
         };
         let body = match self.power_chart.clone().filter(|_| self.power_shown()) {
