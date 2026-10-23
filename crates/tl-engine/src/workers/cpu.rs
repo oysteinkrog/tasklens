@@ -507,6 +507,7 @@ impl CpuSource {
             .collect();
         let sample = CpuSample {
             t_ns: r.t_ns,
+            pressure_t_ns: self.last_slow_ns.unwrap_or(r.t_ns),
             totals,
             irq_pct,
             per_cpu,

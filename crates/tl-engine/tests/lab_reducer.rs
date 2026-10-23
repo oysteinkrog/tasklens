@@ -31,7 +31,7 @@ use tl_model::actions::{
     Signal,
 };
 use tl_model::command::{Command, DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
-use tl_model::demand::{Demand, DetailDemand};
+use tl_model::demand::{CpuDemand, Demand, DetailDemand};
 use tl_model::details::{
     AffinityInfo, DetailTab, DetailTarget, EnvDetail, HandlePhase, HandleSearchState, ScanId,
     SearchId, StringScanOpts, TabPayload,
@@ -366,6 +366,7 @@ impl RecordSink for LogSink {
 fn cpu_cores_msg(t_ns: TimeNs, cores: u16) -> EngineMsg {
     src(SourceUpdate::Cpu(CpuSample {
         t_ns,
+        pressure_t_ns: t_ns,
         totals: CpuTotals {
             util_pct: Metric::valid(10.0),
             kernel_pct: Metric::valid(5.0),
@@ -555,6 +556,7 @@ fn cpu_msg(t_ns: TimeNs, pct: f32, topology: bool) -> EngineMsg {
     });
     src(SourceUpdate::Cpu(CpuSample {
         t_ns,
+        pressure_t_ns: t_ns,
         totals: CpuTotals {
             util_pct: Metric::valid(pct),
             kernel_pct: Metric::valid(pct / 2.0),
@@ -1411,6 +1413,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
         },
         SourceUpdate::Cpu(CpuSample {
             t_ns: SEC,
+            pressure_t_ns: SEC,
             totals: CpuTotals::default(),
             irq_pct: 0.0,
             per_cpu: Vec::new(),
@@ -2415,16 +2418,19 @@ fn system_pressure_series() {
 }
 
 /// tasklens-hjn.47: CPU_LOAD1 and PSI_CPU_SOME stay at 1 Hz while the CPU runs at 10 Hz
-/// (ADR-016 "System pressure"). The CPU total series takes every sample.
+/// (ADR-016 "System pressure"). The CPU total series takes every sample. Every tenth sample
+/// carries a new read; the others repeat it with the same read time.
 #[test]
 fn cpu_pressure_series_at_1_hz() {
     let mut rig = Rig::new();
     let msgs = (0..=20u64)
         .map(|n| {
             let mut m = cpu_msg(SEC + n * 100 * MS, 50.0, n == 0);
+            let read = n / 10 * 10;
             if let EngineMsg::Source(SourceUpdate::Cpu(s)) = &mut m {
-                s.totals.load_avg = Metric::valid([1.0 + n as f32, 0.0, 0.0]);
-                s.totals.psi_some_pct = Metric::valid(n as f32);
+                s.pressure_t_ns = SEC + read * 100 * MS;
+                s.totals.load_avg = Metric::valid([1.0 + read as f32, 0.0, 0.0]);
+                s.totals.psi_some_pct = Metric::valid(read as f32);
             }
             m
         })
@@ -2450,6 +2456,86 @@ fn cpu_pressure_series_at_1_hz() {
         let values: Vec<f32> = s.iter().map(|x| x.value).collect();
         assert_eq!(values, [first, first + 10.0, first + 20.0], "{metric:?}");
     }
+}
+
+/// tasklens-hjn.47: the CPU worker at 10 Hz with timer jitter (ticks 100 ms apart, plus or
+/// minus 30 ms) feeds the reducer. The worker reads load average and CPU pressure once 1 s has
+/// passed since its last read. CPU_LOAD1 and PSI_CPU_SOME take one sample per read: each one
+/// is stored at the tick that read it, never a repeated value, and none is dropped.
+#[test]
+fn cpu_pressure_from_jittered_worker_is_fresh() {
+    let dir = cpu_fixture("pressure-jitter", &["cpu-math/step0", "pressure"]);
+    let mut worker = CpuSource::new(SysRoot::at(&dir)).expect("fixture topology reads");
+    let demand = Demand {
+        cpu: CpuDemand::Total,
+        cpu_fast: true,
+        ..Demand::default()
+    };
+    assert_eq!(
+        worker.period(&demand, &EngineSettings::default()),
+        Some(Duration::from_millis(100))
+    );
+    // A fixed linear congruential sequence, so the jitter is the same on every run.
+    let mut seed: u64 = 12345;
+    let mut ticks = Vec::new();
+    let mut msgs = Vec::new();
+    for k in 0..120u64 {
+        seed = (seed * 1_103_515_245 + 12_345) % (1 << 31);
+        let t = SEC + k * 100 * MS + (seed % 61) * MS - 30 * MS;
+        ticks.push(t);
+        // Each tick's files hold its own index, so a value shows which tick read it.
+        fs::write(
+            dir.join("proc/pressure/cpu"),
+            format!(
+                "some avg10={k}.00 avg60=0.00 avg300=0.00 total=0\n\
+                 full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+            ),
+        )
+        .expect("write pressure");
+        fs::write(
+            dir.join("proc/loadavg"),
+            format!("{k}.00 0.00 0.00 1/100 42\n"),
+        )
+        .expect("write loadavg");
+        let (next, update) = worker.sample_at(Clock {
+            boot_ns: t,
+            mono_ns: t,
+        });
+        worker = next;
+        msgs.push(src(update));
+    }
+    let mut rig = Rig::new();
+    rig.run(msgs).expect("no invariant violation");
+    let pkg = rig.idx(&DeviceIdentity::CpuPackage);
+    let snap = rig.latest();
+    for metric in [MetricId::CPU_LOAD1, MetricId::PSI_CPU_SOME] {
+        let s = &snap
+            .series
+            .get(SeriesId {
+                device: pkg,
+                metric,
+            })
+            .expect("series exists")
+            .samples;
+        // The ticks span 1.0 s to 12.9 s and the worker reads 12 times: one sample per read.
+        assert_eq!(s.len(), 12, "{metric:?}");
+        for x in s.iter() {
+            assert!(x.flags.contains(SampleFlags::VALID), "{metric:?}");
+            let read = x.value as usize;
+            assert_eq!(
+                ticks[read], x.t_ns,
+                "{metric:?}: value read at another tick"
+            );
+        }
+        for pair in s.windows(2) {
+            let gap = pair[1].t_ns - pair[0].t_ns;
+            assert!(
+                (SEC..SEC + 160 * MS).contains(&gap),
+                "{metric:?}: {gap} ns between samples"
+            );
+        }
+    }
+    rig.passed();
 }
 
 /// tasklens-hjn.47: the swap-in rate's RESET and GAP_BEFORE reach the SWAP_IN series (ADR-008).

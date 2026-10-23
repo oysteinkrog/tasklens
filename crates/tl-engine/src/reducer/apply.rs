@@ -58,10 +58,6 @@ pub const QUEUE_MAX: usize = 64;
 const FAST_NS: u64 = 100_000_000;
 const SLOW_NS: u64 = 1_000_000_000;
 const FAST_LIMIT_NS: u64 = 500_000_000;
-/// The CPU pressure series take a CPU sample once this long after the last one they took, so
-/// they stay at 1 Hz while the CPU runs at 10 Hz (ADR-016 "System pressure"). Half a fast tick
-/// below 1 s, so timer jitter does not skip a second.
-const PRESSURE_EVERY_NS: u64 = SLOW_NS - FAST_NS / 2;
 
 const DISK_METRICS: [MetricId; 4] = [
     MetricId::DISK_ACTIVE,
@@ -109,9 +105,9 @@ pub struct ApplyState {
     irq_zero_samples: u32,
     /// A valid CPU sample had an irq share above 0, so the kernel accounts interrupt time.
     irq_seen: bool,
-    /// Time of the last CPU sample that the CPU_LOAD1 and PSI_CPU_SOME series took; 0 before
-    /// the first.
-    cpu_pressure_t: TimeNs,
+    /// `pressure_t_ns` of the last CPU sample that the CPU_LOAD1 and PSI_CPU_SOME series took;
+    /// `None` before the first.
+    cpu_pressure_t: Option<TimeNs>,
     /// The running maximum of `Committed_AS` since engine start (R-166).
     pub peak_committed: u64,
     /// Device details per contributing source (R-139 item 7): sysfs and D-Bus.
@@ -1090,12 +1086,11 @@ impl Reducer {
             ok && fastest.validity.is_valid(),
             period,
         );
-        // System pressure (ADR-016), at 1 Hz also while the CPU runs at 10 Hz: fast ticks
-        // only repeat the last slow read. These do not come from /proc/stat, so only their own
-        // validity counts.
-        let last = self.apply_state.cpu_pressure_t;
-        if last == 0 || t < last || t - last >= PRESSURE_EVERY_NS {
-            self.apply_state.cpu_pressure_t = t;
+        // System pressure (ADR-016), at 1 Hz also while the CPU runs at 10 Hz: only a sample
+        // with a new read time carries a fresh read, fast ticks repeat the last one. These do
+        // not come from /proc/stat, so only their own validity counts.
+        if self.apply_state.cpu_pressure_t != Some(s.pressure_t_ns) {
+            self.apply_state.cpu_pressure_t = Some(s.pressure_t_ns);
             let load = totals.load_avg;
             self.push(
                 pkg,

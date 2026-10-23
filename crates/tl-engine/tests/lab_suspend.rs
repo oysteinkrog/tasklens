@@ -157,6 +157,7 @@ fn cpu_msg(t_ns: TimeNs, pct: f32, validity: Validity) -> EngineMsg {
     };
     src(SourceUpdate::Cpu(CpuSample {
         t_ns,
+        pressure_t_ns: t_ns,
         totals: CpuTotals {
             util_pct,
             kernel_pct: util_pct,

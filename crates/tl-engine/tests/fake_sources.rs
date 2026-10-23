@@ -328,6 +328,7 @@ fn fake_cpu(t_ns: TimeNs) -> CpuSample {
     online.insert(0);
     CpuSample {
         t_ns,
+        pressure_t_ns: t_ns,
         totals: CpuTotals {
             util_pct: Metric::valid(50.0),
             kernel_pct: Metric::valid(10.0),

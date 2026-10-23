@@ -151,6 +151,10 @@ pub struct HelperUpdate {
 #[derive(Debug, Clone)]
 pub struct CpuSample {
     pub t_ns: TimeNs,
+    /// Boot ns of the slow tick that read the load average and /proc/pressure/cpu in
+    /// `totals`. Fast ticks repeat those values with the same time, so the reducer stores
+    /// CPU_LOAD1 and PSI_CPU_SOME only when this changes (ADR-016 "System pressure").
+    pub pressure_t_ns: TimeNs,
     pub totals: CpuTotals,
     /// Δ(irq + softirq) / Δtotal, for the Interrupts row.
     pub irq_pct: f32,
@@ -555,6 +559,7 @@ mod tests {
             (
                 SourceUpdate::Cpu(CpuSample {
                     t_ns: 0,
+                    pressure_t_ns: 0,
                     totals: CpuTotals::default(),
                     irq_pct: 0.0,
                     per_cpu: Vec::new(),

@@ -201,6 +201,7 @@ fn cpu_msg(t_ns: TimeNs, pct: f32) -> EngineMsg {
     online.insert(1);
     EngineMsg::Source(SourceUpdate::Cpu(CpuSample {
         t_ns,
+        pressure_t_ns: t_ns,
         totals: CpuTotals {
             util_pct: Metric::valid(pct),
             kernel_pct: Metric::valid(pct / 2.0),
