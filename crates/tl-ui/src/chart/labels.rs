@@ -43,6 +43,12 @@ const MIN_PLOT_H: f32 = 100.0;
 const COMPACT_MIN_PLOT_H: f32 = 32.0;
 /// The range label and legend need a box at least this wide.
 const MIN_BOX_W: f32 = 160.0;
+/// Axis ticks need a box at least this wide (UI-PRF-058).
+pub(crate) const TICKS_MIN_BOX_W: f32 = 320.0;
+/// Ticks sit at the quarter points of the range and of a percent scale.
+pub(crate) const TICK_COUNT: usize = 3;
+/// A range from this length on labels its x ticks in minutes, else in seconds.
+const TICK_MINUTES_FROM_S: u64 = 300;
 
 pub(crate) static WARMING: &str = "…";
 pub(crate) static UNSUPPORTED: &str = "n/a";
@@ -147,6 +153,10 @@ pub enum LabelKind {
     Legend(usize),
     AxisMax,
     Range,
+    /// X tick by index, oldest first.
+    XTick(usize),
+    /// Y tick by index, 25% first.
+    YTick(usize),
 }
 
 /// One label painted by the last paint (test hook).
@@ -167,6 +177,8 @@ pub struct LabelCache {
     axis_max: CachedLine,
     range: CachedLine,
     legend: SmallVec<[CachedLine; 2]>,
+    x_ticks: [CachedLine; TICK_COUNT],
+    y_ticks: [CachedLine; TICK_COUNT],
     /// `shape_line` calls over every paint.
     #[cfg(any(test, feature = "test-hooks"))]
     pub shape_count: u32,
@@ -217,6 +229,8 @@ impl LabelCache {
             LabelKind::Legend(i) => self.legend.get(i)?,
             LabelKind::AxisMax => &self.axis_max,
             LabelKind::Range => &self.range,
+            LabelKind::XTick(i) => self.x_ticks.get(i)?,
+            LabelKind::YTick(i) => self.y_ticks.get(i)?,
         };
         line.line.is_some().then_some(line.text.as_str())
     }
@@ -461,6 +475,47 @@ pub fn paint(
         );
     }
 
+    // Ticks: x at the quarter points of the range, y at 25% steps of a percent scale.
+    if tall && f32::from(b.size.width) >= TICKS_MIN_BOX_W * s {
+        let ticks = LineStyle {
+            tnum: true,
+            ..secondary
+        };
+        // The range label owns the bottom row when it shows.
+        let range_shown = wide && !p.labels.range_word.is_empty();
+        let x_row = b.bottom() - pad - row - if range_shown { row } else { px(0.) };
+        for i in 0..TICK_COUNT {
+            scratch.clear();
+            x_tick_label(p.spec.range_ns, i, scratch);
+            let shaped = cache.x_ticks[i].sync(window, scratch, ticks);
+            cache.shaped(shaped);
+            let w = cache.x_ticks[i].width();
+            let frac = (i + 1) as f32 / (TICK_COUNT + 1) as f32;
+            let origin = point(p.plot.left() + p.plot.size.width * frac - w / 2.0, x_row);
+            paint_line(window, cx, &cache.x_ticks[i], origin, row);
+            #[cfg(any(test, feature = "test-hooks"))]
+            cache.record(LabelKind::XTick(i), origin, w, ticks.color);
+        }
+        if is_percent_scale(p.spec, p.labels) {
+            for i in 0..TICK_COUNT {
+                scratch.clear();
+                y_tick_label(i, scratch);
+                let shaped = cache.y_ticks[i].sync(window, scratch, ticks);
+                cache.shaped(shaped);
+                let w = cache.y_ticks[i].width();
+                // 25% sits at three quarters of the height, 75% at one quarter.
+                let frac = (TICK_COUNT - i) as f32 / (TICK_COUNT + 1) as f32;
+                let origin = point(
+                    p.plot.right() - m.sp[2] - w,
+                    p.plot.top() + p.plot.size.height * frac + px(1.0),
+                );
+                paint_line(window, cx, &cache.y_ticks[i], origin, row);
+                #[cfg(any(test, feature = "test-hooks"))]
+                cache.record(LabelKind::YTick(i), origin, w, ticks.color);
+            }
+        }
+    }
+
     // Range label: bottom-left.
     if tall && wide && !p.labels.range_word.is_empty() {
         scratch.clear();
@@ -572,6 +627,38 @@ pub(crate) fn paint_swatch(
     }
 }
 
+/// Whether the y axis is a fixed 0..100 percent scale, which gets y ticks.
+pub(crate) fn is_percent_scale(spec: &ChartSpec, labels: &ChartLabels) -> bool {
+    labels.value_fmt == ValueFormat::Percent
+        && matches!(spec.y, YScale::Fixed { min, max } if min == 0.0 && max == 100.0)
+}
+
+/// Appends x tick `i` (0 is the oldest, at a quarter of the width): how long ago that point is.
+/// Seconds below 5 minutes ("45 s", "7.5 s"), minutes from there ("3.75 m", "5 m").
+pub fn x_tick_label(range_ns: u64, i: usize, out: &mut String) {
+    let ago_ms = range_ns / 1_000_000 * (TICK_COUNT - i) as u64 / (TICK_COUNT + 1) as u64;
+    let (value, unit) = if range_ns / NS_PER_S >= TICK_MINUTES_FROM_S {
+        (ago_ms as f64 / 60_000.0, 'm')
+    } else {
+        (ago_ms as f64 / 1000.0, 's')
+    };
+    // At most two decimals, trailing zeros dropped.
+    let start = out.len();
+    let _ = write!(out, "{value:.2}");
+    while out[start..].ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    let _ = write!(out, " {unit}");
+}
+
+/// Appends y tick `i` of a percent scale: "25%", "50%", "75%".
+pub fn y_tick_label(i: usize, out: &mut String) {
+    let _ = write!(out, "{}%", (i + 1) * 100 / (TICK_COUNT + 1));
+}
+
 /// Appends `"<word> over <range>"`: "30 seconds", "60 seconds", "5 minutes", "10 minutes"
 /// (PERF-016). Whole minutes from 2 minutes on, seconds below.
 pub fn range_label(range_word: &str, range_ns: u64, out: &mut String) {
@@ -665,6 +752,31 @@ pub(crate) fn percent_of(value: f32, total: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chart_ticks_for_ranges() {
+        let x = |secs: u64| {
+            (0..TICK_COUNT)
+                .map(|i| {
+                    let mut out = String::new();
+                    x_tick_label(secs * NS_PER_S, i, &mut out);
+                    out
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(x(60), ["45 s", "30 s", "15 s"]);
+        assert_eq!(x(30), ["22.5 s", "15 s", "7.5 s"]);
+        assert_eq!(x(300), ["3.75 m", "2.5 m", "1.25 m"]);
+        assert_eq!(x(600), ["7.5 m", "5 m", "2.5 m"]);
+        let y: Vec<String> = (0..TICK_COUNT)
+            .map(|i| {
+                let mut out = String::new();
+                y_tick_label(i, &mut out);
+                out
+            })
+            .collect();
+        assert_eq!(y, ["25%", "50%", "75%"]);
+    }
 
     const GIB: f32 = 1024.0 * 1024.0 * 1024.0;
 

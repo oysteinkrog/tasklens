@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Div, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    AnyElement, App, Context, Div, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, Size, StatefulInteractiveElement as _,
     StyleRefinement, Styled as _, Subscription, Window, div, px, relative, size,
 };
@@ -40,8 +40,8 @@ use super::parts::{
 };
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
-    YScale, format_value,
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
+    ValueFormat, YScale, format_value,
 };
 use crate::components::validity::copy_text;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
@@ -181,6 +181,8 @@ pub const CPU_BOX_ID: &str = "perf-overview-box-cpu";
 const KEY_TITLE: &str = "perf-card-heading-cpu";
 const KEY_CORE: &str = "perf-overview-core";
 const KEY_RANGE: &str = "perf-cpu-heading-utilization";
+const KEY_LEGEND_TOTAL: &str = "perf-legend-total";
+const KEY_LEGEND_KERNEL: &str = "perf-legend-kernel";
 const KEY_POWER: &str = "perf-cpu-secondary-power";
 
 /// The span one core sparkline point averages (UI-PRF-018).
@@ -334,13 +336,17 @@ fn power_labels(heading: SharedString) -> ChartLabels {
 }
 
 /// No heading and no value: the box title row carries the numbers.
-fn total_labels(range_word: SharedString) -> ChartLabels {
+fn total_labels(range_word: SharedString, kernel: bool, cx: &App) -> ChartLabels {
+    let mut legend = smallvec![(tr(cx, KEY_LEGEND_TOTAL), LegendStyle::Solid)];
+    if kernel {
+        legend.push((tr(cx, KEY_LEGEND_KERNEL), LegendStyle::Dashed));
+    }
     ChartLabels {
         heading: None,
         value_fmt: ValueFormat::Percent,
         value_align: ValueAlign::Hidden,
         range_word,
-        legend: SmallVec::new(),
+        legend,
         show_axis_max: false,
     }
 }
@@ -430,7 +436,7 @@ impl CpuBox {
         let theme = current(cx).clone();
         let settings = ChartSettings::read(cx);
         let spec = total_spec(cpu, &settings, &theme);
-        let labels = total_labels(tr(cx, KEY_RANGE));
+        let labels = total_labels(tr(cx, KEY_RANGE), settings.kernel, cx);
         let total = box_chart(spec, labels, hub, cx);
         let snap = Arc::clone(hub.read(cx).current());
         let grid_size = size(px(0.), px(0.));
@@ -852,7 +858,7 @@ impl CpuBox {
         }
         self.strings_version = version;
         self.title = tr(cx, KEY_TITLE);
-        let labels = total_labels(tr(cx, KEY_RANGE));
+        let labels = total_labels(tr(cx, KEY_RANGE), self.settings.kernel, cx);
         self.total.update(cx, |v, cx| v.set_labels(labels, cx));
         if let Some(chart) = &self.power_chart {
             let labels = power_labels(tr(cx, KEY_POWER));
@@ -873,7 +879,11 @@ impl CpuBox {
     fn rebuild_spec(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
         let spec = total_spec(self.cpu, &self.settings, &theme);
-        self.total.update(cx, |v, cx| v.set_spec(spec, cx));
+        let labels = total_labels(tr(cx, KEY_RANGE), self.settings.kernel, cx);
+        self.total.update(cx, |v, cx| {
+            v.set_spec(spec, cx);
+            v.set_labels(labels, cx);
+        });
         if let Some(chart) = &self.power_chart {
             let spec = power_spec(self.cpu, &self.settings, &theme);
             chart.update(cx, |v, cx| v.set_spec(spec, cx));
