@@ -376,6 +376,8 @@ pub enum CoreCellFit {
     NoGhz,
     /// Name, a sparkline under 48 px, a 16 px meter and percent.
     SparkShrinks,
+    /// Name, a 12 px sparkline, a meter under 16 px (or none) and percent.
+    MeterShrinks,
     /// Name, a meter under 16 px (or none) and percent.
     NoSpark,
 }
@@ -425,6 +427,9 @@ const CORE_FULL_W: f32 = NAME_W + CORE_SPARK_W + CORE_METER_MIN_W + PCT_W + GHZ_
 const CORE_NO_GHZ_W: f32 = CORE_FULL_W - GHZ_W - PART_GAP;
 /// The cell width right of a shrinking sparkline: a gap, the 16 px meter, a gap and the percent.
 const CORE_SPARK_TAIL_W: f32 = PART_GAP + CORE_METER_MIN_W + PART_GAP + PCT_W;
+/// The narrowest cell that keeps a sparkline: name, the 12 px sparkline, no meter and the
+/// percent with their 3 gaps.
+const CORE_SPARK_MIN_CELL_W: f32 = NAME_W + CORE_SPARK_MIN_W + PCT_W + 3. * PART_GAP;
 
 /// The grid for `n` cores in `w × h` (D-029): one column of rows at least 16 px high, or the
 /// fewest equal columns (at most 4) that fit them. When 16 px rows do not fit in 4 columns the
@@ -465,6 +470,8 @@ pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsL
         CoreCellFit::NoGhz
     } else if cell_w >= (NAME_W + PART_GAP + CORE_SPARK_MIN_W + CORE_SPARK_TAIL_W) * scale {
         CoreCellFit::SparkShrinks
+    } else if cell_w >= CORE_SPARK_MIN_CELL_W * scale {
+        CoreCellFit::MeterShrinks
     } else {
         CoreCellFit::NoSpark
     };
@@ -515,6 +522,10 @@ pub fn core_cell(l: &CoreBarsLayout, scale: f32) -> CoreCell {
         CoreCellFit::SparkShrinks => {
             let meter_x = meter_end - px(CORE_METER_MIN_W * scale);
             ((meter_x - gap - spark_x).max(px(0.)), meter_x)
+        }
+        CoreCellFit::MeterShrinks => {
+            let spark_w = px(CORE_SPARK_MIN_W * scale);
+            (spark_w, spark_x + spark_w + gap)
         }
         CoreCellFit::NoSpark => (px(0.), spark_x),
     };
@@ -573,10 +584,10 @@ pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetri
                     .top(inset)
                     .bottom(inset)
                     .left(left);
-                let spark = if l.fit == CoreCellFit::SparkShrinks {
-                    spark.right(tail)
-                } else {
-                    spark.w(px(CORE_SPARK_W * s))
+                let spark = match l.fit {
+                    CoreCellFit::SparkShrinks => spark.right(tail),
+                    CoreCellFit::MeterShrinks => spark.w(px(CORE_SPARK_MIN_W * s)),
+                    _ => spark.w(px(CORE_SPARK_W * s)),
                 };
                 cell = cell.child(
                     spark.child(chart.clone().cached(StyleRefinement::default().size_full())),

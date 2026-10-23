@@ -130,12 +130,34 @@ fn core_cell_shrinks_spark_then_meter() {
             ghz: false,
         }
     );
-    // 90 px: no sparkline, the meter takes what is left.
-    let (fit, c) = cell(4. * 90. + 24.);
+    // 104 px: the sparkline is down to 12 px, the meter still 16 px.
+    let (fit, c) = cell(4. * 104. + 24.);
+    assert_eq!(fit, CoreCellFit::SparkShrinks);
+    assert_eq!((c.spark_w, c.meter_w), (px(12.), px(16.)));
+    // 100 px: the sparkline keeps 12 px, the meter shrinks to 12 px.
+    let (fit, c) = cell(4. * 100. + 24.);
+    assert_eq!(fit, CoreCellFit::MeterShrinks);
+    assert_eq!(
+        c,
+        CoreCell {
+            spark_x: px(32.),
+            spark_w: px(12.),
+            meter_x: px(48.),
+            meter_w: px(12.),
+            pct_right: px(100.),
+            ghz: false,
+        }
+    );
+    // 88 px: the meter is gone, the 12 px sparkline stays.
+    let (fit, c) = cell(4. * 88. + 24.);
+    assert_eq!(fit, CoreCellFit::MeterShrinks);
+    assert_eq!((c.spark_w, c.meter_w), (px(12.), px(0.)));
+    // 86 px: no room for the sparkline, the meter takes what is left.
+    let (fit, c) = cell(4. * 86. + 24.);
     assert_eq!(fit, CoreCellFit::NoSpark);
     assert_eq!(
         (c.spark_w, c.meter_x, c.meter_w),
-        (px(0.), px(32.), px(18.))
+        (px(0.), px(32.), px(14.))
     );
     // 72 px: name and percent only.
     let (fit, c) = cell(4. * 72. + 24.);
