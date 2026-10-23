@@ -31,6 +31,7 @@ use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::testing::render::{RenderHarness, assert_golden, run_on_lavapipe};
+use tl_ui::theme::current;
 
 const WIDTH: f32 = 1280.;
 const HEIGHT: f32 = 800.;
@@ -48,8 +49,12 @@ struct Shot {
 }
 
 impl Render for Shot {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.page.clone())
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The theme's window background, as the main window draws it.
+        div()
+            .size_full()
+            .bg(current(cx).window_bg)
+            .child(self.page.clone())
     }
 }
 
@@ -134,8 +139,23 @@ fn check(page: Page, theme: &str, name: &str) {
     let mut harness = RenderHarness::new();
     harness.set_theme(theme);
     harness.set_scale(1.0);
-    let img = harness.render(size(px(WIDTH), px(HEIGHT)), |_, cx| build(page, cx));
+    let mut img = harness.render(size(px(WIDTH), px(HEIGHT)), |_, cx| build(page, cx));
+    if matches!(page, Page::Cpu) {
+        blank_up_time(&mut img);
+    }
     assert_golden(name, &img);
+}
+
+/// The CPU page's Up time value, in device pixels (2 × logical): x 16..416 and y 584..604
+/// logical. The page reads CLOCK_BOOTTIME itself, so this value differs on every run. It is
+/// painted over with the page background taken from the padding left of it.
+fn blank_up_time(img: &mut image::RgbaImage) {
+    let bg = *img.get_pixel(16, 1168);
+    for y in 1168..1208 {
+        for x in 32..832 {
+            img.put_pixel(x, y, bg);
+        }
+    }
 }
 
 #[test]

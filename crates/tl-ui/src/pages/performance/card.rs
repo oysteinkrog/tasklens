@@ -915,10 +915,10 @@ impl CardTextLayout {
 }
 
 /// The width the device icon takes at the left of a card (UI-PRF-058): the 16 px icon and the
-/// sp3 gap after it. Zero for the Overview card, which has no icon.
+/// card's sp4 gap after it. Zero for the Overview card, which has no icon.
 pub fn card_icon_column(key: &DeviceKey, m: &UiMetrics) -> Pixels {
     if key.kind().icon().is_some() {
-        m.icon.md + m.sp[3]
+        m.icon.md + m.sp[4]
     } else {
         Pixels::ZERO
     }
@@ -1335,6 +1335,8 @@ pub struct CardPrepared {
     pub height: Pixels,
     /// The mini graph width, zero when the card has no room for one ([`card_graph_width`]).
     pub graph_w: Pixels,
+    /// Whether the card draws its device icon: only while a graph fits next to it.
+    pub icon: bool,
 }
 
 impl CardPrepared {
@@ -1629,8 +1631,29 @@ impl DeviceCard {
                     });
                 px(f32::from(w).ceil())
             });
-            let inner_w = self.width - card_icon_column(&self.key, &m);
-            let graph_w = card_graph_width(inner_w, card_text_floor(value_w, &m), &m);
+            // The icon shows only while a graph still fits next to it, so narrow cards keep
+            // their graph and text room (UI-PRF-058).
+            let floor = card_text_floor(value_w, &m);
+            let icon_w = card_icon_column(&self.key, &m);
+            let icon = icon_w > Pixels::ZERO
+                && card_graph_width(self.width - icon_w, floor, &m) > Pixels::ZERO;
+            let inner_w = if icon {
+                self.width - icon_w
+            } else {
+                self.width
+            };
+            // The graph narrows so the value stays in the heading row when it can, rather than
+            // taking a row of its own and growing the card.
+            let inline_floor = card_text_floor(
+                px(f32::from(measure(CardFont::Heading, &self.lines.heading)).ceil())
+                    + m.sp[3]
+                    + value_w,
+                &m,
+            );
+            let graph_w = match card_graph_width(inner_w, inline_floor, &m) {
+                w if w > Pixels::ZERO && value_w > Pixels::ZERO => w,
+                _ => card_graph_width(inner_w, floor, &m),
+            };
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
@@ -1645,6 +1668,7 @@ impl DeviceCard {
                 value,
                 height,
                 graph_w,
+                icon,
             });
         }
         self.prepared.as_ref().expect("prepared above")
@@ -1666,6 +1690,7 @@ impl RenderOnce for DeviceCard {
             value,
             height,
             graph_w,
+            icon: show_icon,
         } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
         let key = self.key;
@@ -1803,11 +1828,10 @@ impl RenderOnce for DeviceCard {
             .on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(PerfSelectDevice { key: key.clone() }), cx);
             })
-            .children(icon_kind.icon().map(|name| {
+            .children(icon_kind.icon().filter(|_| show_icon).map(|name| {
                 div()
                     .debug_selector(|| "perf-card-icon".into())
                     .flex_none()
-                    .mr(m.sp[3])
                     .child(icon(name, m.icon.md, icon_kind.icon_color(&theme)))
             }))
             .child(graph)

@@ -222,7 +222,7 @@ fn card_shows_the_device_icon(cx: &mut TestAppContext) {
     assert_eq!(icon.size.width, px(16.), "i_md icon");
     assert_eq!(icon.size.height, px(16.));
     assert!(icon.left() > card.left() && icon.right() <= graph.left());
-    assert_eq!(graph.left() - icon.right(), px(4.), "sp3 gap");
+    assert_eq!(graph.left() - icon.right(), px(8.), "sp4 gap");
 }
 
 #[gpui_kit::test]
@@ -233,8 +233,10 @@ fn card_layout_and_click(cx: &mut TestAppContext) {
     assert_eq!(card.size.height, px(80.));
     let graph = cx.debug_bounds("perf-card-graph").expect("graph");
     assert_eq!((graph.size.width, graph.size.height), (px(116.), px(56.)));
-    // 1 px border, then the sp5 inset.
-    assert_eq!(graph.left() - card.left(), px(13.));
+    // 1 px border and the sp5 inset, then the 16 px icon and the sp4 gap (UI-PRF-058).
+    let icon = cx.debug_bounds("perf-card-icon").expect("card icon");
+    assert_eq!(icon.left() - card.left(), px(13.));
+    assert_eq!(graph.left() - card.left(), px(37.));
     assert_eq!(
         graph.center().y,
         card.center().y,
@@ -324,7 +326,8 @@ fn card_long_gpu_name_wraps_then_middle_cut(cx: &mut TestAppContext) {
     assert_eq!(line1.rows.len(), 2);
     assert!(LONG_GPU.starts_with(&*line1.rows[0].text), "{line1:?}");
     assert!(line1.rows[1].text.contains('\u{2026}'), "{line1:?}");
-    assert!(line1.rows[1].text.ends_with("GPU 16 GB"), "{line1:?}");
+    // The device icon (UI-PRF-058) leaves a narrower column, so less of the name's end shows.
+    assert!(line1.rows[1].text.ends_with("16 GB"), "{line1:?}");
     assert_eq!(
         &*card_tooltip(&lines, &prepared.layout),
         [SharedString::from(LONG_GPU)]
@@ -1203,16 +1206,22 @@ mod sidebar {
             graph_w > px(0.) && graph_w < px(116.),
             "the graph narrows: {graph_w:?}"
         );
+        assert!(
+            !prepared(&mut r, "cpu").icon,
+            "no device icon when a graph would not fit next to it"
+        );
         assert_values_inside(&mut r, "nav_width 180");
 
         r.host_w.set(252.);
         r.vcx.update(|window, _| window.refresh());
         draw(r.vcx);
+        // 236 − 24 (icon and gap) − 2 − 12 − 8 − 90 ("CPU", sp3, "100.0%" in one row).
         assert_eq!(
             prepared(&mut r, "cpu").graph_w,
-            px(116.),
-            "full graph at 252"
+            px(100.),
+            "graph at 252 next to the icon and the inline value"
         );
+        assert!(prepared(&mut r, "cpu").icon, "device icon at 252");
         enter_edit(&mut r);
         draw(r.vcx);
         assert_values_inside(&mut r, "edit mode");
