@@ -25,7 +25,10 @@
 //! condition: the worker publishes the manager as `Unavailable` and tries again on `RefreshNow`
 //! or after 60 s. A call timeout or a connection error during the first listing ends the
 //! generation with `Err` so the supervisor restarts it. Once connected, a lost bus publishes
-//! the manager as `Reconnecting` with the last records, then ends with `Err`.
+//! the manager as `Reconnecting` with the last records, then ends with `Err`. A call that times
+//! out on a connected bus is not a lost bus: a busy systemd can take over 2 s to answer
+//! `ListUnitFilesByPatterns`. The worker keeps the last records and lists again after
+//! `RESYNC_RETRY`.
 //!
 //! OpenRC (E14-008, SYS-018): at worker start, a host without `/run/systemd/system` but with
 //! `rc-status` runs the OpenRC path. The `SystemdSystem` worker lists services with
@@ -96,6 +99,8 @@ const ALREADY_SUBSCRIBED: &str = "org.freedesktop.systemd1.AlreadySubscribed";
 pub const RETRY_UNAVAILABLE: Duration = Duration::from_secs(60);
 /// ADR-008: a full listing every 60 s while `Demand.services` is true.
 pub const RESYNC_PERIOD: Duration = Duration::from_secs(60);
+/// After a call timed out on a connected bus, the next full listing comes this much later.
+pub const RESYNC_RETRY: Duration = Duration::from_secs(10);
 /// The longest wait on the signal stream. Cancellation, `RefreshNow` and the resync schedule
 /// are checked after each wait.
 const SIGNAL_WAIT: Duration = Duration::from_millis(500);
@@ -272,35 +277,48 @@ async fn run<O: Opener>(
     }
 }
 
-/// One connected generation: fill the slot, start the colour scheme watch, list, subscribe,
-/// then apply signals and resync on schedule until cancelled or the bus is lost.
+/// One connected generation: fill the slot, start the colour scheme watch, then `serve`.
 async fn connected(
     cx: &Cx,
     io: &WorkerIo,
     cfg: &EngineConfig,
     manager: Manager,
     conn: DbusConn,
+    last_seq: u64,
+) -> Outcome<(), WorkerError> {
+    let slot = slot_of(io, manager);
+    slot.set(Arc::new(conn.raw().clone()));
+    // Locals drop before parameters, so both guards go before `conn` stops its tick task.
+    let _clear = ClearOnDrop(slot.clone());
+    let _scheme = start_color_scheme(cx, cfg.mode, manager, conn.raw(), &io.updates);
+    serve(cx, io, cfg, manager, &conn, last_seq).await
+}
+
+/// List, subscribe, then apply signals and resync on schedule until cancelled or the bus is
+/// lost. A call that times out keeps the last records and moves the next listing to
+/// `RESYNC_RETRY` from now.
+async fn serve<B: SystemdBus>(
+    cx: &Cx,
+    io: &WorkerIo,
+    cfg: &EngineConfig,
+    manager: Manager,
+    bus: &B,
     mut last_seq: u64,
 ) -> Outcome<(), WorkerError> {
     let id = source_id(manager);
-    let slot = slot_of(io, manager);
-    slot.set(Arc::new(conn.raw().clone()));
-    // Locals drop in reverse order, so both guards go before `conn` stops its tick task.
-    let _clear = ClearOnDrop(slot.clone());
-    let _scheme = start_color_scheme(cx, cfg.mode, manager, conn.raw(), &io.updates);
     let mut state = ServicesState::new(manager);
     let fs = HostFs {
         root: cfg.sys_root.clone(),
     };
     let dropins = dropin_base(manager, &cfg.sys_root);
-    let first = match resync(cx, &conn, manager, &cfg.sys_root, &fs, &mut state).await {
+    let first = match resync(cx, bus, manager, &cfg.sys_root, &fs, &mut state).await {
         Ok(_) => {
             let wanted = io.demand.borrow_and_clone().unit_details;
             let host = DetailsHost {
                 sys_root: &cfg.sys_root,
                 dropins: dropins.as_deref(),
             };
-            sync_details(cx, &conn, host, &mut state, &wanted, true).await
+            sync_details(cx, bus, host, &mut state, &wanted, true).await
         }
         Err(e) => Err(e),
     };
@@ -314,7 +332,7 @@ async fn connected(
     if let Some(stop) = send(cx, io, state.update(ManagerState::Connected)).await {
         return stop;
     }
-    let mut signals = match SystemdSignals::open(cx, &conn).await {
+    let mut signals = match bus.subscribe(cx).await {
         Ok(signals) => signals,
         Err(e) => return lost(cx, io, &state, e).await,
     };
@@ -342,25 +360,37 @@ async fn connected(
         };
         let mut changed = false;
         if !full {
-            match apply_batch(cx, &conn, manager, &cfg.sys_root, &mut state, &batch).await {
+            match apply_batch(cx, bus, manager, &cfg.sys_root, &mut state, &batch).await {
                 Ok(BatchResult::Applied(c)) => changed = c,
                 Ok(BatchResult::Resync) => full = true,
+                Err(e @ DbusError::Timeout(_)) => {
+                    // The signals already changed the state; the reads they needed come with
+                    // the next listing.
+                    changed = true;
+                    timed_out(manager, &e, &mut schedule, cx.now());
+                }
                 Err(e) => return lost(cx, io, &state, e).await,
             }
         }
         if full {
-            match resync(cx, &conn, manager, &cfg.sys_root, &fs, &mut state).await {
-                Ok(c) => changed = c,
+            match resync(cx, bus, manager, &cfg.sys_root, &fs, &mut state).await {
+                Ok(c) => {
+                    changed = c;
+                    schedule.done(cx.now());
+                }
+                Err(e @ DbusError::Timeout(_)) => {
+                    full = false;
+                    timed_out(manager, &e, &mut schedule, cx.now());
+                }
                 Err(e) => return lost(cx, io, &state, e).await,
             }
-            schedule.done(cx.now());
         }
         let wanted = io.demand.borrow_and_clone().unit_details;
         let host = DetailsHost {
             sys_root: &cfg.sys_root,
             dropins: dropins.as_deref(),
         };
-        match sync_details(cx, &conn, host, &mut state, &wanted, full).await {
+        match sync_details(cx, bus, host, &mut state, &wanted, full).await {
             Ok(c) => changed |= c,
             Err(e) => return lost(cx, io, &state, e).await,
         }
@@ -392,18 +422,29 @@ async fn lost(
     Outcome::Err(e.into())
 }
 
+/// A call timed out on a connected bus. systemd is slow, the bus is not lost: the last records
+/// stay and the next full listing is due `RESYNC_RETRY` from `now`.
+fn timed_out(manager: Manager, e: &DbusError, schedule: &mut Schedule, now: Time) {
+    tracing::warn!(
+        ?manager,
+        error = %e,
+        "systemd: call timed out, keeping the last records"
+    );
+    schedule.retry(now);
+}
+
 /// A full listing into `state`, then the `has_cgroup_procs` walk. True when the record list
 /// changed.
-async fn resync<F: CgroupFs>(
+async fn resync<B: SystemdBus, F: CgroupFs>(
     cx: &Cx,
-    conn: &DbusConn,
+    bus: &B,
     manager: Manager,
     sys_root: &SysRoot,
     fs: &F,
     state: &mut ServicesState,
 ) -> Result<bool, DbusError> {
     let started = cx.now();
-    let listing = list_units(cx, conn).await?;
+    let listing = bus.list(cx).await?;
     let users = resolve_users(cx, manager, sys_root, listing.units.iter().map(|f| &f.raw)).await?;
     let took = Duration::from_nanos(cx.now().duration_since(started));
     tracing::debug!(
@@ -427,9 +468,9 @@ enum BatchResult {
 }
 
 /// Applies one signal batch: the state changes first, then the bus reads they ask for.
-async fn apply_batch(
+async fn apply_batch<B: SystemdBus>(
     cx: &Cx,
-    conn: &DbusConn,
+    bus: &B,
     manager: Manager,
     sys_root: &SysRoot,
     state: &mut ServicesState,
@@ -444,11 +485,11 @@ async fn apply_batch(
     }
     let mut changed = fx.changed;
     if fx.list_files {
-        changed |= state.set_files(list_files(cx, conn).await?);
+        changed |= state.set_files(bus.list_files(cx).await?);
     }
     let mut fetched = Vec::with_capacity(fx.fetch.len());
     for (name, path) in &fx.fetch {
-        if let Some(unit) = fetch_unit(cx, conn, name, path).await? {
+        if let Some(unit) = bus.fetch_unit(cx, name, path).await? {
             fetched.push(unit);
         }
     }
@@ -1214,6 +1255,73 @@ fn is_unit_error(e: &DbusError) -> bool {
     matches!(e, DbusError::Call { name, .. } if &**name != "zbus")
 }
 
+/// The manager reads a connected generation makes. Tests replace the bus with a fake.
+trait SystemdBus {
+    type Signals<'a>: UnitSignals
+    where
+        Self: 'a;
+    /// The full listing (`list_units`).
+    async fn list(&self, cx: &Cx) -> Result<Listing, DbusError>;
+    /// `ListUnitFilesByPatterns`.
+    async fn list_files(&self, cx: &Cx) -> Result<UnitFiles, DbusError>;
+    /// One unit's properties (`fetch_unit`).
+    async fn fetch_unit(
+        &self,
+        cx: &Cx,
+        name: &str,
+        path: &OwnedObjectPath,
+    ) -> Result<Option<Fetched>, DbusError>;
+    /// `LoadUnit`: the object path of `name`.
+    async fn load_unit(&self, cx: &Cx, name: &str) -> Result<OwnedObjectPath, DbusError>;
+    /// One unit's detail properties (`fetch_details`).
+    async fn fetch_details(
+        &self,
+        cx: &Cx,
+        path: &OwnedObjectPath,
+        kind: UnitType,
+    ) -> Result<DetailRaw, DbusError>;
+    /// The unit signals, after `Subscribe`.
+    async fn subscribe(&self, cx: &Cx) -> Result<Self::Signals<'_>, DbusError>;
+}
+
+impl SystemdBus for DbusConn {
+    type Signals<'a> = SystemdSignals<'a>;
+
+    async fn list(&self, cx: &Cx) -> Result<Listing, DbusError> {
+        list_units(cx, self).await
+    }
+
+    async fn list_files(&self, cx: &Cx) -> Result<UnitFiles, DbusError> {
+        list_files(cx, self).await
+    }
+
+    async fn fetch_unit(
+        &self,
+        cx: &Cx,
+        name: &str,
+        path: &OwnedObjectPath,
+    ) -> Result<Option<Fetched>, DbusError> {
+        fetch_unit(cx, self, name, path).await
+    }
+
+    async fn load_unit(&self, cx: &Cx, name: &str) -> Result<OwnedObjectPath, DbusError> {
+        manager_call(cx, self, "LoadUnit", &(name,)).await
+    }
+
+    async fn fetch_details(
+        &self,
+        cx: &Cx,
+        path: &OwnedObjectPath,
+        kind: UnitType,
+    ) -> Result<DetailRaw, DbusError> {
+        fetch_details(cx, self, path, kind).await
+    }
+
+    async fn subscribe(&self, cx: &Cx) -> Result<SystemdSignals<'_>, DbusError> {
+        SystemdSignals::open(cx, self).await
+    }
+}
+
 async fn manager_call<B, T>(
     cx: &Cx,
     conn: &DbusConn,
@@ -1557,6 +1665,8 @@ impl UnitSignals for SystemdSignals<'_> {
 /// listing runs.
 struct Schedule {
     since: Time,
+    /// `RESYNC_PERIOD`, or `RESYNC_RETRY` after a call timed out until the next listing ran.
+    period: Duration,
     /// The last `Demand.unit_details` the loop saw.
     details: Arc<[UnitRef]>,
 }
@@ -1565,6 +1675,7 @@ impl Schedule {
     fn new(now: Time) -> Self {
         Self {
             since: now,
+            period: RESYNC_PERIOD,
             details: Arc::from([]),
         }
     }
@@ -1583,12 +1694,19 @@ impl Schedule {
             self.since = now;
             return false;
         }
-        Duration::from_nanos(now.duration_since(self.since)) >= RESYNC_PERIOD
+        Duration::from_nanos(now.duration_since(self.since)) >= self.period
     }
 
     /// A full listing just ran.
     fn done(&mut self, now: Time) {
         self.since = now;
+        self.period = RESYNC_PERIOD;
+    }
+
+    /// A call timed out: the next listing is due `RESYNC_RETRY` from `now`.
+    fn retry(&mut self, now: Time) {
+        self.since = now;
+        self.period = RESYNC_RETRY;
     }
 }
 
@@ -2608,9 +2726,9 @@ async fn fetch_details(
 /// those that need it. `full` retries every unit not read yet and checks every drop-in again.
 /// A failed read of one unit is logged and leaves it out; only a closed bus is `Err`. True
 /// when published details changed.
-async fn sync_details(
+async fn sync_details<B: SystemdBus>(
     cx: &Cx,
-    conn: &DbusConn,
+    bus: &B,
     host: DetailsHost<'_>,
     state: &mut ServicesState,
     wanted: &[UnitRef],
@@ -2618,14 +2736,14 @@ async fn sync_details(
 ) -> Result<bool, DbusError> {
     let mut changed = state.want_details(wanted);
     for name in state.details_to_resolve() {
-        match manager_call::<_, OwnedObjectPath>(cx, conn, "LoadUnit", &(&*name,)).await {
+        match bus.load_unit(cx, &name).await {
             Ok(path) => state.set_detail_path(&name, path),
             Err(DbusError::Closed) => return Err(DbusError::Closed),
             Err(e) => tracing::debug!(unit = %name, error = %e, "systemd: LoadUnit failed"),
         }
     }
     for (name, path, kind) in state.details_to_fetch(full) {
-        let raw = match fetch_details(cx, conn, &path, kind).await {
+        let raw = match bus.fetch_details(cx, &path, kind).await {
             Ok(raw) => Some(raw),
             Err(DbusError::Closed) => return Err(DbusError::Closed),
             Err(e) => {
@@ -4190,6 +4308,193 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    /// One queued answer of `SlowBus::list`.
+    enum ListAnswer {
+        Units(&'static [&'static str]),
+        /// A busy systemd: no reply within `READ_TIMEOUT`.
+        Slow,
+        Closed,
+    }
+
+    /// A fake system manager for `serve`. Each `list` takes the next queued answer. Units have
+    /// no unit file, no details and send no signals.
+    struct SlowBus {
+        answers: Arc<Mutex<std::collections::VecDeque<ListAnswer>>>,
+        lists: Arc<Mutex<usize>>,
+    }
+
+    impl SystemdBus for SlowBus {
+        type Signals<'a> = QuietSignals;
+
+        async fn list(&self, cx: &Cx) -> Result<Listing, DbusError> {
+            *self.lists.lock().expect("count lock") += 1;
+            let answer = self.answers.lock().expect("queue lock").pop_front();
+            match answer.expect("a queued answer") {
+                ListAnswer::Units(names) => Ok(Listing {
+                    units: names
+                        .iter()
+                        .map(|name| unit(name, "active", "running", "").0)
+                        .collect(),
+                    files: UnitFiles::new(),
+                }),
+                ListAnswer::Slow => {
+                    time::sleep(cx.now(), crate::dbus::READ_TIMEOUT).await;
+                    Err(DbusError::Timeout(crate::dbus::READ_TIMEOUT))
+                }
+                ListAnswer::Closed => Err(DbusError::Closed),
+            }
+        }
+
+        async fn list_files(&self, _cx: &Cx) -> Result<UnitFiles, DbusError> {
+            Ok(UnitFiles::new())
+        }
+
+        async fn fetch_unit(
+            &self,
+            _cx: &Cx,
+            _name: &str,
+            _path: &OwnedObjectPath,
+        ) -> Result<Option<Fetched>, DbusError> {
+            Ok(None)
+        }
+
+        async fn load_unit(&self, _cx: &Cx, name: &str) -> Result<OwnedObjectPath, DbusError> {
+            Ok(unit_path(name))
+        }
+
+        async fn fetch_details(
+            &self,
+            _cx: &Cx,
+            _path: &OwnedObjectPath,
+            _kind: UnitType,
+        ) -> Result<DetailRaw, DbusError> {
+            Err(DbusError::Closed)
+        }
+
+        async fn subscribe(&self, _cx: &Cx) -> Result<QuietSignals, DbusError> {
+            Ok(QuietSignals { end: false })
+        }
+    }
+
+    /// The services updates in `rx` as (state, unit count).
+    fn service_states(rx: &mut mpsc::Receiver<EngineMsg>) -> Vec<(ManagerState, usize)> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                EngineMsg::Source(SourceUpdate::Services(up)) => {
+                    assert_eq!(up.manager, Manager::System);
+                    out.push((up.state, up.units.len()));
+                }
+                other => panic!("unexpected message {other:?}"),
+            }
+        }
+        out
+    }
+
+    /// Regression (y6k.33): a busy systemd let a resync call time out, and the worker took that
+    /// for a lost bus. It published `Reconnecting` and the supervisor restarted it, 53 times in
+    /// one session. A timeout now keeps the generation and the records, and lists again after
+    /// `RESYNC_RETRY`. A closed bus still publishes `Reconnecting` and ends the generation.
+    #[test]
+    fn resync_timeout_keeps_the_worker() {
+        assert_eq!(RESYNC_RETRY, Duration::from_secs(10));
+        let mut lab = LabRuntime::new(LabConfig::new(45).max_steps(1_000_000));
+        let (io, mut rx, control_tx, demand_tx) = worker_io();
+        demand_tx
+            .send(Demand {
+                services: true,
+                ..Demand::default()
+            })
+            .expect("demand send");
+        let root = fixture_root("dbus_systemd_slow_bus");
+        let cfg = EngineConfig::new(EngineMode::Full, root.join("state"))
+            .with_sys_root(SysRoot::at(&root));
+        let answers = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            ListAnswer::Units(&["a.service", "b.service"]),
+            ListAnswer::Slow,
+            ListAnswer::Units(&["a.service"]),
+            ListAnswer::Closed,
+        ])));
+        let lists = Arc::new(Mutex::new(0usize));
+        let bus = SlowBus {
+            answers,
+            lists: Arc::clone(&lists),
+        };
+        let out = Ended::default();
+        let sink = Arc::clone(&out);
+        let lab_root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = lab
+            .state
+            .create_task(lab_root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let outcome = serve(&cx, &io, &cfg, Manager::System, &bus, 0).await;
+                *sink.lock().expect("slot lock") = Some(outcome);
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        let lists_now = || *lists.lock().expect("count lock");
+        assert_eq!(lists_now(), 1);
+        assert_eq!(service_states(&mut rx), vec![(ManagerState::Connected, 2)]);
+
+        // The resync at 60 s gets no reply; the read times out at 62 s.
+        for _ in 0..124 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert_eq!(lists_now(), 2);
+        for _ in 0..4 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert!(
+            out.lock().expect("slot lock").is_none(),
+            "the generation runs"
+        );
+        assert!(
+            service_states(&mut rx).is_empty(),
+            "no Reconnecting, the last records stay"
+        );
+
+        // The next listing comes 10 s after the timeout, not 60 s.
+        for _ in 0..14 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert_eq!(lists_now(), 2, "not before 10 s");
+        for _ in 0..4 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert_eq!(lists_now(), 3, "listed again at 10 s");
+        assert_eq!(service_states(&mut rx), vec![(ManagerState::Connected, 1)]);
+        assert!(
+            out.lock().expect("slot lock").is_none(),
+            "the generation runs"
+        );
+
+        // A closed bus is a lost bus.
+        control_tx
+            .send(WorkerControl {
+                commands: Arc::from([QueuedCommand {
+                    seq: 1,
+                    target: SourceId::SystemdSystem,
+                    command: WorkerCommand::RefreshNow,
+                }]),
+                ..WorkerControl::default()
+            })
+            .expect("control send");
+        advance(&mut lab, SIGNAL_WAIT);
+        assert_eq!(lists_now(), 4);
+        assert_eq!(
+            service_states(&mut rx),
+            vec![(ManagerState::Reconnecting, 1)]
+        );
+        let outcome = out.lock().expect("slot lock").take().expect("ended");
+        assert!(
+            matches!(outcome, Outcome::Err(WorkerError::Dbus(_))),
+            "{outcome:?}"
+        );
         let report = lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
     }
