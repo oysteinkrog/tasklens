@@ -476,7 +476,7 @@ pub fn paint(
     }
 
     // Ticks: x at the quarter points of the range, y at 25% steps of a percent scale.
-    if tall && f32::from(b.size.width) >= TICKS_MIN_BOX_W * s {
+    if f32::from(b.size.width) >= TICKS_MIN_BOX_W * s {
         let ticks = LineStyle {
             tnum: true,
             ..secondary
