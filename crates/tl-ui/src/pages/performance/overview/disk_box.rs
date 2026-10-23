@@ -1278,6 +1278,7 @@ mod tests {
             parent,
             persistent_key: Arc::from(format!("disk:{name}")),
             net_kind: None,
+            hot_c: None,
         }
     }
 

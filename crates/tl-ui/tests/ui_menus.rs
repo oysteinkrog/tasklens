@@ -1512,6 +1512,7 @@ fn set_gpus(r: &mut Rig<'_>, gpus: usize) {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind: None,
+            hot_c: None,
         })
         .collect();
     r.engine.publish_with(|s| {

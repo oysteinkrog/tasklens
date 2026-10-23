@@ -153,6 +153,7 @@ fn entry(idx: u16, identity: DeviceIdentity, kind: Option<NetKind>) -> DeviceEnt
         parent: None,
         persistent_key: Arc::from(""),
         net_kind: kind,
+        hot_c: None,
     }
 }
 

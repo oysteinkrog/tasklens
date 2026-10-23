@@ -885,6 +885,7 @@ mod tests {
             parent: None,
             persistent_key: Arc::from(key),
             net_kind: None,
+            hot_c: None,
         }
     }
 

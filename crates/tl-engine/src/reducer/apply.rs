@@ -530,6 +530,7 @@ impl Reducer {
                         None,
                         &gpu.persistent_key,
                         None,
+                        gpu.hot_c,
                     )?;
                 }
                 self.mark(ComponentMask::DEVICES);
@@ -921,7 +922,7 @@ impl Reducer {
             return Ok((idx, entry.present));
         }
         let (name, key) = fallback_name_key(id);
-        let (idx, _) = self.devices.ensure(id, &name, None, &key, None)?;
+        let (idx, _) = self.devices.ensure(id, &name, None, &key, None, None)?;
         self.mark(ComponentMask::DEVICES);
         if matches!(id, DeviceIdentity::Gpu { .. } | DeviceIdentity::Disk { .. }) {
             self.remap_inventory();
@@ -1545,6 +1546,7 @@ impl Reducer {
                     .map(|p| p.identity.clone()),
                 persistent_key: Arc::clone(&e.persistent_key),
                 net_kind: e.net_kind,
+                hot_c: e.hot_c,
             })
             .collect();
         list.entries.extend(others);

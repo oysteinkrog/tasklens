@@ -289,6 +289,7 @@ fn cpu_catalog() -> DeviceCatalog {
             parent: None,
             persistent_key: Arc::from("cpu"),
             net_kind: None,
+            hot_c: None,
         }]),
     }
 }

@@ -99,6 +99,7 @@ fn sensor_entry(idx: u16, chip: &str, label: &str) -> DeviceEntry {
         parent: None,
         persistent_key: Arc::from(""),
         net_kind: None,
+        hot_c: None,
     }
 }
 
@@ -116,6 +117,7 @@ fn sensors() -> Vec<CpuSensor> {
                 parent: None,
                 persistent_key: Arc::from("cpu"),
                 net_kind: None,
+                hot_c: None,
             },
             sensor_entry(1, "coretemp", "Package id 0"),
             sensor_entry(2, "nct6799", "SYSTIN"),
@@ -1010,6 +1012,7 @@ mod page {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind: None,
+            hot_c: None,
         }
     }
 

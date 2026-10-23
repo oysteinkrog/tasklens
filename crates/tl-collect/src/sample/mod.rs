@@ -5,3 +5,4 @@ pub mod memory;
 pub mod net;
 pub mod pressure;
 pub mod sensors;
+pub mod throttle;

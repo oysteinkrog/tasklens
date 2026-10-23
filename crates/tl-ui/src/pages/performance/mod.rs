@@ -1233,6 +1233,7 @@ mod tests {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind,
+            hot_c: None,
         }
     }
 

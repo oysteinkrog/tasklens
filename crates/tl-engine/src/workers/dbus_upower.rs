@@ -585,6 +585,7 @@ async fn publish(
                 parent: None,
                 persistent_key: format!("bat:{native_path}").into(),
                 net_kind: None,
+                hot_c: None,
             })
             .collect();
         let list = DeviceList {

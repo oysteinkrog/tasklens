@@ -276,6 +276,7 @@ mod page_frame {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind: None,
+            hot_c: None,
         }
     }
 
@@ -1307,6 +1308,7 @@ mod tab {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind: None,
+            hot_c: None,
         }
     }
 
@@ -1764,6 +1766,7 @@ mod summary {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind,
+            hot_c: None,
         }
     }
 

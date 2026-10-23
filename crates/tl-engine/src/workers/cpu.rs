@@ -6,7 +6,7 @@
 //! temperature, live stats and RAPL power are read at most once per second; fast ticks repeat
 //! the last values (PERF-028, PERF-033, PERF-038, PERF-039, PERF-040). /proc/pressure/cpu is
 //! read on the same 1 Hz ticks while CPU or device history is demanded (ADR-016 "System
-//! pressure").
+//! pressure"), together with the Intel `thermal_throttle` counts.
 //!
 //! It also sends the CPU page's static rows as one `CpuStaticInfo` through `take_extra`: on the
 //! first sample of a generation and again after a CPU hotplug (E12-010, PERF-031, PERF-035 to
@@ -31,6 +31,7 @@ use tl_collect::parse::rapl::{RaplReading, RaplStatus, rapl_status};
 use tl_collect::parse::topology::{CacheLevel, TopologyInfo};
 use tl_collect::sample::cpu::{CpuOpts, CpuReading, CpuSampler, LiveStats};
 use tl_collect::sample::pressure::CpuPressureSampler;
+use tl_collect::sample::throttle::ThrottleSampler;
 use tl_collect::sysroot::read_file;
 use tl_collect::{CollectError, SysRoot};
 use tl_model::demand::{CpuDemand, Demand};
@@ -336,6 +337,9 @@ struct SlowFields {
     /// /proc/pressure/cpu `some` avg10. `WarmingUp` while neither CPU nor device history is
     /// demanded.
     psi_some_pct: Measured<f32>,
+    /// Intel `thermal_throttle` counts rose since the last slow tick. Read with the pressure
+    /// values.
+    throttling: Measured<bool>,
     /// `freq.per_cpu_mhz` as sent. A new `Arc` only when a value changed.
     per_cpu_mhz: Arc<[Metric<u32>]>,
 }
@@ -350,6 +354,7 @@ pub struct CpuSource {
     /// `sample()`.
     pressure_wanted: Arc<AtomicBool>,
     pressure: CpuPressureSampler,
+    throttle: ThrottleSampler,
     /// Boot ns of the last sample that read clock, temperature, live stats and power.
     last_slow_ns: Option<TimeNs>,
     last: SlowFields,
@@ -378,6 +383,7 @@ impl CpuSource {
             per_cpu_wanted: Arc::new(AtomicBool::new(false)),
             pressure_wanted: Arc::new(AtomicBool::new(false)),
             pressure: CpuPressureSampler::new(&root),
+            throttle: ThrottleSampler::new(&root),
             last_slow_ns: None,
             last: SlowFields::default(),
             base_mhz,
@@ -429,11 +435,13 @@ impl CpuSource {
             self.last.temp_c = r.temp_c;
             self.last.live = r.live;
             self.last.power = r.power;
-            self.last.psi_some_pct = if self.pressure_wanted.load(Ordering::Relaxed) {
-                self.pressure.sample()
+            if self.pressure_wanted.load(Ordering::Relaxed) {
+                self.last.psi_some_pct = self.pressure.sample();
+                self.last.throttling = self.throttle.sample();
             } else {
-                Measured::default()
-            };
+                self.last.psi_some_pct = Measured::default();
+                self.last.throttling = Measured::default();
+            }
             self.last_slow_ns = Some(clock.boot_ns);
         }
         if r.topology_changed {
@@ -478,6 +486,7 @@ impl CpuSource {
             },
             sockets: Metric::valid(self.sampler.topology().sockets),
             psi_some_pct: metric(last.psi_some_pct),
+            throttling: metric(last.throttling),
         };
         let irq_pct = if r.interrupts_pct.validity.is_valid() {
             r.interrupts_pct.value

@@ -68,7 +68,7 @@ impl Catalog {
         ];
         for (identity, name, key) in fixed {
             // Four entries never overflow a u16 index.
-            let _ = catalog.push(identity, Arc::from(name), None, Arc::from(key), None);
+            let _ = catalog.push(identity, Arc::from(name), None, Arc::from(key), None, None);
         }
         catalog
     }
@@ -86,6 +86,7 @@ impl Catalog {
         parent: Option<&DeviceIdentity>,
         persistent_key: &str,
         net_kind: Option<NetKind>,
+        hot_c: Option<f32>,
     ) -> Result<(DeviceIdx, bool), InvariantViolation> {
         let parent = parent.and_then(|p| self.idx(p));
         let Some(idx) = self.idx(id) else {
@@ -95,6 +96,7 @@ impl Catalog {
                 parent,
                 Arc::from(persistent_key),
                 net_kind,
+                hot_c,
             )?;
             return Ok((idx, true));
         };
@@ -123,6 +125,10 @@ impl Catalog {
             entry.net_kind = net_kind;
             changed = true;
         }
+        if entry.hot_c != hot_c {
+            entry.hot_c = hot_c;
+            changed = true;
+        }
         if changed {
             self.touch();
         }
@@ -147,6 +153,7 @@ impl Catalog {
                 None,
                 &desc.persistent_key,
                 desc.net_kind,
+                desc.hot_c,
             )?;
             seen[usize::from(idx.0)] = true;
             if fresh {
@@ -197,7 +204,7 @@ impl Catalog {
             }
             let name = format!("CPU {id}");
             let key = format!("cpu:{id}");
-            self.ensure(&identity, &name, None, &key, None)?;
+            self.ensure(&identity, &name, None, &key, None, None)?;
         }
         let mut offline = false;
         for entry in &mut self.entries {
@@ -251,6 +258,7 @@ impl Catalog {
         parent: Option<DeviceIdx>,
         persistent_key: Arc<str>,
         net_kind: Option<NetKind>,
+        hot_c: Option<f32>,
     ) -> Result<DeviceIdx, InvariantViolation> {
         let raw = u16::try_from(self.entries.len())
             .map_err(|_| InvariantViolation("device index overflow"))?;
@@ -265,6 +273,7 @@ impl Catalog {
             parent,
             persistent_key,
             net_kind,
+            hot_c,
         });
         self.touch();
         Ok(idx)
@@ -322,6 +331,7 @@ mod tests {
             parent: None,
             persistent_key: Arc::from(key),
             net_kind: None,
+            hot_c: None,
         }
     }
 
@@ -455,6 +465,24 @@ mod tests {
     }
 
     #[test]
+    fn hot_threshold_stored_and_updated() {
+        let mut c = Catalog::new();
+        let sda = disk("sda", 0);
+        let mut d = desc(sda.clone(), "disk:sda");
+        d.hot_c = Some(85.0);
+        c.apply_list(&list(DeviceKinds::DISKS, vec![d])).unwrap();
+        assert_eq!(entry(&c, &sda).hot_c, Some(85.0));
+        let before = c.version();
+        c.apply_list(&list(
+            DeviceKinds::DISKS,
+            vec![desc(sda.clone(), "disk:sda")],
+        ))
+        .unwrap();
+        assert_eq!(entry(&c, &sda).hot_c, None);
+        assert!(c.version() > before);
+    }
+
+    #[test]
     fn persistent_key_stored() {
         let mut c = Catalog::new();
         let sda = disk("sda", 0);
@@ -514,7 +542,7 @@ mod tests {
         let mut c = Catalog::new();
         let mut last = Ok((DeviceIdx(0), true));
         for i in 0..=u32::from(u16::MAX) {
-            last = c.ensure(&disk("sdx", i), "disk", None, "disk:sdx", None);
+            last = c.ensure(&disk("sdx", i), "disk", None, "disk:sdx", None, None);
             if last.is_err() {
                 break;
             }

@@ -468,6 +468,7 @@ mod boxes {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind: None,
+            hot_c: None,
         }
     }
 
@@ -1544,6 +1545,7 @@ mod bottom {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind,
+            hot_c: None,
         }
     }
 
@@ -1639,6 +1641,7 @@ mod bottom {
             pcie_rx_bps: Metric::default(),
             pcie_tx_bps: Metric::default(),
             engines: Default::default(),
+            throttling: Default::default(),
             fdinfo_partial: false,
             energy_since_boot: Metric::default(),
             clock_video_mhz: Metric::default(),
@@ -3030,6 +3033,7 @@ mod page {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind,
+            hot_c: None,
         }
     }
 
@@ -5952,6 +5956,7 @@ mod wired {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind,
+            hot_c: None,
         }
     }
 

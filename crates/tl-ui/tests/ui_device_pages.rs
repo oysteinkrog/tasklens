@@ -77,6 +77,7 @@ fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> Devic
         parent: None,
         persistent_key: Arc::from(""),
         net_kind,
+        hot_c: None,
     }
 }
 

@@ -209,6 +209,7 @@ pub fn disk_list(t_ns: TimeNs, disks: &[BlockDevice], udev_root: &Path) -> Devic
             parent: None,
             persistent_key: disk_key_from_udev(udev_root, &disk.name, disk.major, disk.minor),
             net_kind: None,
+            hot_c: None,
         });
         for child in &disk.children {
             entries.push(DeviceDesc {
@@ -222,6 +223,7 @@ pub fn disk_list(t_ns: TimeNs, disks: &[BlockDevice], udev_root: &Path) -> Devic
                     child.minor,
                 ),
                 net_kind: None,
+                hot_c: None,
             });
         }
     }
@@ -254,6 +256,7 @@ pub fn net_list(t_ns: TimeNs, ifaces: &[NetIface], sys_root: &Path) -> DeviceLis
                 parent: None,
                 persistent_key: net_key(iface, mac),
                 net_kind: None,
+                hot_c: None,
             }
         })
         .collect();
@@ -279,6 +282,7 @@ pub fn sensor_list(t_ns: TimeNs, chips: &[HwmonChip]) -> DeviceList {
                 parent: None,
                 persistent_key: sensor_key(chip, temp),
                 net_kind: None,
+                hot_c: temp.hot_c(),
             });
         }
         for fan in &chip.fans {
@@ -292,6 +296,7 @@ pub fn sensor_list(t_ns: TimeNs, chips: &[HwmonChip]) -> DeviceList {
                 parent: None,
                 persistent_key: fan_key(chip, fan),
                 net_kind: None,
+                hot_c: None,
             });
         }
     }
@@ -409,7 +414,19 @@ mod tests {
         TempInput {
             n,
             label: label.map(Into::into),
+            hot_milli_c: None,
         }
+    }
+
+    #[test]
+    fn sensor_list_carries_hot_threshold() {
+        let mut c = chip("nvme", Some("devices/pci0000:00/0000:00:01.2"));
+        let mut hot = temp_input(1, Some("Composite"));
+        hot.hot_milli_c = Some(85_000);
+        c.temps = vec![hot, temp_input(2, Some("Sensor 1"))];
+        let list = sensor_list(0, std::slice::from_ref(&c));
+        let hot_c: Vec<Option<f32>> = list.entries.iter().map(|d| d.hot_c).collect();
+        assert_eq!(hot_c, [Some(85.0), None]);
     }
 
     #[test]

@@ -62,6 +62,7 @@ fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
         parent: None,
         persistent_key: Arc::from(""),
         net_kind: None,
+        hot_c: None,
     }
 }
 

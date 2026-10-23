@@ -254,6 +254,7 @@ fn entry(idx: u16, identity: DeviceIdentity, name: &str) -> DeviceEntry {
         parent: None,
         persistent_key: Arc::from(format!("synthetic:{idx}")),
         net_kind: None,
+        hot_c: None,
     }
 }
 

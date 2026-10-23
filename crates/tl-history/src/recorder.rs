@@ -206,6 +206,7 @@ mod tests {
                 parent: None,
                 persistent_key: Arc::from("battery:BAT0"),
                 net_kind: None,
+                hot_c: None,
             }]),
         }
     }

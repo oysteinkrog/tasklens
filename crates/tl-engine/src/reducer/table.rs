@@ -3255,6 +3255,7 @@ mod tests {
                 parent: parent.map(DeviceIdx),
                 persistent_key: Arc::from("key"),
                 net_kind,
+                hot_c: None,
             }
         }
 
@@ -3336,6 +3337,7 @@ mod tests {
                 pcie_rx_bps: Metric::with(Validity::Unsupported),
                 pcie_tx_bps: Metric::with(Validity::Unsupported),
                 engines: Default::default(),
+                throttling: Default::default(),
                 fdinfo_partial: false,
                 energy_since_boot: Metric::with(Validity::Unsupported),
                 clock_video_mhz: Metric::with(Validity::Unsupported),

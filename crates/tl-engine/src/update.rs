@@ -242,6 +242,8 @@ pub struct DeviceDesc {
     pub persistent_key: Arc<str>,
     /// Net devices only.
     pub net_kind: Option<NetKind>,
+    /// The Hot threshold in °C (UI-PRF-054), where the device has one.
+    pub hot_c: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +282,8 @@ pub struct GpuStaticInfo {
     pub supports_process_util: bool,
     /// `"gpu:<uuid or PCI slot>"` (R-155 items 7 and 8).
     pub persistent_key: Arc<str>,
+    /// The NVML slowdown threshold in °C; `None` off NVIDIA (UI-PRF-054).
+    pub hot_c: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -481,6 +485,7 @@ mod tests {
                 nvml: Arc::from(""),
                 supports_process_util: false,
                 persistent_key: Arc::from("gpu:0000:01:00.0"),
+                hot_c: None,
             }],
         })
     }

@@ -360,6 +360,7 @@ fn net_desc(identity: DeviceIdentity, kind: NetKind) -> DeviceDesc {
         parent: None,
         persistent_key: Arc::from("net:if"),
         net_kind: Some(kind),
+        hot_c: None,
     }
 }
 

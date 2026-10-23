@@ -163,6 +163,9 @@ pub struct CpuTotals {
     /// /proc/pressure/cpu `some` avg10 in percent; series PSI_CPU_SOME (ADR-016 "System
     /// pressure"). `Unsupported` on a kernel without PSI.
     pub psi_some_pct: Metric<f32>,
+    /// True when an Intel `thermal_throttle` count rose since the last read (ADR-016, UI-PRF-054).
+    /// `Unsupported` where the files are missing (AMD).
+    pub throttling: Metric<bool>,
 }
 
 /// All bytes, from /proc/meminfo unless noted (PERF-041 to PERF-043).
@@ -330,6 +333,9 @@ pub struct GpuTotals {
     /// Why the clocks are held down, for the Clocks tooltip (PERF-066). An empty set means the
     /// clocks are not held down. NVIDIA only.
     pub clock_event_reasons: Metric<ClockEventReasons>,
+    /// True while `HW_SLOWDOWN` or `SW_THERMAL` is set in the clocks event reasons (UI-PRF-054).
+    /// `Unsupported` off NVIDIA.
+    pub throttling: Metric<bool>,
     pub fan_pct: Metric<f32>,
     /// NVML fan 0 or amdgpu hwmon `fan1_input` (PERF-068).
     pub fan_rpm: Metric<u32>,

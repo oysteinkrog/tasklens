@@ -1208,6 +1208,7 @@ mod hardware_builders {
                 pcie_rx_bps: Metric::default(),
                 pcie_tx_bps: Metric::default(),
                 engines: Default::default(),
+                throttling: Default::default(),
                 fdinfo_partial: false,
                 energy_since_boot: Metric::default(),
                 clock_video_mhz: Metric::default(),

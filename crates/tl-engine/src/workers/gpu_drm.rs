@@ -338,6 +338,7 @@ impl GpuDrmSource {
                 parent: None,
                 persistent_key: Arc::clone(&key),
                 net_kind: None,
+                hot_c: None,
             });
             infos.push(GpuStaticInfo {
                 identity: identity(card),
@@ -348,6 +349,7 @@ impl GpuDrmSource {
                 nvml: Arc::from(""),
                 supports_process_util: false,
                 persistent_key: key,
+                hot_c: None,
             });
         }
         self.pending_extra
@@ -572,6 +574,7 @@ fn totals(
         clock_video_mhz: Metric::with(Validity::Unsupported),
         pstate: Metric::with(Validity::Unsupported),
         clock_event_reasons: Metric::with(Validity::Unsupported),
+        throttling: Metric::with(Validity::Unsupported),
         fan_pct: opt(s.fan_pwm.map(|pwm| f32::from(pwm) / 255.0 * 100.0)),
         fan_rpm: opt(s.fan_rpm),
         pcie_rx_bps: Metric::with(Validity::Unsupported),
@@ -699,6 +702,7 @@ fn intel(
         clock_video_mhz: Metric::with(Validity::Unsupported),
         pstate: Metric::with(Validity::Unsupported),
         clock_event_reasons: Metric::with(Validity::Unsupported),
+        throttling: Metric::with(Validity::Unsupported),
         fan_pct: Metric::with(Validity::Unsupported),
         fan_rpm: Metric::with(Validity::Unsupported),
         pcie_rx_bps: Metric::with(Validity::Unsupported),

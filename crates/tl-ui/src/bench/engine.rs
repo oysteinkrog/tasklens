@@ -868,6 +868,7 @@ impl OverviewSynth {
             pcie_rx_bps: none(),
             pcie_tx_bps: none(),
             engines: Default::default(),
+            throttling: Default::default(),
             fdinfo_partial: false,
             energy_since_boot: Metric::with(Validity::Unsupported),
             clock_video_mhz: Metric::with(Validity::Unsupported),
@@ -991,6 +992,7 @@ fn catalog() -> DeviceCatalog {
             parent: None,
             persistent_key: s(key),
             net_kind,
+            hot_c: None,
         });
     };
     add(DeviceIdentity::CpuPackage, "CPU", "cpu", None);
@@ -1065,6 +1067,7 @@ fn overview_catalog() -> DeviceCatalog {
             parent: None,
             persistent_key: Arc::from(key),
             net_kind: None,
+            hot_c: None,
         });
     }
     DeviceCatalog {
@@ -1373,6 +1376,7 @@ mod tests {
             parent: None,
             persistent_key: Arc::from("cpu"),
             net_kind: None,
+            hot_c: None,
         };
         let view = |metric: MetricId| {
             Arc::new(SeriesView {

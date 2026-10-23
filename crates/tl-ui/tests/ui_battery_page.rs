@@ -120,6 +120,7 @@ fn open<'a>(cx: &'a mut TestAppContext, b: BatteryDetails) -> Rig<'a> {
                 parent: None,
                 persistent_key: Arc::from(BAT_KEY),
                 net_kind: None,
+                hot_c: None,
             }]),
         });
     });

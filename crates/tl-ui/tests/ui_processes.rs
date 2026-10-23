@@ -889,6 +889,7 @@ mod delegate {
             parent: None,
             persistent_key: Arc::from(pci),
             net_kind: None,
+            hot_c: None,
         }
     }
 

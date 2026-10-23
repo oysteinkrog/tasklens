@@ -110,6 +110,10 @@ pub struct DeviceEntry {
     pub persistent_key: Arc<str>,
     /// `Some` for `Net` devices only (R-155 item 7).
     pub net_kind: Option<NetKind>,
+    /// The Hot threshold in °C (ADR-016, UI-PRF-054): hwmon `temp<n>_crit`, else `temp<n>_max`
+    /// for a sensor; the NVML slowdown threshold for an NVIDIA GPU. `None` when the device
+    /// has none: it never counts as Hot from its temperature.
+    pub hot_c: Option<f32>,
 }
 
 /// All devices of the session. The reducer replaces the whole `Arc` only when something
@@ -172,6 +176,7 @@ mod tests {
             parent: None,
             persistent_key: Arc::from("key"),
             net_kind,
+            hot_c: None,
         }
     }
 

@@ -381,6 +381,10 @@ pub fn to_totals(
         clock_video_mhz: metric(s.clock_video_mhz, |v| v),
         pstate: metric(s.pstate, |v| v),
         clock_event_reasons: metric(s.clock_event_reasons, clock_event_reasons),
+        throttling: metric(s.clock_event_reasons, |bits| {
+            clock_event_reasons(bits)
+                .intersects(ClockEventReasons::HW_SLOWDOWN | ClockEventReasons::SW_THERMAL)
+        }),
         fan_pct: pct(s.fan_pct),
         fan_rpm: metric(s.fan_rpm, |v| v),
         // NVML reports KB/s.
@@ -459,6 +463,7 @@ pub fn to_static(
         nvml: Arc::clone(&hello.nvml),
         supports_process_util,
         persistent_key: format!("gpu:{}", uuid_text(&info.uuid)).into(),
+        hot_c: info.slowdown_temp_c.map(|c| c as f32),
     }
 }
 
@@ -832,6 +837,43 @@ mod tests {
             let t = to_totals(&without, &info, &statics);
             assert_eq!(t.clock_event_reasons.validity, validity);
         }
+    }
+
+    #[test]
+    fn throttling_follows_thermal_reasons() {
+        let info = device_info();
+        let statics = device_static(&info);
+        let with = |bits: u64| {
+            let s = GpuDeviceSample {
+                clock_event_reasons: Reading::Ok(bits),
+                ..device_sample()
+            };
+            to_totals(&s, &info, &statics).throttling
+        };
+        // POWER_CAP (0x4) and IDLE (0x1) are not thermal.
+        assert_eq!(with(0x4 | 0x1), Metric::valid(false));
+        assert_eq!(with(0x8), Metric::valid(true));
+        assert_eq!(with(0x20), Metric::valid(true));
+        // HW_THERMAL alone is not one of the two flags the spec names.
+        assert_eq!(with(0x40), Metric::valid(false));
+        let unsupported = GpuDeviceSample {
+            clock_event_reasons: Reading::Unsupported,
+            ..device_sample()
+        };
+        let t = to_totals(&unsupported, &info, &statics);
+        assert_eq!(t.throttling.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn to_static_carries_slowdown_threshold_as_hot_c() {
+        let hello = hello_info();
+        let s = to_static(&device_info(), &hello, true);
+        assert_eq!(s.hot_c, Some(88.0));
+        let none = GpuDeviceInfo {
+            slowdown_temp_c: None,
+            ..device_info()
+        };
+        assert_eq!(to_static(&none, &hello, true).hot_c, None);
     }
 
     #[test]

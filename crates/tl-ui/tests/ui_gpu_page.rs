@@ -79,6 +79,7 @@ fn totals(shared: bool) -> GpuTotals {
         pcie_rx_bps: Metric::default(),
         pcie_tx_bps: Metric::default(),
         engines: Default::default(),
+        throttling: Default::default(),
         fdinfo_partial: false,
         energy_since_boot: Metric::default(),
         clock_video_mhz: Metric::default(),
@@ -158,6 +159,7 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
                 parent: None,
                 persistent_key: Arc::from(""),
                 net_kind: None,
+                hot_c: None,
             }]),
         });
         let sys = Arc::make_mut(&mut s.system);

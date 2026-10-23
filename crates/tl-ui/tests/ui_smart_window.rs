@@ -81,6 +81,7 @@ fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
                 parent: None,
                 persistent_key: Arc::from(""),
                 net_kind: None,
+                hot_c: None,
             }]),
         });
     });

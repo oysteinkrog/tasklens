@@ -59,6 +59,7 @@ fn catalog() -> DeviceCatalog {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind: None,
+            hot_c: None,
         }]
         .into(),
     }
@@ -1001,6 +1002,7 @@ mod mini {
             parent: None,
             persistent_key: Arc::from(""),
             net_kind,
+            hot_c: None,
         }
     }
 

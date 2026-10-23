@@ -19,6 +19,9 @@ const VALUE_ERROR: CollectError = CollectError::Parse {
 pub struct TempInput {
     pub n: u16,
     pub label: Option<Arc<str>>,
+    /// The Hot threshold in millidegrees: `temp<n>_crit`, else `temp<n>_max`. `None` when
+    /// neither file holds a positive value (UI-PRF-054).
+    pub hot_milli_c: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,7 +130,12 @@ fn scan_chip(dir: PathBuf, index: u32, name: Arc<str>, buf: &mut Vec<u8>) -> Opt
         };
         if let Some(n) = input_number(file_name, "temp", "_input") {
             let label = read_label(&chip.dir.join(format!("temp{n}_label")), buf);
-            chip.temps.push(TempInput { n, label });
+            let hot_milli_c = read_hot_milli_c(&chip.dir, n, buf);
+            chip.temps.push(TempInput {
+                n,
+                label,
+                hot_milli_c,
+            });
         } else if let Some(n) = input_number(file_name, "fan", "_input") {
             let label = read_label(&chip.dir.join(format!("fan{n}_label")), buf);
             let has_max = chip.dir.join(format!("fan{n}_max")).exists();
@@ -157,6 +165,23 @@ fn parse_digits<T: std::str::FromStr>(s: &str) -> Option<T> {
         return None;
     }
     s.parse().ok()
+}
+
+/// `temp<n>_crit`, else `temp<n>_max`. A file that is missing, unreadable or not above 0 does
+/// not count.
+fn read_hot_milli_c(dir: &Path, n: u16, buf: &mut Vec<u8>) -> Option<i32> {
+    ["crit", "max"].iter().find_map(|suffix| {
+        let bytes = read_trimmed(&dir.join(format!("temp{n}_{suffix}")), buf).ok()?;
+        let milli: i32 = parse_value(bytes).ok()?;
+        (milli > 0).then_some(milli)
+    })
+}
+
+impl TempInput {
+    /// The Hot threshold in °C.
+    pub fn hot_c(&self) -> Option<f32> {
+        self.hot_milli_c.map(|m| (f64::from(m) / 1000.0) as f32)
+    }
 }
 
 /// Trimmed, lossy UTF-8. Absent or unreadable gives `None`.
@@ -318,5 +343,45 @@ mod tests {
         }
         assert!(parse_rpm(b"-1").is_err());
         assert!(parse_fan_control(b"-1").is_err());
+    }
+
+    fn chip_dir(root: &Path, index: u32, name: &str, files: &[(&str, &str)]) {
+        let dir = root.join(format!("sys/class/hwmon/hwmon{index}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("name"), format!("{name}\n")).unwrap();
+        for (file, text) in files {
+            fs::write(dir.join(file), text).unwrap();
+        }
+    }
+
+    #[test]
+    fn hot_threshold_is_crit_else_max_else_none() {
+        let dir = tempfile::tempdir().unwrap();
+        chip_dir(
+            dir.path(),
+            0,
+            "nvme",
+            &[
+                ("temp1_input", "40000\n"),
+                ("temp1_crit", "85000\n"),
+                ("temp1_max", "75000\n"),
+                ("temp2_input", "41000\n"),
+                ("temp2_max", "70000\n"),
+                ("temp3_input", "42000\n"),
+                ("temp3_crit", "0\n"),
+            ],
+        );
+        // k10temp on the owner's desktop has neither file.
+        chip_dir(dir.path(), 1, "k10temp", &[("temp1_input", "95000\n")]);
+        let root = SysRoot {
+            proc: dir.path().join("proc"),
+            sys: dir.path().join("sys"),
+            run: dir.path().join("run"),
+        };
+        let mut chips = Vec::new();
+        enumerate(&root, &mut chips).unwrap();
+        let hot: Vec<Option<f32>> = chips[0].temps.iter().map(TempInput::hot_c).collect();
+        assert_eq!(hot, [Some(85.0), Some(70.0), None]);
+        assert_eq!(chips[1].temps[0].hot_c(), None);
     }
 }

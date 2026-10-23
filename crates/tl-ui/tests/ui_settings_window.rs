@@ -663,6 +663,7 @@ fn publish_gpu(engine: &FakeEngine, cx: &mut TestAppContext) {
                 parent: None,
                 persistent_key: Arc::from(""),
                 net_kind: None,
+                hot_c: None,
             }]),
         });
     });
@@ -1028,6 +1029,7 @@ fn disk(idx: u16, name: &str) -> DeviceEntry {
         parent: None,
         persistent_key: Arc::from(""),
         net_kind: None,
+        hot_c: None,
     }
 }
 
@@ -1043,6 +1045,7 @@ fn publish_devices(engine: &FakeEngine, disks: &[&str], cx: &mut TestAppContext)
             parent: None,
             persistent_key: Arc::from(""),
             net_kind: None,
+            hot_c: None,
         },
         DeviceEntry {
             idx: DeviceIdx(1),
@@ -1053,6 +1056,7 @@ fn publish_devices(engine: &FakeEngine, disks: &[&str], cx: &mut TestAppContext)
             parent: None,
             persistent_key: Arc::from(""),
             net_kind: None,
+            hot_c: None,
         },
     ];
     for (i, name) in disks.iter().enumerate() {
@@ -2098,6 +2102,7 @@ fn entry(idx: u16, identity: DeviceIdentity, key: &str) -> DeviceEntry {
         parent: None,
         persistent_key: Arc::from(key),
         net_kind: None,
+        hot_c: None,
     }
 }
 

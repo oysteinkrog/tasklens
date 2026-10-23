@@ -440,6 +440,7 @@ fn sink_device_catalog() {
             parent: None,
             persistent_key: Arc::from("disk:sda"),
             net_kind: None,
+            hot_c: None,
         }],
     }))])
     .expect("no invariant violation");
@@ -1139,6 +1140,7 @@ fn net_desc(id: DeviceIdentity, kind: NetKind) -> DeviceDesc {
         parent: None,
         persistent_key: Arc::from("net:if"),
         net_kind: Some(kind),
+        hot_c: None,
     }
 }
 
@@ -1478,6 +1480,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
                     pcie_rx_bps: Metric::default(),
                     pcie_tx_bps: Metric::default(),
                     engines: Default::default(),
+                    throttling: Default::default(),
                     fdinfo_partial: false,
                     energy_since_boot: Metric::default(),
                     clock_video_mhz: Metric::default(),
@@ -1505,6 +1508,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
                 nvml: Arc::from(""),
                 supports_process_util: false,
                 persistent_key: Arc::from("gpu:0000:01:00.0"),
+                hot_c: None,
             }],
         }),
         SourceUpdate::GpuApiVersions(ApiVersions {
@@ -1967,6 +1971,7 @@ fn gpu_info(uuid: [u8; 16], supports_process_util: bool) -> EngineMsg {
             nvml: Arc::from(""),
             supports_process_util,
             persistent_key: Arc::from("gpu:0000:01:00.0"),
+            hot_c: None,
         }],
     }))
 }
@@ -2114,6 +2119,7 @@ fn gpu_power_msg(uuid: [u8; 16], watts: f32, sm: &[(u32, u32)]) -> EngineMsg {
                 pcie_rx_bps: Metric::default(),
                 pcie_tx_bps: Metric::default(),
                 engines: Default::default(),
+                throttling: Default::default(),
                 fdinfo_partial: false,
                 energy_since_boot: Metric::default(),
                 clock_video_mhz: Metric::default(),
@@ -3067,6 +3073,7 @@ fn gpu_info_msg() -> EngineMsg {
             nvml: Arc::from(""),
             supports_process_util: false,
             persistent_key: Arc::from("gpu:card"),
+            hot_c: None,
         }],
     }))
 }
@@ -3358,6 +3365,7 @@ fn inventory_devices_remapped_when_catalog_gains_nvidia_gpu_or_disk() {
                 nvml: Arc::from(""),
                 supports_process_util: true,
                 persistent_key: Arc::from("gpu:nvidia"),
+                hot_c: None,
             }],
         })),
         disks_msg(SEC, vec![(disk.clone(), disk_totals(1.0, 1.0))]),
@@ -3389,6 +3397,7 @@ fn gpu_static(identity: &DeviceIdentity, supports_process_util: bool) -> GpuStat
         nvml: Arc::from(""),
         supports_process_util,
         persistent_key: Arc::from("gpu:card"),
+        hot_c: None,
     }
 }
 
@@ -3405,6 +3414,7 @@ fn drm_list(cards: &[&DeviceIdentity]) -> EngineMsg {
                 parent: None,
                 persistent_key: Arc::from("gpu:amd"),
                 net_kind: None,
+                hot_c: None,
             })
             .collect(),
     }))
@@ -3444,6 +3454,7 @@ fn gpu_sample(cards: &[(&DeviceIdentity, f32)]) -> EngineMsg {
                         pcie_rx_bps: Metric::default(),
                         pcie_tx_bps: Metric::default(),
                         engines: Default::default(),
+                        throttling: Default::default(),
                         fdinfo_partial: false,
                         energy_since_boot: Metric::default(),
                         clock_video_mhz: Metric::default(),
