@@ -30,7 +30,7 @@ pub use view::ChartView;
 
 use std::ops::Range;
 
-use gpui_kit::{Hsla, Path, Pixels, SharedString, px};
+use gpui_kit::{Hsla, Path, Pixels, Point, SharedString, px};
 use smallvec::SmallVec;
 use tl_model::ids::{DeviceIdx, MetricId, ProcessSeriesId, SeriesId};
 
@@ -258,6 +258,9 @@ pub struct ChartCache {
     pub stale_strokes: SmallVec<[PathSet; 3]>,
     /// Chart-local x spans that get the dotted baseline.
     pub gaps: SmallVec<[Range<f32>; 4]>,
+    /// Newest drawn point of each series that has one, chart-local, with the series' line colour
+    /// (UI-PRF-058). One per series, so series that share a stroke path still get their own dot.
+    pub newest: SmallVec<[(Point<Pixels>, Hsla); 2]>,
     pub y_min: f32,
     pub y_max: f32,
 }

@@ -483,10 +483,9 @@ fn paint_view(
             painted(window, &cache.strokes, 1.0);
             painted(window, &cache.stale_strokes, STALE_ALPHA);
             if live {
-                for set in &cache.strokes {
-                    if let Some(c) = newest_point(&set.path, offset, sf) {
-                        grid::paint_newest_dot(window, c, set.color, env.reduce_motion);
-                    }
+                for &(p, color) in &cache.newest {
+                    let c = newest_point(p, offset, sf);
+                    grid::paint_newest_dot(window, c, color, env.reduce_motion);
                 }
             }
             grid::paint_gaps(window, &gp, &cache.gaps);
@@ -580,31 +579,10 @@ impl grid::QuadSink for QuadCount {
     }
 }
 
-/// The end of a stroke path in window logical px: the mean of the vertices at its largest x
-/// (the two corners of the line's end), `None` for an empty path. Chart-local physical px in, as
-/// `translated`.
-fn newest_point(
-    path: &Path<Pixels>,
-    offset: Point<Pixels>,
-    scale_factor: f32,
-) -> Option<Point<Pixels>> {
-    let right = path
-        .vertices
-        .iter()
-        .map(|v| f32::from(v.xy_position.x))
-        .reduce(f32::max)?;
-    let (mut n, mut y) = (0u32, 0.0f32);
-    for v in &path.vertices {
-        if f32::from(v.xy_position.x) >= right - 0.5 {
-            n += 1;
-            y += f32::from(v.xy_position.y);
-        }
-    }
-    let inv = 1.0 / scale_factor;
-    Some(point(
-        px(right * inv) + offset.x,
-        px(y / n as f32 * inv) + offset.y,
-    ))
+/// A newest point from `ChartCache::newest` (chart-local physical px) in window logical px, as
+/// `translated` maps the path vertices.
+fn newest_point(p: Point<Pixels>, offset: Point<Pixels>, scale_factor: f32) -> Point<Pixels> {
+    p * (1.0 / scale_factor) + offset
 }
 
 /// Time of the newest valid sample over every series, `None` when there is none.

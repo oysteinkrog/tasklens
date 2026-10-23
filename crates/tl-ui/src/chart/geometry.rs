@@ -1132,7 +1132,7 @@ fn stroke_set(color: Hsla, dashed: bool, mesh: &mut StrokeMesh) -> Option<PathSe
 /// Fresh samples go to the live paths. `STALE` samples go to the stale paths, joined to their
 /// fresh neighbours so the line does not break. When the series is stale (R-051), a flat tail
 /// from the newest sample to `map.right_edge_ns` at the newest value goes to the stale paths too.
-/// Gaps come from the first series only.
+/// Gaps come from the first series only. `cache.newest` gets each series' newest drawn point.
 ///
 /// With `input.stack`, series are stacked in order: each valid sample of series `k` is raised by
 /// the values of series `0..k` in the same period slot, and its fill goes down to that floor
@@ -1154,6 +1154,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         ..
     } = scratch;
     cache.gaps.clear();
+    cache.newest.clear();
     // The old path vertex buffers serve this build's direct meshes.
     live.reclaim_fills(&mut cache.fills);
     live.reclaim_strokes(&mut cache.strokes);
@@ -1204,6 +1205,8 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
             }
         }
 
+        // Stretches come in time order, so the last line vertex is the newest drawn sample.
+        let mut newest = None;
         for run in runs.iter() {
             for_each_stretch(samples, *run, |span, is_stale_flag| {
                 let (out, builders) = if is_stale_flag {
@@ -1216,7 +1219,11 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
                     floors_of(samples, f, span, out, pt_floors);
                 }
                 builders.emit(spec, out, band_floors.map(|_| &pt_floors[..]), input, line);
+                newest = line.line.last().copied().or(newest);
             });
+        }
+        if let Some(p) = newest {
+            cache.newest.push((p, spec.line));
         }
 
         // Flat continuation of a stale series to the right edge (UI-PRF-007). Only when the

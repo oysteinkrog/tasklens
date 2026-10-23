@@ -1225,3 +1225,52 @@ fn overview_core_sparkline_plots_second_means() {
     assert_eq!(out.len(), 3);
     assert!(out[0].is_valid() && !out[1].is_valid() && out[2].is_valid());
 }
+
+/// UI-PRF-058: two series in one colour merge into one stroke, but each keeps its own newest
+/// point, at its newest sample.
+#[test]
+fn newest_point_per_series_when_colours_match() {
+    let a = series(20, 100 * MS, 10 * SEC, |_| 20.0);
+    let b = series(20, 100 * MS, 10 * SEC, |_| 70.0);
+    let map = exact_map(&a);
+    let (va, vb) = (view(a.clone(), 100 * MS), view(b, 100 * MS));
+    let cache = run_build(
+        &[
+            (line(None, RED, false), Some(&va)),
+            (line(None, RED, false), Some(&vb)),
+        ],
+        map,
+        a[19].t_ns,
+    );
+    assert_eq!(cache.strokes.len(), 1, "one merged stroke");
+    let newest: Vec<_> = cache
+        .newest
+        .iter()
+        .map(|(p, c)| (p.x.as_f32(), p.y.as_f32(), *c))
+        .collect();
+    assert_eq!(
+        newest,
+        vec![
+            (0.0, y_of(20.0, 0.0, 100.0, 100.0), RED),
+            (0.0, y_of(70.0, 0.0, 100.0, 100.0), RED),
+        ]
+    );
+}
+
+/// UI-PRF-058: a dashed line whose newest sample falls in a dash gap still puts the newest point
+/// on that sample, not at the end of the last dash.
+#[test]
+fn newest_point_on_dashed_line_ends_at_the_sample() {
+    // 3 samples 10 px apart: 20 px of 5 on, 5 off, so the last 5 px are a gap.
+    let s = series(3, 100 * MS, 10 * SEC, |_| 50.0);
+    let map = exact_map(&s);
+    let v = view(s.clone(), 100 * MS);
+    let cache = run_build(&[(line(None, RED, true), Some(&v))], map, s[2].t_ns);
+    let right = xs(&cache.strokes[0]).fold(f32::MIN, f32::max);
+    assert!(
+        right <= -4.0,
+        "the last dash ends before the sample: {right}"
+    );
+    let (p, c) = cache.newest[0];
+    assert_eq!((p.x.as_f32(), p.y.as_f32(), c), (0.0, 50.0, RED));
+}
