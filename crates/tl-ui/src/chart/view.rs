@@ -333,6 +333,18 @@ impl ChartView {
             .reduce(f32::max)
     }
 
+    /// The cached stroke paths' smallest vertex x, chart-local physical px.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn stroke_left_x(&self) -> Option<f32> {
+        self.cache
+            .borrow()
+            .strokes
+            .iter()
+            .flat_map(|s| s.path.vertices.iter())
+            .map(|v| f32::from(v.xy_position.x))
+            .reduce(f32::min)
+    }
+
     /// Fill and stroke sets in the geometry cache, stale sets excluded.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn cached_fill_stroke_counts(&self) -> (usize, usize) {

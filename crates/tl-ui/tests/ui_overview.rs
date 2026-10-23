@@ -1103,6 +1103,139 @@ mod boxes {
         );
     }
 
+    /// `CPU_TOTAL` of every logical CPU at 10 Hz for the last `secs` seconds.
+    fn publish_core_history(r: &mut Rig, secs: u64) {
+        const PERIOD: u64 = 100_000_000;
+        let newest = now_boot_ns();
+        let n = secs * 10;
+        r.version += 1;
+        let version = r.version;
+        let views: Vec<_> = (0..CPUS)
+            .map(|id| {
+                Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(100 + id),
+                        metric: MetricId::CPU_TOTAL,
+                    },
+                    version,
+                    period_ns: PERIOD,
+                    samples: (0..n)
+                        .map(|k| Sample::valid(newest - (n - 1 - k) * PERIOD, (k % 100) as f32))
+                        .collect::<Vec<_>>()
+                        .into(),
+                })
+            })
+            .collect();
+        r.publish(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+        });
+    }
+
+    /// Each core sparkline's stroke width over its drawn width. The stroke x runs from minus
+    /// the plot width to 0 at the right edge, so the width is `right - left`.
+    fn spark_spans(r: &mut Rig) -> Vec<f32> {
+        draw(r.vcx);
+        let cpu = r.cpu();
+        let strokes: Vec<f32> = r.vcx.update(|_, cx| {
+            cpu.read(cx)
+                .core_sparks()
+                .iter()
+                .map(|s| {
+                    let s = s.read(cx);
+                    let left = s.stroke_left_x().expect("a stroke");
+                    let right = s.stroke_right_x().expect("a stroke");
+                    right - left
+                })
+                .collect()
+        });
+        strokes
+            .into_iter()
+            .enumerate()
+            .map(|(i, stroke)| {
+                let id: &'static str = Box::leak(core_spark_id(i).into_boxed_str());
+                let b = r.vcx.debug_bounds(id).expect("sparkline drawn");
+                let w = f32::from(b.size.width);
+                assert!(w > 20., "core {i} sparkline is {w} px wide");
+                stroke / w
+            })
+            .collect()
+    }
+
+    /// crw.83: after 60 s of 10 Hz samples every core sparkline plots the whole 60 s range, and
+    /// device catalog changes (a new version, a device coming) neither rebuild nor shorten it.
+    #[gpui_kit::test]
+    fn overview_core_sparkline_spans_full_range(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        let cpu = r.cpu();
+        let sparks = |r: &mut Rig| r.vcx.update(|_, cx| cpu.read(cx).core_sparks().to_vec());
+        let before = sparks(&mut r);
+        assert_eq!(before.len(), usize::from(CPUS));
+
+        let check = |spans: Vec<f32>, when: &str| {
+            assert_eq!(spans.len(), usize::from(CPUS), "{when}");
+            for (i, share) in spans.into_iter().enumerate() {
+                assert!(
+                    share >= 0.95,
+                    "{when}: core {i} plots {share} of its width, not the whole range"
+                );
+            }
+        };
+
+        // Only 6 s of history covers only the right tenth.
+        publish_core_history(&mut r, 6);
+        let short = spark_spans(&mut r);
+        assert!(short.iter().all(|&share| share < 0.2), "{short:?}");
+
+        publish_core_history(&mut r, 61);
+        check(spark_spans(&mut r), "steady catalog");
+
+        // A new catalog version with the same CPUs.
+        r.publish(|s| {
+            let mut cat = catalog();
+            cat.version = 2;
+            s.devices = Arc::new(cat);
+        });
+        publish_core_history(&mut r, 61);
+        check(spark_spans(&mut r), "catalog version 2");
+
+        // A device comes (a disk at 50): the CPUs keep their charts.
+        r.publish(|s| {
+            let cat = catalog();
+            let mut entries = cat.entries.to_vec();
+            entries.push(entry(
+                50,
+                DeviceIdentity::Disk {
+                    major: 259,
+                    minor: 0,
+                    name: Arc::from("nvme0n1"),
+                    wwn_or_serial: None,
+                },
+            ));
+            s.devices = Arc::new(DeviceCatalog {
+                version: 3,
+                entries: entries.into(),
+            });
+        });
+        publish_core_history(&mut r, 61);
+        check(spark_spans(&mut r), "catalog version 3");
+
+        let after = sparks(&mut r);
+        assert!(
+            before
+                .iter()
+                .zip(&after)
+                .all(|(a, b)| a.entity_id() == b.entity_id()),
+            "the sparklines are the same entities"
+        );
+    }
+
     #[gpui_kit::test]
     fn overview_core_sparkline_plots_second_means(cx: &mut TestAppContext) {
         let r = open(cx);
