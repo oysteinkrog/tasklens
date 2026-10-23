@@ -972,7 +972,6 @@ pub fn box_frame(
         frame.style().box_shadow = Some(vec![shadow]);
     }
     frame
-        .child(box_highlight(m))
         .child(opens_device(
             div()
                 .debug_selector(move || title_row_id(id))
@@ -1027,6 +1026,8 @@ pub fn box_frame(
             }
             body_el
         })
+        // Last, so the ring paints over the title row and the body.
+        .child(box_highlight(m))
 }
 
 /// Box widths from here up put the chart and its side part next to each other; narrower boxes
