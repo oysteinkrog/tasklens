@@ -1137,6 +1137,8 @@ mod boxes {
         }
 
         // Too short for 4 columns of 16 px rows: the rows scroll, name and percent stay.
+        // The update draws the window itself, so the old labels go first.
+        take_core_labels();
         r.vcx.simulate_resize(size(px(800.), px(440.)));
         let host = r.host.clone();
         r.vcx.update(|_, cx| {
@@ -1145,7 +1147,6 @@ mod boxes {
                 cx.notify();
             })
         });
-        take_core_labels();
         draw(r.vcx);
         let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
         assert!(layout.scrolls, "{layout:?}");
