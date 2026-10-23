@@ -5161,11 +5161,12 @@ mod page {
             );
             assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
 
-            // Reset Box gives the automatic grid back.
+            // Reset Box gives the default mode back, and with it no saved arrangement.
             r.page_action(&PerfOverviewResetBox {
                 kind: "memory".into(),
             });
-            assert_eq!(r.layout().arrange(BoxKind::Memory), Some(Arrange::Auto));
+            assert_eq!(r.layout().config(BoxKind::Memory).mode.id, "rows");
+            assert_eq!(r.layout().arrange(BoxKind::Memory), None);
         }
     }
 
