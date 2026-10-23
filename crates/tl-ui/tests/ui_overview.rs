@@ -4833,10 +4833,56 @@ mod page {
             kind: "net".into(),
             mode: "adapter_charts".into(),
         });
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let m = tl_model::system::Metric::valid;
+            let adapter = |i: u16| {
+                (
+                    tl_model::ids::DeviceIdx(i),
+                    tl_model::system::NetTotals {
+                        device: tl_model::ids::DeviceIdx(i),
+                        rx_bps: m(1000.),
+                        tx_bps: m(100.),
+                        rx_total: 1 << 30,
+                        tx_total: 1 << 29,
+                        link_speed_mbps: tl_model::system::Metric::default(),
+                        state: tl_model::system::LinkState::Up,
+                    },
+                )
+            };
+            sys.nets = Arc::from([adapter(5), adapter(6)]);
+            let mut devices = s.devices.entries.to_vec();
+            devices.push(entry(
+                6,
+                DeviceIdentity::Net {
+                    netns_ino: 1,
+                    ifindex: 3,
+                    name: Arc::from("wlan0"),
+                },
+                Some(NetKind::Wireless),
+            ));
+            let mut catalog = (*s.devices).clone();
+            catalog.entries = devices.into();
+            s.devices = Arc::new(catalog);
+        });
+        r.vcx.run_until_parked();
+        let idxs = r
+            .vcx
+            .update(|_, cx| page.read(cx).net_box().read(cx).adapter_idxs());
+        assert!(idxs.len() >= 2, "{idxs:?}");
+        let ids = || {
+            [
+                tl_ui::pages::performance::overview::net_box::cell_id(idxs[0]),
+                tl_ui::pages::performance::overview::net_box::cell_id(idxs[1]),
+            ]
+        };
         assert_eq!(r.layout().arrange(BoxKind::Net), Some(Arrange::Vertical));
         assert_eq!(shown(&mut r), Arrange::Vertical);
+        assert_line(&mut r, ids(), true, "default one column");
         set_arrange(&mut r, "net", "horizontal");
         assert_eq!(shown(&mut r), Arrange::Horizontal);
+        assert_line(&mut r, ids(), false, "horizontal");
         assert_eq!(saved_arrange(&mut r, "net").as_deref(), Some("horizontal"));
         assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
         set_arrange(&mut r, "net", "vertical");
