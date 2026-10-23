@@ -2,8 +2,7 @@
 
 tasklens is a task manager for Linux, written in Rust with the GPUI UI framework. It shows
 processes, live performance graphs for each device, services, startup apps, network
-connections and system information. Its layout and features follow TaskSlinger 0.9.2 and
-Mission Center 1.2.0.
+connections and system information.
 
 ![The Performance tab on the Overview page](docs/img/overview.png)
 
