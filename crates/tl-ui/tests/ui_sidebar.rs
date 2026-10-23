@@ -1227,6 +1227,32 @@ mod sidebar {
         assert_values_inside(&mut r, "edit mode");
     }
 
+    /// UI-PRF-058: the Overview card has no icon and keeps its full graph, so its value takes a
+    /// row of its own and stays clear of the edit button over the card's top right corner.
+    #[gpui_kit::test]
+    fn overview_card_keeps_value_row(cx: &mut TestAppContext) {
+        let mut settings = with_overview();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
+        r.host_w.set(252.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
+        draw(r.vcx);
+
+        let overview = prepared(&mut r, OVERVIEW);
+        assert_eq!(&*overview.value.expect("value").text, "100.0%");
+        assert!(!overview.icon, "the Overview card has no icon");
+        assert_eq!(overview.graph_w, px(116.), "full graph");
+        assert!(!overview.layout.value_inline, "the value has its own row");
+        let cpu = prepared(&mut r, "cpu");
+        assert!(
+            cpu.icon && cpu.layout.value_inline,
+            "the CPU card keeps it inline"
+        );
+    }
+
     /// The widest IEC rate before the unit steps up, "1023.9 KiB/s", fits a network card at the
     /// least nav_width (180). The text column once kept room only for "999.9 KiB/s". The edit-mode
     /// card there has an 82 px text column even with no graph, so the value takes 2 rows.

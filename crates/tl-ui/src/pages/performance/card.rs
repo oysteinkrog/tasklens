@@ -1642,8 +1642,10 @@ impl DeviceCard {
             } else {
                 self.width
             };
-            // The graph narrows so the value stays in the heading row when it can, rather than
-            // taking a row of its own and growing the card.
+            // On a card with the icon, the graph narrows so the value stays in the heading row
+            // when it can, rather than taking a row of its own and growing the card. The Overview
+            // card has no icon and keeps its value row: an inline value there would reach the
+            // sidebar's edit button over its top right corner.
             let inline_floor = card_text_floor(
                 px(f32::from(measure(CardFont::Heading, &self.lines.heading)).ceil())
                     + m.sp[3]
@@ -1651,7 +1653,7 @@ impl DeviceCard {
                 &m,
             );
             let graph_w = match card_graph_width(inner_w, inline_floor, &m) {
-                w if w > Pixels::ZERO && value_w > Pixels::ZERO => w,
+                w if icon && w > Pixels::ZERO && value_w > Pixels::ZERO => w,
                 _ => card_graph_width(inner_w, floor, &m),
             };
             let layout = card_text_layout(
