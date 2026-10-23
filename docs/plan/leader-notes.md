@@ -963,3 +963,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-22 crw.78 accepted after two review fails on test strength and missing visual notes; leader checked visually on 1.0.2; follow-up tasklens-crw.80.
 - 2026-10-22 D-027: Arrange choice per Overview box, Disk and Net stacked vertically by default (tasklens-crw.81, then tasklens-crw.82).
 - 2026-10-22 D-028: optional power draw strip in the Overview CPU box (tasklens-crw.84).
+- 2026-10-23 o55.44: dead-sensor rule kept, pre-page case to tasklens-o55.46. pdu.68: not a bug (helper shield). y6k.33: requeued with the cancel-path close and a broker-disconnect lab test.
