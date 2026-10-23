@@ -595,6 +595,19 @@ mod page_frame {
         assert_eq!(graph.top(), header.bottom() + px(8.));
     }
 
+    /// UI-PRF-058: the page header starts with a 20 px device icon, then the page word.
+    #[gpui_kit::test]
+    fn page_frame_header_has_the_device_icon(cx: &mut TestAppContext) {
+        let (cx, _) = open(cx, 1000., "AMD Ryzen 7 7800X3D 8-Core Processor", 0);
+        let header = cx.debug_bounds("perf-page-header").expect("header");
+        let icon = cx.debug_bounds("perf-page-icon").expect("page icon");
+        let word = cx.debug_bounds("perf-page-type").expect("page word");
+        assert_eq!(icon.size.width, px(20.), "i_lg icon");
+        assert_eq!(icon.size.height, px(20.));
+        assert_eq!(icon.left(), header.left());
+        assert_eq!(word.left() - icon.right(), px(8.), "sp4 gap");
+    }
+
     fn click(cx: &mut VisualTestContext, at: gpui_kit::Point<gpui_kit::Pixels>, count: usize) {
         cx.simulate_event(MouseDownEvent {
             button: MouseButton::Left,

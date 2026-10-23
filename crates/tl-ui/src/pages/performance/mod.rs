@@ -1267,7 +1267,11 @@ mod tests {
         let style = overview::parts::title_value_style(&m);
         assert_eq!(style.font_weight, Some(gpui_kit::FontWeight::SEMIBOLD));
         assert_eq!(style.font_size, Some(m.text.lg.into()));
-        assert!(style.font_features.is_some());
+        let features = style.font_features.as_ref().expect("font features");
+        assert!(
+            Arc::ptr_eq(&features.0, &crate::text::style::TNUM.0),
+            "tnum"
+        );
     }
 
     fn key(s: &str) -> DeviceKey {

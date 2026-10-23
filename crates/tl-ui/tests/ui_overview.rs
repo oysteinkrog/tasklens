@@ -6726,6 +6726,22 @@ mod wired {
         r.vcx.debug_bounds(id).expect(id).center()
     }
 
+    /// UI-PRF-058: every box title tab starts with a 20 px device icon.
+    #[gpui_kit::test]
+    fn overview_box_titles_show_device_icons(cx: &mut TestAppContext) {
+        let mut r = open_with(cx, true);
+        select(&mut r, OVERVIEW_KEY);
+        draw(r.vcx);
+        for id in [CPU_BOX_ID, MEM_BOX_ID, GPU_BOX_ID, DISK_BOX_ID, NET_BOX_ID] {
+            let icon = r
+                .vcx
+                .debug_bounds(selector_id(format!("{id}-title-icon")))
+                .unwrap_or_else(|| panic!("{id} title icon drawn"));
+            assert_eq!(icon.size.width, px(20.), "{id} icon width");
+            assert_eq!(icon.size.height, px(20.), "{id} icon height");
+        }
+    }
+
     /// crw.44, wlf.37: the page measures its size during the first frame and lays out after it.
     /// Its uncached traversal can continue, but all five cached boxes are settled after select.
     #[gpui_kit::test]

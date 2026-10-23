@@ -43,9 +43,10 @@ use crate::components::icons::{TlIcon, icon};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::i18n::{Strings, tr, tr_en};
+use crate::pages::performance::overview::parts::title_value_style;
 use crate::text::ellipsis::{ELLIPSIS, middle_ellipsis};
 use crate::text::fonts::UI_FAMILY;
-use crate::text::style::{TNUM, label_style, numeric_style};
+use crate::text::style::{TNUM, label_style};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Least card height, × ui_scale. A card grows when its wrapped text needs more.
@@ -829,14 +830,15 @@ pub enum CardFont {
     Heading,
     /// Line 1 and line 2: `t_sm` 400.
     Detail,
-    /// The value: `t_md` 400 with tabular figures.
+    /// The value: `t_lg` 600 with tabular figures (UI-PRF-058).
     Value,
 }
 
 impl CardFont {
     pub fn size(self, m: &UiMetrics) -> Pixels {
         match self {
-            Self::Heading | Self::Value => m.text.md,
+            Self::Heading => m.text.md,
+            Self::Value => m.text.lg,
             Self::Detail => m.text.sm,
         }
     }
@@ -853,7 +855,7 @@ impl CardFont {
                 ..base
             },
             Self::Value => Font {
-                weight: FontWeight::NORMAL,
+                weight: FontWeight::SEMIBOLD,
                 features: TNUM.clone(),
                 ..base
             },
@@ -1919,7 +1921,7 @@ fn line_rows(
     col.into_any_element()
 }
 
-/// Value row `row` showing `text`, all or part of `v`: tabular `t_md` 400 in its validity
+/// Value row `row` showing `text`, all or part of `v`: tabular `t_lg` 600 in its validity
 /// colour, or the lock icon when Restricted.
 fn value_element(
     v: &CardValue,
@@ -1941,7 +1943,11 @@ fn value_element(
             .into_any_element();
     }
     // The style first: it replaces the whole text refinement.
-    *el.text_style() = numeric_style(m, CardFont::Value.size(m));
+    *el.text_style() = gpui_kit::TextStyleRefinement {
+        // The 16 px value sits in the 18 px heading row.
+        line_height: Some(px(HEADING_LINE_H * m.ui_scale).into()),
+        ..title_value_style(m)
+    };
     el.whitespace_nowrap()
         .text_color(v.color(theme))
         .child(text)

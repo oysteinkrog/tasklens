@@ -212,6 +212,19 @@ fn net_lines(state: LinkState) -> CardLines {
     )
 }
 
+/// UI-PRF-058: the card has a 16 px device icon at its left, before the graph.
+#[gpui_kit::test]
+fn card_shows_the_device_icon(cx: &mut TestAppContext) {
+    let (_host, cx) = open(cx, net_lines(LinkState::Up));
+    let card = cx.debug_bounds("perf-card").expect("card");
+    let icon = cx.debug_bounds("perf-card-icon").expect("card icon");
+    let graph = cx.debug_bounds("perf-card-graph").expect("graph");
+    assert_eq!(icon.size.width, px(16.), "i_md icon");
+    assert_eq!(icon.size.height, px(16.));
+    assert!(icon.left() > card.left() && icon.right() <= graph.left());
+    assert_eq!(graph.left() - icon.right(), px(4.), "sp3 gap");
+}
+
 #[gpui_kit::test]
 fn card_layout_and_click(cx: &mut TestAppContext) {
     let (host, cx) = open(cx, net_lines(LinkState::Up));
