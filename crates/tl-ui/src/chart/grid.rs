@@ -8,8 +8,8 @@
 use std::ops::Range;
 
 use gpui_kit::{
-    BorderStyle, Bounds, Edges, Hsla, PaintQuad, Pixels, Point, Window, fill, linear_color_stop,
-    linear_gradient, point, px, quad, size, transparent_black,
+    BorderStyle, Bounds, Edges, Hsla, PaintQuad, Pixels, Point, Window, fill, point, px, quad,
+    size, transparent_black,
 };
 
 use super::GridStyle;
@@ -28,8 +28,11 @@ const GAP_DOT_STEP: f32 = 3.0;
 /// Share of the plot width, from the right edge, that the newest-point glow covers (UI-PRF-058).
 pub const GLOW_FRACTION: f32 = 0.10;
 
-/// Alpha of the glow at its right edge.
+/// Alpha of the glow at its centre, where all rings overlap.
 pub const GLOW_ALPHA: f32 = 0.06;
+
+/// Number of stacked rings that build the radial glow. GPUI quads have no radial fill.
+pub const GLOW_RINGS: usize = 8;
 
 /// Diameter of the newest-point dot, logical px.
 pub const DOT_SIZE: f32 = 4.0;
@@ -221,9 +224,12 @@ pub fn paint_outline(window: &mut impl QuadSink, p: &GridPaint) {
     ));
 }
 
-/// The glow behind the newest 10% of the plot: `color` at 6% at the right edge, fading to clear
-/// toward the left (UI-PRF-058). Returns whether it was drawn: nothing is drawn under reduced
-/// motion. A horizontal gradient stands in for a radial one, which GPUI quads cannot draw.
+/// The radial glow behind the newest 10% of the plot (UI-PRF-058): `color` at 6% at the centre,
+/// fading to clear. GPUI quads have no radial fill, so `GLOW_RINGS` rounded quads of shrinking size
+/// share one centre, on the right edge at mid height, and their low alphas add up toward it. The
+/// outer ring reaches 10% of the width left of the edge and the full plot height. The caller clips
+/// to the plot, which hides the right half. Returns whether it was drawn: nothing is drawn under
+/// reduced motion.
 pub fn paint_newest_glow(
     window: &mut impl QuadSink,
     plot: Bounds<Pixels>,
@@ -233,17 +239,20 @@ pub fn paint_newest_glow(
     if reduce_motion || plot.size.width <= px(0.) {
         return false;
     }
-    let w = plot.size.width * GLOW_FRACTION;
-    let bounds = Bounds::new(
-        point(plot.right() - w, plot.top()),
-        size(w, plot.size.height),
-    );
-    let gradient = linear_gradient(
-        90.0,
-        linear_color_stop(color.alpha(0.0), 0.0),
-        linear_color_stop(color.alpha(GLOW_ALPHA), 1.0),
-    );
-    window.quad(fill(bounds, gradient));
+    let rx = f32::from(plot.size.width) * GLOW_FRACTION;
+    let ry = f32::from(plot.size.height) / 2.0;
+    let center = point(plot.right(), plot.center().y);
+    // Alpha per ring so that all rings stacked give GLOW_ALPHA.
+    let ring_alpha = 1.0 - (1.0 - GLOW_ALPHA).powf(1.0 / GLOW_RINGS as f32);
+    for i in 0..GLOW_RINGS {
+        let k = (GLOW_RINGS - i) as f32 / GLOW_RINGS as f32;
+        let (w, h) = (rx * k, ry * k);
+        let bounds = Bounds::new(
+            point(center.x - px(w), center.y - px(h)),
+            size(px(2.0 * w), px(2.0 * h)),
+        );
+        window.quad(fill(bounds, color.alpha(ring_alpha)).corner_radii(px(w.min(h))));
+    }
     true
 }
 
@@ -289,11 +298,24 @@ mod tests {
         assert!(quads.is_empty());
 
         assert!(paint_newest_glow(&mut quads, plot(), accent, false));
-        assert_eq!(quads.len(), 1);
-        // The newest 10% of the width, at the right edge of the plot.
-        assert_eq!(quads[0].bounds.size.width, px(20.));
-        assert_eq!(quads[0].bounds.right(), plot().right());
-        assert_eq!(quads[0].bounds.size.height, px(80.));
+        assert_eq!(quads.len(), GLOW_RINGS);
+        // The outer ring is centred on the right edge at mid height. Its visible left half covers
+        // the newest 10% of the width and the full plot height.
+        let outer = quads[0].bounds;
+        assert_eq!(outer.center(), point(plot().right(), plot().center().y));
+        assert_eq!(outer.left(), plot().right() - px(20.));
+        assert_eq!(outer.size.height, px(80.));
+        // Every ring shares that centre and is smaller than the one before.
+        for pair in quads.windows(2) {
+            assert_eq!(pair[1].bounds.center(), outer.center());
+            assert!(pair[1].bounds.size.width < pair[0].bounds.size.width);
+            assert!(pair[1].bounds.size.height < pair[0].bounds.size.height);
+        }
+        // Stacked, the rings reach 6% at the centre.
+        let clear = quads.iter().fold(1.0_f32, |clear, q| {
+            clear * (1.0 - q.background.as_solid().expect("solid ring").a)
+        });
+        assert!((1.0 - clear - GLOW_ALPHA).abs() < 1e-4);
     }
 
     #[test]
