@@ -446,6 +446,11 @@ impl MinigraphCard {
             }
             return;
         }
+        // The device may enter the catalog after the card was built (Memory appears with its
+        // first sample). A card built without one binds it here.
+        if self.device.is_none() && ev.mask.contains(ComponentMask::DEVICES) {
+            self.bind_device(&hub, cx);
+        }
         let series = ev.mask.contains(ComponentMask::SERIES) && {
             let changed = ChangedRuns::new(&ev.changed_series);
             self.value_series().iter().any(|id| changed.contains(*id))
@@ -459,6 +464,30 @@ impl MinigraphCard {
             let snap = std::sync::Arc::clone(hub.read(cx).current());
             self.update_value(&snap, false, cx);
         }
+    }
+
+    /// Looks the card's device up again. When it is there now, points the chart at its series
+    /// and formats the value.
+    fn bind_device(&mut self, hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) {
+        let snap = std::sync::Arc::clone(hub.read(cx).current());
+        let order = super::panel::gpu_order(cx);
+        let Some(device) = device_for(&self.entry.source, &snap.devices, &order) else {
+            return;
+        };
+        self.device = Some(device);
+        let theme = current(cx).clone();
+        let smooth = cx.has_global::<TlSettings>() && TlSettings::settings(cx).motion.smooth_graphs;
+        let spec = chart_spec_for(
+            &self.entry.source,
+            device,
+            &snap.system,
+            self.entry.color,
+            self.entry.range_s,
+            smooth,
+            &theme,
+        );
+        self.chart.update(cx, |c, cx| c.set_spec(spec, cx));
+        self.update_value(&snap, false, cx);
     }
 
     /// Process, name and app cards: takes the label, value and state from the resolver and

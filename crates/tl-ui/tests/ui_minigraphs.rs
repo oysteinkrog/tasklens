@@ -945,6 +945,44 @@ mod card {
         assert_eq!(value, "88.6%");
     }
 
+    /// The Memory device joins the catalog with its first sample, after the card was built. The
+    /// card binds it then and shows the value, not the warming-up ellipsis (pdu.66).
+    #[gpui_kit::test]
+    fn memory_card_binds_a_device_that_joins_the_catalog_late(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100);
+        r.engine
+            .publish_with(|s| s.devices = Arc::new(DeviceCatalog::default()));
+        cx.run_until_parked();
+        let hub = r.hub.clone();
+        let (host, vcx) = cx.add_window_view(move |_, cx| Host {
+            card: cx.new(|cx| {
+                MinigraphCard::new(
+                    mini(MinigraphSource::Memory),
+                    &DeviceCatalog::default(),
+                    &[],
+                    &hub,
+                    cx,
+                )
+            }),
+        });
+        let mut vcx = vcx.clone();
+        let card = vcx.read_entity(&host, |h, _| h.card.clone());
+        draw(&mut vcx);
+        assert_eq!(
+            vcx.update(|_, cx| card.read(cx).value().to_string()),
+            "\u{2026}"
+        );
+
+        r.engine
+            .publish_with(|s| Arc::make_mut(&mut s.system).memory.total = 16_000_000_000);
+        r.publish(cx, vec![series(MEMORY, MetricId::MEM_USED, 4.0e9, 1)]);
+        draw(&mut vcx);
+        assert_eq!(
+            vcx.update(|_, cx| card.read(cx).value().to_string()),
+            "25.0%"
+        );
+    }
+
     /// The card adds no render of its own for an equal value. A snapshot that changes none of
     /// its series renders neither the card nor its chart. A new sample with the same value
     /// renders the chart, and gpui re-renders the card as the chart's ancestor (crw.34), but the
