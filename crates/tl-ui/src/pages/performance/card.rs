@@ -70,7 +70,7 @@ const DETAIL_LINE_H: f32 = 16.0;
 /// Space above and below the text column, × ui_scale (sp2).
 const TEXT_PAD_Y: f32 = 4.0;
 /// Width of the sidebar's edit button, a 24 px `TlButton` sm, × ui_scale. It sits over the top
-/// card's top right corner, so that card's heading row ends sp3 before it.
+/// card's top right corner, so that card keeps a column this wide plus sp3 free at its right.
 const EDIT_BUTTON_W: f32 = 24.0;
 /// The R-051 stale floor: a series is stale when its newest sample is older than
 /// max(3 periods, this), as `chart::is_stale`.
@@ -962,31 +962,28 @@ pub fn card_text_width(card_w: Pixels, graph_w: Pixels, m: &UiMetrics) -> Pixels
 /// at most 2 rows, and what does not fit row 2 is cut in the middle ([`middle_ellipsis`]). A
 /// line whose first word does not fit is cut in the middle on one row. The value goes `gap`
 /// after the last heading row when `value_w` fits there, else on a row of its own, and on 2 rows
-/// (number, then unit) when it is wider than `text_w`; a value is never cut. The heading and an
-/// inline value keep the last `clear` of the column free (the top card, under the edit button). `measure` returns the width of a string in a card font; `lock_w` is the width of
+/// (number, then unit) when it is wider than `text_w`; a value is never cut. `measure` returns the width of a string in a card font; `lock_w` is the width of
 /// one lock icon.
 pub fn card_text_layout(
     lines: &CardLines,
     value_w: Pixels,
     text_w: Pixels,
-    clear: Pixels,
     gap: Pixels,
     lock_w: Pixels,
     measure: &mut impl FnMut(CardFont, &str) -> Pixels,
 ) -> CardTextLayout {
-    let heading_w = (text_w - clear).max(Pixels::ZERO);
     let heading = wrap_line(
         &lines.heading,
         &[],
         CardFont::Heading,
-        heading_w,
+        text_w,
         lock_w,
         measure,
     );
     let last_w = heading.rows.last().map_or(Pixels::ZERO, |row| {
         measure(CardFont::Heading, &row.text) + lock_w * row.locks.len() as f32
     });
-    let value_inline = value_w == Pixels::ZERO || last_w + gap + value_w <= heading_w;
+    let value_inline = value_w == Pixels::ZERO || last_w + gap + value_w <= text_w;
     let value_split = !value_inline && value_w > text_w;
     let line1 = wrap_line(
         &lines.line1,
@@ -1344,6 +1341,8 @@ pub struct CardPrepared {
     /// Whether the card draws its device icon: every device card does, unless the value would
     /// not fit next to it. The Overview card has none.
     pub icon: bool,
+    /// The column the top card leaves free at its right for the sidebar's edit button.
+    pub clear: Pixels,
 }
 
 impl CardPrepared {
@@ -1683,16 +1682,19 @@ impl DeviceCard {
             } else {
                 self.width
             };
-            let clear = if top {
-                px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3]
+            // The top card leaves the edit button's column free, as if the button were part of
+            // the card, unless the value would then not fit (again below the least nav_width).
+            let edit_w = px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3];
+            let clear = if top && card_text_width(inner_w - edit_w, Pixels::ZERO, &m) >= value_min_w
+            {
+                edit_w
             } else {
                 Pixels::ZERO
             };
+            let inner_w = inner_w - clear;
             // On a card with the icon, the graph narrows so the value stays in the heading row
-            // when it can, rather than taking a row of its own and growing the card. The top card
-            // keeps its graph, and its value takes its own row when the heading row, which ends
-            // before the edit button, has no room for it. The Overview card has no icon and
-            // keeps its value row.
+            // when it can, rather than taking a row of its own and growing the card. The Overview
+            // card has no icon and keeps its value row.
             let inline_floor = card_text_floor(
                 px(f32::from(measure(CardFont::Heading, &self.lines.heading)).ceil())
                     + m.sp[3]
@@ -1700,14 +1702,13 @@ impl DeviceCard {
                 &m,
             );
             let graph_w = match card_graph_width(inner_w, inline_floor, &m) {
-                w if icon && !top && w > Pixels::ZERO && value_w > Pixels::ZERO => w,
+                w if icon && w > Pixels::ZERO && value_w > Pixels::ZERO => w,
                 _ => card_graph_width(inner_w, floor, &m),
             };
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
                 card_text_width(inner_w, graph_w, &m),
-                clear,
                 m.sp[3],
                 m.icon.xs,
                 &mut measure,
@@ -1719,6 +1720,7 @@ impl DeviceCard {
                 height,
                 graph_w,
                 icon,
+                clear,
             });
         }
         self.prepared.as_ref().expect("prepared above")
@@ -1741,6 +1743,7 @@ impl RenderOnce for DeviceCard {
             height,
             graph_w,
             icon: show_icon,
+            clear,
         } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
         let key = self.key;
@@ -1867,6 +1870,7 @@ impl RenderOnce for DeviceCard {
             .w(self.width)
             .h(height)
             .pl(m.sp[5])
+            .pr(clear)
             .gap(m.sp[4])
             .bg(theme.list_bg)
             .border(px(s))
@@ -2862,15 +2866,7 @@ mod tests {
 
     /// `card_text_layout` with a 1 px gap and a 2 px lock.
     fn layout(lines: &CardLines, value_w: f32, text_w: f32) -> CardTextLayout {
-        card_text_layout(
-            lines,
-            px(value_w),
-            px(text_w),
-            Pixels::ZERO,
-            px(1.),
-            px(2.),
-            &mut mono,
-        )
+        card_text_layout(lines, px(value_w), px(text_w), px(1.), px(2.), &mut mono)
     }
 
     fn rows(line: &CardLineLayout) -> Vec<&str> {

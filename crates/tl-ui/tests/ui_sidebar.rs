@@ -1219,13 +1219,14 @@ mod sidebar {
         r.host_w.set(252.);
         r.vcx.update(|window, _| window.refresh());
         draw(r.vcx);
-        // 236 − 24 (icon and gap) − 2 − 12 − 8 − 80 (the least text column). The CPU card is
-        // the top card, so it keeps its graph rather than narrowing it for an inline value.
+        // 236 − 24 (icon and gap) − 30 (the edit button's column and sp3: the CPU card is the
+        // top card) − 2 − 12 − 8 − 90 ("CPU", sp3, "100.0%" in one row).
         assert_eq!(
             prepared(&mut r, "cpu").graph_w,
-            px(110.),
-            "graph at 252 next to the icon"
+            px(70.),
+            "graph at 252 next to the icon and the inline value"
         );
+        assert_eq!(prepared(&mut r, "cpu").clear, px(30.));
         assert!(prepared(&mut r, "cpu").icon, "device icon at 252");
         enter_edit(&mut r);
         draw(r.vcx);
