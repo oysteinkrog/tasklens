@@ -57,7 +57,7 @@ tasklens/
     tl-gpu-probe/         # bin: the only process that loads NVML
     tl-ui/                # lib: GPUI views, chart element, process table, theme
     tl-app/               # bin "tasklens": main, wiring, single instance, settings store, logging
-    tl-history/           # lib, P3: history segment format, store and rolling window (ADR-012)
+    tl-history/           # lib, P2: device metric segment format (ADR-017); P3: history segment format, store and rolling window (ADR-012)
     tl-tray/              # lib, P3: StatusNotifierItem tray and tray graph rasterizer
     tl-helper/            # bin, P3: pkexec helper for privileged process actions
     tl-netmon/            # bin, P4: privileged eBPF per-process network collector
@@ -82,7 +82,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustc-hash (`GroupKey` is an FxHash of `GroupKind`, R-142), rustix (feature `time` only, for `clock_gettime`) |
 | tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys, sha2, md-5 (file hashes for Properties and VirusTotal), bitflags (`CpuFlags`, R-285) |
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
-| tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, libc (`close_range` in the GPU probe child only, R-290), postcard, serde, serde_json (KWin `Update` payload, `journalctl -o json`, `kscreen-doctor -j`, smartctl JSON; R-142), thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131), bitflags (`DeviceKinds`, E08; R-273) |
+| tl-engine | tl-model, tl-collect, tl-ops, tl-history (P2 for ADR-017 device history, P3 for ADR-012) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, libc (`close_range` in the GPU probe child only, R-290), postcard, serde, serde_json (KWin `Update` payload, `journalctl -o json`, `kscreen-doctor -j`, smartctl JSON; R-142), thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131), bitflags (`DeviceKinds`, E08; R-273) |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
 | tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142), image (optional, `render-tests` only, PNG goldens, R-291) |
 | tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, serde_json (`themes.json` and `run-history.json`, R-245), anyhow, tracing, tracing-subscriber, tracing-appender, rustix, clap, async-channel (R-142), wgpu `=29.0.4` (Rendering GPU adapter probe, R-142) |
@@ -461,7 +461,12 @@ impl MetricId {
     pub const GPU_ENGINE_COMPUTE: Self = Self(70); pub const GPU_ENGINE_DMA: Self = Self(71);
     pub const GPU_ENGINE_RENDER: Self = Self(72);  pub const GPU_ENGINE_COPY: Self = Self(73);
     pub const GPU_ENGINE_VIDEO: Self = Self(74);   pub const GPU_ENGINE_VIDEO_ENHANCE: Self = Self(75);
-    // ALL lists 46 metrics. Bit 15 (0x8000) marks the 1 Hz tier view of a metric:
+    // system pressure for the status bar and device history (ADR-016 "System pressure", ADR-017);
+    // CPU_LOAD1 and PSI_CPU_SOME on the CpuPackage device, the other three on the Memory device
+    pub const CPU_LOAD1: Self = Self(8);      pub const PSI_CPU_SOME: Self = Self(9);   // load1; percent
+    pub const PSI_MEM_SOME: Self = Self(16);  pub const PSI_MEM_FULL: Self = Self(17);  // percent (avg10)
+    pub const SWAP_IN: Self = Self(18);       // pages per second, from the pswpin delta
+    // ALL lists 51 metrics. Bit 15 (0x8000) marks the 1 Hz tier view of a metric:
     pub const TIER_1HZ: u16 = 0x8000;
     pub fn with_tier_1hz(self) -> Self; pub fn is_tier_1hz(self) -> bool; pub fn base(self) -> Self;
     // metric numbers stay below 0x8000
@@ -497,6 +502,7 @@ pub struct DeviceEntry {
                                     // fan:<hwmon name>:<device path>:<n>, bat:<NativePath>, net:<MAC or name>, gpu:<uuid or PCI slot>,
                                     // aggregate:disk, aggregate:net, aggregate:gpu
     pub net_kind: Option<NetKind>,  // network interfaces only
+    pub hot_c: Option<f32>,         // P2: Hot threshold (ADR-016): hwmon temp<n>_crit, else temp<n>_max; NVML slowdown threshold for NVIDIA GPUs
 }
 pub struct DeviceCatalog { pub version: u64, pub entries: Arc<[DeviceEntry]> }
 ```
@@ -635,6 +641,7 @@ pub struct Snapshot {
     pub history: Arc<HistoryView>,     // P3: answer to the latest HistoryQuery (ADR-012)
     pub process_series: Arc<ProcessSeriesSet>,     // P2: engine-sampled per-process, name and app series (R-154)
     pub device_details: Arc<DeviceDetailsSnapshot>, // P2: static and D-Bus device details, SMART, partitions, eject (R-139)
+    pub device_history: Arc<DeviceHistory>,         // P2: device metric history for the Overview ranges and timeline (ADR-017)
 }
 
 pub struct SeriesSet {
@@ -660,7 +667,8 @@ pub enum GraphTarget { Process(ProcessKey), Name(Arc<str>), App(Arc<str>) }
 
 pub struct ComponentMask(pub u16); // one bit per Snapshot component, computed by the UI
 // bits 0..=12: SYSTEM, SERIES, PROCESSES, TABLE, CONNECTIONS, SERVICES, STARTUP, INVENTORY, DEVICES,
-// HEALTH, WINDOWS, DETAILS, HISTORY; PROCESS_SERIES = 1 << 13, DEVICE_DETAILS = 1 << 14; ALL = 0x7FFF (fifteen bits)
+// HEALTH, WINDOWS, DETAILS, HISTORY; PROCESS_SERIES = 1 << 13, DEVICE_DETAILS = 1 << 14,
+// DEVICE_HISTORY = 1 << 15 (P2, ADR-017); ALL = 0xFFFF (sixteen bits)
 ```
 
 **Per-component fields the UI reads** (each type lives in `snapshot.rs` unless named):
@@ -696,7 +704,7 @@ pub struct ComponentMask(pub u16); // one bit per Snapshot component, computed b
 - `WindowsSnapshot.pick: Option<PickResult { seq: u64, outcome: PickOutcome { Picked { pid: u32 }, NoWindow, Cancelled } }>` carries the window picker result (R-149).
 - `InventorySnapshot` holds one struct per Information section (R-156), `public_ip: PublicIpState { NotFetched, Fetching, Fetched { v4: Option<Arc<str>>, v6: Option<Arc<str>>, fetched_at_s: i64 }, Failed(Arc<str>) }` (R-139) and `ProcessorInfo.bits: InvField<u8>` (64 for `x86_64`, `aarch64`, `riscv64`, `ppc64`, `ppc64le`, `s390x`, `loongarch64`, `mips64`, else 32; R-170). Inventory rows arrive with `device: None`; the reducer matches disk name, PCI slot or interface name against the catalog (R-166). `MemoryInfo.peak_committed_bytes` is the reducer's running maximum of `Committed_AS` (R-166).
 - `DeviceDetailsSnapshot { header, cpu: Arc<CpuStaticInfo>, memory: Arc<MemoryDetails>, disks: Arc<[(DeviceIdx, DiskDetails)]>, nets: Arc<[(DeviceIdx, NetDetails)]>, batteries: Arc<[(DeviceIdx, BatteryDetails)]> }` (R-139). `DiskDetails` carries `model`, `wwn`, `serial`, `interface`, `scheduler` as `InvField<Arc<str>>`, `rotation_rpm`, `smart: SmartKind { Ata, Nvme, NeedsFallback, None }`, `smart_data: Option<InvField<Arc<SmartData>>>`, `smart_temp_c`, `ejectable`, `can_power_off`, `eject: Option<(u64, EjectState { Running, Blocked { blockers: Arc<[Blocker]>, others_may_hold: bool }, Done, Failed(Arc<str>) })>`, `partitions: Arc<[PartitionRow]>` (R-140), `formatted_bytes`, `used_bytes`, `free_bytes`, `system_disk`, `swap`. `NetDetails` carries `adapter_name`, `driver`, `mac`, `ifindex`, `link_speed_mbps`, `state: LinkState`, `addresses`, `kind: NetKind`, `wifi: Option<WifiInfo>`. `BatteryDetails` is the E12-023 field list plus `history: Option<Arc<[(i64, f32)]>>`. The reducer merges one record per device: the sysfs source fills every field it knows and a D-Bus source (`Udisks`, `NetworkManager`) overwrites `model`, `wwn`, `serial`, `rotation_rpm`, `smart*`, `ejectable`, `can_power_off`, `eject`, `kind` and `wifi`.
-- Totals in `system.rs` (R-139, R-155, R-170): `DiskTotals.temp_c: Metric<f32>`; `NetTotals.state: LinkState { Up, Down, Dormant, Unknown }` from sysfs `operstate`; `GpuTotals.pcie_rx_bps`, `pcie_tx_bps: Metric<f32>`; `GpuTotals.engines: GpuEngines` (busy percent per `GpuEngine`, `Unsupported` for an engine the device does not report) and `fdinfo_partial: bool` (R-292); `SensorReading.fan_control: Option<FanControlMode { FullSpeed, Manual, Automatic }>` from `pwm<n>_enable` 0, 1, 2 and `fan_connected: bool` (a non-zero RPM seen this session, or a label).
+- Totals in `system.rs` (R-139, R-155, R-170): `CpuTotals.throttling` and `GpuTotals.throttling: Metric<bool>` (P2, ADR-016: Intel `thermal_throttle` counts, NVML clocks event reasons; `Unsupported` where no source exists); `DiskTotals.temp_c: Metric<f32>`; `NetTotals.state: LinkState { Up, Down, Dormant, Unknown }` from sysfs `operstate`; `GpuTotals.pcie_rx_bps`, `pcie_tx_bps: Metric<f32>`; `GpuTotals.engines: GpuEngines` (busy percent per `GpuEngine`, `Unsupported` for an engine the device does not report) and `fdinfo_partial: bool` (R-292); `SensorReading.fan_control: Option<FanControlMode { FullSpeed, Manual, Automatic }>` from `pwm<n>_enable` 0, 1, 2 and `fan_connected: bool` (a non-zero RPM seen this session, or a label).
 
 ```rust
 // tl-model/src/table.rs: one query type for the three system tables (UI-SYS-002)
@@ -748,7 +756,7 @@ Every component except `series` is replaced as a whole new `Arc` when it changes
 ### Verification
 
 - Unit tests: `size_of::<Sample>() == 16`, `size_of::<ProcessKey>() == 24`, `size_of::<ProcessRecord>() <= 160`.
-- A test serializes every `MetricId` constant and compares against a checked-in list; changing a number fails the test.
+- A test serializes every `MetricId` constant and compares against a checked-in list (`crates/tl-model/tests/frozen/metric_ids.txt`, read by `tests/frozen_ids.rs`); changing a number fails the test. New constants are appended to the list (ADR-017 adds `CPU_LOAD1=8`, `PSI_CPU_SOME=9`, `PSI_MEM_SOME=16`, `PSI_MEM_FULL=17`, `SWAP_IN=18`).
 - Formatting tests cover every unit with boundary values (0, 1023, 1024, 999.95, u64::MAX).
 
 ---
@@ -856,8 +864,8 @@ ADR-006 pipeline with identity revalidation.
 
 | SourceId | Module | Phase | Work |
 |---|---|---|---|
-| `Cpu` | `workers/cpu.rs` | P1 | `/proc/stat`, cpufreq, CPU temperature |
-| `Memory` | `workers/memory.rs` | P1 | `/proc/meminfo`, zram `mm_stat` (no `/proc/vmstat` in v1, R-162) |
+| `Cpu` | `workers/cpu.rs` | P1 | `/proc/stat`, cpufreq, CPU temperature; from P2 also `/proc/pressure/cpu` and `/proc/loadavg` at 1 Hz (ADR-016 "System pressure") |
+| `Memory` | `workers/memory.rs` | P1 | `/proc/meminfo`, zram `mm_stat`; from P2 also `/proc/pressure/memory` and `pswpin` from `/proc/vmstat` (ADR-016 "System pressure"; R-162 still holds for every other `/proc/vmstat` field) |
 | `Disk` | `workers/disk.rs` | P1 | `/proc/diskstats`, `/sys/block` enumeration |
 | `Net` | `workers/net.rs` | P1 | `/proc/net/dev`, `/sys/class/net` enumeration |
 | `GpuNvidia` | `workers/gpu_nvidia.rs` | P1 | client of `tl-gpu-probe` (ADR-007) |
@@ -876,6 +884,7 @@ ADR-006 pipeline with identity revalidation.
 | `UPower` | `workers/dbus_upower.rs` | P2 | batteries |
 | `NetworkManager` | `workers/dbus_nm.rs` | P2 | interface kind, addresses, Wi-Fi |
 | `HistoryRecorder` | `workers/history.rs` | P3 | ADR-012 store and rolling window |
+| `MetricHistory` | `workers/metric_history.rs` | P2 | ADR-017 device metric tiers, segment files, event detector and its journal fetches |
 | `Journal` | `workers/journal.rs` | P2 | one `journalctl` child per open `JournalHandle` (ADR-005, UI-SYS-036) |
 
 `opener.rs` (E14-020) holds the portal colour-scheme reader (`org.freedesktop.portal.Settings` `Read("org.freedesktop.appearance", "color-scheme")` plus `SettingChanged`); the `SystemdUser` worker runs `opener::watch_color_scheme` as a child task of each session-bus generation in `EngineMode::Full`, and it ships `SourceUpdate::ColorScheme(u8)` (R-170, R-244). The public IP fetch is a job the `Inventory` worker runs on `DeviceCommand::FetchPublicIp`; the helper session and the setup runner report through `SourceUpdate::Helper` and `SourceUpdate::Setup`, which `source_of()` maps to `None` (R-150). Every `SourceUpdate` variant exists from E08 on, so later epics add arms, not variants. `Source::take_extra()` lets a worker send device lists and details before its sample (R-139).
@@ -1505,7 +1514,13 @@ pub struct Demand {
     pub graph_targets: Arc<[(GraphTarget, ColumnId)]>, // P2: process, name and app graphs, max 16 (GRAPH_TARGETS_MAX, R-154)
     pub tray: TrayDemand,           // P3
     pub recording: bool,            // history recording enabled (P3)
+    pub device_history: bool,       // P2: history.device_metrics is on (ADR-017); independent of visibility
+    pub device_history_range: Option<DeviceHistoryRequest>, // P2: an Overview range served from ADR-017 (UI-PRF-055, UI-PRF-057)
+    pub device_timeline: bool,      // P2: a timeline box is visible (UI-PRF-057)
 }
+
+pub struct DeviceHistoryRequest { pub range: DeviceRange, pub end_realtime_ns: Option<i64> } // None = now; Some = paused at that time
+pub enum DeviceRange { M1, M5, H1, H24, D7 } // M1 and M5 are requested only while paused
 
 pub struct DetailDemand { pub target: DetailTarget, pub tab: DetailTab }
 pub struct TrayDemand { pub icons_shown: bool, pub cpu: bool, pub memory: bool, pub disks: bool, pub nets: bool, pub gpus: bool } // icons_shown counts as a visible surface (R-156)
@@ -1513,36 +1528,38 @@ pub struct TrayDemand { pub icons_shown: bool, pub cpu: bool, pub memory: bool, 
 
 **Schedule.** "Visible" means some visible surface (window page, sidebar mini graph, detached graph, tray icon) displays it.
 
-| Source | Visible rate | Not visible, recording off | Not visible, recording on |
-|---|---|---|---|
-| CPU total and per core | 10 Hz if `cpu_fast`, else 1 Hz | off | 1 Hz |
-| CPU frequency, CPU temperature | 1 Hz | off | 1 Hz |
-| Memory, swap, zram | 1 Hz | off | 1 Hz |
-| Disks, network interfaces | 1 Hz | off | 1 Hz |
-| GPU totals (NVML) | 1 Hz | off | 1 Hz |
-| CPU and memory while `process_table` is true | 1 Hz (the table header needs them, R-166) | | |
-| Sensors (hwmon), fans | 1 Hz | off | off |
-| Process sweep (CPU, memory, I/O, state) | setting `processes.interval_ms`, default 1000, range 250..=10000 | off, unless `graph_targets` is non-empty: then `processes.interval_ms` (PROC-093, R-154) | same as visible rate |
-| Per-process series (`graph_targets`) | one sample per sweep per target, summed over matching processes for `Name` and `App`, gap when none matches; columns `cpu`, `memory`, `disk`, `network`, `gpu`, `gpu_mem_dedicated` only | same | same |
-| PSS/USS for `detail_keys` | 1 Hz, only if a PSS or USS column is shown | off | off |
-| GPU per process | 1 Hz, only if a GPU process column is shown | off | 1 Hz if recording includes GPU |
-| Connections and socket attribution | every 2 s | off | off |
-| systemd units | event-driven; full resync on connect and every 60 s while the page is visible | events only, no resync | same |
-| Startup entries | on page open and on `RefreshNow`; while the Startup Apps tab is visible, inotify on the autostart directories and the two Plasma script directories plus the user manager's `UnitFilesChanged` signal trigger a rescan | off | off |
-| Inventory | on page open and on `RefreshNow` | off | off |
-| Properties payloads (`details`) | `processes.interval_ms` for the demanded tab; `smaps` at most 1 Hz; Environment on open and `DetailRefresh` only | off | off |
-| Affinity masks (`affinity_targets`) | 1 Hz while the dialog is open | off | off |
-| Unit cgroup stats (`service_cgroup_stats`) | 1 Hz while a resource column is shown | off | off |
-| Unit details (`unit_details`) | `GetAll` once, then `PropertiesChanged` | off | off |
-| Reverse DNS (`remote_host_cookies`) | on demand, at most 4 lookups at once | off | off |
-| Logind sleep signal | event-driven, always on | always on | always on |
-| Device enumeration (disks, nets, hwmon) | every 5 s while any of those is demanded | off | every 5 s |
+| Source | Visible rate | Not visible, recording off | Not visible, recording on | Not visible, device history on |
+|---|---|---|---|---|
+| CPU total and per core | 10 Hz if `cpu_fast`, else 1 Hz | off | 1 Hz | 1 Hz |
+| CPU frequency, CPU temperature | 1 Hz | off | 1 Hz | 1 Hz |
+| Memory, swap, zram | 1 Hz | off | 1 Hz | 1 Hz (with PSI and swap-in) |
+| Disks, network interfaces | 1 Hz | off | 1 Hz | 1 Hz |
+| GPU totals (NVML) | 1 Hz | off | 1 Hz | 1 Hz |
+| CPU and memory while `process_table` is true | 1 Hz (the table header needs them, R-166) | | |  |
+| Sensors (hwmon), fans | 1 Hz | off | off | 1 Hz |
+| Process sweep (CPU, memory, I/O, state) | setting `processes.interval_ms`, default 1000, range 250..=10000 | off, unless `graph_targets` is non-empty: then `processes.interval_ms` (PROC-093, R-154) | same as visible rate | as recording off |
+| Per-process series (`graph_targets`) | one sample per sweep per target, summed over matching processes for `Name` and `App`, gap when none matches; columns `cpu`, `memory`, `disk`, `network`, `gpu`, `gpu_mem_dedicated` only | same | same | as recording off |
+| PSS/USS for `detail_keys` | 1 Hz, only if a PSS or USS column is shown | off | off | off |
+| GPU per process | 1 Hz, only if a GPU process column is shown | off | 1 Hz if recording includes GPU | off |
+| Connections and socket attribution | every 2 s | off | off | off |
+| systemd units | event-driven; full resync on connect and every 60 s while the page is visible | events only, no resync | same | events only, no resync |
+| Startup entries | on page open and on `RefreshNow`; while the Startup Apps tab is visible, inotify on the autostart directories and the two Plasma script directories plus the user manager's `UnitFilesChanged` signal trigger a rescan | off | off | off |
+| Inventory | on page open and on `RefreshNow` | off | off | off |
+| Properties payloads (`details`) | `processes.interval_ms` for the demanded tab; `smaps` at most 1 Hz; Environment on open and `DetailRefresh` only | off | off | off |
+| Affinity masks (`affinity_targets`) | 1 Hz while the dialog is open | off | off | off |
+| Unit cgroup stats (`service_cgroup_stats`) | 1 Hz while a resource column is shown | off | off | off |
+| Unit details (`unit_details`) | `GetAll` once, then `PropertiesChanged` | off | off | off |
+| Reverse DNS (`remote_host_cookies`) | on demand, at most 4 lookups at once | off | off | off |
+| Logind sleep signal | event-driven, always on | always on | always on | always on |
+| Device enumeration (disks, nets, hwmon) | every 5 s while any of those is demanded | off | every 5 s | every 5 s |
+
+`device_history` (ADR-017) is true whenever `history.device_metrics` is on, so with the default settings the "device history on" column applies whenever the engine runs. When several columns apply, each source runs at the fastest rate any of them gives. The PSI, load and swap-in reads of ADR-016's "System pressure" row follow the Memory and CPU rows.
 
 While recording is off, the process sweeps that run because the Processes tab is open also feed the 10-minute rolling window (ADR-012, D-010). The window adds no sweeps of its own.
 
 PSS/USS sort and GPU-per-process sort over partial coverage are disabled: the header for PSS and USS is not clickable and shows the tooltip "Only measured for visible rows". `ProcessSnapshot.coverage` lists which keys have PSS/USS so the UI shows `WarmingUp` for others.
 
-**Hidden detection.** `any_surface_visible = false` when the main window has had no render for 1000 ms while the hub had a pending notify (ADR-010 explains), and no detached graph or tray icon is shown. Hidden with recording off means every periodic source is off; only logind and the D-Bus executor ticks remain.
+**Hidden detection.** `any_surface_visible = false` when the main window has had no render for 1000 ms while the hub had a pending notify (ADR-010 explains), and no detached graph or tray icon is shown. Hidden with recording off and device history off means every periodic source is off; only logind and the D-Bus executor ticks remain.
 
 **Tick semantics.**
 - Deadlines are absolute: `t0 + n × period` from asupersync `interval`, `MissedTickBehavior::Skip`. No catch-up bursts.
@@ -1573,7 +1590,7 @@ After resume the GPU probe is not restarted unless it fails a request.
 
 ### Consequences
 
-- Idle cost with the window hidden is a few timer wakeups per second.
+- Idle cost with the window hidden and device history off is a few timer wakeups per second. With device history on (the default) the hidden engine keeps the 1 Hz CPU, memory, disk, network, GPU and sensor reads of that column.
 - Graphs for 1 Hz sources move smoothly because the chart interpolates in time (ADR-009), not because of fast polling.
 
 ### Rejected alternatives
@@ -1583,7 +1600,7 @@ After resume the GPU probe is not restarted unless it fails a request.
 
 ### Verification
 
-- LabRuntime tests with fake sources: demand switches change the observed sample times exactly (10 Hz to 1 Hz to off) within one `IDLE_RECHECK`; hidden with recording off produces zero `sample()` calls over 60 virtual seconds.
+- LabRuntime tests with fake sources: demand switches change the observed sample times exactly (10 Hz to 1 Hz to off) within one `IDLE_RECHECK`; hidden with recording off and device history off produces zero `sample()` calls over 60 virtual seconds; hidden with device history on gives exactly the 1 Hz sources of that column.
 - Parser tests: counter going backwards yields `WarmingUp` and `RESET`.
 - Unit test: a sample pair with a 5 s boottime gap and 10 ms monotonic gap gives a gap and no rate.
 - Real-system test: `systemctl suspend` (manual, owner machine) leaves a visible gap and no spike after resume.
@@ -2324,10 +2341,10 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 
 **Parsers.** Hand-written in `tl-collect`, no `procfs` crate. Each parser takes `&[u8]` and a reusable output struct, uses `memchr`, and allocates only for new strings. `/proc/<pid>/stat` is parsed from the last `)` to handle names with spaces and parentheses.
 
-**Module layout of `tl-collect`** (R-135): `sysroot.rs` (`SysRoot`, kept-open files, `pread`), `fdcache.rs`, `counters.rs` (rates, resets, suspend gap), `sanitize.rs`, `hash.rs`; `parse/` with one file per system file (`stat`, `meminfo`, `vmstat` (stub in v1), `diskstats`, `netdev`, `cpufreq`, `hwmon`, `zram`, `block`, `netif`, `topology`, `rapl`, `udev` (R-140), `partitions` (R-140)); `sample/{cpu,memory,disk,net,sensors}.rs`; `proc/` (`pid_stat`, `status`, `statm`, `io`, `cgroup`, `meta`, `fdcount`, `sweep`, `smaps`, `detail`, `strings`, `handles`, `extras_p2` (R-163)); `pkg.rs` (package owner index, R-163); `apps/` (`classify`, `cgroup_app`, `desktop`, `icons`, `naming`, `launchers`); `net/` (`sock_diag`, `socket_map`, `attribution`, `connections`, `netns`, `rdns`); `startup/` (`autostart`, `user_units`, `plasma_scripts`, `watch`, `impact`); `inventory/` (`cpuinfo`, `dmi`, `os_release`, `displays`, `modules`); `gpu_drm/` (`amdgpu`, `intel`, `fdinfo`).
+**Module layout of `tl-collect`** (R-135): `sysroot.rs` (`SysRoot`, kept-open files, `pread`), `fdcache.rs`, `counters.rs` (rates, resets, suspend gap), `sanitize.rs`, `hash.rs`; `parse/` with one file per system file (`stat`, `meminfo`, `vmstat` (`pswpin` only, ADR-017), `psi`, `loadavg`, `diskstats`, `netdev`, `cpufreq`, `hwmon`, `zram`, `block`, `netif`, `topology`, `rapl`, `udev` (R-140), `partitions` (R-140)); `sample/{cpu,memory,disk,net,sensors}.rs`; `proc/` (`pid_stat`, `status`, `statm`, `io`, `cgroup`, `meta`, `fdcount`, `sweep`, `smaps`, `detail`, `strings`, `handles`, `extras_p2` (R-163)); `pkg.rs` (package owner index, R-163); `apps/` (`classify`, `cgroup_app`, `desktop`, `icons`, `naming`, `launchers`); `net/` (`sock_diag`, `socket_map`, `attribution`, `connections`, `netns`, `rdns`); `startup/` (`autostart`, `user_units`, `plasma_scripts`, `watch`, `impact`); `inventory/` (`cpuinfo`, `dmi`, `os_release`, `displays`, `modules`); `gpu_drm/` (`amdgpu`, `intel`, `fdinfo`).
 
 **File descriptor policy.**
-- Kept open and re-read with `pread` at offset 0: `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/net/dev`, each used `cpufreq` and `hwmon` file, zram `mm_stat`. Reopened after any read error. `/proc/vmstat` is not read in v1 (R-162).
+- Kept open and re-read with `pread` at offset 0: `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/net/dev`, each used `cpufreq` and `hwmon` file, zram `mm_stat`, and from P2 `/proc/pressure/memory`, `/proc/pressure/cpu`, `/proc/loadavg` and `/proc/vmstat`. Reopened after any read error. `/proc/vmstat` is read for `pswpin` only (ADR-017); R-162 still holds for its other fields.
 - Per-process files are opened with `openat` relative to an `O_DIRECTORY` fd of `/proc/<pid>` during the sweep, read, and closed in the same sweep.
 - An FD cache of at most 128 entries holds `smaps_rollup` fds for `detail_keys` only; entries are dropped when the key leaves demand or the identity check fails.
 
@@ -2337,15 +2354,17 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 |---|---|---|
 | CPU [P1] | `/proc/stat` | math in ADR-008 |
 | CPU frequency [P1] | `/sys/devices/system/cpu/cpufreq/policyN/cpuinfo_avg_freq`, else `scaling_cur_freq` | amd-pstate-epp here |
-| CPU temperature [P1] | hwmon `k10temp` `temp1_input` (`Tctl`), else `coretemp`, `zenpower` | board chips such as `nct6797` at 1 Hz only |
-| Memory [P1] | `/proc/meminfo`, `/sys/block/zram*/mm_stat` | no `/proc/vmstat` in v1 (R-162) |
+| CPU temperature [P1] | hwmon `k10temp` `temp1_input` (`Tctl`), else `coretemp`, `zenpower` | board chips such as `nct6797` at 1 Hz only; `hot_c` as in the Sensors row (`k10temp` on this machine has no `_crit` or `_max` file, verified 2026-10-23, so its `hot_c` is `None`) |
+| CPU throttling [P2] | `/sys/devices/system/cpu/cpu<n>/thermal_throttle/{core,package}_throttle_count` (Intel) at 1 Hz | `CpuTotals.throttling` is true when any count increased since the last read; `Unsupported` when the directory is missing (AMD) |
+| Memory [P1] | `/proc/meminfo`, `/sys/block/zram*/mm_stat` | `/proc/vmstat` only for `pswpin` (System pressure row); R-162 holds for its other fields |
+| System pressure [P2] | `/proc/pressure/memory` (`some` and `full` avg10), `/proc/pressure/cpu` (`some` avg10), `/proc/loadavg` (first field, load1), `/proc/vmstat` `pswpin` (delta per second); uptime is CLOCK_BOOTTIME now, no file | read at 1 Hz: the memory file and `pswpin` by the `Memory` worker while `Demand.memory` or `Demand.device_history` (`PSI_MEM_SOME`, `PSI_MEM_FULL`, `SWAP_IN`), the CPU file and `loadavg` by the `Cpu` worker while `Demand.cpu` is not `Off` or `Demand.device_history` (`PSI_CPU_SOME`, `CPU_LOAD1`), also when the CPU runs at 10 Hz; a kernel without PSI (`ENOENT`) gives `Unsupported` for the PSI series; a `pswpin` decrease is a counter reset (ADR-008) |
 | Disks [P1] | `/proc/diskstats`, `/sys/block/*` | active % from `io_ticks` delta; latency = Δ(read_ticks+write_ticks) / Δ(ios); exclude `loop`, `ram`, `zram`, `fd` from the sidebar; partitions and `dm-*` are children |
 | udev properties [P1] | `/run/udev/data/b<major>:<minor>` (block), `n<ifindex>` (net), `+pci:<slot>` (PCI) read by `parse/udev.rs`, 64 KiB cap, `E:KEY=value` lines only for the asked keys (`ID_MODEL`, `ID_MODEL_FROM_DATABASE`, `ID_VENDOR_FROM_DATABASE`, `ID_BUS`, `ID_WWN`, `ID_SERIAL`, `ID_SERIAL_SHORT`, `ID_FS_TYPE`, `ID_FS_LABEL`, `ID_PART_TABLE_TYPE`, `ID_PART_ENTRY_TYPE`, `ID_PART_ENTRY_FLAGS`, `ID_PART_ENTRY_OFFSET`, `ID_PART_ENTRY_SIZE`, `ID_PATH`; the same 15 keys are the fixture capture allowlist, R-266) | no libudev; values are untrusted text and go through `sanitize`; `ID_BUS=usb` gives the USB kind and `ID_MODEL` the model, else the sysfs rules (R-140) |
 | Partitions [P2] | sysfs `/sys/block/<disk>/<part>/{start,size,ro}` plus the udev `ID_PART_*` and `ID_FS_*` keys, `/proc/self/mountinfo` for mounts | `parse/partitions.rs`: rows ordered by `start_bytes`, gaps over 1 MiB as `unallocated`, GPT GUID names and attribute flags per PERF-050, MBR types as `MBR 0x%02X` (R-140) |
 | Network [P1] | `/proc/net/dev`; `ifindex` from `/sys/class/net/<if>/ifindex`; netns inode from `/proc/self/ns/net`; `operstate` for `LinkState` | classified Wired, Wireless, VPN and tunnel, Virtual, Other (PERF-049 [now PERF-054]); the virtual name patterns are checked before `bridge/` (R-162); `lo` never shows; `tailscale0` is a tunnel and is shown; `docker0`, `veth*`, `br-*`, `virbr*`, `vnet*` are Virtual and hidden by default (`mpqemubr` joins once seen, U-52); settings `performance.show_network_{wired,wireless,vpn,virtual,other}` (only `virtual` defaults to false); visibility groups: Ethernet and USB to Wired, Wi-Fi and Cellular to Wireless, Tunnel and VPN to VpnTunnel, Virtual and Bridge to Virtual (R-162) |
-| NVIDIA GPU [P1] | `tl-gpu-probe` (ADR-007) | |
+| NVIDIA GPU [P1] | `tl-gpu-probe` (ADR-007) | P2: `nvmlDeviceGetTemperatureThreshold(NVML_TEMPERATURE_THRESHOLD_SLOWDOWN)` once per device into `hot_c`; `nvmlDeviceGetCurrentClocksEventReasons` at 1 Hz, `GpuTotals.throttling` true when `HW_SLOWDOWN` or `SW_THERMAL` is set |
 | AMD/Intel GPU [P2 AMD, P3 Intel] | sysfs `gpu_busy_percent`, `mem_info_vram_*`, hwmon, DRM fdinfo | untested here |
-| Sensors and fans [P1] | `/sys/class/hwmon/hwmon*/{temp,fan,pwm}*`, `pwm<n>_enable` for `FanControlMode` | `fan_connected` is kept across samples (R-170) |
+| Sensors and fans [P1] | `/sys/class/hwmon/hwmon*/{temp,fan,pwm}*`, `pwm<n>_enable` for `FanControlMode` | `fan_connected` is kept across samples (R-170); P2: `temp<n>_crit`, else `temp<n>_max`, read at enumeration into the device's `hot_c` (millidegrees to °C), `None` when neither exists |
 | Processes [P1] | `/proc/<pid>/stat`, `statm`, `status` (uid, threads, RssAnon), `io` (own processes), `cgroup`; fd count from `fstatat` `st_size` of `/proc/<pid>/fd`, readdir fallback | `io` gives `Restricted` for other users; all timestamps CLOCK_BOOTTIME (ADR-003) |
 | Process metadata [P1] | `comm`, `cmdline`, `exe` | refreshed every 10 sweeps per process and immediately when `comm` changes (exec) |
 | PSS/USS [P1] | `/proc/<pid>/smaps_rollup` | `detail_keys` only |
@@ -2413,7 +2432,82 @@ Still open. Each has a recommended default that beads use unless Oystein decides
 
 ## ADR-017: Device metric history
 
-Status: accepted (D-030, 2026-10-23). Separate from the process history of ADR-012, which stays off by default.
+Status: accepted (D-030, 2026-10-23). Phase P2. Separate from the process history of ADR-012, which stays off by default.
 
-The Overview's 1 h, 24 h and 7 day ranges and the 24-hour timeline need device metrics (CPU total and per core, memory rows, GPU engines and VRAM, disk read, write and active time, network down and up, temperatures, power, PSI, swap-in) for up to 7 days, also from times the app window was closed. A new `MetricHistory` worker in `tl-engine` keeps three tiers per series: 1 s means for the last hour, 10 s means for the last 24 hours, and 1 min means (with min and max) for the last 7 days. Each tier is a ring buffer in memory and is appended to a segment file under `$XDG_STATE_HOME/tasklens/metrics/` once a minute (crash loses at most one minute). At about 150 series this is under 30 MB on disk and under 20 MB in memory. It runs whenever the engine runs, including while the window is hidden in the tray; it is on by default and turned off with `history.device_metrics = false`. Gaps are stored as gaps. The engine's event detector (UI-PRF-057) writes events (kind, time, duration, value, top process name) into the same store. `HistoryQuery` gets `device_series(series, range)` returning the tier that fits the range.
+### Context
 
+The Overview's 1 h, 24 h and 7 day ranges (UI-PRF-055) and the 24-hour timeline (UI-PRF-057) need device metrics for up to 7 days: CPU total and per core, memory rows, GPU engines and VRAM, disk read, write and active time, network down and up, temperatures, power, PSI, swap-in and load. The live series hold at most 10 minutes (ADR-003). `DeviceIdx` is a per-session index and `t_ns` is CLOCK_BOOTTIME, which restarts at every boot, so neither can key data that must be read back after a restart, a reboot or a hotplug. ADR-012 solved the same problem for process history with a device catalog per block and a realtime offset per segment; this ADR uses the same approach.
+
+### Decision
+
+**Worker.** A new `MetricHistory` worker in `tl-engine` (`workers/metric_history.rs`, ADR-004) keeps three tiers per series, with the on-disk format in `tl-history` (`metrics.rs`), so tl-engine's dependency on tl-history starts in P2. It runs while `Demand.device_history` is true, which follows `history.device_metrics` (default `true`) and not visibility; ADR-008's "device history on" column says which sources then keep running while no surface is visible. In P2, closing the main window quits the app, so until the tray ships (P3, `tray.close_to_tray`) the history covers only the time the process runs; a closed app is a gap. Turning `history.device_metrics` off stops the worker and deletes the `metrics/` directory.
+
+**Series identity.** Stored series are keyed by `(device key, MetricId)`, never by `SeriesId`. The device key is the device's `persistent_key` (PERF-005, R-155), which this ADR also defines for the kinds that had none: `cpu` (`CpuPackage`), `cpu:<id>` (`CpuLogical`), `memory`, `sensor:<hwmon name>:<label>`. Each segment's first block, and every block after a catalog change, carries a catalog `Vec<HistSeries { slot: u16, device_key: Arc<str>, device_name: Arc<str>, metric: MetricId }>`; the other blocks refer to series by `slot`. On read, the worker maps each device key to the current catalog's `DeviceIdx`, so a disk unplugged and plugged back, or a reboot that renumbers devices, continues the same series. Series of devices not in the current catalog stay on disk and age out with retention.
+
+**Time base.** Each segment header carries the `boot_id` and `realtime_offset_ns` (CLOCK_REALTIME minus CLOCK_BOOTTIME at segment start), as ADR-012. Points inside a segment use `t_ns`; the reader converts to CLOCK_REALTIME with the segment's offset. Ranges of 1 h and longer and the timeline are drawn on CLOCK_REALTIME in local time. A boot shows as a gap plus a boot event; a suspend shows as a gap plus a suspend event. A new segment starts at every engine start, so one segment never spans two boots.
+
+**Tiers and aggregation.**
+
+| Tier | Point | Kept for | Values per point | Fed from |
+|---|---|---|---|---|
+| 1 s | 1 s | 1 h | value (f32) | the per-second maximum of a 10 Hz series (the ADR-003 1 Hz tier rule, as ADR-012), the sample of a 1 Hz series |
+| 10 s | 10 s | 24 h | mean, min, max (f32) | the ten 1 s points: mean of the valid values, their min and max |
+| 1 min | 60 s | 7 d | mean, min, max (f32) | the six 10 s points: mean of the means weighted by valid counts, min of the mins, max of the maxes |
+
+A point with no valid input is invalid (a gap); validity is one bit per point. A sample whose validity is not `Valid` is not an input. `GAP_BEFORE` on a live sample ends the current point.
+
+**Size** (at about 150 series; raw bytes, in RAM and before compression on disk):
+- 1 s tier: 150 × 3,600 × 4 B = 2.2 MB.
+- 10 s tier: 150 × 8,640 × 12 B = 15.6 MB.
+- 1 min tier: 150 × 10,080 × 12 B = 18.1 MB.
+- Validity bitmaps: 150 × 22,320 bits = 0.4 MB.
+- Total about 36 MB in RAM, which counts against the 150 MB RSS gate of ADR-014. On disk the same 36 MB raw plus up to one extra segment per tier before it is deleted (about 3.6 MB), before zstd; the compressed size is measured when the phase starts. Cap: `history.device_metrics_max_mb = 64` (not in menus); over the cap the oldest segments by end time are deleted first.
+
+**Format** (crate `tl-history`, `metrics.rs`):
+- One directory per tier under `$XDG_STATE_HOME/tasklens/metrics/`: `1s/`, `10s/`, `1m/`. Segment files `seg-<CLOCK_REALTIME start seconds, 10 digits>.tlm`. A segment covers 10 min (1 s tier), 1 h (10 s tier) or 24 h (1 min tier), and is cut early at engine shutdown or start.
+- Retention per tier: 1 h, 24 h and 7 d. Whole segments are deleted once their end is older than the tier's retention; nothing inside a segment is rewritten.
+- Segment header (fixed, 64 bytes, little-endian): magic `b"TLM\x01"` at 0, `format_version: u16 = 1` at 4, `tier: u8` (0 = 1 s, 1 = 10 s, 2 = 1 min) at 6, `boot_id: u64` at 8, `realtime_offset_ns: i64` at 16, `start_t_ns: u64` at 24, reserved zero bytes.
+- Body: one block per 60 s, appended once a minute (a crash loses at most one minute). Each block is `u32 LE compressed length | u32 LE crc32 of compressed bytes | zstd level 3 frame` of a postcard `MetricBlock { start_t_ns, gap_before: bool, catalog: Option<Vec<HistSeries>>, columns: Vec<SeriesColumn { slot, valid: Vec<u8> /* bitmap */, mean: Vec<f32>, min: Option<Vec<f32>>, max: Option<Vec<f32>> }>, events: Vec<HistEvent> }`, with 60, 6 or 1 points per column by tier; `min` and `max` are present in the 10 s and 1 min tiers only. An invalid point stores 0.
+- Events are written in the 1 min tier's blocks only, so they are kept 7 days: `HistEvent { kind: EventKind { MemoryPressure, SwapStorm, Heat, FullLoad, Suspend, Boot, OomKill, Crash }, start_t_ns: u64, duration_ms: u32, peak: f32, device_key: Option<Arc<str>>, process: Option<Arc<str>> }`. Process names are `comm` only (ADR-015: no command lines).
+- A segment without a complete last block (crash) is read up to the first bad CRC, as ADR-012.
+
+**Start.** The worker loads the three tiers into their rings, newest segments first, within the 2 s start budget of ADR-012, and appends a `Boot` event when the newest segment's `boot_id` differs from the current one.
+
+**Event detector.** Part of the `MetricHistory` worker. It evaluates the UI-PRF-057 rules once per second on the live series, and fetches the journal event kinds there named (at start, then every 60 s while `Demand.device_timeline` is true). It writes each event into the store when it ends (or at shutdown, with the duration so far).
+
+**Read path.** The UI does not use `HistoryQuery`. A snapshot component carries the data:
+
+```rust
+pub struct DeviceHistory {
+    pub header: ComponentHeader,
+    pub request: Option<DeviceHistoryRequest>,   // the request this answers (ADR-008 Demand)
+    pub realtime_offset_ns: i64,                  // current boot, to place live samples on the same axis
+    pub since_realtime_ns: Option<i64>,           // oldest stored point of the served tier ("since 09:14")
+    pub series: Arc<[(SeriesId, Arc<[HistPoint]>)]>, // sorted by SeriesId; current catalog only
+    pub timeline: Option<Arc<DeviceTimeline>>,    // while Demand.device_timeline
+}
+pub struct HistPoint { pub t_realtime_ns: i64, pub mean: f32, pub min: f32, pub max: f32 } // mean NaN = gap
+pub struct DeviceTimeline { pub bands: [Arc<[HistPoint]>; 4], pub events: Arc<[HistEvent]>, pub boots: Arc<[i64]>, pub journal: JournalAccess }
+```
+
+`Snapshot.device_history: Arc<DeviceHistory>` has the component bit `DEVICE_HISTORY = 1 << 15`, so `ComponentMask::ALL` becomes `0xFFFF` (sixteen bits). The worker publishes it once per tier period (1 s, 10 s or 60 s) while `Demand.device_history_range` is `Some`, with the tier fixed by the range (1 s for 1 h, 10 s for 24 h, 1 min for 7 d; while paused, the finest tier that covers the requested end, UI-PRF-057) and at most 1,024 points per series, min/max-decimated as `HistoryView` is (ADR-009, ADR-012). Unchanged series reuse their `Arc`. `DeviceTimeline` carries the 24-hour bands (CPU total, memory in use, busiest disk active time, network total, 1 min means) and the events, republished every 60 s and when an event ends.
+
+**Settings** (canonical table (a)): `history.device_metrics = true`, `history.device_metrics_max_mb = 64`.
+
+### Consequences
+
+- With the default settings the engine keeps reading the 1 Hz device sources while the window is hidden (ADR-008), and holds about 36 MB of history in RAM.
+- Device series survive restarts, reboots and hotplug; process history (ADR-012) is unchanged.
+
+### Rejected alternatives
+
+- **Keying by `SeriesId` and `t_ns`.** Rejected: both are only valid within one engine session and one boot.
+- **Means only in the 1 s tier.** Rejected: hides CPU spikes that the live chart and ADR-012 show as per-second maxima.
+- **One file for all tiers.** Rejected: retention would need rewrites; per-tier segments are deleted whole.
+
+### Verification
+
+- Accelerated test: 7 days of synthetic data at 150 series stays under the 64 MB cap, keeps exactly 1 h, 24 h and 7 d per tier, and reloads into the rings within 2 s on the owner machine.
+- A series written under one `DeviceIdx` and read back after a catalog renumbering (and after a fake `boot_id` change) continues under its device key, with a gap and a `Boot` event between.
+- Aggregation: a single 100% 10 Hz sample in a second gives 100 in the 1 s tier and as the max of the 10 s and 1 min points.
+- Truncated last block is read up to the bad CRC.

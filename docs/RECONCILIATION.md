@@ -2079,6 +2079,10 @@ curved_lines = false
 network_dynamic_scale = true   # false = link speed
 overview_core_smoothing = "medium" # off | low | medium | high (UI-PRF-018, D-024)
 overview_top_processes = false # Overview Top processes box (crw.45)
+status_bar = "overview"        # overview | performance | all_tabs | off (UI-PRF-054, P2)
+overview_range = "1m"          # 1m | 5m | 1h | 24h | 7d; the Overview ignores graph_range_s (UI-PRF-055, P2)
+overview_row_unit_px = 40      # 24..=80, snap grid row height in logical px (UI-PRF-056, P2)
+timeline_click = "pause"       # pause | preview | history; history only while history.enabled (UI-PRF-057, P2)
 
 [fans]                          # per fan key, P3
 # "<key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }
@@ -2099,6 +2103,8 @@ enabled = false
 retention_h = 6                # 1..=12; menu 1 2 3 4 6 8 12
 persist = true                 # false = delete segments at shutdown
 max_disk_mb = 256              # not in menus
+device_metrics = true          # P2, ADR-017: 7-day device metric history; false stops it and deletes metrics/
+device_metrics_max_mb = 64     # P2, ADR-017; not in menus
 
 [window]
 close_with_esc = false
