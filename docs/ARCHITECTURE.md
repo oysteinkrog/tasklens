@@ -2461,7 +2461,7 @@ A point with no valid input is invalid (a gap); validity is one bit per point. A
 - 10 s tier: 150 × 8,640 × 12 B = 15.6 MB.
 - 1 min tier: 150 × 10,080 × 12 B = 18.1 MB.
 - Validity bitmaps: 150 × 22,320 bits = 0.4 MB.
-- Total about 36 MB in RAM, which counts against the 150 MB RSS gate of ADR-014. On disk the same 36 MB raw plus up to one extra segment per tier before it is deleted (about 3.6 MB), before zstd; the compressed size is measured when the phase starts. Cap: `history.device_metrics_max_mb = 64` (not in menus); over the cap the oldest segments by end time are deleted first.
+- Total about 36 MB if every tier were held in RAM; that is too much next to the 150 MB RSS gate of ADR-014 (1.0.3 already runs at about 155 MB RSS, 77 MB anonymous, on the owner machine). So RAM holds only the 1 s tier (the last hour, about 2.2 MB) and the open block of each other tier (D-030 leader note, 2026-10-23). The 10 s and 1 min tiers are read from their segment files when a range or the timeline needs them, into a cache that holds only the requested span (at most 1,024 decimated points per series, under 2 MB) and is dropped 60 s after nothing requests it. Idle history RAM stays under 6 MB. On disk the same 36 MB raw plus up to one extra segment per tier before it is deleted (about 3.6 MB), before zstd; the compressed size is measured when the phase starts. Cap: `history.device_metrics_max_mb = 64` (not in menus); over the cap the oldest segments by end time are deleted first.
 
 **Format** (crate `tl-history`, `metrics.rs`):
 - One directory per tier under `$XDG_STATE_HOME/tasklens/metrics/`: `1s/`, `10s/`, `1m/`. Segment files `seg-<CLOCK_REALTIME start seconds, 10 digits>.tlm`. A segment covers 10 min (1 s tier), 1 h (10 s tier) or 24 h (1 min tier), and is cut early at engine shutdown or start.
@@ -2471,7 +2471,7 @@ A point with no valid input is invalid (a gap); validity is one bit per point. A
 - Events are written in the 1 min tier's blocks only, so they are kept 7 days: `HistEvent { kind: EventKind { MemoryPressure, SwapStorm, Heat, FullLoad, Suspend, Boot, OomKill, Crash }, start_t_ns: u64, duration_ms: u32, peak: f32, device_key: Option<Arc<str>>, process: Option<Arc<str>> }`. Process names are `comm` only (ADR-015: no command lines).
 - A segment without a complete last block (crash) is read up to the first bad CRC, as ADR-012.
 
-**Start.** The worker loads the three tiers into their rings, newest segments first, within the 2 s start budget of ADR-012, and appends a `Boot` event when the newest segment's `boot_id` differs from the current one.
+**Start.** The worker loads the last hour of the 1 s tier into its ring within the 2 s start budget of ADR-012 (the 10 s and 1 min tiers are not loaded; they are read on request), and appends a `Boot` event when the newest segment's `boot_id` differs from the current one.
 
 **Event detector.** Part of the `MetricHistory` worker. It evaluates the UI-PRF-057 rules once per second on the live series, and fetches the journal event kinds there named (at start, then every 60 s while `Demand.device_timeline` is true). It writes each event into the store when it ends (or at shutdown, with the duration so far).
 
@@ -2496,7 +2496,7 @@ pub struct DeviceTimeline { pub bands: [Arc<[HistPoint]>; 4], pub events: Arc<[H
 
 ### Consequences
 
-- With the default settings the engine keeps reading the 1 Hz device sources while the window is hidden (ADR-008), and holds about 36 MB of history in RAM.
+- With the default settings the engine keeps reading the 1 Hz device sources while the window is hidden (ADR-008), and holds under 6 MB of history in RAM while no long range is shown.
 - Device series survive restarts, reboots and hotplug; process history (ADR-012) is unchanged.
 
 ### Rejected alternatives
@@ -2507,7 +2507,7 @@ pub struct DeviceTimeline { pub bands: [Arc<[HistPoint]>; 4], pub events: Arc<[H
 
 ### Verification
 
-- Accelerated test: 7 days of synthetic data at 150 series stays under the 64 MB cap, keeps exactly 1 h, 24 h and 7 d per tier, and reloads into the rings within 2 s on the owner machine.
+- Accelerated test: 7 days of synthetic data at 150 series stays under the 64 MB cap, keeps exactly 1 h, 24 h and 7 d per tier, reloads the 1 s ring within 2 s, and serves a 7 d request from disk within 300 ms on the owner machine.
 - A series written under one `DeviceIdx` and read back after a catalog renumbering (and after a fake `boot_id` change) continues under its device key, with a gap and a `Boot` event between.
 - Aggregation: a single 100% 10 Hz sample in a second gives 100 in the 1 s tier and as the max of the 10 s and 1 min points.
 - Truncated last block is read up to the bad CRC.
