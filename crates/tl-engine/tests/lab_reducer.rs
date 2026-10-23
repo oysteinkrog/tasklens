@@ -393,10 +393,10 @@ fn cpu_cores_msg(t_ns: TimeNs, cores: u16) -> EngineMsg {
 fn sink_system_sample_batches() {
     let mut rig = Rig::new();
     let log = LogSink::install(&mut rig);
-    // 7 package series (total, kernel, frequency, temperature, package and core power, fastest
-    // core) and 3 per core.
+    // 9 package series (total, kernel, frequency, temperature, package and core power, fastest
+    // core, load average and CPU pressure) and 3 per core.
     let cores = 8;
-    let expected = 7 + 3 * usize::from(cores);
+    let expected = 9 + 3 * usize::from(cores);
     rig.run(vec![cpu_cores_msg(SEC, cores)])
         .expect("no invariant violation");
     {
