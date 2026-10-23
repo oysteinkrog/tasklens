@@ -978,6 +978,7 @@ impl CpuBox {
                     .flex_none()
                     .h(relative(share))
                     .w_full()
+                    .overflow_hidden()
                     .child(parts),
             )
             .child(
