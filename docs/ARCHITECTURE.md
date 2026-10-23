@@ -2410,3 +2410,10 @@ Still open. Each has a recommended default that beads use unless Oystein decides
 8. **Exact gpui-kit `ThemeColor` token names** (U-8). Default: the mapping in ADR-009, checked against source by the theme bead.
 9. **zed#64499 fix details** (U-9). Default: apply the ADR-010 patch only if the soak test fails, and re-run the soak.
 10. **CSD checklist on KWin** (U-36). Default: client-side; switch the default to server-side if any check fails (ADR-010).
+
+## ADR-017: Device metric history
+
+Status: accepted (D-030, 2026-10-23). Separate from the process history of ADR-012, which stays off by default.
+
+The Overview's 1 h, 24 h and 7 day ranges and the 24-hour timeline need device metrics (CPU total and per core, memory rows, GPU engines and VRAM, disk read, write and active time, network down and up, temperatures, power, PSI, swap-in) for up to 7 days, also from times the app window was closed. A new `MetricHistory` worker in `tl-engine` keeps three tiers per series: 1 s means for the last hour, 10 s means for the last 24 hours, and 1 min means (with min and max) for the last 7 days. Each tier is a ring buffer in memory and is appended to a segment file under `$XDG_STATE_HOME/tasklens/metrics/` once a minute (crash loses at most one minute). At about 150 series this is under 30 MB on disk and under 20 MB in memory. It runs whenever the engine runs, including while the window is hidden in the tray; it is on by default and turned off with `history.device_metrics = false`. Gaps are stored as gaps. The engine's event detector (UI-PRF-057) writes events (kind, time, duration, value, top process name) into the same store. `HistoryQuery` gets `device_series(series, range)` returning the tier that fits the range.
+

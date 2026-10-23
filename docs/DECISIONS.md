@@ -4,6 +4,20 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-23
 
+### D-030: Overview status, history and layout redesign
+
+Oystein (2026-10-23, after the mockups and an interview): build a machine status bar (status
+pill with the reason, chips for uptime, load, temperatures, memory pressure and swap-in, and a
+state edge on each box), with a setting for where it shows (Overview, Performance tab, every
+tab); a global time range of 1 min, 5 min, 1 h, 24 h and 7 days with min, average and peak per
+box; device metric history kept for 7 days and downsampled (1 s for 1 h, 10 s for 24 h, 1 min
+for 7 days); a clickable 24-hour timeline marking pressure and swap storms, heat and throttling,
+long full load, and boots, sleeps and crashes, with a setting for what a click does (pause until
+Live, preview then return, or open History mode); visual polish across the whole Performance tab
+(icons, bigger values, depth and glow, legends and ticks); and a snap grid for free placement.
+Order: status bar and polish first, then time range, snap grid, timeline. Specs: UI-PRF-054 to
+UI-PRF-058, ADR-017.
+
 ### D-029: Memory charts, GPU engine choice, core rows, edit-mode title
 
 Oystein (2026-10-23, using 1.0.3): Memory should be able to show a chart for each of its rows,

@@ -610,6 +610,56 @@ Minimum tile 200 × 120; when the window is too small for that, cols shrink unti
 - **Phase**: P2.
 - **Decided here**: the mode list, ids and defaults, the box menu and gear, the per-box `mode` and `split` keys, the inner splitter rules.
 
+### UI-PRF-054 Machine status bar
+
+- **Implements**: owner decision D-030 (2026-10-23, interview).
+- **Anatomy**: a strip 64 px high across the full width above the Overview boxes (or above the page, see Placement), `bg_card`, 1 px `divider` bottom border, padding `sp4`, items in one row with `sp3` gaps, wrapping to a second row below 900 px. Left: the **status pill** (height 40, radius 20, 18 px `i_md` icon, text `t_md` 600): a state word and the reason, for example "Busy: CPU 97% for 12 min (cargo build)". Then **chips** (height 28, radius 14, `t_sm`, label `text_secondary` and value `text_primary` in `tnum`): Uptime, Load (1-minute load average / logical CPUs), CPU temperature, GPU temperature (one chip per GPU with a temperature), Memory pressure (PSI `some` avg10 for memory), Swap-in (pages/s), and the hottest disk temperature. At the right end: the time-range switch of UI-PRF-055 when the bar is on the Overview, and a warning count button ("2 warnings") when any chip is red.
+- **States** (evaluated once per second from the snapshot; a state holds at least 10 s before it may drop, so it does not flicker): `Calm` (green dot, "Calm"), `Busy` (CPU, GPU, disk active time or network above 80% for 30 s), `Pressure` (memory PSI some avg10 at or above 5%, or swap-in above 500 pages/s for 10 s), `Hot` (CPU or GPU within 5 °C of its critical temperature, or throttling reported), `Saturated` (CPU above 95% for 60 s, or memory PSI full avg10 at or above 2%). The highest of Saturated > Hot > Pressure > Busy > Calm wins. The reason names the resource, the value, how long, and the top process by that resource from the process sweep when one is running ("(cargo build)"); without process data it leaves the parenthesis out. Chip colour: `status_warn` when over the Busy or Pressure threshold of its own metric, `status_err` over the Saturated or Hot one, else neutral.
+- **Box state edge**: each Overview box gets a 2 px top edge in its state colour (`status_ok`, `status_warn`, `status_err`) by the same thresholds applied to that box's device; `Calm` boxes keep their normal border.
+- **Placement** (setting `performance.status_bar`): `overview` (default; top of the Overview page), `performance` (above every Performance page), `all_tabs` (under the tab strip on every tab), `off`. Settings window, Performance page: "Machine status bar" dropdown with Overview, Performance tab, Every tab and Off; also in the Overview page menu as a radio submenu "Status bar".
+- **Interaction**: clicking the pill or a chip opens the page that explains it (CPU, Memory, GPU, Disk); clicking the warning button opens a popup listing each red chip with its value and threshold. Tooltips give the full metric name and the threshold.
+- **Data**: all from the existing snapshot (loadavg, PSI, vmstat swap-in, hwmon and GPU temperatures, uptime, process top by CPU). It adds no worker.
+- **Tests**: `status_bar_state_rules` (each state from fixture snapshots, the 10 s hold), `status_bar_reason_names_top_process`, `status_bar_placement_setting`, `overview_box_state_edge`.
+- **Phase**: P2.
+
+### UI-PRF-055 Overview time range and range figures
+
+- **Implements**: D-030.
+- **Switch**: a segmented control in the Overview header (and at the right end of the status bar when the bar is on the Overview): "1 min", "5 min", "1 h", "24 h", "7 d". Default "1 min". Saved as `performance.overview_range`. Every chart in every Overview box draws the chosen range; the "60 seconds ago" label becomes "1 minute ago", "5 minutes ago", "1 hour ago", "24 hours ago", "7 days ago". Core sparklines and grid cells follow the same range.
+- **Data**: 1 min and 5 min come from the live series as today. 1 h, 24 h and 7 d come from the device metric history of ADR-017 at the tier that gives at most about one point per 2 px of chart width: 1 s points for 1 h, 10 s means for 24 h, 1 min means for 7 d. A gap (app not running, machine off) draws as a break in the line, not as zero. Until the history covers the range, the chart shows what exists and the label says "since 09:14".
+- **Range figures**: under each box title a line `t_xs` `text_secondary` "min 6%  avg 42%  peak 100%" for the box's main metric over the chosen range (CPU total, memory in use, GPU utilization, disk active time of the busiest disk, network total throughput). At 1 min and 5 min they come from the live series.
+- **Tests**: `overview_range_switch_redraws_all_boxes`, `overview_range_figures_min_avg_peak`, `overview_range_gap_draws_break`, `overview_range_label_since`.
+- **Phase**: P2 (needs ADR-017).
+
+### UI-PRF-056 Overview snap grid
+
+- **Implements**: D-030. Replaces the row model of UI-PRF-018 for placement; gaps, splitters inside boxes, box modes and Edit Layout stay.
+- **Grid**: 12 columns over the page width and rows of a unit height (`performance.overview_row_unit_px`, default 40 logical px), `sp3` gutters. Each box has a column, row, column span (at least 3) and row span (at least 4, so 160 px). The page scrolls vertically when the boxes go past the bottom.
+- **Edit Layout**: drag a box by its title to move it; a ghost outline shows the snapped target cell; other boxes move down to make room (no overlaps), and boxes above close up. Drag the bottom-right corner handle to resize in whole cells. The gear, x and Add Box stay as in UI-PRF-018/019. Double-click a corner handle to fit the box to its content minimum.
+- **Saved**: `[performance.overview]` gains `grid = [{ kind, col, row, cols, rows, ... }]` (the per-box mode, split, arrange, power, hidden keys move along with each entry). An old row layout converts once on load: each row becomes a band of grid rows with the row's weight mapped to height, each box's width weight to columns (rounded, the last box takes the rest), and the old keys are kept until the next save.
+- **Narrow windows**: below 720 px the grid stacks every box at full width in reading order, as the row model did.
+- **Tests**: `overview_grid_move_pushes_down`, `overview_grid_resize_snaps`, `overview_grid_converts_rows`, `overview_grid_no_overlap_after_any_drag`, `overview_grid_narrow_stacks`.
+- **Phase**: P2.
+
+### UI-PRF-057 Overview 24-hour timeline
+
+- **Implements**: D-030.
+- **Anatomy**: a box kind `timeline` (in Add Box; added to the default layout as a full-width box at the bottom, 3 rows high): four heat bands 14 px high labelled CPU, Memory, Disk, Network, over the last 24 hours from the device metric history (1 min means), colour from the device's graph colour at low to full intensity (no data = background). Hour ticks 00..24 under the bands in local time; a bracket marks the range the boxes above show.
+- **Events**: markers above the bands with a short label and the time, from an event detector in the engine that writes to the metric history: memory pressure (PSI some avg10 ≥ 10% for 30 s) and swap storms (swap-in ≥ 2,000 pages/s for 30 s); heat (CPU or GPU within 5 °C of critical) and throttling; long full load (CPU or GPU ≥ 95% for 5 min, with the top process named); boots, suspend and resume, OOM kills and app crashes (coredumps) from the journal. Markers closer than 8 px merge into one with a count.
+- **Click** (setting `performance.timeline_click`): `pause` (default; the Overview shows the picked time, centred in the current range, with a "Back to live" button in the header, until clicked), `preview` (shows the picked time while the pointer is down and for 30 s after, then returns to live), `history` (switches the app to History mode at that time, the existing UI-PRC history view). Drag on the bands picks a span and sets the range to fit it.
+- **Tests**: `timeline_bands_from_history`, `timeline_event_markers_merge`, `timeline_click_modes`, `event_detector_rules` (fixture series per event kind).
+- **Phase**: P2 (needs ADR-017).
+
+### UI-PRF-058 Performance tab visual polish
+
+- **Implements**: D-030. Applies to the Overview boxes, every device page header and the sidebar cards.
+- **Icons**: a 20 px device icon left of each box title and page title, and 16 px on sidebar cards: `cpu`, `memory-stick`, `gpu-card`, `hard-drive`, `network`, `fan`, `battery` (Lucide where it has one, else an app SVG), tinted in the device graph colour.
+- **Title values**: the main value at the right of a box title and a page header uses `t_xl` 600 `tnum` (from `t_lg`); the secondary line (`3500 MHz · 78 °C`) stays `t_sm`.
+- **Depth and glow**: boxes get `shadow_card` (y 2, blur 8, black at 25% dark / 8% light) and a 1 px inner highlight; a radial glow in the device colour at 6% behind each chart's last 10% of width; the newest data point gets a 4 px dot in the line colour with a 2 px halo at 30%. All glow and shadow drop when `motion.reduced` or the theme's `effects = false`.
+- **Legends and ticks**: the CPU total chart gets a legend under it ("Total" line colour, "Kernel" dashed); every chart wide enough (≥ 320 px) gets x ticks at quarter points of the range ("45 s", "30 s", "15 s" or "45 m", "30 m", "15 m" and so on) and y ticks at 25% steps for percent scales.
+- **Tests**: `polish_icons_per_kind`, `polish_reduced_motion_drops_glow`, `chart_ticks_for_ranges`, plus golden screenshots of the Overview and CPU page at 1280 × 800 in both themes.
+- **Phase**: P2.
+
 ---
 
 ## Part C: device pages
