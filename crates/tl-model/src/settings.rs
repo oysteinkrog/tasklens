@@ -415,6 +415,18 @@ pub struct OverviewBoxSetting {
     /// it into `split`; it is never written.
     #[serde(skip_serializing, deserialize_with = "loose_some")]
     pub cpu_split: Option<f64>,
+    /// Whether the CPU box shows its power draw strip (UI-PRF-019 "Power draw strip", D-028).
+    /// Only the CPU box has it; written only when on.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "loose")]
+    pub power: bool,
+    /// The strip's share of the box body, in [`OVERVIEW_POWER_SPLIT_RANGE`]. `None` is the
+    /// default 0.25.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_split",
+        deserialize_with = "loose_some"
+    )]
+    pub power_split: Option<f64>,
 }
 
 /// The layout modes of each Overview box kind (UI-PRF-019), the default mode first.
@@ -432,6 +444,13 @@ pub const OVERVIEW_ARRANGES: [&str; 3] = ["auto", "vertical", "horizontal"];
 
 /// The range a box's `split` is accepted in.
 pub const OVERVIEW_SPLIT_RANGE: (f64, f64) = (0.2, 0.8);
+
+/// The range a box's `power_split` is accepted in.
+pub const OVERVIEW_POWER_SPLIT_RANGE: (f64, f64) = (0.1, 0.5);
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
 
 /// The modes of `kind` in [`OVERVIEW_BOX_MODES`]; none for an unknown kind.
 fn modes_of(kind: &str) -> &'static [&'static str] {
@@ -476,6 +495,12 @@ impl Unreadable for f64 {
     }
 }
 
+impl Unreadable for bool {
+    fn unreadable() -> Self {
+        false
+    }
+}
+
 impl Unreadable for String {
     /// Not a kind.
     fn unreadable() -> Self {
@@ -492,6 +517,8 @@ impl Unreadable for OverviewBoxSetting {
             split: None,
             arrange: None,
             cpu_split: None,
+            power: false,
+            power_split: None,
         }
     }
 }
@@ -627,7 +654,9 @@ impl OverviewLayoutSetting {
 
 impl OverviewBoxSetting {
     /// Moves a CPU `cpu_split` into `split`, and drops a mode that `kind` does not have, a
-    /// split outside [`OVERVIEW_SPLIT_RANGE`] and an `arrange` not in [`OVERVIEW_ARRANGES`]
+    /// split outside [`OVERVIEW_SPLIT_RANGE`], an `arrange` not in [`OVERVIEW_ARRANGES`], a
+    /// `power_split` outside [`OVERVIEW_POWER_SPLIT_RANGE`] and `power` keys on a box that is not
+    /// the CPU box
     /// (UI-PRF-019). Returns `true` when it dropped anything; the move alone is not a change.
     fn drop_invalid_mode(&mut self, kind: &str) -> bool {
         let mut changed = false;
@@ -657,6 +686,16 @@ impl OverviewBoxSetting {
             .is_some_and(|a| !OVERVIEW_ARRANGES.contains(&a))
         {
             self.arrange = None;
+            changed = true;
+        }
+        let (lo, hi) = OVERVIEW_POWER_SPLIT_RANGE;
+        if self.power_split.is_some_and(|v| !(lo..=hi).contains(&v)) {
+            self.power_split = None;
+            changed = true;
+        }
+        if kind != "cpu" && (self.power || self.power_split.is_some()) {
+            self.power = false;
+            self.power_split = None;
             changed = true;
         }
         changed

@@ -112,6 +112,16 @@ pub struct PerfOverviewSetBoxArrange {
     pub arrange: Arc<str>,
 }
 
+/// Shows (`on`) or hides the power draw strip of the Overview box of `kind` (the CPU box menu's
+/// "Show power draw", UI-PRF-019, D-028).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewSetBoxPower {
+    pub kind: Arc<str>,
+    pub on: bool,
+}
+
 /// Gives the Overview box of `kind` its default mode, split and arrangement (the box menu's
 /// "Reset Box").
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

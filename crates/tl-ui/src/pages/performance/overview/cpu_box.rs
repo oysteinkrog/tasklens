@@ -18,7 +18,7 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, Size, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, Subscription, Window, div, px, size,
+    StyleRefinement, Styled as _, Subscription, Window, div, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -29,9 +29,9 @@ use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
-use super::super::cpu::logical_devices;
+use super::super::cpu::{PowerState, SecondaryAvail, logical_devices};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
-use super::layout::BoxMode;
+use super::layout::{BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE};
 use super::parts::{
     ChartSettings, CoreBars, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, box_chart,
     box_frame, chart_section_versions, class_probe, core_bars_layout, core_sparks, is_wide,
@@ -54,6 +54,29 @@ pub const CPU_SPLITTER_ID: &str = "perf-overview-cpu-splitter";
 
 /// The debug selector of its accent line.
 pub const CPU_SPLITTER_LINE_ID: &str = "perf-overview-cpu-splitter-line";
+
+/// The debug selector of the gap above the power draw strip, and of its accent line.
+pub const POWER_SPLITTER_ID: &str = "perf-overview-cpu-power-splitter";
+pub const POWER_SPLITTER_LINE_ID: &str = "perf-overview-cpu-power-splitter-line";
+
+/// The debug selector of the power draw strip.
+pub const POWER_STRIP_ID: &str = "perf-overview-cpu-power-strip";
+
+/// The smallest power draw strip (UI-PRF-019 "Power draw strip"), logical px.
+pub const POWER_STRIP_MIN: f32 = 64.;
+
+/// The share of the parts above the strip a drag or a double-click ended on, rounded to 3
+/// decimals. The page saves the strip's share, one minus this, as `power_split`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PowerSplitChanged(pub f32);
+
+impl From<f32> for PowerSplitChanged {
+    fn from(share: f32) -> Self {
+        Self(share)
+    }
+}
+
+impl EventEmitter<PowerSplitChanged> for CpuBox {}
 
 /// The narrowest column of core rows (UI-PRF-018 "CPU box splitter"), logical px.
 pub const CORE_COLUMN_MIN_W: f32 = 188.;
@@ -146,6 +169,7 @@ pub const CPU_BOX_ID: &str = "perf-overview-box-cpu";
 const KEY_TITLE: &str = "perf-card-heading-cpu";
 const KEY_CORE: &str = "perf-overview-core";
 const KEY_RANGE: &str = "perf-cpu-heading-utilization";
+const KEY_POWER: &str = "perf-cpu-secondary-power";
 
 /// The span one core sparkline point averages (UI-PRF-018).
 const SPARK_MEAN_NS: u64 = 1_000_000_000;
@@ -252,6 +276,51 @@ fn core_spec(device: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec
     }
 }
 
+/// The power draw strip: package watts filled, core watts dashed, the same series, colours and
+/// scale as the Power draw chart of the CPU page.
+fn power_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+    let series = |metric, fill: bool, dashed| ChartSeries {
+        id: SeriesId {
+            device: cpu,
+            metric,
+        },
+        fill: fill.then_some(theme.graph.cpu_fill),
+        line: theme.graph.cpu_line,
+        dashed,
+        ..ChartSeries::default()
+    };
+    ChartSpec {
+        series: smallvec![
+            series(MetricId::CPU_POWER_PKG, true, false),
+            series(MetricId::CPU_POWER_CORE, false, true),
+        ],
+        y: YScale::StickyUp { hw_max: None },
+        range_ns: s.range_ns,
+        grid: GridStyle {
+            lines: true,
+            baseline: false,
+            outline: true,
+            rounded: s.rounded,
+            vertical_at: None,
+        },
+        smooth: s.smooth,
+        background: ChartBg::List,
+        ..ChartSpec::default()
+    }
+}
+
+/// "Power draw" and the current package watts at the right.
+fn power_labels(heading: SharedString) -> ChartLabels {
+    ChartLabels {
+        heading: Some(heading),
+        value_fmt: ValueFormat::Watts,
+        value_align: ValueAlign::Right,
+        range_word: SharedString::default(),
+        legend: SmallVec::new(),
+        show_axis_max: false,
+    }
+}
+
 /// No heading and no value: the box title row carries the numbers.
 fn total_labels(range_word: SharedString) -> ChartLabels {
     ChartLabels {
@@ -321,6 +390,13 @@ pub struct CpuBox {
     mode: CpuMode,
     /// The gap between the chart and the core rows (UI-PRF-018 "CPU box splitter").
     split: InnerSplit,
+    /// Whether the power draw strip is switched on, and whether RAPL can be read.
+    power: bool,
+    power_state: PowerState,
+    /// The strip's chart, built the first time the strip is switched on.
+    power_chart: Option<Entity<ChartView>>,
+    /// The gap above the strip. Its share is the parts' share of the body.
+    power_split: InnerSplit<PowerSplitChanged>,
     settings: ChartSettings,
     settings_versions: [u64; 3],
     style_version: u64,
@@ -368,6 +444,16 @@ impl CpuBox {
                 MODES[0].split.unwrap_or_default(),
             )
             .with_mins(PART_MIN, CORE_COLUMN_MIN_W),
+            power: false,
+            power_state: PowerState::NoZone,
+            power_chart: None,
+            power_split: InnerSplit::new(
+                POWER_SPLITTER_ID,
+                POWER_SPLITTER_LINE_ID,
+                1. - POWER_SPLIT_DEFAULT,
+            )
+            .with_range(1. - POWER_SPLIT_RANGE.1, 1. - POWER_SPLIT_RANGE.0)
+            .with_mins(PART_MIN, POWER_STRIP_MIN),
             settings,
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
@@ -385,6 +471,7 @@ impl CpuBox {
         };
         this.sync_devices(&snap, cx);
         this.sync_text(&snap, true);
+        this.sync_power_state(&snap);
         this
     }
 
@@ -446,6 +533,63 @@ impl CpuBox {
         &mut self.split
     }
 
+    fn power_inner_split(&mut self) -> &mut InnerSplit<PowerSplitChanged> {
+        &mut self.power_split
+    }
+
+    /// Whether the CPU power draw can be read.
+    pub fn power_state(&self) -> PowerState {
+        self.power_state
+    }
+
+    /// Whether the strip is switched on (the saved `power`), readable or not.
+    pub fn power_on(&self) -> bool {
+        self.power
+    }
+
+    /// Whether the box draws the strip: switched on and RAPL readable. No zone draws nothing,
+    /// and an unreadable zone has nothing to plot.
+    pub fn power_shown(&self) -> bool {
+        self.power && self.power_state == PowerState::Readable
+    }
+
+    /// The strip's chart, once it has been switched on.
+    pub fn power_chart(&self) -> Option<&Entity<ChartView>> {
+        self.power_chart.as_ref()
+    }
+
+    /// The strip's share of the body as the box lays it out, after the clamps.
+    pub fn power_share(&self, m: &UiMetrics) -> f32 {
+        1. - self
+            .power_split
+            .share(SplitAxis::Column, m.sp[5], m.ui_scale)
+    }
+
+    /// Takes the saved strip: shown or not, and its share of the body (`power_split`). Nothing
+    /// changes while the gap is held.
+    pub fn set_power(&mut self, on: bool, strip_share: f32, cx: &mut Context<Self>) {
+        let mut changed = self.power_split.set_share(1. - strip_share);
+        if on != self.power {
+            self.power = on;
+            changed = true;
+        }
+        if on && self.power_chart.is_none() {
+            let theme = current(cx).clone();
+            let spec = power_spec(self.cpu, &self.settings, &theme);
+            let labels = power_labels(tr(cx, KEY_POWER));
+            self.power_chart = Some(box_chart(spec, labels, &self.hub, cx));
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Reads whether RAPL is readable. True when that changed.
+    fn sync_power_state(&mut self, snap: &Snapshot) -> bool {
+        let state = SecondaryAvail::read(snap, &snap.device_details.cpu).power;
+        std::mem::replace(&mut self.power_state, state) != state
+    }
+
     /// "CPU\t12%", the line when there is one, then "C0\t10%" per logical CPU, with "\t3.9 GHz"
     /// when its clock is known.
     pub fn copy_text(&self, out: &mut String) {
@@ -469,7 +613,8 @@ impl CpuBox {
         let devices = ev.mask.contains(ComponentMask::DEVICES);
         let series = ev.mask.contains(ComponentMask::SERIES);
         let system = ev.mask.contains(ComponentMask::SYSTEM);
-        if !(devices || series || system) {
+        let details = ev.mask.contains(ComponentMask::DEVICE_DETAILS);
+        if !(devices || series || system || details) {
             return;
         }
         let snap = Arc::clone(hub.read(cx).current());
@@ -490,6 +635,9 @@ impl CpuBox {
         }
         if system {
             changed |= self.sync_text(&snap, false);
+        }
+        if system || details {
+            changed |= self.sync_power_state(&snap);
         }
         if changed {
             #[cfg(any(test, feature = "test-hooks"))]
@@ -659,6 +807,10 @@ impl CpuBox {
         self.title = tr(cx, KEY_TITLE);
         let labels = total_labels(tr(cx, KEY_RANGE));
         self.total.update(cx, |v, cx| v.set_labels(labels, cx));
+        if let Some(chart) = &self.power_chart {
+            let labels = power_labels(tr(cx, KEY_POWER));
+            chart.update(cx, |v, cx| v.set_labels(labels, cx));
+        }
         let (values, freqs) = {
             let bars = self.bars.borrow();
             (bars.values.clone(), bars.freqs.clone())
@@ -675,6 +827,10 @@ impl CpuBox {
         let theme = current(cx).clone();
         let spec = total_spec(self.cpu, &self.settings, &theme);
         self.total.update(cx, |v, cx| v.set_spec(spec, cx));
+        if let Some(chart) = &self.power_chart {
+            let spec = power_spec(self.cpu, &self.settings, &theme);
+            chart.update(cx, |v, cx| v.set_spec(spec, cx));
+        }
         for (chart, &device) in self.sparks.iter().zip(&self.logical) {
             let spec = core_spec(device, &self.settings, &theme);
             chart.update(cx, |v, cx| v.set_spec(spec, cx));
@@ -797,6 +953,54 @@ impl CpuBox {
     }
 }
 
+impl CpuBox {
+    /// `parts` over the power draw strip with a horizontal gap between them, the strip at the
+    /// bottom of the body and full width.
+    fn with_power_strip(
+        &mut self,
+        parts: AnyElement,
+        chart: Entity<ChartView>,
+        m: &UiMetrics,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let share = self
+            .power_split
+            .share(SplitAxis::Column, m.sp[5], m.ui_scale);
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap(m.sp[5])
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .h(relative(share))
+                    .w_full()
+                    .child(parts),
+            )
+            .child(
+                div()
+                    .debug_selector(|| POWER_STRIP_ID.into())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(chart.cached(StyleRefinement::default().size_full())),
+            )
+            .child(self.power_split.probe(Self::power_inner_split, cx))
+            .child(self.power_split.gap(
+                SplitAxis::Column,
+                share,
+                m.sp[5],
+                Self::power_inner_split,
+                cx,
+            ))
+            .into_any_element()
+    }
+}
+
 impl Render for CpuBox {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
@@ -829,6 +1033,10 @@ impl Render for CpuBox {
                 }
                 body.into_any_element()
             }
+        };
+        let body = match self.power_chart.clone().filter(|_| self.power_shown()) {
+            Some(chart) => self.with_power_strip(body, chart, &m, cx),
+            None => body,
         };
         box_frame(
             CPU_BOX_ID,

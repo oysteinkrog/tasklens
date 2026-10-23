@@ -46,7 +46,7 @@ use smallvec::SmallVec;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::ids::DeviceIdx;
 
-use self::cpu_box::CpuBox;
+use self::cpu_box::{CpuBox, PowerSplitChanged};
 use self::disk_box::DiskBox;
 use self::edit::EditState;
 use self::gpu_box::GpuBox;
@@ -199,6 +199,8 @@ impl OverviewPage {
         if let Some(split) = layout.split(BoxKind::Cpu) {
             cpu.update(cx, |b, cx| b.set_split(split, cx));
         }
+        let power = layout.config(BoxKind::Cpu);
+        cpu.update(cx, |b, cx| b.set_power(power.power, power.power_split, cx));
         let mem = cx.new(|cx| MemBox::new(&hub, mem_idx, cx));
         let mem_mode = layout.config(BoxKind::Memory).mode.id;
         mem.update(cx, |b, cx| b.set_mode(mem_mode, cx));
@@ -236,6 +238,7 @@ impl OverviewPage {
         subs.push(cx.observe(sidebar, |this, _, cx| this.sync_cards(cx)));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_layout));
         subs.push(cx.subscribe(&cpu, Self::on_cpu_split));
+        subs.push(cx.subscribe(&cpu, Self::on_cpu_power_split));
         subs.push(cx.subscribe(&mem, Self::on_mem_split));
         subs.push(cx.subscribe(&gpu, Self::on_gpu_split));
         subs.push(cx.subscribe(&disk, Self::on_disk_split));
@@ -424,6 +427,19 @@ impl OverviewPage {
         self.save_layout(cx);
     }
 
+    /// The CPU box ended a drag or a double-click on the gap above its power draw strip: the
+    /// strip's share goes into the layout and the profile.
+    fn on_cpu_power_split(
+        &mut self,
+        _: Entity<CpuBox>,
+        ev: &PowerSplitChanged,
+        cx: &mut Context<Self>,
+    ) {
+        let share = ((1. - ev.0) * 1000.).round() / 1000.;
+        self.layout.set_power_split(BoxKind::Cpu, share);
+        self.save_layout(cx);
+    }
+
     /// The Memory box ended a split drag or a double-click: the share goes into the layout and
     /// the profile.
     fn on_mem_split(&mut self, _: Entity<MemBox>, ev: &InnerSplitChanged, cx: &mut Context<Self>) {
@@ -463,6 +479,7 @@ impl OverviewPage {
         let procs = layout.has(BoxKind::TopProcs);
         let split = layout.split(BoxKind::Cpu);
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
+        let cpu_power = layout.config(BoxKind::Cpu);
         let mem_split = layout.split(BoxKind::Memory);
         let mem_mode = layout.config(BoxKind::Memory).mode.id;
         let gpu_split = layout.split(BoxKind::Gpu);
@@ -477,6 +494,9 @@ impl OverviewPage {
         if let Some(split) = split {
             self.cpu.update(cx, |b, cx| b.set_split(split, cx));
         }
+        self.cpu.update(cx, |b, cx| {
+            b.set_power(cpu_power.power, cpu_power.power_split, cx);
+        });
         self.mem.update(cx, |b, cx| b.set_mode(mem_mode, cx));
         if let Some(split) = mem_split {
             self.mem.update(cx, |b, cx| b.set_split(split, cx));
@@ -794,6 +814,7 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_resize_box))
             .on_action(cx.listener(Self::on_set_box_mode))
             .on_action(cx.listener(Self::on_set_box_arrange))
+            .on_action(cx.listener(Self::on_set_box_power))
             .on_action(cx.listener(Self::on_reset_box))
     }
 }

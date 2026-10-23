@@ -25,8 +25,11 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::i18n::tr;
 use crate::pages::performance::actions::{
     PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode,
+    PerfOverviewSetBoxPower,
 };
+use crate::pages::performance::cpu::PowerState;
 use crate::theme::metrics;
+use crate::window::setup::OpenAdditionalSetup;
 
 /// The title line a right-click opens the box menu on: the 1 px top border and the 24 px title
 /// row of the box frame, logical px.
@@ -45,11 +48,13 @@ pub fn gear_id(kind: BoxKind) -> String {
 }
 
 /// The box a right-click landed on, the mode it showed and the arrangement of that mode.
+/// `power` is the CPU box's power draw strip: `None` for any other box.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BoxMenuTarget {
     pub kind: BoxKind,
     pub mode: &'static str,
     pub arrange: Option<Arrange>,
+    pub power: Option<(PowerState, bool)>,
 }
 
 /// The box whose title line took the last right-press. The Performance tab clears it when a
@@ -78,6 +83,7 @@ fn mode_items(
             }),
         );
     }
+    menu = power_item(menu, target, cx);
     let Some(choice) = target.kind.arrange(target.mode) else {
         return menu;
     };
@@ -87,6 +93,40 @@ fn mode_items(
         cx,
         move |menu, _, cx| arrange_items(menu, target, choice, cx),
     )
+}
+
+/// The CPU box's "Show power draw" check item (UI-PRF-019, D-028). Without RAPL there is no
+/// item. When RAPL is unreadable the item is disabled with "Needs setup", and "Set up CPU power
+/// draw…" under it opens Additional Setup, as on the CPU page.
+fn power_item(menu: TlMenu, target: BoxMenuTarget, cx: &App) -> TlMenu {
+    let Some((state, on)) = target.power else {
+        return menu;
+    };
+    let label = tr(cx, "perf-overview-show-power");
+    match state {
+        PowerState::NoZone => menu,
+        PowerState::Readable => menu.separator().check_item(
+            label,
+            on,
+            Box::new(PerfOverviewSetBoxPower {
+                kind: target.kind.key().into(),
+                on: !on,
+            }),
+        ),
+        PowerState::NeedsSetup => {
+            let tip = Some(tr(cx, "perf-tip-needs-setup"));
+            let menu = menu.separator();
+            let menu = if on {
+                menu.item_disabled_checked(label, tip)
+            } else {
+                menu.item_disabled(label, tip)
+            };
+            menu.item(
+                tr(cx, "perf-cpu-setup-power"),
+                Box::new(OpenAdditionalSetup { focus_row: None }),
+            )
+        }
+    }
 }
 
 /// The "Arrange" items of `choice`, the shown arrangement selected. A saved choice has
@@ -154,12 +194,13 @@ pub fn box_menu(menu: TlMenu, target: BoxMenuTarget, window: &mut Window, cx: &m
 
 impl OverviewPage {
     /// The box of `kind` with the mode and arrangement its layout shows.
-    fn menu_target(&self, kind: BoxKind) -> BoxMenuTarget {
+    fn menu_target(&self, kind: BoxKind, cx: &App) -> BoxMenuTarget {
         let config = self.layout.config(kind);
         BoxMenuTarget {
             kind,
             mode: config.mode.id,
             arrange: config.arrange,
+            power: (kind == BoxKind::Cpu).then(|| (self.cpu.read(cx).power_state(), config.power)),
         }
     }
 
@@ -171,7 +212,7 @@ impl OverviewPage {
         };
         let y = ev.position.y - self.content_origin.get().y - placed.bounds.top();
         if f32::from(y) <= TITLE_LINE * metrics(cx).ui_scale {
-            cx.set_global(ClickedBox(Some(self.menu_target(kind))));
+            cx.set_global(ClickedBox(Some(self.menu_target(kind, cx))));
         }
     }
 
@@ -179,7 +220,8 @@ impl OverviewPage {
     /// line and sits above the box, so it names the box itself. The press goes on to the
     /// Performance tab, which opens the menu.
     pub(super) fn title_handle_right_down(&self, kind: BoxKind, cx: &mut App) {
-        cx.set_global(ClickedBox(Some(self.menu_target(kind))));
+        let target = self.menu_target(kind, cx);
+        cx.set_global(ClickedBox(Some(target)));
     }
 
     /// `PerfOverviewSetBoxMode`: the box takes the mode and the layout is saved. A mode the box
@@ -221,7 +263,25 @@ impl OverviewPage {
         }
     }
 
-    /// `PerfOverviewResetBox`: the box's default mode, split and arrangement, saved.
+    /// `PerfOverviewSetBoxPower`: the CPU box shows or hides its power draw strip and the layout
+    /// is saved. Any other kind, or the shown state, does nothing.
+    pub(super) fn on_set_box_power(
+        &mut self,
+        a: &PerfOverviewSetBoxPower,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(kind) = BoxKind::from_key(&a.kind) else {
+            return;
+        };
+        let mut layout = self.layout.clone();
+        if layout.set_power(kind, a.on) {
+            self.set_layout(layout, cx);
+            self.save_layout(cx);
+        }
+    }
+
+    /// `PerfOverviewResetBox`: the box's default mode, split, arrangement and no power strip, saved.
     pub(super) fn on_reset_box(
         &mut self,
         a: &PerfOverviewResetBox,
@@ -242,7 +302,7 @@ impl OverviewPage {
     /// It opens the box's mode items below the pointer.
     pub(super) fn box_gear(&self, kind: BoxKind, cx: &App) -> AnyElement {
         let s = metrics(cx).ui_scale;
-        let target = self.menu_target(kind);
+        let target = self.menu_target(kind, cx);
         let focus = self.focus.clone();
         let id = gear_id(kind);
         let button = TlButton::new(SharedString::from(id.clone()), TlButtonKind::Ghost)

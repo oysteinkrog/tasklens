@@ -13,6 +13,7 @@
 //! their handlers reach it without a separate view.
 
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -64,17 +65,28 @@ impl SplitAxis {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct InnerSplitChanged(pub f32);
 
+impl From<f32> for InnerSplitChanged {
+    fn from(share: f32) -> Self {
+        Self(share)
+    }
+}
+
 /// `share` of a body `len` px long, clamped to [`SPLIT_RANGE`] and so that the first part
 /// keeps `min_first` and the second `min_second` beside the `gap` (minimums in logical px,
 /// `scale` the UI scale). The first part's floor wins when the body is too short for both.
-pub fn clamp_split(
+pub fn clamp_split(share: f32, len: f32, gap: f32, mins: (f32, f32), scale: f32) -> f32 {
+    clamp_split_in(SPLIT_RANGE, share, len, gap, mins, scale)
+}
+
+/// [`clamp_split`] for a splitter whose share has its own `range`.
+pub fn clamp_split_in(
+    (lo, hi): (f32, f32),
     share: f32,
     len: f32,
     gap: f32,
     (min_first, min_second): (f32, f32),
     scale: f32,
 ) -> f32 {
-    let (lo, hi) = SPLIT_RANGE;
     if len <= 0. {
         return share.clamp(lo, hi);
     }
@@ -99,13 +111,16 @@ struct SplitDrag {
     changed: bool,
 }
 
-/// One inner splitter's state.
-pub struct InnerSplit {
+/// One inner splitter's state. `E` is the event it emits when a drag or a double-click ends;
+/// a box with two splitters gives the second its own event type.
+pub struct InnerSplit<E = InnerSplitChanged> {
     id: &'static str,
     line_id: &'static str,
     share: f32,
     default: f32,
     mins: (f32, f32),
+    /// The smallest and largest share, [`SPLIT_RANGE`] unless the mode says otherwise.
+    range: (f32, f32),
     /// When set, the untouched default share leaves the second part this many logical px.
     default_second_px: Option<f32>,
     /// The body's bounds at the last paint.
@@ -114,9 +129,10 @@ pub struct InnerSplit {
     hover: bool,
     hover_shown: bool,
     hover_task: Option<Task<()>>,
+    event: PhantomData<fn() -> E>,
 }
 
-impl InnerSplit {
+impl<E: From<f32> + 'static> InnerSplit<E> {
     /// A splitter at `default`, with debug selectors `id` for the gap and `line_id` for its
     /// accent line, and [`PART_MIN`] for both parts.
     pub fn new(id: &'static str, line_id: &'static str, default: f32) -> Self {
@@ -126,13 +142,21 @@ impl InnerSplit {
             share: default,
             default,
             mins: (PART_MIN, PART_MIN),
+            range: SPLIT_RANGE,
             default_second_px: None,
             body: Rc::default(),
             drag: None,
             hover: false,
             hover_shown: false,
             hover_task: None,
+            event: PhantomData,
         }
+    }
+
+    /// The smallest and largest share, when the mode sets its own.
+    pub fn with_range(mut self, lo: f32, hi: f32) -> Self {
+        self.range = (lo, hi);
+        self
     }
 
     /// The parts' minimums in logical px, when the mode sets its own.
@@ -181,8 +205,8 @@ impl InnerSplit {
 
     /// [`Self::share`] as a function of the body length in px, for a probe that must classify
     /// the layout from the state of this render.
-    pub fn sharer(&self, gap: Pixels, scale: f32) -> impl Fn(f32) -> f32 + 'static + use<> {
-        let (share, default, mins) = (self.share, self.default, self.mins);
+    pub fn sharer(&self, gap: Pixels, scale: f32) -> impl Fn(f32) -> f32 + 'static + use<E> {
+        let (share, default, mins, range) = (self.share, self.default, self.mins, self.range);
         let second_px = self.default_second_px;
         let gap = f32::from(gap);
         move |len| {
@@ -193,7 +217,7 @@ impl InnerSplit {
                     let hi = (len - gap - mins.1 * scale) / len;
                     ((len - gap - second * scale) / len).clamp(lo, hi.max(lo))
                 }
-                _ => clamp_split(share, len, gap, mins, scale),
+                _ => clamp_split_in(range, share, len, gap, mins, scale),
             }
         }
     }
@@ -209,7 +233,7 @@ impl InnerSplit {
 
     /// Button down on the gap: a double-click resets the default share, a single press starts
     /// a drag.
-    fn down<V: EventEmitter<InnerSplitChanged>>(
+    fn down<V: EventEmitter<E>>(
         &mut self,
         axis: SplitAxis,
         gap: Pixels,
@@ -221,7 +245,7 @@ impl InnerSplit {
             self.drag = None;
             if self.share != self.default {
                 self.share = self.default;
-                cx.emit(InnerSplitChanged(self.share));
+                cx.emit(E::from(self.share));
             }
         } else {
             self.drag = Some(SplitDrag {
@@ -245,7 +269,14 @@ impl InnerSplit {
             return;
         }
         let share = drag.start_share + (drag.axis.along(position) - drag.start) / len;
-        let share = clamp_split(share, len, drag.gap, self.mins, metrics(cx).ui_scale);
+        let share = clamp_split_in(
+            self.range,
+            share,
+            len,
+            drag.gap,
+            self.mins,
+            metrics(cx).ui_scale,
+        );
         if share != self.share {
             drag.changed = true;
             self.share = share;
@@ -254,13 +285,13 @@ impl InnerSplit {
     }
 
     /// The button went up: the drag ends and a changed share goes to the page to be saved.
-    fn up<V: EventEmitter<InnerSplitChanged>>(&mut self, cx: &mut Context<V>) {
+    fn up<V: EventEmitter<E>>(&mut self, cx: &mut Context<V>) {
         let Some(drag) = self.drag.take() else {
             return;
         };
         if drag.changed {
             self.share = round_split(self.share);
-            cx.emit(InnerSplitChanged(self.share));
+            cx.emit(E::from(self.share));
         }
         cx.notify();
     }
@@ -296,7 +327,7 @@ impl InnerSplit {
 
     /// The gap's hit area with its cursor, handlers and accent line, absolutely placed in the
     /// body at the first part's `share` along `axis`. `gap` is the gap in px.
-    pub fn gap<V: EventEmitter<InnerSplitChanged>>(
+    pub fn gap<V: EventEmitter<E>>(
         &self,
         axis: SplitAxis,
         share: f32,
@@ -349,11 +380,11 @@ impl InnerSplit {
 
     /// A canvas over the body that keeps its bounds and, while the gap is held, follows the
     /// pointer wherever it goes.
-    pub fn probe<V: EventEmitter<InnerSplitChanged>>(
+    pub fn probe<V: EventEmitter<E>>(
         &self,
         this: fn(&mut V) -> &mut Self,
         cx: &mut Context<V>,
-    ) -> impl IntoElement + use<V> {
+    ) -> impl IntoElement + use<V, E> {
         let body = Rc::clone(&self.body);
         let view = cx.entity().downgrade();
         let dragging = self.drag.is_some();

@@ -202,13 +202,23 @@ impl ArrangeChoice {
 /// The smallest and largest split.
 pub const SPLIT_RANGE: (f32, f32) = (0.2, 0.8);
 
+/// The smallest and largest share of the CPU box body the power draw strip takes.
+pub const POWER_SPLIT_RANGE: (f32, f32) = (0.1, 0.5);
+
+/// The default share of the CPU box body the power draw strip takes.
+pub const POWER_SPLIT_DEFAULT: f32 = 0.25;
+
 /// A box's mode, split and arrangement. `split` is the first part's share, `None` in a mode
-/// with one part. `arrange` is `None` in a mode without a saved Arrange choice.
+/// with one part. `arrange` is `None` in a mode without a saved Arrange choice. `power` and
+/// `power_split` are the CPU box's power draw strip (D-028): it is shown and takes this share
+/// of the body; other kinds keep them at their defaults.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BoxConfig {
     pub mode: &'static BoxMode,
     pub split: Option<f32>,
     pub arrange: Option<Arrange>,
+    pub power: bool,
+    pub power_split: f32,
 }
 
 impl BoxConfig {
@@ -218,6 +228,8 @@ impl BoxConfig {
             mode,
             split: mode.split,
             arrange: kind.arrange(mode.id).and_then(ArrangeChoice::saved_default),
+            power: false,
+            power_split: POWER_SPLIT_DEFAULT,
         }
     }
 
@@ -246,7 +258,21 @@ impl BoxConfig {
             arrange: default
                 .arrange
                 .map(|d| b.arrange.as_deref().and_then(Arrange::from_id).unwrap_or(d)),
+            power: kind == BoxKind::Cpu && b.power,
+            power_split: b
+                .power_split
+                .map(|v| v as f32)
+                .filter(|v| (POWER_SPLIT_RANGE.0..=POWER_SPLIT_RANGE.1).contains(v))
+                .filter(|_| kind == BoxKind::Cpu)
+                .unwrap_or(POWER_SPLIT_DEFAULT),
         }
+    }
+
+    /// `power` when on, and `power_split` when not the default.
+    fn power_setting(self) -> (bool, Option<f64>) {
+        let split = ((self.power_split - POWER_SPLIT_DEFAULT).abs() >= 5e-4)
+            .then(|| f64::from(self.power_split));
+        (self.power, split)
     }
 
     /// The mode when not the kind's default, the split when not the mode's default, and the
@@ -393,7 +419,9 @@ impl OverviewLayout {
                         .boxes
                         .iter()
                         .map(|b| {
-                            let (mode, split, arrange) = self.config(b.kind).to_setting(b.kind);
+                            let config = self.config(b.kind);
+                            let (mode, split, arrange) = config.to_setting(b.kind);
+                            let (power, power_split) = config.power_setting();
                             OverviewBoxSetting {
                                 kind: b.kind.key().to_owned(),
                                 width: f64::from(b.width),
@@ -401,6 +429,8 @@ impl OverviewLayout {
                                 split,
                                 arrange,
                                 cpu_split: None,
+                                power,
+                                power_split,
                             }
                         })
                         .collect(),
@@ -452,6 +482,28 @@ impl OverviewLayout {
             return false;
         }
         config.split = Some(share.clamp(SPLIT_RANGE.0, SPLIT_RANGE.1));
+        true
+    }
+
+    /// Shows or hides the CPU box's power draw strip. Returns whether it changed; any other
+    /// kind has no strip.
+    pub fn set_power(&mut self, kind: BoxKind, on: bool) -> bool {
+        let config = &mut self.configs[kind.index()];
+        if kind != BoxKind::Cpu || config.power == on {
+            return false;
+        }
+        config.power = on;
+        true
+    }
+
+    /// Sets the strip's share of the CPU box body. Returns whether it changed.
+    pub fn set_power_split(&mut self, kind: BoxKind, share: f32) -> bool {
+        let config = &mut self.configs[kind.index()];
+        let share = share.clamp(POWER_SPLIT_RANGE.0, POWER_SPLIT_RANGE.1);
+        if kind != BoxKind::Cpu || config.power_split == share {
+            return false;
+        }
+        config.power_split = share;
         true
     }
 
