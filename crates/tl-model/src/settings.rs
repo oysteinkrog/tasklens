@@ -427,6 +427,11 @@ pub struct OverviewBoxSetting {
         deserialize_with = "loose_some"
     )]
     pub power_split: Option<f64>,
+    /// The GPU box's engine charts the user left out, by en-US name, `"VRAM"` for the VRAM row
+    /// (UI-PRF-019 "Shown engines", D-029). Names the GPU does not report are kept and ignored.
+    /// Only the GPU box has it; written only when not empty.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "loose")]
+    pub hidden: Vec<String>,
 }
 
 /// The layout modes of each Overview box kind (UI-PRF-019), the default mode first.
@@ -508,6 +513,13 @@ impl Unreadable for String {
     }
 }
 
+impl Unreadable for Vec<String> {
+    /// Nothing hidden.
+    fn unreadable() -> Self {
+        Vec::new()
+    }
+}
+
 impl Unreadable for OverviewBoxSetting {
     fn unreadable() -> Self {
         Self {
@@ -519,6 +531,7 @@ impl Unreadable for OverviewBoxSetting {
             cpu_split: None,
             power: false,
             power_split: None,
+            hidden: Vec::new(),
         }
     }
 }
@@ -696,6 +709,10 @@ impl OverviewBoxSetting {
         if kind != "cpu" && (self.power || self.power_split.is_some()) {
             self.power = false;
             self.power_split = None;
+            changed = true;
+        }
+        if kind != "gpu" && !self.hidden.is_empty() {
+            self.hidden.clear();
             changed = true;
         }
         changed
@@ -2222,6 +2239,26 @@ mod tests {
         for kind in OVERVIEW_BOX_KINDS {
             assert!(!modes_of(kind).is_empty(), "{kind}");
         }
+    }
+
+    #[test]
+    fn overview_gpu_hidden_saved_and_dropped_elsewhere() {
+        let entry = |kind: &str| {
+            format!(
+                "[performance.overview]\nrows = [{{ height = 1.0, boxes = [{{ kind = \"{kind}\", \
+                 width = 1.0, hidden = [\"Copy\", \"Nope\"] }}] }}]\n"
+            )
+        };
+        let (s, changed) = load_toml(&entry("gpu"));
+        assert!(changed.is_empty(), "{changed:?}");
+        let b = &s.performance.overview.as_ref().unwrap().rows[0].boxes[0];
+        assert_eq!(b.hidden, ["Copy", "Nope"]);
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("hidden = [\"Copy\", \"Nope\"]"), "{text}");
+        let (s, changed) = load_toml(&entry("disk"));
+        assert!(!changed.is_empty());
+        let b = &s.performance.overview.as_ref().unwrap().rows[0].boxes[0];
+        assert!(b.hidden.is_empty());
     }
 
     #[test]

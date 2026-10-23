@@ -763,6 +763,7 @@ perf-overview-mode-stacked = Stacked
 perf-overview-mode-list = List
 perf-overview-show-power = Show power draw
 perf-overview-arrange = Arrange
+perf-overview-engines = Engines
 perf-overview-arrange-auto = Automatic
 perf-overview-arrange-vertical = Stack vertically
 perf-overview-arrange-horizontal = Side by side

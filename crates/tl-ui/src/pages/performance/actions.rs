@@ -122,6 +122,17 @@ pub struct PerfOverviewSetBoxPower {
     pub on: bool,
 }
 
+/// Shows (`shown`) or hides the engine chart `engine` (an en-US engine name, or "VRAM") of the
+/// Overview box of `kind` (the GPU box menu's "Engines" submenu, UI-PRF-019, D-029).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewSetBoxEngine {
+    pub kind: Arc<str>,
+    pub engine: Arc<str>,
+    pub shown: bool,
+}
+
 /// Gives the Overview box of `kind` its default mode, split and arrangement (the box menu's
 /// "Reset Box").
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

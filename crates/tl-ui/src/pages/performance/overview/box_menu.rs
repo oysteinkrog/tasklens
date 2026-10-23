@@ -24,8 +24,8 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::i18n::tr;
 use crate::pages::performance::actions::{
-    PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode,
-    PerfOverviewSetBoxPower,
+    PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxEngine,
+    PerfOverviewSetBoxMode, PerfOverviewSetBoxPower,
 };
 use crate::pages::performance::cpu::PowerState;
 use crate::theme::metrics;
@@ -34,6 +34,9 @@ use crate::window::setup::OpenAdditionalSetup;
 /// The title line a right-click opens the box menu on: the 1 px top border and the 24 px title
 /// row of the box frame, logical px.
 const TITLE_LINE: f32 = 25.;
+
+/// The "VRAM" item of the GPU box's Engines submenu and its name in the saved `hidden` list.
+pub const GPU_VRAM_ID: &str = "VRAM";
 
 /// The gear icon, logical px.
 const GEAR_ICON: f32 = 16.;
@@ -48,13 +51,15 @@ pub fn gear_id(kind: BoxKind) -> String {
 }
 
 /// The box a right-click landed on, the mode it showed and the arrangement of that mode.
-/// `power` is the CPU box's power draw strip: `None` for any other box.
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// `power` is the CPU box's power draw strip: `None` for any other box. `engines` is the GPU
+/// box's "Engines" list, each name with whether it is shown; empty for any other box.
+#[derive(Clone, PartialEq, Debug)]
 pub struct BoxMenuTarget {
     pub kind: BoxKind,
     pub mode: &'static str,
     pub arrange: Option<Arrange>,
     pub power: Option<(PowerState, bool)>,
+    pub engines: Vec<(SharedString, bool)>,
 }
 
 /// The box whose title line took the last right-press. The Performance tab clears it when a
@@ -83,7 +88,8 @@ fn mode_items(
             }),
         );
     }
-    menu = power_item(menu, target, cx);
+    menu = power_item(menu, &target, cx);
+    menu = engine_items(menu, &target, window, cx);
     let Some(choice) = target.kind.arrange(target.mode) else {
         return menu;
     };
@@ -91,14 +97,53 @@ fn mode_items(
         tr(cx, "perf-overview-arrange"),
         window,
         cx,
-        move |menu, _, cx| arrange_items(menu, target, choice, cx),
+        move |menu, _, cx| arrange_items(menu, &target, choice, cx),
+    )
+}
+
+/// The GPU box's "Engines" submenu (UI-PRF-019, D-029): one check item per engine the GPU
+/// reports and one for VRAM. The last checked item is disabled, so one chart always shows.
+fn engine_items(menu: TlMenu, target: &BoxMenuTarget, window: &mut Window, cx: &mut App) -> TlMenu {
+    if target.engines.is_empty() {
+        return menu;
+    }
+    let kind: std::sync::Arc<str> = target.kind.key().into();
+    let engines = target.engines.clone();
+    menu.separator().submenu(
+        tr(cx, "perf-overview-engines"),
+        window,
+        cx,
+        move |mut menu, _, cx| {
+            let shown = engines.iter().filter(|(_, on)| *on).count();
+            for (name, on) in &engines {
+                let label = if &**name == GPU_VRAM_ID {
+                    tr(cx, "perf-overview-gpu-vram")
+                } else {
+                    name.clone()
+                };
+                menu = if *on && shown == 1 {
+                    menu.item_disabled_checked(label, None)
+                } else {
+                    menu.check_item(
+                        label,
+                        *on,
+                        Box::new(PerfOverviewSetBoxEngine {
+                            kind: kind.clone(),
+                            engine: name.to_string().into(),
+                            shown: !*on,
+                        }),
+                    )
+                };
+            }
+            menu
+        },
     )
 }
 
 /// The CPU box's "Show power draw" check item (UI-PRF-019, D-028). Without RAPL there is no
 /// item. When RAPL is unreadable the item is disabled with "Needs setup", and "Set up CPU power
 /// draw…" under it opens Additional Setup, as on the CPU page.
-fn power_item(menu: TlMenu, target: BoxMenuTarget, cx: &App) -> TlMenu {
+fn power_item(menu: TlMenu, target: &BoxMenuTarget, cx: &App) -> TlMenu {
     let Some((state, on)) = target.power else {
         return menu;
     };
@@ -134,7 +179,7 @@ fn power_item(menu: TlMenu, target: BoxMenuTarget, cx: &App) -> TlMenu {
 /// each switching to its mode.
 fn arrange_items(
     mut menu: TlMenu,
-    target: BoxMenuTarget,
+    target: &BoxMenuTarget,
     choice: ArrangeChoice,
     cx: &App,
 ) -> TlMenu {
@@ -177,17 +222,16 @@ fn arrange_items(
 /// "Layout" with the mode items, "Reset Box" and a separator: the start of the page menu when
 /// the right-click landed on `target`'s title line.
 pub fn box_menu(menu: TlMenu, target: BoxMenuTarget, window: &mut Window, cx: &mut App) -> TlMenu {
+    let kind = target.kind.key().into();
     menu.submenu(
         tr(cx, "perf-overview-box-layout"),
         window,
         cx,
-        move |menu, window, cx| mode_items(menu, target, window, cx),
+        move |menu, window, cx| mode_items(menu, target.clone(), window, cx),
     )
     .item(
         tr(cx, "perf-overview-reset-box"),
-        Box::new(PerfOverviewResetBox {
-            kind: target.kind.key().into(),
-        }),
+        Box::new(PerfOverviewResetBox { kind }),
     )
     .separator()
 }
@@ -196,11 +240,26 @@ impl OverviewPage {
     /// The box of `kind` with the mode and arrangement its layout shows.
     fn menu_target(&self, kind: BoxKind, cx: &App) -> BoxMenuTarget {
         let config = self.layout.config(kind);
+        let engines = if kind == BoxKind::Gpu {
+            let hidden = self.layout.hidden_gpu();
+            self.gpu
+                .read(cx)
+                .engine_names(cx)
+                .into_iter()
+                .map(|name| {
+                    let on = !hidden.iter().any(|h| **h == *name);
+                    (name, on)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         BoxMenuTarget {
             kind,
             mode: config.mode.id,
             arrange: config.arrange,
             power: (kind == BoxKind::Cpu).then(|| (self.cpu.read(cx).power_state(), config.power)),
+            engines,
         }
     }
 
@@ -281,6 +340,28 @@ impl OverviewPage {
         }
     }
 
+    /// `PerfOverviewSetBoxEngine`: the GPU box shows or hides an engine chart and the layout is
+    /// saved. Hiding the last shown item, another kind, or the shown state does nothing.
+    pub(super) fn on_set_box_engine(
+        &mut self,
+        a: &PerfOverviewSetBoxEngine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(kind) = BoxKind::from_key(&a.kind) else {
+            return;
+        };
+        let target = self.menu_target(kind, cx);
+        let mut layout = self.layout.clone();
+        if !a.shown && target.engines.iter().filter(|(_, on)| *on).count() <= 1 {
+            return;
+        }
+        if layout.set_engine_hidden(kind, &a.engine, !a.shown) {
+            self.set_layout(layout, cx);
+            self.save_layout(cx);
+        }
+    }
+
     /// `PerfOverviewResetBox`: the box's default mode, split, arrangement and no power strip, saved.
     pub(super) fn on_reset_box(
         &mut self,
@@ -311,8 +392,9 @@ impl OverviewPage {
             .icon_size(px(GEAR_ICON * s))
             .tooltip(tr(cx, "perf-overview-box-layout-tip"))
             .on_click(move |ev, window, cx| {
+                let target = target.clone();
                 let menu = TlMenu::build(window, cx, focus.clone(), move |menu, window, cx| {
-                    mode_items(menu, target, window, cx)
+                    mode_items(menu, target.clone(), window, cx)
                 });
                 open_context_menu_at(ev.position(), window, cx, menu);
             });

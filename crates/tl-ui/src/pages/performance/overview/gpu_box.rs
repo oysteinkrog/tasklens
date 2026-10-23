@@ -41,7 +41,8 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
-use super::super::gpu::{GpuVendor, gpu_totals, grid_engines, shown_engines};
+use super::super::gpu::{GpuVendor, device_engines, gpu_totals, grid_engines, shown_engines};
+use super::box_menu::GPU_VRAM_ID;
 use super::cpu_box::value_text;
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
@@ -349,16 +350,17 @@ struct SectionRows {
 }
 
 /// `chart` shows the chart and the VRAM row only.
-fn section_rows(s: &GpuSection, mode: GpuMode) -> SectionRows {
+fn section_rows(s: &GpuSection, mode: GpuMode, vram: bool) -> SectionRows {
+    let vram = usize::from(vram);
     if mode == GpuMode::Chart {
         return SectionRows {
             engines: 0,
-            rest: 1,
+            rest: vram,
         };
     }
     SectionRows {
         engines: s.engines.len(),
-        rest: 1 + usize::from(!s.line.is_empty()),
+        rest: vram + usize::from(!s.line.is_empty()),
     }
 }
 
@@ -387,12 +389,13 @@ fn cell_min(m: &UiMetrics) -> Size<Pixels> {
 }
 
 /// The height of an `engine_charts` section without its grid: a heading row when `heading`,
-/// the gap above the rows when it has `engines`, then the VRAM row and `lines` more rows.
-fn charts_fixed_h(engines: usize, lines: usize, heading: bool, m: &UiMetrics) -> f32 {
+/// the gap above the rows when it has `engines`, then the VRAM row (unless `vram` is off) and
+/// `lines` more rows.
+fn charts_fixed_h(engines: usize, lines: usize, vram: bool, heading: bool, m: &UiMetrics) -> f32 {
     let (row, gap, _) = spacing(m);
     let head = if heading { row + gap } else { 0. };
     let above = if engines > 0 { gap } else { 0. };
-    head + above + (1 + lines) as f32 * row + lines as f32 * gap
+    head + above + (usize::from(vram) + lines) as f32 * row + lines as f32 * gap
 }
 
 /// What `engine_charts` fits in `body`. Both sections show when both grids fit at the smallest
@@ -403,6 +406,7 @@ fn charts_fit(
     body: Size<Pixels>,
     engines: &[usize],
     total: usize,
+    vram: bool,
     m: &UiMetrics,
 ) -> ChartsFit {
     let count = engines.len().min(MAX_GPUS);
@@ -421,10 +425,10 @@ fn charts_fit(
     if body.height > px(0.) {
         fit.sections = 1;
         if count >= 2 {
-            let two = charts_fixed_h(engines[0], 0, false, m)
+            let two = charts_fixed_h(engines[0], 0, vram, false, m)
                 + min_grid(0)
                 + section_gap
-                + charts_fixed_h(engines[1], more(2), true, m)
+                + charts_fixed_h(engines[1], more(2), vram, true, m)
                 + min_grid(1);
             if f32::from(body.height) >= two {
                 fit.sections = 2;
@@ -434,7 +438,7 @@ fn charts_fit(
     let n = fit.sections;
     let lines = |i: usize| if i + 1 == n { more(n) } else { 0 };
     let needed: f32 = (0..n)
-        .map(|i| charts_fixed_h(engines[i], lines(i), i > 0, m) + min_grid(i))
+        .map(|i| charts_fixed_h(engines[i], lines(i), vram, i > 0, m) + min_grid(i))
         .sum::<f32>()
         + (n - 1) as f32 * section_gap;
     let spare = (f32::from(body.height) - needed) / n as f32;
@@ -591,6 +595,8 @@ pub struct GpuBox {
     text_bits: u64,
     /// `performance.hidden_gpu_engines`.
     hidden: Vec<String>,
+    /// The box's own hidden engine charts by en-US name, `"VRAM"` for the VRAM row (D-029).
+    box_hidden: Vec<String>,
     /// The body size of the last paint and what the last render showed.
     body: Rc<Cell<Size<Pixels>>>,
     shown: usize,
@@ -633,6 +639,7 @@ impl GpuBox {
                 .performance
                 .hidden_gpu_engines
                 .clone(),
+            box_hidden: Vec::new(),
             body: Rc::new(Cell::new(size(px(0.), px(0.)))),
             shown: 0,
             collapsed: false,
@@ -674,6 +681,55 @@ impl GpuBox {
         #[cfg(any(test, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
+    }
+
+    /// Takes the box's saved hidden engine charts (D-029). The engine lists follow and only this
+    /// box renders again.
+    pub fn set_hidden(&mut self, hidden: &[String], cx: &mut Context<Self>) {
+        if self.box_hidden == hidden {
+            return;
+        }
+        self.box_hidden = hidden.to_vec();
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.sync_engines(&snap, cx);
+        self.sync_text(&snap, true);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// The engines the first GPU reports, by en-US name in the page's order, then "VRAM": the
+    /// items of the Engines submenu.
+    pub fn engine_names(&self, cx: &App) -> Vec<SharedString> {
+        let Some(first) = self.sections.first() else {
+            return Vec::new();
+        };
+        let snap = self.hub.read(cx).current();
+        device_engines(snap, first.idx)
+            .into_iter()
+            .map(|(_, name)| name)
+            .chain([SharedString::from(GPU_VRAM_ID)])
+            .collect()
+    }
+
+    /// Whether the VRAM row is left out.
+    fn vram_hidden(&self) -> bool {
+        self.box_hidden.iter().any(|n| n == GPU_VRAM_ID)
+    }
+
+    /// The engine keys GPU `idx` hides: `performance.hidden_gpu_engines` and the engines whose
+    /// name is in the box's own list.
+    fn hidden_keys(&self, snap: &Snapshot, idx: DeviceIdx) -> Vec<String> {
+        let mut keys = self.hidden.clone();
+        if !self.box_hidden.is_empty() {
+            keys.extend(
+                device_engines(snap, idx)
+                    .into_iter()
+                    .filter(|(_, name)| self.box_hidden.iter().any(|n| **n == **name))
+                    .map(|(key, _)| key.to_string()),
+            );
+        }
+        keys
     }
 
     /// The shown mode's id.
@@ -868,7 +924,8 @@ impl GpuBox {
         let mut changed = false;
         for i in 0..self.sections.len() {
             let idx = self.sections[i].idx;
-            let wants = engine_wants(snap, idx, &self.hidden, self.mode);
+            let hidden = self.hidden_keys(snap, idx);
+            let wants = engine_wants(snap, idx, &hidden, self.mode);
             let same = {
                 let rows = &self.sections[i].engines;
                 rows.len() == wants.len()
@@ -1270,10 +1327,11 @@ impl GpuBox {
         let s = m.ui_scale;
         let row_h = px(LABEL_ROW * s);
         let mode = self.mode;
+        let vram_hidden = self.vram_hidden();
         let rows: SmallVec<[SectionRows; MAX_GPUS]> = self
             .sections
             .iter()
-            .map(|sec| section_rows(sec, mode))
+            .map(|sec| section_rows(sec, mode, !vram_hidden))
             .collect();
         let total = self.sections.len() + self.more;
         let body_size = self.body.get();
@@ -1397,8 +1455,10 @@ impl GpuBox {
                     section_rows = section_rows.children(section.engines.iter().map(engine));
                 }
             }
-            section_rows =
-                section_rows.child(spark_row(&section.vram, None, shown.meters, m, theme));
+            if !vram_hidden {
+                section_rows =
+                    section_rows.child(spark_row(&section.vram, None, shown.meters, m, theme));
+            }
             if with_rows && !section.line.is_empty() {
                 section_rows = section_rows.child(text_row(&section.line, m, theme));
             }
@@ -1472,7 +1532,8 @@ impl GpuBox {
             self.sections.iter().map(|sec| sec.engines.len()).collect();
         let total = self.sections.len() + self.more;
         let arrange = self.arrange;
-        let shown = charts_fit(arrange, self.body.get(), &engines, total, m);
+        let vram = !self.vram_hidden();
+        let shown = charts_fit(arrange, self.body.get(), &engines, total, vram, m);
         self.shown = shown.sections;
         self.collapsed = false;
         self.meters = meter_fits(self.body.get().width, m);
@@ -1490,7 +1551,7 @@ impl GpuBox {
             let last = i + 1 == shown.sections;
             let extra = usize::from(last && !more.is_empty());
             let fit = shown.grids[i];
-            let basis = charts_fixed_h(engines[i], extra, i > 0, m)
+            let basis = charts_fixed_h(engines[i], extra, vram, i > 0, m)
                 + f32::from(arrange_min_h(
                     arrange,
                     engines[i],
@@ -1532,15 +1593,18 @@ impl GpuBox {
                 .flex_col()
                 .flex_none()
                 .w_full()
-                .gap(m.sp[2])
-                .child(spark_row(&section.vram, None, self.meters, m, theme));
+                .gap(m.sp[2]);
+            if vram {
+                rest = rest.child(spark_row(&section.vram, None, self.meters, m, theme));
+            }
             if last && !more.is_empty() {
                 rest = rest.child(text_row(&more, m, theme));
             }
-            if section.engines.is_empty() {
+            if !section.engines.is_empty() {
+                col = col.child(grid);
+            }
+            if vram || (last && !more.is_empty()) {
                 col = col.child(rest);
-            } else {
-                col = col.child(grid).child(rest);
             }
             body = body.child(col);
         }
@@ -1548,7 +1612,7 @@ impl GpuBox {
         body = body.child(class_probe(
             Rc::clone(&self.body),
             shown.class(),
-            move |b| charts_fit(arrange, b, &engines, total, &probe_m).class(),
+            move |b| charts_fit(arrange, b, &engines, total, vram, &probe_m).class(),
             cx.entity_id(),
         ));
         body.into_any_element()

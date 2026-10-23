@@ -222,6 +222,7 @@ impl OverviewPage {
         if let Some(arrange) = layout.arrange(BoxKind::Gpu) {
             gpu.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
+        gpu.update(cx, |b, cx| b.set_hidden(layout.hidden_gpu(), cx));
         let disk = cx.new(|cx| DiskBox::new(&hub, &disk_cards, cx));
         let disk_mode = layout.config(BoxKind::Disk).mode.id;
         disk.update(cx, |b, cx| b.set_mode(disk_mode, cx));
@@ -499,6 +500,7 @@ impl OverviewPage {
         let gpu_split = layout.split(BoxKind::Gpu);
         let gpu_arrange = layout.arrange(BoxKind::Gpu);
         let gpu_mode = layout.config(BoxKind::Gpu).mode.id;
+        let gpu_hidden = layout.hidden_gpu().to_vec();
         let disk_split = layout.split(BoxKind::Disk);
         let disk_mode = layout.config(BoxKind::Disk).mode.id;
         let disk_arrange = layout.arrange(BoxKind::Disk);
@@ -530,6 +532,7 @@ impl OverviewPage {
         if let Some(arrange) = gpu_arrange {
             self.gpu.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
+        self.gpu.update(cx, |b, cx| b.set_hidden(&gpu_hidden, cx));
         self.disk.update(cx, |b, cx| b.set_mode(disk_mode, cx));
         if let Some(split) = disk_split {
             self.disk.update(cx, |b, cx| b.set_split(split, cx));
@@ -843,6 +846,7 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_set_box_mode))
             .on_action(cx.listener(Self::on_set_box_arrange))
             .on_action(cx.listener(Self::on_set_box_power))
+            .on_action(cx.listener(Self::on_set_box_engine))
             .on_action(cx.listener(Self::on_reset_box))
     }
 }

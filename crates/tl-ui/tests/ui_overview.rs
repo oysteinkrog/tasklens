@@ -4154,6 +4154,82 @@ mod page {
         assert!(r.vcx.debug_bounds(id).is_none());
     }
 
+    /// D-029: the GPU box's Engines submenu leaves engine charts and VRAM out, the last shown item
+    /// cannot be hidden, it saves as `hidden`, and Reset Box shows all.
+    #[gpui_kit::test]
+    fn overview_gpu_engine_choice(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::PerfOverviewSetBoxEngine;
+        use tl_ui::pages::performance::overview::gpu_box::{engine_cell_id, vram_id};
+        for (w, h) in [(1920., 1200.), (1280., 800.)] {
+            let mut r = open_rooted(cx, true, w, h);
+            let page = r.page.clone();
+            let names: Vec<String> = r.vcx.update(|_, cx| {
+                page.read(cx)
+                    .gpu_box()
+                    .read(cx)
+                    .engine_names(cx)
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            });
+            assert!(
+                names.len() >= 3 && names.last().unwrap() == "VRAM",
+                "{names:?}"
+            );
+            let keys: Vec<&'static str> = r.vcx.update(|_, cx| {
+                page.read(cx).gpu_box().read(cx).sections()[0]
+                    .engines
+                    .iter()
+                    .map(|e| e.key)
+                    .collect()
+            });
+            let cell = |r: &mut Rig, k: &str| {
+                let id: &'static str = Box::leak(engine_cell_id(0, k).into_boxed_str());
+                r.vcx.debug_bounds(id).is_some()
+            };
+            let vram = |r: &mut Rig| {
+                let id: &'static str = Box::leak(vram_id(0).into_boxed_str());
+                r.vcx.debug_bounds(id).is_some()
+            };
+            let act = |r: &mut Rig, name: &str, shown: bool| {
+                r.page_action(&PerfOverviewSetBoxEngine {
+                    kind: "gpu".into(),
+                    engine: name.into(),
+                    shown,
+                });
+            };
+            assert!(keys.iter().all(|k| cell(&mut r, k)) && vram(&mut r));
+
+            // Hide the first engine: its cell goes, the others stay, and it saves.
+            act(&mut r, &names[0], false);
+            assert_eq!(r.layout().hidden_gpu(), [names[0].clone()]);
+            assert!(!cell(&mut r, keys[0]), "{w}");
+            assert!(keys[1..].iter().all(|k| cell(&mut r, k)), "{w}");
+            assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+
+            // Hide VRAM: the row goes.
+            act(&mut r, "VRAM", false);
+            assert!(!vram(&mut r), "{w}");
+            assert!(keys[1..].iter().all(|k| cell(&mut r, k)), "{w}");
+
+            // Hide all but one: the last shown item stays.
+            for n in &names[1..names.len() - 1] {
+                act(&mut r, n, false);
+            }
+            let last = &names[names.len() - 2];
+            assert!(!r.layout().hidden_gpu().contains(last));
+            act(&mut r, last, false);
+            assert!(!r.layout().hidden_gpu().contains(last));
+            assert!(cell(&mut r, keys[keys.len() - 1]), "{w}");
+
+            // Reset Box shows all.
+            r.page_action(&PerfOverviewResetBox { kind: "gpu".into() });
+            assert!(r.layout().hidden_gpu().is_empty());
+            assert!(keys.iter().all(|k| cell(&mut r, k)) && vram(&mut r), "{w}");
+            assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        }
+    }
+
     /// D-026: a layout with no saved mode shows the GPU box as one chart per engine; a saved
     /// mode still wins.
     #[gpui_kit::test]

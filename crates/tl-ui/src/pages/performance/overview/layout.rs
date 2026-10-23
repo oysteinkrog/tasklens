@@ -315,6 +315,9 @@ pub struct OverviewLayout {
     pub rows: SmallVec<[RowSpec; 4]>,
     /// Each kind's mode and split in [`BoxKind::ALL`] order, kept while its box is hidden.
     configs: [BoxConfig; 6],
+    /// The GPU box's hidden engine charts by en-US name, `"VRAM"` for the VRAM row (D-029). Names
+    /// the GPU does not report stay. Kept while the box is hidden.
+    hidden_gpu: Vec<String>,
 }
 
 /// Why a layout is not valid.
@@ -353,6 +356,7 @@ impl OverviewLayout {
         let b = |kind, width| BoxSpec { kind, width };
         Self {
             configs: BoxKind::ALL.map(BoxConfig::default_for),
+            hidden_gpu: Vec::new(),
             rows: smallvec![
                 RowSpec {
                     height: 3.,
@@ -402,7 +406,23 @@ impl OverviewLayout {
                     .collect(),
             })
             .collect();
-        let layout = Self { rows, configs };
+        let mut hidden_gpu: Vec<String> = Vec::new();
+        for name in setting
+            .rows
+            .iter()
+            .flat_map(|r| &r.boxes)
+            .filter(|b| b.kind == BoxKind::Gpu.key())
+            .flat_map(|b| &b.hidden)
+        {
+            if !hidden_gpu.contains(name) {
+                hidden_gpu.push(name.clone());
+            }
+        }
+        let layout = Self {
+            rows,
+            configs,
+            hidden_gpu,
+        };
         if layout.validate().is_ok() {
             layout
         } else {
@@ -434,6 +454,11 @@ impl OverviewLayout {
                                 cpu_split: None,
                                 power,
                                 power_split,
+                                hidden: if b.kind == BoxKind::Gpu {
+                                    self.hidden_gpu.clone()
+                                } else {
+                                    Vec::new()
+                                },
                             }
                         })
                         .collect(),
@@ -517,12 +542,38 @@ impl OverviewLayout {
         true
     }
 
-    /// Gives `kind` its default mode, split and arrangement (the box menu's "Reset Box").
-    /// Returns whether it changed.
+    /// The GPU box's hidden engine charts, by en-US name; `"VRAM"` is the VRAM row.
+    pub fn hidden_gpu(&self) -> &[String] {
+        &self.hidden_gpu
+    }
+
+    /// Hides or shows the GPU box's engine chart `name` (the Engines submenu). Returns whether it
+    /// changed; any other kind has no engine charts.
+    pub fn set_engine_hidden(&mut self, kind: BoxKind, name: &str, hide: bool) -> bool {
+        if kind != BoxKind::Gpu {
+            return false;
+        }
+        let at = self.hidden_gpu.iter().position(|n| n == name);
+        match (hide, at) {
+            (true, None) => self.hidden_gpu.push(name.to_owned()),
+            (false, Some(i)) => {
+                self.hidden_gpu.remove(i);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Gives `kind` its default mode, split, arrangement and shown engines (the box menu's
+    /// "Reset Box"). Returns whether it changed.
     pub fn reset_box(&mut self, kind: BoxKind) -> bool {
         let default = BoxConfig::default_for(kind);
-        let changed = self.config(kind) != default;
+        let mut changed = self.config(kind) != default;
         self.configs[kind.index()] = default;
+        if kind == BoxKind::Gpu && !self.hidden_gpu.is_empty() {
+            self.hidden_gpu.clear();
+            changed = true;
+        }
         changed
     }
 
@@ -794,6 +845,7 @@ mod tests {
     /// One row per entry: (height, [(kind, width)]).
     fn layout(rows: &[(f32, &[(BoxKind, f32)])]) -> OverviewLayout {
         OverviewLayout {
+            hidden_gpu: Vec::new(),
             rows: rows
                 .iter()
                 .map(|(height, boxes)| RowSpec {
