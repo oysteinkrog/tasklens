@@ -7,9 +7,11 @@
 //! text only when the inputs' hash changes and notifies only then. Pointer movement never
 //! notifies.
 //!
-//! UI-PRF-019 gives the box three modes. `columns` is the Download and Upload columns above with
-//! a vertical splitter between them. `combined` is one chart with download and upload as two
-//! lines, under a rate header and over the Peak and Total rows of both directions.
+//! UI-PRF-019 gives the box four modes. `stacked` (the default) is Download over Upload with a
+//! horizontal splitter. `columns` is the Download and Upload columns above with a vertical
+//! splitter between them. Their Arrange choice (D-027) switches between the two. `combined` is
+//! one chart with download and upload as two lines, under a rate header and over the Peak and
+//! Total rows of both directions.
 //! `adapter_charts` is a grid of one combined chart per counted adapter, in cells of at least
 //! 200 × 80 px. The adapter charts are built when the mode is shown and when the set of counted
 //! adapters changes, never per tick.
@@ -40,7 +42,7 @@ use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::disk_box::{GRID_CELL_MIN_H, charts_fit, more_line};
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
-use super::layout::BoxMode;
+use super::layout::{ArrangeChoice, BoxMode};
 use super::parts::{ChartSettings, box_chart, box_frame, chart_section_versions, class_probe};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -84,6 +86,16 @@ pub const MODES: &[BoxMode] = &[
         split: None,
     },
 ];
+
+/// The Arrange choice of the two-chart modes (UI-PRF-019, D-027): Stack vertically is
+/// `stacked`, Side by side is `columns`.
+const SWITCH: ArrangeChoice = ArrangeChoice::Modes {
+    vertical: "stacked",
+    horizontal: "columns",
+};
+
+/// The modes with an Arrange choice.
+pub const ARRANGE: &[(&str, ArrangeChoice)] = &[("stacked", SWITCH), ("columns", SWITCH)];
 
 /// The debug selector of the splitter between the stacked Download and Upload parts.
 pub const NET_STACK_SPLITTER_ID: &str = "perf-overview-net-stack-splitter";

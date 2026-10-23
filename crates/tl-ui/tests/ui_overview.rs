@@ -2584,7 +2584,7 @@ mod page {
     use tl_ui::pages::performance::DeviceKey;
     use tl_ui::pages::performance::actions::{
         PerfOverviewEditLayout, PerfOverviewResetBox, PerfOverviewResetLayout,
-        PerfOverviewSetBoxMode, bind_keys_performance,
+        PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode, bind_keys_performance,
     };
     use tl_ui::pages::performance::overview::box_menu::gear_id;
     use tl_ui::pages::performance::overview::cpu_box::{
@@ -2594,7 +2594,7 @@ mod page {
         DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, GHOST_VALUE_ID, TOOLBAR_ID, hide_button_id,
         title_handle_id,
     };
-    use tl_ui::pages::performance::overview::layout::{BoxKind, OverviewLayout, place};
+    use tl_ui::pages::performance::overview::layout::{Arrange, BoxKind, OverviewLayout, place};
     use tl_ui::pages::performance::overview::mem_box::MEM_SPLITTER_ID;
     use tl_ui::pages::performance::overview::net_box::NET_STACK_SPLITTER_ID;
     use tl_ui::pages::performance::overview::{BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage};
@@ -3859,6 +3859,7 @@ mod page {
             CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
         };
         let mut r = open_rooted(cx, true, 1200., 900.);
+        set_disk_arrange(&mut r, "auto");
         let page = r.page.clone();
         let keys: Vec<_> = r.vcx.update(|_, cx| {
             page.read(cx)
@@ -3935,6 +3936,14 @@ mod page {
         more_disks(r, 1)
     }
 
+    /// Places the Disk box's `disk_charts` cells as `arrange` says, as the Arrange items do.
+    fn set_disk_arrange(r: &mut Rig, arrange: &str) {
+        r.page_action(&PerfOverviewSetBoxArrange {
+            kind: "disk".into(),
+            arrange: arrange.into(),
+        });
+    }
+
     /// D-026: with three disks at 1200 × 900 the Disk chart areas (each cell's chart below its
     /// header and gap, measured) are about as tall as the GPU engine chart areas in the same row,
     /// where the old cells were the 18 px rows. None is taller than the one Net adapter chart.
@@ -3951,6 +3960,7 @@ mod page {
         const HEAD_LINE: f32 = 18.;
         let mut r = open_rooted(cx, true, 1200., 900.);
         let keys = three_disks(&mut r);
+        set_disk_arrange(&mut r, "auto");
         let page = r.page.clone();
         let engines: Vec<&'static str> = r.vcx.update(|_, cx| {
             page.read(cx).gpu_box().read(cx).sections()[0]
@@ -4060,6 +4070,7 @@ mod page {
             kind: "disk".into(),
             mode: "disk_charts".into(),
         });
+        set_disk_arrange(&mut r, "auto");
         // The first window where the eight cells overflow the Disk grid and the grid shows on
         // screen. A narrow window stacks the boxes, so the Disk box is below the window there.
         let mut seen = Vec::new();
@@ -4105,6 +4116,267 @@ mod page {
             scrolled.bottom() <= grid.bottom() + px(1.),
             "{scrolled:?} in {grid:?}"
         );
+    }
+
+    /// The labels of `kind`'s gear menu, and the label, mark and action of each item of its
+    /// Arrange submenu (empty without one). Edit Layout mode must be on.
+    #[allow(clippy::type_complexity, reason = "test helper")]
+    fn gear_menu(
+        r: &mut Rig,
+        kind: BoxKind,
+    ) -> (
+        Vec<String>,
+        Vec<(String, bool, Option<Box<dyn gpui_kit::Action>>)>,
+    ) {
+        let at = center(r.bounds_of(gear_id(kind)));
+        r.press(at, 1);
+        r.release(at);
+        let label =
+            |l: Option<gpui_kit::SharedString>| l.map(|l| l.to_string()).unwrap_or_default();
+        r.vcx.update(|window, cx| {
+            let menu = tl_ui::components::menu::open_context_menu(window, cx)
+                .expect("the gear menu is open");
+            let entries = menu.read(cx).entries_for_test(window);
+            let arrange = entries
+                .iter()
+                .rev()
+                .find(|e| e.label.as_deref() == Some("Arrange"))
+                .and_then(|e| e.submenu.clone())
+                .map(|sub| {
+                    sub.read(cx)
+                        .entries_for_test(window)
+                        .into_iter()
+                        .map(|e| (label(e.label), e.checked, e.action))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let labels = entries.into_iter().map(|e| label(e.label)).collect();
+            (labels, arrange)
+        })
+    }
+
+    /// Runs the Arrange item `name` of `kind`'s gear menu on the page.
+    fn pick_arrange(r: &mut Rig, kind: BoxKind, name: &str) {
+        let (_, items) = gear_menu(r, kind);
+        let action = items
+            .into_iter()
+            .find(|(l, _, _)| l == name)
+            .and_then(|(_, _, a)| a)
+            .unwrap_or_else(|| panic!("an Arrange item {name}"));
+        r.page_action(&*action);
+    }
+
+    /// The Disk box's saved `arrange`.
+    fn saved_disk_arrange(r: &mut Rig) -> Option<String> {
+        r.saved().and_then(|s| {
+            s.rows
+                .into_iter()
+                .flat_map(|row| row.boxes)
+                .find(|b| b.kind == "disk")
+                .and_then(|b| b.arrange)
+        })
+    }
+
+    /// D-027: the Disk box's `disk_charts` cells go in one column by default, in one row or in
+    /// the mode's grid by the Arrange choice, each an equal share of the box and scrolling in
+    /// its direction when the cells do not fit. The choice saves and reloads, a saved value
+    /// wins over the default, and Reset Box gives the column back. The Net box's Arrange items
+    /// switch between `stacked` and `columns`.
+    #[gpui_kit::test]
+    fn overview_arrange_vertical_horizontal_auto(cx: &mut TestAppContext) {
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent};
+        use tl_ui::pages::performance::overview::disk_box::{
+            CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
+        };
+        use tl_ui::pages::performance::overview::parts::arrange_grid;
+        let mut r = open_rooted(cx, true, 1800., 900.);
+        let keys = three_disks(&mut r);
+        let page = r.page.clone();
+        let shown = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| page.read(cx).disk_box().read(cx).arrange())
+        };
+        // The cells, checked against the helper's fit for the measured grid.
+        let cells = |r: &mut Rig, arrange: Arrange| {
+            let grid = r.bounds_of(GRID_ID.into());
+            let min = size(px(CELL_MIN_W), px(CELL_MIN_H));
+            let fit = arrange_grid(arrange, keys.len(), grid.size, min, px(4.), px(16.));
+            let cs: Vec<_> = keys.iter().map(|k| r.bounds_of(cell_id(k))).collect();
+            for c in &cs {
+                assert_eq!(c.size, fit.cell, "{arrange:?}: {c:?} in {grid:?}");
+            }
+            (grid, cs, fit)
+        };
+        let col = |cs: &[gpui_kit::Bounds<gpui_kit::Pixels>]| {
+            cs.windows(2)
+                .all(|p| p[0].left() == p[1].left() && p[1].top() >= p[0].bottom())
+        };
+        let row = |cs: &[gpui_kit::Bounds<gpui_kit::Pixels>]| {
+            cs.windows(2)
+                .all(|p| p[0].top() == p[1].top() && p[1].left() >= p[0].right())
+        };
+
+        // Default: one column as wide as the grid, the cells sharing its height.
+        assert_eq!(r.layout().arrange(BoxKind::Disk), Some(Arrange::Vertical));
+        assert_eq!(shown(&mut r), Arrange::Vertical);
+        let (grid, cs, fit) = cells(&mut r, Arrange::Vertical);
+        assert!(col(&cs) && !fit.scrolls, "{cs:?} in {grid:?}");
+        assert!(grid.right() - cs[0].right() < px(1.), "{cs:?} in {grid:?}");
+        assert!(
+            grid.bottom() - cs[2].bottom() < px(4.),
+            "{cs:?} in {grid:?}"
+        );
+        assert!(cs[0].size.height > px(CELL_MIN_H));
+        assert_eq!(r.saved(), None, "nothing is written for the default");
+
+        // The gear's Layout items end with the Arrange submenu, the shown choice selected.
+        r.edit_layout();
+        let (labels, items) = gear_menu(&mut r, BoxKind::Disk);
+        assert_eq!(
+            labels.last().map(String::as_str),
+            Some("Arrange"),
+            "{labels:?}"
+        );
+        let marks: Vec<_> = items.iter().map(|(l, c, _)| (l.as_str(), *c)).collect();
+        assert_eq!(
+            marks,
+            [
+                ("Automatic", false),
+                ("Stack vertically", true),
+                ("Side by side", false)
+            ]
+        );
+
+        // Side by side: one row as high as the grid, saved, and the saved layout reloads.
+        pick_arrange(&mut r, BoxKind::Disk, "Side by side");
+        assert_eq!(shown(&mut r), Arrange::Horizontal);
+        let (grid, cs, fit) = cells(&mut r, Arrange::Horizontal);
+        assert!(row(&cs) && !fit.scrolls_x, "{cs:?} in {grid:?}");
+        assert!(
+            grid.bottom() - cs[0].bottom() < px(1.),
+            "{cs:?} in {grid:?}"
+        );
+        assert!(grid.right() - cs[2].right() < px(4.), "{cs:?} in {grid:?}");
+        assert_eq!(saved_disk_arrange(&mut r).as_deref(), Some("horizontal"));
+        let layout = r.layout();
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), layout);
+        let (_, items) = gear_menu(&mut r, BoxKind::Disk);
+        assert!(items[2].1 && !items[1].1, "Side by side selected");
+
+        // In a narrower window the row does not fit at 160 px: it scrolls sideways at the
+        // minimum width, clear of the scrollbar, and the wheel moves it.
+        r.vcx.simulate_resize(size(px(1200.), px(900.)));
+        draw(r.vcx);
+        let (grid, cs, fit) = cells(&mut r, Arrange::Horizontal);
+        assert!(row(&cs) && fit.scrolls_x, "{cs:?} in {grid:?}");
+        assert_eq!(cs[0].size.width, px(CELL_MIN_W));
+        assert!(
+            cs[0].bottom() <= grid.bottom() - px(16.),
+            "{cs:?} clear of the bar"
+        );
+        assert!(cs[2].right() > grid.right(), "{cs:?} past {grid:?}");
+        r.vcx.simulate_event(ScrollWheelEvent {
+            position: center(grid),
+            delta: ScrollDelta::Pixels(point(px(-200.), px(0.))),
+            ..Default::default()
+        });
+        draw(r.vcx);
+        let moved = r.bounds_of(cell_id(&keys[2]));
+        assert!(moved.left() < cs[2].left(), "{moved:?} from {:?}", cs[2]);
+
+        // Automatic: the mode's grid, here two columns, saved as `auto`.
+        r.vcx.simulate_resize(size(px(1200.), px(560.)));
+        draw(r.vcx);
+        pick_arrange(&mut r, BoxKind::Disk, "Automatic");
+        assert_eq!(shown(&mut r), Arrange::Auto);
+        let (grid, cs, fit) = cells(&mut r, Arrange::Auto);
+        assert_eq!((fit.cols, fit.rows), (2, 2), "{cs:?} in {grid:?}");
+        assert!(cs[0].top() == cs[1].top() && cs[2].left() == cs[0].left());
+        assert_eq!(saved_disk_arrange(&mut r).as_deref(), Some("auto"));
+        let layout = r.layout();
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), layout);
+
+        // Stack vertically in that window: the column scrolls at the minimum height.
+        pick_arrange(&mut r, BoxKind::Disk, "Stack vertically");
+        let (grid, cs, fit) = cells(&mut r, Arrange::Vertical);
+        assert!(col(&cs) && fit.scrolls, "{cs:?} in {grid:?}");
+        assert_eq!(cs[0].size.height, px(CELL_MIN_H));
+        assert!(
+            cs[0].right() <= grid.right() - px(16.),
+            "{cs:?} clear of the bar"
+        );
+        assert_eq!(
+            saved_disk_arrange(&mut r),
+            None,
+            "the default is not written"
+        );
+
+        // A saved value wins over the default.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let mut layout = OverviewLayoutSetting::btop_default();
+                let disk = layout
+                    .rows
+                    .iter_mut()
+                    .flat_map(|row| row.boxes.iter_mut())
+                    .find(|b| b.kind == "disk")
+                    .expect("a Disk box");
+                disk.arrange = Some("horizontal".to_owned());
+                d.settings.performance.overview = Some(layout);
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(shown(&mut r), Arrange::Horizontal);
+        assert_eq!(r.layout().arrange(BoxKind::Disk), Some(Arrange::Horizontal));
+
+        // Reset Box gives the default column back and writes nothing for the box.
+        r.page_action(&PerfOverviewResetBox {
+            kind: "disk".into(),
+        });
+        assert_eq!(shown(&mut r), Arrange::Vertical);
+        assert_eq!(r.saved(), Some(OverviewLayoutSetting::btop_default()));
+
+        // A mode without the choice has no Arrange submenu and ignores the action.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "disk".into(),
+            mode: "rows".into(),
+        });
+        let (labels, items) = gear_menu(&mut r, BoxKind::Disk);
+        assert!(
+            items.is_empty() && !labels.contains(&"Arrange".to_owned()),
+            "{labels:?}"
+        );
+        set_disk_arrange(&mut r, "horizontal");
+        assert_eq!(r.layout().arrange(BoxKind::Disk), None);
+        assert_eq!(saved_disk_arrange(&mut r), None);
+
+        // Net: Stack vertically is `stacked` (the default), Side by side is `columns`.
+        let net_mode = |r: &mut Rig| r.layout().config(BoxKind::Net).mode.id;
+        assert_eq!(net_mode(&mut r), "stacked");
+        let (_, items) = gear_menu(&mut r, BoxKind::Net);
+        let marks: Vec<_> = items.iter().map(|(l, c, _)| (l.as_str(), *c)).collect();
+        assert_eq!(marks, [("Stack vertically", true), ("Side by side", false)]);
+        pick_arrange(&mut r, BoxKind::Net, "Side by side");
+        assert_eq!(net_mode(&mut r), "columns");
+        let net = r.page.clone();
+        assert_eq!(
+            r.vcx.update(|_, cx| net.read(cx).net_box().read(cx).mode()),
+            "columns"
+        );
+        let layout = r.layout();
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), layout);
+        let (_, items) = gear_menu(&mut r, BoxKind::Net);
+        let marks: Vec<_> = items.iter().map(|(l, c, _)| (l.as_str(), *c)).collect();
+        assert_eq!(marks, [("Stack vertically", false), ("Side by side", true)]);
+        pick_arrange(&mut r, BoxKind::Net, "Stack vertically");
+        assert_eq!(net_mode(&mut r), "stacked");
+        // `combined` has no Arrange choice.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "net".into(),
+            mode: "combined".into(),
+        });
+        let (_, items) = gear_menu(&mut r, BoxKind::Net);
+        assert!(items.is_empty());
     }
 
     /// Checks that every part of disk `k`'s `disk_charts` cell header stays inside its cell with
@@ -4239,6 +4511,7 @@ mod page {
             kind: "disk".into(),
             mode: "disk_charts".into(),
         });
+        set_disk_arrange(&mut r, "auto");
         widest_rates(&mut r);
         let mut widths = Vec::new();
         for w in [500., 600., 700., 800., 900., 1000.] {

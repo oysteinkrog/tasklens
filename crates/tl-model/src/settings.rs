@@ -404,6 +404,13 @@ pub struct OverviewBoxSetting {
         deserialize_with = "loose_some"
     )]
     pub split: Option<f64>,
+    /// How a mode with several charts of one kind or two parts places them, an id from
+    /// [`OVERVIEW_ARRANGES`] (UI-PRF-019 "Arrange", D-027). `None` is the mode's default.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "loose_some"
+    )]
+    pub arrange: Option<String>,
     /// The crw.63 name of the CPU box's `split` (UI-PRF-018 "CPU box splitter"). Loading moves
     /// it into `split`; it is never written.
     #[serde(skip_serializing, deserialize_with = "loose_some")]
@@ -419,6 +426,9 @@ pub const OVERVIEW_BOX_MODES: [(&str, &[&str]); 6] = [
     ("net", &["stacked", "columns", "combined", "adapter_charts"]),
     ("processes", &["list"]),
 ];
+
+/// The values of a box's `arrange`: the mode's own rule, one column, one row.
+pub const OVERVIEW_ARRANGES: [&str; 3] = ["auto", "vertical", "horizontal"];
 
 /// The range a box's `split` is accepted in.
 pub const OVERVIEW_SPLIT_RANGE: (f64, f64) = (0.2, 0.8);
@@ -480,6 +490,7 @@ impl Unreadable for OverviewBoxSetting {
             width: 1.,
             mode: None,
             split: None,
+            arrange: None,
             cpu_split: None,
         }
     }
@@ -615,9 +626,9 @@ impl OverviewLayoutSetting {
 }
 
 impl OverviewBoxSetting {
-    /// Moves a CPU `cpu_split` into `split`, and drops a mode that `kind` does not have and a
-    /// split outside [`OVERVIEW_SPLIT_RANGE`] (UI-PRF-019). Returns `true` when it dropped
-    /// anything; the move alone is not a change.
+    /// Moves a CPU `cpu_split` into `split`, and drops a mode that `kind` does not have, a
+    /// split outside [`OVERVIEW_SPLIT_RANGE`] and an `arrange` not in [`OVERVIEW_ARRANGES`]
+    /// (UI-PRF-019). Returns `true` when it dropped anything; the move alone is not a change.
     fn drop_invalid_mode(&mut self, kind: &str) -> bool {
         let mut changed = false;
         if let Some(legacy) = self.cpu_split.take() {
@@ -638,6 +649,14 @@ impl OverviewBoxSetting {
         let (lo, hi) = OVERVIEW_SPLIT_RANGE;
         if self.split.is_some_and(|v| !(lo..=hi).contains(&v)) {
             self.split = None;
+            changed = true;
+        }
+        if self
+            .arrange
+            .as_deref()
+            .is_some_and(|a| !OVERVIEW_ARRANGES.contains(&a))
+        {
+            self.arrange = None;
             changed = true;
         }
         changed
@@ -2132,6 +2151,37 @@ mod tests {
         for kind in OVERVIEW_BOX_KINDS {
             assert!(!modes_of(kind).is_empty(), "{kind}");
         }
+    }
+
+    #[test]
+    fn overview_arrange_saved_and_unknown_loads_default() {
+        // D-027: each arrange value loads and is written back on its box entry.
+        for v in OVERVIEW_ARRANGES {
+            let (s, changed) = load_toml(&cpu_entry(&format!("arrange = \"{v}\"")));
+            assert!(changed.is_empty(), "{v} {changed:?}");
+            let b = &s.performance.overview.as_ref().expect("kept").rows[0].boxes[0];
+            assert_eq!(b.arrange.as_deref(), Some(v));
+            let text = toml::to_string(&s).expect("serializes");
+            assert!(text.contains(&format!("arrange = \"{v}\"")), "{text}");
+        }
+        // An unknown value and a value of the wrong type load as the mode's default (`None`)
+        // with one log line; the box and its other keys stay.
+        for v in ["\"diagonal\"", "\"\"", "2", "true"] {
+            let (s, changed) = load_toml(&cpu_entry(&format!("arrange = {v}, split = 0.5")));
+            assert_eq!(changed, ["performance.overview"], "{v}");
+            let b = &s.performance.overview.expect("kept").rows[0].boxes[0];
+            assert_eq!(
+                (b.kind.as_str(), b.arrange.as_deref()),
+                ("cpu", None),
+                "{v}"
+            );
+            assert_eq!(b.split, Some(0.5), "{v}");
+        }
+        // The default layout writes no arrange.
+        let mut s = Settings::default();
+        s.performance.overview = Some(OverviewLayoutSetting::btop_default());
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(!text.contains("arrange"), "{text}");
     }
 
     #[test]

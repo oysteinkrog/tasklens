@@ -3,7 +3,8 @@
 //! come from the box kind. The profile saves it as `[performance.overview]`
 //! ([`OverviewLayoutSetting`]); [`OverviewLayout::from_setting`] and
 //! [`OverviewLayout::to_setting`] convert. Each box kind also has a layout mode and a split
-//! (UI-PRF-019, D-025), kept per kind in [`BoxConfig`] and saved on the box's entry.
+//! (UI-PRF-019, D-025), and an arrangement where its mode offers one (D-027), kept per kind in
+//! [`BoxConfig`] and saved on the box's entry.
 //!
 //! [`place`] turns a layout, the kinds present now and the page area into box bounds. It runs on
 //! resize and on presence changes, never per tick, and does not allocate for up to 8 boxes.
@@ -113,6 +114,17 @@ impl BoxKind {
         self.modes().iter().find(|m| m.id == id)
     }
 
+    /// What the "Arrange" submenu does in mode `id`; `None` when the mode has no Arrange
+    /// choice (UI-PRF-019, D-027).
+    pub fn arrange(self, id: &str) -> Option<ArrangeChoice> {
+        let choices: &[(&str, ArrangeChoice)] = match self {
+            Self::Disk => disk_box::ARRANGE,
+            Self::Net => net_box::ARRANGE,
+            _ => &[],
+        };
+        choices.iter().find(|(m, _)| *m == id).map(|&(_, c)| c)
+    }
+
     fn index(self) -> usize {
         self as usize
     }
@@ -127,32 +139,96 @@ pub struct BoxMode {
     pub split: Option<f32>,
 }
 
+/// How a mode places several charts of one kind (UI-PRF-019 "Arrange", D-027): the mode's own
+/// grid rule, one column, or one row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Arrange {
+    Auto,
+    Vertical,
+    Horizontal,
+}
+
+impl Arrange {
+    /// The menu order.
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Vertical, Self::Horizontal];
+
+    /// The value in `[performance.overview]`.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Vertical => "vertical",
+            Self::Horizontal => "horizontal",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.id() == id)
+    }
+
+    /// The string key of its "Arrange" menu item.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "perf-overview-arrange-auto",
+            Self::Vertical => "perf-overview-arrange-vertical",
+            Self::Horizontal => "perf-overview-arrange-horizontal",
+        }
+    }
+}
+
+/// What a mode's "Arrange" submenu does (UI-PRF-019, D-027).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ArrangeChoice {
+    /// Automatic, Stack vertically and Side by side, saved as the box's `arrange`, with the
+    /// mode's default.
+    Saved(Arrange),
+    /// Stack vertically and Side by side switch between two modes that show the same two
+    /// charts, such as the Net box's `stacked` and `columns`.
+    Modes {
+        vertical: &'static str,
+        horizontal: &'static str,
+    },
+}
+
+impl ArrangeChoice {
+    /// The default arrangement of a [`ArrangeChoice::Saved`] choice.
+    fn saved_default(self) -> Option<Arrange> {
+        match self {
+            Self::Saved(a) => Some(a),
+            Self::Modes { .. } => None,
+        }
+    }
+}
+
 /// The smallest and largest split.
 pub const SPLIT_RANGE: (f32, f32) = (0.2, 0.8);
 
-/// A box's mode and split. `split` is the first part's share, `None` in a mode with one part.
+/// A box's mode, split and arrangement. `split` is the first part's share, `None` in a mode
+/// with one part. `arrange` is `None` in a mode without a saved Arrange choice.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BoxConfig {
     pub mode: &'static BoxMode,
     pub split: Option<f32>,
+    pub arrange: Option<Arrange>,
 }
 
 impl BoxConfig {
-    /// `mode` with its default split.
-    pub fn of(mode: &'static BoxMode) -> Self {
+    /// `kind`'s `mode` with its default split and arrangement.
+    pub fn of(kind: BoxKind, mode: &'static BoxMode) -> Self {
         Self {
             mode,
             split: mode.split,
+            arrange: kind.arrange(mode.id).and_then(ArrangeChoice::saved_default),
         }
     }
 
-    /// The default mode of `kind` and its split.
+    /// The default mode of `kind`, its split and its arrangement.
     pub fn default_for(kind: BoxKind) -> Self {
-        Self::of(&kind.modes()[0])
+        Self::of(kind, &kind.modes()[0])
     }
 
-    /// The saved entry's mode and split: a mode `kind` does not offer is its default, and a
-    /// split out of range or missing is the mode's default.
+    /// The saved entry's mode, split and arrangement: a mode `kind` does not offer is its
+    /// default, and a split out of range or missing and an arrangement unknown or missing are
+    /// the mode's default.
     fn from_setting(kind: BoxKind, b: &OverviewBoxSetting) -> Self {
         let mode = b
             .mode
@@ -163,21 +239,30 @@ impl BoxConfig {
             .split
             .map(|v| v as f32)
             .filter(|v| (SPLIT_RANGE.0..=SPLIT_RANGE.1).contains(v));
+        let default = Self::of(kind, mode);
         Self {
             mode,
             split: mode.split.map(|d| saved.unwrap_or(d)),
+            arrange: default
+                .arrange
+                .map(|d| b.arrange.as_deref().and_then(Arrange::from_id).unwrap_or(d)),
         }
     }
 
-    /// The mode when not the kind's default, and the split when not the mode's default.
-    fn to_setting(self, kind: BoxKind) -> (Option<String>, Option<f64>) {
+    /// The mode when not the kind's default, the split when not the mode's default, and the
+    /// arrangement when not the mode's default.
+    fn to_setting(self, kind: BoxKind) -> (Option<String>, Option<f64>, Option<String>) {
         let mode = (self.mode.id != kind.modes()[0].id).then(|| self.mode.id.to_owned());
         let split = self
             .split
             .zip(self.mode.split)
             .filter(|(s, d)| (s - d).abs() >= 5e-4)
             .map(|(s, _)| f64::from(s));
-        (mode, split)
+        let arrange = self
+            .arrange
+            .filter(|&a| Some(a) != Self::of(kind, self.mode).arrange)
+            .map(|a| a.id().to_owned());
+        (mode, split, arrange)
     }
 }
 
@@ -308,12 +393,13 @@ impl OverviewLayout {
                         .boxes
                         .iter()
                         .map(|b| {
-                            let (mode, split) = self.config(b.kind).to_setting(b.kind);
+                            let (mode, split, arrange) = self.config(b.kind).to_setting(b.kind);
                             OverviewBoxSetting {
                                 kind: b.kind.key().to_owned(),
                                 width: f64::from(b.width),
                                 mode,
                                 split,
+                                arrange,
                                 cpu_split: None,
                             }
                         })
@@ -333,13 +419,29 @@ impl OverviewLayout {
         self.config(kind).split
     }
 
-    /// Switches `kind` to its mode `id` with that mode's default split. Returns `false` when
-    /// the kind has no such mode or already shows it.
+    /// `kind`'s arrangement, `None` when its mode has no saved Arrange choice.
+    pub fn arrange(&self, kind: BoxKind) -> Option<Arrange> {
+        self.config(kind).arrange
+    }
+
+    /// Switches `kind` to its mode `id` with that mode's default split and arrangement.
+    /// Returns `false` when the kind has no such mode or already shows it.
     pub fn set_mode(&mut self, kind: BoxKind, id: &str) -> bool {
         let Some(mode) = kind.mode(id).filter(|m| m.id != self.config(kind).mode.id) else {
             return false;
         };
-        self.configs[kind.index()] = BoxConfig::of(mode);
+        self.configs[kind.index()] = BoxConfig::of(kind, mode);
+        true
+    }
+
+    /// Sets `kind`'s arrangement when its mode has a saved Arrange choice. Returns whether it
+    /// changed.
+    pub fn set_arrange(&mut self, kind: BoxKind, arrange: Arrange) -> bool {
+        let config = &mut self.configs[kind.index()];
+        if config.arrange.is_none_or(|a| a == arrange) {
+            return false;
+        }
+        config.arrange = Some(arrange);
         true
     }
 
@@ -353,8 +455,8 @@ impl OverviewLayout {
         true
     }
 
-    /// Gives `kind` its default mode and split (the box menu's "Reset Box"). Returns whether it
-    /// changed.
+    /// Gives `kind` its default mode, split and arrangement (the box menu's "Reset Box").
+    /// Returns whether it changed.
     pub fn reset_box(&mut self, kind: BoxKind) -> bool {
         let default = BoxConfig::default_for(kind);
         let changed = self.config(kind) != default;

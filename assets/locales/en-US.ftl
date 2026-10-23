@@ -760,6 +760,10 @@ perf-overview-mode-chart-rows = Chart and rows
 perf-overview-mode-columns = Columns
 perf-overview-mode-stacked = Stacked
 perf-overview-mode-list = List
+perf-overview-arrange = Arrange
+perf-overview-arrange-auto = Automatic
+perf-overview-arrange-vertical = Stack vertically
+perf-overview-arrange-horizontal = Side by side
 
 perf-menu-select-pages = Select Pages
 perf-menu-hide-page = Hide This Page

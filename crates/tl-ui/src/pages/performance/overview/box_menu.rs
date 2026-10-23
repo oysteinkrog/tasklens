@@ -3,13 +3,14 @@
 //! A right-click on a box's title line names the box in [`ClickedBox`]. The Performance tab
 //! opens its page menu for every right-click on the page (UI-PRF-015); when a box is named, the
 //! menu starts with [`box_menu`]: a "Layout" submenu with one radio item per mode the box
-//! offers, then "Reset Box", then a separator. A right-click elsewhere in a box names no box and
-//! keeps the plain page menu. In Edit Layout mode the title handle names the box the same way,
-//! and a gear at the right end of each title line opens the same mode items.
+//! offers and, when the shown mode has one, an "Arrange" submenu (D-027), then "Reset Box", then
+//! a separator. A right-click elsewhere in a box names no box and keeps the plain page menu. In
+//! Edit Layout mode the title handle names the box the same way, and a gear at the right end of
+//! each title line opens the same mode items.
 //!
-//! The items dispatch [`PerfOverviewSetBoxMode`] and [`PerfOverviewResetBox`], which the page
-//! handles here: the layout takes the new mode or the default, the box views follow, and the
-//! layout is saved.
+//! The items dispatch [`PerfOverviewSetBoxMode`], [`PerfOverviewSetBoxArrange`] and
+//! [`PerfOverviewResetBox`], which the page handles here: the layout takes the new mode, the
+//! new arrangement or the default, the box views follow, and the layout is saved.
 
 use gpui_kit::{
     AnyElement, App, Context, Global, InteractiveElement as _, IntoElement, MouseButton,
@@ -17,12 +18,14 @@ use gpui_kit::{
 };
 
 use super::OverviewPage;
-use super::layout::BoxKind;
+use super::layout::{Arrange, ArrangeChoice, BoxKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::i18n::tr;
-use crate::pages::performance::actions::{PerfOverviewResetBox, PerfOverviewSetBoxMode};
+use crate::pages::performance::actions::{
+    PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode,
+};
 use crate::theme::metrics;
 
 /// The title line a right-click opens the box menu on: the 1 px top border and the 24 px title
@@ -41,11 +44,12 @@ pub fn gear_id(kind: BoxKind) -> String {
     format!("perf-overview-gear-{}", kind.key())
 }
 
-/// The box a right-click landed on, and the mode it showed.
+/// The box a right-click landed on, the mode it showed and the arrangement of that mode.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BoxMenuTarget {
     pub kind: BoxKind,
     pub mode: &'static str,
+    pub arrange: Option<Arrange>,
 }
 
 /// The box whose title line took the last right-press. The Performance tab clears it when a
@@ -55,8 +59,14 @@ pub struct ClickedBox(pub Option<BoxMenuTarget>);
 
 impl Global for ClickedBox {}
 
-/// One radio item per mode of the target's kind, the shown mode selected.
-fn mode_items(mut menu: TlMenu, target: BoxMenuTarget, cx: &App) -> TlMenu {
+/// One radio item per mode of the target's kind, the shown mode selected, then the "Arrange"
+/// submenu when the shown mode has one.
+fn mode_items(
+    mut menu: TlMenu,
+    target: BoxMenuTarget,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
     let kind: std::sync::Arc<str> = target.kind.key().into();
     for mode in target.kind.modes() {
         menu = menu.radio_item(
@@ -68,6 +78,59 @@ fn mode_items(mut menu: TlMenu, target: BoxMenuTarget, cx: &App) -> TlMenu {
             }),
         );
     }
+    let Some(choice) = target.kind.arrange(target.mode) else {
+        return menu;
+    };
+    menu.separator().submenu(
+        tr(cx, "perf-overview-arrange"),
+        window,
+        cx,
+        move |menu, _, cx| arrange_items(menu, target, choice, cx),
+    )
+}
+
+/// The "Arrange" items of `choice`, the shown arrangement selected. A saved choice has
+/// Automatic, Stack vertically and Side by side; a choice between two modes has the last two,
+/// each switching to its mode.
+fn arrange_items(
+    mut menu: TlMenu,
+    target: BoxMenuTarget,
+    choice: ArrangeChoice,
+    cx: &App,
+) -> TlMenu {
+    let kind: std::sync::Arc<str> = target.kind.key().into();
+    match choice {
+        ArrangeChoice::Saved(_) => {
+            for arrange in Arrange::ALL {
+                menu = menu.radio_item(
+                    tr(cx, arrange.label()),
+                    target.arrange == Some(arrange),
+                    Box::new(PerfOverviewSetBoxArrange {
+                        kind: kind.clone(),
+                        arrange: arrange.id().into(),
+                    }),
+                );
+            }
+        }
+        ArrangeChoice::Modes {
+            vertical,
+            horizontal,
+        } => {
+            for (arrange, mode) in [
+                (Arrange::Vertical, vertical),
+                (Arrange::Horizontal, horizontal),
+            ] {
+                menu = menu.radio_item(
+                    tr(cx, arrange.label()),
+                    target.mode == mode,
+                    Box::new(PerfOverviewSetBoxMode {
+                        kind: kind.clone(),
+                        mode: mode.into(),
+                    }),
+                );
+            }
+        }
+    }
     menu
 }
 
@@ -78,7 +141,7 @@ pub fn box_menu(menu: TlMenu, target: BoxMenuTarget, window: &mut Window, cx: &m
         tr(cx, "perf-overview-box-layout"),
         window,
         cx,
-        move |menu, _, cx| mode_items(menu, target, cx),
+        move |menu, window, cx| mode_items(menu, target, window, cx),
     )
     .item(
         tr(cx, "perf-overview-reset-box"),
@@ -90,11 +153,13 @@ pub fn box_menu(menu: TlMenu, target: BoxMenuTarget, window: &mut Window, cx: &m
 }
 
 impl OverviewPage {
-    /// The box of `kind` with the mode its layout shows.
+    /// The box of `kind` with the mode and arrangement its layout shows.
     fn menu_target(&self, kind: BoxKind) -> BoxMenuTarget {
+        let config = self.layout.config(kind);
         BoxMenuTarget {
             kind,
-            mode: self.layout.config(kind).mode.id,
+            mode: config.mode.id,
+            arrange: config.arrange,
         }
     }
 
@@ -135,7 +200,28 @@ impl OverviewPage {
         }
     }
 
-    /// `PerfOverviewResetBox`: the box's default mode and split, saved.
+    /// `PerfOverviewSetBoxArrange`: the box takes the arrangement and the layout is saved. An
+    /// unknown value, a mode without a saved Arrange choice, or the shown arrangement does
+    /// nothing.
+    pub(super) fn on_set_box_arrange(
+        &mut self,
+        a: &PerfOverviewSetBoxArrange,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(kind), Some(arrange)) =
+            (BoxKind::from_key(&a.kind), Arrange::from_id(&a.arrange))
+        else {
+            return;
+        };
+        let mut layout = self.layout.clone();
+        if layout.set_arrange(kind, arrange) {
+            self.set_layout(layout, cx);
+            self.save_layout(cx);
+        }
+    }
+
+    /// `PerfOverviewResetBox`: the box's default mode, split and arrangement, saved.
     pub(super) fn on_reset_box(
         &mut self,
         a: &PerfOverviewResetBox,
@@ -165,8 +251,8 @@ impl OverviewPage {
             .icon_size(px(GEAR_ICON * s))
             .tooltip(tr(cx, "perf-overview-box-layout-tip"))
             .on_click(move |ev, window, cx| {
-                let menu = TlMenu::build(window, cx, focus.clone(), move |menu, _, cx| {
-                    mode_items(menu, target, cx)
+                let menu = TlMenu::build(window, cx, focus.clone(), move |menu, window, cx| {
+                    mode_items(menu, target, window, cx)
                 });
                 open_context_menu_at(ev.position(), window, cx, menu);
             });

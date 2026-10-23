@@ -102,7 +102,18 @@ pub struct PerfOverviewSetBoxMode {
     pub mode: Arc<str>,
 }
 
-/// Gives the Overview box of `kind` its default mode and split (the box menu's "Reset Box").
+/// Places the charts of the Overview box of `kind` as `arrange` says: `auto`, `vertical` or
+/// `horizontal` (the box menu's "Arrange" items, UI-PRF-019, D-027).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewSetBoxArrange {
+    pub kind: Arc<str>,
+    pub arrange: Arc<str>,
+}
+
+/// Gives the Overview box of `kind` its default mode, split and arrangement (the box menu's
+/// "Reset Box").
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
 #[schemars(crate = "gpui::private::schemars")]

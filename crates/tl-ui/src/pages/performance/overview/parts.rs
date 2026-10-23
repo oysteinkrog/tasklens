@@ -8,14 +8,17 @@
 //! sparklines are cached chart views in [`core_sparks`], a flex grid over the painted cells.
 
 use std::cell::{Cell, RefCell};
+use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Corners, Div, Element, ElementId, Entity,
     EntityId, FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, MouseButton, ParentElement as _, Pixels, SharedString, Size, Style,
     StyleRefinement, Styled as _, Window, canvas, div, fill, point, px, relative, size,
 };
+use rustc_hash::FxHasher;
 use smallvec::SmallVec;
 use tl_model::settings::Settings;
 
@@ -29,7 +32,7 @@ use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current};
 
-use super::layout::BoxKind;
+use super::layout::{Arrange, BoxKind};
 use super::mem_box::{MeterRow, ROW_LABEL_W, ROW_VALUE_W, meter_row};
 
 /// The meter bar height, logical px before `ui_scale`.
@@ -839,7 +842,8 @@ pub fn class_probe(
     .size_full()
 }
 
-/// A grid of equal cells that fills its area (UI-PRF-019, D-026), from [`fill_grid`].
+/// A grid of equal cells that fills its area (UI-PRF-019, D-026), from [`fill_grid`] or
+/// [`arrange_grid`].
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct GridFit {
     pub cols: usize,
@@ -848,6 +852,9 @@ pub struct GridFit {
     pub cell: Size<Pixels>,
     /// The cells do not fit at their minimum height, so the grid scrolls vertically.
     pub scrolls: bool,
+    /// The cells of one row do not fit at their minimum width, so the row scrolls sideways
+    /// (D-027 "Side by side").
+    pub scrolls_x: bool,
 }
 
 impl GridFit {
@@ -859,18 +866,22 @@ impl GridFit {
         self.cell.height * self.rows as f32 + gap * (self.rows - 1) as f32
     }
 
+    /// The width of every column with `gap` between them.
+    pub fn content_w(&self, gap: Pixels) -> Pixels {
+        if self.cols == 0 {
+            return px(0.);
+        }
+        self.cell.width * self.cols as f32 + gap * (self.cols - 1) as f32
+    }
+
     /// A layout class for [`class_probe`]: it changes when the columns, the rows, the scrolling
     /// or the cell size change. Cell sizes are whole px, so a sub-pixel resize keeps the class.
     pub fn class(&self) -> u32 {
-        let (w, h) = (
-            f32::from(self.cell.width) as u32,
-            f32::from(self.cell.height) as u32,
-        );
-        (self.cols as u32 & 0xf)
-            | (self.rows as u32 & 0xf) << 4
-            | u32::from(self.scrolls) << 8
-            | (w & 0x7ff) << 9
-            | (h & 0xfff) << 20
+        let mut h = FxHasher::default();
+        (self.cols, self.rows, self.scrolls, self.scrolls_x).hash(&mut h);
+        (f32::from(self.cell.width) as u32).hash(&mut h);
+        (f32::from(self.cell.height) as u32).hash(&mut h);
+        h.finish() as u32
     }
 }
 
@@ -937,6 +948,7 @@ pub fn fill_grid(
                 rows,
                 cell: size(px(cw), px(ch)),
                 scrolls: false,
+                scrolls_x: false,
             };
             best = Some((size_now, fit));
         }
@@ -951,6 +963,109 @@ pub fn fill_grid(
         rows: n.div_ceil(cols),
         cell: size(px(cell_w(w, cols)), px(min_h.floor())),
         scrolls: true,
+        scrolls_x: false,
+    }
+}
+
+/// `n` equal cells in one line `along` px long and `across` px wide, `gap` apart: each cell's
+/// length and width in whole px, and whether the line scrolls. A cell gets an equal share of
+/// the length, at least `min`; when the cells do not fit at `min` the line scrolls and keeps
+/// `bar` px of its width for the scrollbar.
+fn line_fit(n: usize, along: f32, across: f32, min: f32, gap: f32, bar: f32) -> (f32, f32, bool) {
+    let raw = (along - gap * (n - 1) as f32) / n as f32;
+    if raw + 1e-3 >= min {
+        ((raw + 1e-3).floor(), across.floor().max(0.), false)
+    } else {
+        (min.floor(), (across - bar).floor().max(0.), true)
+    }
+}
+
+/// Lays out `n` equal cells in `area` as `arrange` says (UI-PRF-019 "Arrange", D-027).
+/// `Auto` is the mode's grid, [`fill_grid`]. `Vertical` is one column as wide as the area: each
+/// cell an equal share of the height and at least `min.height`; when they do not fit, the
+/// column scrolls vertically and keeps `bar` px at the right for the scrollbar. `Horizontal` is
+/// one row as high as the area, each cell at least `min.width`; when they do not fit, the row
+/// scrolls sideways and keeps `bar` px at the bottom.
+pub fn arrange_grid(
+    arrange: Arrange,
+    n: usize,
+    area: Size<Pixels>,
+    min: Size<Pixels>,
+    gap: Pixels,
+    bar: Pixels,
+) -> GridFit {
+    if n == 0 {
+        return GridFit::default();
+    }
+    let (w, h, g, b) = (
+        f32::from(area.width),
+        f32::from(area.height),
+        f32::from(gap),
+        f32::from(bar),
+    );
+    match arrange {
+        Arrange::Auto => fill_grid(n, area, min, gap, bar),
+        Arrange::Vertical => {
+            let (ch, cw, scrolls) = line_fit(n, h, w, f32::from(min.height), g, b);
+            GridFit {
+                cols: 1,
+                rows: n,
+                cell: size(px(cw), px(ch)),
+                scrolls,
+                scrolls_x: false,
+            }
+        }
+        Arrange::Horizontal => {
+            let (cw, ch, scrolls_x) = line_fit(n, w, h, f32::from(min.width), g, b);
+            GridFit {
+                cols: n,
+                rows: 1,
+                cell: size(px(cw), px(ch)),
+                scrolls: false,
+                scrolls_x,
+            }
+        }
+    }
+}
+
+/// `cells` in rows of `fit.cols`, `gap` apart. A grid that scrolls sits in a viewport with the
+/// scrollbar of its direction; `id` keeps the viewport's scroll position.
+pub fn grid_cells(
+    fit: &GridFit,
+    cells: impl IntoIterator<Item = AnyElement>,
+    gap: Pixels,
+    id: &'static str,
+) -> AnyElement {
+    let mut cells = cells.into_iter();
+    let mut grid = div().flex().flex_col().flex_none().gap(gap);
+    for _ in 0..fit.rows {
+        grid = grid.child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .gap(gap)
+                .children(cells.by_ref().take(fit.cols.max(1))),
+        );
+    }
+    if fit.scrolls_x {
+        // The row is wider than the viewport, so its width is set: a stretched row would
+        // report the viewport's width and never scroll.
+        div()
+            .size_full()
+            .child(grid.w(fit.content_w(gap)).h(fit.content_h(gap)))
+            .overflow_x_scrollbar()
+            .id(SharedString::from(id))
+            .into_any_element()
+    } else if fit.scrolls {
+        div()
+            .size_full()
+            .child(grid.w_full())
+            .overflow_y_scrollbar()
+            .id(SharedString::from(id))
+            .into_any_element()
+    } else {
+        grid.w_full().into_any_element()
     }
 }
 

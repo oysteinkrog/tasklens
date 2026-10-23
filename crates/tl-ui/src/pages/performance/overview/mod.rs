@@ -217,6 +217,9 @@ impl OverviewPage {
         if let Some(split) = layout.split(BoxKind::Disk) {
             disk.update(cx, |b, cx| b.set_split(split, cx));
         }
+        if let Some(arrange) = layout.arrange(BoxKind::Disk) {
+            disk.update(cx, |b, cx| b.set_arrange(arrange, cx));
+        }
         let net_target = first_card(sidebar, DeviceKind::Net, cx);
         let net = cx.new(|cx| {
             let mut b = NetBox::new(&hub, cx);
@@ -466,6 +469,7 @@ impl OverviewPage {
         let gpu_mode = layout.config(BoxKind::Gpu).mode.id;
         let disk_split = layout.split(BoxKind::Disk);
         let disk_mode = layout.config(BoxKind::Disk).mode.id;
+        let disk_arrange = layout.arrange(BoxKind::Disk);
         let net_split = layout.split(BoxKind::Net);
         let net_mode = layout.config(BoxKind::Net).mode.id;
         self.layout = layout;
@@ -484,6 +488,9 @@ impl OverviewPage {
         self.disk.update(cx, |b, cx| b.set_mode(disk_mode, cx));
         if let Some(split) = disk_split {
             self.disk.update(cx, |b, cx| b.set_split(split, cx));
+        }
+        if let Some(arrange) = disk_arrange {
+            self.disk.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
         self.net.update(cx, |b, cx| b.set_mode(net_mode, cx));
         if let Some(split) = net_split {
@@ -786,6 +793,7 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_move_box))
             .on_action(cx.listener(Self::on_resize_box))
             .on_action(cx.listener(Self::on_set_box_mode))
+            .on_action(cx.listener(Self::on_set_box_arrange))
             .on_action(cx.listener(Self::on_reset_box))
     }
 }
