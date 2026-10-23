@@ -831,7 +831,7 @@ impl CpuPage {
         words.refresh(cx);
         let spec = overall_spec(row.idx, &settings, &theme);
         let labels = overall_labels(settings.kernel, &words);
-        let overall = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+        let overall = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
@@ -930,7 +930,8 @@ impl CpuPage {
                     all_cores_labels(false, &self.words),
                 );
                 let hub = self.hub.clone();
-                self.overlaid = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                self.overlaid =
+                    Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
                 self.sync_total_text(cx);
             }
             CpuGraphMode::AllCoresStacked if self.stacked.is_none() => {
@@ -939,7 +940,8 @@ impl CpuPage {
                     all_cores_labels(true, &self.words),
                 );
                 let hub = self.hub.clone();
-                self.stacked = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                self.stacked =
+                    Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
                 self.sync_total_text(cx);
             }
             _ => {}
@@ -1125,7 +1127,8 @@ impl CpuPage {
             }),
             None => {
                 let hub = self.hub.clone();
-                self.secondary = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                self.secondary =
+                    Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
             }
         }
         want != old || force

@@ -13,10 +13,11 @@ use std::rc::Rc;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Bounds, Context, Corners, Div, Element, ElementId, Entity,
-    EntityId, FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _,
-    IntoElement, LayoutId, MouseButton, ParentElement as _, Pixels, SharedString, Size, Style,
-    StyleRefinement, Styled as _, Window, canvas, div, fill, point, px, relative, size,
+    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, Corners, Div, Element, ElementId,
+    Entity, EntityId, FontWeight, GlobalElementId, Hsla, InspectorElementId,
+    InteractiveElement as _, IntoElement, LayoutId, MouseButton, ParentElement as _, Pixels,
+    SharedString, Size, Style, StyleRefinement, Styled as _, Window, canvas, div, fill, point, px,
+    relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::SmallVec;
@@ -866,6 +867,34 @@ pub fn box_accent(box_id: &str, theme: &TlTheme) -> Hsla {
     theme.graph.device_accent(kind.accent())
 }
 
+/// The box shadow (UI-PRF-058): the menu-level shadow of UI-FND-003, offset (0, 2), blur 8,
+/// colour `derived.shadow`, which already scales with `appearance.shadow_intensity_pct`. `None`
+/// at intensity 0.
+pub fn box_shadow(theme: &TlTheme, ui_scale: f32) -> Option<BoxShadow> {
+    (theme.derived.shadow.a > 0.0).then(|| BoxShadow {
+        color: theme.derived.shadow,
+        offset: point(px(0.), px(2. * ui_scale)),
+        blur_radius: px(8. * ui_scale),
+        spread_radius: px(0.),
+        inset: false,
+    })
+}
+
+/// The 1 px inner highlight of a box: a ring just inside the accent frame, white at 6%. It is
+/// laid over the box and takes no pointer events.
+fn box_highlight(m: &UiMetrics) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .border_1()
+        .border_color(gpui_kit::white().alpha(HIGHLIGHT_ALPHA))
+        .rounded((m.radius_card - px(1.)).max(px(0.)))
+        .debug_selector(|| "BoxHighlight".into())
+}
+
+/// Alpha of the inner highlight ring.
+const HIGHLIGHT_ALPHA: f32 = 0.06;
+
 /// One Overview box: a `list_bg` card with a thin rounded device-accent frame. Its 24 px title
 /// line sits in the top border: an accent title tab, a one-line summary that ellipsizes and the
 /// headline value at the right. `body` fills the rest. A click on the title line opens
@@ -929,15 +958,21 @@ pub fn box_frame(
         .text_color(theme.text_primary)
         .child(value);
     *value_el.text_style() = title_value_style(m);
-    div()
+    let mut frame = div()
         .debug_selector(move || id.into())
+        .relative()
         .flex()
         .flex_col()
         .overflow_hidden()
         .bg(theme.list_bg)
         .border_1()
         .border_color(accent)
-        .rounded(m.radius_card)
+        .rounded(m.radius_card);
+    if let Some(shadow) = box_shadow(theme, m.ui_scale) {
+        frame.style().box_shadow = Some(vec![shadow]);
+    }
+    frame
+        .child(box_highlight(m))
         .child(opens_device(
             div()
                 .debug_selector(move || title_row_id(id))
@@ -1421,7 +1456,7 @@ pub fn box_chart<T: 'static>(
     // caption, especially in the GPU and Network boxes that can contain several charts.
     labels.range_word = SharedString::default();
     cx.new(|cx| {
-        let mut view = ChartView::new(spec, labels, hub, cx);
+        let mut view = ChartView::new(spec, labels, hub, cx).with_newest_marks();
         view.set_compact_scale(true, cx);
         view
     })
@@ -1551,4 +1586,33 @@ pub fn spark_row(
         .child(div().flex_1().min_w_0().child(meter_row(row, m, theme)))
         .child(spark)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod polish_tests {
+    use super::*;
+    use crate::theme::ThemeMode;
+    use crate::theme::tests::test_theme;
+
+    #[test]
+    fn polish_box_shadow_follows_derived_shadow() {
+        let mut t = test_theme(ThemeMode::Dark);
+        t.derived.shadow = Hsla {
+            h: 0.,
+            s: 0.,
+            l: 0.,
+            a: 0.35,
+        };
+        let s = box_shadow(&t, 1.0).expect("shadow at intensity 100");
+        assert_eq!(s.color, t.derived.shadow);
+        assert_eq!(s.offset, point(px(0.), px(2.)));
+        assert_eq!(s.blur_radius, px(8.));
+        assert_eq!(s.spread_radius, px(0.));
+        assert!(!s.inset);
+        assert_eq!(box_shadow(&t, 2.0).unwrap().blur_radius, px(16.));
+
+        // Intensity 0 gives a clear shadow colour: nothing is drawn.
+        t.derived.shadow.a = 0.0;
+        assert!(box_shadow(&t, 1.0).is_none());
+    }
 }

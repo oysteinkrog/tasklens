@@ -424,7 +424,7 @@ impl AggregateDiskPage {
                 disk::active_spec(idx, &settings, &theme),
                 disk::active_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx))
+            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
         };
         let transfer = {
             let (spec, labels) = (
@@ -432,7 +432,7 @@ impl AggregateDiskPage {
                 disk::transfer_labels(&words),
             );
             cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx);
+                let mut view = ChartView::new(spec, labels, &hub, cx).with_newest_marks();
                 // The value is read plus write.
                 view.set_value_sum(true, cx);
                 view
@@ -797,12 +797,12 @@ impl AggregateGpuPage {
                 utilization_spec(idx, &settings, &theme),
                 utilization_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx))
+            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
         };
         let memory = {
             let spec = gpu::memory_spec(idx, false, memory_total, &theme);
             let labels = gpu::memory_labels(false, &words.memory);
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx))
+            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
         };
 
         let mut subs = SmallVec::new();

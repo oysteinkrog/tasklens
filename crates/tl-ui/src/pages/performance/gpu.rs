@@ -919,10 +919,10 @@ impl GpuPage {
             &settings,
         );
         let labels = memory_labels(memory_shape.shared, &words);
-        let memory = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+        let memory = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
         let spec = with_settings(temperature_spec(row.idx, &theme), &settings);
         let labels = temperature_labels(&words);
-        let temperature = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+        let temperature = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
@@ -1176,7 +1176,8 @@ impl GpuPage {
             let spec = with_settings(placeholder_spec(self.row.idx, &theme), &self.settings);
             let labels = placeholder_labels(&self.words);
             let hub = self.hub.clone();
-            self.placeholder = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+            self.placeholder =
+                Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
         }
         for view in [&self.memory, &self.temperature]
             .into_iter()
@@ -1311,7 +1312,9 @@ impl GpuPage {
                 Some(_) => {}
                 None => {
                     let (spec, labels) = (spec(), power_labels(&self.words));
-                    self.power = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                    self.power = Some(
+                        cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()),
+                    );
                     changed = true;
                 }
             }
@@ -1332,7 +1335,9 @@ impl GpuPage {
                 Some(_) => {}
                 None => {
                     let (spec, labels) = (spec(), clocks_labels(&self.words));
-                    self.clocks = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                    self.clocks = Some(
+                        cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()),
+                    );
                     changed = true;
                 }
             }

@@ -56,6 +56,9 @@ pub struct ChartView {
     pub(crate) hover: hover::HoverState,
     /// The scale ceiling shows small in the plot's top-left corner (`set_compact_scale`).
     pub(crate) compact_scale: bool,
+    /// Glow behind the newest 10% and a dot on each line's newest point (UI-PRF-058).
+    /// `with_newest_marks`.
+    pub(crate) newest_marks: bool,
     /// The chart keeps its resolved series and stops (`freeze`): no new snapshot is read, the
     /// right edge stays at the newest valid sample and the chart is never Stale.
     pub(crate) frozen: bool,
@@ -106,6 +109,7 @@ impl ChartView {
             tier_fallback: false,
             value_sum: false,
             compact_scale: false,
+            newest_marks: false,
             frozen: false,
             value_text: None,
             last_value_text: String::new(),
@@ -127,6 +131,13 @@ impl ChartView {
         };
         this.resolve(hub.read(cx).current());
         this
+    }
+
+    /// Turns on the newest-point glow and dot (UI-PRF-058): Overview boxes and device pages.
+    #[must_use]
+    pub fn with_newest_marks(mut self) -> Self {
+        self.newest_marks = true;
+        self
     }
 
     /// Notifies only when one of this chart's series changed, or when a device change may have

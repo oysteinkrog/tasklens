@@ -1104,7 +1104,7 @@ impl NetPage {
                 throughput_labels(&words),
             );
             cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx);
+                let mut view = ChartView::new(spec, labels, &hub, cx).with_newest_marks();
                 // The value is download plus upload.
                 view.set_value_sum(true, cx);
                 view

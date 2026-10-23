@@ -1688,21 +1688,21 @@ impl MemoryPage {
                 physical_spec(idx, totals.mem, &settings, &theme),
                 physical_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx))
+            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
         };
         let commit = {
             let (spec, labels) = (
                 commit_spec(idx, totals.commit_limit, &settings, &theme),
                 commit_labels(&words, totals.commit_limit),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx))
+            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
         };
         let swap = {
             let (spec, labels) = (
                 swap_spec(idx, totals.swap, &settings, &theme),
                 swap_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx))
+            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
         };
 
         let mut subs = SmallVec::new();

@@ -633,10 +633,10 @@ impl FanPage {
         let view = PageSettingsView::of(&settings);
         let spec = speed_spec(row.idx, fan_max, &view, &theme);
         let labels = speed_labels(&words);
-        let speed = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+        let speed = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
         let spec = temperature_spec(sensor_device, &view, &theme);
         let labels = temperature_labels(sensor_device.is_some(), &words);
-        let temperature = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+        let temperature = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
@@ -1828,7 +1828,7 @@ impl BatteryPage {
         let view = PageSettingsView::of(&settings);
         let spec = battery_spec(row.idx, is_system, &view, &theme);
         let labels = battery_labels(is_system, &words);
-        let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+        let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
@@ -2016,7 +2016,7 @@ impl BatteryPage {
                 let labels = history_labels(&self.words);
                 let hub = self.hub.clone();
                 self.history = Some(cx.new(|cx| {
-                    let mut v = ChartView::new(spec, labels, &hub, cx);
+                    let mut v = ChartView::new(spec, labels, &hub, cx).with_newest_marks();
                     v.series.clear();
                     v.series.push(Some(view));
                     v.freeze(cx);

@@ -1251,7 +1251,7 @@ impl DiskPage {
         let idx = row.idx;
         let active = {
             let (spec, labels) = (active_spec(idx, &settings, &theme), active_labels(&words));
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx))
+            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
         };
         let transfer = {
             let (spec, labels) = (
@@ -1259,7 +1259,7 @@ impl DiskPage {
                 transfer_labels(&words),
             );
             cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx);
+                let mut view = ChartView::new(spec, labels, &hub, cx).with_newest_marks();
                 // The value is read plus write.
                 view.set_value_sum(true, cx);
                 view

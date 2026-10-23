@@ -8,8 +8,8 @@
 use std::ops::Range;
 
 use gpui_kit::{
-    BorderStyle, Bounds, Edges, Hsla, PaintQuad, Pixels, Window, fill, point, px, quad, size,
-    transparent_black,
+    BorderStyle, Bounds, Edges, Hsla, PaintQuad, Pixels, Point, Window, fill, linear_color_stop,
+    linear_gradient, point, px, quad, size, transparent_black,
 };
 
 use super::GridStyle;
@@ -24,6 +24,21 @@ const OUTLINE_ALPHA: f32 = 0.40;
 
 /// Spacing of the dotted gap quads, physical px.
 const GAP_DOT_STEP: f32 = 3.0;
+
+/// Share of the plot width, from the right edge, that the newest-point glow covers (UI-PRF-058).
+pub const GLOW_FRACTION: f32 = 0.10;
+
+/// Alpha of the glow at its right edge.
+pub const GLOW_ALPHA: f32 = 0.06;
+
+/// Diameter of the newest-point dot, logical px.
+pub const DOT_SIZE: f32 = 4.0;
+
+/// Width of the halo around the newest-point dot, logical px.
+pub const HALO_WIDTH: f32 = 2.0;
+
+/// Alpha of the halo.
+pub const HALO_ALPHA: f32 = 0.30;
 
 /// Where quads go. `Window` paints them; tests can record them instead.
 pub trait QuadSink {
@@ -204,4 +219,104 @@ pub fn paint_outline(window: &mut impl QuadSink, p: &GridPaint) {
         p.line_color(),
         BorderStyle::Solid,
     ));
+}
+
+/// The glow behind the newest 10% of the plot: `color` at 6% at the right edge, fading to clear
+/// toward the left (UI-PRF-058). Returns whether it was drawn: nothing is drawn under reduced
+/// motion. A horizontal gradient stands in for a radial one, which GPUI quads cannot draw.
+pub fn paint_newest_glow(
+    window: &mut impl QuadSink,
+    plot: Bounds<Pixels>,
+    color: Hsla,
+    reduce_motion: bool,
+) -> bool {
+    if reduce_motion || plot.size.width <= px(0.) {
+        return false;
+    }
+    let w = plot.size.width * GLOW_FRACTION;
+    let bounds = Bounds::new(
+        point(plot.right() - w, plot.top()),
+        size(w, plot.size.height),
+    );
+    let gradient = linear_gradient(
+        90.0,
+        linear_color_stop(color.alpha(0.0), 0.0),
+        linear_color_stop(color.alpha(GLOW_ALPHA), 1.0),
+    );
+    window.quad(fill(bounds, gradient));
+    true
+}
+
+/// The newest data point: a 4 px dot in the line colour and, unless motion is reduced, a 2 px
+/// halo at 30% around it. `center` is in window logical px.
+pub fn paint_newest_dot(
+    window: &mut impl QuadSink,
+    center: Point<Pixels>,
+    color: Hsla,
+    reduce_motion: bool,
+) {
+    let disc = |d: f32, c: Hsla| {
+        let b = Bounds::new(
+            point(center.x - px(d / 2.0), center.y - px(d / 2.0)),
+            size(px(d), px(d)),
+        );
+        fill(b, c).corner_radii(px(d / 2.0))
+    };
+    if !reduce_motion {
+        window.quad(disc(DOT_SIZE + 2.0 * HALO_WIDTH, color.alpha(HALO_ALPHA)));
+    }
+    window.quad(disc(DOT_SIZE, color));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plot() -> Bounds<Pixels> {
+        Bounds::new(point(px(10.), px(20.)), size(px(200.), px(80.)))
+    }
+
+    #[test]
+    fn polish_reduced_motion_drops_glow() {
+        let accent = Hsla {
+            h: 0.5,
+            s: 0.6,
+            l: 0.5,
+            a: 1.0,
+        };
+        let mut quads: Vec<PaintQuad> = Vec::new();
+        assert!(!paint_newest_glow(&mut quads, plot(), accent, true));
+        assert!(quads.is_empty());
+
+        assert!(paint_newest_glow(&mut quads, plot(), accent, false));
+        assert_eq!(quads.len(), 1);
+        // The newest 10% of the width, at the right edge of the plot.
+        assert_eq!(quads[0].bounds.size.width, px(20.));
+        assert_eq!(quads[0].bounds.right(), plot().right());
+        assert_eq!(quads[0].bounds.size.height, px(80.));
+    }
+
+    #[test]
+    fn polish_newest_dot_and_halo() {
+        let line = Hsla {
+            h: 0.1,
+            s: 0.8,
+            l: 0.5,
+            a: 1.0,
+        };
+        let center = point(px(100.), px(50.));
+        let mut quads: Vec<PaintQuad> = Vec::new();
+        paint_newest_dot(&mut quads, center, line, false);
+        // Halo first (8 px), then the 4 px dot on top.
+        assert_eq!(quads.len(), 2);
+        assert_eq!(quads[0].bounds.size.width, px(8.));
+        assert_eq!(quads[1].bounds.size.width, px(4.));
+        assert_eq!(quads[1].bounds.center(), center);
+
+        // Reduced motion drops the halo and keeps the dot.
+        let mut quads: Vec<PaintQuad> = Vec::new();
+        paint_newest_dot(&mut quads, center, line, true);
+        assert_eq!(quads.len(), 1);
+        assert_eq!(quads[0].bounds.size.width, px(4.));
+    }
 }
