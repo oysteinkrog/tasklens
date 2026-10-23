@@ -3579,6 +3579,31 @@ mod fan_menu {
         draw(r.vcx);
     }
 
+    /// Sets the temperature of each sensor in `values` (device idx, °C).
+    fn set_readings(r: &mut Rig, values: &[(u16, f32)]) {
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let mut sensors = sys.sensors.to_vec();
+            for (idx, r) in &mut sensors {
+                if let Some((_, c)) = values.iter().find(|(i, _)| DeviceIdx(*i) == *idx) {
+                    r.value = Metric::valid(*c);
+                }
+            }
+            sys.sensors = Arc::from(sensors);
+        });
+        draw(r.vcx);
+    }
+
+    /// The labels of the "Temperature sensor" submenu.
+    fn sensor_labels(r: &mut Rig) -> Vec<String> {
+        sensor_entries(r)
+            .iter()
+            .filter(|e| e.kind != MenuEntryKind::Separator)
+            .filter_map(|e| e.label.as_deref().map(str::to_owned))
+            .collect()
+    }
+
     fn fan_page(r: &mut Rig) -> Entity<FanPage> {
         view_of(r, FAN).downcast::<FanPage>().expect("a FanPage")
     }
@@ -3689,6 +3714,18 @@ mod fan_menu {
             publish_fan_and_sensors(&mut $r);
             select(&mut $r, FAN);
         };
+        // The sensors in `$dead` read their dead value before the Fan page is built.
+        ($cx:ident, $r:ident, dead: $dead:expr) => {
+            let (engine, mut vcx, page, _queue) = net_settings::open_root($cx, None);
+            let mut $r = Rig {
+                page,
+                engine,
+                vcx: &mut vcx,
+            };
+            publish_fan_and_sensors(&mut $r);
+            set_readings(&mut $r, $dead);
+            select(&mut $r, FAN);
+        };
     }
 
     fn rename(r: &mut Rig, text: &str) {
@@ -3766,30 +3803,15 @@ mod fan_menu {
     /// Sensors that read -128 °C or exactly 0 °C with no history are not listed.
     #[gpui_kit::test]
     fn fan_sensor_menu_hides_dead_readings(cx: &mut TestAppContext) {
-        rig!(cx, r);
-        r.engine.publish_with(|s| {
-            let sys = Arc::make_mut(&mut s.system);
-            sys.header.version += 1;
-            let mut sensors = sys.sensors.to_vec();
-            for (idx, r) in &mut sensors {
-                if *idx == DeviceIdx(20) {
-                    r.value = Metric::valid(-128.0);
-                } else if *idx == DeviceIdx(21) {
-                    r.value = Metric::valid(0.0);
-                }
-            }
-            sys.sensors = Arc::from(sensors);
-        });
-        draw(r.vcx);
-        let items = sensor_entries(&mut r);
-        let labels: Vec<_> = items
-            .iter()
-            .filter(|e| e.kind != MenuEntryKind::Separator)
-            .filter_map(|e| e.label.as_deref())
-            .collect();
+        rig!(cx, r, dead: &[(20, -128.0), (21, 0.0)]);
+        let labels = sensor_labels(&mut r);
         assert_eq!(labels.len(), 11, "10 sensors and None: {labels:?}");
         assert_eq!(labels[0], "nct6797 temp3");
-        assert!(!labels.contains(&"nct6797 temp1") && !labels.contains(&"nct6797 temp2"));
+        assert!(
+            !labels
+                .iter()
+                .any(|l| l == "nct6797 temp1" || l == "nct6797 temp2")
+        );
     }
 
     /// A dead reading stays listed when it is the paired sensor or has a real value in its history.
@@ -3799,7 +3821,7 @@ mod fan_menu {
         use tl_model::series::{Sample, SeriesView};
         use tl_model::snapshot::SeriesSet;
 
-        rig!(cx, r);
+        rig!(cx, r, dead: &[(20, -128.0), (21, 0.0), (22, -128.0), (23, 0.0)]);
         dispatch(
             &mut r,
             PerfSetFanTempSensor {
@@ -3807,49 +3829,63 @@ mod fan_menu {
                 sensor: Some(Arc::from(sensor_key(1).as_str())),
             },
         );
-        r.engine.publish_with(|s| {
-            let sys = Arc::make_mut(&mut s.system);
-            sys.header.version += 1;
-            let mut sensors = sys.sensors.to_vec();
-            for (idx, r) in &mut sensors {
-                if *idx == DeviceIdx(20) || *idx == DeviceIdx(22) {
-                    r.value = Metric::valid(-128.0);
-                } else if *idx == DeviceIdx(21) {
-                    r.value = Metric::valid(0.0);
-                }
-            }
-            sys.sensors = Arc::from(sensors);
-            let mut views = s.series.series.to_vec();
-            views.push(Arc::new(SeriesView {
+        let view = |metric| {
+            Arc::new(SeriesView {
                 id: SeriesId {
-                    device: DeviceIdx(21),
-                    metric: MetricId::SENSOR_TEMP,
+                    device: DeviceIdx(0),
+                    metric,
                 },
                 version: 1,
                 period_ns: 1_000_000_000,
                 samples: Arc::from([Sample::valid(1_000_000_000, 45.0)]),
-            }));
-            views.sort_by_key(|v| v.id);
+            })
+        };
+        r.engine.publish_with(|s| {
+            // temp2 has a real sample in the fast tier, temp3 only in the 1 Hz tier.
+            let mut fast = s.series.series.to_vec();
+            let mut v = view(MetricId::SENSOR_TEMP);
+            Arc::make_mut(&mut v).id.device = DeviceIdx(21);
+            fast.push(v);
+            fast.sort_by_key(|v| v.id);
+            let mut slow = s.series.slow.to_vec();
+            let mut v = view(MetricId::SENSOR_TEMP.with_tier_1hz());
+            Arc::make_mut(&mut v).id.device = DeviceIdx(22);
+            slow.push(v);
+            slow.sort_by_key(|v| v.id);
             s.series = Arc::new(SeriesSet {
                 header: s.series.header,
-                series: Arc::from(views),
-                slow: s.series.slow.clone(),
+                series: Arc::from(fast),
+                slow: Arc::from(slow),
             });
         });
         draw(r.vcx);
-        let items = sensor_entries(&mut r);
-        let labels: Vec<_> = items
-            .iter()
-            .filter(|e| e.kind != MenuEntryKind::Separator)
-            .filter_map(|e| e.label.as_deref())
-            .collect();
+        let labels = sensor_labels(&mut r);
         assert_eq!(labels.len(), 12, "11 sensors and None: {labels:?}");
         assert_eq!(labels[0], "nct6797 temp1", "the paired sensor stays");
-        assert_eq!(labels[1], "nct6797 temp2", "a sensor with history stays");
-        assert!(
-            !labels.contains(&"nct6797 temp3"),
-            "temp3 is dead with no history"
+        assert_eq!(
+            labels[1], "nct6797 temp2",
+            "a sensor with fast-tier history stays"
         );
+        assert_eq!(
+            labels[2], "nct6797 temp3",
+            "a sensor with 1 Hz history stays"
+        );
+        assert!(
+            !labels.iter().any(|l| l == "nct6797 temp4"),
+            "temp4 is dead with no history"
+        );
+    }
+
+    /// A sensor that read a real value earlier in the session stays listed after it turns dead,
+    /// even when no sample of that value is left in either series tier.
+    #[gpui_kit::test]
+    fn fan_sensor_menu_keeps_sensor_live_earlier_in_session(cx: &mut TestAppContext) {
+        rig!(cx, r);
+        set_readings(&mut r, &[(20, -128.0), (21, 0.0)]);
+        let labels = sensor_labels(&mut r);
+        assert_eq!(labels.len(), 13, "12 sensors and None: {labels:?}");
+        assert_eq!(labels[0], "nct6797 temp1");
+        assert_eq!(labels[1], "nct6797 temp2");
     }
 
     #[gpui_kit::test]
