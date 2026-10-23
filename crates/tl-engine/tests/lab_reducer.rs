@@ -2483,12 +2483,15 @@ fn cpu_pressure_from_jittered_worker_is_fresh() {
         seed = (seed * 1_103_515_245 + 12_345) % (1 << 31);
         let t = SEC + k * 100 * MS + (seed % 61) * MS - 30 * MS;
         ticks.push(t);
-        // Each tick's files hold its own index, so a value shows which tick read it.
+        // Each tick's files hold its own index, so a value shows which tick read it. PSI is a
+        // percent from 0 to 100, so it holds half the index.
         fs::write(
             dir.join("proc/pressure/cpu"),
             format!(
-                "some avg10={k}.00 avg60=0.00 avg300=0.00 total=0\n\
-                 full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+                "some avg10={}.{:02} avg60=0.00 avg300=0.00 total=0\n\
+                 full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+                k / 2,
+                k % 2 * 50
             ),
         )
         .expect("write pressure");
@@ -2508,7 +2511,7 @@ fn cpu_pressure_from_jittered_worker_is_fresh() {
     rig.run(msgs).expect("no invariant violation");
     let pkg = rig.idx(&DeviceIdentity::CpuPackage);
     let snap = rig.latest();
-    for metric in [MetricId::CPU_LOAD1, MetricId::PSI_CPU_SOME] {
+    for (metric, scale) in [(MetricId::CPU_LOAD1, 1.0), (MetricId::PSI_CPU_SOME, 2.0)] {
         let s = &snap
             .series
             .get(SeriesId {
@@ -2521,7 +2524,7 @@ fn cpu_pressure_from_jittered_worker_is_fresh() {
         assert_eq!(s.len(), 12, "{metric:?}");
         for x in s.iter() {
             assert!(x.flags.contains(SampleFlags::VALID), "{metric:?}");
-            let read = x.value as usize;
+            let read = (x.value * scale) as usize;
             assert_eq!(
                 ticks[read], x.t_ns,
                 "{metric:?}: value read at another tick"
