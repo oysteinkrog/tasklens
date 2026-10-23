@@ -108,6 +108,22 @@ impl SeriesRing {
         self.version += 1;
     }
 
+    /// Raises the capacity to `capacity` and keeps every stored sample, oldest first. Does
+    /// nothing when the ring already holds that many. The version does not change.
+    pub fn grow(&mut self, capacity: u32) {
+        let capacity = capacity as usize;
+        if capacity <= self.samples.len() {
+            return;
+        }
+        let mut samples = Vec::with_capacity(capacity);
+        let (head, tail) = self.chronological_parts();
+        samples.extend_from_slice(head);
+        samples.extend_from_slice(tail);
+        self.next = samples.len() as u32;
+        samples.resize(capacity, Sample::gap(0));
+        self.samples = samples.into_boxed_slice();
+    }
+
     /// Sets GAP_BEFORE on the next pushed sample (used after suspend, rate change, restart).
     pub fn mark_gap(&mut self) {
         self.gap_pending = true;
@@ -350,6 +366,26 @@ mod tests {
         // Wrapped ring is also oldest first.
         let w = r.to_view(id, 1);
         assert_eq!(&*w.samples, &[s(2), s(3)]);
+    }
+
+    #[test]
+    fn grow_keeps_samples_and_version() {
+        let mut r = SeriesRing::with_capacity(4);
+        for t in 1..=6 {
+            r.push(s(t));
+        }
+        r.grow(3);
+        assert_eq!(r.capacity(), 4, "never shrinks");
+        r.grow(8);
+        assert_eq!(r.capacity(), 8);
+        assert_eq!(r.version(), 6);
+        assert_eq!(r.iter().map(|x| x.t_ns).collect::<Vec<_>>(), [3, 4, 5, 6]);
+        for t in 7..=12 {
+            r.push(s(t));
+        }
+        let ts: Vec<u64> = r.iter().map(|x| x.t_ns).collect();
+        assert_eq!(ts, (5..=12).collect::<Vec<_>>());
+        assert_eq!(r.last(), Some(s(12)));
     }
 
     #[test]

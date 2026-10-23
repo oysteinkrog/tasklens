@@ -719,6 +719,35 @@ fn cpu_update_appends_series() {
     assert_eq!(rig.latest().system.cpu_topology.online, cpus(2));
 }
 
+/// crw.83: the CPU source runs at 1 s without cores (Processes), stops (Services), and starts
+/// again at 10 Hz with cores (Overview). The first core sample counts as 1 s, yet each core
+/// series still holds the full 60 s once the samples come at 10 Hz.
+#[test]
+fn per_core_series_keep_60_s_after_slow_start() {
+    let mut rig = Rig::new();
+    rig.run(vec![cpu_cores_msg(SEC, 0), cpu_cores_msg(2 * SEC, 0)])
+        .expect("no invariant violation");
+    let start = 7 * SEC;
+    let fast: Vec<_> = (0..700u64)
+        .map(|k| cpu_cores_msg(start + k * 100 * MS, 2))
+        .collect();
+    rig.run(fast).expect("no invariant violation");
+    let core = rig.idx(&DeviceIdentity::CpuLogical { id: 0 });
+    let snap = rig.latest();
+    let view = snap
+        .series
+        .get(SeriesId {
+            device: core,
+            metric: MetricId::CPU_TOTAL,
+        })
+        .expect("core 0 CPU_TOTAL");
+    assert_eq!(view.samples.len(), 602);
+    let first = view.samples.first().expect("a sample").t_ns;
+    let last = view.samples.last().expect("a sample").t_ns;
+    assert_eq!(last - first, 601 * 100 * MS, "60.1 s of history");
+    rig.passed();
+}
+
 /// A CPU sample with the secondary chart's values: package and core watts and the fastest core.
 fn cpu_secondary_msg(t_ns: TimeNs, pkg: Metric<f32>, core: Metric<f32>) -> EngineMsg {
     let mut msg = cpu_msg(t_ns, 50.0, false);

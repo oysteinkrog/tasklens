@@ -177,8 +177,9 @@ impl SeriesStore {
     }
 
     /// Appends; creates the ring on first use; a period change sets `gap_next` and keeps the
-    /// ring. Flags without `VALID` append a gap sample (value 0.0). Returns the stored sample,
-    /// `GAP_BEFORE` included, for the record sink.
+    /// ring, grown to the new period's capacity when it is shorter, so a series that started at
+    /// 1 s still holds 60 s at 10 Hz (crw.83). Flags without `VALID` append a gap sample (value
+    /// 0.0). Returns the stored sample, `GAP_BEFORE` included, for the record sink.
     pub fn append(
         &mut self,
         id: SeriesId,
@@ -197,6 +198,7 @@ impl SeriesStore {
         if entry.period_ns != period_ns {
             entry.period_ns = period_ns;
             entry.gap_next = true;
+            entry.ring.grow(SeriesStore::fast_capacity(period_ns));
         }
         if entry.stale {
             // The stale run ends here; do not join the line across it.
@@ -406,6 +408,28 @@ mod tests {
             .collect();
         assert_eq!(gaps, vec![false, false, false, false, false, true, false]);
         assert!(v.samples.iter().all(|s| s.is_valid()));
+    }
+
+    /// crw.83: a series first sampled at 1 s (62 slots) and then at 10 Hz keeps 60 s, not the
+    /// last 6.2 s.
+    #[test]
+    fn faster_rate_grows_ring_to_60_s() {
+        let id = sid(0, MetricId::CPU_TOTAL);
+        let mut store = SeriesStore::new();
+        for i in 0..3u64 {
+            store.append(id, i * SEC, 1.0, SEC, SampleFlags::VALID);
+        }
+        let start = 3 * SEC;
+        for i in 0..1200u64 {
+            store.append(id, start + i * 100 * MS, 2.0, 100 * MS, SampleFlags::VALID);
+        }
+        let set = store.publish();
+        let v = view(&set, id);
+        assert_eq!(v.samples.len(), 602);
+        let first = v.samples.first().map(|s| s.t_ns).unwrap_or_default();
+        let last = v.samples.last().map(|s| s.t_ns).unwrap_or_default();
+        assert_eq!(last - first, 601 * 100 * MS, "60.1 s of history");
+        assert_eq!(v.version, 1203);
     }
 
     #[test]
