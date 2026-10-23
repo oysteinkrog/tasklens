@@ -1,66 +1,118 @@
 # tasklens
 
-tasklens is a task manager for Linux, written in Rust with the GPUI UI framework. It shows
-processes, live performance graphs for each device, services, startup apps, network
-connections and system information.
+<div align="center">
+
+[![CI](https://github.com/oysteinkrog/tasklens/actions/workflows/ci.yml/badge.svg)](https://github.com/oysteinkrog/tasklens/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+</div>
+
+A task manager for Linux, written in Rust with the GPUI UI framework. It shows processes,
+live graphs for every CPU, GPU, disk, network adapter, fan and battery, systemd services,
+startup apps and network connections in one window.
 
 ![The Performance tab on the Overview page](docs/img/overview.png)
 
-It is a personal project, built first for one desktop: CachyOS, KDE Plasma 6 on Wayland, an
-NVIDIA GPU and three monitors. It may work elsewhere, but that is the only setup it is tested
-on. UI and rendering speed come first in every design choice.
+**Install on Arch Linux** (there is no binary release yet):
 
-## What it does
+```sh
+git clone https://github.com/oysteinkrog/tasklens && cd tasklens/packaging && makepkg -si
+```
 
-The main window has six tabs.
+## TL;DR
 
-| Tab | What it shows |
+**The problem.** On a Linux desktop, the job of one Windows Task Manager is split across
+several tools: one for processes, one for performance graphs, `systemctl` for services, and
+a terminal for sockets and process priority. The graphical ones that exist leave out process
+actions such as priority and CPU affinity, and most show nothing about what happened a few
+minutes ago.
+
+**The solution.** tasklens puts all of it in one native window built to draw at 144 Hz, and
+it records history so you can look back at what used the CPU or memory.
+
+### Why use tasklens?
+
+| Feature | What it does |
 |---|---|
-| Processes | A process tree grouped by app, with columns you can pick, a filter box and actions: end, send a signal, set priority and CPU affinity, open Properties (threads, file descriptors, memory maps, security, environment, strings). A History mode shows the last 10 minutes even when recording is off. |
-| Performance | A device sidebar with live mini graphs, an Overview page, and a page for each CPU, memory, disk, network adapter, GPU, fan and battery |
-| Services | systemd system and user units, with a Properties window that includes the unit's journal |
-| Startup Apps | XDG autostart entries and systemd user units, which you can enable and disable |
-| Connections | TCP and UDP sockets, IPv4 and IPv6, with the owning process |
-| Information | CPU, board, OS and GPU details |
+| **Process actions** | End a process or a whole tree, send any signal, set priority, I/O priority and CPU affinity, with `pkexec` for processes you do not own |
+| **Process history** | A History mode shows the process table as it was at any point in the last 10 minutes, even with recording turned off |
+| **Overview page** | CPU, memory, GPU, disk and network charts on one screen, each box with its own layout (per-core rows, one chart per GPU engine, a CPU power strip) |
+| **Device pages** | One page each for every CPU, memory, disk, network adapter, GPU, fan and battery |
+| **Services and startup** | systemd system and user units with their journal, plus XDG autostart entries you can turn on and off |
+| **Connections** | TCP and UDP sockets, IPv4 and IPv6, with the process that owns each one |
+| **Low-memory rescue** | `tasklens-watch` runs as a systemd user service (one switch in Settings) and opens a small rescue window when memory runs out, so you can kill the culprit before the OOM killer picks |
+| **Tray graphs** | Tray icons that draw a live CPU, memory, disk, network or GPU graph |
 
-The Overview page puts CPU, memory, GPU, disk and network charts on one screen. You can
-rearrange its boxes, and each box has its own layout choices (for example, per-core rows or a
-power draw strip in the CPU box).
+## Quick example
 
-Other parts:
+```sh
+tasklens                          # open on the last used tab
+tasklens --tab performance        # open on the Performance tab
+tasklens --select-pid 1234        # open Processes with PID 1234 selected
+tasklens --start-minimized        # start hidden in the tray (for autostart)
+tasklens --low-memory             # open the low-memory rescue window directly
+```
 
-- Detached graph windows and a small always-on-top performance window.
-- Tray icons that draw a live graph.
-- A low-memory watcher (`tasklens-watch`) that runs as a systemd user service and opens a
-  rescue window when memory runs low.
-- A file handle search across processes.
-- One instance at a time: starting tasklens again brings up the open window.
-- Command-line options, for example `--tab services` or `--select-pid 1234`. Run
-  `tasklens --help` for the list.
+Starting `tasklens` while it is already running brings the open window to the front instead of
+starting a second copy.
 
-## Requirements
+## Design principles
 
-- Linux on x86_64. It reads `/proc`, `/sys` (cgroup v2, hwmon, cpufreq, block and net
-  devices) and netlink `sock_diag` directly.
-- A Vulkan driver. GPUI draws through wgpu.
-- Native Wayland is the supported path. X11 is best effort.
-- D-Bus for some features: systemd (Services), udisks2 (disk details and SMART), UPower
-  (batteries), NetworkManager (network details) and KWin (window list). Without one of these
-  services, the views that use it lose that data.
-- polkit and `pkexec` for actions on other users' processes and for the setup steps below.
-- NVIDIA GPUs: `nvidia-utils` for NVML. NVML is loaded only in a separate `tl-gpu-probe`
-  process, so a driver fault cannot crash the app.
-- AMD and Intel GPUs: read from sysfs and DRM fdinfo. This path is not tested on real hardware.
-- The package owner shown in process Properties comes from `pacman`, so it works on Arch-based
-  systems only.
+1. **The UI never waits on the system.** Collectors run on their own runtime in the engine.
+   The UI only reads the latest snapshot, so a slow `/proc` read or a hung D-Bus service
+   cannot freeze a frame.
+2. **Fast drawing comes first.** Every chart and table is drawn on the GPU through GPUI. The
+   targets are in the next section, and every change is checked against them with `--bench`.
+3. **Collect only what is on screen.** Each collector runs at the rate the visible view needs
+   and stops when nothing shows its data.
+4. **Risky code runs in its own process.** NVML (the NVIDIA library) runs only in
+   `tl-gpu-probe`, and root actions run only in `tl-helper` through `pkexec`. A crash in either
+   does not take down the window.
+5. **No Tokio.** The engine uses the asupersync runtime, and `cargo xtask check-deps` fails the
+   build if Tokio or any crate outside the allowed list gets in.
 
-Some sensors need one-time root setup, which the Additional Setup window runs through `pkexec`:
-a udev rule that makes Intel RAPL energy counters readable (CPU power draw), and
-`sensors-detect` for board fan and temperature chips.
+### Speed targets
 
-## Install
+| Measure | Target |
+|---|---|
+| First frame after launch | under 200 ms |
+| UI thread CPU per frame, Performance tab with 32 core graphs at 144 Hz | under 2 ms |
+| Dropped frames while scrolling a 2,000-row table | none at 144 Hz |
+| Collection cost at default rates | under 2% of one core |
+| CPU use with the window hidden | under 0.3% of one core |
+| Memory | under 150 MB resident |
 
-There is no binary release and no crates.io package. Build it from source.
+Not all of these are met yet. See [Limitations](#limitations).
+
+## How tasklens compares
+
+The comparison is with Mission Center 1.2.0, the closest Linux app. The facts come from a
+read of its source, recorded in `docs/research/claude-missioncenter-inventory.md`.
+
+| Feature | tasklens | Mission Center 1.2.0 |
+|---|---|---|
+| UI toolkit | GPUI (GPU, Rust) | GTK 4 and libadwaita |
+| Process priority, I/O priority, CPU affinity | Yes | No |
+| End process tree | Yes | No |
+| Select several processes | Yes | No, one at a time |
+| Pick table columns | Yes | No, reorder only |
+| Look back at past process use | Yes, 10 minutes, plus optional recording | No |
+| Startup apps tab | Yes | No |
+| Service journal | Full journal in the unit's Properties | Last 5 messages |
+| Overview of all devices on one page | Yes | No |
+| Low-memory rescue window | Yes | No |
+| Flatpak | No | Yes |
+| Tested on many systems | No, one machine | Yes |
+
+**Use tasklens when** you want process control and history in one window on a KDE Plasma
+Wayland desktop and do not mind building from source.
+
+**Use Mission Center when** you want a packaged app that is tested on many distributions and
+desktops, or you use GNOME.
+
+## Installation
+
+There is no binary release and no crates.io package.
 
 ### Arch Linux and Arch-based distributions (makepkg)
 
@@ -70,40 +122,138 @@ desktop file, the polkit policy and the icon.
 ```sh
 git clone https://github.com/oysteinkrog/tasklens
 cd tasklens/packaging
-makepkg -si
+makepkg -si              # add --nocheck to skip the test suite
 ```
 
 It needs `base-devel`, `clang`, `pkgconf` and `rustup`. rustup picks Rust 1.98.1 from
-`rust-toolchain.toml`. The `check()` step runs the whole test suite; add `--nocheck` to skip it.
+`rust-toolchain.toml`.
 
 ### Any distribution (cargo)
 
 ```sh
+git clone https://github.com/oysteinkrog/tasklens
+cd tasklens
 cargo build --release --locked --workspace
 ./target/release/tasklens
 ```
 
-This build runs from `target/release/` and finds `tl-gpu-probe` next to it. The privileged
-helper and the setup script are looked up only under `/usr/lib/tasklens/`, and they need the
-polkit policy, so actions on other users' processes and the Additional Setup steps work only
-from the installed package.
+This build runs from `target/release/` and finds `tl-gpu-probe` next to it. The root helper
+and the setup script are looked up only under `/usr/lib/tasklens/` and need the polkit policy,
+so actions on other users' processes and the Additional Setup steps work only from the
+installed package.
 
-## Files
+## Quick start
+
+1. Install it with `makepkg -si` (see above) and start **tasklens** from the app launcher.
+2. Open **Performance** (Ctrl+2) and pick **Overview** at the top of the sidebar.
+3. Right-click a box title on the Overview to change its layout, or pick **Edit Layout** to
+   move and resize boxes.
+4. If CPU power draw or fans are missing, click **Additional setup…** in the banner that
+   says so and run the steps there. They ask for your password once through `pkexec`.
+5. To get the low-memory rescue window, open Settings (Ctrl+,) and turn on **Open rescue
+   window on critical memory pressure**. That installs and starts the
+   `tasklens-lowmem.service` user unit.
+6. Press **Ctrl+?** for the list of keyboard shortcuts.
+
+## Command-line options
+
+```
+Usage: tasklens [OPTIONS]
+
+      --start-minimized         Start hidden to the tray, or minimized when the tray is off
+      --low-memory              Open the low-memory rescue window
+      --watch-memory            Run the low-memory watcher (no window)
+      --tab <TAB>               Open on this tab [processes, performance, services, startup,
+                                connections, information]
+      --select-pid <PID>        Open Processes and select this process
+      --debug                   Show the Debug menu
+      --app-id <ID>             Run a separate instance with its own settings, state, cache
+                                and bus name (development builds)
+  -h, --help                    Print help
+  -V, --version                 Print version
+```
+
+### Keyboard shortcuts
+
+| Keys | Action |
+|---|---|
+| Ctrl+1 to Ctrl+6 | Go to a tab |
+| Ctrl+Tab, Ctrl+Shift+Tab | Next and previous tab |
+| Ctrl+F | Focus the filter box |
+| Ctrl+N | Run a command |
+| Ctrl+, | Settings |
+| Ctrl+Plus, Ctrl+Minus, Ctrl+0 | UI scale |
+| Ctrl+Shift+M | Performance mini window |
+| Ctrl+? | All shortcuts |
+| Ctrl+Q | Quit, even with the tray on |
+| Ctrl+Esc | Open tasklens from anywhere (KDE global shortcut, turned on in Settings) |
+
+## Configuration
+
+Settings are in `~/.config/tasklens/settings.toml`. The Settings window (Ctrl+,) writes the same
+file, so you rarely need to edit it. An excerpt:
+
+```toml
+schema_version = 1
+
+[general]
+start_tab = "processes"      # tab to open on
+
+[appearance]
+ui_scale_pct = 100
+heat_coloring = true         # colour busy cells in the process table
+heat_intensity_pct = 50
+
+[motion]
+animations = true
+smooth_graphs = true
+save_power_on_battery = true # fewer frames when on battery
+
+[units]
+network = "bits"             # or "bytes"
+
+[processes]
+interval_ms = 1000           # process table refresh
+mode = "grouped"             # group processes by app
+
+[performance]
+graph_range_s = 60           # seconds shown in each graph
+cpu_graph_mode = "per_core"
+cpu_secondary_graph = "power"
+```
 
 | Data | Path |
 |---|---|
 | Settings | `~/.config/tasklens/settings.toml` |
 | User themes | `~/.config/tasklens/themes.json` |
 | Window and table state | `~/.local/state/tasklens/state.toml` |
-| Logs and crash reports | `~/.local/state/tasklens/logs/`, `~/.local/state/tasklens/crash/` |
+| Logs | `~/.local/state/tasklens/logs/` |
+| Crash reports | `~/.local/state/tasklens/crash/` |
 
 The paths follow `XDG_CONFIG_HOME` and `XDG_STATE_HOME` when they are set.
 
-## How it is built
+## Architecture
 
-The engine and the UI are separate crates. The engine collects data on its own runtime
-(asupersync) and the UI reads the latest snapshot through a trait, so it never blocks on a
-system call.
+```
+  /proc  /sys  netlink         D-Bus: systemd, udisks2,          tl-gpu-probe
+  (tl-collect parsers)         UPower, NetworkManager, KWin      (only process that loads NVML)
+          │                               │                              │
+          └───────────────┬───────────────┴──────────────────────────────┘
+                          ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ tl-engine (asupersync runtime)                                      │
+  │   workers sample at the rate the visible view asks for              │
+  │   actions go through tl-ops, or tl-helper via pkexec for root       │
+  │   history written by tl-history                                     │
+  └─────────────────────────────────────────────────────────────────────┘
+                          │  latest snapshot, read without blocking
+                          ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ tl-ui (GPUI): tabs, charts, process table, themes                   │
+  └─────────────────────────────────────────────────────────────────────┘
+          │                         │                        │
+       tasklens (tl-app)      tray icons (tl-tray)   tasklens-watch (tl-watch)
+```
 
 | Crate | Role |
 |---|---|
@@ -119,32 +269,96 @@ system call.
 | `tl-tray` | Tray icons and their graphs |
 | `tl-watch` | The `tasklens-watch` low-memory watcher |
 
-`docs/ARCHITECTURE.md` has the design records (ADR-001 to ADR-017). `docs/DECISIONS.md` has
-the owner decisions, `docs/ui/` the UI specs and `docs/spec/` the feature specs.
+`docs/ARCHITECTURE.md` has the design records (ADR-001 to ADR-017), `docs/DECISIONS.md` the
+owner decisions, `docs/ui/` the UI specs and `docs/spec/` the feature specs.
 
-## Development
+## Troubleshooting
 
-Work is tracked as beads in `.beads/`, managed with the `br` tool. Each bead names its spec in
-`docs/`. `AGENTS.md` has the rules for commits, builds and tests.
+### No CPU power draw
+
+The Intel RAPL energy counters are readable only by root by default. Click **Additional setup…** in
+the banner and run the RAPL step. It installs a udev rule through `pkexec`.
+
+### No fan pages, or fans show no RPM
+
+The board's fan chip has no kernel driver loaded yet. Run the `sensors-detect` step in
+**Additional setup…**, then reboot or load the module it names.
+
+### No NVIDIA GPU page
+
+tasklens reads NVIDIA GPUs through NVML, which comes with `nvidia-utils`. Check that
+`nvidia-smi` works. If it does, look in `~/.local/state/tasklens/logs/` for `tl-gpu-probe`
+errors.
+
+### "Permission denied" when ending another user's process
+
+That action needs `tl-helper` and the polkit policy, which only the installed package has.
+Install with `makepkg -si` rather than running from `target/release/`.
+
+### The window does not open
+
+GPUI draws through Vulkan. Check that `vulkaninfo --summary` lists your GPU, and read the newest
+file in `~/.local/state/tasklens/logs/`.
+
+## Limitations
+
+- **Tested on one machine.** CachyOS, KDE Plasma 6 on Wayland, an NVIDIA GPU and three
+  monitors. X11 is best effort. AMD and Intel GPUs are read from sysfs and DRM fdinfo but not
+  tested on real hardware.
+- **x86_64 Linux only.**
+- **Speed targets not all met yet.** Open bugs in `.beads/` record UI thread CPU of about 9 ms
+  per frame in moving scenes (target 2 ms), and resident memory of about 155 MB (target 150 MB).
+- **No binary packages.** You build it yourself.
+- **Window position is not saved**, because Wayland does not allow it. Size and maximized
+  state are.
+- **Per-process power is an estimate.** Linux has no per-process power source, so the column is
+  off by default.
+- **Per-process network rates count TCP only.** UDP traffic is not attributed to processes.
+- **Package owner in process Properties uses `pacman`**, so it works on Arch-based systems
+  only.
+
+## FAQ
+
+### Does tasklens need root?
+
+No. It runs as your user. Root is needed only for actions on other users' processes and for the
+one-time setup steps, and those ask through `pkexec` each time.
+
+### Does it send any data over the network?
+
+Only when you click **Fetch** next to Public IP on the Information tab. That asks
+`api.ipify.org` (and `api6.ipify.org` for IPv6) and shows a notice first. Nothing else leaves
+the machine.
+
+### Does it work on GNOME, or on X11?
+
+It should start, but it is not tested there. The window list uses KWin, so that feature is
+missing on other desktops. Native Wayland is the supported path.
+
+### Why GPUI and not GTK or Qt?
+
+GPUI draws everything on the GPU, which is what the 144 Hz target with dozens of live charts
+needs. The reasoning is in `docs/ARCHITECTURE.md`.
+
+### How is it developed?
+
+Most of the code is written by AI coding agents (Claude and Codex) working from beads in
+`.beads/`, managed with the `br` tool. Each bead names its spec in `docs/`. The owner writes and
+approves the specs and decides held work. `AGENTS.md` has the rules for commits, builds and
+tests.
 
 ```sh
 cargo test --workspace
 cargo xtask check-deps    # fails if Tokio or a crate outside the allowed list gets in
 ```
 
-## Limitations
-
-- Tested on one machine only (KDE Plasma 6, Wayland, NVIDIA).
-- x86_64 only.
-- Window position is not saved, because Wayland does not allow it. Size and maximized state are.
-- The Processes power column is an estimate. Linux has no per-process power source, so the
-  column is off by default.
-- Per-process network rates count TCP only. UDP traffic is not attributed to processes.
-
 ## About Contributions
 
-> *About Contributions:* Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. I simply don't have the mental bandwidth to review anything, and it's my name on the thing, so I'm responsible for any problems it causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also have to worry about other "stakeholders," which seems unwise for tools I mostly make for myself for free. Feel free to submit issues, and even PRs if you want to illustrate a proposed fix, but know I won't merge them directly. Instead, I'll have Claude or Codex review submissions via `gh` and independently decide whether and how to address them. Bug reports in particular are welcome. Sorry if this offends, but I want to avoid wasted time and hurt feelings. I understand this isn't in sync with the prevailing open-source ethos that seeks community contributions, but it's the only way I can move at this velocity and keep my sanity.
+I don't merge outside pull requests. tasklens is a personal tool, and I don't have the time to
+review other people's code for it. Issues and bug reports are welcome. You can also open a pull
+request to show a proposed fix, but I won't merge it directly: an agent reviews it with `gh`,
+and I decide whether and how to make the change myself.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).
