@@ -2422,6 +2422,56 @@ mod summary {
         assert_eq!(after.2, before.2, "the memory chart built no geometry");
     }
 
+    /// UI-PRF-058: the page header shows its device's main value, the sidebar card's value, at
+    /// the right before the toggles, and draws it again on each new sample.
+    #[gpui_kit::test]
+    fn page_header_value_follows_the_card(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let publish = |r: &Rig, version: u64, value: f32| {
+            r.engine.publish_with(|s| {
+                let mut set = SeriesSet::default();
+                set.header.version = version;
+                set.series = Arc::from([Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(0),
+                        metric: MetricId::CPU_TOTAL,
+                    },
+                    version,
+                    period_ns: 1_000_000_000,
+                    samples: Arc::from([Sample::valid(1_000_000_000, value)]),
+                })]);
+                s.series = Arc::new(set);
+            });
+        };
+        publish(&r, 1, 8.0);
+        draw(r.vcx);
+        let header = r.vcx.debug_bounds("perf-page-header").expect("header");
+        let model = r.vcx.debug_bounds("perf-page-model").expect("model");
+        let toggles = r.vcx.debug_bounds("perf-page-toggles").expect("toggles");
+        let narrow = r.vcx.debug_bounds("perf-page-value").expect("header value");
+        assert!(narrow.left() >= model.right(), "{narrow:?} after {model:?}");
+        assert_eq!(
+            toggles.left() - narrow.right(),
+            px(8.),
+            "sp4 before the toggles"
+        );
+        assert!(narrow.top() >= header.top() && narrow.bottom() <= header.bottom());
+
+        // "100.0%" is wider than "8.0%": the value follows the new sample.
+        publish(&r, 2, 100.0);
+        draw(r.vcx);
+        let wide = r.vcx.debug_bounds("perf-page-value").expect("header value");
+        assert!(
+            wide.size.width > narrow.size.width,
+            "{wide:?} after {narrow:?}"
+        );
+        assert_eq!(
+            wide.right(),
+            narrow.right(),
+            "right-aligned before the toggles"
+        );
+    }
+
     fn right_click(cx: &mut VisualTestContext, at: gpui_kit::Point<gpui_kit::Pixels>) {
         cx.simulate_event(MouseDownEvent {
             button: MouseButton::Right,

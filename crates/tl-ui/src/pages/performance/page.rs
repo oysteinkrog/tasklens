@@ -14,7 +14,8 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
     FontWeight, Global, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
+    canvas, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
@@ -23,6 +24,7 @@ use tl_model::validity::Validity;
 
 use super::actions::PerfShowMiniWindow;
 use super::aggregate::{AggregateDiskPage, AggregateGpuPage};
+use super::card::CardValue;
 use super::cpu::CpuPage;
 use super::details::{KeyValueModel, Template, render_details};
 use super::disk::DiskPage;
@@ -30,13 +32,16 @@ use super::gpu::GpuPage;
 use super::memory::MemoryPage;
 use super::net::NetPage;
 use super::sensors::{BatteryPage, FanPage};
+use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind, DeviceRow};
-use crate::components::icons::icon;
+use crate::chart::{ChartView, NetFormat};
+use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
+use crate::pages::performance::overview::parts::title_value_style;
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -415,6 +420,7 @@ impl DevicePageFrame<'_> {
                     .child(word),
             )
             .child(model_text(model, key, m, theme, window, cx))
+            .children(header_value(key, window, cx))
             .child(
                 h_flex()
                     .debug_selector(|| "perf-page-toggles".into())
@@ -486,6 +492,78 @@ impl DevicePageFrame<'_> {
             .id(ElementId::Name(SharedString::from(key.0.clone())))
             .size_full()
             .into_any_element()
+    }
+}
+
+/// The sidebar whose cards give the page headers their values (UI-PRF-058). Set by
+/// `PerformancePage::new`.
+pub struct PerfSidebar(pub WeakEntity<DeviceSidebar>);
+
+impl Global for PerfSidebar {}
+
+/// The main value at the right of the page header: the value of the device's sidebar card, so
+/// the two always agree. `None` while the device has no card.
+fn header_value(key: &DeviceKey, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    let sidebar = cx.try_global::<PerfSidebar>()?.0.upgrade()?;
+    let chart = sidebar
+        .read(cx)
+        .cards()
+        .iter()
+        .find(|c| c.row.key == *key && !c.is_removing())?
+        .chart
+        .clone();
+    let id = ElementId::NamedChild(
+        std::sync::Arc::new(ElementId::Name(SharedString::from(key.0.clone()))),
+        "perf-page-value".into(),
+    );
+    let view = window.use_keyed_state(id, cx, |_, cx| HeaderValue::new(chart.clone(), cx));
+    view.update(cx, |v, cx| v.set_chart(chart, cx));
+    Some(view.into_any_element())
+}
+
+/// The page header value, `t_lg` 600 `tnum` in the card value colours (UI-PRF-058). A view of
+/// its own that draws again on each new sample of the card's chart, which is not in the page's
+/// element tree.
+struct HeaderValue {
+    chart: Entity<ChartView>,
+    _observe: Subscription,
+}
+
+impl HeaderValue {
+    fn new(chart: Entity<ChartView>, cx: &mut Context<Self>) -> Self {
+        Self {
+            _observe: cx.observe(&chart, |_, _, cx| cx.notify()),
+            chart,
+        }
+    }
+
+    /// Follows a card that got a new chart. The page draws this view in the same frame.
+    fn set_chart(&mut self, chart: Entity<ChartView>, cx: &mut Context<Self>) {
+        if self.chart != chart {
+            *self = Self::new(chart, cx);
+        }
+    }
+}
+
+impl Render for HeaderValue {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let m = *metrics(cx);
+        let theme = current(cx);
+        let el = div()
+            .debug_selector(|| "perf-page-value".into())
+            .flex()
+            .flex_none()
+            .items_center();
+        let Some(v) = CardValue::of(self.chart.read(cx), NetFormat::of(cx)) else {
+            return el;
+        };
+        if v.validity == Validity::Restricted {
+            return el.child(icon(TlIcon::Lock, m.icon.md, theme.text_secondary));
+        }
+        el.map_text(title_value_style(&m))
+            .whitespace_nowrap()
+            .text_color(v.color(theme))
+            .child(v.text)
     }
 }
 

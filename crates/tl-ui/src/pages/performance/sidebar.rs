@@ -1113,6 +1113,15 @@ impl DeviceSidebar {
         }
     }
 
+    /// Tells the first card that it sits under the edit button (UI-PRF-058).
+    fn sync_card_top(&self, cx: &mut App) {
+        let top = self.cards.iter().position(|c| !c.is_removing());
+        for (i, card) in self.cards.iter().enumerate() {
+            card.view
+                .update(cx, |view, cx| view.set_top(top == Some(i), cx));
+        }
+    }
+
     /// Rebuilds the chart of each card whose scale input moved, or of every card with `all`.
     fn sync_charts(&mut self, snap: &Snapshot, all: bool, cx: &mut App) {
         let theme = current(cx).clone();
@@ -1757,6 +1766,7 @@ impl Render for DeviceSidebar {
             self.cards_focused = focused;
             self.sync_card_focus(focused, cx);
         }
+        self.sync_card_top(cx);
 
         let m = *metrics(cx);
         let theme = current(cx).clone();

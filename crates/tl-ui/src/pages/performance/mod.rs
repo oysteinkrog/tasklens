@@ -447,6 +447,7 @@ impl PerformancePage {
         cx: &mut Context<Self>,
     ) -> Self {
         let sidebar = cx.new(|cx| sidebar::DeviceSidebar::new(hub.clone(), demand.clone(), cx));
+        cx.set_global(page::PerfSidebar(sidebar.downgrade()));
         let sidebar_focus = sidebar.read(cx).focus.clone();
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&sidebar, Self::on_sidebar));

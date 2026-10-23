@@ -31,6 +31,7 @@ use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::cpu::CpuPage;
 use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui::pages::performance::page::PerfSidebar;
 use tl_ui::pages::performance::sidebar::DeviceSidebar;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
@@ -217,6 +218,8 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
     let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
     let sidebar = cx.new(|cx| DeviceSidebar::new(hub.clone(), demand.clone(), cx));
+    // The page header reads its value from the sidebar card, as in `PerformancePage`.
+    cx.set_global(PerfSidebar(sidebar.downgrade()));
     let (view, mut keep): (AnyView, Vec<gpui_kit::AnyEntity>) = match page {
         Page::Overview => {
             let page = cx.new(|cx| {

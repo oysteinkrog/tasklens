@@ -1186,7 +1186,8 @@ mod sidebar {
     }
 
     /// At the least nav_width (180) and on the narrower edit-mode cards the graph gives way, so
-    /// the widest percent ("100.0%") and every other value fit the text column.
+    /// the widest percent ("100.0%") and every other value fit the text column. The device icon
+    /// stays (UI-PRF-058).
     #[gpui_kit::test]
     fn values_fit_narrow_cards(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
@@ -1201,24 +1202,28 @@ mod sidebar {
 
         let value = prepared(&mut r, "cpu").value.expect("value");
         assert_eq!(&*value.text, "100.0%");
-        let graph_w = prepared(&mut r, "cpu").graph_w;
-        assert!(
-            graph_w > px(0.) && graph_w < px(116.),
-            "the graph narrows: {graph_w:?}"
+        // 164 − 24 (icon and gap) − 2 − 12 − 8 − 80 (the least text column) leaves 38, under
+        // the 40 px least graph.
+        assert_eq!(
+            prepared(&mut r, "cpu").graph_w,
+            px(0.),
+            "the graph gives way to the icon"
         );
-        assert!(
-            !prepared(&mut r, "cpu").icon,
-            "no device icon when a graph would not fit next to it"
-        );
+        for key in keys(&mut r) {
+            if key != OVERVIEW {
+                assert!(prepared(&mut r, &key).icon, "{key} keeps its device icon");
+            }
+        }
         assert_values_inside(&mut r, "nav_width 180");
 
         r.host_w.set(252.);
         r.vcx.update(|window, _| window.refresh());
         draw(r.vcx);
-        // 236 − 24 (icon and gap) − 2 − 12 − 8 − 90 ("CPU", sp3, "100.0%" in one row).
+        // 236 − 24 (icon and gap) − 2 − 12 − 8 − 90 ("CPU", sp3, "100.0%" in one row) − 30
+        // (the edit button and sp3: the CPU card is the top card).
         assert_eq!(
             prepared(&mut r, "cpu").graph_w,
-            px(100.),
+            px(70.),
             "graph at 252 next to the icon and the inline value"
         );
         assert!(prepared(&mut r, "cpu").icon, "device icon at 252");
@@ -1251,6 +1256,62 @@ mod sidebar {
             cpu.icon && cpu.layout.value_inline,
             "the CPU card keeps it inline"
         );
+    }
+
+    /// UI-PRF-058: the top card's heading row ends sp3 before the sidebar's edit button over its
+    /// top right corner, so its value never runs under the button. Here the CPU card is first.
+    #[gpui_kit::test]
+    fn top_card_value_clear_of_edit_button(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
+        for w in [180., 252., 400.] {
+            r.host_w.set(w);
+            r.vcx.update(|window, _| window.refresh());
+            draw(r.vcx);
+            publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
+            draw(r.vcx);
+            assert_eq!(keys(&mut r)[0], "cpu");
+            let button = r
+                .vcx
+                .debug_bounds("TlButton-perf-edit-open")
+                .expect("edit button");
+            for line in ["heading", "value"] {
+                for i in 0..2 {
+                    let id = sel(format!("perf-card-row:cpu:{line}:{i}"));
+                    let Some(row) = r.vcx.debug_bounds(id) else {
+                        continue;
+                    };
+                    let apart = row.right() + px(6.) <= button.left()
+                        || row.top() >= button.bottom()
+                        || row.bottom() <= button.top();
+                    assert!(
+                        apart,
+                        "width {w}: {line} row {i} {row:?}, button {button:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A card that is not first leaves no room for the edit button: moved below Memory, the CPU
+    /// card gets its 100 px graph back next to the inline value.
+    #[gpui_kit::test]
+    fn second_card_keeps_full_heading_row(cx: &mut TestAppContext) {
+        let mut settings = with_order(&["memory", "cpu"]);
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
+        r.host_w.set(252.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
+        draw(r.vcx);
+        assert_eq!(keys(&mut r)[..2], ["memory", "cpu"]);
+        let cpu = prepared(&mut r, "cpu");
+        assert_eq!(cpu.graph_w, px(100.));
+        assert!(cpu.layout.value_inline);
     }
 
     /// The widest IEC rate before the unit steps up, "1023.9 KiB/s", fits a network card at the
@@ -1391,6 +1452,12 @@ mod sidebar {
         draw(r.vcx);
         let before = prepared(&mut r, "cpu");
         assert_eq!(before.graph_w, px(0.), "no graph: {before:?}");
+        assert!(before.icon, "the device icon stays at 200%");
+        let icon = r
+            .vcx
+            .debug_bounds("perf-card-icon")
+            .expect("card icon at 200%");
+        assert_eq!(icon.size.width, px(32.), "i_md at 200%");
         assert_eq!(&*before.value.expect("value").text, "30.0%");
         let cpu_renders = |r: &mut Rig| {
             card_counts(r)
