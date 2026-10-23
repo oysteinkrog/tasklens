@@ -804,6 +804,78 @@ mod delegate {
         );
     }
 
+    /// A Network cell with per-process rates paints the rate, "0 Mbps" for a process with none,
+    /// and no number while the attribution warms up (tasklens-pdu.66).
+    #[gpui_kit::test]
+    fn network_cell_draws_value(cx: &mut TestAppContext) {
+        use gpui_kit::base::Root;
+        use tl_model::validity::ProcessField;
+        use tl_ui::table::cells::{record_painted_texts, take_painted_texts};
+
+        setup(cx);
+        let mut busy = record(10, "node", ProcFlags::empty());
+        busy.net_rx_bps = 250_000.0;
+        busy.net_tx_bps = 37_500.0;
+        let idle = record(20, "am", ProcFlags::empty());
+        let mut waiting = record(30, "claude", ProcFlags::empty());
+        for f in [ProcessField::NetRx, ProcessField::NetTx] {
+            waiting.validity.set(f, Validity::WarmingUp);
+        }
+        let rows = vec![
+            row(NodeId::Process(key(10)), 0, Some(0), None),
+            row(NodeId::Process(key(20)), 0, Some(1), None),
+            row(NodeId::Process(key(30)), 0, Some(2), None),
+        ];
+        let snap = snapshot(1, rows, Vec::new(), vec![busy, idle, waiting]);
+        let slot = Rc::new(std::cell::RefCell::new(None));
+        let keep = Rc::clone(&slot);
+        let handle = cx.add_window(move |window, cx| {
+            let d =
+                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
+            *keep.borrow_mut() = Some(table.clone());
+            Root::new(table, window, cx)
+        });
+        let table = slot.borrow().clone().expect("table");
+        let vcx = &mut VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        record_painted_texts();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let painted = take_painted_texts();
+        let body = vcx.debug_bounds("TlTreeTable-body").expect("table body");
+
+        let (drawn, want) = vcx.update(|_, cx| {
+            let t = table.read(cx);
+            let layout = t.columns();
+            let mut drawn: Vec<_> = painted
+                .iter()
+                .filter(|(bounds, _)| {
+                    body.contains(&bounds.center())
+                        && layout.column_at_x(bounds.center().x) == Some(ColumnId::Network)
+                })
+                .collect();
+            drawn.sort_by(|a, b| f32::from(a.0.origin.y).total_cmp(&f32::from(b.0.origin.y)));
+            let drawn: Vec<String> = drawn.iter().map(|(_, text)| text.to_string()).collect();
+            let want: Vec<_> = (0..3)
+                .map(|i| text(&t.delegate, i, ColumnId::Network))
+                .collect();
+            (drawn, want)
+        });
+        // 287 500 B/s is 2.3 Mbps.
+        assert_eq!(want[0], ("2.3 Mbps".to_string(), Validity::Valid));
+        assert_eq!(want[1], ("0 Mbps".to_string(), Validity::Valid));
+        assert_eq!(want[2].1, Validity::WarmingUp);
+        assert_eq!(
+            drawn,
+            ["2.3 Mbps", "0 Mbps"],
+            "the two current rows paint a number, the warming-up row paints none"
+        );
+        assert!(
+            vcx.debug_bounds("TlCell-glyph").is_some(),
+            "the warming-up Network cell draws its glyph"
+        );
+    }
+
     fn gpu(n: u16, pci: &str, name: &str, present: bool) -> DeviceEntry {
         DeviceEntry {
             idx: DeviceIdx(n),
