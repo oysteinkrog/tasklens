@@ -48,7 +48,8 @@ use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
 use super::mem_box::MeterRow;
 use super::parts::{
     ChartSettings, GridFit, MIN_CHART_H, SPARK_GRID, arrange_grid, arrange_min_h, box_chart,
-    box_frame, chart_section_versions, class_probe, grid_cells, meter_fits, spark_chart, spark_row,
+    box_frame, chart_section_versions, class_probe, edit_chrome, grid_cells, meter_fits,
+    spark_chart, spark_row,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -1573,6 +1574,7 @@ impl Render for GpuBox {
             pick(|s| &s.value),
             SharedString::default(),
             body,
+            edit_chrome(cx),
             &m,
             &theme,
         )

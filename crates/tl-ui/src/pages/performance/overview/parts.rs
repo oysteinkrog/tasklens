@@ -640,9 +640,31 @@ pub fn opens_device(el: Div, target: Option<DeviceKey>) -> Div {
     }
 }
 
+/// Whether Edit Layout mode is on, so every box frame leaves the right end of its title line to
+/// the gear and the hide button (D-029). Set by the page when the mode turns on or off.
+#[derive(Clone, Copy, Default)]
+pub struct EditChrome(pub bool);
+
+impl gpui_kit::Global for EditChrome {}
+
+/// The right end of a title line that Edit Layout keeps free for the gear and the hide button,
+/// logical px before `ui_scale`: the 16 px hide button, a 4 px gap, the gear button (24 px) and a
+/// 4 px gap.
+pub const EDIT_TITLE_RESERVE: f32 = 48.;
+
+/// Whether the box frames reserve the edit controls' space now.
+pub fn edit_chrome(cx: &App) -> bool {
+    cx.try_global::<EditChrome>().is_some_and(|e| e.0)
+}
+
 /// The debug selector of a box's title row: the box id with `-title`.
 pub fn title_row_id(box_id: &str) -> String {
     format!("{box_id}-title")
+}
+
+/// The debug selector of a box's headline value in the title row: the box id with `-title-value`.
+pub fn title_value_id(box_id: &str) -> String {
+    format!("{box_id}-title-value")
 }
 
 /// The debug selector of the title tab inset into a box's top border.
@@ -682,10 +704,17 @@ pub fn box_frame(
     value: SharedString,
     line: SharedString,
     body: AnyElement,
+    edit: bool,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> Div {
     let accent = box_accent(id, theme);
+    // The title value and summary end before the edit controls (D-029).
+    let title_pad_right = if edit {
+        (px(EDIT_TITLE_RESERVE * m.ui_scale) - m.sp[5]).max(px(0.))
+    } else {
+        px(0.)
+    };
     let draws_time_axis = BoxKind::from_frame_id(id) != Some(BoxKind::TopProcs);
     let mut title_el = div()
         .debug_selector(move || title_tab_id(id))
@@ -715,6 +744,7 @@ pub fn box_frame(
         .child(line);
     *line_el.text_style() = t_sm(m);
     let mut value_el = div()
+        .debug_selector(move || title_value_id(id))
         .flex_none()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
@@ -739,6 +769,7 @@ pub fn box_frame(
                 .gap(m.sp[4])
                 .h(px(TITLE_ROW * m.ui_scale))
                 .mx(m.sp[5])
+                .pr(title_pad_right)
                 .child(title_el)
                 .child(line_el)
                 .child(value_el),

@@ -43,7 +43,7 @@ use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_box::ROW_LABEL_W;
 use super::parts::{
     ChartSettings, GridFit, SPARK_GRID, arrange_grid, box_chart, box_frame, chart_section_versions,
-    class_probe, grid_cells, opens_device, spark_chart,
+    class_probe, edit_chrome, grid_cells, opens_device, spark_chart,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -1233,6 +1233,7 @@ impl Render for DiskBox {
             SharedString::default(),
             SharedString::default(),
             body,
+            edit_chrome(cx),
             &m,
             &theme,
         )

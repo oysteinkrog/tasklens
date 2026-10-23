@@ -25,6 +25,7 @@ use smallvec::{SmallVec, smallvec};
 
 use super::OverviewPage;
 use super::layout::{BoxKind, BoxSpec, OverviewLayout, PlacedBox, Placement, RowSpec};
+use super::parts::EditChrome;
 use super::splitter::{Drag, Target, round_weights, set_weights};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::focus::TlFocusRing;
@@ -519,6 +520,7 @@ impl OverviewPage {
     ) {
         if self.edit.is_none() {
             self.edit = Some(EditState::new(cx));
+            self.set_edit_chrome(true, cx);
             self.notify(cx);
         }
         window.focus(&self.focus, cx);
@@ -537,7 +539,22 @@ impl OverviewPage {
         if edit.focused(window).is_some() {
             window.focus(&self.focus, cx);
         }
+        self.set_edit_chrome(false, cx);
         self.notify(cx);
+    }
+
+    /// Tells the box frames whether the edit controls take the right end of the title line, and
+    /// redraws every box, which only re-renders for its own changes otherwise.
+    fn set_edit_chrome(&self, on: bool, cx: &mut Context<Self>) {
+        cx.set_global(EditChrome(on));
+        self.cpu.update(cx, |_, cx| cx.notify());
+        self.mem.update(cx, |_, cx| cx.notify());
+        self.gpu.update(cx, |_, cx| cx.notify());
+        self.disk.update(cx, |_, cx| cx.notify());
+        self.net.update(cx, |_, cx| cx.notify());
+        if let Some(procs) = &self.procs {
+            procs.update(cx, |_, cx| cx.notify());
+        }
     }
 
     /// `PerfOverviewResetLayout`: the default layout, saved; the mode stays on.

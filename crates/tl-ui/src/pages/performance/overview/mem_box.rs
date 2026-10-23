@@ -37,7 +37,7 @@ use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::parts::{
     ChartSettings, Meter, SPARK_GRID, SPARK_W, box_chart, box_frame, chart_section_versions,
-    class_probe, spark_chart,
+    class_probe, edit_chrome, spark_chart,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -1081,6 +1081,7 @@ impl Render for MemBox {
             self.value.clone(),
             SharedString::default(),
             body,
+            edit_chrome(cx),
             &m,
             &theme,
         )

@@ -5371,6 +5371,39 @@ mod page {
         assert!((w - 0.4 * body).abs() <= 1.5, "chart {w} of {body}");
     }
 
+    /// UI-PRF-019, D-029: in Edit Layout mode the title value ends before the gear and the hide
+    /// button of every box, at both smoke sizes.
+    #[gpui_kit::test]
+    fn overview_edit_title_no_overlap(cx: &mut TestAppContext) {
+        for (w, h) in [(1920., 1200.), (1280., 800.)] {
+            let mut r = open_rooted(cx, true, w, h);
+            draw(r.vcx);
+            r.edit_layout();
+            draw(r.vcx);
+            let mut checked = 0;
+            for kind in BoxKind::ALL {
+                let box_id = format!("perf-overview-box-{}", kind.key());
+                let value_id: &'static str = Box::leak(
+                    tl_ui::pages::performance::overview::parts::title_value_id(&box_id)
+                        .into_boxed_str(),
+                );
+                let Some(value) = r.vcx.debug_bounds(value_id) else {
+                    continue;
+                };
+                let gear = r.bounds_of(gear_id(kind));
+                let hide = r.bounds_of(hide_button_id(kind));
+                for (name, ctl) in [("gear", gear), ("hide", hide)] {
+                    assert!(
+                        value.right() <= ctl.left(),
+                        "{w}x{h} {kind:?}: value {value:?} overlaps {name} {ctl:?}"
+                    );
+                }
+                checked += 1;
+            }
+            assert!(checked >= 3, "{w}x{h}: only {checked} boxes checked");
+        }
+    }
+
     #[gpui_kit::test]
     fn overview_box_reset_and_gear(cx: &mut TestAppContext) {
         let mut r = open_rooted(cx, true, 1200., 900.);

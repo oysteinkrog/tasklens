@@ -35,7 +35,7 @@ use super::layout::{Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_
 use super::parts::{
     ChartSettings, CoreBars, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, arrange_grid,
     box_chart, box_frame, chart_section_versions, class_probe, core_bars_layout, core_sparks,
-    grid_cells, is_wide, spark_chart, width_probe,
+    edit_chrome, grid_cells, is_wide, spark_chart, width_probe,
 };
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
@@ -1183,6 +1183,7 @@ impl Render for CpuBox {
             self.value.clone(),
             self.line.clone(),
             body,
+            edit_chrome(cx),
             &m,
             &theme,
         )

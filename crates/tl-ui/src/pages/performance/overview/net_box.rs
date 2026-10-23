@@ -45,7 +45,7 @@ use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::parts::{
     ChartSettings, GridFit, arrange_grid, box_chart, box_frame, chart_section_versions,
-    class_probe, grid_cells,
+    class_probe, edit_chrome, grid_cells,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -1416,6 +1416,7 @@ impl Render for NetBox {
             SharedString::default(),
             self.adapter.clone(),
             body,
+            edit_chrome(cx),
             &m,
             &theme,
         )
