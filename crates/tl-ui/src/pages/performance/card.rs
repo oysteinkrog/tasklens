@@ -229,6 +229,9 @@ pub struct CardLines {
     pub line2: SharedString,
     /// Line 2 in `accent`: a connected interface's rate (R-055).
     pub line2_accent: bool,
+    /// Line 2 stays on one row, cut in the middle when it is too long: a disk's model
+    /// (tasklens-crw.75 leader decision, over the UI-PRF-011 2-row rule). The tooltip has it whole.
+    pub line2_one_row: bool,
     /// The full line 1; network cards use the adapter name and add the NetworkManager
     /// connection on a second line.
     pub tooltip: Option<SharedString>,
@@ -295,6 +298,7 @@ pub fn update_card_lines(
     changed |= keep_or_set(&mut lines.line2, scratch);
     changed |= set_if_changed(&mut lines.line2_locks, &locks);
     changed |= set_if_changed(&mut lines.line2_accent, &connected);
+    changed |= set_if_changed(&mut lines.line2_one_row, &(input.kind == DeviceKind::Disk));
     changed |= set_if_changed(&mut lines.disconnected, &disconnected);
 
     let net_names = (input.kind == DeviceKind::Net).then(|| net_names(input));
@@ -960,7 +964,8 @@ pub fn card_text_width(card_w: Pixels, graph_w: Pixels, m: &UiMetrics) -> Pixels
 
 /// Lays out the card text in a column `text_w` wide (UI-PRF-011). Each line wraps at spaces to
 /// at most 2 rows, and what does not fit row 2 is cut in the middle ([`middle_ellipsis`]). A
-/// line whose first word does not fit is cut in the middle on one row. The value goes `gap`
+/// line whose first word does not fit is cut in the middle on one row, and so is line 2 when
+/// [`CardLines::line2_one_row`] is set. The value goes `gap`
 /// after the last heading row when `value_w` fits there, else on a row of its own, and on 2 rows
 /// (number, then unit) when it is wider than `text_w`; a value is never cut. `measure` returns the width of a string in a card font; `lock_w` is the width of
 /// one lock icon.
@@ -976,6 +981,7 @@ pub fn card_text_layout(
         &lines.heading,
         &[],
         CardFont::Heading,
+        true,
         text_w,
         lock_w,
         measure,
@@ -989,6 +995,7 @@ pub fn card_text_layout(
         &lines.line1,
         &lines.line1_locks,
         CardFont::Detail,
+        true,
         text_w,
         lock_w,
         measure,
@@ -997,6 +1004,7 @@ pub fn card_text_layout(
         &lines.line2,
         &lines.line2_locks,
         CardFont::Detail,
+        !lines.line2_one_row,
         text_w,
         lock_w,
         measure,
@@ -1040,12 +1048,13 @@ fn space_breaks(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
         })
 }
 
-/// `text` in at most 2 rows of `max` (see [`card_text_layout`]). A lock at the end of the text
-/// belongs to the last row.
+/// `text` in at most 2 rows of `max`, or 1 row when `wrap` is false (see [`card_text_layout`]).
+/// A lock at the end of the text belongs to the last row.
 fn wrap_line(
     text: &SharedString,
     locks: &[u16],
     font: CardFont,
+    wrap: bool,
     max: Pixels,
     lock_w: Pixels,
     measure: &mut impl FnMut(CardFont, &str) -> Pixels,
@@ -1060,9 +1069,10 @@ fn wrap_line(
             cut: false,
         };
     }
-    // The widest row 1 that ends before a run of spaces; row 2 starts after the run.
+    // The widest row 1 that ends before a run of spaces; row 2 starts after the run. A line
+    // that does not wrap has no break, so it is cut on one row.
     let mut best = None;
-    for (end, next) in space_breaks(text) {
+    for (end, next) in space_breaks(text).take_while(|_| wrap) {
         let w = measure(font, &text[..end]) + lock_w * lock_count(locks, 0, next) as f32;
         if w > max {
             break;
@@ -3024,5 +3034,45 @@ mod tests {
         assert!(l.line2.cut);
         assert_eq!(&last.locks[..], [last.text.len() as u16]);
         assert!(mono(CardFont::Detail, &last.text) + px(2.) <= px(14.));
+    }
+
+    #[test]
+    fn card_text_layout_keeps_a_disk_model_on_one_row() {
+        // tasklens-crw.75: a long disk model is one row cut in the middle, not 2 rows.
+        let disk = disk_entry();
+        let mut s = disk_snap(&[Some("/")], Metric::valid(41.0));
+        let model = "Western Digital WD Black SN850X NVMe SSD 4TB";
+        let mut details = s.device_details.disks[0].1.clone();
+        details.model = text(model);
+        let mut all = (*s.device_details).clone();
+        all.disks = Arc::from(vec![(DeviceIdx(3), details)]);
+        s.device_details = Arc::new(all);
+        let lines = lines(&input(DeviceKind::Disk, &disk, &s));
+        let full = format!("{model} · 41 °C");
+        assert_eq!(lines.line2, full.as_str());
+        assert!(lines.line2_one_row);
+
+        let l = layout(&lines, 0., 24.);
+        assert_eq!(l.line2.rows.len(), 1, "{:?}", l.line2);
+        assert!(l.line2.cut);
+        let row = &l.line2.rows[0].text;
+        assert!(row.contains(ELLIPSIS), "{row}");
+        assert!(
+            row.starts_with("Western") && row.ends_with("41 °C"),
+            "{row}"
+        );
+        assert!(mono(CardFont::Detail, row) <= px(24.));
+        // The tooltip has the full model.
+        assert_eq!(&*card_tooltip(&lines, &l), [SharedString::from(full)]);
+
+        // A model that fits stays whole.
+        let l = layout(&lines, 0., 60.);
+        assert_eq!(rows(&l.line2), [full.as_str()]);
+        assert!(!l.line2.cut);
+
+        // Other cards keep the 2-row rule for line 2.
+        let cpu = card_text("CPU", "AMD Ryzen 7", &full);
+        assert!(!cpu.line2_one_row);
+        assert_eq!(layout(&cpu, 0., 24.).line2.rows.len(), 2);
     }
 }
