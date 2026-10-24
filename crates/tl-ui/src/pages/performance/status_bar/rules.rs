@@ -41,6 +41,10 @@ pub const SATURATED_PSI_FULL_PCT: f32 = 2.;
 pub const HOLD_S: u64 = 10;
 /// A process sweep older than this is not running: the slowest refresh is 10 s.
 const SWEEP_FRESH_NS: u64 = 12 * NS;
+/// A step more than this after the last one follows a gap in the samples (the bar was hidden,
+/// the engine paused or the UI stalled). The device totals come at 1 Hz and a step can skip one
+/// that came a little early, so 2 s between steps is normal.
+pub const GAP_NS: u64 = 3 * NS;
 
 const NS: u64 = 1_000_000_000;
 
@@ -393,6 +397,11 @@ impl StatusRules {
                 b.since_ns = now;
             }
         }
+        if self.last_ns.is_some_and(|last| now - last > GAP_NS) {
+            // Nothing was seen in the gap, so it does not count toward a window: each rule
+            // that is still true starts its window again now.
+            self.since.clear();
+        }
         self.last_ns = Some(now);
         let mut truths = SmallVec::new();
         r.true_rules(&mut truths);
@@ -723,6 +732,37 @@ mod tests {
         assert_eq!(rules.state(), MachineState::Hot);
         assert_eq!(rules.box_state(BoxKind::Disk), MachineState::Calm);
         assert_eq!(rules.box_state(BoxKind::TopProcs), MachineState::Calm);
+    }
+
+    #[test]
+    fn status_bar_gap_restarts_windows() {
+        // CPU busy 0 to 20 s, no samples for 20 s, busy again from 40 s: the unseen time does
+        // not count, so Busy comes 30 s after 40 s, not at 40 s.
+        let busy = |r: &mut Reading| r.cpu_pct = Some(90.);
+        let mut rules = StatusRules::default();
+        run(&mut rules, 0, 20, busy);
+        run(&mut rules, 40, 69, busy);
+        assert_eq!(rules.state(), MachineState::Calm, "gap counted");
+        run(&mut rules, 70, 70, busy);
+        assert_eq!(rules.state(), MachineState::Busy);
+        assert_eq!(rules.reason().expect("reason").for_ns, 30 * NS);
+
+        // The same for the hot window, and for its box edge.
+        let hot = |r: &mut Reading| r.gpus[0].temp_c = Some(95.);
+        let mut rules = StatusRules::default();
+        run(&mut rules, 0, 25, hot);
+        run(&mut rules, 60, 60, hot);
+        assert_eq!(rules.state(), MachineState::Calm);
+        assert_eq!(rules.box_state(BoxKind::Gpu), MachineState::Calm);
+
+        // A step 2 s after the last (a skipped early sample) is not a gap.
+        let mut rules = StatusRules::default();
+        for t in (0..=30).step_by(2) {
+            let mut r = calm(t);
+            busy(&mut r);
+            rules.step(&r, None);
+        }
+        assert_eq!(rules.state(), MachineState::Busy);
     }
 
     #[test]

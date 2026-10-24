@@ -14,13 +14,15 @@
 
 pub mod rules;
 
+use std::cell::Cell;
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Div, ElementId, Entity, EntityId,
     EventEmitter, FocusHandle, FontWeight, Global, Hsla, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString, Stateful, Styled as _,
-    Subscription, Window, div, px,
+    Subscription, Window, canvas, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
@@ -58,6 +60,8 @@ pub const PILL_ID: &str = "perf-status-pill";
 pub const WARNINGS_ID: &str = "perf-status-warnings";
 /// The bar's height in one row, logical px × ui_scale.
 pub const BAR_H: f32 = 64.;
+/// Below this bar width (logical px × ui_scale) the chips move to a second row.
+pub const WRAP_BELOW: f32 = 900.;
 const PILL_H: f32 = 40.;
 const CHIP_H: f32 = 28.;
 
@@ -493,6 +497,8 @@ pub struct StatusBar {
     shown: [Option<AnyWindowHandle>; 2],
     /// The warning popup's actions come back here.
     focus: FocusHandle,
+    /// The bar was narrower than [`WRAP_BELOW`] at the last prepaint.
+    narrow: Rc<Cell<bool>>,
     _sub: Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
@@ -527,6 +533,7 @@ impl StatusBar {
             text: BarText::default(),
             shown: [None; 2],
             focus: cx.focus_handle(),
+            narrow: Rc::new(Cell::new(false)),
             _sub: sub,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -619,7 +626,8 @@ impl StatusBar {
         self.rules.box_state(kind)
     }
 
-    /// Everything the bar shows: CPU totals, memory, GPUs, sensors and disks.
+    /// Everything the bar shows or its rules read: CPU totals, memory, GPUs, sensors, disks
+    /// and network adapters (the network Busy rule).
     pub fn demand_part() -> Demand {
         Demand {
             any_surface_visible: true,
@@ -628,6 +636,7 @@ impl StatusBar {
             gpus: true,
             sensors: true,
             disks: true,
+            nets: true,
             ..Demand::default()
         }
     }
@@ -889,26 +898,57 @@ impl Render for StatusBar {
                         .child(self.text.warnings.clone()),
                 )
         });
-        div()
+        // The width the bar had at the last prepaint picks the layout; a change across the
+        // breakpoint renders once more.
+        let narrow = self.narrow.get();
+        let measure = {
+            let cell = Rc::clone(&self.narrow);
+            let id = cx.entity_id();
+            let below = px(WRAP_BELOW * s);
+            canvas(
+                move |b, _, cx| {
+                    let now = b.size.width < below;
+                    if cell.replace(now) != now {
+                        cx.notify(id);
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
+        let row = || div().flex().flex_row().items_center().gap(m.sp[3]).w_full();
+        let bar = div()
             .id(BAR_ID)
             .debug_selector(|| BAR_ID.into())
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_open))
+            .relative()
             .flex()
-            .flex_row()
-            .flex_wrap()
             .flex_none()
-            .items_center()
             .gap(m.sp[3])
             .w_full()
             .min_h(px(BAR_H * s))
             .p(m.sp[4])
+            .overflow_hidden()
             .bg(theme.toolbar)
             .border_b_1()
-            .border_color(theme.divider)
-            .child(pill)
-            .children(chips)
-            .child(div().flex_1())
-            .children(warnings)
+            .border_color(theme.divider);
+        if narrow {
+            // Below 900 px: the pill and the warning button, then the chips in a second row.
+            bar.flex_col()
+                .child(row().child(pill).child(div().flex_1()).children(warnings))
+                .child(row().overflow_hidden().children(chips))
+                .child(measure)
+        } else {
+            // One row; chips that do not fit are cut off, they never wrap.
+            bar.flex_row()
+                .items_center()
+                .child(pill)
+                .children(chips)
+                .child(div().flex_1())
+                .children(warnings)
+                .child(measure)
+        }
     }
 }

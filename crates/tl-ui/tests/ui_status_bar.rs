@@ -253,6 +253,38 @@ mod performance_tab {
         let _ = &r.engine;
     }
 
+    /// One row at 900 px and wider, never wrapping; below 900 px the chips take a second row.
+    #[gpui_kit::test]
+    fn status_bar_wraps_below_900(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        let chip_tops = |r: &mut Rig<'_>| -> Vec<_> {
+            [ChipKind::Uptime, ChipKind::Load, ChipKind::CpuTemp]
+                .into_iter()
+                .map(|k| r.vcx.debug_bounds(sel(chip_id(k))).expect("chip").top())
+                .collect()
+        };
+        let bar = r.vcx.debug_bounds(BAR_ID).expect("bar");
+        assert!(bar.size.width >= px(900.), "{:?}", bar.size.width);
+        assert_eq!(bar.size.height, px(64.));
+        let pill = r.vcx.debug_bounds(PILL_ID).expect("pill");
+        for top in chip_tops(&mut r) {
+            assert!(
+                top > pill.top() && top < pill.bottom(),
+                "chips beside the pill"
+            );
+        }
+
+        r.vcx.simulate_resize(size(px(800.), px(800.)));
+        draw(r.vcx);
+        let bar = r.vcx.debug_bounds(BAR_ID).expect("bar");
+        assert!(bar.size.width < px(900.), "{:?}", bar.size.width);
+        assert!(bar.size.height > px(64.));
+        let pill = r.vcx.debug_bounds(PILL_ID).expect("pill");
+        let tops = chip_tops(&mut r);
+        assert!(tops[0] >= pill.bottom(), "chips under the pill");
+        assert!(tops.iter().all(|t| *t == tops[0]), "one chip row: {tops:?}");
+    }
+
     #[gpui_kit::test]
     fn status_bar_pill_and_warnings(cx: &mut TestAppContext) {
         let mut r = open(cx);
@@ -492,6 +524,11 @@ mod main_window {
         let page = vcx.debug_bounds("MainWindowPage").expect("page");
         assert_eq!(bar.bottom(), page.top());
         assert_eq!(bar.size.width, page.size.width);
+        // With no Performance view open, the bar alone asks for what its rules read, the
+        // network adapters for the network Busy rule among them.
+        let merged = vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged());
+        assert!(merged.nets, "network Busy needs the adapters");
+        assert!(merged.memory && merged.gpus && merged.sensors && merged.disks);
 
         set_placement(&mut vcx, StatusBarPlacement::Overview);
         assert!(
