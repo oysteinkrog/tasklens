@@ -36,6 +36,7 @@ use crate::theme::{TlTheme, UiMetrics, current};
 
 use super::layout::{Arrange, BoxKind};
 use super::mem_box::{MeterRow, ROW_LABEL_W, ROW_VALUE_W, meter_row};
+use super::range::RangeText;
 
 /// The meter bar height, logical px before `ui_scale`.
 pub const METER_H: f32 = 6.;
@@ -70,8 +71,9 @@ const MIN_ROW_H: f32 = 16.;
 const CELL_MIN_W: f32 = NAME_W + PART_GAP + PCT_W;
 /// The box title row, logical px before `ui_scale`.
 const TITLE_ROW: f32 = 24.;
-/// The two labels on the one time axis shared by every device box.
-pub const TIME_AXIS_START: &str = "60 seconds ago";
+/// The two labels on the one time axis shared by every device box. The start label follows the
+/// range (UI-PRF-055, [`RangeText::axis_start`]); this one shows until the page sets it.
+pub const TIME_AXIS_START: &str = "1 minute ago";
 pub const TIME_AXIS_END: &str = "Now";
 
 /// `buckets` entry for a core with no valid sample.
@@ -838,6 +840,12 @@ pub fn time_axis_label_id(box_id: &str, end: &str) -> String {
     format!("{box_id}-time-axis-{end}")
 }
 
+/// The debug selector of a device box's min, avg and peak line under its title: the box id with
+/// `-figures`.
+pub fn figures_id(box_id: &str) -> String {
+    format!("{box_id}-figures")
+}
+
 /// The debug selector of a box's device icon in its title tab: the box id with `-title-icon`.
 pub fn title_icon_id(box_id: &str) -> String {
     format!("{box_id}-title-icon")
@@ -907,8 +915,9 @@ const HIGHLIGHT_ALPHA: f32 = 0.06;
 
 /// One Overview box: a `list_bg` card with a thin rounded device-accent frame. Its 24 px title
 /// line sits in the top border: an accent title tab, a one-line summary that ellipsizes and the
-/// headline value at the right. `body` fills the rest. A click on the title line opens
-/// `target`'s page.
+/// headline value at the right. A device box has the range figures under it and the time axis
+/// below `body`, both from `range` (UI-PRF-055). `body` fills the rest. A click on the title
+/// line opens `target`'s page.
 #[allow(
     clippy::too_many_arguments,
     reason = "one call per box, all positional parts"
@@ -919,6 +928,7 @@ pub fn box_frame(
     title: SharedString,
     value: SharedString,
     line: SharedString,
+    range: &RangeText,
     body: AnyElement,
     edit: bool,
     m: &UiMetrics,
@@ -1019,17 +1029,34 @@ pub fn box_frame(
                 .pt(m.sp[2])
                 .pb(m.sp[5]);
             if draws_time_axis {
+                let start = if range.axis_start.is_empty() {
+                    SharedString::from(TIME_AXIS_START)
+                } else {
+                    range.axis_start.clone()
+                };
                 let mut ago = div()
                     .debug_selector(move || time_axis_label_id(id, "start"))
-                    .child(TIME_AXIS_START);
+                    .child(start);
                 *ago.text_style() = t_xs(m);
                 let mut now = div()
                     .debug_selector(move || time_axis_label_id(id, "end"))
                     .child(TIME_AXIS_END);
                 *now.text_style() = t_xs(m);
+                let mut figures = div();
+                *figures.text_style() = t_xs(m);
+                let figures = figures
+                    .debug_selector(move || figures_id(id))
+                    .flex_none()
+                    .h(px(LABEL_ROW * m.ui_scale))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(theme.text_secondary)
+                    .child(range.figures.clone());
                 body_el = body_el
                     .flex()
                     .flex_col()
+                    .child(figures)
                     .child(div().flex_1().min_h_0().w_full().child(body))
                     .child(
                         div()
@@ -1450,7 +1477,8 @@ impl From<&Settings> for ChartSettings {
     fn from(s: &Settings) -> Self {
         Self {
             kernel: s.performance.cpu_kernel,
-            range_ns: u64::from(s.performance.graph_range_s) * 1_000_000_000,
+            // The Overview ignores `graph_range_s` (UI-PRF-055).
+            range_ns: s.performance.overview_range.span_ns(),
             smooth: false,
             rounded: s.appearance.rounded_corners,
         }

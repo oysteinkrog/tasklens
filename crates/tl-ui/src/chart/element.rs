@@ -240,7 +240,9 @@ fn paint_view(
     cx: &mut App,
 ) -> PaintOut {
     let sf = env.scale_factor;
-    let now = env.now;
+    // A chart that reads the device metric history runs on CLOCK_REALTIME (UI-PRF-055).
+    let history = view.history;
+    let now = history.map_or(env.now, |h| h.right_edge_ns(env.now));
     let plot = bounds.inset(px(1.0));
     let pw = (f32::from(plot.size.width) * sf).round().max(0.0) as u32;
     let ph = (f32::from(plot.size.height) * sf).round().max(0.0) as u32;
@@ -281,10 +283,15 @@ fn paint_view(
     if period_ns == u64::MAX {
         period_ns = DEFAULT_PERIOD_NS;
     }
-    let sliding = !frozen && spec.smooth && !env.reduce_motion && !env.power_saving;
-    let stale = !frozen && newest_ns > 0 && geometry::is_stale(newest_ns, now, period_ns);
-    // No data: the grid is placed against the clock, where the first samples will land.
-    let right_edge = if newest_ns == 0 {
+    let sliding =
+        !frozen && history.is_none() && spec.smooth && !env.reduce_motion && !env.power_saving;
+    let stale = !frozen
+        && history.is_none()
+        && newest_ns > 0
+        && geometry::is_stale(newest_ns, now, period_ns);
+    // No data: the grid is placed against the clock, where the first samples will land. A
+    // history chart ends at its request's end, so a stretch with no points before it shows.
+    let right_edge = if newest_ns == 0 || history.is_some() {
         now
     } else if frozen {
         newest_valid_ns(series).unwrap_or(newest_ns)
@@ -357,8 +364,13 @@ fn paint_view(
                 plot_height: ph as f32,
                 y_min: y.y_min,
                 y_max: y.y_max,
-                // Frozen: the clock stops at the right edge, so no stale tail is drawn.
-                now_boot_ns: if frozen { right_edge } else { now },
+                // Frozen and history: the clock stops at the right edge, so no stale tail is
+                // drawn.
+                now_boot_ns: if frozen || history.is_some() {
+                    right_edge
+                } else {
+                    now
+                },
                 stack: spec.stack,
                 curved: env.curved,
             };
@@ -411,6 +423,7 @@ fn paint_view(
         metrics: &env.metrics,
         theme: &env.theme,
         network_unit: env.network_unit,
+        clock_right_ns: history.map(|_| right_edge),
     };
 
     grid::paint_background(window, bounds, env.theme.graph.chart_bg, radius);

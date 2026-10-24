@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actions::DumpMode;
 use crate::command::Tab;
+use crate::demand::DeviceRange;
 use crate::table::{ServiceStateFilter, TableMode, UnitType};
 
 /// First line of `settings.toml` and `state.toml`.
@@ -130,6 +131,61 @@ pub enum StatusBarPlacement {
     /// Under the tab strip on every tab.
     AllTabs,
     Off,
+}
+
+/// `performance.overview_range` (UI-PRF-055, D-030): the range every Overview chart draws. The
+/// Overview ignores `graph_range_s`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub enum OverviewRange {
+    #[default]
+    #[serde(rename = "1m")]
+    M1,
+    #[serde(rename = "5m")]
+    M5,
+    #[serde(rename = "1h")]
+    H1,
+    #[serde(rename = "24h")]
+    H24,
+    #[serde(rename = "7d")]
+    D7,
+}
+
+impl OverviewRange {
+    /// Every value in switch order.
+    pub const ALL: [Self; 5] = [Self::M1, Self::M5, Self::H1, Self::H24, Self::D7];
+
+    /// The range as the device history request names it.
+    pub const fn device_range(self) -> DeviceRange {
+        match self {
+            Self::M1 => DeviceRange::M1,
+            Self::M5 => DeviceRange::M5,
+            Self::H1 => DeviceRange::H1,
+            Self::H24 => DeviceRange::H24,
+            Self::D7 => DeviceRange::D7,
+        }
+    }
+
+    /// Length in ns: 1 min, 5 min, 1 h, 24 h or 7 d.
+    pub const fn span_ns(self) -> u64 {
+        self.device_range().span_ns()
+    }
+
+    /// True for 1 h, 24 h and 7 d, which come from the device metric history (ADR-017); 1 min
+    /// and 5 min come from the live series.
+    pub const fn from_history(self) -> bool {
+        matches!(self, Self::H1 | Self::H24 | Self::D7)
+    }
+
+    /// The saved value: `1m`, `5m`, `1h`, `24h` or `7d`.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::M1 => "1m",
+            Self::M5 => "5m",
+            Self::H1 => "1h",
+            Self::H24 => "24h",
+            Self::D7 => "7d",
+        }
+    }
 }
 
 /// Entries of `performance.gpu_optional_graphs`.
@@ -352,6 +408,8 @@ pub struct PerformanceSettings {
     pub overview_core_smoothing: CoreSmoothing,
     /// Where the machine status bar shows (UI-PRF-054).
     pub status_bar: StatusBarPlacement,
+    /// The range of every Overview chart (UI-PRF-055).
+    pub overview_range: OverviewRange,
     /// The old opt-in Top processes switch (crw.45). Read once by [`Settings::clamp`], which
     /// turns `true` into an `overview` layout, and never written (UI-PRF-018).
     #[serde(skip_serializing)]
@@ -775,6 +833,7 @@ impl Default for PerformanceSettings {
             network_dynamic_scale: true,
             overview_core_smoothing: CoreSmoothing::default(),
             status_bar: StatusBarPlacement::default(),
+            overview_range: OverviewRange::default(),
             overview_top_processes: false,
             overview: None,
         }
@@ -2332,6 +2391,28 @@ mod tests {
             let out = toml::to_string(&s).expect("serializes");
             assert!(out.contains(&format!("status_bar = \"{text}\"")), "{out}");
         }
+    }
+
+    #[test]
+    fn overview_range_values() {
+        assert_eq!(
+            PerformanceSettings::default().overview_range,
+            OverviewRange::M1
+        );
+        for want in OverviewRange::ALL {
+            let text = want.key();
+            let (s, changed) = load_toml(&format!("[performance]\noverview_range = \"{text}\"\n"));
+            assert!(changed.is_empty(), "{text}");
+            assert_eq!(s.performance.overview_range, want, "{text}");
+            let out = toml::to_string(&s).expect("serializes");
+            assert!(
+                out.contains(&format!("overview_range = \"{text}\"")),
+                "{out}"
+            );
+        }
+        assert!(!OverviewRange::M5.from_history());
+        assert!(OverviewRange::H1.from_history());
+        assert_eq!(OverviewRange::D7.span_ns(), 7 * 86_400 * 1_000_000_000);
     }
 
     #[test]

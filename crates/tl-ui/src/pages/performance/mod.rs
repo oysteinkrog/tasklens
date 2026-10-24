@@ -50,8 +50,8 @@ use tl_model::system::{SensorKind, SensorReading};
 
 use self::actions::{
     PERFORMANCE_CONTEXT, PerfCopyDeviceInfo, PerfCopyValue, PerfJumpToType, PerfSelectDevice,
-    PerfSelectVisibleDevice, PerfSetGraphRange, PerfSetStatusBar, PerfToggleSidebar,
-    PerfToggleSummaryMode,
+    PerfSelectVisibleDevice, PerfSetGraphRange, PerfSetOverviewRange, PerfSetStatusBar,
+    PerfToggleSidebar, PerfToggleSummaryMode,
 };
 use self::details::ClickedValue;
 use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
@@ -856,6 +856,16 @@ impl PerformancePage {
         TlSettings::update(cx, |d| d.settings.performance.status_bar = placement);
     }
 
+    /// `PerfSetOverviewRange`: the "Time range" submenu of the Overview menus (UI-PRF-055).
+    fn on_set_overview_range(
+        &mut self,
+        a: &PerfSetOverviewRange,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        overview::range::set_range(a.range, cx);
+    }
+
     /// Whether the page panel draws the status bar now: the tab shows a page and
     /// `performance.status_bar` puts the bar above it.
     fn shows_status_bar(&self) -> bool {
@@ -1337,6 +1347,7 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_toggle_summary))
             .on_action(cx.listener(Self::on_set_graph_range))
             .on_action(cx.listener(Self::on_set_status_bar))
+            .on_action(cx.listener(Self::on_set_overview_range))
             .on_action(cx.listener(Self::on_copy_value))
             .on_action(cx.listener(Self::on_copy_device_info))
             .size_full()

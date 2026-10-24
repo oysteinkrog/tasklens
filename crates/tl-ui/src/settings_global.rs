@@ -339,7 +339,7 @@ macro_rules! setting_keys {
 
         impl SettingKey {
             /// Every key in table (a) order.
-            pub const ALL: [SettingKey; 88] = [$(SettingKey::$key,)*];
+            pub const ALL: [SettingKey; 89] = [$(SettingKey::$key,)*];
 
             /// The dotted name, for example `"motion.animations"`. `Fans` is `"fans"`.
             pub fn as_str(self) -> &'static str {
@@ -423,6 +423,7 @@ setting_keys! {
     PerformanceNetworkDynamicScale => "performance.network_dynamic_scale", Performance, Bool;
     PerformanceOverviewCoreSmoothing => "performance.overview_core_smoothing", Performance, Str;
     PerformanceStatusBar => "performance.status_bar", Performance, Str;
+    PerformanceOverviewRange => "performance.overview_range", Performance, Str;
     Fans => "fans", Fans, Map;
     GraphsMinigraphCpu => "graphs.minigraph_cpu", Graphs, Bool;
     GraphsMinigraphMemory => "graphs.minigraph_memory", Graphs, Bool;
@@ -560,6 +561,7 @@ fn assign(s: &mut Settings, key: SettingKey, value: &SettingValue) -> Result<(),
                 parse(&mut s.performance.overview_core_smoothing, v)
             }
             K::PerformanceStatusBar => parse(&mut s.performance.status_bar, v),
+            K::PerformanceOverviewRange => parse(&mut s.performance.overview_range, v),
             K::RenderingGpu => text(&mut s.rendering.gpu, v),
             _ => Err("kind mismatch"),
         },

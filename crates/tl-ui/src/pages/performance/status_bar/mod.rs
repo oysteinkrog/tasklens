@@ -29,7 +29,7 @@ use tl_model::command::Tab;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceCatalog;
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::StatusBarPlacement;
+use tl_model::settings::{OverviewRange, StatusBarPlacement};
 use tl_model::snapshot::Snapshot;
 use tl_model::units;
 
@@ -39,6 +39,7 @@ use self::rules::{
 use super::actions::{PerfSelectDevice, PerfStatusOpen};
 use super::overview::OVERVIEW_KEY;
 use super::overview::layout::BoxKind;
+use super::overview::range::{STATUS_SWITCH, current_range, range_switch};
 use super::{DeviceKey, PerformancePage};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -499,7 +500,11 @@ pub struct StatusBar {
     focus: FocusHandle,
     /// The bar was narrower than [`WRAP_BELOW`] at the last prepaint.
     narrow: Rc<Cell<bool>>,
+    /// `performance.status_bar` and `performance.overview_range` at the last settings change:
+    /// the bar draws the Overview range switch while it is on the Overview (UI-PRF-055).
+    shown_range: (StatusBarPlacement, OverviewRange),
     _sub: Subscription,
+    _settings: Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
 }
@@ -520,6 +525,13 @@ impl StatusBar {
                 this.evaluate(false, cx);
             }
         });
+        let settings = cx.observe_global::<TlSettings>(|this: &mut Self, cx| {
+            let now = (placement(cx), current_range(cx));
+            if this.shown_range != now {
+                this.shown_range = now;
+                cx.notify();
+            }
+        });
         let id = cx.entity_id();
         let release = demand.clone();
         cx.on_release(move |_, cx| release.update(cx, |d, cx| d.remove(id, cx)))
@@ -534,7 +546,9 @@ impl StatusBar {
             shown: [None; 2],
             focus: cx.focus_handle(),
             narrow: Rc::new(Cell::new(false)),
+            shown_range: (placement(cx), current_range(cx)),
             _sub: sub,
+            _settings: settings,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
         };
@@ -917,6 +931,9 @@ impl Render for StatusBar {
             .absolute()
             .inset_0()
         };
+        // The Overview range switch at the right end while the bar is on the Overview.
+        let switch = (self.shown_range.0 == StatusBarPlacement::Overview)
+            .then(|| range_switch(STATUS_SWITCH, cx));
         let row = || div().flex().flex_row().items_center().gap(m.sp[3]).w_full();
         let bar = div()
             .id(BAR_ID)
@@ -937,7 +954,13 @@ impl Render for StatusBar {
         if narrow {
             // Below 900 px: the pill and the warning button, then the chips in a second row.
             bar.flex_col()
-                .child(row().child(pill).child(div().flex_1()).children(warnings))
+                .child(
+                    row()
+                        .child(pill)
+                        .child(div().flex_1())
+                        .children(switch)
+                        .children(warnings),
+                )
                 .child(row().overflow_hidden().children(chips))
                 .child(measure)
         } else {
@@ -957,6 +980,7 @@ impl Render for StatusBar {
                         .overflow_hidden()
                         .children(chips),
                 )
+                .children(switch)
                 .children(warnings)
                 .child(measure)
         }

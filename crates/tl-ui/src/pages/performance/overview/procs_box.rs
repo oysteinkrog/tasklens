@@ -29,6 +29,7 @@ use tl_model::snapshot::ProcessSnapshot;
 
 use super::layout::BoxMode;
 use super::parts::{Meter, box_frame, edit_chrome};
+use super::range::RangeText;
 use crate::chart::labels::LABEL_ROW;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
@@ -370,6 +371,7 @@ impl Render for ProcsBox {
             self.title.clone(),
             SharedString::default(),
             SharedString::default(),
+            &RangeText::default(),
             body,
             edit_chrome(cx),
             &m,

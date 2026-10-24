@@ -15,7 +15,7 @@ use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{Action, App, KeyBinding, gpui};
 use serde::{Deserialize, Deserializer};
 pub use tl_model::settings::{
-    CpuGraphMode, CpuSecondaryGraph, GpuOptionalGraph, StatusBarPlacement,
+    CpuGraphMode, CpuSecondaryGraph, GpuOptionalGraph, OverviewRange, StatusBarPlacement,
 };
 
 use super::{DeviceKey, DeviceKind};
@@ -315,6 +315,45 @@ pub struct PerfSetStatusBar {
     #[serde(deserialize_with = "via::<_, StatusBarPlacementJson, _>")]
     #[schemars(with = "StatusBarPlacementJson")]
     pub placement: StatusBarPlacement,
+}
+
+/// Sets `performance.overview_range` from the "Time range" submenu of the Overview page and box
+/// menus (UI-PRF-055).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSetOverviewRange {
+    #[serde(deserialize_with = "via::<_, OverviewRangeJson, _>")]
+    #[schemars(with = "OverviewRangeJson")]
+    pub range: OverviewRange,
+}
+
+/// JSON form of [`OverviewRange`], spelled as the setting: `1m`, `5m`, `1h`, `24h`, `7d`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, JsonSchema)]
+#[schemars(crate = "gpui::private::schemars")]
+pub enum OverviewRangeJson {
+    #[serde(rename = "1m")]
+    M1,
+    #[serde(rename = "5m")]
+    M5,
+    #[serde(rename = "1h")]
+    H1,
+    #[serde(rename = "24h")]
+    H24,
+    #[serde(rename = "7d")]
+    D7,
+}
+
+impl From<OverviewRangeJson> for OverviewRange {
+    fn from(m: OverviewRangeJson) -> Self {
+        match m {
+            OverviewRangeJson::M1 => Self::M1,
+            OverviewRangeJson::M5 => Self::M5,
+            OverviewRangeJson::H1 => Self::H1,
+            OverviewRangeJson::H24 => Self::H24,
+            OverviewRangeJson::D7 => Self::D7,
+        }
+    }
 }
 
 /// Opens the page of `key` from the status bar, switching to the Performance tab first

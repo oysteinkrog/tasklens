@@ -52,6 +52,7 @@ use super::parts::{
     box_frame, chart_section_versions, class_probe, edit_chrome, grid_cells, meter_fits,
     spark_chart, spark_row,
 };
+use super::range::RangeText;
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
@@ -580,6 +581,8 @@ pub fn chart_id(i: usize) -> String {
 
 /// The GPU box.
 pub struct GpuBox {
+    /// The range figures and time axis start the page gives (UI-PRF-055).
+    range_text: RangeText,
     hub: Entity<SnapshotHub>,
     sections: SmallVec<[GpuSection; 2]>,
     mode: GpuMode,
@@ -620,6 +623,7 @@ impl GpuBox {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self {
+            range_text: RangeText::default(),
             hub: hub.clone(),
             sections: SmallVec::new(),
             mode: GpuMode::EngineCharts,
@@ -987,6 +991,20 @@ impl GpuBox {
             SharedString::default()
         };
         self.more_text_fit = more(self.more + 1);
+    }
+
+    /// Takes the range figures and time axis start the page worked out (UI-PRF-055). Notifies
+    /// only when they changed.
+    pub fn set_range_text(&mut self, text: RangeText, cx: &mut Context<Self>) {
+        if self.range_text != text {
+            self.range_text = text;
+            cx.notify();
+        }
+    }
+
+    /// The range figures and time axis start the box shows.
+    pub fn range_text(&self) -> &RangeText {
+        &self.range_text
     }
 
     fn on_snapshot(
@@ -1637,6 +1655,7 @@ impl Render for GpuBox {
             pick(|s| &s.heading),
             pick(|s| &s.value),
             SharedString::default(),
+            &self.range_text,
             body,
             edit_chrome(cx),
             &m,

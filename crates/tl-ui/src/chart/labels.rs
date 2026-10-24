@@ -261,6 +261,9 @@ pub struct LabelPaint<'a> {
     pub metrics: &'a UiMetrics,
     pub theme: &'a TlTheme,
     pub network_unit: NetFormat,
+    /// The CLOCK_REALTIME time at the right edge of a chart that reads the device metric
+    /// history: its x ticks are local clock times (UI-PRF-055). `None` for a live chart.
+    pub clock_right_ns: Option<u64>,
 }
 
 /// The owner's value text when set, else `v` formatted.
@@ -486,7 +489,10 @@ pub fn paint(
         let x_row = b.bottom() - pad - row - if range_shown { row } else { px(0.) };
         for i in 0..TICK_COUNT {
             scratch.clear();
-            x_tick_label(p.spec.range_ns, i, scratch);
+            match p.clock_right_ns {
+                Some(right) => x_tick_clock(right, p.spec.range_ns, i, scratch),
+                None => x_tick_label(p.spec.range_ns, i, scratch),
+            }
             let shaped = cache.x_ticks[i].sync(window, scratch, ticks);
             cache.shaped(shaped);
             let w = cache.x_ticks[i].width();
@@ -652,6 +658,24 @@ pub fn x_tick_label(range_ns: u64, i: usize, out: &mut String) {
         out.pop();
     }
     let _ = write!(out, " {unit}");
+}
+
+/// Appends x tick `i` of a chart whose right edge is `right_ns` on CLOCK_REALTIME: the local
+/// time of that point, "14:30", with the weekday for ranges over 24 hours, "Tue 14:30"
+/// (UI-PRF-055).
+pub fn x_tick_clock(right_ns: u64, range_ns: u64, i: usize, out: &mut String) {
+    let ago_ns = range_ns / (TICK_COUNT + 1) as u64 * (TICK_COUNT - i) as u64;
+    let at = i128::from(right_ns.saturating_sub(ago_ns));
+    let Ok(ts) = jiff::Timestamp::from_nanosecond(at) else {
+        return;
+    };
+    let z = ts.to_zoned(jiff::tz::TimeZone::system());
+    let fmt = if range_ns > 86_400 * NS_PER_S {
+        "%a %H:%M"
+    } else {
+        "%H:%M"
+    };
+    let _ = write!(out, "{}", z.strftime(fmt));
 }
 
 /// Appends y tick `i` of a percent scale: "25%", "50%", "75%".

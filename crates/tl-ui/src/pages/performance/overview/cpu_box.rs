@@ -38,6 +38,7 @@ use super::parts::{
     box_frame, chart_section_versions, class_probe, core_bars_layout, core_rows, edit_chrome,
     grid_cells, is_wide, spark_chart, width_probe,
 };
+use super::range::RangeText;
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
@@ -377,6 +378,8 @@ pub(super) fn value_text(validity: Validity, format: impl FnOnce(&mut String)) -
 
 /// The CPU box.
 pub struct CpuBox {
+    /// The range figures and time axis start the page gives (UI-PRF-055).
+    range_text: RangeText,
     hub: Entity<SnapshotHub>,
     cpu: DeviceIdx,
     total: Entity<ChartView>,
@@ -441,6 +444,7 @@ impl CpuBox {
         let snap = Arc::clone(hub.read(cx).current());
         let grid_size = size(px(0.), px(0.));
         let mut this = Self {
+            range_text: RangeText::default(),
             hub: hub.clone(),
             cpu,
             total,
@@ -655,6 +659,20 @@ impl CpuBox {
             out.push('\n');
         }
         self.bars.borrow().copy_text(out);
+    }
+
+    /// Takes the range figures and time axis start the page worked out (UI-PRF-055). Notifies
+    /// only when they changed.
+    pub fn set_range_text(&mut self, text: RangeText, cx: &mut Context<Self>) {
+        if self.range_text != text {
+            self.range_text = text;
+            cx.notify();
+        }
+    }
+
+    /// The range figures and time axis start the box shows.
+    pub fn range_text(&self) -> &RangeText {
+        &self.range_text
     }
 
     fn on_snapshot(
@@ -1195,6 +1213,7 @@ impl Render for CpuBox {
             self.title.clone(),
             self.value.clone(),
             self.line.clone(),
+            &self.range_text,
             body,
             edit_chrome(cx),
             &m,

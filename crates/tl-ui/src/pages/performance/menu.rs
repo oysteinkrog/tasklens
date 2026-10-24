@@ -5,10 +5,12 @@
 use std::sync::Arc;
 
 use gpui_kit::{App, Global, SharedString, Window};
+use tl_model::settings::OverviewRange;
 
 use super::actions::{
     PerfAddTrayGraph, PerfCopyDeviceInfo, PerfCopyValue, PerfEnterEditMode, PerfJumpToType,
-    PerfSetGraphRange, PerfSetPageVisible, PerfToggleGpuEngine, PerfToggleSummaryMode,
+    PerfSetGraphRange, PerfSetOverviewRange, PerfSetPageVisible, PerfToggleGpuEngine,
+    PerfToggleSummaryMode,
 };
 use super::page::DevicePage;
 use super::{DeviceKey, DeviceKind};
@@ -146,7 +148,8 @@ pub fn page_menu(
         ),
         None => menu,
     };
-    let menu = page_menu_common(menu, ctx, window, cx).separator();
+    let overview = &*page.key().0 == super::overview::OVERVIEW_KEY;
+    let menu = page_menu_common(menu, ctx, overview, window, cx).separator();
     // `TlMenu` drops a doubled or trailing separator, so a page with no items leaves one.
     let menu = page.menu_items(menu, window, cx).separator();
     let menu = match ctx.view_types {
@@ -188,39 +191,65 @@ fn view_menu(
     )
 }
 
-/// Copy, Graph Summary View and Time range (UI-PRF-015 items 1 to 3).
+/// Copy, Graph Summary View and Time range (UI-PRF-015 items 1 to 3). On the Overview
+/// (`overview`), Time range holds the five Overview ranges bound to
+/// `performance.overview_range` (UI-PRF-055).
 pub fn page_menu_common(
     menu: TlMenu,
     ctx: &PageMenuCtx,
+    overview: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
     let (range_s, long) = (ctx.range_s, ctx.ranges_long_enabled);
     let later = tr(cx, "perf-later-version");
     let words: Vec<SharedString> = RANGES.iter().map(|(_, k)| tr(cx, k)).collect();
-    menu.item(tr(cx, "perf-menu-copy"), Box::new(PerfCopyDeviceInfo))
+    let menu = menu
+        .item(tr(cx, "perf-menu-copy"), Box::new(PerfCopyDeviceInfo))
         .check_item(
             tr(cx, "perf-menu-summary"),
             ctx.summary_on,
             Box::new(PerfToggleSummaryMode),
-        )
-        .submenu(
+        );
+    if overview {
+        let current = super::overview::range::current_range(cx);
+        let words: Vec<SharedString> = super::overview::range::SWITCH_KEYS
+            .iter()
+            .map(|k| tr(cx, k))
+            .collect();
+        return menu.submenu(
             tr(cx, "perf-menu-time-range"),
             window,
             cx,
             move |mut menu, _, _| {
-                for (&(secs, _), word) in RANGES.iter().zip(&words) {
-                    menu = if secs > 60 && !long {
-                        menu.item_disabled(word.clone(), Some(later.clone()))
-                    } else {
-                        menu.radio_item(
-                            word.clone(),
-                            secs == range_s,
-                            Box::new(PerfSetGraphRange { secs }),
-                        )
-                    };
+                for (range, word) in OverviewRange::ALL.into_iter().zip(&words) {
+                    menu = menu.radio_item(
+                        word.clone(),
+                        range == current,
+                        Box::new(PerfSetOverviewRange { range }),
+                    );
                 }
                 menu
             },
-        )
+        );
+    }
+    menu.submenu(
+        tr(cx, "perf-menu-time-range"),
+        window,
+        cx,
+        move |mut menu, _, _| {
+            for (&(secs, _), word) in RANGES.iter().zip(&words) {
+                menu = if secs > 60 && !long {
+                    menu.item_disabled(word.clone(), Some(later.clone()))
+                } else {
+                    menu.radio_item(
+                        word.clone(),
+                        secs == range_s,
+                        Box::new(PerfSetGraphRange { secs }),
+                    )
+                };
+            }
+            menu
+        },
+    )
 }

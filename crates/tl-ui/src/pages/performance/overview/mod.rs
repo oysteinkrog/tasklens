@@ -13,6 +13,10 @@
 //! adds boxes. Each box has layout modes (UI-PRF-019): [`box_menu`] is the box menu and the
 //! Edit Layout gear, and [`inner_split`] is the one splitter a mode with two parts uses.
 //!
+//! [`range`] is the time range (UI-PRF-055): the switch in the header, the demand for the
+//! device metric history, and the min, avg and peak line and time axis start of each box, which
+//! the page works out from the snapshot and hands to the boxes.
+//!
 //! Render contract (D-022, crw.34): the page never notifies on a sample. Each box is a cached
 //! child view that notifies only when its own text or bars change. The page re-renders on a
 //! resize, when a GPU or disk card comes or goes, and (from GPUI's ancestor marking) when a box
@@ -29,6 +33,7 @@ pub mod mem_box;
 pub mod net_box;
 pub mod parts;
 pub mod procs_box;
+pub mod range;
 pub mod splitter;
 
 use std::cell::Cell;
@@ -44,8 +49,10 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::demand::{CpuDemand, Demand};
-use tl_model::ids::DeviceIdx;
-use tl_model::settings::StatusBarPlacement;
+use tl_model::devices::DeviceIdentity;
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::settings::{OverviewRange, StatusBarPlacement};
+use tl_model::snapshot::ComponentMask;
 
 use self::cpu_box::{CpuBox, PowerSplitChanged};
 use self::disk_box::DiskBox;
@@ -56,16 +63,18 @@ use self::layout::{BoxKind, OverviewLayout, Placement, place};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
+use self::range::{RangeText, history_request};
 use self::splitter::{Drag, Splitter, Target, round_weights, set_weights, splitters};
 use super::actions::{PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfSetStatusBar};
-use super::details::KeyValueModel;
+use super::details::{KeyValueModel, Template};
 use super::page::DevicePage;
 use super::sidebar::DeviceSidebar;
 use super::status_bar::{self, EdgesChanged, StatusBar, state_color};
 use super::{DeviceKey, DeviceKind};
+use crate::chart::{NetFormat, ValueFormat, format_value};
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
-use crate::hub::SnapshotHub;
+use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
 use crate::settings_global::TlSettings;
 use crate::theme::{current, metrics};
@@ -196,6 +205,13 @@ pub struct OverviewPage {
     content_origin: Rc<Cell<Point<Pixels>>>,
     /// The machine status, for each box's state edge (UI-PRF-054).
     status: Entity<StatusBar>,
+    /// `performance.overview_range` (UI-PRF-055).
+    range: OverviewRange,
+    /// The words of the range text: "min { $min }  avg { $avg }  peak { $peak }", "since
+    /// { $time }" and the time axis start of each range.
+    figures_words: Template,
+    since_words: Template,
+    ago_words: [SharedString; 5],
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -287,6 +303,7 @@ impl OverviewPage {
         subs.push(cx.subscribe(&net, Self::on_net_split));
         let status = status_bar::status_bar(&hub, &demand, cx);
         subs.push(cx.subscribe(&status, |this, _, _: &EdgesChanged, cx| this.notify(cx)));
+        subs.push(cx.subscribe(&hub, Self::on_snapshot));
         let procs = layout
             .has(BoxKind::TopProcs)
             .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
@@ -326,6 +343,10 @@ impl OverviewPage {
             edit: None,
             content_origin: Rc::default(),
             status,
+            range: range::current_range(cx),
+            figures_words: Template::new(cx, "perf-overview-figures", &["min", "avg", "peak"]),
+            since_words: Template::new(cx, "perf-overview-since", &["time"]),
+            ago_words: range::ago_words(cx),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -334,11 +355,12 @@ impl OverviewPage {
         }
     }
 
-    /// Everything the boxes draw, CPU per core at 10 Hz, and the process sweep while the Top
-    /// processes box is placed.
+    /// Everything the boxes draw, CPU per core at 10 Hz, the process sweep while the Top
+    /// processes box is placed, and the device metric history for 1 h, 24 h and 7 d.
     pub fn demand_part(&self) -> Demand {
         Demand {
             process_top: self.procs.is_some(),
+            device_history_range: history_request(self.range),
             any_surface_visible: true,
             cpu: CpuDemand::PerCore,
             cpu_fast: true,
@@ -360,6 +382,11 @@ impl OverviewPage {
 
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// The range every box draws (UI-PRF-055).
+    pub fn range(&self) -> OverviewRange {
+        self.range
     }
 
     pub fn cpu_box(&self) -> &Entity<CpuBox> {
@@ -463,11 +490,98 @@ impl OverviewPage {
     /// `[performance.overview]` changed: a new placement and one render, and the Top processes
     /// box with its demand comes or goes. Any other settings change does nothing here.
     fn sync_layout(&mut self, cx: &mut Context<Self>) {
+        let range = range::current_range(cx);
+        if range != self.range {
+            // The boxes re-spec their charts from the same settings change.
+            self.range = range;
+            self.send_demand(cx);
+            self.sync_range(cx);
+        }
         let layout = saved_layout(cx);
         if layout == self.layout || self.drag.is_some() || self.box_dragging() {
             return;
         }
         self.set_layout(layout, cx);
+    }
+
+    /// A new snapshot: the boxes' range text follows the series and the device history. The
+    /// page itself does not notify.
+    fn on_snapshot(
+        &mut self,
+        _: Entity<SnapshotHub>,
+        ev: &SnapshotChanged,
+        cx: &mut Context<Self>,
+    ) {
+        let wanted = ComponentMask::SERIES
+            | ComponentMask::DEVICE_HISTORY
+            | ComponentMask::DEVICES
+            | ComponentMask::SYSTEM;
+        if self.active && ev.mask.intersects(wanted) {
+            self.sync_range(cx);
+        }
+    }
+
+    /// Works out each device box's min, avg and peak line and the time axis start for the range,
+    /// and hands them to the boxes, which notify only when theirs changed (UI-PRF-055). The main
+    /// metric is CPU total, memory in use, the first GPU's utilization, the active time of the
+    /// busiest disk and the total throughput of the Network box's adapter.
+    fn sync_range(&mut self, cx: &mut Context<Self>) {
+        let snap = std::sync::Arc::clone(self.hub.read(cx).current());
+        let range = self.range;
+        let now = jiff::Timestamp::now().as_nanosecond();
+        let now = i64::try_from(now).unwrap_or(i64::MAX);
+        let axis_start = range::axis_start(
+            range,
+            &snap.device_history,
+            now,
+            &self.ago_words,
+            &self.since_words,
+        );
+        let id = |device, metric| SeriesId { device, metric };
+        let idx = |identity| snap.devices.find(&identity).map(|e| e.idx);
+        let words = &self.figures_words;
+        let text = |figures| RangeText {
+            figures,
+            axis_start: axis_start.clone(),
+        };
+        let pct = |f| range::figures_text(words, f, range::whole_percent);
+        let cpu = idx(DeviceIdentity::CpuPackage)
+            .and_then(|d| range::figures(&snap, &[id(d, MetricId::CPU_TOTAL)], range));
+        let total = snap.system.memory.total.max(1) as f32;
+        let mem = idx(DeviceIdentity::Memory)
+            .and_then(|d| range::figures(&snap, &[id(d, MetricId::MEM_USED)], range))
+            .map(|f| range::Figures {
+                min: f.min / total * 100.,
+                avg: f.avg / total * 100.,
+                peak: f.peak / total * 100.,
+            });
+        let gpu = self
+            .gpu_cards
+            .first()
+            .and_then(|c| range::figures(&snap, &[id(c.1, MetricId::GPU_UTIL)], range));
+        let disks: SmallVec<[SeriesId; 8]> = self
+            .disk_cards
+            .iter()
+            .map(|c| id(c.1, MetricId::DISK_ACTIVE))
+            .collect();
+        let disk = range::busiest(&snap, &disks, range);
+        let net = cards_of(&self.sidebar, DeviceKind::Net, cx)
+            .first()
+            .and_then(|c| {
+                let ids = [id(c.1, MetricId::NET_RX), id(c.1, MetricId::NET_TX)];
+                range::figures(&snap, &ids, range)
+            });
+        let unit = NetFormat::of(cx);
+        let net = range::figures_text(words, net, |v, out| {
+            format_value(ValueFormat::RateNetwork, v, unit, out);
+        });
+        let (cpu, mem, gpu, disk) = (pct(cpu), pct(mem), pct(gpu), pct(disk));
+        self.cpu.update(cx, |b, cx| b.set_range_text(text(cpu), cx));
+        self.mem.update(cx, |b, cx| b.set_range_text(text(mem), cx));
+        self.gpu.update(cx, |b, cx| b.set_range_text(text(gpu), cx));
+        self.disk
+            .update(cx, |b, cx| b.set_range_text(text(disk), cx));
+        self.net.update(cx, |b, cx| b.set_range_text(text(net), cx));
     }
 
     /// The CPU box ended a split drag or a double-click: the share goes into the layout and the
@@ -795,8 +909,9 @@ impl DevicePage for OverviewPage {
         self.header.clone()
     }
 
-    fn toggles(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 2]> {
-        SmallVec::new()
+    /// The time range switch (UI-PRF-055).
+    fn toggles(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 2]> {
+        smallvec::smallvec![range::range_switch(range::HEADER_SWITCH, cx)]
     }
 
     fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {

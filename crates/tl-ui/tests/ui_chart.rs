@@ -1312,6 +1312,7 @@ mod labels {
                         metrics: &metrics,
                         theme: &theme,
                         network_unit: NetworkUnit::Bits.into(),
+                        clock_right_ns: None,
                     };
                     let mut scratch = String::new();
                     paint(window, cx, &mut cache.borrow_mut(), &p, &mut scratch);

@@ -45,6 +45,7 @@ use super::parts::{
     ChartSettings, GridFit, SPARK_GRID, arrange_grid, box_chart, box_frame, chart_section_versions,
     class_probe, edit_chrome, grid_cells, opens_device, spark_chart,
 };
+use super::range::RangeText;
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
@@ -395,6 +396,8 @@ pub fn io_row_id(key: &DeviceKey, which: &str) -> String {
 
 /// The Disk box.
 pub struct DiskBox {
+    /// The range figures and time axis start the page gives (UI-PRF-055).
+    range_text: RangeText,
     hub: Entity<SnapshotHub>,
     /// The latest disk cards from the sidebar, including any entry whose parent was not known yet.
     disks: SmallVec<[(DeviceKey, DeviceIdx, SharedString); 8]>,
@@ -450,6 +453,7 @@ impl DiskBox {
             cx,
         );
         let mut this = Self {
+            range_text: RangeText::default(),
             hub: hub.clone(),
             disks: disks.iter().cloned().collect(),
             rows: SmallVec::new(),
@@ -675,6 +679,20 @@ impl DiskBox {
                 tr_args(cx, KEY_MORE, &[("n", FluentValue::from(n))])
             });
         }
+    }
+
+    /// Takes the range figures and time axis start the page worked out (UI-PRF-055). Notifies
+    /// only when they changed.
+    pub fn set_range_text(&mut self, text: RangeText, cx: &mut Context<Self>) {
+        if self.range_text != text {
+            self.range_text = text;
+            cx.notify();
+        }
+    }
+
+    /// The range figures and time axis start the box shows.
+    pub fn range_text(&self) -> &RangeText {
+        &self.range_text
     }
 
     fn on_snapshot(
@@ -1270,6 +1288,7 @@ impl Render for DiskBox {
             self.title.clone(),
             SharedString::default(),
             SharedString::default(),
+            &self.range_text,
             body,
             edit_chrome(cx),
             &m,

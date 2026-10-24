@@ -8,8 +8,10 @@ use std::sync::Arc;
 use gpui_kit::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window};
 use smallvec::SmallVec;
 use tl_model::ids::{ProcessSeriesId, SeriesId};
-use tl_model::series::SeriesView;
-use tl_model::snapshot::{ComponentMask, ProcessSeriesSet, SeriesSet, Snapshot};
+use tl_model::series::{Sample, SampleFlags, SeriesView};
+use tl_model::snapshot::{
+    ComponentMask, DeviceHistory, HistPoint, ProcessSeriesSet, SeriesSet, Snapshot,
+};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
@@ -62,6 +64,9 @@ pub struct ChartView {
     /// The chart keeps its resolved series and stops (`freeze`): no new snapshot is read, the
     /// right edge stays at the newest valid sample and the chart is never Stale.
     pub(crate) frozen: bool,
+    /// Set while the range reads the device metric history ([`reads_history`]): the series are
+    /// on CLOCK_REALTIME and the chart is drawn against that clock.
+    pub(crate) history: Option<HistoryClock>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// `geometry::build` calls.
@@ -111,6 +116,7 @@ impl ChartView {
             compact_scale: false,
             newest_marks: false,
             frozen: false,
+            history: None,
             value_text: None,
             last_value_text: String::new(),
             hover: hover::HoverState::default(),
@@ -154,6 +160,14 @@ impl ChartView {
             return;
         }
         let range_ns = self.spec.range_ns;
+        if reads_history(range_ns) {
+            // History series change only with the device history component.
+            if ev.mask.contains(ComponentMask::DEVICE_HISTORY) {
+                self.resolve(hub.read(cx).current());
+                cx.notify();
+            }
+            return;
+        }
         let own_changed = ev.mask.contains(ComponentMask::SERIES) && {
             let changed = ChangedRuns::new(&ev.changed_series);
             self.spec
@@ -191,9 +205,24 @@ impl ChartView {
     /// `None` when absent. Ranges over 60 s read the 1 Hz tier (`find_tiered`). A series with
     /// `process` set reads `snap.process_series` the same way (`find_process_tiered`). Reuses
     /// the inline buffer, so it does not allocate for up to 2 series.
+    ///
+    /// Ranges over 10 minutes read `snap.device_history` instead ([`reads_history`]): each
+    /// series becomes a view on CLOCK_REALTIME, and process series are absent.
     pub fn resolve(&mut self, snap: &Snapshot) {
         let set = &*snap.series;
         let range_ns = self.spec.range_ns;
+        if reads_history(range_ns) {
+            let hist = &*snap.device_history;
+            self.history = Some(HistoryClock::of(hist));
+            self.tier_fallback = false;
+            self.series.clear();
+            self.series.extend(self.spec.series.iter().map(|s| {
+                let points = hist.get(s.id).filter(|_| s.process.is_none())?;
+                Some(Arc::new(history_view(s.id, points, hist)))
+            }));
+            return;
+        }
+        self.history = None;
         let mut fallback = false;
         self.series.clear();
         self.series.extend(self.spec.series.iter().map(|s| {
@@ -228,7 +257,11 @@ impl ChartView {
         let Some(newest_ns) = newest_ns else {
             return ChartState::WarmingUp;
         };
-        if !self.frozen && geometry::is_stale(newest_ns, now_boot_ns, period_ns) {
+        // History points are not live samples: their age says nothing about the source.
+        if !self.frozen
+            && self.history.is_none()
+            && geometry::is_stale(newest_ns, now_boot_ns, period_ns)
+        {
             ChartState::Stale {
                 age_ns: geometry::stale_age_ns(newest_ns, now_boot_ns),
             }
@@ -497,6 +530,75 @@ fn newest_all_valid(series: &[Option<Arc<SeriesView>>]) -> bool {
 
 /// Ranges longer than this read the 1 Hz tier (PERF-017, R-016).
 pub const TIER_1HZ_MIN_RANGE_NS: u64 = 60_000_000_000;
+
+/// Ranges longer than this read the device metric history (ADR-017, UI-PRF-055): the live
+/// series hold at most 10 minutes (ADR-003). Only the Overview asks for such ranges.
+pub const HISTORY_MIN_RANGE_NS: u64 = 600_000_000_000;
+
+/// Whether a chart of `range_ns` reads `Snapshot.device_history`.
+pub const fn reads_history(range_ns: u64) -> bool {
+    range_ns > HISTORY_MIN_RANGE_NS
+}
+
+/// The clock of a chart that reads the device metric history: its series are on
+/// CLOCK_REALTIME, so the paint turns the boot clock into that clock with `offset_ns`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryClock {
+    /// CLOCK_REALTIME minus CLOCK_BOOTTIME of the current boot.
+    pub offset_ns: i64,
+    /// The right edge while the history request is paused at a time (UI-PRF-057); `None` is
+    /// now.
+    pub end_ns: Option<u64>,
+}
+
+impl HistoryClock {
+    fn of(hist: &DeviceHistory) -> Self {
+        Self {
+            offset_ns: hist.realtime_offset_ns,
+            end_ns: hist
+                .request
+                .and_then(|r| r.end_realtime_ns)
+                .map(|t| t.max(0) as u64),
+        }
+    }
+
+    /// The time at the right edge, on CLOCK_REALTIME, when the boot clock reads `now_boot_ns`.
+    pub fn right_edge_ns(&self, now_boot_ns: u64) -> u64 {
+        self.end_ns
+            .unwrap_or_else(|| now_boot_ns.saturating_add_signed(self.offset_ns))
+    }
+}
+
+/// `points` as a series view on CLOCK_REALTIME (UI-PRF-055). A gap point is a gap sample, and a
+/// point more than one and a half steps after the one before it starts a new run, so a stretch
+/// without points (the app not running, the machine off or asleep) draws as a break, not as a
+/// line across it. The version is the component's, so a new publish rebuilds the geometry.
+fn history_view(id: SeriesId, points: &[HistPoint], hist: &DeviceHistory) -> SeriesView {
+    let step = hist.step_ns.max(1);
+    let mut samples = Vec::with_capacity(points.len());
+    let mut prev: Option<i64> = None;
+    for p in points {
+        let Ok(t) = u64::try_from(p.t_realtime_ns) else {
+            continue;
+        };
+        let mut s = if p.is_gap() {
+            Sample::gap(t)
+        } else {
+            Sample::valid(t, p.mean)
+        };
+        if prev.is_some_and(|q| p.t_realtime_ns.saturating_sub(q) as u64 > step + step / 2) {
+            s.flags |= SampleFlags::GAP_BEFORE;
+        }
+        prev = Some(p.t_realtime_ns);
+        samples.push(s);
+    }
+    SeriesView {
+        id,
+        version: hist.header.version,
+        period_ns: step,
+        samples: samples.into(),
+    }
+}
 
 /// `id` in `set` for a chart of `range_ns`. Over 60 s it looks up the 1 Hz view first and falls
 /// back to the fast view when the snapshot has none; the bool is true when that fallback found

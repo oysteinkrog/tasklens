@@ -7637,6 +7637,7 @@ mod title_row {
                 "Network".into(),
                 "4.7 Mbps".into(),
                 LONG.into(),
+                &Default::default(),
                 div().into_any_element(),
                 false,
                 &m,
