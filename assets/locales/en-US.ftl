@@ -156,6 +156,7 @@ pwn-notices-dump-opening = Opening file location
 pwn-notices-dump-copied = Copied to clipboard
 pwn-notices-dump-failed = Could not create dump file.
 pwn-notices-dump-needs-admin = Creating a dump needs administrator rights
+pwn-notices-dump-ptrace-blocked = Creating a dump is blocked by the kernel ptrace setting (Yama ptrace_scope)
 
 pwn-run-prompt = Type the name of a program, folder, document, or Internet resource.
 pwn-run-open = Open:

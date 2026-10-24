@@ -1186,13 +1186,13 @@ Real-time signal…
 - **States:**
   - Before the first size read: "Writing core…" [chosen].
   - Menu item states (the row menu is owned by `docs/ui/processes.md`): disabled with tooltip "Install gdb to create dumps" when `/usr/bin/gcore` is missing [spec].
-  - Without administrator access: Warning toast "Creating a dump needs administrator rights" [spec], with the "Retry as administrator" button from P3.
+  - Without administrator access: Warning toast "Creating a dump needs administrator rights" [spec], with the "Retry as administrator" button from P3. When Yama `ptrace_scope` is above 0 the same refusal of the user's own process is not a missing privilege, so the text is "Creating a dump is blocked by the kernel ptrace setting (Yama ptrace_scope)" [chosen: same reason as the Security tab and the Strings tab], with the same button.
 - **Interaction:** "Create dump file" in the row menu (`CreateDump { key }`) opens the confirmation when needed, then sends the dump request. The progress size comes from the UI stat-ing the output path every 500 ms on the background executor (`std::fs::metadata(path).len()`) while the action is pending [chosen: ADR-005 action events carry no progress].
 - **Data binding:** setting `processes.dump_type` decides the mode (`Mini` or `Full`) [spec]; the output path `$XDG_STATE_HOME/tasklens/dumps/{name}_{pid}_{yyyymmdd_hhmmss}.core` is chosen by the UI and passed in the request, so it can be stat-ed. `{name}`: every character outside `[A-Za-z0-9._-]` becomes `_` (a run of them becomes one `_`), the name part is cut to 64 bytes, and `process` is used when the result is empty, so the name passes the engine's `^[A-Za-z0-9._-]+\.core$` check; the timestamp is local time formatted with `jiff` (R-224). The engine opens the file itself (`O_EXCL`, mode 0600) and runs gdb's `gcore` into it (R-145).
 - **Build:** `crates/tl-ui/src/windows/notices.rs`, `fn start_dump(key, cx)` and the `DumpProgress` task (cancelled when the action ends).
 - **Performance:** one `stat` every 500 ms off the UI thread during a dump.
 - **Accessibility:** toast text is the only progress indicator; it carries the size as text.
-- **Tests:** `dump_confirm_only_over_2gib`; `dump_progress_toast_updates_in_place` (same toast id, new text); `dump_disabled_without_gcore_tooltip`.
+- **Tests:** `dump_confirm_only_over_2gib`; `dump_progress_toast_updates_in_place` (same toast id, new text); `dump_disabled_without_gcore_tooltip`; `dump_refused_under_yama_names_the_ptrace_setting`.
 - **Phase:** P3.
 - **Decided here:** 500 ms stat polling; the UI picks the output path; "Writing core…" before the first size.
 

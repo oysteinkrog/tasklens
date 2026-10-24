@@ -2434,7 +2434,9 @@ mod dump {
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
     use tl_ui::testing::fake_engine::FakeEngine;
-    use tl_ui::windows::notices::{DUMP_POLL, DumpToast, set_test_home, start_dump};
+    use tl_ui::windows::notices::{
+        DUMP_POLL, DumpToast, set_test_home, set_test_ptrace_scope, start_dump,
+    };
 
     pub(super) const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -3023,6 +3025,24 @@ mod dump {
             "no retry after a privileged try"
         );
         assert!(toasts(&mut r).contains(&"Creating a dump needs administrator rights".to_owned()));
+    }
+
+    #[gpui_kit::test]
+    fn dump_refused_under_yama_names_the_ptrace_setting(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let mut r = rig(cx, &state, DumpMode::Mini, vec![record(3, "x", GIB)]);
+        r.pcx.update(|_, cx| set_test_ptrace_scope(cx, 1));
+        start(&mut r, 3);
+        let (request, _, _) = dump(&r);
+        finish(
+            &mut r,
+            &request,
+            ActionState::Failed(ActionError::PermissionDenied),
+        );
+        assert_eq!(
+            toasts(&mut r),
+            ["Creating a dump is blocked by the kernel ptrace setting (Yama ptrace_scope)"]
+        );
     }
 
     #[gpui_kit::test]

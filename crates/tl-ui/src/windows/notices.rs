@@ -327,6 +327,7 @@ const DUMP_OPENING: &str = "pwn-notices-dump-opening";
 const DUMP_COPIED: &str = "pwn-notices-dump-copied";
 const DUMP_FAILED: &str = "pwn-notices-dump-failed";
 const DUMP_NEEDS_ADMIN: &str = "pwn-notices-dump-needs-admin";
+const DUMP_PTRACE_BLOCKED: &str = "pwn-notices-dump-ptrace-blocked";
 
 /// The toast key of one dump, by the id of its first request: the progress toast and the result
 /// that replaces it, also after "Retry as administrator".
@@ -787,8 +788,15 @@ impl DumpRequest {
 
     /// "Creating a dump needs administrator rights", with the tracker's "Retry as administrator"
     /// when it holds a retry for this request (tl-helper installed, not yet privileged).
+    ///
+    /// With Yama `ptrace_scope` above 0 the refusal comes from the kernel ptrace setting, not
+    /// from a missing privilege, so the text says that (the Security tab's wording).
     fn show_needs_admin(&self, cx: &mut Context<Self>) {
-        let text = tr(cx, DUMP_NEEDS_ADMIN);
+        let text = if ptrace_scope_blocks(cx) {
+            tr(cx, DUMP_PTRACE_BLOCKED)
+        } else {
+            tr(cx, DUMP_NEEDS_ADMIN)
+        };
         let retry = cx
             .try_global::<GlobalActionTracker>()
             .is_some_and(|t| t.0.read(cx).can_retry(self.id));
@@ -810,6 +818,23 @@ impl DumpRequest {
     }
 }
 
+/// True when Yama `ptrace_scope` is above 0. No file means no Yama; a file that cannot be read
+/// or parsed counts as "not blocked", so the plain administrator text stays.
+fn ptrace_scope_blocks(cx: &App) -> bool {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        cx.try_global::<TestPtraceScope>().is_some_and(|s| s.0 > 0)
+    }
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    {
+        let _ = cx;
+        std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+            .ok()
+            .and_then(|t| t.trim().parse::<u8>().ok())
+            .is_some_and(|scope| scope > 0)
+    }
+}
+
 /// `$HOME`, for the `~` form of the path.
 fn home_dir(cx: &App) -> String {
     #[cfg(any(test, feature = "test-hooks"))]
@@ -826,6 +851,19 @@ struct TestHome(String);
 
 #[cfg(any(test, feature = "test-hooks"))]
 impl Global for TestHome {}
+
+#[cfg(any(test, feature = "test-hooks"))]
+struct TestPtraceScope(u8);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Global for TestPtraceScope {}
+
+/// Makes the dump toasts act as if Yama `ptrace_scope` were `scope`. Without it they act as if
+/// there were no Yama, whatever the machine has.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_test_ptrace_scope(cx: &mut App, scope: u8) {
+    cx.set_global(TestPtraceScope(scope));
+}
 
 /// Makes the dump toasts shorten paths under `home` instead of `$HOME`.
 #[cfg(any(test, feature = "test-hooks"))]
