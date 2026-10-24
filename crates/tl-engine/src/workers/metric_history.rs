@@ -171,13 +171,16 @@ pub fn plan(req: DeviceHistoryRequest, now_realtime_ns: i64) -> (Tier, i64, i64)
     (tier, from, to)
 }
 
+/// One published series: its id in the current catalog and its points.
+type HistSeries = (SeriesId, Arc<[HistPoint]>);
+
 /// What the last `DeviceHistory` held, to reuse its `Arc`s and skip unchanged reads.
 struct Published {
     request: DeviceHistoryRequest,
     tier: Tier,
     step_ns: u64,
     since: Option<i64>,
-    series: Arc<[(SeriesId, Arc<[HistPoint]>)]>,
+    series: Arc<[HistSeries]>,
     /// Boottime of the read.
     read_at: TimeNs,
 }
@@ -355,8 +358,8 @@ impl State {
 
     /// The span's series under their current `SeriesId`, sorted, with the `Arc` of the last
     /// publish where the points are equal. The bool is true when every series was reused.
-    fn map_series(&self, span: MetricSpan) -> (Vec<(SeriesId, Arc<[HistPoint]>)>, bool) {
-        let mut out: Vec<(SeriesId, Arc<[HistPoint]>)> = span
+    fn map_series(&self, span: MetricSpan) -> (Vec<HistSeries>, bool) {
+        let mut out: Vec<HistSeries> = span
             .series
             .into_iter()
             .filter_map(|(key, points)| {
@@ -908,19 +911,24 @@ mod tests {
         let now = t0 + 10 * SEC;
         st.tick(now).expect("tick");
         let h = st
-            .answer(live(DeviceRange::H1), now)
+            .answer(live(DeviceRange::M1), now)
             .expect("read")
             .expect("sent");
+        // The newest second of each series is still open, so not readable yet.
         assert_eq!(
             means(&h, sid(3, MetricId::DISK_READ)),
-            [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0]
+            [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
         );
         assert!(h.get(sid(1, MetricId::DISK_READ)).is_none());
         assert!(h.get(sid(2, MetricId::DISK_READ)).is_none());
         assert!(h.get(sid(3, MetricId::DISK_WRITE)).is_none());
-        assert_eq!(means(&h, sid(0, MetricId::CPU_TOTAL)).len(), 5);
+        assert_eq!(
+            means(&h, sid(0, MetricId::CPU_TOTAL)),
+            [10.0, 11.0, 12.0, 13.0]
+        );
         assert_eq!(h.realtime_offset_ns, OFFSET);
         assert!(h.series.windows(2).all(|w| w[0].0 < w[1].0));
+        // Closing writes the open seconds too.
         st.close(now).expect("close");
 
         // A reboot: boottime starts again and the disk is idx 7 now. The last hour comes back
@@ -930,10 +938,11 @@ mod tests {
         let mut st = open(dir.path(), 2, offset2, t1);
         st.set_catalog(catalog(1, vec![entry(7, disk("sda"), "disk:WWN-A", true)]));
         st.push(&[(sid(7, MetricId::DISK_READ), sample(t1, 200.0))]);
+        st.push(&[(sid(7, MetricId::DISK_READ), sample(t1 + SEC, 201.0))]);
         let now = t1 + 3 * SEC;
         st.tick(now).expect("tick");
         let h = st
-            .answer(live(DeviceRange::H1), now)
+            .answer(live(DeviceRange::M1), now)
             .expect("read")
             .expect("sent");
         let points = h.get(sid(7, MetricId::DISK_READ)).expect("series");
