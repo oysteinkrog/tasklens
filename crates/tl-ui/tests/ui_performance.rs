@@ -2111,6 +2111,18 @@ mod summary {
         assert_eq!(first, again);
     }
 
+    /// 14 tiles use 4 columns, `ceil(sqrt(14))` (UI-PRF-016), not 5.
+    #[gpui_kit::test]
+    fn summary_tile_grid_for_14(cx: &mut TestAppContext) {
+        let _ = cx;
+        let l = tl_ui::pages::performance::summary::tile_grid(
+            14,
+            gpui_kit::px(1600.),
+            gpui_kit::px(1000.),
+        );
+        assert_eq!((l.cols, l.rows), (4, 4));
+    }
+
     #[gpui_kit::test]
     fn summary_tile_grid_for_9(cx: &mut TestAppContext) {
         let mut r = open(cx, 1600., 1000., false);
@@ -2933,14 +2945,20 @@ mod summary {
         );
     }
 
-    /// Right-click on a tile opens the page menu's common items (UI-PRF-016); its Time range
-    /// items reach the tiles.
+    /// Right-click on a tile opens the page menu of its device (UI-PRF-016): the same items as
+    /// the page menu, for the CPU tile and for a Disk tile.
     #[gpui_kit::test]
     fn summary_tile_right_click_page_menu(cx: &mut TestAppContext) {
         use tl_ui::components::menu::close_context_menu;
         use tl_ui::pages::performance::actions::PerfSetGraphRange;
 
         let mut r = open(cx, 1600., 1000., true);
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        let page_list = open_menu(&mut r);
+        let page_items: Vec<(MenuEntryKind, String)> =
+            page_list.iter().map(|e| (e.0, e.1.clone())).collect();
+        r.vcx.update(close_context_menu);
         let view = enter(&mut r);
         let tile = r.vcx.debug_bounds("perf-summary-tile-0").expect("CPU tile");
         right_click(r.vcx, tile.center());
@@ -2950,18 +2968,10 @@ mod summary {
             "right-click does not leave summary mode"
         );
         let list = open_menu(&mut r);
-        assert_eq!(
-            labels(&list),
-            [
-                (MenuEntryKind::Item, "Copy"),
-                (MenuEntryKind::Item, "Graph Summary View"),
-                (MenuEntryKind::Submenu, "Time range"),
-            ]
-        );
+        let items: Vec<(MenuEntryKind, String)> = list.iter().map(|e| (e.0, e.1.clone())).collect();
+        assert_eq!(items, page_items);
+        assert!(items.iter().any(|e| e.1 == "Kernel times"));
         assert!(list[1].3, "checked in summary mode");
-        // No page items: the CPU page's Graph and Kernel times stay out (no page is drawn).
-        assert!(!list.iter().any(|e| e.1 == "Graph" || e.1 == "Kernel times"));
-        assert!(!list.iter().any(|e| e.0 == MenuEntryKind::Separator));
 
         // The items run on the summary view.
         let focus = r.vcx.update(|_, cx| view.read(cx).focus_handle(cx));

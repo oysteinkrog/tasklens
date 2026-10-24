@@ -15,7 +15,7 @@ use std::cell::Cell;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, Render, SharedString, Size,
+    MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Size,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, canvas,
     div, px,
 };
@@ -23,14 +23,13 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
 
 use super::actions::{
-    NoOp, PERFORMANCE_SUMMARY_CONTEXT, PerfSetGraphRange, PerfShowMiniWindow, PerfToggleSummaryMode,
+    NoOp, PERFORMANCE_SUMMARY_CONTEXT, PerfCopyDeviceInfo, PerfJumpToType, PerfSetGraphRange,
+    PerfShowMiniWindow, PerfToggleSummaryMode,
 };
-use super::menu::page_menu_common;
+use super::set_graph_range;
 use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind};
-use super::{page_menu_ctx, set_graph_range};
 use crate::chart::{ChartBg, ChartLabels, ChartView, LegendStyle, ValueAlign, ValueFormat};
-use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::i18n::tr;
@@ -111,10 +110,16 @@ pub struct TileText {
 }
 
 /// Emitted to the `PerformancePage`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SummaryEvent {
     /// Leave summary mode, then select `select` when set (a tile click).
     Exit { select: Option<DeviceKey> },
+    /// Right-click on the tile of `key`: the page performs the page menu of that device.
+    Menu { key: DeviceKey, at: Point<Pixels> },
+    /// "Copy" in a tile menu: copy the text of the device the menu was opened for.
+    Copy { key: DeviceKey },
+    /// "View >" in a tile menu: leave summary mode and select the first visible device of `kind`.
+    JumpToType { kind: DeviceKind },
 }
 
 /// The summary mode view.
@@ -123,6 +128,8 @@ pub struct SummaryView {
     pub selected_on_entry: Option<DeviceKey>,
     /// Key context "PerformanceSummary".
     focus: FocusHandle,
+    /// The device whose tile menu was opened last; "Copy" in that menu copies its page.
+    menu_key: Option<DeviceKey>,
     /// The tile layout for `size`, in window pixels.
     layout: TileLayout,
     /// The area the layout was made for, from the last paint.
@@ -222,6 +229,7 @@ impl SummaryView {
             tiles,
             selected_on_entry,
             focus: cx.focus_handle(),
+            menu_key: None,
             layout: tile_grid(0, px(0.), px(0.)),
             size: Size::default(),
             label_class: (false, false),
@@ -318,6 +326,23 @@ impl SummaryView {
                 v.set_spec(spec, cx);
             });
         }
+    }
+
+    /// "Copy" in a tile menu: the page copies the device the menu was opened for.
+    fn on_copy_device_info(
+        &mut self,
+        _: &PerfCopyDeviceInfo,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(key) = self.menu_key.clone() {
+            cx.emit(SummaryEvent::Copy { key });
+        }
+    }
+
+    /// "View >" in a tile menu.
+    fn on_jump_to_type(&mut self, a: &PerfJumpToType, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(SummaryEvent::JumpToType { kind: a.kind });
     }
 
     /// The tile menu's Time range items run here: no `PerformancePage` is drawn above this view.
@@ -481,19 +506,18 @@ impl Render for SummaryView {
                         .cached(StyleRefinement::default().size_full()),
                 )
                 .children(marker)
-                // The page menu's common items (UI-PRF-016). No device page is drawn here, so
-                // its own items would reach no handler.
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                // The page menu of the tile's device (UI-PRF-016), opened by the page.
+                .on_mouse_down(MouseButton::Right, {
+                    let key = tile.key.clone();
+                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        let menu = TlMenu::build(window, cx, this.focus.clone(), |menu, w, cx| {
-                            let ctx = page_menu_ctx(true, cx);
-                            page_menu_common(menu, &ctx, w, cx)
+                        this.menu_key = Some(key.clone());
+                        cx.emit(SummaryEvent::Menu {
+                            key: key.clone(),
+                            at: ev.position,
                         });
-                        open_context_menu_at(ev.position, window, cx, menu);
-                    }),
-                )
+                    })
+                })
                 .on_click(
                     cx.listener(move |_, ev: &gpui_kit::ClickEvent, window, cx| {
                         if ev.click_count() == 2 {
@@ -546,6 +570,8 @@ impl Render for SummaryView {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle))
             .on_action(cx.listener(Self::on_set_graph_range))
+            .on_action(cx.listener(Self::on_copy_device_info))
+            .on_action(cx.listener(Self::on_jump_to_type))
             // A binding whose action has no handler falls through to the next binding for the
             // same keys, so the swallowed tab keys need this empty handler.
             .on_action(|_: &NoOp, _, _| {})

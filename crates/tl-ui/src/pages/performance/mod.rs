@@ -586,6 +586,14 @@ impl PerformancePage {
                 summary::SummaryEvent::Exit { select } => {
                     this.exit_summary(select.clone(), window, cx);
                 }
+                summary::SummaryEvent::Menu { key, at } => {
+                    this.open_summary_menu(key, *at, window, cx);
+                }
+                summary::SummaryEvent::Copy { key } => this.copy_device_info(key, window, cx),
+                summary::SummaryEvent::JumpToType { kind } => {
+                    let key = this.first_visible_of(*kind, cx);
+                    this.exit_summary(key, window, cx);
+                }
             },
         ));
         self.summary = Some(view.clone());
@@ -709,37 +717,39 @@ impl PerformancePage {
         }
     }
 
+    /// The page of `key`, built on the first call. `None` when the sidebar has no such device.
+    fn page_view(&mut self, key: &DeviceKey, cx: &mut App) -> Option<AnyView> {
+        if let Some(view) = self.pages.get(key) {
+            return Some(view.clone());
+        }
+        let row = self
+            .sidebar
+            .read(cx)
+            .rows()
+            .iter()
+            .find(|r| r.key == *key)
+            .cloned()?;
+        // The Overview page reads the sidebar's cards, so it is built here.
+        let view = if row.kind == DeviceKind::Overview {
+            let (hub, demand) = (self.hub.clone(), self.demand.clone());
+            let sidebar = &self.sidebar;
+            cx.new(|cx| overview::OverviewPage::new(key.clone(), hub, demand, sidebar, cx))
+                .into()
+        } else {
+            page::build_page(key, &row, &self.hub, &self.demand, cx)
+        };
+        self.pages.insert(key.clone(), view.clone());
+        Some(view)
+    }
+
     /// Shows the page of `key`: builds it on the first visit, deactivates the old page and
     /// activates the new one. False when nothing changed.
     fn show(&mut self, key: DeviceKey, cx: &mut App) -> bool {
         if self.selected.as_ref() == Some(&key) {
             return false;
         }
-        let view = match self.pages.get(&key) {
-            Some(view) => view.clone(),
-            None => {
-                let Some(row) = self
-                    .sidebar
-                    .read(cx)
-                    .rows()
-                    .iter()
-                    .find(|r| r.key == key)
-                    .cloned()
-                else {
-                    return false;
-                };
-                // The Overview page reads the sidebar's cards, so it is built here.
-                let view = if row.kind == DeviceKind::Overview {
-                    let (hub, demand) = (self.hub.clone(), self.demand.clone());
-                    let sidebar = &self.sidebar;
-                    cx.new(|cx| overview::OverviewPage::new(key.clone(), hub, demand, sidebar, cx))
-                        .into()
-                } else {
-                    page::build_page(&key, &row, &self.hub, &self.demand, cx)
-                };
-                self.pages.insert(key.clone(), view.clone());
-                view
-            }
+        let Some(view) = self.page_view(&key, cx) else {
+            return false;
         };
         if let Some(old) = self.selected_view() {
             self.leave_page(&old, cx);
@@ -913,7 +923,15 @@ impl PerformancePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.selected_view() else {
+        let Some(key) = self.selected.clone() else {
+            return;
+        };
+        self.copy_device_info(&key, window, cx);
+    }
+
+    /// Copies the page of `key` as text, with the toast of [`Self::on_copy_device_info`].
+    fn copy_device_info(&mut self, key: &DeviceKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.page_view(key, cx) else {
             return;
         };
         let mut text = String::new();
@@ -941,14 +959,48 @@ impl PerformancePage {
         }
     }
 
+    /// The first visible card of `kind`.
+    fn first_visible_of(&self, kind: DeviceKind, cx: &App) -> Option<DeviceKey> {
+        let sidebar = self.sidebar.read(cx);
+        sidebar
+            .visible_keys()
+            .find(|k| sidebar.card(k).is_some_and(|c| c.row.kind == kind))
+            .cloned()
+    }
+
+    /// The page menu of the device of a summary tile (UI-PRF-016). The summary view is the
+    /// menu's focus, so its items run there.
+    fn open_summary_menu(
+        &mut self,
+        key: &DeviceKey,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(summary), Some(view)) = (self.summary.clone(), self.page_view(key, cx)) else {
+            return;
+        };
+        let focus = summary.read(cx).focus_handle(cx);
+        let sidebar = self.sidebar.clone();
+        let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
+            let types = view_types(sidebar.read(cx));
+            let ctx = PageMenuCtx {
+                view_types: Some(&types),
+                ..page_menu_ctx(true, cx)
+            };
+            let mut slot = Some(menu);
+            update_page(&view, cx, |p, cx| {
+                let menu = slot.take().expect("one page");
+                slot = Some(page_menu(menu, p, &ctx, window, cx));
+            });
+            slot.expect("the menu")
+        });
+        open_context_menu_at(at, window, cx, menu);
+    }
+
     /// `PerfJumpToType`: selects the first visible card of `kind`.
     fn on_jump_to_type(&mut self, a: &PerfJumpToType, _: &mut Window, cx: &mut Context<Self>) {
-        let sidebar = self.sidebar.read(cx);
-        let key = sidebar
-            .visible_keys()
-            .find(|k| sidebar.card(k).is_some_and(|c| c.row.kind == a.kind))
-            .cloned();
-        if let Some(key) = key {
+        if let Some(key) = self.first_visible_of(a.kind, cx) {
             self.sidebar.update(cx, |s, cx| s.select(key, cx));
         }
     }
