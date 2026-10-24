@@ -1328,6 +1328,7 @@ pub fn battery_spec(
         smooth: s.smooth,
         grid: s.grid.clone(),
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }

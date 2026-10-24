@@ -35,7 +35,9 @@ use tl_ui::pages::performance::actions::PerfSetGraphRange;
 use tl_ui::pages::performance::aggregate::{
     AggregateDiskPage, AggregateGpuPage, ROW_ADAPTERS, ROW_DISKS, ROW_TYPE as AGG_ROW_TYPE,
 };
-use tl_ui::pages::performance::cpu::CpuPage;
+use tl_ui::pages::performance::cpu::{
+    CpuPage, PageSettingsView as CpuPageSettingsView, overlaid_spec, stacked_spec,
+};
 use tl_ui::pages::performance::disk::{
     DiskPage, ROW_ACTIVE, ROW_CAPACITY, ROW_READ, ROW_RESPONSE, ROW_WRITE,
 };
@@ -281,6 +283,22 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
         if let Some(secondary) = page.secondary() {
             assert!(secondary.read(cx).spec.hover, "CPU secondary takes hover");
         }
+        // The overlaid and stacked all-cores modes build their charts from these specs.
+        let theme = tl_ui::theme::current(cx).clone();
+        let view = CpuPageSettingsView {
+            range_ns: 60_000_000_000,
+            smooth: false,
+            rounded: false,
+        };
+        let cores: Vec<DeviceIdx> = (0..4).map(DeviceIdx).collect();
+        assert!(
+            overlaid_spec(&cores, &view, &theme).hover,
+            "CPU overlaid takes hover"
+        );
+        assert!(
+            stacked_spec(&cores, &view, &theme).hover,
+            "CPU stacked takes hover"
+        );
     });
 
     select(&mut r, "memory");
@@ -613,7 +631,16 @@ fn build_page_fan_and_battery(cx: &mut TestAppContext) {
     let header = r.vcx.update(|_, cx| header_of(&fan, cx));
     assert_eq!((header.0.as_ref(), header.1.as_ref()), ("Fan 1", "nct6797"));
     let mouse = view_of(&mut r, MOUSE);
-    assert!(mouse.clone().downcast::<BatteryPage>().is_ok());
+    let mouse_page = mouse
+        .clone()
+        .downcast::<BatteryPage>()
+        .expect("a BatteryPage");
+    r.vcx.update(|_, cx| {
+        assert!(
+            mouse_page.read(cx).chart().read(cx).spec.hover,
+            "battery chart takes hover"
+        );
+    });
     let header = r.vcx.update(|_, cx| header_of(&mouse, cx));
     assert_eq!(
         (header.0.as_ref(), header.1.as_ref()),
