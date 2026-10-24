@@ -66,7 +66,7 @@ use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::settings_global::{TlSettings, animations_on};
-use crate::theme::palette::DeviceAccent;
+use crate::theme::palette::{DeviceAccent, accent_color};
 use crate::theme::{TlTheme, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::{ShellPage, WINDOW_TITLE};
@@ -182,8 +182,8 @@ impl DeviceKind {
         }
     }
 
-    /// The tint of the device icon: the device graph colour. Fan and Battery have no graph
-    /// colour family, so they use the theme accent.
+    /// The tint of the device icon: the device graph colour. Fan and Battery use the Violet and
+    /// Mint of their graphs (UI-PRF-005). The Overview has no icon; it gets the theme accent.
     pub fn icon_color(self, theme: &TlTheme) -> Hsla {
         let family = match self {
             Self::Cpu => DeviceAccent::Cpu,
@@ -191,7 +191,9 @@ impl DeviceKind {
             Self::Gpu | Self::AggregateGpu => DeviceAccent::Gpu,
             Self::Disk | Self::AggregateDisk => DeviceAccent::Disk,
             Self::Net => DeviceAccent::Net,
-            Self::Overview | Self::Fan | Self::Battery => return theme.accent,
+            Self::Fan => return accent_color("violet").unwrap_or(theme.graph.gpu_line),
+            Self::Battery => return accent_color("mint").unwrap_or(theme.graph.gpu_line),
+            Self::Overview => return theme.accent,
         };
         theme.graph.device_accent(family)
     }
@@ -1360,20 +1362,37 @@ mod tests {
 
     #[test]
     fn polish_icons_per_kind() {
+        let mut theme = crate::theme::tests::test_theme(crate::theme::ThemeMode::Dark);
+        let color = |v: u32| -> Hsla { gpui_kit::rgb(v).into() };
+        theme.accent = color(0x000001);
+        theme.graph.cpu_line = color(0x000002);
+        theme.graph.mem_line = color(0x000003);
+        theme.graph.gpu_line = color(0x000004);
+        theme.graph.disk_line = color(0x000005);
+        theme.graph.net_line = color(0x000006);
+        let g = &theme.graph;
+        // Fan and Battery: the Violet and Mint of their graphs (UI-PRF-005).
+        let violet = color(0x8B5CF6);
+        let mint = color(0x3EB489);
         let expect = [
-            (DeviceKind::Overview, None),
-            (DeviceKind::Cpu, Some(TlIcon::Cpu)),
-            (DeviceKind::Memory, Some(TlIcon::MemoryStick)),
-            (DeviceKind::Gpu, Some(TlIcon::Gpu)),
-            (DeviceKind::Disk, Some(TlIcon::HardDrive)),
-            (DeviceKind::Net, Some(TlIcon::Network)),
-            (DeviceKind::Fan, Some(TlIcon::Fan)),
-            (DeviceKind::Battery, Some(TlIcon::Battery)),
-            (DeviceKind::AggregateDisk, Some(TlIcon::HardDrive)),
-            (DeviceKind::AggregateGpu, Some(TlIcon::Gpu)),
+            (DeviceKind::Overview, None, theme.accent),
+            (DeviceKind::Cpu, Some(TlIcon::Cpu), g.cpu_line),
+            (DeviceKind::Memory, Some(TlIcon::MemoryStick), g.mem_line),
+            (DeviceKind::Gpu, Some(TlIcon::Gpu), g.gpu_line),
+            (DeviceKind::Disk, Some(TlIcon::HardDrive), g.disk_line),
+            (DeviceKind::Net, Some(TlIcon::Network), g.net_line),
+            (DeviceKind::Fan, Some(TlIcon::Fan), violet),
+            (DeviceKind::Battery, Some(TlIcon::Battery), mint),
+            (
+                DeviceKind::AggregateDisk,
+                Some(TlIcon::HardDrive),
+                g.disk_line,
+            ),
+            (DeviceKind::AggregateGpu, Some(TlIcon::Gpu), g.gpu_line),
         ];
-        for (kind, icon) in expect {
+        for (kind, icon, tint) in expect {
             assert_eq!(kind.icon(), icon, "{kind:?}");
+            assert_eq!(kind.icon_color(&theme), tint, "{kind:?} tint");
         }
     }
 
