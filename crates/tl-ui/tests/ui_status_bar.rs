@@ -19,7 +19,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, GpuTotals, Metric};
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::kv_grid;
-use tl_ui::components::menu::open_context_menu;
+use tl_ui::components::menu::{close_context_menu, open_context_menu};
 use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
@@ -444,14 +444,12 @@ mod performance_tab {
                     .collect::<Vec<_>>()
             });
             assert_eq!(rows, ["CPU"], "{width}");
-            r.vcx.simulate_keystrokes("escape");
+            r.vcx.update(close_context_menu);
             draw(r.vcx);
-            assert!(
-                r.vcx
-                    .update(|window, cx| open_context_menu(window, cx))
-                    .is_none(),
-                "{width}: popup closed"
-            );
+            let open = r
+                .vcx
+                .update(|window, cx| open_context_menu(window, cx).is_some());
+            assert!(!open, "{width}: popup closed");
         }
     }
 }
