@@ -268,6 +268,21 @@ fn assert_rows<T: DevicePage>(page: &T, expected: &[&str]) {
 fn device_pages_render_smoke(cx: &mut TestAppContext) {
     let mut r = open(cx);
 
+    select(&mut r, "cpu");
+    let cpu = view_of(&mut r, "cpu")
+        .downcast::<CpuPage>()
+        .expect("a CpuPage");
+    r.vcx.update(|_, cx| {
+        let page = cpu.read(cx);
+        assert!(
+            page.overall().read(cx).spec.hover,
+            "CPU overall takes hover"
+        );
+        if let Some(secondary) = page.secondary() {
+            assert!(secondary.read(cx).spec.hover, "CPU secondary takes hover");
+        }
+    });
+
     select(&mut r, "memory");
     let memory = view_of(&mut r, "memory")
         .downcast::<MemoryPage>()
