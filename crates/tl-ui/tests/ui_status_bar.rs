@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
-    Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
+    StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -16,9 +16,10 @@ use tl_model::settings::{
     AppearanceSettings, Settings, StatusBarPlacement, ThemeSettings, UiState,
 };
 use tl_model::snapshot::Snapshot;
-use tl_model::system::{CpuSet, CpuTopology, Metric};
+use tl_model::system::{CpuSet, CpuTopology, GpuTotals, Metric};
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::kv_grid;
+use tl_ui::components::menu::open_context_menu;
 use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
@@ -339,6 +340,119 @@ mod performance_tab {
         assert_eq!(&*text.pill, "Calm");
         assert!(text.warnings.is_empty());
         assert!(r.vcx.debug_bounds(WARNINGS_ID).is_none());
+    }
+
+    /// A GPU at 50 °C.
+    fn gpu(idx: u16) -> (DeviceIdx, GpuTotals) {
+        let totals = GpuTotals {
+            device: DeviceIdx(idx),
+            util_pct: Metric::valid(5.),
+            mem_util_pct: Metric::default(),
+            mem_used: Metric::default(),
+            mem_total: Metric::default(),
+            shared_used: Metric::default(),
+            shared_total: Metric::default(),
+            mem_reserved: Metric::default(),
+            enc_pct: Metric::default(),
+            dec_pct: Metric::default(),
+            enc_sessions: Metric::default(),
+            enc_dec_shared: false,
+            temp_c: Metric::valid(50.),
+            temp_edge_c: Metric::default(),
+            temp_junction_c: Metric::default(),
+            temp_mem_c: Metric::default(),
+            power_w: Metric::default(),
+            power_limit_w: Metric::default(),
+            clock_gfx_mhz: Metric::default(),
+            clock_mem_mhz: Metric::default(),
+            fan_pct: Metric::default(),
+            pcie_rx_bps: Metric::default(),
+            pcie_tx_bps: Metric::default(),
+            engines: Default::default(),
+            throttling: Default::default(),
+            fdinfo_partial: false,
+            energy_since_boot: Metric::default(),
+            clock_video_mhz: Metric::default(),
+            pstate: Metric::default(),
+            clock_event_reasons: Metric::default(),
+            fan_rpm: Metric::default(),
+            pcie_gen: Metric::default(),
+            pcie_width: Metric::default(),
+            info: Arc::default(),
+        };
+        (DeviceIdx(idx), totals)
+    }
+
+    /// With more chips than fit, the warning button keeps its place at the right end of the
+    /// bar, fully visible, and a click on it opens the popup. Checked with the bar 900 px and
+    /// 1280 px wide.
+    #[gpui_kit::test]
+    fn status_bar_warning_button_never_pushed_out(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        // A red CPU chip and 12 GPU temperature chips.
+        r.engine.publish_with(|s| {
+            s.devices = Arc::new(catalog(Some(95.)));
+            calm(s, 101);
+            let sys = Arc::make_mut(&mut s.system);
+            sys.cpu.temp_c = Metric::valid(97.);
+            sys.gpus = Arc::from((200..212).map(gpu).collect::<Vec<_>>());
+        });
+        draw(r.vcx);
+        let bar = r.bar();
+        let text = r.vcx.read_entity(&bar, |b, _| b.text().clone());
+        assert_eq!(&*text.warnings, "1 warning");
+        let last = sel(chip_id(text.chips.last().expect("chips").kind));
+
+        for width in [900., 1280.] {
+            // Size the window so the bar is `width` wide.
+            let window = r.vcx.update(|window, _| window.viewport_size());
+            let bar = r.vcx.debug_bounds(BAR_ID).expect("bar");
+            let w = window.width + px(width) - bar.size.width;
+            r.vcx.simulate_resize(size(w, window.height));
+            draw(r.vcx);
+            let bar = r.vcx.debug_bounds(BAR_ID).expect("bar");
+            assert_eq!(bar.size.width, px(width));
+            assert_eq!(bar.size.height, px(64.), "{width}: one row");
+
+            let button = r.vcx.debug_bounds(WARNINGS_ID).expect("warning button");
+            assert!(
+                button.left() >= bar.left()
+                    && button.right() <= bar.right()
+                    && button.top() >= bar.top()
+                    && button.bottom() <= bar.bottom(),
+                "{width}: button {button:?} inside bar {bar:?}"
+            );
+            let last = r.vcx.debug_bounds(last).expect("last chip");
+            assert!(
+                last.right() > button.left(),
+                "{width}: more chips than fit, last chip {last:?}"
+            );
+            let first = r
+                .vcx
+                .debug_bounds(sel(chip_id(ChipKind::Uptime)))
+                .expect("first chip");
+            assert!(first.right() <= button.left(), "{width}: first chip shown");
+
+            r.vcx.simulate_click(button.center(), Modifiers::none());
+            draw(r.vcx);
+            let rows = r.vcx.update(|window, cx| {
+                let menu = open_context_menu(window, cx).expect("the popup is open");
+                menu.read(cx)
+                    .entries_for_test(window)
+                    .into_iter()
+                    .filter_map(|e| e.label.map(|l| l.to_string()))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(rows, ["CPU"], "{width}");
+            r.vcx.simulate_keystrokes("escape");
+            draw(r.vcx);
+            assert!(
+                r.vcx
+                    .update(|window, cx| open_context_menu(window, cx))
+                    .is_none(),
+                "{width}: popup closed"
+            );
+        }
     }
 }
 

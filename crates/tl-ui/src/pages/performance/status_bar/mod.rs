@@ -941,12 +941,22 @@ impl Render for StatusBar {
                 .child(row().overflow_hidden().children(chips))
                 .child(measure)
         } else {
-            // One row; chips that do not fit are cut off, they never wrap.
+            // One row. The chips get the width the pill and the warning button leave and are
+            // cut off at its end, so they never wrap and never push the button out of the bar.
             bar.flex_row()
                 .items_center()
                 .child(pill)
-                .children(chips)
-                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        .min_w_0()
+                        .items_center()
+                        .gap(m.sp[3])
+                        .overflow_hidden()
+                        .children(chips),
+                )
                 .children(warnings)
                 .child(measure)
         }
