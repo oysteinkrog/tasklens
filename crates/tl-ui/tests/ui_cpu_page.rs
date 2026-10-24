@@ -1288,11 +1288,24 @@ mod page {
     #[gpui_kit::test]
     fn cpu_page_inactive_contributes_no_demand(cx: &mut TestAppContext) {
         let mut r = open(cx, Settings::default());
-        assert_eq!(merged(&mut r), Demand::default(), "never active");
+        assert_eq!(
+            merged(&mut r),
+            Demand {
+                device_history: true,
+                ..Demand::default()
+            },
+            "never active"
+        );
         set_active(&mut r, true);
         assert_ne!(merged(&mut r), Demand::default());
         set_active(&mut r, false);
-        assert_eq!(merged(&mut r), Demand::default());
+        assert_eq!(
+            merged(&mut r),
+            Demand {
+                device_history: true,
+                ..Demand::default()
+            }
+        );
     }
 
     #[cfg(feature = "bench")]

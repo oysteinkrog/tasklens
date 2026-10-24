@@ -199,7 +199,14 @@ fn hidden_turns_demand_off(cx: &mut TestAppContext) {
     let sent = rig.engine.demands();
     assert_eq!(sent.len(), 2);
     assert!(!sent[1].any_surface_visible);
-    assert_eq!(sent[1], Demand::default(), "every periodic source off");
+    assert_eq!(
+        sent[1],
+        Demand {
+            device_history: true,
+            ..Demand::default()
+        },
+        "every periodic source off, device history kept"
+    );
 
     // Visible again: the main-window parts count again.
     rig.hub.update(cx, |h, cx| h.note_render(cx));

@@ -3151,7 +3151,13 @@ mod summary {
         r.vcx.run_until_parked();
         let hub = r.hub.clone();
         assert!(r.vcx.read_entity(&hub, |h, _| h.is_hidden()));
-        assert_eq!(merged(&mut r), Demand::default());
+        assert_eq!(
+            merged(&mut r),
+            Demand {
+                device_history: true,
+                ..Demand::default()
+            }
+        );
     }
 
     /// Publishes a CPU speed of 4631 MHz and returns the bounds of the CPU page's Speed value.

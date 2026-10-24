@@ -1819,7 +1819,13 @@ mod page {
             "the System counts come from the CPU totals"
         );
         r.set_active(false);
-        assert_eq!(r.engine.demands().last(), Some(&Demand::default()));
+        assert_eq!(
+            r.engine.demands().last(),
+            Some(&Demand {
+                device_history: true,
+                ..Demand::default()
+            })
+        );
     }
 
     #[gpui_kit::test]

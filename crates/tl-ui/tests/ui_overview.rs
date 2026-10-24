@@ -3574,7 +3574,13 @@ mod page {
         r.vcx.run_until_parked();
         let hub = r.hub.clone();
         assert!(r.vcx.read_entity(&hub, |h, _| h.is_hidden()));
-        assert_eq!(r.merged(), Demand::default());
+        assert_eq!(
+            r.merged(),
+            Demand {
+                device_history: true,
+                ..Demand::default()
+            }
+        );
     }
 
     fn center(b: gpui_kit::Bounds<gpui_kit::Pixels>) -> gpui_kit::Point<gpui_kit::Pixels> {

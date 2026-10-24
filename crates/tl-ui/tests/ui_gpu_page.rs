@@ -424,13 +424,26 @@ fn gpu_memory_shared_series_when_reported(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn gpu_demand_only_when_active(cx: &mut TestAppContext) {
     let mut r = nvidia(cx);
-    assert_eq!(merged(&mut r), Demand::default(), "never active");
+    assert_eq!(
+        merged(&mut r),
+        Demand {
+            device_history: true,
+            ..Demand::default()
+        },
+        "never active"
+    );
     set_active(&mut r, true);
     let d = merged(&mut r);
     assert!(d.any_surface_visible);
     assert!(d.gpus);
     set_active(&mut r, false);
-    assert_eq!(merged(&mut r), Demand::default());
+    assert_eq!(
+        merged(&mut r),
+        Demand {
+            device_history: true,
+            ..Demand::default()
+        }
+    );
 }
 
 #[gpui_kit::test]

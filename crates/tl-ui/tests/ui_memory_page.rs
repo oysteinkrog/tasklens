@@ -356,7 +356,14 @@ fn memory_demand_only_when_active(cx: &mut TestAppContext) {
     let r = open(cx, Settings::default(), system(64 * GIB, 80 * GIB, 0));
     let (page, demand) = (r.page.clone(), r.demand.clone());
     let merged = |vcx: &mut VisualTestContext| vcx.update(|_, cx| demand.read(cx).merged());
-    assert_eq!(merged(r.vcx), Demand::default(), "never active");
+    assert_eq!(
+        merged(r.vcx),
+        Demand {
+            device_history: true,
+            ..Demand::default()
+        },
+        "never active"
+    );
 
     r.vcx
         .update(|_, cx| page.update(cx, |p, cx| p.set_active(true, cx)));
@@ -367,7 +374,13 @@ fn memory_demand_only_when_active(cx: &mut TestAppContext) {
 
     r.vcx
         .update(|_, cx| page.update(cx, |p, cx| p.set_active(false, cx)));
-    assert_eq!(merged(r.vcx), Demand::default());
+    assert_eq!(
+        merged(r.vcx),
+        Demand {
+            device_history: true,
+            ..Demand::default()
+        }
+    );
 }
 
 #[gpui_kit::test]

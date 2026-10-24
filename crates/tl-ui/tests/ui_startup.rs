@@ -1388,7 +1388,13 @@ mod page {
                 .is_some_and(|d| { d.any_surface_visible && d.startup })
         );
         rig.set_active(false);
-        assert_eq!(rig.engine.demands().last(), Some(&Demand::default()));
+        assert_eq!(
+            rig.engine.demands().last(),
+            Some(&Demand {
+                device_history: true,
+                ..Demand::default()
+            })
+        );
         rig.set_active(true);
         let refreshes = rig
             .engine
