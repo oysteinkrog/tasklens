@@ -1263,15 +1263,25 @@ impl NetBox {
             .flex_col()
             .size_full()
             .gap(m.sp[5])
+            // Clipped, so a box too low for both parts never draws over its time axis.
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .w_full()
                     .h(relative(share))
+                    .overflow_hidden()
                     .child(down),
             )
-            .child(div().flex().flex_1().min_h_0().w_full().child(up))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(up),
+            )
             .child(self.stack_split.probe(Self::stack_inner_split, cx))
             .child(self.stack_split.gap(
                 SplitAxis::Column,

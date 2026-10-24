@@ -897,7 +897,9 @@ impl CpuBox {
     fn rebuild_spec(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
         let spec = total_spec(self.cpu, &self.settings, &theme);
-        let labels = total_labels(tr(cx, KEY_RANGE), self.settings.kernel, cx);
+        // The box frame draws the one time axis, so the chart keeps no range caption, as
+        // `box_chart` set it up.
+        let labels = total_labels(SharedString::default(), self.settings.kernel, cx);
         self.total.update(cx, |v, cx| {
             v.set_spec(spec, cx);
             v.set_labels(labels, cx);
