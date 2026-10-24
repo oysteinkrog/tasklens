@@ -43,7 +43,7 @@ use super::actions::{
     PropsFieldLeft, PropsFieldMenu, PropsFieldRight, PropsFieldUp, PropsFocusFilter, PropsNextTab,
     PropsPrevTab, PropsRefreshNow, PropsSelectTab,
 };
-use super::frame::{EscStep, PwnWindow, app_props_title, esc_step, open_pwn};
+use super::frame::{EscStep, PwnWindow, app_props_title, esc_step, pwn_window_spec};
 use super::props::filter::{
     FilterChanged, NO_MATCH, PropsFilter, filter_bar, lowercase, matches, on_clear,
 };
@@ -204,7 +204,10 @@ pub fn open_app_properties(group: GroupKey, cx: &mut App) {
                 ));
             };
             let title = app_props_title(&row.name, false);
-            let handle = open_pwn(cx, PwnWindow::AppProperties, title, None, |window, cx| {
+            // The key lets the title bar pin send keep-above for this window (R-073, D-031).
+            let spec = pwn_window_spec(cx, PwnWindow::AppProperties, title, None)
+                .key(WindowKey::AppProperties(group));
+            let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
                 cx.new(|cx| AppPropsWindow::new(group, row, window, cx))
             })?;
             opened = Some(handle);

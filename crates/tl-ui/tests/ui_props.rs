@@ -1268,7 +1268,7 @@ mod window {
     use gpui_kit::{AnyWindowHandle, WindowHandle};
     use tl_model::actions::ActionKind;
     use tl_model::client::EngineClient;
-    use tl_model::command::{Command, Tab};
+    use tl_model::command::{Command, KWinCommand, Tab};
     use tl_model::demand::DetailDemand;
     use tl_model::details::{DetailTab, DetailTarget, TargetDetail};
     use tl_model::health::{HelperStartOutcome, HelperState};
@@ -1776,6 +1776,77 @@ mod window {
             cx.update(|cx| cx.active_window().map(|w| w.window_id())),
             Some(app_handle.window_id()),
             "opening twice activates the existing window"
+        );
+    }
+
+    /// Pinning Process or App Properties sends `KeepAbove` for that window's caption. Their
+    /// frames carry the registry key: without it the pin only changed its look, which the old
+    /// `Floating` kind hid (tasklens-fut.25, R-073, D-031).
+    #[gpui_kit::test]
+    fn props_pin_sends_keep_above(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        engine.publish_with(|s| {
+            let windows = Arc::make_mut(&mut s.windows);
+            windows.header.validity = Validity::Valid;
+            windows.header.version += 1;
+        });
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let app = app_group("Firefox", GroupRowKind::App, 34);
+        publish_groups(cx, &engine, vec![app.clone()]);
+        let handle = open(cx, 4321).expect("opened");
+        let app_handle = open_app(cx, app.key).expect("app window opened");
+
+        let frame = cx
+            .update(|cx| {
+                TlSecondaryWindow::<PropsWindow>::find(WindowHandle::new(handle.window_id()), cx)
+            })
+            .expect("frame");
+        let app_frame = cx
+            .update(|cx| {
+                TlSecondaryWindow::<AppPropsWindow>::find(
+                    WindowHandle::new(app_handle.window_id()),
+                    cx,
+                )
+            })
+            .expect("app frame");
+        assert_eq!(
+            cx.update(|cx| frame.read(cx).key().cloned()),
+            Some(WindowKey::Properties(key(4321)))
+        );
+        assert_eq!(
+            cx.update(|cx| app_frame.read(cx).key().cloned()),
+            Some(WindowKey::AppProperties(app.key))
+        );
+
+        cx.update_window(handle, |_, window, cx| {
+            frame.update(cx, |f, cx| f.set_pinned(true, window, cx))
+        })
+        .expect("props window");
+        cx.update_window(app_handle, |_, window, cx| {
+            app_frame.update(cx, |f, cx| f.set_pinned(true, window, cx))
+        })
+        .expect("app props window");
+        cx.run_until_parked();
+
+        let keep_above: Vec<KWinCommand> = engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::KWin(k @ KWinCommand::KeepAbove { .. }) => Some(k),
+                _ => None,
+            })
+            .collect();
+        let pinned = |caption: &str| KWinCommand::KeepAbove {
+            pid: std::process::id(),
+            caption: Some(Arc::from(caption)),
+            on: true,
+        };
+        assert_eq!(
+            keep_above,
+            [
+                pinned("Process Properties - firefox - PID 4321"),
+                pinned("App Properties - Firefox"),
+            ]
         );
     }
 

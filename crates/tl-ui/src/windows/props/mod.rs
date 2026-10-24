@@ -78,7 +78,7 @@ use crate::windows::actions::{
     PropsNextTab, PropsPrevTab, PropsRefreshNow, PropsSelectTab, PropsStartStringScan,
     PropsVerifyPackage,
 };
-use crate::windows::frame::{EscStep, PwnWindow, esc_step, open_pwn, props_title};
+use crate::windows::frame::{EscStep, PwnWindow, esc_step, props_title, pwn_window_spec};
 
 /// Access block texts (UI-PWN-018, P2). [`access_block`] shows the translated text.
 pub const ACCESS_FDS: &str = "Handles unavailable (insufficient privileges)";
@@ -440,13 +440,12 @@ pub fn open_process_properties(key: ProcessKey, cx: &mut App) {
                 ));
             };
             let title = props_title(&record.meta.name, key.pid, false);
-            let handle = open_pwn(
-                cx,
-                PwnWindow::ProcessProperties,
-                title,
-                None,
-                |window, cx| cx.new(|cx| PropsWindow::new(key, Some(record), window, cx)),
-            )?;
+            // The key lets the title bar pin send keep-above for this window (R-073, D-031).
+            let spec = pwn_window_spec(cx, PwnWindow::ProcessProperties, title, None)
+                .key(WindowKey::Properties(key));
+            let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
+                cx.new(|cx| PropsWindow::new(key, Some(record), window, cx))
+            })?;
             opened = Some(handle);
             Ok(handle.into())
         })
