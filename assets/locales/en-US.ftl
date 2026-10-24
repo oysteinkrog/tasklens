@@ -3360,6 +3360,7 @@ shell-settings-perf-status-bar-overview = Overview
 shell-settings-perf-status-bar-performance = Performance tab
 shell-settings-perf-status-bar-all-tabs = Every tab
 shell-settings-perf-status-bar-off = Off
+shell-settings-perf-overview-range = Overview time range
 shell-settings-perf-memory-composition = Show memory composition
 shell-settings-perf-swap = Show swap usage
 shell-settings-perf-gpu-optional = Optional GPU graphs

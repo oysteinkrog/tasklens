@@ -154,10 +154,27 @@ pub fn page(cx: &mut App) -> PageBuilder {
         ],
     );
     page.dropdown(
-        overview,
+        overview.clone(),
         SettingKey::PerformanceStatusBar,
         tr(cx, "shell-settings-perf-status-bar"),
         &status_bar,
+    );
+    // UI-PRF-055.
+    let range = options(
+        cx,
+        &[
+            ("perf-overview-range-1m", "1m"),
+            ("perf-overview-range-5m", "5m"),
+            ("perf-overview-range-1h", "1h"),
+            ("perf-overview-range-24h", "24h"),
+            ("perf-overview-range-7d", "7d"),
+        ],
+    );
+    page.dropdown(
+        overview,
+        SettingKey::PerformanceOverviewRange,
+        tr(cx, "shell-settings-perf-overview-range"),
+        &range,
     );
 
     for (key, label) in [

@@ -1499,7 +1499,7 @@ pub fn chart_section_versions(cx: &App) -> [u64; 3] {
 }
 
 /// A box chart: `ChartView::new` with the compact scale label on (TMOG), the ceiling small in
-/// the plot's top-left corner.
+/// the plot's top-left corner. It reads the device metric history at 1 h, 24 h and 7 d.
 pub fn box_chart<T: 'static>(
     spec: ChartSpec,
     mut labels: ChartLabels,
@@ -1510,7 +1510,10 @@ pub fn box_chart<T: 'static>(
     // caption, especially in the GPU and Network boxes that can contain several charts.
     labels.range_word = SharedString::default();
     cx.new(|cx| {
-        let mut view = ChartView::new(spec, labels, hub, cx).with_newest_marks();
+        let snap = std::sync::Arc::clone(hub.read(cx).current());
+        let mut view = ChartView::new(spec, labels, hub, cx)
+            .with_newest_marks()
+            .with_device_history(&snap);
         view.set_compact_scale(true, cx);
         view
     })
@@ -1558,7 +1561,12 @@ pub fn spark_chart<T: 'static>(
         legend: SmallVec::new(),
         show_axis_max: false,
     };
-    cx.new(|cx| ChartView::new(spec, labels, hub, cx).with_newest_marks())
+    cx.new(|cx| {
+        let snap = std::sync::Arc::clone(hub.read(cx).current());
+        ChartView::new(spec, labels, hub, cx)
+            .with_newest_marks()
+            .with_device_history(&snap)
+    })
 }
 
 /// A meter row with a sparkline column at the right: label, meter, value, then `chart` in a

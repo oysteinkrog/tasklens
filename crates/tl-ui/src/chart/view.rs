@@ -64,7 +64,10 @@ pub struct ChartView {
     /// The chart keeps its resolved series and stops (`freeze`): no new snapshot is read, the
     /// right edge stays at the newest valid sample and the chart is never Stale.
     pub(crate) frozen: bool,
-    /// Set while the range reads the device metric history ([`reads_history`]): the series are
+    /// The chart reads the device metric history for ranges over 10 minutes
+    /// (`with_device_history`, the Overview charts).
+    device_history: bool,
+    /// Set while the chart reads the device metric history ([`reads_history`]): the series are
     /// on CLOCK_REALTIME and the chart is drawn against that clock.
     pub(crate) history: Option<HistoryClock>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -116,6 +119,7 @@ impl ChartView {
             compact_scale: false,
             newest_marks: false,
             frozen: false,
+            device_history: false,
             history: None,
             value_text: None,
             last_value_text: String::new(),
@@ -147,6 +151,20 @@ impl ChartView {
         self
     }
 
+    /// Makes ranges over 10 minutes read `Snapshot.device_history` (ADR-017, UI-PRF-055): the
+    /// Overview charts. Other charts keep the live series at every range.
+    #[must_use]
+    pub fn with_device_history(mut self, snap: &Snapshot) -> Self {
+        self.device_history = true;
+        self.resolve(snap);
+        self
+    }
+
+    /// Whether this chart reads the device metric history now.
+    fn reads_device_history(&self) -> bool {
+        self.device_history && reads_history(self.spec.range_ns)
+    }
+
     /// Notifies only when one of this chart's series changed, or when a device change may have
     /// brought an absent series in (ADR-009: views notify only for what they draw). A frozen
     /// chart reads no snapshot.
@@ -160,7 +178,7 @@ impl ChartView {
             return;
         }
         let range_ns = self.spec.range_ns;
-        if reads_history(range_ns) {
+        if self.reads_device_history() {
             // History series change only with the device history component.
             if ev.mask.contains(ComponentMask::DEVICE_HISTORY) {
                 self.resolve(hub.read(cx).current());
@@ -206,12 +224,13 @@ impl ChartView {
     /// `process` set reads `snap.process_series` the same way (`find_process_tiered`). Reuses
     /// the inline buffer, so it does not allocate for up to 2 series.
     ///
-    /// Ranges over 10 minutes read `snap.device_history` instead ([`reads_history`]): each
-    /// series becomes a view on CLOCK_REALTIME, and process series are absent.
+    /// With `with_device_history`, ranges over 10 minutes read `snap.device_history` instead
+    /// ([`reads_history`]): each series becomes a view on CLOCK_REALTIME, and process series are
+    /// absent.
     pub fn resolve(&mut self, snap: &Snapshot) {
         let set = &*snap.series;
         let range_ns = self.spec.range_ns;
-        if reads_history(range_ns) {
+        if self.reads_device_history() {
             let hist = &*snap.device_history;
             self.history = Some(HistoryClock::of(hist));
             self.tier_fallback = false;
@@ -535,7 +554,7 @@ pub const TIER_1HZ_MIN_RANGE_NS: u64 = 60_000_000_000;
 /// series hold at most 10 minutes (ADR-003). Only the Overview asks for such ranges.
 pub const HISTORY_MIN_RANGE_NS: u64 = 600_000_000_000;
 
-/// Whether a chart of `range_ns` reads `Snapshot.device_history`.
+/// Whether a chart of `range_ns` made `with_device_history` reads `Snapshot.device_history`.
 pub const fn reads_history(range_ns: u64) -> bool {
     range_ns > HISTORY_MIN_RANGE_NS
 }
