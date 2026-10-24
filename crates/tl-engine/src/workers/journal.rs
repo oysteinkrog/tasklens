@@ -715,13 +715,13 @@ fn io_failure(e: &std::io::Error) -> JournalError {
 }
 
 /// What a finished child left behind.
-struct Collected {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(super) struct Collected {
+    pub(super) status: ExitStatus,
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
 }
 
-enum CollectError {
+pub(super) enum CollectError {
     Timeout,
     Stopped,
     Io(std::io::Error),
@@ -729,7 +729,7 @@ enum CollectError {
 
 /// Reads stdout and stderr of `child` to the end and reaps it. Past `deadline`, or when `stop`
 /// returns true, the child is killed and reaped. Every path out of here reaps the child.
-fn collect(
+pub(super) fn collect(
     mut child: Child,
     deadline: Instant,
     stop: impl Fn() -> bool,
@@ -911,7 +911,7 @@ fn parse_entry(line: &[u8]) -> Option<JournalEntry> {
 
 /// `MESSAGE` is a string, or an array of bytes when it is not valid UTF-8. Anything else is
 /// an empty message.
-fn message_text(value: Option<&Value>) -> Arc<str> {
+pub(super) fn message_text(value: Option<&Value>) -> Arc<str> {
     match value {
         Some(Value::String(s)) => Arc::from(s.as_str()),
         Some(Value::Array(items)) => {
@@ -927,7 +927,7 @@ fn message_text(value: Option<&Value>) -> Arc<str> {
 
 /// The process's effective uid and every gid it holds: `getgroups()` plus the real and
 /// effective primary gid.
-fn process_ids() -> (u32, Vec<u32>) {
+pub(super) fn process_ids() -> (u32, Vec<u32>) {
     let mut gids: Vec<u32> = rustix::process::getgroups()
         .unwrap_or_default()
         .into_iter()
@@ -941,7 +941,7 @@ fn process_ids() -> (u32, Vec<u32>) {
 /// SYS-015 for a system unit: `All` for root or a member of `wheel`, `adm` or
 /// `systemd-journal` (gids looked up in `group_file`), else `OwnOnly`. An unreadable group
 /// file proves no membership.
-fn access_for(euid: u32, gids: &[u32], group_file: &Path) -> JournalAccess {
+pub(super) fn access_for(euid: u32, gids: &[u32], group_file: &Path) -> JournalAccess {
     if euid == 0 {
         return JournalAccess::All;
     }

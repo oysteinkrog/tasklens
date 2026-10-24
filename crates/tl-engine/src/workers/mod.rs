@@ -13,6 +13,7 @@ pub mod dbus_upower;
 pub mod disk;
 pub mod eject;
 pub mod enumerate;
+pub mod event_detector;
 pub mod gpu_drm;
 pub mod gpu_nvidia;
 pub mod handle_search;
