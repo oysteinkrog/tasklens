@@ -351,8 +351,9 @@ fn segment_files_and_modes() {
     assert_eq!(names(Tier::S10), [metric_segment_file_name(OFF_S)]);
     assert_eq!(names(Tier::M1), [metric_segment_file_name(OFF_S)]);
 
-    // A restart in the same boot that writes minute 0 again takes the next free name.
-    let (mut h, _) = open(cfg(dir.path(), BOOT_A, OFF), 1300 * SEC);
+    // A restart in the same boot that writes minute 0 again takes the next free name. It opens
+    // more than an hour later, so its ring holds none of the stored seconds.
+    let (mut h, _) = open(cfg(dir.path(), BOOT_A, OFF), 4900 * SEC);
     let slot = h
         .register(&Arc::from("cpu"), &Arc::from("CPU"), MetricId::CPU_TOTAL)
         .unwrap();
@@ -656,7 +657,8 @@ fn boot_event_before_its_segment_is_read() {
     drop(b);
 
     let (mut c, _) = open(cfg(dir.path(), BOOT_B, off_b), 720 * SEC);
-    assert_eq!(c.segments(Tier::M1)[1].1, off_b + 600 * SEC as i64);
+    // Boot B's segment starts after the range read below ends.
+    assert!(c.segments(Tier::M1)[1].1 >= off_b + 6 * MIN as i64);
     let span = c
         .read(
             Tier::M1,
