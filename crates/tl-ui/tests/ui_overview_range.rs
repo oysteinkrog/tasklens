@@ -291,6 +291,17 @@ fn now_realtime() -> i64 {
 /// Publishes a device history answer for `range` with the CPU total `points`, whose oldest
 /// stored point is `since`.
 fn publish_history(r: &mut Rig, range: DeviceRange, since: i64, points: Vec<HistPoint>) {
+    publish_history_boots(r, range, since, points, &[]);
+}
+
+/// `publish_history` with boots at the CLOCK_REALTIME times `boots`.
+fn publish_history_boots(
+    r: &mut Rig,
+    range: DeviceRange,
+    since: i64,
+    points: Vec<HistPoint>,
+    boots: &[i64],
+) {
     r.engine.publish_with(|s| {
         let version = s.device_history.header.version + 1;
         s.device_history = Arc::new(DeviceHistory {
@@ -306,6 +317,7 @@ fn publish_history(r: &mut Rig, range: DeviceRange, since: i64, points: Vec<Hist
             since_realtime_ns: Some(since),
             step_ns: 60 * S,
             series: Arc::from([(cpu(), Arc::from(points))]),
+            boots: Arc::from(boots),
         });
     });
     draw(r.vcx);
@@ -473,6 +485,35 @@ fn overview_range_gap_draws_break(cx: &mut TestAppContext) {
         gaps.len() >= 2,
         "a dotted break for the gap point and one for the missing hours: {gaps:?}"
     );
+}
+
+/// A boot inside the range draws a boot marker on every box chart; the live ranges draw none.
+#[gpui_kit::test]
+fn overview_range_boot_marker(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    set_range(&mut r, OverviewRange::H24);
+    let now = now_realtime();
+    publish_history_boots(
+        &mut r,
+        DeviceRange::H24,
+        now - 30 * 60 * MIN,
+        vec![
+            point(now - 400 * MIN, 10., 10., 10.),
+            // The machine was off, then booted 300 minutes ago.
+            point(now - 290 * MIN, 20., 20., 20.),
+        ],
+        &[now - 300 * MIN],
+    );
+    for chart in box_charts(&mut r) {
+        let marks = r.vcx.read_entity(&chart, |c, _| c.last_boot_marks.get());
+        assert_eq!(marks, 1, "one boot marker on each box chart");
+    }
+    set_range(&mut r, OverviewRange::M1);
+    draw(r.vcx);
+    for chart in box_charts(&mut r) {
+        let marks = r.vcx.read_entity(&chart, |c, _| c.last_boot_marks.get());
+        assert_eq!(marks, 0, "live charts have no boot markers");
+    }
 }
 
 /// Until the history covers the range, the time axis says since when it has data.

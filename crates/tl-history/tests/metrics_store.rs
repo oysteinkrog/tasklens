@@ -632,6 +632,37 @@ fn restart_mid_minute_stores_each_second_once() {
     assert!(p[30..40].iter().all(|p| p.mean.is_nan()));
 }
 
+/// `boots_realtime_ns` lists the start of every boot after the oldest stored one, from the
+/// segment headers: none for a first boot, the later boot once two are stored, and a restart in
+/// the same boot adds nothing.
+#[test]
+fn boots_after_the_oldest_are_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key("cpu", MetricId::CPU_TOTAL);
+    let (mut a, _) = open(cfg(dir.path(), BOOT_A, OFF), 0);
+    assert!(a.boots_realtime_ns().is_empty());
+    let slot = a
+        .register(&k.device_key, &Arc::from("CPU"), k.metric)
+        .unwrap();
+    feed(&mut a, &[slot], 0, 120, |_, _| 1.0);
+    a.close(120 * SEC).unwrap();
+    drop(a);
+
+    let off_b = OFF + 3600 * SEC as i64;
+    let (mut b, _) = open(cfg(dir.path(), BOOT_B, off_b), 600 * SEC);
+    assert_eq!(b.boots_realtime_ns(), [off_b]);
+    let slot = b
+        .register(&k.device_key, &Arc::from("CPU"), k.metric)
+        .unwrap();
+    feed(&mut b, &[slot], 600, 720, |_, _| 2.0);
+    b.close(720 * SEC).unwrap();
+    drop(b);
+
+    // A restart in boot B with a slightly later offset keeps boot B's first start.
+    let (c, _) = open(cfg(dir.path(), BOOT_B, off_b + 5), 720 * SEC);
+    assert_eq!(c.boots_realtime_ns(), [off_b]);
+}
+
 /// The `Boot` event starts at boottime 0, before the first segment of an engine that started
 /// later in that boot. A read of a range that ends before that segment still finds it.
 #[test]

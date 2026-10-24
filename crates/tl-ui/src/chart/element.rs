@@ -269,6 +269,7 @@ fn paint_view(
         last_value_text,
         value_text,
         hover: hover_state,
+        boots,
         ..
     } = view;
 
@@ -505,6 +506,14 @@ fn paint_view(
             grid::paint_gaps(window, &gp, &cache.gaps);
         });
     }
+    // A history chart marks each boot inside its range (UI-PRF-055).
+    let _boot_marks = if history.is_some() {
+        grid::paint_boots(window, &gp, boots)
+    } else {
+        0
+    };
+    #[cfg(any(test, feature = "test-hooks"))]
+    view.last_boot_marks.set(_boot_marks);
 
     grid::paint_baseline(window, &gp);
     grid::paint_outline(window, &gp);

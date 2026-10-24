@@ -70,6 +70,9 @@ pub struct ChartView {
     /// Set while the chart reads the device metric history ([`reads_history`]): the series are
     /// on CLOCK_REALTIME and the chart is drawn against that clock.
     pub(crate) history: Option<HistoryClock>,
+    /// While `history` is set: the CLOCK_REALTIME start of every boot inside the served range,
+    /// drawn as boot markers (UI-PRF-055). Empty otherwise.
+    pub(crate) boots: Arc<[i64]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// `geometry::build` calls.
@@ -90,6 +93,9 @@ pub struct ChartView {
     /// Dotted baseline spans of the last paint, chart-local physical px before the paint shift.
     #[cfg(any(test, feature = "test-hooks"))]
     pub last_gap_spans: RefCell<SmallVec<[std::ops::Range<f32>; 4]>>,
+    /// Boot markers of the last paint.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub last_boot_marks: std::cell::Cell<u32>,
 }
 
 impl ChartView {
@@ -121,6 +127,7 @@ impl ChartView {
             frozen: false,
             device_history: false,
             history: None,
+            boots: Arc::from([]),
             value_text: None,
             last_value_text: String::new(),
             hover: hover::HoverState::default(),
@@ -138,6 +145,8 @@ impl ChartView {
             last_grid_quads: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             last_gap_spans: RefCell::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            last_boot_marks: std::cell::Cell::new(0),
         };
         this.resolve(hub.read(cx).current());
         this
@@ -233,6 +242,7 @@ impl ChartView {
         if self.reads_device_history() {
             let hist = &*snap.device_history;
             self.history = Some(HistoryClock::of(hist));
+            self.boots = Arc::clone(&hist.boots);
             self.tier_fallback = false;
             self.series.clear();
             self.series.extend(self.spec.series.iter().map(|s| {
@@ -242,6 +252,9 @@ impl ChartView {
             return;
         }
         self.history = None;
+        if !self.boots.is_empty() {
+            self.boots = Arc::from([]);
+        }
         let mut fallback = false;
         self.series.clear();
         self.series.extend(self.spec.series.iter().map(|s| {

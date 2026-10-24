@@ -1757,6 +1757,25 @@ impl MetricHistory {
             .min()
     }
 
+    /// The start on CLOCK_REALTIME of every boot after the oldest stored one, oldest first: the
+    /// points where the stored history crosses a boot (UI-PRF-055 boot markers). A boot starts
+    /// at the smallest realtime offset of its segments; the current boot counts once a segment
+    /// of an earlier boot is stored. Reads only the segment headers.
+    pub fn boots_realtime_ns(&self) -> Vec<i64> {
+        let mut boots: Vec<(BootId, i64)> = vec![(self.cfg.boot, self.cfg.realtime_offset_ns)];
+        for s in self.segs.iter().flatten().filter(|s| !s.frames.is_empty()) {
+            let (boot, off) = (s.header.boot_id, s.header.realtime_offset_ns);
+            match boots.iter_mut().find(|(b, _)| *b == boot) {
+                Some((_, start)) => *start = (*start).min(off),
+                None => boots.push((boot, off)),
+            }
+        }
+        let mut starts: Vec<i64> = boots.into_iter().map(|(_, start)| start).collect();
+        starts.sort_unstable();
+        starts.remove(0);
+        starts
+    }
+
     /// Bytes of every indexed segment, all tiers.
     pub fn disk_bytes(&self) -> u64 {
         self.segs.iter().flatten().map(|s| s.size).sum()

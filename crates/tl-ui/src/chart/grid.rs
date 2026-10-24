@@ -25,6 +25,9 @@ const OUTLINE_ALPHA: f32 = 0.40;
 /// Spacing of the dotted gap quads, physical px.
 const GAP_DOT_STEP: f32 = 3.0;
 
+/// Alpha of a boot marker over `theme.text_secondary`.
+const BOOT_ALPHA: f32 = 0.8;
+
 /// Share of the plot width, from the right edge, that the newest-point glow covers (UI-PRF-058).
 pub const GLOW_FRACTION: f32 = 0.10;
 
@@ -210,6 +213,32 @@ pub fn paint_gaps(window: &mut impl QuadSink, p: &GridPaint, gaps: &[Range<f32>]
             i += 1.0;
         }
     }
+}
+
+/// A boot marker at each time of `boots` (chart time, ns) inside the plot: a 1 physical px
+/// vertical line over the plot height, `theme.text_secondary` at 0.8 (UI-PRF-055). Returns the
+/// number of markers painted.
+pub fn paint_boots(window: &mut impl QuadSink, p: &GridPaint, boots: &[i64]) -> u32 {
+    let hairline = p.hairline();
+    let color = p.theme.text_secondary.alpha(BOOT_ALPHA);
+    let dx = f32::from(p.dx);
+    let plot = p.plot;
+    let mut painted = 0;
+    for &t in boots {
+        let Ok(t) = u64::try_from(t) else {
+            continue;
+        };
+        let x = p.to_logical_x(p.map.x_local(t) + dx);
+        if x < plot.left() || x >= plot.right() {
+            continue;
+        }
+        window.quad(fill(
+            Bounds::new(point(x, plot.top()), size(hairline, plot.size.height)),
+            color,
+        ));
+        painted += 1;
+    }
+    painted
 }
 
 /// Border-only quad around the box, 1 physical px, `outline_color` at 0.40, corner radius

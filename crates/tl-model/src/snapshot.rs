@@ -1553,6 +1553,9 @@ pub struct DeviceHistory {
     /// At most 1,024 min/max-decimated points per series, sorted by `SeriesId`. Only devices of
     /// the current catalog. Unchanged series keep their `Arc` across publishes.
     pub series: Arc<[(SeriesId, Arc<[HistPoint]>)]>,
+    /// CLOCK_REALTIME start of every boot inside the served range, oldest first, so a chart
+    /// draws its boot marker (UI-PRF-055).
+    pub boots: Arc<[i64]>,
 }
 
 impl DeviceHistory {

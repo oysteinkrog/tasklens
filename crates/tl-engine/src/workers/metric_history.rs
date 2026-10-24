@@ -226,6 +226,7 @@ struct Published {
     step_ns: u64,
     since: Option<i64>,
     series: Arc<[HistSeries]>,
+    boots: Arc<[i64]>,
     /// Boottime of the read.
     read_at: TimeNs,
 }
@@ -456,6 +457,8 @@ impl State {
         }
         let span = store.read(tier, from, to, now_t_ns)?;
         let since = store.since_realtime_ns(tier);
+        let mut boots = store.boots_realtime_ns();
+        boots.retain(|&t| (from..=to).contains(&t));
         let (series, reused) = self.map_series(span);
         let step_ns = series_step(tier, from, to);
         let unchanged = self.published.as_ref().is_some_and(|p| {
@@ -463,10 +466,12 @@ impl State {
                 && p.tier == tier
                 && p.step_ns == step_ns
                 && p.since == since
+                && *p.boots == *boots
                 && reused
                 && p.series.len() == series.len()
         });
         let series: Arc<[_]> = series.into();
+        let boots: Arc<[i64]> = boots.into();
         if unchanged && let Some(p) = &mut self.published {
             p.read_at = now_t_ns;
             return Ok(None);
@@ -477,6 +482,7 @@ impl State {
             step_ns,
             since,
             series: Arc::clone(&series),
+            boots: Arc::clone(&boots),
             read_at: now_t_ns,
         });
         Ok(Some(DeviceHistory {
@@ -485,6 +491,7 @@ impl State {
             since_realtime_ns: since,
             step_ns,
             series,
+            boots,
             ..DeviceHistory::default()
         }))
     }
@@ -1112,6 +1119,8 @@ mod tests {
         );
         assert_eq!(h.realtime_offset_ns, OFFSET);
         assert!(h.series.windows(2).all(|w| w[0].0 < w[1].0));
+        // One boot stored so far: no boot marker.
+        assert!(h.boots.is_empty());
         // Closing writes the open seconds too.
         st.close(now).expect("close");
 
@@ -1152,6 +1161,8 @@ mod tests {
         let last_old = points.iter().rposition(|p| p.mean == 107.0).expect("old");
         assert!(points[last_old + 1].is_gap());
         assert_eq!(h.realtime_offset_ns, offset2);
+        // The reboot lies inside the range, so it comes with its boot time.
+        assert_eq!(*h.boots, [offset2]);
     }
 
     #[test]
