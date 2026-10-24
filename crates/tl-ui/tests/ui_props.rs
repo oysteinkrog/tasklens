@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui_kit::{
     AppContext as _, Bounds, Context, Entity, Hsla, IntoElement, ParentElement as _, Pixels,
-    Render, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    Render, Styled as _, TestAppContext, TextRun, VisualTestContext, Window, div, font, px, size,
 };
 use tl_model::actions::SchedPolicy;
 use tl_model::details::{
@@ -22,6 +22,9 @@ use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::components::kv_grid::{ValueLook, kv_words, value_look_in};
 use tl_ui::components::window_frame::{client_frame_extra, window_options};
+use tl_ui::text::fonts::UI_FAMILY;
+use tl_ui::text::style::t_sm;
+use tl_ui::theme::{current, metrics};
 use tl_ui::windows::frame::{PwnWindow, open_pwn, pwn_window_spec, spec};
 use tl_ui::windows::props::filter::{PropsFilter, filter_bar};
 use tl_ui::windows::props::general::{FieldId, GeneralTab, RESTRICTED_TOOLTIP};
@@ -293,14 +296,17 @@ fn general_memory_and_cpu_percent_one_decimal(cx: &mut TestAppContext) {
     assert_eq!(value(&t, cx, FieldId::CpuPct), "0%");
 }
 
-/// Hovers the value column of `panel` row by row and returns the y of each row that showed a
-/// tooltip.
-fn hover_tooltips(cx: &mut VisualTestContext, panel: Bounds<Pixels>) -> Vec<f32> {
+/// Hovers the value column of `panel` row by row and returns, for each row that showed a tooltip,
+/// the tooltip bounds and the drawn width of its text.
+fn hover_tooltips(
+    cx: &mut VisualTestContext,
+    panel: Bounds<Pixels>,
+) -> Vec<(Bounds<Pixels>, Pixels)> {
     let mut shown = Vec::new();
     let mut y = panel.origin.y + px(19.);
     while y < panel.bottom() {
-        if hover(cx, panel, y).is_some() {
-            shown.push(f32::from(y));
+        if let Some(tip) = hover(cx, panel, y) {
+            shown.push(tip);
         }
         y += px(26.);
     }
@@ -308,28 +314,22 @@ fn hover_tooltips(cx: &mut VisualTestContext, panel: Bounds<Pixels>) -> Vec<f32>
     shown
 }
 
-/// The bounds of the first tooltip a hover over `panel` shows.
-fn hover_tooltips_at(cx: &mut VisualTestContext, panel: Bounds<Pixels>) -> Bounds<Pixels> {
-    let mut y = panel.origin.y + px(19.);
-    while y < panel.bottom() {
-        if let Some(tip) = hover(cx, panel, y) {
-            hover_away(cx);
-            return tip;
-        }
-        y += px(26.);
-    }
-    panic!("no tooltip in the panel");
-}
-
-/// Rests the pointer on the right end of the row at `y` and returns the tooltip bounds.
-fn hover(cx: &mut VisualTestContext, panel: Bounds<Pixels>, y: Pixels) -> Option<Bounds<Pixels>> {
+/// Rests the pointer on the right end of the row at `y` and returns the tooltip bounds and the
+/// drawn width of its text.
+fn hover(
+    cx: &mut VisualTestContext,
+    panel: Bounds<Pixels>,
+    y: Pixels,
+) -> Option<(Bounds<Pixels>, Pixels)> {
     let at = gpui_kit::point(panel.right() - px(30.), y);
     cx.simulate_mouse_move(at, None, gpui_kit::Modifiers::none());
     cx.executor()
         .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.debug_bounds("TlTooltip")
+    let tip = cx.debug_bounds("TlTooltip")?;
+    let text = cx.debug_bounds("TlTooltip-text")?;
+    Some((tip, text.size.width))
 }
 
 fn hover_away(cx: &mut VisualTestContext) {
@@ -340,6 +340,38 @@ fn hover_away(cx: &mut VisualTestContext) {
     );
 }
 
+/// The width of `text` in the tooltip text style.
+fn tooltip_text_width(cx: &mut VisualTestContext, text: &str) -> Pixels {
+    let text = gpui_kit::SharedString::from(text.to_owned());
+    cx.update(|window, cx| {
+        let size = t_sm(metrics(cx)).font_size.expect("t_sm sets a size");
+        let size = size.to_pixels(window.rem_size());
+        let run = TextRun {
+            len: text.len(),
+            font: font(UI_FAMILY),
+            color: current(cx).text_primary,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(text, size, &[run], None)
+            .width
+    })
+}
+
+/// One of `tips` shows `full`: its text is as wide as `full` shaped in the tooltip style.
+fn assert_tooltip_shows(cx: &mut VisualTestContext, tips: &[(Bounds<Pixels>, Pixels)], full: &str) {
+    let want = tooltip_text_width(cx, full);
+    assert!(
+        tips.iter()
+            .any(|(_, w)| (f32::from(*w) - f32::from(want)).abs() <= 1.),
+        "no tooltip shows {full:?} ({want:?} wide); tooltip text widths {:?}",
+        tips.iter().map(|(_, w)| *w).collect::<Vec<_>>()
+    );
+}
+
 /// A value wider than its cell is cut with "…" and a hover shows a tooltip with the full text, so
 /// a cut value can still be read (smoke 1.0.1, 900 px window). The tooltip stays inside the window.
 #[gpui_kit::test]
@@ -347,16 +379,24 @@ fn general_truncated_value_has_tooltip(cx: &mut TestAppContext) {
     let (view, cx) = host(cx, 900.);
     let t = tab(&view, cx);
     feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    // Hover tooltips open only in the active window. The real Properties window is active once it
+    // opens (checked on 1.0.4 in the nested KWin harness); a test window is not until asked.
     cx.update(|window, _| window.activate_window());
     cx.simulate_resize(size(px(900.), px(700.)));
     draw(cx);
     let [left, _, right] = panels(cx);
+    let priority = value(&t, cx, FieldId::Priority);
+    let net = value(&t, cx, FieldId::NetIo);
     // Column 1 cuts the scheduling line, the user ids, the flags and the cgroup; column 3 cuts
     // Net I/O.
-    assert!(hover_tooltips(cx, left).len() >= 4, "column 1 cut values");
-    assert!(!hover_tooltips(cx, right).is_empty(), "column 3 cut value");
-    let net = hover_tooltips_at(cx, right);
-    assert!(net.right() <= px(900.), "tooltip fits the window: {net:?}");
+    let left_tips = hover_tooltips(cx, left);
+    assert!(left_tips.len() >= 4, "column 1 cut values");
+    assert_tooltip_shows(cx, &left_tips, &priority);
+    let right_tips = hover_tooltips(cx, right);
+    assert_tooltip_shows(cx, &right_tips, &net);
+    for (tip, _) in left_tips.iter().chain(&right_tips) {
+        assert!(tip.right() <= px(900.), "tooltip fits the window: {tip:?}");
+    }
 }
 
 #[gpui_kit::test]
