@@ -478,6 +478,9 @@ impl Reducer {
                 }
             }
             SourceUpdate::Sleep { entering, t_ns } => {
+                if let Some(sink) = self.metric_sink.as_mut() {
+                    sink.on_sleep(entering, t_ns);
+                }
                 if self.suspend.on_sleep(entering, t_ns) == Transition::Resumed {
                     self.resume();
                 }

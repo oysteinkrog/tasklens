@@ -21,8 +21,16 @@
 //! `Arc`, and a read that changed nothing is not sent. When the range is cleared, one empty
 //! `DeviceHistory` frees the points.
 //!
-//! Disk work runs on the blocking pool, under a mutex that each job locks. The event detector and
-//! the timeline (ADR-017 "Event detector", UI-PRF-057) are not part of this module yet.
+//! Events (ADR-017 "Event detector", UI-PRF-057): the sink also sends one `Reading` of the
+//! published snapshot per second and each Logind `PrepareForSleep`. The worker runs the
+//! `EventDetector` rules on each reading, the clock check on each tick, and queues every ended
+//! event in the store. Closing the store queues the running events first. OOM kills and crashes
+//! come from `JournalEvents`, fetched once after each open and then every 60 s while
+//! `Demand.device_timeline` is true, in a blocking job of their own so a slow `journalctl` never
+//! holds up the tick. Each open drops journal entries at or before the newest stored one of this
+//! boot.
+//!
+//! Disk work runs on the blocking pool, under a mutex that each job locks.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,20 +39,25 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use asupersync::channel::mpsc;
-use asupersync::runtime::JoinError;
+use asupersync::runtime::{JoinError, TaskHandle};
 use asupersync::time;
 use asupersync::{Cx, Outcome};
 use rustc_hash::FxHashMap;
 use rustix::time::{ClockId, Timespec, clock_gettime};
-use tl_history::metrics::{self, MetricConfig, MetricHistory, MetricSlot, MetricSpan, Tier};
+use tl_collect::counters::Clock;
+use tl_history::metrics::{
+    self, EventKind, HistEvent, MetricConfig, MetricHistory, MetricSlot, MetricSpan, Tier,
+};
 use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, SeriesId};
+use tl_model::journal::JournalAccess;
 use tl_model::series::Sample;
-use tl_model::snapshot::{DeviceHistory, HistPoint};
+use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 
+use super::event_detector::{EventDetector, JournalEnv, JournalEvents, JournalFetch, Reading};
 use crate::source::WorkerIo;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 
@@ -60,6 +73,7 @@ const TICK_NS: u64 = 1_000_000_000;
 const RETRY_NS: u64 = 60_000_000_000;
 /// `MetricHistory::open` stops loading the 1 s ring after this long (ADR-012 start budget).
 const LOAD_BUDGET: Duration = Duration::from_secs(2);
+const NS_PER_SEC: u64 = 1_000_000_000;
 
 /// One event for the `MetricHistory` worker.
 pub enum MetricMsg {
@@ -67,6 +81,10 @@ pub enum MetricMsg {
     System(Box<[(SeriesId, Sample)]>),
     /// `DeviceCatalog` holds its entries in an `Arc`, so the clone is cheap.
     Catalog(DeviceCatalog),
+    /// The event detector's values of one published snapshot, at most one per second.
+    Reading(Box<Reading>),
+    /// Logind `PrepareForSleep`.
+    Sleep { entering: bool, t_ns: TimeNs },
 }
 
 /// The sender of one open store. `generation` tells the sink that a new store needs the catalog.
@@ -88,6 +106,8 @@ pub struct MetricSink {
     catalog: Option<DeviceCatalog>,
     /// The sender generation that received `catalog`.
     catalog_sent_to: Option<u64>,
+    /// The CLOCK_BOOTTIME second of the last `Reading` sent.
+    reading_sec: Option<u64>,
 }
 
 impl MetricSink {
@@ -96,6 +116,32 @@ impl MetricSink {
             slot,
             catalog: None,
             catalog_sent_to: None,
+            reading_sec: None,
+        }
+    }
+
+    /// Sends the detector's `Reading` of `snap` when a store is open and no reading was sent in
+    /// the same second.
+    pub fn on_snapshot(&mut self, snap: &Snapshot) {
+        let guard = self.slot.load();
+        let Some(tx) = guard.as_deref() else {
+            return;
+        };
+        let sec = snap.published_ns / NS_PER_SEC;
+        if self.reading_sec == Some(sec) {
+            return;
+        }
+        let reading = Box::new(Reading::from_snapshot(snap));
+        if tx.tx.try_send(MetricMsg::Reading(reading)).is_ok() {
+            self.reading_sec = Some(sec);
+        }
+    }
+
+    /// Forwards a Logind `PrepareForSleep`. A dropped one is left to the worker's clock check.
+    pub fn on_sleep(&mut self, entering: bool, t_ns: TimeNs) {
+        let guard = self.slot.load();
+        if let Some(tx) = guard.as_deref() {
+            let _ = tx.tx.try_send(MetricMsg::Sleep { entering, t_ns });
         }
     }
 
@@ -196,6 +242,11 @@ pub struct State {
     /// The store handle of each live series; `None` when its device is not in the catalog.
     slots: FxHashMap<SeriesId, Option<MetricSlot>>,
     published: Option<Published>,
+    detector: EventDetector,
+    /// Counts installs, so a journal fetch started for one store does not queue into the next.
+    opens: u64,
+    /// What the last journal fetch could read, for the timeline's tooltip.
+    journal_access: Option<JournalAccess>,
 }
 
 impl Default for State {
@@ -213,6 +264,9 @@ impl State {
             by_key: FxHashMap::default(),
             slots: FxHashMap::default(),
             published: None,
+            detector: EventDetector::new(),
+            opens: 0,
+            journal_access: None,
         }
     }
 
@@ -221,6 +275,32 @@ impl State {
         self.store = Some(store);
         self.realtime_offset_ns = realtime_offset_ns;
         self.slots.clear();
+        self.detector = EventDetector::new();
+        self.opens += 1;
+    }
+
+    pub fn realtime_offset_ns(&self) -> i64 {
+        self.realtime_offset_ns
+    }
+
+    /// What the last journal fetch could read; `None` before the first one.
+    pub fn journal_access(&self) -> Option<JournalAccess> {
+        self.journal_access
+    }
+
+    /// How many stores were installed. A journal fetch hands it back to `store_journal`.
+    pub fn opens(&self) -> u64 {
+        self.opens
+    }
+
+    /// Queues the events of a journal fetch started while install number `opens` was current.
+    /// A fetch from an earlier store is dropped: the new store's own first fetch reads them.
+    pub fn store_journal(&mut self, opens: u64, fetch: JournalFetch) {
+        if opens != self.opens {
+            return;
+        }
+        self.journal_access = Some(fetch.access);
+        self.queue_events(fetch.events);
     }
 
     pub fn is_open(&self) -> bool {
@@ -232,9 +312,12 @@ impl State {
         self.store.as_mut()
     }
 
-    /// Ends every point and writes every minute not yet written, then drops the store.
+    /// Queues the running events with their duration so far, ends every point and writes every
+    /// minute not yet written, then drops the store.
     pub fn close(&mut self, now_t_ns: TimeNs) -> Result<(), tl_history::HistoryError> {
         self.slots.clear();
+        let running = self.detector.finish(now_t_ns);
+        self.queue_events(running);
         match self.store.take() {
             Some(mut store) => store.close(now_t_ns),
             None => Ok(()),
@@ -287,7 +370,58 @@ impl State {
         match msg {
             MetricMsg::System(series) => self.push(&series),
             MetricMsg::Catalog(catalog) => self.set_catalog(catalog),
+            MetricMsg::Reading(reading) => {
+                let ended = self.detector.observe(&reading);
+                self.queue_events(ended);
+            }
+            MetricMsg::Sleep { entering, t_ns } => {
+                let span = self.detector.sleep(entering, t_ns);
+                self.queue_events(span);
+            }
         }
+    }
+
+    /// The ADR-008 clock check: queues a sleep span the Logind signal did not report.
+    pub fn check_clock(&mut self, clock: Clock) {
+        let span = self.detector.check_clock(clock);
+        self.queue_events(span);
+    }
+
+    /// Queues events for the open store's next 1 min block. Without a store they are dropped.
+    pub fn queue_events(&mut self, events: impl IntoIterator<Item = HistEvent>) {
+        if let Some(store) = self.store.as_mut() {
+            for e in events {
+                store.push_event(e);
+            }
+        }
+    }
+
+    /// The newest stored OOM kill and crash of this boot, as `(kind, CLOCK_REALTIME ns)`, for
+    /// `JournalEvents::skip_until`. Reads the 1 min tier from boot to now.
+    pub fn stored_journal_events(
+        &mut self,
+        now_t_ns: TimeNs,
+    ) -> Result<Vec<(EventKind, i64)>, tl_history::HistoryError> {
+        let offset = self.realtime_offset_ns;
+        let Some(store) = self.store.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let now_rt = (now_t_ns as i64).saturating_add(offset);
+        let span = store.read(Tier::M1, offset, now_rt, now_t_ns)?;
+        let mut newest: Vec<(EventKind, i64)> = Vec::new();
+        for e in &span.events {
+            let kind = e.event.kind;
+            if !matches!(kind, EventKind::OomKill | EventKind::Crash)
+                || e.start_realtime_ns < offset
+            {
+                continue;
+            }
+            match newest.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, t)) => *t = (*t).max(e.start_realtime_ns),
+                None => newest.push((kind, e.start_realtime_ns)),
+            }
+        }
+        Ok(newest)
     }
 
     /// Writes due minutes and applies retention (`MetricHistory::tick`).
@@ -499,6 +633,9 @@ pub async fn run_metric_history(
     let mut retry_at: Option<u64> = None;
     let mut purged = false;
     let mut next_tick = 0u64;
+    // Replaced at each open, with the newest stored journal events of this boot skipped.
+    let mut journal = Arc::new(Mutex::new(JournalEvents::new(JournalEnv::system())));
+    let mut journal_job: Option<TaskHandle<()>> = None;
 
     macro_rules! stop {
         ($outcome:expr) => {{
@@ -608,8 +745,17 @@ pub async fn run_metric_history(
                 sync: true,
             };
             let offset = config.realtime_offset_ns;
+            let job_state = Arc::clone(&state);
             let job = spawn(&cx, move || {
-                MetricHistory::open(config, now_boot_ns(), Instant::now() + LOAD_BUDGET)
+                let (store, report) =
+                    MetricHistory::open(config, now_boot_ns(), Instant::now() + LOAD_BUDGET)?;
+                let mut st = lock(&job_state);
+                st.install(store, offset);
+                let seen = st.stored_journal_events(now_boot_ns()).unwrap_or_else(|e| {
+                    tracing::debug!("device history event read failed: {e}");
+                    Vec::new()
+                });
+                Ok::<_, tl_history::HistoryError>((report, seen))
             });
             let opened = match job {
                 Ok(mut job) => match join_result(&cx, job.join(&cx).await) {
@@ -619,11 +765,15 @@ pub async fn run_metric_history(
                 Err(outcome) => stop!(outcome),
             };
             match opened {
-                Ok((store, report)) => {
+                Ok((report, seen)) => {
                     if report.timed_out {
                         tracing::warn!("device history load timed out; the last hour starts empty");
                     }
-                    lock(&state).install(store, offset);
+                    let mut events = JournalEvents::new(JournalEnv::system());
+                    for (kind, t) in seen {
+                        events.skip_until(kind, t);
+                    }
+                    journal = Arc::new(Mutex::new(events));
                     guard.open();
                     retry_at = None;
                     next_tick = 0;
@@ -639,6 +789,34 @@ pub async fn run_metric_history(
                     );
                     continue;
                 }
+            }
+        }
+
+        if let Some(job) = journal_job.as_mut() {
+            match job.try_join() {
+                Ok(None) => {}
+                Ok(Some(())) => journal_job = None,
+                Err(e) => match join_result(&cx, Err(e)) {
+                    Ok(()) => journal_job = None,
+                    Err(outcome) => stop!(outcome),
+                },
+            }
+        }
+        if journal_job.is_none() && lock(&journal).due(now_boot_ns(), demand.device_timeline) {
+            let job_state = Arc::clone(&state);
+            let job_journal = Arc::clone(&journal);
+            let opens = lock(&state).opens();
+            let job = cx.spawn_blocking(move |job_cx| {
+                let offset = lock(&job_state).realtime_offset_ns();
+                let fetch = lock(&job_journal)
+                    .fetch(now_boot_ns(), offset, || job_cx.is_cancel_requested());
+                lock(&job_state).store_journal(opens, fetch);
+            });
+            match job {
+                Ok(job) => journal_job = Some(job),
+                Err(e) => stop!(Outcome::Err(WorkerError::Other(
+                    format!("spawn: {e}").into()
+                ))),
             }
         }
 
@@ -660,6 +838,9 @@ pub async fn run_metric_history(
             }
             for msg in batch.drain(..) {
                 st.apply(msg);
+            }
+            if tick {
+                st.check_clock(Clock::now());
             }
             let now_t_ns = now_boot_ns();
             let mut error = None;
@@ -1026,6 +1207,129 @@ mod tests {
         assert!(st.answer(None, now + 4 * SEC).expect("read").is_none());
     }
 
+    fn psi(t_ns: TimeNs, pct: f32) -> MetricMsg {
+        MetricMsg::Reading(Box::new(Reading {
+            t_ns,
+            psi_some_pct: Some(pct),
+            ..Reading::default()
+        }))
+    }
+
+    fn event(kind: EventKind, start_t_ns: TimeNs) -> HistEvent {
+        HistEvent {
+            kind,
+            start_t_ns,
+            duration_ms: 0,
+            peak: 0.,
+            device_key: None,
+            process: None,
+        }
+    }
+
+    /// ADR-017 "Event detector": rule events, the Logind sleep span, journal events and the
+    /// event still running at close all reach the 1 min tier.
+    #[test]
+    fn detector_events_reach_the_store() {
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        // Memory pressure for 40 s, then 61 s under: the event ends.
+        for s in 0..101 {
+            st.apply(psi(t0 + s * SEC, if s < 40 { 20. } else { 1. }));
+        }
+        st.apply(MetricMsg::Sleep {
+            entering: true,
+            t_ns: t0 + 200 * SEC,
+        });
+        st.apply(MetricMsg::Sleep {
+            entering: false,
+            t_ns: t0 + 500 * SEC,
+        });
+        // A journal fetch for this store is kept; one from an earlier store is dropped.
+        let fetch = |kind, t| JournalFetch {
+            access: JournalAccess::All,
+            events: vec![event(kind, t)],
+        };
+        st.store_journal(st.opens(), fetch(EventKind::OomKill, t0 + 550 * SEC));
+        st.store_journal(st.opens() - 1, fetch(EventKind::Crash, t0 + 560 * SEC));
+        assert_eq!(st.journal_access(), Some(JournalAccess::All));
+        // Pressure again from 600 s, still running at close.
+        for s in 600..650 {
+            st.apply(psi(t0 + s * SEC, 30.));
+        }
+        let end = t0 + 650 * SEC;
+        st.close(end).expect("close");
+
+        let mut st = open(dir.path(), 1, OFFSET, end + SEC);
+        let now = end + 2 * SEC;
+        let now_rt = now as i64 + OFFSET;
+        let span = st
+            .store_mut()
+            .expect("open")
+            .read(Tier::M1, OFFSET, now_rt, now)
+            .expect("read");
+        let got: Vec<(EventKind, u64, u32)> = span
+            .events
+            .iter()
+            .map(|e| (e.event.kind, e.event.start_t_ns, e.event.duration_ms))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (EventKind::MemoryPressure, t0, 40_000),
+                (EventKind::Suspend, t0 + 200 * SEC, 300_000),
+                (EventKind::OomKill, t0 + 550 * SEC, 0),
+                (EventKind::MemoryPressure, t0 + 600 * SEC, 50_000),
+            ]
+        );
+        // The next open skips journal entries up to the stored OOM kill.
+        assert_eq!(
+            st.stored_journal_events(now).expect("read"),
+            [(EventKind::OomKill, (t0 + 550 * SEC) as i64 + OFFSET)]
+        );
+    }
+
+    #[test]
+    fn sink_sends_one_reading_per_second_and_each_sleep() {
+        let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
+        let mut sink = MetricSink::new(Arc::clone(&slot));
+        let mut snap = Snapshot::empty(BootId(1), 1);
+        snap.published_ns = SEC;
+        // No store open: nothing is queued.
+        sink.on_snapshot(&snap);
+        sink.on_sleep(true, SEC);
+
+        let (tx, mut rx) = mpsc::channel::<MetricMsg>(8);
+        slot.store(Some(Arc::new(MetricTx { generation: 1, tx })));
+        for t in [
+            SEC + SEC / 2,
+            SEC + SEC / 10 * 9,
+            2 * SEC,
+            2 * SEC + 1,
+            4 * SEC,
+        ] {
+            snap.published_ns = t;
+            sink.on_snapshot(&snap);
+        }
+        sink.on_sleep(true, 5 * SEC);
+        let got: Vec<(&str, TimeNs)> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|m| match m {
+                MetricMsg::Reading(r) => ("reading", r.t_ns),
+                MetricMsg::Sleep { t_ns, .. } => ("sleep", t_ns),
+                _ => ("other", 0),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("reading", SEC + SEC / 2),
+                ("reading", 2 * SEC),
+                ("reading", 4 * SEC),
+                ("sleep", 5 * SEC),
+            ]
+        );
+    }
+
     #[test]
     fn sink_sends_the_catalog_to_each_new_store_first() {
         let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
@@ -1043,6 +1347,7 @@ mod tests {
             .map(|m| match m {
                 MetricMsg::Catalog(_) => "catalog",
                 MetricMsg::System(_) => "system",
+                MetricMsg::Reading(_) | MetricMsg::Sleep { .. } => "event",
             })
             .collect();
         assert_eq!(kinds, ["catalog", "system", "system"]);

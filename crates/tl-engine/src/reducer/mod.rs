@@ -302,6 +302,9 @@ impl Reducer {
             tracing::debug!(target: "tasklens::engine", applied, "reducer publish");
             // No await between the store and the wake (ADR-005).
             let next = self.build_snapshot();
+            if let Some(sink) = self.metric_sink.as_mut() {
+                sink.on_snapshot(&next);
+            }
             publisher.publish(next);
         }
         Ok(())

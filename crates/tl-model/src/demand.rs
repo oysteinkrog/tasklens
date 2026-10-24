@@ -171,6 +171,9 @@ pub struct Demand {
     /// P2: an Overview range served from the device metric history (UI-PRF-055, UI-PRF-057).
     /// `None` while no visible Overview shows 1 h, 24 h, 7 d or a paused time.
     pub device_history_range: Option<DeviceHistoryRequest>,
+    /// P2: a timeline box is visible (UI-PRF-057). The `MetricHistory` worker then fetches OOM
+    /// kills and crashes from the journal every 60 s (ADR-017).
+    pub device_timeline: bool,
 }
 
 impl Demand {

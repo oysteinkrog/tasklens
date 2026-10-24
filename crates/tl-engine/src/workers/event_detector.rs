@@ -454,8 +454,8 @@ impl EventDetector {
             self.sleep_since = Some(t_ns);
             return None;
         }
-        self.woke_at = Some(t_ns);
         let start = self.sleep_since.take()?;
+        self.woke_at = Some(t_ns);
         Some(suspend_event(start, t_ns))
     }
 
@@ -853,6 +853,36 @@ mod tests {
         assert!(run_secs(&mut d, 0, 400, no_hot).is_empty());
         assert!(d.finish(400 * S).is_empty());
 
+        // Heat from the temperature alone: the CPU at or above hot_c for 35 s, peak 104 °C.
+        let mut d = EventDetector::new();
+        let cpu_hot = |s: u64| Reading {
+            cpu_temp_c: Some(match s {
+                0..10 => 101.,
+                10 => 104.,
+                11..35 => 100.,
+                _ => 70.,
+            }),
+            cpu_hot_c: Some(100.),
+            top: TopProcesses {
+                cpu: name("ffmpeg"),
+                ..TopProcesses::default()
+            },
+            ..Reading::default()
+        };
+        assert!(run_secs(&mut d, 0, 94, cpu_hot).is_empty());
+        let ev = run_secs(&mut d, 94, 96, cpu_hot);
+        assert_eq!(
+            ev,
+            vec![HistEvent {
+                kind: EventKind::Heat,
+                start_t_ns: 0,
+                duration_ms: 35_000,
+                peak: 104.,
+                device_key: name(CPU_KEY),
+                process: name("ffmpeg"),
+            }]
+        );
+
         // Full load: 5 min at 95%, process only while a sweep ran.
         let mut d = EventDetector::new();
         let load = |s: u64| Reading {
@@ -888,6 +918,40 @@ mod tests {
         };
         let ev = run_secs(&mut d, 0, 362, bare);
         assert_eq!(ev[0].process, None);
+
+        // Full load on each GPU on its own: only the busy one gives an event, under its key.
+        let mut d = EventDetector::new();
+        let gpu = |key: &str, util: f32| GpuReading {
+            key: Arc::from(key),
+            util_pct: Some(util),
+            temp_c: Some(60.),
+            hot_c: Some(90.),
+            throttling: false,
+        };
+        let gpus = |s: u64| Reading {
+            gpus: smallvec![
+                gpu("gpu:a", 40.),
+                gpu("gpu:b", if s < 310 { 97. } else { 5. })
+            ],
+            top: TopProcesses {
+                gpu: name("blender"),
+                ..TopProcesses::default()
+            },
+            ..Reading::default()
+        };
+        assert!(run_secs(&mut d, 0, 369, gpus).is_empty());
+        let ev = run_secs(&mut d, 369, 371, gpus);
+        assert_eq!(
+            ev,
+            vec![HistEvent {
+                kind: EventKind::FullLoad,
+                start_t_ns: 0,
+                duration_ms: 310_000,
+                peak: 97.,
+                device_key: name("gpu:b"),
+                process: name("blender"),
+            }]
+        );
     }
 
     #[test]
@@ -943,6 +1007,13 @@ mod tests {
         assert_eq!((ev.start_t_ns, ev.duration_ms), (11 * S, 100_000));
         // Normal ticks give nothing.
         assert!(d.check_clock(clock(112, 12)).is_none());
+
+        // The sleep signal was missed but the wake came: the clock check still gives the span.
+        let mut d = EventDetector::new();
+        d.check_clock(clock(10, 10));
+        assert!(d.sleep(false, 110 * S).is_none());
+        let ev = d.check_clock(clock(111, 11)).expect("clock sees the sleep");
+        assert_eq!((ev.start_t_ns, ev.duration_ms), (11 * S, 100_000));
     }
 
     #[test]
